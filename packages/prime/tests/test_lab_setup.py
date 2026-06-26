@@ -348,8 +348,8 @@ def test_lab_setup_service_emits_post_setup_call_to_action(
     assert "I want to train a model for <my task domain>" in output
     assert "prime env init my-env" in output
     assert "prime eval run my-env -m openai/gpt-5.4-nano -n 5" in output
-    assert "prime rl run configs/rl/qwen-3-5.toml" in output
-    assert "prime gepa run my-env -m openai/gpt-5.4-nano" in output
+    assert "prime train <training-config.toml>" in output
+    assert "prime gepa run my-env --model openai/gpt-5.4-nano" in output
 
 
 def test_lab_setup_ignores_managed_guidance_and_skips_claude_local_for_codex(

@@ -1,7 +1,8 @@
 from typing import Any
 
 from prime_cli.commands import env as env_commands
-from prime_cli.commands.env import _environment_package_download_url, _resolve_pull_environment_path
+from prime_cli.commands.env import _resolve_pull_environment_path
+from verifiers.utils import install_utils
 
 
 def test_defaults_to_cwd_when_environments_dir_missing(tmp_path, monkeypatch):
@@ -29,22 +30,7 @@ def test_respects_explicit_target_path(tmp_path):
     assert resolved == explicit
 
 
-def test_environment_package_download_url_prefers_tracked_url():
-    details = {
-        "tracked_package_url": "https://example.test/tracked",
-        "package_url": "https://example.test/direct",
-    }
-
-    assert _environment_package_download_url(details) == "https://example.test/tracked"
-
-
-def test_environment_package_download_url_falls_back_to_package_url_when_untracked():
-    details = {"package_url": "https://example.test/direct"}
-
-    assert _environment_package_download_url(details) == "https://example.test/direct"
-
-
-def test_pull_prefers_tracked_url_and_follows_redirects(tmp_path, monkeypatch):
+def test_pull_uses_shared_source_downloader(tmp_path, monkeypatch):
     class FakeAPIClient:
         api_key = "test-token"
 
@@ -63,48 +49,21 @@ def test_pull_prefers_tracked_url_and_follows_redirects(tmp_path, monkeypatch):
                 }
             }
 
-    class FakeStream:
-        def __enter__(self) -> "FakeStream":
-            return self
+    captured = {}
 
-        def __exit__(self, *_args: Any) -> None:
-            return None
-
-        def raise_for_status(self) -> None:
-            return None
-
-        def iter_bytes(self, chunk_size: int) -> list[bytes]:
-            return [b"archive"]
-
-    class FakeTar:
-        def __enter__(self) -> "FakeTar":
-            return self
-
-        def __exit__(self, *_args: Any) -> None:
-            return None
-
-        def extractall(self, target: Any) -> None:
-            (target / "README.md").write_text("# Demo\n", encoding="utf-8")
-
-    def fake_stream(
-        method: str,
-        url: str,
-        headers: dict[str, str],
-        timeout: float,
-        follow_redirects: bool,
-    ) -> FakeStream:
-        assert method == "GET"
-        assert url == "https://example.test/tracked"
-        assert headers == {"Authorization": "Bearer test-token"}
-        assert timeout == 60.0
-        assert follow_redirects is True
-        return FakeStream()
+    def fake_download(details, destination, api_key=None):
+        captured.update(details=details, destination=destination, api_key=api_key)
+        destination.mkdir(parents=True)
+        (destination / "README.md").write_text("# Demo\n", encoding="utf-8")
+        return destination
 
     target = tmp_path / "demo"
     monkeypatch.setattr(env_commands, "APIClient", FakeAPIClient)
-    monkeypatch.setattr(env_commands.httpx, "stream", fake_stream)
-    monkeypatch.setattr(env_commands.tarfile, "open", lambda *_args, **_kwargs: FakeTar())
+    monkeypatch.setattr(install_utils, "download_environment_source", fake_download, raising=False)
 
     env_commands.pull("alice/demo", target=str(target), version="latest")
 
     assert (target / "README.md").read_text(encoding="utf-8") == "# Demo\n"
+    assert captured["details"]["tracked_package_url"] == "https://example.test/tracked"
+    assert captured["destination"] == target
+    assert captured["api_key"] == "test-token"

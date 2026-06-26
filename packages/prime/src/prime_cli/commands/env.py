@@ -1,7 +1,6 @@
 import ast
 import hashlib
 import json
-import os
 import re
 import shutil
 import subprocess
@@ -15,20 +14,20 @@ from datetime import datetime
 # Wheel METADATA files use RFC 822 format (PEP 566), same as email headers
 from email.parser import Parser as EmailParser
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 import httpx
 import toml
 import typer
 import yaml
-from gitignore_parser import parse_gitignore
 from prime_sandboxes import APIClient as SandboxAPIClient
 from prime_sandboxes import Config as SandboxConfig
 from rich.table import Table
 from rich.text import Text
 
 from ..client import APIClient, APIError
+from ..core import Config
 from ..lab_hygiene import LabHygieneOptions, find_lab_workspace, run_lab_hygiene_preflight
 from ..utils import (
     PlainTyper,
@@ -38,7 +37,11 @@ from ..utils import (
     output_data_as_json,
     validate_output_format,
 )
-from ..utils.env_metadata import find_environment_metadata
+from ..utils.env_metadata import (
+    collect_archive_files,
+    compute_content_hash,
+    find_environment_metadata,
+)
 from ..utils.formatters import format_file_size
 from ..utils.formatters import strip_ansi as _strip_ansi
 from ..utils.prompt import (
@@ -52,6 +55,7 @@ from ..verifiers_bridge import (
     build_verifiers_command,
     exec_verifiers_process,
     resolve_workspace_python,
+    verifiers_environment,
 )
 from .config import TEAM_ID_PATTERN
 
@@ -134,29 +138,19 @@ def _uv_pip_command(subcommand: str, *args: str) -> List[str]:
 
 
 def _parse_environment_slug(environment: str) -> Tuple[str, str]:
-    """Parse owner/name from an environment slug.
+    """Parse an unversioned owner/name Hub slug."""
+    from verifiers.utils.install_utils import parse_env_id
 
-    Args:
-        environment: Environment slug in format 'owner/name'
-
-    Returns:
-        Tuple of (owner, name)
-
-    Raises:
-        typer.Exit: If the slug is invalid
-    """
-    if "/" not in environment:
+    try:
+        owner, name, version = parse_env_id(environment)
+    except ValueError:
         console.print(f"[red]Invalid environment format: {environment}[/red]")
         console.print("[dim]Use format: owner/environment-name[/dim]")
         raise typer.Exit(1)
-
-    parts = environment.split("/", 1)
-    if len(parts) != 2 or not parts[0] or not parts[1]:
-        console.print(f"[red]Invalid environment format: {environment}[/red]")
-        console.print("[dim]Use format: owner/environment-name[/dim]")
+    if version is not None:
+        console.print("[red]Environment versions are not accepted by this command[/red]")
         raise typer.Exit(1)
-
-    return parts[0], parts[1]
+    return owner, name
 
 
 def _resolve_environment(environment: Optional[str]) -> Tuple[str, str]:
@@ -580,123 +574,6 @@ def _environment_push_metadata(
     elif existing_forked_from:
         metadata["forked_from"] = existing_forked_from
     return metadata
-
-
-def should_include_file_in_archive(file_path: Path, base_path: Path) -> bool:
-    """Determine if a file should be included in the archive based on filtering rules."""
-    if not file_path.is_file():
-        return False
-
-    # Skip symlinks - they cause extraction failures in _safe_tar_extract
-    if file_path.is_symlink():
-        return False
-
-    rel_path = file_path.relative_to(base_path)
-
-    # Skip hidden files
-    if file_path.name.startswith("."):
-        return False
-
-    # Skip files in __pycache__ directories
-    if "__pycache__" in rel_path.parts:
-        return False
-
-    return True
-
-
-def should_include_directory_in_archive(dir_path: Path) -> bool:
-    """Determine if a directory should be included in the archive based on filtering rules."""
-    if not dir_path.is_dir():
-        return False
-
-    # Skip hidden directories (includes .prime/, .git/, etc.)
-    if dir_path.name.startswith("."):
-        return False
-
-    # Skip build artifacts, cache directories, and outputs
-    if dir_path.name in ["dist", "__pycache__", "build", "outputs"]:
-        return False
-
-    # Skip egg-info directories
-    if dir_path.name.endswith(".egg-info"):
-        return False
-
-    return True
-
-
-def _build_gitignore_matcher(env_path: Path) -> Optional[Callable[[str], bool]]:
-    """Build a matcher for the root .gitignore file, if present."""
-    gitignore_path = env_path / ".gitignore"
-    if not gitignore_path.exists():
-        return None
-    return parse_gitignore(str(gitignore_path), base_dir=str(env_path))
-
-
-def _collect_archive_files(env_path: Path) -> List[Path]:
-    """Collect archive file paths in deterministic order, honoring .gitignore."""
-    ignore_matcher = _build_gitignore_matcher(env_path)
-    files_by_rel_path: Dict[str, Path] = {}
-
-    def maybe_add_file(file_path: Path) -> None:
-        if not should_include_file_in_archive(file_path, env_path):
-            return
-        if ignore_matcher is not None and ignore_matcher(str(file_path)):
-            return
-
-        rel_path = str(file_path.relative_to(env_path)).replace("\\", "/")
-        files_by_rel_path[rel_path] = file_path
-
-    for pattern in ["README.md", "pyproject.toml", "*.py"]:
-        for file_path in sorted(env_path.glob(pattern), key=lambda p: p.name):
-            maybe_add_file(file_path)
-
-    def is_nested_dir_ignored(dir_path: Path) -> bool:
-        """Check if a nested directory should be pruned from traversal."""
-        if not should_include_directory_in_archive(dir_path):
-            return True
-        if ignore_matcher is not None and ignore_matcher(str(dir_path)):
-            return True
-        return False
-
-    for subdir in sorted(env_path.iterdir(), key=lambda path: path.name):
-        if not should_include_directory_in_archive(subdir):
-            continue
-        if is_nested_dir_ignored(subdir):
-            continue
-
-        for root, dirnames, filenames in os.walk(subdir):
-            root_path = Path(root)
-            dirnames[:] = sorted(
-                dirname for dirname in dirnames if not is_nested_dir_ignored(root_path / dirname)
-            )
-            for filename in sorted(filenames):
-                maybe_add_file(root_path / filename)
-
-    return [files_by_rel_path[rel_path] for rel_path in sorted(files_by_rel_path)]
-
-
-def compute_content_hash(env_path: Path) -> str:
-    """Compute deterministic, cross-platform content hash for environment files.
-
-    Args:
-        env_path: Path to the environment directory
-
-    Returns:
-        SHA256 hexdigest of the environment content
-    """
-    content_hasher = hashlib.sha256()
-
-    for file_path in _collect_archive_files(env_path):
-        normalized_path = str(file_path.relative_to(env_path)).replace("\\", "/")
-        content_hasher.update(f"file:{normalized_path}".encode("utf-8"))
-        try:
-            with open(file_path, "rb") as f:
-                content_hasher.update(f.read())
-        except IOError:
-            # Skip files that can't be read
-            pass
-
-    return content_hasher.hexdigest()
 
 
 def _format_action_status(status: Optional[str]) -> Text:
@@ -1427,7 +1304,7 @@ def push(
                 with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
                     temp_file_path = tmp.name
                     with tarfile.open(tmp.name, "w:gz") as tar:
-                        for file_path in _collect_archive_files(env_path):
+                        for file_path in collect_archive_files(env_path):
                             arcname = file_path.relative_to(env_path)
                             tar.add(file_path, arcname=str(arcname))
 
@@ -1551,35 +1428,6 @@ def push(
                     prime_dir.mkdir(exist_ok=True)
                     metadata_path = prime_dir / ".env-metadata.json"
 
-                    # Backwards compatibility: Migrate .env-metadata.json from root to .prime/
-                    # This handles environments that were pulled/pushed before we moved
-                    # to .prime/ subfolder
-                    old_metadata_path = env_path / ".env-metadata.json"
-                    migration_failed = False
-                    if old_metadata_path.exists() and not metadata_path.exists():
-                        try:
-                            # Move the old file to the new location
-                            old_metadata_path.rename(metadata_path)
-                            console.print(
-                                "[dim]Migrated environment metadata from root "
-                                "to .prime/ subfolder[/dim]"
-                            )
-                        except (OSError, IOError) as e:
-                            migration_failed = True
-                            console.print(
-                                f"[yellow]Warning: Could not migrate old .env-metadata.json "
-                                f"file to .prime/ subfolder: {e}[/yellow]"
-                            )
-                    elif old_metadata_path.exists() and metadata_path.exists():
-                        # Both exist - prefer the one in .prime/ and remove the old one
-                        try:
-                            old_metadata_path.unlink()
-                        except (OSError, IOError):
-                            console.print(
-                                "[yellow]Warning: Could not remove old .env-metadata.json[/yellow]"
-                            )
-
-                    # Read existing metadata if it exists
                     existing_metadata = {}
                     if metadata_path.exists():
                         try:
@@ -1588,17 +1436,6 @@ def push(
                         except (json.JSONDecodeError, IOError) as e:
                             console.print(
                                 f"[yellow]Warning: Could not read existing metadata: {e}[/yellow]"
-                            )
-                            existing_metadata = {}
-                    elif migration_failed and old_metadata_path.exists():
-                        # If migration failed, read from old location to preserve metadata
-                        try:
-                            with open(old_metadata_path, "r") as f:
-                                existing_metadata = json.load(f)
-                        except (json.JSONDecodeError, IOError) as e:
-                            console.print(
-                                f"[yellow]Warning: Could not read existing metadata from "
-                                f"old location: {e}[/yellow]"
                             )
                             existing_metadata = {}
 
@@ -1678,10 +1515,10 @@ def push(
 )
 def init(ctx: typer.Context) -> None:
     """Initialize a V1 or V0 environment with Verifiers."""
-    env = os.environ.copy()
-    if is_plain_mode():
-        env.update(NO_COLOR="1", PYDANTIC_CONFIG_PLAIN="1")
-    result = subprocess.run(build_verifiers_command("init", ctx.args), env=env)
+    result = subprocess.run(
+        build_verifiers_command("init", ctx.args),
+        env=verifiers_environment(plain=is_plain_mode()),
+    )
     if result.returncode != 0:
         raise typer.Exit(result.returncode)
     if ctx.args and not any(arg in ("-h", "--help") for arg in ctx.args):
@@ -1972,37 +1809,23 @@ def pull(
     try:
         client = APIClient(require_auth=False)
 
-        # Parse version from env_id if present (e.g., owner/name@version)
-        if "@" in env_id:
-            env_id_base, id_version = env_id.rsplit("@", 1)
-            # Use the version from the env_id, overriding the --version flag
-            version = id_version
-            env_id = env_id_base
+        from verifiers.utils.install_utils import parse_env_id
 
-        parts = env_id.split("/")
-        if len(parts) != 2:
-            console.print("[red]Error: Invalid environment ID format. Expected: owner/name[/red]")
+        try:
+            owner, name, parsed_version = parse_env_id(env_id)
+        except ValueError as exc:
+            console.print(f"[red]Error: {exc}[/red]")
             raise typer.Exit(1)
-
-        owner, name = parts
+        version = parsed_version or version
+        env_id = f"{owner}/{name}"
 
         console.print(f"Pulling {env_id}@{version}...")
 
         try:
             response = client.get(f"/environmentshub/{owner}/{name}/@{version}")
-
-            if "data" in response:
-                details = response["data"]
-            else:
-                # Fallback for old format
-                details = response
+            details = response["data"]
         except APIError as e:
             console.print(f"[red]Failed to get environment details: {e}[/red]")
-            raise typer.Exit(1)
-
-        download_url = _environment_package_download_url(details)
-        if not download_url:
-            console.print("[red]Error: No downloadable package found[/red]")
             raise typer.Exit(1)
 
         base_dir = _resolve_pull_environment_path(target, name)
@@ -2017,67 +1840,18 @@ def pull(
                 f"[yellow]Directory {base_dir} already exists. Using {target_dir} instead.[/yellow]"
             )
 
-        try:
-            target_dir.mkdir(parents=True, exist_ok=True)
-        except PermissionError as e:
-            console.print(f"[red]Permission error creating directory: {e}[/red]")
-            raise typer.Exit(1)
-        except OSError as e:
-            console.print(f"[red]Error creating directory: {e}[/red]")
-            raise typer.Exit(1)
-
         console.print(f"Downloading to {target_dir}...")
-
-        temp_file_path = None
         try:
-            with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
-                temp_file_path = tmp.name
-                try:
-                    if is_valid_url(download_url):
-                        headers = {}
-                        if client.api_key:
-                            headers["Authorization"] = f"Bearer {client.api_key}"
-                        with httpx.stream(
-                            "GET",
-                            download_url,
-                            headers=headers,
-                            timeout=60.0,
-                            follow_redirects=True,
-                        ) as resp:
-                            resp.raise_for_status()
-                            with open(tmp.name, "wb") as f:
-                                for chunk in resp.iter_bytes(chunk_size=8192):
-                                    f.write(chunk)
-                    else:
-                        console.print(f"[red]Error: Invalid download URL: {download_url}[/red]")
-                        raise typer.Exit(1)
-                except httpx.RequestError as e:
-                    console.print(f"[red]Download failed: {e}[/red]")
-                    raise typer.Exit(1)
-                except IOError as e:
-                    console.print(f"[red]Failed to write downloaded file: {e}[/red]")
-                    raise typer.Exit(1)
+            from verifiers.utils.install_utils import download_environment_source
 
-                try:
-                    with tarfile.open(tmp.name, "r:gz") as tar:
-                        tar.extractall(target_dir)
-                except tarfile.TarError as e:
-                    console.print(f"[red]Failed to extract archive: {e}[/red]")
-                    raise typer.Exit(1)
-                except IOError as e:
-                    console.print(f"[red]Failed to extract files: {e}[/red]")
-                    raise typer.Exit(1)
-        except OSError as e:
-            console.print(f"[red]Failed to create temporary file: {e}[/red]")
-            raise typer.Exit(1)
-        finally:
-            # Clean up temporary file if it was created
-            if temp_file_path and Path(temp_file_path).exists():
-                Path(temp_file_path).unlink()
+            download_environment_source(details, target_dir, api_key=client.api_key)
+        except (OSError, ValueError, httpx.HTTPError) as exc:
+            console.print(f"[red]Download failed: {exc}[/red]")
+            raise typer.Exit(1) from exc
 
         console.print(f"[green]✓ Environment pulled to {target_dir}[/green]")
 
-        # Create .env-metadata.json for proper resolution
+        # Record the published upstream for hosted workflows.
         try:
             prime_dir = target_dir / ".prime"
             prime_dir.mkdir(exist_ok=True)
@@ -2117,11 +1891,7 @@ def pull(
 
         try:
             all_files = list(target_dir.iterdir())
-            # Filter out .prime directory and .env-metadata.json files
-            # (created locally, not extracted)
-            extracted_files = [
-                f for f in all_files if f.name != ".prime" and f.name != ".env-metadata.json"
-            ]
+            extracted_files = [f for f in all_files if f.name != ".prime"]
             if extracted_files:
                 console.print("\nExtracted files:")
                 for file in extracted_files[:MAX_FILES_TO_SHOW]:
@@ -2138,63 +1908,6 @@ def pull(
     except Exception as e:
         console.print(f"[red]Unexpected error: {e}[/red]")
         raise typer.Exit(1)
-
-
-def validate_env_id(env_id: str) -> Tuple[str, str]:
-    """Validate and parse environment ID.
-
-    Args:
-        env_id: Environment ID in format 'owner/name' or 'owner/name@version'
-
-    Returns:
-        Tuple of (env_id_without_version, version)
-
-    Raises:
-        ValueError: If format is invalid
-    """
-    if not env_id or not env_id.strip():
-        raise ValueError("Environment ID cannot be empty")
-
-    # Handle version suffix
-    version = "latest"
-    if "@" in env_id:
-        env_id, version = env_id.rsplit("@", 1)
-
-    parts = env_id.split("/")
-    if len(parts) != 2:
-        raise ValueError(
-            f"Invalid environment ID format: '{env_id}'. "
-            f"Expected: 'owner/name' or 'owner/name@version'"
-        )
-
-    owner, name = parts
-    if not owner or not name:
-        raise ValueError("Owner and name cannot be empty")
-
-    return env_id, version
-
-
-def is_valid_url(url: str) -> bool:
-    """Check if a string is a valid URL."""
-    try:
-        result = urlparse(url)
-        return all([result.scheme in ("http", "https"), result.netloc])
-    except Exception:
-        return False
-
-
-def _environment_package_download_url(details: Dict[str, Any]) -> Optional[str]:
-    """Return the platform package URL, preferring tracked public downloads."""
-    for key in ("tracked_package_url", "package_url"):
-        url = details.get(key)
-        if isinstance(url, str) and url:
-            return url
-    return None
-
-
-def normalize_package_name(name: str) -> str:
-    """Normalize package name according to Python packaging standards."""
-    return name.replace("-", "_").lower()
 
 
 def extract_requires_dist_from_wheel(wheel_path: Path) -> List[str]:
@@ -2317,34 +2030,6 @@ def update_pyproject_version(pyproject_path: Path, new_version: str) -> None:
         f.write(updated_content)
 
 
-def get_install_command(
-    tool: str, wheel_url: str, package_name: str, no_upgrade: bool = False
-) -> List[str]:
-    """Generate install command for the specified tool.
-
-    Args:
-        tool: Package manager to use ('uv' or 'pip')
-        wheel_url: URL to the wheel file
-        package_name: Package name for targeted upgrade with -P flag (uv only)
-        no_upgrade: If True, don't include upgrade flags (preserves locked dependencies)
-    """
-    if tool == "uv":
-        cmd = _uv_pip_command("install")
-        if not no_upgrade:
-            # Use -P to only upgrade this package, not its dependencies
-            cmd.extend(["-P", package_name])
-        cmd.append(wheel_url)
-        return cmd
-    elif tool == "pip":
-        cmd = ["pip", "install"]
-        if not no_upgrade:
-            cmd.append("--upgrade")
-        cmd.append(wheel_url)
-        return cmd
-    else:
-        raise ValueError(f"Unsupported package manager: {tool}. Use 'uv' or 'pip'.")
-
-
 @app.command(no_args_is_help=True, rich_help_panel="Explore")
 def info(
     env_id: str = typer.Argument(..., help="Environment ID (owner/name)"),
@@ -2354,19 +2039,15 @@ def info(
     try:
         client = APIClient(require_auth=False)
 
-        # Validate and parse environment ID
+        from verifiers.utils.install_utils import parse_env_id
+
         try:
-            env_id, parsed_version = validate_env_id(env_id)
-            # Use parsed version if it was specified in the env_id, otherwise use the --version flag
-            if parsed_version != "latest":
-                target_version = parsed_version
-            else:
-                target_version = version
+            owner, name, parsed_version = parse_env_id(env_id)
         except ValueError as e:
             console.print(f"[red]Error: {e}[/red]")
             raise typer.Exit(1)
-
-        owner, name = env_id.split("/")
+        env_id = f"{owner}/{name}"
+        target_version = parsed_version or version
 
         console.print(f"Fetching {env_id}@{target_version}...")
 
@@ -2379,7 +2060,15 @@ def info(
             raise typer.Exit(1)
 
         # Process wheel URL
-        wheel_url = process_wheel_url(details.get("wheel_url"))
+        raw_wheel_url = details.get("wheel_url")
+        parsed_wheel_url = urlparse(raw_wheel_url) if isinstance(raw_wheel_url, str) else None
+        wheel_url = (
+            raw_wheel_url
+            if parsed_wheel_url
+            and parsed_wheel_url.scheme in ("http", "https")
+            and parsed_wheel_url.netloc
+            else None
+        )
 
         # Display basic info with nice formatting
         console.print()
@@ -2397,62 +2086,18 @@ def info(
         _print_env_inspect_examples(owner, name, target_version)
         console.print()
 
-        if wheel_url or simple_index_url:
-            normalized_name = normalize_package_name(name)
+        from verifiers.utils.install_utils import environment_package_url
 
-            console.print("[bold yellow]Install (choose one)[/bold yellow]")
-            console.print(f"  [green]$[/green] prime env install {owner}/{name}@{target_version}")
-
-            # Use simple index if available, otherwise fall back to wheel URL
-            if simple_index_url:
-                # For versioned installs, show package name with version specification
-                if target_version and target_version != "latest":
-                    console.print(
-                        f"  [green]$[/green] uv pip install {normalized_name}=={target_version} "
-                        f"--extra-index-url {simple_index_url}"
-                    )
-                    console.print(
-                        f"  [green]$[/green] uv add {normalized_name}=={target_version} "
-                        f"--index {simple_index_url}"
-                    )
-                    console.print(
-                        f"  [green]$[/green] pip install {normalized_name}=={target_version} "
-                        f"--extra-index-url {simple_index_url}"
-                    )
-                else:
-                    console.print(
-                        f"  [green]$[/green] uv pip install {normalized_name} "
-                        f"--extra-index-url {simple_index_url}"
-                    )
-                    console.print(
-                        f"  [green]$[/green] uv add {normalized_name} --index {simple_index_url}"
-                    )
-                    console.print(
-                        f"  [green]$[/green] pip install {normalized_name} "
-                        f"--extra-index-url {simple_index_url}"
-                    )
-            elif wheel_url:
-                console.print(f"  [green]$[/green] uv pip install {wheel_url}")
-                console.print(f"  [green]$[/green] uv add {normalized_name}@{wheel_url}")
-                console.print(f"  [green]$[/green] pip install {wheel_url}")
-
+        if wheel_url or simple_index_url or environment_package_url(details):
+            reference = f"{owner}/{name}@{target_version}"
+            console.print("[bold yellow]Install[/bold yellow]")
+            console.print(f"  [green]$[/green] prime env install {reference}")
             console.print()
-            console.print("[bold yellow]Usage[/bold yellow]")
-            console.print("  [blue]>>>[/blue] from verifiers import load_environment")
-            console.print(f"  [blue]>>>[/blue] env = load_environment('{name}')")
-        elif details.get("visibility") == "PRIVATE":
-            console.print("[bold yellow]Install (private environment)[/bold yellow]")
-            console.print(f"  [green]$[/green] prime env pull {owner}/{name}@{target_version}")
-            console.print(
-                "  [dim]Note: Direct UV/pip install not available for private environments[/dim]"
-            )
-
-            console.print()
-            console.print("[bold yellow]After pulling[/bold yellow]")
-            console.print("  [green]$[/green] cd <target_directory>")
-            console.print("  [green]$[/green] uv pip install -e .")
+            console.print("[bold yellow]Run[/bold yellow]")
+            console.print(f"  [green]$[/green] prime eval run {reference}       # V1")
+            console.print(f"  [green]$[/green] prime eval run --id {reference}  # V0")
         else:
-            console.print("[yellow]No wheel available for this version[/yellow]")
+            console.print("[yellow]No installable artifact is available for this version[/yellow]")
 
         console.print()
 
@@ -2488,15 +2133,15 @@ def inspect_cmd(
     """Inspect environment source without downloading the archive locally."""
     validate_output_format(output, console)
 
+    from verifiers.utils.install_utils import parse_env_id
+
     try:
         try:
-            env_id, parsed_version = validate_env_id(env_id)
-            target_version = parsed_version if parsed_version != "latest" else version
+            owner, name, parsed_version = parse_env_id(env_id)
         except ValueError as e:
             console.print(f"[red]Error: {e}[/red]")
             raise typer.Exit(1)
-
-        owner, name = env_id.split("/")
+        target_version = parsed_version or version
         client = APIClient(require_auth=False)
         params: Dict[str, Any] = {"max_bytes": max_bytes}
         if source_path:
@@ -2574,104 +2219,16 @@ def inspect_cmd(
         raise typer.Exit(1)
 
 
-def fetch_environment_details(
-    client: APIClient, owner: str, name: str, version: str
-) -> Dict[str, Any]:
-    """Fetch environment details from the API.
-
-    Returns:
-        Dictionary containing environment details
-
-    Raises:
-        APIError: If the API request fails
-    """
-    response = client.get(f"/environmentshub/{owner}/{name}/@{version}")
-    details = response.get("data", response)
-    # Ensure we return a dict
-    if not isinstance(details, dict):
-        raise ValueError(f"Invalid response format: expected dict, got {type(details)}")
-    return details
-
-
-def process_wheel_url(wheel_url: Optional[str]) -> Optional[str]:
-    """Process and validate wheel URL.
-
-    Args:
-        wheel_url: The wheel URL from API (should be a full URL)
-
-    Returns:
-        Full wheel URL or None if not available
-    """
-    if not wheel_url:
-        return None
-
-    # Validate the URL
-    if not is_valid_url(wheel_url):
-        raise ValueError(f"Invalid wheel URL: {wheel_url}")
-
-    return wheel_url
-
-
-def execute_install_command(cmd: List[str], env_id: str, version: str, tool: str) -> None:
-    """Execute the installation command with proper output handling.
-
-    Args:
-        cmd: Command to execute
-        env_id: Environment ID for display
-        version: Version for display
-        tool: Tool name for display
-
-    Raises:
-        Exception: If installation fails (caller should catch)
-    """
-    console.print(f"\n[cyan]Installing {env_id}@{version} with {tool}...[/cyan]")
-
-    display_command = " ".join(cmd)
-    console.print(f"[dim]Command: {display_command}[/dim]")
-
-    process = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-        universal_newlines=True,
-    )
-
-    while True:
-        output = process.stdout.readline() if process.stdout else ""
-        if output == "" and process.poll() is not None:
-            break
-        if output:
-            console.print(output.rstrip())
-
-    return_code = process.poll()
-    if return_code != 0:
-        raise Exception(f"Installation failed with exit code {return_code}")
-
-    console.print(f"\n[green]✓ Successfully installed {env_id}@{version}[/green]")
-
-
 @app.command(no_args_is_help=True, rich_help_panel="Manage")
 def install(
     env_ids: List[str] = typer.Argument(
         ..., help="Environment ID(s) to install (owner/name or local name)"
-    ),
-    with_tool: str = typer.Option(
-        "uv",
-        "--with",
-        help="Package manager to use (uv or pip)",
     ),
     path: str = typer.Option(
         "./environments",
         "--path",
         "-p",
         help="Path to local environments directory (for local installs)",
-    ),
-    no_upgrade: bool = typer.Option(
-        False,
-        "--no-upgrade",
-        help="Don't upgrade existing packages. Useful with locked dependencies (uv.lock).",
     ),
     prerelease: bool = typer.Option(
         False,
@@ -2687,323 +2244,56 @@ def install(
         prime env install gsm8k -p /path/to/envs   # local install from custom path
         prime env install owner/environment        # install from Prime Hub
         prime env install owner/environment@0.2.3  # specific version
-        prime env install owner/environment --with pip
         prime env install env1 env2 env3           # install multiple
     """
-    try:
-        client = APIClient(require_auth=False)
+    from verifiers.utils.install_utils import install_from_hub
 
-        # Validate package manager
-        if with_tool not in ["uv", "pip"]:
-            console.print(
-                f"[red]Error: Unsupported package manager '{with_tool}'. Use 'uv' or 'pip'.[/red]"
-            )
-            raise typer.Exit(1)
+    if not shutil.which("uv"):
+        console.print("[red]Error: uv is not installed.[/red]")
+        raise typer.Exit(1)
 
-        # Check if tool is installed
-        if not shutil.which(with_tool):
-            console.print(f"[red]Error: {with_tool} is not installed.[/red]")
-            raise typer.Exit(1)
-
-        # De-dup environment IDs just in case
-        env_ids = list(dict.fromkeys(env_ids))
-
-        # Resolving and validating environments
-        installable_envs = []
-        failed_envs = []
-        skipped_envs = []
-
-        console.print(
-            f"[bold]Resolving {len(env_ids)} "
-            f"environment{'s' if len(env_ids) != 1 else ''}...[/bold]"
-        )
-        for env_id in env_ids:
-            # Check if this is a local environment (no "/" in the name)
-            local_name = env_id.split("@")[0]
-            if "/" not in local_name:
-                if not local_name or not local_name.strip():
-                    skipped_envs.append((env_id, "Empty environment name"))
-                    console.print("[yellow]⚠ Skipping: Empty environment name[/yellow]")
-                    continue
-                env_folder = local_name.replace("-", "_")
-                env_path = Path(path) / env_folder
-                if env_path.exists():
-                    if with_tool == "uv":
-                        cmd_parts = _uv_pip_command("install", "-e", str(env_path))
-                    else:
-                        cmd_parts = ["pip", "install", "-e", str(env_path)]
-                    installable_envs.append((cmd_parts, local_name, "local", local_name))
-                    console.print(f"[green]✓ Found local environment: {env_path}[/green]")
-                else:
-                    failed_envs.append((local_name, f"Local path not found: {env_path}"))
-                    console.print(f"[red]✗ Local environment not found: {env_path}[/red]")
-                    if "-" in local_name:
-                        alt_path = Path(path) / local_name
-                        if alt_path.exists():
-                            console.print(
-                                f"[yellow]  Hint: Found '{alt_path}' but expected "
-                                f"'{env_path}'[/yellow]"
-                            )
-                            console.print(
-                                "[yellow]  Python packages use underscores, not dashes. "
-                                f"Rename folder to '{env_folder}'[/yellow]"
-                            )
-                continue
-
-            # Validate environment ID format (owner/name)
-            try:
-                env_id, target_version = validate_env_id(env_id)
-            except ValueError as e:
-                skipped_envs.append((env_id, f"Invalid format: {e}"))
-                console.print(f"[yellow]⚠ Skipping {env_id}: Invalid format[/yellow]")
-                continue
-
-            owner, name = env_id.split("/")
-
-            # Fetch environment details
-            try:
-                details = fetch_environment_details(client, owner, name, target_version)
-            except APIError as e:
-                failed_envs.append((f"{env_id}@{target_version}", f"{e}"))
-                console.print(f"[red]✗ Failed to resolve {env_id}@{target_version}: {e}[/red]")
-                continue
-
-            # Get both simple index URL and wheel URL
-            simple_index_url = details.get("simple_index_url")
-            wheel_url = process_wheel_url(details.get("wheel_url"))
-            url_dependencies = details.get("url_dependencies", [])
-
-            # Check if this is a private environment - pull, build, and install from cache
-            if not simple_index_url and not wheel_url and details.get("visibility") == "PRIVATE":
-                console.print("[dim]Private environment detected, pulling and building...[/dim]")
-                try:
-                    # Pull, build, and get actual version (resolves "latest" from pyproject.toml)
-                    wheel_path, resolved_version = _pull_and_build_private_env(
-                        client, owner, name, target_version, details
-                    )
-                    normalized_name = normalize_package_name(name)
-                    if with_tool == "uv":
-                        cmd_parts = _uv_pip_command("install")
-                        if not no_upgrade:
-                            # Use -P to only upgrade this package, not its dependencies
-                            cmd_parts.extend(["-P", normalized_name])
-                        cmd_parts.append(str(wheel_path))
-                        if prerelease:
-                            cmd_parts.append("--prerelease=allow")
-                    else:
-                        cmd_parts = ["pip", "install", str(wheel_path)]
-                        if not no_upgrade:
-                            cmd_parts.append("--upgrade")
-                        if prerelease:
-                            cmd_parts.append("--pre")
-                    installable_envs.append((cmd_parts, env_id, resolved_version, name))
-                    console.print(f"[green]✓ Built {env_id}@{resolved_version}[/green]")
-                except Exception as e:
-                    failed_envs.append((f"{env_id}@{target_version}", f"Failed to build: {e}"))
-                    console.print(
-                        f"[red]✗ Failed to build private environment {env_id}@{target_version}: "
-                        f"{e}[/red]"
-                    )
-                continue
-            elif not simple_index_url and not wheel_url:
-                skipped_envs.append((f"{env_id}@{target_version}", "No installation method"))
-                console.print(
-                    f"[yellow]⚠ Skipping {env_id}@{target_version}: "
-                    f"No installation method available[/yellow]"
+    config = Config()
+    failed: list[tuple[str, str]] = []
+    for env_id in dict.fromkeys(env_ids):
+        try:
+            if "/" in env_id:
+                install_from_hub(
+                    env_id,
+                    api_key=config.api_key,
+                    base_url=config.base_url,
+                    python_executable=resolve_workspace_python(),
+                    prerelease=prerelease,
                 )
-                console.print(
-                    "[dim]  Use 'prime env info' to see available options "
-                    "or 'pull' to download source.[/dim]"
-                )
-                continue
+            else:
+                env_path = Path(path) / env_id.replace("-", "_")
+                if not env_path.is_dir():
+                    raise FileNotFoundError(f"Local environment not found: {env_path}")
+                subprocess.run(_uv_pip_command("install", "-e", str(env_path)), check=True)
+            console.print(f"[green]✓ Installed {env_id}[/green]")
+            console.print(f"[dim]V1: prime eval run {env_id}[/dim]")
+            console.print(f"[dim]V0: prime eval run --id {env_id}[/dim]")
+        except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+            failed.append((env_id, str(exc)))
+            console.print(f"[red]✗ {env_id}: {exc}[/red]")
 
-            console.print(f"[green]✓ Found {env_id}@{target_version}[/green]")
-
-            cmd_parts = _build_install_command(
-                name,
-                target_version,
-                simple_index_url,
-                wheel_url,
-                with_tool,
-                no_upgrade,
-                url_dependencies,
-                prerelease=prerelease,
-            )
-            if not cmd_parts:
-                skipped_envs.append((f"{env_id}@{target_version}", "No installation method"))
-                console.print(
-                    f"[yellow]⚠ Skipping {env_id}@{target_version}: No installation method[/yellow]"
-                )
-                continue
-
-            installable_envs.append((cmd_parts, env_id, target_version, name))
-
-        if not installable_envs:
-            console.print("[red]Error: Unable to resolve installable environments[/red]")
-            raise typer.Exit(1)
-
-        # Install resolved environments
-        installed_envs = []
-        install_failed_envs = []
-
-        console.print(
-            f"\n[bold]Installing {len(installable_envs)} "
-            f"environment{'s' if len(installable_envs) != 1 else ''}...[/bold]"
-        )
-        for cmd_parts, env_id, target_version, name in installable_envs:
-            try:
-                execute_install_command(cmd_parts, env_id, target_version, with_tool)
-                installed_envs.append((env_id, target_version))
-
-                # Display usage instructions
-                console.print("\n[dim]Use in Python:[/dim]")
-                console.print("  from verifiers import load_environment")
-                console.print(f"  env = load_environment('{name}')")
-            except FileNotFoundError:
-                error_msg = f"{cmd_parts[0]} command not found"
-                install_failed_envs.append((f"{env_id}@{target_version}", error_msg))
-                console.print(f"[red]✗ Installation failed: {error_msg}[/red]")
-            except Exception as e:
-                install_failed_envs.append((f"{env_id}@{target_version}", str(e)))
-                console.print(f"[red]✗ Installation failed: {e}[/red]")
-
-        # Display final summary of installed/failed environments
-        if installed_envs:
-            console.print(
-                f"\n[bold]Installed {len(installed_envs)} "
-                f"environment{'s' if len(installed_envs) != 1 else ''}:[/bold]"
-            )
-            for env_id, version in installed_envs:
-                console.print(f"[green]✓ {env_id}@{version}[/green]")
-
-        if install_failed_envs:
-            console.print(
-                f"\n[bold]Failed to install {len(install_failed_envs)} "
-                f"environment{'s' if len(install_failed_envs) != 1 else ''}:[/bold]"
-            )
-            for env_id, reason in install_failed_envs:
-                console.print(f"[red]✗ {env_id} - {reason}")
-
-    except typer.Exit:
-        raise
-    except APIError as e:
-        console.print(f"[red]API Error: {e}[/red]")
-        raise typer.Exit(1)
-    except KeyboardInterrupt:
-        console.print("\n[yellow]Installation cancelled by user[/yellow]")
-        raise typer.Exit(1)
-    except Exception as e:
-        console.print(f"[red]Unexpected error: {e}[/red]")
-        raise typer.Exit(1)
-
-
-def execute_uninstall_command(cmd: List[str], env_name: str, tool: str) -> None:
-    """Execute the uninstall command with proper output handling.
-
-    Args:
-        cmd: Command to execute
-        env_name: Environment name for display
-        tool: Tool name for display
-
-    Raises:
-        typer.Exit: If uninstall fails
-    """
-
-    console.print(f"\n[cyan]Uninstalling {env_name} with {tool}...[/cyan]")
-    console.print(f"[dim]Command: {' '.join(cmd)}[/dim]")
-
-    try:
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            universal_newlines=True,
-        )
-
-        # Stream output line by line
-        while True:
-            output = process.stdout.readline() if process.stdout else ""
-            if output == "" and process.poll() is not None:
-                break
-            if output:
-                console.print(output.rstrip())
-
-        return_code = process.poll()
-        if return_code != 0:
-            console.print(f"[red]Environment uninstall failed with exit code {return_code}[/red]")
-            raise typer.Exit(1)
-
-        console.print(f"\n[green]✓ Successfully uninstalled {env_name}[/green]")
-
-    except FileNotFoundError:
-        console.print(f"[red]Failed to run command. Is {cmd[0]} installed?[/red]")
-        raise typer.Exit(1)
-    except Exception as e:
-        console.print(f"[red]Uninstall failed: {e}[/red]")
+    if failed:
         raise typer.Exit(1)
 
 
 @app.command(no_args_is_help=True, rich_help_panel="Manage")
 def uninstall(
     env_name: str = typer.Argument(..., help="Environment name to uninstall"),
-    with_tool: str = typer.Option(
-        "uv",
-        "--with",
-        help="Package manager to use (uv or pip)",
-    ),
 ) -> None:
-    """Uninstall a verifiers environment.
+    """Uninstall an environment distribution with uv."""
+    from verifiers.utils.install_utils import normalize_package_name
 
-    \b
-    Examples:
-        prime env uninstall environment
-        prime env uninstall environment --with pip
-    """
+    package = normalize_package_name(env_name.rsplit("/", 1)[-1].split("@", 1)[0])
     try:
-        # Validate package manager
-        if with_tool not in ["uv", "pip"]:
-            console.print(
-                f"[red]Error: Unsupported package manager '{with_tool}'. Use 'uv' or 'pip'.[/red]"
-            )
-            raise typer.Exit(1)
-
-        # Ignore owner if given
-        if "/" in env_name:
-            _, env_name = env_name.split("/", 1)
-
-        normalized_name = normalize_package_name(env_name)
-
-        # Generate uninstall command
-        if with_tool == "uv":
-            cmd_parts = [
-                "uv",
-                "pip",
-                "uninstall",
-                normalized_name,
-            ]
-        else:  # pip
-            cmd_parts = [
-                "pip",
-                "uninstall",
-                normalized_name,
-            ]
-
-        # Check if tool is installed
-        if not shutil.which(cmd_parts[0]):
-            console.print(f"[red]Error: {cmd_parts[0]} is not installed.[/red]")
-            raise typer.Exit(1)
-
-        # Execute uninstall
-        execute_uninstall_command(cmd_parts, env_name, with_tool)
-
-    except KeyboardInterrupt:
-        console.print("\n[yellow]Uninstall cancelled by user[/yellow]")
-        raise typer.Exit(1)
-    except Exception as e:
-        console.print(f"[red]Unexpected error: {e}[/red]")
-        raise typer.Exit(1)
+        subprocess.run(_uv_pip_command("uninstall", package), check=True)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        console.print(f"[red]Uninstall failed: {exc}[/red]")
+        raise typer.Exit(1) from exc
+    console.print(f"[green]✓ Uninstalled {package}[/green]")
 
 
 version_app = PlainTyper(help="Manage environment versions", no_args_is_help=True)
@@ -3199,411 +2489,6 @@ def delete(
     except Exception as e:
         console.print(f"[red]Unexpected error: {e}[/red]")
         raise typer.Exit(1)
-
-
-def _safe_tar_extract(tar: tarfile.TarFile, dest_path: Path) -> None:
-    """Safely extract tar archive, preventing path traversal and symlink attacks.
-
-    Args:
-        tar: Open tarfile object
-        dest_path: Destination directory for extraction
-
-    Raises:
-        ValueError: If archive contains unsafe paths, symlinks, or hardlinks
-    """
-    dest_path = dest_path.resolve()
-
-    for member in tar.getmembers():
-        member_path = Path(member.name)
-
-        # Block symlinks - they can be used to write outside destination
-        # (e.g., symlink "evil" -> "/tmp", then file "evil/malicious.txt")
-        if member.issym():
-            raise ValueError(f"Refusing to extract symlink: {member.name}")
-
-        # Block hardlinks - they can also be used for attacks
-        if member.islnk():
-            raise ValueError(f"Refusing to extract hardlink: {member.name}")
-
-        # Block absolute paths
-        if member_path.is_absolute():
-            raise ValueError(f"Refusing to extract absolute path: {member.name}")
-
-        # Block path traversal
-        if ".." in member_path.parts:
-            raise ValueError(f"Refusing to extract path with '..': {member.name}")
-
-        # Verify resolved path is within destination
-        target_path = (dest_path / member_path).resolve()
-        if not target_path.is_relative_to(dest_path):
-            raise ValueError(f"Path escapes destination directory: {member.name}")
-
-    # All members validated, safe to extract
-    tar.extractall(dest_path)
-
-
-def _get_env_cache_dir() -> Path:
-    """Get the cache directory for private environment wheels."""
-    cache_dir = Path.home() / ".prime" / "wheel_cache"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    return cache_dir
-
-
-def _validate_path_component(component: str, component_name: str) -> None:
-    """Validate a path component doesn't contain traversal sequences.
-
-    Args:
-        component: The path component to validate (owner, name, or version)
-        component_name: Name of the component for error messages
-
-    Raises:
-        ValueError: If component contains unsafe characters
-    """
-    if not component:
-        raise ValueError(f"{component_name} cannot be empty")
-
-    # Block path traversal sequences
-    if ".." in component:
-        raise ValueError(f"{component_name} cannot contain '..'")
-
-    # Block path separators
-    if "/" in component or "\\" in component:
-        raise ValueError(f"{component_name} cannot contain path separators")
-
-    # Block null bytes
-    if "\x00" in component:
-        raise ValueError(f"{component_name} cannot contain null bytes")
-
-
-def _get_version_from_pyproject(env_path: Path) -> Optional[str]:
-    """Extract version from pyproject.toml in the environment directory."""
-    pyproject_path = env_path / "pyproject.toml"
-    if not pyproject_path.exists():
-        return None
-    try:
-        pyproject_data = toml.load(pyproject_path)
-        return pyproject_data.get("project", {}).get("version")
-    except Exception:
-        return None
-
-
-def _pull_and_build_private_env(
-    client: APIClient,
-    owner: str,
-    name: str,
-    version: str,
-    details: Dict[str, Any],
-) -> Tuple[Path, str]:
-    """Pull a private environment, build it, and return the wheel path and resolved version.
-
-    Args:
-        client: API client with authentication
-        owner: Environment owner
-        name: Environment name
-        version: Environment version (may be "latest")
-        details: Environment details from API
-
-    Returns:
-        Tuple of (wheel_path, resolved_version)
-
-    Raises:
-        Exception: If download, extraction, or build fails
-    """
-    # Validate path components to prevent directory traversal
-    _validate_path_component(owner, "owner")
-    _validate_path_component(name, "name")
-    _validate_path_component(version, "version")
-
-    download_url = _environment_package_download_url(details)
-    if not download_url:
-        raise ValueError("No downloadable package found for private environment")
-
-    cache_dir = _get_env_cache_dir()
-
-    # If version is not "latest", check cache directly
-    if version != "latest":
-        env_cache_path = cache_dir / owner / name / version
-        if not env_cache_path.resolve().is_relative_to(cache_dir.resolve()):
-            raise ValueError("Cache path escapes cache directory")
-        wheel_cache_path = env_cache_path / "dist"
-        if wheel_cache_path.exists():
-            existing_wheels = list(wheel_cache_path.glob("*.whl"))
-            if existing_wheels:
-                console.print(f"[dim]Using cached wheel at {existing_wheels[0]}[/dim]")
-                return existing_wheels[0], version
-
-    # Download to temp directory first to determine actual version
-    temp_extract_dir = None
-    temp_file_path = None
-    try:
-        temp_extract_dir = tempfile.mkdtemp(prefix="prime_env_")
-        temp_extract_path = Path(temp_extract_dir)
-
-        with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
-            temp_file_path = tmp.name
-            headers = {}
-            if client.api_key:
-                headers["Authorization"] = f"Bearer {client.api_key}"
-
-            with httpx.stream(
-                "GET", download_url, headers=headers, timeout=60.0, follow_redirects=True
-            ) as resp:
-                resp.raise_for_status()
-                with open(tmp.name, "wb") as f:
-                    for chunk in resp.iter_bytes(chunk_size=8192):
-                        f.write(chunk)
-
-            # Extract to temp path (with path traversal protection)
-            with tarfile.open(tmp.name, "r:gz") as tar:
-                _safe_tar_extract(tar, temp_extract_path)
-
-        # Get actual version from pyproject.toml
-        actual_version = _get_version_from_pyproject(temp_extract_path) or version
-        _validate_path_component(actual_version, "version")
-
-        # Now we know the real version - check if it's already cached
-        env_cache_path = cache_dir / owner / name / actual_version
-        if not env_cache_path.resolve().is_relative_to(cache_dir.resolve()):
-            raise ValueError("Cache path escapes cache directory")
-        wheel_cache_path = env_cache_path / "dist"
-
-        if wheel_cache_path.exists():
-            existing_wheels = list(wheel_cache_path.glob("*.whl"))
-            if existing_wheels:
-                console.print(f"[dim]Using cached wheel at {existing_wheels[0]}[/dim]")
-                return existing_wheels[0], actual_version
-
-        # Move extracted content to final cache location
-        env_cache_path.mkdir(parents=True, exist_ok=True)
-        for item in temp_extract_path.iterdir():
-            shutil.move(str(item), str(env_cache_path / item.name))
-
-    finally:
-        if temp_file_path and Path(temp_file_path).exists():
-            Path(temp_file_path).unlink()
-        if temp_extract_dir and Path(temp_extract_dir).exists():
-            shutil.rmtree(temp_extract_dir, ignore_errors=True)
-
-    # Build the wheel
-    console.print("[dim]Building wheel...[/dim]")
-    try:
-        if shutil.which("uv"):
-            subprocess.run(
-                ["uv", "build", "--wheel", "--out-dir", "dist"],
-                cwd=env_cache_path,
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-        else:
-            subprocess.run(
-                [sys.executable, "-m", "build", "--wheel", str(env_cache_path)],
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"Failed to build wheel: {e.stderr}") from e
-
-    # Find the built wheel
-    wheels = list(wheel_cache_path.glob("*.whl"))
-    if not wheels:
-        raise RuntimeError("No wheel file found after build")
-
-    wheel_path = wheels[0]
-
-    # Create metadata file for tracking
-    try:
-        prime_dir = env_cache_path / ".prime"
-        prime_dir.mkdir(exist_ok=True)
-        metadata_path = prime_dir / ".env-metadata.json"
-        env_metadata = {
-            "environment_id": details.get("id"),
-            "owner": owner,
-            "name": name,
-            "version": actual_version,
-            "cached_at": datetime.now().isoformat(),
-            "wheel_path": str(wheel_path),
-        }
-        with open(metadata_path, "w") as f:
-            json.dump(env_metadata, f, indent=2)
-    except Exception:
-        pass  # Non-critical if metadata save fails
-
-    return wheel_path, actual_version
-
-
-def _is_environment_installed(env_name: str, required_version: Optional[str] = None) -> bool:
-    """Check if an environment package is installed."""
-    try:
-        pkg_name = normalize_package_name(env_name)
-        result = subprocess.run(
-            _uv_pip_command("show", pkg_name),
-            capture_output=True,
-            text=True,
-        )
-
-        if result.returncode != 0:
-            return False
-
-        if required_version and required_version != "latest":
-            for line in result.stdout.splitlines():
-                if line.startswith("Version:"):
-                    installed_version = line.split(":", 1)[1].strip()
-                    return installed_version == required_version
-            return False
-
-        return True
-    except Exception:
-        return False
-
-
-def _build_install_command(
-    name: str,
-    version: str,
-    simple_index_url: Optional[str],
-    wheel_url: Optional[str],
-    tool: str = "uv",
-    no_upgrade: bool = False,
-    url_dependencies: Optional[List[str]] = None,
-    prerelease: bool = False,
-) -> Optional[List[str]]:
-    """Build install command for an environment. Returns None if no install method available.
-
-    Args:
-        name: Package name
-        version: Package version
-        simple_index_url: Simple index URL for the package
-        wheel_url: Direct wheel URL
-        tool: Package manager to use ('uv' or 'pip')
-        no_upgrade: If True, don't include upgrade flags (preserves locked dependencies)
-        url_dependencies: List of URL dependencies to install as direct requirements
-    """
-    normalized_name = normalize_package_name(name)
-
-    if simple_index_url:
-        if tool == "uv":
-            cmd = _uv_pip_command("install")
-            if not no_upgrade:
-                # Use -P to only upgrade this package, not its dependencies
-                cmd.extend(["-P", normalized_name])
-            if version and version != "latest":
-                cmd.append(f"{normalized_name}=={version}")
-            else:
-                cmd.append(normalized_name)
-            # Add URL dependencies as direct requirements (uv requires this)
-            if url_dependencies:
-                cmd.extend(url_dependencies)
-            cmd.extend(["--extra-index-url", simple_index_url])
-            # Hub simple index doesn't emit PEP 700 upload-time metadata, so any
-            # exclude-newer cutoff on the consumer side filters hub wheels
-            # regardless of how permissive the cutoff is. Disable per-package.
-            cmd.extend(["--exclude-newer-package", f"{normalized_name}=false"])
-            if prerelease:
-                cmd.append("--prerelease=allow")
-            return cmd
-        else:  # pip
-            cmd = ["pip", "install"]
-            if not no_upgrade:
-                cmd.append("--upgrade")
-            if prerelease:
-                cmd.append("--pre")
-            if version and version != "latest":
-                cmd.append(f"{normalized_name}=={version}")
-            else:
-                cmd.append(normalized_name)
-            # Add URL dependencies for consistency
-            if url_dependencies:
-                cmd.extend(url_dependencies)
-            cmd.extend(["--extra-index-url", simple_index_url])
-            return cmd
-    elif wheel_url:
-        try:
-            cmd = get_install_command(tool, wheel_url, normalized_name, no_upgrade)
-            # Add URL dependencies for wheel-only installs too
-            if url_dependencies:
-                cmd.extend(url_dependencies)
-            if prerelease:
-                if tool == "uv":
-                    cmd.append("--prerelease=allow")
-                else:
-                    cmd.append("--pre")
-            return cmd
-        except ValueError:
-            return None
-
-    return None
-
-
-def _install_single_environment(env_slug: str, tool: str = "uv", prerelease: bool = False) -> bool:
-    """Install a single environment from the hub. Returns True on success."""
-    try:
-        env_id, target_version = validate_env_id(env_slug)
-    except ValueError as e:
-        console.print(f"[red]Invalid environment format: {e}[/red]")
-        return False
-
-    owner, name = env_id.split("/")
-
-    try:
-        client = APIClient(require_auth=False)
-        details = fetch_environment_details(client, owner, name, target_version)
-    except APIError as e:
-        console.print(f"[red]Failed to find environment {env_slug}: {e}[/red]")
-        return False
-
-    simple_index_url = details.get("simple_index_url")
-    wheel_url = process_wheel_url(details.get("wheel_url"))
-    url_dependencies = details.get("url_dependencies", [])
-
-    # Mirror the same private-environment behavior as `prime env install`.
-    if not simple_index_url and not wheel_url and details.get("visibility") == "PRIVATE":
-        try:
-            wheel_path, resolved_version = _pull_and_build_private_env(
-                client,
-                owner,
-                name,
-                target_version,
-                details,
-            )
-            normalized_name = normalize_package_name(name)
-            if tool == "uv":
-                cmd_parts = _uv_pip_command("install", "-P", normalized_name, str(wheel_path))
-                if prerelease:
-                    cmd_parts.append("--prerelease=allow")
-            else:
-                cmd_parts = ["pip", "install", "--upgrade", str(wheel_path)]
-                if prerelease:
-                    cmd_parts.append("--pre")
-            execute_install_command(cmd_parts, env_id, resolved_version, tool)
-            return True
-        except Exception as e:
-            console.print(f"[red]Failed to install private environment {env_slug}: {e}[/red]")
-            return False
-
-    if not simple_index_url and not wheel_url:
-        console.print(f"[red]No installation method available for {env_slug}[/red]")
-        return False
-
-    cmd_parts = _build_install_command(
-        name,
-        target_version,
-        simple_index_url,
-        wheel_url,
-        tool,
-        url_dependencies=url_dependencies,
-        prerelease=prerelease,
-    )
-    if not cmd_parts:
-        console.print(f"[red]Failed to build install command for {env_slug}[/red]")
-        return False
-
-    try:
-        execute_install_command(cmd_parts, env_id, target_version, tool)
-        return True
-    except Exception as e:
-        console.print(f"[red]Installation failed: {e}[/red]")
-        return False
 
 
 def _get_environment_id(client: APIClient, owner: str, env_name: str) -> str:

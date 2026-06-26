@@ -8,8 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import toml
-from prime_cli.commands.env import compute_content_hash
-from prime_cli.utils.env_metadata import get_environment_metadata
+from prime_cli.utils.env_metadata import compute_content_hash, get_environment_metadata
 from prime_cli.utils.time_utils import format_time_ago
 
 from .models import LabItem

@@ -1,14 +1,15 @@
-import argparse
 import inspect
 import json
 import re
 import time
+import tomllib
 from functools import wraps
 from pathlib import Path
 from typing import Any, Optional
 
 import typer
 from prime_evals import EvalsAPIError, EvalsClient, InvalidEvaluationError
+from pydantic import ValidationError
 from rich.progress import Progress
 from rich.syntax import Syntax
 from rich.table import Table
@@ -33,11 +34,6 @@ from ..utils.hosted_eval import (
     get_new_log_lines,
 )
 from ..verifiers_bridge import (
-    DEFAULT_ENV_DIR_PATH,
-    DEFAULT_MODEL,
-    _is_config_target,
-    _resolve_environment_reference,
-    _split_owner_and_name,
     exec_verifiers_process,
     run_eval_view,
 )
@@ -75,8 +71,6 @@ PUSH_EVAL_JSON_HELP = json_output_help(
 HOSTED_LOGS_DEFAULT_TAIL_LINES = 1000
 HOSTED_LOGS_DEFAULT_POLL_INTERVAL_SECONDS = 5.0
 HOSTED_RUN_DEFAULT_POLL_INTERVAL_SECONDS = 10.0
-HOSTED_RUN_DEFAULT_NUM_EXAMPLES = 5
-HOSTED_RUN_DEFAULT_ROLLOUTS_PER_EXAMPLE = 3
 HOSTED_LOGS_RATE_LIMIT_THRESHOLD = 3
 HOSTED_LOGS_RATE_LIMIT_WAIT_SECONDS = 30
 HOSTED_LOGS_RETRY_WAIT_SECONDS = 10
@@ -85,84 +79,6 @@ EVAL_TABLE_MAX_TEXT_WIDTH = 30
 EVAL_SUBMIT_EXAMPLE_COMMAND = "prime eval submit gsm8k"
 EVAL_HOSTED_LABEL = "HOSTED"
 EVAL_LOCAL_LABEL = "LOCAL"
-# Legacy verifiers config fields/flags are accepted through the parser only so
-# Prime can reject them with the hosted-specific unsupported-option message.
-HOSTED_EVAL_CONFIG_EXTRA_FIELDS = {
-    "debug",
-    "timeout_minutes",
-    "allow_sandbox_access",
-    "allow_instances_access",
-    "allow_tunnel_access",
-    "eval_name",
-}
-HOSTED_LEGACY_UNSUPPORTED_FLAGS = {"--debug", "--tui", "-u"}
-HOSTED_EVAL_CONFIG_FIELD_TYPES: dict[str, tuple[type[Any], str]] = {
-    "env_dir_path": (str, "a non-empty string"),
-    "num_examples": (int, "an integer"),
-    "rollouts_per_example": (int, "an integer"),
-    "timeout_minutes": (int, "an integer"),
-    "allow_sandbox_access": (bool, "a boolean"),
-    "allow_instances_access": (bool, "a boolean"),
-    "allow_tunnel_access": (bool, "a boolean"),
-    "max_tokens": (int, "an integer"),
-    "max_concurrent": (int, "an integer"),
-    "max_retries": (int, "an integer"),
-    "independent_scoring": (bool, "a boolean"),
-    "verbose": (bool, "a boolean"),
-    "api_client_type": (str, "a non-empty string"),
-    "api_base_url": (str, "a non-empty string"),
-    "api_key_var": (str, "a non-empty string"),
-    "eval_name": (str, "a non-empty string"),
-}
-HOSTED_SUPPORTED_VERIFIERS_FIELDS = {
-    "api_base_url",
-    "api_client_type",
-    "api_key_var",
-    "env_args",
-    "env_dir_path",
-    "extra_env_kwargs",
-    "header",
-    "independent_scoring",
-    "max_concurrent",
-    "verbose",
-    "max_retries",
-    "max_tokens",
-    "model",
-    "num_examples",
-    "rollouts_per_example",
-    "sampling_args",
-    "state_columns",
-    "temperature",
-}
-HOSTED_SUPPORTED_TOML_FIELDS = {
-    "allow_instances_access",
-    "allow_sandbox_access",
-    "allow_tunnel_access",
-    "api_base_url",
-    "api_client_type",
-    "api_key_var",
-    "endpoint_id",
-    "endpoints_path",
-    "env_id",
-    "env_args",
-    "env_dir_path",
-    "eval_name",
-    "extra_env_kwargs",
-    "header",
-    "headers",
-    "independent_scoring",
-    "max_concurrent",
-    "verbose",
-    "max_retries",
-    "max_tokens",
-    "model",
-    "num_examples",
-    "rollouts_per_example",
-    "sampling_args",
-    "state_columns",
-    "temperature",
-    "timeout_minutes",
-}
 
 
 class DefaultGroup(DefaultCommandGroup):
@@ -238,268 +154,27 @@ def _parse_string_map_option(raw: Optional[str], option_name: str) -> Optional[d
     return parsed
 
 
-def _validate_json_object_field(merged: dict[str, Any], field_name: str) -> None:
-    field_value = merged.get(field_name)
-    if field_value is None:
-        return
-    if not isinstance(field_value, dict):
-        console.print(f"[red]Error:[/red] hosted eval config `{field_name}` must be a TOML table")
-        raise typer.Exit(1)
-
+def _load_hosted_eval_configs(config_path: Path) -> list[HostedEvalConfig]:
+    """Load Prime's strict hosted-eval TOML format without the Verifiers V0 parser."""
     try:
-        json.dumps(field_value)
-    except (TypeError, ValueError) as exc:
-        console.print(
-            "[red]Error:[/red] hosted eval config "
-            f"`{field_name}` must contain only JSON-serializable values"
-        )
+        raw = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        console.print(f"[red]Error:[/red] invalid hosted eval config: {exc}")
         raise typer.Exit(1) from exc
-
-
-def _coerce_hosted_headers(raw: dict[str, Any]) -> list[str] | None:
-    from verifiers.cli.commands.eval import build_extra_headers
-
+    entries = raw.pop("eval", None)
+    if entries is None:
+        entries = [raw]
+        defaults: dict[str, Any] = {}
+    elif isinstance(entries, list) and entries:
+        defaults = raw
+    else:
+        console.print("[red]Error:[/red] hosted config requires one or more [[eval]] tables")
+        raise typer.Exit(1)
     try:
-        normalized = build_extra_headers(raw)
-    except ValueError as exc:
-        console.print(f"[red]Error:[/red] {exc}")
+        return [HostedEvalConfig.model_validate({**defaults, **entry}) for entry in entries]
+    except (TypeError, ValidationError) as exc:
+        console.print(f"[red]Error:[/red] invalid hosted eval config: {exc}")
         raise typer.Exit(1) from exc
-
-    if not normalized:
-        return None
-    return [f"{name}: {value}" for name, value in normalized.items()]
-
-
-def _parse_verifiers_eval_namespace(
-    environment: str, passthrough_args: list[str], sampling_args: Optional[str]
-) -> tuple[argparse.Namespace, set[str], dict[str, str]]:
-    from verifiers.cli.commands.eval import build_parser
-
-    argv = [environment, *passthrough_args]
-    if sampling_args is not None:
-        argv.extend(["--sampling-args", sampling_args])
-
-    explicit_parser = build_parser()
-    option_names_by_dest = {}
-    for action in explicit_parser._actions:
-        if action.option_strings:
-            action.default = argparse.SUPPRESS
-            option_names_by_dest[action.dest] = next(
-                (option for option in action.option_strings if option.startswith("--")),
-                action.option_strings[0],
-            )
-
-    try:
-        parsed = build_parser().parse_args(argv)
-        explicit = explicit_parser.parse_args(argv)
-    except SystemExit as exc:
-        raise typer.Exit(exc.code) from exc
-
-    provided_dests = {dest for dest, value in vars(explicit).items() if dest != "env_id_or_config"}
-    return parsed, provided_dests, option_names_by_dest
-
-
-def _reject_unsupported_hosted_verifiers_args(
-    provided_dests: set[str], option_names_by_dest: dict[str, str]
-) -> None:
-    unsupported_flags = [
-        option_name
-        for dest, option_name in option_names_by_dest.items()
-        if dest in provided_dests and dest not in HOSTED_SUPPORTED_VERIFIERS_FIELDS
-    ]
-    if not unsupported_flags:
-        return
-
-    console.print(
-        "[red]Error:[/red] hosted eval CLI does not support: "
-        + ", ".join(f"`{flag}`" for flag in unsupported_flags)
-    )
-    raise typer.Exit(1)
-
-
-def _reject_legacy_unsupported_hosted_flags(passthrough_args: list[str]) -> None:
-    unsupported_flags = []
-    for arg in passthrough_args:
-        flag = arg.split("=", 1)[0]
-        if flag in HOSTED_LEGACY_UNSUPPORTED_FLAGS and flag not in unsupported_flags:
-            unsupported_flags.append(flag)
-
-    if not unsupported_flags:
-        return
-
-    console.print(
-        "[red]Error:[/red] hosted eval CLI does not support: "
-        + ", ".join(f"`{flag}`" for flag in unsupported_flags)
-    )
-    raise typer.Exit(1)
-
-
-def _freeze_json_value(value: Any) -> Any:
-    if isinstance(value, dict):
-        return tuple(sorted((key, _freeze_json_value(nested)) for key, nested in value.items()))
-    if isinstance(value, list):
-        return tuple(_freeze_json_value(item) for item in value)
-    return value
-
-
-def _validate_hosted_config_field(
-    merged: dict[str, Any], field_name: str, expected_type: type[Any], description: str
-) -> None:
-    field_value = merged.get(field_name)
-    if field_value is None:
-        return
-    if type(field_value) is not expected_type:
-        console.print(f"[red]Error:[/red] `{field_name}` must be {description}")
-        raise typer.Exit(1)
-    if expected_type is str and not field_value:
-        console.print(f"[red]Error:[/red] `{field_name}` must be {description}")
-        raise typer.Exit(1)
-
-
-def _resolve_hosted_config_model(raw_config: dict[str, Any], config_path: Path) -> str:
-    raw_endpoint_id = raw_config.get("endpoint_id")
-    raw_model = raw_config.get("model")
-
-    if raw_endpoint_id is not None and raw_model is not None:
-        console.print(
-            "[red]Error:[/red] hosted eval config cannot set both `endpoint_id` and `model`"
-        )
-        raise typer.Exit(1)
-
-    if raw_endpoint_id is None:
-        if raw_model is None:
-            return DEFAULT_MODEL
-        if type(raw_model) is not str or not raw_model:
-            console.print("[red]Error:[/red] `model` must be a non-empty string")
-            raise typer.Exit(1)
-        return raw_model
-
-    if type(raw_endpoint_id) is not str or not raw_endpoint_id:
-        console.print("[red]Error:[/red] `endpoint_id` must be a non-empty string")
-        raise typer.Exit(1)
-
-    endpoints_path = raw_config.get("endpoints_path", "./configs/endpoints.toml")
-    if type(endpoints_path) is not str or not endpoints_path:
-        console.print("[red]Error:[/red] `endpoints_path` must be a non-empty string")
-        raise typer.Exit(1)
-
-    endpoints_path_obj = Path(endpoints_path)
-    if "endpoints_path" in raw_config and not endpoints_path_obj.is_absolute():
-        endpoints_path = str((config_path.parent / endpoints_path_obj).resolve())
-
-    try:
-        from verifiers.utils.eval_utils import load_endpoints, resolve_endpoints_file
-    except ImportError as exc:
-        console.print(
-            "[red]Error:[/red] verifiers is required to resolve `endpoint_id`. "
-            "Install the `verifiers` package or use `model` instead."
-        )
-        raise typer.Exit(1) from exc
-
-    resolved_endpoints_file = resolve_endpoints_file(endpoints_path)
-    if resolved_endpoints_file is None or resolved_endpoints_file.suffix != ".toml":
-        console.print(
-            "[red]Error:[/red] `endpoint_id` requires an endpoints.toml registry "
-            "via `endpoints_path`"
-        )
-        raise typer.Exit(1)
-
-    endpoints = load_endpoints(endpoints_path)
-    if raw_endpoint_id not in endpoints:
-        console.print(
-            f"[red]Error:[/red] endpoint_id '{raw_endpoint_id}' not found in {endpoints_path}"
-        )
-        raise typer.Exit(1)
-
-    endpoint_group = endpoints[raw_endpoint_id]
-    endpoint_models = {entry["model"] for entry in endpoint_group}
-    if len(endpoint_models) != 1:
-        console.print(
-            f"[red]Error:[/red] endpoint_id '{raw_endpoint_id}' resolves to multiple models: "
-            f"{sorted(endpoint_models)}"
-        )
-        raise typer.Exit(1)
-
-    return endpoint_group[0]["model"]
-
-
-def _validate_single_hosted_eval_config(
-    merged: dict[str, Any], config_path: Path
-) -> dict[str, Any]:
-    from verifiers.cli.commands.eval import merge_sampling_args
-
-    unsupported_fields = sorted(
-        field_name for field_name in merged if field_name not in HOSTED_SUPPORTED_TOML_FIELDS
-    )
-    if unsupported_fields:
-        console.print(
-            "[red]Error:[/red] hosted eval config does not support: "
-            + ", ".join(f"`{field}`" for field in unsupported_fields)
-        )
-        raise typer.Exit(1)
-
-    env_id = merged.get("env_id")
-    if type(env_id) is not str or not env_id:
-        console.print("[red]Error:[/red] hosted eval config requires a non-empty `env_id`")
-        raise typer.Exit(1)
-
-    _validate_json_object_field(merged, "env_args")
-    _validate_json_object_field(merged, "sampling_args")
-    _validate_json_object_field(merged, "extra_env_kwargs")
-    state_columns = merged.get("state_columns")
-    if state_columns is not None and (
-        not isinstance(state_columns, list)
-        or any(type(item) is not str or not item for item in state_columns)
-    ):
-        console.print("[red]Error:[/red] `state_columns` must be a list of non-empty strings")
-        raise typer.Exit(1)
-
-    headers = _coerce_hosted_headers(merged)
-    merged.pop("header", None)
-    merged.pop("headers", None)
-    if headers is not None:
-        merged["headers"] = headers
-
-    for field_name, (expected_type, description) in HOSTED_EVAL_CONFIG_FIELD_TYPES.items():
-        _validate_hosted_config_field(merged, field_name, expected_type, description)
-
-    temperature = merged.get("temperature")
-    if temperature is not None and type(temperature) not in {int, float}:
-        console.print("[red]Error:[/red] `temperature` must be a number")
-        raise typer.Exit(1)
-    if type(temperature) is int:
-        merged["temperature"] = float(temperature)
-
-    merged["sampling_args"] = (
-        merge_sampling_args(
-            merged.get("sampling_args"),
-            max_tokens=merged.pop("max_tokens", None),
-            temperature=merged.pop("temperature", None),
-            prefer_existing_keys=True,
-        )
-        or None
-    )
-
-    merged["model"] = _resolve_hosted_config_model(merged, config_path)
-    return merged
-
-
-def _load_hosted_eval_configs(config_path_str: str) -> list[dict[str, Any]]:
-    from verifiers.utils.eval_utils import load_toml_config
-
-    config_path = Path(config_path_str)
-    try:
-        loaded_configs = load_toml_config(
-            config_path,
-            extra_valid_fields=HOSTED_EVAL_CONFIG_EXTRA_FIELDS,
-        )
-    except Exception as exc:
-        console.print(f"[red]Error:[/red] {exc}")
-        raise typer.Exit(1) from exc
-
-    return [
-        _validate_single_hosted_eval_config(dict(config), config_path) for config in loaded_configs
-    ]
 
 
 def _fetch_eval_status(client: APIClient, eval_id: str) -> dict[str, Any]:
@@ -511,7 +186,9 @@ def _fetch_logs(client: APIClient, eval_id: str) -> str:
     return response.get("logs") or ""
 
 
-def _build_hosted_evaluation_payload(config: HostedEvalConfig) -> dict[str, Any]:
+def _build_hosted_evaluation_payload(
+    config: HostedEvalConfig, environment_ids: list[str]
+) -> dict[str, Any]:
     eval_config: dict[str, Any] = {
         "num_examples": config.num_examples,
         "rollouts_per_example": config.rollouts_per_example,
@@ -550,8 +227,8 @@ def _build_hosted_evaluation_payload(config: HostedEvalConfig) -> dict[str, Any]
         eval_config["api_key_var"] = config.api_key_var
 
     payload: dict[str, Any] = {
-        "environment_ids": [config.environment_id],
-        "inference_model": config.inference_model,
+        "environment_ids": environment_ids,
+        "inference_model": config.model,
         "eval_config": eval_config,
     }
     if config.name:
@@ -561,13 +238,10 @@ def _build_hosted_evaluation_payload(config: HostedEvalConfig) -> dict[str, Any]
 
 
 def _create_hosted_evaluations(
-    config: HostedEvalConfig, environment_ids: Optional[list[str]] = None
+    config: HostedEvalConfig, environment_ids: list[str]
 ) -> dict[str, Any]:
     client = APIClient()
-    payload = _build_hosted_evaluation_payload(config)
-
-    if environment_ids is not None:
-        payload["environment_ids"] = environment_ids
+    payload = _build_hosted_evaluation_payload(config, environment_ids)
 
     if client.config.team_id:
         payload["team_id"] = client.config.team_id
@@ -715,17 +389,28 @@ def _display_logs(
 def _resolve_hosted_environment(
     environment: str,
     *,
-    env_dir_path: Optional[str],
     env_path: Optional[str],
 ) -> tuple[str, str]:
-    resolved = _resolve_environment_reference(environment, env_dir_path or DEFAULT_ENV_DIR_PATH)
+    """Resolve an explicit slug or a local package's recorded upstream."""
+    platform_slug = None
+    if "/" in environment:
+        from verifiers.utils.install_utils import parse_env_id
 
-    platform_slug = resolved.platform_slug or resolved.upstream_slug
-    if platform_slug is None and env_path:
+        try:
+            owner, name, version = parse_env_id(environment)
+        except ValueError as exc:
+            console.print(f"[red]Error:[/red] {exc}")
+            raise typer.Exit(1) from exc
+        if version is not None:
+            console.print("[red]Error:[/red] hosted evaluations accept only unversioned slugs")
+            raise typer.Exit(1)
+        platform_slug = f"{owner}/{name}"
+    if platform_slug is None:
+        module_name = environment.replace("-", "_")
         metadata = find_environment_metadata(
-            env_name=resolved.env_name,
-            env_path=Path(env_path),
-            module_name=resolved.env_name.replace("-", "_"),
+            env_name=environment,
+            env_path=Path(env_path) if env_path else Path("environments") / module_name,
+            module_name=module_name,
         )
         owner = metadata.get("owner") if metadata else None
         name = metadata.get("name") if metadata else None
@@ -742,12 +427,7 @@ def _resolve_hosted_environment(
         )
         raise typer.Exit(1)
 
-    parts = _split_owner_and_name(platform_slug)
-    if parts is None:
-        console.print(f"[red]Error:[/red] invalid environment slug: {platform_slug}")
-        raise typer.Exit(1)
-
-    owner, env_name = parts
+    owner, env_name = platform_slug.split("/")
     api_client = APIClient()
     try:
         response = api_client.get(f"/environmentshub/{owner}/{env_name}/@latest")
@@ -768,11 +448,6 @@ def _resolve_hosted_environment(
         console.print(f"[red]Error:[/red] could not resolve environment id for {platform_slug}")
         raise typer.Exit(1)
 
-    if resolved.install_mode == "local" and resolved.recommend_push:
-        console.print(
-            "[yellow]Local environment code differs from the latest published version of "
-            f"{platform_slug}.[/yellow]"
-        )
     console.print(
         f"[dim]Hosted evaluations always use the latest published version of {platform_slug}.[/dim]"
     )
@@ -1196,23 +871,6 @@ def view_cmd(
     run_eval_view(env_dir=env_dir, outputs_dir=outputs_dir, limit=limit)
 
 
-@subcommands_app.command("tui")
-def tui_cmd(
-    _limit: int = typer.Option(
-        50, "--limit", "-n", help="Deprecated; use `prime eval view --limit`."
-    ),
-    _env_dir: Optional[str] = typer.Option(
-        None, "--env-dir", "-e", help="Deprecated; use `prime eval view --env-dir`."
-    ),
-    _outputs_dir: Optional[str] = typer.Option(
-        None, "--outputs-dir", "-o", help="Deprecated; use `prime eval view --outputs-dir`."
-    ),
-) -> None:
-    """Deprecated alias for the evaluation viewer."""
-    console.print("[yellow]Deprecated:[/yellow] `prime eval tui` has moved. Use `prime eval view`.")
-    raise typer.Exit(1)
-
-
 @subcommands_app.command("push", epilog=PUSH_EVAL_JSON_HELP)
 @handle_errors
 def push_eval(
@@ -1441,13 +1099,8 @@ def run_eval_cmd(ctx: typer.Context) -> None:
     "submit",
     help="Submit a hosted V0 evaluation",
     no_args_is_help=True,
-    context_settings={
-        "allow_extra_args": True,
-        "ignore_unknown_options": True,
-    },
 )
 def submit_eval_cmd(
-    ctx: typer.Context,
     environment: Optional[str] = typer.Argument(
         None,
         help="Environment name/slug or V0 TOML config path",
@@ -1470,24 +1123,37 @@ def submit_eval_cmd(
         "--follow",
         help="Follow hosted evaluation status and stream logs until completion",
     ),
+    model: Optional[str] = typer.Option(None, "--model", "-m", help="Inference model"),
+    num_examples: Optional[int] = typer.Option(
+        None, "--num-examples", "-n", help="Examples per environment"
+    ),
+    rollouts_per_example: Optional[int] = typer.Option(
+        None, "--rollouts-per-example", "-r", help="Rollouts per example"
+    ),
+    env_args: Optional[str] = typer.Option(
+        None, "--env-args", help="V0 load_environment arguments as JSON"
+    ),
+    extra_env_kwargs: Optional[str] = typer.Option(
+        None, "--extra-env-kwargs", help="V0 post-load environment arguments as JSON"
+    ),
     timeout_minutes: Optional[int] = typer.Option(
         None,
         "--timeout-minutes",
         help="Timeout in minutes for hosted evaluation",
     ),
-    allow_sandbox_access: bool = typer.Option(
-        False,
-        "--allow-sandbox-access",
+    allow_sandbox_access: Optional[bool] = typer.Option(
+        None,
+        "--allow-sandbox-access/--no-sandbox-access",
         help="Allow sandbox read/write access for hosted evaluations",
     ),
-    allow_instances_access: bool = typer.Option(
-        False,
-        "--allow-instances-access",
+    allow_instances_access: Optional[bool] = typer.Option(
+        None,
+        "--allow-instances-access/--no-instances-access",
         help="Allow instance creation and management for hosted evaluations",
     ),
-    allow_tunnel_access: bool = typer.Option(
-        False,
-        "--allow-tunnel-access",
+    allow_tunnel_access: Optional[bool] = typer.Option(
+        None,
+        "--allow-tunnel-access/--no-tunnel-access",
         help="Allow tunnel creation and management for hosted evaluations",
     ),
     custom_secrets: Optional[str] = typer.Option(
@@ -1508,255 +1174,88 @@ def submit_eval_cmd(
         "--eval-name",
         help="Custom name for the hosted evaluation",
     ),
+    max_concurrent: Optional[int] = typer.Option(
+        None, "--max-concurrent", help="Maximum concurrent rollouts"
+    ),
+    max_retries: Optional[int] = typer.Option(None, "--max-retries", help="Retries per rollout"),
+    state_columns: Optional[list[str]] = typer.Option(
+        None, "--state-column", help="State column to retain; repeat as needed"
+    ),
+    independent_scoring: Optional[bool] = typer.Option(
+        None,
+        "--independent-scoring/--group-scoring",
+        help="Score rollouts independently",
+    ),
+    verbose: Optional[bool] = typer.Option(
+        None, "--verbose/--no-verbose", help="Enable verbose evaluator logs"
+    ),
+    header: Optional[list[str]] = typer.Option(
+        None, "--header", help="Extra HTTP header as 'Name: Value'; repeat as needed"
+    ),
+    api_client_type: Optional[str] = typer.Option(
+        None, "--api-client-type", help="V0 model client type"
+    ),
+    api_base_url: Optional[str] = typer.Option(
+        None, "--api-base-url", help="V0 model API base URL"
+    ),
+    api_key_var: Optional[str] = typer.Option(
+        None, "--api-key-var", help="Environment variable containing the model API key"
+    ),
 ) -> None:
-    """Submit an evaluation through the hosted V0 API."""
-    passthrough_args = list(ctx.args)
-    if environment == "@":
-        if not passthrough_args:
-            console.print("[red]Error:[/red] @ must be followed by a config path.")
-            raise typer.Exit(2)
-        environment = passthrough_args.pop(0)
-
+    """Submit one environment or a strict ``[[eval]]`` TOML file to the hosted V0 API."""
     if environment is None:
         console.print("[red]Error:[/red] Missing argument 'ENVIRONMENT'.")
         console.print(f"[dim]Example: {EVAL_SUBMIT_EXAMPLE_COMMAND}[/dim]")
         raise typer.Exit(2)
-    if environment.startswith("-"):
-        console.print("[red]Error:[/red] Environment/config must be the first argument.")
-        console.print(f"[dim]Example: {EVAL_SUBMIT_EXAMPLE_COMMAND}[/dim]")
-        raise typer.Exit(2)
 
-    _reject_legacy_unsupported_hosted_flags(passthrough_args)
-    parsed_verifiers_args, cli_overrides, option_names_by_dest = _parse_verifiers_eval_namespace(
-        environment,
-        passthrough_args,
-        sampling_args,
+    targets = (
+        _load_hosted_eval_configs(Path(environment))
+        if Path(environment).suffix == ".toml"
+        else [HostedEvalConfig(env_id=environment)]
     )
-    _reject_unsupported_hosted_verifiers_args(cli_overrides, option_names_by_dest)
-    env_dir_path = parsed_verifiers_args.env_dir_path if "env_dir_path" in cli_overrides else None
-
-    cli_headers = None
-    if "header" in cli_overrides:
-        cli_headers = _coerce_hosted_headers({"header": parsed_verifiers_args.header})
-
-    hosted_target_configs: list[dict[str, Any]] = []
-    if _is_config_target(environment):
-        hosted_target_configs = _load_hosted_eval_configs(environment)
-    else:
-        hosted_target_configs = [
-            {
-                "env_id": environment,
-                "env_dir_path": env_dir_path,
-                "model": DEFAULT_MODEL,
-                "num_examples": HOSTED_RUN_DEFAULT_NUM_EXAMPLES,
-                "rollouts_per_example": HOSTED_RUN_DEFAULT_ROLLOUTS_PER_EXAMPLE,
-                "env_args": None,
-                "timeout_minutes": None,
-                "allow_sandbox_access": True,
-                "allow_instances_access": False,
-                "allow_tunnel_access": True,
-                "sampling_args": None,
-                "max_concurrent": None,
-                "max_retries": None,
-                "state_columns": None,
-                "independent_scoring": False,
-                "verbose": False,
-                "headers": None,
-                "extra_env_kwargs": None,
-                "api_client_type": None,
-                "api_base_url": None,
-                "api_key_var": None,
-                "eval_name": None,
-            }
+    updates = {
+        "model": model,
+        "num_examples": num_examples,
+        "rollouts_per_example": rollouts_per_example,
+        "env_args": _parse_json_object_option(env_args, "--env-args"),
+        "extra_env_kwargs": _parse_json_object_option(extra_env_kwargs, "--extra-env-kwargs"),
+        "timeout_minutes": timeout_minutes,
+        "allow_sandbox_access": allow_sandbox_access,
+        "allow_instances_access": allow_instances_access,
+        "allow_tunnel_access": allow_tunnel_access,
+        "custom_secrets": _parse_string_map_option(custom_secrets, "--custom-secrets"),
+        "sampling_args": _parse_json_object_option(sampling_args, "--sampling-args"),
+        "name": eval_name,
+        "max_concurrent": max_concurrent,
+        "max_retries": max_retries,
+        "state_columns": state_columns,
+        "independent_scoring": independent_scoring,
+        "verbose": verbose,
+        "headers": header,
+        "api_client_type": api_client_type,
+        "api_base_url": api_base_url,
+        "api_key_var": api_key_var,
+    }
+    overrides = {key: value for key, value in updates.items() if value is not None}
+    try:
+        targets = [
+            HostedEvalConfig.model_validate({**target.model_dump(), **overrides})
+            for target in targets
         ]
+    except ValidationError as exc:
+        console.print(f"[red]Error:[/red] invalid hosted evaluation: {exc}")
+        raise typer.Exit(1) from exc
 
-    parsed_custom_secrets = _parse_string_map_option(custom_secrets, "--custom-secrets")
-
-    effective_targets: list[dict[str, Any]] = []
-    for target_config in hosted_target_configs:
-        try:
-            default_num_examples = int(
-                target_config.get("num_examples", HOSTED_RUN_DEFAULT_NUM_EXAMPLES)
-            )
-            default_rollouts_per_example = int(
-                target_config.get(
-                    "rollouts_per_example",
-                    HOSTED_RUN_DEFAULT_ROLLOUTS_PER_EXAMPLE,
-                )
-            )
-            num_examples = (
-                parsed_verifiers_args.num_examples
-                if "num_examples" in cli_overrides
-                else default_num_examples
-            )
-            rollouts_per_example = (
-                parsed_verifiers_args.rollouts_per_example
-                if "rollouts_per_example" in cli_overrides
-                else default_rollouts_per_example
-            )
-        except ValueError as exc:
-            console.print(
-                "[red]Error:[/red] --num-examples and --rollouts-per-example must be integers"
-            )
-            raise typer.Exit(1) from exc
-
-        if num_examples < -1 or rollouts_per_example < 1:
-            console.print(
-                "[red]Error:[/red] --num-examples must be >= -1 and "
-                "--rollouts-per-example must be >= 1"
-            )
-            raise typer.Exit(1)
-
-        explicit_sampling_args = "sampling_args" in cli_overrides
-        base_sampling_args_raw = (
-            parsed_verifiers_args.sampling_args
-            if explicit_sampling_args
-            else target_config.get("sampling_args")
-        )
-        if base_sampling_args_raw is None:
-            base_sampling_args = None
-        elif isinstance(base_sampling_args_raw, dict):
-            base_sampling_args = base_sampling_args_raw
-        else:
-            console.print("[red]Error:[/red] `sampling_args` must be a JSON object")
-            raise typer.Exit(1)
-        from verifiers.cli.commands.eval import merge_sampling_args
-
-        effective_sampling_args = (
-            merge_sampling_args(
-                base_sampling_args,
-                max_tokens=(
-                    parsed_verifiers_args.max_tokens if "max_tokens" in cli_overrides else None
-                ),
-                temperature=(
-                    parsed_verifiers_args.temperature if "temperature" in cli_overrides else None
-                ),
-                prefer_existing_keys=explicit_sampling_args,
-            )
-            or None
-        )
-
-        effective_targets.append(
-            {
-                "env_id": target_config["env_id"],
-                "env_dir_path": target_config.get("env_dir_path") or env_dir_path,
-                "model": (
-                    parsed_verifiers_args.model
-                    if "model" in cli_overrides
-                    else target_config["model"]
-                ),
-                "num_examples": num_examples,
-                "rollouts_per_example": rollouts_per_example,
-                "env_args": (
-                    parsed_verifiers_args.env_args
-                    if "env_args" in cli_overrides
-                    else target_config.get("env_args")
-                ),
-                "timeout_minutes": (
-                    timeout_minutes
-                    if timeout_minutes is not None
-                    else target_config.get("timeout_minutes")
-                ),
-                "allow_sandbox_access": (
-                    allow_sandbox_access
-                    if allow_sandbox_access
-                    else target_config.get("allow_sandbox_access", True)
-                ),
-                "allow_instances_access": (
-                    allow_instances_access
-                    if allow_instances_access
-                    else target_config.get("allow_instances_access", False)
-                ),
-                "allow_tunnel_access": (
-                    allow_tunnel_access
-                    if allow_tunnel_access
-                    else target_config.get("allow_tunnel_access", True)
-                ),
-                "custom_secrets": parsed_custom_secrets,
-                "sampling_args": effective_sampling_args,
-                "max_concurrent": (
-                    parsed_verifiers_args.max_concurrent
-                    if "max_concurrent" in cli_overrides
-                    else target_config.get("max_concurrent")
-                ),
-                "max_retries": (
-                    parsed_verifiers_args.max_retries
-                    if "max_retries" in cli_overrides
-                    else target_config.get("max_retries")
-                ),
-                "state_columns": (
-                    parsed_verifiers_args.state_columns
-                    if "state_columns" in cli_overrides
-                    else target_config.get("state_columns")
-                ),
-                "independent_scoring": (
-                    parsed_verifiers_args.independent_scoring
-                    if "independent_scoring" in cli_overrides
-                    else target_config.get("independent_scoring", False)
-                ),
-                "verbose": (
-                    parsed_verifiers_args.verbose
-                    if "verbose" in cli_overrides
-                    else target_config.get("verbose", False)
-                ),
-                "headers": (
-                    cli_headers if "header" in cli_overrides else target_config.get("headers")
-                ),
-                "extra_env_kwargs": (
-                    parsed_verifiers_args.extra_env_kwargs
-                    if "extra_env_kwargs" in cli_overrides
-                    else target_config.get("extra_env_kwargs")
-                ),
-                "api_client_type": (
-                    parsed_verifiers_args.api_client_type
-                    if "api_client_type" in cli_overrides
-                    else target_config.get("api_client_type")
-                ),
-                "api_base_url": (
-                    parsed_verifiers_args.api_base_url
-                    if "api_base_url" in cli_overrides
-                    else target_config.get("api_base_url")
-                ),
-                "api_key_var": (
-                    parsed_verifiers_args.api_key_var
-                    if "api_key_var" in cli_overrides
-                    else target_config.get("api_key_var")
-                ),
-                "eval_name": eval_name or target_config.get("eval_name"),
-            }
-        )
-
-    if follow and len(effective_targets) > 1:
+    if follow and len(targets) > 1:
         console.print(
             "[red]Error:[/red] `--follow` is only supported for a single hosted evaluation"
         )
         raise typer.Exit(1)
 
-    grouped_targets: dict[tuple[Any, ...], dict[str, Any]] = {}
-    target_order: list[tuple[Any, ...]] = []
-    for target in effective_targets:
-        group_key = (
-            target["model"],
-            target["num_examples"],
-            target["rollouts_per_example"],
-            _freeze_json_value(target.get("env_args")),
-            target.get("timeout_minutes"),
-            target.get("allow_sandbox_access", True),
-            target.get("allow_instances_access", False),
-            target.get("allow_tunnel_access", True),
-            _freeze_json_value(target.get("sampling_args")),
-            target.get("max_concurrent"),
-            target.get("max_retries"),
-            _freeze_json_value(target.get("state_columns")),
-            target.get("independent_scoring", False),
-            target.get("verbose", False),
-            _freeze_json_value(target.get("headers")),
-            _freeze_json_value(target.get("extra_env_kwargs")),
-            target.get("api_client_type"),
-            target.get("api_base_url"),
-            target.get("api_key_var"),
-            target.get("eval_name"),
-        )
+    grouped_targets: dict[str, dict[str, Any]] = {}
+    target_order: list[str] = []
+    for target in targets:
+        group_key = json.dumps(target.model_dump(exclude={"env_id"}), sort_keys=True, default=str)
         if group_key not in grouped_targets:
             grouped_targets[group_key] = {
                 "target": target,
@@ -1772,8 +1271,7 @@ def submit_eval_cmd(
             group = grouped_targets[group_key]
             for grouped_target in group["targets"]:
                 platform_slug, environment_id = _resolve_hosted_environment(
-                    grouped_target["env_id"],
-                    env_dir_path=grouped_target["env_dir_path"],
+                    grouped_target.env_id,
                     env_path=env_path,
                 )
                 group["platform_slugs"].append(platform_slug)
@@ -1788,32 +1286,8 @@ def submit_eval_cmd(
         for group_key in target_order:
             group = grouped_targets[group_key]
             target = group["target"]
-            hosted_config = HostedEvalConfig(
-                environment_id=group["environment_ids"][0],
-                inference_model=target["model"],
-                num_examples=target["num_examples"],
-                rollouts_per_example=target["rollouts_per_example"],
-                env_args=target.get("env_args"),
-                name=target.get("eval_name"),
-                timeout_minutes=target.get("timeout_minutes"),
-                allow_sandbox_access=target.get("allow_sandbox_access", True),
-                allow_instances_access=target.get("allow_instances_access", False),
-                allow_tunnel_access=target.get("allow_tunnel_access", True),
-                custom_secrets=target.get("custom_secrets"),
-                sampling_args=target.get("sampling_args"),
-                max_concurrent=target.get("max_concurrent"),
-                max_retries=target.get("max_retries"),
-                state_columns=target.get("state_columns"),
-                independent_scoring=target.get("independent_scoring", False),
-                verbose=target.get("verbose", False),
-                headers=target.get("headers"),
-                extra_env_kwargs=target.get("extra_env_kwargs"),
-                api_client_type=target.get("api_client_type"),
-                api_base_url=target.get("api_base_url"),
-                api_key_var=target.get("api_key_var"),
-            )
             result = _create_hosted_evaluations(
-                hosted_config,
+                target,
                 environment_ids=group["environment_ids"],
             )
             all_platform_slugs.extend(group["platform_slugs"])

@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import pytest
 import typer
 from prime_cli.client import APIError
@@ -16,10 +14,10 @@ from prime_cli.utils.hosted_eval import (
     filter_progress_bars,
     strip_ansi,
 )
-from prime_cli.verifiers_bridge import ResolvedEnvironment
 from typer.testing import CliRunner
 
 runner = CliRunner()
+CLI_ENV = {"PRIME_DISABLE_VERSION_CHECK": "1"}
 
 
 class TestLogCleaning:
@@ -28,8 +26,7 @@ class TestLogCleaning:
 
     def test_filter_progress_bars_keeps_100_percent(self):
         text = "Progress: 100%|██████████| 10/10 [00:01<00:00]"
-        result = filter_progress_bars(text)
-        assert "100%" in result
+        assert "100%" in filter_progress_bars(text)
 
     def test_filter_progress_bars_drops_partial_updates(self):
         text = "Progress: 50%|█████     | 5/10 [00:01<00:01]"
@@ -51,6 +48,22 @@ class TestLogCleaning:
 
     def test_clean_logs_hides_status_messages(self):
         assert clean_logs("The hosted eval is still initializing") == ""
+
+
+@pytest.fixture
+def submit_capture(monkeypatch):
+    captured = []
+
+    def resolve(environment, *, env_path):
+        return environment.split("@", 1)[0], f"env-{environment.rsplit('/', 1)[-1]}"
+
+    def create(config, environment_ids):
+        captured.append((config, environment_ids))
+        return {"evaluation_id": f"eval-{len(captured)}"}
+
+    monkeypatch.setattr("prime_cli.commands.evals._resolve_hosted_environment", resolve)
+    monkeypatch.setattr("prime_cli.commands.evals._create_hosted_evaluations", create)
+    return captured
 
 
 def test_eval_list_shows_hosted_checkbox(monkeypatch):
@@ -88,90 +101,55 @@ def test_eval_list_shows_hosted_checkbox(monkeypatch):
     monkeypatch.setattr("prime_cli.commands.evals.APIClient", lambda: object())
     monkeypatch.setattr("prime_cli.commands.evals.EvalsClient", DummyClient)
 
-    result = runner.invoke(
-        app,
-        ["eval", "list"],
-        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
-    )
+    result = runner.invoke(app, ["eval", "list"], env=CLI_ENV)
 
     assert result.exit_code == 0, result.output
-    assert "Type" in result.output
     assert "HOSTED" in result.output
     assert "LOCAL" in result.output
 
 
-def test_eval_submit_invokes_hosted_runner(monkeypatch):
+def test_eval_run_delegates_untouched_arguments(monkeypatch):
     captured = {}
-
     monkeypatch.setattr(
-        "prime_cli.commands.evals._resolve_hosted_environment",
-        lambda environment, env_dir_path=None, env_path=None: (
-            "primeintellect/gsm8k",
-            "env-123",
-        ),
-    )
-
-    def fake_run_hosted_evaluation(config, environment_ids=None):
-        captured["environment_id"] = config.environment_id
-        captured["environment_ids"] = environment_ids
-        captured["inference_model"] = config.inference_model
-        captured["num_examples"] = config.num_examples
-        captured["rollouts_per_example"] = config.rollouts_per_example
-        captured["allow_sandbox_access"] = config.allow_sandbox_access
-        captured["allow_instances_access"] = config.allow_instances_access
-        captured["allow_tunnel_access"] = config.allow_tunnel_access
-        return {"evaluation_id": "eval-123"}
-
-    monkeypatch.setattr(
-        "prime_cli.commands.evals._create_hosted_evaluations",
-        fake_run_hosted_evaluation,
+        "prime_cli.commands.evals.exec_verifiers_process",
+        lambda name, args, plain=False: captured.update(name=name, args=args, plain=plain),
     )
 
     result = runner.invoke(
         app,
-        ["eval", "submit", "primeintellect/gsm8k", "-m", "openai/gpt-4.1-mini"],
-        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+        ["eval", "run", "--taskset.id", "owner/tasks", "--harness.runtime.type", "prime"],
+        env=CLI_ENV,
     )
 
     assert result.exit_code == 0, result.output
-    assert captured["environment_id"] == "env-123"
-    assert captured["environment_ids"] == ["env-123"]
-    assert captured["inference_model"] == "openai/gpt-4.1-mini"
-    assert captured["num_examples"] == 5
-    assert captured["rollouts_per_example"] == 3
-    assert captured["allow_sandbox_access"] is True
-    assert captured["allow_instances_access"] is False
-    assert captured["allow_tunnel_access"] is True
-    assert "Hosted evaluation started" in result.output
-    assert "prime eval logs eval-123 -f" in result.output
+    assert captured == {
+        "name": "eval",
+        "args": ["--taskset.id", "owner/tasks", "--harness.runtime.type", "prime"],
+        "plain": False,
+    }
 
 
-def test_eval_submit_passes_runtime_args_from_cli(monkeypatch):
-    captured = {}
-
-    monkeypatch.setattr(
-        "prime_cli.commands.evals._resolve_hosted_environment",
-        lambda environment, env_dir_path=None, env_path=None: (
-            "primeintellect/gsm8k",
-            "env-123",
-        ),
+def test_eval_submit_uses_typed_defaults(submit_capture):
+    result = runner.invoke(
+        app,
+        ["eval", "submit", "primeintellect/gsm8k", "--model", "openai/gpt-4.1-mini"],
+        env=CLI_ENV,
     )
 
-    def fake_run_hosted_evaluation(config, environment_ids=None):
-        captured["max_concurrent"] = config.max_concurrent
-        captured["max_retries"] = config.max_retries
-        captured["state_columns"] = config.state_columns
-        captured["independent_scoring"] = config.independent_scoring
-        captured["verbose"] = config.verbose
-        captured["headers"] = config.headers
-        captured["sampling_args"] = config.sampling_args
-        return {"evaluation_id": "eval-123"}
+    assert result.exit_code == 0, result.output
+    config, environment_ids = submit_capture[0]
+    assert config.env_id == "primeintellect/gsm8k"
+    assert config.model == "openai/gpt-4.1-mini"
+    assert config.num_examples == 5
+    assert config.rollouts_per_example == 3
+    assert config.allow_sandbox_access is True
+    assert config.allow_instances_access is False
+    assert config.allow_tunnel_access is True
+    assert environment_ids == ["env-gsm8k"]
+    assert "prime eval logs eval-1 -f" in result.output
 
-    monkeypatch.setattr(
-        "prime_cli.commands.evals._create_hosted_evaluations",
-        fake_run_hosted_evaluation,
-    )
 
+def test_eval_submit_parses_runtime_options(submit_capture):
     result = runner.invoke(
         app,
         [
@@ -182,151 +160,53 @@ def test_eval_submit_passes_runtime_args_from_cli(monkeypatch):
             "100",
             "--max-retries",
             "3",
-            "--state-columns",
-            "turn,timing",
+            "--state-column",
+            "turn",
+            "--state-column",
+            "timing",
             "--independent-scoring",
             "--verbose",
             "--header",
             "X-Test: one",
-            "--max-tokens",
-            "4096",
-            "--temperature",
-            "0.2",
-        ],
-        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
-    )
-
-    assert result.exit_code == 0, result.output
-    assert captured == {
-        "max_concurrent": 100,
-        "max_retries": 3,
-        "state_columns": ["turn", "timing"],
-        "independent_scoring": True,
-        "verbose": True,
-        "headers": ["X-Test: one"],
-        "sampling_args": {"max_tokens": 4096, "temperature": 0.2},
-    }
-
-
-def test_eval_submit_passes_api_base_url_and_key_var(monkeypatch):
-    captured = {}
-
-    monkeypatch.setattr(
-        "prime_cli.commands.evals._resolve_hosted_environment",
-        lambda environment, env_dir_path=None, env_path=None: (
-            "primeintellect/gsm8k",
-            "env-123",
-        ),
-    )
-
-    def fake_run_hosted_evaluation(config, environment_ids=None):
-        captured["api_base_url"] = config.api_base_url
-        captured["api_key_var"] = config.api_key_var
-        return {"evaluation_id": "eval-123"}
-
-    monkeypatch.setattr(
-        "prime_cli.commands.evals._create_hosted_evaluations",
-        fake_run_hosted_evaluation,
-    )
-
-    result = runner.invoke(
-        app,
-        [
-            "eval",
-            "submit",
-            "primeintellect/gsm8k",
-            "-m",
-            "openai/gpt-4.1-mini",
-            "-b",
+            "--sampling-args",
+            '{"max_tokens":4096,"temperature":0.2}',
+            "--extra-env-kwargs",
+            '{"task_library":"ronig"}',
+            "--api-base-url",
             "https://api.openai.com/v1",
-            "-k",
+            "--api-key-var",
             "OPENAI_API_KEY",
         ],
-        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+        env=CLI_ENV,
     )
 
     assert result.exit_code == 0, result.output
-    assert captured["api_base_url"] == "https://api.openai.com/v1"
-    assert captured["api_key_var"] == "OPENAI_API_KEY"
+    config, _ = submit_capture[0]
+    assert config.max_concurrent == 100
+    assert config.max_retries == 3
+    assert config.state_columns == ["turn", "timing"]
+    assert config.independent_scoring is True
+    assert config.verbose is True
+    assert config.headers == ["X-Test: one"]
+    assert config.sampling_args == {"max_tokens": 4096, "temperature": 0.2}
+    assert config.extra_env_kwargs == {"task_library": "ronig"}
+    assert config.api_base_url == "https://api.openai.com/v1"
+    assert config.api_key_var == "OPENAI_API_KEY"
 
 
-def test_eval_submit_passes_allow_tunnel_access(monkeypatch):
-    captured = {}
-
-    monkeypatch.setattr(
-        "prime_cli.commands.evals._resolve_hosted_environment",
-        lambda environment, env_dir_path=None, env_path=None: (
-            "primeintellect/gsm8k",
-            "env-123",
-        ),
-    )
-
-    def fake_run_hosted_evaluation(config, environment_ids=None):
-        captured["allow_tunnel_access"] = config.allow_tunnel_access
-        return {"evaluation_id": "eval-123"}
-
-    monkeypatch.setattr(
-        "prime_cli.commands.evals._create_hosted_evaluations",
-        fake_run_hosted_evaluation,
-    )
-
+def test_eval_submit_rejects_invalid_header(submit_capture):
     result = runner.invoke(
         app,
-        [
-            "eval",
-            "submit",
-            "primeintellect/gsm8k",
-            "--allow-tunnel-access",
-        ],
-        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+        ["eval", "submit", "primeintellect/gsm8k", "--header", "not-a-header"],
+        env=CLI_ENV,
     )
 
-    assert result.exit_code == 0, result.output
-    assert captured["allow_tunnel_access"] is True
+    assert result.exit_code == 1
+    assert "headers must use 'Name: Value'" in result.output
+    assert submit_capture == []
 
 
-def test_eval_submit_passes_extra_env_kwargs(monkeypatch):
-    captured = {}
-
-    monkeypatch.setattr(
-        "prime_cli.commands.evals._resolve_hosted_environment",
-        lambda environment, env_dir_path=None, env_path=None: (
-            "primeintellect/gsm8k",
-            "env-123",
-        ),
-    )
-
-    def fake_run_hosted_evaluation(config, environment_ids=None):
-        captured["extra_env_kwargs"] = config.extra_env_kwargs
-        return {"evaluation_id": "eval-123"}
-
-    monkeypatch.setattr(
-        "prime_cli.commands.evals._create_hosted_evaluations",
-        fake_run_hosted_evaluation,
-    )
-
-    result = runner.invoke(
-        app,
-        [
-            "eval",
-            "submit",
-            "primeintellect/gsm8k",
-            "-m",
-            "openai/gpt-4.1-mini",
-            "-x",
-            '{"task_library":"ronig","keep_remote_artifacts":true}',
-        ],
-        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
-    )
-
-    assert result.exit_code == 0, result.output
-    assert captured["extra_env_kwargs"] == {
-        "task_library": "ronig",
-        "keep_remote_artifacts": True,
-    }
-
-
-def test_create_hosted_evaluation_adds_team_id_to_payload(monkeypatch):
+def test_create_hosted_evaluation_builds_payload(monkeypatch):
     captured = {}
 
     class DummyConfig:
@@ -337,1378 +217,178 @@ def test_create_hosted_evaluation_adds_team_id_to_payload(monkeypatch):
             self.config = DummyConfig()
 
         def post(self, endpoint, json=None):
-            captured["endpoint"] = endpoint
-            captured["json"] = json
+            captured.update(endpoint=endpoint, json=json)
             return {"evaluation_id": "eval-123"}
 
     monkeypatch.setattr("prime_cli.commands.evals.APIClient", DummyAPIClient)
-
-    result = _create_hosted_evaluations(
-        HostedEvalConfig(
-            environment_id="env-123",
-            inference_model="openai/gpt-4.1-mini",
-            num_examples=5,
-            rollouts_per_example=3,
-        )
+    config = HostedEvalConfig(
+        env_id="owner/gsm8k",
+        model="openai/gpt-4.1-mini",
+        sampling_args={"temperature": 0.2},
+        extra_env_kwargs={"split": "test"},
+        max_concurrent=64,
+        headers=["X-Test: one"],
     )
 
-    assert result["evaluation_id"] == "eval-123"
+    result = _create_hosted_evaluations(config, ["env-123", "env-456"])
+
+    assert result == {"evaluation_id": "eval-123"}
     assert captured["endpoint"] == "/hosted-evaluations"
     assert captured["json"]["team_id"] == "team-123"
-    assert captured["json"]["eval_config"]["allow_sandbox_access"] is True
-    assert captured["json"]["eval_config"]["allow_instances_access"] is False
-    assert captured["json"]["eval_config"]["allow_tunnel_access"] is True
-
-
-def test_create_hosted_evaluation_includes_sampling_args_in_payload(monkeypatch):
-    captured = {}
-
-    class DummyConfig:
-        team_id = None
-
-    class DummyAPIClient:
-        def __init__(self):
-            self.config = DummyConfig()
-
-        def post(self, endpoint, json=None):
-            captured["endpoint"] = endpoint
-            captured["json"] = json
-            return {"evaluation_id": "eval-123"}
-
-    monkeypatch.setattr("prime_cli.commands.evals.APIClient", DummyAPIClient)
-
-    _create_hosted_evaluations(
-        HostedEvalConfig(
-            environment_id="env-123",
-            inference_model="openai/gpt-4.1-mini",
-            num_examples=5,
-            rollouts_per_example=3,
-            sampling_args={
-                "temperature": 0.2,
-                "extra_body": {
-                    "provider": {
-                        "order": ["azure"],
-                        "allow_fallbacks": False,
-                        "require_parameters": True,
-                    }
-                },
-            },
-        )
-    )
-
-    assert captured["endpoint"] == "/hosted-evaluations"
-    assert captured["json"]["eval_config"]["sampling_args"] == {
-        "temperature": 0.2,
-        "extra_body": {
-            "provider": {
-                "order": ["azure"],
-                "allow_fallbacks": False,
-                "require_parameters": True,
-            }
-        },
-    }
-
-
-def test_create_hosted_evaluation_includes_extra_env_kwargs_in_payload(monkeypatch):
-    captured = {}
-
-    class DummyConfig:
-        team_id = None
-
-    class DummyAPIClient:
-        def __init__(self):
-            self.config = DummyConfig()
-
-        def post(self, endpoint, json=None):
-            captured["endpoint"] = endpoint
-            captured["json"] = json
-            return {"evaluation_id": "eval-123"}
-
-    monkeypatch.setattr("prime_cli.commands.evals.APIClient", DummyAPIClient)
-
-    _create_hosted_evaluations(
-        HostedEvalConfig(
-            environment_id="env-123",
-            inference_model="openai/gpt-4.1-mini",
-            num_examples=5,
-            rollouts_per_example=3,
-            extra_env_kwargs={
-                "task_library": "ronig",
-                "keep_remote_artifacts": True,
-            },
-        )
-    )
-
-    assert captured["endpoint"] == "/hosted-evaluations"
-    assert captured["json"]["eval_config"]["extra_env_kwargs"] == {
-        "task_library": "ronig",
-        "keep_remote_artifacts": True,
-    }
-
-
-def test_create_hosted_evaluation_includes_hosted_runtime_args_in_payload(monkeypatch):
-    captured = {}
-
-    class DummyConfig:
-        team_id = None
-
-    class DummyAPIClient:
-        def __init__(self):
-            self.config = DummyConfig()
-
-        def post(self, endpoint, json=None):
-            captured["endpoint"] = endpoint
-            captured["json"] = json
-            return {"evaluation_id": "eval-123"}
-
-    monkeypatch.setattr("prime_cli.commands.evals.APIClient", DummyAPIClient)
-
-    _create_hosted_evaluations(
-        HostedEvalConfig(
-            environment_id="env-123",
-            inference_model="openai/gpt-4.1-mini",
-            num_examples=5,
-            rollouts_per_example=3,
-            max_concurrent=64,
-            max_retries=3,
-            state_columns=["turn", "timing"],
-            independent_scoring=True,
-            verbose=True,
-            headers=["X-Test: one", "X-Second: two"],
-        )
-    )
-
-    assert captured["endpoint"] == "/hosted-evaluations"
+    assert captured["json"]["environment_ids"] == ["env-123", "env-456"]
+    assert captured["json"]["inference_model"] == "openai/gpt-4.1-mini"
+    assert captured["json"]["eval_config"]["sampling_args"] == {"temperature": 0.2}
+    assert captured["json"]["eval_config"]["extra_env_kwargs"] == {"split": "test"}
     assert captured["json"]["eval_config"]["max_concurrent"] == 64
-    assert captured["json"]["eval_config"]["max_retries"] == 3
-    assert captured["json"]["eval_config"]["state_columns"] == ["turn", "timing"]
-    assert captured["json"]["eval_config"]["independent_scoring"] is True
-    assert captured["json"]["eval_config"]["verbose"] is True
-    assert captured["json"]["eval_config"]["headers"] == [
-        "X-Test: one",
-        "X-Second: two",
-    ]
+    assert captured["json"]["eval_config"]["headers"] == ["X-Test: one"]
 
 
-def test_create_hosted_evaluation_includes_api_base_url_and_key_var_in_payload(monkeypatch):
-    captured = {}
-
-    class DummyConfig:
-        team_id = None
-
-    class DummyAPIClient:
-        def __init__(self):
-            self.config = DummyConfig()
-
-        def post(self, endpoint, json=None):
-            captured["endpoint"] = endpoint
-            captured["json"] = json
-            return {"evaluation_id": "eval-123"}
-
-    monkeypatch.setattr("prime_cli.commands.evals.APIClient", DummyAPIClient)
-
-    _create_hosted_evaluations(
-        HostedEvalConfig(
-            environment_id="env-123",
-            inference_model="openai/gpt-4.1-mini",
-            num_examples=5,
-            rollouts_per_example=3,
-            api_base_url="https://api.openai.com/v1",
-            api_key_var="OPENAI_API_KEY",
-        )
+def test_load_hosted_eval_configs_supports_shared_defaults(tmp_path):
+    path = tmp_path / "hosted.toml"
+    path.write_text(
+        'model = "openai/gpt-4.1-mini"\n'
+        "num_examples = 8\n"
+        "[[eval]]\n"
+        'env_id = "owner/gsm8k"\n'
+        "[[eval]]\n"
+        'env_id = "owner/math500"\n'
+        "num_examples = 12\n",
+        encoding="utf-8",
     )
 
-    assert captured["endpoint"] == "/hosted-evaluations"
-    assert captured["json"]["eval_config"]["api_base_url"] == "https://api.openai.com/v1"
-    assert captured["json"]["eval_config"]["api_key_var"] == "OPENAI_API_KEY"
+    configs = _load_hosted_eval_configs(path)
+
+    assert [config.env_id for config in configs] == ["owner/gsm8k", "owner/math500"]
+    assert [config.num_examples for config in configs] == [8, 12]
+    assert all(config.model == "openai/gpt-4.1-mini" for config in configs)
 
 
-def test_create_hosted_evaluation_includes_tunnel_access_in_payload(monkeypatch):
-    captured = {}
+def test_load_hosted_eval_configs_rejects_unknown_fields(tmp_path, capsys):
+    path = tmp_path / "hosted.toml"
+    path.write_text('env_id = "owner/gsm8k"\ndebug = true\n', encoding="utf-8")
 
-    class DummyConfig:
-        team_id = None
+    with pytest.raises(typer.Exit):
+        _load_hosted_eval_configs(path)
 
-    class DummyAPIClient:
-        def __init__(self):
-            self.config = DummyConfig()
+    assert "Extra inputs are not permitted" in capsys.readouterr().out
 
-        def post(self, endpoint, json=None):
-            captured["endpoint"] = endpoint
-            captured["json"] = json
-            return {"evaluation_id": "eval-123"}
 
-    monkeypatch.setattr("prime_cli.commands.evals.APIClient", DummyAPIClient)
-
-    _create_hosted_evaluations(
-        HostedEvalConfig(
-            environment_id="env-123",
-            inference_model="openai/gpt-4.1-mini",
-            num_examples=5,
-            rollouts_per_example=3,
-            allow_tunnel_access=True,
-        )
+def test_eval_submit_groups_targets_with_identical_settings(submit_capture, tmp_path):
+    path = tmp_path / "hosted.toml"
+    path.write_text(
+        'model = "openai/gpt-4.1-mini"\n'
+        "[[eval]]\n"
+        'env_id = "owner/gsm8k"\n'
+        "[[eval]]\n"
+        'env_id = "owner/math500"\n',
+        encoding="utf-8",
     )
 
-    assert captured["endpoint"] == "/hosted-evaluations"
-    assert captured["json"]["eval_config"]["allow_tunnel_access"] is True
+    result = runner.invoke(app, ["eval", "submit", str(path)], env=CLI_ENV)
+
+    assert result.exit_code == 0, result.output
+    assert len(submit_capture) == 1
+    _, environment_ids = submit_capture[0]
+    assert environment_ids == ["env-gsm8k", "env-math500"]
 
 
-def test_create_hosted_evaluation_accepts_plural_ids_response(monkeypatch):
-    class DummyConfig:
-        team_id = None
-
-    class DummyAPIClient:
-        def __init__(self):
-            self.config = DummyConfig()
-
-        def post(self, endpoint, json=None):
-            return {"evaluation_ids": ["eval-123", "eval-456"]}
-
-    monkeypatch.setattr("prime_cli.commands.evals.APIClient", DummyAPIClient)
-
-    result = _create_hosted_evaluations(
-        HostedEvalConfig(
-            environment_id="env-123",
-            inference_model="openai/gpt-4.1-mini",
-            num_examples=5,
-            rollouts_per_example=3,
-        ),
-        environment_ids=["env-123", "env-456"],
+def test_eval_submit_keeps_different_settings_separate(submit_capture, tmp_path):
+    path = tmp_path / "hosted.toml"
+    path.write_text(
+        "[[eval]]\n"
+        'env_id = "owner/gsm8k"\n'
+        "num_examples = 5\n"
+        "[[eval]]\n"
+        'env_id = "owner/math500"\n'
+        "num_examples = 10\n",
+        encoding="utf-8",
     )
 
-    assert result["evaluation_ids"] == ["eval-123", "eval-456"]
+    result = runner.invoke(app, ["eval", "submit", str(path)], env=CLI_ENV)
+
+    assert result.exit_code == 0, result.output
+    assert [call[1] for call in submit_capture] == [["env-gsm8k"], ["env-math500"]]
 
 
-def test_eval_submit_follow_streams_logs(monkeypatch):
+def test_eval_submit_follow_streams_single_evaluation(submit_capture, monkeypatch):
     captured = {}
-
     monkeypatch.setattr(
-        "prime_cli.commands.evals._resolve_hosted_environment",
-        lambda environment, env_dir_path=None, env_path=None: (
-            "primeintellect/gsm8k",
-            "env-123",
+        "prime_cli.commands.evals._display_logs",
+        lambda eval_id, tail, follow, poll_interval: captured.update(
+            eval_id=eval_id, tail=tail, follow=follow, poll_interval=poll_interval
         ),
     )
 
-    def fake_run_hosted_evaluation(config, environment_ids=None):
-        captured["num_examples"] = config.num_examples
-        captured["rollouts_per_example"] = config.rollouts_per_example
-        captured["environment_ids"] = environment_ids
-        return {"evaluation_id": "eval-123"}
-
-    monkeypatch.setattr(
-        "prime_cli.commands.evals._create_hosted_evaluations",
-        fake_run_hosted_evaluation,
-    )
-
-    def fake_display_logs(eval_id, tail, follow, poll_interval=5.0):
-        captured["display_eval_id"] = eval_id
-        captured["display_tail"] = tail
-        captured["display_follow"] = follow
-        captured["display_poll_interval"] = poll_interval
-
-    monkeypatch.setattr("prime_cli.commands.evals._display_logs", fake_display_logs)
-
     result = runner.invoke(
         app,
-        [
-            "eval",
-            "submit",
-            "primeintellect/gsm8k",
-            "--follow",
-            "-n",
-            "7",
-            "-r",
-            "2",
-        ],
-        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
-    )
-
-    assert result.exit_code == 0, result.output
-    assert captured["num_examples"] == 7
-    assert captured["rollouts_per_example"] == 2
-    assert captured["environment_ids"] == ["env-123"]
-    assert captured["display_eval_id"] == "eval-123"
-    assert captured["display_tail"] == 1000
-    assert captured["display_follow"] is True
-    assert captured["display_poll_interval"] == 10.0
-
-
-def test_eval_submit_supports_single_eval_toml(monkeypatch, tmp_path):
-    captured = {}
-    config_path = tmp_path / "eval.toml"
-    config_path.write_text(
-        (
-            """
-model = "openai/gpt-4.1-mini"
-num_examples = 7
-rollouts_per_example = 2
-timeout_minutes = 180
-allow_sandbox_access = true
-allow_instances_access = true
-allow_tunnel_access = true
-eval_name = "math500 smoke test"
-"""
-            + "sampling_args = { "
-            + 'extra_body = { provider = { order = ["azure"], '
-            + "allow_fallbacks = false, require_parameters = true } } }\n"
-            + 'extra_env_kwargs = { task_library = "ronig", keep_remote_artifacts = true }\n\n'
-            + "[[eval]]\n"
-            + 'env_id = "gsm8k"\n'
-            + 'env_args = { split = "test" }'
-        )
-    )
-
-    def fake_resolve(environment, env_dir_path=None, env_path=None):
-        captured["environment"] = environment
-        captured["env_dir_path"] = env_dir_path
-        captured["env_path"] = env_path
-        return ("primeintellect/gsm8k", "env-123")
-
-    def fake_run_hosted_evaluation(config, environment_ids=None):
-        captured["environment_id"] = config.environment_id
-        captured["environment_ids"] = environment_ids
-        captured["inference_model"] = config.inference_model
-        captured["num_examples"] = config.num_examples
-        captured["rollouts_per_example"] = config.rollouts_per_example
-        captured["env_args"] = config.env_args
-        captured["timeout_minutes"] = config.timeout_minutes
-        captured["allow_sandbox_access"] = config.allow_sandbox_access
-        captured["allow_instances_access"] = config.allow_instances_access
-        captured["allow_tunnel_access"] = config.allow_tunnel_access
-        captured["sampling_args"] = config.sampling_args
-        captured["extra_env_kwargs"] = config.extra_env_kwargs
-        captured["name"] = config.name
-        return {"evaluation_id": "eval-123"}
-
-    monkeypatch.setattr("prime_cli.commands.evals._resolve_hosted_environment", fake_resolve)
-    monkeypatch.setattr(
-        "prime_cli.commands.evals._create_hosted_evaluations",
-        fake_run_hosted_evaluation,
-    )
-
-    result = runner.invoke(
-        app,
-        ["eval", "submit", str(config_path)],
-        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+        ["eval", "submit", "owner/gsm8k", "--follow", "--poll-interval", "0.25"],
+        env=CLI_ENV,
     )
 
     assert result.exit_code == 0, result.output
     assert captured == {
-        "environment": "gsm8k",
-        "env_dir_path": None,
-        "env_path": None,
-        "environment_id": "env-123",
-        "environment_ids": ["env-123"],
-        "inference_model": "openai/gpt-4.1-mini",
-        "num_examples": 7,
-        "rollouts_per_example": 2,
-        "env_args": {"split": "test"},
-        "timeout_minutes": 180,
-        "allow_sandbox_access": True,
-        "allow_instances_access": True,
-        "allow_tunnel_access": True,
-        "sampling_args": {
-            "extra_body": {
-                "provider": {
-                    "order": ["azure"],
-                    "allow_fallbacks": False,
-                    "require_parameters": True,
-                }
-            }
-        },
-        "extra_env_kwargs": {
-            "task_library": "ronig",
-            "keep_remote_artifacts": True,
-        },
-        "name": "math500 smoke test",
+        "eval_id": "eval-1",
+        "tail": 1000,
+        "follow": True,
+        "poll_interval": 0.25,
     }
 
 
-def test_eval_submit_cli_overrides_supported_toml_fields(monkeypatch, tmp_path):
-    captured = {}
-    config_path = tmp_path / "eval.toml"
-    config_path.write_text(
-        """
-model = "openai/gpt-4.1-mini"
-num_examples = 7
-rollouts_per_example = 2
-timeout_minutes = 180
-allow_sandbox_access = true
-allow_instances_access = true
-allow_tunnel_access = true
-eval_name = "from toml"
-
-[[eval]]
-env_id = "gsm8k"
-env_args = { split = "test" }
-""".strip()
-    )
-
-    def fake_resolve(environment, env_dir_path=None, env_path=None):
-        return ("primeintellect/gsm8k", "env-123")
-
-    def fake_run_hosted_evaluation(config, environment_ids=None):
-        captured["environment_ids"] = environment_ids
-        captured["inference_model"] = config.inference_model
-        captured["num_examples"] = config.num_examples
-        captured["rollouts_per_example"] = config.rollouts_per_example
-        captured["env_args"] = config.env_args
-        captured["timeout_minutes"] = config.timeout_minutes
-        captured["allow_sandbox_access"] = config.allow_sandbox_access
-        captured["allow_instances_access"] = config.allow_instances_access
-        captured["allow_tunnel_access"] = config.allow_tunnel_access
-        captured["sampling_args"] = config.sampling_args
-        captured["extra_env_kwargs"] = config.extra_env_kwargs
-        captured["name"] = config.name
-        return {"evaluation_id": "eval-123"}
-
-    monkeypatch.setattr("prime_cli.commands.evals._resolve_hosted_environment", fake_resolve)
-    monkeypatch.setattr(
-        "prime_cli.commands.evals._create_hosted_evaluations",
-        fake_run_hosted_evaluation,
-    )
-
-    result = runner.invoke(
-        app,
-        [
-            "eval",
-            "submit",
-            str(config_path),
-            "-m",
-            "anthropic/claude-sonnet-4",
-            "-n",
-            "3",
-            "-r",
-            "4",
-            "--env-args",
-            '{"split":"validation"}',
-            "--timeout-minutes",
-            "240",
-            "--sampling-args",
-            '{"temperature":0.2,"extra_body":{"provider":{"order":["azure"],"allow_fallbacks":false,"require_parameters":true}}}',
-            "--extra-env-kwargs",
-            '{"task_library":"ronig","keep_remote_artifacts":true}',
-            "--eval-name",
-            "from cli",
-        ],
-        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
-    )
-
-    assert result.exit_code == 0, result.output
-    assert captured == {
-        "environment_ids": ["env-123"],
-        "inference_model": "anthropic/claude-sonnet-4",
-        "num_examples": 3,
-        "rollouts_per_example": 4,
-        "env_args": {"split": "validation"},
-        "timeout_minutes": 240,
-        "allow_sandbox_access": True,
-        "allow_instances_access": True,
-        "allow_tunnel_access": True,
-        "sampling_args": {
-            "temperature": 0.2,
-            "extra_body": {
-                "provider": {
-                    "order": ["azure"],
-                    "allow_fallbacks": False,
-                    "require_parameters": True,
-                }
-            },
-        },
-        "extra_env_kwargs": {
-            "task_library": "ronig",
-            "keep_remote_artifacts": True,
-        },
-        "name": "from cli",
-    }
-
-
-def test_eval_submit_supports_additional_toml_fields_and_sampling_aliases(monkeypatch, tmp_path):
-    captured = {}
-    config_path = tmp_path / "eval.toml"
-    config_path.write_text(
-        (
-            """
-model = "openai/gpt-4.1-mini"
-num_examples = 7
-rollouts_per_example = 2
-max_concurrent = 100
-max_retries = 3
-state_columns = ["turn", "timing"]
-independent_scoring = true
-verbose = true
-header = ["X-Test: one"]
-max_tokens = 4096
-temperature = 0.2
-"""
-            + 'sampling_args = { extra_body = { provider = { order = ["azure"], '
-            + "allow_fallbacks = false, require_parameters = true } } }\n"
-            + """
-[[eval]]
-env_id = "gsm8k"
-"""
-        ).strip()
-    )
-
-    def fake_resolve(environment, env_dir_path=None, env_path=None):
-        return ("primeintellect/gsm8k", "env-123")
-
-    def fake_run_hosted_evaluation(config, environment_ids=None):
-        captured["max_concurrent"] = config.max_concurrent
-        captured["max_retries"] = config.max_retries
-        captured["state_columns"] = config.state_columns
-        captured["independent_scoring"] = config.independent_scoring
-        captured["verbose"] = config.verbose
-        captured["headers"] = config.headers
-        captured["sampling_args"] = config.sampling_args
-        return {"evaluation_id": "eval-123"}
-
-    monkeypatch.setattr("prime_cli.commands.evals._resolve_hosted_environment", fake_resolve)
-    monkeypatch.setattr(
-        "prime_cli.commands.evals._create_hosted_evaluations",
-        fake_run_hosted_evaluation,
-    )
-
-    result = runner.invoke(
-        app,
-        ["eval", "submit", str(config_path)],
-        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
-    )
-
-    assert result.exit_code == 0, result.output
-    assert captured == {
-        "max_concurrent": 100,
-        "max_retries": 3,
-        "state_columns": ["turn", "timing"],
-        "independent_scoring": True,
-        "verbose": True,
-        "headers": ["X-Test: one"],
-        "sampling_args": {
-            "max_tokens": 4096,
-            "temperature": 0.2,
-            "extra_body": {
-                "provider": {
-                    "order": ["azure"],
-                    "allow_fallbacks": False,
-                    "require_parameters": True,
-                }
-            },
-        },
-    }
-
-
-def test_eval_submit_supports_multi_eval_toml_with_shared_config(monkeypatch, tmp_path):
-    captured = {}
-    config_path = tmp_path / "eval.toml"
-    config_path.write_text(
-        """
-model = "openai/gpt-4.1-mini"
-num_examples = 5
-rollouts_per_example = 3
-
-[[eval]]
-env_id = "gsm8k"
-
-[[eval]]
-env_id = "math500"
-""".strip()
-    )
-
-    resolved_calls = []
-
-    def fake_resolve(environment, env_dir_path=None, env_path=None):
-        resolved_calls.append((environment, env_dir_path, env_path))
-        return (f"primeintellect/{environment}", f"env-{environment}")
-
-    def fake_run_hosted_evaluation(config, environment_ids=None):
-        captured["environment_id"] = config.environment_id
-        captured["environment_ids"] = environment_ids
-        captured["inference_model"] = config.inference_model
-        captured["num_examples"] = config.num_examples
-        captured["rollouts_per_example"] = config.rollouts_per_example
-        return {"evaluation_id": "eval-123", "evaluation_ids": ["eval-123", "eval-456"]}
-
-    monkeypatch.setattr("prime_cli.commands.evals._resolve_hosted_environment", fake_resolve)
-    monkeypatch.setattr(
-        "prime_cli.commands.evals._create_hosted_evaluations",
-        fake_run_hosted_evaluation,
-    )
-
-    result = runner.invoke(
-        app,
-        ["eval", "submit", str(config_path)],
-        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
-    )
-
-    assert result.exit_code == 0, result.output
-    assert resolved_calls == [
-        ("gsm8k", None, None),
-        ("math500", None, None),
-    ]
-    assert captured == {
-        "environment_id": "env-gsm8k",
-        "environment_ids": ["env-gsm8k", "env-math500"],
-        "inference_model": "openai/gpt-4.1-mini",
-        "num_examples": 5,
-        "rollouts_per_example": 3,
-    }
-    assert "Evaluation IDs:" in result.output
-    assert "eval-123, eval-456" in result.output
-
-
-def test_eval_submit_supports_multi_eval_toml_with_different_settings(monkeypatch, tmp_path):
-    captured_calls = []
-    config_path = tmp_path / "eval.toml"
-    config_path.write_text(
-        """
-[[eval]]
-env_id = "gsm8k"
-num_examples = 5
-
-[[eval]]
-env_id = "math500"
-num_examples = 10
-""".strip()
-    )
-
-    def fake_resolve(environment, env_dir_path=None, env_path=None):
-        return (f"primeintellect/{environment}", f"env-{environment}")
-
-    def fake_run_hosted_evaluation(config, environment_ids=None):
-        captured_calls.append(
-            {
-                "environment_id": config.environment_id,
-                "environment_ids": environment_ids,
-                "num_examples": config.num_examples,
-                "rollouts_per_example": config.rollouts_per_example,
-            }
-        )
-        return {
-            "evaluation_id": f"eval-{len(captured_calls)}",
-            "evaluation_ids": [f"eval-{len(captured_calls)}"],
-        }
-
-    monkeypatch.setattr("prime_cli.commands.evals._resolve_hosted_environment", fake_resolve)
-    monkeypatch.setattr(
-        "prime_cli.commands.evals._create_hosted_evaluations",
-        fake_run_hosted_evaluation,
-    )
-
-    result = runner.invoke(
-        app,
-        ["eval", "submit", str(config_path)],
-        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
-    )
-
-    assert result.exit_code == 0, result.output
-    assert captured_calls == [
-        {
-            "environment_id": "env-gsm8k",
-            "environment_ids": ["env-gsm8k"],
-            "num_examples": 5,
-            "rollouts_per_example": 3,
-        },
-        {
-            "environment_id": "env-math500",
-            "environment_ids": ["env-math500"],
-            "num_examples": 10,
-            "rollouts_per_example": 3,
-        },
-    ]
-    assert "Evaluation IDs:" in result.output
-    assert "eval-1, eval-2" in result.output
-
-
-def test_eval_submit_rejects_invalid_supported_toml_field_types(tmp_path):
-    config_path = tmp_path / "eval.toml"
-    config_path.write_text(
-        """
-timeout_minutes = "180"
-
-[[eval]]
-env_id = "gsm8k"
-""".strip()
-    )
-
-    result = runner.invoke(
-        app,
-        ["eval", "submit", str(config_path)],
-        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
-    )
-    assert result.exit_code == 1
-    assert "`timeout_minutes` must be an integer" in result.output
-
-
-def test_eval_submit_rejects_non_json_serializable_sampling_args_in_toml(tmp_path):
-    config_path = tmp_path / "eval.toml"
-    config_path.write_text(
-        """
-sampling_args = { until = 1979-05-27T07:32:00Z }
-
-[[eval]]
-env_id = "gsm8k"
-""".strip()
-    )
-
-    result = runner.invoke(
-        app,
-        ["eval", "submit", str(config_path)],
-        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
-    )
-
-    assert result.exit_code == 1
-    assert "`sampling_args`" in result.output
-    assert "JSON-serializable" in result.output
-
-
-def test_eval_submit_rejects_non_json_serializable_extra_env_kwargs_in_toml(tmp_path):
-    config_path = tmp_path / "eval.toml"
-    config_path.write_text(
-        """
-extra_env_kwargs = { until = 1979-05-27T07:32:00Z }
-
-[[eval]]
-env_id = "gsm8k"
-""".strip()
-    )
-
-    result = runner.invoke(
-        app,
-        ["eval", "submit", str(config_path)],
-        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
-    )
-
-    assert result.exit_code == 1
-    assert "`extra_env_kwargs`" in result.output
-    assert "JSON-serializable" in result.output
-
-
-@pytest.mark.parametrize(
-    ("field_assignment", "expected_field"),
-    [
-        ('provider = "azure"', "provider"),
-        ("debug = true", "debug"),
-        ("save_results = false", "save_results"),
-        ("resume = true", "resume"),
-        ('resume_path = ""', "resume_path"),
-        ("save_to_hf_hub = false", "save_to_hf_hub"),
-        ('hf_hub_dataset_name = ""', "hf_hub_dataset_name"),
-        ('output_dir = ""', "output_dir"),
-        ("disable_env_server = false", "disable_env_server"),
-        ('num_workers = "auto"', "num_workers"),
-    ],
-)
-def test_eval_submit_rejects_explicit_unsupported_toml_fields(
-    tmp_path, field_assignment, expected_field
-):
-    config_path = tmp_path / "eval.toml"
-    config_path.write_text(
-        f"""
-{field_assignment}
-
-[[eval]]
-env_id = "gsm8k"
-""".strip()
-    )
-
-    result = runner.invoke(
-        app,
-        ["eval", "submit", str(config_path)],
-        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
-    )
-
-    assert result.exit_code == 1
-    assert "does not support" in result.output
-    assert f"`{expected_field}`" in result.output
-
-
-def test_eval_submit_toml_preserves_cli_env_dir_path(monkeypatch, tmp_path):
-    captured = {}
-    config_path = tmp_path / "eval.toml"
-    config_path.write_text(
-        """
-[[eval]]
-env_id = "gsm8k"
-""".strip()
-    )
-
-    def fake_resolve(environment, env_dir_path=None, env_path=None):
-        captured["environment"] = environment
-        captured["env_dir_path"] = env_dir_path
-        captured["env_path"] = env_path
-        return ("primeintellect/gsm8k", "env-123")
-
-    def fake_run_hosted_evaluation(config, environment_ids=None):
-        return {"evaluation_id": "eval-123"}
-
-    monkeypatch.setattr("prime_cli.commands.evals._resolve_hosted_environment", fake_resolve)
-    monkeypatch.setattr(
-        "prime_cli.commands.evals._create_hosted_evaluations",
-        fake_run_hosted_evaluation,
-    )
-
-    result = runner.invoke(
-        app,
-        [
-            "eval",
-            "submit",
-            str(config_path),
-            "--env-dir-path",
-            "/tmp/custom-envs",
-        ],
-        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
-    )
-
-    assert result.exit_code == 0, result.output
-    assert captured == {
-        "environment": "gsm8k",
-        "env_dir_path": "/tmp/custom-envs",
-        "env_path": None,
-    }
-
-
-def test_hosted_eval_config_accepts_id_alias(tmp_path):
-    config_path = tmp_path / "eval.toml"
-    config_path.write_text(
-        """
-model = "openai/gpt-4.1-mini"
-
-[[eval]]
-id = "gsm8k"
-""".strip()
-    )
-
-    loaded = _load_hosted_eval_configs(str(config_path))[0]
-
-    assert loaded["env_id"] == "gsm8k"
-
-
-def test_eval_submit_endpoint_id_uses_default_endpoints_path_from_cwd(monkeypatch, tmp_path):
-    config_dir = tmp_path / "configs"
-    config_dir.mkdir()
-    config_path = config_dir / "eval.toml"
-    config_path.write_text(
-        """
-endpoint_id = "test-endpoint"
-
-[[eval]]
-env_id = "gsm8k"
-""".strip()
-    )
-
-    captured = {}
-
-    def fake_resolve_endpoints_file(path):
-        captured["endpoints_path"] = path
-        return Path(path)
-
-    def fake_load_endpoints(path):
-        return {
-            "test-endpoint": [
-                {
-                    "model": "openai/gpt-4.1-mini",
-                    "url": "https://api.example.com/v1",
-                    "key": "PRIME_API_KEY",
-                }
-            ]
-        }
-
-    monkeypatch.setattr(
-        "verifiers.utils.eval_utils.resolve_endpoints_file",
-        fake_resolve_endpoints_file,
-    )
-    monkeypatch.setattr("verifiers.utils.eval_utils.load_endpoints", fake_load_endpoints)
-
-    loaded = _load_hosted_eval_configs(str(config_path))[0]
-
-    assert loaded["model"] == "openai/gpt-4.1-mini"
-    assert captured["endpoints_path"] == "./configs/endpoints.toml"
-
-
-def test_hosted_eval_config_allows_eval_endpoint_id_to_override_top_level_model(
-    monkeypatch, tmp_path
-):
-    config_path = tmp_path / "eval.toml"
-    config_path.write_text(
-        """
-model = "openai/gpt-4.1-mini"
-
-[[eval]]
-env_id = "gsm8k"
-endpoint_id = "test-endpoint"
-""".strip()
-    )
-
-    monkeypatch.setattr(
-        "verifiers.utils.eval_utils.resolve_endpoints_file",
-        lambda path: Path(path),
-    )
-    monkeypatch.setattr(
-        "verifiers.utils.eval_utils.load_endpoints",
-        lambda path: {
-            "test-endpoint": [
-                {
-                    "model": "anthropic/claude-sonnet-4",
-                    "url": "https://api.example.com/v1",
-                    "key": "PRIME_API_KEY",
-                }
-            ]
-        },
-    )
-
-    loaded = _load_hosted_eval_configs(str(config_path))[0]
-
-    assert loaded["model"] == "anthropic/claude-sonnet-4"
-
-
-def test_hosted_eval_config_allows_eval_model_to_override_top_level_endpoint_id(
-    monkeypatch, tmp_path
-):
-    config_path = tmp_path / "eval.toml"
-    config_path.write_text(
-        """
-endpoint_id = "test-endpoint"
-
-[[eval]]
-env_id = "gsm8k"
-model = "anthropic/claude-sonnet-4"
-""".strip()
-    )
-
-    monkeypatch.setattr(
-        "verifiers.utils.eval_utils.resolve_endpoints_file",
-        lambda path: (_ for _ in ()).throw(AssertionError("should not resolve endpoint_id")),
-    )
-    monkeypatch.setattr(
-        "verifiers.utils.eval_utils.load_endpoints",
-        lambda path: (_ for _ in ()).throw(AssertionError("should not load endpoints")),
-    )
-
-    loaded = _load_hosted_eval_configs(str(config_path))[0]
-
-    assert loaded["model"] == "anthropic/claude-sonnet-4"
-
-
-def test_eval_run_local_toml_passthrough(monkeypatch, tmp_path):
-    captured = {}
-    config_path = tmp_path / "eval.toml"
-    config_path.write_text(
-        """
-model = "openai/gpt-4.1-mini"
-
-[taskset]
-id = "gsm8k-v1"
-""".strip()
-    )
-
-    def fake_exec_verifiers_process(name, args, plain):
-        captured["name"] = name
-        captured["args"] = args
-        captured["plain"] = plain
-
-    monkeypatch.setattr(
-        "prime_cli.commands.evals.exec_verifiers_process", fake_exec_verifiers_process
-    )
-
-    result = runner.invoke(
-        app,
-        ["eval", "run", "@", str(config_path)],
-        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
-    )
-
-    assert result.exit_code == 0, result.output
-    assert captured == {
-        "name": "eval",
-        "args": ["@", str(config_path)],
-        "plain": False,
-    }
-
-
-def test_eval_run_resume_passthrough(monkeypatch, tmp_path):
-    captured = {}
-
-    def fake_exec_verifiers_process(name, args, plain):
-        captured["name"] = name
-        captured["args"] = args
-        captured["plain"] = plain
-
-    monkeypatch.setattr(
-        "prime_cli.commands.evals.exec_verifiers_process", fake_exec_verifiers_process
-    )
-    output_dir = tmp_path / "previous-run"
-
-    result = runner.invoke(
-        app,
-        ["eval", "run", "--resume", str(output_dir)],
-        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
-    )
-
-    assert result.exit_code == 0, result.output
-    assert captured == {
-        "name": "eval",
-        "args": ["--resume", str(output_dir)],
-        "plain": False,
-    }
-
-
-def test_eval_run_local_v1_sampling_passthrough(monkeypatch):
-    captured = {}
-
-    def fake_exec_verifiers_process(name, args, plain):
-        captured["name"] = name
-        captured["args"] = args
-        captured["plain"] = plain
-
-    monkeypatch.setattr(
-        "prime_cli.commands.evals.exec_verifiers_process", fake_exec_verifiers_process
-    )
-
-    result = runner.invoke(
-        app,
-        ["eval", "run", "gsm8k-v1", "--sampling.temperature", "0.2"],
-        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
-    )
-
-    assert result.exit_code == 0, result.output
-    assert captured == {
-        "name": "eval",
-        "args": ["gsm8k-v1", "--sampling.temperature", "0.2"],
-        "plain": False,
-    }
-
-
-def test_eval_run_local_v1_accepts_option_first_argv(monkeypatch):
-    captured = {}
-
-    def fake_exec_verifiers_process(name, args, plain):
-        captured["name"] = name
-        captured["args"] = args
-        captured["plain"] = plain
-
-    monkeypatch.setattr(
-        "prime_cli.commands.evals.exec_verifiers_process", fake_exec_verifiers_process
-    )
-
-    result = runner.invoke(
-        app,
-        ["eval", "run", "--taskset.id", "gsm8k-v1", "--dry-run"],
-        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
-    )
-
-    assert result.exit_code == 0, result.output
-    assert captured == {
-        "name": "eval",
-        "args": ["--taskset.id", "gsm8k-v1", "--dry-run"],
-        "plain": False,
-    }
-
-
-def test_eval_run_local_v1_keeps_short_shuffle_flag(monkeypatch):
-    captured = {}
-
-    monkeypatch.setattr(
-        "prime_cli.commands.evals.exec_verifiers_process",
-        lambda name, args, plain: captured.update(name=name, args=args, plain=plain),
-    )
-
-    result = runner.invoke(
-        app,
-        ["eval", "run", "gsm8k-v1", "-s", "--dry-run"],
-        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
-    )
-
-    assert result.exit_code == 0, result.output
-    assert captured["args"] == ["gsm8k-v1", "-s", "--dry-run"]
-    assert captured["name"] == "eval"
-
-
-def test_eval_run_forwards_unknown_options(monkeypatch):
-    captured = {}
-    monkeypatch.setattr(
-        "prime_cli.commands.evals.exec_verifiers_process",
-        lambda name, args, plain: captured.update(name=name, args=args, plain=plain),
-    )
-
-    result = runner.invoke(
-        app,
-        ["eval", "run", "gsm8k-v1", "--skip-upload"],
-        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
-    )
-
-    assert result.exit_code == 0, result.output
-    assert captured["args"] == ["gsm8k-v1", "--skip-upload"]
-    assert captured["name"] == "eval"
-
-
-def test_eval_run_v0_uses_native_id(monkeypatch):
-    captured = {}
-    monkeypatch.setattr(
-        "prime_cli.commands.evals.exec_verifiers_process",
-        lambda name, args, plain: captured.update(name=name, args=args, plain=plain),
-    )
-
-    result = runner.invoke(
-        app,
-        [
-            "eval",
-            "run",
-            "--id",
-            "legacy-env",
-            "--sampling.temperature",
-            "0.2",
-        ],
-        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
-    )
-
-    assert result.exit_code == 0, result.output
-    assert captured["args"] == [
-        "--id",
-        "legacy-env",
-        "--sampling.temperature",
-        "0.2",
-    ]
-    assert captured["name"] == "eval"
-
-
-@pytest.mark.parametrize(
-    ("extra_args", "expected_flag"),
-    [
-        (["--provider", "openai"], "--provider"),
-        (["--endpoints-path", "./configs/endpoints.toml"], "--endpoints-path"),
-        (["--output-dir", "/tmp/results"], "--output-dir"),
-        (["--no-interleave-scoring"], "--no-interleave-scoring"),
-        (["--save-results"], "--save-results"),
-        (["--resume", "/tmp/results.json"], "--resume"),
-        (["--save-to-hf-hub"], "--save-to-hf-hub"),
-        (["--hf-hub-dataset-name", "dataset-name"], "--hf-hub-dataset-name"),
-        (["--tui"], "--tui"),
-        (["--debug"], "--debug"),
-        (["--disable-env-server"], "--disable-env-server"),
-        (["--num-workers", "auto"], "--num-workers"),
-        (["--abbreviated-summary"], "--abbreviated-summary"),
-        (["--heartbeat-url", "https://example.com/heartbeat"], "--heartbeat-url"),
-    ],
-)
-def test_eval_submit_rejects_unsupported_passthrough_flags(extra_args, expected_flag):
-    result = runner.invoke(
-        app,
-        ["eval", "submit", "gsm8k", *extra_args],
-        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
-    )
-
-    assert result.exit_code == 1
-    assert "hosted eval CLI does not support" in result.output
-    assert f"`{expected_flag}`" in result.output
-
-
-def test_eval_submit_accepts_negative_num_examples_value(monkeypatch):
-    captured = {}
-
-    def fake_create_hosted_evaluations(config, environment_ids=None):
-        captured["num_examples"] = config.num_examples
-        return {"evaluation_id": "eval-123"}
-
-    monkeypatch.setattr(
-        "prime_cli.commands.evals._create_hosted_evaluations",
-        fake_create_hosted_evaluations,
-    )
-    monkeypatch.setattr(
-        "prime_cli.commands.evals._resolve_hosted_environment",
-        lambda environment, env_dir_path=None, env_path=None: ("primeintellect/gsm8k", "env-123"),
-    )
-
-    result = runner.invoke(
-        app,
-        ["eval", "submit", "gsm8k", "--num-examples", "-1"],
-        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
-    )
-
-    assert result.exit_code == 0, result.output
-    assert captured["num_examples"] == -1
-
-
-def test_eval_submit_passes_env_dir_path_to_resolver(monkeypatch):
-    captured = {}
-
-    def fake_resolve(environment, env_dir_path=None, env_path=None):
-        captured["environment"] = environment
-        captured["env_dir_path"] = env_dir_path
-        captured["env_path"] = env_path
-        return ("primeintellect/gsm8k", "env-123")
-
-    def fake_run_hosted_evaluation(config, environment_ids=None):
-        return {"evaluation_id": "eval-123"}
-
-    monkeypatch.setattr("prime_cli.commands.evals._resolve_hosted_environment", fake_resolve)
-    monkeypatch.setattr(
-        "prime_cli.commands.evals._create_hosted_evaluations",
-        fake_run_hosted_evaluation,
-    )
-
-    result = runner.invoke(
-        app,
-        [
-            "eval",
-            "submit",
-            "gsm8k",
-            "--env-dir-path",
-            "/tmp/custom-envs",
-        ],
-        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
-    )
-
-    assert result.exit_code == 0, result.output
-    assert captured == {
-        "environment": "gsm8k",
-        "env_dir_path": "/tmp/custom-envs",
-        "env_path": None,
-    }
-
-
-def test_eval_submit_passes_env_path_to_resolver(monkeypatch):
-    captured = {}
-
-    def fake_resolve(environment, env_dir_path=None, env_path=None):
-        captured["environment"] = environment
-        captured["env_dir_path"] = env_dir_path
-        captured["env_path"] = env_path
-        return ("primeintellect/gsm8k", "env-123")
-
-    def fake_run_hosted_evaluation(config, environment_ids=None):
-        return {"evaluation_id": "eval-123"}
-
-    monkeypatch.setattr("prime_cli.commands.evals._resolve_hosted_environment", fake_resolve)
-    monkeypatch.setattr(
-        "prime_cli.commands.evals._create_hosted_evaluations",
-        fake_run_hosted_evaluation,
-    )
-
-    result = runner.invoke(
-        app,
-        [
-            "eval",
-            "submit",
-            "gsm8k",
-            "--env-path",
-            "/tmp/local-env",
-        ],
-        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
-    )
-
-    assert result.exit_code == 0, result.output
-    assert captured == {
-        "environment": "gsm8k",
-        "env_dir_path": None,
-        "env_path": "/tmp/local-env",
-    }
-
-
-def test_resolve_hosted_environment_warns_when_local_code_differs(monkeypatch, capsys):
-    monkeypatch.setattr(
-        "prime_cli.commands.evals._resolve_environment_reference",
-        lambda environment, env_dir_path: ResolvedEnvironment(
-            original=environment,
-            env_name="gsm8k",
-            install_mode="local",
-            env_display_id="gsm8k (local - ahead of primeintellect/gsm8k)",
-            platform_slug="primeintellect/gsm8k",
-            recommend_push=True,
-            push_reason="ahead",
-        ),
-    )
-
+def test_resolve_hosted_environment_uses_explicit_slug(monkeypatch, capsys):
     class DummyAPIClient:
-        def __init__(self, *args, **kwargs):
-            pass
-
         def get(self, endpoint):
-            assert endpoint == "/environmentshub/primeintellect/gsm8k/@latest"
+            assert endpoint == "/environmentshub/owner/gsm8k/@latest"
             return {"data": {"id": "env-123"}}
 
     monkeypatch.setattr("prime_cli.commands.evals.APIClient", DummyAPIClient)
 
-    assert _resolve_hosted_environment("gsm8k", env_dir_path=None, env_path=None) == (
-        "primeintellect/gsm8k",
-        "env-123",
-    )
+    resolved = _resolve_hosted_environment("owner/gsm8k", env_path=None)
 
-    output = capsys.readouterr().out
-    assert "Local environment code differs from the latest published version of" in output
-    assert "Hosted evaluations always use the latest published version of" in output
-    assert "primeintellect/gsm8k" in output
-    assert "Using hosted environment primeintellect/gsm8k@latest" in output
+    assert resolved == ("owner/gsm8k", "env-123")
+    assert "owner/gsm8k@latest" in capsys.readouterr().out
 
 
-def test_resolve_hosted_environment_requires_a_published_environment(monkeypatch, capsys):
-    monkeypatch.setattr(
-        "prime_cli.commands.evals._resolve_environment_reference",
-        lambda environment, env_dir_path: ResolvedEnvironment(
-            original=environment,
-            env_name="gsm8k",
-            install_mode="local",
-            env_display_id="gsm8k (local only)",
-            recommend_push=True,
-            push_reason="local_only",
-        ),
-    )
+def test_resolve_hosted_environment_rejects_version(capsys):
+    with pytest.raises(typer.Exit):
+        _resolve_hosted_environment("owner/gsm8k@1.2.3", env_path=None)
 
-    with pytest.raises(typer.Exit) as exc_info:
-        _resolve_hosted_environment("gsm8k", env_dir_path=None, env_path=None)
-
-    assert exc_info.value.exit_code == 1
-    output = capsys.readouterr().out
-    assert "hosted evaluations require an upstream environment on the platform" in output
-    assert "publish the local environment with `prime env push`" in output
+    assert "only unversioned slugs" in capsys.readouterr().out
 
 
-def test_resolve_hosted_environment_requires_a_pushed_hub_version(monkeypatch, capsys):
-    monkeypatch.setattr(
-        "prime_cli.commands.evals._resolve_environment_reference",
-        lambda environment, env_dir_path: ResolvedEnvironment(
-            original=environment,
-            env_name="gsm8k",
-            install_mode="local",
-            env_display_id="gsm8k (local - ahead of primeintellect/gsm8k)",
-            platform_slug="primeintellect/gsm8k",
-            recommend_push=True,
-            push_reason="ahead",
-        ),
+def test_resolve_hosted_environment_uses_local_metadata(monkeypatch, tmp_path):
+    env_path = tmp_path / "gsm8k"
+    (env_path / ".prime").mkdir(parents=True)
+    (env_path / ".prime" / ".env-metadata.json").write_text(
+        '{"owner":"owner","name":"gsm8k"}', encoding="utf-8"
     )
 
     class DummyAPIClient:
-        def __init__(self, *args, **kwargs):
-            pass
-
         def get(self, endpoint):
-            raise APIError("404 not found")
+            assert endpoint == "/environmentshub/owner/gsm8k/@latest"
+            return {"data": {"id": "env-123"}}
 
     monkeypatch.setattr("prime_cli.commands.evals.APIClient", DummyAPIClient)
 
-    with pytest.raises(typer.Exit) as exc_info:
-        _resolve_hosted_environment("gsm8k", env_dir_path=None, env_path=None)
+    assert _resolve_hosted_environment("gsm8k", env_path=str(env_path)) == (
+        "owner/gsm8k",
+        "env-123",
+    )
 
-    assert exc_info.value.exit_code == 1
-    output = capsys.readouterr().out
-    assert "hosted evaluations require an environment that is published to the" in output
-    assert "platform" in output
-    assert "Publish primeintellect/gsm8k with `prime env push` first." in output
+
+def test_resolve_hosted_environment_requires_upstream(capsys):
+    with pytest.raises(typer.Exit):
+        _resolve_hosted_environment("not-published", env_path=None)
+
+    assert "require an upstream environment" in capsys.readouterr().out
 
 
 def test_eval_submit_reports_resolve_api_errors(monkeypatch):
     monkeypatch.setattr(
         "prime_cli.commands.evals._resolve_hosted_environment",
-        lambda environment, env_dir_path=None, env_path=None: (_ for _ in ()).throw(
-            APIError("lookup failed")
-        ),
+        lambda environment, env_path=None: (_ for _ in ()).throw(APIError("lookup failed")),
     )
 
-    result = runner.invoke(
-        app,
-        ["eval", "submit", "gsm8k"],
-        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
-    )
+    result = runner.invoke(app, ["eval", "submit", "owner/gsm8k"], env=CLI_ENV)
 
     assert result.exit_code == 1
     assert "lookup failed" in result.output
@@ -1723,21 +403,15 @@ def test_eval_stop_command_calls_cancel_endpoint(monkeypatch):
 
     monkeypatch.setattr("prime_cli.commands.evals.APIClient.patch", fake_patch)
 
-    result = runner.invoke(
-        app,
-        ["eval", "stop", "eval-123"],
-        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
-    )
+    result = runner.invoke(app, ["eval", "stop", "eval-123"], env=CLI_ENV)
 
     assert result.exit_code == 0, result.output
     assert captured == {"endpoint": "/hosted-evaluations/eval-123/cancel"}
     assert "Evaluation cancelled" in result.output
-    assert "dashboard/evaluations/eval-123" in result.output
 
 
 def test_print_eval_status_prefers_returned_viewer_url(monkeypatch, capsys):
     called = {"used": False}
-
     monkeypatch.setattr(
         "prime_cli.commands.evals.get_eval_viewer_url",
         lambda eval_id: called.__setitem__("used", True) or f"fallback/{eval_id}",
@@ -1748,16 +422,14 @@ def test_print_eval_status_prefers_returned_viewer_url(monkeypatch, capsys):
             "status": "RUNNING",
             "evaluation_id": "eval-123",
             "viewer_url": "http://localhost:3000/dashboard/evaluations/eval-123",
-            "error_message": None,
         }
     )
 
-    output = capsys.readouterr().out
-    assert "http://localhost:3000/dashboard/evaluations/eval-123" in output
+    assert "http://localhost:3000/dashboard/evaluations/eval-123" in capsys.readouterr().out
     assert called["used"] is False
 
 
-def test_print_eval_status_falls_back_to_eval_id_when_viewer_url_missing(monkeypatch, capsys):
+def test_print_eval_status_falls_back_to_eval_id(monkeypatch, capsys):
     monkeypatch.setattr(
         "prime_cli.commands.evals.get_eval_viewer_url",
         lambda eval_id: f"fallback/{eval_id}",
@@ -1767,7 +439,6 @@ def test_print_eval_status_falls_back_to_eval_id_when_viewer_url_missing(monkeyp
         {
             "status": "CANCELLED",
             "evaluation_id": "eval-123",
-            "viewer_url": None,
             "error_message": "Stopped",
         }
     )
@@ -1785,39 +456,22 @@ def test_eval_logs_command_follows_incremental_output(monkeypatch):
             {"status": "COMPLETED", "evaluation_id": "eval-123", "total_samples": 2},
         ]
     )
-    logs = iter(
-        [
-            "Line 1\nLine 2",
-            "Line 1\nLine 2\nLine 3",
-        ]
-    )
-
+    logs = iter(["Line 1\nLine 2", "Line 1\nLine 2\nLine 3"])
     monkeypatch.setattr("prime_cli.commands.evals.time.sleep", lambda _: None)
     monkeypatch.setattr(
-        "prime_cli.commands.evals._fetch_eval_status",
-        lambda _client, _: next(statuses),
+        "prime_cli.commands.evals._fetch_eval_status", lambda _client, _: next(statuses)
     )
     monkeypatch.setattr("prime_cli.commands.evals._fetch_logs", lambda _client, _: next(logs))
-    monkeypatch.setattr(
-        "prime_cli.commands.evals.get_eval_viewer_url",
-        lambda eval_id: f"https://app.primeintellect.ai/dashboard/evaluations/{eval_id}",
-    )
 
-    result = runner.invoke(
-        app,
-        ["eval", "logs", "eval-123", "--follow"],
-        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
-    )
+    result = runner.invoke(app, ["eval", "logs", "eval-123", "--follow"], env=CLI_ENV)
 
     assert result.exit_code == 0, result.output
-    assert "Line 1" in result.output
-    assert "Line 2" in result.output
-    assert "Line 3" in result.output
     assert result.output.count("Line 1") == 1
+    assert "Line 3" in result.output
     assert "Status: COMPLETED" in result.output
 
 
-def test_eval_logs_command_emits_waiting_status_when_logs_are_unchanged(monkeypatch):
+def test_eval_logs_command_emits_waiting_status(monkeypatch):
     statuses = iter(
         [
             {"status": "RUNNING", "evaluation_id": "eval-123"},
@@ -1825,34 +479,15 @@ def test_eval_logs_command_emits_waiting_status_when_logs_are_unchanged(monkeypa
             {"status": "COMPLETED", "evaluation_id": "eval-123", "total_samples": 1},
         ]
     )
-    logs = iter(
-        [
-            "Line 1",
-            "Line 1",
-            "Line 1",
-        ]
-    )
-
+    logs = iter(["Line 1", "Line 1", "Line 1"])
     monkeypatch.setattr("prime_cli.commands.evals.time.sleep", lambda _: None)
+    monkeypatch.setattr("prime_cli.commands.evals.HOSTED_LOGS_STATUS_UPDATE_EVERY_POLLS", 1)
     monkeypatch.setattr(
-        "prime_cli.commands.evals.HOSTED_LOGS_STATUS_UPDATE_EVERY_POLLS",
-        1,
-    )
-    monkeypatch.setattr(
-        "prime_cli.commands.evals._fetch_eval_status",
-        lambda _client, _: next(statuses),
+        "prime_cli.commands.evals._fetch_eval_status", lambda _client, _: next(statuses)
     )
     monkeypatch.setattr("prime_cli.commands.evals._fetch_logs", lambda _client, _: next(logs))
-    monkeypatch.setattr(
-        "prime_cli.commands.evals.get_eval_viewer_url",
-        lambda eval_id: f"https://app.primeintellect.ai/dashboard/evaluations/{eval_id}",
-    )
 
-    result = runner.invoke(
-        app,
-        ["eval", "logs", "eval-123", "--follow"],
-        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
-    )
+    result = runner.invoke(app, ["eval", "logs", "eval-123", "--follow"], env=CLI_ENV)
 
     assert result.exit_code == 0, result.output
     assert result.output.count("Line 1") == 1

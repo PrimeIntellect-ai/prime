@@ -1,4 +1,4 @@
-from prime_cli.commands.env import _collect_archive_files, compute_content_hash
+from prime_cli.utils.env_metadata import collect_archive_files, compute_content_hash
 
 
 def test_collect_archive_files_respects_gitignore(tmp_path):
@@ -6,7 +6,11 @@ def test_collect_archive_files_respects_gitignore(tmp_path):
     (tmp_path / "README.md").write_text("demo\n")
     (tmp_path / "app.py").write_text("print('ok')\n")
     (tmp_path / "ignored.py").write_text("print('ignore me')\n")
-    (tmp_path / ".gitignore").write_text("ignored.py\nlogs/\n*.tmp\n")
+    (tmp_path / ".gitignore").write_text("ignored.py\nlogs/\n*.tmp\nproj/\n")
+
+    proj_dir = tmp_path / "proj"
+    proj_dir.mkdir()
+    (proj_dir / ".build.json").write_text('{"image":"example"}\n')
 
     data_dir = tmp_path / "data"
     data_dir.mkdir()
@@ -18,13 +22,14 @@ def test_collect_archive_files_respects_gitignore(tmp_path):
     (logs_dir / "run.txt").write_text("log\n")
 
     archive_paths = {
-        file_path.relative_to(tmp_path).as_posix() for file_path in _collect_archive_files(tmp_path)
+        file_path.relative_to(tmp_path).as_posix() for file_path in collect_archive_files(tmp_path)
     }
 
     assert archive_paths == {
         "README.md",
         "app.py",
         "data/keep.txt",
+        "proj/.build.json",
         "pyproject.toml",
     }
 
@@ -40,7 +45,7 @@ def test_collect_archive_files_preserves_gitignore_negation(tmp_path):
     (artifacts_dir / "keep.txt").write_text("keep\n")
 
     archive_paths = {
-        file_path.relative_to(tmp_path).as_posix() for file_path in _collect_archive_files(tmp_path)
+        file_path.relative_to(tmp_path).as_posix() for file_path in collect_archive_files(tmp_path)
     }
 
     assert "artifacts/keep.txt" in archive_paths

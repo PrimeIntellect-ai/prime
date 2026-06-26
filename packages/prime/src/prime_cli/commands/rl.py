@@ -214,6 +214,7 @@ def generate_rl_config_template(environment: str | None = None) -> str:
     env_value = environment or "primeintellect/reverse-text"
 
     return f'''\
+type = "lora"
 model = "Qwen/Qwen3.5-0.8B"
 loss = "rl" # "rl" | "sft"; OPD is not yet supported on hosted runtimes
 max_steps = 100
@@ -309,12 +310,14 @@ class EnvConfig(BaseModel):
 
     @model_validator(mode="after")
     def parse_version_from_id(self) -> "EnvConfig":
-        """Extract version from id if specified as 'owner/name@version'."""
-        if "@" in self.id:
-            id_part, version_part = self.id.rsplit("@", 1)
-            self.id = id_part
-            if self.version is None and version_part:
-                self.version = version_part
+        """Normalize a hosted environment reference with Verifiers' parser."""
+        from verifiers.utils.install_utils import parse_env_id
+
+        if "/" not in self.id:
+            return self
+        owner, name, version = parse_env_id(self.id)
+        self.id = f"{owner}/{name}"
+        self.version = self.version or version
         return self
 
     def to_api_dict(self) -> Dict[str, Any]:
@@ -330,41 +333,16 @@ class EnvConfig(BaseModel):
         return result
 
 
-class EvalEnvConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    id: str
-    name: str | None = None
-    args: Dict[str, Any] = Field(default_factory=dict)
+class EvalEnvConfig(EnvConfig):
     num_examples: int | None = None
     rollouts_per_example: int | None = None
-    max_retries: int | None = Field(default=None, ge=0)
-    version: str | None = None
-
-    @model_validator(mode="after")
-    def parse_version_from_id(self) -> "EvalEnvConfig":
-        """Extract version from id if specified as 'owner/name@version'."""
-        if "@" in self.id:
-            id_part, version_part = self.id.rsplit("@", 1)
-            self.id = id_part
-            if self.version is None and version_part:
-                self.version = version_part
-        return self
 
     def to_api_dict(self) -> Dict[str, Any]:
-        result: Dict[str, Any] = {"id": self.id}
-        if self.name is not None:
-            result["name"] = self.name
-        if self.args:
-            result["args"] = self.args
+        result = super().to_api_dict()
         if self.num_examples is not None:
             result["num_examples"] = self.num_examples
         if self.rollouts_per_example is not None:
             result["rollouts_per_example"] = self.rollouts_per_example
-        if self.max_retries is not None:
-            result["max_retries"] = self.max_retries
-        if self.version is not None:
-            result["version"] = self.version
         return result
 
 
@@ -377,37 +355,28 @@ class TemperatureSchedulerConfig(BaseModel):
     total_steps: int | None = None
 
 
-class SamplingConfig(BaseModel):
+class BaseSamplingConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     max_tokens: int | None = None
     temperature: float | None = None
+    extra_body: Dict[str, Any] | None = None
+    enable_thinking: bool | None = None
+    reasoning_effort: Literal["low", "medium", "high"] | None = None
+
+    @model_validator(mode="after")
+    def _reasoning_controls_mutually_exclusive(self) -> "BaseSamplingConfig":
+        if self.enable_thinking is not None and self.reasoning_effort is not None:
+            raise ValueError("enable_thinking and reasoning_effort cannot both be set")
+        return self
+
+
+class SamplingConfig(BaseSamplingConfig):
     temp_scheduler: TemperatureSchedulerConfig | None = None
-    extra_body: Dict[str, Any] | None = None
-    enable_thinking: bool | None = None
-    reasoning_effort: Literal["low", "medium", "high"] | None = None
-
-    @model_validator(mode="after")
-    def _reasoning_controls_mutually_exclusive(self) -> "SamplingConfig":
-        if self.enable_thinking is not None and self.reasoning_effort is not None:
-            raise ValueError("enable_thinking and reasoning_effort cannot both be set")
-        return self
 
 
-class TeacherSamplingConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    max_tokens: int | None = None
-    temperature: float | None = None
-    extra_body: Dict[str, Any] | None = None
-    enable_thinking: bool | None = None
-    reasoning_effort: Literal["low", "medium", "high"] | None = None
-
-    @model_validator(mode="after")
-    def _reasoning_controls_mutually_exclusive(self) -> "TeacherSamplingConfig":
-        if self.enable_thinking is not None and self.reasoning_effort is not None:
-            raise ValueError("enable_thinking and reasoning_effort cannot both be set")
-        return self
+class TeacherSamplingConfig(BaseSamplingConfig):
+    pass
 
 
 class TeacherClientConfig(BaseModel):
@@ -435,7 +404,7 @@ class TeacherConfig(BaseModel):
         return result
 
 
-class EvalSamplingConfig(BaseModel):
+class EvalSamplingConfig(BaseSamplingConfig):
     """Eval-time sampling overrides.
 
     ``enable_thinking`` / ``reasoning_effort`` are convenience flags the
@@ -443,19 +412,7 @@ class EvalSamplingConfig(BaseModel):
     they cannot both be set on the same block.
     """
 
-    model_config = ConfigDict(extra="forbid")
-
-    max_tokens: int | None = None
-    temperature: float | None = None
-    extra_body: Dict[str, Any] | None = None
-    enable_thinking: bool | None = None
-    reasoning_effort: Literal["low", "medium", "high"] | None = None
-
-    @model_validator(mode="after")
-    def _reasoning_controls_mutually_exclusive(self) -> "EvalSamplingConfig":
-        if self.enable_thinking is not None and self.reasoning_effort is not None:
-            raise ValueError("enable_thinking and reasoning_effort cannot both be set")
-        return self
+    pass
 
 
 class EvalConfig(BaseModel):
@@ -465,10 +422,6 @@ class EvalConfig(BaseModel):
     num_examples: int | None = None
     rollouts_per_example: int | None = None
     skip_first_step: bool | None = None
-    """Skip the eval of the base model that otherwise runs before training
-    starts. Replaces the deprecated ``eval_base_model`` with inverted meaning
-    (``eval_base_model = false`` ≡ ``skip_first_step = true``), matching the
-    prime-rl orch v2 rename."""
     env: List[EvalEnvConfig] = Field(default_factory=list)
     sampling: EvalSamplingConfig | None = None
 
@@ -652,6 +605,7 @@ class TailscaleConfig(BaseModel):
 class RLConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    type: Literal["lora"] = "lora"
     name: str | None = None
     model: str
     loss: Literal["rl", "sft", "opd"] = "rl"
@@ -677,7 +631,6 @@ class RLConfig(BaseModel):
     infrastructure: InfrastructureConfig = Field(default_factory=InfrastructureConfig)
     tailscale: TailscaleConfig = Field(default_factory=TailscaleConfig)
     run_config: Dict[str, Any] = Field(default_factory=dict)
-    env_file: List[str] = Field(default_factory=list)  # deprecated, use env_files
     env_files: List[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -714,45 +667,6 @@ def _format_validation_errors(errors: list[Any]) -> list[str]:
     return messages
 
 
-def _remove_deprecated_config_keys(data: Dict[str, Any]) -> None:
-    """Remove deprecated config keys while warning users."""
-    removed = False
-    for key in ("trajectory_strategy", "trajectoryStrategy"):
-        if key in data:
-            data.pop(key, None)
-            removed = True
-
-    if removed:
-        console.print("[yellow]Warning:[/yellow] `trajectory_strategy` is deprecated and ignored.")
-
-    if "buffer" in data:
-        data.pop("buffer", None)
-        console.print(
-            "[yellow]Warning:[/yellow] `[buffer]` is deprecated and ignored: "
-            "the difficulty-filtering buffer was removed from the trainer."
-        )
-
-    eval_section = data.get("eval")
-    if isinstance(eval_section, dict) and "eval_base_model" in eval_section:
-        legacy = eval_section.pop("eval_base_model")
-        if "skip_first_step" in eval_section:
-            console.print(
-                "[yellow]Warning:[/yellow] `eval.eval_base_model` is deprecated and "
-                "ignored because `eval.skip_first_step` is also set. Remove "
-                "`eval_base_model` from your config."
-            )
-        else:
-            translated = (not legacy) if isinstance(legacy, bool) else legacy
-            eval_section["skip_first_step"] = translated
-            console.print(
-                "[yellow]Warning:[/yellow] `eval.eval_base_model` is deprecated: "
-                "prime-rl renamed it to `skip_first_step` with inverted meaning "
-                "(`eval_base_model = false` ≡ `skip_first_step = true`). "
-                f"Translating to `skip_first_step = {str(translated).lower()}` — "
-                "update your config to use `skip_first_step` directly."
-            )
-
-
 def _peek_toml(config_path: str) -> Dict[str, Any]:
     """Parse the TOML once for the dispatch decision. Returns {} on missing
     or malformed file — the strict load_config call below produces the
@@ -765,37 +679,6 @@ def _peek_toml(config_path: str) -> Dict[str, Any]:
     except toml.TomlDecodeError:
         return {}
     return data if isinstance(data, dict) else {}
-
-
-def _is_full_finetune(cfg: Dict[str, Any]) -> bool:
-    """A config is full-FT iff it carries one of:
-
-    - top-level `type = "full_finetune"` (mirrors prime-rl's discriminator)
-    - a `[deployment]` table with a sizing field — either single-node
-      (`num_train_gpus` / `num_infer_gpus`) or multi-node
-      (`num_train_nodes` / `num_infer_nodes`) — or an explicit
-      `[deployment].type` of `single_node` / `multi_node`.
-
-    Previously only the single-node sizing fields triggered detection, so
-    canonical multi-node prime-rl shapes (e.g. `qwen30b_math/rl.toml`,
-    which uses `num_train_nodes` / `num_infer_nodes`) silently fell
-    through to the LoRA dispatch path.
-    """
-    if cfg.get("type") == "full_finetune":
-        return True
-    deploy = cfg.get("deployment")
-    if isinstance(deploy, dict):
-        if deploy.get("type") in ("single_node", "multi_node"):
-            return True
-        sizing_keys = (
-            "num_train_gpus",
-            "num_infer_gpus",
-            "num_train_nodes",
-            "num_infer_nodes",
-        )
-        if any(k in deploy for k in sizing_keys):
-            return True
-    return False
 
 
 def _dispatch_full_finetune_run(
@@ -834,17 +717,9 @@ def _dispatch_full_finetune_run(
     # the user passed --wandb-api-key, mirroring the platform's existing
     # admin-dialog UX.
     #
-    # `env_file` (deprecated, singular) is loaded first so `env_files`
-    # (canonical, plural) overrides it on key collision. Mirrors the
-    # LoRA path at line 947 ("env_files takes precedence").
     config_dir = Path(config_path).parent
-    cfg_env_files: List[str] = []
-    for key in ("env_file", "env_files"):
-        val = raw_cfg.get(key)
-        if isinstance(val, list):
-            cfg_env_files.extend(str(config_dir / p) for p in val)
-        elif isinstance(val, str):
-            cfg_env_files.append(str(config_dir / val))
+    configured_files = raw_cfg.get("env_files", [])
+    cfg_env_files = [str(config_dir / path) for path in configured_files]
     all_env_files = cfg_env_files + (env_file or [])
 
     def _warn(msg: str) -> None:
@@ -900,25 +775,15 @@ def _dispatch_full_finetune_run(
         raise typer.Exit(1)
     resolved_image_tag = image_tag or config_image_tag
 
-    # Same deprecation pass as the LoRA path. In the prime-rl-native shape
-    # the deprecated keys live one level down, under `[orchestrator]` — and
-    # this config ships verbatim to the dedicated training endpoint, where
-    # orch v2 rejects the removed keys as "Extra inputs are not permitted".
-    orch_section = raw_cfg.get("orchestrator")
-    if isinstance(orch_section, dict):
-        _remove_deprecated_config_keys(orch_section)
-
     # Strip CLI-only secret-loading keys before shipping the TOML to the
-    # backend. `env_file` / `env_files` only meaningfully exist on the
+    # backend. `env_files` only meaningfully exists on the
     # caller's filesystem — the hosted pod doesn't see them, and prime-rl
     # has no use for the paths once we've already materialized the secrets
     # into the per-run k8s Secret above. Leaving them in the config either
     # confuses prime-rl (unknown field) or silently sends it chasing
     # phantom paths. `image_tag` is similarly chart-level — the backend
     # parses it off the request body, not the embedded prime-rl config.
-    config_payload = {
-        k: v for k, v in raw_cfg.items() if k not in ("env_file", "env_files", "image_tag")
-    }
+    config_payload = {k: v for k, v in raw_cfg.items() if k not in ("env_files", "image_tag")}
 
     payload = build_payload_from_toml(
         config_payload,
@@ -976,9 +841,6 @@ def load_config(path: str) -> RLConfig:
     except toml.TomlDecodeError as e:
         console.print(f"[red]Error:[/red] Invalid TOML in {path}: {e}")
         raise typer.Exit(1)
-
-    if isinstance(data, dict):
-        _remove_deprecated_config_keys(data)
 
     try:
         return RLConfig.model_validate(data)
@@ -1084,14 +946,6 @@ class DefaultGroup(DefaultCommandGroup):
         finally:
             self._show_default_command_params = False
 
-    def invoke(self, ctx):
-        if ctx.info_name == "rl":
-            typer.echo(
-                "[DEPRECATED] The 'rl' command is deprecated. Use 'prime train' instead.",
-                err=True,
-            )
-        return super().invoke(ctx)
-
 
 app = PlainTyper(
     cls=DefaultGroup,
@@ -1148,14 +1002,9 @@ def create_run(
     """
     validate_output_format(output, console)
 
-    # Peek at the raw TOML BEFORE the strict-schema RLConfig parse so a
-    # full-FT config (`type = "full_finetune"` or a `[deployment]` block
-    # with num_train_gpus/num_infer_gpus) can bypass the LoRA-shared
-    # validators and dispatch on the hosted full-FT endpoint instead.
-    # Backwards-compatible: configs without these markers take the LoRA
-    # path exactly as before.
+    # The explicit discriminator selects one of the platform's two training APIs.
     raw_cfg = _peek_toml(config_path)
-    if _is_full_finetune(raw_cfg):
+    if raw_cfg.get("type") == "full_finetune":
         _dispatch_full_finetune_run(
             raw_cfg=raw_cfg,
             config_path=config_path,
@@ -1166,6 +1015,9 @@ def create_run(
             image_tag=image_tag,
         )
         return
+    if raw_cfg.get("type") != "lora":
+        console.print("[red]Error:[/red] training config requires type = 'lora' or 'full_finetune'")
+        raise typer.Exit(1)
 
     console.print(f"[dim]Loading config from {config_path}[/dim]\n")
     cfg = load_config(config_path)
@@ -1176,8 +1028,7 @@ def create_run(
 
     # Resolve config env file paths relative to config file directory
     config_dir = Path(config_path).parent
-    config_env_files = cfg.env_file + cfg.env_files  # support both, env_files takes precedence
-    resolved_config_env_files = [str(config_dir / p) for p in config_env_files]
+    resolved_config_env_files = [str(config_dir / path) for path in cfg.env_files]
 
     # Merge config and CLI env files (CLI takes precedence)
     all_env_files = resolved_config_env_files + (env_file or [])
@@ -1362,8 +1213,7 @@ def create_run(
             failed_envs = []
 
             for env_config in hub_envs:
-                env_id_base = env_config.id.split("@")[0]
-                owner, name = env_id_base.split("/", 1)
+                owner, name = env_config.id.split("/", 1)
                 try:
                     status_resp = rl_client.get_environment_status(owner, name)
                     action = status_resp.get("action") or {}
@@ -1386,11 +1236,10 @@ def create_run(
             if failed_envs:
                 console.print("\n[red]Error: Action failed for environments:[/red]\n")
                 for env_id in failed_envs:
-                    env_id_base = env_id.split("@")[0]
-                    owner, name = env_id_base.split("/", 1)
+                    owner, name = env_id.split("/", 1)
                     url = f"{app_config.frontend_url}/dashboard/environments/{owner}/{name}/actions"
                     console.print(f"  [red]✗[/red] {env_id}")
-                    console.print(f"    [dim]Details: prime env action list {env_id_base}[/dim]")
+                    console.print(f"    [dim]Details: prime env action list {env_id}[/dim]")
                     console.print(f"    [dim]View at: [link={url}]{url}[/link][/dim]\n")
 
                 console.print(
@@ -1656,7 +1505,7 @@ def _flatten_config_schema(
     nested_rows: list[tuple[str, str, str]] = []
     props = schema.get("properties", {})
     for name, prop in props.items():
-        if name in ("model_config", "env_file"):
+        if name == "model_config":
             continue
         path = f"{prefix}{name}" if not prefix else f"{prefix}.{name}"
         resolved = _resolve_schema_ref(_unwrap_single_schema_variant(prop), defs)

@@ -1,31 +1,73 @@
 """Utilities for reading and managing environment metadata."""
 
+import hashlib
 import json
+import os
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
+
+from gitignore_parser import parse_gitignore
+
+
+def collect_archive_files(env_path: Path) -> List[Path]:
+    """Collect source files deterministically while honoring root .gitignore."""
+    gitignore = env_path / ".gitignore"
+    ignore: Optional[Callable[[str], bool]] = (
+        parse_gitignore(str(gitignore), base_dir=str(env_path)) if gitignore.exists() else None
+    )
+    files: Dict[str, Path] = {}
+
+    def add(path: Path) -> None:
+        if not path.is_file() or path.is_symlink():
+            return
+        relative = path.relative_to(env_path)
+        if path.name.startswith(".") and relative != Path("proj/.build.json"):
+            return
+        if "__pycache__" in relative.parts:
+            return
+        if relative != Path("proj/.build.json") and ignore and ignore(str(path)):
+            return
+        files[relative.as_posix()] = path
+
+    for pattern in ["README.md", "pyproject.toml", "*.py"]:
+        for path in sorted(env_path.glob(pattern), key=lambda item: item.name):
+            add(path)
+    add(env_path / "proj" / ".build.json")
+
+    for subdir in sorted(env_path.iterdir(), key=lambda item: item.name):
+        if not subdir.is_dir() or subdir.name.startswith("."):
+            continue
+        if subdir.name in {"dist", "__pycache__", "build", "outputs"}:
+            continue
+        if subdir.name.endswith(".egg-info") or (ignore and ignore(str(subdir))):
+            continue
+        for root, dirnames, filenames in os.walk(subdir):
+            root_path = Path(root)
+            dirnames[:] = sorted(
+                name
+                for name in dirnames
+                if not name.startswith(".")
+                and name not in {"dist", "__pycache__", "build", "outputs"}
+                and not name.endswith(".egg-info")
+                and not (ignore and ignore(str(root_path / name)))
+            )
+            for filename in sorted(filenames):
+                add(root_path / filename)
+    return [files[path] for path in sorted(files)]
+
+
+def compute_content_hash(env_path: Path) -> str:
+    """Compute a deterministic hash of an environment's published source files."""
+    digest = hashlib.sha256()
+    for path in collect_archive_files(env_path):
+        digest.update(f"file:{path.relative_to(env_path).as_posix()}".encode())
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
 
 
 def get_environment_metadata(env_path: Path) -> Optional[Dict[str, Any]]:
-    """Read environment metadata from .prime/.env-metadata.json with backwards compatibility.
-
-    Checks both the new location (.prime/.env-metadata.json) and old location
-    (.env-metadata.json) for backwards compatibility.
-
-    This function only checks the provided path - it does not search multiple directories.
-    Use find_environment_metadata() if you need to search multiple locations.
-
-    Args:
-        env_path: Path to the environment directory
-
-    Returns:
-        Dictionary containing environment metadata, or None if not found
-    """
-    # Try new location first
+    """Read Prime-owned metadata from ``.prime/.env-metadata.json``."""
     metadata_path = env_path / ".prime" / ".env-metadata.json"
-    if not metadata_path.exists():
-        # Fall back to old location for backwards compatibility
-        metadata_path = env_path / ".env-metadata.json"
-
     if not metadata_path.exists():
         return None
 

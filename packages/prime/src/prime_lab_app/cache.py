@@ -5,19 +5,12 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
-import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-import httpx
-from prime_cli.commands.env import (
-    _environment_package_download_url,
-    _safe_tar_extract,
-    compute_content_hash,
-    is_valid_url,
-)
+from prime_cli.utils.env_metadata import compute_content_hash
 
 from .models import LabItem, LabSection
 
@@ -319,10 +312,14 @@ def cached_environment_source(raw: dict[str, Any]) -> CachedEnvironmentSource | 
 
 def ensure_environment_source(raw: dict[str, Any]) -> CachedEnvironmentSource | None:
     """Return a local source tree for an environment, downloading it when needed."""
-
     cached = cached_environment_source(raw)
     if cached is not None:
         return cached
+
+    from verifiers.utils.install_utils import (
+        download_environment_source,
+        environment_package_url,
+    )
 
     slug = str(raw.get("slug") or raw.get("id") or "")
     if "/" not in slug:
@@ -330,7 +327,7 @@ def ensure_environment_source(raw: dict[str, Any]) -> CachedEnvironmentSource | 
     owner, name = slug.split("/", 1)
 
     detail = _platform_detail(raw)
-    package_url = _environment_package_download_url(detail)
+    package_url = environment_package_url(detail)
     version = (
         detail.get("semanticVersion")
         or detail.get("semantic_version")
@@ -345,7 +342,7 @@ def ensure_environment_source(raw: dict[str, Any]) -> CachedEnvironmentSource | 
     cache_path = environment_source_cache_path(owner, name, str(version))
     manifest_path = cache_path / ".prime" / "lab-cache.json"
 
-    _download_source_archive(package_url, cache_path)
+    download_environment_source({"package_url": package_url}, cache_path)
     content_hash = compute_content_hash(cache_path)
     manifest = {
         "cache_version": 1,
@@ -473,33 +470,6 @@ def _environment_version_candidates(raw: dict[str, Any]) -> list[str]:
         if value not in values:
             values.append(value)
     return values
-
-
-def _download_source_archive(url: str, dest: Path) -> None:
-    if not is_valid_url(url):
-        raise ValueError(f"Invalid package URL: {url}")
-
-    temp_file_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
-            temp_file_path = Path(tmp.name)
-            with httpx.stream("GET", url, timeout=60.0, follow_redirects=True) as response:
-                response.raise_for_status()
-                for chunk in response.iter_bytes(chunk_size=8192):
-                    tmp.write(chunk)
-        with tempfile.TemporaryDirectory(prefix="prime_lab_extract_") as extract_dir:
-            extract_path = Path(extract_dir)
-            import tarfile
-
-            with tarfile.open(temp_file_path, "r:gz") as tar:
-                _safe_tar_extract(tar, extract_path)
-            if dest.exists():
-                shutil.rmtree(dest)
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(extract_path), str(dest))
-    finally:
-        if temp_file_path and temp_file_path.exists():
-            temp_file_path.unlink()
 
 
 def _ensure_source_blob(source_path: Path, manifest: dict[str, Any]) -> Path:

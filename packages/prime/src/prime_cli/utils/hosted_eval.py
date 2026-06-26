@@ -1,7 +1,8 @@
 import re
-from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Optional
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .formatters import strip_ansi
 
@@ -33,22 +34,25 @@ class EvalStatus(str, Enum):
         }.get(self, "white")
 
 
-@dataclass
-class HostedEvalConfig:
-    environment_id: str
-    inference_model: str
-    num_examples: int
-    rollouts_per_example: int
+class HostedEvalConfig(BaseModel):
+    """Prime-owned input contract for one hosted V0 evaluation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    env_id: str = Field(min_length=1)
+    model: str = Field(default="openai/gpt-4.1-mini", min_length=1)
+    num_examples: int = Field(default=5, ge=-1)
+    rollouts_per_example: int = Field(default=3, ge=1)
     env_args: Optional[dict[str, Any]] = None
     name: Optional[str] = None
-    timeout_minutes: Optional[int] = None
+    timeout_minutes: Optional[int] = Field(default=None, ge=1)
     allow_sandbox_access: bool = True
     allow_instances_access: bool = False
     allow_tunnel_access: bool = True
     custom_secrets: Optional[dict[str, str]] = None
     sampling_args: Optional[dict[str, Any]] = None
-    max_concurrent: Optional[int] = None
-    max_retries: Optional[int] = None
+    max_concurrent: Optional[int] = Field(default=None, ge=1)
+    max_retries: Optional[int] = Field(default=None, ge=0)
     state_columns: Optional[list[str]] = None
     independent_scoring: bool = False
     verbose: bool = False
@@ -58,17 +62,14 @@ class HostedEvalConfig:
     api_base_url: Optional[str] = None
     api_key_var: Optional[str] = None
 
-
-@dataclass
-class HostedEvalResult:
-    evaluation_id: str
-    status: EvalStatus
-    total_samples: int
-    avg_score: Optional[float]
-    min_score: Optional[float]
-    max_score: Optional[float]
-    error_message: Optional[str] = None
-    logs: Optional[str] = None
+    @field_validator("headers")
+    @classmethod
+    def validate_headers(cls, headers: Optional[list[str]]) -> Optional[list[str]]:
+        for header in headers or []:
+            name, separator, value = header.partition(":")
+            if not separator or not name.strip() or not value.strip():
+                raise ValueError("headers must use 'Name: Value'")
+        return headers
 
 
 def filter_progress_bars(text: str) -> str:

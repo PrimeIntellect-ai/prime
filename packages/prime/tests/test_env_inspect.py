@@ -192,7 +192,7 @@ class TestEnvInspect:
         result = runner.invoke(app, ["env", "inspect", "not-a-slug"])
 
         assert result.exit_code == 1
-        assert "Invalid environment ID format" in result.output
+        assert "Invalid environment ID" in result.output
         assert "Unexpected error" not in result.output
 
 
@@ -223,4 +223,4 @@ def test_env_info_shows_inspect_commands_without_wheel(monkeypatch: pytest.Monke
 
     assert result.exit_code == 0, result.output
     assert "prime env inspect testuser/test-env@latest" in result.output
-    assert "No wheel available for this version" in result.output
+    assert "prime env install testuser/test-env@latest" in result.output

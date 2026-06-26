@@ -6,34 +6,21 @@ import typer
 from prime_cli.commands.rl import (
     RLConfig,
     _flatten_config_schema,
-    _is_full_finetune,
     generate_rl_config_template,
     load_config,
 )
 from pydantic import BaseModel
 
 
-def test_load_config_warns_and_ignores_deprecated_trajectory_strategy(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_load_config_rejects_removed_trajectory_strategy(tmp_path: Path) -> None:
     config_path = tmp_path / "rl.toml"
     config_path.write_text(
         'model = "PrimeIntellect/Qwen3-0.6B-Reverse-Text-SFT"\n'
         'trajectory_strategy = "interleaved"\n'
     )
 
-    printed: list[str] = []
-
-    def capture_print(*args: object, **_: object) -> None:
-        printed.append(" ".join(str(arg) for arg in args))
-
-    monkeypatch.setattr("prime_cli.commands.rl.console.print", capture_print)
-
-    cfg = load_config(str(config_path))
-
-    assert cfg.model == "PrimeIntellect/Qwen3-0.6B-Reverse-Text-SFT"
-    assert "trajectory_strategy" not in cfg.model_dump()
-    assert any("trajectory_strategy" in line and "deprecated" in line.lower() for line in printed)
+    with pytest.raises(typer.Exit):
+        load_config(str(config_path))
 
 
 def test_load_config_still_rejects_other_unknown_keys(tmp_path: Path) -> None:
@@ -558,45 +545,3 @@ def test_tailscale_no_auth_key_anywhere_rejected(tmp_path: Path, monkeypatch) ->
     config_path.write_text('model = "dummy"\n[tailscale]\nenabled = true\n')
     with pytest.raises(typer.Exit):
         load_config(str(config_path))
-
-
-def test_is_full_finetune_top_level_discriminator() -> None:
-    assert _is_full_finetune({"type": "full_finetune"}) is True
-
-
-def test_is_full_finetune_single_node_gpu_sizing() -> None:
-    cfg = {"deployment": {"num_train_gpus": 4, "num_infer_gpus": 4}}
-    assert _is_full_finetune(cfg) is True
-
-
-def test_is_full_finetune_multi_node_node_sizing() -> None:
-    # Mirrors prime-rl's qwen30b_math/rl.toml — multi-node configs use
-    # num_train_nodes/num_infer_nodes instead of the *_gpus variants.
-    cfg = {
-        "deployment": {
-            "type": "multi_node",
-            "num_train_nodes": 2,
-            "num_infer_nodes": 2,
-        }
-    }
-    assert _is_full_finetune(cfg) is True
-
-
-def test_is_full_finetune_deployment_type_alone() -> None:
-    assert _is_full_finetune({"deployment": {"type": "single_node"}}) is True
-    assert _is_full_finetune({"deployment": {"type": "multi_node"}}) is True
-
-
-def test_is_full_finetune_lora_config_rejected() -> None:
-    lora_cfg = {
-        "model": "Qwen/Qwen3.5-4B",
-        "max_steps": 50,
-        "batch_size": 128,
-        "rollouts_per_example": 8,
-    }
-    assert _is_full_finetune(lora_cfg) is False
-
-
-def test_is_full_finetune_empty_deployment_rejected() -> None:
-    # `[deployment]` with no recognised fields shouldn't flip dispatch.
-    assert _is_full_finetune({"deployment": {}}) is False

@@ -6,13 +6,12 @@ import os
 import queue
 import shlex
 import sys
-import tarfile
 import threading
 import time
 import types
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from io import BytesIO, StringIO
+from io import StringIO
 from pathlib import Path
 from typing import Any, Callable
 
@@ -219,6 +218,7 @@ from rich.panel import Panel
 from textual.containers import Vertical, VerticalScroll
 from textual.widgets import Button, Label, OptionList, Select, Static, Tree
 from typer.testing import CliRunner
+from verifiers.utils import install_utils
 
 
 class FakeConfig:
@@ -792,29 +792,20 @@ def test_lab_environment_cache_downloads_source_and_writes_manifest(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
-    archive = _tar_bytes({"README.md": "# Cached Env\n", "env.py": "VALUE = 1\n"})
 
-    class FakeStream:
-        def __enter__(self) -> "FakeStream":
-            return self
+    def fake_download(details: dict, destination: Path) -> None:
+        assert details == {"package_url": "https://example.test/tracked-env.tar.gz"}
+        destination.mkdir(parents=True)
+        (destination / "README.md").write_text("# Cached Env\n", encoding="utf-8")
+        (destination / "env.py").write_text("VALUE = 1\n", encoding="utf-8")
 
-        def __exit__(self, *_args: Any) -> None:
-            return None
-
-        def raise_for_status(self) -> None:
-            return None
-
-        def iter_bytes(self, chunk_size: int) -> list[bytes]:
-            return [archive[:chunk_size], archive[chunk_size:]]
-
-    def fake_stream(method: str, url: str, timeout: float, follow_redirects: bool) -> FakeStream:
-        assert method == "GET"
-        assert url == "https://example.test/tracked-env.tar.gz"
-        assert timeout == 60.0
-        assert follow_redirects is True
-        return FakeStream()
-
-    monkeypatch.setattr("prime_lab_app.cache.httpx.stream", fake_stream)
+    monkeypatch.setattr("verifiers.utils.install_utils.download_environment_source", fake_download)
+    monkeypatch.setattr(
+        install_utils,
+        "environment_package_url",
+        lambda details: details.get("tracked_package_url") or details.get("package_url"),
+        raising=False,
+    )
 
     cached = ensure_environment_source(
         {
@@ -911,40 +902,6 @@ def test_lab_environment_cache_resolves_version_pointer_to_hash_blob(
     assert cached is not None
     assert cached.root == source_root
     assert (cached.root / "README.md").read_text(encoding="utf-8") == "# Blob Env\n"
-
-
-def test_lab_environment_cache_rejects_unsafe_archive(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path))
-    archive = _tar_bytes({"../evil.txt": "nope"})
-
-    class FakeStream:
-        def __enter__(self) -> "FakeStream":
-            return self
-
-        def __exit__(self, *_args: Any) -> None:
-            return None
-
-        def raise_for_status(self) -> None:
-            return None
-
-        def iter_bytes(self, chunk_size: int) -> list[bytes]:
-            return [archive[:chunk_size], archive[chunk_size:]]
-
-    monkeypatch.setattr("prime_lab_app.cache.httpx.stream", lambda *_args, **_kwargs: FakeStream())
-
-    with pytest.raises(ValueError, match="path with '..'"):
-        ensure_environment_source(
-            {
-                "slug": "research/unsafe-env",
-                "platform": {
-                    "package_url": "https://example.test/env.tar.gz",
-                    "semanticVersion": "0.2.0",
-                },
-            }
-        )
 
 
 def test_source_browser_lists_and_previews_workspace_files(tmp_path: Path) -> None:
@@ -2113,7 +2070,7 @@ def test_prime_lab_launches_viewer_by_default(monkeypatch: pytest.MonkeyPatch) -
     assert calls[0]["limit"] == 1000
 
 
-def test_prime_lab_app_alias_launches_viewer(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_prime_lab_app_launches_viewer(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[dict[str, Any]] = []
 
     def fake_run_lab_view(**kwargs: Any) -> None:
@@ -2121,7 +2078,7 @@ def test_prime_lab_app_alias_launches_viewer(monkeypatch: pytest.MonkeyPatch) ->
 
     monkeypatch.setattr("prime_lab_app.run_lab_view", fake_run_lab_view)
 
-    result = CliRunner().invoke(lab_cli_app, ["view", "--limit", "7"])
+    result = CliRunner().invoke(lab_cli_app, ["--limit", "7"])
 
     assert result.exit_code == 0
     assert calls[0]["limit"] == 7
@@ -7889,17 +7846,6 @@ def _render_renderable(renderable: Any) -> str:
     console = Console(record=True, width=120, file=StringIO())
     console.print(renderable)
     return console.export_text()
-
-
-def _tar_bytes(files: dict[str, str]) -> bytes:
-    buffer = BytesIO()
-    with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
-        for name, text in files.items():
-            data = text.encode("utf-8")
-            info = tarfile.TarInfo(name)
-            info.size = len(data)
-            tar.addfile(info, BytesIO(data))
-    return buffer.getvalue()
 
 
 def _local_eval_item(

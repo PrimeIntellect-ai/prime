@@ -1,4 +1,4 @@
-"""Tests for `prime rl models` — focused on price column rendering."""
+"""Tests for `prime train models` — focused on price column rendering."""
 
 import json
 from typing import Any, Dict, List
@@ -51,7 +51,7 @@ def test_models_table_renders_pricing(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: List[str] = []
     monkeypatch.setattr("prime_cli.core.APIClient.get", _mock_get_factory(calls))
 
-    result = CliRunner().invoke(app, ["rl", "models"], env={"COLUMNS": "200"})
+    result = CliRunner().invoke(app, ["train", "models"], env={"COLUMNS": "200"})
 
     assert result.exit_code == 0, result.output
     assert "qwen/qwen3-8b" in result.output
@@ -86,7 +86,7 @@ def test_models_handles_backend_without_pricing_fields(
 
     monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
 
-    result = CliRunner().invoke(app, ["rl", "models"], env={"COLUMNS": "200"})
+    result = CliRunner().invoke(app, ["train", "models"], env={"COLUMNS": "200"})
 
     assert result.exit_code == 0, result.output
     assert "qwen/qwen3-8b" in result.output
@@ -118,7 +118,7 @@ def test_models_table_renders_promo_arrow_and_caption(
 
     monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
 
-    result = CliRunner().invoke(app, ["rl", "models"], env={"COLUMNS": "200"})
+    result = CliRunner().invoke(app, ["train", "models"], env={"COLUMNS": "200"})
 
     assert result.exit_code == 0, result.output
     plain = strip_ansi(result.output)
@@ -159,7 +159,7 @@ def test_models_table_no_promo_when_effective_equals_original(
 
     monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
 
-    result = CliRunner().invoke(app, ["rl", "models"], env={"COLUMNS": "200"})
+    result = CliRunner().invoke(app, ["train", "models"], env={"COLUMNS": "200"})
 
     assert result.exit_code == 0, result.output
     plain = strip_ansi(result.output)
@@ -191,7 +191,7 @@ def test_models_zero_original_with_promo_does_not_render_free(
 
     monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
 
-    result = CliRunner().invoke(app, ["rl", "models"], env={"COLUMNS": "200"})
+    result = CliRunner().invoke(app, ["train", "models"], env={"COLUMNS": "200"})
 
     assert result.exit_code == 0, result.output
     plain = strip_ansi(result.output)
@@ -233,7 +233,7 @@ def test_models_promo_label_deduplicated_across_models(
 
     monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
 
-    result = CliRunner().invoke(app, ["rl", "models"], env={"COLUMNS": "200"})
+    result = CliRunner().invoke(app, ["train", "models"], env={"COLUMNS": "200"})
 
     assert result.exit_code == 0, result.output
     plain = strip_ansi(result.output)
@@ -268,7 +268,7 @@ def test_models_table_renders_promo_with_list_fields(
 
     monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
 
-    result = CliRunner().invoke(app, ["rl", "models"], env={"COLUMNS": "200"})
+    result = CliRunner().invoke(app, ["train", "models"], env={"COLUMNS": "200"})
 
     assert result.exit_code == 0, result.output
     plain = strip_ansi(result.output)

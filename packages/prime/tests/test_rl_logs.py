@@ -78,7 +78,7 @@ def test_logs_default_hits_orchestrator(monkeypatch: pytest.MonkeyPatch) -> None
     mock_get = _make_mock_get({"orchestrator_logs": "orch-line-1\norch-line-2"}, orch, env, lst)
     monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
 
-    result = CliRunner().invoke(app, ["rl", "logs", RUN_ID, "--raw"])
+    result = CliRunner().invoke(app, ["train", "logs", RUN_ID, "--raw"])
 
     assert result.exit_code == 0, result.output
     assert "orch-line-1" in result.output
@@ -96,7 +96,7 @@ def test_logs_env_flag_alone_infers_env_server(monkeypatch: pytest.MonkeyPatch) 
     mock_get = _make_mock_get({"env_server_logs": "inferred line"}, orch, env, lst)
     monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
 
-    result = CliRunner().invoke(app, ["rl", "logs", RUN_ID, "--env", "reverse-text", "--raw"])
+    result = CliRunner().invoke(app, ["train", "logs", RUN_ID, "--env", "reverse-text", "--raw"])
 
     assert result.exit_code == 0, result.output
     assert "inferred line" in result.output
@@ -118,7 +118,7 @@ def test_logs_explicit_orchestrator_with_env_errors(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
 
     result = CliRunner().invoke(
-        app, ["rl", "logs", RUN_ID, "-c", "orchestrator", "--env", "reverse-text"]
+        app, ["train", "logs", RUN_ID, "-c", "orchestrator", "--env", "reverse-text"]
     )
     assert result.exit_code != 0
 
@@ -138,7 +138,7 @@ def test_logs_env_server_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
     result = CliRunner().invoke(
         app,
         [
-            "rl",
+            "train",
             "logs",
             RUN_ID,
             "-c",
@@ -172,7 +172,7 @@ def test_logs_env_server_qualified_name_parses_index(monkeypatch: pytest.MonkeyP
 
     result = CliRunner().invoke(
         app,
-        ["rl", "logs", RUN_ID, "-c", "env-server", "--env", "reverse-text/2", "--raw"],
+        ["train", "logs", RUN_ID, "-c", "env-server", "--env", "reverse-text/2", "--raw"],
     )
 
     assert result.exit_code == 0, result.output
@@ -193,7 +193,7 @@ def test_logs_env_server_qualified_name_forwards_filters(
     result = CliRunner().invoke(
         app,
         [
-            "rl",
+            "train",
             "logs",
             RUN_ID,
             "-c",
@@ -237,7 +237,7 @@ def test_logs_env_server_owner_name_preserved(monkeypatch: pytest.MonkeyPatch) -
 
     result = CliRunner().invoke(
         app,
-        ["rl", "logs", RUN_ID, "--env", "primeintellect/reverse-text", "--raw"],
+        ["train", "logs", RUN_ID, "--env", "primeintellect/reverse-text", "--raw"],
     )
 
     assert result.exit_code == 0, result.output
@@ -259,7 +259,7 @@ def test_logs_env_server_owner_name_with_index(monkeypatch: pytest.MonkeyPatch) 
 
     result = CliRunner().invoke(
         app,
-        ["rl", "logs", RUN_ID, "--env", "primeintellect/reverse-text/1", "--raw"],
+        ["train", "logs", RUN_ID, "--env", "primeintellect/reverse-text/1", "--raw"],
     )
 
     assert result.exit_code == 0, result.output
@@ -273,7 +273,7 @@ def test_logs_env_server_requires_env_flag(monkeypatch: pytest.MonkeyPatch) -> N
 
     monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
 
-    result = CliRunner().invoke(app, ["rl", "logs", RUN_ID, "-c", "env-server"])
+    result = CliRunner().invoke(app, ["train", "logs", RUN_ID, "-c", "env-server"])
     assert result.exit_code != 0
     assert "--env" in result.output or "env" in result.output.lower()
 
@@ -284,7 +284,7 @@ def test_logs_invalid_component(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
 
-    result = CliRunner().invoke(app, ["rl", "logs", RUN_ID, "-c", "bogus"])
+    result = CliRunner().invoke(app, ["train", "logs", RUN_ID, "-c", "bogus"])
     assert result.exit_code != 0
 
 
@@ -374,7 +374,7 @@ def test_logs_env_server_follow_dedupes(monkeypatch: pytest.MonkeyPatch) -> None
     result = CliRunner().invoke(
         app,
         [
-            "rl",
+            "train",
             "logs",
             RUN_ID,
             "-c",
@@ -424,7 +424,7 @@ def test_components_lists_orchestrator_and_env_servers(monkeypatch: pytest.Monke
     )
     monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
 
-    result = CliRunner().invoke(app, ["rl", "components", RUN_ID])
+    result = CliRunner().invoke(app, ["train", "components", RUN_ID])
 
     assert result.exit_code == 0, result.output
     out = " ".join(result.output.split())
@@ -468,7 +468,7 @@ def test_components_qualifies_duplicate_env_names(monkeypatch: pytest.MonkeyPatc
     )
     monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
 
-    result = CliRunner().invoke(app, ["rl", "components", RUN_ID])
+    result = CliRunner().invoke(app, ["train", "components", RUN_ID])
 
     assert result.exit_code == 0, result.output
     out = " ".join(result.output.split())
@@ -488,7 +488,7 @@ def test_components_empty_env_servers(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
 
-    result = CliRunner().invoke(app, ["rl", "components", RUN_ID])
+    result = CliRunner().invoke(app, ["train", "components", RUN_ID])
 
     assert result.exit_code == 0, result.output
     assert "orchestrator" in result.output

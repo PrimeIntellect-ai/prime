@@ -113,24 +113,6 @@ def register_github() -> None:
     console.print(f"Wrote {path}", markup=False)
 
 
-@app.command("view")
-def view(
-    limit: int = typer.Option(1000, "--limit", "-n", help="Max rows to load per section"),
-    env_dir: str = typer.Option(
-        "./environments",
-        "--env-dir",
-        help="Local environments directory for discovering eval outputs",
-    ),
-    outputs_dir: str = typer.Option(
-        "./outputs",
-        "--outputs-dir",
-        help="Local outputs directory for discovering eval outputs",
-    ),
-) -> None:
-    """Launch the interactive Lab viewer."""
-    _launch_view(limit=limit, env_dir=env_dir, outputs_dir=outputs_dir)
-
-
 @app.command("mcp")
 def mcp(
     workspace: Path | None = typer.Option(

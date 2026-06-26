@@ -669,7 +669,7 @@ class TestLoadEvalDirectory:
         captured = capsys.readouterr()
         assert "Warning" in captured.out
         assert "Skipped 4" in captured.out
-        assert "expected dict" in captured.out
+        assert "expected object" in captured.out
 
     def test_converts_id_to_example_id(self, tmp_path):
         """Converts 'id' field to 'example_id' in results"""

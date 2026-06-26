@@ -159,15 +159,3 @@ def test_eval_view_rejects_non_positive_limit():
 
     assert result.exit_code == 1
     assert "--limit must be at least 1" in result.output
-
-
-def test_eval_tui_points_to_eval_view():
-    result = runner.invoke(
-        app,
-        ["eval", "tui", "--limit", "0", "--env-dir", "envs", "--outputs-dir", "outs"],
-        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
-    )
-
-    assert result.exit_code == 1
-    assert "Deprecated" in result.output
-    assert "prime eval view" in result.output

@@ -42,7 +42,7 @@ from .lab_hygiene import (
 )
 
 VERIFIERS_REPO = "primeintellect-ai/verifiers"
-VERIFIERS_REF = "f43e42c1fabfe2604afc95b9ce62779a8f55d487"
+VERIFIERS_REF = "174160067ad16673c0b438e4155cc22c336ddfb7"
 VERIFIERS_CONFIG_REF = "main"
 DOWNLOAD_ATTEMPTS = 3
 DOWNLOAD_RETRY_DELAY_SECONDS = 1.0
@@ -1410,9 +1410,9 @@ def _post_setup_call_to_action(options: LabSetupOptions) -> Panel:
         "[bold green]$[/bold green]", "prime eval run my-env -m openai/gpt-5.4-nano -n 5"
     )
     command_table.add_row("[bold green]$[/bold green]", "prime eval view")
-    command_table.add_row("[bold green]$[/bold green]", "prime rl run configs/rl/qwen-3-5.toml")
+    command_table.add_row("[bold green]$[/bold green]", "prime train <training-config.toml>")
     command_table.add_row(
-        "[bold green]$[/bold green]", "prime gepa run my-env -m openai/gpt-5.4-nano"
+        "[bold green]$[/bold green]", "prime gepa run my-env --model openai/gpt-5.4-nano"
     )
 
     header_text = Text.assemble(

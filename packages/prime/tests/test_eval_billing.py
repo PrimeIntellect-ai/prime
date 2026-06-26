@@ -5,7 +5,6 @@ from prime_cli.api.inference import (
     InferenceClient,
     InferencePaymentRequiredError,
 )
-from prime_cli.verifiers_bridge import ResolvedEnvironment, run_gepa_passthrough
 
 
 class DummyConfig:
@@ -47,40 +46,6 @@ def test_inference_client_maps_402_to_billing_error(monkeypatch):
         match="Payment required\\. Insufficient balance",
     ):
         client.list_models()
-
-
-def test_gepa_run_provider_short_flag_does_not_override_env_dir_path(monkeypatch):
-    monkeypatch.setattr(
-        "prime_cli.verifiers_bridge.build_verifiers_command",
-        lambda name, args: [name, *args],
-    )
-    monkeypatch.setattr("prime_cli.verifiers_bridge.Config", lambda: DummyConfig())
-    captured = {}
-    monkeypatch.setattr(
-        "prime_cli.verifiers_bridge._prepare_single_environment",
-        lambda environment, env_dir_path: captured.update(
-            {"environment": environment, "env_dir_path": env_dir_path}
-        )
-        or ResolvedEnvironment(
-            original=environment,
-            env_name=environment,
-            install_mode="local",
-        ),
-    )
-    monkeypatch.setattr(
-        "prime_cli.verifiers_bridge._run_command",
-        lambda command, env=None: None,
-    )
-
-    run_gepa_passthrough(
-        environment_or_config="single_turn_math",
-        passthrough_args=["-p", "openai", "-m", "gpt-4.1-mini"],
-    )
-
-    assert captured == {
-        "environment": "single_turn_math",
-        "env_dir_path": "./environments",
-    }
 
 
 def test_inference_client_uses_custom_timeout(monkeypatch):

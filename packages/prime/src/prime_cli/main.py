@@ -48,13 +48,6 @@ app.command("fork", rich_help_panel="Lab", epilog=FORK_JSON_HELP)(fork_command)
 app.add_typer(evals_app, name="eval", rich_help_panel="Lab")
 app.add_typer(gepa_app, name="gepa", rich_help_panel="Lab")
 app.add_typer(train_app, name="train", rich_help_panel="Lab")
-app.add_typer(
-    train_app,
-    name="rl",
-    help="Deprecated alias for `prime train`.",
-    hidden=True,
-    rich_help_panel="Lab",
-)
 app.add_typer(deployments_app, name="deployments", rich_help_panel="Lab")
 
 # Compute commands
@@ -77,7 +70,6 @@ app.add_typer(teams_app, name="teams", rich_help_panel="Account")
 app.add_typer(secret_app, name="secret", rich_help_panel="Account")
 app.command("wallet", rich_help_panel="Account", epilog=WALLET_JSON_HELP)(wallet_command)
 app.add_typer(upgrade_app, name="upgrade", rich_help_panel="Account")
-app.add_typer(upgrade_app, name="update", rich_help_panel="Account", hidden=True)
 app.add_typer(feedback_app, name="feedback", rich_help_panel="Account")
 
 

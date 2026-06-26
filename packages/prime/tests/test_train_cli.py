@@ -22,7 +22,7 @@ def test_train_help_promotes_config_run_path() -> None:
     assert "request" in result.output
 
 
-def test_rl_alias_is_hidden_from_root_help() -> None:
+def test_removed_rl_alias_is_absent_from_root_help() -> None:
     result = runner.invoke(app, ["--help"], env=TEST_ENV)
 
     assert result.exit_code == 0, result.output
@@ -30,27 +30,21 @@ def test_rl_alias_is_hidden_from_root_help() -> None:
     assert "Deprecated alias for `prime train`." not in result.output
 
 
-def test_rl_alias_still_works_with_deprecation_warning(tmp_path: Path) -> None:
+def test_train_init_writes_requested_path(tmp_path: Path) -> None:
     output_path = tmp_path / "config.toml"
 
-    result = runner.invoke(app, ["rl", "init", str(output_path)], env=TEST_ENV)
+    result = runner.invoke(app, ["train", "init", str(output_path)], env=TEST_ENV)
 
     assert result.exit_code == 0, result.output
-    assert (
-        "[DEPRECATED] The 'rl' command is deprecated. Use 'prime train' instead."
-    ) in result.output
     assert "Run with: prime train" in result.output
     assert output_path.exists()
 
 
-def test_rl_alias_warning_uses_stderr_for_json_output() -> None:
-    result = runner.invoke(app, ["rl", "configs", "--output", "json"], env=TEST_ENV)
+def test_train_json_output_is_clean() -> None:
+    result = runner.invoke(app, ["train", "configs", "--output", "json"], env=TEST_ENV)
 
     assert result.exit_code == 0, result.output
-    assert (
-        "[DEPRECATED] The 'rl' command is deprecated. Use 'prime train' instead."
-    ) in result.stderr
-    assert "[DEPRECATED]" not in result.stdout
+    assert result.stderr == ""
     data = json.loads(result.stdout)
     assert "configs" in data
 

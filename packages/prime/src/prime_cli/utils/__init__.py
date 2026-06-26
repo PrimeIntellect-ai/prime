@@ -1,7 +1,6 @@
 """Shared utilities for CLI commands."""
 
 # Re-export the most commonly used functions
-from .config import BaseConfig, load_toml
 from .display import (
     build_table,
     get_eval_viewer_url,
@@ -53,8 +52,6 @@ __all__ = [
     "select_item_interactive",
     "require_selection",
     "validate_env_var_name",
-    "load_toml",
-    "BaseConfig",
     "optional_team_params",
     "DefaultCommandGroup",
     "PlainAwareTyperGroup",

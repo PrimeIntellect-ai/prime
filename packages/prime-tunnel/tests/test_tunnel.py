@@ -163,6 +163,22 @@ def test_sync_stop_survives_delete_failure():
     assert tunnel._tunnel_info is None
 
 
+@pytest.mark.asyncio
+async def test_wait_for_connection_reads_success_from_pipe_drain():
+    tunnel = _make_started_tunnel()
+    tunnel.connection_timeout = 1.0
+    tunnel._process.poll.return_value = None
+    tunnel._process.stdout = iter(["2026-01-01 00:00:00.000 [I] [proxy] start proxy success\n"])
+    tunnel._process.stderr = iter([])
+    tunnel._output_lines = []
+    tunnel._capture_startup_output = True
+
+    tunnel._start_pipe_drain()
+    await tunnel._wait_for_connection()
+
+    assert "start proxy success" in tunnel.recent_output[0]
+
+
 # -- check_registered tests --
 
 

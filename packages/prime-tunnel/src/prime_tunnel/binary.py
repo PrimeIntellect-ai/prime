@@ -5,6 +5,7 @@ import shutil
 import stat
 import tarfile
 import tempfile
+import zipfile
 from pathlib import Path
 
 import httpx
@@ -19,6 +20,8 @@ FRPC_CHECKSUMS = {
     ("Darwin", "x86_64"): "9558d55a9d8bc40e22018379ea645251f803f9e2d69e7a7a2fd1588f98f8ef43",
     ("Linux", "x86_64"): "317a17a7adac2e6bed2d7a83dc077da91ced0d110e1636373ece8ae5ac8b578b",
     ("Linux", "aarch64"): "196ddaa51b716c2e99aeb2916b0a2bf55bb317494c4acdcefab36c383de950ba",
+    ("Windows", "x86_64"): "3e2925b65a85938b936ea85072657c6c8e62b095c233e739da3eb5615b25ca55",
+    ("Windows", "arm64"): "dfd112469c91e6fa05274dc4929725b062b176b103463196908d24c7888e54b8",
 }
 
 FRPC_URLS = {
@@ -38,6 +41,14 @@ FRPC_URLS = {
         "Linux",
         "aarch64",
     ): f"https://github.com/fatedier/frp/releases/download/v{FRPC_VERSION}/frp_{FRPC_VERSION}_linux_arm64.tar.gz",
+    (
+        "Windows",
+        "x86_64",
+    ): f"https://github.com/fatedier/frp/releases/download/v{FRPC_VERSION}/frp_{FRPC_VERSION}_windows_amd64.zip",
+    (
+        "Windows",
+        "arm64",
+    ): f"https://github.com/fatedier/frp/releases/download/v{FRPC_VERSION}/frp_{FRPC_VERSION}_windows_arm64.zip",
 }
 
 
@@ -47,10 +58,14 @@ def _get_platform_key() -> tuple[str, str]:
 
     if machine in ("AMD64", "x86_64"):
         machine = "x86_64"
-    elif machine in ("arm64", "aarch64"):
-        machine = "arm64" if system == "Darwin" else "aarch64"
+    elif machine in ("ARM64", "arm64", "aarch64"):
+        machine = "arm64" if system in ("Darwin", "Windows") else "aarch64"
 
     return (system, machine)
+
+
+def _frpc_binary_name(platform_key: tuple[str, str]) -> str:
+    return "frpc.exe" if platform_key[0] == "Windows" else "frpc"
 
 
 def _verify_checksum(file_path: Path, expected_checksum: str) -> None:
@@ -80,7 +95,7 @@ def _download_frpc(dest: Path) -> None:
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir_path = Path(tmpdir)
-        archive_path = tmpdir_path / "frp.tar.gz"
+        archive_path = tmpdir_path / ("frp.zip" if url.endswith(".zip") else "frp.tar.gz")
 
         try:
             with httpx.stream("GET", url, follow_redirects=True, timeout=120.0) as response:
@@ -94,20 +109,35 @@ def _download_frpc(dest: Path) -> None:
 
         _verify_checksum(archive_path, expected_checksum)
 
-        try:
-            with tarfile.open(archive_path, "r:gz") as tar:
-                for member in tar.getmembers():
-                    if member.name.endswith("/frpc") or member.name == "frpc":
-                        member.name = "frpc"
-                        tar.extract(member, tmpdir_path)
-                        break
-                else:
-                    raise BinaryDownloadError("frpc binary not found in archive")
+        binary_name = _frpc_binary_name(platform_key)
+        extracted_path = tmpdir_path / binary_name
+        if archive_path.suffix == ".zip":
+            try:
+                with zipfile.ZipFile(archive_path) as archive:
+                    for member_name in archive.namelist():
+                        if Path(member_name).name == binary_name:
+                            with archive.open(member_name) as source:
+                                with open(extracted_path, "wb") as target:
+                                    shutil.copyfileobj(source, target)
+                            break
+                    else:
+                        raise BinaryDownloadError("frpc binary not found in archive")
+            except zipfile.BadZipFile as e:
+                raise BinaryDownloadError(f"Failed to extract frpc: {e}") from e
+        else:
+            try:
+                with tarfile.open(archive_path, "r:gz") as tar:
+                    for member in tar.getmembers():
+                        if Path(member.name).name == binary_name:
+                            member.name = binary_name
+                            tar.extract(member, tmpdir_path)
+                            break
+                    else:
+                        raise BinaryDownloadError("frpc binary not found in archive")
 
-        except tarfile.TarError as e:
-            raise BinaryDownloadError(f"Failed to extract frpc: {e}") from e
+            except tarfile.TarError as e:
+                raise BinaryDownloadError(f"Failed to extract frpc: {e}") from e
 
-        extracted_path = tmpdir_path / "frpc"
         if not extracted_path.exists():
             raise BinaryDownloadError("frpc binary not found after extraction")
 
@@ -132,7 +162,7 @@ def _download_frpc(dest: Path) -> None:
 
 def get_frpc_path() -> Path:
     config = Config()
-    frpc_path = config.bin_dir / "frpc"
+    frpc_path = config.bin_dir / _frpc_binary_name(_get_platform_key())
     version_file = config.bin_dir / ".frpc_version"
 
     if frpc_path.exists():

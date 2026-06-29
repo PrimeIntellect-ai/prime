@@ -4,7 +4,6 @@ import tarfile
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
 
@@ -12,7 +11,15 @@ import click
 import httpx
 import typer
 from gitignore_parser import parse_gitignore
-from prime_sandboxes import APIClient, APIError, Config, UnauthorizedError
+from prime_sandboxes import (
+    APIClient,
+    APIError,
+    BulkImageTransferResponse,
+    Config,
+    ImageClient,
+    ImageVisibility,
+    UnauthorizedError,
+)
 from rich.table import Table
 
 from ..utils import (
@@ -29,11 +36,6 @@ console = get_console()
 PACKAGED_DOCKERFILE_PATH = ".__prime_dockerfile__"
 
 config = Config()
-
-
-class ImageVisibility(str, Enum):
-    PRIVATE = "PRIVATE"
-    PUBLIC = "PUBLIC"
 
 
 LIST_IMAGES_JSON_HELP = json_output_help(
@@ -363,8 +365,8 @@ def _group_sort_key(partition: PartitionMap) -> datetime:
 
 @app.command("push")
 def push_image(
-    image_reference: str = typer.Argument(
-        ..., help="Image reference (e.g., 'myapp:v1.0.0' or 'myapp:latest')"
+    image_reference: Optional[str] = typer.Argument(
+        None, help="Image reference (e.g., 'myapp:v1.0.0' or 'myapp:latest')"
     ),
     context: str = typer.Option(".", "--context", "-c", help="Build context directory"),
     dockerfile: Optional[str] = typer.Option(
@@ -390,6 +392,16 @@ def push_image(
         "--private",
         help="Make the image private when the build completes",
     ),
+    source_image: Optional[str] = typer.Option(
+        None,
+        "--source-image",
+        help="Copy an existing public image into Prime instead of uploading a build context",
+    ),
+    platform_image: bool = typer.Option(
+        False,
+        "--platform-image",
+        help="Build an org-less platform image (admins only)",
+    ),
 ):
     """
     Build and push a Docker image to Prime Intellect registry.
@@ -403,30 +415,171 @@ def push_image(
         prime images push myapp:latest --context ./app --dockerfile ../docker/Dockerfile.prod
         prime images push myapp:v1 --platform linux/arm64
         prime images push myapp:v1 --public
+        prime images push --source-image ubuntu:22.04
+        prime images push myubuntu:22.04 --source-image ubuntu:22.04
     """
     try:
         if public and private:
             console.print("[red]Error: --public and --private cannot be used together[/red]")
             raise typer.Exit(1)
 
+        is_transfer = source_image is not None
+        if platform_image and private:
+            console.print("[red]Error: Platform images must be public[/red]")
+            raise typer.Exit(1)
+        if platform_image and config.team_id:
+            console.print("[red]Error: Platform images cannot be pushed in a team context[/red]")
+            raise typer.Exit(1)
+        if not is_transfer and image_reference is None:
+            console.print(
+                "[red]Error: Image reference is required unless --source-image is used[/red]"
+            )
+            raise typer.Exit(1)
+
+        transfer_sources = [
+            source.strip() for source in (source_image or "").split(",") if source.strip()
+        ]
+        if is_transfer and not transfer_sources:
+            console.print(
+                "[red]Error: --source-image must include at least one image reference[/red]"
+            )
+            raise typer.Exit(1)
+        if is_transfer and image_reference is not None and len(transfer_sources) > 1:
+            console.print(
+                "[red]Error: Destination image reference can only be provided for "
+                "single-image transfers[/red]"
+            )
+            raise typer.Exit(1)
+
         # Parse image reference
-        if ":" in image_reference:
+        if image_reference is None:
+            image_name = None
+            image_tag = None
+        elif ":" in image_reference:
             image_name, image_tag = image_reference.rsplit(":", 1)
         else:
             image_name = image_reference
             image_tag = "latest"
 
         # Validate image name doesn't contain slashes
-        if "/" in image_name:
+        if image_name is not None and "/" in image_name:
             console.print(
                 "[red]Error: Image name cannot contain '/'. "
                 "Use simple names like 'myapp:v1.0.0'.[/red]"
             )
             raise typer.Exit(1)
 
-        console.print(
-            f"[bold blue]Building and pushing image:[/bold blue] {image_name}:{image_tag}"
-        )
+        if is_transfer:
+            source_display = ", ".join(transfer_sources)
+            destination_display = (
+                f"{image_name}:{image_tag}" if image_name and image_tag else "derived"
+            )
+            if platform_image:
+                console.print("[bold blue]Transferring platform image into Prime:[/bold blue]")
+            else:
+                console.print("[bold blue]Transferring image into Prime:[/bold blue]")
+            console.print(f"[bold]Source:[/bold] {source_display}")
+            console.print(f"[bold]Destination:[/bold] {destination_display}")
+            if platform_image:
+                console.print("[bold]Owner:[/bold] Platform")
+            if config.team_id:
+                console.print(f"[dim]Team: {config.team_id}[/dim]")
+            console.print()
+
+            client = ImageClient(APIClient())
+            visibility = None
+            if public:
+                visibility = ImageVisibility.PUBLIC
+            elif private:
+                visibility = ImageVisibility.PRIVATE
+            if platform_image:
+                visibility = ImageVisibility.PUBLIC
+
+            try:
+                response = client.transfer_image(
+                    ",".join(transfer_sources),
+                    image_name=image_name,
+                    image_tag=image_tag,
+                    platform=platform,
+                    team_id=config.team_id,
+                    visibility=visibility,
+                    owner_scope="platform" if platform_image else None,
+                )
+            except UnauthorizedError:
+                console.print(
+                    "[red]Error: Not authenticated. Please run 'prime login' first.[/red]"
+                )
+                raise typer.Exit(1)
+            except APIError as e:
+                console.print(f"[red]Error: Failed to initiate transfer: {e}[/red]")
+                raise typer.Exit(1)
+
+            if isinstance(response, BulkImageTransferResponse):
+                successful_results = [result for result in response.results if result.build_id]
+                build_ids = [result.build_id for result in successful_results if result.build_id]
+                failed_results = response.failed
+                image_path = (
+                    successful_results[0].full_image_path if len(successful_results) == 1 else None
+                )
+            else:
+                build_ids = response.build_ids or [response.build_id]
+                failed_results = []
+                image_path = response.full_image_path
+
+            if not build_ids:
+                console.print("[red]Error: Failed to initiate image transfer[/red]")
+                for result in failed_results:
+                    console.print(f"[red]- {result.source_image}: {result.error}[/red]")
+                raise typer.Exit(1)
+
+            console.print("[green]✓[/green] Transfer queued")
+            console.print()
+            if len(build_ids) == 1:
+                console.print("[bold green]Image transfer queued successfully![/bold green]")
+                console.print()
+                console.print(f"[bold]Build ID:[/bold] {build_ids[0]}")
+                console.print(f"[bold]Image:[/bold] {image_path}")
+            else:
+                console.print("[bold green]Image transfers queued successfully![/bold green]")
+                console.print()
+                console.print(f"[bold]Builds:[/bold] {len(build_ids)}")
+                console.print(f"[bold]Build IDs:[/bold] {', '.join(build_ids)}")
+            if failed_results:
+                console.print()
+                console.print(
+                    f"[yellow]Warning: {len(failed_results)} image transfer(s) failed:[/yellow]"
+                )
+                for result in failed_results:
+                    console.print(f"[yellow]- {result.source_image}: {result.error}[/yellow]")
+            if platform_image:
+                console.print(f"[bold]Visibility:[/bold] {ImageVisibility.PUBLIC.value}")
+            elif public or private:
+                requested_visibility = ImageVisibility.PUBLIC if public else ImageVisibility.PRIVATE
+                console.print(f"[bold]Visibility:[/bold] {requested_visibility.value}")
+            else:
+                console.print(
+                    "[bold]Visibility:[/bold] PRIVATE for new images "
+                    "(existing tags keep their current visibility)"
+                )
+            console.print()
+            console.print("[cyan]Your image transfer is running.[/cyan]")
+            console.print()
+            console.print("[bold]Check transfer status:[/bold]")
+            console.print("  prime images list")
+            console.print()
+            if failed_results:
+                raise typer.Exit(1)
+            return
+
+        if platform_image:
+            console.print(
+                f"[bold blue]Building and pushing platform image:[/bold blue] "
+                f"{image_name}:{image_tag}"
+            )
+        else:
+            console.print(
+                f"[bold blue]Building and pushing image:[/bold blue] {image_name}:{image_tag}"
+            )
         if config.team_id:
             console.print(f"[dim]Team: {config.team_id}[/dim]")
         console.print()
@@ -508,7 +661,10 @@ def push_image(
                 }
                 if config.team_id:
                     build_payload["team_id"] = config.team_id
-                if public:
+                if platform_image:
+                    build_payload["owner_scope"] = "platform"
+                    build_payload["visibility"] = ImageVisibility.PUBLIC.value
+                elif public:
                     build_payload["visibility"] = ImageVisibility.PUBLIC.value
                 elif private:
                     build_payload["visibility"] = ImageVisibility.PRIVATE.value
@@ -577,7 +733,10 @@ def push_image(
             console.print()
             console.print(f"[bold]Build ID:[/bold] {build_id}")
             console.print(f"[bold]Image:[/bold] {full_image_path}")
-            if public or private:
+            if platform_image:
+                console.print("[bold]Owner:[/bold] Platform")
+                console.print(f"[bold]Visibility:[/bold] {ImageVisibility.PUBLIC.value}")
+            elif public or private:
                 requested_visibility = ImageVisibility.PUBLIC if public else ImageVisibility.PRIVATE
                 console.print(f"[bold]Visibility:[/bold] {requested_visibility.value}")
             else:

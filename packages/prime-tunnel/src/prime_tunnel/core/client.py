@@ -299,6 +299,7 @@ class TunnelClient:
         self,
         tunnel_ids: Optional[list[str]] = None,
         labels: Optional[list[str]] = None,
+        status: Optional[str] = None,
         team_id: Optional[str] = None,
         user_id: Optional[str] = None,
         all_users: bool = False,
@@ -308,6 +309,8 @@ class TunnelClient:
 
         if all_users and not team_id:
             raise TunnelError("all_users requires a team ID")
+        if status and tunnel_ids:
+            raise TunnelError("status cannot be combined with tunnel_ids")
 
         url = f"{self.base_url}/api/v1/tunnel"
         payload: Dict[str, Any] = {"all_users": all_users}
@@ -315,6 +318,8 @@ class TunnelClient:
             payload["tunnel_ids"] = tunnel_ids
         if labels:
             payload["labels"] = labels
+        if status:
+            payload["status"] = status
         if team_id:
             payload["teamId"] = team_id
         if user_id:

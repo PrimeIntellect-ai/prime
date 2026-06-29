@@ -1,12 +1,15 @@
+from __future__ import annotations
+
 import shutil
 import subprocess
 import sys
 
+from pydantic import AliasChoices, Field
+from pydantic_config import BaseConfig
+
 from prime_cli import __version__
 from prime_cli.utils import get_console
 from prime_cli.utils.version_check import get_latest_pypi_version
-
-from .upgrade_configs import UpgradeConfig
 
 console = get_console()
 
@@ -114,3 +117,19 @@ def upgrade(config: UpgradeConfig) -> None:
         console.print("  [dim]pipx upgrade prime[/dim]")
         console.print("  [dim]pip install --upgrade prime[/dim]")
         raise SystemExit(1)
+
+
+# --- inlined config schemas (previously in upgrade_configs) ---
+class UpgradeConfig(BaseConfig):
+    """Upgrade the Prime CLI to the latest version"""
+
+    check: bool = Field(
+        False,
+        validation_alias=AliasChoices("check", "c"),
+        description="Only check for updates, don't upgrade",
+    )
+    force: bool = Field(
+        False,
+        validation_alias=AliasChoices("force", "f"),
+        description="Force upgrade even if already on latest version",
+    )

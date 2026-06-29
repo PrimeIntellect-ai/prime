@@ -1,5 +1,7 @@
 """Commands for managing Docker images in Prime Intellect registry."""
 
+from __future__ import annotations
+
 import tarfile
 import tempfile
 from dataclasses import dataclass
@@ -11,6 +13,8 @@ from typing import Any, Optional
 import httpx
 from gitignore_parser import parse_gitignore
 from prime_sandboxes import APIClient, APIError, Config, UnauthorizedError
+from pydantic import AliasChoices, Field
+from pydantic_config import BaseConfig
 from rich.table import Table
 
 from ..utils import (
@@ -20,13 +24,6 @@ from ..utils import (
     validate_output_format,
 )
 from ..utils.prompt import confirm
-from .images_configs import (
-    ImagesDeleteConfig,
-    ImagesListConfig,
-    ImagesPublishConfig,
-    ImagesPushConfig,
-    ImagesUnpublishConfig,
-)
 
 console = get_console()
 # Use a synthetic archive path to avoid collisions with Dockerfiles already in the context.
@@ -935,3 +932,73 @@ def delete_image(config: ImagesDeleteConfig):
         else:
             console.print(f"[red]Error: {e}[/red]")
         raise SystemExit(1)
+
+
+# --- inlined config schemas (previously in images_configs) ---
+class ImagesDeleteConfig(BaseConfig):
+    """Delete an image from your registry."""
+
+    image_reference: str = Field(
+        ...,
+        description="Personal or team image reference to delete.",
+    )
+    yes: bool = Field(
+        False, validation_alias=AliasChoices("yes", "y"), description="Skip confirmation prompt"
+    )
+
+
+class ImagesListConfig(BaseConfig):
+    """List all images you've pushed to Prime Intellect registry."""
+
+    output: str = Field(
+        "table",
+        validation_alias=AliasChoices("output", "o"),
+        description="Output format (table or json)",
+    )
+    search: str | None = Field(
+        None,
+        validation_alias=AliasChoices("search", "q"),
+        description="Case-insensitive substring match on image name, tag, or reference",
+    )
+    page: int = Field(1, validation_alias=AliasChoices("page", "p"), description="Page number")
+    num: int = Field(
+        50, validation_alias=AliasChoices("num", "n"), description="Items per page (max 250)"
+    )
+
+
+class ImagesPublishConfig(BaseConfig):
+    """Make an image public so other Prime users can run it."""
+
+    image_reference: str = Field(
+        ...,
+        description="Personal or team image reference to make public.",
+    )
+
+
+class ImagesPushConfig(BaseConfig):
+    """Build and push a Docker image to Prime Intellect registry."""
+
+    image_reference: str = Field(
+        ..., description="Image reference (e.g., 'myapp:v1.0.0' or 'myapp:latest')"
+    )
+    context: str = Field(
+        ".", validation_alias=AliasChoices("context", "c"), description="Build context directory"
+    )
+    dockerfile: str | None = Field(
+        None, validation_alias=AliasChoices("dockerfile", "f"), description="Path to Dockerfile"
+    )
+    platform: str = Field(
+        "linux/amd64",
+        description="Target platform (defaults to linux/amd64 for Kubernetes compatibility)",
+    )
+    public: bool = Field(False, description="Make the image public when the build completes")
+    private: bool = Field(False, description="Make the image private when the build completes")
+
+
+class ImagesUnpublishConfig(BaseConfig):
+    """Make a public image private again."""
+
+    image_reference: str = Field(
+        ...,
+        description="Personal or team image reference to make private.",
+    )

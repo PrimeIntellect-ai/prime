@@ -5,6 +5,10 @@ audit of the billing flow: "balance dropped by exactly $X after run R logged
 the charge in the Billing table".
 """
 
+from __future__ import annotations
+
+from pydantic import AliasChoices, Field
+from pydantic_config import BaseConfig
 from rich.markup import escape as rich_escape
 
 from prime_cli.api.wallet import BillingEntry, Wallet, WalletClient
@@ -17,8 +21,6 @@ from prime_cli.utils import (
     validate_output_format,
 )
 from prime_cli.utils.formatters import format_usd
-
-from .wallet_configs import WalletConfig
 
 console = get_console()
 
@@ -128,3 +130,19 @@ def wallet_command(config: WalletConfig) -> None:
         console.print(_build_billings_table(wallet))
     else:
         console.print("[dim]No billing rows yet.[/dim]")
+
+
+# --- inlined config schemas (previously in wallet_configs) ---
+class WalletConfig(BaseConfig):
+    """Show wallet balance and most recent billing rows."""
+
+    limit: int = Field(
+        20,
+        validation_alias=AliasChoices("limit", "n"),
+        description="Number of recent billing rows to fetch (max 100)",
+    )
+    output: str = Field(
+        "table",
+        validation_alias=AliasChoices("output", "o"),
+        description="Output format: table or json",
+    )

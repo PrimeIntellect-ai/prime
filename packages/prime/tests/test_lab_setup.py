@@ -10,7 +10,7 @@ from urllib.error import URLError
 import pytest
 from click.testing import CliRunner
 from prime_cli import lab_setup
-from prime_cli.commands.lab_configs import LabSetupConfig, LabSyncConfig
+from prime_cli.commands.lab import LabSetupConfig, LabSyncConfig
 from prime_cli.lab_agents import AgentCapability, known_agent_names
 from prime_cli.lab_setup import (
     LabDoctorOptions,

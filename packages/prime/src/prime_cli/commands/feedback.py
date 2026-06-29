@@ -1,11 +1,14 @@
+from __future__ import annotations
+
 from typing import Literal
+
+from pydantic_config import BaseConfig
 
 from prime_cli import __version__
 
 from ..client import APIClient, APIError
 from ..utils import get_console
 from ..utils.prompt import prompt
-from .feedback_configs import FeedbackConfig
 
 console = get_console()
 
@@ -86,3 +89,10 @@ def feedback(config: FeedbackConfig) -> None:
         raise SystemExit(1)
 
     console.print("[green]Feedback submitted. Thanks![/green]")
+
+
+# --- inlined config schemas (previously in feedback_configs) ---
+class FeedbackConfig(BaseConfig):
+    """Submit feedback about Prime Intellect."""
+
+    pass

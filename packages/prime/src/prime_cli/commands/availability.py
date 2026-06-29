@@ -1,5 +1,9 @@
+from __future__ import annotations
+
 from typing import Any, Dict, List
 
+from pydantic import AliasChoices, Field
+from pydantic_config import BaseConfig
 from rich.table import Table
 from rich.text import Text
 
@@ -14,11 +18,47 @@ from ..utils import (
     validate_output_format,
 )
 from ..utils.display import STOCK_STATUS_COLORS
-from .availability_configs import (
-    AvailabilityDisksConfig,
-    AvailabilityGpuTypesConfig,
-    AvailabilityListConfig,
-)
+
+
+# --- inlined config schemas (previously in availability_configs) ---
+class AvailabilityDisksConfig(BaseConfig):
+    """List available disks"""
+
+    regions: list[str] | None = Field(None, description="Filter by regions (e.g., united_states)")
+    data_center_id: str | None = Field(None, description="Filter by data center ID (e.g., US-1)")
+    output: str = Field(
+        "table",
+        validation_alias=AliasChoices("output", "o"),
+        description="Output format: table or json",
+    )
+
+
+class AvailabilityGpuTypesConfig(BaseConfig):
+    """List available GPU types"""
+
+    output: str = Field(
+        "table",
+        validation_alias=AliasChoices("output", "o"),
+        description="Output format: table or json",
+    )
+
+
+class AvailabilityListConfig(BaseConfig):
+    """List available GPU resources"""
+
+    gpu_type: str | None = Field(None, description="GPU type (e.g., H100_80GB)")
+    gpu_count: int | None = Field(None, description="Number of GPUs required")
+    regions: list[str] | None = Field(None, description="Filter by regions (e.g., united_states)")
+    socket: str | None = Field(None, description="Filter by socket type (e.g., PCIe, SXM5, SXM4)")
+    provider: str | None = Field(None, description="Filter by provider (e.g., aws, azure, google)")
+    disks: list[str] | None = Field(None, description="Filter by disk ids")
+    group_similar: bool = Field(True, description="Group similar configurations from same provider")
+    output: str = Field(
+        "table",
+        validation_alias=AliasChoices("output", "o"),
+        description="Output format: table or json",
+    )
+
 
 console = get_console()
 

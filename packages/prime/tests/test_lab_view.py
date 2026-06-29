@@ -22,7 +22,7 @@ import toml
 from click.testing import CliRunner
 from prime_cli.api.rl import RLClient
 from prime_cli.commands.env import _environment_fork_chain, _environment_ref
-from prime_cli.commands.lab_configs import LabDoctorConfig
+from prime_cli.commands.lab import LabDoctorConfig
 from prime_cli.commands.rl import RLConfig as HostedRLConfig
 from prime_cli.lab_mcp import _serve_lab_mcp_stdio, lab_mcp_tool_definitions
 from prime_cli.lab_setup import (

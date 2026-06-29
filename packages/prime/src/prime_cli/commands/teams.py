@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from pydantic import AliasChoices, Field
+from pydantic_config import BaseConfig
 from rich.table import Table
 
 from prime_cli.core import Config
@@ -9,7 +13,6 @@ from ..utils import (
     output_data_as_json,
     validate_output_format,
 )
-from .teams_configs import TeamsListConfig, TeamsMembersConfig
 
 console = get_console()
 
@@ -157,3 +160,27 @@ def list_members(config: TeamsMembersConfig) -> None:
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {str(e)}")
         raise SystemExit(1)
+
+
+# --- inlined config schemas (previously in teams_configs) ---
+class TeamsListConfig(BaseConfig):
+    """List teams for the current user."""
+
+    limit: int = Field(100, description="Maximum number of teams to list")
+    offset: int = Field(0, description="Number of teams to skip")
+    output: str = Field(
+        "table",
+        validation_alias=AliasChoices("output", "o"),
+        description="Output format: table or json",
+    )
+
+
+class TeamsMembersConfig(BaseConfig):
+    """List members of a team."""
+
+    team_id: str | None = Field(None, description="Team ID (uses config team_id if omitted)")
+    output: str = Field(
+        "table",
+        validation_alias=AliasChoices("output", "o"),
+        description="Output format: table or json",
+    )

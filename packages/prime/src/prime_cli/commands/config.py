@@ -1,6 +1,10 @@
+from __future__ import annotations
+
 import os
 import re
 
+from pydantic import AliasChoices, Field
+from pydantic_config import BaseConfig
 from rich.table import Table
 
 from prime_cli.core import Config as PrimeConfig
@@ -8,22 +12,6 @@ from prime_cli.core import Config as PrimeConfig
 from ..client import APIClient, APIError
 from ..utils import get_console
 from ..utils.prompt import confirm, prompt
-from .config_configs import (
-    ConfigDeleteConfig,
-    ConfigEnvsConfig,
-    ConfigRemoveTeamIdConfig,
-    ConfigResetConfig,
-    ConfigSaveConfig,
-    ConfigSetApiKeyConfig,
-    ConfigSetBaseUrlConfig,
-    ConfigSetFrontendUrlConfig,
-    ConfigSetInferenceUrlConfig,
-    ConfigSetShareResourcesWithTeamConfig,
-    ConfigSetSshKeyPathConfig,
-    ConfigSetTeamIdConfig,
-    ConfigUseConfig,
-    ConfigViewConfig,
-)
 from .teams import fetch_teams
 
 console = get_console()
@@ -388,3 +376,104 @@ def delete_env(config: ConfigDeleteConfig) -> None:
 def list_envs(config: ConfigEnvsConfig) -> None:
     """List available environments"""
     _list_environments()
+
+
+# --- inlined config schemas (previously in config_configs) ---
+class ConfigDeleteConfig(BaseConfig):
+    """Delete a saved environment"""
+
+    name: str = Field(..., description="Name of the saved environment")
+
+
+class ConfigEnvsConfig(BaseConfig):
+    """List available environments"""
+
+    pass
+
+
+class ConfigRemoveTeamIdConfig(BaseConfig):
+    """Remove team ID to use personal account"""
+
+    pass
+
+
+class ConfigResetConfig(BaseConfig):
+    """Reset configuration to defaults"""
+
+    yes: bool = Field(
+        False, validation_alias=AliasChoices("yes", "y"), description="Skip confirmation prompt"
+    )
+
+
+class ConfigSaveConfig(BaseConfig):
+    """Save current config as environment (including API key)"""
+
+    name: str = Field(..., description="Name for the environment")
+
+
+class ConfigSetApiKeyConfig(BaseConfig):
+    """Set your API key (prompts securely if not provided)"""
+
+    api_key: str | None = Field(
+        None,
+        description="Your Prime Intellect API key. If not provided, you'll be prompted securely.",
+    )
+
+
+class ConfigSetBaseUrlConfig(BaseConfig):
+    """Set the API base URL (prompts if not provided)"""
+
+    url: str | None = Field(
+        None,
+        description="Base URL for the Prime Intellect API. If not provided, you'll be prompted.",
+    )
+
+
+class ConfigSetFrontendUrlConfig(BaseConfig):
+    """Set the frontend URL (prompts if not provided)"""
+
+    url: str | None = Field(
+        None,
+        description="Prime Intellect web app URL. Prompts when omitted.",
+    )
+
+
+class ConfigSetInferenceUrlConfig(BaseConfig):
+    """Set the inference URL (prompts if not provided)"""
+
+    url: str | None = Field(
+        None,
+        description="Inference URL for Prime Inference API. If not provided, you'll be prompted.",
+    )
+
+
+class ConfigSetShareResourcesWithTeamConfig(BaseConfig):
+    """Set whether to automatically share new resources with all team members"""
+
+    enabled: str = Field(..., description="Enable or disable auto-sharing with team: true or false")
+
+
+class ConfigSetSshKeyPathConfig(BaseConfig):
+    """Set the SSH private key path"""
+
+    path: str = Field(..., description="Path to your SSH private key file")
+
+
+class ConfigSetTeamIdConfig(BaseConfig):
+    """Set your team ID."""
+
+    team_id: str = Field(..., description="Your Prime Intellect team ID.")
+
+
+class ConfigUseConfig(BaseConfig):
+    """Switch to a different environment"""
+
+    env: str = Field(
+        ..., description="Environment name: 'production' or a custom saved environment"
+    )
+
+
+class ConfigViewConfig(BaseConfig):
+    """View current configuration"""
+
+    pass

@@ -1,7 +1,11 @@
 """Deployments command for managing model deployments for inference."""
 
+from __future__ import annotations
+
 from typing import List, Optional
 
+from pydantic import AliasChoices, Field
+from pydantic_config import BaseConfig
 from rich.table import Table
 
 from ..api.deployments import DeploymentsClient
@@ -14,11 +18,6 @@ from ..utils import (
     validate_output_format,
 )
 from ..utils.prompt import confirm
-from .deployments_configs import (
-    DeploymentsCreateConfig,
-    DeploymentsDeleteConfig,
-    DeploymentsListConfig,
-)
 
 console = get_console()
 
@@ -290,3 +289,34 @@ def delete_deployment(config: DeploymentsDeleteConfig) -> None:
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise SystemExit(1)
+
+
+# --- inlined config schemas (previously in deployments_configs) ---
+class DeploymentsCreateConfig(BaseConfig):
+    """Deploy a model for inference."""
+
+    model_id: str = Field(description="Model ID to deploy")
+    yes: bool = Field(
+        False, validation_alias=AliasChoices("yes", "y"), description="Skip confirmation prompt"
+    )
+
+
+class DeploymentsDeleteConfig(BaseConfig):
+    """Unload a model from inference."""
+
+    model_id: str = Field(description="Model ID to unload")
+
+
+class DeploymentsListConfig(BaseConfig):
+    """List adapters and their deployment status."""
+
+    team: str | None = Field(
+        None, validation_alias=AliasChoices("team", "t"), description="Filter by team ID"
+    )
+    num: int = Field(20, validation_alias=AliasChoices("num", "n"), description="Items per page")
+    page: int = Field(1, validation_alias=AliasChoices("page", "p"), description="Page number")
+    output: str = Field(
+        "table",
+        validation_alias=AliasChoices("output", "o"),
+        description="Output format: table or json",
+    )

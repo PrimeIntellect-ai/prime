@@ -1,12 +1,14 @@
+from __future__ import annotations
+
 from typing import Any, Dict
 
+from pydantic_config import BaseConfig
 from rich.table import Table
 
 from prime_cli.core import Config
 
 from ..client import APIClient, APIError
 from ..utils import get_console
-from .whoami_configs import WhoamiConfig
 
 console = get_console()
 
@@ -84,3 +86,10 @@ def whoami(config: WhoamiConfig) -> None:
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {str(e)}")
         raise SystemExit(1)
+
+
+# --- inlined config schemas (previously in whoami_configs) ---
+class WhoamiConfig(BaseConfig):
+    """Show current authenticated user and update config"""
+
+    pass

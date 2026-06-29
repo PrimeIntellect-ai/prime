@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from prime_sandboxes import (
     APIClient,
     APIError,
@@ -6,6 +8,8 @@ from prime_sandboxes import (
     TemplateClient,
     UnauthorizedError,
 )
+from pydantic import AliasChoices, Field
+from pydantic_config import BaseConfig
 from rich.markup import escape
 
 from ..utils import (
@@ -17,7 +21,6 @@ from ..utils import (
     output_data_as_json,
     validate_output_format,
 )
-from .registry_configs import RegistryCheckImageConfig, RegistryListConfig
 
 console = get_console()
 
@@ -128,3 +131,23 @@ def check_docker_image(config: RegistryCheckImageConfig) -> None:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         console.print_exception(show_locals=True)
         raise SystemExit(1)
+
+
+# --- inlined config schemas (previously in registry_configs) ---
+class RegistryCheckImageConfig(BaseConfig):
+    """Verify that an image is accessible (optionally using registry credentials)."""
+
+    image: str = Field(..., description="Image reference, e.g. ghcr.io/org/repo:tag")
+    registry_credentials_id: str | None = Field(
+        None, description="Registry credentials ID for private images"
+    )
+
+
+class RegistryListConfig(BaseConfig):
+    """List registry credentials available to the current user."""
+
+    output: str = Field(
+        "table",
+        validation_alias=AliasChoices("output", "o"),
+        description="Output format: table or json",
+    )

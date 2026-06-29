@@ -3,6 +3,8 @@ from __future__ import annotations
 import sys
 from typing import Any, Dict, Iterable, List, Optional, cast
 
+from pydantic import AliasChoices, Field
+from pydantic_config import BaseConfig
 from rich.table import Table
 
 from ..api.inference import InferenceAPIError, InferenceClient
@@ -13,7 +15,6 @@ from ..utils import (
     validate_output_format,
 )
 from ..utils.formatters import format_price_per_mtok
-from .inference_configs import InferenceChatConfig, InferenceModelsConfig
 
 console = get_console()
 
@@ -242,3 +243,43 @@ def chat(config: InferenceChatConfig) -> None:
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {e}")
         raise SystemExit(1)
+
+
+# --- inlined config schemas (previously in inference_configs) ---
+class InferenceChatConfig(BaseConfig):
+    """Send a one-shot chat message to a Prime Inference model."""
+
+    model: str = Field(..., description="Model id (see `prime inference models`)")
+    message: str | None = Field(None, description="User message. If omitted, reads from stdin.")
+    system: str | None = Field(
+        None, validation_alias=AliasChoices("system", "s"), description="System prompt"
+    )
+    stream: bool = Field(False, description="Stream tokens as they arrive")
+    temperature: float | None = Field(
+        None, validation_alias=AliasChoices("temperature", "t"), description="Sampling temperature"
+    )
+    max_tokens: int | None = Field(None, description="Maximum tokens to generate")
+    output: str = Field(
+        "text", validation_alias=AliasChoices("output", "o"), description="text|json"
+    )
+
+
+class InferenceModelsConfig(BaseConfig):
+    """List available models from Prime Inference (/v1/models)."""
+
+    output: str = Field(
+        "table", validation_alias=AliasChoices("output", "o"), description="table|json"
+    )
+    search: str | None = Field(
+        None,
+        validation_alias=AliasChoices("search", "q"),
+        description="Case-insensitive substring match on model id",
+    )
+    sort: str = Field(
+        "id", validation_alias=AliasChoices("sort", "s"), description="Sort by: id, input, output"
+    )
+    order: str = Field(
+        "asc",
+        validation_alias=AliasChoices("order", "d"),
+        description="Sort order (direction): asc, desc",
+    )

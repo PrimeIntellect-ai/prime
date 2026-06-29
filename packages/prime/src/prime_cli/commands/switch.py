@@ -1,11 +1,15 @@
+from __future__ import annotations
+
 from typing import Optional
+
+from pydantic import Field
+from pydantic_config import BaseConfig
 
 from prime_cli.core import Config as PrimeConfig
 
 from ..client import APIClient, APIError
 from ..utils import get_console
 from ..utils.prompt import prompt
-from .switch_configs import SwitchConfig
 from .teams import fetch_teams
 
 console = get_console()
@@ -122,3 +126,10 @@ def switch(config: SwitchConfig) -> None:
             console.print(f"[red]Invalid selection. Enter 1-{len(teams) + 1}.[/red]")
         except (EOFError, KeyboardInterrupt):
             raise SystemExit(1)
+
+
+# --- inlined config schemas (previously in switch_configs) ---
+class SwitchConfig(BaseConfig):
+    """Switch between your personal account and team contexts"""
+
+    target: str | None = Field(None, description="'personal', a team slug, or a team ID")

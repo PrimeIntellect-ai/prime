@@ -1,8 +1,12 @@
+from __future__ import annotations
+
 from typing import Dict, Optional, Tuple
+
+from pydantic import AliasChoices, Field
+from pydantic_config import BaseConfig
 
 from ..client import APIClient, APIError
 from ..utils import get_console, json_output_help, output_data_as_json, validate_output_format
-from .fork_configs import ForkConfig
 
 console = get_console()
 
@@ -74,3 +78,20 @@ def fork(config: ForkConfig) -> None:
     except Exception as e:
         console.print(f"[red]Unexpected error: {e}[/red]")
         raise SystemExit(1)
+
+
+# --- inlined config schemas (previously in fork_configs) ---
+class ForkConfig(BaseConfig):
+    """Fork a public environment into your Prime Intellect namespace."""
+
+    environment: str = Field(..., description="Public environment to fork, in owner/name format")
+    team: str | None = Field(
+        None,
+        validation_alias=AliasChoices("team", "t"),
+        description="Team slug to fork into (uses configured team ID if omitted)",
+    )
+    output: str = Field(
+        "table",
+        validation_alias=AliasChoices("output", "o"),
+        description="Output format: table or json",
+    )

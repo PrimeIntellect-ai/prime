@@ -3,8 +3,7 @@ from typing import Any
 
 import pytest
 from prime_cli.commands import env as env_commands
-from prime_cli.commands.env import _resolve_pull_environment_path
-from prime_cli.commands.env_configs import EnvInstallConfig, EnvPullConfig
+from prime_cli.commands.env import EnvInstallConfig, EnvPullConfig, _resolve_pull_environment_path
 from prime_cli.utils import env_metadata
 
 

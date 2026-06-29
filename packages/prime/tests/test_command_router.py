@@ -113,7 +113,7 @@ def test_raw_commands_receive_untouched_argv(
 
 
 def test_toml_and_cli_parse_to_the_same_config(tmp_path: Path) -> None:
-    from prime_cli.commands.wallet_configs import WalletConfig
+    from prime_cli.commands.wallet import WalletConfig
 
     path = tmp_path / "wallet.toml"
     path.write_text('limit = 7\noutput = "json"\n', encoding="utf-8")

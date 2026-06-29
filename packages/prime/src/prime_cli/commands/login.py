@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import base64
 import time
 import webbrowser
@@ -7,13 +9,14 @@ import httpx
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
 from cryptography.hazmat.primitives.asymmetric import rsa
+from pydantic import Field
+from pydantic_config import BaseConfig
 
 from prime_cli.core import Config as PrimeConfig
 
 from ..client import APIClient, APIError
 from ..utils import get_console
 from ..utils.prompt import prompt
-from .login_configs import LoginConfig
 from .teams import fetch_teams
 
 console = get_console()
@@ -242,3 +245,10 @@ def login(config: LoginConfig) -> None:
         # Ensure private key is securely wiped
         if private_key:
             del private_key
+
+
+# --- inlined config schemas (previously in login_configs) ---
+class LoginConfig(BaseConfig):
+    """Login to Prime Intellect"""
+
+    headless: bool = Field(False, description="Don't attempt to open browser")

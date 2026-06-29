@@ -1,11 +1,15 @@
+from __future__ import annotations
+
 import json
 import os
+
+from pydantic import AliasChoices, Field
+from pydantic_config import BaseConfig
 
 from prime_cli.core import Config as PrimeConfig
 
 from ..utils import get_console
 from ..utils.prompt import confirm
-from .logout_configs import LogoutConfig
 
 console = get_console()
 
@@ -83,3 +87,12 @@ def logout(config: LogoutConfig) -> None:
             f"[yellow]Note:[/yellow] {', '.join(set_overrides)} set in your environment "
             "and will override the cleared config. Unset to fully log out."
         )
+
+
+# --- inlined config schemas (previously in logout_configs) ---
+class LogoutConfig(BaseConfig):
+    """Log out of Prime Intellect"""
+
+    yes: bool = Field(
+        False, validation_alias=AliasChoices("yes", "y"), description="Skip confirmation prompt"
+    )

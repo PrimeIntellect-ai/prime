@@ -6,8 +6,12 @@ the dashboard's billing page shows for a training run, with ``--watch`` for
 live polling so an agent can monitor a run's running cost.
 """
 
+from __future__ import annotations
+
 import time
 
+from pydantic import AliasChoices, Field
+from pydantic_config import BaseConfig
 from rich.live import Live
 from rich.markup import escape as rich_escape
 from rich.table import Table
@@ -23,8 +27,6 @@ from prime_cli.utils import (
     validate_output_format,
 )
 from prime_cli.utils.formatters import format_price_per_mtok, format_usd
-
-from .usage_configs import TrainUsageConfig
 
 console = get_console()
 
@@ -225,3 +227,25 @@ def _watch_json(fetch, run_id, interval, to_json):
     except APIError as exc:
         err_console.print(f"[red]Error during watch: {exc}[/red]")
         raise SystemExit(1) from exc
+
+
+# --- inlined config schemas (previously in usage_configs) ---
+class TrainUsageConfig(BaseConfig):
+    """Show token usage and price for a single training run."""
+
+    run_id: str = Field(..., description="RFT run ID (e.g. rft_...")
+    output: str = Field(
+        "table",
+        validation_alias=AliasChoices("output", "o"),
+        description="Output format: table or json",
+    )
+    watch: bool = Field(
+        False,
+        validation_alias=AliasChoices("watch", "w"),
+        description="Poll continuously and update in place",
+    )
+    interval: int = Field(
+        30,
+        validation_alias=AliasChoices("interval", "n"),
+        description="Seconds between polls when --watch is set",
+    )

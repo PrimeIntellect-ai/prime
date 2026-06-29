@@ -2,10 +2,12 @@ import tarfile
 from typing import Any
 
 import pytest
+from prime_cli.command_configs import (
+    EnvInstallConfig,
+    EnvPullConfig,
+)
 from prime_cli.commands import env as env_commands
 from prime_cli.commands.env import _resolve_pull_environment_path
-from prime_cli.leaves.env.install import Config as EnvInstallConfig
-from prime_cli.leaves.env.pull import Config as EnvPullConfig
 from prime_cli.utils import env_metadata
 
 

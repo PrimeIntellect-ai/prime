@@ -8,8 +8,8 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
 from cryptography.hazmat.primitives.asymmetric import rsa
 
+from prime_cli.command_configs import LoginConfig
 from prime_cli.core import Config as PrimeConfig
-from prime_cli.leaves.login import Config as LoginConfig
 
 from ..client import APIClient, APIError
 from ..utils import get_console

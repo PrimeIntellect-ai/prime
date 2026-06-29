@@ -13,8 +13,8 @@ from rich.markup import escape as rich_escape
 from rich.table import Table
 
 from prime_cli.api.billing import BillingClient, RunUsage
+from prime_cli.command_configs import TrainUsageConfig
 from prime_cli.core import APIClient, APIError
-from prime_cli.leaves.train.usage import Config as TrainUsageConfig
 from prime_cli.utils import (
     build_table,
     get_console,

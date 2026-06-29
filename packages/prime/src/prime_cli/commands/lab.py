@@ -4,13 +4,15 @@ from pathlib import Path
 
 from rich.console import Console
 
-from prime_cli.leaves.lab.doctor import Config as LabDoctorConfig
-from prime_cli.leaves.lab.hygiene import Config as LabHygieneConfig
-from prime_cli.leaves.lab.mcp import Config as LabMcpConfig
-from prime_cli.leaves.lab.register_github import Config as LabRegisterGithubConfig
-from prime_cli.leaves.lab.setup import Config as LabSetupConfig
-from prime_cli.leaves.lab.sync import Config as LabSyncConfig
-from prime_cli.leaves.lab.view import Config as LabViewConfig
+from prime_cli.command_configs import (
+    LabDoctorConfig,
+    LabHygieneConfig,
+    LabMcpConfig,
+    LabRegisterGithubConfig,
+    LabSetupConfig,
+    LabSyncConfig,
+    LabViewConfig,
+)
 
 console = Console()
 

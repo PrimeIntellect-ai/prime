@@ -5,8 +5,10 @@ from typing import Any, Dict, Iterable, List, Optional, cast
 
 from rich.table import Table
 
-from prime_cli.leaves.inference.chat import Config as InferenceChatConfig
-from prime_cli.leaves.inference.models import Config as InferenceModelsConfig
+from prime_cli.command_configs import (
+    InferenceChatConfig,
+    InferenceModelsConfig,
+)
 
 from ..api.inference import InferenceAPIError, InferenceClient
 from ..utils import (

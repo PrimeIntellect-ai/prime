@@ -3,9 +3,11 @@ from typing import Any, Dict, List
 from rich.table import Table
 from rich.text import Text
 
-from prime_cli.leaves.availability.disks import Config as AvailabilityDisksConfig
-from prime_cli.leaves.availability.gpu_types import Config as AvailabilityGpuTypesConfig
-from prime_cli.leaves.availability.list import Config as AvailabilityListConfig
+from prime_cli.command_configs import (
+    AvailabilityDisksConfig,
+    AvailabilityGpuTypesConfig,
+    AvailabilityListConfig,
+)
 
 from ..api.availability import AvailabilityClient, GPUAvailability
 from ..client import APIClient, APIError

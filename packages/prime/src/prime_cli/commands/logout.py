@@ -1,8 +1,8 @@
 import json
 import os
 
+from prime_cli.command_configs import LogoutConfig
 from prime_cli.core import Config as PrimeConfig
-from prime_cli.leaves.logout import Config as LogoutConfig
 
 from ..utils import get_console
 from ..utils.prompt import confirm

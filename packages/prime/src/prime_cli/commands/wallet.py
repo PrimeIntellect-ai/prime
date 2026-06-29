@@ -8,8 +8,8 @@ the charge in the Billing table".
 from rich.markup import escape as rich_escape
 
 from prime_cli.api.wallet import BillingEntry, Wallet, WalletClient
+from prime_cli.command_configs import WalletConfig
 from prime_cli.core import APIClient, APIError, Config
-from prime_cli.leaves.wallet import Config as WalletConfig
 from prime_cli.utils import (
     build_table,
     get_console,

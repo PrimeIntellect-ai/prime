@@ -10,6 +10,10 @@ from urllib.error import URLError
 import pytest
 from click.testing import CliRunner
 from prime_cli import lab_setup
+from prime_cli.command_configs import (
+    LabSetupConfig,
+    LabSyncConfig,
+)
 from prime_cli.lab_agents import AgentCapability, known_agent_names
 from prime_cli.lab_setup import (
     LabDoctorOptions,
@@ -22,8 +26,6 @@ from prime_cli.lab_setup import (
     run_lab_setup_service,
     run_lab_sync_service,
 )
-from prime_cli.leaves.lab.setup import Config as LabSetupConfig
-from prime_cli.leaves.lab.sync import Config as LabSyncConfig
 from prime_cli.main import app as prime_cli_app
 from pydantic_config import ConfigFileError, cli
 from rich.console import Console

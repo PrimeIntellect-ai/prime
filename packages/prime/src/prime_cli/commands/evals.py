@@ -1,6 +1,5 @@
 import inspect
 import json
-import re
 import time
 import tomllib
 from functools import wraps
@@ -13,14 +12,16 @@ from rich.progress import Progress
 from rich.syntax import Syntax
 from rich.table import Table
 
-from prime_cli.leaves.eval.get import Config as EvalGetConfig
-from prime_cli.leaves.eval.list import Config as EvalListConfig
-from prime_cli.leaves.eval.logs import Config as EvalLogsConfig
-from prime_cli.leaves.eval.push import Config as EvalPushConfig
-from prime_cli.leaves.eval.samples import Config as EvalSamplesConfig
-from prime_cli.leaves.eval.stop import Config as EvalStopConfig
-from prime_cli.leaves.eval.submit import Config as EvalSubmitConfig
-from prime_cli.leaves.eval.view import Config as EvalViewConfig
+from prime_cli.command_configs import (
+    EvalGetConfig,
+    EvalListConfig,
+    EvalLogsConfig,
+    EvalPushConfig,
+    EvalSamplesConfig,
+    EvalStopConfig,
+    EvalSubmitConfig,
+    EvalViewConfig,
+)
 
 from ..client import APIClient, APIError
 from ..core import Config
@@ -32,7 +33,13 @@ from ..utils import (
 )
 from ..utils.display import get_eval_viewer_url
 from ..utils.env_metadata import find_environment_metadata, parse_env_id
-from ..utils.eval_push import convert_eval_results, load_eval_config, load_results_jsonl
+from ..utils.eval_push import (
+    discover_eval_outputs,
+    has_eval_files,
+    load_eval_upload,
+    resolve_eval_path,
+    skipped_results_warning,
+)
 from ..utils.hosted_eval import (
     EvalStatus,
     HostedEvalConfig,
@@ -569,130 +576,6 @@ def get_samples(config: EvalSamplesConfig) -> None:
     format_output(data, output)
 
 
-def _load_eval_directory(directory: Path) -> dict:
-    if (directory / "config.toml").is_file():
-        config = load_eval_config(directory)
-        results_path = directory / "results.jsonl"
-        taskset = config.get("taskset")
-        env_field = (taskset.get("id") if isinstance(taskset, dict) else None) or config.get("id")
-        model = config.get("model")
-        if not isinstance(env_field, str) or not isinstance(model, str):
-            raise ValueError("Missing taskset.id/id or model in config.toml")
-
-        results = convert_eval_results(load_results_jsonl(results_path))
-        rewards = [row["reward"] for row in results if isinstance(row.get("reward"), (int, float))]
-        return {
-            "eval_name": f"{env_field}-{model}",
-            "model_name": model,
-            "env": env_field,
-            "metrics": {"reward": sum(rewards) / len(rewards)} if rewards else {},
-            "metadata": {
-                "framework": "verifiers",
-                "run_id": directory.name,
-                "num_examples": config.get("num_tasks"),
-                "rollouts_per_example": config.get("num_rollouts"),
-                "resolved_config": config,
-            },
-            "results": results,
-        }
-
-    with open(directory / "metadata.json") as f:
-        metadata = json.load(f)
-
-    env_field = metadata.get("env_id") or metadata.get("env")
-    if not env_field or "model" not in metadata:
-        raise ValueError(
-            f"Missing required 'env_id' or 'model' field in {directory / 'metadata.json'}"
-        )
-
-    results = convert_eval_results(load_results_jsonl(directory / "results.jsonl"))
-
-    avg_pattern = re.compile(r"^avg_(.+)$")
-    metrics = {}
-    metadata_copy = {}
-    for key, value in metadata.items():
-        if match := avg_pattern.match(key):
-            metrics[match.group(1)] = value
-        else:
-            metadata_copy[key] = value
-
-    return {
-        "eval_name": f"{env_field}-{metadata['model']}",
-        "model_name": metadata["model"],
-        "env": env_field,
-        "metrics": metrics,
-        "metadata": metadata_copy,
-        "results": results,
-    }
-
-
-def _has_eval_files(directory: Path) -> bool:
-    if (directory / "config.toml").is_file():
-        try:
-            load_eval_config(directory)
-        except ValueError:
-            return False
-        return (directory / "results.jsonl").is_file()
-    return (directory / "metadata.json").exists() and (directory / "results.jsonl").exists()
-
-
-def _validate_eval_path(path_str: str) -> Path:
-    """Validate and return the evaluation directory path."""
-    path = Path(path_str)
-
-    if path.is_file():
-        # Auto-correct known artifact files to their run directory.
-        if path.name in (
-            "config.toml",
-            "results.jsonl",
-            "eval.log",
-            "metadata.json",
-        ):
-            parent = path.parent
-            if _has_eval_files(parent):
-                return parent
-            if (parent / "config.toml").exists():
-                raise ValueError(f"Directory '{parent}' is not a complete Verifiers run artifact")
-            raise ValueError(
-                f"Directory '{parent}' must contain both metadata.json and results.jsonl"
-            )
-        raise ValueError(
-            f"Expected a directory path, but got file: {path}\n"
-            "Pass a directory containing a native V1 run or metadata.json/results.jsonl"
-        )
-
-    if path.is_dir():
-        if _has_eval_files(path):
-            return path
-
-        if (path / "config.toml").exists():
-            raise ValueError(f"Directory '{path}' is not a complete Verifiers run artifact")
-
-        has_metadata = (path / "metadata.json").exists()
-        has_results = (path / "results.jsonl").exists()
-        if has_metadata and not has_results:
-            raise ValueError(f"Directory '{path}' is missing results.jsonl")
-        elif has_results and not has_metadata:
-            raise ValueError(f"Directory '{path}' is missing metadata.json")
-        else:
-            raise ValueError(f"Directory '{path}' is missing both metadata.json and results.jsonl")
-
-    raise FileNotFoundError(f"Path not found: {path}")
-
-
-def _discover_eval_outputs() -> list[Path]:
-    outputs_dir = Path("outputs")
-    if not outputs_dir.exists():
-        return []
-
-    candidates = {
-        artifact.parent
-        for pattern in ("config.toml", "metadata.json")
-        for artifact in outputs_dir.rglob(pattern)
-    }
-    return sorted(directory for directory in candidates if _has_eval_files(directory))
-
-
 def _resolve_eval_viewer_url(evaluation_id: str, response: Optional[dict[str, Any]] = None) -> str:
     viewer_url = response.get("viewer_url") if response else None
     if viewer_url:
@@ -747,10 +630,13 @@ def _push_single_eval(
     is_public: bool = False,
     name: Optional[str] = None,
 ) -> str:
-    path = _validate_eval_path(config_path)
-    eval_data = _load_eval_directory(path)
+    path = resolve_eval_path(config_path)
+    upload = load_eval_upload(path)
+    eval_data = upload.as_dict()
     eval_name = name or eval_data["eval_name"]
     console.print(f"[blue]✓ Loaded eval data:[/blue] {path}")
+    if warning := skipped_results_warning(upload):
+        console.print(f"[yellow]{warning}[/yellow]")
 
     detected_env = eval_data.get("env_id") or eval_data.get("env")
     if not env_slug and detected_env and not run_id and not eval_id:
@@ -887,14 +773,14 @@ def push_eval(config: EvalPushConfig) -> None:
 
         if config_path is None:
             current_dir = Path(".")
-            if _has_eval_files(current_dir):
+            if has_eval_files(current_dir):
                 result_eval_id = _push_single_eval(".", env_id, run_id, eval_id, is_public, name)
                 if output == "json":
                     console.print()
                     output_data_as_json({"evaluation_id": result_eval_id}, console)
                 return
 
-            eval_dirs = _discover_eval_outputs()
+            eval_dirs = discover_eval_outputs()
             if not eval_dirs:
                 console.print("[red]Error:[/red] No evaluation outputs found")
                 console.print(

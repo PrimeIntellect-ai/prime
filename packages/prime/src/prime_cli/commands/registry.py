@@ -8,8 +8,10 @@ from prime_sandboxes import (
 )
 from rich.markup import escape
 
-from prime_cli.leaves.registry.check_image import Config as RegistryCheckImageConfig
-from prime_cli.leaves.registry.list import Config as RegistryListConfig
+from prime_cli.command_configs import (
+    RegistryCheckImageConfig,
+    RegistryListConfig,
+)
 
 from ..utils import (
     build_table,

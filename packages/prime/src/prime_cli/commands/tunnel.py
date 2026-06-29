@@ -4,10 +4,12 @@ from typing import Any, List, Optional
 
 from rich.table import Table
 
-from prime_cli.leaves.tunnel.list import Config as TunnelListConfig
-from prime_cli.leaves.tunnel.start import Config as TunnelStartConfig
-from prime_cli.leaves.tunnel.status import Config as TunnelStatusConfig
-from prime_cli.leaves.tunnel.stop import Config as TunnelStopConfig
+from prime_cli.command_configs import (
+    TunnelListConfig,
+    TunnelStartConfig,
+    TunnelStatusConfig,
+    TunnelStopConfig,
+)
 from prime_cli.utils import (
     get_console,
     human_age,

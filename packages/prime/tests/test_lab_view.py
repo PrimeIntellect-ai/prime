@@ -21,6 +21,7 @@ import pytest
 import toml
 from click.testing import CliRunner
 from prime_cli.api.rl import RLClient
+from prime_cli.command_configs import LabDoctorConfig
 from prime_cli.commands.env import _environment_fork_chain, _environment_ref
 from prime_cli.commands.rl import RLConfig as HostedRLConfig
 from prime_cli.lab_mcp import _serve_lab_mcp_stdio, lab_mcp_tool_definitions
@@ -36,7 +37,6 @@ from prime_cli.lab_setup import (
     run_lab_setup_service,
     run_lab_sync_service,
 )
-from prime_cli.leaves.lab.doctor import Config as LabDoctorConfig
 from prime_cli.main import app as prime_cli_app
 from prime_lab_app.agent_acp import (
     acp_lab_mcp_servers,

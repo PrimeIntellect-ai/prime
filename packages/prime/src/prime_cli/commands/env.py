@@ -25,31 +25,34 @@ from prime_sandboxes import Config as SandboxConfig
 from rich.table import Table
 from rich.text import Text
 
-from prime_cli.leaves.env.action.list import Config as EnvActionListConfig
-from prime_cli.leaves.env.action.logs import Config as EnvActionLogsConfig
-from prime_cli.leaves.env.action.retry import Config as EnvActionRetryConfig
-from prime_cli.leaves.env.build import Config as EnvBuildConfig
-from prime_cli.leaves.env.delete import Config as EnvDeleteConfig
-from prime_cli.leaves.env.info import Config as EnvInfoConfig
-from prime_cli.leaves.env.inspect import Config as EnvInspectConfig
-from prime_cli.leaves.env.install import Config as EnvInstallConfig
-from prime_cli.leaves.env.list import Config as EnvListConfig
-from prime_cli.leaves.env.pull import Config as EnvPullConfig
-from prime_cli.leaves.env.push import Config as EnvPushConfig
-from prime_cli.leaves.env.secret.create import Config as EnvSecretCreateConfig
-from prime_cli.leaves.env.secret.delete import Config as EnvSecretDeleteConfig
-from prime_cli.leaves.env.secret.link import Config as EnvSecretLinkConfig
-from prime_cli.leaves.env.secret.list import Config as EnvSecretListConfig
-from prime_cli.leaves.env.secret.unlink import Config as EnvSecretUnlinkConfig
-from prime_cli.leaves.env.secret.update import Config as EnvSecretUpdateConfig
-from prime_cli.leaves.env.status import Config as EnvStatusConfig
-from prime_cli.leaves.env.uninstall import Config as EnvUninstallConfig
-from prime_cli.leaves.env.var.create import Config as EnvVarCreateConfig
-from prime_cli.leaves.env.var.delete import Config as EnvVarDeleteConfig
-from prime_cli.leaves.env.var.list import Config as EnvVarListConfig
-from prime_cli.leaves.env.var.update import Config as EnvVarUpdateConfig
-from prime_cli.leaves.env.version.delete import Config as EnvVersionDeleteConfig
-from prime_cli.leaves.env.version.list import Config as EnvVersionListConfig
+from prime_cli.command_configs import (
+    EnvActionListConfig,
+    EnvActionLogsConfig,
+    EnvActionRetryConfig,
+    EnvBuildConfig,
+    EnvDeleteConfig,
+    EnvInfoConfig,
+    EnvInspectConfig,
+    EnvInstallConfig,
+    EnvListConfig,
+    EnvPullConfig,
+    EnvPushConfig,
+    EnvSecretCreateConfig,
+    EnvSecretDeleteConfig,
+    EnvSecretLinkConfig,
+    EnvSecretListConfig,
+    EnvSecretUnlinkConfig,
+    EnvSecretUpdateConfig,
+    EnvStatusConfig,
+    EnvUninstallConfig,
+    EnvVarCreateConfig,
+    EnvVarDeleteConfig,
+    EnvVarListConfig,
+    EnvVarUpdateConfig,
+    EnvVersionDeleteConfig,
+    EnvVersionListConfig,
+    ImagesPushConfig,
+)
 
 from ..client import APIClient, APIError
 from ..lab_hygiene import LabHygieneOptions, find_lab_workspace, run_lab_hygiene_preflight
@@ -1632,8 +1635,6 @@ def _build_environment(env_id: Optional[str], path: str) -> int:
     start_command = (
         f'sh -lc "cd /app/env && /app/.venv/bin/uvicorn {app_name} --host 0.0.0.0 --port {port}"'
     )
-
-    from ..leaves.images.push import Config as ImagesPushConfig
     from .images import push_image
 
     resolved_image = push_image(

@@ -71,6 +71,11 @@ def _positionals(argv: list[str], fields: tuple[str, ...]) -> list[str]:
     return [*leading, *argv]
 
 
+def _load_ref(ref: str) -> Any:
+    module_name, name = ref.split(":", 1)
+    return getattr(importlib.import_module(module_name), name)
+
+
 def _root_help(commands: dict[tuple[str, ...], Command], prefix: tuple[str, ...] = ()) -> None:
     console = get_console()
     name = "prime" + (" " + " ".join(prefix) if prefix else "")
@@ -150,13 +155,14 @@ class Router:
                 raise ConfigFileError(f"Unknown command: {' '.join(tokens)}")
 
             leaf_args = tokens[len(command.path) :]
-            module = importlib.import_module(command.module)
-            run_leaf = getattr(module, "run")
             if command.raw:
-                return run_leaf(leaf_args)
-            positionals = getattr(module, "POSITIONALS", ())
-            parsed_args = _positionals(leaf_args, positionals)
-            config_model = getattr(module, "Config")
+                callback = _load_ref(command.callback)
+                return callback(leaf_args)
+
+            if command.config is None:
+                raise RuntimeError(f"command {' '.join(command.path)} is missing config")
+            parsed_args = _positionals(leaf_args, command.positionals)
+            config_model = _load_ref(command.config)
             parse_config: Any = cli
             config = parse_config(  # ty: ignore[no-matching-overload]
                 config_model,
@@ -165,7 +171,8 @@ class Router:
                 description=command.summary,
                 plain=plain,
             )
-            return run_leaf(config)
+            callback = _load_ref(command.callback)
+            return callback(config)
         except (ConfigFileError, ValueError) as exc:
             print(f"Error: {exc}", file=sys.stderr)
             raise SystemExit(2) from exc

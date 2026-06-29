@@ -1,7 +1,7 @@
 from typing import Literal
 
 from prime_cli import __version__
-from prime_cli.leaves.feedback import Config as FeedbackConfig
+from prime_cli.command_configs import FeedbackConfig
 
 from ..client import APIClient, APIError
 from ..utils import get_console

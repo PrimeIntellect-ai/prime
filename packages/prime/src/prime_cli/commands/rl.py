@@ -14,24 +14,26 @@ from pydantic import ValidationError as PydanticValidationError
 from rich.markup import escape as rich_escape
 from rich.table import Table
 
+from prime_cli.command_configs import (
+    TrainCheckpointsConfig,
+    TrainComponentsConfig,
+    TrainConfigsConfig,
+    TrainDeleteConfig,
+    TrainDistributionsConfig,
+    TrainGetConfig,
+    TrainInitConfig,
+    TrainListConfig,
+    TrainLogsConfig,
+    TrainMetricsConfig,
+    TrainModelsConfig,
+    TrainProgressConfig,
+    TrainRequestConfig,
+    TrainRestartConfig,
+    TrainRolloutsConfig,
+    TrainRunConfig,
+    TrainStopConfig,
+)
 from prime_cli.core import Config
-from prime_cli.leaves.train.checkpoints import Config as TrainCheckpointsConfig
-from prime_cli.leaves.train.components import Config as TrainComponentsConfig
-from prime_cli.leaves.train.configs import Config as TrainConfigsConfig
-from prime_cli.leaves.train.delete import Config as TrainDeleteConfig
-from prime_cli.leaves.train.distributions import Config as TrainDistributionsConfig
-from prime_cli.leaves.train.get import Config as TrainGetConfig
-from prime_cli.leaves.train.init import Config as TrainInitConfig
-from prime_cli.leaves.train.list import Config as TrainListConfig
-from prime_cli.leaves.train.logs import Config as TrainLogsConfig
-from prime_cli.leaves.train.metrics import Config as TrainMetricsConfig
-from prime_cli.leaves.train.models import Config as TrainModelsConfig
-from prime_cli.leaves.train.progress import Config as TrainProgressConfig
-from prime_cli.leaves.train.request import Config as TrainRequestConfig
-from prime_cli.leaves.train.restart import Config as TrainRestartConfig
-from prime_cli.leaves.train.rollouts import Config as TrainRolloutsConfig
-from prime_cli.leaves.train.run import Config as TrainRunConfig
-from prime_cli.leaves.train.stop import Config as TrainStopConfig
 
 from ..api.rl import EnvServerInfo, RLClient, RLRun
 from ..client import APIClient, APIError, ValidationError

@@ -1,8 +1,10 @@
 from rich.table import Table
 
+from prime_cli.command_configs import (
+    TeamsListConfig,
+    TeamsMembersConfig,
+)
 from prime_cli.core import Config
-from prime_cli.leaves.teams.list import Config as TeamsListConfig
-from prime_cli.leaves.teams.members import Config as TeamsMembersConfig
 
 from ..client import APIClient, APIError
 from ..utils import (

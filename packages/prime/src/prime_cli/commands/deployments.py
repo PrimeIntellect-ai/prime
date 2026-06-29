@@ -4,9 +4,11 @@ from typing import List, Optional
 
 from rich.table import Table
 
-from prime_cli.leaves.deployments.create import Config as DeploymentsCreateConfig
-from prime_cli.leaves.deployments.delete import Config as DeploymentsDeleteConfig
-from prime_cli.leaves.deployments.list import Config as DeploymentsListConfig
+from prime_cli.command_configs import (
+    DeploymentsCreateConfig,
+    DeploymentsDeleteConfig,
+    DeploymentsListConfig,
+)
 
 from ..api.deployments import DeploymentsClient
 from ..client import APIClient, APIError

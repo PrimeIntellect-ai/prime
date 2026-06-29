@@ -3,23 +3,23 @@ import re
 
 from rich.table import Table
 
-from prime_cli.core import Config as PrimeConfig
-from prime_cli.leaves.config.delete import Config as ConfigDeleteConfig
-from prime_cli.leaves.config.envs import Config as ConfigEnvsConfig
-from prime_cli.leaves.config.remove_team_id import Config as ConfigRemoveTeamIdConfig
-from prime_cli.leaves.config.reset import Config as ConfigResetConfig
-from prime_cli.leaves.config.save import Config as ConfigSaveConfig
-from prime_cli.leaves.config.set_api_key import Config as ConfigSetApiKeyConfig
-from prime_cli.leaves.config.set_base_url import Config as ConfigSetBaseUrlConfig
-from prime_cli.leaves.config.set_frontend_url import Config as ConfigSetFrontendUrlConfig
-from prime_cli.leaves.config.set_inference_url import Config as ConfigSetInferenceUrlConfig
-from prime_cli.leaves.config.set_share_resources_with_team import (
-    Config as ConfigSetShareResourcesWithTeamConfig,
+from prime_cli.command_configs import (
+    ConfigDeleteConfig,
+    ConfigEnvsConfig,
+    ConfigRemoveTeamIdConfig,
+    ConfigResetConfig,
+    ConfigSaveConfig,
+    ConfigSetApiKeyConfig,
+    ConfigSetBaseUrlConfig,
+    ConfigSetFrontendUrlConfig,
+    ConfigSetInferenceUrlConfig,
+    ConfigSetShareResourcesWithTeamConfig,
+    ConfigSetSshKeyPathConfig,
+    ConfigSetTeamIdConfig,
+    ConfigUseConfig,
+    ConfigViewConfig,
 )
-from prime_cli.leaves.config.set_ssh_key_path import Config as ConfigSetSshKeyPathConfig
-from prime_cli.leaves.config.set_team_id import Config as ConfigSetTeamIdConfig
-from prime_cli.leaves.config.use import Config as ConfigUseConfig
-from prime_cli.leaves.config.view import Config as ConfigViewConfig
+from prime_cli.core import Config as PrimeConfig
 
 from ..client import APIClient, APIError
 from ..utils import get_console

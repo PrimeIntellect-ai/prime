@@ -13,11 +13,13 @@ from gitignore_parser import parse_gitignore
 from prime_sandboxes import APIClient, APIError, Config, UnauthorizedError
 from rich.table import Table
 
-from prime_cli.leaves.images.delete import Config as ImagesDeleteConfig
-from prime_cli.leaves.images.list import Config as ImagesListConfig
-from prime_cli.leaves.images.publish import Config as ImagesPublishConfig
-from prime_cli.leaves.images.push import Config as ImagesPushConfig
-from prime_cli.leaves.images.unpublish import Config as ImagesUnpublishConfig
+from prime_cli.command_configs import (
+    ImagesDeleteConfig,
+    ImagesListConfig,
+    ImagesPublishConfig,
+    ImagesPushConfig,
+    ImagesUnpublishConfig,
+)
 
 from ..utils import (
     get_console,

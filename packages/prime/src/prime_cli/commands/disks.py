@@ -9,13 +9,15 @@ from rich.table import Table
 from rich.text import Text
 
 from prime_cli.api.availability import AvailabilityClient
+from prime_cli.command_configs import (
+    DisksCreateConfig,
+    DisksGetConfig,
+    DisksListConfig,
+    DisksTerminateConfig,
+    DisksUpdateConfig,
+)
 from prime_cli.core import APIClient, APIError
 from prime_cli.helper.short_id import generate_short_id_disk
-from prime_cli.leaves.disks.create import Config as DisksCreateConfig
-from prime_cli.leaves.disks.get import Config as DisksGetConfig
-from prime_cli.leaves.disks.list import Config as DisksListConfig
-from prime_cli.leaves.disks.terminate import Config as DisksTerminateConfig
-from prime_cli.leaves.disks.update import Config as DisksUpdateConfig
 
 from ..api.disks import Disk, DisksClient
 from ..utils import (

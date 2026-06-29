@@ -19,20 +19,21 @@ def _command_id(command: Command) -> str:
     return " ".join(command.path)
 
 
-def test_registry_matches_leaf_modules() -> None:
-    leaves = Path(__file__).parents[1] / "src" / "prime_cli" / "leaves"
-    modules = {
-        "prime_cli.leaves." + ".".join(path.relative_to(leaves).with_suffix("").parts)
-        for path in leaves.rglob("*.py")
-        if path.name != "__init__.py"
-    }
+def _load_ref(ref: str):
+    module_name, name = ref.split(":", 1)
+    return getattr(importlib.import_module(module_name), name)
 
-    registered_modules = [command.module for command in COMMANDS]
-    assert len(registered_modules) == len(set(registered_modules)) == len(modules)
-    assert set(registered_modules) == modules
+
+def test_registry_has_direct_command_refs() -> None:
+    callbacks = [command.callback for command in COMMANDS]
+
+    assert len(callbacks) == len(set(callbacks))
     assert set(GROUPS) == {
         command.path[:index] for command in COMMANDS for index in range(1, len(command.path))
     }
+    assert all(":" in command.callback for command in COMMANDS)
+    assert all(command.config is None for command in COMMANDS if command.raw)
+    assert all(command.config is not None for command in COMMANDS if not command.raw)
 
 
 def test_registry_has_no_duplicate_or_prefix_paths() -> None:
@@ -52,21 +53,23 @@ def test_command_map_rejects_duplicate_paths(monkeypatch: pytest.MonkeyPatch) ->
 
 
 @pytest.mark.parametrize("command", COMMANDS, ids=_command_id)
-def test_leaf_contract(command: Command) -> None:
-    module = importlib.import_module(command.module)
-    parameter = next(iter(inspect.signature(module.run).parameters.values()))
+def test_command_contract(command: Command) -> None:
+    callback = _load_ref(command.callback)
+    parameter = next(iter(inspect.signature(callback).parameters.values()))
 
-    assert len(inspect.signature(module.run).parameters) == 1
+    assert len(inspect.signature(callback).parameters) == 1
     assert parameter.name == ("argv" if command.raw else "config")
     if command.raw:
-        assert module.Config is None
+        assert command.config is None
         return
 
-    assert issubclass(module.Config, BaseConfig)
-    assert module.Config.model_config["extra"] == "forbid"
-    module.Config.model_rebuild()
+    assert command.config is not None
+    config = _load_ref(command.config)
+    assert issubclass(config, BaseConfig)
+    assert config.model_config["extra"] == "forbid"
+    config.model_rebuild()
     with pytest.raises(ValidationError) as exc_info:
-        module.Config.model_validate({"definitely_unknown": True})
+        config.model_validate({"definitely_unknown": True})
     assert any(error["type"] == "extra_forbidden" for error in exc_info.value.errors())
 
 
@@ -75,7 +78,7 @@ def test_leaf_contract(command: Command) -> None:
     [command for command in COMMANDS if not command.raw],
     ids=_command_id,
 )
-def test_leaf_help_smoke(command: Command) -> None:
+def test_command_help_smoke(command: Command) -> None:
     result = CliRunner().invoke(app, [*command.path, "--help"])
 
     assert result.exit_code == 0, result.output
@@ -99,9 +102,10 @@ def test_raw_commands_receive_untouched_argv(
     command: Command,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    module = importlib.import_module(command.module)
+    module_name, name = command.callback.split(":", 1)
+    module = importlib.import_module(module_name)
     captured: list[list[str]] = []
-    monkeypatch.setattr(module, "run", lambda argv: captured.append(argv))
+    monkeypatch.setattr(module, name, lambda argv: captured.append(argv))
 
     result = CliRunner().invoke(app, [*command.path, "target", "--unknown", "value"])
 
@@ -110,13 +114,13 @@ def test_raw_commands_receive_untouched_argv(
 
 
 def test_toml_and_cli_parse_to_the_same_config(tmp_path: Path) -> None:
-    from prime_cli.leaves.wallet import Config
+    from prime_cli.command_configs import WalletConfig
 
     path = tmp_path / "wallet.toml"
     path.write_text('limit = 7\noutput = "json"\n', encoding="utf-8")
 
-    from_toml = cli(Config, args=["@", str(path)])
-    from_cli = cli(Config, args=["--limit", "7", "--output", "json"])
+    from_toml = cli(WalletConfig, args=["@", str(path)])
+    from_cli = cli(WalletConfig, args=["--limit", "7", "--output", "json"])
 
     assert from_toml == from_cli
 

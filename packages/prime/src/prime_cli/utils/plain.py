@@ -7,6 +7,7 @@ from copy import copy
 from typing import Any
 
 from rich.console import Console
+from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
@@ -56,15 +57,18 @@ class PrimeConsole(Console):
         kwargs.pop("highlight", None)
         plain_objects = []
         for obj in objects:
-            if isinstance(obj, Table):
-                table = copy(obj)
-                table.box = None
-                table.show_lines = False
-                table.border_style = ""
-                table.header_style = ""
-                table.row_styles = []
-                table.pad_edge = False
-                table.padding = (0, 1)
+            if isinstance(obj, Panel | Table):
+                title = f"{obj.title}\n" if isinstance(obj, Panel) and obj.title else ""
+                renderable = obj.renderable if isinstance(obj, Panel) else obj
+                table = copy(renderable) if isinstance(renderable, Table) else renderable
+                if isinstance(table, Table):
+                    table.box = None
+                    table.show_lines = False
+                    table.border_style = ""
+                    table.header_style = ""
+                    table.row_styles = []
+                    table.pad_edge = False
+                    table.padding = (0, 1)
                 console = Console(
                     record=True,
                     file=io.StringIO(),
@@ -74,7 +78,7 @@ class PrimeConsole(Console):
                     emoji=False,
                 )
                 console.print(table)
-                plain_objects.append(console.export_text().rstrip())
+                plain_objects.append(title + console.export_text().rstrip())
                 continue
 
             text = ""

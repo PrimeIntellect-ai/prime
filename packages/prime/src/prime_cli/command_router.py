@@ -8,10 +8,12 @@ import sys
 from typing import Any, Sequence
 
 from pydantic_config import ConfigFileError, cli
+from rich import box
+from rich.panel import Panel
 from rich.table import Table
 
 from prime_cli import __version__
-from prime_cli.command_registry import GROUPS, Command, command_map
+from prime_cli.command_registry import GROUPS, ROOT_GROUP, SECTION_ORDER, Command, command_map
 from prime_cli.core import Config as PrimeConfig
 from prime_cli.utils.plain import HELP_NOTE, get_console
 
@@ -79,31 +81,76 @@ def _load_ref(ref: str) -> Any:
 def _root_help(commands: dict[tuple[str, ...], Command], prefix: tuple[str, ...] = ()) -> None:
     console = get_console()
     name = "prime" + (" " + " ".join(prefix) if prefix else "")
-    console.print(f"[bold]Usage:[/bold] {name} [OPTIONS] COMMAND [ARGS]...")
-    if description := GROUPS.get(prefix):
-        console.print(f"\n{description}")
-    if not prefix:
-        console.print("\nPrime Intellect CLI")
-        console.print(f"\n[dim]{HELP_NOTE}[/dim]")
-        console.print("\n[bold]Global options[/bold]")
-        console.print("  --context, -c NAME   Select a saved Prime context")
-        console.print("  --plain              Use terse, unstyled output")
-        console.print("  --version, -v        Show the Prime CLI version")
-
+    group = GROUPS.get(prefix) or (ROOT_GROUP if not prefix else None)
+    usage = group.usage if group else "[OPTIONS] COMMAND [ARGS]..."
+    description = group.summary if group else None
+    note = group.note if group else None
     children: dict[str, tuple[str, str]] = {}
     for path, command in commands.items():
         if path[: len(prefix)] != prefix or len(path) <= len(prefix):
             continue
         child = path[len(prefix)]
         is_group = len(path) > len(prefix) + 1
-        summary = GROUPS.get((*prefix, child), f"{child} commands") if is_group else command.summary
+        child_group = GROUPS.get((*prefix, child))
+        summary = child_group.summary if is_group and child_group else command.summary
         children.setdefault(child, (summary, command.section))
-    table = Table(title="Commands", box=None, show_header=False)
-    table.add_column(style="cyan", no_wrap=True)
-    table.add_column()
-    for child, (summary, _) in sorted(children.items()):
-        table.add_row(child, summary)
-    console.print(table)
+
+    console.print(f"[yellow]Usage:[/yellow] [bold]{name}[/bold] {usage}")
+    if description:
+        console.print(f"\n{description}")
+    if note:
+        console.print(f"\n[dim]{note}[/dim]")
+    if not prefix:
+        console.print(f"\n[dim]{HELP_NOTE}[/dim]")
+
+    options = Table.grid(padding=(0, 2))
+    options.add_column(style="green", no_wrap=True)
+    options.add_column(style="yellow", no_wrap=True)
+    options.add_column()
+    if not prefix:
+        options.add_row("--context", "-c NAME", "Select a saved Prime context")
+        options.add_row("--version", "-v", "Show the Prime CLI version")
+    options.add_row("--plain", "", "Use plain, terse outputs. USE THIS IF YOU ARE AI.")
+    options.add_row("--help", "-h", "Show this message and exit.")
+
+    console.print()
+    console.print(
+        Panel(
+            options,
+            title="Options",
+            title_align="left",
+            border_style="dim",
+            box=box.ROUNDED,
+        )
+    )
+
+    command_sections: dict[str, dict[str, tuple[str, str]]] = {}
+    for child, value in children.items():
+        title = value[1] if not prefix else "Commands"
+        command_sections.setdefault(title, {})[child] = value
+    section_titles = (
+        list(SECTION_ORDER) + [title for title in command_sections if title not in SECTION_ORDER]
+        if not prefix
+        else ["Commands"]
+    )
+    for title in section_titles:
+        rows = command_sections.get(title)
+        if not rows:
+            continue
+        command_table = Table.grid(padding=(0, 3))
+        command_table.add_column(style="green", no_wrap=True)
+        command_table.add_column()
+        for child, (summary, _) in rows.items():
+            command_table.add_row(child, summary)
+        console.print(
+            Panel(
+                command_table,
+                title=title,
+                title_align="left",
+                border_style="dim",
+                box=box.ROUNDED,
+            )
+        )
 
 
 class Router:
@@ -139,6 +186,16 @@ class Router:
                     return None
 
             tokens = argv
+            for group, group_info in GROUPS.items():
+                if not group_info.default:
+                    continue
+                if tuple(tokens[: len(group)]) != group or len(tokens) <= len(group):
+                    continue
+                next_token = tokens[len(group)]
+                if next_token.startswith("-") or (*group, next_token) in commands:
+                    continue
+                tokens = [*group, group_info.default, *tokens[len(group) :]]
+                break
             command = next(
                 (
                     commands[tuple(tokens[:length])]

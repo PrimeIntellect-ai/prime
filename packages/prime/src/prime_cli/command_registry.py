@@ -14,28 +14,44 @@ class Command:
     raw: bool = False
 
 
-GROUPS: dict[tuple[str, ...], str] = {
-    ("availability",): "Check GPU availability and pricing.",
-    ("config",): "Configure the Prime CLI.",
-    ("deployments",): "Manage adapter deployments.",
-    ("disks",): "Manage persistent storage.",
-    ("env",): "Manage Verifiers environments and Hub publishing.",
-    ("env", "action"): "Manage environment actions.",
-    ("env", "secret"): "Manage environment secrets.",
-    ("env", "var"): "Manage environment variables.",
-    ("env", "version"): "Manage environment versions.",
-    ("eval",): "Run local evaluations or manage hosted evaluations.",
-    ("gepa",): "Run GEPA prompt optimization with Verifiers.",
-    ("images",): "Manage container images in the Prime registry.",
-    ("inference",): "Use Prime Inference.",
-    ("lab",): "Manage the Prime Lab workspace.",
-    ("pods",): "Manage compute pods.",
-    ("registry",): "Manage registry credentials and private images.",
-    ("sandbox",): "Manage sandboxes.",
-    ("secret",): "Manage global secrets.",
-    ("teams",): "Inspect teams and memberships.",
-    ("train",): "Launch and manage Hosted Training runs.",
-    ("tunnel",): "Manage tunnels for exposing local services.",
+@dataclass(frozen=True)
+class CommandGroup:
+    summary: str
+    usage: str = "[OPTIONS] COMMAND [ARGS]..."
+    note: str | None = None
+    default: str | None = None
+
+
+ROOT_GROUP = CommandGroup("Prime Intellect CLI")
+SECTION_ORDER = ("Lab", "Compute", "Account")
+
+GROUPS: dict[tuple[str, ...], CommandGroup] = {
+    ("availability",): CommandGroup("Check GPU availability and pricing."),
+    ("config",): CommandGroup("Configure the Prime CLI."),
+    ("deployments",): CommandGroup("Manage adapter deployments."),
+    ("disks",): CommandGroup("Manage persistent storage."),
+    ("env",): CommandGroup("Manage Verifiers environments and Hub publishing."),
+    ("env", "action"): CommandGroup("Manage environment actions."),
+    ("env", "secret"): CommandGroup("Manage environment secrets."),
+    ("env", "var"): CommandGroup("Manage environment variables."),
+    ("env", "version"): CommandGroup("Manage environment versions."),
+    ("eval",): CommandGroup(
+        "Run evaluations or manage results (list, get, push, samples).",
+        usage="[OPTIONS] ENVIRONMENT [ARGS]... | COMMAND [ARGS]...",
+        note="By default, 'prime eval <environment>' runs 'prime eval run <environment>'.",
+        default="run",
+    ),
+    ("gepa",): CommandGroup("Run GEPA prompt optimization with Verifiers."),
+    ("images",): CommandGroup("Manage container images in the Prime registry."),
+    ("inference",): CommandGroup("Use Prime Inference."),
+    ("lab",): CommandGroup("Manage the Prime Lab workspace."),
+    ("pods",): CommandGroup("Manage compute pods."),
+    ("registry",): CommandGroup("Manage registry credentials and private images."),
+    ("sandbox",): CommandGroup("Manage sandboxes."),
+    ("secret",): CommandGroup("Manage global secrets."),
+    ("teams",): CommandGroup("Inspect teams and memberships."),
+    ("train",): CommandGroup("Launch and manage Hosted Training runs."),
+    ("tunnel",): CommandGroup("Manage tunnels for exposing local services."),
 }
 
 

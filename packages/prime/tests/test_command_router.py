@@ -93,6 +93,39 @@ def test_group_help_smoke(group: tuple[str, ...]) -> None:
     assert "COMMAND [ARGS]" in result.output
 
 
+def test_root_help_groups_commands_by_section() -> None:
+    result = CliRunner().invoke(app, ["--help"])
+
+    assert result.exit_code == 0, result.output
+    assert result.output.count("Prime Intellect CLI") == 1
+    assert "Options" in result.output
+    assert "Lab" in result.output
+    assert "Compute" in result.output
+    assert "Account" in result.output
+
+
+def test_eval_group_help_keeps_prime_owned_formatting() -> None:
+    result = CliRunner().invoke(app, ["eval", "--help"])
+
+    assert result.exit_code == 0, result.output
+    assert "Usage: prime eval [OPTIONS] ENVIRONMENT [ARGS]... | COMMAND [ARGS]..." in result.output
+    assert "By default, 'prime eval <environment>' runs 'prime eval run <environment>'." in (
+        result.output
+    )
+    assert "Options" in result.output
+    assert "--plain" in result.output
+    assert "Commands" in result.output
+
+
+def test_eval_plain_group_help_skips_rich_panels() -> None:
+    result = CliRunner().invoke(app, ["--plain", "eval", "--help"])
+
+    assert result.exit_code == 0, result.output
+    assert "Usage: prime eval [OPTIONS] ENVIRONMENT [ARGS]... | COMMAND [ARGS]..." in result.output
+    assert "Options" in result.output
+    assert "╭" not in result.output
+
+
 @pytest.mark.parametrize(
     "command",
     [command for command in COMMANDS if command.raw],
@@ -111,6 +144,19 @@ def test_raw_commands_receive_untouched_argv(
 
     assert result.exit_code == 0, result.output
     assert captured == [["target", "--unknown", "value"]]
+
+
+def test_eval_environment_defaults_to_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: list[tuple[str, list[str], bool]] = []
+    monkeypatch.setattr(
+        "prime_cli.commands.evals.exec_verifiers_process",
+        lambda name, args, plain: captured.append((name, list(args), plain)),
+    )
+
+    result = CliRunner().invoke(app, ["eval", "gsm8k-v1", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert captured == [("eval", ["gsm8k-v1", "--dry-run"], False)]
 
 
 def test_toml_and_cli_parse_to_the_same_config(tmp_path: Path) -> None:

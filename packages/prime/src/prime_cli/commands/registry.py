@@ -8,9 +8,6 @@ from prime_sandboxes import (
 )
 from rich.markup import escape
 
-from prime_cli.leaves.registry.check_image import Config as RegistryCheckImageConfig
-from prime_cli.leaves.registry.list import Config as RegistryListConfig
-
 from ..utils import (
     build_table,
     get_console,
@@ -20,6 +17,7 @@ from ..utils import (
     output_data_as_json,
     validate_output_format,
 )
+from .registry_configs import RegistryCheckImageConfig, RegistryListConfig
 
 console = get_console()
 

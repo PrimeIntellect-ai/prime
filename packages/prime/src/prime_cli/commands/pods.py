@@ -10,12 +10,6 @@ from rich.table import Table
 from rich.text import Text
 
 from prime_cli.core import Config as PrimeConfig
-from prime_cli.leaves.pods.create import Config as PodsCreateConfig
-from prime_cli.leaves.pods.history import Config as PodsHistoryConfig
-from prime_cli.leaves.pods.list import Config as PodsListConfig
-from prime_cli.leaves.pods.ssh import Config as PodsSshConfig
-from prime_cli.leaves.pods.status import Config as PodsStatusConfig
-from prime_cli.leaves.pods.terminate import Config as PodsTerminateConfig
 
 from ..api.availability import AvailabilityClient, GPUAvailability
 from ..api.pods import HistoryObj, Pod, PodsClient, PodStatus
@@ -36,6 +30,14 @@ from ..utils import (
 )
 from ..utils.display import POD_STATUS_COLORS
 from ..utils.prompt import prompt
+from .pods_configs import (
+    PodsCreateConfig,
+    PodsHistoryConfig,
+    PodsListConfig,
+    PodsSshConfig,
+    PodsStatusConfig,
+    PodsTerminateConfig,
+)
 
 console = get_console()
 

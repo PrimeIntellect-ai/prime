@@ -13,12 +13,6 @@ from gitignore_parser import parse_gitignore
 from prime_sandboxes import APIClient, APIError, Config, UnauthorizedError
 from rich.table import Table
 
-from prime_cli.leaves.images.delete import Config as ImagesDeleteConfig
-from prime_cli.leaves.images.list import Config as ImagesListConfig
-from prime_cli.leaves.images.publish import Config as ImagesPublishConfig
-from prime_cli.leaves.images.push import Config as ImagesPushConfig
-from prime_cli.leaves.images.unpublish import Config as ImagesUnpublishConfig
-
 from ..utils import (
     get_console,
     json_output_help,
@@ -26,6 +20,13 @@ from ..utils import (
     validate_output_format,
 )
 from ..utils.prompt import confirm
+from .images_configs import (
+    ImagesDeleteConfig,
+    ImagesListConfig,
+    ImagesPublishConfig,
+    ImagesPushConfig,
+    ImagesUnpublishConfig,
+)
 
 console = get_console()
 # Use a synthetic archive path to avoid collisions with Dockerfiles already in the context.

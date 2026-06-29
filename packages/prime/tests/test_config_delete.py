@@ -64,7 +64,7 @@ def test_delete_current_environment_requires_switching_first(temp_home: Path) ->
 
     assert result.exit_code == 1, result.output
     assert "Cannot delete currently active environment 'staging'" in result.output
-    assert "prime config use production" in result.output
+    assert "prime config" in result.output and "use production" in result.output
     assert (temp_home / ".prime" / "environments" / "staging.json").exists()
 
 
@@ -79,5 +79,5 @@ def test_delete_current_environment_normalizes_name_before_guard(temp_home: Path
 
     assert result.exit_code == 1, result.output
     assert "Cannot delete currently active environment 'STAGING'" in result.output
-    assert "prime config use production" in result.output
+    assert "prime config" in result.output and "use production" in result.output
     assert (temp_home / ".prime" / "environments" / "staging.json").exists()

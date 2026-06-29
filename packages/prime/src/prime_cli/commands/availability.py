@@ -3,10 +3,6 @@ from typing import Any, Dict, List
 from rich.table import Table
 from rich.text import Text
 
-from prime_cli.leaves.availability.disks import Config as AvailabilityDisksConfig
-from prime_cli.leaves.availability.gpu_types import Config as AvailabilityGpuTypesConfig
-from prime_cli.leaves.availability.list import Config as AvailabilityListConfig
-
 from ..api.availability import AvailabilityClient, GPUAvailability
 from ..client import APIClient, APIError
 from ..helper.short_id import generate_short_id, generate_short_id_disk
@@ -18,6 +14,11 @@ from ..utils import (
     validate_output_format,
 )
 from ..utils.display import STOCK_STATUS_COLORS
+from .availability_configs import (
+    AvailabilityDisksConfig,
+    AvailabilityGpuTypesConfig,
+    AvailabilityListConfig,
+)
 
 console = get_console()
 

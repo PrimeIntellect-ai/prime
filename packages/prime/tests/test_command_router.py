@@ -19,17 +19,18 @@ def _command_id(command: Command) -> str:
     return " ".join(command.path)
 
 
-def test_registry_matches_leaf_modules() -> None:
-    leaves = Path(__file__).parents[1] / "src" / "prime_cli" / "leaves"
-    modules = {
-        "prime_cli.leaves." + ".".join(path.relative_to(leaves).with_suffix("").parts)
-        for path in leaves.rglob("*.py")
-        if path.name != "__init__.py"
-    }
-
-    registered_modules = [command.module for command in COMMANDS]
-    assert len(registered_modules) == len(set(registered_modules)) == len(modules)
-    assert set(registered_modules) == modules
+def test_registry_commands_resolve() -> None:
+    """Every registered command's callback module exposes the declared attrs."""
+    for command in COMMANDS:
+        module = importlib.import_module(command.module)
+        assert hasattr(module, command.run_attr), command.path
+        if command.raw:
+            assert command.config_attr is None, command.path
+            continue
+        assert command.config_attr is not None, command.path
+        config_model = getattr(module, command.config_attr)
+        assert issubclass(config_model, BaseConfig), command.path
+    # No duplicate command paths, and GROUPS exactly covers every non-root prefix.
     assert set(GROUPS) == {
         command.path[:index] for command in COMMANDS for index in range(1, len(command.path))
     }
@@ -52,21 +53,23 @@ def test_command_map_rejects_duplicate_paths(monkeypatch: pytest.MonkeyPatch) ->
 
 
 @pytest.mark.parametrize("command", COMMANDS, ids=_command_id)
-def test_leaf_contract(command: Command) -> None:
+def test_command_contract(command: Command) -> None:
     module = importlib.import_module(command.module)
-    parameter = next(iter(inspect.signature(module.run).parameters.values()))
+    callback = getattr(module, command.run_attr)
+    parameter = next(iter(inspect.signature(callback).parameters.values()))
 
-    assert len(inspect.signature(module.run).parameters) == 1
+    assert len(inspect.signature(callback).parameters) == 1
     assert parameter.name == ("argv" if command.raw else "config")
     if command.raw:
-        assert module.Config is None
+        assert command.config_attr is None
         return
 
-    assert issubclass(module.Config, BaseConfig)
-    assert module.Config.model_config["extra"] == "forbid"
-    module.Config.model_rebuild()
+    config_model = getattr(module, command.config_attr)
+    assert issubclass(config_model, BaseConfig)
+    assert config_model.model_config["extra"] == "forbid"
+    config_model.model_rebuild()
     with pytest.raises(ValidationError) as exc_info:
-        module.Config.model_validate({"definitely_unknown": True})
+        config_model.model_validate({"definitely_unknown": True})
     assert any(error["type"] == "extra_forbidden" for error in exc_info.value.errors())
 
 
@@ -101,7 +104,7 @@ def test_raw_commands_receive_untouched_argv(
 ) -> None:
     module = importlib.import_module(command.module)
     captured: list[list[str]] = []
-    monkeypatch.setattr(module, "run", lambda argv: captured.append(argv))
+    monkeypatch.setattr(module, command.run_attr, lambda argv: captured.append(argv))
 
     result = CliRunner().invoke(app, [*command.path, "target", "--unknown", "value"])
 
@@ -110,13 +113,13 @@ def test_raw_commands_receive_untouched_argv(
 
 
 def test_toml_and_cli_parse_to_the_same_config(tmp_path: Path) -> None:
-    from prime_cli.leaves.wallet import Config
+    from prime_cli.commands.wallet_configs import WalletConfig
 
     path = tmp_path / "wallet.toml"
     path.write_text('limit = 7\noutput = "json"\n', encoding="utf-8")
 
-    from_toml = cli(Config, args=["@", str(path)])
-    from_cli = cli(Config, args=["--limit", "7", "--output", "json"])
+    from_toml = cli(WalletConfig, args=["@", str(path)])
+    from_cli = cli(WalletConfig, args=["--limit", "7", "--output", "json"])
 
     assert from_toml == from_cli
 

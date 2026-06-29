@@ -3,9 +3,10 @@ import subprocess
 import sys
 
 from prime_cli import __version__
-from prime_cli.leaves.upgrade import Config as UpgradeConfig
 from prime_cli.utils import get_console
 from prime_cli.utils.version_check import get_latest_pypi_version
+
+from .upgrade_configs import UpgradeConfig
 
 console = get_console()
 

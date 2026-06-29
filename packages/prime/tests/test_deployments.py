@@ -2,6 +2,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from click.testing import CliRunner
+from prime_cli.commands import deployments as deployments_cmd
 from prime_cli.main import app
 from prime_cli.utils import strip_ansi
 
@@ -43,7 +44,17 @@ def test_deployments_create_prints_chat_and_api_key_commands(monkeypatch) -> Non
         DummyDeploymentsClient,
     )
 
-    result = runner.invoke(app, ["deployments", "create", "adapter-123", "--yes"])
+    # Click 8.2 forces formatting.FORCED_WIDTH=80 inside CliRunner.invoke, so
+    # Rich wraps the long ``prime inference chat ...`` example line even though
+    # we set COLUMNS=200. Pin the shared console's cached dimensions to the
+    # requested width for the invoke, then restore.
+    console = deployments_cmd.console
+    saved_width, saved_height = console._width, console._height
+    console._width, console._height = 200, 50
+    try:
+        result = runner.invoke(app, ["deployments", "create", "adapter-123", "--yes"])
+    finally:
+        console._width, console._height = saved_width, saved_height
     output = strip_ansi(result.output)
 
     assert result.exit_code == 0, result.output

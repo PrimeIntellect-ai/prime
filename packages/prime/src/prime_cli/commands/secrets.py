@@ -3,11 +3,6 @@ from typing import Any, Dict, List
 from rich.table import Table
 
 from prime_cli.core import Config as PrimeConfig
-from prime_cli.leaves.secret.create import Config as SecretCreateConfig
-from prime_cli.leaves.secret.delete import Config as SecretDeleteConfig
-from prime_cli.leaves.secret.get import Config as SecretGetConfig
-from prime_cli.leaves.secret.list import Config as SecretListConfig
-from prime_cli.leaves.secret.update import Config as SecretUpdateConfig
 
 from ..client import APIClient, APIError
 from ..utils import (
@@ -25,6 +20,13 @@ from ..utils.prompt import (
     validate_env_var_name,
 )
 from ..utils.time_utils import format_time_ago
+from .secrets_configs import (
+    SecretCreateConfig,
+    SecretDeleteConfig,
+    SecretGetConfig,
+    SecretListConfig,
+    SecretUpdateConfig,
+)
 
 console = get_console()
 

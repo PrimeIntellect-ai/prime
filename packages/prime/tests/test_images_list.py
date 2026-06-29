@@ -503,7 +503,21 @@ def run_images_list(monkeypatch) -> Callable[..., Any]:
 
         monkeypatch.setattr(images_cmd, "prime_config", _StubConfig(team_id=team_id))
         monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
-        return runner.invoke(app, ["images", "list"], env=env or TEST_ENV)
+        run_env = env or TEST_ENV
+        # Click 8.2 forces formatting.FORCED_WIDTH=80 inside CliRunner.invoke,
+        # which makes Rich render the table at 80 columns even though the test
+        # passes COLUMNS=<n> — so long headers like "Container / VM" get
+        # truncated at 80 regardless of the requested width. Pin the shared
+        # console's cached dimensions to the env's COLUMNS/LINES for the
+        # duration of the invoke, then restore.
+        console = images_cmd.console
+        saved_width, saved_height = console._width, console._height
+        console._width = int(run_env.get("COLUMNS", "200"))
+        console._height = int(run_env.get("LINES", "50"))
+        try:
+            return runner.invoke(app, ["images", "list"], env=run_env)
+        finally:
+            console._width, console._height = saved_width, saved_height
 
     return _run
 

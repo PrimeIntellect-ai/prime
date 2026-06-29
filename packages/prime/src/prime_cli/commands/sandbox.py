@@ -28,20 +28,6 @@ from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
 
-from prime_cli.leaves.sandbox.create import Config as SandboxCreateConfig
-from prime_cli.leaves.sandbox.delete import Config as SandboxDeleteConfig
-from prime_cli.leaves.sandbox.download import Config as SandboxDownloadConfig
-from prime_cli.leaves.sandbox.expose import Config as SandboxExposeConfig
-from prime_cli.leaves.sandbox.get import Config as SandboxGetConfig
-from prime_cli.leaves.sandbox.list import Config as SandboxListConfig
-from prime_cli.leaves.sandbox.list_ports import Config as SandboxListPortsConfig
-from prime_cli.leaves.sandbox.logs import Config as SandboxLogsConfig
-from prime_cli.leaves.sandbox.reset_cache import Config as SandboxResetCacheConfig
-from prime_cli.leaves.sandbox.run import Config as SandboxRunConfig
-from prime_cli.leaves.sandbox.ssh import Config as SandboxSshConfig
-from prime_cli.leaves.sandbox.unexpose import Config as SandboxUnexposeConfig
-from prime_cli.leaves.sandbox.upload import Config as SandboxUploadConfig
-
 from ..utils import (
     build_table,
     confirm_or_skip,
@@ -61,6 +47,21 @@ from ..utils import (
 from ..utils.display import SANDBOX_STATUS_COLORS
 from ..utils.prompt import confirm
 from ..utils.time_utils import now_utc, to_utc
+from .sandbox_configs import (
+    SandboxCreateConfig,
+    SandboxDeleteConfig,
+    SandboxDownloadConfig,
+    SandboxExposeConfig,
+    SandboxGetConfig,
+    SandboxListConfig,
+    SandboxListPortsConfig,
+    SandboxLogsConfig,
+    SandboxResetCacheConfig,
+    SandboxRunConfig,
+    SandboxSshConfig,
+    SandboxUnexposeConfig,
+    SandboxUploadConfig,
+)
 
 console = get_console()
 

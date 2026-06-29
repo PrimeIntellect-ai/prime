@@ -1,9 +1,8 @@
 from typing import Dict, Optional, Tuple
 
-from prime_cli.leaves.fork import Config as ForkConfig
-
 from ..client import APIClient, APIError
 from ..utils import get_console, json_output_help, output_data_as_json, validate_output_format
+from .fork_configs import ForkConfig
 
 console = get_console()
 

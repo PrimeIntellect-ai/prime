@@ -14,7 +14,6 @@ from rich.table import Table
 
 from prime_cli.api.billing import BillingClient, RunUsage
 from prime_cli.core import APIClient, APIError
-from prime_cli.leaves.train.usage import Config as TrainUsageConfig
 from prime_cli.utils import (
     build_table,
     get_console,
@@ -24,6 +23,8 @@ from prime_cli.utils import (
     validate_output_format,
 )
 from prime_cli.utils.formatters import format_price_per_mtok, format_usd
+
+from .usage_configs import TrainUsageConfig
 
 console = get_console()
 

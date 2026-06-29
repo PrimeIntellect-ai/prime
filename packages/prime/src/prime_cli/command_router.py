@@ -8,12 +8,90 @@ import sys
 from typing import Any, Sequence
 
 from pydantic_config import ConfigFileError, cli
+from rich.box import ROUNDED
+from rich.panel import Panel
 from rich.table import Table
 
 from prime_cli import __version__
 from prime_cli.command_registry import GROUPS, Command, command_map
 from prime_cli.core import Config as PrimeConfig
-from prime_cli.utils.plain import HELP_NOTE, get_console
+from prime_cli.utils.plain import HELP_NOTE, get_console, is_plain_mode
+
+# Display order for the top-level command groups. The old ``rich_help_panel``
+# grouping rendered these as titled boxes; we reproduce that layout from the
+# registry's ``section`` field so the group-level help keeps the same panels
+# the per-command help (pydantic_config) already shows.
+SECTION_ORDER = ("Lab", "Compute", "Account")
+
+
+def _print_help_group(title: str, rows: list[tuple[str, str]]) -> None:
+    """Render one titled help group as a rounded panel (or plain text)."""
+    rows = sorted(rows)
+    if is_plain_mode():
+        console = get_console()
+        console.print(f"\n{title}:")
+        for name, summary in rows:
+            console.print(f"  {name}  {summary}".rstrip())
+        return
+    table = Table(box=None, show_header=False, padding=(0, 1))
+    table.add_column(style="cyan", no_wrap=True)
+    table.add_column()
+    for name, summary in rows:
+        table.add_row(name, summary)
+    get_console().print(
+        Panel(
+            table,
+            title=title,
+            title_align="left",
+            box=ROUNDED,
+            border_style="dim",
+            padding=(0, 1),
+            width=get_console().width,
+        )
+    )
+
+
+def _root_help(commands: dict[tuple[str, ...], Command], prefix: tuple[str, ...] = ()) -> None:
+    console = get_console()
+    name = "prime" + (" " + " ".join(prefix) if prefix else "")
+    console.print(f"[bold]Usage:[/bold] {name} [OPTIONS] COMMAND [ARGS]...")
+    if description := GROUPS.get(prefix):
+        console.print(f"\n{description}")
+    if not prefix:
+        console.print("\nPrime Intellect CLI")
+        console.print(f"\n[dim]{HELP_NOTE}[/dim]")
+        _print_help_group(
+            "Global options",
+            [
+                ("--context, -c NAME", "Select a saved Prime context"),
+                ("--plain", "Use terse, unstyled output"),
+                ("--version, -v", "Show the Prime CLI version"),
+            ],
+        )
+
+    # Collect the direct children of ``prefix`` (deduped), keeping each
+    # child's section so root help can group them into Lab/Compute/Account.
+    children: dict[str, tuple[str, str]] = {}
+    for path, command in commands.items():
+        if path[: len(prefix)] != prefix or len(path) <= len(prefix):
+            continue
+        child = path[len(prefix)]
+        is_group = len(path) > len(prefix) + 1
+        summary = GROUPS.get((*prefix, child), f"{child} commands") if is_group else command.summary
+        children.setdefault(child, (summary, command.section))
+
+    if prefix:
+        # Sub-group help lists its commands under a single "Commands" panel,
+        # matching the old default subcommand rendering.
+        _print_help_group("Commands", [(c, s) for c, (s, _) in children.items()])
+        return
+
+    by_section: dict[str, list[tuple[str, str]]] = {}
+    for child, (summary, section) in children.items():
+        by_section.setdefault(section, []).append((child, summary))
+    for section in (*SECTION_ORDER, *(s for s in by_section if s not in SECTION_ORDER)):
+        if section in by_section:
+            _print_help_group(section, by_section[section])
 
 
 def _global_options(argv: list[str]) -> tuple[list[str], bool]:
@@ -71,36 +149,6 @@ def _positionals(argv: list[str], fields: tuple[str, ...]) -> list[str]:
     return [*leading, *argv]
 
 
-def _root_help(commands: dict[tuple[str, ...], Command], prefix: tuple[str, ...] = ()) -> None:
-    console = get_console()
-    name = "prime" + (" " + " ".join(prefix) if prefix else "")
-    console.print(f"[bold]Usage:[/bold] {name} [OPTIONS] COMMAND [ARGS]...")
-    if description := GROUPS.get(prefix):
-        console.print(f"\n{description}")
-    if not prefix:
-        console.print("\nPrime Intellect CLI")
-        console.print(f"\n[dim]{HELP_NOTE}[/dim]")
-        console.print("\n[bold]Global options[/bold]")
-        console.print("  --context, -c NAME   Select a saved Prime context")
-        console.print("  --plain              Use terse, unstyled output")
-        console.print("  --version, -v        Show the Prime CLI version")
-
-    children: dict[str, tuple[str, str]] = {}
-    for path, command in commands.items():
-        if path[: len(prefix)] != prefix or len(path) <= len(prefix):
-            continue
-        child = path[len(prefix)]
-        is_group = len(path) > len(prefix) + 1
-        summary = GROUPS.get((*prefix, child), f"{child} commands") if is_group else command.summary
-        children.setdefault(child, (summary, command.section))
-    table = Table(title="Commands", box=None, show_header=False)
-    table.add_column(style="cyan", no_wrap=True)
-    table.add_column()
-    for child, (summary, _) in sorted(children.items()):
-        table.add_row(child, summary)
-    console.print(table)
-
-
 class Router:
     name = "prime"
 
@@ -151,12 +199,11 @@ class Router:
 
             leaf_args = tokens[len(command.path) :]
             module = importlib.import_module(command.module)
-            run_leaf = getattr(module, "run")
+            run_leaf = getattr(module, command.run_attr)
             if command.raw:
                 return run_leaf(leaf_args)
-            positionals = getattr(module, "POSITIONALS", ())
-            parsed_args = _positionals(leaf_args, positionals)
-            config_model = getattr(module, "Config")
+            parsed_args = _positionals(leaf_args, command.positionals)
+            config_model = getattr(module, command.config_attr)
             parse_config: Any = cli
             config = parse_config(  # ty: ignore[no-matching-overload]
                 config_model,

@@ -4,10 +4,6 @@ from typing import List, Optional
 
 from rich.table import Table
 
-from prime_cli.leaves.deployments.create import Config as DeploymentsCreateConfig
-from prime_cli.leaves.deployments.delete import Config as DeploymentsDeleteConfig
-from prime_cli.leaves.deployments.list import Config as DeploymentsListConfig
-
 from ..api.deployments import DeploymentsClient
 from ..client import APIClient, APIError
 from ..core import Config
@@ -18,6 +14,11 @@ from ..utils import (
     validate_output_format,
 )
 from ..utils.prompt import confirm
+from .deployments_configs import (
+    DeploymentsCreateConfig,
+    DeploymentsDeleteConfig,
+    DeploymentsListConfig,
+)
 
 console = get_console()
 

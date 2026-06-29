@@ -9,11 +9,11 @@ from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from prime_cli.core import Config as PrimeConfig
-from prime_cli.leaves.login import Config as LoginConfig
 
 from ..client import APIClient, APIError
 from ..utils import get_console
 from ..utils.prompt import prompt
+from .login_configs import LoginConfig
 from .teams import fetch_teams
 
 console = get_console()

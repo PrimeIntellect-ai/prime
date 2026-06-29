@@ -3,10 +3,10 @@ from typing import Any, Dict
 from rich.table import Table
 
 from prime_cli.core import Config
-from prime_cli.leaves.whoami import Config as WhoamiConfig
 
 from ..client import APIClient, APIError
 from ..utils import get_console
+from .whoami_configs import WhoamiConfig
 
 console = get_console()
 

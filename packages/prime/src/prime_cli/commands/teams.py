@@ -1,8 +1,6 @@
 from rich.table import Table
 
 from prime_cli.core import Config
-from prime_cli.leaves.teams.list import Config as TeamsListConfig
-from prime_cli.leaves.teams.members import Config as TeamsMembersConfig
 
 from ..client import APIClient, APIError
 from ..utils import (
@@ -11,6 +9,7 @@ from ..utils import (
     output_data_as_json,
     validate_output_format,
 )
+from .teams_configs import TeamsListConfig, TeamsMembersConfig
 
 console = get_console()
 

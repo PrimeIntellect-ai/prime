@@ -13,15 +13,6 @@ from rich.progress import Progress
 from rich.syntax import Syntax
 from rich.table import Table
 
-from prime_cli.leaves.eval.get import Config as EvalGetConfig
-from prime_cli.leaves.eval.list import Config as EvalListConfig
-from prime_cli.leaves.eval.logs import Config as EvalLogsConfig
-from prime_cli.leaves.eval.push import Config as EvalPushConfig
-from prime_cli.leaves.eval.samples import Config as EvalSamplesConfig
-from prime_cli.leaves.eval.stop import Config as EvalStopConfig
-from prime_cli.leaves.eval.submit import Config as EvalSubmitConfig
-from prime_cli.leaves.eval.view import Config as EvalViewConfig
-
 from ..client import APIClient, APIError
 from ..core import Config
 from ..utils import (
@@ -42,6 +33,16 @@ from ..utils.hosted_eval import (
 from ..verifiers_bridge import (
     exec_verifiers_process,
     run_eval_view,
+)
+from .evals_configs import (
+    EvalGetConfig,
+    EvalListConfig,
+    EvalLogsConfig,
+    EvalPushConfig,
+    EvalSamplesConfig,
+    EvalStopConfig,
+    EvalSubmitConfig,
+    EvalViewConfig,
 )
 
 console = get_console()

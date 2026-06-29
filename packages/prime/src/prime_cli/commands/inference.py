@@ -5,9 +5,6 @@ from typing import Any, Dict, Iterable, List, Optional, cast
 
 from rich.table import Table
 
-from prime_cli.leaves.inference.chat import Config as InferenceChatConfig
-from prime_cli.leaves.inference.models import Config as InferenceModelsConfig
-
 from ..api.inference import InferenceAPIError, InferenceClient
 from ..utils import (
     get_console,
@@ -16,6 +13,7 @@ from ..utils import (
     validate_output_format,
 )
 from ..utils.formatters import format_price_per_mtok
+from .inference_configs import InferenceChatConfig, InferenceModelsConfig
 
 console = get_console()
 

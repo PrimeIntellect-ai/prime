@@ -1,11 +1,11 @@
 from typing import Optional
 
 from prime_cli.core import Config as PrimeConfig
-from prime_cli.leaves.switch import Config as SwitchConfig
 
 from ..client import APIClient, APIError
 from ..utils import get_console
 from ..utils.prompt import prompt
+from .switch_configs import SwitchConfig
 from .teams import fetch_teams
 
 console = get_console()

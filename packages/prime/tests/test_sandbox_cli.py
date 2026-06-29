@@ -4,6 +4,7 @@ from typing import Any
 
 import pytest
 from click.testing import CliRunner
+from prime_cli.commands import sandbox as sandbox_cmd
 from prime_cli.commands.sandbox import _format_sandbox_expiry
 from prime_cli.main import app
 from prime_cli.utils import strip_ansi
@@ -660,7 +661,18 @@ def test_sandbox_list_table_has_expires_column(monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.list", mock_list)
 
-    result = runner.invoke(app, ["sandbox", "list"])
+    # Click 8.2 forces formatting.FORCED_WIDTH=80 inside CliRunner.invoke, so
+    # Rich renders the table at 80 columns even though we set COLUMNS=200 — the
+    # narrow "Expires" cell then wraps "45m timeout" across two rows and the
+    # contiguous assertion fails. Pin the shared console's cached dimensions to
+    # the requested width for the invoke, then restore.
+    console = sandbox_cmd.console
+    saved_width, saved_height = console._width, console._height
+    console._width, console._height = 200, 50
+    try:
+        result = runner.invoke(app, ["sandbox", "list"])
+    finally:
+        console._width, console._height = saved_width, saved_height
 
     output = strip_ansi(result.output)
     assert result.exit_code == 0, f"Failed: {result.output}"

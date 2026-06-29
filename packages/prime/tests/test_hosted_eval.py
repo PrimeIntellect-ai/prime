@@ -110,7 +110,7 @@ def test_eval_list_shows_hosted_checkbox(monkeypatch):
 def test_eval_run_delegates_untouched_arguments(monkeypatch):
     captured = {}
     monkeypatch.setattr(
-        "prime_cli.commands.evals.exec_verifiers_process",
+        "prime_cli.command_router.exec_verifiers_process",
         lambda name, args, plain=False: captured.update(name=name, args=args, plain=plain),
     )
 

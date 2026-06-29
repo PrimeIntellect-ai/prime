@@ -16,6 +16,7 @@ from prime_cli import __version__
 from prime_cli.command_registry import GROUPS, Command, command_map
 from prime_cli.core import Config as PrimeConfig
 from prime_cli.utils.plain import HELP_NOTE, get_console, is_plain_mode
+from prime_cli.verifiers_bridge import exec_verifiers_process
 
 # Display order for the top-level command groups. The old ``rich_help_panel``
 # grouping rendered these as titled boxes; we reproduce that layout from the
@@ -198,10 +199,13 @@ class Router:
                 raise ConfigFileError(f"Unknown command: {' '.join(tokens)}")
 
             leaf_args = tokens[len(command.path) :]
+            if command.verifiers is not None:
+                if command.pre_exec:
+                    pre_module = importlib.import_module(command.module)
+                    getattr(pre_module, command.pre_exec)(leaf_args)
+                return exec_verifiers_process(command.verifiers, leaf_args, plain=plain)
             module = importlib.import_module(command.module)
             run_leaf = getattr(module, command.run_attr)
-            if command.raw:
-                return run_leaf(leaf_args)
             parsed_args = _positionals(leaf_args, command.positionals)
             config_model = getattr(module, command.config_attr)
             parse_config: Any = cli

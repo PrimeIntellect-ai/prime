@@ -141,9 +141,10 @@ def test_env_init_runs_lab_hygiene_preflight_inside_lab_workspace(tmp_path, monk
         encoding="utf-8",
     )
 
+    # init now delegates to Verifiers via exec; stub it so the test stays in-process.
     monkeypatch.setattr(
-        "prime_cli.commands.env.build_verifiers_command",
-        lambda name, args: ["verifiers-init", name, *args],
+        "prime_cli.command_router.exec_verifiers_process",
+        lambda name, args, plain=False: None,
     )
 
     def fake_run(command, *args, **kwargs):

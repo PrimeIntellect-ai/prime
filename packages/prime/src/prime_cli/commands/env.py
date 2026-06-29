@@ -31,7 +31,6 @@ from ..client import APIClient, APIError
 from ..lab_hygiene import LabHygieneOptions, find_lab_workspace, run_lab_hygiene_preflight
 from ..utils import (
     get_console,
-    is_plain_mode,
     json_output_help,
     output_data_as_json,
     validate_output_format,
@@ -56,12 +55,7 @@ from ..utils.prompt import (
     validate_env_var_name,
 )
 from ..utils.time_utils import format_time_ago, iso_timestamp
-from ..verifiers_bridge import (
-    build_verifiers_command,
-    exec_verifiers_process,
-    resolve_workspace_python,
-    verifiers_environment,
-)
+from ..verifiers_bridge import resolve_workspace_python
 from .config import TEAM_ID_PATTERN
 
 console = get_console()
@@ -1405,14 +1399,8 @@ def push(config: EnvPushConfig) -> None:
         raise SystemExit(1)
 
 
-def init(argv: list[str]) -> None:
-    """Initialize a V1 or V0 environment with Verifiers."""
-    result = subprocess.run(
-        build_verifiers_command("init", argv),
-        env=verifiers_environment(plain=is_plain_mode()),
-    )
-    if result.returncode != 0:
-        raise SystemExit(result.returncode)
+def init_preflight(argv: list[str]) -> None:
+    """Run Prime-side lab hygiene fixes before delegating ``env init`` to Verifiers."""
     if argv and not any(arg in ("-h", "--help") for arg in argv):
         _run_env_init_lab_hygiene_preflight()
 
@@ -1655,16 +1643,6 @@ def build(config: EnvBuildConfig) -> None:
     code = _build_environment(env_id, path)
     if code != 0:
         raise SystemExit(code)
-
-
-def validate(argv: list[str]) -> None:
-    """Run a taskset's model-free validation with Verifiers."""
-    exec_verifiers_process("validate", argv, plain=is_plain_mode())
-
-
-def serve(argv: list[str]) -> None:
-    """Serve a V1 or V0 environment with Verifiers."""
-    exec_verifiers_process("serve", argv, plain=is_plain_mode())
 
 
 def pull(config: EnvPullConfig) -> None:

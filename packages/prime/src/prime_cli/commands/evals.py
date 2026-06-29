@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import inspect
 import json
-import re
 import time
 import tomllib
 from functools import wraps
@@ -20,23 +19,18 @@ from ..client import APIClient, APIError
 from ..core import Config
 from ..utils import (
     get_console,
-    is_plain_mode,
     json_output_help,
     output_data_as_json,
 )
 from ..utils.display import get_eval_viewer_url
 from ..utils.env_metadata import find_environment_metadata, parse_env_id
-from ..utils.eval_push import convert_eval_results, load_eval_config, load_results_jsonl
 from ..utils.hosted_eval import (
     EvalStatus,
     HostedEvalConfig,
     clean_logs,
     get_new_log_lines,
 )
-from ..verifiers_bridge import (
-    exec_verifiers_process,
-    run_eval_view,
-)
+from ..verifiers_bridge import run_eval_view
 
 console = get_console()
 
@@ -564,127 +558,35 @@ def get_samples(config: EvalSamplesConfig) -> None:
 
 
 def _load_eval_directory(directory: Path) -> dict:
-    if (directory / "config.toml").is_file():
-        config = load_eval_config(directory)
-        results_path = directory / "results.jsonl"
-        taskset = config.get("taskset")
-        env_field = (taskset.get("id") if isinstance(taskset, dict) else None) or config.get("id")
-        model = config.get("model")
-        if not isinstance(env_field, str) or not isinstance(model, str):
-            raise ValueError("Missing taskset.id/id or model in config.toml")
+    from verifiers.v1.cli.output import read_upload_data
 
-        results = convert_eval_results(load_results_jsonl(results_path))
-        rewards = [row["reward"] for row in results if isinstance(row.get("reward"), (int, float))]
-        return {
-            "eval_name": f"{env_field}-{model}",
-            "model_name": model,
-            "env": env_field,
-            "metrics": {"reward": sum(rewards) / len(rewards)} if rewards else {},
-            "metadata": {
-                "framework": "verifiers",
-                "run_id": directory.name,
-                "num_examples": config.get("num_tasks"),
-                "rollouts_per_example": config.get("num_rollouts"),
-                "resolved_config": config,
-            },
-            "results": results,
-        }
-
-    with open(directory / "metadata.json") as f:
-        metadata = json.load(f)
-
-    env_field = metadata.get("env_id") or metadata.get("env")
-    if not env_field or "model" not in metadata:
-        raise ValueError(
-            f"Missing required 'env_id' or 'model' field in {directory / 'metadata.json'}"
+    upload = read_upload_data(directory)
+    if upload.invalid_results:
+        preview = [f"line {error.line}: {error.reason}" for error in upload.invalid_results[:5]]
+        suffix = ", ..." if len(upload.invalid_results) > 5 else ""
+        console.print(
+            f"[yellow]Warning: Skipped {len(upload.invalid_results)} invalid lines "
+            f"in results.jsonl ({', '.join(preview)}{suffix})[/yellow]"
         )
-
-    results = convert_eval_results(load_results_jsonl(directory / "results.jsonl"))
-
-    avg_pattern = re.compile(r"^avg_(.+)$")
-    metrics = {}
-    metadata_copy = {}
-    for key, value in metadata.items():
-        if match := avg_pattern.match(key):
-            metrics[match.group(1)] = value
-        else:
-            metadata_copy[key] = value
-
-    return {
-        "eval_name": f"{env_field}-{metadata['model']}",
-        "model_name": metadata["model"],
-        "env": env_field,
-        "metrics": metrics,
-        "metadata": metadata_copy,
-        "results": results,
-    }
+    return upload.as_dict()
 
 
 def _has_eval_files(directory: Path) -> bool:
-    if (directory / "config.toml").is_file():
-        try:
-            load_eval_config(directory)
-        except ValueError:
-            return False
-        return (directory / "results.jsonl").is_file()
-    return (directory / "metadata.json").exists() and (directory / "results.jsonl").exists()
+    from verifiers.v1.cli.output import has_eval_artifacts
+
+    return has_eval_artifacts(directory)
 
 
 def _validate_eval_path(path_str: str) -> Path:
-    """Validate and return the evaluation directory path."""
-    path = Path(path_str)
+    from verifiers.v1.cli.output import resolve_eval_artifact_dir
 
-    if path.is_file():
-        # Auto-correct known artifact files to their run directory.
-        if path.name in (
-            "config.toml",
-            "results.jsonl",
-            "eval.log",
-            "metadata.json",
-        ):
-            parent = path.parent
-            if _has_eval_files(parent):
-                return parent
-            if (parent / "config.toml").exists():
-                raise ValueError(f"Directory '{parent}' is not a complete Verifiers run artifact")
-            raise ValueError(
-                f"Directory '{parent}' must contain both metadata.json and results.jsonl"
-            )
-        raise ValueError(
-            f"Expected a directory path, but got file: {path}\n"
-            "Pass a directory containing a native V1 run or metadata.json/results.jsonl"
-        )
-
-    if path.is_dir():
-        if _has_eval_files(path):
-            return path
-
-        if (path / "config.toml").exists():
-            raise ValueError(f"Directory '{path}' is not a complete Verifiers run artifact")
-
-        has_metadata = (path / "metadata.json").exists()
-        has_results = (path / "results.jsonl").exists()
-        if has_metadata and not has_results:
-            raise ValueError(f"Directory '{path}' is missing results.jsonl")
-        elif has_results and not has_metadata:
-            raise ValueError(f"Directory '{path}' is missing metadata.json")
-        else:
-            raise ValueError(f"Directory '{path}' is missing both metadata.json and results.jsonl")
-
-    raise FileNotFoundError(f"Path not found: {path}")
+    return resolve_eval_artifact_dir(path_str)
 
 
 def _discover_eval_outputs() -> list[Path]:
-    outputs_dir = Path("outputs")
-    if not outputs_dir.exists():
-        return []
+    from verifiers.v1.cli.output import discover_eval_artifact_dirs
 
-    candidates = {
-        artifact.parent
-        for pattern in ("config.toml", "metadata.json")
-        for artifact in outputs_dir.rglob(pattern)
-    }
-    return sorted(directory for directory in candidates if _has_eval_files(directory))
+    return discover_eval_artifact_dirs()
 
 
 def _resolve_eval_viewer_url(evaluation_id: str, response: Optional[dict[str, Any]] = None) -> str:
@@ -991,11 +893,6 @@ def stop_cmd(config: EvalStopConfig) -> None:
     except APIError as exc:
         console.print(f"[red]Error:[/red] {exc}")
         raise SystemExit(1) from exc
-
-
-def run_eval_cmd(argv: list[str]) -> None:
-    """Hand the untouched evaluation arguments to Verifiers."""
-    exec_verifiers_process("eval", argv, plain=is_plain_mode())
 
 
 def submit_eval_cmd(config: EvalSubmitConfig) -> None:

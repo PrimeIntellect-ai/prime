@@ -1,5 +1,3 @@
-from types import SimpleNamespace
-
 import pytest
 from click.testing import CliRunner
 from prime_cli.main import app
@@ -15,7 +13,7 @@ class ExecCalled(Exception):
 def test_eval_run_help_flags_are_forwarded(monkeypatch):
     captured = []
     monkeypatch.setattr(
-        "prime_cli.commands.evals.exec_verifiers_process",
+        "prime_cli.command_router.exec_verifiers_process",
         lambda name, args, plain: captured.append((name, list(args), plain)),
     )
 
@@ -84,7 +82,7 @@ def test_exec_verifiers_process_forwards_once(monkeypatch):
 def test_env_verifiers_commands_forward_argv(monkeypatch, subcommand, args):
     captured = {}
     monkeypatch.setattr(
-        "prime_cli.commands.env.exec_verifiers_process",
+        "prime_cli.command_router.exec_verifiers_process",
         lambda name, forwarded, plain: captured.update(
             name=name, args=list(forwarded), plain=plain
         ),
@@ -100,15 +98,13 @@ def test_env_verifiers_commands_forward_argv(monkeypatch, subcommand, args):
     assert captured == {"name": subcommand, "args": args, "plain": False}
 
 
-def test_env_init_forwards_argv_before_running_hygiene(monkeypatch):
+def test_env_init_runs_hygiene_then_delegates_to_verifiers(monkeypatch):
     captured = {}
     monkeypatch.setattr(
-        "prime_cli.commands.env.build_verifiers_command",
-        lambda name, args: captured.update(name=name, args=list(args)) or ["init"],
-    )
-    monkeypatch.setattr(
-        "prime_cli.commands.env.subprocess.run",
-        lambda command, env: captured.update(command=command) or SimpleNamespace(returncode=0),
+        "prime_cli.command_router.exec_verifiers_process",
+        lambda name, forwarded, plain: captured.update(
+            name=name, args=list(forwarded), plain=plain
+        ),
     )
     monkeypatch.setattr(
         "prime_cli.commands.env._run_env_init_lab_hygiene_preflight",
@@ -123,10 +119,10 @@ def test_env_init_forwards_argv_before_running_hygiene(monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert captured == {
+        "hygiene": True,
         "name": "init",
         "args": ["demo-v1", "--add-tool", "--force"],
-        "command": ["init"],
-        "hygiene": True,
+        "plain": False,
     }
 
 

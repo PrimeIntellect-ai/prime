@@ -14,8 +14,13 @@ class Command:
     path: tuple[str, ...]
     summary: str
     section: str
-    run_attr: str
-    raw: bool = False
+    # Either ``run_attr`` (a Prime-owned command function taking a parsed config)
+    # or ``verifiers`` (the name of a Verifiers CLI module the router execs in
+    # its place). ``pre_exec`` optionally names a ``module`` callable receiving
+    # the raw leaf argv that runs in-process before the Verifiers exec.
+    run_attr: str | None = None
+    verifiers: str | None = None
+    pre_exec: str | None = None
     positionals: tuple[str, ...] = ()
     module_override: str | None = None
 
@@ -26,7 +31,7 @@ class Command:
 
     @property
     def config_attr(self) -> str | None:
-        if self.raw:
+        if self.verifiers is not None:
             return None
         return "".join(seg.title() for p in self.path for seg in p.split("-")) + "Config"
 
@@ -230,8 +235,8 @@ COMMANDS: tuple[Command, ...] = (
         ("env", "init"),
         "Initialize a V1 or V0 environment with Verifiers.",
         "Lab",
-        raw=True,
-        run_attr="init",
+        verifiers="init",
+        pre_exec="init_preflight",
     ),
     Command(
         ("env", "inspect"),
@@ -308,8 +313,7 @@ COMMANDS: tuple[Command, ...] = (
         ("env", "serve"),
         "Serve a V1 or V0 environment with Verifiers.",
         "Lab",
-        raw=True,
-        run_attr="serve",
+        verifiers="serve",
     ),
     Command(
         ("env", "status"),
@@ -329,8 +333,7 @@ COMMANDS: tuple[Command, ...] = (
         ("env", "validate"),
         "Run a taskset's model-free validation with Verifiers.",
         "Lab",
-        raw=True,
-        run_attr="validate",
+        verifiers="validate",
     ),
     Command(
         ("env", "var", "create"),
@@ -400,8 +403,7 @@ COMMANDS: tuple[Command, ...] = (
         ("eval", "run"),
         "Run a local V1 or V0 evaluation with Verifiers",
         "Lab",
-        raw=True,
-        run_attr="run_eval_cmd",
+        verifiers="eval",
     ),
     Command(("eval", "samples"), "", "Lab", positionals=("eval_id",), run_attr="get_samples"),
     Command(
@@ -435,8 +437,7 @@ COMMANDS: tuple[Command, ...] = (
         ("gepa", "run"),
         "Run Verifiers' native GEPA command.",
         "Lab",
-        raw=True,
-        run_attr="run_gepa_cmd",
+        verifiers="gepa",
     ),
     Command(
         ("images", "delete"),

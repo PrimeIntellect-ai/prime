@@ -20,13 +20,14 @@ def _command_id(command: Command) -> str:
 
 
 def test_registry_commands_resolve() -> None:
-    """Every registered command's callback module exposes the declared attrs."""
+    """Every registered command declares a resolvable callback or Verifiers exec."""
     for command in COMMANDS:
-        module = importlib.import_module(command.module)
-        assert hasattr(module, command.run_attr), command.path
-        if command.raw:
+        if command.verifiers is not None:
+            assert command.run_attr is None, command.path
             assert command.config_attr is None, command.path
             continue
+        module = importlib.import_module(command.module)
+        assert hasattr(module, command.run_attr), command.path
         assert command.config_attr is not None, command.path
         config_model = getattr(module, command.config_attr)
         assert issubclass(config_model, BaseConfig), command.path
@@ -52,17 +53,18 @@ def test_command_map_rejects_duplicate_paths(monkeypatch: pytest.MonkeyPatch) ->
         command_map()
 
 
-@pytest.mark.parametrize("command", COMMANDS, ids=_command_id)
+@pytest.mark.parametrize(
+    "command",
+    [command for command in COMMANDS if command.verifiers is None],
+    ids=_command_id,
+)
 def test_command_contract(command: Command) -> None:
     module = importlib.import_module(command.module)
     callback = getattr(module, command.run_attr)
     parameter = next(iter(inspect.signature(callback).parameters.values()))
 
     assert len(inspect.signature(callback).parameters) == 1
-    assert parameter.name == ("argv" if command.raw else "config")
-    if command.raw:
-        assert command.config_attr is None
-        return
+    assert parameter.name == "config"
 
     config_model = getattr(module, command.config_attr)
     assert issubclass(config_model, BaseConfig)
@@ -75,7 +77,7 @@ def test_command_contract(command: Command) -> None:
 
 @pytest.mark.parametrize(
     "command",
-    [command for command in COMMANDS if not command.raw],
+    [command for command in COMMANDS if command.verifiers is None],
     ids=_command_id,
 )
 def test_leaf_help_smoke(command: Command) -> None:
@@ -95,21 +97,24 @@ def test_group_help_smoke(group: tuple[str, ...]) -> None:
 
 @pytest.mark.parametrize(
     "command",
-    [command for command in COMMANDS if command.raw],
+    [command for command in COMMANDS if command.verifiers is not None],
     ids=_command_id,
 )
-def test_raw_commands_receive_untouched_argv(
+def test_verifiers_commands_receive_untouched_argv(
     command: Command,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    module = importlib.import_module(command.module)
-    captured: list[list[str]] = []
-    monkeypatch.setattr(module, command.run_attr, lambda argv: captured.append(argv))
+    captured: list[tuple] = []
+    monkeypatch.setattr(
+        router,
+        "exec_verifiers_process",
+        lambda name, args, plain=False: captured.append((name, list(args), plain)),
+    )
 
     result = CliRunner().invoke(app, [*command.path, "target", "--unknown", "value"])
 
     assert result.exit_code == 0, result.output
-    assert captured == [["target", "--unknown", "value"]]
+    assert captured == [(command.verifiers, ["target", "--unknown", "value"], False)]
 
 
 def test_toml_and_cli_parse_to_the_same_config(tmp_path: Path) -> None:

@@ -347,9 +347,11 @@ def test_create_hosted_evaluation_adds_team_id_to_payload(monkeypatch):
 
     monkeypatch.setattr("prime_cli.commands.evals.APIClient", DummyAPIClient)
 
+    environment = {"taskset": {"id": "gsm8k-v1"}, "harness": {"id": "default"}}
     result = _create_hosted_evaluations(
         HostedEvalConfig(
-            environment_id="env-123",
+            environment_id=None,
+            environments=[environment],
             inference_model="openai/gpt-4.1-mini",
             num_examples=5,
             rollouts_per_example=3,
@@ -359,48 +361,11 @@ def test_create_hosted_evaluation_adds_team_id_to_payload(monkeypatch):
     assert result["evaluation_id"] == "eval-123"
     assert captured["endpoint"] == "/hosted-evaluations"
     assert captured["json"]["team_id"] == "team-123"
+    assert "environment_ids" not in captured["json"]
+    assert captured["json"]["environments"] == [environment]
     assert captured["json"]["eval_config"]["allow_sandbox_access"] is True
     assert captured["json"]["eval_config"]["allow_instances_access"] is False
     assert captured["json"]["eval_config"]["allow_tunnel_access"] is True
-
-
-def test_create_hosted_evaluation_sends_v1_environments_payload(monkeypatch):
-    captured = {}
-
-    class DummyConfig:
-        team_id = None
-
-    class DummyAPIClient:
-        def __init__(self):
-            self.config = DummyConfig()
-
-        def post(self, endpoint, json=None):
-            captured["endpoint"] = endpoint
-            captured["json"] = json
-            return {"evaluation_id": "eval-123"}
-
-    monkeypatch.setattr("prime_cli.commands.evals.APIClient", DummyAPIClient)
-
-    environment = {
-        "taskset": {"id": "gsm8k-v1", "split": "test"},
-        "harness": {"id": "default"},
-    }
-
-    _create_hosted_evaluations(
-        HostedEvalConfig(
-            environment_id=None,
-            environments=[environment],
-            inference_model="openai/gpt-4.1-mini",
-            num_examples=1,
-            rollouts_per_example=1,
-        )
-    )
-
-    assert captured["endpoint"] == "/hosted-evaluations"
-    assert "environment_ids" not in captured["json"]
-    assert captured["json"]["environments"] == [environment]
-    assert captured["json"]["eval_config"]["num_examples"] == 1
-    assert captured["json"]["eval_config"]["rollouts_per_example"] == 1
 
 
 def test_create_hosted_evaluation_includes_sampling_args_in_payload(monkeypatch):
@@ -1322,6 +1287,7 @@ taskset = { id = "gsm8k-v1" }
 
     assert result.exit_code == 1
     assert "cannot combine `env_id` with `taskset` or `harness`" in result.output
+    assert "Error: 1" not in result.output
 
 
 def test_eval_run_hosted_rejects_v1_selector_without_taskset_id(tmp_path):
@@ -1392,20 +1358,22 @@ env_id = "gsm8k"
     }
 
 
-def test_hosted_eval_config_accepts_id_alias(tmp_path):
+def test_hosted_eval_config_accepts_top_level_id_alias(tmp_path):
     config_path = tmp_path / "eval.toml"
     config_path.write_text(
         """
 model = "openai/gpt-4.1-mini"
+id = "gsm8k"
 
 [[eval]]
-id = "gsm8k"
+num_examples = 3
 """.strip()
     )
 
     loaded = _load_hosted_eval_configs(str(config_path))[0]
 
     assert loaded["env_id"] == "gsm8k"
+    assert loaded["num_examples"] == 3
 
 
 def test_eval_run_hosted_endpoint_id_uses_default_endpoints_path_from_cwd(monkeypatch, tmp_path):

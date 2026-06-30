@@ -581,13 +581,19 @@ def _load_hosted_eval_configs(config_path_str: str) -> list[dict[str, Any]]:
             and ("taskset" in eval_config or "harness" in eval_config)
             for eval_config in eval_list
         )
-        if not uses_v1_selector:
-            if any(
-                isinstance(eval_config, dict)
-                and "env_id" not in eval_config
-                and "id" not in eval_config
-                for eval_config in eval_list
-            ):
+        has_global_legacy_selector = "env_id" in raw_config or "id" in raw_config
+        evals_missing_legacy_selector = any(
+            isinstance(eval_config, dict)
+            and "env_id" not in eval_config
+            and "id" not in eval_config
+            for eval_config in eval_list
+        )
+        uses_hosted_merge = uses_v1_selector or (
+            has_global_legacy_selector
+            and (evals_missing_legacy_selector or "id" in raw_config)
+        )
+        if not uses_hosted_merge:
+            if evals_missing_legacy_selector:
                 raise ValueError(
                     "hosted eval config requires either `env_id` or `taskset.id`"
                 )
@@ -607,15 +613,27 @@ def _load_hosted_eval_configs(config_path_str: str) -> list[dict[str, Any]]:
                 f"(double brackets) for array of tables: {config_path}"
             )
         if ablation_list:
-            raise ValueError("hosted eval v1 environment configs do not support ablations")
+            if uses_v1_selector:
+                raise ValueError(
+                    "hosted eval v1 environment configs do not support ablations"
+                )
+            raise ValueError(
+                "hosted eval configs with top-level `env_id` defaults on "
+                "selector-less [[eval]] sections do not support ablations"
+            )
         if not eval_list:
             raise ValueError(
                 f"Config file must contain at least one [[eval]] section: {config_path}"
             )
 
-        global_defaults = {
-            key: value for key, value in raw_config.items() if key not in ("eval", "ablation")
-        }
+        global_defaults = normalize_env_id_alias(
+            {
+                key: value
+                for key, value in raw_config.items()
+                if key not in ("eval", "ablation")
+            },
+            "global defaults",
+        )
         loaded_configs = []
         for eval_config in eval_list:
             normalized_eval = normalize_env_id_alias(eval_config, "[[eval]]")
@@ -634,6 +652,8 @@ def _load_hosted_eval_configs(config_path_str: str) -> list[dict[str, Any]]:
                     merged["endpoints_path"] = str(
                         (config_path.parent / endpoints_path_obj).resolve()
                     )
+    except typer.Exit:
+        raise
     except Exception as exc:
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(1) from exc

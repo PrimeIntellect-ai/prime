@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -26,6 +27,8 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from .api.projects import ProjectsClient
+from .core import APIClient, APIError, Config
 from .lab_agents import (
     agent_capability,
     agent_project_skills_dirs,
@@ -39,6 +42,14 @@ from .lab_hygiene import (
     missing_lab_gitignore_patterns,
     run_lab_hygiene_preflight,
     tracked_lab_hygiene_paths,
+)
+from .utils.projects import (
+    PROJECT_CONTEXT_CLEARED_KEY,
+    PROJECT_CONTEXT_ENV,
+    ensure_active_project_scope,
+    get_active_project_id,
+    read_project_context,
+    write_project_context,
 )
 
 VERIFIERS_REPO = "primeintellect-ai/verifiers"
@@ -93,6 +104,9 @@ class LabSetupOptions:
     skip_agents_md: bool = False
     skip_install: bool = False
     agents: tuple[str, ...] = ()
+    no_project: bool = False
+    project_ref: str | None = None
+    project_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -245,7 +259,27 @@ def parse_lab_setup_args(args: list[str]) -> LabSetupOptions:
         action="store_true",
         help="Use setup defaults without prompts.",
     )
+    parser.add_argument(
+        "--no-project",
+        action="store_true",
+        help="Skip creating or selecting a Lab project during setup.",
+    )
+    parser.add_argument(
+        "--project",
+        dest="project_ref",
+        help="Project ID or slug to make active instead of creating a default project.",
+    )
+    parser.add_argument(
+        "--project-name",
+        help="Name for the default project created during setup.",
+    )
     namespace = parser.parse_args(args)
+    if namespace.no_project and namespace.project_ref:
+        raise ValueError("--project and --no-project cannot be used together.")
+    if namespace.no_project and namespace.project_name:
+        raise ValueError("--project-name and --no-project cannot be used together.")
+    if namespace.project_ref and namespace.project_name:
+        raise ValueError("--project and --project-name cannot be used together.")
     return LabSetupOptions(
         skip_agents_md=bool(namespace.skip_agents_md),
         skip_install=bool(namespace.skip_install),
@@ -253,6 +287,9 @@ def parse_lab_setup_args(args: list[str]) -> LabSetupOptions:
             namespace.agents,
             no_interactive=bool(namespace.no_interactive),
         ),
+        no_project=bool(namespace.no_project),
+        project_ref=namespace.project_ref,
+        project_name=namespace.project_name,
     )
 
 
@@ -378,6 +415,7 @@ def _run_lab_setup_steps(
     _report_missing_agent_requirements(options.agents, emit)
     _prepare_agent_native_surfaces(workspace, options.agents, emit)
     _sync_lab_metadata(workspace, options.agents, setup_source="prime lab setup")
+    _ensure_setup_project(options, workspace=workspace, emit=emit)
 
     if not options.skip_agents_md:
         _sync_workspace_guidance(workspace, options.agents, emit, force=True)
@@ -1388,6 +1426,185 @@ def _ensure_uv_project(workspace: Path, emit: Emit, runner: Runner) -> None:
 
     emit("Adding verifiers dependency\n")
     _check_command(["uv", "add", "verifiers"], workspace, emit, runner)
+
+
+def _default_project_name(workspace: Path) -> str:
+    parts = [part for part in re.split(r"[^A-Za-z0-9]+", workspace.name) if part]
+    if not parts:
+        return "Lab Project"
+    return " ".join(f"{part[:1].upper()}{part[1:]}" for part in parts)
+
+
+def _default_project_slug(workspace: Path) -> str:
+    parts = [part.lower() for part in re.split(r"[^A-Za-z0-9]+", workspace.name) if part]
+    return "-".join(parts) or "lab-project"
+
+
+def _project_context_matches_scope(context: dict, config: Config) -> bool:
+    if context.get("base_url") and context.get("base_url") != config.base_url:
+        return False
+    if context.get("team_id") != config.team_id:
+        return False
+    return True
+
+
+def _project_context_cleared_for_scope(context: dict, config: Config) -> bool:
+    return context.get(PROJECT_CONTEXT_CLEARED_KEY) is True and _project_context_matches_scope(
+        context,
+        config,
+    )
+
+
+def _project_context_has_active_project(
+    context: dict,
+    config: Config,
+    project_id: str,
+) -> bool:
+    context_project_id = context.get("project_id")
+    return (
+        context_project_id is not None
+        and str(context_project_id) == project_id
+        and _project_context_matches_scope(context, config)
+    )
+
+
+def _emit_project_setup_api_failure(exc: APIError, emit: Emit) -> None:
+    emit(f"Skipped Lab project setup because the Projects API request failed: {exc}\n")
+    emit("Run prime project create later to attach new Lab runs and evals by default.\n")
+
+
+def _activate_setup_project(
+    project: Any,
+    config: Config,
+    *,
+    workspace: Path,
+    emit: Emit,
+    action: str,
+) -> bool:
+    try:
+        ensure_active_project_scope(project.team_id, config, action=action)
+    except APIError as exc:
+        emit(f"Skipped Lab project setup because the project scope is not active: {exc}\n")
+        emit("Switch account context first, or rerun setup with --no-project.\n")
+        return False
+
+    write_project_context(project, config, workspace=workspace)
+    return True
+
+
+def _ensure_setup_project(
+    options: LabSetupOptions,
+    *,
+    workspace: Path,
+    emit: Emit,
+) -> None:
+    if options.no_project:
+        emit("Skipped Lab project setup (--no-project)\n")
+        return
+
+    config = Config()
+    if not config.api_key:
+        emit(
+            "Skipped Lab project setup because no API key is configured; "
+            "run prime login, then prime project create later.\n"
+        )
+        return
+
+    explicit_project_requested = options.project_ref is not None or options.project_name is not None
+    project_context = read_project_context(workspace)
+    if not explicit_project_requested and _project_context_cleared_for_scope(
+        project_context,
+        config,
+    ):
+        emit("Skipped Lab project setup because this workspace cleared its active project.\n")
+        emit("Run prime project use, or rerun setup with --project or --project-name.\n")
+        return
+
+    api_client = APIClient()
+    projects_client = ProjectsClient(api_client)
+    try:
+        active_project_id = get_active_project_id(
+            config,
+            workspace=workspace,
+            client=api_client,
+        )
+    except APIError as exc:
+        active_project_id = None
+        emit(f"Ignored {PROJECT_CONTEXT_ENV} because it is not valid for this CLI context: {exc}\n")
+    if active_project_id and not explicit_project_requested:
+        if not _project_context_has_active_project(project_context, config, active_project_id):
+            try:
+                project = projects_client.get(active_project_id, team_id=config.team_id)
+            except APIError as exc:
+                _emit_project_setup_api_failure(exc, emit)
+                return
+            if not _activate_setup_project(
+                project,
+                config,
+                workspace=workspace,
+                emit=emit,
+                action="set an active project",
+            ):
+                return
+        emit(f"Using active Lab project {active_project_id}\n")
+        return
+
+    if options.project_ref:
+        try:
+            project = projects_client.get(options.project_ref, team_id=config.team_id)
+        except APIError as exc:
+            _emit_project_setup_api_failure(exc, emit)
+            return
+
+        if _activate_setup_project(
+            project,
+            config,
+            workspace=workspace,
+            emit=emit,
+            action="set an active project",
+        ):
+            emit(f"Using Lab project {project.name} ({project.slug})\n")
+        return
+
+    if options.project_name is None:
+        try:
+            project = projects_client.get(
+                _default_project_slug(workspace),
+                team_id=config.team_id,
+            )
+        except APIError:
+            project = None
+        if project is not None:
+            if _activate_setup_project(
+                project,
+                config,
+                workspace=workspace,
+                emit=emit,
+                action="set an active project",
+            ):
+                emit(f"Using Lab project {project.name} ({project.slug})\n")
+            return
+
+    project_name = options.project_name or _default_project_name(workspace)
+    project_slug = None if options.project_name else _default_project_slug(workspace)
+    try:
+        project = projects_client.create(
+            name=project_name,
+            slug=project_slug,
+            team_id=config.team_id,
+        )
+    except APIError as exc:
+        _emit_project_setup_api_failure(exc, emit)
+        return
+
+    if _activate_setup_project(
+        project,
+        config,
+        workspace=workspace,
+        emit=emit,
+        action="create and set an active project",
+    ):
+        emit(f"Created Lab project {project.name} ({project.slug})\n")
 
 
 def _post_setup_call_to_action(options: LabSetupOptions) -> Panel:

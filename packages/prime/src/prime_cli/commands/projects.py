@@ -51,7 +51,7 @@ PROJECT_USAGE_HELP = _usage_help(
     ),
     (
         "prime project current",
-        "Show the active project for this workspace.",
+        "Show the active project that new Lab runs and evals will use.",
     ),
     (
         "prime project use <project-id>",
@@ -137,7 +137,7 @@ PROJECT_USE_HELP = _usage_help(
     ),
     (
         "prime project current",
-        "Confirm which project is active for this workspace.",
+        "Confirm which project this workspace will use by default.",
     ),
     json_help_text=PROJECT_JSON_HELP,
 )
@@ -173,7 +173,7 @@ PROJECT_UPDATE_HELP = _usage_help(
 PROJECT_CLEAR_HELP = _usage_help(
     (
         "prime project clear",
-        "Clear this workspace's active project.",
+        "Stop attaching new Lab runs and evals to a workspace project by default.",
     ),
 )
 

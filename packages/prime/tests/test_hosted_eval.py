@@ -1517,12 +1517,58 @@ def test_eval_run_local_no_project_disables_active_project(monkeypatch):
     }
 
 
+def test_eval_run_local_skip_upload_skips_active_project_lookup(monkeypatch):
+    captured = {}
+    resolve_calls = []
+
+    def fake_resolve_project_id(project, *, no_project=False, use_active_project=False):
+        resolve_calls.append((project, no_project, use_active_project))
+        if use_active_project:
+            raise AssertionError("skip-upload should not resolve the active project")
+        return None
+
+    def fake_run_eval_passthrough(
+        environment,
+        passthrough_args,
+        skip_upload,
+        env_path,
+        project_id=None,
+        use_active_project=True,
+    ):
+        captured["environment"] = environment
+        captured["passthrough_args"] = passthrough_args
+        captured["skip_upload"] = skip_upload
+        captured["env_path"] = env_path
+        captured["project_id"] = project_id
+        captured["use_active_project"] = use_active_project
+
+    monkeypatch.setattr("prime_cli.commands.evals.resolve_project_id", fake_resolve_project_id)
+    monkeypatch.setattr("prime_cli.commands.evals.run_eval_passthrough", fake_run_eval_passthrough)
+
+    result = runner.invoke(
+        app,
+        ["eval", "run", "gsm8k", "--skip-upload"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert resolve_calls == [(None, False, False)]
+    assert captured == {
+        "environment": "gsm8k",
+        "passthrough_args": [],
+        "skip_upload": True,
+        "env_path": None,
+        "project_id": None,
+        "use_active_project": False,
+    }
+
+
 def test_eval_run_local_passes_resolved_project_without_active_relookup(monkeypatch):
     captured = {}
     resolve_calls = []
 
-    def fake_resolve_project_id(project, *, no_project=False):
-        resolve_calls.append((project, no_project))
+    def fake_resolve_project_id(project, *, no_project=False, use_active_project=False):
+        resolve_calls.append((project, no_project, use_active_project))
         return "project-123"
 
     def fake_run_eval_passthrough(
@@ -1550,7 +1596,7 @@ def test_eval_run_local_passes_resolved_project_without_active_relookup(monkeypa
     )
 
     assert result.exit_code == 0, result.output
-    assert resolve_calls == [(None, False)]
+    assert resolve_calls == [(None, False, True)]
     assert captured == {
         "environment": "gsm8k",
         "passthrough_args": [],
@@ -1623,7 +1669,7 @@ def test_eval_run_hosted_forwards_resolved_project_id(monkeypatch):
 
     monkeypatch.setattr(
         "prime_cli.commands.evals.resolve_project_id",
-        lambda project, no_project=False: "project-123",
+        lambda project, no_project=False, use_active_project=False: "project-123",
     )
     monkeypatch.setattr(
         "prime_cli.commands.evals._resolve_hosted_environment",

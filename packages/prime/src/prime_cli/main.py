@@ -20,6 +20,7 @@ from .commands.lab import app as lab_app
 from .commands.login import app as login_app
 from .commands.logout import app as logout_app
 from .commands.pods import app as pods_app
+from .commands.projects import app as projects_app
 from .commands.registry import app as registry_app
 from .commands.rl import app as train_app
 from .commands.sandbox import app as sandbox_app
@@ -47,6 +48,7 @@ app.add_typer(env_app, name="env", rich_help_panel="Lab")
 app.command("fork", rich_help_panel="Lab", epilog=FORK_JSON_HELP)(fork_command)
 app.add_typer(evals_app, name="eval", rich_help_panel="Lab")
 app.add_typer(gepa_app, name="gepa", rich_help_panel="Lab")
+app.add_typer(projects_app, name="project", rich_help_panel="Lab")
 app.add_typer(train_app, name="train", rich_help_panel="Lab")
 app.add_typer(
     train_app,

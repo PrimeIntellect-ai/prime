@@ -22,6 +22,13 @@ from typer.testing import CliRunner
 runner = CliRunner()
 
 
+@pytest.fixture(autouse=True)
+def isolated_project_context(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("PRIME_PROJECT_ID", raising=False)
+
+
 class TestLogCleaning:
     def test_strip_ansi_basic(self):
         assert strip_ansi("\x1b[31mRed text\x1b[0m") == "Red text"
@@ -117,9 +124,6 @@ def test_eval_run_hosted_invokes_hosted_runner(monkeypatch):
         captured["inference_model"] = config.inference_model
         captured["num_examples"] = config.num_examples
         captured["rollouts_per_example"] = config.rollouts_per_example
-        captured["allow_sandbox_access"] = config.allow_sandbox_access
-        captured["allow_instances_access"] = config.allow_instances_access
-        captured["allow_tunnel_access"] = config.allow_tunnel_access
         return {"evaluation_id": "eval-123"}
 
     monkeypatch.setattr(
@@ -139,9 +143,6 @@ def test_eval_run_hosted_invokes_hosted_runner(monkeypatch):
     assert captured["inference_model"] == "openai/gpt-4.1-mini"
     assert captured["num_examples"] == 5
     assert captured["rollouts_per_example"] == 3
-    assert captured["allow_sandbox_access"] is True
-    assert captured["allow_instances_access"] is False
-    assert captured["allow_tunnel_access"] is True
     assert "Hosted evaluation started" in result.output
     assert "prime eval logs eval-123 -f" in result.output
 
@@ -288,6 +289,40 @@ def test_eval_run_hosted_passes_allow_tunnel_access(monkeypatch):
     assert captured["allow_tunnel_access"] is True
 
 
+def test_eval_run_hosted_defaults_to_sandbox_and_tunnel_access(monkeypatch):
+    captured = {}
+
+    monkeypatch.setattr(
+        "prime_cli.commands.evals._resolve_hosted_environment",
+        lambda environment, env_dir_path=None, env_path=None: (
+            "primeintellect/gsm8k",
+            "env-123",
+        ),
+    )
+
+    def fake_run_hosted_evaluation(config, environment_ids=None):
+        captured["allow_sandbox_access"] = config.allow_sandbox_access
+        captured["allow_tunnel_access"] = config.allow_tunnel_access
+        return {"evaluation_id": "eval-123"}
+
+    monkeypatch.setattr(
+        "prime_cli.commands.evals._create_hosted_evaluations",
+        fake_run_hosted_evaluation,
+    )
+
+    result = runner.invoke(
+        app,
+        ["eval", "run", "primeintellect/gsm8k", "--hosted"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured == {
+        "allow_sandbox_access": True,
+        "allow_tunnel_access": True,
+    }
+
+
 def test_eval_run_hosted_passes_extra_env_kwargs(monkeypatch):
     captured = {}
 
@@ -359,9 +394,71 @@ def test_create_hosted_evaluation_adds_team_id_to_payload(monkeypatch):
     assert result["evaluation_id"] == "eval-123"
     assert captured["endpoint"] == "/hosted-evaluations"
     assert captured["json"]["team_id"] == "team-123"
-    assert captured["json"]["eval_config"]["allow_sandbox_access"] is True
-    assert captured["json"]["eval_config"]["allow_instances_access"] is False
-    assert captured["json"]["eval_config"]["allow_tunnel_access"] is True
+
+
+def test_create_hosted_evaluation_adds_project_id_to_payload(monkeypatch):
+    captured = {}
+
+    class DummyConfig:
+        team_id = None
+
+    class DummyAPIClient:
+        def __init__(self):
+            self.config = DummyConfig()
+
+        def post(self, endpoint, json=None):
+            captured["endpoint"] = endpoint
+            captured["json"] = json
+            return {"evaluation_id": "eval-123"}
+
+    monkeypatch.setattr("prime_cli.commands.evals.APIClient", DummyAPIClient)
+
+    result = _create_hosted_evaluations(
+        HostedEvalConfig(
+            environment_id="env-123",
+            inference_model="openai/gpt-4.1-mini",
+            num_examples=5,
+            rollouts_per_example=3,
+        ),
+        environment_ids=["env-123"],
+        project_id="project-123",
+    )
+
+    assert result["evaluation_id"] == "eval-123"
+    assert captured["endpoint"] == "/hosted-evaluations"
+    assert captured["json"]["project_id"] == "project-123"
+    assert "projectId" not in captured["json"]
+
+
+def test_create_hosted_evaluation_preserves_empty_project_id_payload(monkeypatch):
+    captured = {}
+
+    class DummyConfig:
+        team_id = None
+
+    class DummyAPIClient:
+        def __init__(self):
+            self.config = DummyConfig()
+
+        def post(self, endpoint, json=None):
+            captured["endpoint"] = endpoint
+            captured["json"] = json
+            return {"evaluation_id": "eval-123"}
+
+    monkeypatch.setattr("prime_cli.commands.evals.APIClient", DummyAPIClient)
+
+    _create_hosted_evaluations(
+        HostedEvalConfig(
+            environment_id="env-123",
+            inference_model="openai/gpt-4.1-mini",
+            num_examples=5,
+            rollouts_per_example=3,
+        ),
+        project_id="",
+    )
+
+    assert captured["endpoint"] == "/hosted-evaluations"
+    assert captured["json"]["project_id"] == ""
 
 
 def test_create_hosted_evaluation_includes_sampling_args_in_payload(monkeypatch):
@@ -1312,11 +1409,20 @@ env_id = "gsm8k"
 """.strip()
     )
 
-    def fake_run_eval_passthrough(environment, passthrough_args, skip_upload, env_path):
+    def fake_run_eval_passthrough(
+        environment,
+        passthrough_args,
+        skip_upload,
+        env_path,
+        project_id=None,
+        use_active_project=True,
+    ):
         captured["environment"] = environment
         captured["passthrough_args"] = passthrough_args
         captured["skip_upload"] = skip_upload
         captured["env_path"] = env_path
+        captured["project_id"] = project_id
+        captured["use_active_project"] = use_active_project
 
     monkeypatch.setattr("prime_cli.commands.evals.run_eval_passthrough", fake_run_eval_passthrough)
 
@@ -1332,17 +1438,28 @@ env_id = "gsm8k"
         "passthrough_args": [],
         "skip_upload": True,
         "env_path": None,
+        "project_id": None,
+        "use_active_project": False,
     }
 
 
 def test_eval_run_local_sampling_args_passthrough(monkeypatch):
     captured = {}
 
-    def fake_run_eval_passthrough(environment, passthrough_args, skip_upload, env_path):
+    def fake_run_eval_passthrough(
+        environment,
+        passthrough_args,
+        skip_upload,
+        env_path,
+        project_id=None,
+        use_active_project=True,
+    ):
         captured["environment"] = environment
         captured["passthrough_args"] = passthrough_args
         captured["skip_upload"] = skip_upload
         captured["env_path"] = env_path
+        captured["project_id"] = project_id
+        captured["use_active_project"] = use_active_project
 
     monkeypatch.setattr("prime_cli.commands.evals.run_eval_passthrough", fake_run_eval_passthrough)
 
@@ -1358,6 +1475,135 @@ def test_eval_run_local_sampling_args_passthrough(monkeypatch):
         "passthrough_args": ["--sampling-args", '{"temperature":0.2}'],
         "skip_upload": False,
         "env_path": None,
+        "project_id": None,
+        "use_active_project": False,
+    }
+
+
+def test_eval_run_local_no_project_disables_active_project(monkeypatch):
+    captured = {}
+
+    def fake_run_eval_passthrough(
+        environment,
+        passthrough_args,
+        skip_upload,
+        env_path,
+        project_id=None,
+        use_active_project=True,
+    ):
+        captured["environment"] = environment
+        captured["passthrough_args"] = passthrough_args
+        captured["skip_upload"] = skip_upload
+        captured["env_path"] = env_path
+        captured["project_id"] = project_id
+        captured["use_active_project"] = use_active_project
+
+    monkeypatch.setattr("prime_cli.commands.evals.run_eval_passthrough", fake_run_eval_passthrough)
+
+    result = runner.invoke(
+        app,
+        ["eval", "run", "gsm8k", "--no-project"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured == {
+        "environment": "gsm8k",
+        "passthrough_args": [],
+        "skip_upload": False,
+        "env_path": None,
+        "project_id": None,
+        "use_active_project": False,
+    }
+
+
+def test_eval_run_local_skip_upload_skips_active_project_lookup(monkeypatch):
+    captured = {}
+    resolve_calls = []
+
+    def fake_resolve_project_id(project, *, no_project=False, use_active_project=False):
+        resolve_calls.append((project, no_project, use_active_project))
+        if use_active_project:
+            raise AssertionError("skip-upload should not resolve the active project")
+        return None
+
+    def fake_run_eval_passthrough(
+        environment,
+        passthrough_args,
+        skip_upload,
+        env_path,
+        project_id=None,
+        use_active_project=True,
+    ):
+        captured["environment"] = environment
+        captured["passthrough_args"] = passthrough_args
+        captured["skip_upload"] = skip_upload
+        captured["env_path"] = env_path
+        captured["project_id"] = project_id
+        captured["use_active_project"] = use_active_project
+
+    monkeypatch.setattr("prime_cli.commands.evals.resolve_project_id", fake_resolve_project_id)
+    monkeypatch.setattr("prime_cli.commands.evals.run_eval_passthrough", fake_run_eval_passthrough)
+
+    result = runner.invoke(
+        app,
+        ["eval", "run", "gsm8k", "--skip-upload"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert resolve_calls == [(None, False, False)]
+    assert captured == {
+        "environment": "gsm8k",
+        "passthrough_args": [],
+        "skip_upload": True,
+        "env_path": None,
+        "project_id": None,
+        "use_active_project": False,
+    }
+
+
+def test_eval_run_local_passes_resolved_project_without_active_relookup(monkeypatch):
+    captured = {}
+    resolve_calls = []
+
+    def fake_resolve_project_id(project, *, no_project=False, use_active_project=False):
+        resolve_calls.append((project, no_project, use_active_project))
+        return "project-123"
+
+    def fake_run_eval_passthrough(
+        environment,
+        passthrough_args,
+        skip_upload,
+        env_path,
+        project_id=None,
+        use_active_project=True,
+    ):
+        captured["environment"] = environment
+        captured["passthrough_args"] = passthrough_args
+        captured["skip_upload"] = skip_upload
+        captured["env_path"] = env_path
+        captured["project_id"] = project_id
+        captured["use_active_project"] = use_active_project
+
+    monkeypatch.setattr("prime_cli.commands.evals.resolve_project_id", fake_resolve_project_id)
+    monkeypatch.setattr("prime_cli.commands.evals.run_eval_passthrough", fake_run_eval_passthrough)
+
+    result = runner.invoke(
+        app,
+        ["eval", "run", "gsm8k"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert resolve_calls == [(None, False, True)]
+    assert captured == {
+        "environment": "gsm8k",
+        "passthrough_args": [],
+        "skip_upload": False,
+        "env_path": None,
+        "project_id": "project-123",
+        "use_active_project": False,
     }
 
 
@@ -1416,6 +1662,41 @@ def test_eval_run_hosted_accepts_negative_num_examples_value(monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert captured["num_examples"] == -1
+
+
+def test_eval_run_hosted_forwards_resolved_project_id(monkeypatch):
+    captured = {}
+
+    monkeypatch.setattr(
+        "prime_cli.commands.evals.resolve_project_id",
+        lambda project, no_project=False, use_active_project=False: "project-123",
+    )
+    monkeypatch.setattr(
+        "prime_cli.commands.evals._resolve_hosted_environment",
+        lambda environment, env_dir_path=None, env_path=None: ("primeintellect/gsm8k", "env-123"),
+    )
+
+    def fake_create_hosted_evaluations(config, environment_ids=None, project_id=None):
+        captured["environment_ids"] = environment_ids
+        captured["project_id"] = project_id
+        return {"evaluation_id": "eval-123"}
+
+    monkeypatch.setattr(
+        "prime_cli.commands.evals._create_hosted_evaluations",
+        fake_create_hosted_evaluations,
+    )
+
+    result = runner.invoke(
+        app,
+        ["eval", "run", "gsm8k", "--hosted", "--project", "project-slug"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured == {
+        "environment_ids": ["env-123"],
+        "project_id": "project-123",
+    }
 
 
 def test_eval_run_rejects_hosted_only_flags_without_hosted():

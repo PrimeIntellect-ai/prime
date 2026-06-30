@@ -10,6 +10,7 @@ from prime_cli.core import APIClient
 from .display import get_eval_viewer_url
 from .env_metadata import find_environment_metadata
 from .plain import get_console
+from .projects import resolve_project_id
 
 console = get_console()
 
@@ -57,6 +58,8 @@ def push_eval_results_to_hub(
     job_id: str,
     env_path: Optional[Path] = None,
     upstream_slug: Optional[str] = None,
+    project_id: Optional[str] = None,
+    use_active_project: bool = True,
 ) -> None:
     """
     Push evaluation results to Prime Evals Hub after `prime eval run` completes.
@@ -191,6 +194,12 @@ def push_eval_results_to_hub(
     eval_name = f"{env_name}--{model}--{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
     evals_client = EvalsClient(api_client)
+    if project_id is None and use_active_project:
+        project_id = resolve_project_id(
+            None,
+            client=api_client,
+            use_active_project=True,
+        )
 
     create_response = evals_client.create_evaluation(
         name=eval_name,
@@ -201,6 +210,7 @@ def push_eval_results_to_hub(
         task_type=metadata.get("task_type"),
         metadata=eval_metadata,
         metrics=metrics,
+        project_id=project_id,
         is_public=False,  # Private by default - only visible to the user who created it
     )
 

@@ -5,15 +5,110 @@ import typer
 from prime_cli.commands.evals import (
     _has_eval_files,
     _load_eval_directory,
-    _push_samples_with_progress,
     _push_single_eval,
     _validate_eval_path,
 )
 from prime_cli.main import app
+from prime_cli.utils.eval_push import push_eval_results_to_hub
 from typer.testing import CliRunner
 from typing_extensions import cast
 
 runner = CliRunner()
+
+
+def test_push_eval_results_no_project_does_not_resolve_active_project(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    output_dir = tmp_path / "outputs" / "evals" / "simpleqa--openai--gpt-4" / "20260520_120000"
+    output_dir.mkdir(parents=True)
+    (output_dir / "metadata.json").write_text(json.dumps({"task_type": "qa"}))
+    (output_dir / "results.jsonl").write_text("")
+
+    captured = {}
+
+    class DummyAPIClient:
+        def get(self, _endpoint):
+            return {"data": {"id": "env-123"}}
+
+    class DummyEvalsClient:
+        def __init__(self, _api_client):
+            pass
+
+        def create_evaluation(self, **kwargs):
+            captured.update(kwargs)
+            return {"evaluation_id": "eval-123"}
+
+        def finalize_evaluation(self, evaluation_id, metrics=None):
+            captured["finalized_evaluation_id"] = evaluation_id
+            captured["finalized_metrics"] = metrics
+
+    monkeypatch.setattr("prime_cli.utils.eval_push.APIClient", DummyAPIClient)
+    monkeypatch.setattr("prime_cli.utils.eval_push.EvalsClient", DummyEvalsClient)
+    monkeypatch.setattr(
+        "prime_cli.utils.eval_push.resolve_project_id",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("should not resolve active project")
+        ),
+    )
+
+    push_eval_results_to_hub(
+        env_name="simpleqa",
+        model="openai/gpt-4",
+        job_id="job-123",
+        upstream_slug="owner/simpleqa",
+        use_active_project=False,
+    )
+
+    assert captured["project_id"] is None
+    assert captured["finalized_evaluation_id"] == "eval-123"
+
+
+def test_push_eval_results_uses_active_project_when_enabled(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    output_dir = tmp_path / "outputs" / "evals" / "simpleqa--openai--gpt-4" / "20260520_120000"
+    output_dir.mkdir(parents=True)
+    (output_dir / "metadata.json").write_text(json.dumps({"task_type": "qa"}))
+    (output_dir / "results.jsonl").write_text("")
+
+    captured = {}
+
+    class DummyAPIClient:
+        def get(self, _endpoint):
+            return {"data": {"id": "env-123"}}
+
+    class DummyEvalsClient:
+        def __init__(self, _api_client):
+            pass
+
+        def create_evaluation(self, **kwargs):
+            captured.update(kwargs)
+            return {"evaluation_id": "eval-123"}
+
+        def finalize_evaluation(self, evaluation_id, metrics=None):
+            captured["finalized_evaluation_id"] = evaluation_id
+            captured["finalized_metrics"] = metrics
+
+    def fake_resolve_project_id(project_ref, *, client=None, use_active_project=False):
+        captured["resolve_project_ref"] = project_ref
+        captured["resolve_client"] = client
+        captured["use_active_project"] = use_active_project
+        return "project-123"
+
+    monkeypatch.setattr("prime_cli.utils.eval_push.APIClient", DummyAPIClient)
+    monkeypatch.setattr("prime_cli.utils.eval_push.EvalsClient", DummyEvalsClient)
+    monkeypatch.setattr("prime_cli.utils.eval_push.resolve_project_id", fake_resolve_project_id)
+
+    push_eval_results_to_hub(
+        env_name="simpleqa",
+        model="openai/gpt-4",
+        job_id="job-123",
+        upstream_slug="owner/simpleqa",
+        use_active_project=True,
+    )
+
+    assert captured["resolve_project_ref"] is None
+    assert captured["use_active_project"] is True
+    assert isinstance(captured["resolve_client"], DummyAPIClient)
+    assert captured["project_id"] == "project-123"
 
 
 class TestHasEvalFiles:
@@ -151,7 +246,16 @@ def test_push_eval_forwards_name_override(monkeypatch, tmp_path):
 
     captured = {}
 
-    def fake_push_single_eval(config_path, env_slug, run_id, eval_id, is_public, name):
+    def fake_push_single_eval(
+        config_path,
+        env_slug,
+        run_id,
+        eval_id,
+        is_public,
+        name,
+        project_id=None,
+        clear_project=False,
+    ):
         captured.update(
             {
                 "config_path": config_path,
@@ -160,6 +264,8 @@ def test_push_eval_forwards_name_override(monkeypatch, tmp_path):
                 "eval_id": eval_id,
                 "is_public": is_public,
                 "name": name,
+                "project_id": project_id,
+                "clear_project": clear_project,
             }
         )
         return "eval-123"
@@ -183,104 +289,163 @@ def test_push_eval_forwards_name_override(monkeypatch, tmp_path):
         "eval_id": "eval-123",
         "is_public": False,
         "name": "custom eval",
+        "project_id": None,
+        "clear_project": False,
     }
 
 
-def test_push_samples_with_progress_supports_old_prime_evals_client(monkeypatch):
-    calls = []
-
-    class DummyClient:
-        def push_samples(self, evaluation_id, samples):
-            calls.append((evaluation_id, samples))
-
-    class DummyConsole:
-        is_terminal = True
-
-    class UnexpectedProgress:
-        def __init__(self, *_args, **_kwargs):
-            raise AssertionError("old prime-evals clients should skip progress callbacks")
-
-    monkeypatch.setattr("prime_cli.commands.evals.console", DummyConsole())
-    monkeypatch.setattr("prime_cli.commands.evals.Progress", UnexpectedProgress)
-
-    samples = [{"example_id": "1"}]
-    _push_samples_with_progress(DummyClient(), "eval-123", samples)
-
-    assert calls == [("eval-123", samples)]
-
-
-def test_push_eval_cli_supports_old_prime_evals_client(monkeypatch, tmp_path):
+def test_push_eval_id_no_project_clears_existing_project(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
     captured = {}
 
-    class TerminalConsole:
-        is_terminal = True
+    def fake_push_single_eval(
+        config_path,
+        env_slug,
+        run_id,
+        eval_id,
+        is_public,
+        name,
+        project_id=None,
+        clear_project=False,
+    ):
+        captured.update(
+            {
+                "config_path": config_path,
+                "env_slug": env_slug,
+                "run_id": run_id,
+                "eval_id": eval_id,
+                "is_public": is_public,
+                "name": name,
+                "project_id": project_id,
+                "clear_project": clear_project,
+            }
+        )
+        return "eval-123"
 
-        def print(self, *_args, **_kwargs):
-            return None
+    monkeypatch.setattr("prime_cli.commands.evals._push_single_eval", fake_push_single_eval)
 
-    class OldEvalsClient:
-        def __init__(self, _api_client):
-            return None
-
-        def create_evaluation(self, **kwargs):
-            captured["create"] = kwargs
-            return {"evaluation_id": "eval-123"}
-
-        def push_samples(self, evaluation_id, samples):
-            captured["push"] = (evaluation_id, samples)
-
-        def finalize_evaluation(self, evaluation_id, metrics=None):
-            captured["finalize"] = (evaluation_id, metrics)
-            return {}
-
-    monkeypatch.setattr("prime_cli.commands.evals.console", TerminalConsole())
-    monkeypatch.setattr("prime_cli.commands.evals.APIClient", lambda: object())
-    monkeypatch.setattr("prime_cli.commands.evals.EvalsClient", OldEvalsClient)
-
-    (tmp_path / "metadata.json").write_text(
-        json.dumps({"env": "owner/gsm8k", "model": "gpt-4", "avg_reward": 1.0})
-    )
-    (tmp_path / "results.jsonl").write_text(json.dumps({"id": 1, "reward": 1.0}) + "\n")
+    (tmp_path / "metadata.json").write_text(json.dumps({"env": "gsm8k", "model": "gpt-4"}))
+    (tmp_path / "results.jsonl").write_text("")
 
     result = runner.invoke(
         app,
-        ["eval", "push", "."],
+        ["eval", "push", ".", "--eval-id", "eval-123", "--no-project"],
         env={"PRIME_DISABLE_VERSION_CHECK": "1"},
     )
 
     assert result.exit_code == 0, result.output
-    assert captured["create"]["environments"] == [{"slug": "owner/gsm8k"}]
-    assert captured["push"] == ("eval-123", [{"id": 1, "reward": 1.0, "example_id": 1}])
-    assert captured["finalize"] == ("eval-123", {"reward": 1.0})
+    assert captured == {
+        "config_path": ".",
+        "env_slug": None,
+        "run_id": None,
+        "eval_id": "eval-123",
+        "is_public": False,
+        "name": None,
+        "project_id": None,
+        "clear_project": True,
+    }
 
 
-def test_push_samples_with_progress_skips_callback_when_signature_is_uninspectable(monkeypatch):
-    calls = []
-
-    class DummyClient:
-        def push_samples(self, evaluation_id, samples):
-            calls.append((evaluation_id, samples))
-
-    class DummyConsole:
-        is_terminal = True
-
-    class UnexpectedProgress:
-        def __init__(self, *_args, **_kwargs):
-            raise AssertionError("uninspectable clients should skip progress callbacks")
-
-    monkeypatch.setattr("prime_cli.commands.evals.console", DummyConsole())
-    monkeypatch.setattr("prime_cli.commands.evals.Progress", UnexpectedProgress)
+def test_push_eval_forwards_resolved_project_id(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
     monkeypatch.setattr(
-        "prime_cli.commands.evals.inspect.signature",
-        lambda _callable: (_ for _ in ()).throw(ValueError("no signature")),
+        "prime_cli.commands.evals.resolve_project_id",
+        lambda project, no_project=False, use_active_project=False: "project-123",
     )
 
-    samples = [{"example_id": "1"}]
-    _push_samples_with_progress(DummyClient(), "eval-123", samples)
+    captured = {}
 
-    assert calls == [("eval-123", samples)]
+    def fake_push_single_eval(
+        config_path,
+        env_slug,
+        run_id,
+        eval_id,
+        is_public,
+        name,
+        project_id=None,
+        clear_project=False,
+    ):
+        captured.update(
+            {
+                "config_path": config_path,
+                "env_slug": env_slug,
+                "run_id": run_id,
+                "eval_id": eval_id,
+                "is_public": is_public,
+                "name": name,
+                "project_id": project_id,
+                "clear_project": clear_project,
+            }
+        )
+        return "eval-123"
+
+    monkeypatch.setattr("prime_cli.commands.evals._push_single_eval", fake_push_single_eval)
+
+    (tmp_path / "metadata.json").write_text(json.dumps({"env": "gsm8k", "model": "gpt-4"}))
+    (tmp_path / "results.jsonl").write_text("")
+
+    result = runner.invoke(
+        app,
+        ["eval", "push", ".", "--project", "project-slug"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured == {
+        "config_path": ".",
+        "env_slug": None,
+        "run_id": None,
+        "eval_id": None,
+        "is_public": False,
+        "name": None,
+        "project_id": "project-123",
+        "clear_project": False,
+    }
+
+
+def test_push_eval_id_does_not_resolve_active_project(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+    resolve_calls = []
+
+    def fake_resolve_project_id(project, no_project=False, use_active_project=False):
+        resolve_calls.append((project, no_project, use_active_project))
+        return "active-project" if use_active_project else None
+
+    captured = {}
+
+    def fake_push_single_eval(
+        config_path,
+        env_slug,
+        run_id,
+        eval_id,
+        is_public,
+        name,
+        project_id=None,
+        clear_project=False,
+    ):
+        captured["eval_id"] = eval_id
+        captured["project_id"] = project_id
+        captured["clear_project"] = clear_project
+        return "eval-123"
+
+    monkeypatch.setattr("prime_cli.commands.evals.resolve_project_id", fake_resolve_project_id)
+    monkeypatch.setattr("prime_cli.commands.evals._push_single_eval", fake_push_single_eval)
+
+    (tmp_path / "metadata.json").write_text(json.dumps({"env": "gsm8k", "model": "gpt-4"}))
+    (tmp_path / "results.jsonl").write_text("")
+
+    result = runner.invoke(
+        app,
+        ["eval", "push", ".", "--eval-id", "eval-123"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert resolve_calls == [(None, False, False)]
+    assert captured == {"eval_id": "eval-123", "project_id": None, "clear_project": False}
 
 
 class TestPushSingleEval:
@@ -410,6 +575,42 @@ class TestPushSingleEval:
         assert eval_id == "eval-123"
         assert captured["checked_evaluation_id"] == "eval-123"
         assert captured["name"] == "explicit override"
+
+    def test_update_evaluation_can_clear_project(self, tmp_path, monkeypatch):
+        metadata = {"env": "gsm8k", "model": "gpt-4"}
+        (tmp_path / "metadata.json").write_text(json.dumps(metadata))
+        (tmp_path / "results.jsonl").write_text("")
+
+        captured = {}
+
+        class DummyEvalsClient:
+            def __init__(self, _api_client):
+                pass
+
+            def get_evaluation(self, evaluation_id):
+                return {"evaluation_id": evaluation_id}
+
+            def update_evaluation(self, **kwargs):
+                captured.update(kwargs)
+
+            def finalize_evaluation(self, evaluation_id, metrics=None):
+                captured["finalized_evaluation_id"] = evaluation_id
+                captured["finalized_metrics"] = metrics
+
+        monkeypatch.setattr("prime_cli.commands.evals.APIClient", lambda: object())
+        monkeypatch.setattr("prime_cli.commands.evals.EvalsClient", DummyEvalsClient)
+
+        eval_id = _push_single_eval(
+            str(tmp_path),
+            None,
+            None,
+            "eval-123",
+            clear_project=True,
+        )
+
+        assert eval_id == "eval-123"
+        assert captured["project_id"] is None
+        assert captured["clear_project"] is True
 
     def test_push_single_eval_prints_returned_viewer_url(self, tmp_path, monkeypatch, capsys):
         metadata = {"env": "owner/gsm8k", "model": "gpt-4"}

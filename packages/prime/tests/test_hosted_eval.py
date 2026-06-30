@@ -795,6 +795,31 @@ harness = { id = "default" }
     assert loaded["rollouts_per_example"] == 2
 
 
+def test_hosted_eval_config_accepts_top_level_v1_taskset_and_harness(tmp_path):
+    config_path = tmp_path / "eval.toml"
+    config_path.write_text(
+        """
+model = "openai/gpt-4.1-mini"
+taskset = { id = "gsm8k-v1", split = "test" }
+harness = { id = "default" }
+
+[[eval]]
+num_examples = 7
+rollouts_per_example = 2
+""".strip()
+    )
+
+    loaded = _load_hosted_eval_configs(str(config_path))[0]
+
+    assert "env_id" not in loaded
+    assert loaded["environment"] == {
+        "taskset": {"id": "gsm8k-v1", "split": "test"},
+        "harness": {"id": "default"},
+    }
+    assert loaded["num_examples"] == 7
+    assert loaded["rollouts_per_example"] == 2
+
+
 def test_eval_run_hosted_supports_v1_eval_toml(monkeypatch, tmp_path):
     captured = {}
     config_path = tmp_path / "eval.toml"

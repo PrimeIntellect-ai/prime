@@ -575,7 +575,8 @@ def _load_hosted_eval_configs(config_path_str: str) -> list[dict[str, Any]]:
                 f"Config file uses [eval] but should use [[eval]] (double brackets) "
                 f"for array of tables: {config_path}"
             )
-        uses_v1_selector = any(
+        has_global_v1_selector = "taskset" in raw_config or "harness" in raw_config
+        uses_v1_selector = has_global_v1_selector or any(
             isinstance(eval_config, dict)
             and ("taskset" in eval_config or "harness" in eval_config)
             for eval_config in eval_list

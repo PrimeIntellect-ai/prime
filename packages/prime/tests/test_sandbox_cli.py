@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from prime_cli.commands import sandbox as sandbox_cmd
 from prime_cli.commands.sandbox import _format_sandbox_expiry
 from prime_cli.main import app
 from prime_cli.utils import strip_ansi
@@ -168,6 +169,118 @@ def test_sandbox_create_accepts_region(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "Successfully created sandbox sbx-eu-west" in output
     assert "Region: eu-west" in output
     assert captured["request"].region == "eu-west"
+
+
+def test_sandbox_create_forwards_allowed_domains(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PRIME_API_KEY", "dummy")
+    monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
+
+    captured: dict[str, Any] = {}
+
+    def mock_create(self: Any, request: Any) -> Any:
+        captured["request"] = request
+        return SimpleNamespace(id="sbx-allowed-domains")
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.create", mock_create)
+
+    result = runner.invoke(
+        app,
+        [
+            "sandbox",
+            "create",
+            "python:3.11-slim",
+            "--no-network-access",
+            "--allowed-domain",
+            "api.github.com",
+            "--allowed-domain",
+            "*.pypi.org",
+            "--yes",
+        ],
+    )
+
+    output = strip_ansi(result.output)
+    assert result.exit_code == 0, f"Failed: {result.output}"
+    assert "Allowed Domains: api.github.com, *.pypi.org" in output
+    assert captured["request"].network_access is False
+    assert captured["request"].allowed_domains == ["api.github.com", "*.pypi.org"]
+
+
+def test_sandbox_create_forwards_blocked_domains(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PRIME_API_KEY", "dummy")
+    monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
+
+    captured: dict[str, Any] = {}
+
+    def mock_create(self: Any, request: Any) -> Any:
+        captured["request"] = request
+        return SimpleNamespace(id="sbx-blocked-domains")
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.create", mock_create)
+
+    result = runner.invoke(
+        app,
+        [
+            "sandbox",
+            "create",
+            "python:3.11-slim",
+            "--blocked-domain",
+            "github.com",
+            "--blocked-domain",
+            "*.tracker.test",
+            "--yes",
+        ],
+    )
+
+    output = strip_ansi(result.output)
+    assert result.exit_code == 0, f"Failed: {result.output}"
+    assert "Blocked Domains: github.com, *.tracker.test" in output
+    assert captured["request"].network_access is True
+    assert captured["request"].blocked_domains == ["github.com", "*.tracker.test"]
+
+
+@pytest.mark.parametrize(
+    ("flag_args", "missing_field", "unsupported_flag"),
+    [
+        (
+            ["--no-network-access", "--allowed-domain", "api.github.com"],
+            "allowed_domains",
+            "--allowed-domain",
+        ),
+        (["--blocked-domain", "github.com"], "blocked_domains", "--blocked-domain"),
+    ],
+)
+def test_sandbox_create_domain_flags_require_sdk_field(
+    monkeypatch: pytest.MonkeyPatch,
+    flag_args: list[str],
+    missing_field: str,
+    unsupported_flag: str,
+) -> None:
+    monkeypatch.setenv("PRIME_API_KEY", "dummy")
+    monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
+
+    request_fields = dict(sandbox_cmd.CreateSandboxRequest.model_fields)
+    request_fields.pop(missing_field, None)
+    monkeypatch.setattr(sandbox_cmd.CreateSandboxRequest, "model_fields", request_fields)
+
+    called = False
+
+    def mock_create(self: Any, request: Any) -> Any:
+        nonlocal called
+        called = True
+        return SimpleNamespace(id="sbx-should-not-create")
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.create", mock_create)
+
+    result = runner.invoke(
+        app,
+        ["sandbox", "create", "python:3.11-slim", *flag_args, "--yes"],
+    )
+
+    output = strip_ansi(result.output)
+    assert result.exit_code == 1
+    assert f"does not support {unsupported_flag}" in output
+    assert "Sandbox Configuration:" not in output
+    assert called is False
 
 
 def test_sandbox_create_requires_gpu_type(monkeypatch: pytest.MonkeyPatch) -> None:

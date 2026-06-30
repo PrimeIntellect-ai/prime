@@ -165,6 +165,8 @@ def _format_sandbox_for_details(sandbox: Sandbox) -> Dict[str, Any]:
         "gpu_type": getattr(sandbox, "gpu_type", None),
         "vm": sandbox.vm,
         "network_access": sandbox.network_access,
+        "allowed_domains": getattr(sandbox, "allowed_domains", []) or [],
+        "blocked_domains": getattr(sandbox, "blocked_domains", []) or [],
         "timeout_minutes": sandbox.timeout_minutes,
         # Read with getattr so an older installed prime-sandboxes wheel
         # (without these fields) still renders the details view instead of
@@ -413,6 +415,10 @@ def get(
                 style="green" if sandbox_data["network_access"] else "yellow",
             )
             table.add_row("Network Access", network_display)
+            if sandbox_data.get("allowed_domains"):
+                table.add_row("Allowed Domains", ", ".join(sandbox_data["allowed_domains"]))
+            if sandbox_data.get("blocked_domains"):
+                table.add_row("Blocked Domains", ", ".join(sandbox_data["blocked_domains"]))
             table.add_row("Timeout (minutes)", str(sandbox_data["timeout_minutes"]))
             if sandbox_data.get("idle_timeout_minutes") is not None:
                 table.add_row("Idle Timeout (minutes)", str(sandbox_data["idle_timeout_minutes"]))
@@ -502,6 +508,24 @@ def create(
         True,
         "--network-access/--no-network-access",
         help="Allow outbound internet access (enabled by default)",
+    ),
+    allowed_domains: Optional[List[str]] = typer.Option(
+        None,
+        "--allowed-domain",
+        help=(
+            "Egress domain allowlist for a restricted sandbox. "
+            "Wildcards like '*.example.com' are allowed. Requires "
+            "--no-network-access. Can be specified multiple times."
+        ),
+    ),
+    blocked_domains: Optional[List[str]] = typer.Option(
+        None,
+        "--blocked-domain",
+        help=(
+            "Egress domain blocklist for an unrestricted sandbox. "
+            "Wildcards like '*.example.com' are allowed. Requires "
+            "--network-access (the default). Can be specified multiple times."
+        ),
     ),
     timeout_minutes: int = typer.Option(60, help="Timeout in minutes"),
     idle_timeout_minutes: Optional[int] = typer.Option(
@@ -600,6 +624,28 @@ def create(
             )
             raise typer.Exit(1)
 
+        if allowed_domains:
+            if network_access:
+                console.print(
+                    "[red]--allowed-domain requires --no-network-access.[/red] "
+                    "It is an egress allowlist for restricted sandboxes."
+                )
+                raise typer.Exit(1)
+            if vm:
+                console.print("[red]--allowed-domain is not supported for VM sandboxes.[/red]")
+                raise typer.Exit(1)
+
+        if blocked_domains:
+            if not network_access:
+                console.print(
+                    "[red]--blocked-domain requires --network-access.[/red] "
+                    "It is an egress blocklist for unrestricted sandboxes."
+                )
+                raise typer.Exit(1)
+            if vm:
+                console.print("[red]--blocked-domain is not supported for VM sandboxes.[/red]")
+                raise typer.Exit(1)
+
         if idle_timeout_minutes is not None:
             if idle_timeout_minutes < 1:
                 console.print("[red]--idle-timeout-minutes must be at least 1.[/red]")
@@ -638,13 +684,32 @@ def create(
             suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=4))
             name = f"{base_name}-{suffix}"
 
-        # Only forward idle_timeout_minutes if the installed prime-sandboxes
-        # SDK actually defines the field; older wheels would silently drop it
-        # via Pydantic's extra="ignore" default, hiding the misconfiguration
-        # from the user. SDK version floor is bumped in a follow-up release PR.
+        # Only forward fields if the installed prime-sandboxes SDK actually
+        # defines them
         request_kwargs: Dict[str, Any] = {}
+        request_model_fields = CreateSandboxRequest.model_fields
+        if allowed_domains:
+            if "allowed_domains" not in request_model_fields:
+                console.print(
+                    "[red]Installed prime-sandboxes SDK does not support "
+                    "--allowed-domain.[/red] Upgrade prime-sandboxes before "
+                    "using sandbox egress allowlists."
+                )
+                raise typer.Exit(1)
+        if blocked_domains:
+            if "blocked_domains" not in request_model_fields:
+                console.print(
+                    "[red]Installed prime-sandboxes SDK does not support "
+                    "--blocked-domain.[/red] Upgrade prime-sandboxes before "
+                    "using sandbox egress blocklists."
+                )
+                raise typer.Exit(1)
+        if "allowed_domains" in request_model_fields:
+            request_kwargs["allowed_domains"] = allowed_domains if allowed_domains else []
+        if "blocked_domains" in request_model_fields:
+            request_kwargs["blocked_domains"] = blocked_domains if blocked_domains else []
         if idle_timeout_minutes is not None:
-            if "idle_timeout_minutes" in CreateSandboxRequest.model_fields:
+            if "idle_timeout_minutes" in request_model_fields:
                 request_kwargs["idle_timeout_minutes"] = idle_timeout_minutes
             else:
                 console.print(
@@ -687,6 +752,10 @@ def create(
             console.print(f"GPUs: {gpu_type} x{gpu_count}")
         network_status = "[green]Enabled[/green]" if network_access else "[yellow]Disabled[/yellow]"
         console.print(f"Network Access: {network_status}")
+        if request_kwargs.get("allowed_domains"):
+            console.print(f"Allowed Domains: {', '.join(request_kwargs['allowed_domains'])}")
+        if request_kwargs.get("blocked_domains"):
+            console.print(f"Blocked Domains: {', '.join(request_kwargs['blocked_domains'])}")
         console.print(f"Timeout: {timeout_minutes} minutes")
         # Only show the idle timeout in the summary when the SDK actually
         # accepted it; otherwise we'd display a value the backend never sees.

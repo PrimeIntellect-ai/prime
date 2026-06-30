@@ -42,6 +42,8 @@ class Sandbox(BaseModel):
     gpu_type: Optional[str] = Field(None, alias="gpuType")
     vm: bool = False
     network_access: bool = Field(True, alias="networkAccess")
+    allowed_domains: List[str] = Field(default_factory=list, alias="allowedDomains")
+    blocked_domains: List[str] = Field(default_factory=list, alias="blockedDomains")
     status: str
     timeout_minutes: int = Field(..., alias="timeoutMinutes")
     idle_timeout_minutes: Optional[int] = Field(None, alias="idleTimeoutMinutes")
@@ -91,6 +93,8 @@ class CreateSandboxRequest(BaseModel):
     gpu_type: Optional[str] = None
     vm: bool = False
     network_access: bool = True
+    allowed_domains: List[str] = Field(default_factory=list)
+    blocked_domains: List[str] = Field(default_factory=list)
     timeout_minutes: int = 60
     idle_timeout_minutes: Optional[int] = None
     environment_vars: Optional[Dict[str, str]] = None
@@ -117,6 +121,30 @@ class CreateSandboxRequest(BaseModel):
     def validate_guaranteed(self) -> "CreateSandboxRequest":
         if self.guaranteed and self.vm:
             raise ValueError("guaranteed is not supported for VM sandboxes")
+        return self
+
+    @model_validator(mode="after")
+    def validate_allowed_domains(self) -> "CreateSandboxRequest":
+        if self.allowed_domains:
+            if self.network_access:
+                raise ValueError(
+                    "allowed_domains requires network_access=false "
+                    "(it is an egress allowlist for restricted sandboxes)"
+                )
+            if self.vm:
+                raise ValueError("allowed_domains is not supported for VM sandboxes")
+        return self
+
+    @model_validator(mode="after")
+    def validate_blocked_domains(self) -> "CreateSandboxRequest":
+        if self.blocked_domains:
+            if not self.network_access:
+                raise ValueError(
+                    "blocked_domains requires network_access=true "
+                    "(it is an egress blocklist for unrestricted sandboxes)"
+                )
+            if self.vm:
+                raise ValueError("blocked_domains is not supported for VM sandboxes")
         return self
 
     @model_validator(mode="after")

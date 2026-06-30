@@ -143,6 +143,23 @@ def test_create_run_sends_sft_loss_and_teacher_config() -> None:
     }
 
 
+def test_create_run_sends_opd_loss_and_teacher_config() -> None:
+    api_client = FakeAPIClient()
+    client = RLClient(api_client)  # type: ignore[arg-type]
+
+    client.create_run(
+        model_name="openai/gpt-oss-20b",
+        environments=[{"id": "primeintellect/reverse-text"}],
+        loss="opd",
+        teacher={"model": {"name": "openai/gpt-oss-120b"}},
+    )
+
+    assert api_client.posts[0][0] == "/rft/runs"
+    payload = api_client.posts[0][1]
+    assert payload["loss"] == "opd"
+    assert payload["teacher"] == {"model": {"name": "openai/gpt-oss-120b"}}
+
+
 def test_create_run_omits_default_rl_loss() -> None:
     api_client = FakeAPIClient()
     client = RLClient(api_client)  # type: ignore[arg-type]

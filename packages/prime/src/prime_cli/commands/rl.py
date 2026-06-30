@@ -216,7 +216,7 @@ def generate_rl_config_template(environment: str | None = None) -> str:
 
     return f'''\
 model = "Qwen/Qwen3.5-0.8B"
-loss = "rl" # "rl" | "sft"; OPD is not yet supported on hosted runtimes
+loss = "rl" # "rl" | "sft" | "opd"
 max_steps = 100
 
 # env_files = ["secrets.env"] # optional file(s) for secrets
@@ -230,8 +230,9 @@ rollouts_per_example = 8
 # Optional: warm-start from an existing checkpoint
 # checkpoint_id = "..."
 
-# Optional: SFT distillation teacher
-# To use SFT, change loss to "sft" and uncomment this block. Defaults to Prime Inference.
+# Optional: distillation teacher
+# To use SFT or OPD, change the top-level loss and uncomment this block.
+# To use Prime Inference, omit [teacher.client]; it is the default.
 # [teacher]
 # model = "openai/gpt-oss-120b"
 #
@@ -692,13 +693,8 @@ class RLConfig(BaseModel):
             raise ValueError("max_inflight_rollouts must be at least rollouts_per_example")
         if self.loss == "rl" and self.teacher is not None:
             raise ValueError("teacher can only be set when loss is 'sft' or 'opd'")
-        if self.loss == "sft" and self.teacher is None:
-            raise ValueError("teacher is required when loss is 'sft'")
-        if self.loss == "opd":
-            raise ValueError(
-                "loss='opd' is not supported for hosted runs yet; OPD requires "
-                "teacher logprob scoring support in the hosted runtime"
-            )
+        if self.loss in {"sft", "opd"} and self.teacher is None:
+            raise ValueError(f"teacher is required when loss is '{self.loss}'")
         return self
 
 

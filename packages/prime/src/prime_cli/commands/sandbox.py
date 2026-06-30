@@ -684,13 +684,32 @@ def create(
             suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=4))
             name = f"{base_name}-{suffix}"
 
-        # Only forward idle_timeout_minutes if the installed prime-sandboxes
-        # SDK actually defines the field; older wheels would silently drop it
-        # via Pydantic's extra="ignore" default, hiding the misconfiguration
-        # from the user. SDK version floor is bumped in a follow-up release PR.
+        # Only forward fields if the installed prime-sandboxes SDK actually
+        # defines them
         request_kwargs: Dict[str, Any] = {}
+        request_model_fields = CreateSandboxRequest.model_fields
+        if allowed_domains:
+            if "allowed_domains" not in request_model_fields:
+                console.print(
+                    "[red]Installed prime-sandboxes SDK does not support "
+                    "--allowed-domain.[/red] Upgrade prime-sandboxes before "
+                    "using sandbox egress allowlists."
+                )
+                raise typer.Exit(1)
+        if blocked_domains:
+            if "blocked_domains" not in request_model_fields:
+                console.print(
+                    "[red]Installed prime-sandboxes SDK does not support "
+                    "--blocked-domain.[/red] Upgrade prime-sandboxes before "
+                    "using sandbox egress blocklists."
+                )
+                raise typer.Exit(1)
+        if "allowed_domains" in request_model_fields:
+            request_kwargs["allowed_domains"] = allowed_domains if allowed_domains else []
+        if "blocked_domains" in request_model_fields:
+            request_kwargs["blocked_domains"] = blocked_domains if blocked_domains else []
         if idle_timeout_minutes is not None:
-            if "idle_timeout_minutes" in CreateSandboxRequest.model_fields:
+            if "idle_timeout_minutes" in request_model_fields:
                 request_kwargs["idle_timeout_minutes"] = idle_timeout_minutes
             else:
                 console.print(
@@ -709,8 +728,6 @@ def create(
             gpu_type=gpu_type,
             vm=vm,
             network_access=network_access,
-            allowed_domains=allowed_domains if allowed_domains else [],
-            blocked_domains=blocked_domains if blocked_domains else [],
             timeout_minutes=timeout_minutes,
             environment_vars=env_vars if env_vars else None,
             secrets=secrets_vars if secrets_vars else None,
@@ -735,10 +752,10 @@ def create(
             console.print(f"GPUs: {gpu_type} x{gpu_count}")
         network_status = "[green]Enabled[/green]" if network_access else "[yellow]Disabled[/yellow]"
         console.print(f"Network Access: {network_status}")
-        if allowed_domains:
-            console.print(f"Allowed Domains: {', '.join(allowed_domains)}")
-        if blocked_domains:
-            console.print(f"Blocked Domains: {', '.join(blocked_domains)}")
+        if request_kwargs.get("allowed_domains"):
+            console.print(f"Allowed Domains: {', '.join(request_kwargs['allowed_domains'])}")
+        if request_kwargs.get("blocked_domains"):
+            console.print(f"Blocked Domains: {', '.join(request_kwargs['blocked_domains'])}")
         console.print(f"Timeout: {timeout_minutes} minutes")
         # Only show the idle timeout in the summary when the SDK actually
         # accepted it; otherwise we'd display a value the backend never sees.

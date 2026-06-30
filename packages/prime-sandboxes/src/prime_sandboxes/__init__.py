@@ -26,6 +26,7 @@ from .exceptions import (
 from .images import AsyncImageClient, ImageClient
 from .models import (
     AdvancedConfigs,
+    AuthorizeSSHForVMResponse,
     BackgroundJob,
     BackgroundJobStatus,
     BuildImageRequest,
@@ -97,6 +98,7 @@ __all__ = [
     "ExposedPort",
     "ListExposedPortsResponse",
     "SSHSession",
+    "AuthorizeSSHForVMResponse",
     # Exceptions
     "APIError",
     "UnauthorizedError",

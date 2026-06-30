@@ -150,6 +150,7 @@ HOSTED_SUPPORTED_TOML_FIELDS = {
     "env_dir_path",
     "eval_name",
     "extra_env_kwargs",
+    "harness",
     "header",
     "headers",
     "independent_scoring",
@@ -162,6 +163,7 @@ HOSTED_SUPPORTED_TOML_FIELDS = {
     "rollouts_per_example",
     "sampling_args",
     "state_columns",
+    "taskset",
     "temperature",
     "timeout_minutes",
 }
@@ -358,6 +360,51 @@ def _validate_hosted_config_field(
         raise typer.Exit(1)
 
 
+def _format_pydantic_validation_error(exc: Exception) -> str:
+    errors = getattr(exc, "errors", lambda: [])()
+    messages = [
+        str(error.get("msg")).removeprefix("Value error, ")
+        for error in errors
+        if isinstance(error, dict) and error.get("msg")
+    ]
+    return "; ".join(messages) or str(exc)
+
+
+def _build_hosted_v1_environment_config(merged: dict[str, Any]) -> dict[str, Any]:
+    from pydantic import ValidationError as PydanticValidationError
+
+    from .rl import EvalEnvConfig
+
+    _validate_json_object_field(merged, "taskset")
+    _validate_json_object_field(merged, "harness")
+
+    raw_environment = {
+        field_name: merged[field_name]
+        for field_name in ("taskset", "harness")
+        if merged.get(field_name) is not None
+    }
+
+    try:
+        return EvalEnvConfig.model_validate(raw_environment).to_api_dict()
+    except (PydanticValidationError, ValueError) as exc:
+        console.print(
+            "[red]Error:[/red] hosted eval config "
+            + _format_pydantic_validation_error(exc)
+        )
+        raise typer.Exit(1) from exc
+
+
+def _hosted_v1_environment_display_name(
+    environment: dict[str, Any], index: Optional[int] = None
+) -> str:
+    taskset = environment.get("taskset")
+    taskset_id = taskset.get("id") if isinstance(taskset, dict) else None
+    value = environment.get("name") or environment.get("id") or taskset_id
+    if value:
+        return str(value)
+    return f"v1-env-{index}" if index is not None else "v1 environment"
+
+
 def _resolve_hosted_config_model(raw_config: dict[str, Any], config_path: Path) -> str:
     raw_endpoint_id = raw_config.get("endpoint_id")
     raw_model = raw_config.get("model")
@@ -441,9 +488,27 @@ def _validate_single_hosted_eval_config(
         raise typer.Exit(1)
 
     env_id = merged.get("env_id")
-    if type(env_id) is not str or not env_id:
-        console.print("[red]Error:[/red] hosted eval config requires a non-empty `env_id`")
+    has_env_id = env_id is not None
+    has_v1_selector = merged.get("taskset") is not None or merged.get("harness") is not None
+
+    if has_env_id and has_v1_selector:
+        console.print(
+            "[red]Error:[/red] hosted eval config cannot combine `env_id` "
+            "with `taskset` or `harness`"
+        )
         raise typer.Exit(1)
+    if has_env_id:
+        if type(env_id) is not str or not env_id:
+            console.print("[red]Error:[/red] hosted eval config requires a non-empty `env_id`")
+            raise typer.Exit(1)
+    else:
+        if not has_v1_selector:
+            console.print(
+                "[red]Error:[/red] hosted eval config requires either `env_id` "
+                "or `taskset.id`"
+            )
+            raise typer.Exit(1)
+        merged["environment"] = _build_hosted_v1_environment_config(merged)
 
     _validate_json_object_field(merged, "env_args")
     _validate_json_object_field(merged, "sampling_args")
@@ -487,14 +552,87 @@ def _validate_single_hosted_eval_config(
 
 
 def _load_hosted_eval_configs(config_path_str: str) -> list[dict[str, Any]]:
-    from verifiers.utils.eval_utils import load_toml_config
+    from verifiers.utils.env_config_utils import normalize_env_config_sections
+    from verifiers.utils.eval_utils import load_toml_config, normalize_env_id_alias
+    from verifiers.utils.import_utils import load_toml
+
+    def normalize_hosted_eval_sections(raw: dict[str, Any]) -> dict[str, Any]:
+        if raw.get("taskset") is not None or raw.get("harness") is not None:
+            return dict(raw)
+        return normalize_env_config_sections(raw)
 
     config_path = Path(config_path_str)
     try:
-        loaded_configs = load_toml_config(
-            config_path,
-            extra_valid_fields=HOSTED_EVAL_CONFIG_EXTRA_FIELDS,
+        if not config_path.exists():
+            raise FileNotFoundError(f"Config file not found: {config_path}")
+
+        with open(config_path, "rb") as file:
+            raw_config = load_toml(file)
+
+        eval_list = raw_config.get("eval", [])
+        if not isinstance(eval_list, list):
+            raise ValueError(
+                f"Config file uses [eval] but should use [[eval]] (double brackets) "
+                f"for array of tables: {config_path}"
+            )
+        uses_v1_selector = any(
+            isinstance(eval_config, dict)
+            and ("taskset" in eval_config or "harness" in eval_config)
+            for eval_config in eval_list
         )
+        if not uses_v1_selector:
+            if any(
+                isinstance(eval_config, dict)
+                and "env_id" not in eval_config
+                and "id" not in eval_config
+                for eval_config in eval_list
+            ):
+                raise ValueError(
+                    "hosted eval config requires either `env_id` or `taskset.id`"
+                )
+            loaded_configs = load_toml_config(
+                config_path,
+                extra_valid_fields=HOSTED_EVAL_CONFIG_EXTRA_FIELDS,
+            )
+            return [
+                _validate_single_hosted_eval_config(dict(config), config_path)
+                for config in loaded_configs
+            ]
+
+        ablation_list = raw_config.get("ablation", [])
+        if not isinstance(ablation_list, list):
+            raise ValueError(
+                f"Config file uses [ablation] but should use [[ablation]] "
+                f"(double brackets) for array of tables: {config_path}"
+            )
+        if ablation_list:
+            raise ValueError("hosted eval v1 environment configs do not support ablations")
+        if not eval_list:
+            raise ValueError(
+                f"Config file must contain at least one [[eval]] section: {config_path}"
+            )
+
+        global_defaults = {
+            key: value for key, value in raw_config.items() if key not in ("eval", "ablation")
+        }
+        loaded_configs = []
+        for eval_config in eval_list:
+            normalized_eval = normalize_env_id_alias(eval_config, "[[eval]]")
+            merged = {**global_defaults, **normalized_eval}
+            if "endpoint_id" in normalized_eval and "model" not in normalized_eval:
+                merged.pop("model", None)
+            if "model" in normalized_eval and "endpoint_id" not in normalized_eval:
+                merged.pop("endpoint_id", None)
+            loaded_configs.append(normalize_hosted_eval_sections(merged))
+
+        for merged in loaded_configs:
+            endpoints_path = merged.get("endpoints_path")
+            if isinstance(endpoints_path, str):
+                endpoints_path_obj = Path(endpoints_path)
+                if not endpoints_path_obj.is_absolute():
+                    merged["endpoints_path"] = str(
+                        (config_path.parent / endpoints_path_obj).resolve()
+                    )
     except Exception as exc:
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(1) from exc
@@ -551,11 +689,21 @@ def _build_hosted_evaluation_payload(config: HostedEvalConfig) -> dict[str, Any]
     if config.api_key_var:
         eval_config["api_key_var"] = config.api_key_var
 
+    has_environment_id = config.environment_id is not None
+    has_environments = config.environments is not None
+    if has_environment_id == has_environments:
+        raise ValueError(
+            "Hosted eval config must set exactly one of environment_id or environments"
+        )
+
     payload: dict[str, Any] = {
-        "environment_ids": [config.environment_id],
         "inference_model": config.inference_model,
         "eval_config": eval_config,
     }
+    if config.environment_id is not None:
+        payload["environment_ids"] = [config.environment_id]
+    if config.environments is not None:
+        payload["environments"] = config.environments
     if config.name:
         payload["name"] = config.name
 
@@ -569,6 +717,7 @@ def _create_hosted_evaluations(
     payload = _build_hosted_evaluation_payload(config)
 
     if environment_ids is not None:
+        payload.pop("environments", None)
         payload["environment_ids"] = environment_ids
 
     if client.config.team_id:
@@ -1633,10 +1782,17 @@ def run_eval_cmd(
                 or None
             )
 
-            effective_targets.append(
-                {
+            selector = (
+                {"environment": target_config["environment"]}
+                if target_config.get("environment") is not None
+                else {
                     "env_id": target_config["env_id"],
                     "env_dir_path": target_config.get("env_dir_path") or env_dir_path,
+                }
+            )
+            effective_targets.append(
+                {
+                    **selector,
                     "model": (
                         parsed_verifiers_args.model
                         if "model" in cli_overrides
@@ -1732,7 +1888,9 @@ def run_eval_cmd(
         grouped_targets: dict[tuple[Any, ...], dict[str, Any]] = {}
         target_order: list[tuple[Any, ...]] = []
         for target in effective_targets:
+            selector_mode = "v1_env" if target.get("environment") is not None else "published_env"
             group_key = (
+                selector_mode,
                 target["model"],
                 target["num_examples"],
                 target["rollouts_per_example"],
@@ -1760,6 +1918,7 @@ def run_eval_cmd(
                     "targets": [],
                     "platform_slugs": [],
                     "environment_ids": [],
+                    "environments": [],
                 }
                 target_order.append(group_key)
             grouped_targets[group_key]["targets"].append(target)
@@ -1768,6 +1927,15 @@ def run_eval_cmd(
             for group_key in target_order:
                 group = grouped_targets[group_key]
                 for grouped_target in group["targets"]:
+                    if grouped_target.get("environment") is not None:
+                        group["environments"].append(grouped_target["environment"])
+                        group["platform_slugs"].append(
+                            _hosted_v1_environment_display_name(
+                                grouped_target["environment"],
+                                len(group["environments"]),
+                            )
+                        )
+                        continue
                     platform_slug, environment_id = _resolve_hosted_environment(
                         grouped_target["env_id"],
                         env_dir_path=grouped_target["env_dir_path"],
@@ -1785,11 +1953,14 @@ def run_eval_cmd(
             for group_key in target_order:
                 group = grouped_targets[group_key]
                 target = group["target"]
+                environment_ids = group["environment_ids"] or None
+                environments = group["environments"] or None
                 hosted_config = HostedEvalConfig(
-                    environment_id=group["environment_ids"][0],
+                    environment_id=environment_ids[0] if environment_ids else None,
                     inference_model=target["model"],
                     num_examples=target["num_examples"],
                     rollouts_per_example=target["rollouts_per_example"],
+                    environments=environments,
                     env_args=target.get("env_args"),
                     name=target.get("eval_name"),
                     timeout_minutes=target.get("timeout_minutes"),
@@ -1811,7 +1982,7 @@ def run_eval_cmd(
                 )
                 result = _create_hosted_evaluations(
                     hosted_config,
-                    environment_ids=group["environment_ids"],
+                    environment_ids=environment_ids,
                 )
                 all_platform_slugs.extend(group["platform_slugs"])
                 all_evaluation_ids.extend(result.get("evaluation_ids") or [result["evaluation_id"]])

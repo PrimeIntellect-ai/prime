@@ -35,10 +35,11 @@ class EvalStatus(str, Enum):
 
 @dataclass
 class HostedEvalConfig:
-    environment_id: str
+    environment_id: Optional[str]
     inference_model: str
     num_examples: int
     rollouts_per_example: int
+    environments: Optional[list[dict[str, Any]]] = None
     env_args: Optional[dict[str, Any]] = None
     name: Optional[str] = None
     timeout_minutes: Optional[int] = None

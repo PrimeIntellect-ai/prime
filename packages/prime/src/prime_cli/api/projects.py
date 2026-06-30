@@ -14,7 +14,7 @@ class Project(BaseModel):
     slug: str
     description: Optional[str] = None
     status: str
-    user_id: str = Field(alias="userId")
+    user_id: Optional[str] = Field(None, alias="userId")
     team_id: Optional[str] = Field(None, alias="teamId")
     created_at: datetime = Field(alias="createdAt")
     updated_at: datetime = Field(alias="updatedAt")

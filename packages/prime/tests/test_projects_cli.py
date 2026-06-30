@@ -32,12 +32,19 @@ def _project(team_id: Optional[str] = None) -> Project:
             "name": "Battleship Baseline",
             "slug": "battleship-baseline",
             "status": "ACTIVE",
-            "userId": "cmuser000000000000000001",
+            "userId": None if team_id else "cmuser000000000000000001",
             "teamId": team_id,
             "createdAt": "2026-05-20T12:00:00Z",
             "updatedAt": "2026-05-20T12:00:00Z",
         }
     )
+
+
+def test_project_model_accepts_team_project_without_user_owner() -> None:
+    project = _project(team_id="team-123")
+
+    assert project.user_id is None
+    assert project.team_id == "team-123"
 
 
 def test_project_create_sets_active_context(monkeypatch, tmp_path) -> None:

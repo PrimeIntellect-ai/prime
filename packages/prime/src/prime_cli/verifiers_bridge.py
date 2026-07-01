@@ -992,6 +992,8 @@ def run_eval_passthrough(
         job_target = _env_name_from_reference(config_envs[0][0])
     if job_target is None:
         job_target = Path(environment).stem
+    if config_envs and _parse_value_option(passthrough_args, "--model", "-m") is None:
+        model = toml.load(environment).get("model") or model
     job_id = _build_job_id(job_target, model)
     args.extend(["--header", f"X-PI-Job-Id: {job_id}"])
 

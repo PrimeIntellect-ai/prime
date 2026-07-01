@@ -1,5 +1,6 @@
 import json
 import re
+import sys
 import tarfile
 import tempfile
 import time
@@ -8,10 +9,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
-try:
+if sys.version_info >= (3, 11):
     import tomllib
-except ModuleNotFoundError:  # Python 3.10
-    import tomli as tomllib  # type: ignore[no-redef]
+else:
+    import tomli as tomllib
 
 import click
 import httpx

@@ -20,12 +20,16 @@ class RLModel(BaseModel):
     inference_output_price_per_mtok: Optional[float] = Field(
         None, alias="inferenceOutputPricePerMtok"
     )
+    cached_input_price_per_mtok: Optional[float] = Field(None, alias="cachedInputPricePerMtok")
     list_training_price_per_mtok: Optional[float] = Field(None, alias="listTrainingPricePerMtok")
     list_inference_input_price_per_mtok: Optional[float] = Field(
         None, alias="listInferenceInputPricePerMtok"
     )
     list_inference_output_price_per_mtok: Optional[float] = Field(
         None, alias="listInferenceOutputPricePerMtok"
+    )
+    list_cached_input_price_per_mtok: Optional[float] = Field(
+        None, alias="listCachedInputPricePerMtok"
     )
     effective_training_price_per_mtok: Optional[float] = Field(
         None, alias="effectiveTrainingPricePerMtok"
@@ -36,6 +40,9 @@ class RLModel(BaseModel):
     effective_inference_output_price_per_mtok: Optional[float] = Field(
         None, alias="effectiveInferenceOutputPricePerMtok"
     )
+    effective_cached_input_price_per_mtok: Optional[float] = Field(
+        None, alias="effectiveCachedInputPricePerMtok"
+    )
     promo_label: Optional[str] = Field(None, alias="promoLabel")
 
     model_config = ConfigDict(populate_by_name=True)
@@ -43,13 +50,21 @@ class RLModel(BaseModel):
     def resolve_prices(self, category: str) -> tuple[Optional[float], Optional[float]]:
         """Return ``(list_price, effective_price)`` for ``category``.
 
-        Categories: ``training``, ``inference_input``, ``inference_output``.
+        Categories: ``training``, ``inference_input``, ``inference_output``,
+        ``inference_cached_input``.
 
         Post-swap backends populate ``list_*`` with the un-discounted price and
         the legacy ``*_price_per_mtok`` with the effective (charged) price.
         Pre-swap backends omit ``list_*`` and keep ``legacy = list``,
         ``effective = charged``.
         """
+        # `inference_cached_input` is a virtual category — the API exposes the
+        # prefix-cache discount rate under the shorter `cached_input_*` names.
+        if category == "inference_cached_input":
+            list_value = self.list_cached_input_price_per_mtok
+            if list_value is not None:
+                return list_value, self.cached_input_price_per_mtok
+            return self.cached_input_price_per_mtok, self.effective_cached_input_price_per_mtok
         list_attr = f"list_{category}_price_per_mtok"
         legacy_attr = f"{category}_price_per_mtok"
         effective_attr = f"effective_{category}_price_per_mtok"

@@ -11,6 +11,9 @@ class RunUsageBreakdown(BaseModel):
     tokens: int = 0
     input_tokens: int = Field(0, alias="input_tokens")
     output_tokens: int = Field(0, alias="output_tokens")
+    # Prefix-cache hits — a subset of ``input_tokens`` billed at the discounted
+    # cached-input rate. Optional so old backends that don't emit it stay valid.
+    cached_input_tokens: Optional[int] = Field(None, alias="cached_input_tokens")
     cost_usd: float = Field(0.0, alias="cost_usd")
 
     model_config = ConfigDict(populate_by_name=True)
@@ -20,6 +23,9 @@ class RunPricing(BaseModel):
     training_per_mtok: Optional[float] = Field(None, alias="training_per_mtok")
     inference_input_per_mtok: Optional[float] = Field(None, alias="inference_input_per_mtok")
     inference_output_per_mtok: Optional[float] = Field(None, alias="inference_output_per_mtok")
+    inference_cached_input_per_mtok: Optional[float] = Field(
+        None, alias="inference_cached_input_per_mtok"
+    )
 
     model_config = ConfigDict(populate_by_name=True)
 

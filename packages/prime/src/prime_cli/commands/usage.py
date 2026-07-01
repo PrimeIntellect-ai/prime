@@ -32,9 +32,9 @@ RUN_USAGE_JSON_HELP = json_output_help(
     ". = {run_id, run_name?, base_model?, status?, total_tokens, "
     "total_cost_usd, record_count, "
     "training: {tokens, input_tokens, output_tokens, cost_usd}, "
-    "inference: {tokens, input_tokens, output_tokens, cost_usd}, "
+    "inference: {tokens, input_tokens, output_tokens, cached_input_tokens?, cost_usd}, "
     "pricing: {training_per_mtok?, inference_input_per_mtok?, "
-    "inference_output_per_mtok?}}"
+    "inference_output_per_mtok?, inference_cached_input_per_mtok?}}"
 )
 
 
@@ -106,7 +106,20 @@ def _build_run_usage_table(usage: RunUsage) -> Table:
     # halves sum to the combined inference cost in the response (modulo a
     # cent of rounding). The Total row keeps using the backend's exact sum
     # so what we show as "Total" is what was actually billed.
-    in_cost = _derived_cost(usage.inference.input_tokens, usage.pricing.inference_input_per_mtok)
+    #
+    # Prefix-cache hits are a subset of input_tokens — the "Inference (input)"
+    # row shows the non-cached remainder so the two rows sum to total input
+    # tokens (and derived cost sums to combined inference cost). We fall back
+    # to the full input rate for cached tokens when the backend hasn't sent a
+    # discounted rate yet, so cost stays consistent with the billed total.
+    cached_tokens = usage.inference.cached_input_tokens or 0
+    cached_rate = usage.pricing.inference_cached_input_per_mtok
+    effective_cached_rate = (
+        cached_rate if cached_rate is not None else usage.pricing.inference_input_per_mtok
+    )
+    non_cached_input = max(0, usage.inference.input_tokens - cached_tokens)
+    in_cost = _derived_cost(non_cached_input, usage.pricing.inference_input_per_mtok)
+    cached_cost = _derived_cost(cached_tokens, effective_cached_rate)
     out_cost = _derived_cost(usage.inference.output_tokens, usage.pricing.inference_output_per_mtok)
 
     table.add_row(
@@ -117,10 +130,20 @@ def _build_run_usage_table(usage: RunUsage) -> Table:
     )
     table.add_row(
         "Inference (input)",
-        _format_tokens(usage.inference.input_tokens),
+        _format_tokens(non_cached_input),
         format_usd(in_cost) if in_cost is not None else "-",
         format_price_per_mtok(usage.pricing.inference_input_per_mtok) or "-",
     )
+    # Only show the cached row when there's a signal it's relevant: either
+    # the backend published a discounted rate, or the run actually consumed
+    # cached tokens. Otherwise stay quiet for models without prefix caching.
+    if cached_rate is not None or cached_tokens > 0:
+        table.add_row(
+            "Inference (cached input)",
+            _format_tokens(cached_tokens),
+            format_usd(cached_cost) if cached_cost is not None else "-",
+            format_price_per_mtok(effective_cached_rate) or "-",
+        )
     table.add_row(
         "Inference (output)",
         _format_tokens(usage.inference.output_tokens),

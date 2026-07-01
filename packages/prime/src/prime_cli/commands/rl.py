@@ -51,9 +51,11 @@ RL_RUN_JSON_HELP = json_output_help(
 RL_MODELS_JSON_HELP = json_output_help(
     ".models[] = {name, at_capacity, training_price_per_mtok, "
     "inference_input_price_per_mtok, inference_output_price_per_mtok, "
+    "cached_input_price_per_mtok?, "
     "effective_training_price_per_mtok?, "
     "effective_inference_input_price_per_mtok?, "
-    "effective_inference_output_price_per_mtok?, promo_label?}",
+    "effective_inference_output_price_per_mtok?, "
+    "effective_cached_input_price_per_mtok?, promo_label?}",
 )
 
 RL_LIST_JSON_HELP = json_output_help(
@@ -1344,6 +1346,7 @@ def create_run(
             list_train, eff_train = priced.resolve_prices("training")
             list_input, eff_input = priced.resolve_prices("inference_input")
             list_output, eff_output = priced.resolve_prices("inference_output")
+            list_cached, eff_cached = priced.resolve_prices("inference_cached_input")
             console.print(
                 "\n[cyan]Pricing[/cyan] [dim](per 1M tokens, charged on actual usage)[/dim]"
             )
@@ -1358,9 +1361,13 @@ def create_run(
                     return "[bold green]Free[/bold green]"
                 return format_promo_price(list_p, eff_p) or "-"
 
-            console.print(f"  Training:         {_format(list_train, eff_train)}")
-            console.print(f"  Inference Input:  {_format(list_input, eff_input)}")
-            console.print(f"  Inference Output: {_format(list_output, eff_output)}")
+            console.print(f"  Training:                {_format(list_train, eff_train)}")
+            console.print(f"  Inference Input:         {_format(list_input, eff_input)}")
+            # Only show cached-input line when the backend advertises a rate —
+            # models without prefix-cache pricing shouldn't get an empty row.
+            if list_cached is not None or eff_cached is not None:
+                console.print(f"  Inference Cached Input:  {_format(list_cached, eff_cached)}")
+            console.print(f"  Inference Output:        {_format(list_output, eff_output)}")
             if priced.promo_label:
                 console.print(f"  [bold yellow]{rich_escape(priced.promo_label)}[/bold yellow]")
 
@@ -1542,6 +1549,7 @@ def list_models(
         table.add_column("Model", style="cyan")
         table.add_column("Status")
         table.add_column("Input", style="green", justify="right")
+        table.add_column("Cached", style="green", justify="right")
         table.add_column("Output", style="green", justify="right")
         table.add_column("Train", style="green", justify="right")
 
@@ -1554,10 +1562,12 @@ def list_models(
             list_train, eff_train = model.resolve_prices("training")
             list_input, eff_input = model.resolve_prices("inference_input")
             list_output, eff_output = model.resolve_prices("inference_output")
+            list_cached, eff_cached = model.resolve_prices("inference_cached_input")
             table.add_row(
                 model.name,
                 status,
                 format_promo_price(list_input, eff_input) or "-",
+                format_promo_price(list_cached, eff_cached) or "-",
                 format_promo_price(list_output, eff_output) or "-",
                 format_promo_price(list_train, eff_train) or "-",
             )

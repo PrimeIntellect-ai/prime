@@ -165,6 +165,71 @@ def test_format_tokens_promotes_to_M_at_rounding_boundary() -> None:
     assert _format_tokens(0) == "0"
 
 
+def test_train_usage_renders_cached_input_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When the backend emits cached-input tokens+rate, they get their own row
+    and the plain input row shows the non-cached remainder so tokens sum right.
+    """
+    payload = _run_usage_payload()
+    # 1M input total split into 200K cached + 800K non-cached, cached rate $0.1/Mtok.
+    payload["inference"]["cached_input_tokens"] = 200_000
+    payload["pricing"]["inference_cached_input_per_mtok"] = 0.1
+
+    monkeypatch.setattr(
+        "prime_cli.core.APIClient.get",
+        _make_get_mock({"/billing/runs/rft_abc/usage": payload}, []),
+    )
+
+    result = CliRunner().invoke(app, ["train", "usage", "rft_abc"], env={"COLUMNS": "200"})
+
+    assert result.exit_code == 0, result.output
+    plain = strip_ansi(result.output)
+    assert "Inference (cached input)" in plain
+    # 200K cached tokens rendered.
+    assert "200.00K" in plain
+    # Non-cached remainder rendered on the input row.
+    assert "800.00K" in plain
+    # Cached rate rendered.
+    assert "$0.1" in plain
+
+
+def test_train_usage_skips_cached_row_when_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pre-cache-pricing backends must render the same layout as today."""
+    monkeypatch.setattr(
+        "prime_cli.core.APIClient.get",
+        _make_get_mock({"/billing/runs/rft_abc/usage": _run_usage_payload()}, []),
+    )
+
+    result = CliRunner().invoke(app, ["train", "usage", "rft_abc"], env={"COLUMNS": "200"})
+
+    assert result.exit_code == 0, result.output
+    plain = strip_ansi(result.output)
+    assert "cached input" not in plain.lower()
+
+
+def test_train_usage_cached_row_falls_back_to_input_rate_when_no_cached_rate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If cached tokens > 0 but no cached rate is set yet, cost falls back to
+    the full input rate so the totals still line up.
+    """
+    payload = _run_usage_payload()
+    payload["inference"]["cached_input_tokens"] = 100_000
+    # deliberately no inference_cached_input_per_mtok
+
+    monkeypatch.setattr(
+        "prime_cli.core.APIClient.get",
+        _make_get_mock({"/billing/runs/rft_abc/usage": payload}, []),
+    )
+
+    result = CliRunner().invoke(app, ["train", "usage", "rft_abc"], env={"COLUMNS": "200"})
+
+    assert result.exit_code == 0, result.output
+    plain = strip_ansi(result.output)
+    assert "Inference (cached input)" in plain
+    # Fell back to input rate ($0.5/Mtok).
+    assert "$0.5" in plain
+
+
 def test_train_usage_wraps_response_shape_drift_as_api_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

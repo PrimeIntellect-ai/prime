@@ -296,6 +296,63 @@ def test_models_json_includes_effective_fields(monkeypatch: pytest.MonkeyPatch) 
     assert data["models"][0]["promo_label"] == "Free RFT week"
 
 
+def test_models_table_renders_cached_input_price(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cached-input column shows the discounted rate when the backend emits it."""
+
+    def mock_get(self: Any, endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        return {
+            "models": [
+                {
+                    "name": "qwen/qwen3-8b",
+                    "atCapacity": False,
+                    "trainingPricePerMtok": 0.5,
+                    "inferenceInputPricePerMtok": 1.0,
+                    "inferenceOutputPricePerMtok": 3.0,
+                    "cachedInputPricePerMtok": 0.1,
+                }
+            ]
+        }
+
+    monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+
+    result = CliRunner().invoke(app, ["rl", "models"], env={"COLUMNS": "200"})
+
+    assert result.exit_code == 0, result.output
+    plain = strip_ansi(result.output)
+    # Header includes the new Cached column between Input and Output.
+    assert "Cached" in plain
+    # Discounted rate rendered.
+    assert "$0.1" in plain
+
+
+def test_models_json_includes_cached_input_pricing(monkeypatch: pytest.MonkeyPatch) -> None:
+    def mock_get(self: Any, endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        return {
+            "models": [
+                {
+                    "name": "qwen/qwen3-8b",
+                    "atCapacity": False,
+                    "trainingPricePerMtok": 0.5,
+                    "inferenceInputPricePerMtok": 1.0,
+                    "inferenceOutputPricePerMtok": 3.0,
+                    "cachedInputPricePerMtok": 0.1,
+                    "listCachedInputPricePerMtok": 0.2,
+                    "effectiveCachedInputPricePerMtok": 0.1,
+                }
+            ]
+        }
+
+    monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+
+    result = CliRunner().invoke(app, ["train", "models", "--output", "json"])
+
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert data["models"][0]["cached_input_price_per_mtok"] == 0.1
+    assert data["models"][0]["list_cached_input_price_per_mtok"] == 0.2
+    assert data["models"][0]["effective_cached_input_price_per_mtok"] == 0.1
+
+
 def test_model_name_sort_key_orders_parameter_counts_numerically() -> None:
     models = [
         "Qwen/Qwen3-30B-A3B-Instruct-2507",

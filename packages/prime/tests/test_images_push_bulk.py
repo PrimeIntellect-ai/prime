@@ -150,16 +150,22 @@ def test_manifest_validation_fails_before_any_submission(tmp_path, fake_api, mon
             {"image": "app-b:v1", "context": "a", "dokerfile": "x"},  # typo key
             {"image": "dup:v1", "context": "a"},
             {"image": "dup:v1", "context": "a"},
+            {"image": "good:v1", "context": "a"},
+            {"image": "bad:bad/tag", "context": "a"},
+            {"image": "app-c:v1", "context": "a", "dockerfile": 123},  # non-string type
         ],
     )
 
     result = runner.invoke(app, ["images", "push-bulk", "--manifest", str(manifest)], env=TEST_ENV)
 
     assert result.exit_code == 1
+    # The valid good:v1 entry must not be submitted while other lines are invalid.
     assert fake_api.calls == []
     assert "builds.jsonl:1" in result.output
     assert "dokerfile" in result.output
     assert "duplicate image reference 'dup:v1'" in result.output
+    assert "invalid image tag 'bad/tag'" in result.output
+    assert "'dockerfile' must be a string" in result.output
 
 
 def test_sliding_window_refills_as_builds_finish(tmp_path, fake_api, monkeypatch):

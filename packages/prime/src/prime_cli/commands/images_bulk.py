@@ -222,6 +222,9 @@ def load_manifest(manifest_path: Path, default_platform: str) -> list[BuildSpec]
                 "use simple names like 'myapp:v1'"
             )
             continue
+        if not _TAG_RE.match(image_tag):
+            problems.append(f"{where}: invalid image tag '{image_tag}'")
+            continue
 
         platform = entry.get("platform") or default_platform
         if platform not in SUPPORTED_PLATFORMS:
@@ -231,8 +234,12 @@ def load_manifest(manifest_path: Path, default_platform: str) -> list[BuildSpec]
             )
             continue
 
-        context_path = (base / context).resolve()
         dockerfile = entry.get("dockerfile")
+        if dockerfile is not None and not isinstance(dockerfile, str):
+            problems.append(f"{where}: 'dockerfile' must be a string")
+            continue
+
+        context_path = (base / context).resolve()
         dockerfile_path = (
             (base / dockerfile).resolve() if dockerfile else context_path / "Dockerfile"
         )

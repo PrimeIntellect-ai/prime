@@ -55,6 +55,14 @@ class ImageClient:
             json={"context_uploaded": True},
         )
 
+    def get_build_status(self, build_id: str) -> dict:
+        """Fetch the aggregated status of a build group.
+
+        The response's ``status`` field is one of PENDING, UPLOADING,
+        BUILDING, COMPLETED, FAILED, or CANCELLED.
+        """
+        return self.client.request("GET", f"/images/build/{build_id}")
+
 
 class AsyncImageClient:
     """Async client for Prime image build and transfer APIs."""
@@ -99,6 +107,14 @@ class AsyncImageClient:
             f"/images/build/{build_id}/start",
             json={"context_uploaded": True},
         )
+
+    async def get_build_status(self, build_id: str) -> dict:
+        """Fetch the aggregated status of a build group.
+
+        The response's ``status`` field is one of PENDING, UPLOADING,
+        BUILDING, COMPLETED, FAILED, or CANCELLED.
+        """
+        return await self.client.request("GET", f"/images/build/{build_id}")
 
     async def aclose(self) -> None:
         await self.client.aclose()

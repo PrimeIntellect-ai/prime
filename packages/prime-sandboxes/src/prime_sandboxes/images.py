@@ -56,11 +56,7 @@ class ImageClient:
         )
 
     def get_build_status(self, build_id: str) -> dict:
-        """Fetch the aggregated status of a build group.
-
-        The response's ``status`` field is one of PENDING, UPLOADING,
-        BUILDING, COMPLETED, FAILED, or CANCELLED.
-        """
+        """Fetch the status of a build group."""
         return self.client.request("GET", f"/images/build/{build_id}")
 
 
@@ -109,11 +105,7 @@ class AsyncImageClient:
         )
 
     async def get_build_status(self, build_id: str) -> dict:
-        """Fetch the aggregated status of a build group.
-
-        The response's ``status`` field is one of PENDING, UPLOADING,
-        BUILDING, COMPLETED, FAILED, or CANCELLED.
-        """
+        """Fetch the status of a build group."""
         return await self.client.request("GET", f"/images/build/{build_id}")
 
     async def aclose(self) -> None:

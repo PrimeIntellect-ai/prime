@@ -42,8 +42,7 @@ DEFAULT_BUILD_TIMEOUT_SECONDS = 1800
 POLL_INTERVAL_SECONDS = 10.0
 UPLOAD_TIMEOUT_SECONDS = 600.0
 
-# Backoff schedule for rate-limit 429s: the initiate/start endpoints are
-# capped at 150 requests/min per token, which a fast submit loop can exceed.
+# Backoff schedule for rate-limit 429s
 RATE_LIMIT_MAX_ATTEMPTS = 5
 RATE_LIMIT_BACKOFF_INITIAL_SECONDS = 2.0
 RATE_LIMIT_BACKOFF_MAX_SECONDS = 60.0
@@ -66,10 +65,7 @@ class BulkPushValidationError(Exception):
 
 
 class QuotaExceededError(APIError):
-    """A 429 caused by the wallet's image count/storage quota, not the rate limiter.
-
-    Retrying cannot succeed, so the submit loop must stop instead of backing off.
-    """
+    """A 429 caused by the wallet's image count/storage quota, not the rate limiter."""
 
 
 @dataclass
@@ -179,12 +175,7 @@ def _duplicate_ref_problems(specs: list[BuildSpec], hint: str = "") -> list[str]
 
 
 def load_manifest(manifest_path: Path, default_platform: str) -> list[BuildSpec]:
-    """Parse and fully validate a JSONL manifest.
-
-    Relative ``context``/``dockerfile`` paths resolve against the manifest's
-    directory, not the cwd. All problems are collected and raised together so
-    a bad line 900 surfaces before any build is submitted.
-    """
+    """Parse and fully validate a JSONL manifest."""
     base = manifest_path.parent
     problems: list[str] = []
     specs: list[BuildSpec] = []
@@ -281,11 +272,7 @@ def _is_harbor_task_dir(path: Path) -> bool:
 
 
 def discover_harbor_tasks(root: Path) -> list[Path]:
-    """Return Harbor task directories under root (or root itself if it is a task).
-
-    Mirrors Harbor's own scanner: a task is a directory containing task.toml
-    and environment/. Only immediate children are considered.
-    """
+    """Return Harbor task directories under root (or root itself if it is a task)."""
     if _is_harbor_task_dir(root):
         return [root]
     return sorted(

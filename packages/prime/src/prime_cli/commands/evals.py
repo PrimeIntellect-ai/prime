@@ -25,7 +25,7 @@ from ..utils import (
 )
 from ..utils.display import get_eval_viewer_url
 from ..utils.env_metadata import find_environment_metadata
-from ..utils.eval_push import load_results_jsonl
+from ..utils.eval_push import convert_eval_results, load_results_jsonl
 from ..utils.hosted_eval import (
     EvalStatus,
     HostedEvalConfig,
@@ -84,7 +84,7 @@ HOSTED_LOGS_RATE_LIMIT_WAIT_SECONDS = 30
 HOSTED_LOGS_RETRY_WAIT_SECONDS = 10
 HOSTED_LOGS_STATUS_UPDATE_EVERY_POLLS = 6
 EVAL_TABLE_MAX_TEXT_WIDTH = 30
-EVAL_RUN_EXAMPLE_COMMAND = "prime eval run gsm8k -n 10"
+EVAL_RUN_EXAMPLE_COMMAND = "prime eval run harbor_v1 -n 1"
 EVAL_HOSTED_LABEL = "HOSTED"
 EVAL_LOCAL_LABEL = "LOCAL"
 # Legacy verifiers config fields/flags are accepted through the parser only so
@@ -924,11 +924,7 @@ def _load_eval_directory(directory: Path) -> dict:
             f"Missing required 'env_id' or 'model' field in {directory / 'metadata.json'}"
         )
 
-    results = load_results_jsonl(directory / "results.jsonl")
-
-    for sample in results:
-        if "id" in sample and "example_id" not in sample:
-            sample["example_id"] = sample["id"]
+    results = convert_eval_results(load_results_jsonl(directory / "results.jsonl"))
 
     avg_pattern = re.compile(r"^avg_(.+)$")
     metrics = {}
@@ -1474,6 +1470,22 @@ def run_eval_cmd(
 ) -> None:
     """Run an evaluation with local-first environment resolution."""
     passthrough_args = list(ctx.args)
+    if environment == "@":
+        if not passthrough_args:
+            console.print("[red]Error:[/red] @ must be followed by a config path.")
+            raise typer.Exit(2)
+        environment = passthrough_args.pop(0)
+    elif environment == "--resume":
+        if not passthrough_args:
+            console.print("[red]Error:[/red] --resume must be followed by an output directory.")
+            raise typer.Exit(2)
+        resume_dir = passthrough_args.pop(0)
+        environment = resume_dir
+        passthrough_args = ["--resume", resume_dir, *passthrough_args]
+    elif environment and environment.startswith("--resume="):
+        resume_dir = environment.split("=", 1)[1]
+        environment = resume_dir
+        passthrough_args = [f"--resume={resume_dir}", *passthrough_args]
 
     if is_help_request(environment or "", passthrough_args):
         print_eval_run_help()
@@ -1494,10 +1506,17 @@ def run_eval_cmd(
         ctx.get_parameter_source("poll_interval") == ParameterSource.COMMANDLINE
     )
     local_passthrough_args = list(passthrough_args)
-    if sampling_args is not None:
-        local_passthrough_args.extend(["--sampling-args", sampling_args])
 
     if not hosted:
+        legacy_eval = any(arg in ("--save-results", "-s") for arg in local_passthrough_args)
+        if sampling_args is not None and legacy_eval:
+            local_passthrough_args.extend(["--sampling-args", sampling_args])
+        elif sampling_args is not None:
+            console.print(
+                "[red]Error:[/red] local v1 evals use --sampling.* options "
+                "(for example, --sampling.temperature 0.7)"
+            )
+            raise typer.Exit(2)
         hosted_only_args = {
             "--follow": follow,
             "--poll-interval": poll_interval_was_provided,

@@ -1,7 +1,5 @@
 """Commands for managing Docker images in Prime Intellect registry."""
 
-import tarfile
-import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,7 +8,6 @@ from typing import Any, Optional
 import click
 import httpx
 import typer
-from gitignore_parser import parse_gitignore
 from prime_sandboxes import (
     APIClient,
     APIError,
@@ -29,11 +26,14 @@ from ..utils import (
     output_data_as_json,
     validate_output_format,
 )
+from .images_bulk import (
+    PACKAGED_DOCKERFILE_PATH,
+    package_build_context,
+    push_bulk,
+)
 
 app = PlainTyper(help="Manage Docker images in Prime Intellect registry", no_args_is_help=True)
 console = get_console()
-# Use a synthetic archive path to avoid collisions with Dockerfiles already in the context.
-PACKAGED_DOCKERFILE_PATH = ".__prime_dockerfile__"
 
 config = Config()
 
@@ -609,44 +609,9 @@ def push_image(
 
         # Create tar.gz of build context
         console.print("[cyan]Preparing build context...[/cyan]")
-        with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp_file:
-            tar_path = tmp_file.name
-
-        # Build a .dockerignore matcher so we don't upload ignored paths
-        # (e.g. local .venv, node_modules) with the context. BuildKit
-        # looks for <Dockerfile>.dockerignore next to the Dockerfile first
-        # and falls back to <context>/.dockerignore, so mirror that.
-        per_dockerfile_ignore = dockerfile_path.with_name(dockerfile_path.name + ".dockerignore")
-        root_dockerignore = context_path / ".dockerignore"
-        if per_dockerfile_ignore.is_file():
-            dockerignore_path: Optional[Path] = per_dockerfile_ignore
-        elif root_dockerignore.is_file():
-            dockerignore_path = root_dockerignore
-        else:
-            dockerignore_path = None
-        ignore_matcher = (
-            parse_gitignore(str(dockerignore_path), base_dir=str(context_path))
-            if dockerignore_path is not None
-            else None
-        )
-
-        def tar_filter(tarinfo: tarfile.TarInfo) -> Optional[tarfile.TarInfo]:
-            if ignore_matcher is None:
-                return tarinfo
-            rel = tarinfo.name
-            if rel.startswith("./"):
-                rel = rel[2:]
-            if not rel or rel == ".":
-                return tarinfo
-            if ignore_matcher(str(context_path / rel)):
-                return None
-            return tarinfo
+        tar_path = package_build_context(context_path, dockerfile_path)
 
         try:
-            with tarfile.open(tar_path, "w:gz") as tar:
-                tar.add(context_path, arcname=".", filter=tar_filter)
-                tar.add(dockerfile_path, arcname=PACKAGED_DOCKERFILE_PATH)
-
             tar_size_mb = Path(tar_path).stat().st_size / (1024 * 1024)
             console.print(f"[green]✓[/green] Build context packaged ({tar_size_mb:.2f} MB)")
             console.print()
@@ -770,6 +735,10 @@ def push_image(
     except KeyboardInterrupt:
         console.print("\n[yellow]Operation cancelled by user[/yellow]")
         raise typer.Exit(1)
+
+
+# Bulk push (JSONL manifest / Harbor task dirs) lives in images_bulk.py.
+app.command("push-bulk")(push_bulk)
 
 
 @app.command("list", epilog=LIST_IMAGES_JSON_HELP)

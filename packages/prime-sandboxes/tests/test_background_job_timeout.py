@@ -19,6 +19,13 @@ def _make_job() -> BackgroundJob:
     )
 
 
+def _whole_file(content: str) -> ReadFileResponse:
+    size = len(content.encode())
+    return ReadFileResponse(
+        content=content, size=size, total_size=size, offset=0, truncated=False
+    )
+
+
 def test_sync_get_background_job_forwards_timeout_to_read_file():
     client = SandboxClient(APIClient(api_key="test-key"))
     client_any = cast(Any, client)
@@ -26,11 +33,15 @@ def test_sync_get_background_job_forwards_timeout_to_read_file():
     seen_timeouts: List[Optional[int]] = []
 
     def fake_read_file(
-        sandbox_id: str, file_path: str, timeout: Optional[int] = None
+        sandbox_id: str,
+        file_path: str,
+        timeout: Optional[int] = None,
+        offset: Optional[int] = None,
+        length: Optional[int] = None,
     ) -> ReadFileResponse:
         seen_timeouts.append(timeout)
         # Empty content => job not completed; single read_file invocation is enough.
-        return ReadFileResponse(content="", size=0)
+        return _whole_file("")
 
     client_any.read_file = fake_read_file
 
@@ -48,10 +59,14 @@ def test_sync_get_background_job_defaults_timeout_to_none():
     seen_timeouts: List[Optional[int]] = []
 
     def fake_read_file(
-        sandbox_id: str, file_path: str, timeout: Optional[int] = None
+        sandbox_id: str,
+        file_path: str,
+        timeout: Optional[int] = None,
+        offset: Optional[int] = None,
+        length: Optional[int] = None,
     ) -> ReadFileResponse:
         seen_timeouts.append(timeout)
-        return ReadFileResponse(content="", size=0)
+        return _whole_file("")
 
     client_any.read_file = fake_read_file
 
@@ -71,12 +86,16 @@ def test_sync_get_background_job_forwards_timeout_on_completed_reads():
     seen_timeouts: List[Optional[int]] = []
 
     def fake_read_file(
-        sandbox_id: str, file_path: str, timeout: Optional[int] = None
+        sandbox_id: str,
+        file_path: str,
+        timeout: Optional[int] = None,
+        offset: Optional[int] = None,
+        length: Optional[int] = None,
     ) -> ReadFileResponse:
         seen_timeouts.append(timeout)
         if file_path.endswith(".exit"):
-            return ReadFileResponse(content="0\n", size=2)
-        return ReadFileResponse(content="out", size=3)
+            return _whole_file("0\n")
+        return _whole_file("out")
 
     client_any.read_file = fake_read_file
 
@@ -97,10 +116,14 @@ async def test_async_get_background_job_forwards_timeout_to_read_file():
     seen_timeouts: List[Optional[int]] = []
 
     async def fake_read_file(
-        sandbox_id: str, file_path: str, timeout: Optional[int] = None
+        sandbox_id: str,
+        file_path: str,
+        timeout: Optional[int] = None,
+        offset: Optional[int] = None,
+        length: Optional[int] = None,
     ) -> ReadFileResponse:
         seen_timeouts.append(timeout)
-        return ReadFileResponse(content="", size=0)
+        return _whole_file("")
 
     client_any.read_file = fake_read_file
 
@@ -119,10 +142,14 @@ async def test_async_get_background_job_defaults_timeout_to_none():
     seen_timeouts: List[Optional[int]] = []
 
     async def fake_read_file(
-        sandbox_id: str, file_path: str, timeout: Optional[int] = None
+        sandbox_id: str,
+        file_path: str,
+        timeout: Optional[int] = None,
+        offset: Optional[int] = None,
+        length: Optional[int] = None,
     ) -> ReadFileResponse:
         seen_timeouts.append(timeout)
-        return ReadFileResponse(content="", size=0)
+        return _whole_file("")
 
     client_any.read_file = fake_read_file
 

@@ -200,6 +200,9 @@ class ReadFileResponse(BaseModel):
 
     content: str
     size: int
+    total_size: int
+    offset: int
+    truncated: bool
 
 
 class SandboxLogsResponse(BaseModel):
@@ -365,3 +368,5 @@ class BackgroundJobStatus(BaseModel):
     exit_code: Optional[int] = None
     stdout: Optional[str] = None
     stderr: Optional[str] = None
+    stdout_truncated: bool = False
+    stderr_truncated: bool = False

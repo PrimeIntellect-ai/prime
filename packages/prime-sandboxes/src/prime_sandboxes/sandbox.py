@@ -30,6 +30,7 @@ from .exceptions import (
     CommandTimeoutError,
     DownloadTimeoutError,
     SandboxFileNotFoundError,
+    SandboxFileTooLargeError,
     SandboxImagePullError,
     SandboxNotRunningError,
     SandboxOOMError,
@@ -95,6 +96,9 @@ RETRYABLE_5XX_STATUSES = frozenset({500, 502, 503, 504, 524})
 # Max retries for transient 409 errors
 MAX_409_RETRIES = 4
 RETRY_409_BASE_DELAY = 0.25  # 250ms, 500ms, 1000ms, 2000ms with exponential backoff
+
+# Max bytes of stdout/stderr returned per background-job status check
+JOB_OUTPUT_TAIL_BYTES = 10 * 1024 * 1024
 
 
 def _is_retryable_gateway_error(exc: BaseException) -> bool:
@@ -984,7 +988,9 @@ class SandboxClient:
                 applies.
 
         Returns:
-            BackgroundJobStatus with completed flag, and exit_code/stdout if done
+            BackgroundJobStatus with completed flag, and exit_code/stdout if
+            done. stdout/stderr hold at most the last JOB_OUTPUT_TAIL_BYTES
+            of each stream; the *_truncated flags report dropped output.
         """
 
         def read_or_empty(path: str) -> str:
@@ -992,6 +998,19 @@ class SandboxClient:
                 return self.read_file(sandbox_id, path, timeout=timeout).content
             except SandboxFileNotFoundError:
                 return ""
+
+        def read_output_tail(path: str) -> "tuple[str, bool]":
+            try:
+                response = self.read_file(
+                    sandbox_id,
+                    path,
+                    timeout=timeout,
+                    offset=-JOB_OUTPUT_TAIL_BYTES,
+                    length=JOB_OUTPUT_TAIL_BYTES,
+                )
+                return response.content, response.truncated
+            except SandboxFileNotFoundError:
+                return "", False
 
         exit_content = read_or_empty(job.exit_file)
         if not exit_content.strip():
@@ -1002,12 +1021,16 @@ class SandboxClient:
         except ValueError:
             return BackgroundJobStatus(job_id=job.job_id, completed=False)
 
+        stdout, stdout_truncated = read_output_tail(job.stdout_log_file)
+        stderr, stderr_truncated = read_output_tail(job.stderr_log_file)
         return BackgroundJobStatus(
             job_id=job.job_id,
             completed=True,
             exit_code=exit_code,
-            stdout=read_or_empty(job.stdout_log_file),
-            stderr=read_or_empty(job.stderr_log_file),
+            stdout=stdout,
+            stderr=stderr,
+            stdout_truncated=stdout_truncated,
+            stderr_truncated=stderr_truncated,
         )
 
     def run_background_job(
@@ -1296,14 +1319,20 @@ class SandboxClient:
         sandbox_id: str,
         file_path: str,
         timeout: Optional[int] = None,
+        offset: Optional[int] = None,
+        length: Optional[int] = None,
     ) -> ReadFileResponse:
-        """Read a file from a sandbox via gateway."""
+        """Read a file (or a byte window of it) from a sandbox via gateway."""
         auth = self._auth_cache.get_or_refresh(sandbox_id)
 
         gateway_url = auth["gateway_url"].rstrip("/")
         url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/read-file"
         headers = {"Authorization": f"Bearer {auth['token']}"}
-        params = {"path": file_path}
+        params: Dict[str, Any] = {"path": file_path}
+        if offset is not None:
+            params["offset"] = offset
+        if length is not None:
+            params["length"] = length
 
         effective_timeout = timeout if timeout is not None else 30
 
@@ -1322,6 +1351,10 @@ class SandboxClient:
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 404:
                     raise SandboxFileNotFoundError(f"File not found: {file_path}") from e
+                if e.response.status_code == 413:
+                    raise SandboxFileTooLargeError(
+                        f"File too large to read: {file_path}: {e.response.text}"
+                    ) from e
                 if e.response.status_code == 409:
                     if self._should_retry_409(sandbox_id, e, attempt):
                         continue
@@ -1908,7 +1941,9 @@ class AsyncSandboxClient:
                 applies.
 
         Returns:
-            BackgroundJobStatus with completed flag, and exit_code/stdout if done
+            BackgroundJobStatus with completed flag, and exit_code/stdout if
+            done. stdout/stderr hold at most the last JOB_OUTPUT_TAIL_BYTES
+            of each stream; the *_truncated flags report dropped output.
         """
 
         async def read_or_empty(path: str) -> str:
@@ -1916,6 +1951,19 @@ class AsyncSandboxClient:
                 return (await self.read_file(sandbox_id, path, timeout=timeout)).content
             except SandboxFileNotFoundError:
                 return ""
+
+        async def read_output_tail(path: str) -> "tuple[str, bool]":
+            try:
+                response = await self.read_file(
+                    sandbox_id,
+                    path,
+                    timeout=timeout,
+                    offset=-JOB_OUTPUT_TAIL_BYTES,
+                    length=JOB_OUTPUT_TAIL_BYTES,
+                )
+                return response.content, response.truncated
+            except SandboxFileNotFoundError:
+                return "", False
 
         exit_content = await read_or_empty(job.exit_file)
         if not exit_content.strip():
@@ -1926,12 +1974,16 @@ class AsyncSandboxClient:
         except ValueError:
             return BackgroundJobStatus(job_id=job.job_id, completed=False)
 
+        stdout, stdout_truncated = await read_output_tail(job.stdout_log_file)
+        stderr, stderr_truncated = await read_output_tail(job.stderr_log_file)
         return BackgroundJobStatus(
             job_id=job.job_id,
             completed=True,
             exit_code=exit_code,
-            stdout=await read_or_empty(job.stdout_log_file),
-            stderr=await read_or_empty(job.stderr_log_file),
+            stdout=stdout,
+            stderr=stderr,
+            stdout_truncated=stdout_truncated,
+            stderr_truncated=stderr_truncated,
         )
 
     async def run_background_job(
@@ -2236,14 +2288,20 @@ class AsyncSandboxClient:
         sandbox_id: str,
         file_path: str,
         timeout: Optional[int] = None,
+        offset: Optional[int] = None,
+        length: Optional[int] = None,
     ) -> ReadFileResponse:
-        """Read a file from a sandbox via gateway (async)"""
+        """Read a file (or a byte window of it) from a sandbox via gateway (async)."""
         auth = await self._auth_cache.get_or_refresh(sandbox_id)
 
         gateway_url = auth["gateway_url"].rstrip("/")
         url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/read-file"
         headers = {"Authorization": f"Bearer {auth['token']}"}
-        params = {"path": file_path}
+        params: Dict[str, Any] = {"path": file_path}
+        if offset is not None:
+            params["offset"] = offset
+        if length is not None:
+            params["length"] = length
 
         effective_timeout = timeout if timeout is not None else 30
 
@@ -2262,6 +2320,10 @@ class AsyncSandboxClient:
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 404:
                     raise SandboxFileNotFoundError(f"File not found: {file_path}") from e
+                if e.response.status_code == 413:
+                    raise SandboxFileTooLargeError(
+                        f"File too large to read: {file_path}: {e.response.text}"
+                    ) from e
                 if e.response.status_code == 409:
                     if await self._should_retry_409(sandbox_id, e, attempt):
                         continue

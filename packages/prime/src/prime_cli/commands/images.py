@@ -31,6 +31,7 @@ from .images_bulk import (
     package_build_context,
     push_bulk,
 )
+from .images_transfer_bulk import transfer_bulk
 
 app = PlainTyper(help="Manage Docker images in Prime Intellect registry", no_args_is_help=True)
 console = get_console()
@@ -739,6 +740,10 @@ def push_image(
 
 # Bulk push (JSONL manifest / Harbor task dirs) lives in images_bulk.py.
 app.command("push-bulk")(push_bulk)
+
+# Bulk transfer (JSONL manifest / Harbor task dirs / Hugging Face datasets)
+# lives in images_transfer_bulk.py.
+app.command("transfer-bulk")(transfer_bulk)
 
 
 @app.command("list", epilog=LIST_IMAGES_JSON_HELP)

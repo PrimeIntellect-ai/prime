@@ -7,7 +7,7 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -68,6 +68,14 @@ class QuotaExceededError(APIError):
     """A 429 caused by the wallet's image count/storage quota, not the rate limiter."""
 
 
+class SubmitRateLimited(Exception):
+    """Raised by a submit callable to defer the spec instead of failing it."""
+
+    def __init__(self, message: str, retry_after: float):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
 @dataclass
 class BuildSpec:
     """One resolved build: where the context lives and what to call the image."""
@@ -97,13 +105,15 @@ class BuildSpec:
 class BuildOutcome:
     """Terminal result for one spec.
 
+    ``spec`` is any object with ``image_ref``, ``source`` and
+    ``to_manifest_line()`` (BuildSpec here, TransferSpec for bulk transfers).
     ``status`` is a backend terminal status (COMPLETED/FAILED/CANCELLED) or a
     client-side one: SUBMIT_FAILED (initiate/upload/start failed), TIMEOUT
     (no terminal status within --build-timeout), SKIPPED (never submitted
     because the quota was exhausted mid-run).
     """
 
-    spec: BuildSpec
+    spec: Any
     status: str
     build_id: Optional[str] = None
     full_image_path: Optional[str] = None
@@ -163,7 +173,8 @@ def package_build_context(context_path: Path, dockerfile_path: Path) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _duplicate_ref_problems(specs: list[BuildSpec], hint: str = "") -> list[str]:
+def _duplicate_ref_problems(specs: list[Any], hint: str = "") -> list[str]:
+    """Report specs (anything with image_ref/source) sharing a destination ref."""
     by_ref: dict[str, list[str]] = {}
     for spec in specs:
         by_ref.setdefault(spec.image_ref, []).append(spec.source)
@@ -475,31 +486,37 @@ def _submit_build(
 
 @dataclass
 class _InFlightBuild:
-    spec: BuildSpec
+    spec: Any
     full_image_path: str
     deadline: float
 
 
-def run_bulk_push(
+def run_bulk_jobs(
     client: APIClient,
-    specs: list[BuildSpec],
+    specs: list[Any],
     *,
-    team_id: Optional[str],
-    visibility: Optional[ImageVisibility],
+    submit: Callable[[Any], tuple[str, str]],
     concurrency: int,
     build_timeout: int,
+    progress_description: str = "Pushing images",
 ) -> list[BuildOutcome]:
-    """Submit builds with a sliding window and poll them to terminal status.
+    """Submit jobs with a sliding window and poll them to terminal status.
 
-    A finished build immediately frees a slot for the next queued build, so
-    one slow build never blocks the rest of a "batch". Once the wallet quota
-    is hit, submission stops (remaining specs become SKIPPED) but builds
-    already in flight are still polled to completion.
+    ``submit(spec)`` starts one server-side build/transfer and returns
+    (build_id, full_image_path). A finished job immediately frees a slot for
+    the next queued spec, so one slow job never blocks the rest of a "batch".
+    Once the wallet quota is hit (QuotaExceededError), submission stops
+    (remaining specs become SKIPPED) but jobs already in flight are still
+    polled to completion. A submit that raises SubmitRateLimited requeues its
+    spec and pauses new submissions for ``retry_after`` seconds while polling
+    continues.
     """
-    pending: deque[BuildSpec] = deque(specs)
+    pending: deque[Any] = deque(specs)
     in_flight: dict[str, _InFlightBuild] = {}
     outcomes: list[BuildOutcome] = []
     quota_error: Optional[str] = None
+    submit_gate = 0.0
+    rate_limit_notice_shown = False
 
     progress = Progress(
         TextColumn("[progress.description]{task.description}"),
@@ -509,7 +526,7 @@ def run_bulk_push(
         console=console,
     )
     with progress:
-        task_id = progress.add_task("Pushing images", total=len(specs))
+        task_id = progress.add_task(progress_description, total=len(specs))
 
         def record(outcome: BuildOutcome) -> None:
             outcomes.append(outcome)
@@ -526,11 +543,21 @@ def run_bulk_push(
 
         while pending or in_flight:
             while pending and quota_error is None and len(in_flight) < concurrency:
+                if time.monotonic() < submit_gate:
+                    break
                 spec = pending.popleft()
                 try:
-                    build_id, full_image_path = _submit_build(
-                        client, spec, team_id=team_id, visibility=visibility
-                    )
+                    build_id, full_image_path = submit(spec)
+                except SubmitRateLimited as e:
+                    pending.appendleft(spec)
+                    submit_gate = time.monotonic() + e.retry_after
+                    if not rate_limit_notice_shown:
+                        rate_limit_notice_shown = True
+                        progress.console.print(
+                            "[dim]Server rate limit reached; pacing submissions "
+                            "(jobs already submitted keep running)...[/dim]"
+                        )
+                    break
                 except QuotaExceededError as e:
                     quota_error = str(e)
                     record(BuildOutcome(spec=spec, status="SUBMIT_FAILED", error=str(e)))
@@ -556,8 +583,13 @@ def run_bulk_push(
                     )
                 pending.clear()
 
-            if not in_flight:
+            if not pending and not in_flight:
                 break
+
+            if not in_flight:
+                # Everything left is waiting on the submit gate.
+                time.sleep(max(0.0, submit_gate - time.monotonic()))
+                continue
 
             time.sleep(POLL_INTERVAL_SECONDS)
 
@@ -601,6 +633,25 @@ def run_bulk_push(
                     )
 
     return outcomes
+
+
+def run_bulk_push(
+    client: APIClient,
+    specs: list[BuildSpec],
+    *,
+    team_id: Optional[str],
+    visibility: Optional[ImageVisibility],
+    concurrency: int,
+    build_timeout: int,
+) -> list[BuildOutcome]:
+    """Bulk build-and-push: submit build contexts through the shared engine."""
+    return run_bulk_jobs(
+        client,
+        specs,
+        submit=lambda spec: _submit_build(client, spec, team_id=team_id, visibility=visibility),
+        concurrency=concurrency,
+        build_timeout=build_timeout,
+    )
 
 
 def _write_failures_manifest(path: Path, failures: list[BuildOutcome]) -> None:

@@ -605,6 +605,17 @@ class SandboxClient:
         # Sandbox is not running
         _raise_not_running_error(sandbox_id, ctx, command=command, cause=error)
 
+    def _should_retry_upload_5xx(self, error: httpx.HTTPStatusError, attempt: int) -> bool:
+        """Check if a transient gateway 5xx on an upload should be retried."""
+        if error.response.status_code not in RETRYABLE_5XX_STATUSES:
+            return False
+        if _is_gateway_sandbox_not_found(error.response):
+            return False
+        if attempt < MAX_409_RETRIES - 1:
+            time.sleep(RETRY_409_BASE_DELAY * (2**attempt))
+            return True
+        return False
+
     def clear_auth_cache(self) -> None:
         """Clear all cached auth tokens"""
         self._auth_cache.clear()
@@ -1179,6 +1190,8 @@ class SandboxClient:
                 if e.response.status_code == 409:
                     if self._should_retry_409(sandbox_id, e, attempt):
                         continue
+                elif self._should_retry_upload_5xx(e, attempt):
+                    continue
                 error_details = (
                     f"HTTP {e.response.status_code} {e.request.method} "
                     f"{e.request.url}: {e.response.text}"
@@ -1233,6 +1246,8 @@ class SandboxClient:
                 if e.response.status_code == 409:
                     if self._should_retry_409(sandbox_id, e, attempt):
                         continue
+                elif self._should_retry_upload_5xx(e, attempt):
+                    continue
                 error_details = f"HTTP {e.response.status_code}: {e.response.text}"
                 raise APIError(f"Upload failed: {error_details}")
             except Exception as e:
@@ -1530,6 +1545,17 @@ class AsyncSandboxClient:
             ) from error
         # Sandbox is not running
         _raise_not_running_error(sandbox_id, ctx, command=command, cause=error)
+
+    async def _should_retry_upload_5xx(self, error: httpx.HTTPStatusError, attempt: int) -> bool:
+        """Check if a transient gateway 5xx on an upload should be retried (async)."""
+        if error.response.status_code not in RETRYABLE_5XX_STATUSES:
+            return False
+        if _is_gateway_sandbox_not_found(error.response):
+            return False
+        if attempt < MAX_409_RETRIES - 1:
+            await asyncio.sleep(RETRY_409_BASE_DELAY * (2**attempt))
+            return True
+        return False
 
     async def clear_auth_cache(self) -> None:
         """Clear all cached auth tokens."""
@@ -2115,6 +2141,8 @@ class AsyncSandboxClient:
                 if e.response.status_code == 409:
                     if await self._should_retry_409(sandbox_id, e, attempt):
                         continue
+                elif await self._should_retry_upload_5xx(e, attempt):
+                    continue
                 error_details = (
                     f"HTTP {e.response.status_code} {e.request.method} "
                     f"{e.request.url}: {e.response.text}"
@@ -2170,6 +2198,8 @@ class AsyncSandboxClient:
                 if e.response.status_code == 409:
                     if await self._should_retry_409(sandbox_id, e, attempt):
                         continue
+                elif await self._should_retry_upload_5xx(e, attempt):
+                    continue
                 error_details = f"HTTP {e.response.status_code}: {e.response.text}"
                 raise APIError(f"Upload failed: {error_details}")
             except Exception as e:

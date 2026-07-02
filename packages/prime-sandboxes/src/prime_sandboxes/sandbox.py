@@ -605,9 +605,10 @@ class SandboxClient:
         # Sandbox is not running
         _raise_not_running_error(sandbox_id, ctx, command=command, cause=error)
 
-    def _should_retry_upload_5xx(self, error: httpx.HTTPStatusError, attempt: int) -> bool:
-        """Check if a transient gateway 5xx on an upload should be retried."""
-        if error.response.status_code not in RETRYABLE_5XX_STATUSES:
+    def _should_retry_upload_error(self, error: httpx.HTTPStatusError, attempt: int) -> bool:
+        """Check if a transient error (408/5xx) on an idempotent upload should be retried."""
+        status = error.response.status_code
+        if status != 408 and status not in RETRYABLE_5XX_STATUSES:
             return False
         if _is_gateway_sandbox_not_found(error.response):
             return False
@@ -1190,7 +1191,7 @@ class SandboxClient:
                 if e.response.status_code == 409:
                     if self._should_retry_409(sandbox_id, e, attempt):
                         continue
-                elif self._should_retry_upload_5xx(e, attempt):
+                elif self._should_retry_upload_error(e, attempt):
                     continue
                 error_details = (
                     f"HTTP {e.response.status_code} {e.request.method} "
@@ -1246,7 +1247,7 @@ class SandboxClient:
                 if e.response.status_code == 409:
                     if self._should_retry_409(sandbox_id, e, attempt):
                         continue
-                elif self._should_retry_upload_5xx(e, attempt):
+                elif self._should_retry_upload_error(e, attempt):
                     continue
                 error_details = f"HTTP {e.response.status_code}: {e.response.text}"
                 raise APIError(f"Upload failed: {error_details}")
@@ -1546,9 +1547,10 @@ class AsyncSandboxClient:
         # Sandbox is not running
         _raise_not_running_error(sandbox_id, ctx, command=command, cause=error)
 
-    async def _should_retry_upload_5xx(self, error: httpx.HTTPStatusError, attempt: int) -> bool:
-        """Check if a transient gateway 5xx on an upload should be retried (async)."""
-        if error.response.status_code not in RETRYABLE_5XX_STATUSES:
+    async def _should_retry_upload_error(self, error: httpx.HTTPStatusError, attempt: int) -> bool:
+        """Check if a transient 408/5xx on an idempotent upload should be retried (async)."""
+        status = error.response.status_code
+        if status != 408 and status not in RETRYABLE_5XX_STATUSES:
             return False
         if _is_gateway_sandbox_not_found(error.response):
             return False
@@ -2141,7 +2143,7 @@ class AsyncSandboxClient:
                 if e.response.status_code == 409:
                     if await self._should_retry_409(sandbox_id, e, attempt):
                         continue
-                elif await self._should_retry_upload_5xx(e, attempt):
+                elif await self._should_retry_upload_error(e, attempt):
                     continue
                 error_details = (
                     f"HTTP {e.response.status_code} {e.request.method} "
@@ -2198,7 +2200,7 @@ class AsyncSandboxClient:
                 if e.response.status_code == 409:
                     if await self._should_retry_409(sandbox_id, e, attempt):
                         continue
-                elif await self._should_retry_upload_5xx(e, attempt):
+                elif await self._should_retry_upload_error(e, attempt):
                     continue
                 error_details = f"HTTP {e.response.status_code}: {e.response.text}"
                 raise APIError(f"Upload failed: {error_details}")

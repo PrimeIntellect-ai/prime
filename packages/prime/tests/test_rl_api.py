@@ -104,6 +104,37 @@ def test_create_run_sends_max_inflight_rollouts() -> None:
     assert run.max_inflight_rollouts == 96
 
 
+def test_create_run_sends_v1_env_payload_unchanged() -> None:
+    api_client = FakeAPIClient()
+    client = RLClient(api_client)  # type: ignore[arg-type]
+    v1_env = {
+        "name": "alphabet-sort",
+        "taskset": {"id": "alphabet-sort-v1", "min_turns": 3},
+        "harness": {"id": "default", "runtime": {"type": "subprocess"}},
+        "group_size": 8,
+    }
+    eval_config = {
+        "environments": [
+            {
+                "taskset": {"id": "alphabet-sort-v1", "split": "test"},
+                "harness": {"id": "default"},
+                "group_size": 4,
+            }
+        ]
+    }
+
+    client.create_run(
+        model_name="Qwen/Qwen3.5-0.8B",
+        environments=[v1_env],
+        eval_config=eval_config,
+    )
+
+    assert api_client.posts[0][0] == "/rft/runs"
+    payload = api_client.posts[0][1]
+    assert payload["environments"] == [v1_env]
+    assert payload["eval"] == eval_config
+
+
 def test_create_run_sends_sft_loss_and_teacher_config() -> None:
     api_client = FakeAPIClient()
     client = RLClient(api_client)  # type: ignore[arg-type]

@@ -23,12 +23,16 @@ from .exceptions import (
     SandboxTimeoutError,
     UploadTimeoutError,
 )
+from .images import AsyncImageClient, ImageClient
 from .models import (
     AdvancedConfigs,
     BackgroundJob,
     BackgroundJobStatus,
+    BuildImageRequest,
+    BuildImageResponse,
     BulkDeleteSandboxRequest,
     BulkDeleteSandboxResponse,
+    BulkImageTransferResponse,
     CommandRequest,
     CommandResponse,
     CreateSandboxRequest,
@@ -36,6 +40,7 @@ from .models import (
     ExposedPort,
     ExposePortRequest,
     FileUploadResponse,
+    ImageVisibility,
     ListExposedPortsResponse,
     ReadFileResponse,
     RegistryCredentialSummary,
@@ -43,11 +48,12 @@ from .models import (
     SandboxListResponse,
     SandboxStatus,
     SSHSession,
+    TransferImageResult,
     UpdateSandboxRequest,
 )
 from .sandbox import AsyncSandboxClient, AsyncTemplateClient, SandboxClient, TemplateClient
 
-__version__ = "0.2.27"
+__version__ = "0.2.28"
 
 # Deprecated alias for backward compatibility
 TimeoutError = APITimeoutError
@@ -62,6 +68,8 @@ __all__ = [
     "AsyncSandboxClient",
     "TemplateClient",
     "AsyncTemplateClient",
+    "ImageClient",
+    "AsyncImageClient",
     # Models
     "Sandbox",
     "SandboxStatus",
@@ -79,6 +87,11 @@ __all__ = [
     "AdvancedConfigs",
     "BackgroundJob",
     "BackgroundJobStatus",
+    "BuildImageRequest",
+    "BuildImageResponse",
+    "BulkImageTransferResponse",
+    "TransferImageResult",
+    "ImageVisibility",
     # Port Forwarding
     "ExposePortRequest",
     "ExposedPort",

@@ -1,18 +1,22 @@
 """Commands for managing Docker images in Prime Intellect registry."""
 
-import tarfile
-import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
 
 import click
 import httpx
 import typer
-from gitignore_parser import parse_gitignore
-from prime_sandboxes import APIClient, APIError, Config, UnauthorizedError
+from prime_sandboxes import (
+    APIClient,
+    APIError,
+    BulkImageTransferResponse,
+    Config,
+    ImageClient,
+    ImageVisibility,
+    UnauthorizedError,
+)
 from rich.table import Table
 
 from ..utils import (
@@ -22,18 +26,16 @@ from ..utils import (
     output_data_as_json,
     validate_output_format,
 )
+from .images_bulk import (
+    PACKAGED_DOCKERFILE_PATH,
+    package_build_context,
+    push_bulk,
+)
 
 app = PlainTyper(help="Manage Docker images in Prime Intellect registry", no_args_is_help=True)
 console = get_console()
-# Use a synthetic archive path to avoid collisions with Dockerfiles already in the context.
-PACKAGED_DOCKERFILE_PATH = ".__prime_dockerfile__"
 
 config = Config()
-
-
-class ImageVisibility(str, Enum):
-    PRIVATE = "PRIVATE"
-    PUBLIC = "PUBLIC"
 
 
 LIST_IMAGES_JSON_HELP = json_output_help(
@@ -258,10 +260,11 @@ def _render_status_column(partition: PartitionMap) -> str:
 def _render_image_reference(img: ImageRow, *, is_team_listing: bool) -> str:
     """Render the user-facing image reference.
 
-    The owner prefix (``{userId}/`` or ``team-{teamId}/``) is **always**
-    preserved so the full string is a valid reference that can be pasted
-    directly into downstream commands (e.g. ``prime sandbox create``),
-    which require the fully-qualified ``<userId>/<imageName>:<tag>`` form.
+    The Prime owner prefix (``prime/{ownerSlug}/``, ``prime/{userId}/``, or
+    ``prime/team-{teamId}/``) is **always** preserved so the full string is a
+    valid reference that can be pasted directly into downstream commands
+    (e.g. ``prime sandbox create``), which require a fully-qualified
+    ``prime/<owner>/<imageName>:<tag>`` form.
 
     Visual truncation (if any) is applied separately by
     :func:`_truncate_ref_left` so that when the terminal is too narrow the
@@ -363,8 +366,8 @@ def _group_sort_key(partition: PartitionMap) -> datetime:
 
 @app.command("push")
 def push_image(
-    image_reference: str = typer.Argument(
-        ..., help="Image reference (e.g., 'myapp:v1.0.0' or 'myapp:latest')"
+    image_reference: Optional[str] = typer.Argument(
+        None, help="Image reference (e.g., 'myapp:v1.0.0' or 'myapp:latest')"
     ),
     context: str = typer.Option(".", "--context", "-c", help="Build context directory"),
     dockerfile: Optional[str] = typer.Option(
@@ -390,6 +393,16 @@ def push_image(
         "--private",
         help="Make the image private when the build completes",
     ),
+    source_image: Optional[str] = typer.Option(
+        None,
+        "--source-image",
+        help="Copy an existing public image into Prime instead of uploading a build context",
+    ),
+    platform_image: bool = typer.Option(
+        False,
+        "--platform-image",
+        help="Build an org-less platform image (admins only)",
+    ),
 ):
     """
     Build and push a Docker image to Prime Intellect registry.
@@ -403,30 +416,171 @@ def push_image(
         prime images push myapp:latest --context ./app --dockerfile ../docker/Dockerfile.prod
         prime images push myapp:v1 --platform linux/arm64
         prime images push myapp:v1 --public
+        prime images push --source-image ubuntu:22.04
+        prime images push myubuntu:22.04 --source-image ubuntu:22.04
     """
     try:
         if public and private:
             console.print("[red]Error: --public and --private cannot be used together[/red]")
             raise typer.Exit(1)
 
+        is_transfer = source_image is not None
+        if platform_image and private:
+            console.print("[red]Error: Platform images must be public[/red]")
+            raise typer.Exit(1)
+        if platform_image and config.team_id:
+            console.print("[red]Error: Platform images cannot be pushed in a team context[/red]")
+            raise typer.Exit(1)
+        if not is_transfer and image_reference is None:
+            console.print(
+                "[red]Error: Image reference is required unless --source-image is used[/red]"
+            )
+            raise typer.Exit(1)
+
+        transfer_sources = [
+            source.strip() for source in (source_image or "").split(",") if source.strip()
+        ]
+        if is_transfer and not transfer_sources:
+            console.print(
+                "[red]Error: --source-image must include at least one image reference[/red]"
+            )
+            raise typer.Exit(1)
+        if is_transfer and image_reference is not None and len(transfer_sources) > 1:
+            console.print(
+                "[red]Error: Destination image reference can only be provided for "
+                "single-image transfers[/red]"
+            )
+            raise typer.Exit(1)
+
         # Parse image reference
-        if ":" in image_reference:
+        if image_reference is None:
+            image_name = None
+            image_tag = None
+        elif ":" in image_reference:
             image_name, image_tag = image_reference.rsplit(":", 1)
         else:
             image_name = image_reference
             image_tag = "latest"
 
         # Validate image name doesn't contain slashes
-        if "/" in image_name:
+        if image_name is not None and "/" in image_name and not platform_image:
             console.print(
                 "[red]Error: Image name cannot contain '/'. "
                 "Use simple names like 'myapp:v1.0.0'.[/red]"
             )
             raise typer.Exit(1)
 
-        console.print(
-            f"[bold blue]Building and pushing image:[/bold blue] {image_name}:{image_tag}"
-        )
+        if is_transfer:
+            source_display = ", ".join(transfer_sources)
+            destination_display = (
+                f"{image_name}:{image_tag}" if image_name and image_tag else "derived"
+            )
+            if platform_image:
+                console.print("[bold blue]Transferring platform image into Prime:[/bold blue]")
+            else:
+                console.print("[bold blue]Transferring image into Prime:[/bold blue]")
+            console.print(f"[bold]Source:[/bold] {source_display}")
+            console.print(f"[bold]Destination:[/bold] {destination_display}")
+            if platform_image:
+                console.print("[bold]Owner:[/bold] Platform")
+            if config.team_id:
+                console.print(f"[dim]Team: {config.team_id}[/dim]")
+            console.print()
+
+            client = ImageClient(APIClient())
+            visibility = None
+            if public:
+                visibility = ImageVisibility.PUBLIC
+            elif private:
+                visibility = ImageVisibility.PRIVATE
+            if platform_image:
+                visibility = ImageVisibility.PUBLIC
+
+            try:
+                response = client.transfer_image(
+                    ",".join(transfer_sources),
+                    image_name=image_name,
+                    image_tag=image_tag,
+                    platform=platform,
+                    team_id=config.team_id or None,
+                    visibility=visibility,
+                    owner_scope="platform" if platform_image else None,
+                )
+            except UnauthorizedError:
+                console.print(
+                    "[red]Error: Not authenticated. Please run 'prime login' first.[/red]"
+                )
+                raise typer.Exit(1)
+            except APIError as e:
+                console.print(f"[red]Error: Failed to initiate transfer: {e}[/red]")
+                raise typer.Exit(1)
+
+            if isinstance(response, BulkImageTransferResponse):
+                successful_results = [result for result in response.results if result.build_id]
+                build_ids = [result.build_id for result in successful_results if result.build_id]
+                failed_results = response.failed
+                image_path = (
+                    successful_results[0].full_image_path if len(successful_results) == 1 else None
+                )
+            else:
+                build_ids = response.build_ids or [response.build_id]
+                failed_results = []
+                image_path = response.full_image_path
+
+            if not build_ids:
+                console.print("[red]Error: Failed to initiate image transfer[/red]")
+                for result in failed_results:
+                    console.print(f"[red]- {result.source_image}: {result.error}[/red]")
+                raise typer.Exit(1)
+
+            console.print("[green]✓[/green] Transfer queued")
+            console.print()
+            if len(build_ids) == 1:
+                console.print("[bold green]Image transfer queued successfully![/bold green]")
+                console.print()
+                console.print(f"[bold]Build ID:[/bold] {build_ids[0]}")
+                console.print(f"[bold]Image:[/bold] {image_path}")
+            else:
+                console.print("[bold green]Image transfers queued successfully![/bold green]")
+                console.print()
+                console.print(f"[bold]Builds:[/bold] {len(build_ids)}")
+                console.print(f"[bold]Build IDs:[/bold] {', '.join(build_ids)}")
+            if failed_results:
+                console.print()
+                console.print(
+                    f"[yellow]Warning: {len(failed_results)} image transfer(s) failed:[/yellow]"
+                )
+                for result in failed_results:
+                    console.print(f"[yellow]- {result.source_image}: {result.error}[/yellow]")
+            if platform_image:
+                console.print(f"[bold]Visibility:[/bold] {ImageVisibility.PUBLIC.value}")
+            elif public or private:
+                requested_visibility = ImageVisibility.PUBLIC if public else ImageVisibility.PRIVATE
+                console.print(f"[bold]Visibility:[/bold] {requested_visibility.value}")
+            else:
+                console.print(
+                    "[bold]Visibility:[/bold] PRIVATE for new images "
+                    "(existing tags keep their current visibility)"
+                )
+            console.print()
+            console.print("[cyan]Your image transfer is running.[/cyan]")
+            console.print()
+            console.print("[bold]Check transfer status:[/bold]")
+            console.print("  prime images list")
+            console.print()
+            if failed_results:
+                raise typer.Exit(1)
+            return
+
+        if platform_image:
+            console.print(
+                f"[bold blue]Building and pushing platform image:[/bold blue] "
+                f"{image_name}:{image_tag}"
+            )
+        else:
+            console.print(
+                f"[bold blue]Building and pushing image:[/bold blue] {image_name}:{image_tag}"
+            )
         if config.team_id:
             console.print(f"[dim]Team: {config.team_id}[/dim]")
         console.print()
@@ -455,44 +609,9 @@ def push_image(
 
         # Create tar.gz of build context
         console.print("[cyan]Preparing build context...[/cyan]")
-        with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp_file:
-            tar_path = tmp_file.name
-
-        # Build a .dockerignore matcher so we don't upload ignored paths
-        # (e.g. local .venv, node_modules) with the context. BuildKit
-        # looks for <Dockerfile>.dockerignore next to the Dockerfile first
-        # and falls back to <context>/.dockerignore, so mirror that.
-        per_dockerfile_ignore = dockerfile_path.with_name(dockerfile_path.name + ".dockerignore")
-        root_dockerignore = context_path / ".dockerignore"
-        if per_dockerfile_ignore.is_file():
-            dockerignore_path: Optional[Path] = per_dockerfile_ignore
-        elif root_dockerignore.is_file():
-            dockerignore_path = root_dockerignore
-        else:
-            dockerignore_path = None
-        ignore_matcher = (
-            parse_gitignore(str(dockerignore_path), base_dir=str(context_path))
-            if dockerignore_path is not None
-            else None
-        )
-
-        def tar_filter(tarinfo: tarfile.TarInfo) -> Optional[tarfile.TarInfo]:
-            if ignore_matcher is None:
-                return tarinfo
-            rel = tarinfo.name
-            if rel.startswith("./"):
-                rel = rel[2:]
-            if not rel or rel == ".":
-                return tarinfo
-            if ignore_matcher(str(context_path / rel)):
-                return None
-            return tarinfo
+        tar_path = package_build_context(context_path, dockerfile_path)
 
         try:
-            with tarfile.open(tar_path, "w:gz") as tar:
-                tar.add(context_path, arcname=".", filter=tar_filter)
-                tar.add(dockerfile_path, arcname=PACKAGED_DOCKERFILE_PATH)
-
             tar_size_mb = Path(tar_path).stat().st_size / (1024 * 1024)
             console.print(f"[green]✓[/green] Build context packaged ({tar_size_mb:.2f} MB)")
             console.print()
@@ -508,7 +627,10 @@ def push_image(
                 }
                 if config.team_id:
                     build_payload["team_id"] = config.team_id
-                if public:
+                if platform_image:
+                    build_payload["owner_scope"] = "platform"
+                    build_payload["visibility"] = ImageVisibility.PUBLIC.value
+                elif public:
                     build_payload["visibility"] = ImageVisibility.PUBLIC.value
                 elif private:
                     build_payload["visibility"] = ImageVisibility.PRIVATE.value
@@ -577,7 +699,10 @@ def push_image(
             console.print()
             console.print(f"[bold]Build ID:[/bold] {build_id}")
             console.print(f"[bold]Image:[/bold] {full_image_path}")
-            if public or private:
+            if platform_image:
+                console.print("[bold]Owner:[/bold] Platform")
+                console.print(f"[bold]Visibility:[/bold] {ImageVisibility.PUBLIC.value}")
+            elif public or private:
                 requested_visibility = ImageVisibility.PUBLIC if public else ImageVisibility.PRIVATE
                 console.print(f"[bold]Visibility:[/bold] {requested_visibility.value}")
             else:
@@ -610,6 +735,10 @@ def push_image(
     except KeyboardInterrupt:
         console.print("\n[yellow]Operation cancelled by user[/yellow]")
         raise typer.Exit(1)
+
+
+# Bulk push (JSONL manifest / Harbor task dirs) lives in images_bulk.py.
+app.command("push-bulk")(push_bulk)
 
 
 @app.command("list", epilog=LIST_IMAGES_JSON_HELP)
@@ -813,37 +942,59 @@ def list_images(
         raise typer.Exit(1)
 
 
+def _looks_like_registry_host(value: str) -> bool:
+    # Docker treats localhost as a registry host even without a dot or port.
+    return "." in value or ":" in value or value == "localhost"
+
+
 def _parse_mutable_image_reference(image_reference: str) -> tuple[str, str, Optional[str]]:
     """Parse refs accepted by mutating image commands.
 
-    Returns ``(image_name, image_tag, team_id)``. Personal image refs may use
-    either ``name:tag`` or ``{currentUserId}/name:tag``. Team image refs may
-    use ``team-{teamId}/name:tag``.
+    Returns ``(image_name, image_tag, team_id)``. ``name:tag`` uses the current
+    personal/team context. Owner-prefixed refs are passed through for
+    server-side resolution because only the backend can distinguish user slugs
+    from team slugs. New slug refs must use ``prime/<owner>/name:tag``; legacy
+    ``<userId>/<imageName>:tag`` and ``team-<teamId>/<imageName>:tag`` refs are still
+    accepted.
     """
     team_id: Optional[str] = config.team_id
     if "/" in image_reference:
-        namespace, rest = image_reference.split("/", 1)
-        if namespace.startswith("team-"):
-            extracted_team_id = namespace[5:]
-            if not extracted_team_id:
+        parts = image_reference.split("/")
+        if parts[0] == "prime":
+            if len(parts) < 3:
                 console.print(
-                    "[red]Error: Invalid team image reference. "
-                    "Expected format: team-{teamId}/imagename:tag[/red]"
+                    "[red]Error: Owner-prefixed image references must use "
+                    "prime/<owner>/<imageName>:tag or legacy "
+                    "<userId>/<imageName>:tag[/red]"
                 )
                 raise typer.Exit(1)
-            team_id = extracted_team_id
-            image_reference = rest
-        elif namespace == config.user_id:
-            team_id = None
-            image_reference = rest
+            namespace = parts[1]
+            repo_and_tag = "/".join(parts[2:])
+        elif len(parts) >= 2 and not _looks_like_registry_host(parts[0]):
+            namespace = parts[0]
+            repo_and_tag = "/".join(parts[1:])
         else:
             console.print(
-                f"[red]Error: Unrecognized image namespace '{namespace}'. "
-                "Use 'imagename:tag' for personal images, "
-                "'{userId}/imagename:tag' with your current user ID, or "
-                "'team-{teamId}/imagename:tag' for team images.[/red]"
+                "[red]Error: Owner-prefixed image references must use "
+                "prime/<owner>/<imageName>:tag or legacy "
+                "<userId>/<imageName>:tag[/red]"
             )
             raise typer.Exit(1)
+        if not namespace or not repo_and_tag:
+            console.print(
+                "[red]Error: Owner-prefixed image references must use "
+                "prime/<owner>/<imageName>:tag or legacy "
+                "<userId>/<imageName>:tag[/red]"
+            )
+            raise typer.Exit(1)
+        if namespace == "team-":
+            console.print(
+                "[red]Error: Invalid team image reference. "
+                "Expected format: prime/team-{teamId}/imagename:tag or "
+                "team-{teamId}/imagename:tag[/red]"
+            )
+            raise typer.Exit(1)
+        team_id = None
 
     if ":" not in image_reference:
         console.print("[red]Error: Image reference must include a tag (e.g., myapp:latest)[/red]")
@@ -877,8 +1028,11 @@ def publish_image(
         ...,
         help=(
             "Image reference to make public "
-            "(e.g., 'myapp:v1.0.0', '<currentUserId>/myapp:v1.0.0', "
-            "or 'team-{teamId}/myapp:v1.0.0')"
+            "(e.g., 'myapp:v1.0.0', 'prime/<ownerSlug>/myapp:v1.0.0', "
+            "'prime/<currentUserId>/myapp:v1.0.0', or "
+            "'prime/team-{teamId}/myapp:v1.0.0'; legacy "
+            "'<currentUserId>/myapp:v1.0.0' and "
+            "'team-{teamId}/myapp:v1.0.0' also work)"
         ),
     ),
 ):
@@ -888,6 +1042,9 @@ def publish_image(
     \b
     Examples:
         prime images publish myapp:v1.0.0
+        prime images publish prime/alice/myapp:v1.0.0
+        prime images publish prime/cmk123/myapp:v1.0.0
+        prime images publish prime/team-abc123/myapp:v1.0.0
         prime images publish cmk123/myapp:v1.0.0
         prime images publish team-abc123/myapp:v1.0.0
     """
@@ -907,8 +1064,11 @@ def unpublish_image(
         ...,
         help=(
             "Image reference to make private "
-            "(e.g., 'myapp:v1.0.0', '<currentUserId>/myapp:v1.0.0', "
-            "or 'team-{teamId}/myapp:v1.0.0')"
+            "(e.g., 'myapp:v1.0.0', 'prime/<ownerSlug>/myapp:v1.0.0', "
+            "'prime/<currentUserId>/myapp:v1.0.0', or "
+            "'prime/team-{teamId}/myapp:v1.0.0'; legacy "
+            "'<currentUserId>/myapp:v1.0.0' and "
+            "'team-{teamId}/myapp:v1.0.0' also work)"
         ),
     ),
 ):
@@ -918,6 +1078,9 @@ def unpublish_image(
     \b
     Examples:
         prime images unpublish myapp:v1.0.0
+        prime images unpublish prime/alice/myapp:v1.0.0
+        prime images unpublish prime/cmk123/myapp:v1.0.0
+        prime images unpublish prime/team-abc123/myapp:v1.0.0
         prime images unpublish cmk123/myapp:v1.0.0
         prime images unpublish team-abc123/myapp:v1.0.0
     """
@@ -937,8 +1100,11 @@ def delete_image(
         ...,
         help=(
             "Image reference to delete "
-            "(e.g., 'myapp:v1.0.0', '<currentUserId>/myapp:v1.0.0', "
-            "or 'team-{teamId}/myapp:v1.0.0')"
+            "(e.g., 'myapp:v1.0.0', 'prime/<ownerSlug>/myapp:v1.0.0', "
+            "'prime/<currentUserId>/myapp:v1.0.0', or "
+            "'prime/team-{teamId}/myapp:v1.0.0'; legacy "
+            "'<currentUserId>/myapp:v1.0.0' and "
+            "'team-{teamId}/myapp:v1.0.0' also work)"
         ),
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
@@ -946,13 +1112,16 @@ def delete_image(
     """
     Delete an image from your registry.
 
-    For team images, you can use the team-prefixed format directly.
+    For team images, you can use the prime/team-{teamId}/... format directly.
     Only the image creator or team admins can delete team images.
 
     \b
     Examples:
         prime images delete myapp:v1.0.0
         prime images delete myapp:latest --yes
+        prime images delete prime/alice/myapp:v1.0.0
+        prime images delete prime/cmk123/myapp:v1.0.0
+        prime images delete prime/team-abc123/myapp:v1.0.0
         prime images delete cmk123/myapp:v1.0.0
         prime images delete team-abc123/myapp:v1.0.0
     """

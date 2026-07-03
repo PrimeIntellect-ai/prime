@@ -67,7 +67,7 @@ def _art(
         "pushedAt": pushed_at,
         "teamId": team_id,
         "ownerType": "team" if team_id else "personal",
-        "displayRef": f"{scope}/{name}:{tag}",
+        "displayRef": f"prime/{scope}/{name}:{tag}",
     }
 
 
@@ -205,7 +205,7 @@ def test_render_type_column_container_and_vm():
     assert text.index("Container") < text.index("VM")
 
 
-def test_render_type_column_container_only_legacy():
+def test_render_type_column_container_only():
     text = _render_type_column(_partition_group([_container(pushed_at="2026-04-16T22:24:07")]))
     assert "Container" in text
     assert "VM" not in text
@@ -238,7 +238,7 @@ def test_render_status_column_partial_failure_aligned():
     assert text == "[green]Ready[/green] / [red]Failed[/red]"
 
 
-def test_render_status_column_container_only_legacy():
+def test_render_status_column_container_only():
     text = _render_status_column(_partition_group([_container(pushed_at="2026-04-16T22:24:07")]))
     assert text == "[green]Ready[/green]"
     assert " / " not in text
@@ -308,21 +308,24 @@ def test_render_status_column_surfaces_unknown_status_alongside_known():
 def test_render_image_reference_always_shows_user_prefix_for_personal():
     assert (
         _render_image_reference(_container(image="myapp:v1"), is_team_listing=False)
-        == f"{USER_ID}/myapp:v1"
+        == f"prime/{USER_ID}/myapp:v1"
     )
 
 
 def test_render_image_reference_keeps_team_prefix_for_team_listing():
     assert (
         _render_image_reference(_container(image="myapp:v1", team_id=TEAM_ID), is_team_listing=True)
-        == f"team-{TEAM_ID}/myapp:v1"
+        == f"prime/team-{TEAM_ID}/myapp:v1"
     )
 
 
 def test_render_image_reference_falls_back_without_display_ref():
     assert (
-        _render_image_reference({"imageName": "legacy", "imageTag": "v2"}, is_team_listing=False)
-        == "legacy:v2"
+        _render_image_reference(
+            {"imageName": "fallback-image", "imageTag": "v2"},
+            is_team_listing=False,
+        )
+        == "fallback-image:v2"
     )
 
 
@@ -336,7 +339,7 @@ def test_truncate_ref_left_returns_unchanged_when_within_width():
 
 
 def test_truncate_ref_left_clips_head_and_preserves_name_tag():
-    ref = f"{USER_ID}/nvidia-basic-dev:latest"
+    ref = f"prime/{USER_ID}/nvidia-basic-dev:latest"
     out = _truncate_ref_left(ref, 30)
     assert out.endswith("nvidia-basic-dev:latest")
     assert out.startswith("…")
@@ -345,7 +348,7 @@ def test_truncate_ref_left_clips_head_and_preserves_name_tag():
 
 @pytest.mark.parametrize("budget", [0, -5])
 def test_truncate_ref_left_handles_zero_or_negative_budget(budget):
-    ref = f"{USER_ID}/x:y"
+    ref = f"prime/{USER_ID}/x:y"
     assert _truncate_ref_left(ref, budget) == ref
 
 
@@ -522,7 +525,7 @@ def test_list_cli_shows_type_and_positional_status(run_images_list):
     assert "Container / VM" in result.output
     assert "Ready / Ready" in result.output
     assert "Failed" not in result.output  # stale, hidden by newer COMPLETED
-    assert f"{USER_ID}/nvidia-basic-dev:latest" in result.output
+    assert f"prime/{USER_ID}/nvidia-basic-dev:latest" in result.output
     assert "300.0 MB" in result.output
 
 
@@ -586,14 +589,16 @@ def test_list_cli_team_listing_keeps_owner_column_and_prefix(run_images_list):
     )
     assert result.exit_code == 0, result.output
     assert "Owner" in result.output
-    assert f"team-{TEAM_ID}/teamapp:latest" in result.output
+    assert f"prime/team-{TEAM_ID}/teamapp:latest" in result.output
 
 
-def test_list_cli_container_only_legacy_image(run_images_list):
+def test_list_cli_container_only_image(run_images_list):
     result = run_images_list(
         [
             _container(
-                image="legacy:latest", pushed_at="2026-04-16T22:24:07", size_bytes=10 * 1024 * 1024
+                image="container-only:latest",
+                pushed_at="2026-04-16T22:24:07",
+                size_bytes=10 * 1024 * 1024,
             ),
         ]
     )
@@ -632,7 +637,7 @@ def test_list_cli_truncates_owner_prefix_on_narrow_terminal(run_images_list):
     assert result.exit_code == 0, result.output
     assert "nvidia-basic-dev:latest" in result.output
     assert "…" in result.output
-    assert f"{USER_ID}/nvidia-basic-dev" not in result.output
+    assert f"prime/{USER_ID}/nvidia-basic-dev" not in result.output
 
 
 def _run_list_capturing_params(

@@ -4,6 +4,7 @@ import json
 import os
 import re
 import time
+from contextlib import nullcontext
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
@@ -41,6 +42,22 @@ from .feedback import submit_feedback
 from .usage import RUN_USAGE_JSON_HELP, run_usage_command
 
 console = get_console()
+
+V1_ENV_CONFIG_FIELDS = (
+    "taskset",
+    "harness",
+    "pool",
+    "timeout",
+    "retries",
+    "sampling",
+    "ratio",
+    "group_size",
+    "max_turns",
+    "max_input_tokens",
+    "max_output_tokens",
+    "max_total_tokens",
+    "multiplex",
+)
 
 RL_RUN_JSON_HELP = json_output_help(
     ".run = {id, name?, status, base_model, environments[], "
@@ -258,6 +275,12 @@ id = "{env_value}"
 # [[env]] # add multiple [[env]] sections for multi-env training
 # id = "primeintellect/another-env"
 # args = {{ split = "train", max_examples = 1000 }}
+#
+# v1 environment shape: use taskset/harness instead of legacy id.
+# [[env]]
+# name = "alphabet-sort"
+# taskset = {{ id = "alphabet-sort-v1", min_turns = 3, max_turns = 5, power_per_turn = false }}
+# harness = {{ id = "default", runtime = {{ type = "subprocess" }} }}
 
 # Optional: online evaluation
 # [eval]
@@ -298,29 +321,125 @@ id = "{env_value}"
 '''
 
 
+def _validate_env_id_value(v: str, *, field_name: str) -> str:
+    """Validate a legacy env id or v1 plugin id.
+
+    Bare ids are importable runtime ids. Slash-shaped ids are Hub refs and
+    must include both owner and name.
+    """
+    v = v.strip()
+    if not v:
+        raise ValueError(f"{field_name} cannot be empty")
+    if "/" in v:
+        owner, name = v.split("/", 1)
+        if not owner.strip() or not name.strip():
+            raise ValueError(
+                f"{field_name} must have both owner and name (e.g., 'primeintellect/vf-math')"
+            )
+    return v
+
+
+def _dict_id(config: Dict[str, Any] | None) -> Any:
+    return config.get("id") if isinstance(config, dict) else None
+
+
+def _is_hub_env_id(value: Any) -> bool:
+    return isinstance(value, str) and "/" in value
+
+
+def _split_hub_env_id(env_id: str) -> str:
+    return env_id.rsplit("@", 1)[0]
+
+
+def _env_display_name(env: Dict[str, Any], index: int | None = None) -> str:
+    taskset_id = _dict_id(env.get("taskset") if isinstance(env.get("taskset"), dict) else None)
+    value = env.get("slug") or env.get("name") or env.get("id") or taskset_id
+    if value:
+        return str(value)
+    return f"env-{index}" if index is not None else "?"
+
+
 class EnvConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    id: str
+    id: str | None = None
     name: str | None = None
+    taskset: Dict[str, Any] | None = None
+    harness: Dict[str, Any] | None = None
+    pool: Dict[str, Any] | None = None
+    timeout: Dict[str, Any] | None = None
+    retries: Dict[str, Any] | None = None
+    sampling: Dict[str, Any] | None = None
+    ratio: float | None = Field(default=None, gt=0)
+    group_size: int | None = Field(default=None, ge=1)
+    max_turns: int | None = Field(default=None, ge=1)
+    max_input_tokens: int | None = Field(default=None, ge=1)
+    max_output_tokens: int | None = Field(default=None, ge=1)
+    max_total_tokens: int | None = Field(default=None, ge=1)
+    multiplex: int | None = Field(default=None, ge=1)
     args: Dict[str, Any] = Field(default_factory=dict)
     max_retries: int | None = Field(default=None, ge=0)
     version: str | None = None
 
+    @field_validator("id")
+    @classmethod
+    def validate_environment_id(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        return _validate_env_id_value(v, field_name="Environment ID")
+
     @model_validator(mode="after")
     def parse_version_from_id(self) -> "EnvConfig":
         """Extract version from id if specified as 'owner/name@version'."""
-        if "@" in self.id:
+        if self.id and "@" in self.id:
             id_part, version_part = self.id.rsplit("@", 1)
-            self.id = id_part
+            self.id = _validate_env_id_value(id_part, field_name="Environment ID")
             if self.version is None and version_part:
                 self.version = version_part
         return self
 
+    @model_validator(mode="after")
+    def validate_env_selector(self) -> "EnvConfig":
+        taskset_id = _dict_id(self.taskset)
+        if self.id is None and not taskset_id:
+            raise ValueError("Environment config requires either legacy id or v1 taskset.id")
+        if taskset_id is not None:
+            assert self.taskset is not None
+            self.taskset["id"] = _validate_env_id_value(str(taskset_id), field_name="taskset.id")
+        harness_id = _dict_id(self.harness)
+        if harness_id is not None:
+            assert self.harness is not None
+            self.harness["id"] = _validate_env_id_value(str(harness_id), field_name="harness.id")
+        return self
+
+    @property
+    def is_v1(self) -> bool:
+        return bool(_dict_id(self.taskset))
+
+    @property
+    def display_name(self) -> str:
+        return _env_display_name(self.to_api_dict())
+
+    def hub_env_ids(self) -> list[str]:
+        refs: list[str] = []
+        if _is_hub_env_id(self.id):
+            refs.append(str(self.id))
+        for config in (self.taskset, self.harness):
+            plugin_id = _dict_id(config)
+            if _is_hub_env_id(plugin_id):
+                refs.append(str(plugin_id))
+        return refs
+
     def to_api_dict(self) -> Dict[str, Any]:
-        result: Dict[str, Any] = {"id": self.id}
+        result: Dict[str, Any] = {}
+        if self.id is not None:
+            result["id"] = self.id
         if self.name is not None:
             result["name"] = self.name
+        for field_name in V1_ENV_CONFIG_FIELDS:
+            value = getattr(self, field_name)
+            if value is not None:
+                result[field_name] = value
         if self.args:
             result["args"] = self.args
         if self.max_retries is not None:
@@ -330,41 +449,34 @@ class EnvConfig(BaseModel):
         return result
 
 
-class EvalEnvConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    id: str
-    name: str | None = None
-    args: Dict[str, Any] = Field(default_factory=dict)
+class EvalEnvConfig(EnvConfig):
     num_examples: int | None = None
-    rollouts_per_example: int | None = None
-    max_retries: int | None = Field(default=None, ge=0)
-    version: str | None = None
+    rollouts_per_example: int | None = Field(default=None, ge=1)
+
+    @field_validator("num_examples")
+    @classmethod
+    def validate_num_examples(cls, v: int | None) -> int | None:
+        if v is not None and v != -1 and v < 1:
+            raise ValueError("num_examples must be -1 (all) or a positive integer")
+        return v
 
     @model_validator(mode="after")
-    def parse_version_from_id(self) -> "EvalEnvConfig":
-        """Extract version from id if specified as 'owner/name@version'."""
-        if "@" in self.id:
-            id_part, version_part = self.id.rsplit("@", 1)
-            self.id = id_part
-            if self.version is None and version_part:
-                self.version = version_part
+    def validate_eval_group_size_aliases(self) -> "EvalEnvConfig":
+        if (
+            self.group_size is not None
+            and self.rollouts_per_example is not None
+            and self.group_size != self.rollouts_per_example
+        ):
+            raise ValueError("group_size and rollouts_per_example cannot differ")
         return self
 
     def to_api_dict(self) -> Dict[str, Any]:
-        result: Dict[str, Any] = {"id": self.id}
-        if self.name is not None:
-            result["name"] = self.name
-        if self.args:
-            result["args"] = self.args
+        result = super().to_api_dict()
         if self.num_examples is not None:
             result["num_examples"] = self.num_examples
         if self.rollouts_per_example is not None:
-            result["rollouts_per_example"] = self.rollouts_per_example
-        if self.max_retries is not None:
-            result["max_retries"] = self.max_retries
-        if self.version is not None:
-            result["version"] = self.version
+            key = "group_size" if self.is_v1 else "rollouts_per_example"
+            result.setdefault(key, self.rollouts_per_example)
         return result
 
 
@@ -936,14 +1048,24 @@ def _dispatch_full_finetune_run(
     # so the JSON output path doesn't accidentally launch an expensive
     # training job without an explicit ack — matches confirm_or_skip
     # in the LoRA path.
-    if not yes:
-        if not typer.confirm("Dispatch full_finetune run on auto-picked PrimeCluster?"):
-            raise typer.Exit(0)
+    if not confirm_or_skip("Launch this Hosted Training run?", yes, default=True):
+        console.print("\nRun cancelled")
+        raise typer.Exit(0)
 
     api_client = APIClient()
     client = HostedTrainingClient(api_client)
+    # Skip the spinner for --output json: PrimeConsole.status() falls back
+    # to a plain print in --plain mode, which would emit "Creating Hosted
+    # Training run..." on stdout ahead of the JSON payload and break
+    # automation parsing of run_id.
+    status_ctx = (
+        console.status("[bold blue]Creating Hosted Training run...", spinner="dots")
+        if output != "json"
+        else nullcontext()
+    )
     try:
-        result = client.create_run(payload)
+        with status_ctx:
+            result = client.create_run(payload)
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
@@ -1034,7 +1156,8 @@ def _render_failure_analysis(analysis: Dict[str, Any]) -> None:
 def _format_run_for_display(run: RLRun) -> Dict[str, Any]:
     created_at = run.created_at.strftime("%Y-%m-%d %H:%M") if run.created_at else ""
     env_names = [
-        env.get("slug") or env.get("name") or env.get("id") or "?" for env in run.environments
+        _env_display_name(env, index=index) if isinstance(env, dict) else str(env)
+        for index, env in enumerate(run.environments)
     ]
     envs_display = ", ".join(env_names[:3])
     if len(env_names) > 3:
@@ -1240,7 +1363,7 @@ def create_run(
         console.print(f"  Loss:         {cfg.loss}")
         if cfg.teacher is not None:
             console.print(f"  Teacher:      {cfg.teacher.model}")
-        console.print(f"  Environments: {', '.join(e.id for e in cfg.env)}")
+        console.print(f"  Environments: {', '.join(e.display_name for e in cfg.env)}")
         if app_config.team_id:
             console.print(f"  Team:         {app_config.team_id}")
 
@@ -1296,7 +1419,7 @@ def create_run(
         # Eval
         if cfg.eval.env:
             console.print("\n[cyan]Evaluation[/cyan]")
-            console.print(f"  Environments: {', '.join(e.id for e in cfg.eval.env)}")
+            console.print(f"  Environments: {', '.join(e.display_name for e in cfg.eval.env)}")
             if cfg.eval.interval:
                 console.print(f"  Interval:     {cfg.eval.interval}")
 
@@ -1355,14 +1478,21 @@ def create_run(
 
         console.print()
 
-        # Check action status for hub environments
-        hub_envs = [e for e in cfg.env if "/" in e.id]
-        if hub_envs and not skip_action_check:
+        # Check action status for Hub-backed environment refs. Bare v1 ids
+        # like taskset.id="alphabet-sort-v1" are runtime-importable names and
+        # intentionally do not resolve through the Hub.
+        hub_env_ids: list[str] = []
+        for env_config in cfg.env:
+            for env_id in env_config.hub_env_ids():
+                if env_id not in hub_env_ids:
+                    hub_env_ids.append(env_id)
+
+        if hub_env_ids and not skip_action_check:
             console.print("[dim]Checking Environment Actions...[/dim]")
             failed_envs = []
 
-            for env_config in hub_envs:
-                env_id_base = env_config.id.split("@")[0]
+            for env_id in hub_env_ids:
+                env_id_base = _split_hub_env_id(env_id)
                 owner, name = env_id_base.split("/", 1)
                 try:
                     status_resp = rl_client.get_environment_status(owner, name)
@@ -1370,23 +1500,21 @@ def create_run(
                     action_status = action.get("status")
 
                     if action_status == "FAILED":
-                        console.print(f"  [red]✗[/red] {env_config.id} [dim](failed)[/dim]")
-                        failed_envs.append(env_config.id)
+                        console.print(f"  [red]✗[/red] {env_id} [dim](failed)[/dim]")
+                        failed_envs.append(env_id)
                     elif action_status == "SUCCESS":
-                        console.print(f"  [green]✓[/green] {env_config.id} [dim](success)[/dim]")
+                        console.print(f"  [green]✓[/green] {env_id} [dim](success)[/dim]")
                     elif action_status in ("RUNNING", "PENDING"):
-                        console.print(
-                            f"  [yellow]○[/yellow] {env_config.id} [dim](in progress)[/dim]"
-                        )
+                        console.print(f"  [yellow]○[/yellow] {env_id} [dim](in progress)[/dim]")
                     else:
-                        console.print(f"  [dim]-[/dim] {env_config.id} [dim](no action)[/dim]")
+                        console.print(f"  [dim]-[/dim] {env_id} [dim](no action)[/dim]")
                 except APIError:
-                    console.print(f"  [dim]-[/dim] {env_config.id} [dim](could not check)[/dim]")
+                    console.print(f"  [dim]-[/dim] {env_id} [dim](could not check)[/dim]")
 
             if failed_envs:
                 console.print("\n[red]Error: Action failed for environments:[/red]\n")
                 for env_id in failed_envs:
-                    env_id_base = env_id.split("@")[0]
+                    env_id_base = _split_hub_env_id(env_id)
                     owner, name = env_id_base.split("/", 1)
                     url = f"{app_config.frontend_url}/dashboard/environments/{owner}/{name}/actions"
                     console.print(f"  [red]✗[/red] {env_id}")

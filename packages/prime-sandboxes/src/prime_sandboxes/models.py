@@ -2,9 +2,9 @@
 
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
 
 class SandboxStatus(str, Enum):
@@ -243,6 +243,62 @@ class RegistryCredentialSummary(BaseModel):
 class DockerImageCheckResponse(BaseModel):
     accessible: bool
     details: str
+
+
+class ImageVisibility(str, Enum):
+    PRIVATE = "PRIVATE"
+    PUBLIC = "PUBLIC"
+
+
+class BuildImageRequest(BaseModel):
+    image_name: Optional[str] = None
+    image_tag: Optional[str] = None
+    dockerfile_path: str = "Dockerfile"
+    source_image: Optional[str] = Field(default=None, alias="sourceImage")
+    platform: str = "linux/amd64"
+    team_id: Optional[str] = Field(default=None, alias="teamId")
+    visibility: Optional[ImageVisibility] = None
+    owner_scope: Optional[Literal["platform"]] = Field(default=None, alias="ownerScope")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class BuildImageResponse(BaseModel):
+    build_id: str = Field(
+        ...,
+        alias="build_id",
+        validation_alias=AliasChoices("build_id", "buildId"),
+    )
+    build_ids: List[str] = Field(default_factory=list, alias="buildIds")
+    upload_url: Optional[str] = None
+    expires_in: Optional[int] = None
+    full_image_path: str = Field(..., alias="fullImagePath")
+    visibility: Optional[ImageVisibility] = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class TransferImageResult(BaseModel):
+    """Per-source result returned by bulk image transfer requests."""
+
+    source_image: str = Field(..., alias="sourceImage")
+    success: bool
+    build_id: Optional[str] = Field(default=None, alias="buildId")
+    full_image_path: Optional[str] = Field(default=None, alias="fullImagePath")
+    visibility: Optional[ImageVisibility] = None
+    error: Optional[str] = None
+    retryable: bool = False
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class BulkImageTransferResponse(BaseModel):
+    """Response returned for comma-separated image transfer requests."""
+
+    results: List[TransferImageResult] = Field(default_factory=list)
+    failed: List[TransferImageResult] = Field(default_factory=list)
+
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class ExposePortRequest(BaseModel):

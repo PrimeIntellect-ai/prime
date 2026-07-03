@@ -21,9 +21,12 @@ def _make_job() -> BackgroundJob:
 
 def _whole_file(content: str) -> ReadFileResponse:
     size = len(content.encode())
-    return ReadFileResponse(
-        content=content, size=size, total_size=size, offset=0, truncated=False
-    )
+    return ReadFileResponse(content=content, size=size, total_size=size, offset=0, truncated=False)
+
+
+def _legacy_whole_file(content: str) -> ReadFileResponse:
+    """Response shape from servers without windowed-read support (VM sandboxes)."""
+    return ReadFileResponse.model_validate({"content": content, "size": len(content.encode())})
 
 
 def test_sync_get_background_job_forwards_timeout_to_read_file():
@@ -106,6 +109,63 @@ def test_sync_get_background_job_forwards_timeout_on_completed_reads():
     assert status.exit_code == 0
     # Exit file read, then stdout, then stderr.
     assert seen_timeouts == [45, 45, 45]
+
+
+def test_sync_get_background_job_handles_legacy_read_file_response():
+    """VM sandboxes ignore offset/length and omit the window metadata fields;
+    the truncated flags must default to False rather than fail validation."""
+
+    client = SandboxClient(APIClient(api_key="test-key"))
+    client_any = cast(Any, client)
+
+    def fake_read_file(
+        sandbox_id: str,
+        file_path: str,
+        timeout: Optional[int] = None,
+        offset: Optional[int] = None,
+        length: Optional[int] = None,
+    ) -> ReadFileResponse:
+        if file_path.endswith(".exit"):
+            return _legacy_whole_file("0\n")
+        return _legacy_whole_file("out")
+
+    client_any.read_file = fake_read_file
+
+    status = client.get_background_job("sbx-123", _make_job())
+
+    assert status.completed
+    assert status.exit_code == 0
+    assert status.stdout == "out"
+    assert status.stderr == "out"
+    assert status.stdout_truncated is False
+    assert status.stderr_truncated is False
+
+
+@pytest.mark.asyncio
+async def test_async_get_background_job_handles_legacy_read_file_response():
+    client = AsyncSandboxClient(api_key="test-key")
+    client_any = cast(Any, client)
+
+    async def fake_read_file(
+        sandbox_id: str,
+        file_path: str,
+        timeout: Optional[int] = None,
+        offset: Optional[int] = None,
+        length: Optional[int] = None,
+    ) -> ReadFileResponse:
+        if file_path.endswith(".exit"):
+            return _legacy_whole_file("0\n")
+        return _legacy_whole_file("out")
+
+    client_any.read_file = fake_read_file
+
+    status = await client.get_background_job("sbx-123", _make_job())
+
+    assert status.completed
+    assert status.exit_code == 0
+    assert status.stdout == "out"
+    assert status.stdout_truncated is False
+    assert status.stderr_truncated is False
 
 
 @pytest.mark.asyncio

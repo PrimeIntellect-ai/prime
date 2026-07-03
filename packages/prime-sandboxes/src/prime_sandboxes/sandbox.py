@@ -1008,7 +1008,8 @@ class SandboxClient:
                     offset=-JOB_OUTPUT_TAIL_BYTES,
                     length=JOB_OUTPUT_TAIL_BYTES,
                 )
-                return response.content, response.truncated
+                # Servers without windowed-read support omit `truncated`.
+                return response.content, bool(response.truncated)
             except SandboxFileNotFoundError:
                 return "", False
 
@@ -1322,7 +1323,13 @@ class SandboxClient:
         offset: Optional[int] = None,
         length: Optional[int] = None,
     ) -> ReadFileResponse:
-        """Read a file (or a byte window of it) from a sandbox via gateway."""
+        """Read a file (or a byte window of it) from a sandbox via gateway.
+
+        offset/length require server-side windowed-read support. VM sandboxes
+        don't support it yet: they ignore both params, return the whole file
+        (subject to the read size limit), and omit total_size/offset/truncated
+        from the response (detectable via ``response.offset is None``).
+        """
         auth = self._auth_cache.get_or_refresh(sandbox_id)
 
         gateway_url = auth["gateway_url"].rstrip("/")
@@ -1961,7 +1968,8 @@ class AsyncSandboxClient:
                     offset=-JOB_OUTPUT_TAIL_BYTES,
                     length=JOB_OUTPUT_TAIL_BYTES,
                 )
-                return response.content, response.truncated
+                # Servers without windowed-read support omit `truncated`.
+                return response.content, bool(response.truncated)
             except SandboxFileNotFoundError:
                 return "", False
 
@@ -2291,7 +2299,13 @@ class AsyncSandboxClient:
         offset: Optional[int] = None,
         length: Optional[int] = None,
     ) -> ReadFileResponse:
-        """Read a file (or a byte window of it) from a sandbox via gateway (async)."""
+        """Read a file (or a byte window of it) from a sandbox via gateway (async).
+
+        offset/length require server-side windowed-read support. VM sandboxes
+        don't support it yet: they ignore both params, return the whole file
+        (subject to the read size limit), and omit total_size/offset/truncated
+        from the response (detectable via ``response.offset is None``).
+        """
         auth = await self._auth_cache.get_or_refresh(sandbox_id)
 
         gateway_url = auth["gateway_url"].rstrip("/")

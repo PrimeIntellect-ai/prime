@@ -200,9 +200,10 @@ class ReadFileResponse(BaseModel):
 
     content: str
     size: int
-    total_size: int
-    offset: int
-    truncated: bool
+    # VM sandboxes don't support windowed reads yet and omit them.
+    total_size: Optional[int] = None
+    offset: Optional[int] = None
+    truncated: Optional[bool] = None
 
 
 class SandboxLogsResponse(BaseModel):

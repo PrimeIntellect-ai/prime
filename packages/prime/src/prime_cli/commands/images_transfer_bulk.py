@@ -102,6 +102,11 @@ def derive_transfer_destination(source_ref: str) -> tuple[str, str]:
     ref = (source_ref or "").strip()
     if not ref:
         raise ValueError("empty image reference")
+    # A comma is never valid inside an image reference. Reject it here rather
+    # than letting the server split it into multiple transfers, which this
+    # command tracks one-per-spec.
+    if "," in ref:
+        raise ValueError("commas are not allowed; use one entry per image reference")
 
     digest: Optional[str] = None
     if "@" in ref:
@@ -594,7 +599,13 @@ def _submit_transfer(
     # contract shifts.
     results = response.get("results")
     if isinstance(results, list):
-        entry = results[0] if results and isinstance(results[0], dict) else {}
+        # Specs are validated to hold exactly one image reference, so anything
+        # other than one entry means we would silently drop transfers.
+        if len(results) != 1 or not isinstance(results[0], dict):
+            raise APIError(
+                f"invalid response from server (expected one transfer result, got {len(results)})"
+            )
+        entry = results[0]
         if not entry.get("success") or not entry.get("buildId"):
             error = entry.get("error") or "invalid response from server (transfer not queued)"
             if any(marker in error.lower() for marker in _QUOTA_DETAIL_MARKERS):

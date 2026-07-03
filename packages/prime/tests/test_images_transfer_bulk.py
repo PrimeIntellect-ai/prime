@@ -52,6 +52,7 @@ class FakeTransferAPI:
         # Respond with the per-source results shape instead of a top-level build_id.
         self.respond_bulk_shape = False
         self.bulk_entry_error = None
+        self.bulk_results_count = 1
 
     def request(self, method, path, json=None, params=None):
         self.calls.append((method, path))
@@ -71,17 +72,13 @@ class FakeTransferAPI:
             self.build_counter += 1
             build_id = f"build-{self.build_counter}"
             if self.respond_bulk_shape:
-                return {
-                    "results": [
-                        {
-                            "sourceImage": json["source_image"],
-                            "success": True,
-                            "buildId": build_id,
-                            "fullImagePath": f"user/{json.get('image_name') or 'derived'}",
-                        }
-                    ],
-                    "failed": [],
+                entry = {
+                    "sourceImage": json["source_image"],
+                    "success": True,
+                    "buildId": build_id,
+                    "fullImagePath": f"user/{json.get('image_name') or 'derived'}",
                 }
+                return {"results": [entry] * self.bulk_results_count, "failed": []}
             return {
                 "build_id": build_id,
                 "fullImagePath": f"user/{json.get('image_name') or 'derived'}",
@@ -179,6 +176,9 @@ def test_derive_destination_matches_server_rules():
         derive_transfer_destination("")
     with pytest.raises(ValueError):
         derive_transfer_destination("app@sha512:abc")
+    # Comma-separated refs (the push --source-image ad-hoc form) are one-per-entry here.
+    with pytest.raises(ValueError, match="commas"):
+        derive_transfer_destination("a/app:v1,b/app:v2")
 
 
 # ---------------------------------------------------------------------------
@@ -437,6 +437,41 @@ def test_bulk_shape_response_is_unwrapped(tmp_path, fake_api):
     # The build ids from the unwrapped entries are what gets polled.
     assert ("GET", "/images/build/build-1") in fake_api.calls
     assert ("GET", "/images/build/build-2") in fake_api.calls
+
+
+def test_comma_separated_sources_rejected_in_manifest_and_hf(tmp_path, fake_api, monkeypatch):
+    manifest = tmp_path / "transfers.jsonl"
+    _write_manifest(manifest, [{"source": "a/app:v1,b/app:v2"}])
+    result = runner.invoke(
+        app, ["images", "transfer-bulk", "--manifest", str(manifest)], env=TEST_ENV
+    )
+    assert result.exit_code == 1
+    assert "commas are not allowed" in result.output
+    assert fake_api.post_build_count() == 0
+
+    _fake_hf(
+        monkeypatch,
+        info=HF_INFO_ONE_CONFIG,
+        pages={0: ["org/img-a:v1,org/img-b:v1"]},
+        total=1,
+    )
+    result = runner.invoke(app, ["images", "transfer-bulk", "--hf", "org/ds"], env=TEST_ENV)
+    assert result.exit_code == 1
+    assert "row 0" in result.output
+    assert "commas are not allowed" in result.output
+    assert fake_api.post_build_count() == 0
+
+
+def test_bulk_shape_multi_entry_response_fails_loudly(tmp_path, fake_api):
+    fake_api.respond_bulk_shape = True
+    fake_api.bulk_results_count = 2
+    manifest = tmp_path / "transfers.jsonl"
+    _write_manifest(manifest, [{"source": "a/app-a:v1"}])
+    result = runner.invoke(
+        app, ["images", "transfer-bulk", "--manifest", str(manifest)], env=TEST_ENV
+    )
+    assert result.exit_code == 1
+    assert "expected one transfer result, got 2" in result.output
 
 
 def test_bulk_shape_failed_entry_records_submit_failed(tmp_path, fake_api):

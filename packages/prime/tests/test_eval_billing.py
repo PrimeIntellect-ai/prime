@@ -126,7 +126,7 @@ def test_eval_preflight_omits_max_tokens(monkeypatch):
 
     monkeypatch.setattr("prime_cli.verifiers_bridge.InferenceClient", DummyInferenceClient)
     monkeypatch.setattr(
-        "prime_cli.verifiers_bridge._prepare_single_environment",
+        "prime_cli.verifiers_bridge._prepare_v1_environment",
         lambda *args, **kwargs: (_ for _ in ()).throw(typer.Exit(0)),
     )
 
@@ -163,12 +163,14 @@ def test_eval_run_uses_v1_client_config(monkeypatch, tmp_path):
     captured = {}
     monkeypatch.setattr("prime_cli.verifiers_bridge.InferenceClient", ExplodingInferenceClient)
     monkeypatch.setattr(
-        "prime_cli.verifiers_bridge._prepare_single_environment",
-        lambda _plugin, env_name, env_dir: captured.update(prepared=(env_name, env_dir))
-        or ResolvedEnvironment(
-            original=env_name,
-            env_name=env_name,
-            install_mode="local",
+        "prime_cli.verifiers_bridge._prepare_v1_environment",
+        lambda _plugin, env_name, env_dir: (
+            captured.update(prepared=(env_name, env_dir))
+            or ResolvedEnvironment(
+                original=env_name,
+                env_name=env_name,
+                install_mode="local",
+            )
         ),
     )
     monkeypatch.setattr(
@@ -351,7 +353,7 @@ def test_eval_run_missing_endpoint_registry_falls_back_to_configured_inference(
 
     monkeypatch.setattr("prime_cli.verifiers_bridge.InferenceClient", DummyInferenceClient)
     monkeypatch.setattr(
-        "prime_cli.verifiers_bridge._prepare_single_environment",
+        "prime_cli.verifiers_bridge._prepare_v1_environment",
         lambda *args, **kwargs: (_ for _ in ()).throw(typer.Exit(0)),
     )
 
@@ -380,13 +382,13 @@ def test_gepa_run_provider_short_flag_does_not_override_env_dir_path(monkeypatch
     captured = {}
     monkeypatch.setattr(
         "prime_cli.verifiers_bridge._prepare_single_environment",
-        lambda _plugin, environment, env_dir_path: captured.update(
-            {"environment": environment, "env_dir_path": env_dir_path}
-        )
-        or ResolvedEnvironment(
-            original=environment,
-            env_name=environment,
-            install_mode="local",
+        lambda _plugin, environment, env_dir_path: (
+            captured.update({"environment": environment, "env_dir_path": env_dir_path})
+            or ResolvedEnvironment(
+                original=environment,
+                env_name=environment,
+                install_mode="local",
+            )
         ),
     )
     monkeypatch.setattr("prime_cli.verifiers_bridge._run_command", lambda command, env=None: None)
@@ -422,7 +424,7 @@ def test_eval_run_continues_when_model_validation_times_out(monkeypatch):
 
     monkeypatch.setattr("prime_cli.verifiers_bridge.InferenceClient", DummyInferenceClient)
     monkeypatch.setattr(
-        "prime_cli.verifiers_bridge._prepare_single_environment",
+        "prime_cli.verifiers_bridge._prepare_v1_environment",
         lambda *args, **kwargs: (_ for _ in ()).throw(typer.Exit(0)),
     )
 
@@ -459,7 +461,7 @@ def test_eval_run_continues_when_billing_preflight_times_out(monkeypatch):
 
     monkeypatch.setattr("prime_cli.verifiers_bridge.InferenceClient", DummyInferenceClient)
     monkeypatch.setattr(
-        "prime_cli.verifiers_bridge._prepare_single_environment",
+        "prime_cli.verifiers_bridge._prepare_v1_environment",
         lambda *args, **kwargs: (_ for _ in ()).throw(typer.Exit(0)),
     )
 
@@ -508,7 +510,7 @@ id = "primeintellect/wordle"
     def fake_run_command(command, env=None):
         commands.append(command)
 
-    monkeypatch.setattr("prime_cli.verifiers_bridge._prepare_single_environment", fake_prepare)
+    monkeypatch.setattr("prime_cli.verifiers_bridge._prepare_v1_environment", fake_prepare)
     monkeypatch.setattr("prime_cli.verifiers_bridge._run_command", fake_run_command)
 
     run_eval_passthrough(
@@ -520,7 +522,8 @@ id = "primeintellect/wordle"
 
     assert prepared == [("primeintellect/wordle", "./environments")]
     assert commands
-    assert commands[0][1] == f"@{config_path}"
+    # pydantic-config only accepts a root config file as two tokens: `@ path`
+    assert commands[0][1:3] == ["@", str(config_path)]
     header_idx = commands[0].index("--client.headers")
     headers = json.loads(commands[0][header_idx + 1])
     assert headers["X-PI-Job-Id"].startswith("wordle_openai_gpt_4.1_mini_")
@@ -542,7 +545,7 @@ def test_eval_dry_run_skips_inference_preflight(monkeypatch, tmp_path, from_conf
         lambda *_args: (_ for _ in ()).throw(AssertionError("dry-run must not make API calls")),
     )
     monkeypatch.setattr(
-        "prime_cli.verifiers_bridge._prepare_single_environment",
+        "prime_cli.verifiers_bridge._prepare_v1_environment",
         lambda _plugin, environment, _env_dir: ResolvedEnvironment(
             original=environment,
             env_name=environment,
@@ -583,7 +586,7 @@ def test_eval_config_preserves_output_dir(monkeypatch, tmp_path):
     monkeypatch.setattr(
         "prime_cli.verifiers_bridge._preflight_inference_billing", lambda *args: None
     )
-    monkeypatch.setattr("prime_cli.verifiers_bridge._prepare_single_environment", lambda *_: None)
+    monkeypatch.setattr("prime_cli.verifiers_bridge._prepare_v1_environment", lambda *_: None)
 
     output_dir = tmp_path / "configured-output"
     config_path = tmp_path / "eval.toml"
@@ -637,7 +640,7 @@ def test_eval_writes_v1_metadata(monkeypatch, tmp_path, task_ids, expected_rollo
     )
 
     monkeypatch.setattr(
-        "prime_cli.verifiers_bridge._prepare_single_environment",
+        "prime_cli.verifiers_bridge._prepare_v1_environment",
         lambda *_args: ResolvedEnvironment(
             original="wiki-search", env_name="wiki-search", install_mode="local"
         ),

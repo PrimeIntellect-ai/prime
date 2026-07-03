@@ -588,7 +588,9 @@ def _choose_remote_owner(env_name: str, candidates: list[tuple[str, str]]) -> tu
         console.print(f"[red]Invalid selection.[/red] Enter 1-{len(candidates)}.")
 
 
-def _resolve_environment_reference(env_reference: str, env_dir_path: str) -> ResolvedEnvironment:
+def _resolve_environment_reference(
+    env_reference: str, env_dir_path: str, probe_remote: bool = True
+) -> ResolvedEnvironment:
     base_ref, version = _split_version(env_reference)
 
     if _is_slug_reference(base_ref):
@@ -647,7 +649,7 @@ def _resolve_environment_reference(env_reference: str, env_dir_path: str) -> Res
             local_env_path=local_dir,
         )
 
-    if config is None or client is None:
+    if not probe_remote or config is None or client is None:
         return ResolvedEnvironment(
             original=env_reference,
             env_name=env_name,
@@ -767,6 +769,23 @@ def _prepare_single_environment(
             f"[yellow]Warning:[/yellow] No local checkout or matching remote environment found "
             f"for '{resolved.env_name}'. Continuing with installed package resolution."
         )
+    return resolved
+
+
+def _prepare_v1_environment(
+    plugin: PrimeVerifiersPlugin, env_reference: str, env_dir_path: str
+) -> ResolvedEnvironment:
+    """Prepare `env_reference` for the v1 CLI, which resolves references itself: hub ids
+    (`org/name[@version]`) install on demand, anything else must be importable. Prime only
+    pre-installs a local checkout and collects platform metadata for the results upload."""
+    resolved = _resolve_environment_reference(env_reference, env_dir_path, probe_remote=False)
+    if resolved.install_mode == "local":
+        console.print(f"[dim]Using local environment '{resolved.env_name}'[/dim]")
+        if resolved.env_display_id:
+            console.print(f"[dim]Resolved source: {resolved.env_display_id}[/dim]")
+        _install_local_environment(plugin, resolved.env_name, env_dir_path)
+    elif resolved.install_mode == "remote":
+        console.print(f"[dim]Resolved source: {resolved.env_display_id}[/dim]")
     return resolved
 
 
@@ -1046,22 +1065,27 @@ def run_eval_passthrough(
                 del args[env_dir_index : env_dir_index + 2]
             else:
                 del args[env_dir_index]
-        run_target = target
         upstream_slug: Optional[str] = None
         env_name_for_upload: Optional[str] = None
         resolved_env: Optional[ResolvedEnvironment] = None
         config_envs: list[tuple[str, str]] = []
 
         if is_config:
-            taskset = config_data.get("taskset", {})
-            if isinstance(taskset, dict) and isinstance(taskset.get("id"), str):
-                config_envs = [(taskset["id"], env_dir_path)]
-            for env_ref, ref_env_dir in config_envs:
-                _prepare_single_environment(plugin, env_ref, ref_env_dir)
-            run_target = f"@{target}"
+            taskset = config_data.get("taskset")
+            env_ref = taskset.get("id") if isinstance(taskset, dict) else None
+            if not (isinstance(env_ref, str) and env_ref):
+                # v1's legacy field: a top-level `id` runs a v0 env through the bridge
+                env_ref = config_data.get("id")
+            if isinstance(env_ref, str) and env_ref:
+                config_envs = [(env_ref, env_dir_path)]
+            for config_env_ref, ref_env_dir in config_envs:
+                _prepare_v1_environment(plugin, config_env_ref, ref_env_dir)
+            # pydantic-config only reads a root config file as two tokens: `@ path`
+            run_args = ["@", target]
         else:
-            resolved_env = _prepare_single_environment(plugin, target, env_dir_path)
-            run_target = resolved_env.env_name
+            resolved_env = _prepare_v1_environment(plugin, target, env_dir_path)
+            # hub refs (org/name[@version]) pass through verbatim; verifiers installs them
+            run_args = [resolved_env.install_slug or resolved_env.env_name]
             upstream_slug = resolved_env.upstream_slug
             env_name_for_upload = resolved_env.env_name
 
@@ -1112,7 +1136,7 @@ def run_eval_passthrough(
         args.extend(["--client.headers", json.dumps(headers)])
 
         console.print(f"[dim]Eval job_id: {job_id}[/dim]")
-        command = plugin.build_module_command(plugin.eval_module, [run_target, *args])
+        command = plugin.build_module_command(plugin.eval_module, [*run_args, *args])
         _run_command(command, env=env)
 
     results_path = output_dir / "results.jsonl"

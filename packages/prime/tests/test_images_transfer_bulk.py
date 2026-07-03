@@ -430,6 +430,19 @@ def test_hf_column_is_required(tmp_path, fake_api, monkeypatch):
     assert fake_api.post_build_count() == 0
 
 
+def test_hf_large_dataset_prints_size_note(tmp_path, fake_api, monkeypatch):
+    info = json.loads(json.dumps(HF_INFO_ONE_CONFIG))
+    info["dataset_info"]["default"]["dataset_size"] = 3_700_000_000
+    _fake_hf(monkeypatch, info=info, pages={0: ["org/img-a:v1"]}, total=1)
+    result = runner.invoke(
+        app,
+        ["images", "transfer-bulk", "--hf", "org/ds", "--column", "docker_image"],
+        env=TEST_ENV,
+    )
+    assert result.exit_code == 0, result.output
+    assert "may take a few minutes" in result.output
+
+
 def test_hf_non_string_column_rejected(tmp_path, fake_api, monkeypatch):
     _fake_hf(monkeypatch, info=HF_INFO_ONE_CONFIG, pages={0: []}, total=0)
     result = runner.invoke(

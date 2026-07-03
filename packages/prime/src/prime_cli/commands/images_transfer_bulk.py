@@ -22,6 +22,7 @@ from prime_sandboxes import (
     ImageVisibility,
     UnauthorizedError,
 )
+from rich.progress import BarColumn, Progress, TextColumn, TimeElapsedColumn
 from rich.table import Table
 
 from ..utils import get_console
@@ -52,6 +53,7 @@ TRANSFER_RATE_LIMIT_PAUSE_SECONDS = 15.0
 
 HF_DATASETS_SERVER_URL = "https://datasets-server.huggingface.co"
 HF_ROWS_PAGE_LENGTH = 100
+LARGE_DATASET_WARN_BYTES = 500_000_000
 HF_REQUEST_TIMEOUT_SECONDS = 30.0
 HF_REQUEST_MAX_ATTEMPTS = 6
 HF_REQUEST_BACKOFF_SECONDS = 2.0
@@ -380,6 +382,10 @@ def _hf_get(path: str, params: dict[str, Any]) -> dict[str, Any]:
                     retry_delay = max(retry_delay, float(retry_after))
                 except ValueError:
                     pass
+            console.print(
+                f"[dim]Hugging Face returned HTTP {response.status_code}; "
+                f"retrying in {int(retry_delay)}s...[/dim]"
+            )
             time.sleep(retry_delay)
             continue
         if response.status_code != 200:
@@ -481,42 +487,62 @@ def load_hf_specs(
             "Warning: the dataset viewer only covers part of this dataset; some rows may be missing"
         )
 
+    # The rows API returns full rows (a columns filter is not honored), so
+    # reading time scales with total dataset size, not just row count.
+    dataset_size = config_info.get("dataset_size")
+    if isinstance(dataset_size, (int, float)) and dataset_size > LARGE_DATASET_WARN_BYTES:
+        console.print(
+            f"[dim]Dataset rows total ~{dataset_size / 1e9:.1f}GB and the viewer API "
+            "streams full rows, so reading may take a few minutes.[/dim]"
+        )
+
     sources: list[tuple[str, int]] = []  # (image ref, first row index), order-preserving
     seen: set[str] = set()
     scanned = 0
     empty_rows = 0
     offset = 0
     total: Optional[int] = None
-    while True:
-        page = _hf_get(
-            "/rows",
-            {
-                "dataset": dataset_id,
-                "config": config,
-                "split": split,
-                "offset": offset,
-                "length": HF_ROWS_PAGE_LENGTH,
-            },
-        )
-        rows = page.get("rows") or []
-        if isinstance(page.get("num_rows_total"), int):
-            total = page["num_rows_total"]
-        for item in rows:
-            row = item.get("row") or {}
-            row_idx = item.get("row_idx", offset)
-            value = row.get(column)
-            if not isinstance(value, str) or not value.strip():
-                empty_rows += 1
-                continue
-            scanned += 1
-            value = value.strip()
-            if value in seen:
-                continue
-            seen.add(value)
-            sources.append((value, row_idx))
-        offset += len(rows)
-        if not rows or (total is not None and offset >= total):
-            break
+    progress = Progress(
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("{task.completed}/{task.total}"),
+        TimeElapsedColumn(),
+        console=console,
+    )
+    with progress:
+        task_id = progress.add_task("Reading dataset rows", total=None)
+        while True:
+            page = _hf_get(
+                "/rows",
+                {
+                    "dataset": dataset_id,
+                    "config": config,
+                    "split": split,
+                    "offset": offset,
+                    "length": HF_ROWS_PAGE_LENGTH,
+                },
+            )
+            rows = page.get("rows") or []
+            if isinstance(page.get("num_rows_total"), int):
+                total = page["num_rows_total"]
+                progress.update(task_id, total=total)
+            for item in rows:
+                row = item.get("row") or {}
+                row_idx = item.get("row_idx", offset)
+                value = row.get(column)
+                if not isinstance(value, str) or not value.strip():
+                    empty_rows += 1
+                    continue
+                scanned += 1
+                value = value.strip()
+                if value in seen:
+                    continue
+                seen.add(value)
+                sources.append((value, row_idx))
+            offset += len(rows)
+            progress.update(task_id, completed=offset)
+            if not rows or (total is not None and offset >= total):
+                break
 
     if empty_rows:
         notes.append(f"Skipped {empty_rows} row(s) with an empty '{column}' value")

@@ -26,11 +26,13 @@ from rich.table import Table
 
 from ..utils import get_console
 from .images_bulk import (
+    _QUOTA_DETAIL_MARKERS,
     _TAG_RE,
     DEFAULT_BUILD_TIMEOUT_SECONDS,
     DEFAULT_MAX_IN_FLIGHT,
     FAILURE_TABLE_MAX_ROWS,
     POLL_INTERVAL_SECONDS,
+    RATE_LIMIT_SKIP_REASON,
     SUPPORTED_PLATFORMS,
     BulkPushValidationError,
     QuotaExceededError,
@@ -586,7 +588,21 @@ def _submit_transfer(
             raise SubmitRateLimited(str(e), retry_after=TRANSFER_RATE_LIMIT_PAUSE_SECONDS) from e
         raise
 
-    build_id = response.get("build_id")
+    # Single-source transfers return a top-level build_id today; the endpoint
+    # also has a per-source results shape (used for comma-separated sources),
+    # so unwrap it like `prime images push --source-image` does in case the
+    # contract shifts.
+    results = response.get("results")
+    if isinstance(results, list):
+        entry = results[0] if results and isinstance(results[0], dict) else {}
+        if not entry.get("success") or not entry.get("buildId"):
+            error = entry.get("error") or "invalid response from server (transfer not queued)"
+            if any(marker in error.lower() for marker in _QUOTA_DETAIL_MARKERS):
+                raise QuotaExceededError(error)
+            raise APIError(error)
+        return entry["buildId"], entry.get("fullImagePath") or spec.image_ref
+
+    build_id = response.get("build_id") or response.get("buildId")
     if not build_id:
         raise APIError("invalid response from server (missing build_id)")
     return build_id, response.get("fullImagePath") or spec.image_ref
@@ -839,10 +855,19 @@ def transfer_bulk(
                 f"[dim]... and {len(failures) - FAILURE_TABLE_MAX_ROWS} more, "
                 f"all included in {failures_out}[/dim]"
             )
-        if any("limit exceeded" in (o.error or "").lower() for o in failures):
+        failure_errors = [(o.error or "").lower() for o in failures]
+        if any(marker in error for error in failure_errors for marker in _QUOTA_DETAIL_MARKERS):
             console.print(
                 "[red]Image quota reached — delete unused images (prime images delete) "
                 "or request a higher limit, then retry.[/red]"
+            )
+        if any(
+            (o.error or "") == RATE_LIMIT_SKIP_REASON or "rate-limit deferrals" in (o.error or "")
+            for o in failures
+        ):
+            console.print(
+                "[yellow]The server kept rate-limiting submissions — wait a few minutes, "
+                "then retry with the failures manifest.[/yellow]"
             )
 
         _write_failures_manifest(failures_out, failures)

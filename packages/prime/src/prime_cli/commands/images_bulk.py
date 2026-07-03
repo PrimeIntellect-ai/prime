@@ -47,6 +47,14 @@ RATE_LIMIT_MAX_ATTEMPTS = 5
 RATE_LIMIT_BACKOFF_INITIAL_SECONDS = 2.0
 RATE_LIMIT_BACKOFF_MAX_SECONDS = 60.0
 
+# Liveness bound for SubmitRateLimited deferrals: rate-limit pauses are normal
+# while pacing a large batch, but this many consecutive deferrals without a
+# single successful submission (~5 minutes at the transfer pause) means the
+# server is persistently rejecting us, so the run gives up instead of pacing
+# forever.
+MAX_CONSECUTIVE_SUBMIT_DEFERRALS = 20
+RATE_LIMIT_SKIP_REASON = "not submitted: the server kept rate-limiting submissions"
+
 TERMINAL_BUILD_STATUSES = {"COMPLETED", "FAILED", "CANCELLED"}
 
 FAILURE_TABLE_MAX_ROWS = 20
@@ -509,13 +517,19 @@ def run_bulk_jobs(
     (remaining specs become SKIPPED) but jobs already in flight are still
     polled to completion. A submit that raises SubmitRateLimited requeues its
     spec and pauses new submissions for ``retry_after`` seconds while polling
-    continues.
+    continues; after MAX_CONSECUTIVE_SUBMIT_DEFERRALS deferrals with no
+    successful submission in between, the run stops submitting the same way
+    the quota path does, so a persistently 429ing server cannot stall it
+    forever.
     """
     pending: deque[Any] = deque(specs)
     in_flight: dict[str, _InFlightBuild] = {}
     outcomes: list[BuildOutcome] = []
-    quota_error: Optional[str] = None
+    # When set, no more submissions happen and the remaining specs are
+    # SKIPPED with this message (quota exhausted or persistent rate limiting).
+    stop_skip_reason: Optional[str] = None
     submit_gate = 0.0
+    consecutive_deferrals = 0
     rate_limit_notice_shown = False
 
     progress = Progress(
@@ -542,13 +556,27 @@ def run_bulk_jobs(
                 )
 
         while pending or in_flight:
-            while pending and quota_error is None and len(in_flight) < concurrency:
+            while pending and stop_skip_reason is None and len(in_flight) < concurrency:
                 if time.monotonic() < submit_gate:
                     break
                 spec = pending.popleft()
                 try:
                     build_id, full_image_path = submit(spec)
                 except SubmitRateLimited as e:
+                    consecutive_deferrals += 1
+                    if consecutive_deferrals > MAX_CONSECUTIVE_SUBMIT_DEFERRALS:
+                        record(
+                            BuildOutcome(
+                                spec=spec,
+                                status="SUBMIT_FAILED",
+                                error=(
+                                    f"{e} (gave up after {MAX_CONSECUTIVE_SUBMIT_DEFERRALS} "
+                                    "rate-limit deferrals with no successful submission)"
+                                ),
+                            )
+                        )
+                        stop_skip_reason = RATE_LIMIT_SKIP_REASON
+                        break
                     pending.appendleft(spec)
                     submit_gate = time.monotonic() + e.retry_after
                     if not rate_limit_notice_shown:
@@ -559,26 +587,28 @@ def run_bulk_jobs(
                         )
                     break
                 except QuotaExceededError as e:
-                    quota_error = str(e)
+                    stop_skip_reason = "not submitted: image quota exceeded"
                     record(BuildOutcome(spec=spec, status="SUBMIT_FAILED", error=str(e)))
                 except UnauthorizedError:
                     raise
                 except (APIError, httpx.HTTPError, OSError) as e:
+                    consecutive_deferrals = 0
                     record(BuildOutcome(spec=spec, status="SUBMIT_FAILED", error=str(e)))
                 else:
+                    consecutive_deferrals = 0
                     in_flight[build_id] = _InFlightBuild(
                         spec=spec,
                         full_image_path=full_image_path,
                         deadline=time.monotonic() + build_timeout,
                     )
 
-            if quota_error is not None and pending:
+            if stop_skip_reason is not None and pending:
                 for spec in pending:
                     record(
                         BuildOutcome(
                             spec=spec,
                             status="SKIPPED",
-                            error="not submitted: image quota exceeded",
+                            error=stop_skip_reason,
                         )
                     )
                 pending.clear()

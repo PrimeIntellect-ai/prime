@@ -49,6 +49,9 @@ class FakeTransferAPI:
         self.default_poll = ["COMPLETED"]
         # Exceptions raised (FIFO) by POST /images/build before any transfer is queued.
         self.build_error_queue = []
+        # Respond with the per-source results shape instead of a top-level build_id.
+        self.respond_bulk_shape = False
+        self.bulk_entry_error = None
 
     def request(self, method, path, json=None, params=None):
         self.calls.append((method, path))
@@ -56,9 +59,29 @@ class FakeTransferAPI:
             if self.build_error_queue:
                 raise self.build_error_queue.pop(0)
             assert "source_image" in json
+            if self.respond_bulk_shape and self.bulk_entry_error is not None:
+                entry = {
+                    "sourceImage": json["source_image"],
+                    "success": False,
+                    "error": self.bulk_entry_error,
+                    "retryable": False,
+                }
+                return {"results": [entry], "failed": [entry]}
             self.payloads.append(json)
             self.build_counter += 1
             build_id = f"build-{self.build_counter}"
+            if self.respond_bulk_shape:
+                return {
+                    "results": [
+                        {
+                            "sourceImage": json["source_image"],
+                            "success": True,
+                            "buildId": build_id,
+                            "fullImagePath": f"user/{json.get('image_name') or 'derived'}",
+                        }
+                    ],
+                    "failed": [],
+                }
             return {
                 "build_id": build_id,
                 "fullImagePath": f"user/{json.get('image_name') or 'derived'}",
@@ -400,6 +423,64 @@ def test_rate_limited_submit_defers_and_retries(tmp_path, fake_api):
     assert "2/2 transfers completed" in result.output
     # First POST is rejected, the spec is requeued, then both succeed.
     assert fake_api.post_build_count() == 3
+
+
+def test_bulk_shape_response_is_unwrapped(tmp_path, fake_api):
+    fake_api.respond_bulk_shape = True
+    manifest = tmp_path / "transfers.jsonl"
+    _write_manifest(manifest, [{"source": "a/app-a:v1"}, {"source": "b/app-b:v1"}])
+    result = runner.invoke(
+        app, ["images", "transfer-bulk", "--manifest", str(manifest)], env=TEST_ENV
+    )
+    assert result.exit_code == 0, result.output
+    assert "All images transferred successfully" in result.output
+    # The build ids from the unwrapped entries are what gets polled.
+    assert ("GET", "/images/build/build-1") in fake_api.calls
+    assert ("GET", "/images/build/build-2") in fake_api.calls
+
+
+def test_bulk_shape_failed_entry_records_submit_failed(tmp_path, fake_api):
+    fake_api.respond_bulk_shape = True
+    fake_api.bulk_entry_error = "Invalid transfer source: nope"
+    manifest = tmp_path / "transfers.jsonl"
+    _write_manifest(manifest, [{"source": "a/app-a:v1"}])
+    result = runner.invoke(
+        app, ["images", "transfer-bulk", "--manifest", str(manifest)], env=TEST_ENV
+    )
+    assert result.exit_code == 1
+    assert "0/1 transfers completed" in result.output
+    assert "Invalid transfer source: nope" in result.output
+
+
+def test_persistent_rate_limit_gives_up_instead_of_pacing_forever(tmp_path, fake_api, monkeypatch):
+    monkeypatch.setattr(images_bulk, "MAX_CONSECUTIVE_SUBMIT_DEFERRALS", 2)
+    manifest = tmp_path / "transfers.jsonl"
+    _write_manifest(manifest, [{"source": "a/app-a:v1"}, {"source": "b/app-b:v1"}])
+    fake_api.build_error_queue.extend(
+        APIError("HTTP 429: Image transfer rate limit exceeded: 10/10 images") for _ in range(10)
+    )
+    failures_out = tmp_path / "failures.jsonl"
+    result = runner.invoke(
+        app,
+        [
+            "images",
+            "transfer-bulk",
+            "--manifest",
+            str(manifest),
+            "--failures-out",
+            str(failures_out),
+        ],
+        env=TEST_ENV,
+    )
+    assert result.exit_code == 1
+    assert "0/2 transfers completed" in result.output
+    assert "kept rate-limiting" in result.output
+    # Rate-limit failures must not trigger the quota guidance.
+    assert "Image quota reached" not in result.output
+    # cap+1 attempts for the first spec, then the run stops without touching the second.
+    assert fake_api.post_build_count() == 3
+    lines = [json.loads(line) for line in failures_out.read_text().splitlines()]
+    assert [entry["source"] for entry in lines] == ["a/app-a:v1", "b/app-b:v1"]
 
 
 def test_quota_429_aborts_and_skips_remaining(tmp_path, fake_api):

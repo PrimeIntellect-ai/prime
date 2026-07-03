@@ -151,7 +151,11 @@ def _fake_hf(monkeypatch, *, info, pages, total, rate_limit_first_rows=False):
 HF_INFO_ONE_CONFIG = {
     "dataset_info": {
         "default": {
-            "features": {"docker_image": {"dtype": "string"}, "prompt": {"dtype": "string"}},
+            "features": {
+                "docker_image": {"dtype": "string", "_type": "Value"},
+                "prompt": {"dtype": "string", "_type": "Value"},
+                "picture": {"_type": "Image"},
+            },
             "splits": {"train": {"name": "train"}},
         }
     },
@@ -295,7 +299,7 @@ def test_harbor_with_no_transferable_tasks_fails(tmp_path, fake_api):
 # ---------------------------------------------------------------------------
 
 
-def test_hf_pages_rows_dedupes_and_autodetects_column(tmp_path, fake_api, monkeypatch):
+def test_hf_pages_rows_and_dedupes(tmp_path, fake_api, monkeypatch):
     hf_calls = _fake_hf(
         monkeypatch,
         info=HF_INFO_ONE_CONFIG,
@@ -305,9 +309,12 @@ def test_hf_pages_rows_dedupes_and_autodetects_column(tmp_path, fake_api, monkey
         },
         total=5,
     )
-    result = runner.invoke(app, ["images", "transfer-bulk", "--hf", "Org/DataSet"], env=TEST_ENV)
+    result = runner.invoke(
+        app,
+        ["images", "transfer-bulk", "--hf", "Org/DataSet", "--column", "docker_image"],
+        env=TEST_ENV,
+    )
     assert result.exit_code == 0, result.output
-    assert "Using column 'docker_image' (auto-detected)" in result.output
     assert "Collapsed 1 duplicate image reference(s)" in result.output
     assert "Skipped 1 row(s) with an empty 'docker_image' value" in result.output
     assert fake_api.post_build_count() == 3
@@ -327,7 +334,11 @@ def test_hf_rate_limited_request_retries(tmp_path, fake_api, monkeypatch):
         total=1,
         rate_limit_first_rows=True,
     )
-    result = runner.invoke(app, ["images", "transfer-bulk", "--hf", "org/ds"], env=TEST_ENV)
+    result = runner.invoke(
+        app,
+        ["images", "transfer-bulk", "--hf", "org/ds", "--column", "docker_image"],
+        env=TEST_ENV,
+    )
     assert result.exit_code == 0, result.output
     assert fake_api.post_build_count() == 1
     # The rate-limited /rows request is retried: info + 429 + 200.
@@ -343,6 +354,8 @@ def test_hf_accepts_dataset_url(tmp_path, fake_api, monkeypatch):
             "transfer-bulk",
             "--hf",
             "https://huggingface.co/datasets/R2E-Gym/R2E-Gym-Subset/viewer/default/train",
+            "--column",
+            "docker_image",
         ],
         env=TEST_ENV,
     )
@@ -364,7 +377,16 @@ def test_hf_multiple_configs_requires_flag(tmp_path, fake_api, monkeypatch):
 
     result = runner.invoke(
         app,
-        ["images", "transfer-bulk", "--hf", "org/ds", "--hf-config", "cfg-a"],
+        [
+            "images",
+            "transfer-bulk",
+            "--hf",
+            "org/ds",
+            "--hf-config",
+            "cfg-a",
+            "--column",
+            "docker_image",
+        ],
         env=TEST_ENV,
     )
     assert result.exit_code == 0, result.output
@@ -382,26 +404,42 @@ def test_hf_unknown_column_and_split_fail(tmp_path, fake_api, monkeypatch):
 
     result = runner.invoke(
         app,
-        ["images", "transfer-bulk", "--hf", "org/ds", "--hf-split", "test"],
+        [
+            "images",
+            "transfer-bulk",
+            "--hf",
+            "org/ds",
+            "--column",
+            "docker_image",
+            "--hf-split",
+            "test",
+        ],
         env=TEST_ENV,
     )
     assert result.exit_code == 1
     assert "split 'test' not found" in result.output
 
 
-def test_hf_no_detectable_column_asks_for_flag(tmp_path, fake_api, monkeypatch):
-    info = {
-        "dataset_info": {
-            "default": {
-                "features": {"prompt": {"dtype": "string"}},
-                "splits": {"train": {"name": "train"}},
-            }
-        }
-    }
-    _fake_hf(monkeypatch, info=info, pages={0: []}, total=0)
+def test_hf_column_is_required(tmp_path, fake_api, monkeypatch):
+    _fake_hf(monkeypatch, info=HF_INFO_ONE_CONFIG, pages={0: []}, total=0)
     result = runner.invoke(app, ["images", "transfer-bulk", "--hf", "org/ds"], env=TEST_ENV)
     assert result.exit_code == 1
-    assert "pass --column" in result.output
+    assert "--column is required" in result.output
+    # The error lists the dataset's columns so the user can pick one.
+    assert "docker_image" in result.output
+    assert fake_api.post_build_count() == 0
+
+
+def test_hf_non_string_column_rejected(tmp_path, fake_api, monkeypatch):
+    _fake_hf(monkeypatch, info=HF_INFO_ONE_CONFIG, pages={0: []}, total=0)
+    result = runner.invoke(
+        app,
+        ["images", "transfer-bulk", "--hf", "org/ds", "--column", "picture"],
+        env=TEST_ENV,
+    )
+    assert result.exit_code == 1
+    assert "not a string column" in result.output
+    assert fake_api.post_build_count() == 0
 
 
 # ---------------------------------------------------------------------------
@@ -455,7 +493,11 @@ def test_comma_separated_sources_rejected_in_manifest_and_hf(tmp_path, fake_api,
         pages={0: ["org/img-a:v1,org/img-b:v1"]},
         total=1,
     )
-    result = runner.invoke(app, ["images", "transfer-bulk", "--hf", "org/ds"], env=TEST_ENV)
+    result = runner.invoke(
+        app,
+        ["images", "transfer-bulk", "--hf", "org/ds", "--column", "docker_image"],
+        env=TEST_ENV,
+    )
     assert result.exit_code == 1
     assert "row 0" in result.output
     assert "commas are not allowed" in result.output

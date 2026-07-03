@@ -47,20 +47,12 @@ RATE_LIMIT_MAX_ATTEMPTS = 5
 RATE_LIMIT_BACKOFF_INITIAL_SECONDS = 2.0
 RATE_LIMIT_BACKOFF_MAX_SECONDS = 60.0
 
-# Liveness bound for SubmitRateLimited deferrals: rate-limit pauses are normal
-# while pacing a large batch, but this many consecutive deferrals without a
-# single successful submission (~5 minutes at the transfer pause) means the
-# server is persistently rejecting us, so the run gives up instead of pacing
-# forever.
+# Max consecutive deferrals without a single successful submission
 MAX_CONSECUTIVE_SUBMIT_DEFERRALS = 20
-RATE_LIMIT_SKIP_REASON = "not submitted: the server kept rate-limiting submissions"
-
-TERMINAL_BUILD_STATUSES = {"COMPLETED", "FAILED", "CANCELLED"}
 
 FAILURE_TABLE_MAX_ROWS = 20
 
 _TAG_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$")
-
 _MANIFEST_KEYS = {"image", "context", "dockerfile", "platform"}
 
 
@@ -525,8 +517,6 @@ def run_bulk_jobs(
     pending: deque[Any] = deque(specs)
     in_flight: dict[str, _InFlightBuild] = {}
     outcomes: list[BuildOutcome] = []
-    # When set, no more submissions happen and the remaining specs are
-    # SKIPPED with this message (quota exhausted or persistent rate limiting).
     stop_skip_reason: Optional[str] = None
     submit_gate = 0.0
     consecutive_deferrals = 0
@@ -575,7 +565,9 @@ def run_bulk_jobs(
                                 ),
                             )
                         )
-                        stop_skip_reason = RATE_LIMIT_SKIP_REASON
+                        stop_skip_reason = (
+                            "not submitted: the server kept rate-limiting submissions"
+                        )
                         break
                     pending.appendleft(spec)
                     submit_gate = time.monotonic() + e.retry_after
@@ -632,7 +624,7 @@ def run_bulk_jobs(
                 except APIError:
                     build_status = ""  # transient poll failure; the deadline still applies
 
-                if build_status in TERMINAL_BUILD_STATUSES:
+                if build_status in {"COMPLETED", "FAILED", "CANCELLED"}:
                     del in_flight[build_id]
                     record(
                         BuildOutcome(

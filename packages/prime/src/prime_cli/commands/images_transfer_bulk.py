@@ -32,7 +32,6 @@ from .images_bulk import (
     DEFAULT_MAX_IN_FLIGHT,
     FAILURE_TABLE_MAX_ROWS,
     POLL_INTERVAL_SECONDS,
-    RATE_LIMIT_SKIP_REASON,
     SUPPORTED_PLATFORMS,
     BulkPushValidationError,
     QuotaExceededError,
@@ -53,7 +52,6 @@ TRANSFER_RATE_LIMIT_PAUSE_SECONDS = 15.0
 
 HF_DATASETS_SERVER_URL = "https://datasets-server.huggingface.co"
 HF_ROWS_PAGE_LENGTH = 100
-HF_IMAGE_COLUMN_CANDIDATES = ("docker_image", "image_name", "container_image", "image")
 HF_REQUEST_TIMEOUT_SECONDS = 30.0
 HF_REQUEST_MAX_ATTEMPTS = 6
 HF_REQUEST_BACKOFF_SECONDS = 2.0
@@ -93,18 +91,11 @@ class TransferSpec:
 
 
 def derive_transfer_destination(source_ref: str) -> tuple[str, str]:
-    """Derive the (name, tag) a transfer gets when no destination is given.
-
-    Mirrors the server's parsing (last repository segment lowercased; tag kept,
-    or ``sha256-<digest prefix>`` for digest refs). Used client-side for dry
-    runs and duplicate-destination detection; the server stays authoritative.
-    """
+    """Derive the (name, tag) a transfer gets when no destination is given."""
     ref = (source_ref or "").strip()
     if not ref:
         raise ValueError("empty image reference")
-    # A comma is never valid inside an image reference. Reject it here rather
-    # than letting the server split it into multiple transfers, which this
-    # command tracks one-per-spec.
+    # A comma is never valid inside an image reference.
     if "," in ref:
         raise ValueError("commas are not allowed; use one entry per image reference")
 
@@ -449,22 +440,31 @@ def load_hf_specs(
 
     features = config_info.get("features") or {}
     if column is None:
-        column = next((c for c in HF_IMAGE_COLUMN_CANDIDATES if c in features), None)
-        if column is None:
-            raise BulkPushValidationError(
-                [
-                    f"could not auto-detect an image column in '{dataset_id}' "
-                    f"(looked for: {', '.join(HF_IMAGE_COLUMN_CANDIDATES)}; "
-                    f"dataset columns: {', '.join(sorted(features)) or 'unknown'}); "
-                    "pass --column"
-                ]
-            )
-        notes.append(f"Using column '{column}' (auto-detected)")
-    elif features and column not in features:
+        raise BulkPushValidationError(
+            [
+                "--column is required with --hf (columns in "
+                f"'{dataset_id}': {', '.join(sorted(features)) or 'unknown'})"
+            ]
+        )
+    if features and column not in features:
         raise BulkPushValidationError(
             [
                 f"column '{column}' not found in dataset '{dataset_id}' "
                 f"(columns: {', '.join(sorted(features))})"
+            ]
+        )
+    # Reject columns whose feature type cannot hold image reference strings
+    # (e.g. actual pictures, nested lists) before submitting anything.
+    feature_spec = features.get(column) if isinstance(features, dict) else None
+    if feature_spec is not None and not (
+        isinstance(feature_spec, dict)
+        and feature_spec.get("_type") == "Value"
+        and feature_spec.get("dtype") in ("string", "large_string")
+    ):
+        raise BulkPushValidationError(
+            [
+                f"column '{column}' in '{dataset_id}' is not a string column, "
+                "so it cannot hold image references"
             ]
         )
 
@@ -660,8 +660,9 @@ def transfer_bulk(
     column: Optional[str] = typer.Option(
         None,
         "--column",
-        help="Dataset column holding image references for --hf mode",
-        show_default=f"auto-detect: {', '.join(HF_IMAGE_COLUMN_CANDIDATES)}",
+        help=(
+            "Dataset column holding image references (required for --hf mode; e.g. 'docker_image')"
+        ),
     ),
     platform: str = typer.Option(
         "linux/amd64",
@@ -712,15 +713,15 @@ def transfer_bulk(
     tasks push-bulk skips, so the two commands together cover a task set.
 
     \b
-    Hugging Face mode reads image references straight from a dataset column
-    (auto-detected, e.g. docker_image) using the dataset viewer API — no local
-    dataset download. Set HF_TOKEN for private or gated datasets.
+    Hugging Face mode reads image references straight from the dataset column
+    named by --column (e.g. docker_image) using the dataset viewer API — no
+    local dataset download. Set HF_TOKEN for private or gated datasets.
 
     \b
     Examples:
         prime images transfer-bulk --manifest transfers.jsonl
         prime images transfer-bulk --harbor ./tasks
-        prime images transfer-bulk --hf R2E-Gym/R2E-Gym-Subset --dry-run
+        prime images transfer-bulk --hf R2E-Gym/R2E-Gym-Subset --column docker_image --dry-run
         prime images transfer-bulk --hf org/dataset --hf-split test --column image_name
         prime images transfer-bulk --manifest transfer-bulk-failures.jsonl
     """
@@ -873,7 +874,9 @@ def transfer_bulk(
                 "or request a higher limit, then retry.[/red]"
             )
         if any(
-            (o.error or "") == RATE_LIMIT_SKIP_REASON or "rate-limit deferrals" in (o.error or "")
+            # Matches the engine's skip reason and its give-up SUBMIT_FAILED error.
+            "kept rate-limiting submissions" in (o.error or "")
+            or "rate-limit deferrals" in (o.error or "")
             for o in failures
         ):
             console.print(

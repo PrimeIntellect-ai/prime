@@ -71,10 +71,9 @@ def convert_eval_results(samples: list[dict]) -> list[dict]:
             continue
 
         if trace_type is None:
-            from verifiers.v1.task import WireTask
-            from verifiers.v1.trace import Trace
+            from verifiers.v1.trace import WireTrace
 
-            trace_type = Trace[WireTask]
+            trace_type = WireTrace
             trace_fields = trace_type.model_fields
         trace = trace_type.model_validate(
             {key: value for key, value in sample.items() if key in trace_fields}
@@ -89,13 +88,20 @@ def convert_eval_results(samples: list[dict]) -> list[dict]:
             if branches
             else []
         )
+        # v0-style split: prompt = messages before the first assistant turn
+        first_assistant = next(
+            (i for i, m in enumerate(main_messages) if m.get("role") == "assistant"),
+            len(main_messages),
+        )
+        # the trace reward belongs to the completed (final) branch; earlier branches
+        # carry no per-step reward, matching v0 samples
         trajectory = [
             {
                 "messages": [
                     message.model_dump(mode="json", exclude_none=True)
                     for message in branch.messages
                 ],
-                "reward": trace.reward,
+                "reward": trace.reward if branch is branches[-1] else None,
                 "num_input_tokens": branch.prompt_len,
                 "num_output_tokens": branch.completion_len,
             }
@@ -112,8 +118,8 @@ def convert_eval_results(samples: list[dict]) -> list[dict]:
                 "example_id": example_id,
                 "rollout_number": rollout_counts[example_id],
                 "task": task,
-                "prompt": [],
-                "completion": main_messages,
+                "prompt": main_messages[:first_assistant],
+                "completion": main_messages[first_assistant:],
                 "answer": task.get("answer"),
                 "reward": trace.reward,
                 "timing": trace.timing.model_dump(mode="json", exclude_none=True),

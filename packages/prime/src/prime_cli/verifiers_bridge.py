@@ -1015,7 +1015,9 @@ def run_eval_passthrough(
         saved_headers = saved_config.get("client", {}).get("headers", {})
         job_id = saved_headers.get("X-PI-Job-Id") or _build_job_id(job_target, model)
         display_id = saved_headers.get(INTERNAL_ENV_DISPLAY_HEADER)
-        upstream_slug = display_id if isinstance(display_id, str) and "/" in display_id else None
+        # display values like "name (local - ahead of org/name)" carry a "/" but are not slugs
+        is_slug = isinstance(display_id, str) and "/" in display_id and " " not in display_id
+        upstream_slug = display_id if is_slug else None
         env_name_for_upload = job_target
         resolved_env = None
         is_config = False
@@ -1029,6 +1031,14 @@ def run_eval_passthrough(
             env["PRIME_TEAM_ID"] = config.team_id
 
         config_data = toml.load(target) if is_config else {}
+        if isinstance(config_data, dict) and ("env_id" in config_data or "eval" in config_data):
+            console.print(
+                "[red]Error:[/red] this looks like a legacy (v0) eval config "
+                "(`env_id` / `\\[\\[eval]]`). Run it on the v0 evaluator with "
+                "[bold]--save-results[/bold], or convert it to a v1 config "
+                "(`\\[taskset] id` for a v1 env, top-level `id` for a v0 env)."
+            )
+            raise typer.Exit(2)
         config_model = config_data.get("model") if isinstance(config_data, dict) else None
         model = _parse_value_option(args, "--model", "-m") or config_model or DEFAULT_MODEL
         if _parse_value_option(args, "--model", "-m") is None and not config_model:

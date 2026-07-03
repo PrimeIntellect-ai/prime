@@ -646,7 +646,7 @@ def transfer_bulk(
         None,
         "--hf",
         help=(
-            "Hugging Face dataset id or URL (e.g. 'R2E-Gym/R2E-Gym-Subset'); "
+            "Hugging Face dataset id or URL (e.g. 'org/dataset'); "
             "transfers every image referenced in the dataset"
         ),
     ),
@@ -721,7 +721,7 @@ def transfer_bulk(
     Examples:
         prime images transfer-bulk --manifest transfers.jsonl
         prime images transfer-bulk --harbor ./tasks
-        prime images transfer-bulk --hf R2E-Gym/R2E-Gym-Subset --column docker_image --dry-run
+        prime images transfer-bulk --hf org/dataset --column docker_image --dry-run
         prime images transfer-bulk --hf org/dataset --hf-split test --column image_name
         prime images transfer-bulk --manifest transfer-bulk-failures.jsonl
     """

@@ -988,6 +988,16 @@ def run_eval_passthrough(
             console.print("[dim]Skipped uploading evaluation results[/dim]")
             return
 
+        # mirror the v1 path: never upload results from an unpublished local checkout,
+        # or the hub helper would attribute them to the stale tracked upstream
+        if resolved_env.recommend_push:
+            _print_environment_source_footer(resolved_env)
+            console.print(
+                "[yellow]Evaluation completed. Automatic upload is skipped until the local "
+                "environment is published.[/yellow]"
+            )
+            return
+
         push_eval_results_to_hub(
             env_name=resolved_env.env_name,
             model=model,
@@ -1056,10 +1066,15 @@ def run_eval_passthrough(
             raise typer.Exit(1)
         if cli_base_url is None and not config_base_url:
             args.extend(["--client.base-url", base_url])
-        dry_run_arg = _parse_value_option(args, "--dry-run", None)
+        # mirror v1 bool-flag semantics: a bare --dry-run (no value, or followed by
+        # another flag) means true; only an explicit false-y literal disables it
         dry_run = config_data.get("dry_run") is True
-        if dry_run_arg is not None:
-            dry_run = dry_run_arg.lower() == "true"
+        for idx, arg in enumerate(args):
+            if arg == "--dry-run":
+                value = args[idx + 1].lower() if idx + 1 < len(args) else ""
+                dry_run = value not in ("false", "0")
+            elif arg.startswith("--dry-run="):
+                dry_run = arg.split("=", 1)[1].lower() not in ("false", "0")
         if not dry_run:
             _validate_model(model, base_url, configured_base_url)
             _preflight_inference_billing(model, base_url, configured_base_url)

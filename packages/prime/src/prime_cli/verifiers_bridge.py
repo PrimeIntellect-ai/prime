@@ -8,7 +8,7 @@ import re
 import subprocess
 import sys
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -21,10 +21,10 @@ from prime_cli.core import Config
 
 from .api.inference import InferenceAPIError, InferenceClient, InferencePaymentRequiredError
 from .client import APIClient, APIError
-from .utils.env_metadata import find_environment_metadata, get_environment_metadata
-from .utils.eval_push import convert_eval_results, load_results_jsonl, push_eval_results_to_hub
+from .utils.env_metadata import get_environment_metadata
+from .utils.eval_push import push_eval_results_to_hub
 from .utils.plain import get_console
-from .verifiers_plugin import PrimeVerifiersPlugin, load_verifiers_prime_plugin
+from .verifiers_plugin import load_verifiers_prime_plugin
 
 console = get_console()
 
@@ -33,11 +33,10 @@ DEFAULT_ENV_DIR_PATH = "./environments"
 DEFAULT_ENDPOINTS_PATH = "./configs/endpoints.toml"
 PRIME_SLUG = "primeintellect"
 INTERNAL_ENV_DISPLAY_HEADER = "X-Prime-Eval-Env-Display"
-LEGACY_EVAL_MODULE = "verifiers.cli.commands.eval"
 EVAL_PREFLIGHT_TIMEOUT = httpx.Timeout(connect=10.0, read=300.0, write=60.0, pool=60.0)
 MODULE_TO_PRIME_COMMAND = {
-    "verifiers.cli.commands.eval": "prime eval run",
-    "verifiers.v1.cli.eval.main": "prime eval run",
+    "verifiers.v1.cli.eval.main": "prime eval",
+    "verifiers.v1.cli.validate": "prime eval validate",
     "verifiers.cli.commands.gepa": "prime gepa run",
     "verifiers.cli.commands.init": "prime env init",
     "verifiers.v1.cli.init": "prime env init",
@@ -50,6 +49,7 @@ MODULE_TO_PRIME_COMMAND = {
 MODULE_TO_CONSOLE_SCRIPT = {
     "verifiers.v1.cli.eval.main": "eval",
     "verifiers.v1.cli.init": "init",
+    "verifiers.v1.cli.validate": "validate",
 }
 
 
@@ -121,13 +121,13 @@ def _sanitize_help_text(help_text: str, module_name: str, prime_command: str) ->
         )
 
     sanitized = re.sub(r"\bvf-[a-z0-9-]+\b", prime_command, sanitized)
-    if prime_command in {"prime eval run", "prime gepa run"}:
+    if prime_command in {"prime eval", "prime gepa run"}:
         sanitized = re.sub(r"\benv_id_or_config\b", "environment", sanitized)
     return sanitized.rstrip() + "\n"
 
 
 def _load_help_text(module_name: str, prime_command: str) -> str:
-    plugin = load_verifiers_prime_plugin(console=console)
+    plugin = load_verifiers_prime_plugin()
     command = plugin.build_module_command(module_name, ["--help"])
     result = subprocess.run(command, capture_output=True, text=True)
     help_text = result.stdout
@@ -142,6 +142,14 @@ def _load_help_text(module_name: str, prime_command: str) -> str:
     return _sanitize_help_text(help_text, module_name, prime_command)
 
 
+def _load_module_help(module_name: str, prime_command: str) -> str:
+    try:
+        return _load_help_text(module_name, prime_command)
+    except Exception as exc:
+        console.print(f"[red]Failed to load help for {prime_command}:[/red] {exc}")
+        raise typer.Exit(1) from exc
+
+
 def _write_help(text: str) -> None:
     sys.stdout.write(text)
     sys.stdout.flush()
@@ -150,9 +158,9 @@ def _write_help(text: str) -> None:
 def _append_eval_options(help_text: str) -> str:
     extra_lines = [
         "  --skip-upload               Skip uploading evaluation results to the platform.",
+        "  --disable-tui               Disable the live display (alias for --rich false).",
         "  --env-path PATH             Explicit path for upstream environment metadata.",
         "  --hosted                    Run the evaluation on the platform instead of locally.",
-        "  stop EVAL_ID                Cancel a running hosted evaluation.",
         "  --poll-interval FLOAT       Polling interval in seconds for hosted evaluations.",
         "  --follow                    Follow hosted evaluation logs until completion.",
         "  --timeout-minutes INTEGER   Timeout in minutes for hosted evaluations.",
@@ -163,6 +171,11 @@ def _append_eval_options(help_text: str) -> str:
         "Allow tunnel creation and management for hosted evaluations.",
         "  --custom-secrets JSON       Custom sandbox secrets for hosted evaluations.",
         "  --eval-name TEXT            Custom name for the hosted evaluation.",
+        "Subcommands:",
+        "  list | get | samples | push     Manage evaluation results.",
+        "  logs EVAL_ID [-f] | stop EVAL_ID Follow or cancel hosted evaluations.",
+        "  validate ENVIRONMENT             Run each task's validate hook (model-free).",
+        "  view                             Browse local runs in the lab TUI.",
     ]
     lines = help_text.rstrip("\n").splitlines()
     for extra_line in extra_lines:
@@ -172,63 +185,28 @@ def _append_eval_options(help_text: str) -> str:
 
 
 def print_eval_run_help() -> None:
-    try:
-        help_text = _load_help_text(
-            load_verifiers_prime_plugin(console=console).eval_module,
-            "prime eval run",
-        )
-    except Exception as exc:
-        console.print(f"[red]Failed to load help for prime eval run:[/red] {exc}")
-        raise typer.Exit(1) from exc
-    _write_help(_append_eval_options(help_text))
+    plugin = load_verifiers_prime_plugin()
+    _write_help(_append_eval_options(_load_module_help(plugin.eval_module, "prime eval")))
 
 
 def print_gepa_run_help() -> None:
-    try:
-        help_text = _load_help_text(
-            load_verifiers_prime_plugin(console=console).gepa_module,
-            "prime gepa run",
-        )
-    except Exception as exc:
-        console.print(f"[red]Failed to load help for prime gepa run:[/red] {exc}")
-        raise typer.Exit(1) from exc
-    _write_help(help_text)
+    plugin = load_verifiers_prime_plugin()
+    _write_help(_load_module_help(plugin.gepa_module, "prime gepa run"))
 
 
 def print_env_init_help() -> None:
-    try:
-        help_text = _load_help_text(
-            load_verifiers_prime_plugin(console=console).init_module,
-            "prime env init",
-        )
-    except Exception as exc:
-        console.print(f"[red]Failed to load help for prime env init:[/red] {exc}")
-        raise typer.Exit(1) from exc
-    _write_help(help_text)
+    plugin = load_verifiers_prime_plugin()
+    _write_help(_load_module_help(plugin.init_module, "prime env init"))
 
 
 def print_env_build_help() -> None:
-    try:
-        help_text = _load_help_text(
-            load_verifiers_prime_plugin(console=console).build_module,
-            "prime env build",
-        )
-    except Exception as exc:
-        console.print(f"[red]Failed to load help for prime env build:[/red] {exc}")
-        raise typer.Exit(1) from exc
-    _write_help(help_text)
+    plugin = load_verifiers_prime_plugin()
+    _write_help(_load_module_help(plugin.build_module, "prime env build"))
 
 
-def print_lab_setup_help() -> None:
-    try:
-        help_text = _load_help_text(
-            load_verifiers_prime_plugin(console=console).setup_module,
-            "prime lab setup",
-        )
-    except Exception as exc:
-        console.print(f"[red]Failed to load help for prime lab setup:[/red] {exc}")
-        raise typer.Exit(1) from exc
-    _write_help(help_text)
+def print_validate_help() -> None:
+    plugin = load_verifiers_prime_plugin()
+    _write_help(_load_module_help(plugin.validate_module, "prime eval validate"))
 
 
 def run_eval_view(env_dir: Optional[str], outputs_dir: Optional[str], limit: int = 50) -> None:
@@ -264,6 +242,19 @@ def _has_flag(args: list[str], long_flag: str, short_flag: str) -> bool:
         if arg.startswith(f"{long_flag}="):
             return True
     return False
+
+
+def _pop_value_option(args: list[str], long_flag: str) -> Optional[str]:
+    """Return the value of `long_flag` and remove flag + value from `args` in place."""
+    for idx, arg in enumerate(args):
+        if arg == long_flag:
+            value = args[idx + 1] if idx + 1 < len(args) else None
+            del args[idx : idx + 2]
+            return value
+        if arg.startswith(f"{long_flag}="):
+            del args[idx]
+            return arg.split("=", 1)[1]
+    return None
 
 
 def _resolve_endpoint_alias(args: list[str], model: str) -> Optional[EndpointResolution]:
@@ -348,13 +339,9 @@ def _split_owner_and_name(slug: str) -> Optional[tuple[str, str]]:
 
 
 def _environment_url_from_slug(slug: str) -> Optional[str]:
-    parts = _split_owner_and_name(slug)
-    if parts is None:
+    if _split_owner_and_name(slug) is None:
         return None
-    try:
-        frontend_url = Config().frontend_url.rstrip("/")
-    except Exception:
-        frontend_url = "https://app.primeintellect.ai"
+    frontend_url = Config().frontend_url.rstrip("/")
     return f"{frontend_url}/dashboard/environments/{slug}"
 
 
@@ -476,15 +463,10 @@ def _fetch_remote_env_details(
 ) -> Optional[dict]:
     try:
         response = client.get(f"/environmentshub/{owner_slug}/{env_name}/@{version}")
-        details = response.get("data", response) if isinstance(response, dict) else None
-        if isinstance(details, dict):
-            return details
-        return {}
-    except APIError as exc:
-        message = str(exc).lower()
-        if "404" in message or "not found" in message:
-            return None
+    except APIError:
         return None
+    details = response.get("data", response) if isinstance(response, dict) else None
+    return details if isinstance(details, dict) else {}
 
 
 def _extract_remote_version_details(details: Optional[dict]) -> tuple[Optional[str], Optional[str]]:
@@ -616,14 +598,9 @@ def _resolve_environment_reference(
 
     env_name = base_ref
     local_dir = _find_local_env_dir(env_name, env_dir_path)
+    # remote probing is optional context; a client that can't be built just degrades it
     try:
-        config = Config()
-    except Exception:
-        config = None
-
-    client: Optional[APIClient] = None
-    try:
-        client = APIClient(require_auth=False)
+        client: Optional[APIClient] = APIClient(require_auth=False)
     except Exception:
         client = None
 
@@ -649,7 +626,7 @@ def _resolve_environment_reference(
             local_env_path=local_dir,
         )
 
-    if not probe_remote or config is None or client is None:
+    if not probe_remote or client is None:
         return ResolvedEnvironment(
             original=env_reference,
             env_name=env_name,
@@ -662,7 +639,7 @@ def _resolve_environment_reference(
     if user_slug:
         owner_candidates.append(("personal", user_slug))
 
-    team_slug = _fetch_active_team_slug(client, config.team_id)
+    team_slug = _fetch_active_team_slug(client, Config().team_id)
     if team_slug and team_slug != user_slug:
         owner_candidates.append(("team", team_slug))
 
@@ -713,14 +690,11 @@ def _run_command(command: list[str], env: Optional[dict[str, str]] = None) -> No
         raise typer.Exit(result.returncode)
 
 
-def _install_local_environment(
-    plugin: PrimeVerifiersPlugin, env_name: str, env_dir_path: str
-) -> None:
-    command = plugin.build_module_command(
-        plugin.install_module,
-        [env_name, "--path", env_dir_path],
-    )
-    _run_command(command)
+def _install_local_environment(env_path: Path) -> None:
+    """Make a local checkout importable for verifiers (which no longer installs anything)."""
+    from .commands.env import _uv_pip_command
+
+    _run_command(_uv_pip_command("install", "-e", str(env_path)))
 
 
 def _is_installed(env_name: str, version: Optional[str]) -> bool:
@@ -745,15 +719,13 @@ def _install_remote_environment(env_slug: str) -> None:
         raise typer.Exit(1)
 
 
-def _prepare_single_environment(
-    plugin: PrimeVerifiersPlugin, env_reference: str, env_dir_path: str
-) -> ResolvedEnvironment:
+def _prepare_single_environment(env_reference: str, env_dir_path: str) -> ResolvedEnvironment:
     resolved = _resolve_environment_reference(env_reference, env_dir_path)
     if resolved.install_mode == "local":
         console.print(f"[dim]Using local environment '{resolved.env_name}'[/dim]")
         if resolved.env_display_id:
             console.print(f"[dim]Resolved source: {resolved.env_display_id}[/dim]")
-        _install_local_environment(plugin, resolved.env_name, env_dir_path)
+        _install_local_environment(resolved.local_env_path)
         return resolved
     if resolved.install_mode == "remote":
         if resolved.install_slug is None:
@@ -772,20 +744,20 @@ def _prepare_single_environment(
     return resolved
 
 
-def _prepare_v1_environment(
-    plugin: PrimeVerifiersPlugin, env_reference: str, env_dir_path: str
-) -> ResolvedEnvironment:
-    """Prepare `env_reference` for the v1 CLI, which resolves references itself: hub ids
-    (`org/name[@version]`) install on demand, anything else must be importable. Prime only
-    pre-installs a local checkout and collects platform metadata for the results upload."""
+def _prepare_v1_environment(env_reference: str, env_dir_path: str) -> ResolvedEnvironment:
+    """Make `env_reference` importable before the v1 CLI runs: install a local checkout or a
+    hub slug (`org/name[@version]`). The v1 CLI only accepts locally importable ids, so hub
+    refs are installed here and run by bare name; bare names without a local checkout must
+    already be importable. Also collects platform metadata for the results upload."""
     resolved = _resolve_environment_reference(env_reference, env_dir_path, probe_remote=False)
     if resolved.install_mode == "local":
         console.print(f"[dim]Using local environment '{resolved.env_name}'[/dim]")
         if resolved.env_display_id:
             console.print(f"[dim]Resolved source: {resolved.env_display_id}[/dim]")
-        _install_local_environment(plugin, resolved.env_name, env_dir_path)
+        _install_local_environment(resolved.local_env_path)
     elif resolved.install_mode == "remote":
         console.print(f"[dim]Resolved source: {resolved.env_display_id}[/dim]")
+        _install_remote_environment(resolved.install_slug or env_reference)
     return resolved
 
 
@@ -942,6 +914,18 @@ def _print_environment_source_footer(resolved: Optional[ResolvedEnvironment]) ->
         )
 
 
+@dataclass(frozen=True)
+class V1EvalRun:
+    """What the upload tail needs to know about a finished v1 eval subprocess."""
+
+    output_dir: Path
+    job_id: str
+    env_name: str
+    upstream_slug: Optional[str] = None
+    resolved_env: Optional[ResolvedEnvironment] = None
+    is_config: bool = False
+
+
 def run_eval_passthrough(
     environment: str,
     passthrough_args: list[str],
@@ -949,9 +933,7 @@ def run_eval_passthrough(
     skip_upload: bool,
     env_path: Optional[str],
 ) -> None:
-    plugin = load_verifiers_prime_plugin(console=console)
     config = Config()
-
     if not config.api_key:
         console.print(
             "[red]No API key configured.[/red] "
@@ -959,288 +941,368 @@ def run_eval_passthrough(
         )
         raise typer.Exit(1)
 
-    legacy_eval = _has_flag(passthrough_args, "--save-results", "-s")
-    # Hosted-eval sandboxes still emit the v0 CLI surface; v1 always saves results.
-    if legacy_eval:
-        args, env, model, base_url = _add_default_inference_and_key_args(passthrough_args, config)
-        configured_base_url = (config.inference_url or "").strip().rstrip("/")
+    args = list(passthrough_args)
+    tui_disabled = _pop_tui_flags(args)
+
+    # Hosted-eval sandboxes still emit the frozen v0 CLI surface (marked by
+    # --save-results); convert it onto the v1 CLI, which always saves results.
+    if _has_flag(args, "--save-results", "-s"):
+        run = _run_converted_v0_eval(environment, args, config, tui_disabled=tui_disabled)
+    else:
+        resume_dir = _parse_value_option(args, "--resume", None)
+        if resume_dir is not None:
+            run = _resume_v1_eval(resume_dir, args, config)
+        else:
+            run = _run_v1_eval(environment, args, config, tui_disabled=tui_disabled)
+    _upload_v1_results(run, skip_upload=skip_upload, env_path=env_path)
+
+
+def run_validate_passthrough(environment: str, passthrough_args: list[str]) -> None:
+    """Run verifiers' `validate` (each task's `validate` hook, model-free) with prime's
+    environment resolution and auth env vars. Validate is fire-and-forget — nothing is
+    written to disk or uploaded, so there is no model, output-dir, resume, or dry-run path."""
+    config = Config()
+    if not config.api_key:
+        console.print(
+            "[red]No API key configured.[/red] "
+            "Run [bold]prime login[/bold] or [bold]prime config set-api-key[/bold]."
+        )
+        raise typer.Exit(1)
+
+    target = environment.removeprefix("@")
+    is_config = _is_config_target(target)
+    args = list(passthrough_args)
+    env = os.environ.copy()
+    env["PRIME_API_KEY"] = config.api_key
+    if config.team_id:
+        env["PRIME_TEAM_ID"] = config.team_id
+
+    # prime-only option: verifiers must not see it
+    env_dir_path = _pop_value_option(args, "--env-dir-path") or DEFAULT_ENV_DIR_PATH
+
+    if is_config:
+        # pydantic-config reads a root config file as two tokens: `@ path`
+        run_args = ["@", target]
+    else:
+        resolved_env = _prepare_v1_environment(target, env_dir_path)
+        # the v1 CLI accepts only locally importable ids; hub refs were installed above
+        run_args = [resolved_env.env_name]
+        _print_environment_source_footer(resolved_env)
+
+    plugin = load_verifiers_prime_plugin()
+    _run_command(plugin.build_module_command(plugin.validate_module, [*run_args, *args]), env=env)
+
+
+def _pop_tui_flags(args: list[str]) -> bool:
+    """Remove the v0 TUI flags hosted-eval scripts append; v1 maps them to --rich false."""
+    found = False
+    for flag in ("--disable-tui", "--debug"):
+        while flag in args:
+            args.remove(flag)
+            found = True
+    return found
+
+
+def _load_transitional_fields(config_path: Path) -> dict:
+    from verifiers.v1.cli.eval.compat import transitional_config_to_fields
+
+    try:
+        return transitional_config_to_fields(config_path)
+    except ValueError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(2) from exc
+
+
+def _write_converted_v1_config(
+    fields: dict, *, tui_disabled: bool
+) -> tuple[Path, ResolvedEnvironment]:
+    """Turn flattened v0 fields into a v1 config file with a locally importable env id."""
+    from verifiers.v1.cli.eval.compat import (
+        build_v1_eval_config,
+        write_converted_eval_config,
+    )
+
+    env_dir_path = str(fields.pop("env_dir_path", None) or DEFAULT_ENV_DIR_PATH)
+    taskset = fields.get("taskset")
+    taskset_id = taskset.get("id") if isinstance(taskset, dict) else None
+    env_ref = taskset_id or fields.get("id")
+    if not (isinstance(env_ref, str) and env_ref):
+        console.print("[red]Error:[/red] eval config requires an env_id or taskset.id")
+        raise typer.Exit(2)
+
+    # install hub refs and pin the locally importable name into the config
+    resolved = _prepare_v1_environment(env_ref, env_dir_path)
+    if taskset_id:
+        fields["taskset"] = {**taskset, "id": resolved.env_name}
+    else:
+        fields["id"] = resolved.env_name
+
+    try:
+        v1_config, warnings = build_v1_eval_config(fields, tui_disabled=tui_disabled)
+    except ValueError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(2) from exc
+    for warning in warnings:
+        console.print(f"[yellow]Warning:[/yellow] {warning}")
+
+    if resolved.env_display_id:
+        headers = v1_config.setdefault("client", {}).setdefault("headers", {})
+        headers.setdefault(INTERNAL_ENV_DISPLAY_HEADER, resolved.env_display_id)
+    config_path = write_converted_eval_config(
+        v1_config, header_comment="converted from the v0 eval surface by prime"
+    )
+    console.print(f"[dim]Converted v0 eval invocation to {config_path}[/dim]")
+    return config_path, resolved
+
+
+def _run_converted_v0_eval(
+    environment: str,
+    passthrough_args: list[str],
+    config: Config,
+    *,
+    tui_disabled: bool,
+) -> V1EvalRun:
+    """Run a frozen v0 invocation (hosted argv and/or a transitional TOML) on the v1 CLI.
+
+    Classic env ids route through verifiers' legacy bridge automatically, so the
+    converted config never has to tag the environment generation."""
+    from .utils.verifiers_v0_cli import v0_argv_to_fields
+
+    try:
+        argv_fields = v0_argv_to_fields(environment, passthrough_args)
+    except SystemExit as exc:
+        raise typer.Exit(exc.code if isinstance(exc.code, int) else 2) from exc
+    target = str(argv_fields.pop("env_target"))
+
+    fields: dict = {}
+    is_config = _is_config_target(target)
+    if is_config:
+        fields = _load_transitional_fields(Path(target))
+    else:
+        # bare env id: verifiers auto-detects v0 envs given as the taskset id
+        fields["taskset"] = {"id": target}
+    fields.update(argv_fields)
+
+    config_path, resolved = _write_converted_v1_config(fields, tui_disabled=tui_disabled)
+    run = _run_v1_eval(str(config_path), [], config)
+    if not is_config:
+        # keep bare-env upload attribution: this run is config-driven only as plumbing
+        run = replace(
+            run, is_config=False, resolved_env=resolved, upstream_slug=resolved.upstream_slug
+        )
+    return run
+
+
+def _resume_v1_eval(resume_dir: str, passthrough_args: list[str], config: Config) -> V1EvalRun:
+    """Re-run `--resume <dir>` and recover the upload identity from the run's config.toml."""
+    env = os.environ.copy()
+    env["PRIME_API_KEY"] = config.api_key
+    if config.team_id:
+        env["PRIME_TEAM_ID"] = config.team_id
+    plugin = load_verifiers_prime_plugin()
+    _run_command(plugin.build_module_command(plugin.eval_module, passthrough_args), env=env)
+
+    output_dir = Path(resume_dir)
+    saved_config = toml.load(output_dir / "config.toml")
+    model = saved_config["model"]
+    env_name = _env_name_from_reference(saved_config["taskset"]["id"])
+    saved_headers = saved_config.get("client", {}).get("headers", {})
+    display_id = saved_headers.get(INTERNAL_ENV_DISPLAY_HEADER)
+    # display values like "name (local - ahead of org/name)" carry a "/" but are not slugs
+    is_slug = isinstance(display_id, str) and "/" in display_id and " " not in display_id
+    return V1EvalRun(
+        output_dir=output_dir,
+        job_id=saved_headers.get("X-PI-Job-Id") or _build_job_id(env_name, model),
+        env_name=env_name,
+        upstream_slug=display_id if is_slug else None,
+    )
+
+
+def _run_v1_eval(
+    environment: str,
+    passthrough_args: list[str],
+    config: Config,
+    *,
+    tui_disabled: bool = False,
+) -> V1EvalRun:
+    """Prepare and run a fresh v1 eval: fill in prime's model/base-url/output-dir defaults,
+    make the environment importable, and tag the run with a job id header."""
+    target = environment.removeprefix("@")
+    is_config = _is_config_target(target)
+    args = list(passthrough_args)
+    env = os.environ.copy()
+    env["PRIME_API_KEY"] = config.api_key
+    if config.team_id:
+        env["PRIME_TEAM_ID"] = config.team_id
+
+    config_data: dict = toml.load(target) if is_config else {}
+    if "env_id" in config_data or "eval" in config_data:
+        # a transitional/hosted v0 config (`env_id` / `[[eval]]`): convert it in place
+        fields = _load_transitional_fields(Path(target))
+        target = str(_write_converted_v1_config(fields, tui_disabled=tui_disabled)[0])
+        tui_disabled = False  # the converted config already sets rich = false
+        config_data = toml.load(target)
+    if tui_disabled:
+        args.extend(["--rich", "false"])
+    config_model = config_data.get("model")
+    cli_model = _parse_value_option(args, "--model", "-m")
+    model = cli_model or config_model or DEFAULT_MODEL
+    if cli_model is None and not config_model:
+        args.extend(["--model", model])
+
+    configured_base_url = (config.inference_url or "").strip().rstrip("/")
+    config_client = config_data.get("client")
+    config_base_url = config_client.get("base_url") if isinstance(config_client, dict) else None
+    cli_base_url = _parse_value_option(args, "--client.base-url", None)
+    base_url = cli_base_url or config_base_url or configured_base_url
+    if not base_url:
+        console.print(
+            "[red]Inference URL not configured.[/red] Check [bold]prime config view[/bold]."
+        )
+        raise typer.Exit(1)
+    if cli_base_url is None and not config_base_url:
+        args.extend(["--client.base-url", base_url])
+
+    # mirror v1 bool-flag semantics: a bare --dry-run (no value, or followed by
+    # another flag) means true; only an explicit false-y literal disables it
+    dry_run = config_data.get("dry_run") is True
+    for idx, arg in enumerate(args):
+        if arg == "--dry-run":
+            value = args[idx + 1].lower() if idx + 1 < len(args) else ""
+            dry_run = value not in ("false", "0")
+        elif arg.startswith("--dry-run="):
+            dry_run = arg.split("=", 1)[1].lower() not in ("false", "0")
+    if not dry_run:
         _validate_model(model, base_url, configured_base_url)
         _preflight_inference_billing(model, base_url, configured_base_url)
 
-        env_dir_path = _env_dir_path_arg(args)
-        resolved_env = _prepare_single_environment(plugin, environment, env_dir_path)
-        if resolved_env.env_display_id:
-            args.extend(
-                ["--header", f"{INTERNAL_ENV_DISPLAY_HEADER}: {resolved_env.env_display_id}"]
-            )
+    # prime-only option: verifiers must not see it
+    env_dir_path = _pop_value_option(args, "--env-dir-path") or DEFAULT_ENV_DIR_PATH
+    resolved_env: Optional[ResolvedEnvironment] = None
+    upstream_slug: Optional[str] = None
 
-        job_id = _build_job_id(resolved_env.env_name, model)
-        args.extend(["--header", f"X-PI-Job-Id: {job_id}"])
-        if config.team_id:
-            args.extend(["--header", f"X-Prime-Team-ID: {config.team_id}"])
-
-        console.print(f"[dim]Eval job_id: {job_id}[/dim]")
-        command = plugin.build_module_command(LEGACY_EVAL_MODULE, [resolved_env.env_name, *args])
-        _run_command(command, env=env)
-
-        if skip_upload:
-            _print_environment_source_footer(resolved_env)
-            console.print("[dim]Skipped uploading evaluation results[/dim]")
-            return
-
-        # mirror the v1 path: never upload results from an unpublished local checkout,
-        # or the hub helper would attribute them to the stale tracked upstream
-        if resolved_env.recommend_push:
-            _print_environment_source_footer(resolved_env)
-            console.print(
-                "[yellow]Evaluation completed. Automatic upload is skipped until the local "
-                "environment is published.[/yellow]"
-            )
-            return
-
-        push_eval_results_to_hub(
-            env_name=resolved_env.env_name,
-            model=model,
-            job_id=job_id,
-            env_path=Path(env_path) if env_path else None,
-            upstream_slug=resolved_env.upstream_slug,
-        )
-        _print_environment_source_footer(resolved_env)
-        return
-
-    resume_dir = _parse_value_option(passthrough_args, "--resume", None)
-    if resume_dir is not None:
-        env = os.environ.copy()
-        env["PRIME_API_KEY"] = config.api_key
-        if config.team_id:
-            env["PRIME_TEAM_ID"] = config.team_id
-        command = plugin.build_module_command(plugin.eval_module, passthrough_args)
-        _run_command(command, env=env)
-
-        output_dir = Path(resume_dir)
-        saved_config = toml.load(output_dir / "config.toml")
-        model = saved_config["model"]
-        taskset_id = saved_config["taskset"]["id"]
-        job_target = _env_name_from_reference(taskset_id)
-        saved_headers = saved_config.get("client", {}).get("headers", {})
-        job_id = saved_headers.get("X-PI-Job-Id") or _build_job_id(job_target, model)
-        display_id = saved_headers.get(INTERNAL_ENV_DISPLAY_HEADER)
-        # display values like "name (local - ahead of org/name)" carry a "/" but are not slugs
-        is_slug = isinstance(display_id, str) and "/" in display_id and " " not in display_id
-        upstream_slug = display_id if is_slug else None
-        env_name_for_upload = job_target
-        resolved_env = None
-        is_config = False
-    else:
-        target = environment.removeprefix("@")
-        is_config = _is_config_target(target)
-        args = list(passthrough_args)
-        env = os.environ.copy()
-        env["PRIME_API_KEY"] = config.api_key
-        if config.team_id:
-            env["PRIME_TEAM_ID"] = config.team_id
-
-        config_data = toml.load(target) if is_config else {}
-        if isinstance(config_data, dict) and ("env_id" in config_data or "eval" in config_data):
-            console.print(
-                "[red]Error:[/red] this looks like a legacy (v0) eval config "
-                "(`env_id` / `\\[\\[eval]]`). Run it on the v0 evaluator with "
-                "[bold]--save-results[/bold], or convert it to a v1 config "
-                "(`\\[taskset] id` for a v1 env, top-level `id` for a v0 env)."
-            )
-            raise typer.Exit(2)
-        config_model = config_data.get("model") if isinstance(config_data, dict) else None
-        model = _parse_value_option(args, "--model", "-m") or config_model or DEFAULT_MODEL
-        if _parse_value_option(args, "--model", "-m") is None and not config_model:
-            args.extend(["--model", model])
-
-        configured_base_url = (config.inference_url or "").strip().rstrip("/")
-        config_client = config_data.get("client") if isinstance(config_data, dict) else None
-        config_base_url = config_client.get("base_url") if isinstance(config_client, dict) else None
-        cli_base_url = _parse_value_option(args, "--client.base-url", None)
-        base_url = cli_base_url or config_base_url or configured_base_url
-        if not base_url:
-            console.print(
-                "[red]Inference URL not configured.[/red] Check [bold]prime config view[/bold]."
-            )
-            raise typer.Exit(1)
-        if cli_base_url is None and not config_base_url:
-            args.extend(["--client.base-url", base_url])
-        # mirror v1 bool-flag semantics: a bare --dry-run (no value, or followed by
-        # another flag) means true; only an explicit false-y literal disables it
-        dry_run = config_data.get("dry_run") is True
-        for idx, arg in enumerate(args):
-            if arg == "--dry-run":
-                value = args[idx + 1].lower() if idx + 1 < len(args) else ""
-                dry_run = value not in ("false", "0")
-            elif arg.startswith("--dry-run="):
-                dry_run = arg.split("=", 1)[1].lower() not in ("false", "0")
-        if not dry_run:
-            _validate_model(model, base_url, configured_base_url)
-            _preflight_inference_billing(model, base_url, configured_base_url)
-
-        env_dir_path = _env_dir_path_arg(args)
-        if _parse_value_option(args, "--env-dir-path", None) is not None:
-            env_dir_index = next(
-                idx
-                for idx, arg in enumerate(args)
-                if arg == "--env-dir-path" or arg.startswith("--env-dir-path=")
-            )
-            if args[env_dir_index] == "--env-dir-path":
-                del args[env_dir_index : env_dir_index + 2]
-            else:
-                del args[env_dir_index]
-        upstream_slug: Optional[str] = None
-        env_name_for_upload: Optional[str] = None
-        resolved_env: Optional[ResolvedEnvironment] = None
-        config_envs: list[tuple[str, str]] = []
-
-        if is_config:
-            taskset = config_data.get("taskset")
-            env_ref = taskset.get("id") if isinstance(taskset, dict) else None
-            if not (isinstance(env_ref, str) and env_ref):
-                # v1's legacy field: a top-level `id` runs a v0 env through the bridge
-                env_ref = config_data.get("id")
-            if isinstance(env_ref, str) and env_ref:
-                config_envs = [(env_ref, env_dir_path)]
-            for config_env_ref, ref_env_dir in config_envs:
-                _prepare_v1_environment(plugin, config_env_ref, ref_env_dir)
-            # pydantic-config only reads a root config file as two tokens: `@ path`
-            run_args = ["@", target]
+    if is_config:
+        taskset = config_data.get("taskset")
+        env_ref = taskset.get("id") if isinstance(taskset, dict) else None
+        if not (isinstance(env_ref, str) and env_ref):
+            # v1's legacy field: a top-level `id` runs a v0 env through the bridge
+            env_ref = config_data.get("id")
+        if isinstance(env_ref, str) and env_ref:
+            _prepare_v1_environment(env_ref, env_dir_path)
+            job_target = _env_name_from_reference(env_ref)
         else:
-            resolved_env = _prepare_v1_environment(plugin, target, env_dir_path)
-            # hub refs (org/name[@version]) pass through verbatim; verifiers installs them
-            run_args = [resolved_env.install_slug or resolved_env.env_name]
-            upstream_slug = resolved_env.upstream_slug
-            env_name_for_upload = resolved_env.env_name
-
-        job_target = env_name_for_upload
-        if job_target is None and config_envs:
-            job_target = _env_name_from_reference(config_envs[0][0])
-        if job_target is None:
             job_target = Path(target).stem
-        job_id = _build_job_id(job_target, model)
-        output_dir_arg = _parse_value_option(args, "--output-dir", "-o")
-        config_output_dir = config_data.get("output_dir") if isinstance(config_data, dict) else None
-        configured_output_dir = output_dir_arg or config_output_dir
-        output_dir = (
-            Path(configured_output_dir)
-            if configured_output_dir
-            else Path("outputs", "evals", f"{job_target}--{model.replace('/', '--')}", job_id)
-        )
-        if configured_output_dir is None:
-            args.extend(["--output-dir", str(output_dir)])
+        # pydantic-config only reads a root config file as two tokens: `@ path`
+        run_args = ["@", target]
+    else:
+        resolved_env = _prepare_v1_environment(target, env_dir_path)
+        # the v1 CLI accepts only locally importable ids; hub refs were installed above
+        run_args = [resolved_env.env_name]
+        upstream_slug = resolved_env.upstream_slug
+        job_target = resolved_env.env_name
 
-        headers = config_client.get("headers", {}) if isinstance(config_client, dict) else {}
-        if not isinstance(headers, dict):
-            console.print("[red]Error:[/red] client.headers must be a table")
+    job_id = _build_job_id(job_target, model)
+    output_dir_arg = _parse_value_option(args, "--output-dir", "-o")
+    configured_output_dir = output_dir_arg or config_data.get("output_dir")
+    output_dir = (
+        Path(configured_output_dir)
+        if configured_output_dir
+        else Path("outputs", "evals", f"{job_target}--{model.replace('/', '--')}", job_id)
+    )
+    if configured_output_dir is None:
+        args.extend(["--output-dir", str(output_dir)])
+
+    headers = config_client.get("headers", {}) if isinstance(config_client, dict) else {}
+    if not isinstance(headers, dict):
+        console.print("[red]Error:[/red] client.headers must be a table")
+        raise typer.Exit(2)
+    cli_headers = _pop_value_option(args, "--client.headers")
+    if cli_headers:
+        try:
+            parsed_headers = json.loads(cli_headers)
+        except json.JSONDecodeError as exc:
+            console.print("[red]Error:[/red] --client.headers must be valid JSON")
+            raise typer.Exit(2) from exc
+        if not isinstance(parsed_headers, dict):
+            console.print("[red]Error:[/red] --client.headers must be a JSON object")
             raise typer.Exit(2)
-        cli_headers = _parse_value_option(args, "--client.headers", None)
-        if cli_headers:
-            try:
-                parsed_headers = json.loads(cli_headers)
-            except json.JSONDecodeError as exc:
-                console.print("[red]Error:[/red] --client.headers must be valid JSON")
-                raise typer.Exit(2) from exc
-            if not isinstance(parsed_headers, dict):
-                console.print("[red]Error:[/red] --client.headers must be a JSON object")
-                raise typer.Exit(2)
-            headers = {**headers, **parsed_headers}
-            header_index = next(
-                idx
-                for idx, arg in enumerate(args)
-                if arg == "--client.headers" or arg.startswith("--client.headers=")
-            )
-            if args[header_index] == "--client.headers":
-                del args[header_index : header_index + 2]
-            else:
-                del args[header_index]
-        headers["X-PI-Job-Id"] = job_id
-        if resolved_env is not None and resolved_env.env_display_id:
-            headers[INTERNAL_ENV_DISPLAY_HEADER] = resolved_env.env_display_id
-        args.extend(["--client.headers", json.dumps(headers)])
+        headers = {**headers, **parsed_headers}
+    headers["X-PI-Job-Id"] = job_id
+    if resolved_env is not None and resolved_env.env_display_id:
+        headers[INTERNAL_ENV_DISPLAY_HEADER] = resolved_env.env_display_id
+    args.extend(["--client.headers", json.dumps(headers)])
 
-        console.print(f"[dim]Eval job_id: {job_id}[/dim]")
-        command = plugin.build_module_command(plugin.eval_module, [*run_args, *args])
-        _run_command(command, env=env)
+    console.print(f"[dim]Eval job_id: {job_id}[/dim]")
+    plugin = load_verifiers_prime_plugin()
+    _run_command(plugin.build_module_command(plugin.eval_module, [*run_args, *args]), env=env)
+    return V1EvalRun(
+        output_dir=output_dir,
+        job_id=job_id,
+        env_name=job_target,
+        upstream_slug=upstream_slug,
+        resolved_env=resolved_env,
+        is_config=is_config,
+    )
 
-    results_path = output_dir / "results.jsonl"
-    if not results_path.exists():
+
+def _upload_v1_results(run: V1EvalRun, *, skip_upload: bool, env_path: Optional[str]) -> None:
+    """Read the run's artifacts once (via verifiers), keep the lab view indexed, and upload."""
+    if not (run.output_dir / "results.jsonl").exists():
         console.print("[dim]No rollout results produced.[/dim]")
         return
-    results = convert_eval_results(load_results_jsonl(results_path))
+
+    from verifiers.v1.cli.output import read_upload_data
+
+    upload = read_upload_data(run.output_dir)
+
+    # `prime eval view` only lists runs that have a metadata.json; keep writing one.
     rollout_counts: dict[object, int] = {}
-    for row in results:
+    for row in upload.results:
         if "example_id" in row:
-            example_id = row["example_id"]
-            rollout_counts[example_id] = rollout_counts.get(example_id, 0) + 1
-    rewards = [row["reward"] for row in results if isinstance(row.get("reward"), (int, float))]
+            rollout_counts[row["example_id"]] = rollout_counts.get(row["example_id"], 0) + 1
     metadata = {
-        "env": job_target,
-        "model": model,
+        "env": run.env_name,
+        "model": upload.model_name,
         "num_examples": len(rollout_counts),
-        "avg_reward": sum(rewards) / len(rewards) if rewards else 0.0,
+        "avg_reward": upload.metrics.get("reward", 0.0),
     }
     rollout_totals = set(rollout_counts.values())
     if len(rollout_totals) == 1:
         metadata["rollouts_per_example"] = rollout_totals.pop()
-    (output_dir / "metadata.json").write_text(
+    (run.output_dir / "metadata.json").write_text(
         json.dumps(metadata, indent=2) + "\n", encoding="utf-8"
     )
 
     if skip_upload:
-        _print_environment_source_footer(resolved_env)
+        _print_environment_source_footer(run.resolved_env)
         console.print("[dim]Skipped uploading evaluation results[/dim]")
         return
 
-    if is_config:
+    if run.is_config:
         console.print(
             "[yellow]Evaluation completed. Automatic upload is skipped for "
             "config-driven runs.[/yellow]"
         )
         return
 
-    if resolved_env is not None and resolved_env.recommend_push:
-        _print_environment_source_footer(resolved_env)
+    if run.resolved_env is not None and run.resolved_env.recommend_push:
+        _print_environment_source_footer(run.resolved_env)
         console.print(
             "[yellow]Evaluation completed. Automatic upload is skipped until the local "
             "environment is published.[/yellow]"
         )
         return
 
-    upload_env_name = env_name_for_upload or environment
-    if upstream_slug is None:
-        check_path = Path(env_path) if env_path else Path.cwd()
-        metadata = find_environment_metadata(
-            env_name=upload_env_name,
-            env_path=check_path,
-            module_name=upload_env_name.replace("-", "_"),
-        )
-        if metadata and metadata.get("owner") and metadata.get("name"):
-            upstream_slug = f"{metadata.get('owner')}/{metadata.get('name')}"
-            console.print(f"[dim]Using upstream environment {upstream_slug}[/dim]")
-
-    if upstream_slug is None:
-        _print_environment_source_footer(resolved_env)
-        console.print(
-            "[dim]No upstream environment found. "
-            "Skipped uploading evaluation results to platform.\n"
-            "Use `prime env push` to set an upstream, or use `--env-path` to specify the "
-            "correct environment path.[/dim]"
-        )
-        return
-
-    if resolved_env is not None and resolved_env.platform_url:
-        console.print(f"[dim]Environment URL: {resolved_env.platform_url}[/dim]")
+    if run.resolved_env is not None and run.resolved_env.platform_url:
+        console.print(f"[dim]Environment URL: {run.resolved_env.platform_url}[/dim]")
 
     try:
         push_eval_results_to_hub(
-            env_name=upload_env_name,
-            model=model,
-            job_id=job_id,
+            env_name=run.env_name,
+            job_id=run.job_id,
+            upload=upload,
             env_path=Path(env_path) if env_path else None,
-            upstream_slug=upstream_slug,
-            output_dir=output_dir,
+            upstream_slug=run.upstream_slug,
         )
     except Exception as exc:
         console.print(f"[red]Failed to push results to hub:[/red] {exc}")
@@ -1249,7 +1311,7 @@ def run_eval_passthrough(
 
 
 def run_gepa_passthrough(environment_or_config: str, passthrough_args: list[str]) -> None:
-    plugin = load_verifiers_prime_plugin(console=console)
+    plugin = load_verifiers_prime_plugin()
     config = Config()
 
     if not config.api_key:
@@ -1266,9 +1328,9 @@ def run_gepa_passthrough(environment_or_config: str, passthrough_args: list[str]
     if _is_config_target(environment_or_config):
         config_env = _collect_gepa_config_env(Path(environment_or_config), env_dir_path)
         if config_env is not None:
-            _prepare_single_environment(plugin, config_env[0], config_env[1])
+            _prepare_single_environment(config_env[0], config_env[1])
     else:
-        resolved = _prepare_single_environment(plugin, environment_or_config, env_dir_path)
+        resolved = _prepare_single_environment(environment_or_config, env_dir_path)
         run_target = resolved.env_name
 
     command = plugin.build_module_command(plugin.gepa_module, [run_target, *args])

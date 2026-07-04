@@ -1,8 +1,7 @@
-"""Compatibility layer for verifiers prime plugin loading."""
+"""Locate a verifiers-capable Python and build verifiers CLI commands."""
 
 from __future__ import annotations
 
-import importlib
 import os
 import subprocess
 import sys
@@ -11,16 +10,17 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Sequence
 
-from rich.console import Console
-
-from .utils.plain import get_console
-
-EXPECTED_PLUGIN_API_VERSION = 1
 V1_EVAL_MODULE = "verifiers.v1.cli.eval.main"
 V1_INIT_MODULE = "verifiers.v1.cli.init"
+V1_VALIDATE_MODULE = "verifiers.v1.cli.validate"
+# `python -m` needs a `__main__` guard the v1 modules only gained recently; these -c
+# shims call `main()` directly so they work across verifiers versions.
 V1_ENTRYPOINTS = {
     V1_EVAL_MODULE: f"import sys; sys.argv[0] = 'eval'; from {V1_EVAL_MODULE} import main; main()",
     V1_INIT_MODULE: f"import sys; sys.argv[0] = 'init'; from {V1_INIT_MODULE} import main; main()",
+    V1_VALIDATE_MODULE: (
+        f"import sys; sys.argv[0] = 'validate'; from {V1_VALIDATE_MODULE} import main; main()"
+    ),
 }
 
 
@@ -83,16 +83,14 @@ def resolve_workspace_python(cwd: Path | None = None) -> str:
 
 @dataclass(frozen=True)
 class PrimeVerifiersPlugin:
-    """Local fallback contract used when verifiers plugin loading fails."""
+    """The verifiers CLI modules prime shells out to."""
 
-    api_version: int = EXPECTED_PLUGIN_API_VERSION
     eval_module: str = V1_EVAL_MODULE
+    init_module: str = V1_INIT_MODULE
+    validate_module: str = V1_VALIDATE_MODULE
     gepa_module: str = "verifiers.cli.commands.gepa"
     install_module: str = "verifiers.cli.commands.install"
-    init_module: str = V1_INIT_MODULE
-    setup_module: str = "verifiers.cli.commands.setup"
     build_module: str = "verifiers.cli.commands.build"
-    tui_module: str = "verifiers.cli.tui"
 
     def build_module_command(
         self, module_name: str, args: Sequence[str] | None = None
@@ -105,50 +103,7 @@ class PrimeVerifiersPlugin:
         return command
 
 
-def load_verifiers_prime_plugin(console: Console | None = None) -> PrimeVerifiersPlugin:
-    """Load plugin exported by verifiers with fallback behavior."""
-    sink = console or get_console(stderr=True)
-    try:
-        module = importlib.import_module("verifiers.cli.plugins.prime")
-    except Exception as exc:
-        sink.print(
-            "[yellow]Warning:[/yellow] Could not import verifiers prime plugin "
-            f"({exc}). Falling back to built-in command mapping."
-        )
-        return PrimeVerifiersPlugin()
-
-    get_plugin = getattr(module, "get_plugin", None)
-    if not callable(get_plugin):
-        sink.print(
-            "[yellow]Warning:[/yellow] verifiers prime plugin module does not expose "
-            "a callable get_plugin(). Falling back to built-in command mapping."
-        )
-        return PrimeVerifiersPlugin()
-
-    try:
-        plugin = get_plugin()
-    except Exception as exc:
-        sink.print(
-            "[yellow]Warning:[/yellow] Failed to load verifiers plugin "
-            f"({exc}). Falling back to built-in command mapping."
-        )
-        return PrimeVerifiersPlugin()
-
-    api_version = getattr(plugin, "api_version", None)
-    if api_version != EXPECTED_PLUGIN_API_VERSION:
-        sink.print(
-            "[yellow]Warning:[/yellow] verifiers plugin API version mismatch "
-            f"(got {api_version}, expected {EXPECTED_PLUGIN_API_VERSION}). "
-            "Continuing with compatibility behavior."
-        )
-
-    return PrimeVerifiersPlugin(
-        api_version=int(api_version or EXPECTED_PLUGIN_API_VERSION),
-        eval_module=V1_EVAL_MODULE,
-        gepa_module=getattr(plugin, "gepa_module", "verifiers.cli.commands.gepa"),
-        install_module=getattr(plugin, "install_module", "verifiers.cli.commands.install"),
-        init_module=V1_INIT_MODULE,
-        setup_module=getattr(plugin, "setup_module", "verifiers.cli.commands.setup"),
-        build_module=getattr(plugin, "build_module", "verifiers.cli.commands.build"),
-        tui_module=getattr(plugin, "tui_module", "verifiers.cli.tui"),
-    )
+def load_verifiers_prime_plugin() -> PrimeVerifiersPlugin:
+    """The static verifiers command map. Verifiers no longer exports a plugin module; the
+    old import handshake always resolved to these values anyway."""
+    return PrimeVerifiersPlugin()

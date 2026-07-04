@@ -11,8 +11,9 @@ def test_eval_run_help_flags_use_backend_help(monkeypatch):
         print("BACKEND_HELP")
 
     monkeypatch.setattr("prime_cli.commands.evals.print_eval_run_help", fake_help)
-    for flag in ("-h", "--help"):
-        result = runner.invoke(app, ["eval", "run", flag], env={"PRIME_DISABLE_VERSION_CHECK": "1"})
+    # `prime eval` is the command; `run` stays as the hidden hosted-sandbox alias
+    for invocation in (["eval", "-h"], ["eval", "--help"], ["eval"], ["eval", "run", "--help"]):
+        result = runner.invoke(app, invocation, env={"PRIME_DISABLE_VERSION_CHECK": "1"})
         assert result.exit_code == 0, result.output
         assert "BACKEND_HELP" in result.output
 
@@ -35,9 +36,9 @@ def test_sanitize_help_removes_vf_eval_aliases():
         "usage: python -m verifiers.cli.commands.eval [-h] env_id_or_config\n"
         "Run vf-eval with verifiers.cli.commands.eval\n"
     )
-    help_text = _sanitize_help_text(raw, "verifiers.cli.commands.eval", "prime eval run")
+    help_text = _sanitize_help_text(raw, "verifiers.cli.commands.eval", "prime eval")
 
-    assert "Usage: prime eval run [-h] environment" in help_text
+    assert "Usage: prime eval [-h] environment" in help_text
     assert "verifiers.cli.commands.eval" not in help_text
     assert "vf-eval" not in help_text
     assert "env_id_or_config" not in help_text
@@ -46,9 +47,9 @@ def test_sanitize_help_removes_vf_eval_aliases():
 def test_sanitize_help_rewrites_v1_console_script():
     raw = "usage: uv run eval [<taskset-id>]\nusage: main.py [-h] [@ FILE] [OPTIONS]\n"
 
-    help_text = _sanitize_help_text(raw, "verifiers.v1.cli.eval.main", "prime eval run")
+    help_text = _sanitize_help_text(raw, "verifiers.v1.cli.eval.main", "prime eval")
 
-    assert help_text.count("Usage: prime eval run") == 2
+    assert help_text.count("Usage: prime eval") == 2
     assert "uv run eval" not in help_text
 
 
@@ -64,7 +65,7 @@ def test_v1_module_command_calls_console_entrypoint(monkeypatch):
 
 
 def test_append_eval_options_mentions_tunnel_access():
-    help_text = _append_eval_options("Usage: prime eval run [-h] environment\n")
+    help_text = _append_eval_options("Usage: prime eval [-h] environment\n")
 
     assert "--allow-tunnel-access" in help_text
 

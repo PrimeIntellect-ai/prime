@@ -5771,9 +5771,7 @@ async def test_prime_lab_app_chat_widget_launches_from_inline_config(
         command = launch_plan.command
         generated = tmp_path / ".prime" / "lab" / "configs" / "eval" / "reverse-text.toml"
         parsed = toml.loads(generated.read_text(encoding="utf-8"))
-        assert command == (
-            "prime eval run .prime/lab/configs/eval/reverse-text.toml --hosted --follow"
-        )
+        assert command == ("prime eval .prime/lab/configs/eval/reverse-text.toml --hosted --follow")
         assert parsed["model"] == "openai/gpt-4.1-mini"
         assert parsed["num_examples"] == 7
         assert parsed["rollouts_per_example"] == 4
@@ -6456,7 +6454,7 @@ async def test_prime_lab_app_chat_widget_launch_button_streams_inline_output(
         card = app.screen.query_one(AgentWidgetCard)
         launch_plan = card.current_launch_plan()
         assert launch_plan.command == (
-            "prime eval run .prime/lab/configs/eval/reverse-text.toml --hosted --follow"
+            "prime eval .prime/lab/configs/eval/reverse-text.toml --hosted --follow"
         )
         assert card._launch_running is False
         card.query_one(".agent-widget-action-launch", Button).press()
@@ -6465,9 +6463,7 @@ async def test_prime_lab_app_chat_widget_launch_button_streams_inline_output(
 
         log_text = _render_renderable(card.query_one(".agent-widget-log", Static).content)
         status_text = _render_renderable(card.query_one(".agent-widget-status", Static).content)
-        assert calls == [
-            "prime eval run .prime/lab/configs/eval/reverse-text.toml --hosted --follow"
-        ]
+        assert calls == ["prime eval .prime/lab/configs/eval/reverse-text.toml --hosted --follow"]
         assert "launching" in log_text
         assert "done" in log_text
         assert "Completed" in status_text
@@ -7331,7 +7327,6 @@ def test_launch_command_quotes_config_paths_with_spaces() -> None:
     assert shlex.split(launch_command_for_config("eval", "configs/eval/my eval.toml")) == [
         "prime",
         "eval",
-        "run",
         "configs/eval/my eval.toml",
         "--hosted",
     ]

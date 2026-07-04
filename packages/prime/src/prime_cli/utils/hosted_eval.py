@@ -35,7 +35,7 @@ class EvalStatus(str, Enum):
 
 @dataclass
 class HostedEvalConfig:
-    environment_id: str
+    environment_id: Optional[str]
     inference_model: str
     num_examples: int
     rollouts_per_example: int
@@ -57,6 +57,8 @@ class HostedEvalConfig:
     api_client_type: Optional[str] = None
     api_base_url: Optional[str] = None
     api_key_var: Optional[str] = None
+    environment: Optional[dict[str, Any]] = None
+    """Raw v1 environment config sent as `environments` instead of `environment_ids`."""
 
 
 @dataclass

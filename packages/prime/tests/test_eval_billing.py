@@ -3,6 +3,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+import toml
 import typer
 from prime_cli.api.inference import (
     InferenceAPIError,
@@ -78,7 +79,7 @@ def test_inference_client_maps_402_to_billing_error(monkeypatch):
 )
 def test_eval_run_blocks_when_inference_billing_is_missing(monkeypatch, error_message):
     monkeypatch.setattr(
-        "prime_cli.verifiers_bridge.load_verifiers_prime_plugin", lambda console: DummyPlugin()
+        "prime_cli.verifiers_bridge.load_verifiers_prime_plugin", lambda: DummyPlugin()
     )
     monkeypatch.setattr("prime_cli.verifiers_bridge.Config", lambda: DummyConfig())
 
@@ -107,7 +108,7 @@ def test_eval_run_blocks_when_inference_billing_is_missing(monkeypatch, error_me
 
 def test_eval_preflight_omits_max_tokens(monkeypatch):
     monkeypatch.setattr(
-        "prime_cli.verifiers_bridge.load_verifiers_prime_plugin", lambda console: DummyPlugin()
+        "prime_cli.verifiers_bridge.load_verifiers_prime_plugin", lambda: DummyPlugin()
     )
     monkeypatch.setattr("prime_cli.verifiers_bridge.Config", lambda: DummyConfig())
     seen_payloads = []
@@ -152,7 +153,7 @@ def test_eval_preflight_omits_max_tokens(monkeypatch):
 def test_eval_run_uses_v1_client_config(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
-        "prime_cli.verifiers_bridge.load_verifiers_prime_plugin", lambda console: DummyPlugin()
+        "prime_cli.verifiers_bridge.load_verifiers_prime_plugin", lambda: DummyPlugin()
     )
     monkeypatch.setattr("prime_cli.verifiers_bridge.Config", lambda: DummyConfig())
 
@@ -164,7 +165,7 @@ def test_eval_run_uses_v1_client_config(monkeypatch, tmp_path):
     monkeypatch.setattr("prime_cli.verifiers_bridge.InferenceClient", ExplodingInferenceClient)
     monkeypatch.setattr(
         "prime_cli.verifiers_bridge._prepare_v1_environment",
-        lambda _plugin, env_name, env_dir: (
+        lambda env_name, env_dir: (
             captured.update(prepared=(env_name, env_dir))
             or ResolvedEnvironment(
                 original=env_name,
@@ -212,9 +213,9 @@ def test_eval_run_uses_v1_client_config(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("save_flag", ["--save-results", "-s"])
-def test_eval_run_legacy_save_results_uses_v0_entrypoint(monkeypatch, save_flag):
+def test_eval_run_legacy_save_results_converts_to_v1(monkeypatch, save_flag):
     monkeypatch.setattr(
-        "prime_cli.verifiers_bridge.load_verifiers_prime_plugin", lambda console: DummyPlugin()
+        "prime_cli.verifiers_bridge.load_verifiers_prime_plugin", lambda: DummyPlugin()
     )
     monkeypatch.setattr("prime_cli.verifiers_bridge.Config", lambda: DummyConfig())
     monkeypatch.setattr("prime_cli.verifiers_bridge._validate_model", lambda *args: None)
@@ -222,7 +223,7 @@ def test_eval_run_legacy_save_results_uses_v0_entrypoint(monkeypatch, save_flag)
         "prime_cli.verifiers_bridge._preflight_inference_billing", lambda *args: None
     )
     monkeypatch.setattr(
-        "prime_cli.verifiers_bridge._prepare_single_environment",
+        "prime_cli.verifiers_bridge._prepare_v1_environment",
         lambda *_args: ResolvedEnvironment(
             original="legacy-env", env_name="legacy-env", install_mode="local"
         ),
@@ -237,8 +238,6 @@ def test_eval_run_legacy_save_results_uses_v0_entrypoint(monkeypatch, save_flag)
         environment="legacy-env",
         passthrough_args=[
             save_flag,
-            "--resume",
-            "/tmp/legacy-results.jsonl",
             "--debug",
             "--num-examples",
             "1",
@@ -249,16 +248,43 @@ def test_eval_run_legacy_save_results_uses_v0_entrypoint(monkeypatch, save_flag)
         env_path=None,
     )
 
-    assert captured["command"][0] == "verifiers.cli.commands.eval"
-    assert save_flag in captured["command"]
-    assert "--resume" in captured["command"]
-    assert "--debug" in captured["command"]
-    assert "--client.headers" not in captured["command"]
+    # the frozen v0 surface now runs converted on the v1 entrypoint
+    assert captured["command"][0] == "verifiers.v1.cli.eval.main"
+    assert captured["command"][1] == "@"
+    converted = toml.load(captured["command"][2])
+    assert converted["taskset"] == {"id": "legacy-env"}
+    assert converted["num_tasks"] == 1
+    assert converted["num_rollouts"] == 2
+    assert converted["rich"] is False  # --debug means "no live display"
+    assert "--client.headers" in captured["command"]
+
+
+def test_eval_run_v0_resume_is_rejected_with_guidance(monkeypatch):
+    monkeypatch.setattr(
+        "prime_cli.verifiers_bridge.load_verifiers_prime_plugin", lambda: DummyPlugin()
+    )
+    monkeypatch.setattr("prime_cli.verifiers_bridge.Config", lambda: DummyConfig())
+    monkeypatch.setattr(
+        "prime_cli.verifiers_bridge._prepare_v1_environment",
+        lambda *_args: ResolvedEnvironment(
+            original="legacy-env", env_name="legacy-env", install_mode="local"
+        ),
+    )
+
+    with pytest.raises(typer.Exit) as exc_info:
+        run_eval_passthrough(
+            environment="legacy-env",
+            passthrough_args=["-s", "--resume", "/tmp/legacy-results.jsonl"],
+            skip_upload=True,
+            env_path=None,
+        )
+
+    assert cast(typer.Exit, exc_info.value).exit_code == 2
 
 
 def test_eval_resume_forwards_only_resume_arguments(monkeypatch, tmp_path):
     monkeypatch.setattr(
-        "prime_cli.verifiers_bridge.load_verifiers_prime_plugin", lambda console: DummyPlugin()
+        "prime_cli.verifiers_bridge.load_verifiers_prime_plugin", lambda: DummyPlugin()
     )
     monkeypatch.setattr("prime_cli.verifiers_bridge.Config", lambda: DummyConfig())
     monkeypatch.setattr(
@@ -310,14 +336,15 @@ X-Prime-Eval-Env-Display = "primeintellect/wiki-search"
         str(output_dir),
     ]
     assert captured["env"]["PRIME_API_KEY"] == "test-api-key"
-    assert captured["upload"] == {
-        "env_name": "wiki-search",
-        "model": "openai/gpt-4.1-mini",
-        "job_id": "existing-job-id",
-        "env_path": None,
-        "upstream_slug": "primeintellect/wiki-search",
-        "output_dir": output_dir,
-    }
+    upload_kwargs = captured["upload"]
+    assert upload_kwargs["env_name"] == "wiki-search"
+    assert upload_kwargs["job_id"] == "existing-job-id"
+    assert upload_kwargs["env_path"] is None
+    assert upload_kwargs["upstream_slug"] == "primeintellect/wiki-search"
+    upload = upload_kwargs["upload"]
+    assert upload.model_name == "openai/gpt-4.1-mini"
+    assert upload.env == "wiki-search"
+    assert upload.results == [{"id": 0, "reward": 1.0, "example_id": 0}]
     metadata = json.loads((output_dir / "metadata.json").read_text())
     assert metadata["num_examples"] == 1
     assert metadata["rollouts_per_example"] == 1
@@ -329,7 +356,7 @@ def test_eval_run_missing_endpoint_registry_falls_back_to_configured_inference(
 ):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
-        "prime_cli.verifiers_bridge.load_verifiers_prime_plugin", lambda console: DummyPlugin()
+        "prime_cli.verifiers_bridge.load_verifiers_prime_plugin", lambda: DummyPlugin()
     )
     monkeypatch.setattr("prime_cli.verifiers_bridge.Config", lambda: DummyConfig())
 
@@ -376,13 +403,13 @@ def test_eval_run_missing_endpoint_registry_falls_back_to_configured_inference(
 
 def test_gepa_run_provider_short_flag_does_not_override_env_dir_path(monkeypatch):
     monkeypatch.setattr(
-        "prime_cli.verifiers_bridge.load_verifiers_prime_plugin", lambda console: DummyPlugin()
+        "prime_cli.verifiers_bridge.load_verifiers_prime_plugin", lambda: DummyPlugin()
     )
     monkeypatch.setattr("prime_cli.verifiers_bridge.Config", lambda: DummyConfig())
     captured = {}
     monkeypatch.setattr(
         "prime_cli.verifiers_bridge._prepare_single_environment",
-        lambda _plugin, environment, env_dir_path: (
+        lambda environment, env_dir_path: (
             captured.update({"environment": environment, "env_dir_path": env_dir_path})
             or ResolvedEnvironment(
                 original=environment,
@@ -406,7 +433,7 @@ def test_gepa_run_provider_short_flag_does_not_override_env_dir_path(monkeypatch
 
 def test_eval_run_continues_when_model_validation_times_out(monkeypatch):
     monkeypatch.setattr(
-        "prime_cli.verifiers_bridge.load_verifiers_prime_plugin", lambda console: DummyPlugin()
+        "prime_cli.verifiers_bridge.load_verifiers_prime_plugin", lambda: DummyPlugin()
     )
     monkeypatch.setattr("prime_cli.verifiers_bridge.Config", lambda: DummyConfig())
 
@@ -443,7 +470,7 @@ def test_eval_run_continues_when_model_validation_times_out(monkeypatch):
 
 def test_eval_run_continues_when_billing_preflight_times_out(monkeypatch):
     monkeypatch.setattr(
-        "prime_cli.verifiers_bridge.load_verifiers_prime_plugin", lambda console: DummyPlugin()
+        "prime_cli.verifiers_bridge.load_verifiers_prime_plugin", lambda: DummyPlugin()
     )
     monkeypatch.setattr("prime_cli.verifiers_bridge.Config", lambda: DummyConfig())
 
@@ -481,7 +508,7 @@ def test_eval_run_continues_when_billing_preflight_times_out(monkeypatch):
 @pytest.mark.parametrize("prefix", ["", "@"])
 def test_eval_config_uses_v1_taskset(monkeypatch, tmp_path, prefix):
     monkeypatch.setattr(
-        "prime_cli.verifiers_bridge.load_verifiers_prime_plugin", lambda console: DummyPlugin()
+        "prime_cli.verifiers_bridge.load_verifiers_prime_plugin", lambda: DummyPlugin()
     )
     monkeypatch.setattr("prime_cli.verifiers_bridge.Config", lambda: DummyConfig())
     monkeypatch.setattr("prime_cli.verifiers_bridge._validate_model", lambda *args: None)
@@ -504,7 +531,7 @@ id = "primeintellect/wordle"
     prepared = []
     commands = []
 
-    def fake_prepare(_plugin, env_reference, env_dir_path):
+    def fake_prepare(env_reference, env_dir_path):
         prepared.append((env_reference, env_dir_path))
 
     def fake_run_command(command, env=None):
@@ -533,7 +560,7 @@ id = "primeintellect/wordle"
 def test_eval_dry_run_skips_inference_preflight(monkeypatch, tmp_path, from_config):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
-        "prime_cli.verifiers_bridge.load_verifiers_prime_plugin", lambda console: DummyPlugin()
+        "prime_cli.verifiers_bridge.load_verifiers_prime_plugin", lambda: DummyPlugin()
     )
     monkeypatch.setattr("prime_cli.verifiers_bridge.Config", lambda: DummyConfig())
     monkeypatch.setattr(
@@ -546,7 +573,7 @@ def test_eval_dry_run_skips_inference_preflight(monkeypatch, tmp_path, from_conf
     )
     monkeypatch.setattr(
         "prime_cli.verifiers_bridge._prepare_v1_environment",
-        lambda _plugin, environment, _env_dir: ResolvedEnvironment(
+        lambda environment, _env_dir: ResolvedEnvironment(
             original=environment,
             env_name=environment,
             install_mode="local",
@@ -579,7 +606,7 @@ def test_eval_dry_run_skips_inference_preflight(monkeypatch, tmp_path, from_conf
 
 def test_eval_config_preserves_output_dir(monkeypatch, tmp_path):
     monkeypatch.setattr(
-        "prime_cli.verifiers_bridge.load_verifiers_prime_plugin", lambda console: DummyPlugin()
+        "prime_cli.verifiers_bridge.load_verifiers_prime_plugin", lambda: DummyPlugin()
     )
     monkeypatch.setattr("prime_cli.verifiers_bridge.Config", lambda: DummyConfig())
     monkeypatch.setattr("prime_cli.verifiers_bridge._validate_model", lambda *args: None)
@@ -599,6 +626,10 @@ def test_eval_config_preserves_output_dir(monkeypatch, tmp_path):
     def fake_run(command, env=None):
         captured["command"] = command
         output_dir.mkdir()
+        # a real run writes its resolved config.toml alongside the results
+        (output_dir / "config.toml").write_text(
+            'model = "openai/gpt-4.1-mini"\n\n[taskset]\nid = "gsm8k-v1"\n', encoding="utf-8"
+        )
         (output_dir / "results.jsonl").write_text(
             json.dumps(
                 {"task": {"idx": 0, "prompt": None}, "nodes": [], "rewards": {"correct": 1.0}}
@@ -630,7 +661,7 @@ def test_eval_config_preserves_output_dir(monkeypatch, tmp_path):
 def test_eval_writes_v1_metadata(monkeypatch, tmp_path, task_ids, expected_rollouts):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
-        "prime_cli.verifiers_bridge.load_verifiers_prime_plugin", lambda console: DummyPlugin()
+        "prime_cli.verifiers_bridge.load_verifiers_prime_plugin", lambda: DummyPlugin()
     )
     monkeypatch.setattr("prime_cli.verifiers_bridge.Config", lambda: DummyConfig())
     monkeypatch.setattr("prime_cli.verifiers_bridge._validate_model", lambda *args: None)
@@ -652,6 +683,10 @@ def test_eval_writes_v1_metadata(monkeypatch, tmp_path, task_ids, expected_rollo
         captured["command"] = command
         output_dir = Path(command[command.index("--output-dir") + 1])
         output_dir.mkdir(parents=True)
+        # a real run writes its resolved config.toml alongside the results
+        (output_dir / "config.toml").write_text(
+            'model = "openai/gpt-4.1-mini"\n\n[taskset]\nid = "wiki-search"\n', encoding="utf-8"
+        )
         rewards = [1.0, 0.5, 0.75]
         rows = [
             {

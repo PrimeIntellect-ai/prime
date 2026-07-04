@@ -347,7 +347,7 @@ def test_lab_setup_service_emits_post_setup_call_to_action(
     assert "ask codex" in output
     assert "I want to train a model for <my task domain>" in output
     assert "prime env init my-env" in output
-    assert "prime eval run my-env -m openai/gpt-5.4-nano -n 5" in output
+    assert "prime eval my-env -m openai/gpt-5.4-nano -n 5" in output
     assert "prime rl run configs/rl/qwen-3-5.toml" in output
     assert "prime gepa run my-env -m openai/gpt-5.4-nano" in output
 

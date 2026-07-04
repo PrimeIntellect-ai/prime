@@ -18,7 +18,7 @@ from ..utils.formatters import format_price_per_mtok
 
 app = PlainTyper(
     help="Run and manage Prime Inference\n\n"
-    "Use `prime eval run` for environment evals with Prime Inference.",
+    "Use `prime eval` for environment evals with Prime Inference.",
     no_args_is_help=True,
 )
 console = get_console()

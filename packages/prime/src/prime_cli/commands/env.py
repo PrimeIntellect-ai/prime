@@ -1688,7 +1688,7 @@ def init(
         console.print("[dim]Example: prime env init my-env --path ./environments[/dim]")
         raise typer.Exit(2)
 
-    plugin = load_verifiers_prime_plugin(console=console)
+    plugin = load_verifiers_prime_plugin()
     command = plugin.build_module_command(plugin.init_module, [name, *passthrough_args])
     result = subprocess.run(command)
     if result.returncode != 0:
@@ -1728,7 +1728,7 @@ def build(
         console.print("[dim]Example: prime env build openenv-echo --path ./environments[/dim]")
         raise typer.Exit(2)
 
-    plugin = load_verifiers_prime_plugin(console=console)
+    plugin = load_verifiers_prime_plugin()
     command = plugin.build_module_command(plugin.build_module, [env_id, *passthrough_args])
     result = subprocess.run(command)
     if result.returncode != 0:
@@ -2467,7 +2467,7 @@ def install(
     """
     try:
         client = APIClient(require_auth=False)
-        plugin = load_verifiers_prime_plugin(console=console)
+        plugin = load_verifiers_prime_plugin()
 
         # Validate package manager
         if with_tool not in ["uv", "pip"]:

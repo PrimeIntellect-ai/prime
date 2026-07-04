@@ -4,6 +4,7 @@ import pytest
 import typer
 from prime_cli.client import APIError
 from prime_cli.commands.evals import (
+    _build_hosted_evaluation_payload,
     _create_hosted_evaluations,
     _load_hosted_eval_configs,
     _print_eval_status,
@@ -1839,3 +1840,98 @@ def test_eval_logs_command_emits_waiting_status_when_logs_are_unchanged(monkeypa
     assert result.output.count("Line 1") == 1
     assert "Evaluation status: RUNNING (waiting for logs...)" in result.output
     assert "Status: COMPLETED" in result.output
+
+
+V1_HOSTED_TOML = """\
+model = "openai/gpt-4.1-mini"
+num_tasks = 7
+num_rollouts = 2
+max_concurrent = 16
+
+[taskset]
+id = "gsm8k-v1"
+difficulty = "easy"
+
+[harness]
+id = "default"
+
+[sampling]
+temperature = 0.3
+
+[retries.rollout]
+max_retries = 2
+
+[client.headers]
+X-Custom = "yes"
+"""
+
+
+def test_eval_run_hosted_v1_config_sends_environments(monkeypatch, tmp_path):
+    captured = {}
+
+    def fail_resolve(*args, **kwargs):
+        raise AssertionError("raw v1 hosted evals must not resolve a published environment")
+
+    monkeypatch.setattr("prime_cli.commands.evals._resolve_hosted_environment", fail_resolve)
+
+    def fake_create(config, environment_ids=None):
+        captured["payload"] = _build_hosted_evaluation_payload(config)
+        captured["environment_ids"] = environment_ids
+        return {"evaluation_id": "eval-123"}
+
+    monkeypatch.setattr("prime_cli.commands.evals._create_hosted_evaluations", fake_create)
+
+    config_path = tmp_path / "eval.toml"
+    config_path.write_text(V1_HOSTED_TOML)
+    result = runner.invoke(
+        app,
+        ["eval", str(config_path), "--hosted", "-n", "9"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = captured["payload"]
+    assert "environment_ids" not in payload
+    assert payload["environments"] == [
+        {
+            "taskset": {"id": "gsm8k-v1", "difficulty": "easy"},
+            "harness": {"id": "default"},
+            "retries": {"rollout": {"max_retries": 2}},
+            "sampling": {"temperature": 0.3},
+        }
+    ]
+    assert payload["eval_config"]["num_examples"] == 9  # CLI override wins over num_tasks
+    assert payload["eval_config"]["rollouts_per_example"] == 2
+    assert payload["eval_config"]["max_concurrent"] == 16
+    assert payload["eval_config"]["headers"] == ["X-Custom: yes"]
+    assert captured["environment_ids"] is None
+    assert "Hosted evaluation started" in result.output
+
+
+def test_eval_run_hosted_v1_config_rejects_local_only_fields(monkeypatch, tmp_path):
+    config_path = tmp_path / "eval.toml"
+    config_path.write_text('output_dir = "outputs"\n\n[taskset]\nid = "gsm8k-v1"\n')
+
+    result = runner.invoke(
+        app,
+        ["eval", "run", str(config_path), "--hosted"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 1
+    assert "does not support" in result.output
+    assert "output_dir" in result.output
+
+
+def test_eval_run_hosted_legacy_id_config_needs_published_env(monkeypatch, tmp_path):
+    config_path = tmp_path / "eval.toml"
+    config_path.write_text('id = "reverse-text"\nmodel = "openai/gpt-4.1-mini"\n')
+
+    result = runner.invoke(
+        app,
+        ["eval", "run", str(config_path), "--hosted"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 1
+    assert "published environment" in result.output

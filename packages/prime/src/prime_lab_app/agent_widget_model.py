@@ -1134,7 +1134,7 @@ def _widget_command_text(payload: dict[str, Any], workspace: Path) -> str:
     if config_kind == "rl":
         return f"prime train run {rel_path} --yes"
     if config_kind == "eval":
-        return f"prime eval run {rel_path} --hosted"
+        return f"prime eval {rel_path} --hosted"
     if config_kind == "gepa":
         return f"prime gepa run {rel_path}"
     return ""

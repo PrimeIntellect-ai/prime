@@ -941,7 +941,8 @@ def run_eval_passthrough(
         raise typer.Exit(1)
 
     resume_dir = _parse_value_option(passthrough_args, "--resume", None)
-    if resume_dir is not None:
+    # a flag-like "value" means --resume had no directory; let verifiers report it
+    if resume_dir is not None and not resume_dir.startswith("-"):
         run = _resume_v1_eval(resume_dir, passthrough_args, config)
     else:
         run = _run_v1_eval(environment, passthrough_args, config)
@@ -972,6 +973,8 @@ def run_validate_passthrough(environment: str, passthrough_args: list[str]) -> N
     env_dir_path = _pop_value_option(args, "--env-dir-path") or DEFAULT_ENV_DIR_PATH
 
     if is_config:
+        # install hub refs and pin the local name into a config copy before verifiers parses
+        target, _ = _pin_config_env(toml.load(target), target, env_dir_path)
         # pydantic-config reads a root config file as two tokens: `@ path`
         run_args = ["@", target]
     else:

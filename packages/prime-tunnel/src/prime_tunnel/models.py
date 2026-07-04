@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 
 
 class TunnelInfo(BaseModel):
@@ -11,8 +11,8 @@ class TunnelInfo(BaseModel):
     name: Optional[str] = Field(None, description="Friendly name")
     hostname: str = Field(..., description="Tunnel hostname")
     url: str = Field(..., description="Full HTTPS URL")
-    frp_token: str = Field(..., description="Authentication token for frpc")
-    binding_secret: str = Field("", description="Per-tunnel secret for frpc metadata")
+    frp_token: SecretStr = Field(..., description="Authentication token for frpc")
+    binding_secret: SecretStr = Field(default=SecretStr(""), description="Per-tunnel secret for frpc metadata")
     server_host: str = Field(..., description="frps server hostname")
     server_port: int = Field(7000, description="frps server port")
     local_port: Optional[int] = Field(None, description="Local port forwarded by the tunnel")
@@ -20,7 +20,7 @@ class TunnelInfo(BaseModel):
     http_user: Optional[str] = Field(
         None, description="HTTP basic auth username, if auth is enabled"
     )
-    http_password: Optional[str] = Field(
+    http_password: Optional[SecretStr] = Field(
         None,
         description=(
             "Auto-generated HTTP basic auth password. Only present in the "

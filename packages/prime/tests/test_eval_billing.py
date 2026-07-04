@@ -212,76 +212,6 @@ def test_eval_run_uses_v1_client_config(monkeypatch, tmp_path):
     assert captured["env"]["PRIME_API_KEY"] == "test-api-key"
 
 
-@pytest.mark.parametrize("save_flag", ["--save-results", "-s"])
-def test_eval_run_legacy_save_results_converts_to_v1(monkeypatch, save_flag):
-    monkeypatch.setattr(
-        "prime_cli.verifiers_bridge.load_verifiers_prime_plugin", lambda: DummyPlugin()
-    )
-    monkeypatch.setattr("prime_cli.verifiers_bridge.Config", lambda: DummyConfig())
-    monkeypatch.setattr("prime_cli.verifiers_bridge._validate_model", lambda *args: None)
-    monkeypatch.setattr(
-        "prime_cli.verifiers_bridge._preflight_inference_billing", lambda *args: None
-    )
-    monkeypatch.setattr(
-        "prime_cli.verifiers_bridge._prepare_v1_environment",
-        lambda *_args: ResolvedEnvironment(
-            original="legacy-env", env_name="legacy-env", install_mode="local"
-        ),
-    )
-    captured = {}
-    monkeypatch.setattr(
-        "prime_cli.verifiers_bridge._run_command",
-        lambda command, env=None: captured.update(command=command, env=env),
-    )
-
-    run_eval_passthrough(
-        environment="legacy-env",
-        passthrough_args=[
-            save_flag,
-            "--debug",
-            "--num-examples",
-            "1",
-            "--rollouts-per-example",
-            "2",
-        ],
-        skip_upload=True,
-        env_path=None,
-    )
-
-    # the frozen v0 surface now runs converted on the v1 entrypoint
-    assert captured["command"][0] == "verifiers.v1.cli.eval.main"
-    assert captured["command"][1] == "@"
-    converted = toml.load(captured["command"][2])
-    assert converted["taskset"] == {"id": "legacy-env"}
-    assert converted["num_tasks"] == 1
-    assert converted["num_rollouts"] == 2
-    assert converted["rich"] is False  # --debug means "no live display"
-    assert "--client.headers" in captured["command"]
-
-
-def test_eval_run_v0_resume_is_rejected_with_guidance(monkeypatch):
-    monkeypatch.setattr(
-        "prime_cli.verifiers_bridge.load_verifiers_prime_plugin", lambda: DummyPlugin()
-    )
-    monkeypatch.setattr("prime_cli.verifiers_bridge.Config", lambda: DummyConfig())
-    monkeypatch.setattr(
-        "prime_cli.verifiers_bridge._prepare_v1_environment",
-        lambda *_args: ResolvedEnvironment(
-            original="legacy-env", env_name="legacy-env", install_mode="local"
-        ),
-    )
-
-    with pytest.raises(typer.Exit) as exc_info:
-        run_eval_passthrough(
-            environment="legacy-env",
-            passthrough_args=["-s", "--resume", "/tmp/legacy-results.jsonl"],
-            skip_upload=True,
-            env_path=None,
-        )
-
-    assert cast(typer.Exit, exc_info.value).exit_code == 2
-
-
 def test_eval_resume_forwards_only_resume_arguments(monkeypatch, tmp_path):
     monkeypatch.setattr(
         "prime_cli.verifiers_bridge.load_verifiers_prime_plugin", lambda: DummyPlugin()
@@ -533,6 +463,11 @@ id = "primeintellect/wordle"
 
     def fake_prepare(env_reference, env_dir_path):
         prepared.append((env_reference, env_dir_path))
+        return ResolvedEnvironment(
+            original=env_reference,
+            env_name=env_reference.split("/")[-1],
+            install_mode="hub",
+        )
 
     def fake_run_command(command, env=None):
         commands.append(command)
@@ -549,8 +484,11 @@ id = "primeintellect/wordle"
 
     assert prepared == [("primeintellect/wordle", "./environments")]
     assert commands
-    # pydantic-config only accepts a root config file as two tokens: `@ path`
-    assert commands[0][1:3] == ["@", str(config_path)]
+    # pydantic-config only accepts a root config file as two tokens: `@ path`;
+    # the hub slug is installed and pinned to the local name in a config copy
+    assert commands[0][1] == "@"
+    assert commands[0][2] != str(config_path)
+    assert toml.load(commands[0][2])["taskset"]["id"] == "wordle"
     header_idx = commands[0].index("--client.headers")
     headers = json.loads(commands[0][header_idx + 1])
     assert headers["X-PI-Job-Id"].startswith("wordle_openai_gpt_4.1_mini_")
@@ -613,7 +551,12 @@ def test_eval_config_preserves_output_dir(monkeypatch, tmp_path):
     monkeypatch.setattr(
         "prime_cli.verifiers_bridge._preflight_inference_billing", lambda *args: None
     )
-    monkeypatch.setattr("prime_cli.verifiers_bridge._prepare_v1_environment", lambda *_: None)
+    monkeypatch.setattr(
+        "prime_cli.verifiers_bridge._prepare_v1_environment",
+        lambda *_: ResolvedEnvironment(
+            original="gsm8k-v1", env_name="gsm8k-v1", install_mode="local"
+        ),
+    )
 
     output_dir = tmp_path / "configured-output"
     config_path = tmp_path / "eval.toml"

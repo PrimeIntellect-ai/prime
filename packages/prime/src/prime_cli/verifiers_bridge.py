@@ -8,7 +8,7 @@ import re
 import subprocess
 import sys
 import uuid
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -158,7 +158,6 @@ def _write_help(text: str) -> None:
 def _append_eval_options(help_text: str) -> str:
     extra_lines = [
         "  --skip-upload               Skip uploading evaluation results to the platform.",
-        "  --disable-tui               Disable the live display (alias for --rich false).",
         "  --env-path PATH             Explicit path for upstream environment metadata.",
         "  --hosted                    Run the evaluation on the platform instead of locally.",
         "  --poll-interval FLOAT       Polling interval in seconds for hosted evaluations.",
@@ -941,19 +940,11 @@ def run_eval_passthrough(
         )
         raise typer.Exit(1)
 
-    args = list(passthrough_args)
-    tui_disabled = _pop_tui_flags(args)
-
-    # Hosted-eval sandboxes still emit the frozen v0 CLI surface (marked by
-    # --save-results); convert it onto the v1 CLI, which always saves results.
-    if _has_flag(args, "--save-results", "-s"):
-        run = _run_converted_v0_eval(environment, args, config, tui_disabled=tui_disabled)
+    resume_dir = _parse_value_option(passthrough_args, "--resume", None)
+    if resume_dir is not None:
+        run = _resume_v1_eval(resume_dir, passthrough_args, config)
     else:
-        resume_dir = _parse_value_option(args, "--resume", None)
-        if resume_dir is not None:
-            run = _resume_v1_eval(resume_dir, args, config)
-        else:
-            run = _run_v1_eval(environment, args, config, tui_disabled=tui_disabled)
+        run = _run_v1_eval(environment, passthrough_args, config)
     _upload_v1_results(run, skip_upload=skip_upload, env_path=env_path)
 
 
@@ -993,104 +984,35 @@ def run_validate_passthrough(environment: str, passthrough_args: list[str]) -> N
     _run_command(plugin.build_module_command(plugin.validate_module, [*run_args, *args]), env=env)
 
 
-def _pop_tui_flags(args: list[str]) -> bool:
-    """Remove the v0 TUI flags hosted-eval scripts append; v1 maps them to --rich false."""
-    found = False
-    for flag in ("--disable-tui", "--debug"):
-        while flag in args:
-            args.remove(flag)
-            found = True
-    return found
+def _pin_config_env(
+    config_data: dict, config_path: str, env_dir_path: str
+) -> tuple[str, Optional[ResolvedEnvironment]]:
+    """Install a config's hub env ref and pin the locally importable name into a copy.
 
-
-def _load_transitional_fields(config_path: Path) -> dict:
-    from verifiers.v1.cli.eval.compat import transitional_config_to_fields
-
-    try:
-        return transitional_config_to_fields(config_path)
-    except ValueError as exc:
-        console.print(f"[red]Error:[/red] {exc}")
-        raise typer.Exit(2) from exc
-
-
-def _write_converted_v1_config(
-    fields: dict, *, tui_disabled: bool
-) -> tuple[Path, ResolvedEnvironment]:
-    """Turn flattened v0 fields into a v1 config file with a locally importable env id."""
-    from verifiers.v1.cli.eval.compat import (
-        build_v1_eval_config,
-        write_converted_eval_config,
-    )
-
-    env_dir_path = str(fields.pop("env_dir_path", None) or DEFAULT_ENV_DIR_PATH)
-    taskset = fields.get("taskset")
+    The v1 CLI accepts only local ids; prime owns acquisition, so `owner/name[@version]`
+    refs are installed here and the config is rewritten before verifiers parses it."""
+    taskset = config_data.get("taskset")
     taskset_id = taskset.get("id") if isinstance(taskset, dict) else None
-    env_ref = taskset_id or fields.get("id")
+    env_ref = taskset_id or config_data.get("id")
     if not (isinstance(env_ref, str) and env_ref):
-        console.print("[red]Error:[/red] eval config requires an env_id or taskset.id")
-        raise typer.Exit(2)
+        return config_path, None
 
-    # install hub refs and pin the locally importable name into the config
     resolved = _prepare_v1_environment(env_ref, env_dir_path)
+    if resolved.env_name == env_ref:
+        return config_path, resolved
+
+    from verifiers.v1.cli.eval.compat import write_converted_eval_config
+
+    pinned = dict(config_data)
     if taskset_id:
-        fields["taskset"] = {**taskset, "id": resolved.env_name}
+        pinned["taskset"] = {**taskset, "id": resolved.env_name}
     else:
-        fields["id"] = resolved.env_name
-
-    try:
-        v1_config, warnings = build_v1_eval_config(fields, tui_disabled=tui_disabled)
-    except ValueError as exc:
-        console.print(f"[red]Error:[/red] {exc}")
-        raise typer.Exit(2) from exc
-    for warning in warnings:
-        console.print(f"[yellow]Warning:[/yellow] {warning}")
-
-    if resolved.env_display_id:
-        headers = v1_config.setdefault("client", {}).setdefault("headers", {})
-        headers.setdefault(INTERNAL_ENV_DISPLAY_HEADER, resolved.env_display_id)
-    config_path = write_converted_eval_config(
-        v1_config, header_comment="converted from the v0 eval surface by prime"
+        pinned["id"] = resolved.env_name
+    pinned_path = write_converted_eval_config(
+        pinned, header_comment=f"hub env pinned to local install by prime ({config_path})"
     )
-    console.print(f"[dim]Converted v0 eval invocation to {config_path}[/dim]")
-    return config_path, resolved
-
-
-def _run_converted_v0_eval(
-    environment: str,
-    passthrough_args: list[str],
-    config: Config,
-    *,
-    tui_disabled: bool,
-) -> V1EvalRun:
-    """Run a frozen v0 invocation (hosted argv and/or a transitional TOML) on the v1 CLI.
-
-    Classic env ids route through verifiers' legacy bridge automatically, so the
-    converted config never has to tag the environment generation."""
-    from .utils.verifiers_v0_cli import v0_argv_to_fields
-
-    try:
-        argv_fields = v0_argv_to_fields(environment, passthrough_args)
-    except SystemExit as exc:
-        raise typer.Exit(exc.code if isinstance(exc.code, int) else 2) from exc
-    target = str(argv_fields.pop("env_target"))
-
-    fields: dict = {}
-    is_config = _is_config_target(target)
-    if is_config:
-        fields = _load_transitional_fields(Path(target))
-    else:
-        # bare env id: verifiers auto-detects v0 envs given as the taskset id
-        fields["taskset"] = {"id": target}
-    fields.update(argv_fields)
-
-    config_path, resolved = _write_converted_v1_config(fields, tui_disabled=tui_disabled)
-    run = _run_v1_eval(str(config_path), [], config)
-    if not is_config:
-        # keep bare-env upload attribution: this run is config-driven only as plumbing
-        run = replace(
-            run, is_config=False, resolved_env=resolved, upstream_slug=resolved.upstream_slug
-        )
-    return run
+    console.print(f"[dim]Pinned {env_ref} to local install in {pinned_path}[/dim]")
+    return str(pinned_path), resolved
 
 
 def _resume_v1_eval(resume_dir: str, passthrough_args: list[str], config: Config) -> V1EvalRun:
@@ -1122,11 +1044,12 @@ def _run_v1_eval(
     environment: str,
     passthrough_args: list[str],
     config: Config,
-    *,
-    tui_disabled: bool = False,
 ) -> V1EvalRun:
     """Prepare and run a fresh v1 eval: fill in prime's model/base-url/output-dir defaults,
-    make the environment importable, and tag the run with a job id header."""
+    make the environment importable, and tag the run with a job id header.
+
+    Legacy (v0) inputs need no handling here: verifiers auto-detects v0 env ids and
+    converts transitional configs at its own ingestion boundary."""
     target = environment.removeprefix("@")
     is_config = _is_config_target(target)
     args = list(passthrough_args)
@@ -1136,14 +1059,6 @@ def _run_v1_eval(
         env["PRIME_TEAM_ID"] = config.team_id
 
     config_data: dict = toml.load(target) if is_config else {}
-    if "env_id" in config_data or "eval" in config_data:
-        # a transitional/hosted v0 config (`env_id` / `[[eval]]`): convert it in place
-        fields = _load_transitional_fields(Path(target))
-        target = str(_write_converted_v1_config(fields, tui_disabled=tui_disabled)[0])
-        tui_disabled = False  # the converted config already sets rich = false
-        config_data = toml.load(target)
-    if tui_disabled:
-        args.extend(["--rich", "false"])
     config_model = config_data.get("model")
     cli_model = _parse_value_option(args, "--model", "-m")
     model = cli_model or config_model or DEFAULT_MODEL
@@ -1182,16 +1097,9 @@ def _run_v1_eval(
     upstream_slug: Optional[str] = None
 
     if is_config:
-        taskset = config_data.get("taskset")
-        env_ref = taskset.get("id") if isinstance(taskset, dict) else None
-        if not (isinstance(env_ref, str) and env_ref):
-            # v1's legacy field: a top-level `id` runs a v0 env through the bridge
-            env_ref = config_data.get("id")
-        if isinstance(env_ref, str) and env_ref:
-            _prepare_v1_environment(env_ref, env_dir_path)
-            job_target = _env_name_from_reference(env_ref)
-        else:
-            job_target = Path(target).stem
+        # install hub refs and pin the local name into a config copy before verifiers parses
+        target, resolved_env = _pin_config_env(config_data, target, env_dir_path)
+        job_target = resolved_env.env_name if resolved_env else Path(target).stem
         # pydantic-config only reads a root config file as two tokens: `@ path`
         run_args = ["@", target]
     else:

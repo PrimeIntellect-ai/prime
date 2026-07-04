@@ -97,7 +97,6 @@ HOSTED_EVAL_CONFIG_EXTRA_FIELDS = {
     "allow_tunnel_access",
     "eval_name",
 }
-HOSTED_LEGACY_UNSUPPORTED_FLAGS = {"--debug", "--tui", "-u"}
 HOSTED_EVAL_CONFIG_FIELD_TYPES: dict[str, tuple[type[Any], str]] = {
     "env_dir_path": (str, "a non-empty string"),
     "num_examples": (int, "an integer"),
@@ -115,26 +114,6 @@ HOSTED_EVAL_CONFIG_FIELD_TYPES: dict[str, tuple[type[Any], str]] = {
     "api_base_url": (str, "a non-empty string"),
     "api_key_var": (str, "a non-empty string"),
     "eval_name": (str, "a non-empty string"),
-}
-HOSTED_SUPPORTED_VERIFIERS_FIELDS = {
-    "api_base_url",
-    "api_client_type",
-    "api_key_var",
-    "env_args",
-    "env_dir_path",
-    "extra_env_kwargs",
-    "header",
-    "independent_scoring",
-    "max_concurrent",
-    "verbose",
-    "max_retries",
-    "max_tokens",
-    "model",
-    "num_examples",
-    "rollouts_per_example",
-    "sampling_args",
-    "state_columns",
-    "temperature",
 }
 HOSTED_SUPPORTED_TOML_FIELDS = {
     "allow_instances_access",
@@ -268,7 +247,7 @@ def _validate_json_object_field(merged: dict[str, Any], field_name: str) -> None
 
 
 def _coerce_hosted_headers(raw: dict[str, Any]) -> list[str] | None:
-    from ..utils.verifiers_v0_cli import build_extra_headers
+    from verifiers.v1.cli.eval.compat import build_extra_headers
 
     try:
         normalized = build_extra_headers(raw)
@@ -281,61 +260,43 @@ def _coerce_hosted_headers(raw: dict[str, Any]) -> list[str] | None:
     return [f"{name}: {value}" for name, value in normalized.items()]
 
 
-def _parse_hosted_cli_fields(
-    environment: str, passthrough_args: list[str], sampling_args: Optional[str]
-) -> dict[str, Any]:
-    """The explicitly-passed hosted CLI flags as v0 fields, headers pre-coerced."""
-    from ..utils.verifiers_v0_cli import build_parser, v0_argv_to_fields
+def _hosted_overrides_from_flags(passthrough_args: list[str]) -> dict[str, Any]:
+    """Map hosted override flags onto the platform's eval_config fields.
 
-    argv = list(passthrough_args)
-    if sampling_args is not None:
-        argv.extend(["--sampling-args", sampling_args])
+    Hosted runs speak the same v1 flag dialect as local runs (`-n`, `-r`, `-m`,
+    `--sampling.*`, plus the old names via verifiers' aliases); only the fields the
+    caller explicitly set become overrides."""
+    if not passthrough_args:
+        return {}
+    from pydantic_config import ConfigFileError
+    from pydantic_config import cli as pydantic_cli
+    from verifiers.v1.configs.eval import EvalConfig
+
     try:
-        fields = v0_argv_to_fields(environment, argv)
+        parsed = pydantic_cli(EvalConfig, args=list(passthrough_args), prog="prime eval --hosted")
     except SystemExit as exc:
-        raise typer.Exit(exc.code) from exc
-    fields.pop("env_target")
+        raise typer.Exit(exc.code if isinstance(exc.code, int) else 2) from exc
+    except ConfigFileError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(2) from exc
 
-    option_names_by_dest = {
-        action.dest: next(
-            (option for option in action.option_strings if option.startswith("--")),
-            action.option_strings[0],
-        )
-        for action in build_parser()._actions
-        if action.option_strings
-    }
-    unsupported_flags = [
-        option_names_by_dest[dest]
-        for dest in fields
-        if dest not in HOSTED_SUPPORTED_VERIFIERS_FIELDS
-    ]
-    if unsupported_flags:
-        console.print(
-            "[red]Error:[/red] hosted eval CLI does not support: "
-            + ", ".join(f"`{flag}`" for flag in unsupported_flags)
-        )
-        raise typer.Exit(1)
-
-    if "header" in fields:
-        fields["headers"] = _coerce_hosted_headers({"header": fields.pop("header")})
-    return fields
-
-
-def _reject_legacy_unsupported_hosted_flags(passthrough_args: list[str]) -> None:
-    unsupported_flags = []
-    for arg in passthrough_args:
-        flag = arg.split("=", 1)[0]
-        if flag in HOSTED_LEGACY_UNSUPPORTED_FLAGS and flag not in unsupported_flags:
-            unsupported_flags.append(flag)
-
-    if not unsupported_flags:
-        return
-
-    console.print(
-        "[red]Error:[/red] hosted eval CLI does not support: "
-        + ", ".join(f"`{flag}`" for flag in unsupported_flags)
-    )
-    raise typer.Exit(1)
+    overrides: dict[str, Any] = {}
+    provided = parsed.model_fields_set
+    if "num_tasks" in provided:
+        # v1's unset num_tasks means "all"; the platform spells that -1
+        overrides["num_examples"] = -1 if parsed.num_tasks is None else parsed.num_tasks
+    if "num_rollouts" in provided:
+        overrides["rollouts_per_example"] = parsed.num_rollouts
+    if "model" in provided:
+        overrides["model"] = parsed.model
+    if "max_concurrent" in provided:
+        overrides["max_concurrent"] = parsed.max_concurrent
+    if "verbose" in provided:
+        overrides["verbose"] = parsed.verbose
+    sampling = parsed.sampling.model_dump(exclude_none=True)
+    if sampling:
+        overrides["sampling_args"] = sampling
+    return overrides
 
 
 def _freeze_json_value(value: Any) -> Any:
@@ -430,7 +391,7 @@ def _resolve_hosted_config_model(raw_config: dict[str, Any], config_path: Path) 
 def _validate_single_hosted_eval_config(
     merged: dict[str, Any], config_path: Path
 ) -> dict[str, Any]:
-    from ..utils.verifiers_v0_cli import merge_sampling_args
+    from verifiers.v1.cli.eval.compat import merge_sampling_args
 
     unsupported_fields = sorted(
         field_name for field_name in merged if field_name not in HOSTED_SUPPORTED_TOML_FIELDS
@@ -1537,14 +1498,6 @@ def run_eval_cmd(
         "--custom-secrets",
         help='Custom secrets for hosted eval as JSON (e.g. \'{"API_KEY":"xxx"}\')',
     ),
-    sampling_args: Optional[str] = typer.Option(
-        None,
-        "--sampling-args",
-        help=(
-            "Sampling args as JSON for local or hosted evals. "
-            'Example: {"temperature": 0.7, "extra_body": {"provider": {"order": ["azure"]}}}'
-        ),
-    ),
     eval_name: Optional[str] = typer.Option(
         None,
         "--eval-name",
@@ -1591,15 +1544,6 @@ def run_eval_cmd(
     local_passthrough_args = list(passthrough_args)
 
     if not hosted:
-        legacy_eval = any(arg in ("--save-results", "-s") for arg in local_passthrough_args)
-        if sampling_args is not None and legacy_eval:
-            local_passthrough_args.extend(["--sampling-args", sampling_args])
-        elif sampling_args is not None:
-            console.print(
-                "[red]Error:[/red] local v1 evals use --sampling.* options "
-                "(for example, --sampling.temperature 0.7)"
-            )
-            raise typer.Exit(2)
         hosted_only_args = {
             "--follow": follow,
             "--poll-interval": poll_interval_was_provided,
@@ -1619,9 +1563,9 @@ def run_eval_cmd(
             raise typer.Exit(1)
 
     if hosted:
-        _reject_legacy_unsupported_hosted_flags(passthrough_args)
-        cli_fields = _parse_hosted_cli_fields(environment, passthrough_args, sampling_args)
-        env_dir_path = cli_fields.get("env_dir_path")
+        # run knobs come from the config file or the shared v1 flag dialect;
+        # everything endpoint/env-specific belongs in the config file
+        overrides = _hosted_overrides_from_flags(passthrough_args)
 
         hosted_target_configs: list[dict[str, Any]] = []
         if _is_config_target(environment):
@@ -1639,41 +1583,28 @@ def run_eval_cmd(
 
         effective_targets: list[dict[str, Any]] = []
         for target_config in hosted_target_configs:
-            merged = {**target_config, **cli_fields}  # explicit CLI flags win over config
+            merged = {**target_config, **overrides}  # explicit CLI flags win over config
             try:
                 num_examples = int(merged.get("num_examples", HOSTED_RUN_DEFAULT_NUM_EXAMPLES))
                 rollouts_per_example = int(
                     merged.get("rollouts_per_example", HOSTED_RUN_DEFAULT_ROLLOUTS_PER_EXAMPLE)
                 )
             except (TypeError, ValueError) as exc:
-                console.print(
-                    "[red]Error:[/red] --num-examples and --rollouts-per-example must be integers"
-                )
+                console.print("[red]Error:[/red] --num-tasks and --num-rollouts must be integers")
                 raise typer.Exit(1) from exc
 
             if num_examples < -1 or rollouts_per_example < 1:
                 console.print(
-                    "[red]Error:[/red] --num-examples must be >= -1 and "
-                    "--rollouts-per-example must be >= 1"
+                    "[red]Error:[/red] --num-tasks must be >= -1 and --num-rollouts must be >= 1"
                 )
                 raise typer.Exit(1)
 
-            base_sampling_args = merged.get("sampling_args")
-            if base_sampling_args is not None and not isinstance(base_sampling_args, dict):
+            effective_sampling_args = merged.get("sampling_args")
+            if effective_sampling_args is not None and not isinstance(
+                effective_sampling_args, dict
+            ):
                 console.print("[red]Error:[/red] `sampling_args` must be a JSON object")
                 raise typer.Exit(1)
-            from ..utils.verifiers_v0_cli import merge_sampling_args
-
-            effective_sampling_args = (
-                merge_sampling_args(
-                    base_sampling_args,
-                    max_tokens=cli_fields.get("max_tokens"),
-                    temperature=cli_fields.get("temperature"),
-                    # an explicit --sampling-args wins over --max-tokens/--temperature
-                    prefer_existing_keys="sampling_args" in cli_fields,
-                )
-                or None
-            )
 
             effective_targets.append(
                 {

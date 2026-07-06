@@ -1031,9 +1031,8 @@ def _split_image_references(values: Optional[List[str]]) -> list[str]:
     refs: list[str] = []
     seen: set[str] = set()
     for value in values or []:
-        for part in value.split(","):
-            ref = part.strip()
-            if ref and ref not in seen:
+        for ref in value.replace(",", " ").split():
+            if ref not in seen:
                 refs.append(ref)
                 seen.add(ref)
     return refs
@@ -1096,6 +1095,7 @@ def _bulk_set_image_visibility_refs(refs: list[str], visibility: ImageVisibility
     client = APIClient()
     all_succeeded: list[str] = []
     all_failed: list[dict[str, Any]] = []
+    batch_error: Optional[str] = None
     batch_size = BULK_VISIBILITY_BATCH_SIZE
     total_batches = (len(images) + batch_size - 1) // batch_size
 
@@ -1109,9 +1109,26 @@ def _bulk_set_image_visibility_refs(refs: list[str], visibility: ImageVisibility
                 )
             payload = _bulk_visibility_payload(visibility)
             payload["images"] = batch
-            response = client.request("PATCH", "/images/visibility", json=payload)
+            try:
+                response = client.request("PATCH", "/images/visibility", json=payload)
+            except UnauthorizedError:
+                raise
+            except APIError as e:
+                batch_error = str(e)
+                break
             all_succeeded.extend(response.get("succeeded", []))
             all_failed.extend(response.get("failed", []))
+
+    if batch_error is not None:
+        console.print(f"[red]Error: {batch_error}[/red]")
+        if all_succeeded or all_failed:
+            _display_bulk_visibility_result(all_succeeded, all_failed, visibility)
+            not_processed = len(images) - len(all_succeeded) - len(all_failed)
+            console.print(
+                f"\n[yellow]{not_processed} image(s) were not processed; "
+                "re-run the command to retry them.[/yellow]"
+            )
+        raise typer.Exit(1)
 
     _display_bulk_visibility_result(all_succeeded, all_failed, visibility)
     if all_failed:
@@ -1119,16 +1136,14 @@ def _bulk_set_image_visibility_refs(refs: list[str], visibility: ImageVisibility
 
 
 def _preview_bulk_visibility_count(client: APIClient, search: str) -> Optional[int]:
-    """Count the logical images matching the search, cheaply, via list(limit=1).
-
-    Returns None on API error so the caller can still proceed (the server
-    re-evaluates the filter on update).
-    """
+    """Count the logical images matching the search, cheaply, via list(limit=1)."""
     params: dict[str, str] = {"limit": "1", "offset": "0", "search": search}
     if config.team_id:
         params["teamId"] = config.team_id
     try:
         response = client.request("GET", "/images", params=params)
+    except UnauthorizedError:
+        raise
     except APIError:
         return None
     total = response.get("totalCount")
@@ -1216,8 +1231,7 @@ def publish_image(
         "--search",
         "-q",
         help=(
-            "Publish every image matching this case-insensitive substring "
-            "of the image name or tag"
+            "Publish every image matching this case-insensitive substring of the image name or tag"
         ),
     ),
     yes: bool = typer.Option(

@@ -1137,6 +1137,12 @@ def _preview_bulk_visibility_count(client: APIClient, search: str) -> Optional[i
 
 def _bulk_set_image_visibility_search(search: str, visibility: ImageVisibility, yes: bool) -> None:
     """Update every image matching the search filter via the bulk endpoint."""
+    if "/" in search:
+        console.print(
+            f"[red]Error: '--search {search}': search matches image name/tag only; "
+            "remove the owner prefix (e.g. use 'myapp' instead of 'prime/alice/myapp')[/red]"
+        )
+        raise typer.Exit(1)
     client = APIClient()
     total = _preview_bulk_visibility_count(client, search)
     if total == 0:
@@ -1211,7 +1217,7 @@ def publish_image(
         "-q",
         help=(
             "Publish every image matching this case-insensitive substring "
-            "(server-side, same semantics as 'prime images list --search')"
+            "of the image name or tag"
         ),
     ),
     yes: bool = typer.Option(
@@ -1257,7 +1263,7 @@ def unpublish_image(
         "-q",
         help=(
             "Unpublish every image matching this case-insensitive substring "
-            "(server-side, same semantics as 'prime images list --search')"
+            "of the image name or tag"
         ),
     ),
     yes: bool = typer.Option(

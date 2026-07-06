@@ -287,7 +287,7 @@ def _provider_base_url(provider: Optional[str]) -> Optional[str]:
     if not provider:
         return None
     try:
-        from verifiers.scripts.eval import PROVIDER_CONFIGS
+        from verifiers.v1.cli.eval.compat import PROVIDER_CONFIGS
     except ImportError:
         return None
 

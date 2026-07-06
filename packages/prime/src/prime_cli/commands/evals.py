@@ -250,7 +250,7 @@ def _coerce_hosted_headers(raw: dict[str, Any]) -> list[str] | None:
     from verifiers.v1.cli.eval.compat import build_extra_headers
 
     try:
-        normalized = build_extra_headers(raw)
+        normalized = build_extra_headers(raw.get("headers"), raw.get("header"))
     except ValueError as exc:
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(1) from exc
@@ -475,7 +475,6 @@ def _validate_single_hosted_eval_config(
             merged.get("sampling_args"),
             max_tokens=merged.pop("max_tokens", None),
             temperature=merged.pop("temperature", None),
-            prefer_existing_keys=True,
         )
         or None
     )

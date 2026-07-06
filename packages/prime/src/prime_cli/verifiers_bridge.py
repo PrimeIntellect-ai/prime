@@ -300,6 +300,17 @@ def _provider_base_url(provider: Optional[str]) -> Optional[str]:
     return url.rstrip("/")
 
 
+def _prime_runtime_env(config: Config) -> dict[str, str]:
+    env = os.environ.copy()
+    env["PRIME_API_KEY"] = config.api_key
+    env["PRIME_INFERENCE_URL"] = config.inference_url
+    if config.team_id:
+        env["PRIME_TEAM_ID"] = config.team_id
+    else:
+        env.pop("PRIME_TEAM_ID", None)
+    return env
+
+
 def _env_dir_path_arg(args: list[str]) -> str:
     return _parse_value_option(args, "--env-dir-path", None) or DEFAULT_ENV_DIR_PATH
 
@@ -796,15 +807,15 @@ def _add_default_inference_and_key_args(
     passthrough_args: list[str], config: Config
 ) -> tuple[list[str], dict[str, str], str, str]:
     args = list(passthrough_args)
-    env = os.environ.copy()
+    env = _prime_runtime_env(config)
 
     model = _parse_value_option(args, "--model", "-m") or DEFAULT_MODEL
     configured_base = (config.inference_url or "").strip().rstrip("/")
     base = _parse_value_option(args, "--api-base-url", "-b")
     provider = _parse_value_option(args, "--provider", "-p")
     api_key_var = _parse_value_option(args, "--api-key-var", "-k")
-    if api_key_var is None:
-        env["PRIME_API_KEY"] = config.api_key
+    if api_key_var is not None and api_key_var != "PRIME_API_KEY":
+        env.pop("PRIME_API_KEY", None)
 
     if base:
         base = base.rstrip("/")
@@ -964,10 +975,7 @@ def run_validate_passthrough(environment: str, passthrough_args: list[str]) -> N
     target = environment.removeprefix("@")
     is_config = _is_config_target(target)
     args = list(passthrough_args)
-    env = os.environ.copy()
-    env["PRIME_API_KEY"] = config.api_key
-    if config.team_id:
-        env["PRIME_TEAM_ID"] = config.team_id
+    env = _prime_runtime_env(config)
 
     # prime-only option: verifiers must not see it
     env_dir_path = _pop_value_option(args, "--env-dir-path") or DEFAULT_ENV_DIR_PATH
@@ -1020,10 +1028,7 @@ def _pin_config_env(
 
 def _resume_v1_eval(resume_dir: str, passthrough_args: list[str], config: Config) -> V1EvalRun:
     """Re-run `--resume <dir>` and recover the upload identity from the run's config.toml."""
-    env = os.environ.copy()
-    env["PRIME_API_KEY"] = config.api_key
-    if config.team_id:
-        env["PRIME_TEAM_ID"] = config.team_id
+    env = _prime_runtime_env(config)
     plugin = load_verifiers_prime_plugin()
     _run_command(plugin.build_module_command(plugin.eval_module, passthrough_args), env=env)
 
@@ -1056,10 +1061,7 @@ def _run_v1_eval(
     target = environment.removeprefix("@")
     is_config = _is_config_target(target)
     args = list(passthrough_args)
-    env = os.environ.copy()
-    env["PRIME_API_KEY"] = config.api_key
-    if config.team_id:
-        env["PRIME_TEAM_ID"] = config.team_id
+    env = _prime_runtime_env(config)
 
     config_data: dict = toml.load(target) if is_config else {}
     config_model = config_data.get("model")

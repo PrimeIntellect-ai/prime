@@ -112,6 +112,7 @@ def test_validate_environment_id_resolves_and_passes_bare_name(monkeypatch, tmp_
     assert "--env-dir-path" not in command  # stripped (prime-only)
     assert prepared == {"env": "gsm8k-v1", "env_dir": str(tmp_path / "envs")}
     assert captured["env"]["PRIME_API_KEY"] == "test-api-key"
+    assert captured["env"]["PRIME_INFERENCE_URL"] == DummyConfig.inference_url
     assert captured["env"]["PRIME_TEAM_ID"] == "team-abc"
 
 

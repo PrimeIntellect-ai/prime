@@ -268,34 +268,69 @@ def _hosted_overrides_from_flags(passthrough_args: list[str]) -> dict[str, Any]:
     caller explicitly set become overrides."""
     if not passthrough_args:
         return {}
+    legacy_header_values: list[str] = []
+    parsed_args: list[str] = []
+    idx = 0
+    while idx < len(passthrough_args):
+        arg = passthrough_args[idx]
+        if arg == "--header":
+            if idx + 1 >= len(passthrough_args):
+                console.print("[red]Error:[/red] --header must be followed by 'Name: Value'")
+                raise typer.Exit(2)
+            legacy_header_values.append(passthrough_args[idx + 1])
+            idx += 2
+            continue
+        if arg.startswith("--header="):
+            legacy_header_values.append(arg.split("=", 1)[1])
+            idx += 1
+            continue
+        parsed_args.append(arg)
+        idx += 1
+
     from pydantic_config import ConfigFileError
     from pydantic_config import cli as pydantic_cli
     from verifiers.v1.configs.eval import EvalConfig
 
-    try:
-        parsed = pydantic_cli(EvalConfig, args=list(passthrough_args), prog="prime eval --hosted")
-    except SystemExit as exc:
-        raise typer.Exit(exc.code if isinstance(exc.code, int) else 2) from exc
-    except ConfigFileError as exc:
-        console.print(f"[red]Error:[/red] {exc}")
-        raise typer.Exit(2) from exc
-
     overrides: dict[str, Any] = {}
-    provided = parsed.model_fields_set
-    if "num_tasks" in provided:
-        # v1's unset num_tasks means "all"; the platform spells that -1
-        overrides["num_examples"] = -1 if parsed.num_tasks is None else parsed.num_tasks
-    if "num_rollouts" in provided:
-        overrides["rollouts_per_example"] = parsed.num_rollouts
-    if "model" in provided:
-        overrides["model"] = parsed.model
-    if "max_concurrent" in provided:
-        overrides["max_concurrent"] = parsed.max_concurrent
-    if "verbose" in provided:
-        overrides["verbose"] = parsed.verbose
-    sampling = parsed.sampling.model_dump(exclude_none=True)
-    if sampling:
-        overrides["sampling_args"] = sampling
+    client_headers: dict[str, str] = {}
+    if parsed_args:
+        try:
+            parsed = pydantic_cli(EvalConfig, args=parsed_args, prog="prime eval --hosted")
+        except SystemExit as exc:
+            raise typer.Exit(exc.code if isinstance(exc.code, int) else 2) from exc
+        except ConfigFileError as exc:
+            console.print(f"[red]Error:[/red] {exc}")
+            raise typer.Exit(2) from exc
+
+        provided = parsed.model_fields_set
+        if "num_tasks" in provided:
+            # v1's unset num_tasks means "all"; the platform spells that -1
+            overrides["num_examples"] = -1 if parsed.num_tasks is None else parsed.num_tasks
+        if "num_rollouts" in provided:
+            overrides["rollouts_per_example"] = parsed.num_rollouts
+        if "model" in provided:
+            overrides["model"] = parsed.model
+        if "max_concurrent" in provided:
+            overrides["max_concurrent"] = parsed.max_concurrent
+        if "verbose" in provided:
+            overrides["verbose"] = parsed.verbose
+        sampling = parsed.sampling.model_dump(exclude_none=True)
+        if sampling:
+            overrides["sampling_args"] = sampling
+        if "headers" in parsed.client.model_fields_set:
+            default_headers = type(parsed.client)().headers
+            client_headers = {
+                key: value
+                for key, value in parsed.client.headers.items()
+                if key not in default_headers or default_headers[key] != value
+            }
+
+    if client_headers or legacy_header_values:
+        headers = _coerce_hosted_headers(
+            {"headers": client_headers, "header": legacy_header_values}
+        )
+        if headers is not None:
+            overrides["headers"] = headers
     return overrides
 
 

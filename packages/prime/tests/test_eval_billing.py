@@ -210,6 +210,8 @@ def test_eval_run_uses_v1_client_config(monkeypatch, tmp_path):
     assert headers["X-PI-Job-Id"].startswith("goblin_questions_gpt_4.1_mini_")
     assert captured["prepared"] == ("goblin-questions", str(tmp_path / "custom-envs"))
     assert captured["env"]["PRIME_API_KEY"] == "test-api-key"
+    assert captured["env"]["PRIME_INFERENCE_URL"] == DummyConfig.inference_url
+    assert "PRIME_TEAM_ID" not in captured["env"]
 
 
 def test_eval_resume_forwards_only_resume_arguments(monkeypatch, tmp_path):
@@ -266,6 +268,7 @@ X-Prime-Eval-Env-Display = "primeintellect/wiki-search"
         str(output_dir),
     ]
     assert captured["env"]["PRIME_API_KEY"] == "test-api-key"
+    assert captured["env"]["PRIME_INFERENCE_URL"] == DummyConfig.inference_url
     upload_kwargs = captured["upload"]
     assert upload_kwargs["env_name"] == "wiki-search"
     assert upload_kwargs["job_id"] == "existing-job-id"

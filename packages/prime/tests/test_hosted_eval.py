@@ -162,6 +162,7 @@ def test_eval_run_hosted_passes_runtime_args_from_cli(monkeypatch):
         captured["max_concurrent"] = config.max_concurrent
         captured["verbose"] = config.verbose
         captured["sampling_args"] = config.sampling_args
+        captured["headers"] = config.headers
         return {"evaluation_id": "eval-123"}
 
     monkeypatch.setattr(
@@ -183,6 +184,10 @@ def test_eval_run_hosted_passes_runtime_args_from_cli(monkeypatch):
             "4096",
             "--sampling.temperature",
             "0.2",
+            "--client.headers",
+            '{"X-Test": "yes"}',
+            "--header",
+            "X-Legacy: one",
         ],
         env={"PRIME_DISABLE_VERSION_CHECK": "1"},
     )
@@ -192,6 +197,7 @@ def test_eval_run_hosted_passes_runtime_args_from_cli(monkeypatch):
         "max_concurrent": 100,
         "verbose": True,
         "sampling_args": {"max_tokens": 4096, "temperature": 0.2},
+        "headers": ["X-Test: yes", "X-Legacy: one"],
     }
 
 

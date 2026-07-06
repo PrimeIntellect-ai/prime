@@ -1038,12 +1038,12 @@ def _split_image_references(values: Optional[List[str]]) -> list[str]:
     return refs
 
 
-def _parse_bulk_visibility_ref(ref: str) -> dict[str, str]:
+def _parse_bulk_visibility_ref(ref: str, command: str) -> dict[str, str]:
     """Parse a plain name:tag reference for the bulk visibility endpoint."""
     if "/" in ref:
         console.print(
             f"[red]Error: '{ref}': owner-prefixed references cannot be combined "
-            f"with other images; run 'prime images publish {ref}' on its own[/red]"
+            f"with other images; run 'prime images {command} {ref}' on its own[/red]"
         )
         raise typer.Exit(1)
     name, _, tag = ref.rpartition(":")
@@ -1091,7 +1091,8 @@ def _bulk_visibility_payload(visibility: ImageVisibility) -> dict[str, Any]:
 
 def _bulk_set_image_visibility_refs(refs: list[str], visibility: ImageVisibility) -> None:
     """Update explicit references via the bulk endpoint, batched per request."""
-    images = [_parse_bulk_visibility_ref(ref) for ref in refs]
+    command = "publish" if visibility == ImageVisibility.PUBLIC else "unpublish"
+    images = [_parse_bulk_visibility_ref(ref, command) for ref in refs]
     client = APIClient()
     all_succeeded: list[str] = []
     all_failed: list[dict[str, Any]] = []

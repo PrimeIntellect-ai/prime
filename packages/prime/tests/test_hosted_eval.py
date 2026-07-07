@@ -1751,3 +1751,28 @@ def test_eval_run_hosted_legacy_id_config_needs_published_env(monkeypatch, tmp_p
 
     assert result.exit_code == 1
     assert "published environment" in result.output
+
+
+def test_hosted_overrides_forward_client_base_url_and_api_key_var():
+    """--client.base-url and --client.api-key-var on the hosted CLI must reach the
+    hosted payload, not be silently dropped after pydantic_cli parses them."""
+    from prime_cli.commands.evals import _hosted_overrides_from_flags
+
+    overrides = _hosted_overrides_from_flags(
+        ["--client.base-url", "https://api.openai.com/v1", "--client.api-key-var", "OPENAI_API_KEY"]
+    )
+    assert overrides["api_base_url"] == "https://api.openai.com/v1"
+    assert overrides["api_key_var"] == "OPENAI_API_KEY"
+
+
+def test_load_v1_hosted_target_defaults_num_examples_to_all_when_omitted(tmp_path):
+    """A v1 hosted TOML with [taskset] but no num_tasks means "all tasks";
+    the platform spells that -1, not the hosted default of 5."""
+    from prime_cli.commands.evals import _load_v1_hosted_target
+
+    config = tmp_path / "eval.toml"
+    config.write_text('[taskset]\nid = "gsm8k-v1"\n', encoding="utf-8")
+
+    target = _load_v1_hosted_target(config)
+    assert target is not None
+    assert target["num_examples"] == -1

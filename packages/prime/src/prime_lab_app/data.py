@@ -1018,10 +1018,15 @@ def discover_local_eval_runs(
     runs: list[dict[str, Any]] = []
     for root in roots:
         for env_model_dir in _safe_sorted_children(root):
-            if not _safe_is_dir(env_model_dir) or "--" not in env_model_dir.name:
+            if not _safe_is_dir(env_model_dir):
                 continue
-            env_id, model_part = env_model_dir.name.split("--", 1)
-            model = model_part.replace("--", "/")
+            # legacy runs encode env--model in the dir name; native v1 runs with a
+            # custom output_dir don't, so fall back to metadata for env/model
+            if "--" in env_model_dir.name:
+                env_id, model_part = env_model_dir.name.split("--", 1)
+                model = model_part.replace("--", "/")
+            else:
+                env_id, model = env_model_dir.name, None
             for run_dir in _safe_sorted_children(env_model_dir, reverse=True):
                 metadata_path = run_dir / "metadata.json"
                 results_path = run_dir / "results.jsonl"
@@ -1037,7 +1042,7 @@ def discover_local_eval_runs(
                         # the metadata is authoritative; dir-name parsing can't recover
                         # native names like <env>--<model>--<harness> exactly
                         "env_id": str(metadata.get("env") or metadata.get("env_id") or env_id),
-                        "model": str(metadata.get("model") or model),
+                        "model": str(metadata.get("model") or model or ""),
                         "run_id": run_dir.name,
                         "path": str(run_dir),
                         "metadata": metadata,

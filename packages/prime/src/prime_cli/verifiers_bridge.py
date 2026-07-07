@@ -674,9 +674,9 @@ def _prepare_single_environment(env_reference: str, env_dir_path: str) -> Resolv
 def _prepare_v1_environment(env_reference: str, env_dir_path: str) -> ResolvedEnvironment:
     """Make `env_reference` importable before the v1 CLI runs: install a local checkout or a
     hub slug (`org/name[@version]`). The v1 CLI only accepts locally importable ids, so hub
-    refs are installed here and run by bare name; bare names without a local checkout must
-    already be importable. Also collects platform metadata for the results upload."""
-    resolved = _resolve_environment_reference(env_reference, env_dir_path, probe_remote=False)
+    refs are installed here and run by bare name. Also collects platform metadata (including
+    `upstream_slug` for installed Hub envs) for the results upload."""
+    resolved = _resolve_environment_reference(env_reference, env_dir_path, probe_remote=True)
     if resolved.install_mode == "local":
         console.print(f"[dim]Using local environment '{resolved.env_name}'[/dim]")
         if resolved.env_display_id:
@@ -1091,13 +1091,16 @@ def _run_v1_eval(
     config_client = config_data.get("client")
     config_base_url = config_client.get("base_url") if isinstance(config_client, dict) else None
     cli_base_url = _parse_value_option(args, "--client.base-url")
-    base_url = cli_base_url or config_base_url or configured_base_url
-    if not base_url:
+    # endpoint aliases resolve natively from endpoints.toml; don't force Prime's
+    # inference URL or run Prime preflight for them (mirrors the v0 gepa path)
+    is_alias = _is_endpoint_alias(args, model)
+    base_url = cli_base_url or config_base_url or (None if is_alias else configured_base_url)
+    if not base_url and not is_alias:
         console.print(
             "[red]Inference URL not configured.[/red] Check [bold]prime config view[/bold]."
         )
         raise typer.Exit(1)
-    if cli_base_url is None and not config_base_url:
+    if cli_base_url is None and not config_base_url and base_url:
         args.extend(["--client.base-url", base_url])
 
     # mirror v1 bool-flag semantics: a bare --dry-run (no value, or followed by
@@ -1109,7 +1112,7 @@ def _run_v1_eval(
             dry_run = value not in ("false", "0")
         elif arg.startswith("--dry-run="):
             dry_run = arg.split("=", 1)[1].lower() not in ("false", "0")
-    if not dry_run:
+    if not dry_run and base_url:
         _validate_model(model, base_url, configured_base_url)
         _preflight_inference_billing(model, base_url, configured_base_url)
 

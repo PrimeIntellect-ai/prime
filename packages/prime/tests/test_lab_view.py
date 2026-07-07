@@ -7918,3 +7918,22 @@ def _local_eval_item(
             "metadata": metadata,
         },
     )
+
+
+def test_discover_local_eval_runs_finds_custom_output_dir(tmp_path: Path) -> None:
+    """Native v1 runs in a custom output_dir (no env--model in the path) must be
+    discovered by metadata, not skipped because the dir name lacks '--'."""
+    run_dir = tmp_path / "outputs" / "my-custom-run" / "abc-123"
+    run_dir.mkdir(parents=True)
+    (run_dir / "metadata.json").write_text(
+        '{"env": "wiki-search", "model": "openai/gpt-4.1", "avg_reward": 0.8}',
+        encoding="utf-8",
+    )
+    (run_dir / "results.jsonl").write_text('{"reward": 0.8}\n', encoding="utf-8")
+
+    runs = discover_local_eval_runs(tmp_path)
+
+    assert len(runs) == 1
+    assert runs[0]["env_id"] == "wiki-search"
+    assert runs[0]["model"] == "openai/gpt-4.1"
+    assert runs[0]["run_id"] == "abc-123"

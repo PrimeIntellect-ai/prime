@@ -711,3 +711,43 @@ def test_streaming_error_reads_response_before_formatting(monkeypatch):
         next(client.chat_completion({"model": "x", "messages": []}, stream=True))
 
     assert response.text == "upstream boom"
+
+
+def test_eval_run_endpoint_alias_skips_prime_preflight(monkeypatch, tmp_path):
+    """Endpoint aliases resolve natively from endpoints.toml; the v1 path must not
+    force Prime's inference URL or run Prime preflight for them."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "prime_cli.verifiers_bridge.load_verifiers_prime_plugin", lambda: DummyPlugin()
+    )
+    monkeypatch.setattr("prime_cli.verifiers_bridge.Config", lambda: DummyConfig())
+    monkeypatch.setattr("prime_cli.verifiers_bridge._is_endpoint_alias", lambda args, model: True)
+
+    class ExplodingInferenceClient:
+        def __init__(self, timeout=None):
+            raise AssertionError("endpoint aliases must skip Prime Inference preflight")
+
+    monkeypatch.setattr("prime_cli.verifiers_bridge.InferenceClient", ExplodingInferenceClient)
+    captured = {}
+    monkeypatch.setattr(
+        "prime_cli.verifiers_bridge._prepare_v1_environment",
+        lambda env_name, env_dir: ResolvedEnvironment(
+            original=env_name,
+            env_name=env_name,
+            install_mode="local",
+        ),
+    )
+    monkeypatch.setattr(
+        "prime_cli.verifiers_bridge._run_command",
+        lambda command, env=None: captured.update(command=command, env=env),
+    )
+
+    run_eval_passthrough(
+        environment="goblin-questions",
+        passthrough_args=["-m", "my-alias"],
+        skip_upload=True,
+        env_path=None,
+    )
+
+    # Prime's inference URL must not be forced for endpoint aliases
+    assert "--client.base-url" not in captured["command"]

@@ -34,6 +34,7 @@ from ..verifiers_bridge import (
     DEFAULT_ENV_DIR_PATH,
     DEFAULT_MODEL,
     _is_config_target,
+    _pop_value_option,
     _resolve_environment_reference,
     _split_owner_and_name,
     is_help_request,
@@ -313,6 +314,10 @@ def _hosted_overrides_from_flags(passthrough_args: list[str]) -> dict[str, Any]:
                 for key, value in parsed.client.headers.items()
                 if key not in default_headers or default_headers[key] != value
             }
+        if "base_url" in parsed.client.model_fields_set and parsed.client.base_url:
+            overrides["api_base_url"] = parsed.client.base_url
+        if "api_key_var" in parsed.client.model_fields_set and parsed.client.api_key_var:
+            overrides["api_key_var"] = parsed.client.api_key_var
 
     if client_headers or legacy_header_values:
         headers = _coerce_hosted_headers(
@@ -547,10 +552,14 @@ def _load_v1_hosted_target(config_path: Path) -> Optional[dict[str, Any]]:
     headers = [f"{key}: {value}" for key, value in headers_map.items()] or None
 
     environment = {key: raw[key] for key in _V1_HOSTED_ENV_KEYS if raw.get(key) is not None}
+    # v1's unset num_tasks means "all tasks"; the platform spells that -1
+    num_examples = _first_config_value(raw, "num_examples", "num_tasks")
+    if num_examples is None:
+        num_examples = -1
     # alias order mirrors EvalConfig's AliasChoices so hosted and local runs
     # resolve duplicate count spellings identically
     optional = {
-        "num_examples": _first_config_value(raw, "num_examples", "num_tasks"),
+        "num_examples": num_examples,
         "rollouts_per_example": _first_config_value(
             raw, "group_size", "rollouts_per_example", "num_rollouts"
         ),
@@ -1527,6 +1536,9 @@ def run_eval_cmd(
             console.print("[red]Error:[/red] @ must be followed by a config path.")
             raise typer.Exit(2)
         environment = passthrough_args.pop(0)
+    elif environment and environment.startswith("@") and len(environment) > 1:
+        # compact form: `@configs/eval.toml` → `configs/eval.toml`
+        environment = environment[1:]
     elif environment == "--resume":
         if not passthrough_args:
             console.print("[red]Error:[/red] --resume must be followed by an output directory.")
@@ -1579,6 +1591,8 @@ def run_eval_cmd(
     if hosted:
         # run knobs come from the config file or the shared v1 flag dialect;
         # everything endpoint/env-specific belongs in the config file
+        # prime-only option: pop before pydantic_cli sees it (it would reject it)
+        hosted_env_dir_path = _pop_value_option(passthrough_args, "--env-dir-path")
         overrides = _hosted_overrides_from_flags(passthrough_args)
 
         if _is_config_target(environment):
@@ -1588,7 +1602,11 @@ def run_eval_cmd(
             )
         else:
             hosted_target_configs = [
-                {"env_id": environment, "env_dir_path": None, "model": DEFAULT_MODEL}
+                {
+                    "env_id": environment,
+                    "env_dir_path": hosted_env_dir_path,
+                    "model": DEFAULT_MODEL,
+                }
             ]
 
         parsed_custom_secrets = _parse_string_map_option(custom_secrets, "--custom-secrets")

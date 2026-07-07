@@ -77,6 +77,19 @@ class SubmitRateLimited(Exception):
         self.retry_after = retry_after
 
 
+class BulkRunInterrupted(Exception):
+    """Ctrl+C during a bulk run.
+
+    Carries the outcomes recorded so far plus every never-submitted spec
+    (marked SKIPPED), so the command can write a resume manifest. Jobs already
+    in flight are not included — they keep running server-side.
+    """
+
+    def __init__(self, outcomes: list["BuildOutcome"]):
+        super().__init__("bulk run interrupted")
+        self.outcomes = outcomes
+
+
 @dataclass
 class BuildSpec:
     """One resolved build: where the context lives and what to call the image."""
@@ -546,114 +559,134 @@ def run_bulk_jobs(
                     f"[dim]({outcome.status.lower()}: {outcome.error})[/dim]"
                 )
 
-        while pending or in_flight:
-            while pending and stop_skip_reason is None and len(in_flight) < concurrency:
-                if time.monotonic() < submit_gate:
-                    break
-                spec = pending.popleft()
-                try:
-                    build_id, full_image_path = submit(spec)
-                except SubmitRateLimited as e:
-                    consecutive_deferrals += 1
-                    if consecutive_deferrals > MAX_CONSECUTIVE_SUBMIT_DEFERRALS:
+        try:
+            while pending or in_flight:
+                while pending and stop_skip_reason is None and len(in_flight) < concurrency:
+                    if time.monotonic() < submit_gate:
+                        break
+                    spec = pending.popleft()
+                    try:
+                        build_id, full_image_path = submit(spec)
+                    except KeyboardInterrupt:
+                        # The submit was cut short and may have half-queued the
+                        # job; treating it as never submitted keeps it in the
+                        # resume manifest.
+                        pending.appendleft(spec)
+                        raise
+                    except SubmitRateLimited as e:
+                        consecutive_deferrals += 1
+                        if consecutive_deferrals > MAX_CONSECUTIVE_SUBMIT_DEFERRALS:
+                            record(
+                                BuildOutcome(
+                                    spec=spec,
+                                    status="SUBMIT_FAILED",
+                                    error=(
+                                        f"{e} (gave up after {MAX_CONSECUTIVE_SUBMIT_DEFERRALS} "
+                                        "rate-limit deferrals with no successful submission)"
+                                    ),
+                                )
+                            )
+                            stop_skip_reason = (
+                                "not submitted: the server kept rate-limiting submissions"
+                            )
+                            break
+                        pending.appendleft(spec)
+                        submit_gate = time.monotonic() + e.retry_after
+                        if not rate_limit_notice_shown:
+                            rate_limit_notice_shown = True
+                            progress.console.print(
+                                "[dim]Server rate limit reached; pacing submissions "
+                                "(jobs already submitted keep running)...[/dim]"
+                            )
+                        break
+                    except QuotaExceededError as e:
+                        stop_skip_reason = "not submitted: image quota exceeded"
+                        record(BuildOutcome(spec=spec, status="SUBMIT_FAILED", error=str(e)))
+                    except UnauthorizedError:
+                        raise
+                    except (APIError, httpx.HTTPError, OSError) as e:
+                        consecutive_deferrals = 0
+                        record(BuildOutcome(spec=spec, status="SUBMIT_FAILED", error=str(e)))
+                    else:
+                        consecutive_deferrals = 0
+                        in_flight[build_id] = _InFlightBuild(
+                            spec=spec,
+                            full_image_path=full_image_path,
+                            deadline=time.monotonic() + build_timeout,
+                        )
+
+                if stop_skip_reason is not None and pending:
+                    for spec in pending:
                         record(
                             BuildOutcome(
                                 spec=spec,
-                                status="SUBMIT_FAILED",
+                                status="SKIPPED",
+                                error=stop_skip_reason,
+                            )
+                        )
+                    pending.clear()
+
+                if not pending and not in_flight:
+                    break
+
+                if not in_flight:
+                    # Everything left is waiting on the submit gate.
+                    time.sleep(max(0.0, submit_gate - time.monotonic()))
+                    continue
+
+                time.sleep(POLL_INTERVAL_SECONDS)
+
+                for build_id, entry in list(in_flight.items()):
+                    build_error: Optional[str] = None
+                    try:
+                        status_response = client.request("GET", f"/images/build/{build_id}")
+                        build_status = str(status_response.get("status") or "")
+                        error_message = status_response.get("errorMessage") or status_response.get(
+                            "error_message"
+                        )
+                        if isinstance(error_message, str) and error_message.strip():
+                            build_error = error_message.strip()
+                    except UnauthorizedError:
+                        raise
+                    except APIError:
+                        build_status = ""  # transient poll failure; the deadline still applies
+
+                    if build_status in {"COMPLETED", "FAILED", "CANCELLED"}:
+                        del in_flight[build_id]
+                        failure_reason = f"build ended as {build_status}"
+                        if build_error:
+                            failure_reason += f": {build_error}"
+                        record(
+                            BuildOutcome(
+                                spec=entry.spec,
+                                status=build_status,
+                                build_id=build_id,
+                                full_image_path=entry.full_image_path,
+                                error=None if build_status == "COMPLETED" else failure_reason,
+                            )
+                        )
+                    elif time.monotonic() > entry.deadline:
+                        del in_flight[build_id]
+                        record(
+                            BuildOutcome(
+                                spec=entry.spec,
+                                status="TIMEOUT",
+                                build_id=build_id,
+                                full_image_path=entry.full_image_path,
                                 error=(
-                                    f"{e} (gave up after {MAX_CONSECUTIVE_SUBMIT_DEFERRALS} "
-                                    "rate-limit deferrals with no successful submission)"
+                                    f"no terminal status after {build_timeout}s "
+                                    "(the build may still finish server-side)"
                                 ),
                             )
                         )
-                        stop_skip_reason = (
-                            "not submitted: the server kept rate-limiting submissions"
-                        )
-                        break
-                    pending.appendleft(spec)
-                    submit_gate = time.monotonic() + e.retry_after
-                    if not rate_limit_notice_shown:
-                        rate_limit_notice_shown = True
-                        progress.console.print(
-                            "[dim]Server rate limit reached; pacing submissions "
-                            "(jobs already submitted keep running)...[/dim]"
-                        )
-                    break
-                except QuotaExceededError as e:
-                    stop_skip_reason = "not submitted: image quota exceeded"
-                    record(BuildOutcome(spec=spec, status="SUBMIT_FAILED", error=str(e)))
-                except UnauthorizedError:
-                    raise
-                except (APIError, httpx.HTTPError, OSError) as e:
-                    consecutive_deferrals = 0
-                    record(BuildOutcome(spec=spec, status="SUBMIT_FAILED", error=str(e)))
-                else:
-                    consecutive_deferrals = 0
-                    in_flight[build_id] = _InFlightBuild(
-                        spec=spec,
-                        full_image_path=full_image_path,
-                        deadline=time.monotonic() + build_timeout,
+        except KeyboardInterrupt:
+            for spec in pending:
+                outcomes.append(
+                    BuildOutcome(
+                        spec=spec, status="SKIPPED", error="not submitted: run interrupted"
                     )
-
-            if stop_skip_reason is not None and pending:
-                for spec in pending:
-                    record(
-                        BuildOutcome(
-                            spec=spec,
-                            status="SKIPPED",
-                            error=stop_skip_reason,
-                        )
-                    )
-                pending.clear()
-
-            if not pending and not in_flight:
-                break
-
-            if not in_flight:
-                # Everything left is waiting on the submit gate.
-                time.sleep(max(0.0, submit_gate - time.monotonic()))
-                continue
-
-            time.sleep(POLL_INTERVAL_SECONDS)
-
-            for build_id, entry in list(in_flight.items()):
-                try:
-                    status_response = client.request("GET", f"/images/build/{build_id}")
-                    build_status = str(status_response.get("status") or "")
-                except UnauthorizedError:
-                    raise
-                except APIError:
-                    build_status = ""  # transient poll failure; the deadline still applies
-
-                if build_status in {"COMPLETED", "FAILED", "CANCELLED"}:
-                    del in_flight[build_id]
-                    record(
-                        BuildOutcome(
-                            spec=entry.spec,
-                            status=build_status,
-                            build_id=build_id,
-                            full_image_path=entry.full_image_path,
-                            error=(
-                                None
-                                if build_status == "COMPLETED"
-                                else f"build ended as {build_status}"
-                            ),
-                        )
-                    )
-                elif time.monotonic() > entry.deadline:
-                    del in_flight[build_id]
-                    record(
-                        BuildOutcome(
-                            spec=entry.spec,
-                            status="TIMEOUT",
-                            build_id=build_id,
-                            full_image_path=entry.full_image_path,
-                            error=(
-                                f"no terminal status after {build_timeout}s "
-                                "(the build may still finish server-side)"
-                            ),
-                        )
-                    )
+                )
+            raise BulkRunInterrupted(outcomes) from None
 
     return outcomes
 
@@ -998,6 +1031,27 @@ def push_bulk(
 
     except UnauthorizedError:
         console.print("[red]Error: Not authenticated. Please run 'prime login' first.[/red]")
+        raise typer.Exit(1)
+    except BulkRunInterrupted as e:
+        console.print(
+            "\n[yellow]Cancelled. Builds already started keep running server-side; "
+            "check them with 'prime images list'.[/yellow]"
+        )
+        unfinished = [o for o in e.outcomes if o.status != "COMPLETED"]
+        if unfinished:
+            _write_failures_manifest(failures_out, unfinished)
+            console.print(
+                f"Wrote {len(unfinished)} unfinished build(s) to [bold]{failures_out}[/bold]"
+            )
+            console.print(
+                f"[dim]Resume with: prime images push-bulk --manifest {failures_out}[/dim]"
+            )
+            if hf_context_root is not None:
+                keep_hf_context = True
+                console.print(
+                    f"[dim]Keeping generated Dockerfiles in {hf_context_root} "
+                    "so the manifest can be re-run.[/dim]"
+                )
         raise typer.Exit(1)
     except KeyboardInterrupt:
         console.print(

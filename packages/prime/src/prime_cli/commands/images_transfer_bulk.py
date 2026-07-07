@@ -31,6 +31,7 @@ from .images_bulk import (
     POLL_INTERVAL_SECONDS,
     SUPPORTED_PLATFORMS,
     BulkPushValidationError,
+    BulkRunInterrupted,
     QuotaExceededError,
     SubmitRateLimited,
     _duplicate_ref_problems,
@@ -765,6 +766,21 @@ def transfer_bulk(
 
     except UnauthorizedError:
         console.print("[red]Error: Not authenticated. Please run 'prime login' first.[/red]")
+        raise typer.Exit(1)
+    except BulkRunInterrupted as e:
+        console.print(
+            "\n[yellow]Cancelled. Transfers already queued keep running server-side; "
+            "check them with 'prime images list'.[/yellow]"
+        )
+        unfinished = [o for o in e.outcomes if o.status != "COMPLETED"]
+        if unfinished:
+            _write_failures_manifest(failures_out, unfinished)
+            console.print(
+                f"Wrote {len(unfinished)} unfinished transfer(s) to [bold]{failures_out}[/bold]"
+            )
+            console.print(
+                f"[dim]Resume with: prime images transfer-bulk --manifest {failures_out}[/dim]"
+            )
         raise typer.Exit(1)
     except KeyboardInterrupt:
         console.print(

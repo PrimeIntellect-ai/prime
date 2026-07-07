@@ -57,6 +57,8 @@ class FakeAPI:
         self.default_poll = ["COMPLETED"]
         # Exceptions raised (FIFO) by POST /images/build before any build is created.
         self.build_error_queue = []
+        # errorMessage returned alongside FAILED poll statuses.
+        self.poll_error_message = None
 
     def request(self, method, path, json=None, params=None):
         self.calls.append((method, path))
@@ -76,7 +78,11 @@ class FakeAPI:
         if method == "GET" and path.startswith("/images/build/"):
             build_id = path.rsplit("/", 1)[1]
             script = self.poll_scripts.setdefault(build_id, list(self.default_poll))
-            return {"status": script.pop(0) if len(script) > 1 else script[0]}
+            status_value = script.pop(0) if len(script) > 1 else script[0]
+            response = {"status": status_value}
+            if status_value == "FAILED" and self.poll_error_message:
+                response["errorMessage"] = self.poll_error_message
+            return response
         raise AssertionError(f"Unexpected request: {method} {path}")
 
     def post_build_indices(self):
@@ -656,3 +662,54 @@ def test_hf_failures_keep_contexts_and_manifest_is_rerunnable(tmp_path, fake_api
     )
     assert result.exit_code == 0, result.output
     assert "1/1 builds completed" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Failure detail and interruption
+# ---------------------------------------------------------------------------
+
+
+def test_failed_build_surfaces_server_error_message(tmp_path, fake_api, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _make_context(tmp_path, "a")
+    manifest = tmp_path / "builds.jsonl"
+    _write_manifest(manifest, [{"image": "app-a:v1", "context": "a"}])
+    fake_api.default_poll = ["FAILED"]
+    fake_api.poll_error_message = "failed to pull base image openswe-python-3.12: not found"
+
+    result = runner.invoke(app, ["images", "push-bulk", "--manifest", str(manifest)], env=TEST_ENV)
+
+    assert result.exit_code == 1
+    assert "openswe-python-3.12" in result.output
+
+
+def test_interrupt_writes_resume_manifest(tmp_path, fake_api, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    for name in ("a", "b", "c"):
+        _make_context(tmp_path, name)
+    manifest = tmp_path / "builds.jsonl"
+    _write_manifest(manifest, [{"image": f"app-{n}:v1", "context": n} for n in ("a", "b", "c")])
+
+    original_request = fake_api.request
+
+    def interrupt_on_poll(method, path, json=None, params=None):
+        if method == "GET" and path.startswith("/images/build/"):
+            raise KeyboardInterrupt()
+        return original_request(method, path, json=json, params=params)
+
+    monkeypatch.setattr(fake_api, "request", interrupt_on_poll)
+
+    result = runner.invoke(
+        app,
+        ["images", "push-bulk", "--manifest", str(manifest), "--concurrency", "1"],
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 1
+    assert "Cancelled" in result.output
+    assert "Resume with" in result.output
+    # app-a was submitted (still running server-side, not in the manifest);
+    # app-b and app-c were never submitted and land in the resume manifest.
+    failures_file = tmp_path / "push-bulk-failures.jsonl"
+    lines = [json.loads(line) for line in failures_file.read_text().splitlines()]
+    assert [line["image"] for line in lines] == ["app-b:v1", "app-c:v1"]

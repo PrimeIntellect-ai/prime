@@ -588,6 +588,7 @@ def _submit_transfer(
     *,
     team_id: Optional[str],
     visibility: Optional[ImageVisibility],
+    owner_scope: Optional[str] = None,
 ) -> tuple[str, str]:
     """Queue one transfer. Returns (build_id, full_image_path).
 
@@ -607,6 +608,8 @@ def _submit_transfer(
         payload["team_id"] = team_id
     if visibility is not None:
         payload["visibility"] = visibility.value
+    if owner_scope is not None:
+        payload["owner_scope"] = owner_scope
 
     try:
         response = client.request("POST", "/images/build", json=payload)
@@ -702,6 +705,11 @@ def transfer_bulk(
     private: bool = typer.Option(
         False, "--private", help="Make the images private when the transfers complete"
     ),
+    platform_image: bool = typer.Option(
+        False,
+        "--platform-image",
+        help="Transfer org-less platform images (admins only; implies --public)",
+    ),
     concurrency: int = typer.Option(
         DEFAULT_MAX_IN_FLIGHT, "--concurrency", help="Maximum transfers in flight at once"
     ),
@@ -744,11 +752,16 @@ def transfer_bulk(
     local dataset download. Set HF_TOKEN for private or gated datasets.
 
     \b
+    Admins can pass --platform-image to transfer org-less public platform
+    images, exactly like 'prime images push --source-image --platform-image'.
+
+    \b
     Examples:
         prime images transfer-bulk --manifest transfers.jsonl
         prime images transfer-bulk --harbor ./tasks
         prime images transfer-bulk --hf org/dataset --column docker_image --dry-run
         prime images transfer-bulk --hf org/dataset --hf-split test --column image_name
+        prime images transfer-bulk --hf org/dataset --column docker_image --platform-image
         prime images transfer-bulk --manifest transfer-bulk-failures.jsonl
     """
     try:
@@ -763,6 +776,9 @@ def transfer_bulk(
             raise typer.Exit(1)
         if public and private:
             console.print("[red]Error: --public and --private cannot be used together[/red]")
+            raise typer.Exit(1)
+        if platform_image and private:
+            console.print("[red]Error: Platform images must be public[/red]")
             raise typer.Exit(1)
         if concurrency < 1:
             console.print("[red]Error: --concurrency must be at least 1[/red]")
@@ -830,12 +846,18 @@ def transfer_bulk(
             visibility = ImageVisibility.PUBLIC
         elif private:
             visibility = ImageVisibility.PRIVATE
+        if platform_image:
+            visibility = ImageVisibility.PUBLIC
 
         console.print(
             f"[bold blue]Bulk transferring {len(specs)} image(s)[/bold blue] "
             f"[dim]({source_desc})[/dim]"
         )
-        if config.team_id:
+        if platform_image:
+            console.print("[dim]Owner: Platform[/dim]")
+            if config.team_id:
+                console.print("[dim]Team context ignored: platform images are org-less[/dim]")
+        elif config.team_id:
             console.print(f"[dim]Team: {config.team_id}[/dim]")
         if visibility is not None:
             console.print(f"[dim]Visibility: {visibility.value}[/dim]")
@@ -844,10 +866,18 @@ def transfer_bulk(
                 "[dim]Visibility: PRIVATE for new images "
                 "(existing tags keep their current visibility)[/dim]"
             )
+        # Platform transfers skip the server's per-account transfer rate limiter.
+        pacing_note = (
+            ""
+            if platform_image
+            else (
+                " Transfers are rate-limited per account server-side, "
+                "so large batches take a while to submit."
+            )
+        )
         console.print(
             f"[dim]Up to {concurrency} transfers in flight; "
-            f"polling every {int(POLL_INTERVAL_SECONDS)}s. Transfers are rate-limited "
-            "per account server-side, so large batches take a while to submit.[/dim]"
+            f"polling every {int(POLL_INTERVAL_SECONDS)}s.{pacing_note}[/dim]"
         )
         console.print()
 
@@ -856,7 +886,11 @@ def transfer_bulk(
             client,
             specs,
             submit=lambda spec: _submit_transfer(
-                client, spec, team_id=config.team_id or None, visibility=visibility
+                client,
+                spec,
+                team_id=None if platform_image else (config.team_id or None),
+                visibility=visibility,
+                owner_scope="platform" if platform_image else None,
             ),
             concurrency=concurrency,
             build_timeout=build_timeout,

@@ -429,9 +429,6 @@ def push_image(
         if platform_image and private:
             console.print("[red]Error: Platform images must be public[/red]")
             raise typer.Exit(1)
-        if platform_image and config.team_id:
-            console.print("[red]Error: Platform images cannot be pushed in a team context[/red]")
-            raise typer.Exit(1)
         if not is_transfer and image_reference is None:
             console.print(
                 "[red]Error: Image reference is required unless --source-image is used[/red]"
@@ -484,7 +481,9 @@ def push_image(
             console.print(f"[bold]Destination:[/bold] {destination_display}")
             if platform_image:
                 console.print("[bold]Owner:[/bold] Platform")
-            if config.team_id:
+                if config.team_id:
+                    console.print("[dim]Team context ignored: platform images are org-less[/dim]")
+            elif config.team_id:
                 console.print(f"[dim]Team: {config.team_id}[/dim]")
             console.print()
 
@@ -503,7 +502,7 @@ def push_image(
                     image_name=image_name,
                     image_tag=image_tag,
                     platform=platform,
-                    team_id=config.team_id or None,
+                    team_id=None if platform_image else (config.team_id or None),
                     visibility=visibility,
                     owner_scope="platform" if platform_image else None,
                 )
@@ -582,7 +581,10 @@ def push_image(
             console.print(
                 f"[bold blue]Building and pushing image:[/bold blue] {image_name}:{image_tag}"
             )
-        if config.team_id:
+        if platform_image:
+            if config.team_id:
+                console.print("[dim]Team context ignored: platform images are org-less[/dim]")
+        elif config.team_id:
             console.print(f"[dim]Team: {config.team_id}[/dim]")
         console.print()
 
@@ -626,7 +628,7 @@ def push_image(
                     "dockerfile_path": PACKAGED_DOCKERFILE_PATH,
                     "platform": platform,
                 }
-                if config.team_id:
+                if config.team_id and not platform_image:
                     build_payload["team_id"] = config.team_id
                 if platform_image:
                     build_payload["owner_scope"] = "platform"

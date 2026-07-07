@@ -661,3 +661,55 @@ def test_hf_flags_rejected_outside_hf_mode(tmp_path, fake_api):
     )
     assert result.exit_code == 1
     assert "only apply to --hf mode" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Platform images
+# ---------------------------------------------------------------------------
+
+
+def test_platform_image_sends_owner_scope_and_public_visibility(tmp_path, fake_api):
+    manifest = tmp_path / "transfers.jsonl"
+    _write_manifest(
+        manifest,
+        [{"source": "docker.io/org/app:v1"}, {"source": "ghcr.io/org/other:v2"}],
+    )
+    result = runner.invoke(
+        app,
+        ["images", "transfer-bulk", "--manifest", str(manifest), "--platform-image"],
+        env=TEST_ENV,
+    )
+    assert result.exit_code == 0, result.output
+    assert "Owner: Platform" in result.output
+    assert "Visibility: PUBLIC" in result.output
+    for payload in fake_api.payloads:
+        assert payload["owner_scope"] == "platform"
+        assert payload["visibility"] == "PUBLIC"
+        assert "team_id" not in payload
+
+
+def test_platform_image_rejects_private(tmp_path, fake_api):
+    manifest = tmp_path / "transfers.jsonl"
+    _write_manifest(manifest, [{"source": "a/app:v1"}])
+    result = runner.invoke(
+        app,
+        ["images", "transfer-bulk", "--manifest", str(manifest), "--platform-image", "--private"],
+        env=TEST_ENV,
+    )
+    assert result.exit_code == 1
+    assert "Platform images must be public" in result.output
+    assert fake_api.post_build_count() == 0
+
+
+def test_platform_image_ignores_team_context(tmp_path, fake_api):
+    manifest = tmp_path / "transfers.jsonl"
+    _write_manifest(manifest, [{"source": "a/app:v1"}])
+    result = runner.invoke(
+        app,
+        ["images", "transfer-bulk", "--manifest", str(manifest), "--platform-image"],
+        env={**TEST_ENV, "PRIME_TEAM_ID": "team-123"},
+    )
+    assert result.exit_code == 0, result.output
+    assert "Team context ignored" in result.output
+    assert fake_api.payloads[0]["owner_scope"] == "platform"
+    assert "team_id" not in fake_api.payloads[0]

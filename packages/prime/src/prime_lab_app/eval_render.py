@@ -12,7 +12,13 @@ from rich.console import Group
 from rich.table import Table
 from rich.text import Text
 
-from .eval_records import LocalEvalRun, MetricSummary, RunOverviewStats, parse_log_header
+from .eval_records import (
+    LocalEvalRun,
+    MetricSummary,
+    RunOverviewStats,
+    legacy_row,
+    parse_log_header,
+)
 from .palette import (
     STATUS_ERROR,
     STATUS_INFO,
@@ -386,10 +392,6 @@ def build_state_text(record: dict[str, Any], metadata: dict[str, Any]) -> Text:
     return out
 
 
-def build_info_text(record: dict[str, Any], metadata: dict[str, Any]) -> Text:
-    return build_state_text(record, metadata)
-
-
 def build_run_summary_text(
     run: LocalEvalRun,
     *,
@@ -513,6 +515,7 @@ def compute_run_overview_stats(run: LocalEvalRun) -> RunOverviewStats:
                     continue
                 if not isinstance(record, dict):
                     continue
+                record = legacy_row(record)
                 reward = numeric_reward(record.get("reward"))
                 if reward is not None:
                     rewards.append(reward)

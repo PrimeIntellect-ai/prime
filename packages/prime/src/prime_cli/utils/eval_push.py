@@ -23,24 +23,6 @@ if TYPE_CHECKING:
 console = get_console()
 
 
-def find_latest_eval_output_dir(env_name: str, model: str) -> Path:
-    """The newest run directory in the legacy (v0) eval output layout."""
-    module_name = env_name.replace("-", "_")
-    env_model_str = f"{env_name}--{model.replace('/', '--')}"
-    local_env_dir = Path("./environments") / module_name
-    base_evals_dir = (
-        local_env_dir / "outputs" / "evals" / env_model_str
-        if local_env_dir.exists()
-        else Path("./outputs") / "evals" / env_model_str
-    )
-    if not base_evals_dir.exists():
-        raise FileNotFoundError(f"Evaluation output directory not found: {base_evals_dir}")
-    subdirs = [d for d in base_evals_dir.iterdir() if d.is_dir()]
-    if not subdirs:
-        raise FileNotFoundError(f"No evaluation results found in {base_evals_dir}")
-    return max(subdirs, key=lambda d: d.stat().st_mtime)
-
-
 def push_eval_results_to_hub(
     env_name: str,
     job_id: str,

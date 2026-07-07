@@ -88,9 +88,7 @@ class PrimeVerifiersPlugin:
     eval_module: str = V1_EVAL_MODULE
     init_module: str = V1_INIT_MODULE
     validate_module: str = V1_VALIDATE_MODULE
-    gepa_module: str = "verifiers.cli.commands.gepa"
-    install_module: str = "verifiers.cli.commands.install"
-    build_module: str = "verifiers.cli.commands.build"
+    gepa_module: str = "verifiers.scripts.gepa"
 
     def build_module_command(
         self, module_name: str, args: Sequence[str] | None = None
@@ -104,6 +102,5 @@ class PrimeVerifiersPlugin:
 
 
 def load_verifiers_prime_plugin() -> PrimeVerifiersPlugin:
-    """The static verifiers command map. Verifiers no longer exports a plugin module; the
-    old import handshake always resolved to these values anyway."""
+    """The static verifiers command map (verifiers stopped exporting a plugin module)."""
     return PrimeVerifiersPlugin()

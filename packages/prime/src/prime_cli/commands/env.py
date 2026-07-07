@@ -43,7 +43,7 @@ from ..utils.prompt import (
     validate_env_var_name,
 )
 from ..utils.time_utils import format_time_ago, iso_timestamp
-from ..verifiers_bridge import is_help_request, print_env_build_help, print_env_init_help
+from ..verifiers_bridge import is_help_request, print_env_init_help
 from ..verifiers_plugin import load_verifiers_prime_plugin, resolve_workspace_python
 from .config import TEAM_ID_PATTERN
 
@@ -1697,7 +1697,7 @@ def init(
 
 
 @app.command(
-    no_args_is_help=True,
+    hidden=True,
     rich_help_panel="Manage",
     context_settings={
         "allow_extra_args": True,
@@ -1705,34 +1705,14 @@ def init(
         "help_option_names": [],
     },
 )
-def build(
-    ctx: typer.Context,
-    env_id: Optional[str] = typer.Argument(
-        None, help="Environment ID (hyphenated, e.g. openenv-echo)"
-    ),
-) -> None:
-    """Build an OpenEnv-backed environment image."""
-    passthrough_args = list(ctx.args)
-
-    if is_help_request(env_id or "", passthrough_args):
-        print_env_build_help()
-        raise typer.Exit(0)
-
-    if env_id is None:
-        console.print("[red]Error:[/red] Missing argument 'ENV_ID'.")
-        console.print("[dim]Example: prime env build openenv-echo --path ./environments[/dim]")
-        raise typer.Exit(2)
-
-    if env_id.startswith("-"):
-        console.print("[red]Error:[/red] Environment ID must be the first argument.")
-        console.print("[dim]Example: prime env build openenv-echo --path ./environments[/dim]")
-        raise typer.Exit(2)
-
-    plugin = load_verifiers_prime_plugin()
-    command = plugin.build_module_command(plugin.build_module, [env_id, *passthrough_args])
-    result = subprocess.run(command)
-    if result.returncode != 0:
-        raise typer.Exit(result.returncode)
+def build() -> None:
+    """Removed: OpenEnv images must be prebuilt."""
+    console.print(
+        "[red]prime env build was removed.[/red] The OpenEnv image builder no longer ships "
+        "with verifiers. Build and push the image yourself, then register it in the "
+        'environment\'s .build.json ("image", "port", "start_command", "contract").'
+    )
+    raise typer.Exit(1)
 
 
 @app.command(no_args_is_help=True, rich_help_panel="Manage")
@@ -2399,10 +2379,7 @@ def execute_install_command(cmd: List[str], env_id: str, version: str, tool: str
     """
     console.print(f"\n[cyan]Installing {env_id}@{version} with {tool}...[/cyan]")
 
-    display_command = " ".join(cmd)
-    if len(cmd) >= 3 and cmd[1] == "-m" and cmd[2].startswith("verifiers.cli.commands."):
-        display_command = f"prime env install {env_id}"
-    console.print(f"[dim]Command: {display_command}[/dim]")
+    console.print(f"[dim]Command: {' '.join(cmd)}[/dim]")
 
     process = subprocess.Popen(
         cmd,
@@ -2467,7 +2444,6 @@ def install(
     """
     try:
         client = APIClient(require_auth=False)
-        plugin = load_verifiers_prime_plugin()
 
         # Validate package manager
         if with_tool not in ["uv", "pip"]:
@@ -2505,10 +2481,7 @@ def install(
                 env_path = Path(path) / env_folder
                 if env_path.exists():
                     if with_tool == "uv":
-                        cmd_parts = plugin.build_module_command(
-                            plugin.install_module,
-                            [local_name, "--path", path],
-                        )
+                        cmd_parts = _uv_pip_command("install", "-e", str(env_path))
                     else:
                         cmd_parts = ["pip", "install", "-e", str(env_path)]
                     installable_envs.append((cmd_parts, local_name, "local", local_name))

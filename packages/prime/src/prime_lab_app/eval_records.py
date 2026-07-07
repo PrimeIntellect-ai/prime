@@ -10,6 +10,17 @@ from typing import Any
 from .models import LabItem
 
 
+def legacy_row(data: dict[str, Any]) -> dict[str, Any]:
+    """Back-translate a native v1 trace row into the legacy sample shape the viewer
+    renders (prompt/completion/reward/trajectory); legacy rows pass through."""
+    if "nodes" not in data and "rewards" not in data:
+        return data
+    from verifiers.v1.cli.output import convert_results_for_upload
+
+    converted = convert_results_for_upload([data])
+    return converted[0] if converted else {}
+
+
 @dataclass
 class LocalEvalRun:
     """A local evaluation run discovered from a verifiers output directory."""
@@ -175,7 +186,7 @@ class LazyRunResults:
                 data = {}
         finally:
             self._fh.seek(position)
-        data = data if isinstance(data, dict) else {}
+        data = legacy_row(data) if isinstance(data, dict) else {}
         self._cache[index] = data
         return data
 

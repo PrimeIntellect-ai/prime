@@ -20,7 +20,7 @@ class DummyPlugin:
     eval_module = "verifiers.v1.cli.eval.main"
     init_module = "verifiers.v1.cli.init"
     validate_module = "verifiers.v1.cli.validate"
-    gepa_module = "verifiers.cli.commands.gepa"
+    gepa_module = "verifiers.scripts.gepa"
 
     def build_module_command(self, module: str, args: list[str]) -> list[str]:
         return [module, *args]

@@ -48,12 +48,12 @@ def run_gepa_cmd(
 
     if environment_or_config is None:
         console.print("[red]Error:[/red] Missing argument 'ENV_OR_CONFIG'.")
-        console.print("[dim]Example: prime gepa run wordle --max-calls 100[/dim]")
+        console.print("[dim]Example: prime gepa run wordle --gepa.max-calls 100[/dim]")
         raise typer.Exit(2)
 
     if environment_or_config.startswith("-"):
         console.print("[red]Error:[/red] Environment/config must be the first argument.")
-        console.print("[dim]Example: prime gepa run wordle --max-calls 100[/dim]")
+        console.print("[dim]Example: prime gepa run wordle --gepa.max-calls 100[/dim]")
         raise typer.Exit(2)
 
     run_gepa_passthrough(environment_or_config, passthrough_args)

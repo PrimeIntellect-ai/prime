@@ -109,8 +109,8 @@ class LabDataSource:
         cache_key = _row_cache_key(options, config, team)
         detail_cache_key = _account_cache_key(config, team)
         cached_sections = load_cached_lab_sections(cache_key, limit=options.limit)
-        local_environment_items = tuple(
-            _workspace_environment_items(
+        workspace_env_items = tuple(
+            local_environment_items(
                 options.workspace.resolve(),
                 options.env_dir,
                 options.limit,
@@ -126,7 +126,7 @@ class LabDataSource:
                 "Environments",
                 "Local and platform environments.",
                 authenticated=True,
-                local_items=local_environment_items,
+                local_items=workspace_env_items,
                 cached_section=cached_sections.get("environments"),
             ),
             _cached_or_loading_section(
@@ -282,7 +282,7 @@ class LabDataSource:
                 limit=options.limit,
             ),
             *_workspace_profile_items(profiles, current_profile),
-            *_workspace_environment_items(
+            *local_environment_items(
                 workspace,
                 options.env_dir,
                 options.limit,
@@ -713,10 +713,6 @@ class LabDataSource:
         )
 
 
-def load_lab_snapshot(options: LabLoadOptions) -> LabSnapshot:
-    return LabDataSource().load(options)
-
-
 def _row_cache_key(options: LabLoadOptions, config: Config, team: str | None) -> str:
     return lab_row_cache_key(
         workspace=options.workspace.resolve(),
@@ -1002,17 +998,22 @@ def discover_local_eval_runs(
     outputs_dir: str = "./outputs",
     limit: int = 30,
 ) -> list[dict[str, Any]]:
+    # Legacy runs live under outputs/evals/<env--model>/<run>; native v1 runs live
+    # directly under outputs/<name>/<uuid> (the `evals` child has no "--" and is skipped).
     roots: list[Path] = []
     env_root = (workspace / env_dir).resolve()
     if _safe_is_dir(env_root):
         for env_path in _safe_sorted_children(env_root):
-            candidate = env_path / "outputs" / "evals"
-            if _safe_is_dir(candidate):
-                roots.append(candidate)
+            for candidate in (env_path / "outputs" / "evals", env_path / "outputs"):
+                if _safe_is_dir(candidate):
+                    roots.append(candidate)
 
-    global_root = (workspace / outputs_dir / "evals").resolve()
-    if _safe_is_dir(global_root):
-        roots.append(global_root)
+    for candidate in (
+        (workspace / outputs_dir / "evals").resolve(),
+        (workspace / outputs_dir).resolve(),
+    ):
+        if _safe_is_dir(candidate):
+            roots.append(candidate)
 
     runs: list[dict[str, Any]] = []
     for root in roots:
@@ -1033,8 +1034,10 @@ def discover_local_eval_runs(
                 metadata = _read_json_file(metadata_path)
                 runs.append(
                     {
-                        "env_id": env_id,
-                        "model": model,
+                        # the metadata is authoritative; dir-name parsing can't recover
+                        # native names like <env>--<model>--<harness> exactly
+                        "env_id": str(metadata.get("env") or metadata.get("env_id") or env_id),
+                        "model": str(metadata.get("model") or model),
                         "run_id": run_dir.name,
                         "path": str(run_dir),
                         "metadata": metadata,
@@ -1607,12 +1610,6 @@ def _workspace_profile_items(profiles: list[str], current_profile: str) -> list[
     return items
 
 
-def _workspace_environment_items(
-    workspace: Path, env_dir: str, limit: int, *, section: str
-) -> list[LabItem]:
-    return local_environment_items(workspace, env_dir, limit, section=section)
-
-
 def _workspace_config_items(workspace: Path, limit: int) -> list[LabItem]:
     configs_root = workspace / "configs"
     if not configs_root.is_dir():
@@ -1678,28 +1675,11 @@ def _config_current_profile(config: Config) -> str:
     return str(getattr(config, "current_environment", None) or "production")
 
 
-def _workspace_path(workspace: Path, value: str) -> Path:
-    path = Path(value).expanduser()
-    if not path.is_absolute():
-        path = workspace / path
-    return path.resolve()
-
-
 def _relative_path(path: Path, root: Path) -> str:
     try:
         return str(path.resolve().relative_to(root.resolve()))
     except ValueError:
         return str(path)
-
-
-def _interesting_child_files(path: Path) -> list[str]:
-    names = []
-    for child in sorted(path.iterdir()):
-        if child.name.startswith("."):
-            continue
-        if child.is_file() and child.suffix in {".py", ".toml", ".md", ".json"}:
-            names.append(child.name)
-    return names[:12]
 
 
 def _read_toml_preview(path: Path) -> tuple[dict[str, Any], str]:

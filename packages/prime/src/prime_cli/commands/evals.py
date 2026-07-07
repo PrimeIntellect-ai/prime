@@ -40,7 +40,6 @@ from ..verifiers_bridge import (
     print_eval_run_help,
     print_validate_help,
     run_eval_passthrough,
-    run_eval_view,
     run_validate_passthrough,
 )
 
@@ -85,8 +84,6 @@ HOSTED_LOGS_RETRY_WAIT_SECONDS = 10
 HOSTED_LOGS_STATUS_UPDATE_EVERY_POLLS = 6
 EVAL_TABLE_MAX_TEXT_WIDTH = 30
 EVAL_RUN_EXAMPLE_COMMAND = "prime eval harbor_v1 -n 1"
-EVAL_HOSTED_LABEL = "HOSTED"
-EVAL_LOCAL_LABEL = "LOCAL"
 # Legacy verifiers config fields/flags are accepted through the parser only so
 # Prime can reject them with the hosted-specific unsupported-option message.
 HOSTED_EVAL_CONFIG_EXTRA_FIELDS = {
@@ -197,7 +194,7 @@ def format_output(data: dict, output: str) -> None:
         console.print(syntax)
 
 
-def _parse_json_object_option(raw: Optional[str], option_name: str) -> Optional[dict[str, Any]]:
+def _parse_string_map_option(raw: Optional[str], option_name: str) -> Optional[dict[str, str]]:
     if raw is None:
         return None
     try:
@@ -209,14 +206,6 @@ def _parse_json_object_option(raw: Optional[str], option_name: str) -> Optional[
     if type(parsed) is not dict:
         console.print(f"[red]Error:[/red] {option_name} must be a JSON object")
         raise typer.Exit(1)
-
-    return parsed
-
-
-def _parse_string_map_option(raw: Optional[str], option_name: str) -> Optional[dict[str, str]]:
-    parsed = _parse_json_object_option(raw, option_name)
-    if parsed is None:
-        return None
 
     for key, value in parsed.items():
         if type(key) is not str or type(value) is not str:
@@ -387,14 +376,7 @@ def _resolve_hosted_config_model(raw_config: dict[str, Any], config_path: Path) 
     if "endpoints_path" in raw_config and not endpoints_path_obj.is_absolute():
         endpoints_path = str((config_path.parent / endpoints_path_obj).resolve())
 
-    try:
-        from verifiers.utils.eval_utils import load_endpoints, resolve_endpoints_file
-    except ImportError as exc:
-        console.print(
-            "[red]Error:[/red] verifiers is required to resolve `endpoint_id`. "
-            "Install the `verifiers` package or use `model` instead."
-        )
-        raise typer.Exit(1) from exc
+    from verifiers.utils.eval_utils import load_endpoints, resolve_endpoints_file
 
     resolved_endpoints_file = resolve_endpoints_file(endpoints_path)
     if resolved_endpoints_file is None or resolved_endpoints_file.suffix != ".toml":
@@ -565,10 +547,12 @@ def _load_v1_hosted_target(config_path: Path) -> Optional[dict[str, Any]]:
     headers = [f"{key}: {value}" for key, value in headers_map.items()] or None
 
     environment = {key: raw[key] for key in _V1_HOSTED_ENV_KEYS if raw.get(key) is not None}
+    # alias order mirrors EvalConfig's AliasChoices so hosted and local runs
+    # resolve duplicate count spellings identically
     optional = {
-        "num_examples": _first_config_value(raw, "num_tasks", "num_examples"),
+        "num_examples": _first_config_value(raw, "num_examples", "num_tasks"),
         "rollouts_per_example": _first_config_value(
-            raw, "num_rollouts", "rollouts_per_example", "group_size"
+            raw, "group_size", "rollouts_per_example", "num_rollouts"
         ),
         "timeout_minutes": raw.get("timeout_minutes"),
         "allow_sandbox_access": raw.get("allow_sandbox_access"),
@@ -951,16 +935,13 @@ def list_evals(
             num_examples = metadata.get("num_examples", "-")
             rollouts_per_example = metadata.get("rollouts_per_example", "-")
 
-            env_name = "-"
             environment_names = e.get("environment_names", [])
-            if environment_names and len(environment_names) > 0:
-                env_name = environment_names[0]
+            env_name = environment_names[0] if environment_names else "-"
 
-            is_hosted = bool(e.get("is_hosted"))
-            execution_mode = EVAL_HOSTED_LABEL if is_hosted else EVAL_LOCAL_LABEL
+            execution_mode = "HOSTED" if e.get("is_hosted") else "LOCAL"
 
             table.add_row(
-                eval_id if eval_id else "",
+                eval_id,
                 str(env_name)[:EVAL_TABLE_MAX_TEXT_WIDTH],
                 str(e.get("model_name", ""))[:EVAL_TABLE_MAX_TEXT_WIDTH],
                 str(e.get("status", "")),
@@ -1019,13 +1000,6 @@ def get_samples(
     client = EvalsClient(api_client)
     data = client.get_samples(eval_id, page=page, limit=num)
     format_output(data, output)
-
-
-def _resolve_eval_viewer_url(evaluation_id: str, response: Optional[dict[str, Any]] = None) -> str:
-    viewer_url = response.get("viewer_url") if response else None
-    if viewer_url:
-        return str(viewer_url)
-    return get_eval_viewer_url(evaluation_id)
 
 
 def _push_samples_with_progress(
@@ -1156,7 +1130,7 @@ def _push_single_eval(
 
     console.print("[blue]Finalizing evaluation...[/blue]")
     finalize_response = client.finalize_evaluation(eval_id, metrics=eval_data.get("metrics"))
-    viewer_url = _resolve_eval_viewer_url(eval_id, finalize_response)
+    viewer_url = (finalize_response or {}).get("viewer_url") or get_eval_viewer_url(eval_id)
     console.print("[green]✓ Evaluation finalized[/green]")
     console.print()
 
@@ -1185,7 +1159,15 @@ def view_cmd(
     if limit < 1:
         console.print("[red]Error:[/red] --limit must be at least 1")
         raise typer.Exit(1)
-    run_eval_view(env_dir=env_dir, outputs_dir=outputs_dir, limit=limit)
+
+    from prime_lab_app import run_eval_view
+
+    run_eval_view(
+        limit=limit,
+        env_dir=env_dir or DEFAULT_ENV_DIR_PATH,
+        outputs_dir=outputs_dir or "./outputs",
+        workspace=Path.cwd(),
+    )
 
 
 @subcommands_app.command("tui")
@@ -1571,11 +1553,9 @@ def run_eval_cmd(
         console.print(f"[dim]Example: {EVAL_RUN_EXAMPLE_COMMAND}[/dim]")
         raise typer.Exit(2)
 
-    env_dir_path: Optional[str] = None
     poll_interval_was_provided = (
         ctx.get_parameter_source("poll_interval") == ParameterSource.COMMANDLINE
     )
-    local_passthrough_args = list(passthrough_args)
 
     if not hosted:
         hosted_only_args = {
@@ -1601,16 +1581,14 @@ def run_eval_cmd(
         # everything endpoint/env-specific belongs in the config file
         overrides = _hosted_overrides_from_flags(passthrough_args)
 
-        hosted_target_configs: list[dict[str, Any]] = []
         if _is_config_target(environment):
             v1_target = _load_v1_hosted_target(Path(environment))
-            if v1_target is not None:
-                hosted_target_configs = [v1_target]
-            else:
-                hosted_target_configs = _load_hosted_eval_configs(environment)
+            hosted_target_configs = (
+                [v1_target] if v1_target is not None else _load_hosted_eval_configs(environment)
+            )
         else:
             hosted_target_configs = [
-                {"env_id": environment, "env_dir_path": env_dir_path, "model": DEFAULT_MODEL}
+                {"env_id": environment, "env_dir_path": None, "model": DEFAULT_MODEL}
             ]
 
         parsed_custom_secrets = _parse_string_map_option(custom_secrets, "--custom-secrets")
@@ -1644,7 +1622,7 @@ def run_eval_cmd(
                 {
                     "env_id": target_config["env_id"],
                     "environment": target_config.get("environment"),
-                    "env_dir_path": target_config.get("env_dir_path") or env_dir_path,
+                    "env_dir_path": target_config.get("env_dir_path"),
                     "model": merged["model"],
                     "num_examples": num_examples,
                     "rollouts_per_example": rollouts_per_example,
@@ -1685,31 +1663,16 @@ def run_eval_cmd(
             )
             raise typer.Exit(1)
 
-        grouped_targets: dict[tuple[Any, ...], dict[str, Any]] = {}
-        target_order: list[tuple[Any, ...]] = []
+        grouped_targets: dict[Any, dict[str, Any]] = {}
+        target_order: list[Any] = []
         for target in effective_targets:
-            group_key = (
-                target["model"],
-                _freeze_json_value(target.get("environment")),
-                target["num_examples"],
-                target["rollouts_per_example"],
-                _freeze_json_value(target.get("env_args")),
-                target.get("timeout_minutes"),
-                target.get("allow_sandbox_access", True),
-                target.get("allow_instances_access", False),
-                target.get("allow_tunnel_access", True),
-                _freeze_json_value(target.get("sampling_args")),
-                target.get("max_concurrent"),
-                target.get("max_retries"),
-                _freeze_json_value(target.get("state_columns")),
-                target.get("independent_scoring", False),
-                target.get("verbose", False),
-                _freeze_json_value(target.get("headers")),
-                _freeze_json_value(target.get("extra_env_kwargs")),
-                target.get("api_client_type"),
-                target.get("api_base_url"),
-                target.get("api_key_var"),
-                target.get("eval_name"),
+            # targets that differ only by environment identity share one submission
+            group_key = _freeze_json_value(
+                {
+                    key: value
+                    for key, value in target.items()
+                    if key not in ("env_id", "env_dir_path")
+                }
             )
             if group_key not in grouped_targets:
                 grouped_targets[group_key] = {
@@ -1725,7 +1688,7 @@ def run_eval_cmd(
             for group_key in target_order:
                 group = grouped_targets[group_key]
                 for grouped_target in group["targets"]:
-                    raw_environment = grouped_target.get("environment")
+                    raw_environment = grouped_target["environment"]
                     if raw_environment is not None:
                         # raw v1 configs need no published environment on the platform
                         group["platform_slugs"].append(raw_environment["taskset"]["id"])
@@ -1748,31 +1711,31 @@ def run_eval_cmd(
             for group_key in target_order:
                 group = grouped_targets[group_key]
                 target = group["target"]
-                raw_environment = target.get("environment")
+                raw_environment = target["environment"]
                 hosted_config = HostedEvalConfig(
                     environment_id=group["environment_ids"][0],
                     environment=raw_environment,
                     inference_model=target["model"],
                     num_examples=target["num_examples"],
                     rollouts_per_example=target["rollouts_per_example"],
-                    env_args=target.get("env_args"),
-                    name=target.get("eval_name"),
-                    timeout_minutes=target.get("timeout_minutes"),
-                    allow_sandbox_access=target.get("allow_sandbox_access", True),
-                    allow_instances_access=target.get("allow_instances_access", False),
-                    allow_tunnel_access=target.get("allow_tunnel_access", True),
-                    custom_secrets=target.get("custom_secrets"),
-                    sampling_args=target.get("sampling_args"),
-                    max_concurrent=target.get("max_concurrent"),
-                    max_retries=target.get("max_retries"),
-                    state_columns=target.get("state_columns"),
-                    independent_scoring=target.get("independent_scoring", False),
-                    verbose=target.get("verbose", False),
-                    headers=target.get("headers"),
-                    extra_env_kwargs=target.get("extra_env_kwargs"),
-                    api_client_type=target.get("api_client_type"),
-                    api_base_url=target.get("api_base_url"),
-                    api_key_var=target.get("api_key_var"),
+                    env_args=target["env_args"],
+                    name=target["eval_name"],
+                    timeout_minutes=target["timeout_minutes"],
+                    allow_sandbox_access=target["allow_sandbox_access"],
+                    allow_instances_access=target["allow_instances_access"],
+                    allow_tunnel_access=target["allow_tunnel_access"],
+                    custom_secrets=target["custom_secrets"],
+                    sampling_args=target["sampling_args"],
+                    max_concurrent=target["max_concurrent"],
+                    max_retries=target["max_retries"],
+                    state_columns=target["state_columns"],
+                    independent_scoring=target["independent_scoring"],
+                    verbose=target["verbose"],
+                    headers=target["headers"],
+                    extra_env_kwargs=target["extra_env_kwargs"],
+                    api_client_type=target["api_client_type"],
+                    api_base_url=target["api_base_url"],
+                    api_key_var=target["api_key_var"],
                 )
                 result = _create_hosted_evaluations(
                     hosted_config,
@@ -1814,7 +1777,7 @@ def run_eval_cmd(
 
     run_eval_passthrough(
         environment=environment,
-        passthrough_args=local_passthrough_args,
+        passthrough_args=passthrough_args,
         skip_upload=skip_upload,
         env_path=env_path,
     )

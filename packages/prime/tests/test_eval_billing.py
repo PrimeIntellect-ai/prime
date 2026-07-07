@@ -26,7 +26,7 @@ class DummyConfig:
 
 class DummyPlugin:
     eval_module = "verifiers.v1.cli.eval.main"
-    gepa_module = "verifiers.cli.commands.gepa"
+    gepa_module = "verifiers.scripts.gepa"
 
     def build_module_command(self, module: str, args: list[str]) -> list[str]:
         return [module, *args]
@@ -352,6 +352,11 @@ def test_gepa_run_provider_short_flag_does_not_override_env_dir_path(monkeypatch
         ),
     )
     monkeypatch.setattr("prime_cli.verifiers_bridge._run_command", lambda command, env=None: None)
+    # the provider table lives in verifiers; the venv's verifiers may predate it
+    monkeypatch.setattr(
+        "prime_cli.verifiers_bridge._provider_endpoint",
+        lambda provider: ("https://api.openai.com/v1", "OPENAI_API_KEY"),
+    )
 
     run_gepa_passthrough(
         environment_or_config="single_turn_math",

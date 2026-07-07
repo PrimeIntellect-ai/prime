@@ -37,19 +37,15 @@ EVAL_PREFLIGHT_TIMEOUT = httpx.Timeout(connect=10.0, read=300.0, write=60.0, poo
 MODULE_TO_PRIME_COMMAND = {
     "verifiers.v1.cli.eval.main": "prime eval",
     "verifiers.v1.cli.validate": "prime eval validate",
-    "verifiers.cli.commands.gepa": "prime gepa run",
-    "verifiers.cli.commands.init": "prime env init",
     "verifiers.v1.cli.init": "prime env init",
-    "verifiers.cli.commands.install": "prime env install",
-    "verifiers.cli.commands.build": "prime env build",
-    "verifiers.cli.commands.setup": "prime lab setup",
-    "verifiers.cli.tui": "prime eval view",
+    "verifiers.scripts.gepa": "prime gepa run",
 }
 
 MODULE_TO_CONSOLE_SCRIPT = {
     "verifiers.v1.cli.eval.main": "eval",
     "verifiers.v1.cli.init": "init",
     "verifiers.v1.cli.validate": "validate",
+    "verifiers.scripts.gepa": "vf-gepa",
 }
 
 
@@ -68,16 +64,8 @@ class ResolvedEnvironment:
     local_env_path: Optional[Path] = None
 
 
-@dataclass(frozen=True)
-class EndpointResolution:
-    model: str
-    base_url: str
-
-
 def is_help_request(primary_arg: str, passthrough_args: list[str]) -> bool:
-    if primary_arg in ("-h", "--help"):
-        return True
-    return any(arg in ("-h", "--help") for arg in passthrough_args)
+    return any(arg in ("-h", "--help") for arg in (primary_arg, *passthrough_args))
 
 
 def _sanitize_help_text(help_text: str, module_name: str, prime_command: str) -> str:
@@ -126,7 +114,7 @@ def _sanitize_help_text(help_text: str, module_name: str, prime_command: str) ->
     return sanitized.rstrip() + "\n"
 
 
-def _load_help_text(module_name: str, prime_command: str) -> str:
+def _load_module_help(module_name: str, prime_command: str) -> str:
     plugin = load_verifiers_prime_plugin()
     command = plugin.build_module_command(module_name, ["--help"])
     result = subprocess.run(command, capture_output=True, text=True)
@@ -137,17 +125,12 @@ def _load_help_text(module_name: str, prime_command: str) -> str:
         help_text += result.stderr
 
     if not help_text.strip():
-        raise RuntimeError(f"Unable to load help text from {module_name}")
+        console.print(
+            f"[red]Failed to load help for {prime_command}:[/red] no output from {module_name}"
+        )
+        raise typer.Exit(1)
 
     return _sanitize_help_text(help_text, module_name, prime_command)
-
-
-def _load_module_help(module_name: str, prime_command: str) -> str:
-    try:
-        return _load_help_text(module_name, prime_command)
-    except Exception as exc:
-        console.print(f"[red]Failed to load help for {prime_command}:[/red] {exc}")
-        raise typer.Exit(1) from exc
 
 
 def _write_help(text: str) -> None:
@@ -198,29 +181,13 @@ def print_env_init_help() -> None:
     _write_help(_load_module_help(plugin.init_module, "prime env init"))
 
 
-def print_env_build_help() -> None:
-    plugin = load_verifiers_prime_plugin()
-    _write_help(_load_module_help(plugin.build_module, "prime env build"))
-
-
 def print_validate_help() -> None:
     plugin = load_verifiers_prime_plugin()
     _write_help(_load_module_help(plugin.validate_module, "prime eval validate"))
 
 
-def run_eval_view(env_dir: Optional[str], outputs_dir: Optional[str], limit: int = 50) -> None:
-    from prime_lab_app import run_eval_view as run_prime_eval_view
-
-    run_prime_eval_view(
-        limit=limit,
-        env_dir=env_dir or "./environments",
-        outputs_dir=outputs_dir or "./outputs",
-        workspace=Path.cwd(),
-    )
-
-
 def _parse_value_option(
-    args: list[str], long_flag: str, short_flag: Optional[str]
+    args: list[str], long_flag: str, short_flag: Optional[str] = None
 ) -> Optional[str]:
     for idx, arg in enumerate(args):
         if arg == long_flag or arg == short_flag:
@@ -232,15 +199,6 @@ def _parse_value_option(
         if short_flag and arg.startswith(short_flag) and len(arg) > len(short_flag):
             return arg[len(short_flag) :]
     return None
-
-
-def _has_flag(args: list[str], long_flag: str, short_flag: str) -> bool:
-    for arg in args:
-        if arg == long_flag or arg == short_flag:
-            return True
-        if arg.startswith(f"{long_flag}="):
-            return True
-    return False
 
 
 def _pop_value_option(args: list[str], long_flag: str) -> Optional[str]:
@@ -256,48 +214,29 @@ def _pop_value_option(args: list[str], long_flag: str) -> Optional[str]:
     return None
 
 
-def _resolve_endpoint_alias(args: list[str], model: str) -> Optional[EndpointResolution]:
+def _is_endpoint_alias(args: list[str], model: str) -> bool:
+    """Whether `model` names an endpoints.toml alias gepa resolves natively."""
     endpoints_path = _parse_value_option(args, "--endpoints-path", "-e") or DEFAULT_ENDPOINTS_PATH
-    try:
-        from verifiers.utils.eval_utils import load_endpoints, resolve_endpoints_file
-    except ImportError:
-        return None
+    from verifiers.utils.eval_utils import load_endpoints, resolve_endpoints_file
 
     endpoints_file = resolve_endpoints_file(endpoints_path)
     if endpoints_file is None or not endpoints_file.exists():
-        return None
-
+        return False
     try:
-        endpoints = load_endpoints(str(endpoints_file))
-    except (ImportError, AttributeError, OSError, ValueError):
-        return None
-
-    endpoint_group = endpoints.get(model)
-    if not endpoint_group:
-        return None
-
-    endpoint = endpoint_group[0]
-    return EndpointResolution(
-        model=str(endpoint.get("model") or model),
-        base_url=str(endpoint.get("url") or "").rstrip("/"),
-    )
+        return model in load_endpoints(str(endpoints_file))
+    except (OSError, ValueError):
+        return False
 
 
-def _provider_base_url(provider: Optional[str]) -> Optional[str]:
-    if not provider:
-        return None
-    try:
-        from verifiers.v1.cli.eval.compat import PROVIDER_CONFIGS
-    except ImportError:
-        return None
+def _provider_endpoint(provider: str) -> tuple[str, str]:
+    """Resolve the v0 --provider shorthand to (base_url, api_key_var)."""
+    from verifiers.v1.cli.eval.compat import PROVIDER_CONFIGS
 
     provider_config = PROVIDER_CONFIGS.get(provider)
-    if not provider_config:
-        return None
-    url = provider_config.get("url")
-    if not isinstance(url, str) or not url:
-        return None
-    return url.rstrip("/")
+    if provider_config is None or provider_config.get("client_type"):
+        console.print(f"[red]Error:[/red] unsupported provider '{provider}'.")
+        raise typer.Exit(1)
+    return provider_config["url"].rstrip("/"), provider_config["key"]
 
 
 def _prime_runtime_env(config: Config) -> dict[str, str]:
@@ -309,10 +248,6 @@ def _prime_runtime_env(config: Config) -> dict[str, str]:
     else:
         env.pop("PRIME_TEAM_ID", None)
     return env
-
-
-def _env_dir_path_arg(args: list[str]) -> str:
-    return _parse_value_option(args, "--env-dir-path", None) or DEFAULT_ENV_DIR_PATH
 
 
 def _is_config_target(raw: str) -> bool:
@@ -348,9 +283,7 @@ def _split_owner_and_name(slug: str) -> Optional[tuple[str, str]]:
     return owner, name
 
 
-def _environment_url_from_slug(slug: str) -> Optional[str]:
-    if _split_owner_and_name(slug) is None:
-        return None
+def _environment_url_from_slug(slug: str) -> str:
     frontend_url = Config().frontend_url.rstrip("/")
     return f"{frontend_url}/dashboard/environments/{slug}"
 
@@ -432,7 +365,7 @@ def _fetch_user_slug(client: APIClient) -> Optional[str]:
     except APIError:
         return None
 
-    data = response.get("data") if isinstance(response, dict) else None
+    data = response.get("data")
     if not isinstance(data, dict):
         return None
 
@@ -451,7 +384,7 @@ def _fetch_active_team_slug(client: APIClient, active_team_id: Optional[str]) ->
     except APIError:
         return None
 
-    teams = response.get("data") if isinstance(response, dict) else None
+    teams = response.get("data")
     if not isinstance(teams, list):
         return None
 
@@ -475,14 +408,11 @@ def _fetch_remote_env_details(
         response = client.get(f"/environmentshub/{owner_slug}/{env_name}/@{version}")
     except APIError:
         return None
-    details = response.get("data", response) if isinstance(response, dict) else None
+    details = response.get("data", response)
     return details if isinstance(details, dict) else {}
 
 
-def _extract_remote_version_details(details: Optional[dict]) -> tuple[Optional[str], Optional[str]]:
-    if not isinstance(details, dict):
-        return None, None
-
+def _extract_remote_version_details(details: dict) -> tuple[Optional[str], Optional[str]]:
     version_block = details.get("latest_version")
     if isinstance(version_block, dict):
         semantic = version_block.get("semantic_version")
@@ -503,9 +433,9 @@ def _resolve_local_env_display(
     local_dir: Path,
     client: Optional[APIClient],
 ) -> tuple[str, Optional[str], Optional[str], bool, Optional[str]]:
-    metadata = get_environment_metadata(local_dir)
-    owner = metadata.get("owner") if isinstance(metadata, dict) else None
-    tracked_name = metadata.get("name") if isinstance(metadata, dict) else None
+    metadata = get_environment_metadata(local_dir) or {}
+    owner = metadata.get("owner")
+    tracked_name = metadata.get("name")
     tracked_slug: Optional[str] = None
     if isinstance(owner, str) and isinstance(tracked_name, str) and owner and tracked_name:
         tracked_slug = f"{owner}/{tracked_name}"
@@ -530,11 +460,11 @@ def _resolve_local_env_display(
 
     remote_version, remote_hash = _extract_remote_version_details(remote_details)
     local_hash = _compute_local_content_hash(local_dir)
-    local_meta_hash = metadata.get("content_hash") if isinstance(metadata, dict) else None
+    local_meta_hash = metadata.get("content_hash")
     if local_hash is None and _is_valid_hash(local_meta_hash):
         local_hash = str(local_meta_hash)
 
-    local_version = metadata.get("version") if isinstance(metadata, dict) else None
+    local_version = metadata.get("version")
     if not isinstance(local_version, str):
         local_version = None
 
@@ -586,15 +516,13 @@ def _resolve_environment_reference(
     base_ref, version = _split_version(env_reference)
 
     if _is_slug_reference(base_ref):
-        parts = base_ref.split("/", 1)
-        if len(parts) != 2 or not parts[0] or not parts[1]:
+        parts = _split_owner_and_name(base_ref)
+        if parts is None:
             console.print(f"[red]Invalid environment reference: {env_reference}[/red]")
             raise typer.Exit(1)
-        owner, env_name = parts
-        install_slug = f"{owner}/{env_name}"
-        if version:
-            install_slug = f"{install_slug}@{version}"
-        upstream_slug = f"{owner}/{env_name}"
+        env_name = parts[1]
+        upstream_slug = base_ref
+        install_slug = f"{upstream_slug}@{version}" if version else upstream_slug
         return ResolvedEnvironment(
             original=env_reference,
             env_name=env_name,
@@ -675,10 +603,8 @@ def _resolve_environment_reference(
     selected_label, selected_owner = _choose_remote_owner(
         env_name, [(label, slug) for label, slug, _ in found]
     )
-    install_slug = f"{selected_owner}/{env_name}"
-    if version:
-        install_slug = f"{install_slug}@{version}"
     upstream_slug = f"{selected_owner}/{env_name}"
+    install_slug = f"{upstream_slug}@{version}" if version else upstream_slug
     console.print(
         f"[dim]Using remote environment {selected_owner}/{env_name} ({selected_label})[/dim]"
     )
@@ -701,28 +627,20 @@ def _run_command(command: list[str], env: Optional[dict[str, str]] = None) -> No
 
 
 def _install_local_environment(env_path: Path) -> None:
-    """Make a local checkout importable for verifiers (which no longer installs anything)."""
+    """Make a local checkout importable; verifiers itself never installs environments."""
     from .commands.env import _uv_pip_command
 
     _run_command(_uv_pip_command("install", "-e", str(env_path)))
 
 
-def _is_installed(env_name: str, version: Optional[str]) -> bool:
-    from .commands.env import _is_environment_installed
-
-    return _is_environment_installed(env_name, version)
-
-
 def _install_remote_environment(env_slug: str) -> None:
-    from .commands.env import _install_single_environment
+    from .commands.env import _install_single_environment, _is_environment_installed
 
+    # resolution only hands us owner/name[@version] slugs
     slug_no_version, version = _split_version(env_slug)
-    if "/" not in slug_no_version:
-        console.print(f"[red]Invalid remote environment slug: {env_slug}[/red]")
-        raise typer.Exit(1)
-    _, env_name = slug_no_version.split("/", 1)
+    env_name = slug_no_version.split("/", 1)[1]
 
-    if _is_installed(env_name, version):
+    if _is_environment_installed(env_name, version):
         return
 
     if not _install_single_environment(env_slug):
@@ -738,15 +656,14 @@ def _prepare_single_environment(env_reference: str, env_dir_path: str) -> Resolv
         _install_local_environment(resolved.local_env_path)
         return resolved
     if resolved.install_mode == "remote":
-        if resolved.install_slug is None:
-            console.print(f"[red]Could not resolve remote slug for {env_reference}[/red]")
-            raise typer.Exit(1)
         if resolved.env_display_id:
             console.print(f"[dim]Resolved source: {resolved.env_display_id}[/dim]")
         _install_remote_environment(resolved.install_slug)
         return resolved
 
-    if not _is_installed(resolved.env_name, version=None):
+    from .commands.env import _is_environment_installed
+
+    if not _is_environment_installed(resolved.env_name):
         console.print(
             f"[yellow]Warning:[/yellow] No local checkout or matching remote environment found "
             f"for '{resolved.env_name}'. Continuing with installed package resolution."
@@ -767,13 +684,8 @@ def _prepare_v1_environment(env_reference: str, env_dir_path: str) -> ResolvedEn
         _install_local_environment(resolved.local_env_path)
     elif resolved.install_mode == "remote":
         console.print(f"[dim]Resolved source: {resolved.env_display_id}[/dim]")
-        _install_remote_environment(resolved.install_slug or env_reference)
+        _install_remote_environment(resolved.install_slug)
     return resolved
-
-
-def _env_name_from_reference(env_reference: str) -> str:
-    base_ref, _version = _split_version(env_reference)
-    return base_ref.rsplit("/", 1)[-1]
 
 
 def _collect_gepa_config_env(config_path: Path, fallback_env_dir: str) -> Optional[tuple[str, str]]:
@@ -786,14 +698,13 @@ def _collect_gepa_config_env(config_path: Path, fallback_env_dir: str) -> Option
         )
         return None
 
-    if not isinstance(raw, dict):
-        return None
-
-    env_table = raw.get("env")
-    if not isinstance(env_table, dict):
-        return None
-
-    env_id = env_table.get("env_id")
+    # current gepa configs: top-level `id` or an `[[env]]` list; old ones: an `[env]`
+    # table with `env_id`
+    env_entries = raw.get("env")
+    first_env = env_entries[0] if isinstance(env_entries, list) and env_entries else env_entries
+    env_id = raw.get("id")
+    if not env_id and isinstance(first_env, dict):
+        env_id = first_env.get("id") or first_env.get("env_id")
     if not isinstance(env_id, str) or not env_id:
         return None
 
@@ -803,39 +714,52 @@ def _collect_gepa_config_env(config_path: Path, fallback_env_dir: str) -> Option
     return (env_id, env_dir_path)
 
 
+# v0-era short flags rewritten to the long forms GEPAConfig's typed CLI accepts.
+_GEPA_SHORT_FLAGS = {
+    "-m": "--model",
+    "-b": "--api-base-url",
+    "-k": "--api-key-var",
+    "-p": "--provider",
+    "-e": "--endpoints-path",
+}
+
+
 def _add_default_inference_and_key_args(
     passthrough_args: list[str], config: Config
-) -> tuple[list[str], dict[str, str], str, str]:
-    args = list(passthrough_args)
+) -> tuple[list[str], dict[str, str]]:
+    """Normalize gepa args for verifiers' typed CLI (long flags only, no --provider) and
+    default the base URL to the configured Prime inference URL. An endpoints.toml alias
+    given as the model is left alone — gepa resolves it natively."""
+    args = [_GEPA_SHORT_FLAGS.get(arg, arg) for arg in passthrough_args]
     env = _prime_runtime_env(config)
 
-    model = _parse_value_option(args, "--model", "-m") or DEFAULT_MODEL
-    configured_base = (config.inference_url or "").strip().rstrip("/")
-    base = _parse_value_option(args, "--api-base-url", "-b")
-    provider = _parse_value_option(args, "--provider", "-p")
-    api_key_var = _parse_value_option(args, "--api-key-var", "-k")
+    model = _parse_value_option(args, "--model") or DEFAULT_MODEL
+    base = _parse_value_option(args, "--api-base-url")
+    api_key_var = _parse_value_option(args, "--api-key-var")
+
+    # GEPAConfig has no provider field: resolve the shorthand here and strip it.
+    provider = _pop_value_option(args, "--provider")
+    if provider is not None:
+        provider_base, provider_key_var = _provider_endpoint(provider)
+        if base is None:
+            base = provider_base
+            args.extend(["--api-base-url", base])
+        if api_key_var is None:
+            api_key_var = provider_key_var
+            args.extend(["--api-key-var", api_key_var])
+
+    if base is None and not _is_endpoint_alias(args, model):
+        base = (config.inference_url or "").strip().rstrip("/")
+        if not base:
+            console.print(
+                "[red]Inference URL not configured.[/red] Check [bold]prime config view[/bold]."
+            )
+            raise typer.Exit(1)
+        args.extend(["--api-base-url", base])
+
     if api_key_var is not None and api_key_var != "PRIME_API_KEY":
         env.pop("PRIME_API_KEY", None)
-
-    if base:
-        base = base.rstrip("/")
-    elif provider is not None:
-        base = _provider_base_url(provider) or ""
-    elif endpoint := _resolve_endpoint_alias(args, model):
-        return args, env, endpoint.model, endpoint.base_url
-    elif configured_base:
-        base = configured_base
-        args.extend(["-b", base])
-    else:
-        console.print(
-            "[red]Inference URL not configured.[/red] Check [bold]prime config view[/bold]."
-        )
-        raise typer.Exit(1)
-
-    if api_key_var is None and provider is None:
-        args.extend(["-k", "PRIME_API_KEY"])
-
-    return args, env, model, base
+    return args, env
 
 
 def _validate_model(model: str, inference_base_url: str, configured_base_url: str) -> None:
@@ -936,6 +860,15 @@ class V1EvalRun:
     is_config: bool = False
 
 
+def _require_api_key(config: Config) -> None:
+    if not config.api_key:
+        console.print(
+            "[red]No API key configured.[/red] "
+            "Run [bold]prime login[/bold] or [bold]prime config set-api-key[/bold]."
+        )
+        raise typer.Exit(1)
+
+
 def run_eval_passthrough(
     environment: str,
     passthrough_args: list[str],
@@ -944,14 +877,9 @@ def run_eval_passthrough(
     env_path: Optional[str],
 ) -> None:
     config = Config()
-    if not config.api_key:
-        console.print(
-            "[red]No API key configured.[/red] "
-            "Run [bold]prime login[/bold] or [bold]prime config set-api-key[/bold]."
-        )
-        raise typer.Exit(1)
+    _require_api_key(config)
 
-    resume_dir = _parse_value_option(passthrough_args, "--resume", None)
+    resume_dir = _parse_value_option(passthrough_args, "--resume")
     # a flag-like "value" means --resume had no directory; let verifiers report it
     if resume_dir is not None and not resume_dir.startswith("-"):
         run = _resume_v1_eval(resume_dir, passthrough_args, config)
@@ -965,22 +893,16 @@ def run_validate_passthrough(environment: str, passthrough_args: list[str]) -> N
     environment resolution and auth env vars. Validate is fire-and-forget — nothing is
     written to disk or uploaded, so there is no model, output-dir, resume, or dry-run path."""
     config = Config()
-    if not config.api_key:
-        console.print(
-            "[red]No API key configured.[/red] "
-            "Run [bold]prime login[/bold] or [bold]prime config set-api-key[/bold]."
-        )
-        raise typer.Exit(1)
+    _require_api_key(config)
 
     target = environment.removeprefix("@")
-    is_config = _is_config_target(target)
     args = list(passthrough_args)
     env = _prime_runtime_env(config)
 
     # prime-only option: verifiers must not see it
     env_dir_path = _pop_value_option(args, "--env-dir-path") or DEFAULT_ENV_DIR_PATH
 
-    if is_config:
+    if _is_config_target(target):
         # install hub refs and pin the local name into a config copy before verifiers parses
         target, _ = _pin_config_env(toml.load(target), target, env_dir_path)
         # pydantic-config reads a root config file as two tokens: `@ path`
@@ -1035,7 +957,8 @@ def _resume_v1_eval(resume_dir: str, passthrough_args: list[str], config: Config
     output_dir = Path(resume_dir)
     saved_config = toml.load(output_dir / "config.toml")
     model = saved_config["model"]
-    env_name = _env_name_from_reference(saved_config["taskset"]["id"])
+    taskset_ref, _version = _split_version(saved_config["taskset"]["id"])
+    env_name = taskset_ref.rsplit("/", 1)[-1]
     saved_headers = saved_config.get("client", {}).get("headers", {})
     display_id = saved_headers.get(INTERNAL_ENV_DISPLAY_HEADER)
     # display values like "name (local - ahead of org/name)" carry a "/" but are not slugs
@@ -1048,6 +971,87 @@ def _resume_v1_eval(resume_dir: str, passthrough_args: list[str], config: Config
     )
 
 
+# The frozen v0 eval argv hosted sandboxes still emit, mapped to the v0 config fields
+# verifiers' compat layer converts. Flags the v1 CLI parses natively (--model, --verbose,
+# --max-concurrent, --extra-env-kwargs) stay on the command line.
+_V0_EVAL_VALUE_FLAGS = {
+    "--env-args": "env_args",
+    "--sampling-args": "sampling_args",
+    "--max-retries": "max_retries",
+    "--state-columns": "state_columns",
+    "--api-client-type": "api_client_type",
+    "--api-base-url": "api_base_url",
+    "--api-key-var": "api_key_var",
+    "--num-examples": "num_examples",
+    "--rollouts-per-example": "rollouts_per_example",
+}
+_V0_EVAL_TRIGGER_FLAGS = (
+    set(_V0_EVAL_VALUE_FLAGS)
+    | {"--save-results", "--debug", "--disable-tui", "--independent-scoring", "--header"}
+) - {"--num-examples", "--rollouts-per-example"}  # both are valid v1 aliases
+
+
+def _pop_v0_eval_args(args: list[str]) -> tuple[dict, bool]:
+    """Pop the v0 eval dialect out of argv; returns (v0 fields, tui disabled).
+
+    Only kicks in when a v0-only flag is present (hosted sandboxes and old scripts);
+    pure v1 invocations pass through untouched."""
+    present = {arg.split("=", 1)[0] for arg in args}
+    tui_disabled = False
+    for flag in ("--debug", "--disable-tui"):
+        while flag in args:
+            args.remove(flag)
+            tui_disabled = True
+    if not present & _V0_EVAL_TRIGGER_FLAGS:
+        return {}, tui_disabled
+
+    fields: dict = {}
+    while "--save-results" in args:
+        args.remove("--save-results")  # v1 always saves
+    while "--independent-scoring" in args:
+        args.remove("--independent-scoring")
+        fields["independent_scoring"] = True
+    for flag, field in _V0_EVAL_VALUE_FLAGS.items():
+        while (value := _pop_value_option(args, flag)) is not None:
+            fields[field] = value
+    headers = []
+    while (value := _pop_value_option(args, "--header")) is not None:
+        headers.append(value)
+    if headers:
+        fields["header"] = headers
+
+    try:
+        for field in ("env_args", "sampling_args"):
+            if isinstance(fields.get(field), str):
+                fields[field] = json.loads(fields[field])
+        for field in ("num_examples", "rollouts_per_example"):
+            if field in fields:
+                fields[field] = int(fields[field])
+    except (json.JSONDecodeError, ValueError) as exc:
+        console.print(f"[red]Error:[/red] invalid v0 eval flag value: {exc}")
+        raise typer.Exit(2) from exc
+    return fields, tui_disabled
+
+
+def _convert_v0_eval_args(target: str, fields: dict) -> str:
+    """Convert popped v0 flags + the env target into a runnable v1 config file."""
+    from verifiers.v1.cli.eval.compat import build_v1_eval_config, write_converted_eval_config
+
+    fields["id"] = target
+    try:
+        converted, warnings = build_v1_eval_config(fields)
+    except ValueError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(2) from exc
+    for warning in warnings:
+        console.print(f"[yellow]warning:[/yellow] {warning}")
+    return str(
+        write_converted_eval_config(
+            converted, header_comment=f"converted v0 eval flags by prime ({target})"
+        )
+    )
+
+
 def _run_v1_eval(
     environment: str,
     passthrough_args: list[str],
@@ -1056,12 +1060,25 @@ def _run_v1_eval(
     """Prepare and run a fresh v1 eval: fill in prime's model/base-url/output-dir defaults,
     make the environment importable, and tag the run with a job id header.
 
-    Legacy (v0) inputs need no handling here: verifiers auto-detects v0 env ids and
-    converts transitional configs at its own ingestion boundary."""
+    Transitional configs convert at verifiers' own ingestion boundary; the frozen v0
+    *argv* dialect (hosted sandboxes) converts here via the same compat layer."""
     target = environment.removeprefix("@")
     is_config = _is_config_target(target)
     args = list(passthrough_args)
     env = _prime_runtime_env(config)
+
+    v0_fields, tui_disabled = _pop_v0_eval_args(args)
+    if tui_disabled:
+        args.append("--no-rich")
+    if v0_fields:
+        if is_config:
+            console.print(
+                "[red]Error:[/red] v0 eval flags can't be combined with a config file; "
+                "set them in the config instead."
+            )
+            raise typer.Exit(2)
+        target = _convert_v0_eval_args(target, v0_fields)
+        is_config = True
 
     config_data: dict = toml.load(target) if is_config else {}
     config_model = config_data.get("model")
@@ -1073,7 +1090,7 @@ def _run_v1_eval(
     configured_base_url = (config.inference_url or "").strip().rstrip("/")
     config_client = config_data.get("client")
     config_base_url = config_client.get("base_url") if isinstance(config_client, dict) else None
-    cli_base_url = _parse_value_option(args, "--client.base-url", None)
+    cli_base_url = _parse_value_option(args, "--client.base-url")
     base_url = cli_base_url or config_base_url or configured_base_url
     if not base_url:
         console.print(
@@ -1164,17 +1181,16 @@ def _upload_v1_results(run: V1EvalRun, *, skip_upload: bool, env_path: Optional[
         console.print("[dim]No rollout results produced.[/dim]")
         return
 
+    from collections import Counter
+
     from verifiers.v1.cli.output import read_upload_data
 
     upload = read_upload_data(run.output_dir)
 
     # `prime eval view` only lists runs that have a metadata.json; keep writing one.
-    rollout_counts: dict[object, int] = {}
-    for row in upload.results:
-        if "example_id" in row:
-            rollout_counts[row["example_id"]] = rollout_counts.get(row["example_id"], 0) + 1
+    rollout_counts = Counter(row["example_id"] for row in upload.results if "example_id" in row)
     metadata = {
-        "env": run.env_name,
+        "env": run.env_name or upload.env,  # resume runs carry no env_name
         "model": upload.model_name,
         "num_examples": len(rollout_counts),
         "avg_reward": upload.metrics.get("reward", 0.0),
@@ -1226,16 +1242,10 @@ def _upload_v1_results(run: V1EvalRun, *, skip_upload: bool, env_path: Optional[
 def run_gepa_passthrough(environment_or_config: str, passthrough_args: list[str]) -> None:
     plugin = load_verifiers_prime_plugin()
     config = Config()
+    _require_api_key(config)
 
-    if not config.api_key:
-        console.print(
-            "[red]No API key configured.[/red] "
-            "Run [bold]prime login[/bold] or [bold]prime config set-api-key[/bold]."
-        )
-        raise typer.Exit(1)
-
-    args, env, _model, _base_url = _add_default_inference_and_key_args(passthrough_args, config)
-    env_dir_path = _env_dir_path_arg(args)
+    args, env = _add_default_inference_and_key_args(passthrough_args, config)
+    env_dir_path = _parse_value_option(args, "--env-dir-path") or DEFAULT_ENV_DIR_PATH
 
     run_target = environment_or_config
     if _is_config_target(environment_or_config):

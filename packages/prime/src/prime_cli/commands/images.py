@@ -753,6 +753,11 @@ def list_images(
     all_images: bool = typer.Option(
         False, "--all", "-a", help="[Deprecated] Show all accessible images (personal + team)"
     ),
+    platform_image: bool = typer.Option(
+        False,
+        "--platform-image",
+        help="List org-less platform images (admins only)",
+    ),
     page: int = typer.Option(1, "--page", "-p", help="Page number"),
     num: int = typer.Option(50, "--num", "-n", help="Items per page (max 250)"),
 ):
@@ -772,6 +777,7 @@ def list_images(
         prime images list --num 100
         prime images list --page 2
         prime images list --output json
+        prime images list --platform-image
     """
     validate_output_format(output, console)
 
@@ -780,6 +786,9 @@ def list_images(
         raise typer.Exit(1)
     if num > 250:
         console.print("[red]Error:[/red] --num cannot exceed 250")
+        raise typer.Exit(1)
+    if platform_image and config.team_id:
+        console.print("[red]Error: Platform images cannot be listed in a team context[/red]")
         raise typer.Exit(1)
 
     if all_images and output != "json":
@@ -795,7 +804,9 @@ def list_images(
 
         # Build query params
         params: dict[str, str] = {"limit": str(num), "offset": str(offset)}
-        if config.team_id:
+        if platform_image:
+            params["ownerScope"] = "platform"
+        elif config.team_id:
             params["teamId"] = config.team_id
         if search:
             params["search"] = search
@@ -809,6 +820,11 @@ def list_images(
             output_data_as_json(response, console)
             return
 
+        push_hint: str = (
+            "Push an image with: [bold]prime images push <name>:<tag> --platform-image[/bold]"
+            if platform_image
+            else "Push an image with: [bold]prime images push <name>:<tag>[/bold]"
+        )
         if not images:
             if has_total_count and total_count == 0:
                 if search:
@@ -818,7 +834,7 @@ def list_images(
                     )
                 else:
                     console.print("[yellow]No images or builds found.[/yellow]")
-                    console.print("Push an image with: [bold]prime images push <name>:<tag>[/bold]")
+                    console.print(push_hint)
             elif has_total_count:
                 console.print(
                     f"[yellow]No images on page {page}. Total: {total_count} image(s).[/yellow]"
@@ -832,13 +848,16 @@ def list_images(
                 console.print("Try a different search term or run without [bold]--search[/bold].")
             else:
                 console.print("[yellow]No images or builds found.[/yellow]")
-                console.print("Push an image with: [bold]prime images push <name>:<tag>[/bold]")
+                console.print(push_hint)
             return
 
         # Table output
+        # Platform listings are never team-scoped (rejected above).
         is_team_listing: bool = bool(config.team_id)
         title: str
-        if is_team_listing:
+        if platform_image:
+            title = "Platform Docker Images"
+        elif is_team_listing:
             title = f"Team Docker Images (team: {config.team_id})"
         else:
             title = "Personal Docker Images"

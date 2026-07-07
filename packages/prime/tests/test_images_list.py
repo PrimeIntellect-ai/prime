@@ -770,3 +770,60 @@ def test_list_cli_newest_group_first(run_images_list):
     new_idx = result.output.find("new-image")
     old_idx = result.output.find("old-image")
     assert 0 <= new_idx < old_idx
+
+
+# ---------------------------------------------------------------------------
+# --platform-image — org-less platform image listing (admins only)
+# ---------------------------------------------------------------------------
+
+
+def _platform_row(**kw: Any) -> ImageRow:
+    row = _container(**kw)
+    name = row["imageName"]
+    tag = row["imageTag"]
+    row.update({"ownerType": "platform", "displayRef": f"{name}:{tag}"})
+    return row
+
+
+def test_list_platform_image_forwards_owner_scope(monkeypatch):
+    result, captured = _run_list_capturing_params(
+        monkeypatch,
+        ["--platform-image"],
+        payload=[_platform_row(image="ubuntu:22.04", pushed_at="2026-04-16T22:24:07")],
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["params"].get("ownerScope") == "platform"
+    assert "teamId" not in captured["params"]
+    assert "Platform Docker Images" in result.output
+
+
+def test_list_platform_image_rejected_in_team_context(monkeypatch):
+    result, captured = _run_list_capturing_params(
+        monkeypatch,
+        ["--platform-image"],
+        team_id=TEAM_ID,
+    )
+    assert result.exit_code == 1
+    assert "team context" in result.output
+    # Rejected client-side before any API request is made.
+    assert "params" not in captured
+
+
+def test_list_platform_image_empty_shows_platform_push_hint(monkeypatch):
+    result, _ = _run_list_capturing_params(
+        monkeypatch,
+        ["--platform-image"],
+        payload=[],
+    )
+    assert result.exit_code == 0, result.output
+    assert "--platform-image" in result.output
+
+
+def test_list_without_platform_flag_omits_owner_scope(monkeypatch):
+    result, captured = _run_list_capturing_params(
+        monkeypatch,
+        [],
+        payload=[_container(pushed_at="2026-04-16T22:24:07")],
+    )
+    assert result.exit_code == 0, result.output
+    assert "ownerScope" not in captured["params"]

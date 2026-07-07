@@ -1,8 +1,6 @@
 import json
-import os
 import re
 import sys
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -13,7 +11,6 @@ else:
     import tomli as tomllib
 
 import click
-import httpx
 import typer
 from prime_sandboxes import (
     APIClient,
@@ -22,7 +19,6 @@ from prime_sandboxes import (
     ImageVisibility,
     UnauthorizedError,
 )
-from rich.progress import BarColumn, Progress, TextColumn, TimeElapsedColumn
 from rich.table import Table
 
 from ..utils import get_console
@@ -44,20 +40,22 @@ from .images_bulk import (
     discover_harbor_tasks,
     run_bulk_jobs,
 )
+from .images_hf import (
+    PARTIAL_DATASET_NOTE,
+    check_split,
+    iter_hf_rows,
+    missing_column_error,
+    normalize_hf_dataset_id,
+    require_string_column,
+    select_hf_config,
+    warn_if_large,
+)
 
 console = get_console()
 
 # How long to pause new submissions after the server's transfer rate limiter
 # rejects one.
 TRANSFER_RATE_LIMIT_PAUSE_SECONDS = 15.0
-
-HF_DATASETS_SERVER_URL = "https://datasets-server.huggingface.co"
-HF_ROWS_PAGE_LENGTH = 100
-LARGE_DATASET_WARN_BYTES = 500_000_000
-HF_REQUEST_TIMEOUT_SECONDS = 30.0
-HF_REQUEST_MAX_ATTEMPTS = 9
-HF_REQUEST_BACKOFF_SECONDS = 2.0
-HF_REQUEST_BACKOFF_MAX_SECONDS = 60.0
 
 _TRANSFER_MANIFEST_KEYS = {"source", "image", "platform"}
 
@@ -315,96 +313,6 @@ def load_harbor_transfer_specs(
 # ---------------------------------------------------------------------------
 
 
-def normalize_hf_dataset_id(raw: str) -> str:
-    """Accept 'org/name', hf://datasets/... and huggingface.co dataset URLs."""
-    dataset = (raw or "").strip()
-    for prefix in (
-        "hf://datasets/",
-        "https://huggingface.co/datasets/",
-        "http://huggingface.co/datasets/",
-        "huggingface.co/datasets/",
-    ):
-        if dataset.startswith(prefix):
-            dataset = dataset[len(prefix) :]
-            dataset = dataset.split("?", 1)[0].split("#", 1)[0]
-            # Drop trailing URL parts like /viewer/default/train.
-            parts = [part for part in dataset.split("/") if part]
-            dataset = "/".join(parts[:2])
-            break
-    dataset = dataset.strip("/")
-    if not dataset or dataset.count("/") > 1:
-        raise BulkPushValidationError(
-            [f"invalid Hugging Face dataset '{raw}' (expected 'org/name' or a dataset URL)"]
-        )
-    return dataset
-
-
-def _hf_get(path: str, params: dict[str, Any]) -> dict[str, Any]:
-    """GET from the HF datasets-server with retries on transient failures.
-
-    Uses HF_TOKEN from the environment for gated/private datasets. The
-    datasets-server rate limit is per IP and clears within about a minute, so
-    429/5xx retries back off long enough to ride out a full window, honoring
-    Retry-After when the server sends one.
-    """
-    token = os.environ.get("HF_TOKEN")
-    headers = {"Authorization": f"Bearer {token}"} if token else {}
-    url = f"{HF_DATASETS_SERVER_URL}{path}"
-    delay = HF_REQUEST_BACKOFF_SECONDS
-    for attempt in range(1, HF_REQUEST_MAX_ATTEMPTS + 1):
-        retry_delay = delay
-        delay = min(delay * 2, HF_REQUEST_BACKOFF_MAX_SECONDS)
-        try:
-            response = httpx.get(
-                url, params=params, headers=headers, timeout=HF_REQUEST_TIMEOUT_SECONDS
-            )
-        except httpx.HTTPError as e:
-            if attempt == HF_REQUEST_MAX_ATTEMPTS:
-                raise BulkPushValidationError([f"Hugging Face request failed: {e}"])
-            time.sleep(retry_delay)
-            continue
-        if response.status_code == 429 or response.status_code >= 500:
-            if attempt == HF_REQUEST_MAX_ATTEMPTS:
-                rate_limit_hint = (
-                    " (rate limited — wait a minute and re-run)"
-                    if response.status_code == 429
-                    else ""
-                )
-                raise BulkPushValidationError(
-                    [
-                        f"Hugging Face request failed with HTTP "
-                        f"{response.status_code}: {url}{rate_limit_hint}"
-                    ]
-                )
-            retry_after = response.headers.get("retry-after")
-            if retry_after:
-                try:
-                    retry_delay = max(retry_delay, float(retry_after))
-                except ValueError:
-                    pass
-            console.print(
-                f"[dim]Hugging Face returned HTTP {response.status_code}; "
-                f"retrying in {int(retry_delay)}s...[/dim]"
-            )
-            time.sleep(retry_delay)
-            continue
-        if response.status_code != 200:
-            try:
-                detail = response.json().get("error") or response.text
-            except ValueError:
-                detail = response.text
-            raise BulkPushValidationError(
-                [
-                    f"Hugging Face request failed with HTTP {response.status_code} "
-                    f"({detail}). The dataset may be private/gated (set HF_TOKEN) or have "
-                    "the dataset viewer disabled — as a fallback, extract the image "
-                    "references yourself and use --manifest"
-                ]
-            )
-        return response.json()
-    raise AssertionError("unreachable")
-
-
 def load_hf_specs(
     dataset: str,
     *,
@@ -419,130 +327,33 @@ def load_hf_specs(
     `datasets` dependency), dedupes identical references preserving order,
     and returns (specs, notes) where notes are informational messages.
     """
-    dataset_id = normalize_hf_dataset_id(dataset)
+    ds = select_hf_config(dataset, config)
+    dataset_id = ds.dataset_id
     notes: list[str] = []
 
-    info = _hf_get("/info", {"dataset": dataset_id})
-    configs = info.get("dataset_info")
-    if not isinstance(configs, dict) or not configs:
-        raise BulkPushValidationError([f"no dataset info available for '{dataset_id}'"])
-    if config is None:
-        if len(configs) > 1:
-            raise BulkPushValidationError(
-                [
-                    f"dataset '{dataset_id}' has multiple configs "
-                    f"({', '.join(sorted(configs))}); choose one with --hf-config"
-                ]
-            )
-        config = next(iter(configs))
-    elif config not in configs:
-        raise BulkPushValidationError(
-            [
-                f"config '{config}' not found in dataset '{dataset_id}' "
-                f"(available: {', '.join(sorted(configs))})"
-            ]
-        )
-    config_info = configs.get(config) or {}
-
-    features = config_info.get("features") or {}
     if column is None:
-        raise BulkPushValidationError(
-            [
-                "--column is required with --hf (columns in "
-                f"'{dataset_id}': {', '.join(sorted(features)) or 'unknown'})"
-            ]
-        )
-    if features and column not in features:
-        raise BulkPushValidationError(
-            [
-                f"column '{column}' not found in dataset '{dataset_id}' "
-                f"(columns: {', '.join(sorted(features))})"
-            ]
-        )
-    # Reject columns whose feature type cannot hold image reference strings
-    # (e.g. actual pictures, nested lists) before submitting anything.
-    feature_spec = features.get(column) if isinstance(features, dict) else None
-    if feature_spec is not None and not (
-        isinstance(feature_spec, dict)
-        and feature_spec.get("_type") == "Value"
-        and feature_spec.get("dtype") in ("string", "large_string")
-    ):
-        raise BulkPushValidationError(
-            [
-                f"column '{column}' in '{dataset_id}' is not a string column, "
-                "so it cannot hold image references"
-            ]
-        )
-
-    splits = config_info.get("splits")
-    if isinstance(splits, dict) and splits and split not in splits:
-        raise BulkPushValidationError(
-            [
-                f"split '{split}' not found in dataset '{dataset_id}' "
-                f"(available: {', '.join(sorted(splits))})"
-            ]
-        )
-    if info.get("partial"):
-        notes.append(
-            "Warning: the dataset viewer only covers part of this dataset; some rows may be missing"
-        )
-
-    # The rows API returns full rows (a columns filter is not honored), so
-    # reading time scales with total dataset size, not just row count.
-    dataset_size = config_info.get("dataset_size")
-    if isinstance(dataset_size, (int, float)) and dataset_size > LARGE_DATASET_WARN_BYTES:
-        console.print(
-            f"[dim]Dataset rows total ~{dataset_size / 1e9:.1f}GB and the viewer API "
-            "streams full rows, so reading may take a few minutes.[/dim]"
-        )
+        raise missing_column_error("--column", ds)
+    require_string_column(ds, column, reason="it cannot hold image references")
+    check_split(ds, split)
+    if ds.partial:
+        notes.append(PARTIAL_DATASET_NOTE)
+    warn_if_large(ds)
 
     sources: list[tuple[str, int]] = []  # (image ref, first row index), order-preserving
     seen: set[str] = set()
     scanned = 0
     empty_rows = 0
-    offset = 0
-    total: Optional[int] = None
-    progress = Progress(
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        TextColumn("{task.completed}/{task.total}"),
-        TimeElapsedColumn(),
-        console=console,
-    )
-    with progress:
-        task_id = progress.add_task("Reading dataset rows", total=None)
-        while True:
-            page = _hf_get(
-                "/rows",
-                {
-                    "dataset": dataset_id,
-                    "config": config,
-                    "split": split,
-                    "offset": offset,
-                    "length": HF_ROWS_PAGE_LENGTH,
-                },
-            )
-            rows = page.get("rows") or []
-            if isinstance(page.get("num_rows_total"), int):
-                total = page["num_rows_total"]
-                progress.update(task_id, total=total)
-            for item in rows:
-                row = item.get("row") or {}
-                row_idx = item.get("row_idx", offset)
-                value = row.get(column)
-                if not isinstance(value, str) or not value.strip():
-                    empty_rows += 1
-                    continue
-                scanned += 1
-                value = value.strip()
-                if value in seen:
-                    continue
-                seen.add(value)
-                sources.append((value, row_idx))
-            offset += len(rows)
-            progress.update(task_id, completed=offset)
-            if not rows or (total is not None and offset >= total):
-                break
+    for row_idx, row in iter_hf_rows(ds, split):
+        value = row.get(column)
+        if not isinstance(value, str) or not value.strip():
+            empty_rows += 1
+            continue
+        scanned += 1
+        value = value.strip()
+        if value in seen:
+            continue
+        seen.add(value)
+        sources.append((value, row_idx))
 
     if empty_rows:
         notes.append(f"Skipped {empty_rows} row(s) with an empty '{column}' value")
@@ -683,7 +494,7 @@ def transfer_bulk(
     hf_config: Optional[str] = typer.Option(
         None,
         "--hf-config",
-        help="Dataset config for --hf mode",
+        help="Dataset config (called 'subset' in the HF viewer) for --hf mode",
         show_default="the dataset's only config",
     ),
     column: Optional[str] = typer.Option(

@@ -1,5 +1,6 @@
 import json
 import re
+import shutil
 import sys
 import tarfile
 import tempfile
@@ -705,14 +706,44 @@ def push_bulk(
             "environment/ folder is the build context"
         ),
     ),
-    tag: str = typer.Option("latest", "--tag", help="Image tag for Harbor mode"),
+    hf_dataset: Optional[str] = typer.Option(
+        None,
+        "--hf",
+        help=(
+            "Hugging Face dataset id or URL (e.g. 'org/dataset'); "
+            "builds every Dockerfile stored in the dataset"
+        ),
+    ),
+    hf_split: str = typer.Option("train", "--hf-split", help="Dataset split for --hf mode"),
+    hf_config: Optional[str] = typer.Option(
+        None,
+        "--hf-config",
+        help="Dataset config (called 'subset' in the HF viewer) for --hf mode",
+        show_default="the dataset's only config",
+    ),
+    dockerfile_column: Optional[str] = typer.Option(
+        None,
+        "--dockerfile-column",
+        help=(
+            "Dataset column holding Dockerfile contents (required for --hf mode; e.g. 'dockerfile')"
+        ),
+    ),
+    name_column: Optional[str] = typer.Option(
+        None,
+        "--name-column",
+        help=(
+            "Dataset column naming each image (required for --hf mode; "
+            "e.g. 'instance_id'; values are sanitized to valid image names)"
+        ),
+    ),
+    tag: str = typer.Option("latest", "--tag", help="Image tag for Harbor and --hf modes"),
     name_template: str = typer.Option(
         "{dir}",
         "--name-template",
         help=(
-            "Image name template for Harbor mode; placeholders: {dir} (task directory "
-            "name) and {name} (task.toml [task].name). The result is sanitized to a "
-            "valid image name"
+            "Image name template for Harbor and --hf modes; placeholders: {dir} (task "
+            "directory name) and {name} (task.toml [task].name; in --hf mode both are "
+            "the --name-column value). The result is sanitized to a valid image name"
         ),
     ),
     platform: str = typer.Option(
@@ -747,10 +778,11 @@ def push_bulk(
     """
     Build and push many Docker images in one command.
 
-    Reads builds from a JSONL manifest (--manifest) or a Harbor tasks
-    directory (--harbor), validates everything up front, then keeps up to
-    --concurrency builds running server-side, starting the next build as soon
-    as one finishes. Failed builds are written to a manifest you can re-run.
+    Reads builds from a JSONL manifest (--manifest), a Harbor tasks directory
+    (--harbor), or a Hugging Face dataset of Dockerfiles (--hf), validates
+    everything up front, then keeps up to --concurrency builds running
+    server-side, starting the next build as soon as one finishes. Failed
+    builds are written to a manifest you can re-run.
 
     \b
     Manifest format (one JSON object per line; paths relative to the manifest):
@@ -765,15 +797,36 @@ def push_bulk(
     are skipped.
 
     \b
+    Hugging Face mode builds one image per dataset row using the dataset
+    viewer API — no local dataset download. --dockerfile-column holds each
+    row's Dockerfile contents and --name-column names the image (sanitized,
+    tagged with --tag). Set HF_TOKEN for private or gated datasets. Datasets
+    whose rows reference prebuilt registry images are transfer-bulk's job:
+    prime images transfer-bulk --hf.
+
+    \b
     Examples:
         prime images push-bulk --manifest builds.jsonl
         prime images push-bulk --harbor ./tasks --tag v1
         prime images push-bulk --harbor ./tasks --name-template "swe-{dir}" --dry-run
+        prime images push-bulk --hf org/dataset --dockerfile-column dockerfile \\
+            --name-column instance_id
         prime images push-bulk --manifest push-bulk-failures.jsonl
     """
+    hf_context_root: Optional[Path] = None
+    keep_hf_context = False
     try:
-        if (manifest is None) == (harbor is None):
-            console.print("[red]Error: Provide exactly one of --manifest or --harbor[/red]")
+        modes = [m for m in (manifest, harbor, hf_dataset) if m is not None]
+        if len(modes) != 1:
+            console.print("[red]Error: Provide exactly one of --manifest, --harbor or --hf[/red]")
+            raise typer.Exit(1)
+        if hf_dataset is None and (
+            hf_split != "train" or hf_config or dockerfile_column or name_column
+        ):
+            console.print(
+                "[red]Error: --hf-split, --hf-config, --dockerfile-column and "
+                "--name-column only apply to --hf mode[/red]"
+            )
             raise typer.Exit(1)
         if public and private:
             console.print("[red]Error: --public and --private cannot be used together[/red]")
@@ -785,10 +838,13 @@ def push_bulk(
             console.print("[red]Error: --build-timeout must be at least 1[/red]")
             raise typer.Exit(1)
         if manifest is not None and (tag != "latest" or name_template != "{dir}"):
-            console.print("[red]Error: --tag and --name-template only apply to --harbor mode[/red]")
+            console.print(
+                "[red]Error: --tag and --name-template only apply to --harbor and --hf modes[/red]"
+            )
             raise typer.Exit(1)
 
         skipped: list[tuple[str, str]] = []
+        notes: list[str] = []
         try:
             if manifest is not None:
                 manifest_path = manifest.resolve()
@@ -796,8 +852,7 @@ def push_bulk(
                     raise BulkPushValidationError([f"manifest not found: {manifest_path}"])
                 source_desc = f"manifest {manifest_path}"
                 specs = load_manifest(manifest_path, default_platform=platform)
-            else:
-                assert harbor is not None
+            elif harbor is not None:
                 harbor_root = harbor.resolve()
                 if not harbor_root.is_dir():
                     raise BulkPushValidationError(
@@ -809,6 +864,27 @@ def push_bulk(
                 specs, skipped = load_harbor_specs(
                     harbor_root, tag=tag, name_template=name_template, platform=platform
                 )
+            else:
+                assert hf_dataset is not None
+                if not _TAG_RE.match(tag):
+                    raise BulkPushValidationError([f"invalid image tag '{tag}'"])
+                # Imported here: images_hf imports BuildSpec helpers from this module.
+                from .images_hf import load_hf_build_specs, normalize_hf_dataset_id
+
+                source_desc = f"Hugging Face dataset {normalize_hf_dataset_id(hf_dataset)}"
+                console.print(f"[cyan]Reading Dockerfiles from {source_desc}...[/cyan]")
+                hf_context_root = Path(tempfile.mkdtemp(prefix="prime-push-bulk-hf-"))
+                specs, notes = load_hf_build_specs(
+                    hf_dataset,
+                    config=hf_config,
+                    split=hf_split,
+                    dockerfile_column=dockerfile_column,
+                    name_column=name_column,
+                    tag=tag,
+                    name_template=name_template,
+                    platform=platform,
+                    context_root=hf_context_root,
+                )
         except BulkPushValidationError as e:
             console.print(
                 f"[red]Error: cannot start bulk push ({len(e.problems)} problem(s)):[/red]"
@@ -817,6 +893,8 @@ def push_bulk(
                 console.print(f"[red]  - {problem}[/red]")
             raise typer.Exit(1)
 
+        for note in notes:
+            console.print(f"[dim]{note}[/dim]")
         for task_name, reason in skipped:
             console.print(f"[yellow]Skipping {task_name}: {reason}[/yellow]")
 
@@ -909,6 +987,13 @@ def push_bulk(
         console.print()
         console.print(f"Wrote {len(failures)} failed build(s) to [bold]{failures_out}[/bold]")
         console.print(f"[dim]Retry with: prime images push-bulk --manifest {failures_out}[/dim]")
+        if hf_context_root is not None:
+            # The failures manifest points into the generated build contexts.
+            keep_hf_context = True
+            console.print(
+                f"[dim]Keeping generated Dockerfiles in {hf_context_root} "
+                "so the failures manifest can be re-run.[/dim]"
+            )
         raise typer.Exit(1)
 
     except UnauthorizedError:
@@ -920,3 +1005,6 @@ def push_bulk(
             "check them with 'prime images list'.[/yellow]"
         )
         raise typer.Exit(1)
+    finally:
+        if hf_context_root is not None and not keep_hf_context:
+            shutil.rmtree(hf_context_root, ignore_errors=True)

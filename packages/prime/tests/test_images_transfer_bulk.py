@@ -1,6 +1,7 @@
 import json
 
 import prime_cli.commands.images_bulk as images_bulk
+import prime_cli.commands.images_hf as images_hf
 import prime_cli.commands.images_transfer_bulk as images_transfer_bulk
 import pytest
 from prime_cli.commands.images_transfer_bulk import derive_transfer_destination
@@ -144,7 +145,7 @@ def _fake_hf(monkeypatch, *, info, pages, total, rate_limit_first_rows=False):
             return FakeResponse({"rows": rows, "num_rows_total": total})
         raise AssertionError(f"Unexpected HF request: {url}")
 
-    monkeypatch.setattr(images_transfer_bulk.httpx, "get", fake_get)
+    monkeypatch.setattr(images_hf.httpx, "get", fake_get)
     return calls
 
 
@@ -326,7 +327,7 @@ def test_hf_pages_rows_and_dedupes(tmp_path, fake_api, monkeypatch):
 
 
 def test_hf_rate_limited_request_retries(tmp_path, fake_api, monkeypatch):
-    monkeypatch.setattr(images_transfer_bulk, "HF_REQUEST_BACKOFF_SECONDS", 0.0)
+    monkeypatch.setattr(images_hf, "HF_REQUEST_BACKOFF_SECONDS", 0.0)
     hf_calls = _fake_hf(
         monkeypatch,
         info=HF_INFO_ONE_CONFIG,

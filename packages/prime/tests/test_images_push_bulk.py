@@ -1,6 +1,9 @@
+import io
 import json
+import tarfile
 
 import prime_cli.commands.images_bulk as images_bulk
+import prime_cli.commands.images_hf as images_hf
 import pytest
 from prime_cli.main import app
 from prime_sandboxes import APIError
@@ -45,6 +48,8 @@ class FakeAPI:
 
     def __init__(self):
         self.calls = []
+        self.payloads = []
+        self.uploads = []  # raw tar.gz bytes PUT to each upload URL, in order
         self.build_counter = 0
         # build_id -> list of statuses returned by successive GET polls;
         # the last status repeats once the list is exhausted.
@@ -58,6 +63,7 @@ class FakeAPI:
         if method == "POST" and path == "/images/build":
             if self.build_error_queue:
                 raise self.build_error_queue.pop(0)
+            self.payloads.append(json)
             self.build_counter += 1
             build_id = f"build-{self.build_counter}"
             return {
@@ -87,7 +93,7 @@ def fake_api(monkeypatch):
 
     def fake_put(url, content, headers=None, timeout=None):
         api.calls.append(("PUT", url))
-        content.read()
+        api.uploads.append(content.read())
         return DummyUploadResponse()
 
     monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
@@ -259,7 +265,7 @@ def test_requires_exactly_one_mode(tmp_path, fake_api, monkeypatch):
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["images", "push-bulk"], env=TEST_ENV)
     assert result.exit_code == 1
-    assert "exactly one of --manifest or --harbor" in result.output
+    assert "exactly one of --manifest, --harbor or --hf" in result.output
 
     manifest = tmp_path / "builds.jsonl"
     manifest.write_text("")
@@ -269,7 +275,15 @@ def test_requires_exactly_one_mode(tmp_path, fake_api, monkeypatch):
         env=TEST_ENV,
     )
     assert result.exit_code == 1
-    assert "exactly one of --manifest or --harbor" in result.output
+    assert "exactly one of --manifest, --harbor or --hf" in result.output
+
+    result = runner.invoke(
+        app,
+        ["images", "push-bulk", "--manifest", str(manifest), "--hf", "org/ds"],
+        env=TEST_ENV,
+    )
+    assert result.exit_code == 1
+    assert "exactly one of --manifest, --harbor or --hf" in result.output
 
 
 def test_tag_flag_rejected_in_manifest_mode(tmp_path, fake_api, monkeypatch):
@@ -373,4 +387,272 @@ def test_harbor_root_is_single_task(tmp_path, fake_api, monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert len(fake_api.post_build_indices()) == 1
+    assert "1/1 builds completed" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Hugging Face mode
+# ---------------------------------------------------------------------------
+
+
+def _fake_hf(monkeypatch, *, info, pages, total):
+    """Serve datasets-server /info and /rows from canned data.
+
+    ``pages`` maps a row offset to the list of row dicts served at that offset.
+    """
+    calls = []
+
+    class FakeResponse:
+        def __init__(self, payload, status_code=200, headers=None):
+            self.status_code = status_code
+            self._payload = payload
+            self.text = json.dumps(payload)
+            self.headers = headers or {}
+
+        def json(self):
+            return self._payload
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        params = dict(params or {})
+        calls.append((url, params))
+        if url.endswith("/info"):
+            return FakeResponse(info)
+        if url.endswith("/rows"):
+            offset = params["offset"]
+            rows = [
+                {"row_idx": offset + i, "row": row} for i, row in enumerate(pages.get(offset, []))
+            ]
+            return FakeResponse({"rows": rows, "num_rows_total": total})
+        raise AssertionError(f"Unexpected HF request: {url}")
+
+    monkeypatch.setattr(images_hf.httpx, "get", fake_get)
+    return calls
+
+
+HF_INFO_ONE_CONFIG = {
+    "dataset_info": {
+        "default": {
+            "features": {
+                "dockerfile": {"dtype": "string", "_type": "Value"},
+                "instance_id": {"dtype": "string", "_type": "Value"},
+                "picture": {"_type": "Image"},
+            },
+            "splits": {"train": {"name": "train"}},
+        }
+    },
+    "partial": False,
+}
+
+HF_ARGS = ["--dockerfile-column", "dockerfile", "--name-column", "instance_id"]
+
+
+def _packaged_dockerfile(tar_bytes):
+    with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:gz") as tar:
+        member = tar.extractfile(images_bulk.PACKAGED_DOCKERFILE_PATH)
+        assert member is not None
+        return member.read().decode()
+
+
+def _use_local_hf_context_root(monkeypatch, tmp_path):
+    """Route the generated HF build contexts to a known directory."""
+    root = tmp_path / "hf-contexts"
+
+    def fake_mkdtemp(prefix):
+        root.mkdir()
+        return str(root)
+
+    monkeypatch.setattr(images_bulk.tempfile, "mkdtemp", fake_mkdtemp)
+    return root
+
+
+def test_hf_builds_each_row_dockerfile(tmp_path, fake_api, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    context_root = _use_local_hf_context_root(monkeypatch, tmp_path)
+    _fake_hf(
+        monkeypatch,
+        info=HF_INFO_ONE_CONFIG,
+        pages={
+            0: [
+                {"instance_id": "Org__Repo-1", "dockerfile": "FROM busybox\nRUN echo a\n"},
+                {"instance_id": "org__repo-2", "dockerfile": "FROM busybox\nRUN echo b\n"},
+            ]
+        },
+        total=2,
+    )
+
+    result = runner.invoke(
+        app, ["images", "push-bulk", "--hf", "org/ds", "--tag", "v1", *HF_ARGS], env=TEST_ENV
+    )
+
+    assert result.exit_code == 0, result.output
+    assert [(p["image_name"], p["image_tag"]) for p in fake_api.payloads] == [
+        ("org__repo-1", "v1"),
+        ("org__repo-2", "v1"),
+    ]
+    # Each build context carries that row's Dockerfile contents.
+    assert [_packaged_dockerfile(upload) for upload in fake_api.uploads] == [
+        "FROM busybox\nRUN echo a\n",
+        "FROM busybox\nRUN echo b\n",
+    ]
+    assert "2/2 builds completed" in result.output
+    # Generated contexts are cleaned up when nothing failed.
+    assert not context_root.exists()
+
+
+def test_hf_name_template_and_dedupe_and_empty_rows(tmp_path, fake_api, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _use_local_hf_context_root(monkeypatch, tmp_path)
+    row = {"instance_id": "repo-1", "dockerfile": "FROM busybox\n"}
+    _fake_hf(
+        monkeypatch,
+        info=HF_INFO_ONE_CONFIG,
+        pages={0: [row, dict(row), {"instance_id": "no-dockerfile"}]},
+        total=3,
+    )
+
+    result = runner.invoke(
+        app,
+        ["images", "push-bulk", "--hf", "org/ds", "--name-template", "swe-{name}", *HF_ARGS],
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Collapsed 1 duplicate row(s)" in result.output
+    assert "Skipped 1 row(s) with an empty 'instance_id' or 'dockerfile' value" in result.output
+    assert [p["image_name"] for p in fake_api.payloads] == ["swe-repo-1"]
+
+
+def test_hf_same_name_different_dockerfiles_fail(tmp_path, fake_api, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _use_local_hf_context_root(monkeypatch, tmp_path)
+    _fake_hf(
+        monkeypatch,
+        info=HF_INFO_ONE_CONFIG,
+        pages={
+            0: [
+                {"instance_id": "repo-1", "dockerfile": "FROM busybox\nRUN echo a\n"},
+                {"instance_id": "repo-1", "dockerfile": "FROM busybox\nRUN echo b\n"},
+            ]
+        },
+        total=2,
+    )
+
+    result = runner.invoke(app, ["images", "push-bulk", "--hf", "org/ds", *HF_ARGS], env=TEST_ENV)
+
+    assert result.exit_code == 1
+    assert "duplicate image reference 'repo-1:latest'" in result.output
+    assert "--name-template" in result.output
+    assert fake_api.calls == []
+
+
+def test_hf_column_flags_are_required(tmp_path, fake_api, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _use_local_hf_context_root(monkeypatch, tmp_path)
+    _fake_hf(monkeypatch, info=HF_INFO_ONE_CONFIG, pages={0: []}, total=0)
+
+    result = runner.invoke(app, ["images", "push-bulk", "--hf", "org/ds"], env=TEST_ENV)
+    assert result.exit_code == 1
+    assert "--dockerfile-column is required" in result.output
+    # The error lists the dataset's columns so the user can pick one.
+    assert "instance_id" in result.output
+
+    result = runner.invoke(
+        app,
+        ["images", "push-bulk", "--hf", "org/ds", "--dockerfile-column", "dockerfile"],
+        env=TEST_ENV,
+    )
+    assert result.exit_code == 1
+    assert "--name-column is required" in result.output
+    assert fake_api.calls == []
+
+
+def test_hf_non_string_column_rejected(tmp_path, fake_api, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _use_local_hf_context_root(monkeypatch, tmp_path)
+    _fake_hf(monkeypatch, info=HF_INFO_ONE_CONFIG, pages={0: []}, total=0)
+
+    result = runner.invoke(
+        app,
+        [
+            "images",
+            "push-bulk",
+            "--hf",
+            "org/ds",
+            "--dockerfile-column",
+            "picture",
+            "--name-column",
+            "instance_id",
+        ],
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 1
+    assert "not a string column" in result.output
+    assert fake_api.calls == []
+
+
+def test_hf_flags_rejected_outside_hf_mode(tmp_path, fake_api, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _make_context(tmp_path, "a")
+    manifest = tmp_path / "builds.jsonl"
+    _write_manifest(manifest, [{"image": "app-a:v1", "context": "a"}])
+
+    result = runner.invoke(
+        app,
+        ["images", "push-bulk", "--manifest", str(manifest), "--name-column", "instance_id"],
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 1
+    assert "only apply to --hf mode" in result.output
+    assert fake_api.calls == []
+
+
+def test_hf_dry_run_resolves_without_api_calls(tmp_path, fake_api, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    context_root = _use_local_hf_context_root(monkeypatch, tmp_path)
+    _fake_hf(
+        monkeypatch,
+        info=HF_INFO_ONE_CONFIG,
+        pages={0: [{"instance_id": "repo-1", "dockerfile": "FROM busybox\n"}]},
+        total=1,
+    )
+
+    result = runner.invoke(
+        app, ["images", "push-bulk", "--hf", "org/ds", "--dry-run", *HF_ARGS], env=TEST_ENV
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "repo-1:latest" in result.output
+    assert "Dry run only" in result.output
+    assert fake_api.calls == []
+    assert not context_root.exists()
+
+
+def test_hf_failures_keep_contexts_and_manifest_is_rerunnable(tmp_path, fake_api, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    context_root = _use_local_hf_context_root(monkeypatch, tmp_path)
+    _fake_hf(
+        monkeypatch,
+        info=HF_INFO_ONE_CONFIG,
+        pages={0: [{"instance_id": "repo-1", "dockerfile": "FROM busybox\n"}]},
+        total=1,
+    )
+    fake_api.default_poll = ["FAILED"]
+
+    result = runner.invoke(app, ["images", "push-bulk", "--hf", "org/ds", *HF_ARGS], env=TEST_ENV)
+
+    assert result.exit_code == 1
+    failures_file = tmp_path / "push-bulk-failures.jsonl"
+    lines = [json.loads(line) for line in failures_file.read_text().splitlines()]
+    assert [line["image"] for line in lines] == ["repo-1:latest"]
+    # The generated contexts stay behind so the failures manifest re-runs.
+    assert str(context_root) in result.output
+    assert all((tmp_path / line["dockerfile"]).is_file() for line in lines)
+
+    fake_api.default_poll = ["COMPLETED"]
+    result = runner.invoke(
+        app, ["images", "push-bulk", "--manifest", str(failures_file)], env=TEST_ENV
+    )
+    assert result.exit_code == 0, result.output
     assert "1/1 builds completed" in result.output

@@ -741,6 +741,56 @@ def push_image(
 app.command("push-bulk")(push_bulk)
 
 
+@app.command("build")
+def build_vm_image(
+    image_reference: str = typer.Argument(
+        ...,
+        help=(
+            "Existing image to build a VM image for "
+            "(e.g., 'myapp:v1.0.0', 'prime/<ownerSlug>/myapp:v1.0.0', or "
+            "'prime/team-{teamId}/myapp:v1.0.0')"
+        ),
+    ),
+):
+    """
+    Build a VM image from an existing container image.
+
+    Requires VM sandboxes to be enabled for your account and a linux/amd64
+    image. Track progress with 'prime images list'.
+
+    \b
+    Examples:
+        prime images build myapp:v1.0.0
+        prime images build prime/alice/myapp:v1.0.0
+        prime images build prime/team-abc123/myapp:v1.0.0
+    """
+    try:
+        image_name, image_tag, team_id = _parse_mutable_image_reference(image_reference)
+        payload: dict[str, str] = {"teamId": team_id} if team_id else {}
+
+        client = APIClient()
+        response = client.request(
+            "POST",
+            f"/images/{image_name}/{image_tag}/vm-build",
+            json=payload,
+        )
+
+        context = f" (team: {team_id})" if team_id else ""
+        console.print(
+            f"[green]✓[/green] VM image build queued for {image_name}:{image_tag}{context}"
+        )
+        build_id = response.get("buildId") if isinstance(response, dict) else None
+        if build_id:
+            console.print(f"[bold]Build ID:[/bold] {build_id}")
+        console.print("Track progress with: prime images list")
+    except UnauthorizedError:
+        console.print("[red]Error: Not authenticated. Please run 'prime login' first.[/red]")
+        raise typer.Exit(1)
+    except APIError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+
+
 @app.command("list", epilog=LIST_IMAGES_JSON_HELP)
 def list_images(
     output: str = typer.Option("table", "--output", "-o", help="Output format (table or json)"),

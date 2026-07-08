@@ -9,6 +9,16 @@ class SandboxFileNotFoundError(APIError):
     pass
 
 
+class SandboxFileTooLargeError(APIError):
+    """Raised when a file exceeds the sandbox read size limit (413).
+
+    Read a bounded window via read_file(offset=..., length=...) or use
+    download_file() for the full content.
+    """
+
+    pass
+
+
 class SandboxNotRunningError(RuntimeError):
     """Raised when an operation requires a RUNNING sandbox but it is not running."""
 

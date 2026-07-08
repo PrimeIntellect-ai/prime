@@ -643,6 +643,7 @@ class AgentRuntime:
                 },
                 timeout=12,
             )
+            self._record_codex_account_status()
             thread = self._request(
                 "thread/start",
                 {
@@ -668,6 +669,71 @@ class AgentRuntime:
         thread_payload = thread.get("thread")
         thread_id = str(thread_payload.get("id") or "") if isinstance(thread_payload, dict) else ""
         self._set_connected(message="Connected", session_id=thread_id)
+
+    def _record_codex_account_status(self) -> None:
+        """Read Codex account metadata, including ChatGPT subscription plan, when available."""
+
+        try:
+            auth_status = self._request(
+                "getAuthStatus",
+                {"includeToken": False, "refreshToken": False},
+                timeout=5,
+            )
+        except Exception:
+            auth_status = {}
+        try:
+            account_status = self._request(
+                "account/read",
+                {"refreshToken": False},
+                timeout=5,
+            )
+        except Exception:
+            account_status = {}
+
+        auth_method = str(auth_status.get("authMethod") or "")
+        requires_openai_auth = bool(
+            auth_status.get("requiresOpenaiAuth") or account_status.get("requiresOpenaiAuth")
+        )
+        account = account_status.get("account")
+        account_type = ""
+        email = ""
+        plan_type = ""
+        if isinstance(account, dict):
+            account_type = str(account.get("type") or "")
+            email = str(account.get("email") or "")
+            plan_type = str(account.get("planType") or "")
+
+        content = _codex_account_status_text(
+            auth_method=auth_method,
+            account_type=account_type,
+            email=email,
+            plan_type=plan_type,
+            requires_openai_auth=requires_openai_auth,
+        )
+        if not content:
+            return
+        with self._lock:
+            self._messages = [
+                message
+                for message in self._messages
+                if message.metadata.get("title") != "Codex account"
+            ]
+            self._messages.append(
+                AgentChatMessage(
+                    "system",
+                    content,
+                    "tool",
+                    {
+                        "title": "Codex account",
+                        "auth_method": auth_method,
+                        "account_type": account_type,
+                        "email": email,
+                        "plan_type": plan_type,
+                        "requires_openai_auth": requires_openai_auth,
+                    },
+                )
+            )
+            self._emit_messages_locked()
 
     def _wait_for_endpoint_or_alive(self) -> None:
         deadline = time.monotonic() + 2.0
@@ -860,6 +926,11 @@ class AgentRuntime:
             if request_id is not None:
                 self._respond(request_id, None)
             return
+        if method == "account/updated":
+            self._handle_codex_account_updated(params)
+            if request_id is not None:
+                self._respond(request_id, None)
+            return
         if method == "item/agentMessage/delta":
             self._handle_codex_agent_delta(params)
             if request_id is not None:
@@ -951,6 +1022,33 @@ class AgentRuntime:
                         {"title": label, "tool_status": status},
                     )
                 )
+            self._emit_messages_locked()
+
+    def _handle_codex_account_updated(self, params: dict[str, Any]) -> None:
+        content = _codex_account_status_text(
+            auth_method=_string_or_empty(params.get("authMode")),
+            plan_type=_string_or_empty(params.get("planType")),
+        )
+        if not content:
+            return
+        with self._lock:
+            self._messages = [
+                message
+                for message in self._messages
+                if message.metadata.get("title") != "Codex account"
+            ]
+            self._messages.append(
+                AgentChatMessage(
+                    "system",
+                    content,
+                    "tool",
+                    {
+                        "title": "Codex account",
+                        "auth_method": _string_or_empty(params.get("authMode")),
+                        "plan_type": _string_or_empty(params.get("planType")),
+                    },
+                )
+            )
             self._emit_messages_locked()
 
     def _handle_codex_agent_delta(self, params: dict[str, Any]) -> None:
@@ -1522,6 +1620,52 @@ def _suffix_prefix_overlap(existing: str, delta: str) -> int:
         if existing.endswith(delta[:size]):
             return size
     return 0
+
+
+def _codex_account_status_text(
+    *,
+    auth_method: str = "",
+    account_type: str = "",
+    email: str = "",
+    plan_type: str = "",
+    requires_openai_auth: bool = False,
+) -> str:
+    auth_method = auth_method.strip()
+    account_type = account_type.strip()
+    email = email.strip()
+    plan_type = plan_type.strip()
+    if requires_openai_auth:
+        return "Codex account requires OpenAI authentication. Run `codex login` to connect ChatGPT."
+    if account_type == "chatgpt" or auth_method in {"chatgpt", "chatgptAuthTokens"}:
+        plan_label = _chatgpt_plan_label(plan_type)
+        account_label = email or "ChatGPT account"
+        return f"Codex is authenticated with {account_label} ({plan_label})."
+    if auth_method == "apikey" or account_type == "apiKey":
+        return "Codex is authenticated with an OpenAI API key."
+    return ""
+
+
+def _chatgpt_plan_label(plan_type: str) -> str:
+    normalized = plan_type.strip().lower()
+    labels = {
+        "free": "ChatGPT Free",
+        "go": "ChatGPT Go",
+        "plus": "ChatGPT Plus",
+        "pro": "ChatGPT Pro",
+        "prolite": "ChatGPT Pro",
+        "team": "ChatGPT Team",
+        "self_serve_business_usage_based": "ChatGPT Business",
+        "business": "ChatGPT Business",
+        "enterprise_cbp_usage_based": "ChatGPT Enterprise",
+        "enterprise": "ChatGPT Enterprise",
+        "edu": "ChatGPT Edu",
+        "unknown": "ChatGPT subscription",
+    }
+    return labels.get(normalized, "ChatGPT subscription")
+
+
+def _string_or_empty(value: Any) -> str:
+    return value if isinstance(value, str) else ""
 
 
 def _jsonrpc_response_id(value: Any) -> int | None:

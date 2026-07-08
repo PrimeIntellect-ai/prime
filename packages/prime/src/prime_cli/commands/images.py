@@ -756,7 +756,8 @@ def build_vm_image(
     Build a VM image from an existing container image.
 
     Requires VM sandboxes to be enabled for your account and a linux/amd64
-    image. Track progress with 'prime images list'.
+    image. For team images, only the image creator or team admins can
+    trigger this. Track progress with 'prime images list'.
 
     \b
     Examples:

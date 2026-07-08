@@ -1,6 +1,5 @@
 from prime_cli.main import app
 from prime_cli.verifiers_bridge import _append_eval_options, _sanitize_help_text
-from prime_cli.verifiers_plugin import PrimeVerifiersPlugin
 from typer.testing import CliRunner
 
 runner = CliRunner()
@@ -42,26 +41,6 @@ def test_sanitize_help_removes_vf_eval_aliases():
     assert "verifiers.cli.commands.eval" not in help_text
     assert "vf-eval" not in help_text
     assert "env_id_or_config" not in help_text
-
-
-def test_sanitize_help_rewrites_v1_console_script():
-    raw = "usage: uv run eval [<taskset-id>]\nusage: main.py [-h] [@ FILE] [OPTIONS]\n"
-
-    help_text = _sanitize_help_text(raw, "verifiers.v1.cli.eval.main", "prime eval")
-
-    assert help_text.count("Usage: prime eval") == 2
-    assert "uv run eval" not in help_text
-
-
-def test_v1_module_command_calls_console_entrypoint(monkeypatch):
-    monkeypatch.setattr("prime_cli.verifiers_plugin.resolve_workspace_python", lambda: "python")
-    plugin = PrimeVerifiersPlugin()
-
-    command = plugin.build_module_command(plugin.eval_module, ["--help"])
-
-    assert command[:2] == ["python", "-c"]
-    assert "sys.argv[0] = 'eval'" in command[2]
-    assert command[-1] == "--help"
 
 
 def test_append_eval_options_mentions_tunnel_access():

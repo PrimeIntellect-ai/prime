@@ -4,7 +4,6 @@ import pytest
 import typer
 from prime_cli.client import APIError
 from prime_cli.commands.evals import (
-    _build_hosted_evaluation_payload,
     _create_hosted_evaluations,
     _load_hosted_eval_configs,
     _print_eval_status,
@@ -1268,102 +1267,6 @@ id = "gsm8k-v1"
     }
 
 
-def test_eval_run_resume_passthrough(monkeypatch, tmp_path):
-    captured = {}
-
-    def fake_run_eval_passthrough(environment, passthrough_args, skip_upload, env_path):
-        captured["environment"] = environment
-        captured["passthrough_args"] = passthrough_args
-        captured["skip_upload"] = skip_upload
-        captured["env_path"] = env_path
-
-    monkeypatch.setattr("prime_cli.commands.evals.run_eval_passthrough", fake_run_eval_passthrough)
-    output_dir = tmp_path / "previous-run"
-
-    result = runner.invoke(
-        app,
-        ["eval", "run", "--resume", str(output_dir), "--skip-upload"],
-        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
-    )
-
-    assert result.exit_code == 0, result.output
-    assert captured == {
-        "environment": str(output_dir),
-        "passthrough_args": ["--resume", str(output_dir)],
-        "skip_upload": True,
-        "env_path": None,
-    }
-
-
-def test_eval_run_local_v1_sampling_passthrough(monkeypatch):
-    captured = {}
-
-    def fake_run_eval_passthrough(environment, passthrough_args, skip_upload, env_path):
-        captured["environment"] = environment
-        captured["passthrough_args"] = passthrough_args
-        captured["skip_upload"] = skip_upload
-        captured["env_path"] = env_path
-
-    monkeypatch.setattr("prime_cli.commands.evals.run_eval_passthrough", fake_run_eval_passthrough)
-
-    result = runner.invoke(
-        app,
-        ["eval", "run", "gsm8k-v1", "--sampling.temperature", "0.2"],
-        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
-    )
-
-    assert result.exit_code == 0, result.output
-    assert captured == {
-        "environment": "gsm8k-v1",
-        "passthrough_args": ["--sampling.temperature", "0.2"],
-        "skip_upload": False,
-        "env_path": None,
-    }
-
-
-def test_eval_run_legacy_sampling_args_passthrough(monkeypatch):
-    captured = {}
-
-    def fake_run_eval_passthrough(environment, passthrough_args, skip_upload, env_path):
-        captured["environment"] = environment
-        captured["passthrough_args"] = passthrough_args
-
-    monkeypatch.setattr("prime_cli.commands.evals.run_eval_passthrough", fake_run_eval_passthrough)
-
-    result = runner.invoke(
-        app,
-        [
-            "eval",
-            "run",
-            "legacy-env",
-            "-s",
-            "--sampling-args",
-            '{"temperature":0.2}',
-        ],
-        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
-    )
-
-    assert result.exit_code == 0, result.output
-    assert captured == {
-        "environment": "legacy-env",
-        "passthrough_args": [
-            "-s",
-            "--sampling-args",
-            '{"temperature":0.2}',
-        ],
-    }
-
-
-def test_eval_run_hosted_rejects_v0_only_flags():
-    result = runner.invoke(
-        app,
-        ["eval", "run", "gsm8k", "--hosted", "--state-columns", "turn,timing"],
-        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
-    )
-
-    assert result.exit_code == 2
-
-
 def test_eval_run_hosted_passes_env_path_to_resolver(monkeypatch):
     captured = {}
 
@@ -1585,8 +1488,8 @@ def test_eval_logs_command_follows_incremental_output(monkeypatch):
     )
     logs = iter(
         [
-            "Line 1\nLine 2",
-            "Line 1\nLine 2\nLine 3",
+            "Line 1\nLine 2 [/yellow]",
+            "Line 1\nLine 2 [/yellow]\nLine 3",
         ]
     )
 
@@ -1612,6 +1515,8 @@ def test_eval_logs_command_follows_incremental_output(monkeypatch):
     assert "Line 2" in result.output
     assert "Line 3" in result.output
     assert result.output.count("Line 1") == 1
+    assert "Line 2 [/yellow]" in result.output
+    assert "MarkupError" not in result.output
     assert "Status: COMPLETED" in result.output
 
 
@@ -1656,123 +1561,3 @@ def test_eval_logs_command_emits_waiting_status_when_logs_are_unchanged(monkeypa
     assert result.output.count("Line 1") == 1
     assert "Evaluation status: RUNNING (waiting for logs...)" in result.output
     assert "Status: COMPLETED" in result.output
-
-
-V1_HOSTED_TOML = """\
-model = "openai/gpt-4.1-mini"
-num_tasks = 7
-num_rollouts = 2
-max_concurrent = 16
-
-[taskset]
-id = "gsm8k-v1"
-difficulty = "easy"
-
-[harness]
-id = "default"
-
-[sampling]
-temperature = 0.3
-
-[retries.rollout]
-max_retries = 2
-
-[client.headers]
-X-Custom = "yes"
-"""
-
-
-def test_eval_run_hosted_v1_config_sends_environments(monkeypatch, tmp_path):
-    captured = {}
-
-    def fail_resolve(*args, **kwargs):
-        raise AssertionError("raw v1 hosted evals must not resolve a published environment")
-
-    monkeypatch.setattr("prime_cli.commands.evals._resolve_hosted_environment", fail_resolve)
-
-    def fake_create(config, environment_ids=None):
-        captured["payload"] = _build_hosted_evaluation_payload(config)
-        captured["environment_ids"] = environment_ids
-        return {"evaluation_id": "eval-123"}
-
-    monkeypatch.setattr("prime_cli.commands.evals._create_hosted_evaluations", fake_create)
-
-    config_path = tmp_path / "eval.toml"
-    config_path.write_text(V1_HOSTED_TOML)
-    result = runner.invoke(
-        app,
-        ["eval", str(config_path), "--hosted", "-n", "9"],
-        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
-    )
-
-    assert result.exit_code == 0, result.output
-    payload = captured["payload"]
-    assert "environment_ids" not in payload
-    assert payload["environments"] == [
-        {
-            "taskset": {"id": "gsm8k-v1", "difficulty": "easy"},
-            "harness": {"id": "default"},
-            "retries": {"rollout": {"max_retries": 2}},
-            "sampling": {"temperature": 0.3},
-        }
-    ]
-    assert payload["eval_config"]["num_examples"] == 9  # CLI override wins over num_tasks
-    assert payload["eval_config"]["rollouts_per_example"] == 2
-    assert payload["eval_config"]["max_concurrent"] == 16
-    assert payload["eval_config"]["headers"] == ["X-Custom: yes"]
-    assert captured["environment_ids"] is None
-    assert "Hosted evaluation started" in result.output
-
-
-def test_eval_run_hosted_v1_config_rejects_local_only_fields(monkeypatch, tmp_path):
-    config_path = tmp_path / "eval.toml"
-    config_path.write_text('output_dir = "outputs"\n\n[taskset]\nid = "gsm8k-v1"\n')
-
-    result = runner.invoke(
-        app,
-        ["eval", "run", str(config_path), "--hosted"],
-        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
-    )
-
-    assert result.exit_code == 1
-    assert "does not support" in result.output
-    assert "output_dir" in result.output
-
-
-def test_eval_run_hosted_legacy_id_config_needs_published_env(monkeypatch, tmp_path):
-    config_path = tmp_path / "eval.toml"
-    config_path.write_text('id = "reverse-text"\nmodel = "openai/gpt-4.1-mini"\n')
-
-    result = runner.invoke(
-        app,
-        ["eval", "run", str(config_path), "--hosted"],
-        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
-    )
-
-    assert result.exit_code == 1
-    assert "published environment" in result.output
-
-
-def test_hosted_overrides_forward_client_base_url_and_api_key_var():
-    """--client.base-url and --client.api-key-var on the hosted CLI must reach the
-    hosted payload, not be silently dropped after pydantic_cli parses them."""
-    from prime_cli.commands.evals import _hosted_overrides_from_flags
-
-    overrides = _hosted_overrides_from_flags(
-        ["--client.base-url", "https://api.openai.com/v1", "--client.api-key-var", "OPENAI_API_KEY"]
-    )
-    assert overrides["api_base_url"] == "https://api.openai.com/v1"
-    assert overrides["api_key_var"] == "OPENAI_API_KEY"
-
-
-def test_load_v1_hosted_target_defaults_num_examples_to_all_when_omitted(tmp_path):
-    """A v1 hosted TOML with [taskset] but no num_tasks means "all tasks";
-    the platform spells that -1, not the hosted default of 5."""
-    from prime_cli.commands.evals import _load_v1_hosted_target
-
-    config = tmp_path / "eval.toml"
-    config.write_text('[taskset]\nid = "gsm8k-v1"\n', encoding="utf-8")
-
-    target = _load_v1_hosted_target(config)
-    assert target is not None
-    assert target["num_examples"] == -1

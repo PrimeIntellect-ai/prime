@@ -33,6 +33,7 @@ DEFAULT_ENV_DIR_PATH = "./environments"
 DEFAULT_ENDPOINTS_PATH = "./configs/endpoints.toml"
 PRIME_SLUG = "primeintellect"
 INTERNAL_ENV_DISPLAY_HEADER = "X-Prime-Eval-Env-Display"
+INTERNAL_UPLOAD_GUARD_HEADER = "X-Prime-Eval-Upload-Guard"
 EVAL_PREFLIGHT_TIMEOUT = httpx.Timeout(connect=10.0, read=300.0, write=60.0, pool=60.0)
 MODULE_TO_PRIME_COMMAND = {
     "verifiers.v1.cli.eval.main": "prime eval",
@@ -857,7 +858,9 @@ class V1EvalRun:
     env_name: str
     upstream_slug: Optional[str] = None
     resolved_env: Optional[ResolvedEnvironment] = None
-    is_config: bool = False
+    # "config" or "unpublished" when auto-upload must stay off; persisted in the run's
+    # client headers so --resume applies the same guard
+    upload_guard: Optional[str] = None
 
 
 def _require_api_key(config: Config) -> None:
@@ -968,6 +971,7 @@ def _resume_v1_eval(resume_dir: str, passthrough_args: list[str], config: Config
         job_id=saved_headers.get("X-PI-Job-Id") or _build_job_id(env_name, model),
         env_name=env_name,
         upstream_slug=display_id if is_slug else None,
+        upload_guard=saved_headers.get(INTERNAL_UPLOAD_GUARD_HEADER),
     )
 
 
@@ -1006,8 +1010,9 @@ def _pop_v0_eval_args(args: list[str]) -> tuple[dict, bool]:
         return {}, tui_disabled
 
     fields: dict = {}
-    while "--save-results" in args:
-        args.remove("--save-results")  # v1 always saves
+    for flag in ("-s", "--save-results"):  # v0 save-results; v1 always saves
+        while flag in args:
+            args.remove(flag)
     while "--independent-scoring" in args:
         args.remove("--independent-scoring")
         fields["independent_scoring"] = True
@@ -1060,8 +1065,9 @@ def _run_v1_eval(
     """Prepare and run a fresh v1 eval: fill in prime's model/base-url/output-dir defaults,
     make the environment importable, and tag the run with a job id header.
 
-    Transitional configs convert at verifiers' own ingestion boundary; the frozen v0
-    *argv* dialect (hosted sandboxes) converts here via the same compat layer."""
+    Both legacy dialects convert to v1 configs up front via verifiers' compat layer —
+    the frozen v0 *argv* (hosted sandboxes) and transitional TOML configs — so the
+    defaulting below always reads v1 shape."""
     target = environment.removeprefix("@")
     is_config = _is_config_target(target)
     args = list(passthrough_args)
@@ -1081,6 +1087,22 @@ def _run_v1_eval(
         is_config = True
 
     config_data: dict = toml.load(target) if is_config else {}
+    if is_config:
+        from verifiers.v1.cli.eval.compat import (
+            convert_transitional_config,
+            is_transitional_config,
+        )
+
+        if is_transitional_config(config_data):
+            try:
+                converted_path, warnings = convert_transitional_config(config_data, Path(target))
+            except ValueError as exc:
+                console.print(f"[red]Error:[/red] {exc}")
+                raise typer.Exit(2) from exc
+            for warning in warnings:
+                console.print(f"[yellow]warning:[/yellow] {warning}")
+            target = str(converted_path)
+            config_data = toml.load(target)
     config_model = config_data.get("model")
     cli_model = _parse_value_option(args, "--model", "-m")
     model = cli_model or config_model or DEFAULT_MODEL
@@ -1089,8 +1111,15 @@ def _run_v1_eval(
 
     configured_base_url = (config.inference_url or "").strip().rstrip("/")
     config_client = config_data.get("client")
-    config_base_url = config_client.get("base_url") if isinstance(config_client, dict) else None
+    if not isinstance(config_client, dict):
+        config_client = {}
+    config_base_url = config_client.get("base_url")
     cli_base_url = _parse_value_option(args, "--client.base-url")
+    api_key_var = (
+        _parse_value_option(args, "--client.api-key-var")
+        or config_client.get("api_key_var")
+        or "PRIME_API_KEY"
+    )
     # endpoint aliases resolve natively from endpoints.toml; don't force Prime's
     # inference URL or run Prime preflight for them (mirrors the v0 gepa path)
     is_alias = _is_endpoint_alias(args, model)
@@ -1112,7 +1141,9 @@ def _run_v1_eval(
             dry_run = value not in ("false", "0")
         elif arg.startswith("--dry-run="):
             dry_run = arg.split("=", 1)[1].lower() not in ("false", "0")
-    if not dry_run and base_url:
+    if api_key_var != "PRIME_API_KEY":
+        env.pop("PRIME_API_KEY", None)
+    if not dry_run and base_url and api_key_var == "PRIME_API_KEY":
         _validate_model(model, base_url, configured_base_url)
         _preflight_inference_billing(model, base_url, configured_base_url)
 
@@ -1145,7 +1176,7 @@ def _run_v1_eval(
     if configured_output_dir is None:
         args.extend(["--output-dir", str(output_dir)])
 
-    headers = config_client.get("headers", {}) if isinstance(config_client, dict) else {}
+    headers = config_client.get("headers", {})
     if not isinstance(headers, dict):
         console.print("[red]Error:[/red] client.headers must be a table")
         raise typer.Exit(2)
@@ -1163,6 +1194,13 @@ def _run_v1_eval(
     headers["X-PI-Job-Id"] = job_id
     if resolved_env is not None and resolved_env.env_display_id:
         headers[INTERNAL_ENV_DISPLAY_HEADER] = resolved_env.env_display_id
+    upload_guard = None
+    if is_config:
+        upload_guard = "config"
+    elif resolved_env is not None and resolved_env.recommend_push:
+        upload_guard = "unpublished"
+    if upload_guard:
+        headers[INTERNAL_UPLOAD_GUARD_HEADER] = upload_guard
     args.extend(["--client.headers", json.dumps(headers)])
 
     console.print(f"[dim]Eval job_id: {job_id}[/dim]")
@@ -1174,7 +1212,7 @@ def _run_v1_eval(
         env_name=job_target,
         upstream_slug=upstream_slug,
         resolved_env=resolved_env,
-        is_config=is_config,
+        upload_guard=upload_guard,
     )
 
 
@@ -1210,14 +1248,14 @@ def _upload_v1_results(run: V1EvalRun, *, skip_upload: bool, env_path: Optional[
         console.print("[dim]Skipped uploading evaluation results[/dim]")
         return
 
-    if run.is_config:
+    if run.upload_guard == "config":
         console.print(
             "[yellow]Evaluation completed. Automatic upload is skipped for "
             "config-driven runs.[/yellow]"
         )
         return
 
-    if run.resolved_env is not None and run.resolved_env.recommend_push:
+    if run.upload_guard == "unpublished":
         _print_environment_source_footer(run.resolved_env)
         console.print(
             "[yellow]Evaluation completed. Automatic upload is skipped until the local "

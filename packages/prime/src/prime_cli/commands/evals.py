@@ -34,6 +34,7 @@ from ..verifiers_bridge import (
     DEFAULT_ENV_DIR_PATH,
     DEFAULT_MODEL,
     _is_config_target,
+    _parse_value_option,
     _pop_value_option,
     _resolve_environment_reference,
     _split_owner_and_name,
@@ -304,6 +305,10 @@ def _hosted_overrides_from_flags(passthrough_args: list[str]) -> dict[str, Any]:
             overrides["max_concurrent"] = parsed.max_concurrent
         if "verbose" in provided:
             overrides["verbose"] = parsed.verbose
+        if "args" in provided:
+            overrides["env_args"] = parsed.args
+        if "extra_env_kwargs" in provided:
+            overrides["extra_env_kwargs"] = parsed.extra_env_kwargs
         sampling = parsed.sampling.model_dump(exclude_none=True)
         if sampling:
             overrides["sampling_args"] = sampling
@@ -314,10 +319,12 @@ def _hosted_overrides_from_flags(passthrough_args: list[str]) -> dict[str, Any]:
                 for key, value in parsed.client.headers.items()
                 if key not in default_headers or default_headers[key] != value
             }
-        if "base_url" in parsed.client.model_fields_set and parsed.client.base_url:
-            overrides["api_base_url"] = parsed.client.base_url
-        if "api_key_var" in parsed.client.model_fields_set and parsed.client.api_key_var:
-            overrides["api_key_var"] = parsed.client.api_key_var
+        # detect explicit client flags from raw args: the parsed client model reports
+        # its defaults as set, which would leak them into every override set
+        if base_url := _parse_value_option(parsed_args, "--client.base-url"):
+            overrides["api_base_url"] = base_url
+        if api_key_var := _parse_value_option(parsed_args, "--client.api-key-var"):
+            overrides["api_key_var"] = api_key_var
 
     if client_headers or legacy_header_values:
         headers = _coerce_hosted_headers(
@@ -748,7 +755,7 @@ def _display_logs_follow(eval_id: str, poll_interval: float) -> None:
                 final_logs = clean_logs(_fetch_logs(client, eval_id))
                 if final_logs and final_logs != last_logs:
                     for line in get_new_log_lines(last_logs, final_logs):
-                        console.print(line)
+                        console.print(line, markup=False, highlight=False)
                     last_logs = final_logs
                 console.print()
                 _print_eval_status(eval_data)
@@ -762,7 +769,7 @@ def _display_logs_follow(eval_id: str, poll_interval: float) -> None:
 
             if logs and logs != last_logs:
                 for line in get_new_log_lines(last_logs, logs):
-                    console.print(line)
+                    console.print(line, markup=False, highlight=False)
                 last_logs = logs
                 no_logs_polls = 0
             else:
@@ -786,7 +793,7 @@ def _display_logs_once(eval_id: str, tail: int) -> None:
 
     if logs:
         for line in logs.splitlines()[-tail:]:
-            console.print(line)
+            console.print(line, markup=False, highlight=False)
     else:
         console.print("[yellow]No logs available.[/yellow]")
 

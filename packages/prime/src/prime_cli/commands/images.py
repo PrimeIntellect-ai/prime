@@ -741,7 +741,7 @@ def push_image(
 app.command("push-bulk")(push_bulk)
 
 
-@app.command("build")
+@app.command("build-vm")
 def build_vm_image(
     image_reference: str = typer.Argument(
         ...,
@@ -761,9 +761,9 @@ def build_vm_image(
 
     \b
     Examples:
-        prime images build myapp:v1.0.0
-        prime images build prime/alice/myapp:v1.0.0
-        prime images build prime/team-abc123/myapp:v1.0.0
+        prime images build-vm myapp:v1.0.0
+        prime images build-vm prime/alice/myapp:v1.0.0
+        prime images build-vm prime/team-abc123/myapp:v1.0.0
     """
     try:
         image_name, image_tag, team_id = _parse_mutable_image_reference(image_reference)

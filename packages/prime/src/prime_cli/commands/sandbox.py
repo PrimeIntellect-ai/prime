@@ -710,6 +710,13 @@ def create(
                 sandbox = sandbox_client.create(request)
 
             console.print(f"\n[green]Successfully created sandbox {sandbox.id}[/green]")
+            if getattr(sandbox, "pending_image_build_id", None):
+                console.print(
+                    "[yellow]First VM use of this image: a VM image is being "
+                    "built automatically. The sandbox stays PENDING and starts "
+                    "on its own once the build completes (this can take "
+                    "several minutes).[/yellow]"
+                )
             console.print(
                 f"[blue]Use 'prime sandbox get {sandbox.id}' to check the sandbox status[/blue]"
             )

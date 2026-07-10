@@ -488,15 +488,6 @@ class AsyncSandboxAuthCache:
             await self._save_cache()
 
 
-# First VM use of an image: the platform builds the VM image automatically
-# and the sandbox stays PENDING (pending_image_build_id set) until the build
-# completes. That phase is bounded server-side (~45 minutes), far beyond the
-# normal creation budget, so waits poll it on a separate slower budget that
-# does not consume the regular attempts.
-IMAGE_BUILD_WAIT_POLL_SECONDS = 10
-IMAGE_BUILD_WAIT_TIMEOUT_SECONDS = 50 * 60
-
-
 def _is_waiting_for_image_build(sandbox: Sandbox) -> bool:
     return sandbox.status == "PENDING" and bool(
         getattr(sandbox, "pending_image_build_id", None)
@@ -1108,7 +1099,7 @@ class SandboxClient:
         sandbox_id: str,
         max_attempts: int = 60,
         stability_checks: int = 1,
-        image_build_timeout_seconds: int = IMAGE_BUILD_WAIT_TIMEOUT_SECONDS,
+        image_build_timeout_seconds: int = 3000,
     ) -> None:
         """Wait for sandbox to be running and stable.
 
@@ -1154,7 +1145,7 @@ class SandboxClient:
                     raise SandboxNotRunningError(
                         sandbox_id, "Timeout waiting for the VM image build"
                     )
-                time.sleep(IMAGE_BUILD_WAIT_POLL_SECONDS)
+                time.sleep(10)
                 continue
 
             attempt += 1
@@ -1167,7 +1158,7 @@ class SandboxClient:
         self,
         sandbox_ids: List[str],
         max_attempts: int = 60,
-        image_build_timeout_seconds: int = IMAGE_BUILD_WAIT_TIMEOUT_SECONDS,
+        image_build_timeout_seconds: int = 3000,
     ) -> Dict[str, str]:
         """Wait for multiple sandboxes to be running using list endpoint to avoid rate limits.
 
@@ -1231,7 +1222,7 @@ class SandboxClient:
                 if image_build_deadline is None:
                     image_build_deadline = time.monotonic() + image_build_timeout_seconds
                 if time.monotonic() < image_build_deadline:
-                    time.sleep(IMAGE_BUILD_WAIT_POLL_SECONDS)
+                    time.sleep(10)
                     continue
                 break
 
@@ -2131,7 +2122,7 @@ class AsyncSandboxClient:
         sandbox_id: str,
         max_attempts: int = 60,
         stability_checks: int = 1,
-        image_build_timeout_seconds: int = IMAGE_BUILD_WAIT_TIMEOUT_SECONDS,
+        image_build_timeout_seconds: int = 3000,
     ) -> None:
         """Wait for sandbox to be running and stable (async version).
 
@@ -2177,7 +2168,7 @@ class AsyncSandboxClient:
                     raise SandboxNotRunningError(
                         sandbox_id, "Timeout waiting for the VM image build"
                     )
-                await asyncio.sleep(IMAGE_BUILD_WAIT_POLL_SECONDS)
+                await asyncio.sleep(10)
                 continue
 
             attempt += 1
@@ -2189,7 +2180,7 @@ class AsyncSandboxClient:
         self,
         sandbox_ids: List[str],
         max_attempts: int = 60,
-        image_build_timeout_seconds: int = IMAGE_BUILD_WAIT_TIMEOUT_SECONDS,
+        image_build_timeout_seconds: int = 3000,
     ) -> Dict[str, str]:
         """Wait for multiple sandboxes to be running using list endpoint.
 
@@ -2254,7 +2245,7 @@ class AsyncSandboxClient:
                 if image_build_deadline is None:
                     image_build_deadline = time.monotonic() + image_build_timeout_seconds
                 if time.monotonic() < image_build_deadline:
-                    await asyncio.sleep(IMAGE_BUILD_WAIT_POLL_SECONDS)
+                    await asyncio.sleep(10)
                     continue
                 break
 

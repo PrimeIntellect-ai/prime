@@ -890,7 +890,8 @@ class SandboxClient:
             payload["user"] = user
 
         reauthed = False
-        for attempt in range(MAX_409_RETRIES):
+        # +1: the single 401 re-auth retry gets its own attempt
+        for attempt in range(MAX_409_RETRIES + 1):
             auth = self._auth_cache.get_or_refresh(sandbox_id)
             gateway_url = auth["gateway_url"].rstrip("/")
             url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/exec"
@@ -1232,7 +1233,7 @@ class SandboxClient:
             file_content = f.read()
 
         reauthed = False
-        for attempt in range(MAX_409_RETRIES):
+        for attempt in range(MAX_409_RETRIES + 1):
             auth = self._auth_cache.get_or_refresh(sandbox_id)
             url = f"{auth['gateway_url']}/{auth['user_ns']}/{auth['job_id']}/upload"
             headers = {"Authorization": f"Bearer {auth['token']}"}
@@ -1292,7 +1293,8 @@ class SandboxClient:
         effective_timeout = timeout if timeout is not None else 300
 
         reauthed = False
-        for attempt in range(MAX_409_RETRIES):
+        # +1: the single 401 re-auth retry gets its own attempt
+        for attempt in range(MAX_409_RETRIES + 1):
             auth = self._auth_cache.get_or_refresh(sandbox_id)
             url = f"{auth['gateway_url']}/{auth['user_ns']}/{auth['job_id']}/upload"
             headers = {"Authorization": f"Bearer {auth['token']}"}
@@ -1337,7 +1339,8 @@ class SandboxClient:
         effective_timeout = timeout if timeout is not None else 300
 
         reauthed = False
-        for attempt in range(MAX_409_RETRIES):
+        # +1: the single 401 re-auth retry gets its own attempt
+        for attempt in range(MAX_409_RETRIES + 1):
             auth = self._auth_cache.get_or_refresh(sandbox_id)
             url = f"{auth['gateway_url']}/{auth['user_ns']}/{auth['job_id']}/download"
             headers = {"Authorization": f"Bearer {auth['token']}"}
@@ -1404,7 +1407,8 @@ class SandboxClient:
         effective_timeout = timeout if timeout is not None else 30
 
         reauthed = False
-        for attempt in range(MAX_409_RETRIES):
+        # +1: the single 401 re-auth retry gets its own attempt
+        for attempt in range(MAX_409_RETRIES + 1):
             auth = self._auth_cache.get_or_refresh(sandbox_id)
             gateway_url = auth["gateway_url"].rstrip("/")
             url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/read-file"
@@ -1903,7 +1907,8 @@ class AsyncSandboxClient:
             payload["user"] = user
 
         reauthed = False
-        for attempt in range(MAX_409_RETRIES):
+        # +1: the single 401 re-auth retry gets its own attempt
+        for attempt in range(MAX_409_RETRIES + 1):
             auth = await self._auth_cache.get_or_refresh(sandbox_id)
             gateway_url = auth["gateway_url"].rstrip("/")
             url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/exec"
@@ -2258,7 +2263,8 @@ class AsyncSandboxClient:
             file_content = await f.read()
 
         reauthed = False
-        for attempt in range(MAX_409_RETRIES):
+        # +1: the single 401 re-auth retry gets its own attempt
+        for attempt in range(MAX_409_RETRIES + 1):
             auth = await self._auth_cache.get_or_refresh(sandbox_id)
             gateway_url = auth["gateway_url"].rstrip("/")
             url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/upload"
@@ -2320,7 +2326,10 @@ class AsyncSandboxClient:
         effective_timeout = timeout if timeout is not None else 300
 
         reauthed = False
-        for attempt in range(MAX_409_RETRIES):
+        # +1: the single 401 re-auth retry gets its own attempt (it must not
+        # consume the last slot and exit the loop unretried); 409/5xx retries
+        # stay capped at MAX_409_RETRIES via the attempt-indexed helpers.
+        for attempt in range(MAX_409_RETRIES + 1):
             auth = await self._auth_cache.get_or_refresh(sandbox_id)
             gateway_url = auth["gateway_url"].rstrip("/")
             url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/upload"
@@ -2365,7 +2374,8 @@ class AsyncSandboxClient:
         effective_timeout = timeout if timeout is not None else 300
 
         reauthed = False
-        for attempt in range(MAX_409_RETRIES):
+        # +1: the single 401 re-auth retry gets its own attempt
+        for attempt in range(MAX_409_RETRIES + 1):
             auth = await self._auth_cache.get_or_refresh(sandbox_id)
             gateway_url = auth["gateway_url"].rstrip("/")
             url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/download"
@@ -2435,7 +2445,8 @@ class AsyncSandboxClient:
         effective_timeout = timeout if timeout is not None else 30
 
         reauthed = False
-        for attempt in range(MAX_409_RETRIES):
+        # +1: the single 401 re-auth retry gets its own attempt
+        for attempt in range(MAX_409_RETRIES + 1):
             auth = await self._auth_cache.get_or_refresh(sandbox_id)
             gateway_url = auth["gateway_url"].rstrip("/")
             url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/read-file"

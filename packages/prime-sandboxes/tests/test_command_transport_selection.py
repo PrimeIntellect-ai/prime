@@ -225,10 +225,10 @@ def test_sync_connect_execution_collects_stdout_stderr(monkeypatch):
     monkeypatch.setattr("prime_sandboxes.sandbox.ConnectClientSync", _FakeConnectClient)
 
     client = SandboxClient(APIClient(api_key="test-key"))
+    cast(Any, client)._auth_cache = _FakeCache(is_vm=True)
     result = client._execute_command_connect_rpc(
         sandbox_id="sbx-gpu",
         command="echo hi",
-        auth=_auth_payload(),
     )
 
     assert result.stdout == "hello\n"
@@ -250,6 +250,7 @@ def test_sync_connect_execution_maps_deadline_to_timeout(monkeypatch):
     monkeypatch.setattr("prime_sandboxes.sandbox.ConnectClientSync", _FakeConnectClient)
 
     client = SandboxClient(APIClient(api_key="test-key"))
+    cast(Any, client)._auth_cache = _FakeCache(is_vm=True)
     cast(Any, client)._get_sandbox_error_context = lambda sandbox_id: {
         "status": "RUNNING",
         "error_type": None,
@@ -260,7 +261,6 @@ def test_sync_connect_execution_maps_deadline_to_timeout(monkeypatch):
         client._execute_command_connect_rpc(
             sandbox_id="sbx-gpu",
             command="sleep 100",
-            auth=_auth_payload(),
             timeout=2,
         )
 

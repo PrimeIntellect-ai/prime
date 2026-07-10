@@ -266,8 +266,8 @@ def _resolve_endpoint_alias(args: list[str], model: str) -> Optional[EndpointRes
 
     endpoint = endpoint_group[0]
     return EndpointResolution(
-        model=endpoint.model,
-        base_url=endpoint.base_url.rstrip("/"),
+        model=str(endpoint.get("model") or model),
+        base_url=str(endpoint.get("url") or "").rstrip("/"),
     )
 
 

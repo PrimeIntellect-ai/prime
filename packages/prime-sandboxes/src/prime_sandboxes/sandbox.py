@@ -9,7 +9,7 @@ import sys
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, NoReturn, Optional
 
 import aiofiles
@@ -96,6 +96,9 @@ RETRYABLE_5XX_STATUSES = frozenset({500, 502, 503, 504, 524})
 # Max retries for transient 409 errors
 MAX_409_RETRIES = 4
 RETRY_409_BASE_DELAY = 0.25  # 250ms, 500ms, 1000ms, 2000ms with exponential backoff
+
+# Refresh cached gateway auth this many seconds before its reported expiry.
+AUTH_REFRESH_MARGIN_SECONDS = 60
 
 # Max bytes of stdout/stderr returned per background-job status check
 JOB_OUTPUT_TAIL_BYTES = 10 * 1024 * 1024
@@ -249,6 +252,15 @@ def _raise_not_running_error(
     raise exc
 
 
+def _auth_refresh_cutoff(auth_info: Dict[str, Any]) -> datetime:
+    """Moment at which cached auth stops being usable (expiry minus margin)."""
+    expires_at_str = auth_info["expires_at"].replace("Z", "+00:00")
+    expires_at = datetime.fromisoformat(expires_at_str)
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    return expires_at - timedelta(seconds=AUTH_REFRESH_MARGIN_SECONDS)
+
+
 def _load_auth_cache(cache_file: Any) -> tuple[Dict[str, Any], bool]:
     """Load auth cache from file and clean expired entries."""
     try:
@@ -259,11 +271,7 @@ def _load_auth_cache(cache_file: Any) -> tuple[Dict[str, Any], bool]:
             now = datetime.now(timezone.utc)
             for sandbox_id, auth_info in cache.items():
                 try:
-                    expires_at_str = auth_info["expires_at"].replace("Z", "+00:00")
-                    expires_at = datetime.fromisoformat(expires_at_str)
-                    if expires_at.tzinfo is None:
-                        expires_at = expires_at.replace(tzinfo=timezone.utc)
-                    if now < expires_at:
+                    if now < _auth_refresh_cutoff(auth_info):
                         cleaned_cache[sandbox_id] = auth_info
                 except Exception:
                     pass
@@ -278,11 +286,7 @@ def _check_cached_auth(cache: Dict[str, Any], sandbox_id: str) -> Optional[Dict[
     """Return a copy of cached auth if still valid, else evict and return None."""
     if sandbox_id in cache:
         auth_info = cache[sandbox_id]
-        expires_at_str = auth_info["expires_at"].replace("Z", "+00:00")
-        expires_at = datetime.fromisoformat(expires_at_str)
-        if expires_at.tzinfo is None:
-            expires_at = expires_at.replace(tzinfo=timezone.utc)
-        if datetime.now(timezone.utc) < expires_at:
+        if datetime.now(timezone.utc) < _auth_refresh_cutoff(auth_info):
             return dict(auth_info)
         del cache[sandbox_id]
     return None
@@ -373,6 +377,12 @@ class SandboxAuthCache:
         with self._lock:
             self._auth_cache[sandbox_id] = auth_info
             self._save_cache()
+
+    def invalidate(self, sandbox_id: str) -> None:
+        """Drop cached auth for one sandbox (e.g. after a gateway 401)."""
+        with self._lock:
+            if self._auth_cache.pop(sandbox_id, None) is not None:
+                self._save_cache()
 
     def clear(self) -> None:
         with self._lock:
@@ -480,6 +490,13 @@ class AsyncSandboxAuthCache:
             await self._ensure_loaded()
             self._auth_cache[sandbox_id] = auth_info
             await self._save_cache()
+
+    async def invalidate(self, sandbox_id: str) -> None:
+        """Drop cached auth for one sandbox (e.g. after a gateway 401)."""
+        async with self._lock:
+            await self._ensure_loaded()
+            if self._auth_cache.pop(sandbox_id, None) is not None:
+                await self._save_cache()
 
     async def clear(self) -> None:
         async with self._lock:
@@ -621,6 +638,13 @@ class SandboxClient:
             return True
         return False
 
+    def _should_retry_401(self, sandbox_id: str, reauthed: bool) -> bool:
+        """Check if a gateway 401 should be retried with fresh auth."""
+        if reauthed:
+            return False
+        self._auth_cache.invalidate(sandbox_id)
+        return True
+
     def clear_auth_cache(self) -> None:
         """Clear all cached auth tokens"""
         self._auth_cache.clear()
@@ -740,7 +764,7 @@ class SandboxClient:
         user: Optional[str] = None,
     ) -> CommandResponse:
         """Execute command directly via gateway."""
-        auth = self._auth_cache.get_or_refresh(sandbox_id)
+        self._auth_cache.get_or_refresh(sandbox_id)
 
         if self._auth_cache.is_vm(sandbox_id):
             if user is not None:
@@ -751,7 +775,6 @@ class SandboxClient:
             return self._execute_command_connect_rpc(
                 sandbox_id=sandbox_id,
                 command=command,
-                auth=auth,
                 working_dir=working_dir,
                 env=env,
                 timeout=timeout,
@@ -760,7 +783,6 @@ class SandboxClient:
         return self._execute_command_rest(
             sandbox_id=sandbox_id,
             command=command,
-            auth=auth,
             working_dir=working_dir,
             env=env,
             timeout=timeout,
@@ -771,85 +793,90 @@ class SandboxClient:
         self,
         sandbox_id: str,
         command: str,
-        auth: Dict[str, Any],
         working_dir: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
         timeout: Optional[int] = None,
     ) -> CommandResponse:
-        gateway_url = auth["gateway_url"].rstrip("/")
-        base_url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}"
-        headers = {"Authorization": f"Bearer {auth['token']}"}
         effective_timeout = timeout if timeout is not None else 300
         request = build_command_session_start_request(command, working_dir, env)
-        stdout_parts: List[str] = []
-        stderr_parts: List[str] = []
-        exit_code: Optional[int] = None
 
-        rpc_client = ConnectClientSync(base_url)
-        try:
-            stream = rpc_client.execute_server_stream(
-                request=request,
-                method=COMMAND_SESSION_START_RPC_METHOD,
-                headers=headers,
-                timeout_ms=effective_timeout * 1000,
-            )
-            for event in stream:
-                event_exit_code = collect_command_session_start_event(
-                    event,
-                    stdout_parts,
-                    stderr_parts,
+        reauthed = False
+        while True:
+            auth = self._auth_cache.get_or_refresh(sandbox_id)
+            gateway_url = auth["gateway_url"].rstrip("/")
+            base_url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}"
+            headers = {"Authorization": f"Bearer {auth['token']}"}
+            stdout_parts: List[str] = []
+            stderr_parts: List[str] = []
+            exit_code: Optional[int] = None
+
+            rpc_client = ConnectClientSync(base_url)
+            try:
+                stream = rpc_client.execute_server_stream(
+                    request=request,
+                    method=COMMAND_SESSION_START_RPC_METHOD,
+                    headers=headers,
+                    timeout_ms=effective_timeout * 1000,
                 )
-                if event_exit_code is not None:
-                    exit_code = event_exit_code
-
-            if exit_code is None:
-                raise APIError("Command stream ended without exit code")
-
-            return CommandResponse(
-                stdout="".join(stdout_parts),
-                stderr="".join(stderr_parts),
-                exit_code=exit_code,
-            )
-        except ConnectError as e:
-            if e.code == Code.DEADLINE_EXCEEDED:
-                ctx = self._get_sandbox_error_context(sandbox_id)
-                if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
-                    _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
-                raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
-
-            if e.code == Code.NOT_FOUND:
-                ctx = self._get_sandbox_error_context(sandbox_id)
-                ctx["status"] = "TERMINATED"
-                if not ctx.get("error_type"):
-                    ctx["error_type"] = "SANDBOX_NOT_FOUND"
-                if not ctx.get("error_message"):
-                    ctx["error_message"] = (
-                        "Sandbox is no longer present on the runtime node. "
-                        "Please create a new sandbox."
+                for event in stream:
+                    event_exit_code = collect_command_session_start_event(
+                        event,
+                        stdout_parts,
+                        stderr_parts,
                     )
-                _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
+                    if event_exit_code is not None:
+                        exit_code = event_exit_code
 
-            raise APIError(f"Connect RPC failed ({e.code.value}): {e.message}") from e
-        except APIError:
-            raise
-        except Exception as e:
-            raise APIError(f"Request failed: {e.__class__.__name__}: {e}") from e
-        finally:
-            rpc_client.close()
+                if exit_code is None:
+                    raise APIError("Command stream ended without exit code")
+
+                return CommandResponse(
+                    stdout="".join(stdout_parts),
+                    stderr="".join(stderr_parts),
+                    exit_code=exit_code,
+                )
+            except ConnectError as e:
+                if e.code == Code.UNAUTHENTICATED and self._should_retry_401(
+                    sandbox_id, reauthed
+                ):
+                    reauthed = True
+                    continue
+
+                if e.code == Code.DEADLINE_EXCEEDED:
+                    ctx = self._get_sandbox_error_context(sandbox_id)
+                    if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
+                        _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
+                    raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
+
+                if e.code == Code.NOT_FOUND:
+                    ctx = self._get_sandbox_error_context(sandbox_id)
+                    ctx["status"] = "TERMINATED"
+                    if not ctx.get("error_type"):
+                        ctx["error_type"] = "SANDBOX_NOT_FOUND"
+                    if not ctx.get("error_message"):
+                        ctx["error_message"] = (
+                            "Sandbox is no longer present on the runtime node. "
+                            "Please create a new sandbox."
+                        )
+                    _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
+
+                raise APIError(f"Connect RPC failed ({e.code.value}): {e.message}") from e
+            except APIError:
+                raise
+            except Exception as e:
+                raise APIError(f"Request failed: {e.__class__.__name__}: {e}") from e
+            finally:
+                rpc_client.close()
 
     def _execute_command_rest(
         self,
         sandbox_id: str,
         command: str,
-        auth: Dict[str, Any],
         working_dir: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
         timeout: Optional[int] = None,
         user: Optional[str] = None,
     ) -> CommandResponse:
-        gateway_url = auth["gateway_url"].rstrip("/")
-        url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/exec"
-        headers = {"Authorization": f"Bearer {auth['token']}"}
         effective_timeout = timeout if timeout is not None else 300
 
         payload = {
@@ -862,7 +889,12 @@ class SandboxClient:
         if user is not None:
             payload["user"] = user
 
+        reauthed = False
         for attempt in range(MAX_409_RETRIES):
+            auth = self._auth_cache.get_or_refresh(sandbox_id)
+            gateway_url = auth["gateway_url"].rstrip("/")
+            url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/exec"
+            headers = {"Authorization": f"Bearer {auth['token']}"}
             try:
                 # The + 5 accounts for connection creation and closing. Prevents any command
                 # running close to its `effective_timeout` from being killed prematurely
@@ -880,6 +912,10 @@ class SandboxClient:
             except httpx.HTTPStatusError as e:
                 resp = getattr(e, "response", None)
                 status = getattr(resp, "status_code", "?")
+
+                if status == 401 and self._should_retry_401(sandbox_id, reauthed):
+                    reauthed = True
+                    continue
 
                 if status == 502 and _is_gateway_sandbox_not_found(resp):
                     ctx = self._get_sandbox_error_context(sandbox_id)
@@ -1190,17 +1226,16 @@ class SandboxClient:
         if not os.path.exists(local_file_path):
             raise FileNotFoundError(f"Local file not found: {local_file_path}")
 
-        auth = self._auth_cache.get_or_refresh(sandbox_id)
-
-        url = f"{auth['gateway_url']}/{auth['user_ns']}/{auth['job_id']}/upload"
-        headers = {"Authorization": f"Bearer {auth['token']}"}
-
         effective_timeout = timeout if timeout is not None else 300
 
         with open(local_file_path, "rb") as f:
             file_content = f.read()
 
+        reauthed = False
         for attempt in range(MAX_409_RETRIES):
+            auth = self._auth_cache.get_or_refresh(sandbox_id)
+            url = f"{auth['gateway_url']}/{auth['user_ns']}/{auth['job_id']}/upload"
+            headers = {"Authorization": f"Bearer {auth['token']}"}
             try:
                 files = {"file": (os.path.basename(local_file_path), file_content)}
                 params = {"path": file_path, "sandbox_id": sandbox_id}
@@ -1212,6 +1247,11 @@ class SandboxClient:
             except httpx.TimeoutException as e:
                 raise UploadTimeoutError(sandbox_id, file_path, effective_timeout) from e
             except httpx.HTTPStatusError as e:
+                if e.response.status_code == 401 and self._should_retry_401(
+                    sandbox_id, reauthed
+                ):
+                    reauthed = True
+                    continue
                 if e.response.status_code == 409:
                     if self._should_retry_409(sandbox_id, e, attempt):
                         continue
@@ -1249,14 +1289,13 @@ class SandboxClient:
             filename: Name for the file (used in multipart form)
             timeout: Optional timeout in seconds
         """
-        auth = self._auth_cache.get_or_refresh(sandbox_id)
-
-        url = f"{auth['gateway_url']}/{auth['user_ns']}/{auth['job_id']}/upload"
-        headers = {"Authorization": f"Bearer {auth['token']}"}
-
         effective_timeout = timeout if timeout is not None else 300
 
+        reauthed = False
         for attempt in range(MAX_409_RETRIES):
+            auth = self._auth_cache.get_or_refresh(sandbox_id)
+            url = f"{auth['gateway_url']}/{auth['user_ns']}/{auth['job_id']}/upload"
+            headers = {"Authorization": f"Bearer {auth['token']}"}
             try:
                 files = {"file": (filename, file_bytes)}
                 params = {"path": file_path, "sandbox_id": sandbox_id}
@@ -1268,6 +1307,11 @@ class SandboxClient:
             except httpx.TimeoutException:
                 raise UploadTimeoutError(sandbox_id, file_path, effective_timeout)
             except httpx.HTTPStatusError as e:
+                if e.response.status_code == 401 and self._should_retry_401(
+                    sandbox_id, reauthed
+                ):
+                    reauthed = True
+                    continue
                 if e.response.status_code == 409:
                     if self._should_retry_409(sandbox_id, e, attempt):
                         continue
@@ -1288,15 +1332,15 @@ class SandboxClient:
         timeout: Optional[int] = None,
     ) -> None:
         """Download file directly via gateway"""
-        auth = self._auth_cache.get_or_refresh(sandbox_id)
-
-        url = f"{auth['gateway_url']}/{auth['user_ns']}/{auth['job_id']}/download"
-        headers = {"Authorization": f"Bearer {auth['token']}"}
         params = {"path": file_path, "sandbox_id": sandbox_id}
 
         effective_timeout = timeout if timeout is not None else 300
 
+        reauthed = False
         for attempt in range(MAX_409_RETRIES):
+            auth = self._auth_cache.get_or_refresh(sandbox_id)
+            url = f"{auth['gateway_url']}/{auth['user_ns']}/{auth['job_id']}/download"
+            headers = {"Authorization": f"Bearer {auth['token']}"}
             try:
                 response = self._gateway_get(
                     url, headers=headers, params=params, timeout=effective_timeout
@@ -1313,6 +1357,11 @@ class SandboxClient:
             except httpx.TimeoutException as e:
                 raise DownloadTimeoutError(sandbox_id, file_path, effective_timeout) from e
             except httpx.HTTPStatusError as e:
+                if e.response.status_code == 401 and self._should_retry_401(
+                    sandbox_id, reauthed
+                ):
+                    reauthed = True
+                    continue
                 if e.response.status_code == 409:
                     if self._should_retry_409(sandbox_id, e, attempt):
                         continue
@@ -1346,11 +1395,6 @@ class SandboxClient:
         (subject to the read size limit), and omit total_size/offset/truncated
         from the response (detectable via ``response.offset is None``).
         """
-        auth = self._auth_cache.get_or_refresh(sandbox_id)
-
-        gateway_url = auth["gateway_url"].rstrip("/")
-        url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/read-file"
-        headers = {"Authorization": f"Bearer {auth['token']}"}
         params: Dict[str, Any] = {"path": file_path}
         if offset is not None:
             params["offset"] = offset
@@ -1359,7 +1403,12 @@ class SandboxClient:
 
         effective_timeout = timeout if timeout is not None else 30
 
+        reauthed = False
         for attempt in range(MAX_409_RETRIES):
+            auth = self._auth_cache.get_or_refresh(sandbox_id)
+            gateway_url = auth["gateway_url"].rstrip("/")
+            url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/read-file"
+            headers = {"Authorization": f"Bearer {auth['token']}"}
             try:
                 response = self._gateway_read_file_get(
                     url, headers=headers, params=params, timeout=effective_timeout
@@ -1372,6 +1421,11 @@ class SandboxClient:
                     f"({e.__class__.__name__}): {file_path}"
                 ) from e
             except httpx.HTTPStatusError as e:
+                if e.response.status_code == 401 and self._should_retry_401(
+                    sandbox_id, reauthed
+                ):
+                    reauthed = True
+                    continue
                 if e.response.status_code == 404:
                     raise SandboxFileNotFoundError(f"File not found: {file_path}") from e
                 if e.response.status_code == 413:
@@ -1599,6 +1653,13 @@ class AsyncSandboxClient:
             return True
         return False
 
+    async def _should_retry_401(self, sandbox_id: str, reauthed: bool) -> bool:
+        """Check if a gateway 401 should be retried with fresh auth (async)."""
+        if reauthed:
+            return False
+        await self._auth_cache.invalidate(sandbox_id)
+        return True
+
     async def clear_auth_cache(self) -> None:
         """Clear all cached auth tokens."""
         await self._auth_cache.clear()
@@ -1716,7 +1777,7 @@ class AsyncSandboxClient:
         user: Optional[str] = None,
     ) -> CommandResponse:
         """Execute command directly via gateway (async)."""
-        auth = await self._auth_cache.get_or_refresh(sandbox_id)
+        await self._auth_cache.get_or_refresh(sandbox_id)
 
         if await self._auth_cache.is_vm(sandbox_id):
             if user is not None:
@@ -1727,7 +1788,6 @@ class AsyncSandboxClient:
             return await self._execute_command_connect_rpc(
                 sandbox_id=sandbox_id,
                 command=command,
-                auth=auth,
                 working_dir=working_dir,
                 env=env,
                 timeout=timeout,
@@ -1736,7 +1796,6 @@ class AsyncSandboxClient:
         return await self._execute_command_rest(
             sandbox_id=sandbox_id,
             command=command,
-            auth=auth,
             working_dir=working_dir,
             env=env,
             timeout=timeout,
@@ -1747,85 +1806,90 @@ class AsyncSandboxClient:
         self,
         sandbox_id: str,
         command: str,
-        auth: Dict[str, Any],
         working_dir: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
         timeout: Optional[int] = None,
     ) -> CommandResponse:
-        gateway_url = auth["gateway_url"].rstrip("/")
-        base_url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}"
-        headers = {"Authorization": f"Bearer {auth['token']}"}
         effective_timeout = timeout if timeout is not None else 300
         request = build_command_session_start_request(command, working_dir, env)
-        stdout_parts: List[str] = []
-        stderr_parts: List[str] = []
-        exit_code: Optional[int] = None
 
-        rpc_client = ConnectClient(base_url)
-        try:
-            stream = rpc_client.execute_server_stream(
-                request=request,
-                method=COMMAND_SESSION_START_RPC_METHOD,
-                headers=headers,
-                timeout_ms=effective_timeout * 1000,
-            )
-            async for event in stream:
-                event_exit_code = collect_command_session_start_event(
-                    event,
-                    stdout_parts,
-                    stderr_parts,
+        reauthed = False
+        while True:
+            auth = await self._auth_cache.get_or_refresh(sandbox_id)
+            gateway_url = auth["gateway_url"].rstrip("/")
+            base_url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}"
+            headers = {"Authorization": f"Bearer {auth['token']}"}
+            stdout_parts: List[str] = []
+            stderr_parts: List[str] = []
+            exit_code: Optional[int] = None
+
+            rpc_client = ConnectClient(base_url)
+            try:
+                stream = rpc_client.execute_server_stream(
+                    request=request,
+                    method=COMMAND_SESSION_START_RPC_METHOD,
+                    headers=headers,
+                    timeout_ms=effective_timeout * 1000,
                 )
-                if event_exit_code is not None:
-                    exit_code = event_exit_code
-
-            if exit_code is None:
-                raise APIError("Command stream ended without exit code")
-
-            return CommandResponse(
-                stdout="".join(stdout_parts),
-                stderr="".join(stderr_parts),
-                exit_code=exit_code,
-            )
-        except ConnectError as e:
-            if e.code == Code.DEADLINE_EXCEEDED:
-                ctx = await self._get_sandbox_error_context(sandbox_id)
-                if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
-                    _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
-                raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
-
-            if e.code == Code.NOT_FOUND:
-                ctx = await self._get_sandbox_error_context(sandbox_id)
-                ctx["status"] = "TERMINATED"
-                if not ctx.get("error_type"):
-                    ctx["error_type"] = "SANDBOX_NOT_FOUND"
-                if not ctx.get("error_message"):
-                    ctx["error_message"] = (
-                        "Sandbox is no longer present on the runtime node. "
-                        "Please create a new sandbox."
+                async for event in stream:
+                    event_exit_code = collect_command_session_start_event(
+                        event,
+                        stdout_parts,
+                        stderr_parts,
                     )
-                _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
+                    if event_exit_code is not None:
+                        exit_code = event_exit_code
 
-            raise APIError(f"Connect RPC failed ({e.code.value}): {e.message}") from e
-        except APIError:
-            raise
-        except Exception as e:
-            raise APIError(f"Request failed: {e.__class__.__name__}: {e}") from e
-        finally:
-            await rpc_client.close()
+                if exit_code is None:
+                    raise APIError("Command stream ended without exit code")
+
+                return CommandResponse(
+                    stdout="".join(stdout_parts),
+                    stderr="".join(stderr_parts),
+                    exit_code=exit_code,
+                )
+            except ConnectError as e:
+                if e.code == Code.UNAUTHENTICATED and await self._should_retry_401(
+                    sandbox_id, reauthed
+                ):
+                    reauthed = True
+                    continue
+
+                if e.code == Code.DEADLINE_EXCEEDED:
+                    ctx = await self._get_sandbox_error_context(sandbox_id)
+                    if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
+                        _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
+                    raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
+
+                if e.code == Code.NOT_FOUND:
+                    ctx = await self._get_sandbox_error_context(sandbox_id)
+                    ctx["status"] = "TERMINATED"
+                    if not ctx.get("error_type"):
+                        ctx["error_type"] = "SANDBOX_NOT_FOUND"
+                    if not ctx.get("error_message"):
+                        ctx["error_message"] = (
+                            "Sandbox is no longer present on the runtime node. "
+                            "Please create a new sandbox."
+                        )
+                    _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
+
+                raise APIError(f"Connect RPC failed ({e.code.value}): {e.message}") from e
+            except APIError:
+                raise
+            except Exception as e:
+                raise APIError(f"Request failed: {e.__class__.__name__}: {e}") from e
+            finally:
+                await rpc_client.close()
 
     async def _execute_command_rest(
         self,
         sandbox_id: str,
         command: str,
-        auth: Dict[str, Any],
         working_dir: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
         timeout: Optional[int] = None,
         user: Optional[str] = None,
     ) -> CommandResponse:
-        gateway_url = auth["gateway_url"].rstrip("/")
-        url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/exec"
-        headers = {"Authorization": f"Bearer {auth['token']}"}
         effective_timeout = timeout if timeout is not None else 300
 
         payload = {
@@ -1838,7 +1902,12 @@ class AsyncSandboxClient:
         if user is not None:
             payload["user"] = user
 
+        reauthed = False
         for attempt in range(MAX_409_RETRIES):
+            auth = await self._auth_cache.get_or_refresh(sandbox_id)
+            gateway_url = auth["gateway_url"].rstrip("/")
+            url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/exec"
+            headers = {"Authorization": f"Bearer {auth['token']}"}
             try:
                 # The + 5 accounts for connection creation and closing. Prevents any command
                 # running close to its `effective_timeout` from being killed prematurely
@@ -1856,6 +1925,10 @@ class AsyncSandboxClient:
             except httpx.HTTPStatusError as e:
                 resp = getattr(e, "response", None)
                 status = getattr(resp, "status_code", "?")
+
+                if status == 401 and await self._should_retry_401(sandbox_id, reauthed):
+                    reauthed = True
+                    continue
 
                 if status == 502 and _is_gateway_sandbox_not_found(resp):
                     ctx = await self._get_sandbox_error_context(sandbox_id)
@@ -2176,11 +2249,6 @@ class AsyncSandboxClient:
         if not await asyncio.to_thread(os.path.exists, local_file_path):
             raise FileNotFoundError(f"Local file not found: {local_file_path}")
 
-        auth = await self._auth_cache.get_or_refresh(sandbox_id)
-
-        gateway_url = auth["gateway_url"].rstrip("/")
-        url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/upload"
-        headers = {"Authorization": f"Bearer {auth['token']}"}
         params = {"path": file_path, "sandbox_id": sandbox_id}
 
         effective_timeout = timeout if timeout is not None else 300
@@ -2189,7 +2257,12 @@ class AsyncSandboxClient:
         async with aiofiles.open(local_file_path, "rb") as f:
             file_content = await f.read()
 
+        reauthed = False
         for attempt in range(MAX_409_RETRIES):
+            auth = await self._auth_cache.get_or_refresh(sandbox_id)
+            gateway_url = auth["gateway_url"].rstrip("/")
+            url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/upload"
+            headers = {"Authorization": f"Bearer {auth['token']}"}
             try:
                 files = {"file": (os.path.basename(local_file_path), file_content)}
                 response = await self._gateway_post(
@@ -2200,6 +2273,11 @@ class AsyncSandboxClient:
             except httpx.TimeoutException as e:
                 raise UploadTimeoutError(sandbox_id, file_path, effective_timeout) from e
             except httpx.HTTPStatusError as e:
+                if e.response.status_code == 401 and await self._should_retry_401(
+                    sandbox_id, reauthed
+                ):
+                    reauthed = True
+                    continue
                 if e.response.status_code == 409:
                     if await self._should_retry_409(sandbox_id, e, attempt):
                         continue
@@ -2237,16 +2315,16 @@ class AsyncSandboxClient:
             filename: Name for the file (used in multipart form)
             timeout: Optional timeout in seconds
         """
-        auth = await self._auth_cache.get_or_refresh(sandbox_id)
-
-        gateway_url = auth["gateway_url"].rstrip("/")
-        url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/upload"
-        headers = {"Authorization": f"Bearer {auth['token']}"}
         params = {"path": file_path, "sandbox_id": sandbox_id}
 
         effective_timeout = timeout if timeout is not None else 300
 
+        reauthed = False
         for attempt in range(MAX_409_RETRIES):
+            auth = await self._auth_cache.get_or_refresh(sandbox_id)
+            gateway_url = auth["gateway_url"].rstrip("/")
+            url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/upload"
+            headers = {"Authorization": f"Bearer {auth['token']}"}
             try:
                 files = {"file": (filename, file_bytes)}
                 response = await self._gateway_post(
@@ -2257,6 +2335,11 @@ class AsyncSandboxClient:
             except httpx.TimeoutException:
                 raise UploadTimeoutError(sandbox_id, file_path, effective_timeout)
             except httpx.HTTPStatusError as e:
+                if e.response.status_code == 401 and await self._should_retry_401(
+                    sandbox_id, reauthed
+                ):
+                    reauthed = True
+                    continue
                 if e.response.status_code == 409:
                     if await self._should_retry_409(sandbox_id, e, attempt):
                         continue
@@ -2277,16 +2360,16 @@ class AsyncSandboxClient:
         timeout: Optional[int] = None,
     ) -> None:
         """Download a file from a sandbox via gateway (async)"""
-        auth = await self._auth_cache.get_or_refresh(sandbox_id)
-
-        gateway_url = auth["gateway_url"].rstrip("/")
-        url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/download"
-        headers = {"Authorization": f"Bearer {auth['token']}"}
         params = {"path": file_path, "sandbox_id": sandbox_id}
 
         effective_timeout = timeout if timeout is not None else 300
 
+        reauthed = False
         for attempt in range(MAX_409_RETRIES):
+            auth = await self._auth_cache.get_or_refresh(sandbox_id)
+            gateway_url = auth["gateway_url"].rstrip("/")
+            url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/download"
+            headers = {"Authorization": f"Bearer {auth['token']}"}
             try:
                 response = await self._gateway_get(
                     url, headers=headers, params=params, timeout=effective_timeout
@@ -2305,6 +2388,11 @@ class AsyncSandboxClient:
             except httpx.TimeoutException as e:
                 raise DownloadTimeoutError(sandbox_id, file_path, effective_timeout) from e
             except httpx.HTTPStatusError as e:
+                if e.response.status_code == 401 and await self._should_retry_401(
+                    sandbox_id, reauthed
+                ):
+                    reauthed = True
+                    continue
                 if e.response.status_code == 409:
                     if await self._should_retry_409(sandbox_id, e, attempt):
                         continue
@@ -2338,11 +2426,6 @@ class AsyncSandboxClient:
         (subject to the read size limit), and omit total_size/offset/truncated
         from the response (detectable via ``response.offset is None``).
         """
-        auth = await self._auth_cache.get_or_refresh(sandbox_id)
-
-        gateway_url = auth["gateway_url"].rstrip("/")
-        url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/read-file"
-        headers = {"Authorization": f"Bearer {auth['token']}"}
         params: Dict[str, Any] = {"path": file_path}
         if offset is not None:
             params["offset"] = offset
@@ -2351,7 +2434,12 @@ class AsyncSandboxClient:
 
         effective_timeout = timeout if timeout is not None else 30
 
+        reauthed = False
         for attempt in range(MAX_409_RETRIES):
+            auth = await self._auth_cache.get_or_refresh(sandbox_id)
+            gateway_url = auth["gateway_url"].rstrip("/")
+            url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/read-file"
+            headers = {"Authorization": f"Bearer {auth['token']}"}
             try:
                 response = await self._gateway_read_file_get(
                     url, headers=headers, params=params, timeout=effective_timeout
@@ -2364,6 +2452,11 @@ class AsyncSandboxClient:
                     f"({e.__class__.__name__}): {file_path}"
                 ) from e
             except httpx.HTTPStatusError as e:
+                if e.response.status_code == 401 and await self._should_retry_401(
+                    sandbox_id, reauthed
+                ):
+                    reauthed = True
+                    continue
                 if e.response.status_code == 404:
                     raise SandboxFileNotFoundError(f"File not found: {file_path}") from e
                 if e.response.status_code == 413:

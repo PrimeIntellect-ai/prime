@@ -279,7 +279,7 @@ def remote_script(config: RemoteConfig) -> str:
                 requires-python = ">=3.11"
                 dependencies = [
                   "datasets>=2.18.0",
-                  "verifiers>=0.1.14",
+                  "verifiers>=0.2.0",
                 ]
 
                 [build-system]

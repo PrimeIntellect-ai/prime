@@ -42,7 +42,7 @@ from .lab_hygiene import (
 )
 
 VERIFIERS_REPO = "primeintellect-ai/verifiers"
-VERIFIERS_REF = "f43e42c1fabfe2604afc95b9ce62779a8f55d487"
+VERIFIERS_REF = "6c64ce6a3a01e8edde7c3c0e8e5315fb236e9faa"
 VERIFIERS_CONFIG_REF = "main"
 DOWNLOAD_ATTEMPTS = 3
 DOWNLOAD_RETRY_DELAY_SECONDS = 1.0

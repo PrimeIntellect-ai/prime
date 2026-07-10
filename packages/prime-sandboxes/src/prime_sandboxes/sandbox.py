@@ -809,6 +809,7 @@ class SandboxClient:
             stdout_parts: List[str] = []
             stderr_parts: List[str] = []
             exit_code: Optional[int] = None
+            stream_started = False
 
             rpc_client = ConnectClientSync(base_url)
             try:
@@ -819,6 +820,7 @@ class SandboxClient:
                     timeout_ms=effective_timeout * 1000,
                 )
                 for event in stream:
+                    stream_started = True
                     event_exit_code = collect_command_session_start_event(
                         event,
                         stdout_parts,
@@ -836,8 +838,11 @@ class SandboxClient:
                     exit_code=exit_code,
                 )
             except ConnectError as e:
-                if e.code == Code.UNAUTHENTICATED and self._should_retry_401(
-                    sandbox_id, reauthed
+                # Only re-auth before any stream event.
+                if (
+                    e.code == Code.UNAUTHENTICATED
+                    and not stream_started
+                    and self._should_retry_401(sandbox_id, reauthed)
                 ):
                     reauthed = True
                     continue
@@ -1826,6 +1831,7 @@ class AsyncSandboxClient:
             stdout_parts: List[str] = []
             stderr_parts: List[str] = []
             exit_code: Optional[int] = None
+            stream_started = False
 
             rpc_client = ConnectClient(base_url)
             try:
@@ -1836,6 +1842,7 @@ class AsyncSandboxClient:
                     timeout_ms=effective_timeout * 1000,
                 )
                 async for event in stream:
+                    stream_started = True
                     event_exit_code = collect_command_session_start_event(
                         event,
                         stdout_parts,
@@ -1853,8 +1860,11 @@ class AsyncSandboxClient:
                     exit_code=exit_code,
                 )
             except ConnectError as e:
-                if e.code == Code.UNAUTHENTICATED and await self._should_retry_401(
-                    sandbox_id, reauthed
+                # Only re-auth before any stream event.
+                if (
+                    e.code == Code.UNAUTHENTICATED
+                    and not stream_started
+                    and await self._should_retry_401(sandbox_id, reauthed)
                 ):
                     reauthed = True
                     continue

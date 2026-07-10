@@ -414,7 +414,7 @@ def _resolve_hosted_config_model(raw_config: dict[str, Any], config_path: Path) 
         raise typer.Exit(1)
 
     endpoint_group = endpoints[raw_endpoint_id]
-    endpoint_models = {entry["model"] for entry in endpoint_group}
+    endpoint_models = {entry.model for entry in endpoint_group}
     if len(endpoint_models) != 1:
         console.print(
             f"[red]Error:[/red] endpoint_id '{raw_endpoint_id}' resolves to multiple models: "
@@ -422,7 +422,7 @@ def _resolve_hosted_config_model(raw_config: dict[str, Any], config_path: Path) 
         )
         raise typer.Exit(1)
 
-    return endpoint_group[0]["model"]
+    return endpoint_group[0].model
 
 
 def _validate_single_hosted_eval_config(

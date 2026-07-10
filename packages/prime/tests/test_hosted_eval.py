@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import typer
@@ -1216,11 +1217,7 @@ env_id = "gsm8k"
     def fake_load_endpoints(path):
         return {
             "test-endpoint": [
-                {
-                    "model": "openai/gpt-4.1-mini",
-                    "url": "https://api.example.com/v1",
-                    "key": "PRIME_API_KEY",
-                }
+                SimpleNamespace(model="openai/gpt-4.1-mini"),
             ]
         }
 
@@ -1258,11 +1255,7 @@ endpoint_id = "test-endpoint"
         "verifiers.utils.eval_utils.load_endpoints",
         lambda path: {
             "test-endpoint": [
-                {
-                    "model": "anthropic/claude-sonnet-4",
-                    "url": "https://api.example.com/v1",
-                    "key": "PRIME_API_KEY",
-                }
+                SimpleNamespace(model="anthropic/claude-sonnet-4"),
             ]
         },
     )

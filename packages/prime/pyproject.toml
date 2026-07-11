@@ -4,7 +4,7 @@ name = "prime"
 dynamic = ["version"]
 description = "Prime Intellect CLI + SDK"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11,<3.14"
 license = "MIT"
 authors = [
     { name = "Prime Intellect", email = "contact@primeintellect.ai" }
@@ -20,7 +20,7 @@ dependencies = [
     "textual>=6.1.0",
     "textual-plot>=0.10.1",
     "cryptography>=41.0.0",
-    "verifiers>=0.1.14",
+    "verifiers>=0.2.0",
     "build>=1.0.0",
     "gitignore-parser>=0.1.13",
     "pyyaml>=6.0.0",
@@ -35,11 +35,9 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
-    "Programming Language :: Python :: 3.14",
     "Topic :: Software Development :: Libraries :: Python Modules"
 ]
 
@@ -64,7 +62,7 @@ dev = [
 prime-sandboxes = { workspace = true }
 prime-evals = { workspace = true }
 prime-tunnel = { workspace = true }
-verifiers = { git = "https://github.com/PrimeIntellect-ai/verifiers.git", tag = "v0.1.14" }
+verifiers = { git = "https://github.com/PrimeIntellect-ai/verifiers.git", tag = "v0.2.0" }
 
 [build-system]
 requires = ["hatchling"]

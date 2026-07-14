@@ -383,6 +383,7 @@ def reset(
         config.set_team(None)
         config.set_base_url(Config.DEFAULT_BASE_URL)
         config.set_frontend_url(Config.DEFAULT_FRONTEND_URL)
+        config.set_inference_url(Config.DEFAULT_INFERENCE_URL)
         config.set_ssh_key_path(Config.DEFAULT_SSH_KEY_PATH)
         config.set_current_environment("production")
         console.print("[green]Configuration reset to defaults![/green]")

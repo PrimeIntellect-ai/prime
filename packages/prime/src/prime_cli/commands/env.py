@@ -1833,7 +1833,11 @@ def pull(
 
                 try:
                     with tarfile.open(tmp.name, "r:gz") as tar:
-                        tar.extractall(target_dir)
+                        # Use path-traversal / symlink-safe extract (same as install)
+                        _safe_tar_extract(tar, Path(target_dir))
+                except ValueError as e:
+                    console.print(f"[red]Failed to extract archive: {e}[/red]")
+                    raise typer.Exit(1)
                 except tarfile.TarError as e:
                     console.print(f"[red]Failed to extract archive: {e}[/red]")
                     raise typer.Exit(1)

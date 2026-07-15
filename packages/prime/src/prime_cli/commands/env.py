@@ -18,7 +18,6 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 import httpx
-import questionary
 import toml
 import typer
 from gitignore_parser import parse_gitignore
@@ -39,6 +38,7 @@ from ..utils.formatters import format_file_size
 from ..utils.formatters import strip_ansi as _strip_ansi
 from ..utils.prompt import (
     any_provided,
+    ask_text,
     confirm,
     prompt_for_value,
     require_selection,
@@ -1257,7 +1257,7 @@ def push(
                     )
 
                     while True:
-                        answer = questionary.text("Enter your desired username").ask()
+                        answer = ask_text("Enter your desired username")
                         if answer is None:
                             console.print("[red]Cancelled by user[/red]")
                             raise typer.Exit(1)

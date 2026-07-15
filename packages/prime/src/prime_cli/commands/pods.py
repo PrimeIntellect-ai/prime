@@ -20,6 +20,9 @@ from ..commands.teams import fetch_team_members
 from ..helper.short_id import generate_short_id
 from ..utils import (
     PlainTyper,
+    ask_checkbox,
+    ask_select,
+    ask_text,
     confirm_or_skip,
     format_ip_display,
     get_console,
@@ -38,7 +41,7 @@ console = get_console()
 
 
 def _select_or_exit(message: str, choices: List[questionary.Choice]) -> Any:
-    answer = questionary.select(message, choices=choices).ask()
+    answer = ask_select(message, choices)
     if answer is None:
         raise typer.Exit(1)
     return answer
@@ -58,9 +61,9 @@ def _prompt_int(
             return f"Must be at most {maximum}."
         return True
 
-    answer = questionary.text(
+    answer = ask_text(
         message, default=str(default) if default is not None else "", validate=validate
-    ).ask()
+    )
     if answer is None:
         raise typer.Exit(1)
     return int(answer)
@@ -666,9 +669,7 @@ def create(
                     return True
                 return "Use letters, numbers and dashes; must contain at least 1 letter."
 
-            answer = questionary.text(
-                "Pod name", default=default_name, validate=_valid_pod_name
-            ).ask()
+            answer = ask_text("Pod name", default=default_name, validate=_valid_pod_name)
             if answer is None:
                 raise typer.Exit(1)
             name = answer.strip()
@@ -758,10 +759,7 @@ def create(
                         questionary.Choice(f"{member_name} ({email}) - {role}", value=m)
                     )
 
-                picked = questionary.checkbox(
-                    "Select members to share with",
-                    choices=member_choices,
-                ).ask()
+                picked = ask_checkbox("Select members to share with", member_choices)
                 if picked is None:
                     raise typer.Exit(1)
 

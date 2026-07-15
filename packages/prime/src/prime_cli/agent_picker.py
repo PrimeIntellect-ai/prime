@@ -4,14 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
-import questionary
-from questionary import Choice, Style
+from questionary import Choice
+
+from .utils.prompt import ask_checkbox
 
 AgentMenu = list[tuple[str, str, bool]]
-
-# Colour the checked marker (●) green and leave the label at its normal colour,
-# so selecting an agent does not highlight the whole row.
-_STYLE = Style([("selected", "fg:green noreverse")])
 
 
 def _choices(menu: AgentMenu, default_index: int) -> list[Choice]:
@@ -32,14 +29,13 @@ def select_agents(
 ) -> tuple[str, ...] | None:
     """Prompt for coding agents inline; return the picks in menu order (first is primary)."""
 
-    answer = questionary.checkbox(
+    answer = ask_checkbox(
         "Select coding agents (first is primary)",
-        choices=_choices(menu, default_index),
+        _choices(menu, default_index),
         instruction="↑/↓ move · space toggle · enter confirm",
         validate=_require_one,
-        style=_STYLE,
         **prompt_kwargs,
-    ).ask()
+    )
     if not answer:
         return None
     chosen = set(answer)

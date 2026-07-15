@@ -8,6 +8,35 @@ from .plain import get_console
 
 console = get_console()
 
+# Shared look for every interactive prompt: a green accent and no reverse-video
+# bar on the current row (prompt_toolkit's default "selected" style is reverse).
+PROMPT_STYLE = questionary.Style(
+    [
+        ("qmark", "fg:green bold"),
+        ("pointer", "fg:green bold"),
+        ("highlighted", "fg:green bold noreverse"),
+        ("selected", "fg:green noreverse"),
+        ("answer", "fg:green bold"),
+    ]
+)
+
+
+def ask_select(message: str, choices: List[Any], **kwargs: Any) -> Any:
+    return questionary.select(message, choices=choices, style=PROMPT_STYLE, **kwargs).ask()
+
+
+def ask_checkbox(message: str, choices: List[Any], **kwargs: Any) -> Any:
+    return questionary.checkbox(message, choices=choices, style=PROMPT_STYLE, **kwargs).ask()
+
+
+def ask_text(message: str, **kwargs: Any) -> Any:
+    return questionary.text(message, style=PROMPT_STYLE, **kwargs).ask()
+
+
+def ask_password(message: str, **kwargs: Any) -> Any:
+    return questionary.password(message, style=PROMPT_STYLE, **kwargs).ask()
+
+
 _ENV_VAR_NAME_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
 
@@ -25,7 +54,7 @@ def validate_env_var_name(name: str, item_type: str = "secret") -> bool:
 
 def confirm(message: str, default: bool = False) -> bool:
     """Ask a yes/no question inline. Returns ``default`` behaviour on cancel (False)."""
-    return bool(questionary.confirm(message, default=default).ask())
+    return bool(questionary.confirm(message, default=default, style=PROMPT_STYLE).ask())
 
 
 def confirm_or_skip(message: str, yes_flag: bool, default: bool = False) -> bool:
@@ -93,7 +122,7 @@ def select_item_interactive(
 
     formatter = display_fn or _default_display_fn
     choices = [questionary.Choice(title=formatter(item), value=item) for item in items]
-    return questionary.select(f"Select a {item_type} to {action}", choices=choices).ask()
+    return ask_select(f"Select a {item_type} to {action}", choices)
 
 
 def prompt_for_value(
@@ -111,8 +140,8 @@ def prompt_for_value(
     Returns:
         The entered value, or None if cancelled
     """
-    ask = questionary.password if hide_input else questionary.text
-    value = ask(prompt_text).ask()
+    ask = ask_password if hide_input else ask_text
+    value = ask(prompt_text)
     if value is None:
         return None
     if required and not value:

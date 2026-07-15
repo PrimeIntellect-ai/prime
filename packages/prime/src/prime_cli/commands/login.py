@@ -13,7 +13,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from prime_cli.core import Config
 
 from ..client import APIClient, APIError
-from ..utils import PlainTyper, get_console
+from ..utils import PlainTyper, ask_select, get_console
 from .teams import fetch_teams
 
 app = PlainTyper(help="Login to Prime Intellect")
@@ -37,11 +37,11 @@ def fetch_and_select_team(client: APIClient, config: Config) -> None:
                 questionary.Choice(f"{team.get('name', 'Unknown')} (role: {role})", value=team)
             )
 
-        selected = questionary.select(
+        selected = ask_select(
             "Select account",
-            choices=choices,
+            choices,
             instruction="Change this any time by running 'prime login' again.",
-        ).ask()
+        )
 
         if selected is None or selected == "personal":
             config.set_team(None)

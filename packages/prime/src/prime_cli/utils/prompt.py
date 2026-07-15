@@ -16,6 +16,7 @@ PROMPT_STYLE = questionary.Style(
     [
         ("highlighted", "fg:green noreverse"),
         ("selected", "fg:green noreverse"),
+        ("answer", "fg:green bold"),
     ]
 )
 

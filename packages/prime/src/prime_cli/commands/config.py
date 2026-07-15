@@ -2,14 +2,13 @@ import os
 import re
 from typing import Optional
 
-import questionary
 import typer
 from rich.table import Table
 
 from prime_cli.core import Config
 
 from ..client import APIClient, APIError
-from ..utils import PlainTyper, confirm, get_console
+from ..utils import PlainTyper, ask_password, ask_text, confirm, get_console
 from .teams import fetch_teams
 
 app = PlainTyper(help="Configure the CLI", no_args_is_help=True)
@@ -119,9 +118,7 @@ def set_api_key(
     """Set your API key (prompts securely if not provided)"""
     if api_key is None:
         # Interactive mode with secure prompt
-        answer = questionary.password(
-            "Enter your Prime Intellect API key (or press Enter to clear)"
-        ).ask()
+        answer = ask_password("Enter your Prime Intellect API key (or press Enter to clear)")
         if answer is None:
             raise typer.Abort()
         api_key = answer
@@ -215,10 +212,10 @@ def set_base_url(
     """Set the API base URL (prompts if not provided)"""
     if not url:
         config = Config()
-        url = questionary.text(
+        url = ask_text(
             "Enter the base URL for the Prime Intellect API",
             default=config.base_url,
-        ).ask()
+        )
         if not url:
             raise typer.Abort()
         if not url:
@@ -240,10 +237,10 @@ def set_frontend_url(
     """Set the frontend URL (prompts if not provided)"""
     if not url:
         config = Config()
-        url = questionary.text(
+        url = ask_text(
             "Enter the frontend URL for the Prime Intellect web app",
             default=config.frontend_url,
-        ).ask()
+        )
         if not url:
             raise typer.Abort()
         if not url:
@@ -265,10 +262,10 @@ def set_inference_url(
     """Set the inference URL (prompts if not provided)"""
     if not url:
         config = Config()
-        url = questionary.text(
+        url = ask_text(
             "Enter the inference URL for Prime Inference API",
             default=config.inference_url,
-        ).ask()
+        )
         if not url:
             raise typer.Abort()
         if not url:

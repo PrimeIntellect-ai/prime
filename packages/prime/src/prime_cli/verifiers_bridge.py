@@ -24,6 +24,7 @@ from .client import APIClient, APIError
 from .utils.env_metadata import find_environment_metadata, get_environment_metadata
 from .utils.eval_push import push_eval_results_to_hub
 from .utils.plain import get_console
+from .utils.prompt import ask_select
 from .verifiers_plugin import PrimeVerifiersPlugin, load_verifiers_prime_plugin
 
 console = get_console()
@@ -555,13 +556,13 @@ def _choose_remote_owner(env_name: str, candidates: list[tuple[str, str]]) -> tu
         )
         return selected
 
-    selected = questionary.select(
+    selected = ask_select(
         f"Multiple remote environments found for '{env_name}' — choose owner",
-        choices=[
+        [
             questionary.Choice(f"{slug} ({label})", value=(label, slug))
             for label, slug in candidates
         ],
-    ).ask()
+    )
     if selected is None:
         raise typer.Exit(1)
     return selected

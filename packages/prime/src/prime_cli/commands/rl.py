@@ -9,7 +9,6 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
-import questionary
 import toml
 import typer
 from click.exceptions import Abort
@@ -38,7 +37,7 @@ from ..utils.formatters import (
     format_promo_price,
     strip_ansi,
 )
-from ..utils.prompt import confirm, confirm_or_skip
+from ..utils.prompt import ask_text, confirm, confirm_or_skip
 from .feedback import submit_feedback
 from .usage import RUN_USAGE_JSON_HELP, run_usage_command
 
@@ -1880,7 +1879,7 @@ def list_gpus(
 def _prompt_required_text(label: str, help_text: str, empty_error: str) -> str:
     console.print(f"[dim]{help_text}[/dim]")
     while True:
-        answer = questionary.text(f"{label} (required)").ask()
+        answer = ask_text(f"{label} (required)")
         if answer is None:
             raise typer.Abort()
         value = answer.strip()
@@ -1891,7 +1890,7 @@ def _prompt_required_text(label: str, help_text: str, empty_error: str) -> str:
 
 def _prompt_optional_text(label: str, help_text: str) -> str | None:
     console.print(f"[dim]{help_text}[/dim]")
-    answer = questionary.text(f"{label} (optional)").ask()
+    answer = ask_text(f"{label} (optional)")
     if answer is None:
         raise typer.Abort()
     return answer.strip() or None

@@ -6,7 +6,7 @@ import typer
 from prime_cli.core import Config
 
 from ..client import APIClient, APIError
-from ..utils import PlainTyper, get_console
+from ..utils import PlainTyper, ask_select, get_console
 from .teams import fetch_teams
 
 app = PlainTyper(
@@ -118,7 +118,7 @@ def switch(
     current_team_id = config.team_id
     choices = _account_choices(teams, current_team_id)
 
-    selected = questionary.select("Switch account", choices=choices).ask()
+    selected = ask_select("Switch account", choices)
     if selected is None:
         raise typer.Exit(1)
     if selected == "personal":

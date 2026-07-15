@@ -7,7 +7,7 @@ from click.exceptions import Abort
 from prime_cli import __version__
 
 from ..client import APIClient, APIError
-from ..utils import PlainTyper, get_console
+from ..utils import PlainTyper, ask_select, ask_text, get_console
 
 app = PlainTyper(
     help="Submit feedback about Prime Intellect.",
@@ -27,11 +27,11 @@ _CATEGORY_CHOICES: tuple[tuple[FeedbackCategory, str], ...] = (
 
 
 def _prompt_category() -> FeedbackCategory:
-    selected = questionary.select(
+    selected = ask_select(
         "What are you sharing?",
-        choices=[questionary.Choice(label, value=cat) for cat, label in _CATEGORY_CHOICES],
+        [questionary.Choice(label, value=cat) for cat, label in _CATEGORY_CHOICES],
         default="general",
-    ).ask()
+    )
     if selected is None:
         raise Abort()
     return selected
@@ -39,7 +39,7 @@ def _prompt_category() -> FeedbackCategory:
 
 def _prompt_message() -> str:
     while True:
-        answer = questionary.text("Your feedback (required)").ask()
+        answer = ask_text("Your feedback (required)")
         if answer is None:
             raise Abort()
         message = answer.strip()
@@ -49,7 +49,7 @@ def _prompt_message() -> str:
 
 
 def _prompt_run_id() -> str | None:
-    answer = questionary.text("Related run ID (optional)").ask()
+    answer = ask_text("Related run ID (optional)")
     if answer is None:
         raise Abort()
     return answer.strip() or None

@@ -10,7 +10,7 @@ authors = [
     { name = "Prime Intellect", email = "contact@primeintellect.ai" }
 ]
 dependencies = [
-    "prime-sandboxes>=0.2.28",
+    "prime-sandboxes>=0.2.31",
     "prime-evals>=0.2.3",
     "prime-tunnel>=0.1.9",
     "httpx>=0.25.0",

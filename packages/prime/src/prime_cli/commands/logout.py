@@ -5,7 +5,7 @@ import typer
 
 from prime_cli.core import Config
 
-from ..utils import PlainTyper, get_console
+from ..utils import PlainTyper, confirm, get_console
 
 app = PlainTyper(help="Log out of Prime Intellect", no_args_is_help=False)
 console = get_console()
@@ -66,7 +66,7 @@ def logout(
         raise typer.Exit(0)
 
     env_name = config.current_environment
-    if not yes and not typer.confirm(
+    if not yes and not confirm(
         f"Log out of '{env_name}' (clears API key, team, and user id)?",
         default=True,
     ):

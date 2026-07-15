@@ -2,13 +2,14 @@ import os
 import re
 from typing import Optional
 
+import questionary
 import typer
 from rich.table import Table
 
 from prime_cli.core import Config
 
 from ..client import APIClient, APIError
-from ..utils import PlainTyper, get_console
+from ..utils import PlainTyper, confirm, get_console
 from .teams import fetch_teams
 
 app = PlainTyper(help="Configure the CLI", no_args_is_help=True)
@@ -118,12 +119,12 @@ def set_api_key(
     """Set your API key (prompts securely if not provided)"""
     if api_key is None:
         # Interactive mode with secure prompt
-        api_key = typer.prompt(
-            "Enter your Prime Intellect API key (or press Enter to clear)",
-            hide_input=True,
-            confirmation_prompt=False,
-            default="",
-        )
+        answer = questionary.password(
+            "Enter your Prime Intellect API key (or press Enter to clear)"
+        ).ask()
+        if answer is None:
+            raise typer.Abort()
+        api_key = answer
 
     config = Config()
     config.set_api_key(api_key)
@@ -214,10 +215,12 @@ def set_base_url(
     """Set the API base URL (prompts if not provided)"""
     if not url:
         config = Config()
-        url = typer.prompt(
+        url = questionary.text(
             "Enter the base URL for the Prime Intellect API",
             default=config.base_url,
-        )
+        ).ask()
+        if not url:
+            raise typer.Abort()
         if not url:
             console.print("[red]Base URL is required[/red]")
             return
@@ -237,10 +240,12 @@ def set_frontend_url(
     """Set the frontend URL (prompts if not provided)"""
     if not url:
         config = Config()
-        url = typer.prompt(
+        url = questionary.text(
             "Enter the frontend URL for the Prime Intellect web app",
             default=config.frontend_url,
-        )
+        ).ask()
+        if not url:
+            raise typer.Abort()
         if not url:
             console.print("[red]Frontend URL is required[/red]")
             return
@@ -260,10 +265,12 @@ def set_inference_url(
     """Set the inference URL (prompts if not provided)"""
     if not url:
         config = Config()
-        url = typer.prompt(
+        url = questionary.text(
             "Enter the inference URL for Prime Inference API",
             default=config.inference_url,
-        )
+        ).ask()
+        if not url:
+            raise typer.Abort()
         if not url:
             console.print("[red]Inference URL is required[/red]")
             return
@@ -377,7 +384,7 @@ def reset(
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ) -> None:
     """Reset configuration to defaults"""
-    if yes or typer.confirm("Are you sure you want to reset all settings?"):
+    if yes or confirm("Are you sure you want to reset all settings?"):
         config = Config()
         config.set_api_key("")
         config.set_team(None)

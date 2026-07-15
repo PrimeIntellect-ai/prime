@@ -4,8 +4,8 @@ import webbrowser
 from typing import Optional
 
 import httpx
+import questionary
 import typer
-from click.exceptions import Abort
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -30,56 +30,39 @@ def fetch_and_select_team(client: APIClient, config: Config) -> None:
             config.update_current_environment_file()
             return
 
-        console.print("\n[bold]Select:[/bold]\n")
-        console.print("  [cyan](1)[/cyan] Personal")
-        for idx, team in enumerate(teams, start=2):
-            role = team.get("role", "member")
-            role_display = role.lower()
-            role_badge = (
-                f"[yellow](role: {role_display})[/yellow]"
-                if role == "admin"
-                else f"[dim](role: {role_display})[/dim]"
+        choices = [questionary.Choice("Personal", value="personal")]
+        for team in teams:
+            role = str(team.get("role", "member")).lower()
+            choices.append(
+                questionary.Choice(f"{team.get('name', 'Unknown')} (role: {role})", value=team)
             )
-            console.print(f"  [cyan]({idx})[/cyan] {team.get('name', 'Unknown')} {role_badge}")
 
-        console.print("\n[dim]You can always change this by running 'prime login' again.[/dim]")
+        selected = questionary.select(
+            "Select account",
+            choices=choices,
+            instruction="Change this any time by running 'prime login' again.",
+        ).ask()
 
-        while True:
-            try:
-                selection = typer.prompt("Select", type=int, default=1)
+        if selected is None or selected == "personal":
+            config.set_team(None)
+            config.update_current_environment_file()
+            if selected == "personal":
+                console.print("[green]Using personal account.[/green]")
+            return
 
-                if selection == 1:
-                    config.set_team(None)
-                    config.update_current_environment_file()
-                    console.print("[green]Using personal account.[/green]")
-                    return
+        team_id = selected.get("teamId")
+        team_name = selected.get("name", "Unknown")
+        team_role = selected.get("role", "member")
+        if not team_id:
+            console.print("[yellow]Invalid team. Using personal account.[/yellow]")
+            config.set_team(None)
+            config.update_current_environment_file()
+            return
 
-                if 2 <= selection <= len(teams) + 1:
-                    selected_team = teams[selection - 2]
-                    team_id = selected_team.get("teamId")
-                    team_name = selected_team.get("name", "Unknown")
-                    team_role = selected_team.get("role", "member")
-
-                    if not team_id:
-                        console.print("[yellow]Invalid team. Using personal account.[/yellow]")
-                        config.set_team(None)
-                        config.update_current_environment_file()
-                        return
-
-                    config.set_team(team_id, team_name=team_name, team_role=team_role)
-                    config.update_current_environment_file()
-                    console.print(f"[green]Using team '{team_name}'.[/green]")
-                    return
-
-                console.print(f"[red]Invalid selection. Enter 1-{len(teams) + 1}.[/red]")
-            except Abort:
-                config.set_team(None)
-                config.update_current_environment_file()
-                return
-
-    except Abort:
-        config.set_team(None)
+        config.set_team(team_id, team_name=team_name, team_role=team_role)
         config.update_current_environment_file()
+        console.print(f"[green]Using team '{team_name}'.[/green]")
+
     except (APIError, Exception):
         config.set_team(None)
         config.update_current_environment_file()

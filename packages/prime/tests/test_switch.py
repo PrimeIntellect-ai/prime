@@ -148,52 +148,25 @@ class TestSwitchCommand:
         assert result.exit_code == 1, result.output
         assert "Team 'none' not found." in result.output
 
-    def test_switch_interactive_selection(self, temp_home: None, mock_teams_api: None) -> None:
-        result = runner.invoke(app, ["switch"], input="2\n", env=TEST_ENV)
+    def test_switch_interactive_selection(
+        self, temp_home: None, mock_teams_api: None, keys: Any
+    ) -> None:
+        keys.select(1)
+        result = runner.invoke(app, ["switch"], env=TEST_ENV)
 
         assert result.exit_code == 0, result.output
-        assert "Switch account:" in result.output
-        assert "Prime Team (slug: prime, role: admin)" in result.output
         assert "Switched to team 'Prime Team'." in result.output
 
-    def test_switch_interactive_handles_missing_slug_without_double_current(
-        self, temp_home: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
-    ) -> None:
-        monkeypatch.setenv("PRIME_API_KEY", "test-key")
+    def test_account_choices_marks_current_team_without_slug(self) -> None:
+        from prime_cli.commands.switch import _account_choices
 
-        config_dir = tmp_path / ".prime"
-        config_dir.mkdir()
-        (config_dir / "environments").mkdir()
-        (config_dir / "config.json").write_text(
-            '{"api_key":"","team_id":"cmf0ohr9s0026ilerf3w68s6n","team_name":"New team","team_role":"ADMIN","user_id":null,"base_url":"https://api.primeintellect.ai","frontend_url":"https://app.primeintellect.ai","inference_url":"https://api.pinference.ai/api/v1","ssh_key_path":"~/.ssh/id_rsa","current_environment":"production"}'
-        )
+        teams = [{"teamId": "team-1", "name": "New team", "slug": None, "role": "ADMIN"}]
+        labels = [choice.title for choice in _account_choices(teams, "team-1")]
 
-        def mock_get(
-            self: Any, endpoint: str, params: Optional[Dict[str, Any]] = None
-        ) -> Dict[str, Any]:
-            if endpoint == "/user/teams":
-                return {
-                    "data": [
-                        {
-                            "teamId": "cmf0ohr9s0026ilerf3w68s6n",
-                            "name": "New team",
-                            "slug": None,
-                            "role": "ADMIN",
-                            "createdAt": "2026-01-15T10:00:00Z",
-                        }
-                    ]
-                }
-            return {"data": []}
-
-        monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
-        monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
-
-        result = runner.invoke(app, ["switch"], input="1\n", env=TEST_ENV)
-
-        assert result.exit_code == 0, result.output
-        assert "Personal (current)" not in result.output
-        assert "New team (role: admin) (current)" in result.output
-        assert "slug:" not in result.output
+        assert "Personal" in labels
+        assert "Personal (current)" not in labels
+        assert "New team (role: admin) (current)" in labels
+        assert not any("slug:" in label for label in labels)
 
     def test_switch_fails_when_team_is_forced_by_environment(
         self, temp_home: None, mock_teams_api: None

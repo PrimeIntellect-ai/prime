@@ -62,6 +62,7 @@ class Sandbox(BaseModel):
     kubernetes_job_id: Optional[str] = Field(None, alias="kubernetesJobId")
     region: Optional[str] = None
     registry_credentials_id: Optional[str] = Field(default=None, alias="registryCredentialsId")
+    pending_image_build_id: Optional[str] = Field(default=None, alias="pendingImageBuildId")
 
     model_config = ConfigDict(populate_by_name=True)
 

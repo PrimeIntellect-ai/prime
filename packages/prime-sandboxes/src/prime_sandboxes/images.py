@@ -55,6 +55,21 @@ class ImageClient:
             json={"context_uploaded": True},
         )
 
+    def build_vm_image(
+        self,
+        image_name: str,
+        image_tag: str,
+        *,
+        team_id: Optional[str] = None,
+    ) -> dict:
+        """Build a VM image from an existing container image."""
+        payload = {"teamId": team_id} if team_id else {}
+        return self.client.request(
+            "POST",
+            f"/images/{image_name}/{image_tag}/vm-build",
+            json=payload,
+        )
+
     def get_build_status(self, build_id: str) -> dict:
         """Fetch the status of a build group."""
         return self.client.request("GET", f"/images/build/{build_id}")
@@ -102,6 +117,21 @@ class AsyncImageClient:
             "POST",
             f"/images/build/{build_id}/start",
             json={"context_uploaded": True},
+        )
+
+    async def build_vm_image(
+        self,
+        image_name: str,
+        image_tag: str,
+        *,
+        team_id: Optional[str] = None,
+    ) -> dict:
+        """Build a VM image from an existing container image."""
+        payload = {"teamId": team_id} if team_id else {}
+        return await self.client.request(
+            "POST",
+            f"/images/{image_name}/{image_tag}/vm-build",
+            json=payload,
         )
 
     async def get_build_status(self, build_id: str) -> dict:

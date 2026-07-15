@@ -506,17 +506,25 @@ class AsyncSandboxAuthCache:
             await self._save_cache()
 
 
+def _is_waiting_for_image_build(sandbox: Sandbox) -> bool:
+    return sandbox.status == "PENDING" and bool(
+        getattr(sandbox, "pending_image_build_id", None)
+    )
+
+
 def _check_sandbox_statuses(
     sandboxes: List[Sandbox], target_ids: set
-) -> tuple[int, List[tuple], Dict[str, str]]:
+) -> tuple[int, List[tuple], Dict[str, str], int]:
     """Helper function to check sandbox statuses
 
     Returns:
-        tuple of (running_count, failed_sandboxes, final_statuses)
+        tuple of (running_count, failed_sandboxes, final_statuses,
+        image_build_waiting_count)
     """
     running_count = 0
     failed_sandboxes = []
     final_statuses = {}
+    image_build_waiting = 0
 
     for sandbox in sandboxes:
         if sandbox.id in target_ids:
@@ -526,8 +534,10 @@ def _check_sandbox_statuses(
             elif sandbox.status in ["ERROR", "TERMINATED", "TIMEOUT"]:
                 failed_sandboxes.append((sandbox.id, sandbox.status))
                 final_statuses[sandbox.id] = sandbox.status
+            elif _is_waiting_for_image_build(sandbox):
+                image_build_waiting += 1
 
-    return running_count, failed_sandboxes, final_statuses
+    return running_count, failed_sandboxes, final_statuses, image_build_waiting
 
 
 class SandboxClient:
@@ -1129,7 +1139,11 @@ class SandboxClient:
         raise CommandTimeoutError(sandbox_id, command, timeout)
 
     def wait_for_creation(
-        self, sandbox_id: str, max_attempts: int = 60, stability_checks: int = 1
+        self,
+        sandbox_id: str,
+        max_attempts: int = 60,
+        stability_checks: int = 1,
+        image_build_timeout_seconds: int = 3000,
     ) -> None:
         """Wait for sandbox to be running and stable.
 
@@ -1137,9 +1151,15 @@ class SandboxClient:
             sandbox_id: The sandbox ID to wait for
             max_attempts: Maximum polling attempts
             stability_checks: Number of consecutive successful reachability checks required
+            image_build_timeout_seconds: Separate wall-clock budget while the
+                platform auto-builds the VM image for a first-use image (the
+                sandbox stays PENDING with pending_image_build_id set). That
+                phase polls slowly and does not consume max_attempts.
         """
         consecutive_successes = 0
-        for attempt in range(max_attempts):
+        image_build_deadline: Optional[float] = None
+        attempt = 0
+        while attempt < max_attempts:
             sandbox = self.get(sandbox_id)
             if sandbox.status == "RUNNING":
                 if self._is_sandbox_reachable(sandbox_id):
@@ -1148,6 +1168,7 @@ class SandboxClient:
                         return
                     # Small delay between stability checks
                     time.sleep(0.5)
+                    attempt += 1
                     continue
                 else:
                     # Reset counter if check fails
@@ -1159,22 +1180,45 @@ class SandboxClient:
                     "error_message": sandbox.error_message,
                 }
                 _raise_not_running_error(sandbox.id, ctx)
+            elif _is_waiting_for_image_build(sandbox):
+                # The platform is building the VM image for this sandbox; it
+                # starts on its own once the build completes.
+                if image_build_deadline is None:
+                    image_build_deadline = time.monotonic() + image_build_timeout_seconds
+                if time.monotonic() >= image_build_deadline:
+                    raise SandboxNotRunningError(
+                        sandbox_id, "Timeout waiting for the VM image build"
+                    )
+                time.sleep(10)
+                continue
 
+            attempt += 1
             # Aggressive polling for first 5 attempts (5 seconds), then back off
-            sleep_time = 1 if attempt < 5 else 2
+            sleep_time = 1 if attempt <= 5 else 2
             time.sleep(sleep_time)
         raise SandboxNotRunningError(sandbox_id, "Timeout during sandbox creation")
 
     def bulk_wait_for_creation(
-        self, sandbox_ids: List[str], max_attempts: int = 60
+        self,
+        sandbox_ids: List[str],
+        max_attempts: int = 60,
+        image_build_timeout_seconds: int = 3000,
     ) -> Dict[str, str]:
-        """Wait for multiple sandboxes to be running using list endpoint to avoid rate limits"""
+        """Wait for multiple sandboxes to be running using list endpoint to avoid rate limits.
+
+        Sandboxes PENDING on an automatic VM image build (first use of an
+        image) are waited on a separate slower budget bounded by
+        image_build_timeout_seconds instead of consuming max_attempts.
+        """
         sandbox_id_set = set(sandbox_ids)
         final_statuses = {}
+        image_build_deadline: Optional[float] = None
 
-        for attempt in range(max_attempts):
+        attempt = 0
+        while attempt < max_attempts:
             total_running = 0
             all_failed = []
+            total_image_build_waiting = 0
             page = 1
 
             while True:
@@ -1187,13 +1231,14 @@ class SandboxClient:
                         continue
                     raise
 
-                running_count, failed_sandboxes, page_statuses = _check_sandbox_statuses(
-                    list_response.sandboxes, sandbox_id_set
+                running_count, failed_sandboxes, page_statuses, image_build_waiting = (
+                    _check_sandbox_statuses(list_response.sandboxes, sandbox_id_set)
                 )
 
                 total_running += running_count
                 all_failed.extend(failed_sandboxes)
                 final_statuses.update(page_statuses)
+                total_image_build_waiting += image_build_waiting
 
                 if len(final_statuses) == len(sandbox_ids) or not list_response.has_next:
                     break
@@ -1214,7 +1259,19 @@ class SandboxClient:
                 if all_reachable:
                     return final_statuses
 
-            sleep_time = 1 if attempt < 5 else 2
+            if total_image_build_waiting:
+                # At least one sandbox is waiting on an automatic VM image
+                # build; poll slowly on the image-build budget instead of
+                # consuming the normal attempts.
+                if image_build_deadline is None:
+                    image_build_deadline = time.monotonic() + image_build_timeout_seconds
+                if time.monotonic() < image_build_deadline:
+                    time.sleep(10)
+                    continue
+                break
+
+            attempt += 1
+            sleep_time = 1 if attempt <= 5 else 2
             time.sleep(sleep_time)
 
         for sandbox_id in sandbox_id_set:
@@ -2167,7 +2224,11 @@ class AsyncSandboxClient:
         raise CommandTimeoutError(sandbox_id, command, timeout)
 
     async def wait_for_creation(
-        self, sandbox_id: str, max_attempts: int = 60, stability_checks: int = 1
+        self,
+        sandbox_id: str,
+        max_attempts: int = 60,
+        stability_checks: int = 1,
+        image_build_timeout_seconds: int = 3000,
     ) -> None:
         """Wait for sandbox to be running and stable (async version).
 
@@ -2175,9 +2236,15 @@ class AsyncSandboxClient:
             sandbox_id: The sandbox ID to wait for
             max_attempts: Maximum polling attempts
             stability_checks: Number of consecutive successful reachability checks required
+            image_build_timeout_seconds: Separate wall-clock budget while the
+                platform auto-builds the VM image for a first-use image (the
+                sandbox stays PENDING with pending_image_build_id set). That
+                phase polls slowly and does not consume max_attempts.
         """
         consecutive_successes = 0
-        for attempt in range(max_attempts):
+        image_build_deadline: Optional[float] = None
+        attempt = 0
+        while attempt < max_attempts:
             sandbox = await self.get(sandbox_id)
             if sandbox.status == "RUNNING":
                 if await self._is_sandbox_reachable(sandbox_id):
@@ -2186,6 +2253,7 @@ class AsyncSandboxClient:
                         return
                     # Small delay between stability checks
                     await asyncio.sleep(0.5)
+                    attempt += 1
                     continue
                 else:
                     # Reset counter if check fails
@@ -2197,22 +2265,45 @@ class AsyncSandboxClient:
                     "error_message": sandbox.error_message,
                 }
                 _raise_not_running_error(sandbox.id, ctx)
+            elif _is_waiting_for_image_build(sandbox):
+                # The platform is building the VM image for this sandbox; it
+                # starts on its own once the build completes.
+                if image_build_deadline is None:
+                    image_build_deadline = time.monotonic() + image_build_timeout_seconds
+                if time.monotonic() >= image_build_deadline:
+                    raise SandboxNotRunningError(
+                        sandbox_id, "Timeout waiting for the VM image build"
+                    )
+                await asyncio.sleep(10)
+                continue
 
-            sleep_time = 1 if attempt < 5 else 2
+            attempt += 1
+            sleep_time = 1 if attempt <= 5 else 2
             await asyncio.sleep(sleep_time)
         raise SandboxNotRunningError(sandbox_id, "Timeout during sandbox creation")
 
     async def bulk_wait_for_creation(
-        self, sandbox_ids: List[str], max_attempts: int = 60
+        self,
+        sandbox_ids: List[str],
+        max_attempts: int = 60,
+        image_build_timeout_seconds: int = 3000,
     ) -> Dict[str, str]:
-        """Wait for multiple sandboxes to be running using list endpoint"""
+        """Wait for multiple sandboxes to be running using list endpoint.
+
+        Sandboxes PENDING on an automatic VM image build (first use of an
+        image) are waited on a separate slower budget bounded by
+        image_build_timeout_seconds instead of consuming max_attempts.
+        """
 
         sandbox_id_set = set(sandbox_ids)
         final_statuses = {}
+        image_build_deadline: Optional[float] = None
 
-        for attempt in range(max_attempts):
+        attempt = 0
+        while attempt < max_attempts:
             total_running = 0
             all_failed = []
+            total_image_build_waiting = 0
             page = 1
 
             while True:
@@ -2225,13 +2316,14 @@ class AsyncSandboxClient:
                         continue
                     raise
 
-                running_count, failed_sandboxes, page_statuses = _check_sandbox_statuses(
-                    list_response.sandboxes, sandbox_id_set
+                running_count, failed_sandboxes, page_statuses, image_build_waiting = (
+                    _check_sandbox_statuses(list_response.sandboxes, sandbox_id_set)
                 )
 
                 total_running += running_count
                 all_failed.extend(failed_sandboxes)
                 final_statuses.update(page_statuses)
+                total_image_build_waiting += image_build_waiting
 
                 if len(final_statuses) == len(sandbox_ids) or not list_response.has_next:
                     break
@@ -2252,7 +2344,19 @@ class AsyncSandboxClient:
                 if all_reachable:
                     return final_statuses
 
-            sleep_time = 1 if attempt < 5 else 2
+            if total_image_build_waiting:
+                # At least one sandbox is waiting on an automatic VM image
+                # build; poll slowly on the image-build budget instead of
+                # consuming the normal attempts.
+                if image_build_deadline is None:
+                    image_build_deadline = time.monotonic() + image_build_timeout_seconds
+                if time.monotonic() < image_build_deadline:
+                    await asyncio.sleep(10)
+                    continue
+                break
+
+            attempt += 1
+            sleep_time = 1 if attempt <= 5 else 2
             await asyncio.sleep(sleep_time)
 
         for sandbox_id in sandbox_id_set:

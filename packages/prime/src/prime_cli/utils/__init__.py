@@ -22,6 +22,7 @@ from .params import optional_team_params
 from .plain import DefaultCommandGroup, PlainAwareTyperGroup, PlainTyper, get_console, is_plain_mode
 from .prompt import (
     any_provided,
+    confirm,
     confirm_or_skip,
     prompt_for_value,
     require_selection,
@@ -48,6 +49,7 @@ __all__ = [
     "json_help",
     "json_output_help",
     "any_provided",
+    "confirm",
     "confirm_or_skip",
     "prompt_for_value",
     "select_item_interactive",

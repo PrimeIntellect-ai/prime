@@ -10,6 +10,7 @@ from ..client import APIClient, APIError
 from ..core import Config
 from ..utils import (
     PlainTyper,
+    confirm,
     get_console,
     json_output_help,
     output_data_as_json,
@@ -240,8 +241,7 @@ def create_deployment(
             console.print()
 
             if not yes:
-                confirm = typer.confirm("Are you sure you want to deploy this checkpoint?")
-                if not confirm:
+                if not confirm("Are you sure you want to deploy this checkpoint?"):
                     console.print("Cancelled.")
                     raise typer.Exit(0)
 
@@ -298,8 +298,7 @@ def create_deployment(
         console.print()
 
         if not yes:
-            confirm = typer.confirm("Are you sure you want to deploy this model?")
-            if not confirm:
+            if not confirm("Are you sure you want to deploy this model?"):
                 console.print("Cancelled.")
                 raise typer.Exit(0)
 

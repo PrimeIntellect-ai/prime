@@ -403,7 +403,9 @@ def test_sandbox_delete_by_label_all_users_passes_admin_scope(
     assert "Processed 1 sandbox(es)" in output
 
 
-def test_sandbox_ssh_no_id_picks_running_sandbox(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_sandbox_ssh_no_id_picks_running_sandbox(
+    monkeypatch: pytest.MonkeyPatch, keys: Any
+) -> None:
     """`prime sandbox ssh` with no ID lists running, non-VM sandboxes to pick from.
 
     Selecting one feeds its ID into the rest of the flow; we stop the flow right
@@ -447,7 +449,8 @@ def test_sandbox_ssh_no_id_picks_running_sandbox(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.list", mock_list)
     monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.get", mock_get)
 
-    result = runner.invoke(app, ["sandbox", "ssh"], input="1\n")
+    keys.select(0)
+    result = runner.invoke(app, ["sandbox", "ssh"])
 
     output = strip_ansi(result.output)
     # Only RUNNING sandboxes are requested, and the VM one is filtered out of the picker.
@@ -497,7 +500,9 @@ def test_sandbox_ssh_no_id_no_running_sandboxes(monkeypatch: pytest.MonkeyPatch)
     assert result.exit_code == 0
 
 
-def test_sandbox_ssh_no_id_pages_through_results(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_sandbox_ssh_no_id_pages_through_results(
+    monkeypatch: pytest.MonkeyPatch, keys: Any
+) -> None:
     """The picker pages past page 1, even when page 1 holds only VMs.
 
     Guards against reporting "no running sandboxes" when the only SSH-able
@@ -552,7 +557,8 @@ def test_sandbox_ssh_no_id_pages_through_results(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.list", mock_list)
     monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.get", mock_get)
 
-    result = runner.invoke(app, ["sandbox", "ssh"], input="1\n")
+    keys.select(0)
+    result = runner.invoke(app, ["sandbox", "ssh"])
 
     output = strip_ansi(result.output)
     assert captured["pages_requested"] == [1, 2]
@@ -561,8 +567,10 @@ def test_sandbox_ssh_no_id_pages_through_results(monkeypatch: pytest.MonkeyPatch
     assert result.exit_code == 1
 
 
-def test_sandbox_ssh_no_id_picker_paginates_display(monkeypatch: pytest.MonkeyPatch) -> None:
-    """With >50 SSH-able sandboxes the picker shows 50 per page with next/prev nav."""
+def test_sandbox_ssh_no_id_picker_scrolls_long_list(
+    monkeypatch: pytest.MonkeyPatch, keys: Any
+) -> None:
+    """With many SSH-able sandboxes the picker scrolls and still selects any item."""
     monkeypatch.setenv("PRIME_API_KEY", "dummy")
     monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
     monkeypatch.setattr("prime_cli.commands.sandbox.shutil.which", lambda _: "/usr/bin/ssh")
@@ -590,12 +598,10 @@ def test_sandbox_ssh_no_id_picker_paginates_display(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.list", mock_list)
     monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.get", mock_get)
 
-    # Advance to page 2, then select item 51 (global numbering -> sbx-050).
-    result = runner.invoke(app, ["sandbox", "ssh"], input="n\n51\n")
+    # Scroll down to the 51st item (sbx-050) and select it.
+    keys.select(50)
+    result = runner.invoke(app, ["sandbox", "ssh"])
 
-    output = strip_ansi(result.output)
-    assert "page 1/2" in output
-    assert "page 2/2" in output
     assert captured["get_id"] == "sbx-050"
     assert result.exit_code == 1
 

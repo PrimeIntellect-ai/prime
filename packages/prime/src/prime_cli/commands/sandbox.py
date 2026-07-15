@@ -32,6 +32,7 @@ from rich.text import Text
 from ..utils import (
     PlainTyper,
     build_table,
+    confirm,
     confirm_or_skip,
     format_resources,
     get_console,
@@ -1271,7 +1272,7 @@ def download_file(
 
         # Check if local file already exists
         if os.path.exists(local_file):
-            if not typer.confirm(f"File {local_file} already exists. Overwrite?"):
+            if not confirm(f"File {local_file} already exists. Overwrite?"):
                 console.print("Download cancelled.")
                 return
 
@@ -1319,7 +1320,7 @@ def reset_cache(
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ) -> None:
     """Reset sandbox authentication cache"""
-    if yes or typer.confirm("Are you sure you want to clear the sandbox auth cache?"):
+    if yes or confirm("Are you sure you want to clear the sandbox auth cache?"):
         try:
             client = APIClient()
             sandbox_client = SandboxClient(client)

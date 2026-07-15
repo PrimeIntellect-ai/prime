@@ -1,8 +1,8 @@
 import re
 from typing import Any, Callable, Dict, List, Optional
 
+import questionary
 import typer
-from rich.markup import escape
 
 from .plain import get_console
 
@@ -23,11 +23,16 @@ def validate_env_var_name(name: str, item_type: str = "secret") -> bool:
     return False
 
 
+def confirm(message: str, default: bool = False) -> bool:
+    """Ask a yes/no question inline. Returns ``default`` behaviour on cancel (False)."""
+    return bool(questionary.confirm(message, default=default).ask())
+
+
 def confirm_or_skip(message: str, yes_flag: bool, default: bool = False) -> bool:
     """Show confirmation prompt or skip if --yes flag is provided."""
     if yes_flag:
         return True
-    return bool(typer.confirm(message, default=default))
+    return confirm(message, default=default)
 
 
 def any_provided(*values: Any) -> bool:
@@ -70,7 +75,7 @@ def select_item_interactive(
     display_fn: Optional[Callable[[Dict[str, Any]], str]] = None,
     page_size: Optional[int] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Display items and let user select one interactively.
+    """Display items and let the user pick one with arrow keys.
 
     Args:
         items: List of items to select from
@@ -78,8 +83,7 @@ def select_item_interactive(
         item_type: Type of item being selected (e.g., "secret", "variable")
         display_fn: Function to format each item for display.
                    Defaults to showing 'name' and 'description' fields.
-        page_size: When set and there are more items than this, show them
-                   page_size at a time with [n]ext / [p]rev navigation.
+        page_size: Rows to show at once before scrolling.
 
     Returns:
         Selected item or None if cancelled
@@ -88,93 +92,8 @@ def select_item_interactive(
         return None
 
     formatter = display_fn or _default_display_fn
-
-    if page_size is not None and len(items) > page_size:
-        return _select_item_paged(items, action, item_type, formatter, page_size)
-
-    console.print(f"\n[bold]Select a {item_type} to {action}:[/bold]\n")
-    for i, item in enumerate(items, 1):
-        console.print(f"  {i}. {formatter(item)}")
-    console.print()
-
-    while True:
-        try:
-            selection_str = typer.prompt("Select (empty to cancel)", default="")
-            if not selection_str:
-                return None
-            selection = int(selection_str)
-            if 1 <= selection <= len(items):
-                return items[selection - 1]
-            console.print(f"[red]Please enter a number between 1 and {len(items)}[/red]")
-        except ValueError:
-            console.print("[red]Please enter a valid number[/red]")
-        except KeyboardInterrupt:
-            return None
-
-
-def _select_item_paged(
-    items: List[Dict[str, Any]],
-    action: str,
-    item_type: str,
-    formatter: Callable[[Dict[str, Any]], str],
-    page_size: int,
-) -> Optional[Dict[str, Any]]:
-    """Paged variant of the interactive selector with next/prev navigation.
-
-    Selection numbers are global (1..len(items)) — the number printed next to an
-    item is what you type, on any page.
-    """
-    total = len(items)
-    total_pages = (total + page_size - 1) // page_size
-    page = 0
-
-    while True:
-        start = page * page_size
-        end = min(start + page_size, total)
-
-        console.print(
-            f"\n[bold]Select a {item_type} to {action} (page {page + 1}/{total_pages}):[/bold]\n"
-        )
-        for i in range(start, end):
-            console.print(f"  {i + 1}. {formatter(items[i])}")
-
-        nav = []
-        if page + 1 < total_pages:
-            nav.append("[n] next page")
-        if page > 0:
-            nav.append("[p] prev page")
-        console.print(f"\n[dim]{escape('  '.join(nav))}[/dim]\n")
-
-        try:
-            choice = typer.prompt("Select (empty to cancel)", default="").strip()
-        except KeyboardInterrupt:
-            return None
-
-        if not choice:
-            return None
-
-        lowered = choice.lower()
-        if lowered == "n":
-            if page + 1 < total_pages:
-                page += 1
-            else:
-                console.print("[red]Already on the last page[/red]")
-            continue
-        if lowered == "p":
-            if page > 0:
-                page -= 1
-            else:
-                console.print("[red]Already on the first page[/red]")
-            continue
-
-        try:
-            selection = int(choice)
-        except ValueError:
-            console.print("[red]Please enter a number, or 'n'/'p' to navigate[/red]")
-            continue
-        if 1 <= selection <= total:
-            return items[selection - 1]
-        console.print(f"[red]Please enter a number between 1 and {total}[/red]")
+    choices = [questionary.Choice(title=formatter(item), value=item) for item in items]
+    return questionary.select(f"Select a {item_type} to {action}", choices=choices).ask()
 
 
 def prompt_for_value(
@@ -192,11 +111,10 @@ def prompt_for_value(
     Returns:
         The entered value, or None if cancelled
     """
-    try:
-        suffix = " (empty to cancel)" if required else ""
-        value = typer.prompt(f"{prompt_text}{suffix}", default="", hide_input=hide_input)
-        if required and not value:
-            return None
-        return value
-    except KeyboardInterrupt:
+    ask = questionary.password if hide_input else questionary.text
+    value = ask(prompt_text).ask()
+    if value is None:
         return None
+    if required and not value:
+        return None
+    return value

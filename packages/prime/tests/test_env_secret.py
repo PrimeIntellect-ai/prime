@@ -234,32 +234,29 @@ class TestEnvSecretCreate:
         assert output["name"] == "NEW_SECRET"
         assert "id" in output
 
-    def test_create_secret_interactive(self, mock_env_secret_api: None) -> None:
+    def test_create_secret_interactive(self, mock_env_secret_api: None, keys: Any) -> None:
         """Test creating an env secret interactively."""
-        result = runner.invoke(
-            app,
-            ["env", "secret", "create", "testuser/test-env"],
-            input="MY_NEW_SECRET\nsecret-value\n",
-        )
+        keys.text("MY_NEW_SECRET").text("secret-value")
+        result = runner.invoke(app, ["env", "secret", "create", "testuser/test-env"])
         assert result.exit_code == 0, f"Failed: {result.output}"
         assert "Created secret" in result.output
 
-    def test_create_secret_interactive_cancel_name(self, mock_env_secret_api: None) -> None:
+    def test_create_secret_interactive_cancel_name(
+        self, mock_env_secret_api: None, keys: Any
+    ) -> None:
         """Test that create can be cancelled during name prompt."""
-        result = runner.invoke(
-            app,
-            ["env", "secret", "create", "testuser/test-env"],
-            input="\n",
-        )
+        keys.send(keys.ENTER)
+        result = runner.invoke(app, ["env", "secret", "create", "testuser/test-env"])
         assert result.exit_code == 0
         assert "Cancelled" in result.output
 
-    def test_create_secret_interactive_cancel_value(self, mock_env_secret_api: None) -> None:
+    def test_create_secret_interactive_cancel_value(
+        self, mock_env_secret_api: None, keys: Any
+    ) -> None:
         """Test that create can be cancelled during value prompt."""
+        keys.send(keys.ENTER)
         result = runner.invoke(
-            app,
-            ["env", "secret", "create", "testuser/test-env", "-n", "NEW_SECRET"],
-            input="\n",
+            app, ["env", "secret", "create", "testuser/test-env", "-n", "NEW_SECRET"]
         )
         assert result.exit_code == 0
         assert "Cancelled" in result.output
@@ -370,34 +367,28 @@ class TestEnvSecretUpdate:
         output = json.loads(result.output)
         assert "id" in output
 
-    def test_update_secret_no_changes_cancel(self, mock_env_secret_api: None) -> None:
+    def test_update_secret_no_changes_cancel(self, mock_env_secret_api: None, keys: Any) -> None:
         """Test that update with no changes and empty interactive input cancels."""
+        keys.send(keys.ENTER)
         result = runner.invoke(
-            app,
-            ["env", "secret", "update", "testuser/test-env", "--id", "esecret-id-001"],
-            input="\n",
+            app, ["env", "secret", "update", "testuser/test-env", "--id", "esecret-id-001"]
         )
         assert result.exit_code == 0
         assert "No changes made" in result.output
 
-    def test_update_secret_interactive_select(self, mock_env_secret_api: None) -> None:
+    def test_update_secret_interactive_select(self, mock_env_secret_api: None, keys: Any) -> None:
         """Test interactive secret selection for update."""
-        result = runner.invoke(
-            app,
-            ["env", "secret", "update", "testuser/test-env"],
-            # Select item 1, then provide new value
-            input="1\nnew-secret-value\n",
-        )
+        keys.select(0).text("new-secret-value")
+        result = runner.invoke(app, ["env", "secret", "update", "testuser/test-env"])
         assert result.exit_code == 0, f"Failed: {result.output}"
         assert "Updated secret" in result.output
 
-    def test_update_secret_interactive_cancel_selection(self, mock_env_secret_api: None) -> None:
+    def test_update_secret_interactive_cancel_selection(
+        self, mock_env_secret_api: None, keys: Any
+    ) -> None:
         """Test cancelling interactive selection for update."""
-        result = runner.invoke(
-            app,
-            ["env", "secret", "update", "testuser/test-env"],
-            input="\n",
-        )
+        keys.cancel()
+        result = runner.invoke(app, ["env", "secret", "update", "testuser/test-env"])
         assert result.exit_code == 0
         assert "Cancelled" in result.output
 
@@ -415,34 +406,28 @@ class TestEnvSecretDelete:
         assert "Deleted secret" in result.output
         assert "testuser/test-env" in result.output
 
-    def test_delete_secret_cancelled(self, mock_env_secret_api: None) -> None:
+    def test_delete_secret_cancelled(self, mock_env_secret_api: None, keys: Any) -> None:
         """Test cancelling env secret deletion."""
+        keys.confirm(False)
         result = runner.invoke(
-            app,
-            ["env", "secret", "delete", "testuser/test-env", "--id", "esecret-id-001"],
-            input="n\n",
+            app, ["env", "secret", "delete", "testuser/test-env", "--id", "esecret-id-001"]
         )
         assert result.exit_code == 0
         assert "Cancelled" in result.output
 
-    def test_delete_secret_interactive_select(self, mock_env_secret_api: None) -> None:
+    def test_delete_secret_interactive_select(self, mock_env_secret_api: None, keys: Any) -> None:
         """Test interactive secret selection for delete."""
-        result = runner.invoke(
-            app,
-            ["env", "secret", "delete", "testuser/test-env"],
-            # Select item 1, then confirm
-            input="1\ny\n",
-        )
+        keys.select(0).confirm(True)
+        result = runner.invoke(app, ["env", "secret", "delete", "testuser/test-env"])
         assert result.exit_code == 0, f"Failed: {result.output}"
         assert "Deleted secret" in result.output
 
-    def test_delete_secret_interactive_cancel_selection(self, mock_env_secret_api: None) -> None:
+    def test_delete_secret_interactive_cancel_selection(
+        self, mock_env_secret_api: None, keys: Any
+    ) -> None:
         """Test cancelling interactive selection for delete."""
-        result = runner.invoke(
-            app,
-            ["env", "secret", "delete", "testuser/test-env"],
-            input="\n",
-        )
+        keys.cancel()
+        result = runner.invoke(app, ["env", "secret", "delete", "testuser/test-env"])
         assert result.exit_code == 0
         assert "Cancelled" in result.output
 
@@ -514,22 +499,22 @@ class TestEnvSecretUnlink:
         assert "Unlinked global secret" in result.output
         assert "testuser/test-env" in result.output
 
-    def test_unlink_secret_cancelled(self, mock_env_secret_api: None) -> None:
+    def test_unlink_secret_cancelled(self, mock_env_secret_api: None, keys: Any) -> None:
         """Test cancelling unlink confirmation."""
+        keys.confirm(False)
         result = runner.invoke(
-            app,
-            ["env", "secret", "unlink", "global-secret-id-123", "testuser/test-env"],
-            input="n\n",
+            app, ["env", "secret", "unlink", "global-secret-id-123", "testuser/test-env"]
         )
         assert result.exit_code == 0
         assert "Cancelled" in result.output
 
-    def test_unlink_secret_confirmed_interactively(self, mock_env_secret_api: None) -> None:
+    def test_unlink_secret_confirmed_interactively(
+        self, mock_env_secret_api: None, keys: Any
+    ) -> None:
         """Test confirming unlink interactively."""
+        keys.confirm(True)
         result = runner.invoke(
-            app,
-            ["env", "secret", "unlink", "global-secret-id-123", "testuser/test-env"],
-            input="y\n",
+            app, ["env", "secret", "unlink", "global-secret-id-123", "testuser/test-env"]
         )
         assert result.exit_code == 0, f"Failed: {result.output}"
         assert "Unlinked global secret" in result.output

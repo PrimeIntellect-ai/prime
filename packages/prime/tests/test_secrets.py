@@ -192,33 +192,26 @@ class TestSecretsCreate:
         assert output["name"] == "NEW_SECRET"
         assert "id" in output
 
-    def test_create_secret_interactive_cancel_name(self, mock_secrets_api: None) -> None:
+    def test_create_secret_interactive_cancel_name(self, mock_secrets_api: None, keys: Any) -> None:
         """Test that create can be cancelled during name prompt."""
-        result = runner.invoke(
-            app,
-            ["secret", "create"],
-            input="\n",
-        )
+        keys.send(keys.ENTER)
+        result = runner.invoke(app, ["secret", "create"])
         assert result.exit_code == 0
         assert "Cancelled" in result.output
 
-    def test_create_secret_interactive(self, mock_secrets_api: None) -> None:
+    def test_create_secret_interactive(self, mock_secrets_api: None, keys: Any) -> None:
         """Test creating a secret interactively."""
-        result = runner.invoke(
-            app,
-            ["secret", "create"],
-            input="MY_NEW_SECRET\nsecret-value\n",
-        )
+        keys.text("MY_NEW_SECRET").text("secret-value")
+        result = runner.invoke(app, ["secret", "create"])
         assert result.exit_code == 0, f"Failed: {result.output}"
         assert "Created personal secret" in result.output
 
-    def test_create_secret_interactive_cancel_value(self, mock_secrets_api: None) -> None:
+    def test_create_secret_interactive_cancel_value(
+        self, mock_secrets_api: None, keys: Any
+    ) -> None:
         """Test that create can be cancelled during value prompt."""
-        result = runner.invoke(
-            app,
-            ["secret", "create", "-n", "MY_SECRET"],
-            input="\n",
-        )
+        keys.send(keys.ENTER)
+        result = runner.invoke(app, ["secret", "create", "-n", "MY_SECRET"])
         assert result.exit_code == 0
         assert "Cancelled" in result.output
 
@@ -309,23 +302,17 @@ class TestSecretsUpdate:
         assert result.exit_code == 0, f"Failed: {result.output}"
         assert "Updated secret" in result.output
 
-    def test_update_secret_no_changes(self, mock_secrets_api: None) -> None:
+    def test_update_secret_no_changes(self, mock_secrets_api: None, keys: Any) -> None:
         """Test that update prompts when no changes are provided."""
-        result = runner.invoke(
-            app,
-            ["secret", "update", "secret-id-1234567890"],
-            input="\n",
-        )
+        keys.send(keys.ENTER)
+        result = runner.invoke(app, ["secret", "update", "secret-id-1234567890"])
         assert result.exit_code == 0
         assert "No changes made" in result.output
 
-    def test_update_secret_interactive(self, mock_secrets_api: None) -> None:
+    def test_update_secret_interactive(self, mock_secrets_api: None, keys: Any) -> None:
         """Test updating a secret interactively."""
-        result = runner.invoke(
-            app,
-            ["secret", "update", "secret-id-1234567890"],
-            input="new-secret-value\n",
-        )
+        keys.text("new-secret-value")
+        result = runner.invoke(app, ["secret", "update", "secret-id-1234567890"])
         assert result.exit_code == 0, f"Failed: {result.output}"
         assert "Updated secret" in result.output
 
@@ -354,13 +341,10 @@ class TestSecretsDelete:
         assert result.exit_code == 0, f"Failed: {result.output}"
         assert "Deleted secret" in result.output
 
-    def test_delete_secret_cancelled(self, mock_secrets_api: None) -> None:
+    def test_delete_secret_cancelled(self, mock_secrets_api: None, keys: Any) -> None:
         """Test cancelling secret deletion."""
-        result = runner.invoke(
-            app,
-            ["secret", "delete", "secret-id-1234567890"],
-            input="n\n",
-        )
+        keys.confirm(False)
+        result = runner.invoke(app, ["secret", "delete", "secret-id-1234567890"])
 
         assert result.exit_code == 0
         assert "Cancelled" in result.output
@@ -530,13 +514,10 @@ class TestSecretsTeamContext:
 class TestSecretsDeleteEdgeCases:
     """Additional edge case tests for delete."""
 
-    def test_delete_secret_confirmed_yes(self, mock_secrets_api: None) -> None:
+    def test_delete_secret_confirmed_yes(self, mock_secrets_api: None, keys: Any) -> None:
         """Test deleting a secret by confirming interactively."""
-        result = runner.invoke(
-            app,
-            ["secret", "delete", "secret-id-1234567890"],
-            input="y\n",
-        )
+        keys.confirm(True)
+        result = runner.invoke(app, ["secret", "delete", "secret-id-1234567890"])
         assert result.exit_code == 0, f"Failed: {result.output}"
         assert "Deleted secret" in result.output
 

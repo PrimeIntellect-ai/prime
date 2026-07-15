@@ -16,6 +16,7 @@ from ..utils import (
 )
 from ..utils.prompt import (
     any_provided,
+    confirm,
     prompt_for_value,
     require_selection,
     validate_env_var_name,
@@ -287,8 +288,7 @@ def secret_delete(
             secret_name = secret_data.get("name", secret_id)
 
         if not yes:
-            confirm = typer.confirm(f"Delete secret '{secret_name}'?")
-            if not confirm:
+            if not confirm(f"Delete secret '{secret_name}'?"):
                 console.print("\n[dim]Cancelled.[/dim]")
                 raise typer.Exit()
 

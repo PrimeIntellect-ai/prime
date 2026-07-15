@@ -16,6 +16,7 @@ dependencies = [
     "httpx>=0.25.0",
     "pydantic>=2.0.0",
     "typer>=0.9.0,<0.26",
+    "questionary>=2.0.0",
     "rich>=13.3.1",
     "textual>=6.1.0",
     "textual-plot>=0.10.1",

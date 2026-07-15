@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Optional
 
 import httpx
+import questionary
 import toml
 import typer
 
@@ -554,16 +555,16 @@ def _choose_remote_owner(env_name: str, candidates: list[tuple[str, str]]) -> tu
         )
         return selected
 
-    console.print(f"[cyan]Multiple remote environments found for '{env_name}':[/cyan]")
-    for idx, (label, slug) in enumerate(candidates, start=1):
-        console.print(f"  [cyan]({idx})[/cyan] {slug} [dim]({label})[/dim]")
-
-    default_idx = 1
-    while True:
-        selection = typer.prompt("Select owner", type=int, default=default_idx)
-        if 1 <= selection <= len(candidates):
-            return candidates[selection - 1]
-        console.print(f"[red]Invalid selection.[/red] Enter 1-{len(candidates)}.")
+    selected = questionary.select(
+        f"Multiple remote environments found for '{env_name}' — choose owner",
+        choices=[
+            questionary.Choice(f"{slug} ({label})", value=(label, slug))
+            for label, slug in candidates
+        ],
+    ).ask()
+    if selected is None:
+        raise typer.Exit(1)
+    return selected
 
 
 def _resolve_environment_reference(env_reference: str, env_dir_path: str) -> ResolvedEnvironment:

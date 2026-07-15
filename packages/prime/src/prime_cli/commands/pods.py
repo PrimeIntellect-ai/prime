@@ -6,6 +6,7 @@ import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
+import questionary
 import typer
 from rich.table import Table
 from rich.text import Text
@@ -34,6 +35,36 @@ from ..utils.display import POD_STATUS_COLORS
 
 app = PlainTyper(help="Manage compute pods", no_args_is_help=True)
 console = get_console()
+
+
+def _select_or_exit(message: str, choices: List[questionary.Choice]) -> Any:
+    answer = questionary.select(message, choices=choices).ask()
+    if answer is None:
+        raise typer.Exit(1)
+    return answer
+
+
+def _prompt_int(
+    message: str, default: Optional[int], minimum: Optional[int], maximum: Optional[int]
+) -> int:
+    def validate(text: str) -> object:
+        try:
+            value = int(text)
+        except ValueError:
+            return "Enter a whole number."
+        if minimum is not None and value < minimum:
+            return f"Must be at least {minimum}."
+        if maximum is not None and value > maximum:
+            return f"Must be at most {maximum}."
+        return True
+
+    answer = questionary.text(
+        message, default=str(default) if default is not None else "", validate=validate
+    ).ask()
+    if answer is None:
+        raise typer.Exit(1)
+    return int(answer)
+
 
 LIST_PODS_JSON_HELP = json_output_help(
     ".pods[] = {id, name, gpu, status, created_at}",
@@ -520,19 +551,13 @@ def create(
         else:
             # Interactive GPU selection if no ID provided
             if not gpu_type:
-                # Show available GPU types
-                console.print("\n[bold]Available GPU Types:[/bold]")
                 gpu_types = sorted(
                     [gpu_type for gpu_type, gpus in availabilities.items() if len(gpus) > 0]
                 )
-                for idx, gpu_type_option in enumerate(gpu_types, 1):
-                    console.print(f"{idx}. {gpu_type_option}")
-
-                gpu_type_idx = typer.prompt("Select GPU type number", type=int, default=1)
-                if gpu_type_idx < 1 or gpu_type_idx > len(gpu_types):
-                    console.print("[red]Invalid GPU type selection[/red]")
-                    raise typer.Exit(1)
-                gpu_type = gpu_types[gpu_type_idx - 1]
+                gpu_type = _select_or_exit(
+                    "Select GPU type",
+                    [questionary.Choice(option, value=option) for option in gpu_types],
+                )
 
             def select_provider_from_configs(
                 matching_configs: List[GPUAvailability],
@@ -553,25 +578,19 @@ def create(
                         unique_configs.append(gpu)
 
                 if len(unique_configs) > 1:
-                    console.print("\n[bold]Available Providers:[/bold]")
-                    for idx, gpu in enumerate(unique_configs, 1):
+                    provider_choices = []
+                    for gpu in unique_configs:
                         price = gpu.prices.price if gpu.prices else float("inf")
                         price_display = (
                             f"${round(float(price), 2)}/hr" if price != float("inf") else "N/A"
                         )
                         spot_display = " (spot)" if gpu.is_spot else ""
-                        console.print(f"{idx}. {gpu.provider}{spot_display} ({price_display})")
-
-                    provider_idx = typer.prompt(
-                        "Select provider number",
-                        type=int,
-                        default=1,
-                        show_default=False,
-                    )
-                    if provider_idx < 1 or provider_idx > len(unique_configs):
-                        console.print("[red]Invalid provider selection[/red]")
-                        raise typer.Exit(1)
-                    selected_gpu = unique_configs[provider_idx - 1]
+                        provider_choices.append(
+                            questionary.Choice(
+                                f"{gpu.provider}{spot_display} ({price_display})", value=gpu
+                            )
+                        )
+                    selected_gpu = _select_or_exit("Select provider", provider_choices)
                     if not isinstance(selected_gpu, GPUAvailability):
                         raise TypeError("Selected GPU is not of type GPUAvailability")
                     return selected_gpu
@@ -600,24 +619,17 @@ def create(
                     key=lambda x: x[0],
                 )
 
-                for idx, (count, gpu, price) in enumerate(config_list, 1):
+                config_choices = []
+                for count, gpu, price in config_list:
                     price_display = (
                         f"${round(float(price), 2)}/hr" if price != float("inf") else "N/A"
                     )
-                    console.print(f"{idx}. {count}x {gpu_type} ({price_display})")
-
-                config_idx = typer.prompt(
-                    "Select configuration number",
-                    type=int,
-                    default=1,
-                    show_default=False,
-                )
-                if config_idx < 1 or config_idx > len(config_list):
-                    console.print("[red]Invalid configuration selection[/red]")
-                    raise typer.Exit(1)
+                    config_choices.append(
+                        questionary.Choice(f"{count}x {gpu_type} ({price_display})", value=count)
+                    )
 
                 # Find all providers for selected configuration
-                selected_count = config_list[config_idx - 1][0]
+                selected_count = _select_or_exit("Select configuration", config_choices)
                 matching_configs = [gpu for gpu in gpu_configs if gpu.gpu_count == selected_count]
 
                 selected_gpu = select_provider_from_configs(matching_configs)
@@ -641,23 +653,25 @@ def create(
             raise typer.Exit(1)
 
         if not name:
-            while True:
-                gpu_name = selected_gpu.gpu_type.lower().split("_")[0]
-                default_name = f"{gpu_name}-{selected_gpu.gpu_count}"
-                name = typer.prompt(
-                    "Pod name (alphanumeric and dashes only, must contain at least 1 letter)",
-                    default=default_name,
-                )
+            gpu_name = selected_gpu.gpu_type.lower().split("_")[0]
+            default_name = f"{gpu_name}-{selected_gpu.gpu_count}"
+
+            def _valid_pod_name(text: str) -> object:
+                candidate = text.strip()
                 if (
-                    name
-                    and any(c.isalpha() for c in name)
-                    and all(c.isalnum() or c == "-" for c in name)
+                    candidate
+                    and any(c.isalpha() for c in candidate)
+                    and all(c.isalnum() or c == "-" for c in candidate)
                 ):
-                    break
-                console.print(
-                    "[red]Invalid name format. Use only letters, numbers and dashes. "
-                    "Must contain at least 1 letter.[/red]"
-                )
+                    return True
+                return "Use letters, numbers and dashes; must contain at least 1 letter."
+
+            answer = questionary.text(
+                "Pod name", default=default_name, validate=_valid_pod_name
+            ).ask()
+            if answer is None:
+                raise typer.Exit(1)
+            name = answer.strip()
 
         gpu_count = selected_gpu.gpu_count
 
@@ -669,17 +683,12 @@ def create(
             if min_disk is None or max_disk is None:
                 disk_size = default_disk
             else:
-                disk_size = typer.prompt(
+                disk_size = _prompt_int(
                     f"Disk size in GB (min: {min_disk}, max: {max_disk})",
-                    default=default_disk or min_disk,
-                    type=int,
+                    default_disk or min_disk,
+                    min_disk,
+                    max_disk,
                 )
-                if min_disk is not None and disk_size is not None and disk_size < min_disk:
-                    console.print(f"[red]Disk size must be at least {min_disk}GB[/red]")
-                    raise typer.Exit(1)
-                if max_disk is not None and disk_size is not None and disk_size > max_disk:
-                    console.print(f"[red]Disk size must be at most {max_disk}GB[/red]")
-                    raise typer.Exit(1)
 
         if not vcpus:
             min_vcpus = selected_gpu.vcpu.min_count
@@ -688,16 +697,12 @@ def create(
             if min_vcpus is None or max_vcpus is None or default_vcpus is None:
                 vcpus = default_vcpus
             else:
-                vcpus = typer.prompt(
+                vcpus = _prompt_int(
                     f"Number of vCPUs (min: {min_vcpus}, max: {max_vcpus})",
-                    default=default_vcpus,
-                    type=int,
+                    default_vcpus,
+                    min_vcpus,
+                    max_vcpus,
                 )
-                if vcpus is None or vcpus < min_vcpus or vcpus > max_vcpus:
-                    console.print(
-                        f"[red]vCPU count must be between {min_vcpus} and {max_vcpus}[/red]"
-                    )
-                    raise typer.Exit(1)
 
         if not memory:
             min_memory = selected_gpu.memory.min_count
@@ -707,16 +712,12 @@ def create(
             if min_memory is None or max_memory is None:
                 memory = default_memory
             else:
-                memory = typer.prompt(
+                memory = _prompt_int(
                     f"Memory in GB (min: {min_memory}, max: {max_memory})",
-                    default=default_memory,
-                    type=int,
+                    default_memory,
+                    min_memory,
+                    max_memory,
                 )
-                if memory is None or memory < min_memory or memory > max_memory:
-                    console.print(
-                        f"[red]Memory must be between {min_memory}GB and {max_memory}GB[/red]"
-                    )
-                    raise typer.Exit(1)
 
         available_images = selected_gpu.images
 
@@ -725,21 +726,10 @@ def create(
                 # If only one image available, use it directly
                 image = available_images[0]
             else:
-                # Show available images
-                console.print("\n[bold]Available Images:[/bold]")
-                for idx, img in enumerate(available_images):
-                    console.print(f"{idx + 1}. {img}")
-
-                # Prompt for image selection
-                image_idx = typer.prompt(
-                    "Select image number", type=int, default=1, show_default=False
+                image = _select_or_exit(
+                    "Select image",
+                    [questionary.Choice(img, value=img) for img in available_images],
                 )
-
-                if image_idx < 1 or image_idx > len(available_images):
-                    console.print("[red]Invalid image selection[/red]")
-                    raise typer.Exit(1)
-
-                image = available_images[image_idx - 1]
 
         # Determine sharing settings
         shared_with_team = share_with_team
@@ -757,43 +747,30 @@ def create(
             if not selectable_members:
                 console.print("[yellow]No other team members to share with.[/yellow]")
             else:
-                console.print("\n[bold]Team Members:[/bold]")
-                for idx, m in enumerate(selectable_members, 1):
+                member_choices = [
+                    questionary.Choice("Everyone (share with the whole team)", value="__all__")
+                ]
+                for m in selectable_members:
                     member_name = m.get("userName") or "N/A"
                     email = m.get("userEmail") or "N/A"
                     role = m.get("role", "")
-                    console.print(f"  {idx}. {member_name} ({email}) - {role}")
+                    member_choices.append(
+                        questionary.Choice(f"{member_name} ({email}) - {role}", value=m)
+                    )
 
-                selection = typer.prompt(
-                    "\nSelect members (comma-separated numbers, or 'all' for everyone)",
-                    default="all",
-                )
+                picked = questionary.checkbox(
+                    "Select members to share with",
+                    choices=member_choices,
+                ).ask()
+                if picked is None:
+                    raise typer.Exit(1)
 
-                if selection.strip().lower() == "all":
+                if any(item == "__all__" for item in picked):
                     shared_with_team = True
                     sharing_display = "All team members"
                 else:
-                    selected_indices = []
-                    for part in selection.split(","):
-                        part = part.strip()
-                        if part.isdigit():
-                            idx = int(part)
-                            if 1 <= idx <= len(selectable_members):
-                                selected_indices.append(idx - 1)
-                            else:
-                                console.print(
-                                    f"[red]Invalid selection: {idx}. "
-                                    f"Must be between 1 and "
-                                    f"{len(selectable_members)}[/red]"
-                                )
-                                raise typer.Exit(1)
-                        else:
-                            console.print(f"[red]Invalid input: {part}[/red]")
-                            raise typer.Exit(1)
-
-                    selected_members = [selectable_members[i] for i in selected_indices]
-                    team_member_ids = [m["userId"] for m in selected_members]
-                    names = [m.get("userName") or m["userId"] for m in selected_members]
+                    team_member_ids = [m["userId"] for m in picked]
+                    names = [m.get("userName") or m["userId"] for m in picked]
                     sharing_display = ", ".join(names)
 
         elif not share_with_team and not add_members:
@@ -1093,17 +1070,10 @@ def connect(pod_id: str) -> None:
         # If multiple connections available, let user choose
         connection_str: str
         if len(connections) > 1:
-            console.print("\nMultiple nodes available. Please select one:")
-            for idx, conn in enumerate(connections):
-                console.print(f"[blue]{idx + 1}[/blue]) {conn}")
-
-            choice = typer.prompt("Enter node number", type=int, default=1, show_default=False)
-
-            if choice < 1 or choice > len(connections):
-                console.print("[red]Invalid selection[/red]")
-                raise typer.Exit(1)
-
-            connection_str = connections[choice - 1]
+            connection_str = _select_or_exit(
+                "Multiple nodes available. Select one",
+                [questionary.Choice(conn, value=conn) for conn in connections],
+            )
         else:
             connection_str = connections[0]
 

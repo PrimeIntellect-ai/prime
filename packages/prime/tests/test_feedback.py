@@ -32,8 +32,8 @@ def capture_feedback_post(monkeypatch: pytest.MonkeyPatch) -> Dict[str, Any]:
 def test_feedback_submits_general_without_run_id(
     capture_feedback_post: Dict[str, Any], keys: Any
 ) -> None:
-    # general is the default choice; blank run id; then the message
-    keys.send(keys.ENTER).send(keys.ENTER).text("The CLI is great")
+    # move down to general (bug, feature, general); blank run id; then the message
+    keys.send(keys.DOWN + keys.DOWN + keys.ENTER).send(keys.ENTER).text("The CLI is great")
     result = runner.invoke(app, ["feedback"], env=TEST_ENV)
 
     assert result.exit_code == 0, result.output
@@ -47,8 +47,8 @@ def test_feedback_submits_general_without_run_id(
 
 
 def test_feedback_submits_bug_with_run_id(capture_feedback_post: Dict[str, Any], keys: Any) -> None:
-    # move up from general to bug, then run id, then message
-    keys.send(keys.UP + keys.UP + keys.ENTER).text("run_abc123").text("Training crashed on step 42")
+    # bug is the first choice, then run id, then message
+    keys.send(keys.ENTER).text("run_abc123").text("Training crashed on step 42")
     result = runner.invoke(app, ["feedback"], env=TEST_ENV)
 
     assert result.exit_code == 0, result.output
@@ -60,7 +60,9 @@ def test_feedback_submits_bug_with_run_id(capture_feedback_post: Dict[str, Any],
 
 def test_feedback_rejects_empty_message(capture_feedback_post: Dict[str, Any], keys: Any) -> None:
     # general, no run id, one empty message (re-prompted), then the real one
-    keys.send(keys.ENTER).send(keys.ENTER).send(keys.ENTER).text("Actually here is my feedback")
+    keys.send(keys.DOWN + keys.DOWN + keys.ENTER).send(keys.ENTER).send(keys.ENTER).text(
+        "Actually here is my feedback"
+    )
     result = runner.invoke(app, ["feedback"], env=TEST_ENV)
 
     assert result.exit_code == 0, result.output

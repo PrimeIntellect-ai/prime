@@ -8,10 +8,16 @@ from .plain import get_console
 
 console = get_console()
 
-# Shared look for every interactive prompt: questionary's default colours, with a
-# green current/checked row and no reverse-video bar (prompt_toolkit defaults the
-# "selected" class to reverse, which draws the highlight box we don't want).
-PROMPT_STYLE = questionary.Style([("selected", "fg:green noreverse")])
+# Shared look for every interactive prompt: questionary's default colours, with the
+# current row (single-select) and checked markers (multi-select) in green and no
+# reverse-video bar (prompt_toolkit defaults the "selected" class to reverse, which
+# draws the highlight box we don't want).
+PROMPT_STYLE = questionary.Style(
+    [
+        ("highlighted", "fg:green noreverse"),
+        ("selected", "fg:green noreverse"),
+    ]
+)
 
 
 def ask_select(message: str, choices: List[Any], **kwargs: Any) -> Any:

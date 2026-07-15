@@ -30,7 +30,6 @@ def _prompt_category() -> FeedbackCategory:
     selected = ask_select(
         "What are you sharing?",
         [questionary.Choice(label, value=cat) for cat, label in _CATEGORY_CHOICES],
-        default="general",
     )
     if selected is None:
         raise Abort()

@@ -1,5 +1,6 @@
 import json
 import re
+import shutil
 import sys
 import tarfile
 import tempfile
@@ -7,7 +8,7 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -47,12 +48,12 @@ RATE_LIMIT_MAX_ATTEMPTS = 5
 RATE_LIMIT_BACKOFF_INITIAL_SECONDS = 2.0
 RATE_LIMIT_BACKOFF_MAX_SECONDS = 60.0
 
-TERMINAL_BUILD_STATUSES = {"COMPLETED", "FAILED", "CANCELLED"}
+# Max consecutive deferrals without a single successful submission
+MAX_CONSECUTIVE_SUBMIT_DEFERRALS = 20
 
 FAILURE_TABLE_MAX_ROWS = 20
 
 _TAG_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$")
-
 _MANIFEST_KEYS = {"image", "context", "dockerfile", "platform"}
 
 
@@ -66,6 +67,27 @@ class BulkPushValidationError(Exception):
 
 class QuotaExceededError(APIError):
     """A 429 caused by the wallet's image count/storage quota, not the rate limiter."""
+
+
+class SubmitRateLimited(Exception):
+    """Raised by a submit callable to defer the spec instead of failing it."""
+
+    def __init__(self, message: str, retry_after: float):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
+class BulkRunInterrupted(Exception):
+    """Ctrl+C during a bulk run.
+
+    Carries the outcomes recorded so far plus every never-submitted spec
+    (marked SKIPPED), so the command can write a resume manifest. Jobs already
+    in flight are not included — they keep running server-side.
+    """
+
+    def __init__(self, outcomes: list["BuildOutcome"]):
+        super().__init__("bulk run interrupted")
+        self.outcomes = outcomes
 
 
 @dataclass
@@ -97,13 +119,15 @@ class BuildSpec:
 class BuildOutcome:
     """Terminal result for one spec.
 
+    ``spec`` is any object with ``image_ref``, ``source`` and
+    ``to_manifest_line()`` (BuildSpec here, TransferSpec for bulk transfers).
     ``status`` is a backend terminal status (COMPLETED/FAILED/CANCELLED) or a
     client-side one: SUBMIT_FAILED (initiate/upload/start failed), TIMEOUT
     (no terminal status within --build-timeout), SKIPPED (never submitted
     because the quota was exhausted mid-run).
     """
 
-    spec: BuildSpec
+    spec: Any
     status: str
     build_id: Optional[str] = None
     full_image_path: Optional[str] = None
@@ -163,7 +187,8 @@ def package_build_context(context_path: Path, dockerfile_path: Path) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _duplicate_ref_problems(specs: list[BuildSpec], hint: str = "") -> list[str]:
+def _duplicate_ref_problems(specs: list[Any], hint: str = "") -> list[str]:
+    """Report specs (anything with image_ref/source) sharing a destination ref."""
     by_ref: dict[str, list[str]] = {}
     for spec in specs:
         by_ref.setdefault(spec.image_ref, []).append(spec.source)
@@ -475,31 +500,41 @@ def _submit_build(
 
 @dataclass
 class _InFlightBuild:
-    spec: BuildSpec
+    spec: Any
     full_image_path: str
     deadline: float
 
 
-def run_bulk_push(
+def run_bulk_jobs(
     client: APIClient,
-    specs: list[BuildSpec],
+    specs: list[Any],
     *,
-    team_id: Optional[str],
-    visibility: Optional[ImageVisibility],
+    submit: Callable[[Any], tuple[str, str]],
     concurrency: int,
     build_timeout: int,
+    progress_description: str = "Pushing images",
 ) -> list[BuildOutcome]:
-    """Submit builds with a sliding window and poll them to terminal status.
+    """Submit jobs with a sliding window and poll them to terminal status.
 
-    A finished build immediately frees a slot for the next queued build, so
-    one slow build never blocks the rest of a "batch". Once the wallet quota
-    is hit, submission stops (remaining specs become SKIPPED) but builds
-    already in flight are still polled to completion.
+    ``submit(spec)`` starts one server-side build/transfer and returns
+    (build_id, full_image_path). A finished job immediately frees a slot for
+    the next queued spec, so one slow job never blocks the rest of a "batch".
+    Once the wallet quota is hit (QuotaExceededError), submission stops
+    (remaining specs become SKIPPED) but jobs already in flight are still
+    polled to completion. A submit that raises SubmitRateLimited requeues its
+    spec and pauses new submissions for ``retry_after`` seconds while polling
+    continues; after MAX_CONSECUTIVE_SUBMIT_DEFERRALS deferrals with no
+    successful submission in between, the run stops submitting the same way
+    the quota path does, so a persistently 429ing server cannot stall it
+    forever.
     """
-    pending: deque[BuildSpec] = deque(specs)
+    pending: deque[Any] = deque(specs)
     in_flight: dict[str, _InFlightBuild] = {}
     outcomes: list[BuildOutcome] = []
-    quota_error: Optional[str] = None
+    stop_skip_reason: Optional[str] = None
+    submit_gate = 0.0
+    consecutive_deferrals = 0
+    rate_limit_notice_shown = False
 
     progress = Progress(
         TextColumn("[progress.description]{task.description}"),
@@ -509,7 +544,7 @@ def run_bulk_push(
         console=console,
     )
     with progress:
-        task_id = progress.add_task("Pushing images", total=len(specs))
+        task_id = progress.add_task(progress_description, total=len(specs))
 
         def record(outcome: BuildOutcome) -> None:
             outcomes.append(outcome)
@@ -524,83 +559,155 @@ def run_bulk_push(
                     f"[dim]({outcome.status.lower()}: {outcome.error})[/dim]"
                 )
 
-        while pending or in_flight:
-            while pending and quota_error is None and len(in_flight) < concurrency:
-                spec = pending.popleft()
-                try:
-                    build_id, full_image_path = _submit_build(
-                        client, spec, team_id=team_id, visibility=visibility
-                    )
-                except QuotaExceededError as e:
-                    quota_error = str(e)
-                    record(BuildOutcome(spec=spec, status="SUBMIT_FAILED", error=str(e)))
-                except UnauthorizedError:
-                    raise
-                except (APIError, httpx.HTTPError, OSError) as e:
-                    record(BuildOutcome(spec=spec, status="SUBMIT_FAILED", error=str(e)))
-                else:
-                    in_flight[build_id] = _InFlightBuild(
-                        spec=spec,
-                        full_image_path=full_image_path,
-                        deadline=time.monotonic() + build_timeout,
-                    )
-
-            if quota_error is not None and pending:
-                for spec in pending:
-                    record(
-                        BuildOutcome(
+        try:
+            while pending or in_flight:
+                while pending and stop_skip_reason is None and len(in_flight) < concurrency:
+                    if time.monotonic() < submit_gate:
+                        break
+                    spec = pending.popleft()
+                    try:
+                        build_id, full_image_path = submit(spec)
+                    except KeyboardInterrupt:
+                        # The submit was cut short and may have half-queued the
+                        # job; treating it as never submitted keeps it in the
+                        # resume manifest.
+                        pending.appendleft(spec)
+                        raise
+                    except SubmitRateLimited as e:
+                        consecutive_deferrals += 1
+                        if consecutive_deferrals > MAX_CONSECUTIVE_SUBMIT_DEFERRALS:
+                            record(
+                                BuildOutcome(
+                                    spec=spec,
+                                    status="SUBMIT_FAILED",
+                                    error=(
+                                        f"{e} (gave up after {MAX_CONSECUTIVE_SUBMIT_DEFERRALS} "
+                                        "rate-limit deferrals with no successful submission)"
+                                    ),
+                                )
+                            )
+                            stop_skip_reason = (
+                                "not submitted: the server kept rate-limiting submissions"
+                            )
+                            break
+                        pending.appendleft(spec)
+                        submit_gate = time.monotonic() + e.retry_after
+                        if not rate_limit_notice_shown:
+                            rate_limit_notice_shown = True
+                            progress.console.print(
+                                "[dim]Server rate limit reached; pacing submissions "
+                                "(jobs already submitted keep running)...[/dim]"
+                            )
+                        break
+                    except QuotaExceededError as e:
+                        stop_skip_reason = "not submitted: image quota exceeded"
+                        record(BuildOutcome(spec=spec, status="SUBMIT_FAILED", error=str(e)))
+                    except UnauthorizedError:
+                        raise
+                    except (APIError, httpx.HTTPError, OSError) as e:
+                        consecutive_deferrals = 0
+                        record(BuildOutcome(spec=spec, status="SUBMIT_FAILED", error=str(e)))
+                    else:
+                        consecutive_deferrals = 0
+                        in_flight[build_id] = _InFlightBuild(
                             spec=spec,
-                            status="SKIPPED",
-                            error="not submitted: image quota exceeded",
+                            full_image_path=full_image_path,
+                            deadline=time.monotonic() + build_timeout,
                         )
-                    )
-                pending.clear()
 
-            if not in_flight:
-                break
-
-            time.sleep(POLL_INTERVAL_SECONDS)
-
-            for build_id, entry in list(in_flight.items()):
-                try:
-                    status_response = client.request("GET", f"/images/build/{build_id}")
-                    build_status = str(status_response.get("status") or "")
-                except UnauthorizedError:
-                    raise
-                except APIError:
-                    build_status = ""  # transient poll failure; the deadline still applies
-
-                if build_status in TERMINAL_BUILD_STATUSES:
-                    del in_flight[build_id]
-                    record(
-                        BuildOutcome(
-                            spec=entry.spec,
-                            status=build_status,
-                            build_id=build_id,
-                            full_image_path=entry.full_image_path,
-                            error=(
-                                None
-                                if build_status == "COMPLETED"
-                                else f"build ended as {build_status}"
-                            ),
+                if stop_skip_reason is not None and pending:
+                    for spec in pending:
+                        record(
+                            BuildOutcome(
+                                spec=spec,
+                                status="SKIPPED",
+                                error=stop_skip_reason,
+                            )
                         )
-                    )
-                elif time.monotonic() > entry.deadline:
-                    del in_flight[build_id]
-                    record(
-                        BuildOutcome(
-                            spec=entry.spec,
-                            status="TIMEOUT",
-                            build_id=build_id,
-                            full_image_path=entry.full_image_path,
-                            error=(
-                                f"no terminal status after {build_timeout}s "
-                                "(the build may still finish server-side)"
-                            ),
+                    pending.clear()
+
+                if not pending and not in_flight:
+                    break
+
+                if not in_flight:
+                    # Everything left is waiting on the submit gate.
+                    time.sleep(max(0.0, submit_gate - time.monotonic()))
+                    continue
+
+                time.sleep(POLL_INTERVAL_SECONDS)
+
+                for build_id, entry in list(in_flight.items()):
+                    build_error: Optional[str] = None
+                    try:
+                        status_response = client.request("GET", f"/images/build/{build_id}")
+                        build_status = str(status_response.get("status") or "")
+                        error_message = status_response.get("errorMessage") or status_response.get(
+                            "error_message"
                         )
+                        if isinstance(error_message, str) and error_message.strip():
+                            build_error = error_message.strip()
+                    except UnauthorizedError:
+                        raise
+                    except APIError:
+                        build_status = ""  # transient poll failure; the deadline still applies
+
+                    if build_status in {"COMPLETED", "FAILED", "CANCELLED"}:
+                        del in_flight[build_id]
+                        failure_reason = f"build ended as {build_status}"
+                        if build_error:
+                            failure_reason += f": {build_error}"
+                        record(
+                            BuildOutcome(
+                                spec=entry.spec,
+                                status=build_status,
+                                build_id=build_id,
+                                full_image_path=entry.full_image_path,
+                                error=None if build_status == "COMPLETED" else failure_reason,
+                            )
+                        )
+                    elif time.monotonic() > entry.deadline:
+                        del in_flight[build_id]
+                        record(
+                            BuildOutcome(
+                                spec=entry.spec,
+                                status="TIMEOUT",
+                                build_id=build_id,
+                                full_image_path=entry.full_image_path,
+                                error=(
+                                    f"no terminal status after {build_timeout}s "
+                                    "(the build may still finish server-side)"
+                                ),
+                            )
+                        )
+        except KeyboardInterrupt:
+            for spec in pending:
+                outcomes.append(
+                    BuildOutcome(
+                        spec=spec, status="SKIPPED", error="not submitted: run interrupted"
                     )
+                )
+            raise BulkRunInterrupted(outcomes) from None
 
     return outcomes
+
+
+def run_bulk_push(
+    client: APIClient,
+    specs: list[BuildSpec],
+    *,
+    team_id: Optional[str],
+    visibility: Optional[ImageVisibility],
+    concurrency: int,
+    build_timeout: int,
+) -> list[BuildOutcome]:
+    """Bulk build-and-push: submit build contexts through the shared engine."""
+    return run_bulk_jobs(
+        client,
+        specs,
+        submit=lambda spec: _submit_build(client, spec, team_id=team_id, visibility=visibility),
+        concurrency=concurrency,
+        build_timeout=build_timeout,
+    )
 
 
 def _write_failures_manifest(path: Path, failures: list[BuildOutcome]) -> None:
@@ -632,14 +739,44 @@ def push_bulk(
             "environment/ folder is the build context"
         ),
     ),
-    tag: str = typer.Option("latest", "--tag", help="Image tag for Harbor mode"),
+    hf_dataset: Optional[str] = typer.Option(
+        None,
+        "--hf",
+        help=(
+            "Hugging Face dataset id or URL (e.g. 'org/dataset'); "
+            "builds every Dockerfile stored in the dataset"
+        ),
+    ),
+    hf_split: str = typer.Option("train", "--hf-split", help="Dataset split for --hf mode"),
+    hf_config: Optional[str] = typer.Option(
+        None,
+        "--hf-config",
+        help="Dataset config (called 'subset' in the HF viewer) for --hf mode",
+        show_default="the dataset's only config",
+    ),
+    dockerfile_column: Optional[str] = typer.Option(
+        None,
+        "--dockerfile-column",
+        help=(
+            "Dataset column holding Dockerfile contents (required for --hf mode; e.g. 'dockerfile')"
+        ),
+    ),
+    name_column: Optional[str] = typer.Option(
+        None,
+        "--name-column",
+        help=(
+            "Dataset column naming each image (required for --hf mode; "
+            "e.g. 'instance_id'; values are sanitized to valid image names)"
+        ),
+    ),
+    tag: str = typer.Option("latest", "--tag", help="Image tag for Harbor and --hf modes"),
     name_template: str = typer.Option(
         "{dir}",
         "--name-template",
         help=(
-            "Image name template for Harbor mode; placeholders: {dir} (task directory "
-            "name) and {name} (task.toml [task].name). The result is sanitized to a "
-            "valid image name"
+            "Image name template for Harbor and --hf modes; placeholders: {dir} (task "
+            "directory name) and {name} (task.toml [task].name; in --hf mode both are "
+            "the --name-column value). The result is sanitized to a valid image name"
         ),
     ),
     platform: str = typer.Option(
@@ -674,10 +811,11 @@ def push_bulk(
     """
     Build and push many Docker images in one command.
 
-    Reads builds from a JSONL manifest (--manifest) or a Harbor tasks
-    directory (--harbor), validates everything up front, then keeps up to
-    --concurrency builds running server-side, starting the next build as soon
-    as one finishes. Failed builds are written to a manifest you can re-run.
+    Reads builds from a JSONL manifest (--manifest), a Harbor tasks directory
+    (--harbor), or a Hugging Face dataset of Dockerfiles (--hf), validates
+    everything up front, then keeps up to --concurrency builds running
+    server-side, starting the next build as soon as one finishes. Failed
+    builds are written to a manifest you can re-run.
 
     \b
     Manifest format (one JSON object per line; paths relative to the manifest):
@@ -692,15 +830,36 @@ def push_bulk(
     are skipped.
 
     \b
+    Hugging Face mode builds one image per dataset row using the dataset
+    viewer API — no local dataset download. --dockerfile-column holds each
+    row's Dockerfile contents and --name-column names the image (sanitized,
+    tagged with --tag). Set HF_TOKEN for private or gated datasets. Datasets
+    whose rows reference prebuilt registry images are transfer-bulk's job:
+    prime images transfer-bulk --hf.
+
+    \b
     Examples:
         prime images push-bulk --manifest builds.jsonl
         prime images push-bulk --harbor ./tasks --tag v1
         prime images push-bulk --harbor ./tasks --name-template "swe-{dir}" --dry-run
+        prime images push-bulk --hf org/dataset --dockerfile-column dockerfile \\
+            --name-column instance_id
         prime images push-bulk --manifest push-bulk-failures.jsonl
     """
+    hf_context_root: Optional[Path] = None
+    keep_hf_context = False
     try:
-        if (manifest is None) == (harbor is None):
-            console.print("[red]Error: Provide exactly one of --manifest or --harbor[/red]")
+        modes = [m for m in (manifest, harbor, hf_dataset) if m is not None]
+        if len(modes) != 1:
+            console.print("[red]Error: Provide exactly one of --manifest, --harbor or --hf[/red]")
+            raise typer.Exit(1)
+        if hf_dataset is None and (
+            hf_split != "train" or hf_config or dockerfile_column or name_column
+        ):
+            console.print(
+                "[red]Error: --hf-split, --hf-config, --dockerfile-column and "
+                "--name-column only apply to --hf mode[/red]"
+            )
             raise typer.Exit(1)
         if public and private:
             console.print("[red]Error: --public and --private cannot be used together[/red]")
@@ -712,10 +871,13 @@ def push_bulk(
             console.print("[red]Error: --build-timeout must be at least 1[/red]")
             raise typer.Exit(1)
         if manifest is not None and (tag != "latest" or name_template != "{dir}"):
-            console.print("[red]Error: --tag and --name-template only apply to --harbor mode[/red]")
+            console.print(
+                "[red]Error: --tag and --name-template only apply to --harbor and --hf modes[/red]"
+            )
             raise typer.Exit(1)
 
         skipped: list[tuple[str, str]] = []
+        notes: list[str] = []
         try:
             if manifest is not None:
                 manifest_path = manifest.resolve()
@@ -723,8 +885,7 @@ def push_bulk(
                     raise BulkPushValidationError([f"manifest not found: {manifest_path}"])
                 source_desc = f"manifest {manifest_path}"
                 specs = load_manifest(manifest_path, default_platform=platform)
-            else:
-                assert harbor is not None
+            elif harbor is not None:
                 harbor_root = harbor.resolve()
                 if not harbor_root.is_dir():
                     raise BulkPushValidationError(
@@ -736,6 +897,27 @@ def push_bulk(
                 specs, skipped = load_harbor_specs(
                     harbor_root, tag=tag, name_template=name_template, platform=platform
                 )
+            else:
+                assert hf_dataset is not None
+                if not _TAG_RE.match(tag):
+                    raise BulkPushValidationError([f"invalid image tag '{tag}'"])
+                # Imported here: images_hf imports BuildSpec helpers from this module.
+                from .images_hf import load_hf_build_specs, normalize_hf_dataset_id
+
+                source_desc = f"Hugging Face dataset {normalize_hf_dataset_id(hf_dataset)}"
+                console.print(f"[cyan]Reading Dockerfiles from {source_desc}...[/cyan]")
+                hf_context_root = Path(tempfile.mkdtemp(prefix="prime-push-bulk-hf-"))
+                specs, notes = load_hf_build_specs(
+                    hf_dataset,
+                    config=hf_config,
+                    split=hf_split,
+                    dockerfile_column=dockerfile_column,
+                    name_column=name_column,
+                    tag=tag,
+                    name_template=name_template,
+                    platform=platform,
+                    context_root=hf_context_root,
+                )
         except BulkPushValidationError as e:
             console.print(
                 f"[red]Error: cannot start bulk push ({len(e.problems)} problem(s)):[/red]"
@@ -744,6 +926,8 @@ def push_bulk(
                 console.print(f"[red]  - {problem}[/red]")
             raise typer.Exit(1)
 
+        for note in notes:
+            console.print(f"[dim]{note}[/dim]")
         for task_name, reason in skipped:
             console.print(f"[yellow]Skipping {task_name}: {reason}[/yellow]")
 
@@ -836,10 +1020,38 @@ def push_bulk(
         console.print()
         console.print(f"Wrote {len(failures)} failed build(s) to [bold]{failures_out}[/bold]")
         console.print(f"[dim]Retry with: prime images push-bulk --manifest {failures_out}[/dim]")
+        if hf_context_root is not None:
+            # The failures manifest points into the generated build contexts.
+            keep_hf_context = True
+            console.print(
+                f"[dim]Keeping generated Dockerfiles in {hf_context_root} "
+                "so the failures manifest can be re-run.[/dim]"
+            )
         raise typer.Exit(1)
 
     except UnauthorizedError:
         console.print("[red]Error: Not authenticated. Please run 'prime login' first.[/red]")
+        raise typer.Exit(1)
+    except BulkRunInterrupted as e:
+        console.print(
+            "\n[yellow]Cancelled. Builds already started keep running server-side; "
+            "check them with 'prime images list'.[/yellow]"
+        )
+        unfinished = [o for o in e.outcomes if o.status != "COMPLETED"]
+        if unfinished:
+            _write_failures_manifest(failures_out, unfinished)
+            console.print(
+                f"Wrote {len(unfinished)} unfinished build(s) to [bold]{failures_out}[/bold]"
+            )
+            console.print(
+                f"[dim]Resume with: prime images push-bulk --manifest {failures_out}[/dim]"
+            )
+            if hf_context_root is not None:
+                keep_hf_context = True
+                console.print(
+                    f"[dim]Keeping generated Dockerfiles in {hf_context_root} "
+                    "so the manifest can be re-run.[/dim]"
+                )
         raise typer.Exit(1)
     except KeyboardInterrupt:
         console.print(
@@ -847,3 +1059,6 @@ def push_bulk(
             "check them with 'prime images list'.[/yellow]"
         )
         raise typer.Exit(1)
+    finally:
+        if hf_context_root is not None and not keep_hf_context:
+            shutil.rmtree(hf_context_root, ignore_errors=True)

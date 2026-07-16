@@ -301,23 +301,33 @@ def test_push_platform_image_rejects_private(monkeypatch):
     assert "Platform images must be public" in result.output
 
 
-def test_push_platform_image_rejects_team_context(monkeypatch):
+def test_push_platform_image_ignores_team_context(monkeypatch):
     monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+    captured = {}
 
     class DummyAPIClient:
         def request(self, method, path, json=None, params=None):
-            raise AssertionError(f"Unexpected request: {method} {path}")
+            captured["json"] = json
+            return {
+                "build_id": "build-123",
+                "buildIds": ["build-123"],
+                "upload_url": None,
+                "fullImagePath": "ubuntu:22.04",
+                "visibility": "PUBLIC",
+            }
 
     monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
 
     result = runner.invoke(
         app,
-        ["images", "push", "ubuntu:22.04", "--platform-image"],
+        ["images", "push", "--source-image", "ubuntu:22.04", "--platform-image"],
         env={**TEST_ENV, "PRIME_TEAM_ID": "team-123"},
     )
 
-    assert result.exit_code == 1
-    assert "Platform images cannot be pushed in a team context" in result.output
+    assert result.exit_code == 0, result.output
+    assert "Team context ignored" in result.output
+    assert captured["json"]["owner_scope"] == "platform"
+    assert "team_id" not in captured["json"]
 
 
 def test_push_image_source_image_queues_transfer_without_upload(monkeypatch):

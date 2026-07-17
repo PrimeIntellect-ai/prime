@@ -143,3 +143,85 @@ def test_sandbox_model_with_alias():
     assert sandbox.gpu_type == "H100_80GB"
     assert sandbox.vm is True
     assert sandbox.region == "eu-west"
+
+
+def test_image_update_source_forms_are_mutually_exclusive():
+    import pytest
+
+    from prime_sandboxes import ImageUpdateSource, PersonalImageOwner
+
+    with pytest.raises(ValueError):
+        ImageUpdateSource(owner=PersonalImageOwner(), name="app", tag="v1", reference="app:v1")
+    with pytest.raises(ValueError):
+        ImageUpdateSource(owner=PersonalImageOwner(), name="app")
+    assert ImageUpdateSource(reference="prime/alice/app:v1").reference
+
+
+def test_image_update_patch_requires_a_change():
+    import pytest
+
+    from prime_sandboxes import ImageUpdatePatch
+
+    with pytest.raises(ValueError):
+        ImageUpdatePatch()
+
+
+def test_image_update_patch_rejects_private_platform():
+    import pytest
+
+    from prime_sandboxes import ImageUpdatePatch, ImageVisibility, PlatformImageOwner
+
+    with pytest.raises(ValueError):
+        ImageUpdatePatch(owner=PlatformImageOwner(), visibility=ImageVisibility.PRIVATE)
+
+
+def test_update_images_request_serializes_camel_case_aliases():
+    from prime_sandboxes import (
+        ExplicitUpdateImagesRequest,
+        ImageUpdateItem,
+        ImageUpdatePatch,
+        ImageUpdateSource,
+        TeamImageOwner,
+    )
+
+    request = ExplicitUpdateImagesRequest(
+        dry_run=True,
+        updates=[
+            ImageUpdateItem(
+                source=ImageUpdateSource(
+                    owner=TeamImageOwner(team_id="team1"), name="app", tag="v1"
+                ),
+                set=ImageUpdatePatch(name="renamed"),
+            )
+        ],
+    )
+    payload = request.model_dump(by_alias=True, exclude_none=True)
+    assert payload["dryRun"] is True
+    assert payload["updates"][0]["source"]["owner"] == {
+        "type": "team",
+        "teamId": "team1",
+    }
+
+
+def test_update_images_response_parses_owner_union():
+    from prime_sandboxes import PlatformImageOwner, UpdateImagesResponse
+
+    response = UpdateImagesResponse.model_validate(
+        {
+            "success": True,
+            "dryRun": False,
+            "results": [
+                {
+                    "source": {"owner": {"type": "personal"}, "name": "a", "tag": "b"},
+                    "success": True,
+                    "after": {
+                        "owner": {"type": "platform"},
+                        "name": "a",
+                        "tag": "b",
+                        "visibility": "PUBLIC",
+                    },
+                }
+            ],
+        }
+    )
+    assert isinstance(response.results[0].after.owner, PlatformImageOwner)

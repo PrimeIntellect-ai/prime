@@ -440,7 +440,13 @@ def test_publish_image_passes_prime_team_ref_to_backend(monkeypatch):
             captured["method"] = method
             captured["path"] = path
             captured["json"] = json
-            return {"success": True, "message": "ok", "visibility": "PUBLIC", "images": []}
+            return {
+                "success": True,
+                "dryRun": False,
+                "results": [
+                    {"source": update["source"], "success": True} for update in json["updates"]
+                ],
+            }
 
     monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
 
@@ -452,8 +458,14 @@ def test_publish_image_passes_prime_team_ref_to_backend(monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert captured["method"] == "PATCH"
-    assert captured["path"] == "/images/prime/team-abc123/rehl/latest/visibility"
-    assert captured["json"] == {"visibility": "PUBLIC"}
+    assert captured["path"] == "/images"
+    assert captured["json"]["mode"] == "explicit"
+    assert captured["json"]["updates"] == [
+        {
+            "source": {"reference": "prime/team-abc123/rehl:latest"},
+            "set": {"visibility": "PUBLIC"},
+        }
+    ]
 
 
 def test_unpublish_image_passes_prime_team_ref_to_backend(monkeypatch):
@@ -465,7 +477,13 @@ def test_unpublish_image_passes_prime_team_ref_to_backend(monkeypatch):
             captured["method"] = method
             captured["path"] = path
             captured["json"] = json
-            return {"success": True, "message": "ok", "visibility": "PRIVATE", "images": []}
+            return {
+                "success": True,
+                "dryRun": False,
+                "results": [
+                    {"source": update["source"], "success": True} for update in json["updates"]
+                ],
+            }
 
     monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
 
@@ -477,8 +495,14 @@ def test_unpublish_image_passes_prime_team_ref_to_backend(monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert captured["method"] == "PATCH"
-    assert captured["path"] == "/images/prime/team-abc123/rehl/latest/visibility"
-    assert captured["json"] == {"visibility": "PRIVATE"}
+    assert captured["path"] == "/images"
+    assert captured["json"]["mode"] == "explicit"
+    assert captured["json"]["updates"] == [
+        {
+            "source": {"reference": "prime/team-abc123/rehl:latest"},
+            "set": {"visibility": "PRIVATE"},
+        }
+    ]
 
 
 def test_publish_image_rejects_empty_team_prefix(monkeypatch):
@@ -522,7 +546,13 @@ def test_publish_image_passes_legacy_user_id_ref_to_backend(monkeypatch):
             captured["method"] = method
             captured["path"] = path
             captured["json"] = json
-            return {"success": True, "message": "ok", "visibility": "PUBLIC", "images": []}
+            return {
+                "success": True,
+                "dryRun": False,
+                "results": [
+                    {"source": update["source"], "success": True} for update in json["updates"]
+                ],
+            }
 
     monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
 
@@ -534,8 +564,14 @@ def test_publish_image_passes_legacy_user_id_ref_to_backend(monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert captured["method"] == "PATCH"
-    assert captured["path"] == "/images/cmk123/rehl/latest/visibility"
-    assert captured["json"] == {"visibility": "PUBLIC"}
+    assert captured["path"] == "/images"
+    assert captured["json"]["mode"] == "explicit"
+    assert captured["json"]["updates"] == [
+        {
+            "source": {"reference": "cmk123/rehl:latest"},
+            "set": {"visibility": "PUBLIC"},
+        }
+    ]
 
 
 def test_publish_image_passes_legacy_user_id_nested_ref_to_backend(monkeypatch):
@@ -547,7 +583,13 @@ def test_publish_image_passes_legacy_user_id_nested_ref_to_backend(monkeypatch):
             captured["method"] = method
             captured["path"] = path
             captured["json"] = json
-            return {"success": True, "message": "ok", "visibility": "PUBLIC", "images": []}
+            return {
+                "success": True,
+                "dryRun": False,
+                "results": [
+                    {"source": update["source"], "success": True} for update in json["updates"]
+                ],
+            }
 
     monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
 
@@ -559,8 +601,14 @@ def test_publish_image_passes_legacy_user_id_nested_ref_to_backend(monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert captured["method"] == "PATCH"
-    assert captured["path"] == "/images/cmk123/nested/rehl/latest/visibility"
-    assert captured["json"] == {"visibility": "PUBLIC"}
+    assert captured["path"] == "/images"
+    assert captured["json"]["mode"] == "explicit"
+    assert captured["json"]["updates"] == [
+        {
+            "source": {"reference": "cmk123/nested/rehl:latest"},
+            "set": {"visibility": "PUBLIC"},
+        }
+    ]
 
 
 def test_publish_image_passes_legacy_team_id_ref_to_backend(monkeypatch):
@@ -572,7 +620,13 @@ def test_publish_image_passes_legacy_team_id_ref_to_backend(monkeypatch):
             captured["method"] = method
             captured["path"] = path
             captured["json"] = json
-            return {"success": True, "message": "ok", "visibility": "PUBLIC", "images": []}
+            return {
+                "success": True,
+                "dryRun": False,
+                "results": [
+                    {"source": update["source"], "success": True} for update in json["updates"]
+                ],
+            }
 
     monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
 
@@ -584,8 +638,14 @@ def test_publish_image_passes_legacy_team_id_ref_to_backend(monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert captured["method"] == "PATCH"
-    assert captured["path"] == "/images/team-abc123/rehl/latest/visibility"
-    assert captured["json"] == {"visibility": "PUBLIC"}
+    assert captured["path"] == "/images"
+    assert captured["json"]["mode"] == "explicit"
+    assert captured["json"]["updates"] == [
+        {
+            "source": {"reference": "team-abc123/rehl:latest"},
+            "set": {"visibility": "PUBLIC"},
+        }
+    ]
 
 
 def test_publish_image_passes_legacy_team_id_nested_ref_to_backend(monkeypatch):
@@ -597,7 +657,13 @@ def test_publish_image_passes_legacy_team_id_nested_ref_to_backend(monkeypatch):
             captured["method"] = method
             captured["path"] = path
             captured["json"] = json
-            return {"success": True, "message": "ok", "visibility": "PUBLIC", "images": []}
+            return {
+                "success": True,
+                "dryRun": False,
+                "results": [
+                    {"source": update["source"], "success": True} for update in json["updates"]
+                ],
+            }
 
     monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
 
@@ -609,8 +675,14 @@ def test_publish_image_passes_legacy_team_id_nested_ref_to_backend(monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert captured["method"] == "PATCH"
-    assert captured["path"] == "/images/team-abc123/nested/rehl/latest/visibility"
-    assert captured["json"] == {"visibility": "PUBLIC"}
+    assert captured["path"] == "/images"
+    assert captured["json"]["mode"] == "explicit"
+    assert captured["json"]["updates"] == [
+        {
+            "source": {"reference": "team-abc123/nested/rehl:latest"},
+            "set": {"visibility": "PUBLIC"},
+        }
+    ]
 
 
 def test_publish_image_passes_prime_user_id_ref_to_backend(monkeypatch):
@@ -622,7 +694,13 @@ def test_publish_image_passes_prime_user_id_ref_to_backend(monkeypatch):
             captured["method"] = method
             captured["path"] = path
             captured["json"] = json
-            return {"success": True, "message": "ok", "visibility": "PUBLIC", "images": []}
+            return {
+                "success": True,
+                "dryRun": False,
+                "results": [
+                    {"source": update["source"], "success": True} for update in json["updates"]
+                ],
+            }
 
     monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
 
@@ -634,8 +712,14 @@ def test_publish_image_passes_prime_user_id_ref_to_backend(monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert captured["method"] == "PATCH"
-    assert captured["path"] == "/images/prime/cmk123/rehl/latest/visibility"
-    assert captured["json"] == {"visibility": "PUBLIC"}
+    assert captured["path"] == "/images"
+    assert captured["json"]["mode"] == "explicit"
+    assert captured["json"]["updates"] == [
+        {
+            "source": {"reference": "prime/cmk123/rehl:latest"},
+            "set": {"visibility": "PUBLIC"},
+        }
+    ]
 
 
 def test_publish_image_passes_prime_slug_ref_to_backend(monkeypatch):
@@ -647,7 +731,13 @@ def test_publish_image_passes_prime_slug_ref_to_backend(monkeypatch):
             captured["method"] = method
             captured["path"] = path
             captured["json"] = json
-            return {"success": True, "message": "ok", "visibility": "PUBLIC", "images": []}
+            return {
+                "success": True,
+                "dryRun": False,
+                "results": [
+                    {"source": update["source"], "success": True} for update in json["updates"]
+                ],
+            }
 
     monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
 
@@ -659,8 +749,14 @@ def test_publish_image_passes_prime_slug_ref_to_backend(monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert captured["method"] == "PATCH"
-    assert captured["path"] == "/images/prime/alice/rehl/latest/visibility"
-    assert captured["json"] == {"visibility": "PUBLIC"}
+    assert captured["path"] == "/images"
+    assert captured["json"]["mode"] == "explicit"
+    assert captured["json"]["updates"] == [
+        {
+            "source": {"reference": "prime/alice/rehl:latest"},
+            "set": {"visibility": "PUBLIC"},
+        }
+    ]
 
 
 def test_publish_image_passes_prime_slug_nested_ref_to_backend(monkeypatch):
@@ -672,7 +768,13 @@ def test_publish_image_passes_prime_slug_nested_ref_to_backend(monkeypatch):
             captured["method"] = method
             captured["path"] = path
             captured["json"] = json
-            return {"success": True, "message": "ok", "visibility": "PUBLIC", "images": []}
+            return {
+                "success": True,
+                "dryRun": False,
+                "results": [
+                    {"source": update["source"], "success": True} for update in json["updates"]
+                ],
+            }
 
     monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
 
@@ -684,8 +786,14 @@ def test_publish_image_passes_prime_slug_nested_ref_to_backend(monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert captured["method"] == "PATCH"
-    assert captured["path"] == "/images/prime/alice/nested/rehl/latest/visibility"
-    assert captured["json"] == {"visibility": "PUBLIC"}
+    assert captured["path"] == "/images"
+    assert captured["json"]["mode"] == "explicit"
+    assert captured["json"]["updates"] == [
+        {
+            "source": {"reference": "prime/alice/nested/rehl:latest"},
+            "set": {"visibility": "PUBLIC"},
+        }
+    ]
 
 
 def test_publish_image_rejects_external_registry_ref(monkeypatch):

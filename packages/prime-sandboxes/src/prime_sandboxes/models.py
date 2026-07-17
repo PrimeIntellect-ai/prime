@@ -402,37 +402,18 @@ class ImageUpdateItem(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
-class ExplicitUpdateImagesRequest(BaseModel):
-    """Explicit list of independent logical-image patches."""
+class UpdateImagesRequest(BaseModel):
+    """Explicit list of independent logical-image patches.
+
+    Every update names its source exactly; there is no server-side search
+    selection for mutations.
+    """
 
     mode: Literal["explicit"] = "explicit"
     dry_run: bool = Field(default=False, alias="dryRun")
     updates: List[ImageUpdateItem]
 
     model_config = ConfigDict(populate_by_name=True)
-
-
-class ImageSearchSelection(BaseModel):
-    """Server-side selection with the list endpoint's search semantics."""
-
-    owner: Optional[ImageOwner] = None
-    search: str
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class SearchUpdateImagesRequest(BaseModel):
-    """Visibility change applied to every image matched by ``selection``."""
-
-    mode: Literal["search"] = "search"
-    dry_run: bool = Field(default=False, alias="dryRun")
-    selection: ImageSearchSelection
-    set: ImageUpdatePatch
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-UpdateImagesRequest = Union[ExplicitUpdateImagesRequest, SearchUpdateImagesRequest]
 
 
 class ImageMutationError(BaseModel):

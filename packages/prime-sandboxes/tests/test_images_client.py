@@ -6,16 +6,14 @@ from prime_sandboxes import (
     BuildImageRequest,
     BuildImageResponse,
     BulkImageTransferResponse,
-    ExplicitUpdateImagesRequest,
     ImageClient,
-    ImageSearchSelection,
     ImageUpdateItem,
     ImageUpdatePatch,
     ImageUpdateSource,
     ImageVisibility,
     PersonalImageOwner,
-    SearchUpdateImagesRequest,
     TeamImageOwner,
+    UpdateImagesRequest,
     UpdateImagesResponse,
 )
 
@@ -255,7 +253,7 @@ def test_image_client_update_images_explicit_payload_and_response():
     client = ImageClient(DummyAPIClient(_update_images_response("prime/alice/app:v1"), captured))
 
     response = client.update_images(
-        ExplicitUpdateImagesRequest(
+        UpdateImagesRequest(
             updates=[
                 ImageUpdateItem(
                     source=ImageUpdateSource(reference="prime/alice/app:v1"),
@@ -284,33 +282,6 @@ def test_image_client_update_images_explicit_payload_and_response():
     assert result.before is not None and result.before.visibility == ImageVisibility.PRIVATE
     assert isinstance(result.after.owner, TeamImageOwner)
     assert result.after.owner.team_id == "team1"
-
-
-def test_image_client_update_images_search_payload():
-    captured: dict[str, Any] = {}
-    client = ImageClient(DummyAPIClient({"success": True, "dryRun": True, "results": []}, captured))
-
-    response = client.update_images(
-        SearchUpdateImagesRequest(
-            dry_run=True,
-            selection=ImageSearchSelection(owner=TeamImageOwner(team_id="team1"), search="exp-"),
-            set=ImageUpdatePatch(visibility=ImageVisibility.PUBLIC),
-        )
-    )
-
-    assert captured["method"] == "PATCH"
-    assert captured["path"] == "/images"
-    assert captured["json"] == {
-        "mode": "search",
-        "dryRun": True,
-        "selection": {
-            "owner": {"type": "team", "teamId": "team1"},
-            "search": "exp-",
-        },
-        "set": {"visibility": ImageVisibility.PUBLIC},
-    }
-    assert response.dry_run
-    assert response.results == []
 
 
 def test_image_client_update_images_partial_failure():
@@ -346,7 +317,7 @@ def test_image_client_update_images_partial_failure():
     )
 
     response = client.update_images(
-        ExplicitUpdateImagesRequest(
+        UpdateImagesRequest(
             updates=[
                 ImageUpdateItem(
                     source=ImageUpdateSource(owner=PersonalImageOwner(), name="app", tag="v1"),
@@ -381,7 +352,7 @@ def test_async_image_client_update_images():
 
     response = asyncio.run(
         client.update_images(
-            ExplicitUpdateImagesRequest(
+            UpdateImagesRequest(
                 updates=[
                     ImageUpdateItem(
                         source=ImageUpdateSource(owner=PersonalImageOwner(), name="app", tag="v1"),

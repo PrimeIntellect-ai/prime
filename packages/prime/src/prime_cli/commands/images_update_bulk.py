@@ -8,13 +8,13 @@ import typer
 from prime_sandboxes import (
     APIClient,
     APIError,
-    ExplicitUpdateImagesRequest,
     ImageClient,
     ImageUpdateItem,
     ImageUpdateResult,
     PersonalImageOwner,
     TeamImageOwner,
     UnauthorizedError,
+    UpdateImagesRequest,
 )
 from pydantic import ValidationError
 from rich.table import Table
@@ -267,9 +267,7 @@ def update_bulk(
     for offset in range(0, len(items), UPDATE_BULK_BATCH_SIZE):
         batch = items[offset : offset + UPDATE_BULK_BATCH_SIZE]
         try:
-            response = client.update_images(
-                ExplicitUpdateImagesRequest(dry_run=dry_run, updates=batch)
-            )
+            response = client.update_images(UpdateImagesRequest(dry_run=dry_run, updates=batch))
         except UnauthorizedError:
             console.print("[red]Error: Not authenticated. Please run 'prime login' first.[/red]")
             raise typer.Exit(1)

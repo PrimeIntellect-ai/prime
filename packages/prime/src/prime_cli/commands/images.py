@@ -13,9 +13,7 @@ from prime_sandboxes import (
     APIError,
     BulkImageTransferResponse,
     Config,
-    ExplicitUpdateImagesRequest,
     ImageClient,
-    ImageSearchSelection,
     ImageUpdateItem,
     ImageUpdatePatch,
     ImageUpdateResult,
@@ -23,9 +21,9 @@ from prime_sandboxes import (
     ImageVisibility,
     PersonalImageOwner,
     PlatformImageOwner,
-    SearchUpdateImagesRequest,
     TeamImageOwner,
     UnauthorizedError,
+    UpdateImagesRequest,
 )
 from rich.table import Table
 
@@ -1130,7 +1128,7 @@ def _result_ref(result: ImageUpdateResult) -> str:
 
 def _set_image_visibility(image_reference: str, visibility: ImageVisibility) -> None:
     image_name, image_tag, team_id = _parse_mutable_image_reference(image_reference)
-    request = ExplicitUpdateImagesRequest(
+    request = UpdateImagesRequest(
         updates=[
             ImageUpdateItem(
                 source=_update_source_for_parsed_reference(image_name, image_tag, team_id),
@@ -1261,7 +1259,7 @@ def _bulk_set_image_visibility_refs(refs: list[str], visibility: ImageVisibility
                     f"{total_batches} ({len(batch)} images)...[/dim]"
                 )
             try:
-                response = client.update_images(ExplicitUpdateImagesRequest(updates=batch))
+                response = client.update_images(UpdateImagesRequest(updates=batch))
             except UnauthorizedError:
                 raise
             except APIError as e:
@@ -1285,76 +1283,16 @@ def _bulk_set_image_visibility_refs(refs: list[str], visibility: ImageVisibility
         raise typer.Exit(1)
 
 
-def _preview_bulk_visibility_count(client: APIClient, search: str) -> Optional[int]:
-    """Count the logical images matching the search, cheaply, via list(limit=1)."""
-    params: dict[str, str] = {"limit": "1", "offset": "0", "search": search}
-    if config.team_id:
-        params["teamId"] = config.team_id
-    try:
-        response = client.request("GET", "/images", params=params)
-    except UnauthorizedError:
-        raise
-    except APIError:
-        return None
-    total = response.get("totalCount")
-    return int(total) if total is not None else None
-
-
-def _bulk_set_image_visibility_search(search: str, visibility: ImageVisibility, yes: bool) -> None:
-    """Update every image matching the search filter via the bulk endpoint."""
-    if "/" in search:
-        console.print(
-            f"[red]Error: '--search {search}': search matches image name/tag only; "
-            "remove the owner prefix (e.g. use 'myapp' instead of 'prime/alice/myapp')[/red]"
-        )
-        raise typer.Exit(1)
-    client = APIClient()
-    total = _preview_bulk_visibility_count(client, search)
-    if total == 0:
-        console.print(f"[yellow]No images match '{search}'.[/yellow]")
-        return
-
-    scope = f"team {config.team_id}" if config.team_id else "your personal images"
-    count_phrase = f"{total} image(s)" if total is not None else "all matching images"
-    if not confirm_or_skip(
-        f"Make {count_phrase} matching '{search}' in {scope} {_visibility_label(visibility)}?",
-        yes,
-    ):
-        console.print("Update cancelled")
-        return
-
-    request = SearchUpdateImagesRequest(
-        selection=ImageSearchSelection(owner=_current_scope_owner(), search=search),
-        set=ImageUpdatePatch(visibility=visibility),
-    )
-    with console.status("[bold blue]Updating image visibility...", spinner="dots"):
-        response = ImageClient(client).update_images(request)
-
-    succeeded: list[str] = []
-    failed: list[dict[str, Any]] = []
-    _collect_update_results(response.results, succeeded, failed)
-    _display_bulk_visibility_result(succeeded, failed, visibility)
-    if failed:
-        raise typer.Exit(1)
-
-
 def _run_visibility_command(
     image_references: Optional[List[str]],
-    search: Optional[str],
-    yes: bool,
     visibility: ImageVisibility,
 ) -> None:
     refs = _split_image_references(image_references)
-    if refs and search:
-        console.print("[red]Error: Provide image references or --search, not both[/red]")
-        raise typer.Exit(1)
-    if not refs and not search:
-        console.print("[red]Error: Provide at least one image reference or --search[/red]")
+    if not refs:
+        console.print("[red]Error: Provide at least one image reference[/red]")
         raise typer.Exit(1)
     try:
-        if search:
-            _bulk_set_image_visibility_search(search, visibility, yes)
-        elif len(refs) == 1:
+        if len(refs) == 1:
             _set_image_visibility(refs[0], visibility)
         else:
             _bulk_set_image_visibility_refs(refs, visibility)
@@ -1380,35 +1318,22 @@ def publish_image(
             "current personal or team context"
         ),
     ),
-    search: Optional[str] = typer.Option(
-        None,
-        "--search",
-        "-q",
-        help=(
-            "Publish every image matching this case-insensitive substring of the image name or tag"
-        ),
-    ),
-    yes: bool = typer.Option(
-        False, "--yes", "-y", help="Skip the confirmation prompt for --search"
-    ),
 ):
     """
     Make one or more images public so other Prime users can run them.
 
-    Pass explicit references, or --search to publish every image matching a
-    substring (with a count preview and confirmation). In a team context a
-    --search publish only updates images you may change (your own images, or
-    all team images if you are a team admin).
+    Pass one or more explicit references; each is matched exactly. For team
+    images, only images you may change are updatable (your own images, or all
+    team images if you are a team admin).
 
     \b
     Examples:
         prime images publish myapp:v1.0.0
         prime images publish myapp:v1.0.0 other:v2.0.0 third:latest
-        prime images publish --search swe- --yes
         prime images publish prime/alice/myapp:v1.0.0
         prime images publish prime/team-abc123/myapp:v1.0.0
     """
-    _run_visibility_command(image_references, search, yes, ImageVisibility.PUBLIC)
+    _run_visibility_command(image_references, ImageVisibility.PUBLIC)
 
 
 @app.command("unpublish", no_args_is_help=True)
@@ -1425,36 +1350,22 @@ def unpublish_image(
             "current personal or team context"
         ),
     ),
-    search: Optional[str] = typer.Option(
-        None,
-        "--search",
-        "-q",
-        help=(
-            "Unpublish every image matching this case-insensitive substring "
-            "of the image name or tag"
-        ),
-    ),
-    yes: bool = typer.Option(
-        False, "--yes", "-y", help="Skip the confirmation prompt for --search"
-    ),
 ):
     """
     Make one or more public images private again.
 
-    Pass explicit references, or --search to unpublish every image matching a
-    substring (with a count preview and confirmation). In a team context a
-    --search unpublish only updates images you may change (your own images, or
-    all team images if you are a team admin).
+    Pass one or more explicit references; each is matched exactly. For team
+    images, only images you may change are updatable (your own images, or all
+    team images if you are a team admin).
 
     \b
     Examples:
         prime images unpublish myapp:v1.0.0
         prime images unpublish myapp:v1.0.0 other:v2.0.0 third:latest
-        prime images unpublish --search swe- --yes
         prime images unpublish prime/alice/myapp:v1.0.0
         prime images unpublish prime/team-abc123/myapp:v1.0.0
     """
-    _run_visibility_command(image_references, search, yes, ImageVisibility.PRIVATE)
+    _run_visibility_command(image_references, ImageVisibility.PRIVATE)
 
 
 def _owner_display(owner: Any) -> str:
@@ -1569,7 +1480,7 @@ def update_image(
             console.print("Update cancelled")
             return
 
-    request = ExplicitUpdateImagesRequest(
+    request = UpdateImagesRequest(
         dry_run=dry_run,
         updates=[
             ImageUpdateItem(

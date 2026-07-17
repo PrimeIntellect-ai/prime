@@ -177,14 +177,14 @@ def test_image_update_patch_rejects_private_platform():
 
 def test_update_images_request_serializes_camel_case_aliases():
     from prime_sandboxes import (
-        ExplicitUpdateImagesRequest,
         ImageUpdateItem,
         ImageUpdatePatch,
         ImageUpdateSource,
         TeamImageOwner,
+        UpdateImagesRequest,
     )
 
-    request = ExplicitUpdateImagesRequest(
+    request = UpdateImagesRequest(
         dry_run=True,
         updates=[
             ImageUpdateItem(

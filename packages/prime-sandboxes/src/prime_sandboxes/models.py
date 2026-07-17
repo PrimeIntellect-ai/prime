@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List, Literal, Optional
+from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
@@ -302,6 +302,162 @@ class BulkImageTransferResponse(BaseModel):
 
     results: List[TransferImageResult] = Field(default_factory=list)
     failed: List[TransferImageResult] = Field(default_factory=list)
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+MAX_IMAGE_UPDATES = 100
+
+
+class PersonalImageOwner(BaseModel):
+    """The authenticated caller's personal image scope."""
+
+    type: Literal["personal"] = "personal"
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class TeamImageOwner(BaseModel):
+    """A team image scope."""
+
+    type: Literal["team"] = "team"
+    team_id: str = Field(..., alias="teamId")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class PlatformImageOwner(BaseModel):
+    """Org-less platform image scope (admin-managed, always PUBLIC)."""
+
+    type: Literal["platform"] = "platform"
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+ImageOwner = Annotated[
+    Union[PersonalImageOwner, TeamImageOwner, PlatformImageOwner],
+    Field(discriminator="type"),
+]
+
+
+class ImageUpdateSource(BaseModel):
+    """Source selector for one logical-image update.
+
+    Either the structured coordinate form (``owner`` + ``name`` + ``tag``) or
+    the ``reference`` form (owner-prefixed / plain ``name:tag`` reference).
+    The two forms are mutually exclusive.
+    """
+
+    owner: Optional[ImageOwner] = None
+    name: Optional[str] = None
+    tag: Optional[str] = None
+    reference: Optional[str] = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    @model_validator(mode="after")
+    def _require_exactly_one_form(self) -> "ImageUpdateSource":
+        coordinate_fields = (self.owner, self.name, self.tag)
+        if self.reference is not None:
+            if any(value is not None for value in coordinate_fields):
+                raise ValueError("source accepts either reference or owner/name/tag, not both")
+        elif any(value is None for value in coordinate_fields):
+            raise ValueError("source requires owner, name, and tag (or a reference)")
+        return self
+
+
+class ImageUpdatePatch(BaseModel):
+    """Partial patch for one logical image; omitted fields keep their value."""
+
+    name: Optional[str] = None
+    tag: Optional[str] = None
+    owner: Optional[ImageOwner] = None
+    visibility: Optional[ImageVisibility] = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    @model_validator(mode="after")
+    def _require_some_change(self) -> "ImageUpdatePatch":
+        if (
+            self.name is None
+            and self.tag is None
+            and self.owner is None
+            and self.visibility is None
+        ):
+            raise ValueError("set must change at least one field")
+        if (
+            isinstance(self.owner, PlatformImageOwner)
+            and self.visibility == ImageVisibility.PRIVATE
+        ):
+            raise ValueError("platform images are always PUBLIC")
+        return self
+
+
+class ImageUpdateItem(BaseModel):
+    """One independent logical-image patch."""
+
+    source: ImageUpdateSource
+    set: ImageUpdatePatch
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class UpdateImagesRequest(BaseModel):
+    """Explicit list of independent logical-image patches.
+
+    Every update names its source exactly; there is no server-side search
+    selection for mutations.
+    """
+
+    mode: Literal["explicit"] = "explicit"
+    dry_run: bool = Field(default=False, alias="dryRun")
+    updates: List[ImageUpdateItem]
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class ImageMutationError(BaseModel):
+    """Machine-readable failure for one update item.
+
+    ``code`` is intentionally a plain string so new server-side codes never
+    break response parsing.
+    """
+
+    code: str
+    message: str
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class ImageCoordinateState(BaseModel):
+    """Canonical logical-image coordinate plus effective visibility."""
+
+    owner: ImageOwner
+    name: str
+    tag: str
+    visibility: ImageVisibility
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class ImageUpdateResult(BaseModel):
+    """Per-item outcome, in deterministic request order."""
+
+    source: ImageUpdateSource
+    success: bool
+    before: Optional[ImageCoordinateState] = None
+    after: Optional[ImageCoordinateState] = None
+    error: Optional[ImageMutationError] = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class UpdateImagesResponse(BaseModel):
+    """Response for both explicit and search update modes."""
+
+    success: bool
+    dry_run: bool = Field(default=False, alias="dryRun")
+    results: List[ImageUpdateResult] = Field(default_factory=list)
 
     model_config = ConfigDict(populate_by_name=True)
 

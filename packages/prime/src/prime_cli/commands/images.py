@@ -14,8 +14,16 @@ from prime_sandboxes import (
     BulkImageTransferResponse,
     Config,
     ImageClient,
+    ImageUpdateItem,
+    ImageUpdatePatch,
+    ImageUpdateResult,
+    ImageUpdateSource,
     ImageVisibility,
+    PersonalImageOwner,
+    PlatformImageOwner,
+    TeamImageOwner,
     UnauthorizedError,
+    UpdateImagesRequest,
 )
 from rich.table import Table
 
@@ -33,6 +41,8 @@ from .images_bulk import (
     push_bulk,
 )
 from .images_transfer_bulk import transfer_bulk
+from .images_update_bulk import update_bulk
+from .images_update_helpers import format_image_coordinate
 
 app = PlainTyper(help="Manage Docker images in Prime Intellect registry", no_args_is_help=True)
 console = get_console()
@@ -748,6 +758,10 @@ app.command("push-bulk")(push_bulk)
 # lives in images_transfer_bulk.py.
 app.command("transfer-bulk")(transfer_bulk)
 
+# Bulk logical-image updates (rename / owner move / visibility) from a JSONL
+# manifest live in images_update_bulk.py.
+app.command("update-bulk")(update_bulk)
+
 
 @app.command("build-vm")
 def build_vm_image(
@@ -1082,18 +1096,56 @@ def _parse_mutable_image_reference(image_reference: str) -> tuple[str, str, Opti
     return image_name, image_tag, team_id
 
 
+def _update_source_for_parsed_reference(
+    image_name: str, image_tag: str, team_id: Optional[str]
+) -> ImageUpdateSource:
+    """Build the PATCH /images source selector for a parsed mutable reference.
+
+    Owner-prefixed references keep their prefix and go through the server-side
+    reference resolver, exactly like the historical per-image routes did.
+    """
+    if "/" in image_name:
+        return ImageUpdateSource(reference=f"{image_name}:{image_tag}")
+    if team_id:
+        return ImageUpdateSource(
+            owner=TeamImageOwner(team_id=team_id), name=image_name, tag=image_tag
+        )
+    return ImageUpdateSource(owner=PersonalImageOwner(), name=image_name, tag=image_tag)
+
+
+def _current_scope_owner() -> Any:
+    """Owner object for the configured personal/team context."""
+    if config.team_id:
+        return TeamImageOwner(team_id=config.team_id)
+    return PersonalImageOwner()
+
+
+def _result_ref(result: ImageUpdateResult) -> str:
+    """Render a result's source as the familiar name:tag reference."""
+    if result.source.reference:
+        return result.source.reference
+    return f"{result.source.name}:{result.source.tag}"
+
+
 def _set_image_visibility(image_reference: str, visibility: ImageVisibility) -> None:
     image_name, image_tag, team_id = _parse_mutable_image_reference(image_reference)
-    payload: dict[str, str] = {"visibility": visibility.value}
-    if team_id:
-        payload["teamId"] = team_id
-
-    client = APIClient()
-    client.request(
-        "PATCH",
-        f"/images/{image_name}/{image_tag}/visibility",
-        json=payload,
+    request = UpdateImagesRequest(
+        updates=[
+            ImageUpdateItem(
+                source=_update_source_for_parsed_reference(image_name, image_tag, team_id),
+                set=ImageUpdatePatch(visibility=visibility),
+            )
+        ]
     )
+    response = ImageClient(APIClient()).update_images(request)
+    result = response.results[0] if response.results else None
+    if result is None or not result.success:
+        message = (
+            result.error.message
+            if result is not None and result.error is not None
+            else f"Failed to update image {image_name}:{image_tag}"
+        )
+        raise APIError(message)
     context = f" (team: {team_id})" if team_id else ""
     console.print(
         f"[green]✓[/green] Updated {image_name}:{image_tag}{context} to {visibility.value}"
@@ -1159,49 +1211,68 @@ def _display_bulk_visibility_result(
             console.print(f"  ✗ {ref}: {error}")
 
 
-def _bulk_visibility_payload(visibility: ImageVisibility) -> dict[str, Any]:
-    payload: dict[str, Any] = {"visibility": visibility.value}
-    if config.team_id:
-        payload["teamId"] = config.team_id
-    return payload
+def _collect_update_results(
+    results: list[ImageUpdateResult],
+    succeeded: list[str],
+    failed: list[dict[str, Any]],
+) -> None:
+    """Split PATCH /images results into the historical succeeded/failed shape."""
+    for result in results:
+        ref = _result_ref(result)
+        if result.success:
+            succeeded.append(ref)
+        else:
+            failed.append(
+                {
+                    "image": ref,
+                    "error": (
+                        result.error.message if result.error is not None else "unknown error"
+                    ),
+                }
+            )
 
 
 def _bulk_set_image_visibility_refs(refs: list[str], visibility: ImageVisibility) -> None:
-    """Update explicit references via the bulk endpoint, batched per request."""
+    """Update explicit references via PATCH /images, batched per request."""
     command = "publish" if visibility == ImageVisibility.PUBLIC else "unpublish"
     images = [_parse_bulk_visibility_ref(ref, command) for ref in refs]
-    client = APIClient()
+    owner = _current_scope_owner()
+    items = [
+        ImageUpdateItem(
+            source=ImageUpdateSource(owner=owner, name=img["name"], tag=img["tag"]),
+            set=ImageUpdatePatch(visibility=visibility),
+        )
+        for img in images
+    ]
+    client = ImageClient(APIClient())
     all_succeeded: list[str] = []
     all_failed: list[dict[str, Any]] = []
     batch_error: Optional[str] = None
     batch_size = BULK_VISIBILITY_BATCH_SIZE
-    total_batches = (len(images) + batch_size - 1) // batch_size
+    total_batches = (len(items) + batch_size - 1) // batch_size
 
     with console.status("[bold blue]Updating image visibility...", spinner="dots"):
-        for i in range(0, len(images), batch_size):
-            batch = images[i : i + batch_size]
+        for i in range(0, len(items), batch_size):
+            batch = items[i : i + batch_size]
             if total_batches > 1:
                 console.print(
                     f"[dim]Processing batch {i // batch_size + 1}/"
                     f"{total_batches} ({len(batch)} images)...[/dim]"
                 )
-            payload = _bulk_visibility_payload(visibility)
-            payload["images"] = batch
             try:
-                response = client.request("PATCH", "/images/visibility", json=payload)
+                response = client.update_images(UpdateImagesRequest(updates=batch))
             except UnauthorizedError:
                 raise
             except APIError as e:
                 batch_error = str(e)
                 break
-            all_succeeded.extend(response.get("succeeded", []))
-            all_failed.extend(response.get("failed", []))
+            _collect_update_results(response.results, all_succeeded, all_failed)
 
     if batch_error is not None:
         console.print(f"[red]Error: {batch_error}[/red]")
         if all_succeeded or all_failed:
             _display_bulk_visibility_result(all_succeeded, all_failed, visibility)
-            not_processed = len(images) - len(all_succeeded) - len(all_failed)
+            not_processed = len(items) - len(all_succeeded) - len(all_failed)
             console.print(
                 f"\n[yellow]{not_processed} image(s) were not processed; "
                 "re-run the command to retry them.[/yellow]"
@@ -1213,72 +1284,16 @@ def _bulk_set_image_visibility_refs(refs: list[str], visibility: ImageVisibility
         raise typer.Exit(1)
 
 
-def _preview_bulk_visibility_count(client: APIClient, search: str) -> Optional[int]:
-    """Count the logical images matching the search, cheaply, via list(limit=1)."""
-    params: dict[str, str] = {"limit": "1", "offset": "0", "search": search}
-    if config.team_id:
-        params["teamId"] = config.team_id
-    try:
-        response = client.request("GET", "/images", params=params)
-    except UnauthorizedError:
-        raise
-    except APIError:
-        return None
-    total = response.get("totalCount")
-    return int(total) if total is not None else None
-
-
-def _bulk_set_image_visibility_search(search: str, visibility: ImageVisibility, yes: bool) -> None:
-    """Update every image matching the search filter via the bulk endpoint."""
-    if "/" in search:
-        console.print(
-            f"[red]Error: '--search {search}': search matches image name/tag only; "
-            "remove the owner prefix (e.g. use 'myapp' instead of 'prime/alice/myapp')[/red]"
-        )
-        raise typer.Exit(1)
-    client = APIClient()
-    total = _preview_bulk_visibility_count(client, search)
-    if total == 0:
-        console.print(f"[yellow]No images match '{search}'.[/yellow]")
-        return
-
-    scope = f"team {config.team_id}" if config.team_id else "your personal images"
-    count_phrase = f"{total} image(s)" if total is not None else "all matching images"
-    if not confirm_or_skip(
-        f"Make {count_phrase} matching '{search}' in {scope} {_visibility_label(visibility)}?",
-        yes,
-    ):
-        console.print("Update cancelled")
-        return
-
-    payload = _bulk_visibility_payload(visibility)
-    payload["search"] = search
-    with console.status("[bold blue]Updating image visibility...", spinner="dots"):
-        response = client.request("PATCH", "/images/visibility", json=payload)
-
-    failed = response.get("failed", [])
-    _display_bulk_visibility_result(response.get("succeeded", []), failed, visibility)
-    if failed:
-        raise typer.Exit(1)
-
-
 def _run_visibility_command(
     image_references: Optional[List[str]],
-    search: Optional[str],
-    yes: bool,
     visibility: ImageVisibility,
 ) -> None:
     refs = _split_image_references(image_references)
-    if refs and search:
-        console.print("[red]Error: Provide image references or --search, not both[/red]")
-        raise typer.Exit(1)
-    if not refs and not search:
-        console.print("[red]Error: Provide at least one image reference or --search[/red]")
+    if not refs:
+        console.print("[red]Error: Provide at least one image reference[/red]")
         raise typer.Exit(1)
     try:
-        if search:
-            _bulk_set_image_visibility_search(search, visibility, yes)
-        elif len(refs) == 1:
+        if len(refs) == 1:
             _set_image_visibility(refs[0], visibility)
         else:
             _bulk_set_image_visibility_refs(refs, visibility)
@@ -1304,35 +1319,22 @@ def publish_image(
             "current personal or team context"
         ),
     ),
-    search: Optional[str] = typer.Option(
-        None,
-        "--search",
-        "-q",
-        help=(
-            "Publish every image matching this case-insensitive substring of the image name or tag"
-        ),
-    ),
-    yes: bool = typer.Option(
-        False, "--yes", "-y", help="Skip the confirmation prompt for --search"
-    ),
 ):
     """
     Make one or more images public so other Prime users can run them.
 
-    Pass explicit references, or --search to publish every image matching a
-    substring (with a count preview and confirmation). In a team context a
-    --search publish only updates images you may change (your own images, or
-    all team images if you are a team admin).
+    Pass one or more explicit references; each is matched exactly. For team
+    images, only images you may change are updatable (your own images, or all
+    team images if you are a team admin).
 
     \b
     Examples:
         prime images publish myapp:v1.0.0
         prime images publish myapp:v1.0.0 other:v2.0.0 third:latest
-        prime images publish --search swe- --yes
         prime images publish prime/alice/myapp:v1.0.0
         prime images publish prime/team-abc123/myapp:v1.0.0
     """
-    _run_visibility_command(image_references, search, yes, ImageVisibility.PUBLIC)
+    _run_visibility_command(image_references, ImageVisibility.PUBLIC)
 
 
 @app.command("unpublish", no_args_is_help=True)
@@ -1349,36 +1351,158 @@ def unpublish_image(
             "current personal or team context"
         ),
     ),
-    search: Optional[str] = typer.Option(
-        None,
-        "--search",
-        "-q",
-        help=(
-            "Unpublish every image matching this case-insensitive substring "
-            "of the image name or tag"
-        ),
-    ),
-    yes: bool = typer.Option(
-        False, "--yes", "-y", help="Skip the confirmation prompt for --search"
-    ),
 ):
     """
     Make one or more public images private again.
 
-    Pass explicit references, or --search to unpublish every image matching a
-    substring (with a count preview and confirmation). In a team context a
-    --search unpublish only updates images you may change (your own images, or
-    all team images if you are a team admin).
+    Pass one or more explicit references; each is matched exactly. For team
+    images, only images you may change are updatable (your own images, or all
+    team images if you are a team admin).
 
     \b
     Examples:
         prime images unpublish myapp:v1.0.0
         prime images unpublish myapp:v1.0.0 other:v2.0.0 third:latest
-        prime images unpublish --search swe- --yes
         prime images unpublish prime/alice/myapp:v1.0.0
         prime images unpublish prime/team-abc123/myapp:v1.0.0
     """
-    _run_visibility_command(image_references, search, yes, ImageVisibility.PRIVATE)
+    _run_visibility_command(image_references, ImageVisibility.PRIVATE)
+
+
+@app.command("update", no_args_is_help=True)
+def update_image(
+    image_reference: str = typer.Argument(
+        ...,
+        help=(
+            "Image to update "
+            "(e.g., 'myapp:v1.0.0', 'prime/<ownerSlug>/myapp:v1.0.0', or "
+            "'prime/team-{teamId}/myapp:v1.0.0')"
+        ),
+    ),
+    name: Optional[str] = typer.Option(None, "--name", help="New image name"),
+    tag: Optional[str] = typer.Option(None, "--tag", help="New image tag"),
+    to_team: Optional[str] = typer.Option(
+        None,
+        "--to-team",
+        help="Move a personal image into this team (you must be a member)",
+    ),
+    to_platform: bool = typer.Option(
+        False,
+        "--to-platform",
+        help=(
+            "Promote the image to an org-less platform image "
+            "(platform admins only; platform images are always public)"
+        ),
+    ),
+    public: bool = typer.Option(False, "--public", help="Make the image public"),
+    private: bool = typer.Option(False, "--private", help="Make the image private"),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Validate and preview the update without applying it",
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip the confirmation prompt for owner moves and platform promotions",
+    ),
+):
+    """
+    Update a logical image: rename it, change its tag or visibility, move it
+    into a team, or promote it to a platform image.
+
+    The image contents do not move: the old reference stops resolving and the
+    new reference points at the same stored artifacts. The destination must
+    not already exist.
+
+    \b
+    Examples:
+        prime images update myapp:v1 --name myapp-final
+        prime images update myapp:v1 --tag v2
+        prime images update myapp:v1 --to-team team_abc123
+        prime images update myapp:v1 --to-platform --yes
+        prime images update prime/alice/myapp:v1 --public
+        prime images update myapp:v1 --name newapp --tag v2 --dry-run
+    """
+    if public and private:
+        console.print("[red]Error: --public and --private cannot be used together[/red]")
+        raise typer.Exit(1)
+    if to_team and to_platform:
+        console.print("[red]Error: --to-team and --to-platform cannot be used together[/red]")
+        raise typer.Exit(1)
+    if to_platform and private:
+        console.print("[red]Error: Platform images are always public[/red]")
+        raise typer.Exit(1)
+    if not any([name, tag, to_team, to_platform, public, private]):
+        console.print(
+            "[red]Error: Provide at least one change "
+            "(--name, --tag, --to-team, --to-platform, --public, or --private)[/red]"
+        )
+        raise typer.Exit(1)
+
+    image_name, image_tag, team_id = _parse_mutable_image_reference(image_reference)
+
+    patch_owner: Any = None
+    if to_team:
+        patch_owner = TeamImageOwner(team_id=to_team)
+    elif to_platform:
+        patch_owner = PlatformImageOwner()
+
+    visibility: Optional[ImageVisibility] = None
+    if public:
+        visibility = ImageVisibility.PUBLIC
+    elif private:
+        visibility = ImageVisibility.PRIVATE
+
+    if patch_owner is not None and not dry_run:
+        if to_platform:
+            prompt = (
+                f"Promote {image_name}:{image_tag} to a PUBLIC platform image? "
+                "This cannot be undone from the CLI."
+            )
+        else:
+            prompt = f"Move {image_name}:{image_tag} into team {to_team}?"
+        if not confirm_or_skip(prompt, yes):
+            console.print("Update cancelled")
+            return
+
+    request = UpdateImagesRequest(
+        dry_run=dry_run,
+        updates=[
+            ImageUpdateItem(
+                source=_update_source_for_parsed_reference(image_name, image_tag, team_id),
+                set=ImageUpdatePatch(name=name, tag=tag, owner=patch_owner, visibility=visibility),
+            )
+        ],
+    )
+
+    try:
+        response = ImageClient(APIClient()).update_images(request)
+    except UnauthorizedError:
+        console.print("[red]Error: Not authenticated. Please run 'prime login' first.[/red]")
+        raise typer.Exit(1)
+    except APIError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+
+    result = response.results[0] if response.results else None
+    if result is None or not result.success:
+        message = (
+            result.error.message
+            if result is not None and result.error is not None
+            else "Failed to update image"
+        )
+        console.print(f"[red]Error: {message}[/red]")
+        raise typer.Exit(1)
+
+    before = format_image_coordinate(result.before, missing="?")
+    after = format_image_coordinate(result.after, missing="?")
+    if dry_run:
+        console.print(f"[cyan]Dry run:[/cyan] {before} → {after}")
+        console.print("[dim]No changes were applied.[/dim]")
+    else:
+        console.print(f"[green]✓[/green] Updated {before} → {after}")
 
 
 @app.command("delete")

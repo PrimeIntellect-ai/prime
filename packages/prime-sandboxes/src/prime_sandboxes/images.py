@@ -8,6 +8,8 @@ from .models import (
     BuildImageResponse,
     BulkImageTransferResponse,
     ImageVisibility,
+    UpdateImagesRequest,
+    UpdateImagesResponse,
 )
 
 
@@ -74,6 +76,16 @@ class ImageClient:
         """Fetch the status of a build group."""
         return self.client.request("GET", f"/images/build/{build_id}")
 
+    def update_images(self, request: UpdateImagesRequest) -> UpdateImagesResponse:
+        """Update one or many logical images (visibility, name/tag, owner).
+
+        Issues ``PATCH /images``. A valid request with item-specific failures
+        still returns a response; inspect ``results[*].error``.
+        """
+        payload = request.model_dump(by_alias=True, exclude_none=True)
+        response = self.client.request("PATCH", "/images", json=payload)
+        return UpdateImagesResponse.model_validate(response)
+
 
 class AsyncImageClient:
     """Async client for Prime image build and transfer APIs."""
@@ -137,6 +149,16 @@ class AsyncImageClient:
     async def get_build_status(self, build_id: str) -> dict:
         """Fetch the status of a build group."""
         return await self.client.request("GET", f"/images/build/{build_id}")
+
+    async def update_images(self, request: UpdateImagesRequest) -> UpdateImagesResponse:
+        """Update one or many logical images (visibility, name/tag, owner).
+
+        Issues ``PATCH /images``. A valid request with item-specific failures
+        still returns a response; inspect ``results[*].error``.
+        """
+        payload = request.model_dump(by_alias=True, exclude_none=True)
+        response = await self.client.request("PATCH", "/images", json=payload)
+        return UpdateImagesResponse.model_validate(response)
 
     async def aclose(self) -> None:
         await self.client.aclose()

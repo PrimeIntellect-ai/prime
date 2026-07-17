@@ -10,21 +10,34 @@ from prime_sandboxes import (
     APIError,
     ImageClient,
     ImageUpdateItem,
+    ImageUpdatePatch,
     ImageUpdateResult,
+    ImageUpdateSource,
     PersonalImageOwner,
+    PlatformImageOwner,
     TeamImageOwner,
     UnauthorizedError,
     UpdateImagesRequest,
 )
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 from rich.table import Table
 
 from ..utils import confirm_or_skip, get_console
+from .images_update_helpers import format_image_coordinate
 
 console = get_console()
 
 UPDATE_BULK_BATCH_SIZE = 100
 _MANIFEST_KEYS = {"source", "set"}
+_NESTED_MANIFEST_MODELS = {
+    "source": ImageUpdateSource,
+    "set": ImageUpdatePatch,
+}
+_OWNER_MODELS = {
+    "personal": PersonalImageOwner,
+    "team": TeamImageOwner,
+    "platform": PlatformImageOwner,
+}
 FAILURE_TABLE_MAX_ROWS = 20
 
 
@@ -39,6 +52,44 @@ class BulkUpdateValidationError(Exception):
 def _manifest_line(item: ImageUpdateItem) -> str:
     """Serialize one item back to its manifest JSONL form (API field names)."""
     return json.dumps(item.model_dump(by_alias=True, exclude_none=True), separators=(",", ":"))
+
+
+def _model_input_keys(model: type[BaseModel]) -> set[str]:
+    """Return field names and aliases accepted as input by a Pydantic model."""
+    keys = set(model.model_fields)
+    keys.update(
+        field.alias for field in model.model_fields.values() if isinstance(field.alias, str)
+    )
+    return keys
+
+
+def _nested_unknown_key_problems(data: dict[str, Any]) -> List[str]:
+    """Find unknown keys below the already-checked manifest item level."""
+    problems: List[str] = []
+    for section, model in _NESTED_MANIFEST_MODELS.items():
+        value = data.get(section)
+        if not isinstance(value, dict):
+            continue
+
+        unknown_keys = set(value) - _model_input_keys(model)
+        if unknown_keys:
+            problems.append(f"{section}: unknown key(s): {', '.join(sorted(unknown_keys))}")
+
+        owner = value.get("owner")
+        if not isinstance(owner, dict):
+            continue
+        owner_type = owner.get("type")
+        if not isinstance(owner_type, str):
+            continue
+        owner_model = _OWNER_MODELS.get(owner_type)
+        if owner_model is None:
+            continue
+        unknown_owner_keys = set(owner) - _model_input_keys(owner_model)
+        if unknown_owner_keys:
+            problems.append(
+                f"{section}.owner: unknown key(s): {', '.join(sorted(unknown_owner_keys))}"
+            )
+    return problems
 
 
 def load_update_manifest(manifest_path: Path) -> List[ImageUpdateItem]:
@@ -73,6 +124,10 @@ def load_update_manifest(manifest_path: Path) -> List[ImageUpdateItem]:
             problems.append(
                 f"line {line_number}: unknown key(s): {', '.join(sorted(unknown_keys))}"
             )
+            continue
+        nested_problems = _nested_unknown_key_problems(data)
+        if nested_problems:
+            problems.extend(f"line {line_number}: {problem}" for problem in nested_problems)
             continue
         try:
             items.append(ImageUpdateItem.model_validate(data))
@@ -152,20 +207,6 @@ def _duplicate_problems(items: List[ImageUpdateItem]) -> List[str]:
     return problems
 
 
-def _owner_label(owner: Any) -> str:
-    if isinstance(owner, TeamImageOwner):
-        return f"team {owner.team_id}"
-    if isinstance(owner, PersonalImageOwner):
-        return "personal"
-    return "platform"
-
-
-def _state_label(state: Any) -> str:
-    if state is None:
-        return "—"
-    return f"{state.name}:{state.tag} [{_owner_label(state.owner)}, {state.visibility.value}]"
-
-
 def _result_source_label(item: ImageUpdateItem) -> str:
     source = item.source
     if source.reference is not None:
@@ -185,8 +226,8 @@ def _print_outcomes(
     for item, result in outcomes:
         if result.success:
             console.print(
-                f"  [green]✓[/green] {verb} {_state_label(result.before)} "
-                f"→ {_state_label(result.after)}"
+                f"  [green]✓[/green] {verb} {format_image_coordinate(result.before)} "
+                f"→ {format_image_coordinate(result.after)}"
             )
         else:
             message = result.error.message if result.error else "unknown error"

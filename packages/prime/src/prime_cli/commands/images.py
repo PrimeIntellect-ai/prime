@@ -42,6 +42,7 @@ from .images_bulk import (
 )
 from .images_transfer_bulk import transfer_bulk
 from .images_update_bulk import update_bulk
+from .images_update_helpers import format_image_coordinate
 
 app = PlainTyper(help="Manage Docker images in Prime Intellect registry", no_args_is_help=True)
 console = get_console()
@@ -1368,20 +1369,6 @@ def unpublish_image(
     _run_visibility_command(image_references, ImageVisibility.PRIVATE)
 
 
-def _owner_display(owner: Any) -> str:
-    """Human-readable owner label for update output."""
-    if isinstance(owner, TeamImageOwner):
-        return f"team {owner.team_id}"
-    if isinstance(owner, PlatformImageOwner):
-        return "platform"
-    return "personal"
-
-
-def _coordinate_display(state: Any) -> str:
-    """Render an ImageCoordinateState as owner-qualified name:tag (visibility)."""
-    return f"{state.name}:{state.tag} [{_owner_display(state.owner)}, {state.visibility.value}]"
-
-
 @app.command("update", no_args_is_help=True)
 def update_image(
     image_reference: str = typer.Argument(
@@ -1509,8 +1496,8 @@ def update_image(
         console.print(f"[red]Error: {message}[/red]")
         raise typer.Exit(1)
 
-    before = _coordinate_display(result.before) if result.before else "?"
-    after = _coordinate_display(result.after) if result.after else "?"
+    before = format_image_coordinate(result.before, missing="?")
+    after = format_image_coordinate(result.after, missing="?")
     if dry_run:
         console.print(f"[cyan]Dry run:[/cyan] {before} → {after}")
         console.print("[dim]No changes were applied.[/dim]")

@@ -2,6 +2,7 @@
 
 import json
 
+import pytest
 from prime_cli.main import app
 from typer.testing import CliRunner
 
@@ -90,6 +91,40 @@ def test_update_bulk_validates_all_lines_before_sending(tmp_path, monkeypatch):
     assert "line 2" in result.output
     assert "line 3" in result.output
     assert captured == []  # nothing was sent
+
+
+@pytest.mark.parametrize(
+    ("section", "unknown_key"),
+    [
+        ("source", "nmae"),
+        ("set", "visibilty"),
+        ("source.owner", "scope"),
+        ("set.owner", "scope"),
+    ],
+)
+def test_update_bulk_rejects_nested_unknown_keys_before_sending(
+    tmp_path, monkeypatch, section, unknown_key
+):
+    captured = []
+    _patch_success_client(monkeypatch, captured)
+    update = _rename_line("a", "a2")
+    if section == "set.owner":
+        update["set"]["owner"] = {"type": "personal"}
+    target = update
+    for part in section.split("."):
+        target = target[part]
+    target[unknown_key] = "unexpected"
+    manifest = _write_manifest(tmp_path, [update])
+
+    result = runner.invoke(
+        app,
+        ["images", "update-bulk", "--manifest", str(manifest)],
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 1
+    assert f"{section}: unknown key(s): {unknown_key}" in result.output
+    assert captured == []
 
 
 def test_update_bulk_detects_local_duplicates(tmp_path, monkeypatch):

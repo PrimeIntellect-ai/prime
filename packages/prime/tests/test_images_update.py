@@ -1,6 +1,13 @@
 """Tests for `prime images update` and the publish/unpublish bulk transports."""
 
+from types import SimpleNamespace
+
+from prime_cli.commands.images_update_helpers import (
+    format_image_coordinate,
+    format_image_owner,
+)
 from prime_cli.main import app
+from prime_sandboxes import PersonalImageOwner, PlatformImageOwner, TeamImageOwner
 from typer.testing import CliRunner
 
 runner = CliRunner()
@@ -11,6 +18,27 @@ TEST_ENV = {
     "PRIME_DISABLE_VERSION_CHECK": "1",
     "PRIME_TEAM_ID": "",
 }
+
+
+def test_update_display_helpers_use_consistent_unknown_owner_fallback():
+    unknown_owner = object()
+    state = SimpleNamespace(
+        owner=unknown_owner,
+        name="app",
+        tag="v1",
+        visibility=SimpleNamespace(value="PUBLIC"),
+    )
+
+    assert format_image_owner(unknown_owner) == "unknown"
+    assert format_image_coordinate(state) == "app:v1 [unknown, PUBLIC]"
+    assert format_image_coordinate(None) == "—"
+    assert format_image_coordinate(None, missing="?") == "?"
+
+
+def test_update_display_helpers_format_known_owner_types():
+    assert format_image_owner(PersonalImageOwner()) == "personal"
+    assert format_image_owner(TeamImageOwner(team_id="team-123")) == "team team-123"
+    assert format_image_owner(PlatformImageOwner()) == "platform"
 
 
 def _success_response(json):

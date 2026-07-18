@@ -45,6 +45,7 @@ from .models import (
     CommandResponse,
     CreateSandboxRequest,
     DockerImageCheckResponse,
+    EgressPolicyStatus,
     ExposedPort,
     ExposePortRequest,
     FileUploadResponse,
@@ -55,6 +56,7 @@ from .models import (
     SandboxListResponse,
     SandboxLogsResponse,
     SSHSession,
+    validate_egress_lists,
 )
 from .rpc_command_session import (
     COMMAND_SESSION_START_RPC_METHOD,
@@ -507,9 +509,7 @@ class AsyncSandboxAuthCache:
 
 
 def _is_waiting_for_image_build(sandbox: Sandbox) -> bool:
-    return sandbox.status == "PENDING" and bool(
-        getattr(sandbox, "pending_image_build_id", None)
-    )
+    return sandbox.status == "PENDING" and bool(getattr(sandbox, "pending_image_build_id", None))
 
 
 def _check_sandbox_statuses(
@@ -734,6 +734,37 @@ class SandboxClient:
         """Delete a sandbox"""
         response = self.client.request("DELETE", f"/sandbox/{sandbox_id}")
         return response
+
+    def get_egress_policy(self, sandbox_id: str) -> EgressPolicyStatus:
+        """Get the desired and applied egress policy of a VM sandbox."""
+        response = self.client.request("GET", f"/sandbox/{sandbox_id}/egress-policy")
+        return EgressPolicyStatus.model_validate(response)
+
+    def update_egress_policy(
+        self,
+        sandbox_id: str,
+        *,
+        allowlist: Optional[List[str]] = None,
+        denylist: Optional[List[str]] = None,
+    ) -> EgressPolicyStatus:
+        """Replace the egress policy of a running VM sandbox.
+
+        Exactly one of allowlist or denylist must be provided; the replacement
+        is complete, never a merge. An empty allowlist denies all egress; an
+        empty denylist restores allow-all. New connections follow the
+        replacement once ``applied`` is true; established flows are not
+        revoked.
+        """
+        if (allowlist is None) == (denylist is None):
+            raise ValueError("exactly one of allowlist or denylist must be provided")
+        validate_egress_lists(allowlist, denylist)
+
+        response = self.client.request(
+            "PUT",
+            f"/sandbox/{sandbox_id}/egress-policy",
+            json={"allowlist": allowlist, "denylist": denylist},
+        )
+        return EgressPolicyStatus.model_validate(response)
 
     def bulk_delete(
         self,
@@ -1313,9 +1344,7 @@ class SandboxClient:
             except httpx.TimeoutException as e:
                 raise UploadTimeoutError(sandbox_id, file_path, effective_timeout) from e
             except httpx.HTTPStatusError as e:
-                if e.response.status_code == 401 and self._should_retry_401(
-                    sandbox_id, reauthed
-                ):
+                if e.response.status_code == 401 and self._should_retry_401(sandbox_id, reauthed):
                     reauthed = True
                     continue
                 if e.response.status_code == 409:
@@ -1379,9 +1408,7 @@ class SandboxClient:
             except httpx.TimeoutException:
                 raise UploadTimeoutError(sandbox_id, file_path, effective_timeout)
             except httpx.HTTPStatusError as e:
-                if e.response.status_code == 401 and self._should_retry_401(
-                    sandbox_id, reauthed
-                ):
+                if e.response.status_code == 401 and self._should_retry_401(sandbox_id, reauthed):
                     reauthed = True
                     continue
                 if e.response.status_code == 409:
@@ -1432,9 +1459,7 @@ class SandboxClient:
             except httpx.TimeoutException as e:
                 raise DownloadTimeoutError(sandbox_id, file_path, effective_timeout) from e
             except httpx.HTTPStatusError as e:
-                if e.response.status_code == 401 and self._should_retry_401(
-                    sandbox_id, reauthed
-                ):
+                if e.response.status_code == 401 and self._should_retry_401(sandbox_id, reauthed):
                     reauthed = True
                     continue
                 if e.response.status_code == 409:
@@ -1503,9 +1528,7 @@ class SandboxClient:
                     f"({e.__class__.__name__}): {file_path}"
                 ) from e
             except httpx.HTTPStatusError as e:
-                if e.response.status_code == 401 and self._should_retry_401(
-                    sandbox_id, reauthed
-                ):
+                if e.response.status_code == 401 and self._should_retry_401(sandbox_id, reauthed):
                     reauthed = True
                     continue
                 if e.response.status_code == 404:
@@ -1819,6 +1842,37 @@ class AsyncSandboxClient:
         """Delete a sandbox"""
         response = await self.client.request("DELETE", f"/sandbox/{sandbox_id}")
         return response
+
+    async def get_egress_policy(self, sandbox_id: str) -> EgressPolicyStatus:
+        """Get the desired and applied egress policy of a VM sandbox."""
+        response = await self.client.request("GET", f"/sandbox/{sandbox_id}/egress-policy")
+        return EgressPolicyStatus.model_validate(response)
+
+    async def update_egress_policy(
+        self,
+        sandbox_id: str,
+        *,
+        allowlist: Optional[List[str]] = None,
+        denylist: Optional[List[str]] = None,
+    ) -> EgressPolicyStatus:
+        """Replace the egress policy of a running VM sandbox.
+
+        Exactly one of allowlist or denylist must be provided; the replacement
+        is complete, never a merge. An empty allowlist denies all egress; an
+        empty denylist restores allow-all. New connections follow the
+        replacement once ``applied`` is true; established flows are not
+        revoked.
+        """
+        if (allowlist is None) == (denylist is None):
+            raise ValueError("exactly one of allowlist or denylist must be provided")
+        validate_egress_lists(allowlist, denylist)
+
+        response = await self.client.request(
+            "PUT",
+            f"/sandbox/{sandbox_id}/egress-policy",
+            json={"allowlist": allowlist, "denylist": denylist},
+        )
+        return EgressPolicyStatus.model_validate(response)
 
     async def bulk_delete(
         self,

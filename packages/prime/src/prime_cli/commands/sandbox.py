@@ -19,6 +19,7 @@ from prime_sandboxes import (
     CommandTimeoutError,
     Config,
     CreateSandboxRequest,
+    EgressPolicyStatus,
     PaymentRequiredError,
     Sandbox,
     SandboxClient,
@@ -67,8 +68,8 @@ LIST_SANDBOXES_JSON_HELP = json_output_help(
 SANDBOX_DETAIL_JSON_HELP = json_output_help(
     ". = {id, name, docker_image, start_command, status, cpu_cores, "
     "memory_gb, disk_size_gb, disk_mount_path, gpu_count, gpu_type?, "
-    "network_access, timeout_minutes, labels[], created_at, user_id, team_id, "
-    "...}",
+    "network_allowlist?, network_denylist?, timeout_minutes, labels[], "
+    "created_at, user_id, team_id, ...}",
     ".environment_vars? = object",
     ".secrets? = object",
     ".advanced_configs? = object",
@@ -164,7 +165,8 @@ def _format_sandbox_for_details(sandbox: Sandbox) -> Dict[str, Any]:
         "gpu_count": sandbox.gpu_count,
         "gpu_type": getattr(sandbox, "gpu_type", None),
         "vm": sandbox.vm,
-        "network_access": sandbox.network_access,
+        "network_allowlist": getattr(sandbox, "network_allowlist", None),
+        "network_denylist": getattr(sandbox, "network_denylist", None),
         "timeout_minutes": sandbox.timeout_minutes,
         # Read with getattr so an older installed prime-sandboxes wheel
         # (without these fields) still renders the details view instead of
@@ -408,11 +410,18 @@ def get(
             table.add_row("Disk Mount Path", sandbox_data["disk_mount_path"])
             table.add_row("GPU Count", str(sandbox_data["gpu_count"]))
             table.add_row("GPU Type", sandbox_data.get("gpu_type") or "N/A")
-            network_display = Text(
-                "Enabled" if sandbox_data["network_access"] else "Disabled",
-                style="green" if sandbox_data["network_access"] else "yellow",
-            )
-            table.add_row("Network Access", network_display)
+            if sandbox_data.get("network_allowlist") is not None:
+                allowlist = sandbox_data["network_allowlist"]
+                table.add_row(
+                    "Egress Allowlist",
+                    Text(", ".join(allowlist) if allowlist else "(deny all)", style="yellow"),
+                )
+            elif sandbox_data.get("network_denylist") is not None:
+                denylist = sandbox_data["network_denylist"]
+                table.add_row(
+                    "Egress Denylist",
+                    Text(", ".join(denylist) if denylist else "(allow all)", style="yellow"),
+                )
             table.add_row("Timeout (minutes)", str(sandbox_data["timeout_minutes"]))
             if sandbox_data.get("idle_timeout_minutes") is not None:
                 table.add_row("Idle Timeout (minutes)", str(sandbox_data["idle_timeout_minutes"]))
@@ -498,10 +507,21 @@ def create(
         "--vm",
         help="Create a VM-backed sandbox on the VM sandbox infra. Required when requesting GPUs.",
     ),
-    network_access: bool = typer.Option(
-        True,
-        "--network-access/--no-network-access",
-        help="Allow outbound internet access (enabled by default)",
+    network_allow: Optional[List[str]] = typer.Option(
+        None,
+        "--network-allow",
+        help=(
+            "VM only, repeatable. Allow egress only to these domains/IPv4 CIDRs "
+            "(hostname-aware). Mutually exclusive with --network-deny."
+        ),
+    ),
+    network_deny: Optional[List[str]] = typer.Option(
+        None,
+        "--network-deny",
+        help=(
+            "VM only, repeatable. Deny egress to these domains/IPv4 CIDRs and "
+            "allow everything else. Mutually exclusive with --network-allow."
+        ),
     ),
     timeout_minutes: int = typer.Option(60, help="Timeout in minutes"),
     idle_timeout_minutes: Optional[int] = typer.Option(
@@ -652,6 +672,16 @@ def create(
                     "does not support --idle-timeout-minutes; ignoring."
                 )
 
+        # Reject conflicting flags locally before any API request.
+        if network_allow is not None and network_deny is not None:
+            console.print(
+                "[red]Error:[/red] --network-allow and --network-deny are mutually exclusive"
+            )
+            raise typer.Exit(1)
+        if (network_allow is not None or network_deny is not None) and not vm:
+            console.print("[red]Error:[/red] --network-allow/--network-deny require --vm")
+            raise typer.Exit(1)
+
         request = CreateSandboxRequest(
             name=name,
             docker_image=docker_image,
@@ -662,7 +692,8 @@ def create(
             gpu_count=gpu_count,
             gpu_type=gpu_type,
             vm=vm,
-            network_access=network_access,
+            network_allowlist=network_allow,
+            network_denylist=network_deny,
             timeout_minutes=timeout_minutes,
             environment_vars=env_vars if env_vars else None,
             secrets=secrets_vars if secrets_vars else None,
@@ -685,8 +716,14 @@ def create(
         console.print(f"VM: {'Enabled' if vm else 'Disabled'}")
         if gpu_count > 0:
             console.print(f"GPUs: {gpu_type} x{gpu_count}")
-        network_status = "[green]Enabled[/green]" if network_access else "[yellow]Disabled[/yellow]"
-        console.print(f"Network Access: {network_status}")
+        if network_allow is not None:
+            console.print(
+                f"Egress Allowlist: {', '.join(network_allow) if network_allow else '(deny all)'}"
+            )
+        elif network_deny is not None:
+            console.print(
+                f"Egress Denylist: {', '.join(network_deny) if network_deny else '(allow all)'}"
+            )
         console.print(f"Timeout: {timeout_minutes} minutes")
         # Only show the idle timeout in the summary when the SDK actually
         # accepted it; otherwise we'd display a value the backend never sees.
@@ -1038,6 +1075,142 @@ def delete(
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         console.print_exception(show_locals=True)
         raise typer.Exit(1)
+
+
+@app.command("get-egress-policy", no_args_is_help=True)
+def get_egress_policy(sandbox_id: str) -> None:
+    """Get the desired and applied egress policy of a VM sandbox"""
+    try:
+        base_client = APIClient()
+        sandbox_client = SandboxClient(base_client)
+
+        with console.status("[bold blue]Fetching egress policy...", spinner="dots"):
+            status = sandbox_client.get_egress_policy(sandbox_id)
+
+        _print_egress_policy_status(sandbox_id, status)
+
+    except typer.Exit:
+        raise
+    except UnauthorizedError as e:
+        console.print(f"[red]Unauthorized:[/red] {str(e)}")
+        raise typer.Exit(1)
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+
+
+@app.command("update-egress-policy", no_args_is_help=True)
+def update_egress_policy(
+    sandbox_id: str,
+    allow: Optional[List[str]] = typer.Option(
+        None,
+        "--allow",
+        help=(
+            "Repeatable. Replace the policy with an allowlist of these "
+            "domains/IPv4 CIDRs. Mutually exclusive with --deny/--allow-all/--deny-all."
+        ),
+    ),
+    deny: Optional[List[str]] = typer.Option(
+        None,
+        "--deny",
+        help=(
+            "Repeatable. Replace the policy with a denylist of these "
+            "domains/IPv4 CIDRs. Mutually exclusive with --allow/--allow-all/--deny-all."
+        ),
+    ),
+    allow_all: bool = typer.Option(
+        False,
+        "--allow-all",
+        help="Restore allow-all egress (sends an empty denylist).",
+    ),
+    deny_all: bool = typer.Option(
+        False,
+        "--deny-all",
+        help="Deny all egress (sends an empty allowlist).",
+    ),
+) -> None:
+    """Replace the egress policy of a running VM sandbox (full replacement)"""
+    selections = [
+        allow is not None,
+        deny is not None,
+        allow_all,
+        deny_all,
+    ]
+    if sum(selections) != 1:
+        console.print(
+            "[red]Error:[/red] provide exactly one of --allow, --deny, --allow-all, or --deny-all"
+        )
+        raise typer.Exit(1)
+
+    allowlist: Optional[List[str]] = None
+    denylist: Optional[List[str]] = None
+    if allow is not None:
+        allowlist = list(allow)
+    elif deny is not None:
+        denylist = list(deny)
+    elif deny_all:
+        allowlist = []
+    else:  # allow_all
+        denylist = []
+
+    try:
+        base_client = APIClient()
+        sandbox_client = SandboxClient(base_client)
+
+        with console.status("[bold blue]Replacing egress policy...", spinner="dots"):
+            status = sandbox_client.update_egress_policy(
+                sandbox_id, allowlist=allowlist, denylist=denylist
+            )
+
+        _print_egress_policy_status(sandbox_id, status)
+        if not status.applied:
+            console.print(
+                "[yellow]The policy is persisted but not yet applied on the node; "
+                "it will be retried automatically.[/yellow]"
+            )
+
+    except typer.Exit:
+        raise
+    except ValueError as e:
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except UnauthorizedError as e:
+        console.print(f"[red]Unauthorized:[/red] {str(e)}")
+        raise typer.Exit(1)
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+
+
+def _print_egress_policy_status(sandbox_id: str, status: "EgressPolicyStatus") -> None:
+    table = Table(title=f"Egress Policy for {sandbox_id}")
+    table.add_column("Field", style="cyan")
+    table.add_column("Value")
+
+    if status.policy.allowlist is not None:
+        entries = status.policy.allowlist
+        table.add_row("Mode", "Allowlist")
+        table.add_row("Entries", ", ".join(entries) if entries else "(deny all)")
+    elif status.policy.denylist is not None:
+        entries = status.policy.denylist
+        table.add_row("Mode", "Denylist")
+        table.add_row("Entries", ", ".join(entries) if entries else "(allow all)")
+    else:
+        table.add_row("Mode", "None (allow all)")
+
+    table.add_row("Desired Generation", str(status.generation))
+    table.add_row("Applied Generation", str(status.applied_generation))
+    table.add_row(
+        "Applied",
+        Text("Yes", style="green") if status.applied else Text("No", style="yellow"),
+    )
+    console.print(table)
 
 
 @app.command(no_args_is_help=True)

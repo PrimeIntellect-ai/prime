@@ -165,7 +165,6 @@ def test_auth_cache_stores_vm_flag_for_reuse(tmp_path):
                     "gpuCount": 0,
                     "gpuType": None,
                     "vm": True,
-                    "networkAccess": True,
                     "status": "RUNNING",
                     "timeoutMinutes": 60,
                     "environmentVars": None,

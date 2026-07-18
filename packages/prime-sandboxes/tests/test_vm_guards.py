@@ -255,7 +255,6 @@ def test_sync_is_vm_hits_backend_on_cold_cache(tmp_path):
                     "gpuCount": 0,
                     "gpuType": None,
                     "vm": True,
-                    "networkAccess": True,
                     "status": "RUNNING",
                     "timeoutMinutes": 60,
                     "environmentVars": None,

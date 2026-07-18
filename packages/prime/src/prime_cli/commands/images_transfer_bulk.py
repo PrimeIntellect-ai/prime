@@ -91,8 +91,18 @@ class TransferSpec:
         return line
 
 
-def derive_transfer_destination(source_ref: str) -> tuple[str, str]:
-    """Derive the (name, tag) a transfer gets when no destination is given."""
+def derive_transfer_destination(
+    source_ref: str, *, keep_namespace: bool = False
+) -> tuple[str, str]:
+    """Derive the (name, tag) a transfer gets when no destination is given.
+
+    With ``keep_namespace`` (platform-image transfers) the name is the full
+    source path minus the registry host: org-less platform images carry the
+    Docker Hub namespace inside their name (docker.io/ns/app:v1 -> ns/app:v1),
+    which is how the backend stores them and how sandbox-create resolution and
+    auto-import match raw references. Otherwise only the last path segment is
+    kept, matching how the server derives personal/team destinations.
+    """
     ref = (source_ref or "").strip()
     if not ref:
         raise ValueError("empty image reference")
@@ -126,7 +136,7 @@ def derive_transfer_destination(source_ref: str) -> tuple[str, str]:
     if not repository:
         raise ValueError("missing repository")
 
-    name = repository.split("/")[-1].lower()
+    name = repository.lower() if keep_namespace else repository.split("/")[-1].lower()
     if tag is None:
         assert digest is not None
         tag = "sha256-" + digest.split(":", 1)[1][:16]
@@ -143,8 +153,14 @@ _DUPLICATE_DEST_HINT = (
 # ---------------------------------------------------------------------------
 
 
-def load_transfer_manifest(manifest_path: Path, default_platform: str) -> list[TransferSpec]:
-    """Parse and fully validate a JSONL transfer manifest."""
+def load_transfer_manifest(
+    manifest_path: Path, default_platform: str, *, platform_image: bool = False
+) -> list[TransferSpec]:
+    """Parse and fully validate a JSONL transfer manifest.
+
+    With ``platform_image``, destinations keep the source's registry namespace
+    and "image" overrides may be namespaced ('ns/name:tag').
+    """
     problems: list[str] = []
     specs: list[TransferSpec] = []
 
@@ -184,7 +200,9 @@ def load_transfer_manifest(manifest_path: Path, default_platform: str) -> list[T
             continue
 
         try:
-            derived_name, derived_tag = derive_transfer_destination(source)
+            derived_name, derived_tag = derive_transfer_destination(
+                source, keep_namespace=platform_image
+            )
         except ValueError as e:
             problems.append(f"{where}: invalid source '{source}' ({e})")
             continue
@@ -198,10 +216,17 @@ def load_transfer_manifest(manifest_path: Path, default_platform: str) -> list[T
                 dest_name, dest_tag = image.rsplit(":", 1)
             else:
                 dest_name, dest_tag = image, "latest"
-            if not dest_name or "/" in dest_name:
-                problems.append(
-                    f"{where}: invalid destination '{image}'; use simple names like 'myapp:v1'"
+            # '/' separates owner from name in personal/team image paths, so
+            # only platform images (org-less, stored under their Docker Hub
+            # namespace) may use a single-level namespace in the destination.
+            segments = dest_name.split("/")
+            if len(segments) > (2 if platform_image else 1) or not all(segments):
+                hint = (
+                    "use 'name:tag' or a namespaced 'ns/name:tag'"
+                    if platform_image
+                    else "use simple names like 'myapp:v1'"
                 )
+                problems.append(f"{where}: invalid destination '{image}'; {hint}")
                 continue
             if not _TAG_RE.match(dest_tag):
                 problems.append(f"{where}: invalid destination tag '{dest_tag}'")
@@ -236,7 +261,7 @@ def load_transfer_manifest(manifest_path: Path, default_platform: str) -> list[T
 
 
 def load_harbor_transfer_specs(
-    root: Path, *, platform: str
+    root: Path, *, platform: str, platform_image: bool = False
 ) -> tuple[list[TransferSpec], list[tuple[str, str]]]:
     """Resolve transfer specs from a Harbor tasks directory.
 
@@ -282,7 +307,9 @@ def load_harbor_transfer_specs(
         first_task_by_source[docker_image] = task_dir.name
 
         try:
-            dest_name, dest_tag = derive_transfer_destination(docker_image)
+            dest_name, dest_tag = derive_transfer_destination(
+                docker_image, keep_namespace=platform_image
+            )
         except ValueError as e:
             problems.append(f"{task_dir.name}: invalid docker_image '{docker_image}' ({e})")
             continue
@@ -321,6 +348,7 @@ def load_hf_specs(
     split: str,
     column: Optional[str],
     platform: str,
+    platform_image: bool = False,
 ) -> tuple[list[TransferSpec], list[str]]:
     """Resolve transfer specs from a Hugging Face dataset column.
 
@@ -366,7 +394,7 @@ def load_hf_specs(
     specs: list[TransferSpec] = []
     for ref, row_idx in sources:
         try:
-            dest_name, dest_tag = derive_transfer_destination(ref)
+            dest_name, dest_tag = derive_transfer_destination(ref, keep_namespace=platform_image)
         except ValueError as e:
             problems.append(f"{dataset_id} row {row_idx}: invalid image reference '{ref}' ({e})")
             continue
@@ -520,7 +548,10 @@ def transfer_bulk(
     platform_image: bool = typer.Option(
         False,
         "--platform-image",
-        help="Transfer org-less platform images (admins only; implies --public)",
+        help=(
+            "Transfer org-less platform images (admins only; implies --public; "
+            "destinations keep the source's registry namespace)"
+        ),
     ),
     concurrency: int = typer.Option(
         DEFAULT_MAX_IN_FLIGHT, "--concurrency", help="Maximum transfers in flight at once"
@@ -566,6 +597,10 @@ def transfer_bulk(
     \b
     Admins can pass --platform-image to transfer org-less public platform
     images, exactly like 'prime images push --source-image --platform-image'.
+    Platform destinations keep the source's registry namespace — the backend
+    stores platform images under their Docker Hub path, so
+    docker.io/ns/app:v1 lands as ns/app:v1 — and manifest "image" overrides
+    may be namespaced ('ns/name:tag').
 
     \b
     Examples:
@@ -607,7 +642,9 @@ def transfer_bulk(
                 if not manifest_path.is_file():
                     raise BulkPushValidationError([f"manifest not found: {manifest_path}"])
                 source_desc = f"manifest {manifest_path}"
-                specs = load_transfer_manifest(manifest_path, default_platform=platform)
+                specs = load_transfer_manifest(
+                    manifest_path, default_platform=platform, platform_image=platform_image
+                )
             elif harbor is not None:
                 harbor_root = harbor.resolve()
                 if not harbor_root.is_dir():
@@ -615,7 +652,9 @@ def transfer_bulk(
                         [f"Harbor task directory not found: {harbor_root}"]
                     )
                 source_desc = f"Harbor tasks in {harbor_root}"
-                specs, skipped = load_harbor_transfer_specs(harbor_root, platform=platform)
+                specs, skipped = load_harbor_transfer_specs(
+                    harbor_root, platform=platform, platform_image=platform_image
+                )
             else:
                 assert hf_dataset is not None
                 source_desc = f"Hugging Face dataset {normalize_hf_dataset_id(hf_dataset)}"
@@ -626,6 +665,7 @@ def transfer_bulk(
                     split=hf_split,
                     column=column,
                     platform=platform,
+                    platform_image=platform_image,
                 )
         except BulkPushValidationError as e:
             console.print(

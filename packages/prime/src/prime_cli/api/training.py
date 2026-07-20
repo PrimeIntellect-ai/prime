@@ -60,6 +60,7 @@ def build_payload_from_toml(
     image_tag: Optional[str] = None,
     wandb_api_key: Optional[str] = None,
     hf_token: Optional[str] = None,
+    gpu_type: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build the /v1/training/runs payload from a prime-rl-style TOML dict.
 
@@ -67,14 +68,17 @@ def build_payload_from_toml(
     per-component (trainer / orchestrator / inference) and bake each
     into the corresponding pod's startup command. Anything outside the
     handful of platform-authoritative overlays (chart-side scrape ports,
-    monitor URL, secret name) flows through unchanged — same e2e
+    monitor URL, secret name) flows through unchanged - same e2e
     behaviour as `uv run rl @ rl.toml`.
 
     What stays out of `config`:
       - secrets (wandb / hf): materialised into a per-run k8s Secret,
       - run name: lives on the platform's RFTRun row, not the TOML,
       - team_id: links the RFTRun to a team for billing/access scoping,
-      - image_tag: chart-level (which prime-rl image to pull).
+      - image_tag: chart-level (which prime-rl image to pull),
+      - gpu_type: narrows the backend picker to clusters with matching
+        PrimeCluster.gpuType (e.g. "H200_141GB"); omit for the default
+        auto-pick with no type preference.
 
     Cluster targeting is backend-side (auto-pick first uncordoned).
     """
@@ -89,4 +93,6 @@ def build_payload_from_toml(
         payload["wandbApiKey"] = wandb_api_key
     if hf_token:
         payload["hfToken"] = hf_token
+    if gpu_type:
+        payload["gpuType"] = gpu_type
     return payload

@@ -223,6 +223,10 @@ prime eval get <eval-id>
 
 # View evaluation samples
 prime eval samples <eval-id>
+
+# Export hosted eval rollouts for verifiers training or Inspect AI
+prime eval export <run-id>
+prime eval export <run-id> --format inspect -o results.eval
 ```
 
 ### Team Management

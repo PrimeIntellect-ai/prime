@@ -6,7 +6,7 @@ own helm release on a registered PrimeCluster. Auth is the standard API
 token; admin role is gated server-side.
 """
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -18,6 +18,14 @@ class HostedTrainingRunResponse(BaseModel):
 
     run_id: str = Field(..., alias="runId")
     token_value: str = Field(..., alias="tokenValue")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class AvailableGpuTypesResponse(BaseModel):
+    """Response from GET /v1/training/available-gpu-types."""
+
+    gpu_types: List[str] = Field(default_factory=list, alias="gpuTypes")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -51,6 +59,18 @@ class HostedTrainingClient:
         response = self.client.request("DELETE", f"/training/runs/{run_id}")
         return response if isinstance(response, dict) else {"runId": run_id}
 
+    def list_available_gpu_types(self, team_id: Optional[str] = None) -> AvailableGpuTypesResponse:
+        """GET /v1/training/available-gpu-types. Distinct GPU types the
+        caller could dispatch a dedicated FFT run on. Same principal
+        collapse as the dispatch picker: `team_id` wins when set,
+        otherwise the caller's personal allocations.
+        """
+        params: Dict[str, Any] = {}
+        if team_id:
+            params["team_id"] = team_id
+        response = self.client.get("/training/available-gpu-types", params=params)
+        return AvailableGpuTypesResponse.model_validate(response)
+
 
 def build_payload_from_toml(
     cfg: Dict[str, Any],
@@ -60,6 +80,7 @@ def build_payload_from_toml(
     image_tag: Optional[str] = None,
     wandb_api_key: Optional[str] = None,
     hf_token: Optional[str] = None,
+    gpu_type: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build the /v1/training/runs payload from a prime-rl-style TOML dict.
 
@@ -67,14 +88,17 @@ def build_payload_from_toml(
     per-component (trainer / orchestrator / inference) and bake each
     into the corresponding pod's startup command. Anything outside the
     handful of platform-authoritative overlays (chart-side scrape ports,
-    monitor URL, secret name) flows through unchanged — same e2e
+    monitor URL, secret name) flows through unchanged - same e2e
     behaviour as `uv run rl @ rl.toml`.
 
     What stays out of `config`:
       - secrets (wandb / hf): materialised into a per-run k8s Secret,
       - run name: lives on the platform's RFTRun row, not the TOML,
       - team_id: links the RFTRun to a team for billing/access scoping,
-      - image_tag: chart-level (which prime-rl image to pull).
+      - image_tag: chart-level (which prime-rl image to pull),
+      - gpu_type: narrows the backend picker to clusters with matching
+        PrimeCluster.gpuType (e.g. "H200_141GB"); omit for the default
+        auto-pick with no type preference.
 
     Cluster targeting is backend-side (auto-pick first uncordoned).
     """
@@ -89,4 +113,6 @@ def build_payload_from_toml(
         payload["wandbApiKey"] = wandb_api_key
     if hf_token:
         payload["hfToken"] = hf_token
+    if gpu_type:
+        payload["gpuType"] = gpu_type
     return payload

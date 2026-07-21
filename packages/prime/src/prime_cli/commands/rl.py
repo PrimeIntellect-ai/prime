@@ -919,6 +919,7 @@ def _dispatch_full_finetune_run(
     output: str,
     yes: bool,
     image_tag: Optional[str] = None,
+    gpu_type: Optional[str] = None,
 ) -> None:
     """Hand off to /api/v1/training/runs (full-FT prime-rl on a registered
     PrimeCluster). Reuses the shared env-file plumbing for WANDB / HF
@@ -1012,6 +1013,20 @@ def _dispatch_full_finetune_run(
         raise typer.Exit(1)
     resolved_image_tag = image_tag or config_image_tag
 
+    # `gpu_type` is request-level (narrows the backend cluster picker to
+    # PrimeClusters with matching gpuType), not prime-rl config. Two ways
+    # to set it: `--gpu-type` (CLI flag) or top-level `gpu_type = "..."`
+    # in the TOML. CLI flag wins. Falling through to None keeps today's
+    # "no preference, backend auto-picks" behaviour.
+    config_gpu_type = raw_cfg.get("gpu_type")
+    if config_gpu_type is not None and not isinstance(config_gpu_type, str):
+        console.print(
+            f"[red]Error:[/red] gpu_type in {config_path} must be a string, "
+            f"got {type(config_gpu_type).__name__}."
+        )
+        raise typer.Exit(1)
+    resolved_gpu_type = gpu_type or config_gpu_type
+
     # Same deprecation pass as the LoRA path. In the prime-rl-native shape
     # the deprecated keys live one level down, under `[orchestrator]` — and
     # this config ships verbatim to the dedicated training endpoint, where
@@ -1029,7 +1044,9 @@ def _dispatch_full_finetune_run(
     # phantom paths. `image_tag` is similarly chart-level — the backend
     # parses it off the request body, not the embedded prime-rl config.
     config_payload = {
-        k: v for k, v in raw_cfg.items() if k not in ("env_file", "env_files", "image_tag")
+        k: v
+        for k, v in raw_cfg.items()
+        if k not in ("env_file", "env_files", "image_tag", "gpu_type")
     }
 
     payload = build_payload_from_toml(
@@ -1039,6 +1056,7 @@ def _dispatch_full_finetune_run(
         image_tag=resolved_image_tag,
         wandb_api_key=secrets.get("WANDB_API_KEY"),
         hf_token=secrets.get("HF_TOKEN"),
+        gpu_type=resolved_gpu_type,
     )
 
     # `--output json` is a formatting switch: still dispatch the run,
@@ -1262,6 +1280,17 @@ def create_run(
             "if unset, then to the backend default."
         ),
     ),
+    gpu_type: Optional[str] = typer.Option(
+        None,
+        "--gpu-type",
+        help=(
+            "GPU type to dispatch on (full-FT only, e.g. 'H200_141GB', "
+            "'B200_180GB'). Narrows the backend cluster picker to "
+            "PrimeClusters with matching gpuType. Falls back to a top-level "
+            '`gpu_type = "..."` in the TOML if unset, then to the backend '
+            "default (no preference, auto-pick)."
+        ),
+    ),
 ) -> None:
     """Launch a Hosted Training run from a config file.
 
@@ -1287,8 +1316,21 @@ def create_run(
             output=output,
             yes=yes,
             image_tag=image_tag,
+            gpu_type=gpu_type,
         )
         return
+
+    # --gpu-type is full-FT only. The LoRA path below never reads it, so
+    # silently letting the flag through would launch a run with the GPU
+    # constraint dropped - misleading for a knob that affects expensive
+    # hardware placement. Reject explicitly.
+    if gpu_type or raw_cfg.get("gpu_type") is not None:
+        console.print(
+            "[red]Error:[/red] --gpu-type (and top-level `gpu_type` in the "
+            "TOML) is only supported for full-FT runs. Drop the flag or use "
+            "a full-FT config."
+        )
+        raise typer.Exit(1)
 
     console.print(f"[dim]Loading config from {config_path}[/dim]\n")
     cfg = load_config(config_path)
@@ -1694,6 +1736,44 @@ def list_models(
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
+
+
+@app.command("gpus", rich_help_panel="Commands")
+def list_gpus(
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """List GPU types you can dispatch a full-FT run on.
+
+    Uses the active team from `prime config` when set, otherwise your
+    personal allocations. Pass any value to `prime train run
+    --gpu-type <value>` to steer dispatch.
+    """
+    from ..api.training import HostedTrainingClient
+
+    validate_output_format(output, console)
+
+    try:
+        api_client = APIClient()
+        client = HostedTrainingClient(api_client)
+        config = Config()
+        response = client.list_available_gpu_types(team_id=config.team_id)
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+    if output == "json":
+        output_data_as_json({"gpuTypes": response.gpu_types}, console)
+        return
+
+    if not response.gpu_types:
+        console.print(
+            "[yellow]No GPU types available.[/yellow] Contact support if you need access."
+        )
+        return
+
+    console.print("[bold]Available GPU types[/bold] [dim](full-FT dispatch)[/dim]")
+    for gpu_type in response.gpu_types:
+        console.print(f"  [cyan]{gpu_type}[/cyan]")
 
 
 def _prompt_required_text(label: str, help_text: str, empty_error: str) -> str:

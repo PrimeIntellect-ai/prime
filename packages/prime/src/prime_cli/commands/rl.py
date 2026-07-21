@@ -1320,6 +1320,18 @@ def create_run(
         )
         return
 
+    # --gpu-type is full-FT only. The LoRA path below never reads it, so
+    # silently letting the flag through would launch a run with the GPU
+    # constraint dropped - misleading for a knob that affects expensive
+    # hardware placement. Reject explicitly.
+    if gpu_type or raw_cfg.get("gpu_type") is not None:
+        console.print(
+            "[red]Error:[/red] --gpu-type (and top-level `gpu_type` in the "
+            "TOML) is only supported for full-FT runs. Drop the flag or use "
+            "a full-FT config."
+        )
+        raise typer.Exit(1)
+
     console.print(f"[dim]Loading config from {config_path}[/dim]\n")
     cfg = load_config(config_path)
 

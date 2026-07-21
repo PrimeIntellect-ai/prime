@@ -797,16 +797,33 @@ def test_list_platform_image_forwards_owner_scope(monkeypatch):
     assert "Platform Docker Images" in result.output
 
 
-def test_list_platform_image_rejected_in_team_context(monkeypatch):
+def test_list_platform_image_ignores_team_context(monkeypatch):
     result, captured = _run_list_capturing_params(
         monkeypatch,
         ["--platform-image"],
+        payload=[_platform_row(image="ubuntu:22.04", pushed_at="2026-04-16T22:24:07")],
         team_id=TEAM_ID,
     )
-    assert result.exit_code == 1
-    assert "team context" in result.output
-    # Rejected client-side before any API request is made.
-    assert "params" not in captured
+    assert result.exit_code == 0, result.output
+    assert captured["params"].get("ownerScope") == "platform"
+    assert "teamId" not in captured["params"]
+    assert "Team context ignored" in result.output
+    assert "Platform Docker Images" in result.output
+    # Platform listings never render the team-scoped Owner column.
+    assert "Owner" not in result.output
+
+
+def test_list_platform_image_team_context_json_output_stays_clean(monkeypatch):
+    result, captured = _run_list_capturing_params(
+        monkeypatch,
+        ["--platform-image", "--output", "json"],
+        payload=[_platform_row(image="ubuntu:22.04", pushed_at="2026-04-16T22:24:07")],
+        team_id=TEAM_ID,
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["params"].get("ownerScope") == "platform"
+    assert "teamId" not in captured["params"]
+    assert "Team context ignored" not in result.output
 
 
 def test_list_platform_image_empty_shows_platform_push_hint(monkeypatch):

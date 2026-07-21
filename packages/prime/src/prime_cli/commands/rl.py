@@ -1755,17 +1755,13 @@ def list_gpus(
 
     if not response.gpu_types:
         console.print(
-            "[yellow]No GPU types available.[/yellow] "
-            "Your account has no ClusterAllocation on any live PrimeCluster - "
-            "ask an admin to assign one before dispatching a full-FT run."
+            "[yellow]No GPU types available.[/yellow] Contact support if you need access."
         )
         return
 
-    table = Table(title="Available GPU types (full-FT dispatch)")
-    table.add_column("gpu_type", style="cyan")
+    console.print("[bold]Available GPU types[/bold] [dim](full-FT dispatch)[/dim]")
     for gpu_type in response.gpu_types:
-        table.add_row(gpu_type)
-    console.print(table)
+        console.print(f"  [cyan]{gpu_type}[/cyan]")
 
 
 def _prompt_required_text(label: str, help_text: str, empty_error: str) -> str:

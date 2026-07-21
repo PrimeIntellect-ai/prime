@@ -860,9 +860,8 @@ def list_images(
     if num > 250:
         console.print("[red]Error:[/red] --num cannot exceed 250")
         raise typer.Exit(1)
-    if platform_image and config.team_id:
-        console.print("[red]Error: Platform images cannot be listed in a team context[/red]")
-        raise typer.Exit(1)
+    if platform_image and config.team_id and output != "json":
+        console.print("[dim]Team context ignored: platform images are org-less[/dim]")
 
     if all_images and output != "json":
         console.print(
@@ -925,8 +924,8 @@ def list_images(
             return
 
         # Table output
-        # Platform listings are never team-scoped (rejected above).
-        is_team_listing: bool = bool(config.team_id)
+        # Platform listings are org-less: any configured team is ignored.
+        is_team_listing: bool = bool(config.team_id) and not platform_image
         title: str
         if platform_image:
             title = "Platform Docker Images"

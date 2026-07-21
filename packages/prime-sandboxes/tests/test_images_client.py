@@ -204,6 +204,24 @@ def test_image_client_transfer_image_accepts_bulk_transfer_response():
     assert response.failed[0].error == "source image not found"
 
 
+def test_image_client_build_vm_image_accepts_platform_owner_scope():
+    captured: dict[str, Any] = {}
+    client = ImageClient(DummyAPIClient({"buildId": "build-123"}, captured))
+
+    response = client.build_vm_image(
+        "org/ubuntu",
+        "22.04",
+        owner_scope="platform",
+    )
+
+    assert captured == {
+        "method": "POST",
+        "path": "/images/org/ubuntu/22.04/vm-build",
+        "json": {"ownerScope": "platform"},
+    }
+    assert response == {"buildId": "build-123"}
+
+
 class DummyAsyncAPIClient:
     def __init__(self, response: dict[str, Any], captured: dict[str, Any] | None = None) -> None:
         self.response = response
@@ -221,6 +239,28 @@ class DummyAsyncAPIClient:
             self.captured["path"] = path
             self.captured["json"] = json
         return self.response
+
+
+def test_async_image_client_build_vm_image_accepts_platform_owner_scope():
+    import asyncio
+
+    captured: dict[str, Any] = {}
+    client = AsyncImageClient(DummyAsyncAPIClient({"buildId": "build-123"}, captured))  # type: ignore[arg-type]
+
+    response = asyncio.run(
+        client.build_vm_image(
+            "org/ubuntu",
+            "22.04",
+            owner_scope="platform",
+        )
+    )
+
+    assert captured == {
+        "method": "POST",
+        "path": "/images/org/ubuntu/22.04/vm-build",
+        "json": {"ownerScope": "platform"},
+    }
+    assert response == {"buildId": "build-123"}
 
 
 def _update_images_response(reference: str) -> dict[str, Any]:

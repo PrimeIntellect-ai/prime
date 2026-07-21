@@ -63,9 +63,12 @@ class ImageClient:
         image_tag: str,
         *,
         team_id: Optional[str] = None,
+        owner_scope: Optional[Literal["platform"]] = None,
     ) -> dict:
         """Build a VM image from an existing container image."""
         payload = {"teamId": team_id} if team_id else {}
+        if owner_scope:
+            payload["ownerScope"] = owner_scope
         return self.client.request(
             "POST",
             f"/images/{image_name}/{image_tag}/vm-build",
@@ -137,9 +140,12 @@ class AsyncImageClient:
         image_tag: str,
         *,
         team_id: Optional[str] = None,
+        owner_scope: Optional[Literal["platform"]] = None,
     ) -> dict:
         """Build a VM image from an existing container image."""
         payload = {"teamId": team_id} if team_id else {}
+        if owner_scope:
+            payload["ownerScope"] = owner_scope
         return await self.client.request(
             "POST",
             f"/images/{image_name}/{image_tag}/vm-build",

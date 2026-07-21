@@ -773,23 +773,36 @@ def build_vm_image(
             "'prime/team-{teamId}/myapp:v1.0.0')"
         ),
     ),
+    platform_image: bool = typer.Option(
+        False,
+        "--platform-image",
+        help="Build the VM artifact for an org-less platform image (admins only)",
+    ),
 ):
     """
     Build a VM image from an existing container image.
 
-    Requires VM sandboxes to be enabled for your account and a linux/amd64
-    image. For team images, only the image creator or team admins can
-    trigger this. Track progress with 'prime images list'.
+    Requires a linux/amd64 image. Personal and team builds require VM
+    sandboxes to be enabled for the owning account. For team images, only
+    the image creator or team admins can trigger this. Platform images
+    require a platform admin with sandboxes:update permission.
 
     \b
     Examples:
         prime images build-vm myapp:v1.0.0
         prime images build-vm prime/alice/myapp:v1.0.0
         prime images build-vm prime/team-abc123/myapp:v1.0.0
+        prime images build-vm ubuntu:22.04 --platform-image
     """
     try:
-        image_name, image_tag, team_id = _parse_mutable_image_reference(image_reference)
+        if platform_image:
+            image_name, image_tag = _parse_platform_image_reference(image_reference)
+            team_id = None
+        else:
+            image_name, image_tag, team_id = _parse_mutable_image_reference(image_reference)
         payload: dict[str, str] = {"teamId": team_id} if team_id else {}
+        if platform_image:
+            payload["ownerScope"] = "platform"
 
         client = APIClient()
         response = client.request(
@@ -798,14 +811,20 @@ def build_vm_image(
             json=payload,
         )
 
-        context = f" (team: {team_id})" if team_id else ""
+        if platform_image:
+            context = " (platform)"
+        else:
+            context = f" (team: {team_id})" if team_id else ""
         console.print(
             f"[green]✓[/green] VM image build queued for {image_name}:{image_tag}{context}"
         )
         build_id = response.get("buildId") if isinstance(response, dict) else None
         if build_id:
             console.print(f"[bold]Build ID:[/bold] {build_id}")
-        console.print("Track progress with: prime images list")
+        list_command = (
+            "prime images list --platform-image" if platform_image else "prime images list"
+        )
+        console.print(f"Track progress with: {list_command}")
     except UnauthorizedError:
         console.print("[red]Error: Not authenticated. Please run 'prime login' first.[/red]")
         raise typer.Exit(1)
@@ -1037,6 +1056,19 @@ def list_images(
 def _looks_like_registry_host(value: str) -> bool:
     # Docker treats localhost as a registry host even without a dot or port.
     return "." in value or ":" in value or value == "localhost"
+
+
+def _parse_platform_image_reference(image_reference: str) -> tuple[str, str]:
+    """Parse an org-less platform image reference, preserving name namespaces."""
+    if ":" not in image_reference:
+        console.print("[red]Error: Image reference must include a tag (e.g., ubuntu:22.04)[/red]")
+        raise typer.Exit(1)
+
+    image_name, image_tag = image_reference.rsplit(":", 1)
+    if not image_name or not image_tag:
+        console.print("[red]Error: Platform image reference must use image:tag[/red]")
+        raise typer.Exit(1)
+    return image_name, image_tag
 
 
 def _parse_mutable_image_reference(image_reference: str) -> tuple[str, str, Optional[str]]:

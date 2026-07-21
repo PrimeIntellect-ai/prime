@@ -1077,98 +1077,55 @@ def delete(
         raise typer.Exit(1)
 
 
-@app.command("get-egress-policy", no_args_is_help=True)
-def get_egress_policy(sandbox_id: str) -> None:
-    """Get the desired and applied egress policy of a VM sandbox"""
-    try:
-        base_client = APIClient()
-        sandbox_client = SandboxClient(base_client)
-
-        with console.status("[bold blue]Fetching egress policy...", spinner="dots"):
-            status = sandbox_client.get_egress_policy(sandbox_id)
-
-        _print_egress_policy_status(sandbox_id, status)
-
-    except typer.Exit:
-        raise
-    except UnauthorizedError as e:
-        console.print(f"[red]Unauthorized:[/red] {str(e)}")
-        raise typer.Exit(1)
-    except APIError as e:
-        console.print(f"[red]Error:[/red] {escape(str(e))}")
-        raise typer.Exit(1)
-    except Exception as e:
-        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
-        raise typer.Exit(1)
-
-
-@app.command("update-egress-policy", no_args_is_help=True)
-def update_egress_policy(
+@app.command("network", no_args_is_help=True)
+def network(
     sandbox_id: str,
-    allow: Optional[List[str]] = typer.Option(
+    allow: Optional[str] = typer.Option(
         None,
         "--allow",
         help=(
-            "Repeatable. Replace the policy with an allowlist of these "
-            "domains/IPv4 CIDRs. Mutually exclusive with --deny/--allow-all/--deny-all."
+            "Replace the allowed destinations with a comma-separated list of "
+            "domains/IPv4 CIDRs. Use '*' to allow all."
         ),
     ),
-    deny: Optional[List[str]] = typer.Option(
+    deny: Optional[str] = typer.Option(
         None,
         "--deny",
         help=(
-            "Repeatable. Replace the policy with a denylist of these "
-            "domains/IPv4 CIDRs. Mutually exclusive with --allow/--allow-all/--deny-all."
+            "Replace the denied destinations with a comma-separated list of "
+            "domains/IPv4 CIDRs. Use '*' to deny all."
         ),
     ),
-    allow_all: bool = typer.Option(
-        False,
-        "--allow-all",
-        help="Restore allow-all egress (sends an empty denylist).",
-    ),
-    deny_all: bool = typer.Option(
-        False,
-        "--deny-all",
-        help="Deny all egress (sends an empty allowlist).",
-    ),
 ) -> None:
-    """Replace the egress policy of a running VM sandbox (full replacement)"""
-    selections = [
-        allow is not None,
-        deny is not None,
-        allow_all,
-        deny_all,
-    ]
-    if sum(selections) != 1:
-        console.print(
-            "[red]Error:[/red] provide exactly one of --allow, --deny, --allow-all, or --deny-all"
-        )
+    """Show or replace the network access rules of a VM sandbox."""
+    selections = [allow is not None, deny is not None]
+    if sum(selections) > 1:
+        console.print("[red]Error:[/red] provide at most one of --allow or --deny")
         raise typer.Exit(1)
-
-    allowlist: Optional[List[str]] = None
-    denylist: Optional[List[str]] = None
-    if allow is not None:
-        allowlist = list(allow)
-    elif deny is not None:
-        denylist = list(deny)
-    elif deny_all:
-        allowlist = []
-    else:  # allow_all
-        denylist = []
 
     try:
         base_client = APIClient()
         sandbox_client = SandboxClient(base_client)
 
-        with console.status("[bold blue]Replacing egress policy...", spinner="dots"):
-            status = sandbox_client.update_egress_policy(
-                sandbox_id, allowlist=allowlist, denylist=denylist
+        if not any(selections):
+            with console.status("[bold blue]Fetching network rules...", spinner="dots"):
+                status = sandbox_client.get_network(sandbox_id)
+        else:
+            allow_entries = (
+                _parse_network_destinations(allow, "--allow") if allow is not None else None
             )
+            deny_entries = _parse_network_destinations(deny, "--deny") if deny is not None else None
+            with console.status("[bold blue]Updating network rules...", spinner="dots"):
+                status = sandbox_client.set_network(
+                    sandbox_id,
+                    allow=allow_entries,
+                    deny=deny_entries,
+                )
 
-        _print_egress_policy_status(sandbox_id, status)
+        _print_network_status(sandbox_id, status)
         if not status.applied:
             console.print(
-                "[yellow]The policy is persisted but not yet applied on the node; "
+                "[yellow]The network rules are saved but not yet active on the node; "
                 "it will be retried automatically.[/yellow]"
             )
 
@@ -1188,24 +1145,36 @@ def update_egress_policy(
         raise typer.Exit(1)
 
 
-def _print_egress_policy_status(sandbox_id: str, status: "EgressPolicyStatus") -> None:
-    table = Table(title=f"Egress Policy for {sandbox_id}")
+def _parse_network_destinations(value: str, option: str) -> List[str]:
+    entries = [entry.strip() for entry in value.split(",")]
+    if not entries or any(not entry for entry in entries):
+        raise ValueError(f"{option} requires a comma-separated list of destinations")
+    return entries
+
+
+def _print_network_status(sandbox_id: str, status: "EgressPolicyStatus") -> None:
+    table = Table(title=f"Network Access for {sandbox_id}")
     table.add_column("Field", style="cyan")
     table.add_column("Value")
 
     if status.policy.allowlist is not None:
         entries = status.policy.allowlist
-        table.add_row("Mode", "Allowlist")
-        table.add_row("Entries", ", ".join(entries) if entries else "(deny all)")
+        table.add_row("Mode", "Allow" if entries else "Deny all")
+        if entries:
+            table.add_row("Destinations", ", ".join(entries))
     elif status.policy.denylist is not None:
         entries = status.policy.denylist
-        table.add_row("Mode", "Denylist")
-        table.add_row("Entries", ", ".join(entries) if entries else "(allow all)")
+        table.add_row("Mode", "Deny" if entries else "Allow all")
+        if entries:
+            table.add_row("Destinations", ", ".join(entries))
     else:
-        table.add_row("Mode", "None (allow all)")
+        table.add_row("Mode", "Allow all")
 
     table.add_row("Desired Generation", str(status.generation))
-    table.add_row("Applied Generation", str(status.applied_generation))
+    table.add_row(
+        "Applied Generation",
+        str(status.applied_generation) if status.applied_generation >= 0 else "Not applied",
+    )
     table.add_row(
         "Applied",
         Text("Yes", style="green") if status.applied else Text("No", style="yellow"),

@@ -32,6 +32,182 @@ def _fake_sandbox(**overrides: Any) -> SimpleNamespace:
     return SimpleNamespace(**base)
 
 
+def _network_status(
+    *,
+    allowlist: list[str] | None = None,
+    denylist: list[str] | None = None,
+    applied: bool = True,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        policy=SimpleNamespace(allowlist=allowlist, denylist=denylist),
+        generation=2,
+        applied_generation=2 if applied else -1,
+        applied=applied,
+    )
+
+
+def _configure_cli(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PRIME_API_KEY", "dummy")
+    monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
+
+
+def test_sandbox_network_without_flags_shows_current_rules(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_cli(monkeypatch)
+    calls: list[str] = []
+
+    def mock_get_network(self: Any, sandbox_id: str) -> SimpleNamespace:
+        calls.append(sandbox_id)
+        return _network_status(denylist=[])
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.get_network", mock_get_network)
+
+    result = runner.invoke(app, ["sandbox", "network", "sbx-1"])
+
+    output = strip_ansi(result.output)
+    assert result.exit_code == 0, result.output
+    assert calls == ["sbx-1"]
+    assert "Network Access for sbx-1" in output
+    assert "Allow all" in output
+
+
+def test_sandbox_network_shows_when_no_generation_is_applied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_cli(monkeypatch)
+
+    def mock_get_network(self: Any, sandbox_id: str) -> SimpleNamespace:
+        return _network_status(denylist=[], applied=False)
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.get_network", mock_get_network)
+
+    result = runner.invoke(app, ["sandbox", "network", "sbx-1"])
+
+    output = strip_ansi(result.output)
+    assert result.exit_code == 0, result.output
+    assert "Not applied" in output
+    assert "No" in output
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected"),
+    [
+        (
+            ["--allow", "api.example.com, 10.0.0.0/8"],
+            {
+                "allow": ["api.example.com", "10.0.0.0/8"],
+                "deny": None,
+            },
+        ),
+        (
+            ["--deny", "ads.example.com,192.0.2.0/24"],
+            {
+                "allow": None,
+                "deny": ["ads.example.com", "192.0.2.0/24"],
+            },
+        ),
+        (
+            ["--allow", "*"],
+            {
+                "allow": ["*"],
+                "deny": None,
+            },
+        ),
+        (
+            ["--deny", "*"],
+            {
+                "allow": None,
+                "deny": ["*"],
+            },
+        ),
+    ],
+)
+def test_sandbox_network_flags_replace_rules(
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: list[str],
+    expected: dict[str, Any],
+) -> None:
+    _configure_cli(monkeypatch)
+    captured: dict[str, Any] = {}
+
+    def mock_set_network(self: Any, sandbox_id: str, **kwargs: Any) -> SimpleNamespace:
+        captured["sandbox_id"] = sandbox_id
+        captured.update(kwargs)
+        return _network_status(denylist=[])
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.set_network", mock_set_network)
+
+    result = runner.invoke(app, ["sandbox", "network", "sbx-1", *arguments])
+
+    assert result.exit_code == 0, result.output
+    assert captured == {"sandbox_id": "sbx-1", **expected}
+
+
+def test_sandbox_network_rejects_multiple_modes(monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_cli(monkeypatch)
+
+    result = runner.invoke(
+        app,
+        [
+            "sandbox",
+            "network",
+            "sbx-1",
+            "--allow",
+            "api.example.com",
+            "--deny",
+            "ads.example.com",
+        ],
+    )
+
+    output = strip_ansi(result.output)
+    assert result.exit_code == 1
+    assert "provide at most one of" in output
+
+
+def test_sandbox_network_replaces_instead_of_accumulating(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_cli(monkeypatch)
+    calls: list[dict[str, Any]] = []
+
+    def mock_set_network(self: Any, sandbox_id: str, **kwargs: Any) -> SimpleNamespace:
+        calls.append({"sandbox_id": sandbox_id, **kwargs})
+        return _network_status(allowlist=kwargs["allow"])
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.set_network", mock_set_network)
+
+    first = runner.invoke(
+        app,
+        ["sandbox", "network", "sbx-1", "--allow", "example.com"],
+    )
+    second = runner.invoke(
+        app,
+        ["sandbox", "network", "sbx-1", "--allow", "google.com"],
+    )
+
+    assert first.exit_code == 0, first.output
+    assert second.exit_code == 0, second.output
+    assert calls == [
+        {"sandbox_id": "sbx-1", "allow": ["example.com"], "deny": None},
+        {"sandbox_id": "sbx-1", "allow": ["google.com"], "deny": None},
+    ]
+
+
+def test_sandbox_network_rejects_empty_comma_separated_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_cli(monkeypatch)
+
+    result = runner.invoke(
+        app,
+        ["sandbox", "network", "sbx-1", "--allow", "example.com,,google.com"],
+    )
+
+    assert result.exit_code == 1
+    assert "comma-separated list" in strip_ansi(result.output)
+
+
 def test_sandbox_create_with_gpu_options(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PRIME_API_KEY", "dummy")
     monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")

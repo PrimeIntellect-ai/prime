@@ -1,5 +1,8 @@
 """Tests for the egress policy SDK surface."""
 
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 from pydantic import ValidationError
 
@@ -10,6 +13,29 @@ from prime_sandboxes.models import (
     UpdateSandboxRequest,
     validate_egress_lists,
 )
+from prime_sandboxes.sandbox import AsyncSandboxClient, SandboxClient
+
+
+def _policy_response():
+    return {
+        "policy": {"allowlist": None, "denylist": []},
+        "generation": 2,
+        "applied_generation": 2,
+        "applied": True,
+    }
+
+
+def _sync_client():
+    client = object.__new__(SandboxClient)
+    client.client = MagicMock()
+    client.client.request.return_value = _policy_response()
+    return client
+
+
+def _async_client():
+    client = object.__new__(AsyncSandboxClient)
+    client.client = SimpleNamespace(request=AsyncMock(return_value=_policy_response()))
+    return client
 
 
 class TestCreateSandboxRequestNetworkLists:
@@ -119,6 +145,98 @@ class TestEgressPolicyStatus:
         assert status.policy.allowlist == ["api.example.com"]
         assert status.generation == 3
         assert status.applied
+
+    def test_parses_unapplied_generation(self):
+        status = EgressPolicyStatus.model_validate(
+            {
+                "policy": {"allowlist": None, "denylist": []},
+                "generation": 0,
+                "applied_generation": -1,
+                "applied": False,
+            }
+        )
+
+        assert status.generation == 0
+        assert status.applied_generation == -1
+        assert not status.applied
+
+
+class TestSandboxNetworkMethods:
+    def test_get_network(self):
+        client = _sync_client()
+
+        status = client.get_network("sbx-1")
+
+        client.client.request.assert_called_once_with("GET", "/sandbox/sbx-1/egress-policy")
+        assert status.applied
+
+    @pytest.mark.parametrize(
+        ("kwargs", "payload"),
+        [
+            (
+                {"allow": ["api.example.com"]},
+                {"allowlist": ["api.example.com"], "denylist": None},
+            ),
+            (
+                {"deny": ["ads.example.com"]},
+                {"allowlist": None, "denylist": ["ads.example.com"]},
+            ),
+            ({"allow": ["*"]}, {"allowlist": None, "denylist": []}),
+            ({"deny": ["*"]}, {"allowlist": [], "denylist": None}),
+        ],
+    )
+    def test_set_network_maps_explicit_modes(self, kwargs, payload):
+        client = _sync_client()
+
+        status = client.set_network("sbx-1", **kwargs)
+
+        client.client.request.assert_called_once_with(
+            "PUT", "/sandbox/sbx-1/egress-policy", json=payload
+        )
+        assert status.applied
+
+    @pytest.mark.parametrize(
+        ("kwargs", "message"),
+        [
+            ({}, "exactly one"),
+            (
+                {"allow": ["api.example.com"], "deny": ["ads.example.com"]},
+                "exactly one",
+            ),
+            ({"allow": []}, "at least one destination"),
+            ({"deny": []}, "at least one destination"),
+            ({"allow": ["*", "api.example.com"]}, "only destination"),
+            ({"deny": ["ads.example.com", "*"]}, "only destination"),
+        ],
+    )
+    def test_set_network_rejects_invalid_replacements(self, kwargs, message):
+        client = _sync_client()
+
+        with pytest.raises(ValueError, match=message):
+            client.set_network("sbx-1", **kwargs)
+
+        client.client.request.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_async_methods_use_same_interface(self):
+        client = _async_client()
+
+        read_status = await client.get_network("sbx-1")
+        write_status = await client.set_network("sbx-1", allow=["api.example.com"])
+
+        assert read_status.applied
+        assert write_status.applied
+        assert client.client.request.await_args_list[0].args == (
+            "GET",
+            "/sandbox/sbx-1/egress-policy",
+        )
+        assert client.client.request.await_args_list[1].args == (
+            "PUT",
+            "/sandbox/sbx-1/egress-policy",
+        )
+        assert client.client.request.await_args_list[1].kwargs == {
+            "json": {"allowlist": ["api.example.com"], "denylist": None}
+        }
 
 
 class TestValidateEgressLists:

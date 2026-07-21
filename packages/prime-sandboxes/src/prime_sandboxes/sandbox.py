@@ -75,6 +75,31 @@ GATEWAY_CONNECTION_RETRYABLE_EXCEPTIONS = (
     httpx.PoolTimeout,  # No connection available in pool
 )
 
+
+def _network_update_payload(
+    allow: Optional[List[str]], deny: Optional[List[str]]
+) -> Dict[str, Optional[List[str]]]:
+    if (allow is None) == (deny is None):
+        raise ValueError("exactly one of allow or deny must be provided")
+
+    entries = list(allow if allow is not None else deny or [])
+    if not entries:
+        raise ValueError("allow or deny must contain at least one destination")
+    if "*" in entries:
+        if entries != ["*"]:
+            raise ValueError("'*' must be the only destination")
+        return (
+            {"allowlist": None, "denylist": []}
+            if allow is not None
+            else {"allowlist": [], "denylist": None}
+        )
+
+    allowlist = entries if allow is not None else None
+    denylist = entries if deny is not None else None
+    validate_egress_lists(allowlist, denylist)
+    return {"allowlist": allowlist, "denylist": denylist}
+
+
 # Response-read failures: the server may have already processed the request
 # (TCP connection dropped mid-response body). Only safe to retry on idempotent
 # methods (GET/HEAD/PUT/DELETE), where a duplicate request is a no-op.
@@ -735,34 +760,31 @@ class SandboxClient:
         response = self.client.request("DELETE", f"/sandbox/{sandbox_id}")
         return response
 
-    def get_egress_policy(self, sandbox_id: str) -> EgressPolicyStatus:
-        """Get the desired and applied egress policy of a VM sandbox."""
+    def get_network(self, sandbox_id: str) -> EgressPolicyStatus:
+        """Get the desired and applied network rules of a VM sandbox."""
         response = self.client.request("GET", f"/sandbox/{sandbox_id}/egress-policy")
         return EgressPolicyStatus.model_validate(response)
 
-    def update_egress_policy(
+    def set_network(
         self,
         sandbox_id: str,
         *,
-        allowlist: Optional[List[str]] = None,
-        denylist: Optional[List[str]] = None,
+        allow: Optional[List[str]] = None,
+        deny: Optional[List[str]] = None,
     ) -> EgressPolicyStatus:
-        """Replace the egress policy of a running VM sandbox.
+        """Replace the network rules of a running VM sandbox.
 
-        Exactly one of allowlist or denylist must be provided; the replacement
-        is complete, never a merge. An empty allowlist denies all egress; an
-        empty denylist restores allow-all. New connections follow the
-        replacement once ``applied`` is true; established flows are not
-        revoked.
+        Exactly one of ``allow`` or ``deny`` must be provided. Each call is a
+        complete replacement, never a merge; use ``["*"]`` to allow or deny
+        all destinations. New connections follow the replacement once
+        ``applied`` is true; established flows are not revoked.
         """
-        if (allowlist is None) == (denylist is None):
-            raise ValueError("exactly one of allowlist or denylist must be provided")
-        validate_egress_lists(allowlist, denylist)
+        payload = _network_update_payload(allow, deny)
 
         response = self.client.request(
             "PUT",
             f"/sandbox/{sandbox_id}/egress-policy",
-            json={"allowlist": allowlist, "denylist": denylist},
+            json=payload,
         )
         return EgressPolicyStatus.model_validate(response)
 
@@ -1843,34 +1865,31 @@ class AsyncSandboxClient:
         response = await self.client.request("DELETE", f"/sandbox/{sandbox_id}")
         return response
 
-    async def get_egress_policy(self, sandbox_id: str) -> EgressPolicyStatus:
-        """Get the desired and applied egress policy of a VM sandbox."""
+    async def get_network(self, sandbox_id: str) -> EgressPolicyStatus:
+        """Get the desired and applied network rules of a VM sandbox."""
         response = await self.client.request("GET", f"/sandbox/{sandbox_id}/egress-policy")
         return EgressPolicyStatus.model_validate(response)
 
-    async def update_egress_policy(
+    async def set_network(
         self,
         sandbox_id: str,
         *,
-        allowlist: Optional[List[str]] = None,
-        denylist: Optional[List[str]] = None,
+        allow: Optional[List[str]] = None,
+        deny: Optional[List[str]] = None,
     ) -> EgressPolicyStatus:
-        """Replace the egress policy of a running VM sandbox.
+        """Replace the network rules of a running VM sandbox.
 
-        Exactly one of allowlist or denylist must be provided; the replacement
-        is complete, never a merge. An empty allowlist denies all egress; an
-        empty denylist restores allow-all. New connections follow the
-        replacement once ``applied`` is true; established flows are not
-        revoked.
+        Exactly one of ``allow`` or ``deny`` must be provided. Each call is a
+        complete replacement, never a merge; use ``["*"]`` to allow or deny
+        all destinations. New connections follow the replacement once
+        ``applied`` is true; established flows are not revoked.
         """
-        if (allowlist is None) == (denylist is None):
-            raise ValueError("exactly one of allowlist or denylist must be provided")
-        validate_egress_lists(allowlist, denylist)
+        payload = _network_update_payload(allow, deny)
 
         response = await self.client.request(
             "PUT",
             f"/sandbox/{sandbox_id}/egress-policy",
-            json={"allowlist": allowlist, "denylist": denylist},
+            json=payload,
         )
         return EgressPolicyStatus.model_validate(response)
 

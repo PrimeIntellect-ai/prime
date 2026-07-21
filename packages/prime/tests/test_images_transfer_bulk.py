@@ -186,6 +186,21 @@ def test_derive_destination_matches_server_rules():
         derive_transfer_destination("a/app:v1,b/app:v2")
 
 
+def test_derive_destination_keeps_namespace_for_platform_images():
+    # Platform images are stored under their Docker Hub path: only the
+    # registry host is stripped, the namespace stays in the name.
+    assert derive_transfer_destination("docker.io/ns/app:v1", keep_namespace=True) == (
+        "ns/app",
+        "v1",
+    )
+    assert derive_transfer_destination("ns/app", keep_namespace=True) == ("ns/app", "latest")
+    assert derive_transfer_destination("ubuntu", keep_namespace=True) == ("ubuntu", "latest")
+    assert derive_transfer_destination("ghcr.io/Org/My-App:v1", keep_namespace=True) == (
+        "org/my-app",
+        "v1",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Manifest mode
 # ---------------------------------------------------------------------------
@@ -700,6 +715,118 @@ def test_platform_image_rejects_private(tmp_path, fake_api):
     assert result.exit_code == 1
     assert "Platform images must be public" in result.output
     assert fake_api.post_build_count() == 0
+
+
+def test_platform_image_derives_namespaced_destinations(tmp_path, fake_api):
+    manifest = tmp_path / "transfers.jsonl"
+    # Same trailing name from two namespaces: distinct destinations in
+    # platform mode, so no duplicate-destination problem.
+    _write_manifest(
+        manifest,
+        [{"source": "docker.io/a/app:v2"}, {"source": "b/app:v2"}],
+    )
+    result = runner.invoke(
+        app,
+        ["images", "transfer-bulk", "--manifest", str(manifest), "--platform-image", "--dry-run"],
+        env=TEST_ENV,
+    )
+    assert result.exit_code == 0, result.output
+    assert "a/app:v2" in result.output
+    assert "b/app:v2" in result.output
+
+    result = runner.invoke(
+        app,
+        ["images", "transfer-bulk", "--manifest", str(manifest), "--platform-image"],
+        env=TEST_ENV,
+    )
+    assert result.exit_code == 0, result.output
+    assert fake_api.post_build_count() == 2
+    # Derived destinations are display-only; the server derives its own.
+    assert all("image_name" not in p for p in fake_api.payloads)
+
+
+def test_platform_image_accepts_namespaced_destination_override(tmp_path, fake_api):
+    manifest = tmp_path / "transfers.jsonl"
+    _write_manifest(
+        manifest,
+        [{"source": "ghcr.io/org/app:v1", "image": "ns/app:v1"}],
+    )
+    result = runner.invoke(
+        app,
+        ["images", "transfer-bulk", "--manifest", str(manifest), "--platform-image"],
+        env=TEST_ENV,
+    )
+    assert result.exit_code == 0, result.output
+    assert fake_api.payloads[0]["image_name"] == "ns/app"
+    assert fake_api.payloads[0]["image_tag"] == "v1"
+    assert fake_api.payloads[0]["owner_scope"] == "platform"
+
+
+def test_platform_image_rejects_multi_level_destination_override(tmp_path, fake_api):
+    manifest = tmp_path / "transfers.jsonl"
+    _write_manifest(
+        manifest,
+        [{"source": "ghcr.io/org/app:v1", "image": "a/b/app:v1"}],
+    )
+    result = runner.invoke(
+        app,
+        ["images", "transfer-bulk", "--manifest", str(manifest), "--platform-image"],
+        env=TEST_ENV,
+    )
+    assert result.exit_code == 1
+    assert "invalid destination 'a/b/app:v1'" in result.output
+    assert "use 'name:tag' or a namespaced 'ns/name:tag'" in result.output
+    assert fake_api.post_build_count() == 0
+
+
+def test_namespaced_destination_override_still_rejected_without_platform_image(tmp_path, fake_api):
+    manifest = tmp_path / "transfers.jsonl"
+    _write_manifest(
+        manifest,
+        [{"source": "ghcr.io/org/app:v1", "image": "ns/app:v1"}],
+    )
+    result = runner.invoke(
+        app, ["images", "transfer-bulk", "--manifest", str(manifest)], env=TEST_ENV
+    )
+    assert result.exit_code == 1
+    assert "invalid destination 'ns/app:v1'" in result.output
+    assert "use simple names like 'myapp:v1'" in result.output
+    assert fake_api.post_build_count() == 0
+
+
+def test_platform_image_keeps_namespace_in_harbor_and_hf_modes(tmp_path, fake_api, monkeypatch):
+    root = tmp_path / "tasks"
+    _make_harbor_task(root, "task-a", docker_image="ghcr.io/org/img-a:v1")
+    result = runner.invoke(
+        app,
+        ["images", "transfer-bulk", "--harbor", str(root), "--platform-image", "--dry-run"],
+        env=TEST_ENV,
+    )
+    assert result.exit_code == 0, result.output
+    assert "org/img-a:v1" in result.output
+
+    _fake_hf(
+        monkeypatch,
+        info=HF_INFO_ONE_CONFIG,
+        pages={0: ["docker.io/ns/img-b:v1"]},
+        total=1,
+    )
+    result = runner.invoke(
+        app,
+        [
+            "images",
+            "transfer-bulk",
+            "--hf",
+            "org/ds",
+            "--column",
+            "docker_image",
+            "--platform-image",
+            "--dry-run",
+        ],
+        env=TEST_ENV,
+    )
+    assert result.exit_code == 0, result.output
+    assert "ns/img-b:v1" in result.output
 
 
 def test_platform_image_ignores_team_context(tmp_path, fake_api):

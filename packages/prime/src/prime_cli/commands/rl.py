@@ -1726,6 +1726,48 @@ def list_models(
         raise typer.Exit(1)
 
 
+@app.command("available-gpu-types", rich_help_panel="Commands")
+def available_gpu_types(
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """List GPU types you can dispatch a full-FT run on.
+
+    Uses the same principal collapse as dispatch: your active team from
+    `prime config` when set, otherwise personal allocations. Pass any of
+    these to `prime train run --gpu-type <value>` to steer dispatch.
+    """
+    from ..api.training import HostedTrainingClient
+
+    validate_output_format(output, console)
+
+    try:
+        api_client = APIClient()
+        client = HostedTrainingClient(api_client)
+        config = Config()
+        response = client.list_available_gpu_types(team_id=config.team_id)
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+    if output == "json":
+        output_data_as_json({"gpuTypes": response.gpu_types}, console)
+        return
+
+    if not response.gpu_types:
+        console.print(
+            "[yellow]No GPU types available.[/yellow] "
+            "Your account has no ClusterAllocation on any live PrimeCluster - "
+            "ask an admin to assign one before dispatching a full-FT run."
+        )
+        return
+
+    table = Table(title="Available GPU types (full-FT dispatch)")
+    table.add_column("gpu_type", style="cyan")
+    for gpu_type in response.gpu_types:
+        table.add_row(gpu_type)
+    console.print(table)
+
+
 def _prompt_required_text(label: str, help_text: str, empty_error: str) -> str:
     console.print(f"\n[bold]{label}[/bold] [dim](required)[/dim]")
     console.print(f"[dim]{help_text}[/dim]")

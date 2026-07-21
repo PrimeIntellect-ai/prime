@@ -6,7 +6,7 @@ own helm release on a registered PrimeCluster. Auth is the standard API
 token; admin role is gated server-side.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -18,14 +18,6 @@ class HostedTrainingRunResponse(BaseModel):
 
     run_id: str = Field(..., alias="runId")
     token_value: str = Field(..., alias="tokenValue")
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class AvailableGpuTypesResponse(BaseModel):
-    """Response from GET /v1/training/available-gpu-types."""
-
-    gpu_types: List[str] = Field(default_factory=list, alias="gpuTypes")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -58,18 +50,6 @@ class HostedTrainingClient:
         """
         response = self.client.request("DELETE", f"/training/runs/{run_id}")
         return response if isinstance(response, dict) else {"runId": run_id}
-
-    def list_available_gpu_types(self, team_id: Optional[str] = None) -> AvailableGpuTypesResponse:
-        """GET /v1/training/available-gpu-types. Distinct GPU types the
-        caller could dispatch a dedicated FFT run on. Same principal
-        collapse as the dispatch picker: `team_id` wins when set,
-        otherwise the caller's personal allocations.
-        """
-        params: Dict[str, Any] = {}
-        if team_id:
-            params["team_id"] = team_id
-        response = self.client.get("/training/available-gpu-types", params=params)
-        return AvailableGpuTypesResponse.model_validate(response)
 
 
 def build_payload_from_toml(

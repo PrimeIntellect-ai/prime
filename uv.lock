@@ -12,10 +12,12 @@ exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for 
 exclude-newer-span = "P7D"
 
 [options.exclude-newer-package]
-prime-tunnel = false
-prime-sandboxes = false
 verifiers = false
 tasksets = false
+prime-pydantic-config = "2099-12-31T23:00:00Z"
+prime-tunnel = false
+prime-sandboxes = false
+renderers = "2099-12-31T23:00:00Z"
 harnesses = false
 prime-evals = false
 prime = false

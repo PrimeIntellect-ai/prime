@@ -581,6 +581,9 @@ def should_include_file_in_archive(file_path: Path, base_path: Path) -> bool:
     if file_path.is_symlink():
         return False
 
+    # Hardlinks are fine to include: _add_file_to_archive stores them as
+    # regular file content so pull/install safe-extract never sees LNKTYPE.
+
     rel_path = file_path.relative_to(base_path)
 
     # Skip hidden files
@@ -663,6 +666,25 @@ def _collect_archive_files(env_path: Path) -> List[Path]:
                 maybe_add_file(root_path / filename)
 
     return [files_by_rel_path[rel_path] for rel_path in sorted(files_by_rel_path)]
+
+
+def _add_file_to_archive(tar: tarfile.TarFile, file_path: Path, arcname: str) -> None:
+    """Add a file as REGTYPE content (never symlink/hardlink members).
+
+    ``tar.add()`` records a hardlink (``LNKTYPE``) when another file with the
+    same inode is already in the archive. ``_safe_tar_extract`` rejects
+    hardlinks, so push must always store byte content as a regular file —
+    same rationale as skipping symlinks at collect time.
+    """
+    if file_path.is_symlink():
+        return
+
+    info = tar.gettarinfo(str(file_path), arcname=arcname)
+    info.type = tarfile.REGTYPE
+    info.linkname = ""
+    info.size = file_path.stat().st_size
+    with open(file_path, "rb") as handle:
+        tar.addfile(info, handle)
 
 
 def compute_content_hash(env_path: Path) -> str:
@@ -1419,7 +1441,7 @@ def push(
                     with tarfile.open(tmp.name, "w:gz") as tar:
                         for file_path in _collect_archive_files(env_path):
                             arcname = file_path.relative_to(env_path)
-                            tar.add(file_path, arcname=str(arcname))
+                            _add_file_to_archive(tar, file_path, str(arcname))
 
                     # Check tarball size
                     tarball_size = Path(tmp.name).stat().st_size
@@ -1833,7 +1855,11 @@ def pull(
 
                 try:
                     with tarfile.open(tmp.name, "r:gz") as tar:
-                        tar.extractall(target_dir)
+                        # Use path-traversal / symlink-safe extract (same as install)
+                        _safe_tar_extract(tar, Path(target_dir))
+                except ValueError as e:
+                    console.print(f"[red]Failed to extract archive: {e}[/red]")
+                    raise typer.Exit(1)
                 except tarfile.TarError as e:
                     console.print(f"[red]Failed to extract archive: {e}[/red]")
                     raise typer.Exit(1)

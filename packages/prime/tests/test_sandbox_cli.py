@@ -347,6 +347,95 @@ def test_sandbox_create_with_gpu_options(monkeypatch: pytest.MonkeyPatch) -> Non
     assert captured["request"].vm is True
 
 
+def test_sandbox_create_vm_forwards_secrets_without_displaying_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_cli(monkeypatch)
+    captured: dict[str, Any] = {}
+
+    def mock_create(self: Any, request: Any) -> Any:
+        captured["request"] = request
+        return SimpleNamespace(id="sbx-secret-123")
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.create", mock_create)
+
+    result = runner.invoke(
+        app,
+        [
+            "sandbox",
+            "create",
+            "python:3.11-slim",
+            "--vm",
+            "--env",
+            "PUBLIC_VALUE=hello",
+            "--secret",
+            "API_TOKEN=super-secret-value",
+            "--yes",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["request"].environment_vars == {"PUBLIC_VALUE": "hello"}
+    assert captured["request"].secrets == {"API_TOKEN": "super-secret-value"}
+    assert "super-secret-value" not in strip_ansi(result.output)
+
+
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        (["--env", "TOKEN=public", "--secret", "TOKEN=secret"], "cannot be both"),
+        (["--secret", "TOKEN=one", "--secret", "TOKEN=two"], "provided more than once"),
+    ],
+)
+def test_sandbox_create_rejects_duplicate_environment_keys_without_api_call(
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: list[str],
+    message: str,
+) -> None:
+    _configure_cli(monkeypatch)
+    called = False
+
+    def mock_create(self: Any, request: Any) -> Any:
+        nonlocal called
+        called = True
+        return SimpleNamespace(id="unexpected")
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.create", mock_create)
+
+    result = runner.invoke(
+        app,
+        ["sandbox", "create", "python:3.11-slim", "--vm", *arguments, "--yes"],
+    )
+
+    assert result.exit_code == 1
+    assert message in strip_ansi(result.output)
+    assert not called
+
+
+def test_sandbox_create_sanitizes_vm_secret_validation_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_cli(monkeypatch)
+
+    result = runner.invoke(
+        app,
+        [
+            "sandbox",
+            "create",
+            "python:3.11-slim",
+            "--vm",
+            "--secret",
+            "SANDBOX_ID=must-not-leak",
+            "--yes",
+        ],
+    )
+
+    output = strip_ansi(result.output)
+    assert result.exit_code == 1
+    assert "reserved" in output
+    assert "must-not-leak" not in output
+
+
 def test_sandbox_create_gpu_without_docker_image(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PRIME_API_KEY", "dummy")
     monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")

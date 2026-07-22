@@ -1,5 +1,7 @@
 """Pydantic models for Prime Sandboxes SDK."""
 
+import json
+import re
 from datetime import datetime
 from enum import Enum
 from typing import Annotated, Any, Dict, List, Literal, Optional, Union
@@ -20,6 +22,105 @@ class SandboxStatus(str, Enum):
 
 
 MAX_EGRESS_POLICY_ENTRIES = 256
+
+VM_ENV_MAX_KEY_BYTES = 128
+VM_ENV_MAX_VALUE_BYTES = 16 * 1024
+VM_ENV_MAX_TOTAL_BYTES = 32 * 1024
+VM_ENV_MAX_VARIABLES = 256
+VM_SECRETS_MAX_PLAINTEXT_BYTES = 32 * 1024
+
+_VM_ENV_KEY_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_VM_ENV_RESERVED_KEYS = frozenset(
+    {
+        "SANDBOX_ID",
+        "SANDBOX_NAME",
+        "DISK_MOUNT_PATH",
+        "SANDBOX_IDLE_TIMEOUT_SECONDS",
+        "PRIME_GUESTBRIDGE_ADDRESS",
+    }
+)
+
+
+def _utf8_size(value: str, *, description: str) -> int:
+    try:
+        return len(value.encode("utf-8"))
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{description} must be valid UTF-8") from exc
+
+
+def _validate_vm_environment_map(name: str, values: Optional[Dict[str, str]]) -> int:
+    if not values:
+        return 0
+    if len(values) > VM_ENV_MAX_VARIABLES:
+        raise ValueError(
+            f"{name} contains {len(values)} variables; maximum is {VM_ENV_MAX_VARIABLES}"
+        )
+
+    total_bytes = 0
+    for key, value in values.items():
+        key_bytes = _utf8_size(key, description=f"{name} key")
+        if key_bytes > VM_ENV_MAX_KEY_BYTES:
+            raise ValueError(f"{name} key {key!r} exceeds the {VM_ENV_MAX_KEY_BYTES}-byte limit")
+        if not _VM_ENV_KEY_PATTERN.fullmatch(key):
+            raise ValueError(
+                f"{name} key {key!r} is invalid; keys must match {_VM_ENV_KEY_PATTERN.pattern}"
+            )
+        if key in _VM_ENV_RESERVED_KEYS:
+            raise ValueError(f"{name} key {key!r} is reserved by the VM sandbox runtime")
+
+        value_bytes = _utf8_size(value, description=f"{name} value for {key!r}")
+        if value_bytes > VM_ENV_MAX_VALUE_BYTES:
+            raise ValueError(
+                f"{name} value for {key!r} exceeds the {VM_ENV_MAX_VALUE_BYTES}-byte limit"
+            )
+        if "\x00" in value:
+            raise ValueError(f"{name} value for {key!r} must not contain NUL bytes")
+        total_bytes += key_bytes + value_bytes
+
+    if total_bytes > VM_ENV_MAX_TOTAL_BYTES:
+        raise ValueError(f"{name} uses {total_bytes} bytes; maximum is {VM_ENV_MAX_TOTAL_BYTES}")
+    return total_bytes
+
+
+def validate_vm_environment(
+    environment_vars: Optional[Dict[str, str]],
+    secrets: Optional[Dict[str, str]],
+) -> None:
+    """Mirror the VM runtime's environment and secret plaintext contract."""
+    public_bytes = _validate_vm_environment_map("environment_vars", environment_vars)
+    secret_bytes = _validate_vm_environment_map("secrets", secrets)
+
+    public_keys = set(environment_vars or {})
+    duplicate_keys = public_keys.intersection(secrets or {})
+    if duplicate_keys:
+        duplicate = min(duplicate_keys)
+        raise ValueError(
+            f"environment key {duplicate!r} is present in both environment_vars and secrets"
+        )
+
+    variable_count = len(environment_vars or {}) + len(secrets or {})
+    if variable_count > VM_ENV_MAX_VARIABLES:
+        raise ValueError(
+            f"VM environment contains {variable_count} variables; maximum is {VM_ENV_MAX_VARIABLES}"
+        )
+
+    total_bytes = public_bytes + secret_bytes
+    if total_bytes > VM_ENV_MAX_TOTAL_BYTES:
+        raise ValueError(
+            f"combined VM environment uses {total_bytes} bytes; maximum is {VM_ENV_MAX_TOTAL_BYTES}"
+        )
+
+    if secrets:
+        plaintext = json.dumps(
+            secrets,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        if len(plaintext) > VM_SECRETS_MAX_PLAINTEXT_BYTES:
+            raise ValueError(
+                f"serialized VM secrets use {len(plaintext)} bytes; "
+                f"maximum is {VM_SECRETS_MAX_PLAINTEXT_BYTES}"
+            )
 
 
 def _validate_egress_entry(entry: str) -> None:
@@ -239,6 +340,12 @@ class CreateSandboxRequest(BaseModel):
                 "idle_timeout_minutes must be <= timeout_minutes "
                 f"(got idle={self.idle_timeout_minutes}, lifetime={self.timeout_minutes})"
             )
+        return self
+
+    @model_validator(mode="after")
+    def validate_vm_environment_and_secrets(self) -> "CreateSandboxRequest":
+        if self.vm:
+            validate_vm_environment(self.environment_vars, self.secrets)
         return self
 
 

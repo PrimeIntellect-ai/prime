@@ -26,6 +26,7 @@ from prime_sandboxes import (
     SandboxNotRunningError,
     UnauthorizedError,
 )
+from pydantic import ValidationError
 from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
@@ -591,6 +592,12 @@ def create(
                     console.print("[red]Environment variables must be in KEY=VALUE format[/red]")
                     raise typer.Exit(1)
                 key, value = env_var.split("=", 1)
+                if vm and key in env_vars:
+                    console.print(
+                        f"[red]Environment variable {escape(key)!r} was provided "
+                        "more than once[/red]"
+                    )
+                    raise typer.Exit(1)
                 env_vars[key] = value
 
         secrets_vars = {}
@@ -600,7 +607,19 @@ def create(
                     console.print("[red]Secrets must be in KEY=VALUE format[/red]")
                     raise typer.Exit(1)
                 key, value = secret_var.split("=", 1)
+                if vm and key in secrets_vars:
+                    console.print(f"[red]Secret {escape(key)!r} was provided more than once[/red]")
+                    raise typer.Exit(1)
                 secrets_vars[key] = value
+
+        duplicate_keys = set(env_vars).intersection(secrets_vars) if vm else set()
+        if duplicate_keys:
+            duplicate = min(duplicate_keys)
+            console.print(
+                f"[red]Environment key {escape(duplicate)!r} cannot be both "
+                "an environment variable and a secret[/red]"
+            )
+            raise typer.Exit(1)
 
         if gpu_count > 0 and not gpu_type:
             console.print(
@@ -772,6 +791,12 @@ def create(
 
     except typer.Exit:
         raise
+    except ValidationError as e:
+        # Pydantic's full exception includes the rejected input, which may
+        # contain secret values. Render messages only.
+        messages = "; ".join(error["msg"] for error in e.errors(include_url=False))
+        console.print(f"[red]Invalid sandbox configuration:[/red] {escape(messages)}")
+        raise typer.Exit(1)
     except UnauthorizedError as e:
         console.print(f"[red]Unauthorized:[/red] {str(e)}")
         raise typer.Exit(1)

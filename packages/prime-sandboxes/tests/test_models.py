@@ -105,6 +105,75 @@ def test_create_sandbox_request_gpu_type_none_matches_default():
     assert request_none.gpu_type is None
 
 
+def test_vm_sandbox_accepts_environment_variables_and_secrets():
+    request = CreateSandboxRequest(
+        name="vm-sandbox",
+        docker_image="python:3.11-slim",
+        vm=True,
+        environment_vars={"PUBLIC_VALUE": "hello"},
+        secrets={"API_TOKEN": "secret"},
+    )
+
+    assert request.environment_vars == {"PUBLIC_VALUE": "hello"}
+    assert request.secrets == {"API_TOKEN": "secret"}
+
+
+@pytest.mark.parametrize(
+    ("environment_vars", "secrets", "message"),
+    [
+        ({"1INVALID": "value"}, None, "must match"),
+        ({"SANDBOX_ID": "value"}, None, "reserved"),
+        (None, {"TOKEN": "before\x00after"}, "NUL"),
+        ({"TOKEN": "public"}, {"TOKEN": "secret"}, "both"),
+        (None, {"TOKEN": "x" * (16 * 1024 + 1)}, "16384-byte limit"),
+    ],
+)
+def test_vm_sandbox_rejects_invalid_environment_contract(environment_vars, secrets, message):
+    with pytest.raises(ValidationError, match=message):
+        CreateSandboxRequest(
+            name="vm-sandbox",
+            docker_image="python:3.11-slim",
+            vm=True,
+            environment_vars=environment_vars,
+            secrets=secrets,
+        )
+
+
+def test_vm_sandbox_rejects_too_many_combined_variables():
+    with pytest.raises(ValidationError, match="257 variables"):
+        CreateSandboxRequest(
+            name="vm-sandbox",
+            docker_image="python:3.11-slim",
+            vm=True,
+            environment_vars={f"PUBLIC_{index}": "x" for index in range(128)},
+            secrets={f"SECRET_{index}": "x" for index in range(129)},
+        )
+
+
+def test_vm_sandbox_rejects_oversized_serialized_secret_payload():
+    # The key/value total is below 32 KiB, but JSON framing pushes the KMS
+    # plaintext beyond its independent 32 KiB limit.
+    secrets = {f"K{index}": "x" * 155 for index in range(200)}
+
+    with pytest.raises(ValidationError, match="serialized VM secrets"):
+        CreateSandboxRequest(
+            name="vm-sandbox",
+            docker_image="python:3.11-slim",
+            vm=True,
+            secrets=secrets,
+        )
+
+
+def test_container_sandbox_keeps_existing_environment_contract():
+    request = CreateSandboxRequest(
+        name="container-sandbox",
+        docker_image="python:3.11-slim",
+        environment_vars={"container.style.key": "value"},
+    )
+
+    assert request.environment_vars == {"container.style.key": "value"}
+
+
 def test_sandbox_status_enum():
     """Test SandboxStatus enum values"""
     assert SandboxStatus.PENDING == "PENDING"

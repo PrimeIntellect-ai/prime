@@ -425,6 +425,23 @@ class TestAsyncAPIClientRetry:
 
 
 class TestCreateSandboxIdempotencyPayload:
+    def test_vm_create_sends_plaintext_secrets_only_to_platform_api(self):
+        client = SandboxClient(APIClient(api_key="test-key"))
+        recording = RecordingCreateAPIClient()
+        client.client = recording
+        request = CreateSandboxRequest(
+            name="sandbox",
+            docker_image="python:3.11-slim",
+            vm=True,
+            secrets={"TOKEN": "secret"},
+        )
+
+        client.create(request)
+
+        payload = recording.calls[0][2]["json"]
+        assert payload["secrets"] == {"TOKEN": "secret"}
+        assert "encrypted_secrets" not in payload
+
     def test_sync_create_does_not_reuse_generated_idempotency_key_on_request_reuse(self):
         client = SandboxClient(APIClient(api_key="test-key"))
         recording = RecordingCreateAPIClient()

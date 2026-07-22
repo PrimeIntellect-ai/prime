@@ -1,6 +1,8 @@
 """Tests for `prime images update-bulk`."""
 
 import json
+import threading
+import time
 
 import pytest
 from prime_cli.main import app
@@ -63,6 +65,55 @@ def test_update_bulk_applies_manifest(tmp_path, monkeypatch):
     assert captured[0]["json"]["mode"] == "explicit"
     assert len(captured[0]["json"]["updates"]) == 2
     assert "Updated:" in result.output and "Failed:" in result.output
+
+
+def test_update_bulk_dispatches_batches_on_cadence_without_waiting(tmp_path, monkeypatch):
+    request_started_at = []
+    second_request_started = threading.Event()
+    first_request_finished = threading.Event()
+    request_lock = threading.Lock()
+
+    class DummyAPIClient:
+        def request(self, method, path, json=None, params=None):
+            with request_lock:
+                request_number = len(request_started_at) + 1
+                request_started_at.append(time.monotonic())
+
+            if request_number == 1:
+                assert second_request_started.wait(timeout=1.0)
+                first_request_finished.set()
+            else:
+                second_request_started.set()
+
+            return {
+                "success": True,
+                "dryRun": False,
+                "results": [
+                    {"source": update["source"], "success": True} for update in json["updates"]
+                ],
+            }
+
+    monkeypatch.setattr("prime_cli.commands.images_update_bulk.APIClient", DummyAPIClient)
+    monkeypatch.setattr(
+        "prime_cli.commands.images_update_bulk.UPDATE_BULK_DISPATCH_INTERVAL_SECONDS",
+        0.02,
+    )
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+    manifest = _write_manifest(
+        tmp_path,
+        [_rename_line(f"image-{index}", f"renamed-{index}") for index in range(200)],
+    )
+
+    result = runner.invoke(
+        app,
+        ["images", "update-bulk", "--manifest", str(manifest)],
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert len(request_started_at) == 2
+    assert request_started_at[1] - request_started_at[0] >= 0.015
+    assert first_request_finished.is_set()
 
 
 def test_update_bulk_validates_all_lines_before_sending(tmp_path, monkeypatch):

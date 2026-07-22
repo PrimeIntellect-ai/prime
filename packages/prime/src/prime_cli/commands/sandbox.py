@@ -149,6 +149,17 @@ def _format_sandbox_for_list(sandbox: Sandbox) -> Dict[str, Any]:
     }
 
 
+def _network_access_description(
+    allowlist: Optional[List[str]],
+    denylist: Optional[List[str]],
+) -> str:
+    if allowlist is not None:
+        return f"Limited to: {', '.join(allowlist)}" if allowlist else "Blocked"
+    if denylist is not None:
+        return f"Blocked: {', '.join(denylist)}" if denylist else "Unrestricted"
+    return "Unrestricted"
+
+
 def _format_sandbox_for_details(sandbox: Sandbox) -> Dict[str, Any]:
     """Format sandbox data for details display (both table and JSON)"""
     data: Dict[str, Any] = {
@@ -193,7 +204,10 @@ def _format_sandbox_for_details(sandbox: Sandbox) -> Dict[str, Any]:
     if sandbox.secrets:
         data["secrets"] = obfuscate_secrets(sandbox.secrets)
     if sandbox.advanced_configs:
-        data["advanced_configs"] = sandbox.advanced_configs.model_dump()
+        advanced_configs = sandbox.advanced_configs.model_dump()
+        advanced_configs.pop("vmEgressPolicy", None)
+        if advanced_configs:
+            data["advanced_configs"] = advanced_configs
 
     return data
 
@@ -410,18 +424,13 @@ def get(
             table.add_row("Disk Mount Path", sandbox_data["disk_mount_path"])
             table.add_row("GPU Count", str(sandbox_data["gpu_count"]))
             table.add_row("GPU Type", sandbox_data.get("gpu_type") or "N/A")
-            if sandbox_data.get("network_allowlist") is not None:
-                allowlist = sandbox_data["network_allowlist"]
-                table.add_row(
-                    "Egress Allowlist",
-                    Text(", ".join(allowlist) if allowlist else "(deny all)", style="yellow"),
-                )
-            elif sandbox_data.get("network_denylist") is not None:
-                denylist = sandbox_data["network_denylist"]
-                table.add_row(
-                    "Egress Denylist",
-                    Text(", ".join(denylist) if denylist else "(allow all)", style="yellow"),
-                )
+            table.add_row(
+                "Network Access",
+                _network_access_description(
+                    sandbox_data.get("network_allowlist"),
+                    sandbox_data.get("network_denylist"),
+                ),
+            )
             table.add_row("Timeout (minutes)", str(sandbox_data["timeout_minutes"]))
             if sandbox_data.get("idle_timeout_minutes") is not None:
                 table.add_row("Idle Timeout (minutes)", str(sandbox_data["idle_timeout_minutes"]))
@@ -1122,11 +1131,11 @@ def network(
                     deny=deny_entries,
                 )
 
-        _print_network_status(sandbox_id, status)
+        _print_network_status(sandbox_id, status, updated=any(selections))
         if not status.applied:
             console.print(
-                "[yellow]The network rules are saved but not yet active on the node; "
-                "it will be retried automatically.[/yellow]"
+                "[yellow]⚠ Network rules were saved but are not active yet. "
+                "Retrying automatically.[/yellow]"
             )
 
     except typer.Exit:
@@ -1152,34 +1161,32 @@ def _parse_network_destinations(value: str, option: str) -> List[str]:
     return entries
 
 
-def _print_network_status(sandbox_id: str, status: "EgressPolicyStatus") -> None:
-    table = Table(title=f"Network Access for {sandbox_id}")
-    table.add_column("Field", style="cyan")
-    table.add_column("Value")
-
+def _network_policy_summary(status: "EgressPolicyStatus") -> tuple[str, str]:
     if status.policy.allowlist is not None:
         entries = status.policy.allowlist
-        table.add_row("Mode", "Allow" if entries else "Deny all")
         if entries:
-            table.add_row("Destinations", ", ".join(entries))
+            return "Access limited to", ", ".join(entries)
+        return "Internet access", "blocked"
     elif status.policy.denylist is not None:
         entries = status.policy.denylist
-        table.add_row("Mode", "Deny" if entries else "Allow all")
         if entries:
-            table.add_row("Destinations", ", ".join(entries))
-    else:
-        table.add_row("Mode", "Allow all")
+            return "Blocked", ", ".join(entries)
+    return "Internet access", "unrestricted"
 
-    table.add_row("Desired Generation", str(status.generation))
-    table.add_row(
-        "Applied Generation",
-        str(status.applied_generation) if status.applied_generation >= 0 else "Not applied",
-    )
-    table.add_row(
-        "Applied",
-        Text("Yes", style="green") if status.applied else Text("No", style="yellow"),
-    )
-    console.print(table)
+
+def _print_network_status(
+    sandbox_id: str,
+    status: "EgressPolicyStatus",
+    *,
+    updated: bool,
+) -> None:
+    if updated:
+        console.print("[green]✓[/green] Network access updated")
+    else:
+        console.print(f"[bold]Network access for {escape(sandbox_id)}[/bold]")
+
+    label, value = _network_policy_summary(status)
+    console.print(f"  [cyan]{label}:[/cyan] {escape(value)}")
 
 
 @app.command(no_args_is_help=True)

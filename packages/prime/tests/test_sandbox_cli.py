@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
@@ -30,6 +31,39 @@ def _fake_sandbox(**overrides: Any) -> SimpleNamespace:
     )
     base.update(overrides)
     return SimpleNamespace(**base)
+
+
+def _fake_detailed_sandbox(**overrides: Any) -> SimpleNamespace:
+    advanced_configs = SimpleNamespace(
+        model_dump=lambda: {
+            "vmEgressPolicy": {
+                "accepted": True,
+                "allowlist": ["example.com", "google.com"],
+                "denylist": None,
+                "generation": 3,
+            },
+            "customSetting": True,
+        }
+    )
+    return _fake_sandbox(
+        start_command="tail -f /dev/null",
+        disk_size_gb=10.0,
+        disk_mount_path="/sandbox-workspace",
+        vm=True,
+        network_allowlist=["example.com", "google.com"],
+        network_denylist=None,
+        idle_timeout_minutes=None,
+        termination_reason=None,
+        terminated_at=None,
+        exit_code=None,
+        environment_vars=None,
+        secrets=None,
+        advanced_configs=advanced_configs,
+        user_id="user-1",
+        team_id=None,
+        registry_credentials_id=None,
+        **overrides,
+    )
 
 
 def _network_status(
@@ -68,11 +102,12 @@ def test_sandbox_network_without_flags_shows_current_rules(
     output = strip_ansi(result.output)
     assert result.exit_code == 0, result.output
     assert calls == ["sbx-1"]
-    assert "Network Access for sbx-1" in output
-    assert "Allow all" in output
+    assert "Network access for sbx-1" in output
+    assert "Internet access: unrestricted" in output
+    assert "generation" not in output.lower()
 
 
-def test_sandbox_network_shows_when_no_generation_is_applied(
+def test_sandbox_network_warns_when_rules_are_pending(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _configure_cli(monkeypatch)
@@ -86,8 +121,39 @@ def test_sandbox_network_shows_when_no_generation_is_applied(
 
     output = strip_ansi(result.output)
     assert result.exit_code == 0, result.output
-    assert "Not applied" in output
-    assert "No" in output
+    assert "not active yet" in output
+    assert "Retrying automatically" in output
+    assert "generation" not in output.lower()
+
+
+@pytest.mark.parametrize(
+    ("allowlist", "denylist", "expected"),
+    [
+        (["example.com", "google.com"], None, "Access limited to: example.com, google.com"),
+        ([], None, "Internet access: blocked"),
+        (None, ["example.com", "google.com"], "Blocked: example.com, google.com"),
+        (None, [], "Internet access: unrestricted"),
+    ],
+)
+def test_sandbox_network_describes_effective_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    allowlist: list[str] | None,
+    denylist: list[str] | None,
+    expected: str,
+) -> None:
+    _configure_cli(monkeypatch)
+
+    def mock_get_network(self: Any, sandbox_id: str) -> SimpleNamespace:
+        return _network_status(allowlist=allowlist, denylist=denylist)
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.get_network", mock_get_network)
+
+    result = runner.invoke(app, ["sandbox", "network", "sbx-1"])
+
+    output = strip_ansi(result.output)
+    assert result.exit_code == 0, result.output
+    assert expected in output
+    assert "generation" not in output.lower()
 
 
 @pytest.mark.parametrize(
@@ -188,6 +254,10 @@ def test_sandbox_network_replaces_instead_of_accumulating(
 
     assert first.exit_code == 0, first.output
     assert second.exit_code == 0, second.output
+    assert "✓ Network access updated" in strip_ansi(first.output)
+    assert "Access limited to: example.com" in strip_ansi(first.output)
+    assert "generation" not in strip_ansi(first.output).lower()
+    assert "Access limited to: google.com" in strip_ansi(second.output)
     assert calls == [
         {"sandbox_id": "sbx-1", "allow": ["example.com"], "deny": None},
         {"sandbox_id": "sbx-1", "allow": ["google.com"], "deny": None},
@@ -206,6 +276,36 @@ def test_sandbox_network_rejects_empty_comma_separated_entry(
 
     assert result.exit_code == 1
     assert "comma-separated list" in strip_ansi(result.output)
+
+
+def test_sandbox_get_renders_network_as_first_class_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_cli(monkeypatch)
+    sandbox = _fake_detailed_sandbox()
+    monkeypatch.setattr(
+        "prime_cli.commands.sandbox.SandboxClient.get",
+        lambda self, sandbox_id: sandbox,
+    )
+
+    table_result = runner.invoke(app, ["sandbox", "get", "sbx-1"])
+
+    table_output = strip_ansi(table_result.output)
+    assert table_result.exit_code == 0, table_result.output
+    assert "Network Access" in table_output
+    assert "Limited to: example.com, google.com" in table_output
+    assert "Egress Allowlist" not in table_output
+    assert "vmEgressPolicy" not in table_output
+    assert "generation" not in table_output
+    assert "customSetting" in table_output
+
+    json_result = runner.invoke(app, ["sandbox", "get", "sbx-1", "--output", "json"])
+
+    assert json_result.exit_code == 0, json_result.output
+    json_output = json.loads(json_result.output)
+    assert json_output["network_allowlist"] == ["example.com", "google.com"]
+    assert json_output["network_denylist"] is None
+    assert json_output["advanced_configs"] == {"customSetting": True}
 
 
 def test_sandbox_create_with_gpu_options(monkeypatch: pytest.MonkeyPatch) -> None:

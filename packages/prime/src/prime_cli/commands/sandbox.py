@@ -19,6 +19,7 @@ from prime_sandboxes import (
     CommandTimeoutError,
     Config,
     CreateSandboxRequest,
+    EgressPolicyStatus,
     PaymentRequiredError,
     Sandbox,
     SandboxClient,
@@ -67,8 +68,8 @@ LIST_SANDBOXES_JSON_HELP = json_output_help(
 SANDBOX_DETAIL_JSON_HELP = json_output_help(
     ". = {id, name, docker_image, start_command, status, cpu_cores, "
     "memory_gb, disk_size_gb, disk_mount_path, gpu_count, gpu_type?, "
-    "network_access, timeout_minutes, labels[], created_at, user_id, team_id, "
-    "...}",
+    "network_allowlist?, network_denylist?, timeout_minutes, labels[], "
+    "created_at, user_id, team_id, ...}",
     ".environment_vars? = object",
     ".secrets? = object",
     ".advanced_configs? = object",
@@ -148,6 +149,17 @@ def _format_sandbox_for_list(sandbox: Sandbox) -> Dict[str, Any]:
     }
 
 
+def _network_access_description(
+    allowlist: Optional[List[str]],
+    denylist: Optional[List[str]],
+) -> str:
+    if allowlist is not None:
+        return f"Limited to: {', '.join(allowlist)}" if allowlist else "Blocked"
+    if denylist is not None:
+        return f"Blocked: {', '.join(denylist)}" if denylist else "Unrestricted"
+    return "Unrestricted"
+
+
 def _format_sandbox_for_details(sandbox: Sandbox) -> Dict[str, Any]:
     """Format sandbox data for details display (both table and JSON)"""
     data: Dict[str, Any] = {
@@ -164,7 +176,8 @@ def _format_sandbox_for_details(sandbox: Sandbox) -> Dict[str, Any]:
         "gpu_count": sandbox.gpu_count,
         "gpu_type": getattr(sandbox, "gpu_type", None),
         "vm": sandbox.vm,
-        "network_access": sandbox.network_access,
+        "network_allowlist": getattr(sandbox, "network_allowlist", None),
+        "network_denylist": getattr(sandbox, "network_denylist", None),
         "timeout_minutes": sandbox.timeout_minutes,
         # Read with getattr so an older installed prime-sandboxes wheel
         # (without these fields) still renders the details view instead of
@@ -191,7 +204,10 @@ def _format_sandbox_for_details(sandbox: Sandbox) -> Dict[str, Any]:
     if sandbox.secrets:
         data["secrets"] = obfuscate_secrets(sandbox.secrets)
     if sandbox.advanced_configs:
-        data["advanced_configs"] = sandbox.advanced_configs.model_dump()
+        advanced_configs = sandbox.advanced_configs.model_dump()
+        advanced_configs.pop("vmEgressPolicy", None)
+        if advanced_configs:
+            data["advanced_configs"] = advanced_configs
 
     return data
 
@@ -408,11 +424,13 @@ def get(
             table.add_row("Disk Mount Path", sandbox_data["disk_mount_path"])
             table.add_row("GPU Count", str(sandbox_data["gpu_count"]))
             table.add_row("GPU Type", sandbox_data.get("gpu_type") or "N/A")
-            network_display = Text(
-                "Enabled" if sandbox_data["network_access"] else "Disabled",
-                style="green" if sandbox_data["network_access"] else "yellow",
+            table.add_row(
+                "Network Access",
+                _network_access_description(
+                    sandbox_data.get("network_allowlist"),
+                    sandbox_data.get("network_denylist"),
+                ),
             )
-            table.add_row("Network Access", network_display)
             table.add_row("Timeout (minutes)", str(sandbox_data["timeout_minutes"]))
             if sandbox_data.get("idle_timeout_minutes") is not None:
                 table.add_row("Idle Timeout (minutes)", str(sandbox_data["idle_timeout_minutes"]))
@@ -498,10 +516,21 @@ def create(
         "--vm",
         help="Create a VM-backed sandbox on the VM sandbox infra. Required when requesting GPUs.",
     ),
-    network_access: bool = typer.Option(
-        True,
-        "--network-access/--no-network-access",
-        help="Allow outbound internet access (enabled by default)",
+    network_allow: Optional[List[str]] = typer.Option(
+        None,
+        "--network-allow",
+        help=(
+            "VM only, repeatable. Allow egress only to these domains/IPv4 CIDRs "
+            "(hostname-aware). Mutually exclusive with --network-deny."
+        ),
+    ),
+    network_deny: Optional[List[str]] = typer.Option(
+        None,
+        "--network-deny",
+        help=(
+            "VM only, repeatable. Deny egress to these domains/IPv4 CIDRs and "
+            "allow everything else. Mutually exclusive with --network-allow."
+        ),
     ),
     timeout_minutes: int = typer.Option(60, help="Timeout in minutes"),
     idle_timeout_minutes: Optional[int] = typer.Option(
@@ -652,6 +681,16 @@ def create(
                     "does not support --idle-timeout-minutes; ignoring."
                 )
 
+        # Reject conflicting flags locally before any API request.
+        if network_allow is not None and network_deny is not None:
+            console.print(
+                "[red]Error:[/red] --network-allow and --network-deny are mutually exclusive"
+            )
+            raise typer.Exit(1)
+        if (network_allow is not None or network_deny is not None) and not vm:
+            console.print("[red]Error:[/red] --network-allow/--network-deny require --vm")
+            raise typer.Exit(1)
+
         request = CreateSandboxRequest(
             name=name,
             docker_image=docker_image,
@@ -662,7 +701,8 @@ def create(
             gpu_count=gpu_count,
             gpu_type=gpu_type,
             vm=vm,
-            network_access=network_access,
+            network_allowlist=network_allow,
+            network_denylist=network_deny,
             timeout_minutes=timeout_minutes,
             environment_vars=env_vars if env_vars else None,
             secrets=secrets_vars if secrets_vars else None,
@@ -685,8 +725,14 @@ def create(
         console.print(f"VM: {'Enabled' if vm else 'Disabled'}")
         if gpu_count > 0:
             console.print(f"GPUs: {gpu_type} x{gpu_count}")
-        network_status = "[green]Enabled[/green]" if network_access else "[yellow]Disabled[/yellow]"
-        console.print(f"Network Access: {network_status}")
+        if network_allow is not None:
+            console.print(
+                f"Egress Allowlist: {', '.join(network_allow) if network_allow else '(deny all)'}"
+            )
+        elif network_deny is not None:
+            console.print(
+                f"Egress Denylist: {', '.join(network_deny) if network_deny else '(allow all)'}"
+            )
         console.print(f"Timeout: {timeout_minutes} minutes")
         # Only show the idle timeout in the summary when the SDK actually
         # accepted it; otherwise we'd display a value the backend never sees.
@@ -1038,6 +1084,109 @@ def delete(
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         console.print_exception(show_locals=True)
         raise typer.Exit(1)
+
+
+@app.command("network", no_args_is_help=True)
+def network(
+    sandbox_id: str,
+    allow: Optional[str] = typer.Option(
+        None,
+        "--allow",
+        help=(
+            "Replace the allowed destinations with a comma-separated list of "
+            "domains/IPv4 CIDRs. Use '*' to allow all."
+        ),
+    ),
+    deny: Optional[str] = typer.Option(
+        None,
+        "--deny",
+        help=(
+            "Replace the denied destinations with a comma-separated list of "
+            "domains/IPv4 CIDRs. Use '*' to deny all."
+        ),
+    ),
+) -> None:
+    """Show or replace the network access rules of a VM sandbox."""
+    selections = [allow is not None, deny is not None]
+    if sum(selections) > 1:
+        console.print("[red]Error:[/red] provide at most one of --allow or --deny")
+        raise typer.Exit(1)
+
+    try:
+        base_client = APIClient()
+        sandbox_client = SandboxClient(base_client)
+
+        if not any(selections):
+            with console.status("[bold blue]Fetching network rules...", spinner="dots"):
+                status = sandbox_client.get_network(sandbox_id)
+        else:
+            allow_entries = (
+                _parse_network_destinations(allow, "--allow") if allow is not None else None
+            )
+            deny_entries = _parse_network_destinations(deny, "--deny") if deny is not None else None
+            with console.status("[bold blue]Updating network rules...", spinner="dots"):
+                status = sandbox_client.set_network(
+                    sandbox_id,
+                    allow=allow_entries,
+                    deny=deny_entries,
+                )
+
+        _print_network_status(sandbox_id, status, updated=any(selections))
+        if not status.applied:
+            console.print(
+                "[yellow]⚠ Network rules were saved but are not active yet. "
+                "Retrying automatically.[/yellow]"
+            )
+
+    except typer.Exit:
+        raise
+    except ValueError as e:
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except UnauthorizedError as e:
+        console.print(f"[red]Unauthorized:[/red] {str(e)}")
+        raise typer.Exit(1)
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+
+
+def _parse_network_destinations(value: str, option: str) -> List[str]:
+    entries = [entry.strip() for entry in value.split(",")]
+    if not entries or any(not entry for entry in entries):
+        raise ValueError(f"{option} requires a comma-separated list of destinations")
+    return entries
+
+
+def _network_policy_summary(status: "EgressPolicyStatus") -> tuple[str, str]:
+    if status.policy.allowlist is not None:
+        entries = status.policy.allowlist
+        if entries:
+            return "Access limited to", ", ".join(entries)
+        return "Internet access", "blocked"
+    elif status.policy.denylist is not None:
+        entries = status.policy.denylist
+        if entries:
+            return "Blocked", ", ".join(entries)
+    return "Internet access", "unrestricted"
+
+
+def _print_network_status(
+    sandbox_id: str,
+    status: "EgressPolicyStatus",
+    *,
+    updated: bool,
+) -> None:
+    if updated:
+        console.print("[green]✓[/green] Network access updated")
+    else:
+        console.print(f"[bold]Network access for {escape(sandbox_id)}[/bold]")
+
+    label, value = _network_policy_summary(status)
+    console.print(f"  [cyan]{label}:[/cyan] {escape(value)}")
 
 
 @app.command(no_args_is_help=True)

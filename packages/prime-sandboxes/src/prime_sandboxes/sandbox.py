@@ -45,6 +45,7 @@ from .models import (
     CommandResponse,
     CreateSandboxRequest,
     DockerImageCheckResponse,
+    EgressPolicyStatus,
     ExposedPort,
     ExposePortRequest,
     FileUploadResponse,
@@ -55,6 +56,7 @@ from .models import (
     SandboxListResponse,
     SandboxLogsResponse,
     SSHSession,
+    validate_egress_lists,
 )
 from .rpc_command_session import (
     COMMAND_SESSION_START_RPC_METHOD,
@@ -72,6 +74,31 @@ GATEWAY_CONNECTION_RETRYABLE_EXCEPTIONS = (
     httpx.ConnectError,  # Connection refused/failed
     httpx.PoolTimeout,  # No connection available in pool
 )
+
+
+def _network_update_payload(
+    allow: Optional[List[str]], deny: Optional[List[str]]
+) -> Dict[str, Optional[List[str]]]:
+    if (allow is None) == (deny is None):
+        raise ValueError("exactly one of allow or deny must be provided")
+
+    entries = list(allow if allow is not None else deny or [])
+    if not entries:
+        raise ValueError("allow or deny must contain at least one destination")
+    if "*" in entries:
+        if entries != ["*"]:
+            raise ValueError("'*' must be the only destination")
+        return (
+            {"allowlist": None, "denylist": []}
+            if allow is not None
+            else {"allowlist": [], "denylist": None}
+        )
+
+    allowlist = entries if allow is not None else None
+    denylist = entries if deny is not None else None
+    validate_egress_lists(allowlist, denylist)
+    return {"allowlist": allowlist, "denylist": denylist}
+
 
 # Response-read failures: the server may have already processed the request
 # (TCP connection dropped mid-response body). Only safe to retry on idempotent
@@ -507,9 +534,7 @@ class AsyncSandboxAuthCache:
 
 
 def _is_waiting_for_image_build(sandbox: Sandbox) -> bool:
-    return sandbox.status == "PENDING" and bool(
-        getattr(sandbox, "pending_image_build_id", None)
-    )
+    return sandbox.status == "PENDING" and bool(getattr(sandbox, "pending_image_build_id", None))
 
 
 def _check_sandbox_statuses(
@@ -734,6 +759,34 @@ class SandboxClient:
         """Delete a sandbox"""
         response = self.client.request("DELETE", f"/sandbox/{sandbox_id}")
         return response
+
+    def get_network(self, sandbox_id: str) -> EgressPolicyStatus:
+        """Get the desired and applied network rules of a VM sandbox."""
+        response = self.client.request("GET", f"/sandbox/{sandbox_id}/egress-policy")
+        return EgressPolicyStatus.model_validate(response)
+
+    def set_network(
+        self,
+        sandbox_id: str,
+        *,
+        allow: Optional[List[str]] = None,
+        deny: Optional[List[str]] = None,
+    ) -> EgressPolicyStatus:
+        """Replace the network rules of a running VM sandbox.
+
+        Exactly one of ``allow`` or ``deny`` must be provided. Each call is a
+        complete replacement, never a merge; use ``["*"]`` to allow or deny
+        all destinations. New connections follow the replacement once
+        ``applied`` is true; established flows are not revoked.
+        """
+        payload = _network_update_payload(allow, deny)
+
+        response = self.client.request(
+            "PUT",
+            f"/sandbox/{sandbox_id}/egress-policy",
+            json=payload,
+        )
+        return EgressPolicyStatus.model_validate(response)
 
     def bulk_delete(
         self,
@@ -1313,9 +1366,7 @@ class SandboxClient:
             except httpx.TimeoutException as e:
                 raise UploadTimeoutError(sandbox_id, file_path, effective_timeout) from e
             except httpx.HTTPStatusError as e:
-                if e.response.status_code == 401 and self._should_retry_401(
-                    sandbox_id, reauthed
-                ):
+                if e.response.status_code == 401 and self._should_retry_401(sandbox_id, reauthed):
                     reauthed = True
                     continue
                 if e.response.status_code == 409:
@@ -1379,9 +1430,7 @@ class SandboxClient:
             except httpx.TimeoutException:
                 raise UploadTimeoutError(sandbox_id, file_path, effective_timeout)
             except httpx.HTTPStatusError as e:
-                if e.response.status_code == 401 and self._should_retry_401(
-                    sandbox_id, reauthed
-                ):
+                if e.response.status_code == 401 and self._should_retry_401(sandbox_id, reauthed):
                     reauthed = True
                     continue
                 if e.response.status_code == 409:
@@ -1432,9 +1481,7 @@ class SandboxClient:
             except httpx.TimeoutException as e:
                 raise DownloadTimeoutError(sandbox_id, file_path, effective_timeout) from e
             except httpx.HTTPStatusError as e:
-                if e.response.status_code == 401 and self._should_retry_401(
-                    sandbox_id, reauthed
-                ):
+                if e.response.status_code == 401 and self._should_retry_401(sandbox_id, reauthed):
                     reauthed = True
                     continue
                 if e.response.status_code == 409:
@@ -1503,9 +1550,7 @@ class SandboxClient:
                     f"({e.__class__.__name__}): {file_path}"
                 ) from e
             except httpx.HTTPStatusError as e:
-                if e.response.status_code == 401 and self._should_retry_401(
-                    sandbox_id, reauthed
-                ):
+                if e.response.status_code == 401 and self._should_retry_401(sandbox_id, reauthed):
                     reauthed = True
                     continue
                 if e.response.status_code == 404:
@@ -1819,6 +1864,34 @@ class AsyncSandboxClient:
         """Delete a sandbox"""
         response = await self.client.request("DELETE", f"/sandbox/{sandbox_id}")
         return response
+
+    async def get_network(self, sandbox_id: str) -> EgressPolicyStatus:
+        """Get the desired and applied network rules of a VM sandbox."""
+        response = await self.client.request("GET", f"/sandbox/{sandbox_id}/egress-policy")
+        return EgressPolicyStatus.model_validate(response)
+
+    async def set_network(
+        self,
+        sandbox_id: str,
+        *,
+        allow: Optional[List[str]] = None,
+        deny: Optional[List[str]] = None,
+    ) -> EgressPolicyStatus:
+        """Replace the network rules of a running VM sandbox.
+
+        Exactly one of ``allow`` or ``deny`` must be provided. Each call is a
+        complete replacement, never a merge; use ``["*"]`` to allow or deny
+        all destinations. New connections follow the replacement once
+        ``applied`` is true; established flows are not revoked.
+        """
+        payload = _network_update_payload(allow, deny)
+
+        response = await self.client.request(
+            "PUT",
+            f"/sandbox/{sandbox_id}/egress-policy",
+            json=payload,
+        )
+        return EgressPolicyStatus.model_validate(response)
 
     async def bulk_delete(
         self,

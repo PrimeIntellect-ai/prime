@@ -19,6 +19,100 @@ class SandboxStatus(str, Enum):
     TIMEOUT = "TIMEOUT"
 
 
+MAX_EGRESS_POLICY_ENTRIES = 256
+
+
+def _validate_egress_entry(entry: str) -> None:
+    """Client-side mirror of the API's egress entry contract.
+
+    Accepts an exact hostname, a leftmost-label ``*.`` wildcard, an IPv4
+    address, or an IPv4 CIDR. Schemes, credentials, ports, paths, query
+    strings, bare ``*``, IPv6, and wildcards in other positions are rejected.
+    The server canonicalizes entries further (lowercase, IDNA, /32).
+    """
+    import ipaddress
+
+    value = entry.strip()
+    if not value:
+        raise ValueError("empty entry")
+
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        address = None
+    if address is not None:
+        if address.version != 4:
+            raise ValueError(f"'{entry}': IPv6 is not supported")
+        return
+
+    if "/" in value:
+        try:
+            network = ipaddress.ip_network(value, strict=False)
+        except ValueError as exc:
+            raise ValueError(f"'{entry}' is not a valid IPv4 CIDR") from exc
+        if network.version != 4:
+            raise ValueError(f"'{entry}': IPv6 is not supported")
+        return
+
+    for forbidden, reason in (
+        ("://", "schemes are not supported"),
+        ("@", "credentials are not supported"),
+        (":", "ports are not supported"),
+        ("?", "query strings are not supported"),
+    ):
+        if forbidden in value:
+            raise ValueError(f"'{entry}': {reason}")
+
+    domain = value[2:] if value.startswith("*.") else value
+    domain = domain.rstrip(".")
+    if not domain:
+        raise ValueError(f"'{entry}': domain is empty")
+    if "*" in domain:
+        raise ValueError(f"'{entry}': wildcard is only supported as the leftmost label")
+    for label in domain.split("."):
+        if not label:
+            raise ValueError(f"'{entry}' contains an empty label")
+
+
+def validate_egress_lists(allowlist: Optional[List[str]], denylist: Optional[List[str]]) -> None:
+    """Mirror the public API's mutual-exclusion and rule-count contract."""
+    if allowlist is not None and denylist is not None:
+        raise ValueError(
+            "network_allowlist and network_denylist are mutually exclusive; provide at most one"
+        )
+    for name, entries in (
+        ("network_allowlist", allowlist),
+        ("network_denylist", denylist),
+    ):
+        if entries is None:
+            continue
+        if len(entries) > MAX_EGRESS_POLICY_ENTRIES:
+            raise ValueError(f"{name} supports at most {MAX_EGRESS_POLICY_ENTRIES} entries")
+        for entry in entries:
+            try:
+                _validate_egress_entry(entry)
+            except ValueError as exc:
+                raise ValueError(f"{name}: {exc}") from exc
+
+
+class SandboxEgressPolicy(BaseModel):
+    """The desired egress policy: at most one list is non-null."""
+
+    allowlist: Optional[List[str]] = None
+    denylist: Optional[List[str]] = None
+
+
+class EgressPolicyStatus(BaseModel):
+    """Desired vs applied egress policy state for a VM sandbox."""
+
+    policy: SandboxEgressPolicy
+    generation: int
+    applied_generation: int
+    applied: bool
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class AdvancedConfigs(BaseModel):
     """Advanced configuration options for sandbox"""
 
@@ -41,7 +135,8 @@ class Sandbox(BaseModel):
     gpu_count: int = Field(..., alias="gpuCount")
     gpu_type: Optional[str] = Field(None, alias="gpuType")
     vm: bool = False
-    network_access: bool = Field(True, alias="networkAccess")
+    network_allowlist: Optional[List[str]] = Field(None, alias="networkAllowlist")
+    network_denylist: Optional[List[str]] = Field(None, alias="networkDenylist")
     status: str
     timeout_minutes: int = Field(..., alias="timeoutMinutes")
     idle_timeout_minutes: Optional[int] = Field(None, alias="idleTimeoutMinutes")
@@ -91,7 +186,8 @@ class CreateSandboxRequest(BaseModel):
     gpu_count: int = 0
     gpu_type: Optional[str] = None
     vm: bool = False
-    network_access: bool = True
+    network_allowlist: Optional[List[str]] = None
+    network_denylist: Optional[List[str]] = None
     timeout_minutes: int = 60
     idle_timeout_minutes: Optional[int] = None
     environment_vars: Optional[Dict[str, str]] = None
@@ -118,6 +214,18 @@ class CreateSandboxRequest(BaseModel):
     def validate_guaranteed(self) -> "CreateSandboxRequest":
         if self.guaranteed and self.vm:
             raise ValueError("guaranteed is not supported for VM sandboxes")
+        return self
+
+    @model_validator(mode="after")
+    def validate_network_lists(self) -> "CreateSandboxRequest":
+        if not self.vm and (
+            self.network_allowlist is not None or self.network_denylist is not None
+        ):
+            raise ValueError(
+                "network_allowlist and network_denylist are only supported for "
+                "VM sandboxes (vm=True)"
+            )
+        validate_egress_lists(self.network_allowlist, self.network_denylist)
         return self
 
     @model_validator(mode="after")
@@ -150,7 +258,6 @@ class UpdateSandboxRequest(BaseModel):
     environment_vars: Optional[Dict[str, str]] = None
     registry_credentials_id: Optional[str] = None
     secrets: Optional[Dict[str, str]] = None
-    network_access: Optional[bool] = None
 
     @model_validator(mode="after")
     def validate_idle_timeout(self) -> "UpdateSandboxRequest":

@@ -20,7 +20,7 @@ def test_create_sandbox_request_defaults():
     assert request.name == "test-sandbox"
     assert request.docker_image == "python:3.11-slim"
     assert request.cpu_cores == 1
-    assert request.memory_gb == 2
+    assert request.memory_gb == 1
     assert request.disk_size_gb == 5
     assert request.gpu_count == 0
     assert request.gpu_type is None

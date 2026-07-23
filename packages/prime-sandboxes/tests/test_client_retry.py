@@ -6,7 +6,13 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from prime_sandboxes.core.client import APIClient, APIError, AsyncAPIClient
+from prime_sandboxes.core.client import (
+    DEFAULT_CONNECTION_LIMITS,
+    DEFAULT_TIMEOUT,
+    APIClient,
+    APIError,
+    AsyncAPIClient,
+)
 from prime_sandboxes.models import CreateSandboxRequest
 from prime_sandboxes.sandbox import (
     AsyncSandboxAuthCache,
@@ -172,6 +178,69 @@ class AsyncAlwaysFailTransport(httpx.AsyncBaseTransport):
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         self.call_count += 1
         raise httpx.RemoteProtocolError("Server disconnected")
+
+
+class TestAsyncAPIClientDefaults:
+    @pytest.mark.asyncio
+    async def test_uses_default_connection_limits_and_timeout(self):
+        client = AsyncAPIClient(api_key="test-key")
+        try:
+            backend_pool = client.client._transport._pool
+            timeout = client.client.timeout
+
+            assert backend_pool._max_connections == DEFAULT_CONNECTION_LIMITS.max_connections
+            assert (
+                backend_pool._max_keepalive_connections
+                == DEFAULT_CONNECTION_LIMITS.max_keepalive_connections
+            )
+            assert timeout.connect == DEFAULT_TIMEOUT.connect
+            assert timeout.read == DEFAULT_TIMEOUT.read
+            assert timeout.write == DEFAULT_TIMEOUT.write
+            assert timeout.pool == DEFAULT_TIMEOUT.pool
+        finally:
+            await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_allows_custom_connection_limits_and_timeout(self):
+        custom_limits = httpx.Limits(max_connections=321, max_keepalive_connections=123)
+        custom_timeout = httpx.Timeout(12.0, connect=4.0)
+        client = AsyncAPIClient(
+            api_key="test-key",
+            limits=custom_limits,
+            timeout=custom_timeout,
+        )
+        try:
+            backend_pool = client.client._transport._pool
+            timeout = client.client.timeout
+
+            assert backend_pool._max_connections == custom_limits.max_connections
+            assert (
+                backend_pool._max_keepalive_connections
+                == custom_limits.max_keepalive_connections
+            )
+            assert timeout.connect == custom_timeout.connect
+            assert timeout.read == custom_timeout.read
+            assert timeout.write == custom_timeout.write
+            assert timeout.pool == custom_timeout.pool
+        finally:
+            await client.aclose()
+
+
+class TestAsyncSandboxClientConnectionLimits:
+    @pytest.mark.asyncio
+    async def test_threads_connection_limits_to_backend_api_client(self):
+        client = AsyncSandboxClient(
+            api_key="test-key",
+            max_connections=321,
+            max_keepalive_connections=123,
+        )
+        try:
+            backend_pool = client.client.client._transport._pool
+
+            assert backend_pool._max_connections == 321
+            assert backend_pool._max_keepalive_connections == 123
+        finally:
+            await client.aclose()
 
 
 class TestSyncAPIClientRetry:

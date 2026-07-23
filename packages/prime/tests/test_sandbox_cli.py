@@ -570,6 +570,8 @@ def test_sandbox_create_vm_without_gpu(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "Successfully created sandbox sbx-vm-123" in output
     assert captured["request"].vm is True
     assert captured["request"].gpu_count == 0
+    assert captured["request"].cpu_cores == 1.0
+    assert captured["request"].memory_gb == 1.0
 
 
 def test_sandbox_delete_by_label_scopes_to_caller(

@@ -37,6 +37,7 @@ from ..utils.formatters import (
     format_promo_price,
     strip_ansi,
 )
+from ..utils.projects import resolve_project_id
 from ..utils.prompt import confirm_or_skip
 from .feedback import submit_feedback
 from .usage import RUN_USAGE_JSON_HELP, run_usage_command
@@ -548,12 +549,7 @@ class TeacherConfig(BaseModel):
 
 
 class EvalSamplingConfig(BaseModel):
-    """Eval-time sampling overrides.
-
-    ``enable_thinking`` / ``reasoning_effort`` are convenience flags the
-     platform merges into ``extra_body.chat_template_kwargs`` for supported models;
-    they cannot both be set on the same block.
-    """
+    """Eval-time sampling overrides."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -1190,6 +1186,7 @@ def _format_run_for_display(run: RLRun) -> Dict[str, Any]:
         "rollouts": "-" if run.rollouts_per_example is None else str(run.rollouts_per_example),
         "created_at": created_at,
         "team_id": run.team_id,
+        "project_id": run.project_id,
     }
 
 
@@ -1269,6 +1266,16 @@ def create_run(
         False,
         "--skip-action-check",
         help="Skip action status check and run even if environment action failed.",
+    ),
+    project: Optional[str] = typer.Option(
+        None,
+        "--project",
+        help="Project ID or slug. Defaults to the active project for this workspace.",
+    ),
+    no_project: bool = typer.Option(
+        False,
+        "--no-project",
+        help="Do not attach this run to the active project.",
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
     image_tag: Optional[str] = typer.Option(
@@ -1376,6 +1383,13 @@ def create_run(
         api_client = APIClient()
         rl_client = RLClient(api_client)
         app_config = Config()
+        project_id = resolve_project_id(
+            project,
+            no_project=no_project,
+            use_active_project=True,
+            config=app_config,
+            client=api_client,
+        )
 
         # Kick off pricing fetch in the background so it overlaps with summary
         # rendering and the action-status checks below. Daemon thread so a slow
@@ -1408,6 +1422,8 @@ def create_run(
         console.print(f"  Environments: {', '.join(e.display_name for e in cfg.env)}")
         if app_config.team_id:
             console.print(f"  Team:         {app_config.team_id}")
+        if project_id:
+            console.print(f"  Project:      {project_id}")
 
         # Training
         console.print("\n[cyan]Training[/cyan]")
@@ -1598,6 +1614,7 @@ def create_run(
             wandb_run_name=cfg.wandb.name,
             secrets=secrets if secrets else None,
             team_id=app_config.team_id,
+            project_id=project_id,
             eval_config=cfg.eval.to_api_dict(),
             val_config=cfg.val.to_api_dict(),
             # `is not None` rather than truthiness: an explicit `= []` means

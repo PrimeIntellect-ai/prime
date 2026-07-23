@@ -74,9 +74,9 @@ class EvalsClient:
             EvalsAPIError: If the environment does not exist (404)
         """
         try:
-            response = self.client.get(f"/environmentshub/{owner_slug}/{name}/@latest")
-            details = response.get("data", response)
-            return details["id"]
+            lookup_data: Dict[str, Any] = {"name": name, "owner_slug": owner_slug}
+            response = self.client.post("/environmentshub/lookup", json=lookup_data)
+            return response["data"]["id"]
         except APIError as e:
             raise EvalsAPIError(
                 f"Environment '{owner_slug}/{name}' does not exist in the hub. "
@@ -159,6 +159,7 @@ class EvalsClient:
         task_type: Optional[str] = None,
         description: Optional[str] = None,
         tags: Optional[List[str]] = None,
+        project_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
         metrics: Optional[Dict[str, Any]] = None,
         is_public: Optional[bool] = None,
@@ -202,6 +203,7 @@ class EvalsClient:
             "task_type": task_type,
             "description": description,
             "tags": tags or [],
+            "project_id": project_id,
             "metadata": metadata,
             "metrics": metrics,
         }
@@ -365,6 +367,8 @@ class EvalsClient:
         task_type: Optional[str] = None,
         description: Optional[str] = None,
         tags: Optional[List[str]] = None,
+        project_id: Optional[str] = None,
+        clear_project: bool = False,
         metadata: Optional[Dict[str, Any]] = None,
         metrics: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
@@ -375,11 +379,16 @@ class EvalsClient:
             "framework": framework,
             "task_type": task_type,
             "description": description,
-            "tags": tags if tags is not None else [],
+            "tags": tags,
+            "project_id": project_id,
             "metadata": metadata,
             "metrics": metrics,
         }
-        payload = {k: v for k, v in payload.items() if v is not None or k in ["tags"]}
+        payload = {
+            k: v
+            for k, v in payload.items()
+            if v is not None or (clear_project and k == "project_id")
+        }
 
         response = self.client.request("PUT", f"/evaluations/{evaluation_id}", json=payload)
         return response
@@ -424,9 +433,9 @@ class AsyncEvalsClient:
             EvalsAPIError: If the environment does not exist (404)
         """
         try:
-            response = await self.client.get(f"/environmentshub/{owner_slug}/{name}/@latest")
-            details = response.get("data", response)
-            return details["id"]
+            lookup_data: Dict[str, Any] = {"name": name, "owner_slug": owner_slug}
+            response = await self.client.post("/environmentshub/lookup", json=lookup_data)
+            return response["data"]["id"]
         except APIError as e:
             raise EvalsAPIError(
                 f"Environment '{owner_slug}/{name}' does not exist in the hub. "
@@ -515,6 +524,7 @@ class AsyncEvalsClient:
         task_type: Optional[str] = None,
         description: Optional[str] = None,
         tags: Optional[List[str]] = None,
+        project_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
         metrics: Optional[Dict[str, Any]] = None,
         is_public: Optional[bool] = None,
@@ -558,6 +568,7 @@ class AsyncEvalsClient:
             "task_type": task_type,
             "description": description,
             "tags": tags or [],
+            "project_id": project_id,
             "metadata": metadata,
             "metrics": metrics,
         }
@@ -715,6 +726,8 @@ class AsyncEvalsClient:
         task_type: Optional[str] = None,
         description: Optional[str] = None,
         tags: Optional[List[str]] = None,
+        project_id: Optional[str] = None,
+        clear_project: bool = False,
         metadata: Optional[Dict[str, Any]] = None,
         metrics: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
@@ -725,11 +738,16 @@ class AsyncEvalsClient:
             "framework": framework,
             "task_type": task_type,
             "description": description,
-            "tags": tags if tags is not None else [],
+            "tags": tags,
+            "project_id": project_id,
             "metadata": metadata,
             "metrics": metrics,
         }
-        payload = {k: v for k, v in payload.items() if v is not None or k in ["tags"]}
+        payload = {
+            k: v
+            for k, v in payload.items()
+            if v is not None or (clear_project and k == "project_id")
+        }
 
         response = await self.client.request("PUT", f"/evaluations/{evaluation_id}", json=payload)
         return response

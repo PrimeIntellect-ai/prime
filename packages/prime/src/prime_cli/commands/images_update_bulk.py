@@ -1,6 +1,9 @@
 """Bulk logical-image updates from a JSONL manifest (`prime images update-bulk`)."""
 
 import json
+import threading
+import time
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, List, Optional, Tuple
 
@@ -28,6 +31,12 @@ from .images_update_helpers import format_image_coordinate
 console = get_console()
 
 UPDATE_BULK_BATCH_SIZE = 100
+UPDATE_BULK_REQUEST_LIMIT = 40
+UPDATE_BULK_RATE_LIMIT_WINDOW_SECONDS = 60.0
+UPDATE_BULK_DISPATCH_INTERVAL_SECONDS = (
+    UPDATE_BULK_RATE_LIMIT_WINDOW_SECONDS / UPDATE_BULK_REQUEST_LIMIT
+)
+UPDATE_BULK_MAX_IN_FLIGHT = UPDATE_BULK_REQUEST_LIMIT
 _MANIFEST_KEYS = {"source", "set"}
 _NESTED_MANIFEST_MODELS = {
     "source": ImageUpdateSource,
@@ -47,6 +56,10 @@ class BulkUpdateValidationError(Exception):
     def __init__(self, problems: List[str]) -> None:
         super().__init__(f"{len(problems)} problem(s)")
         self.problems = problems
+
+
+class _BatchNotDispatched(Exception):
+    """Raised when a queued batch is skipped after dispatch has stopped."""
 
 
 def _manifest_line(item: ImageUpdateItem) -> str:
@@ -235,6 +248,87 @@ def _print_outcomes(
             console.print(f"  [red]✗[/red] {_result_source_label(item)}: {message}{code}")
 
 
+def _send_update_batch(
+    client: ImageClient,
+    batch: List[ImageUpdateItem],
+    *,
+    dry_run: bool,
+    stop_dispatch: threading.Event,
+):
+    """Send one batch and stop future launches if transport/auth fails."""
+    if stop_dispatch.is_set():
+        raise _BatchNotDispatched
+
+    try:
+        return client.update_images(UpdateImagesRequest(dry_run=dry_run, updates=batch))
+    except (UnauthorizedError, APIError):
+        stop_dispatch.set()
+        raise
+
+
+def _dispatch_update_batches(
+    client: ImageClient,
+    items: List[ImageUpdateItem],
+    *,
+    dry_run: bool,
+) -> tuple[
+    dict[int, tuple[List[ImageUpdateItem], List[ImageUpdateResult]]],
+    dict[int, tuple[List[ImageUpdateItem], APIError]],
+    List[ImageUpdateItem],
+]:
+    """Launch 100-item batches on cadence without waiting for each response.
+
+    The platform permits 50 PATCH /images requests per 60 seconds per token;
+    this command budgets 40, so launches are separated by 1.5 seconds. A
+    transport/auth failure stops future launches, while batches already in
+    flight are allowed to finish.
+    """
+    stop_dispatch = threading.Event()
+    scheduled: dict[Future, tuple[int, List[ImageUpdateItem]]] = {}
+    never_dispatched_by_offset: dict[int, List[ImageUpdateItem]] = {}
+
+    with ThreadPoolExecutor(max_workers=UPDATE_BULK_MAX_IN_FLIGHT) as executor:
+        next_dispatch_at = time.monotonic()
+        for offset in range(0, len(items), UPDATE_BULK_BATCH_SIZE):
+            wait_seconds = max(0.0, next_dispatch_at - time.monotonic())
+            if stop_dispatch.wait(wait_seconds):
+                never_dispatched_by_offset[offset] = items[offset:]
+                break
+
+            batch = items[offset : offset + UPDATE_BULK_BATCH_SIZE]
+            future = executor.submit(
+                _send_update_batch,
+                client,
+                batch,
+                dry_run=dry_run,
+                stop_dispatch=stop_dispatch,
+            )
+            scheduled[future] = (offset, batch)
+            # Base the next launch on the actual dispatch time so scheduler
+            # delays never cause a catch-up burst that exceeds the rate limit.
+            next_dispatch_at = time.monotonic() + UPDATE_BULK_DISPATCH_INTERVAL_SECONDS
+
+    completed: dict[int, tuple[List[ImageUpdateItem], List[ImageUpdateResult]]] = {}
+    transport_failures: dict[int, tuple[List[ImageUpdateItem], APIError]] = {}
+    for future in as_completed(scheduled):
+        offset, batch = scheduled[future]
+        try:
+            response = future.result()
+        except _BatchNotDispatched:
+            never_dispatched_by_offset[offset] = batch
+        except (UnauthorizedError, APIError) as exc:
+            transport_failures[offset] = (batch, exc)
+        else:
+            completed[offset] = (batch, response.results)
+
+    never_dispatched = [
+        item
+        for offset in sorted(never_dispatched_by_offset)
+        for item in never_dispatched_by_offset[offset]
+    ]
+    return completed, transport_failures, never_dispatched
+
+
 def update_bulk(
     manifest: Path = typer.Option(
         ...,
@@ -266,8 +360,10 @@ def update_bulk(
     Apply many logical-image updates from a JSONL manifest.
 
     Every line is validated before anything is sent. Updates are applied in
-    batches of 100; each update is independent, so one failure does not stop
-    the rest. Failed updates are written to a re-runnable failures manifest.
+    batches of 100, launched at 40 requests per minute without waiting for the
+    previous response; each update is independent, so one item failure does
+    not stop the rest. Failed updates are written to a re-runnable failures
+    manifest.
 
     \b
     Example manifest lines:
@@ -300,23 +396,28 @@ def update_bulk(
         return
 
     client = ImageClient(APIClient())
+    completed, transport_failures, never_dispatched = _dispatch_update_batches(
+        client,
+        items,
+        dry_run=dry_run,
+    )
+    auth_failed = any(isinstance(exc, UnauthorizedError) for _, exc in transport_failures.values())
+
     outcomes: List[Tuple[ImageUpdateItem, ImageUpdateResult]] = []
     failed_items: List[ImageUpdateItem] = []
-    unsent_items: List[ImageUpdateItem] = []
-    transport_error: Optional[str] = None
+    unsent_by_offset = {offset: batch for offset, (batch, _) in transport_failures.items()}
+    if never_dispatched:
+        unsent_by_offset[len(items) - len(never_dispatched)] = never_dispatched
+    unsent_items = [
+        item for offset in sorted(unsent_by_offset) for item in unsent_by_offset[offset]
+    ]
+    transport_error = (
+        str(transport_failures[min(transport_failures)][1]) if transport_failures else None
+    )
 
-    for offset in range(0, len(items), UPDATE_BULK_BATCH_SIZE):
-        batch = items[offset : offset + UPDATE_BULK_BATCH_SIZE]
-        try:
-            response = client.update_images(UpdateImagesRequest(dry_run=dry_run, updates=batch))
-        except UnauthorizedError:
-            console.print("[red]Error: Not authenticated. Please run 'prime login' first.[/red]")
-            raise typer.Exit(1)
-        except APIError as exc:
-            transport_error = str(exc)
-            unsent_items.extend(items[offset:])
-            break
-        for item, result in zip(batch, response.results):
+    for offset in sorted(completed):
+        batch, results = completed[offset]
+        for item, result in zip(batch, results):
             outcomes.append((item, result))
             if not result.success:
                 failed_items.append(item)
@@ -331,10 +432,13 @@ def update_bulk(
         f"[bold]Not sent:[/bold] {len(unsent_items)}"
     )
 
-    if transport_error is not None:
+    if auth_failed:
+        console.print("[red]Error: Not authenticated. Please run 'prime login' first.[/red]")
+    elif transport_error is not None:
         console.print(f"[red]Error: {transport_error}[/red]")
 
-    retry_items = failed_items + unsent_items
+    retry_item_ids = {id(item) for item in failed_items + unsent_items}
+    retry_items = [item for item in items if id(item) in retry_item_ids]
     if retry_items and not dry_run:
         _write_failures_manifest(failures_out, retry_items)
         console.print(

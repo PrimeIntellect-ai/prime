@@ -1,6 +1,8 @@
 """Tests for `prime images update-bulk`."""
 
 import json
+import threading
+import time
 
 import pytest
 from prime_cli.main import app
@@ -63,6 +65,102 @@ def test_update_bulk_applies_manifest(tmp_path, monkeypatch):
     assert captured[0]["json"]["mode"] == "explicit"
     assert len(captured[0]["json"]["updates"]) == 2
     assert "Updated:" in result.output and "Failed:" in result.output
+
+
+def test_update_bulk_dispatches_batches_on_cadence_without_waiting(tmp_path, monkeypatch):
+    request_started_at = []
+    second_request_started = threading.Event()
+    first_request_finished = threading.Event()
+    request_lock = threading.Lock()
+
+    class DummyAPIClient:
+        def request(self, method, path, json=None, params=None):
+            with request_lock:
+                request_number = len(request_started_at) + 1
+                request_started_at.append(time.monotonic())
+
+            if request_number == 1:
+                assert second_request_started.wait(timeout=1.0)
+                first_request_finished.set()
+            else:
+                second_request_started.set()
+
+            return {
+                "success": True,
+                "dryRun": False,
+                "results": [
+                    {"source": update["source"], "success": True} for update in json["updates"]
+                ],
+            }
+
+    monkeypatch.setattr("prime_cli.commands.images_update_bulk.APIClient", DummyAPIClient)
+    monkeypatch.setattr(
+        "prime_cli.commands.images_update_bulk.UPDATE_BULK_DISPATCH_INTERVAL_SECONDS",
+        0.02,
+    )
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+    manifest = _write_manifest(
+        tmp_path,
+        [_rename_line(f"image-{index}", f"renamed-{index}") for index in range(200)],
+    )
+
+    result = runner.invoke(
+        app,
+        ["images", "update-bulk", "--manifest", str(manifest)],
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert len(request_started_at) == 2
+    assert request_started_at[1] - request_started_at[0] >= 0.015
+    assert first_request_finished.is_set()
+
+
+def test_dispatch_update_batches_skips_queued_batches_after_transport_failure(monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from prime_cli.commands import images_update_bulk
+    from prime_sandboxes import APIError, ImageUpdateItem
+
+    all_batches_submitted = threading.Event()
+    submit_count = 0
+
+    class TrackingExecutor(ThreadPoolExecutor):
+        def submit(self, fn, /, *args, **kwargs):
+            nonlocal submit_count
+            future = super().submit(fn, *args, **kwargs)
+            submit_count += 1
+            if submit_count == 3:
+                all_batches_submitted.set()
+            return future
+
+    class FailingImageClient:
+        def __init__(self):
+            self.sent_batches = []
+
+        def update_images(self, request):
+            self.sent_batches.append(request.updates)
+            assert all_batches_submitted.wait(timeout=1.0)
+            raise APIError("HTTP 500: boom")
+
+    items = [
+        ImageUpdateItem.model_validate(_rename_line(f"image-{index}", f"renamed-{index}"))
+        for index in range(3)
+    ]
+    client = FailingImageClient()
+    monkeypatch.setattr(images_update_bulk, "ThreadPoolExecutor", TrackingExecutor)
+    monkeypatch.setattr(images_update_bulk, "UPDATE_BULK_BATCH_SIZE", 1)
+    monkeypatch.setattr(images_update_bulk, "UPDATE_BULK_MAX_IN_FLIGHT", 1)
+    monkeypatch.setattr(images_update_bulk, "UPDATE_BULK_DISPATCH_INTERVAL_SECONDS", 0)
+
+    completed, transport_failures, never_dispatched = images_update_bulk._dispatch_update_batches(
+        client, items, dry_run=False
+    )
+
+    assert len(client.sent_batches) == 1
+    assert completed == {}
+    assert list(transport_failures) == [0]
+    assert never_dispatched == items[1:]
 
 
 def test_update_bulk_validates_all_lines_before_sending(tmp_path, monkeypatch):
@@ -269,3 +367,56 @@ def test_update_bulk_transport_failure_records_unsent(tmp_path, monkeypatch):
     assert "Not sent:" in result.output
     retry_lines = [json.loads(line) for line in failures_out.read_text().splitlines() if line]
     assert retry_lines == [_rename_line("a", "a2")]
+
+
+def test_update_bulk_auth_failure_preserves_completed_results_and_retry_manifest(
+    tmp_path, monkeypatch
+):
+    from prime_sandboxes import ImageUpdateResult, UnauthorizedError
+
+    updates = [
+        _rename_line("completed", "completed-2"),
+        _rename_line("unauthorized", "unauthorized-2"),
+        _rename_line("never-dispatched", "never-dispatched-2"),
+    ]
+    manifest = _write_manifest(tmp_path, updates)
+    failures_out = tmp_path / "failed.jsonl"
+
+    def fake_dispatch(client, items, *, dry_run):
+        return (
+            {
+                0: (
+                    [items[0]],
+                    [ImageUpdateResult(source=items[0].source, success=True)],
+                )
+            },
+            {1: ([items[1]], UnauthorizedError("token expired"))},
+            [items[2]],
+        )
+
+    monkeypatch.setattr("prime_cli.commands.images_update_bulk.APIClient", lambda: object())
+    monkeypatch.setattr(
+        "prime_cli.commands.images_update_bulk._dispatch_update_batches",
+        fake_dispatch,
+    )
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+
+    result = runner.invoke(
+        app,
+        [
+            "images",
+            "update-bulk",
+            "--manifest",
+            str(manifest),
+            "--failures-out",
+            str(failures_out),
+        ],
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 1
+    assert "Updated: 1" in result.output
+    assert "Not sent: 2" in result.output
+    assert "Not authenticated" in result.output
+    retry_lines = [json.loads(line) for line in failures_out.read_text().splitlines() if line]
+    assert retry_lines == updates[1:]

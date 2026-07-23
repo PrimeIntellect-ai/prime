@@ -1,12 +1,13 @@
 from typing import Literal
 
+import questionary
 import typer
 from click.exceptions import Abort
 
 from prime_cli import __version__
 
 from ..client import APIClient, APIError
-from ..utils import PlainTyper, get_console
+from ..utils import PlainTyper, ask_select, ask_text, get_console
 
 app = PlainTyper(
     help="Submit feedback about Prime Intellect.",
@@ -26,33 +27,31 @@ _CATEGORY_CHOICES: tuple[tuple[FeedbackCategory, str], ...] = (
 
 
 def _prompt_category() -> FeedbackCategory:
-    console.print("\n[bold]What are you sharing?[/bold]")
-    for idx, (_, label) in enumerate(_CATEGORY_CHOICES, start=1):
-        console.print(f"  [cyan]({idx})[/cyan] {label}")
-
-    while True:
-        selection = typer.prompt("Select", type=int, default=3)
-        if 1 <= selection <= len(_CATEGORY_CHOICES):
-            return _CATEGORY_CHOICES[selection - 1][0]
-        console.print(f"[red]Invalid selection. Enter 1-{len(_CATEGORY_CHOICES)}.[/red]")
+    selected = ask_select(
+        "What are you sharing?",
+        [questionary.Choice(label, value=cat) for cat, label in _CATEGORY_CHOICES],
+    )
+    if selected is None:
+        raise Abort()
+    return selected
 
 
 def _prompt_message() -> str:
-    console.print("\n[bold]Your feedback[/bold] [dim](required)[/dim]")
     while True:
-        message = typer.prompt("", prompt_suffix="> ").strip()
+        answer = ask_text("Your feedback (required)")
+        if answer is None:
+            raise Abort()
+        message = answer.strip()
         if message:
             return message
         console.print("[red]Feedback cannot be empty.[/red]")
 
 
 def _prompt_run_id() -> str | None:
-    run_id = typer.prompt(
-        "Related run ID (optional)",
-        default="",
-        show_default=False,
-    ).strip()
-    return run_id or None
+    answer = ask_text("Related run ID (optional)")
+    if answer is None:
+        raise Abort()
+    return answer.strip() or None
 
 
 def submit_feedback(

@@ -38,6 +38,8 @@ from ..utils.formatters import format_file_size
 from ..utils.formatters import strip_ansi as _strip_ansi
 from ..utils.prompt import (
     any_provided,
+    ask_text,
+    confirm,
     prompt_for_value,
     require_selection,
     validate_env_var_name,
@@ -1255,17 +1257,11 @@ def push(
                     )
 
                     while True:
-                        try:
-                            chosen = (
-                                typer.prompt(
-                                    "Enter your desired username",
-                                )
-                                .strip()
-                                .lower()
-                            )
-                        except typer.Abort:
+                        answer = ask_text("Enter your desired username")
+                        if answer is None:
                             console.print("[red]Cancelled by user[/red]")
                             raise typer.Exit(1)
+                        chosen = answer.strip().lower()
 
                         if not chosen:
                             console.print("[red]Username cannot be empty[/red]")
@@ -2899,8 +2895,7 @@ def delete_version(
                     f"Are you sure you want to permanently delete version with content "
                     f"hash '{content_hash}' from '{env_id}' on the environments hub?"
                 )
-                confirm = typer.confirm(confirm_msg)
-                if not confirm:
+                if not confirm(confirm_msg):
                     console.print("Deletion cancelled.")
                     raise typer.Exit()
             except typer.Abort:
@@ -2954,8 +2949,7 @@ def delete(
                     f"Are you sure you want to permanently delete entire environment "
                     f"'{env_id}' and ALL its versions from the environments hub?"
                 )
-                confirm = typer.confirm(delete_msg)
-                if not confirm:
+                if not confirm(delete_msg):
                     console.print("Deletion cancelled.")
                     raise typer.Exit()
             except typer.Abort:
@@ -3661,8 +3655,7 @@ def env_secret_delete(
             secret_name = secret_data.get("name") if secret_data else secret_id
 
         if not yes:
-            confirm = typer.confirm(f"Delete secret '{secret_name}' from {owner}/{env_name}?")
-            if not confirm:
+            if not confirm(f"Delete secret '{secret_name}' from {owner}/{env_name}?"):
                 console.print("\n[dim]Cancelled.[/dim]")
                 raise typer.Exit()
 
@@ -3744,10 +3737,7 @@ def env_secret_unlink(
 
     try:
         if not yes:
-            confirm = typer.confirm(
-                f"Unlink global secret {global_secret_id} from {owner}/{env_name}?"
-            )
-            if not confirm:
+            if not confirm(f"Unlink global secret {global_secret_id} from {owner}/{env_name}?"):
                 console.print("\n[dim]Cancelled.[/dim]")
                 raise typer.Exit()
 
@@ -3998,8 +3988,7 @@ def var_delete(
 
     try:
         if not yes:
-            confirm = typer.confirm(f"Delete variable {var_id} from {owner}/{env_name}?")
-            if not confirm:
+            if not confirm(f"Delete variable {var_id} from {owner}/{env_name}?"):
                 console.print("\n[dim]Cancelled.[/dim]")
                 raise typer.Exit()
 

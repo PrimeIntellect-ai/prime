@@ -29,6 +29,7 @@ from rich.table import Table
 
 from ..utils import (
     PlainTyper,
+    confirm,
     confirm_or_skip,
     get_console,
     json_output_help,
@@ -1576,8 +1577,7 @@ def delete_image(
         context = f" (team: {team_id})" if team_id else ""
         if not yes:
             msg = f"Are you sure you want to delete {image_name}:{image_tag}{context}?"
-            confirm = typer.confirm(msg)
-            if not confirm:
+            if not confirm(msg):
                 console.print("[yellow]Cancelled[/yellow]")
                 raise typer.Exit(0)
 

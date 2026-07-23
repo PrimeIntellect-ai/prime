@@ -26,6 +26,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from .agent_picker import AgentMenu, select_agents
 from .lab_agents import (
     agent_capability,
     agent_project_skills_dirs,
@@ -1666,42 +1667,30 @@ def _resolve_setup_agents(value: str | None, *, no_interactive: bool) -> tuple[s
     )
 
 
+def _agent_menu() -> AgentMenu:
+    menu: AgentMenu = []
+    for name in SUPPORTED_AGENTS:
+        capability = agent_capability(name)
+        menu.append((name, capability.label, not capability.missing_requirements()))
+    return menu
+
+
+def _default_primary_index(menu: AgentMenu) -> int:
+    for index, (_, _, installed) in enumerate(menu):
+        if installed:
+            return index
+    for index, (name, _, _) in enumerate(menu):
+        if name == "codex":
+            return index
+    return 0
+
+
 def _prompt_for_agents() -> tuple[str, ...]:
-    print(f"Supported coding agents: {', '.join(SUPPORTED_AGENTS)}")
-    while True:
-        try:
-            raw_primary = _prompt_input("Primary coding agent [codex]: ").strip()
-            primary = raw_primary or "codex"
-            selected = [_normalize_supported_agent(primary, allow_all=False)]
-            break
-        except EOFError as exc:
-            raise ValueError("Agent selection was cancelled.") from exc
-        except ValueError as exc:
-            print(exc)
-
-    try:
-        use_multiple_raw = _prompt_input("Using multiple coding agents? [y/N]: ").strip().lower()
-    except EOFError as exc:
-        raise ValueError("Agent selection was cancelled.") from exc
-
-    if use_multiple_raw in {"y", "yes"}:
-        while True:
-            try:
-                additional_raw = _prompt_input("Additional agents (comma-separated): ").strip()
-                additional_agents = _parse_agents(additional_raw) if additional_raw else []
-                break
-            except EOFError as exc:
-                raise ValueError("Agent selection was cancelled.") from exc
-            except ValueError as exc:
-                print(exc)
-        for agent in additional_agents:
-            if agent not in selected:
-                selected.append(agent)
-    return tuple(selected)
-
-
-def _prompt_input(prompt: str) -> str:
-    return input(prompt)
+    menu = _agent_menu()
+    selected = select_agents(menu, _default_primary_index(menu))
+    if not selected:
+        raise ValueError("Agent selection was cancelled.")
+    return selected
 
 
 def _resolve_explicit_agents(value: str) -> tuple[str, ...]:

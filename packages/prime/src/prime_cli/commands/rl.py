@@ -37,7 +37,7 @@ from ..utils.formatters import (
     format_promo_price,
     strip_ansi,
 )
-from ..utils.prompt import confirm_or_skip
+from ..utils.prompt import ask_text, confirm, confirm_or_skip
 from .feedback import submit_feedback
 from .usage import RUN_USAGE_JSON_HELP, run_usage_command
 
@@ -1777,20 +1777,23 @@ def list_gpus(
 
 
 def _prompt_required_text(label: str, help_text: str, empty_error: str) -> str:
-    console.print(f"\n[bold]{label}[/bold] [dim](required)[/dim]")
     console.print(f"[dim]{help_text}[/dim]")
     while True:
-        value = typer.prompt("", prompt_suffix="> ").strip()
+        answer = ask_text(f"{label} (required)")
+        if answer is None:
+            raise typer.Abort()
+        value = answer.strip()
         if value:
             return value
         console.print(f"[red]{empty_error}[/red]")
 
 
 def _prompt_optional_text(label: str, help_text: str) -> str | None:
-    console.print(f"\n[bold]{label}[/bold] [dim](optional)[/dim]")
     console.print(f"[dim]{help_text}[/dim]")
-    value = typer.prompt("", default="", show_default=False, prompt_suffix="> ").strip()
-    return value or None
+    answer = ask_text(f"{label} (optional)")
+    if answer is None:
+        raise typer.Abort()
+    return answer.strip() or None
 
 
 def _format_model_request_feedback(models: str, context: str | None) -> str:
@@ -2150,8 +2153,7 @@ def stop_run(
     """Stop a run."""
     try:
         if not force:
-            confirm = typer.confirm(f"Are you sure you want to stop run {run_id}?")
-            if not confirm:
+            if not confirm(f"Are you sure you want to stop run {run_id}?"):
                 console.print("Cancelled.")
                 raise typer.Exit(0)
 
@@ -2175,8 +2177,7 @@ def delete_run(
 ) -> None:
     """Delete a run."""
     if not force:
-        confirm = typer.confirm(f"Are you sure you want to permanently delete run {run_id}?")
-        if not confirm:
+        if not confirm(f"Are you sure you want to permanently delete run {run_id}?"):
             console.print("Cancelled.")
             raise typer.Exit(0)
 
@@ -2218,10 +2219,9 @@ def restart_run(
     """
     try:
         if not force:
-            confirm = typer.confirm(
+            if not confirm(
                 f"Are you sure you want to restart run {run_id} from its latest checkpoint?"
-            )
-            if not confirm:
+            ):
                 console.print("Cancelled.")
                 raise typer.Exit(0)
 

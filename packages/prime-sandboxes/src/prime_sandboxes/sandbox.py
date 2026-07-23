@@ -38,6 +38,7 @@ from .exceptions import (
     UploadTimeoutError,
 )
 from .models import (
+    AuthorizeSSHForVMResponse,
     BackgroundJob,
     BackgroundJobStatus,
     BulkDeleteSandboxRequest,
@@ -1618,8 +1619,12 @@ class SandboxClient:
         sandbox_id: str,
         ttl_seconds: Optional[int] = None,
     ) -> SSHSession:
-        """Create an SSH session"""
-        self._guard_vm_unsupported(sandbox_id, "SSH")
+        """Create an SSH session.
+
+        This only creates the session. Register the ephemeral public key in a
+        separate step: container sandboxes authorize directly against the SSH
+        sidecar, VM sandboxes authorize via ``authorize_ssh_session``.
+        """
         payload: Dict[str, Any] = {}
         if ttl_seconds is not None:
             payload["ttl_seconds"] = ttl_seconds
@@ -1630,9 +1635,30 @@ class SandboxClient:
         )
         return SSHSession.model_validate(response)
 
+    def authorize_ssh_session(
+        self,
+        sandbox_id: str,
+        session_id: str,
+        public_key: str,
+        ttl_seconds: Optional[int] = None,
+    ) -> AuthorizeSSHForVMResponse:
+        """Authorize an ephemeral public key for a VM sandbox SSH session.
+
+        Container sandboxes authorize directly against the SSH sidecar and
+        should not call this method.
+        """
+        payload: Dict[str, Any] = {"public_key": public_key}
+        if ttl_seconds is not None:
+            payload["ttl_seconds"] = ttl_seconds
+        response = self.client.request(
+            "POST",
+            f"/sandbox/{sandbox_id}/ssh-session/{session_id}/authorize",
+            json=payload,
+        )
+        return AuthorizeSSHForVMResponse.model_validate(response)
+
     def close_ssh_session(self, sandbox_id: str, session_id: str) -> None:
-        """Close an SSH session and remove its exposure"""
-        self._guard_vm_unsupported(sandbox_id, "SSH")
+        """Close an SSH session."""
         self.client.request("DELETE", f"/sandbox/{sandbox_id}/ssh-session/{session_id}")
 
 
@@ -2757,8 +2783,12 @@ class AsyncSandboxClient:
         sandbox_id: str,
         ttl_seconds: Optional[int] = None,
     ) -> SSHSession:
-        """Create an SSH session"""
-        await self._guard_vm_unsupported(sandbox_id, "SSH")
+        """Create an SSH session.
+
+        This only creates the session. Register the ephemeral public key in a
+        separate step: container sandboxes authorize directly against the SSH
+        sidecar, VM sandboxes authorize via ``authorize_ssh_session``.
+        """
         payload: Dict[str, Any] = {}
         if ttl_seconds is not None:
             payload["ttl_seconds"] = ttl_seconds
@@ -2769,9 +2799,30 @@ class AsyncSandboxClient:
         )
         return SSHSession.model_validate(response)
 
+    async def authorize_ssh_session(
+        self,
+        sandbox_id: str,
+        session_id: str,
+        public_key: str,
+        ttl_seconds: Optional[int] = None,
+    ) -> AuthorizeSSHForVMResponse:
+        """Authorize an ephemeral public key for a VM sandbox SSH session.
+
+        Container sandboxes authorize directly against the SSH sidecar and
+        should not call this method.
+        """
+        payload: Dict[str, Any] = {"public_key": public_key}
+        if ttl_seconds is not None:
+            payload["ttl_seconds"] = ttl_seconds
+        response = await self.client.request(
+            "POST",
+            f"/sandbox/{sandbox_id}/ssh-session/{session_id}/authorize",
+            json=payload,
+        )
+        return AuthorizeSSHForVMResponse.model_validate(response)
+
     async def close_ssh_session(self, sandbox_id: str, session_id: str) -> None:
-        """Close an SSH session and remove its exposure"""
-        await self._guard_vm_unsupported(sandbox_id, "SSH")
+        """Close an SSH session."""
         await self.client.request("DELETE", f"/sandbox/{sandbox_id}/ssh-session/{session_id}")
 
 

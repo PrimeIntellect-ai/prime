@@ -680,7 +680,7 @@ def test_sandbox_delete_by_label_all_users_passes_admin_scope(
 
 
 def test_sandbox_ssh_no_id_picks_running_sandbox(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`prime sandbox ssh` with no ID lists running, non-VM sandboxes to pick from.
+    """`prime sandbox ssh` with no ID lists running sandboxes to pick from.
 
     Selecting one feeds its ID into the rest of the flow; we stop the flow right
     after by returning a non-RUNNING sandbox from ``get``.
@@ -726,10 +726,10 @@ def test_sandbox_ssh_no_id_picks_running_sandbox(monkeypatch: pytest.MonkeyPatch
     result = runner.invoke(app, ["sandbox", "ssh"], input="1\n")
 
     output = strip_ansi(result.output)
-    # Only RUNNING sandboxes are requested, and the VM one is filtered out of the picker.
+    # Only RUNNING sandboxes are requested, and VMs are valid SSH targets.
     assert captured["list_kwargs"]["status"] == "RUNNING"
     assert "sbx-container" in output
-    assert "sbx-vm" not in output
+    assert "sbx-vm" in output
     # The chosen sandbox flows into the rest of the SSH flow.
     assert captured["get_id"] == "sbx-container"
     assert "not running" in output
@@ -743,18 +743,9 @@ def test_sandbox_ssh_no_id_no_running_sandboxes(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr("prime_cli.commands.sandbox.shutil.which", lambda _: "/usr/bin/ssh")
 
     def mock_list(self: Any, **kwargs: Any) -> Any:
-        # Only a VM sandbox exists; it is not SSH-able, so the picker is empty.
         return SimpleNamespace(
-            sandboxes=[
-                SimpleNamespace(
-                    id="sbx-vm",
-                    name="gpu-box",
-                    docker_image="cuda:12",
-                    vm=True,
-                    created_at="2026-05-02T00:00:00Z",
-                ),
-            ],
-            total=1,
+            sandboxes=[],
+            total=0,
             page=1,
             per_page=100,
             has_next=False,
@@ -774,11 +765,7 @@ def test_sandbox_ssh_no_id_no_running_sandboxes(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_sandbox_ssh_no_id_pages_through_results(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The picker pages past page 1, even when page 1 holds only VMs.
-
-    Guards against reporting "no running sandboxes" when the only SSH-able
-    container lives on a later page.
-    """
+    """The picker pages past page 1 before presenting all running sandboxes."""
     monkeypatch.setenv("PRIME_API_KEY", "dummy")
     monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
     monkeypatch.setattr("prime_cli.commands.sandbox.shutil.which", lambda _: "/usr/bin/ssh")
@@ -788,7 +775,7 @@ def test_sandbox_ssh_no_id_pages_through_results(monkeypatch: pytest.MonkeyPatch
         1: SimpleNamespace(
             sandboxes=[
                 SimpleNamespace(
-                    id="sbx-vm",
+                    id="sbx-first",
                     name="gpu-box",
                     docker_image="cuda:12",
                     vm=True,
@@ -832,8 +819,9 @@ def test_sandbox_ssh_no_id_pages_through_results(monkeypatch: pytest.MonkeyPatch
 
     output = strip_ansi(result.output)
     assert captured["pages_requested"] == [1, 2]
+    assert "sbx-first" in output
     assert "sbx-container" in output
-    assert captured["get_id"] == "sbx-container"
+    assert captured["get_id"] == "sbx-first"
     assert result.exit_code == 1
 
 
@@ -874,6 +862,102 @@ def test_sandbox_ssh_no_id_picker_paginates_display(monkeypatch: pytest.MonkeyPa
     assert "page 2/2" in output
     assert captured["get_id"] == "sbx-050"
     assert result.exit_code == 1
+
+
+def test_sandbox_ssh_vm_uses_public_key_and_proxy_command(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    monkeypatch.setenv("PRIME_API_KEY", "dummy")
+    monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
+    monkeypatch.setattr("prime_cli.commands.sandbox.shutil.which", lambda _: "/usr/bin/ssh")
+
+    temp_dir = tmp_path / "ssh"
+    temp_dir.mkdir()
+    monkeypatch.setattr("prime_cli.commands.sandbox.tempfile.mkdtemp", lambda prefix: str(temp_dir))
+
+    captured: dict[str, Any] = {"closed": []}
+
+    def mock_get(self: Any, sandbox_id: str) -> Any:
+        return SimpleNamespace(id=sandbox_id, vm=True, status="RUNNING")
+
+    def mock_create_ssh_session(self: Any, sandbox_id: str, **kwargs: Any) -> Any:
+        captured["create_kwargs"] = kwargs
+        return SimpleNamespace(
+            session_id="sess-vm",
+            host="gw-tcp.example.com",
+            port=2222,
+            ttl_seconds=300,
+            gateway_url="",
+            user_ns="",
+            job_id=sandbox_id,
+            token="",
+        )
+
+    def mock_authorize_ssh_session(
+        self: Any, sandbox_id: str, session_id: str, **kwargs: Any
+    ) -> Any:
+        captured["authorize_args"] = (sandbox_id, session_id)
+        captured["authorize_kwargs"] = kwargs
+        return SimpleNamespace(
+            session_id=session_id,
+            sandbox_id=sandbox_id,
+            host="gw-tcp.example.com",
+            port=2222,
+            external_endpoint="gw-tcp.example.com:2222",
+            ttl_seconds=300,
+        )
+
+    def mock_close_ssh_session(self: Any, sandbox_id: str, session_id: str) -> None:
+        captured["closed"].append((sandbox_id, session_id))
+
+    def mock_subprocess_run(cmd: list[str], **kwargs: Any) -> Any:
+        if cmd[:2] == ["ssh-keygen", "-t"]:
+            (temp_dir / "id_ed25519.pub").write_text("ssh-ed25519 AAAA vm@test")
+            return SimpleNamespace(returncode=0)
+        captured["ssh_cmd"] = cmd
+        return SimpleNamespace(returncode=0)
+
+    class _NoHTTPClient:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        def __enter__(self) -> "_NoHTTPClient":
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def post(self, *_args: Any, **_kwargs: Any) -> Any:
+            raise AssertionError("VM SSH should not call sidecar authorize")
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.get", mock_get)
+    monkeypatch.setattr(
+        "prime_cli.commands.sandbox.SandboxClient.create_ssh_session",
+        mock_create_ssh_session,
+    )
+    monkeypatch.setattr(
+        "prime_cli.commands.sandbox.SandboxClient.authorize_ssh_session",
+        mock_authorize_ssh_session,
+    )
+    monkeypatch.setattr(
+        "prime_cli.commands.sandbox.SandboxClient.close_ssh_session",
+        mock_close_ssh_session,
+    )
+    monkeypatch.setattr("prime_cli.commands.sandbox.subprocess.run", mock_subprocess_run)
+    monkeypatch.setattr("prime_cli.commands.sandbox.httpx.Client", _NoHTTPClient)
+
+    result = runner.invoke(app, ["sandbox", "ssh", "sbx-vm"])
+
+    assert result.exit_code == 0, result.output
+    # Create no longer carries the public key.
+    assert "public_key" not in captured["create_kwargs"]
+    # Authorize is a separate step, called with the generated public key.
+    assert captured["authorize_args"] == ("sbx-vm", "sess-vm")
+    assert captured["authorize_kwargs"]["public_key"] == "ssh-ed25519 AAAA vm@test"
+    ssh_cmd = captured["ssh_cmd"]
+    assert any("ProxyCommand=" in arg for arg in ssh_cmd)
+    assert any("PRIME-SSH-SESSION sess-vm" in arg for arg in ssh_cmd)
+    assert captured["closed"] == [("sbx-vm", "sess-vm")]
 
 
 def test_format_sandbox_expiry_running_shows_time_left() -> None:

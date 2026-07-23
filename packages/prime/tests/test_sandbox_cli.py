@@ -432,8 +432,40 @@ def test_sandbox_create_sanitizes_vm_secret_validation_errors(
 
     output = strip_ansi(result.output)
     assert result.exit_code == 1
+    assert "Invalid sandbox configuration" in output
     assert "reserved" in output
     assert "must-not-leak" not in output
+
+
+def test_sandbox_create_reports_unknown_status_for_invalid_api_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from prime_sandboxes import Sandbox
+
+    _configure_cli(monkeypatch)
+
+    def mock_create(self: Any, request: Any) -> Any:
+        return Sandbox.model_validate(
+            {
+                "id": "sbx-maybe-created",
+                "secrets": {"API_TOKEN": "response-secret-must-not-leak"},
+            }
+        )
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.create", mock_create)
+
+    result = runner.invoke(
+        app,
+        ["sandbox", "create", "python:3.11-slim", "--yes"],
+    )
+
+    output = strip_ansi(result.output)
+    assert result.exit_code == 1
+    assert "Sandbox creation status is unknown" in output
+    assert "sandbox may have been created" in output
+    assert "prime sandbox list" in output
+    assert "Invalid sandbox configuration" not in output
+    assert "response-secret-must-not-leak" not in output
 
 
 def test_sandbox_create_gpu_without_docker_image(monkeypatch: pytest.MonkeyPatch) -> None:

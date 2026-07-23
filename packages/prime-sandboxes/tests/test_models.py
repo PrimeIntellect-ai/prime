@@ -139,6 +139,20 @@ def test_vm_sandbox_rejects_invalid_environment_contract(environment_vars, secre
         )
 
 
+def test_vm_sandbox_validation_error_hides_secret_input():
+    secret = "super-sensitive-secret-value"
+
+    with pytest.raises(ValidationError, match="reserved") as exc_info:
+        CreateSandboxRequest(
+            name="vm-sandbox",
+            docker_image="python:3.11-slim",
+            vm=True,
+            secrets={"SANDBOX_ID": secret},
+        )
+
+    assert secret not in str(exc_info.value)
+
+
 def test_vm_sandbox_rejects_too_many_combined_variables():
     with pytest.raises(ValidationError, match="257 variables"):
         CreateSandboxRequest(

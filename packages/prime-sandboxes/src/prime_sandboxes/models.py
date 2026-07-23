@@ -278,6 +278,8 @@ class SandboxListResponse(BaseModel):
 class CreateSandboxRequest(BaseModel):
     """Create sandbox request model"""
 
+    model_config = ConfigDict(hide_input_in_errors=True)
+
     name: str
     docker_image: str
     start_command: Optional[str] = "tail -f /dev/null"

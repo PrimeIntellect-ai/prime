@@ -26,6 +26,7 @@ from prime_sandboxes import (
     SandboxNotRunningError,
     UnauthorizedError,
 )
+from pydantic import ValidationError
 from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
@@ -591,6 +592,12 @@ def create(
                     console.print("[red]Environment variables must be in KEY=VALUE format[/red]")
                     raise typer.Exit(1)
                 key, value = env_var.split("=", 1)
+                if vm and key in env_vars:
+                    console.print(
+                        f"[red]Environment variable {escape(key)!r} was provided "
+                        "more than once[/red]"
+                    )
+                    raise typer.Exit(1)
                 env_vars[key] = value
 
         secrets_vars = {}
@@ -600,7 +607,19 @@ def create(
                     console.print("[red]Secrets must be in KEY=VALUE format[/red]")
                     raise typer.Exit(1)
                 key, value = secret_var.split("=", 1)
+                if vm and key in secrets_vars:
+                    console.print(f"[red]Secret {escape(key)!r} was provided more than once[/red]")
+                    raise typer.Exit(1)
                 secrets_vars[key] = value
+
+        duplicate_keys = set(env_vars).intersection(secrets_vars) if vm else set()
+        if duplicate_keys:
+            duplicate = min(duplicate_keys)
+            console.print(
+                f"[red]Environment key {escape(duplicate)!r} cannot be both "
+                "an environment variable and a secret[/red]"
+            )
+            raise typer.Exit(1)
 
         if gpu_count > 0 and not gpu_type:
             console.print(
@@ -691,28 +710,35 @@ def create(
             console.print("[red]Error:[/red] --network-allow/--network-deny require --vm")
             raise typer.Exit(1)
 
-        request = CreateSandboxRequest(
-            name=name,
-            docker_image=docker_image,
-            start_command=start_command,
-            cpu_cores=cpu_cores,
-            memory_gb=memory_gb,
-            disk_size_gb=disk_size_gb,
-            gpu_count=gpu_count,
-            gpu_type=gpu_type,
-            vm=vm,
-            network_allowlist=network_allow,
-            network_denylist=network_deny,
-            timeout_minutes=timeout_minutes,
-            environment_vars=env_vars if env_vars else None,
-            secrets=secrets_vars if secrets_vars else None,
-            labels=labels if labels else [],
-            team_id=team_id,
-            region=region,
-            registry_credentials_id=registry_credentials_id,
-            **request_kwargs,
-            guaranteed=guaranteed,
-        )
+        try:
+            request = CreateSandboxRequest(
+                name=name,
+                docker_image=docker_image,
+                start_command=start_command,
+                cpu_cores=cpu_cores,
+                memory_gb=memory_gb,
+                disk_size_gb=disk_size_gb,
+                gpu_count=gpu_count,
+                gpu_type=gpu_type,
+                vm=vm,
+                network_allowlist=network_allow,
+                network_denylist=network_deny,
+                timeout_minutes=timeout_minutes,
+                environment_vars=env_vars if env_vars else None,
+                secrets=secrets_vars if secrets_vars else None,
+                labels=labels if labels else [],
+                team_id=team_id,
+                region=region,
+                registry_credentials_id=registry_credentials_id,
+                **request_kwargs,
+                guaranteed=guaranteed,
+            )
+        except ValidationError as e:
+            # Render messages only because the rejected model input may contain
+            # secret values.
+            messages = "; ".join(error["msg"] for error in e.errors(include_url=False))
+            console.print(f"[red]Invalid sandbox configuration:[/red] {escape(messages)}")
+            raise typer.Exit(1)
 
         # Show configuration summary
         console.print("\n[bold]Sandbox Configuration:[/bold]")
@@ -752,8 +778,19 @@ def create(
             console.print(f"Secrets: {obfuscated_secrets}")
 
         if confirm_or_skip("\nDo you want to create this sandbox?", yes, default=True):
-            with console.status("[bold blue]Creating sandbox...", spinner="dots"):
-                sandbox = sandbox_client.create(request)
+            try:
+                with console.status("[bold blue]Creating sandbox...", spinner="dots"):
+                    sandbox = sandbox_client.create(request)
+            except ValidationError:
+                # The SDK validates the response after the API request. At this
+                # point the sandbox may exist, so do not describe this as a
+                # rejected configuration or encourage an immediate retry.
+                console.print(
+                    "[red]Sandbox creation status is unknown:[/red] The API returned "
+                    "an unexpected response, and the sandbox may have been created. "
+                    "Check 'prime sandbox list' before retrying."
+                )
+                raise typer.Exit(1)
 
             console.print(f"\n[green]Successfully created sandbox {sandbox.id}[/green]")
             if getattr(sandbox, "pending_image_build_id", None):

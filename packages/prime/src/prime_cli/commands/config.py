@@ -16,6 +16,16 @@ console = get_console()
 
 # Team ID validation pattern: CUID (v1)
 TEAM_ID_PATTERN = re.compile(r"^c[a-z0-9]{24}$")
+PROFILE_OVERRIDE_ENV_VARS = (
+    "PRIME_API_KEY",
+    "PRIME_TEAM_ID",
+    "PRIME_USER_ID",
+    "PRIME_API_BASE_URL",
+    "PRIME_BASE_URL",
+    "PRIME_FRONTEND_URL",
+    "PRIME_INFERENCE_URL",
+    "PRIME_CONTEXT",
+)
 
 
 def validate_team_id(team_id: str) -> bool:
@@ -30,6 +40,36 @@ def validate_team_id(team_id: str) -> bool:
     if not team_id:  # Empty string is valid (means personal account)
         return True
     return bool(TEAM_ID_PATTERN.match(team_id))
+
+
+def _active_profile_override_env_vars() -> list[str]:
+    return [name for name in PROFILE_OVERRIDE_ENV_VARS if _env_var_overrides_profile(name)]
+
+
+def _env_var_overrides_profile(name: str) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return False
+    if name == "PRIME_TEAM_ID":
+        return bool(value.strip())
+    if name == "PRIME_USER_ID":
+        return True
+    if name == "PRIME_CONTEXT" and Config.context_from_cli_option():
+        return False
+    return bool(value)
+
+
+def _require_profile_env_unset(command: str) -> None:
+    names = _active_profile_override_env_vars()
+    if not names:
+        return
+    joined = ", ".join(names)
+    console.print(
+        f"[red]Error:[/red] {joined} {'is' if len(names) == 1 else 'are'} set in your "
+        f"environment, so [bold]prime config {command}[/bold] cannot make a saved profile "
+        "active. Unset the environment override and rerun the command."
+    )
+    raise typer.Exit(1)
 
 
 @app.command()
@@ -278,6 +318,7 @@ def _set_environment(
     env: str,
 ) -> None:
     """Set URLs for a specific environment"""
+    _require_profile_env_unset(f"use {env}")
     config = Config()
 
     # Try to load the environment (handles both built-in and custom)

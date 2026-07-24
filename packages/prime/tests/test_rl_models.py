@@ -5,6 +5,7 @@ from typing import Any, Dict, List
 
 import pytest
 from prime_cli.commands.rl import _model_name_sort_key
+from prime_cli.core.client import NotFoundError
 from prime_cli.main import app
 from prime_cli.utils.formatters import strip_ansi
 from typer.testing import CliRunner
@@ -37,11 +38,59 @@ def _models_payload() -> Dict[str, Any]:
     }
 
 
-def _mock_get_factory(calls: List[str]):
+def _fft_models_payload() -> Dict[str, Any]:
+    return {
+        "models": [
+            {
+                "name": "meta-llama/Llama-3.1-8B-Instruct",
+                "clusters": [
+                    {
+                        "clusterId": "cluster-a",
+                        "clusterName": "athens",
+                        "gpuType": "H200_141GB",
+                        "cacheSyncedAt": "2026-06-01T10:15:00Z",
+                    },
+                    {
+                        "clusterId": "cluster-b",
+                        "clusterName": "berlin",
+                        "gpuType": "H100_80GB",
+                        "cacheSyncedAt": "2026-06-02T08:00:00Z",
+                    },
+                ],
+            },
+            {
+                "name": "qwen/qwen3-8b",
+                "clusters": [
+                    {
+                        "clusterId": "cluster-a",
+                        "clusterName": "athens",
+                        "gpuType": "H200_141GB",
+                        "cacheSyncedAt": "2026-06-01T10:15:00Z",
+                    }
+                ],
+            },
+        ]
+    }
+
+
+def _mock_get_factory(
+    calls: List[str],
+    *,
+    fft_payload: Dict[str, Any] | None = None,
+):
+    """Mock APIClient.get for the models command.
+
+    By default returns an empty FFT list so tests that pre-date the FFT
+    endpoint continue to exercise the LoRA-only rendering path. Pass
+    ``fft_payload`` to opt into a populated FFT response.
+    """
+
     def mock_get(self: Any, endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
         calls.append(endpoint)
         if endpoint == "/rft/models":
             return _models_payload()
+        if endpoint == "/training/available-fft-models":
+            return fft_payload if fft_payload is not None else {"models": []}
         raise AssertionError(f"Unexpected endpoint: {endpoint}")
 
     return mock_get
@@ -60,7 +109,9 @@ def test_models_table_renders_pricing(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "$3" in result.output
     # Null pricing renders as a dash.
     assert "-" in result.output
-    assert calls == ["/rft/models"]
+    # LoRA endpoint is always hit; FFT endpoint is polled every time so
+    # the table shows up transparently when it starts returning data.
+    assert calls == ["/rft/models", "/training/available-fft-models"]
 
 
 def test_models_json_includes_pricing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -82,7 +133,11 @@ def test_models_handles_backend_without_pricing_fields(
     """Older backends may not return the pricing fields at all."""
 
     def mock_get(self: Any, endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
-        return {"models": [{"name": "qwen/qwen3-8b", "atCapacity": False}]}
+        if endpoint == "/rft/models":
+            return {"models": [{"name": "qwen/qwen3-8b", "atCapacity": False}]}
+        if endpoint == "/training/available-fft-models":
+            return {"models": []}
+        raise AssertionError(f"Unexpected endpoint: {endpoint}")
 
     monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
 
@@ -114,6 +169,8 @@ def test_models_table_renders_promo_arrow_and_caption(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def mock_get(self: Any, endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        if endpoint == "/training/available-fft-models":
+            return {"models": []}
         return _promo_payload()
 
     monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
@@ -135,6 +192,21 @@ def test_models_table_renders_promo_arrow_and_caption(
     assert plain.count("Free RFT week") == 1
 
 
+def _lora_only_mock(payload: Dict[str, Any]):
+    """Return a mock_get that serves ``payload`` for /rft/models and an
+    empty FFT list for /training/available-fft-models — the shape most
+    LoRA-focused tests want."""
+
+    def mock_get(self: Any, endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        if endpoint == "/rft/models":
+            return payload
+        if endpoint == "/training/available-fft-models":
+            return {"models": []}
+        raise AssertionError(f"Unexpected endpoint: {endpoint}")
+
+    return mock_get
+
+
 def test_models_table_no_promo_when_effective_equals_original(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -154,10 +226,7 @@ def test_models_table_no_promo_when_effective_equals_original(
         ]
     }
 
-    def mock_get(self: Any, endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
-        return payload
-
-    monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+    monkeypatch.setattr("prime_cli.core.APIClient.get", _lora_only_mock(payload))
 
     result = CliRunner().invoke(app, ["rl", "models"], env={"COLUMNS": "200"})
 
@@ -186,10 +255,7 @@ def test_models_zero_original_with_promo_does_not_render_free(
         ]
     }
 
-    def mock_get(self: Any, endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
-        return payload
-
-    monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+    monkeypatch.setattr("prime_cli.core.APIClient.get", _lora_only_mock(payload))
 
     result = CliRunner().invoke(app, ["rl", "models"], env={"COLUMNS": "200"})
 
@@ -228,10 +294,7 @@ def test_models_promo_label_deduplicated_across_models(
         ]
     }
 
-    def mock_get(self: Any, endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
-        return payload
-
-    monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+    monkeypatch.setattr("prime_cli.core.APIClient.get", _lora_only_mock(payload))
 
     result = CliRunner().invoke(app, ["rl", "models"], env={"COLUMNS": "200"})
 
@@ -263,10 +326,7 @@ def test_models_table_renders_promo_with_list_fields(
         ]
     }
 
-    def mock_get(self: Any, endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
-        return payload
-
-    monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+    monkeypatch.setattr("prime_cli.core.APIClient.get", _lora_only_mock(payload))
 
     result = CliRunner().invoke(app, ["rl", "models"], env={"COLUMNS": "200"})
 
@@ -282,6 +342,8 @@ def test_models_table_renders_promo_with_list_fields(
 
 def test_models_json_includes_effective_fields(monkeypatch: pytest.MonkeyPatch) -> None:
     def mock_get(self: Any, endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        if endpoint == "/training/available-fft-models":
+            return {"models": []}
         return _promo_payload()
 
     monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
@@ -348,3 +410,138 @@ def test_model_name_sort_key_handles_active_params_case_insensitively() -> None:
         "org/model-30B-A10b",
         "org/model-30B",
     ]
+
+
+def test_models_command_renders_fft_section_when_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both LoRA and FFT tables render side by side when the FFT endpoint
+    returns any results."""
+    calls: List[str] = []
+    monkeypatch.setattr(
+        "prime_cli.core.APIClient.get",
+        _mock_get_factory(calls, fft_payload=_fft_models_payload()),
+    )
+
+    result = CliRunner().invoke(app, ["train", "models"], env={"COLUMNS": "200"})
+
+    assert result.exit_code == 0, result.output
+    plain = strip_ansi(result.output)
+    # LoRA table survives.
+    assert "Hosted Training - Models" in plain
+    assert "qwen/qwen3-8b" in plain
+    # FFT table shows up too.
+    assert "Full Finetuning" in plain
+    assert "meta-llama/Llama-3.1-8B-Instruct" in plain
+    # Model cached on two clusters + two GPU types.
+    assert "H100_80GB" in plain
+    assert "H200_141GB" in plain
+    assert "athens" in plain
+    assert "berlin" in plain
+    # Both endpoints were hit.
+    assert "/rft/models" in calls
+    assert "/training/available-fft-models" in calls
+
+
+def test_models_json_output_includes_available_fft_models(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "prime_cli.core.APIClient.get",
+        _mock_get_factory([], fft_payload=_fft_models_payload()),
+    )
+
+    result = CliRunner().invoke(app, ["train", "models", "--output", "json"])
+
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert [m["name"] for m in data["models"]] == [
+        "qwen/qwen3-8b",
+        "openai/gpt-oss-20b",
+    ]
+    fft = data["available_fft_models"]
+    assert [m["name"] for m in fft] == [
+        "meta-llama/Llama-3.1-8B-Instruct",
+        "qwen/qwen3-8b",
+    ]
+    first = fft[0]
+    assert [c["cluster_name"] for c in first["clusters"]] == ["athens", "berlin"]
+    assert first["clusters"][0]["gpu_type"] == "H200_141GB"
+
+
+def test_models_json_omits_fft_key_when_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """JSON output stays backwards compatible: no available_fft_models
+    key when the FFT endpoint returns an empty list."""
+    monkeypatch.setattr("prime_cli.core.APIClient.get", _mock_get_factory([]))
+
+    result = CliRunner().invoke(app, ["train", "models", "--output", "json"])
+
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert "models" in data
+    assert "available_fft_models" not in data
+
+
+def test_models_command_survives_fft_endpoint_404(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Older backends that haven't shipped the FFT endpoint yet should
+    still get the LoRA listing rendered — the CLI must not crash."""
+
+    def mock_get(self: Any, endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        if endpoint == "/rft/models":
+            return _models_payload()
+        if endpoint == "/training/available-fft-models":
+            raise NotFoundError("HTTP 404: available-fft-models not deployed on this backend")
+        raise AssertionError(f"Unexpected endpoint: {endpoint}")
+
+    monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+
+    result = CliRunner().invoke(app, ["train", "models"], env={"COLUMNS": "200"})
+
+    assert result.exit_code == 0, result.output
+    plain = strip_ansi(result.output)
+    assert "qwen/qwen3-8b" in plain
+    assert "Full Finetuning" not in plain
+
+
+def test_models_fft_only_suppresses_lora_section(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: List[str] = []
+
+    def mock_get(self: Any, endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        calls.append(endpoint)
+        if endpoint == "/training/available-fft-models":
+            return _fft_models_payload()
+        raise AssertionError(f"Unexpected endpoint: {endpoint}")
+
+    monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+
+    result = CliRunner().invoke(app, ["train", "models", "--fft-only"], env={"COLUMNS": "200"})
+
+    assert result.exit_code == 0, result.output
+    plain = strip_ansi(result.output)
+    assert "Full Finetuning" in plain
+    assert "meta-llama/Llama-3.1-8B-Instruct" in plain
+    # LoRA table title should not appear.
+    assert "Hosted Training - Models" not in plain
+    # Only the FFT endpoint was fetched.
+    assert calls == ["/training/available-fft-models"]
+
+
+def test_list_available_fft_models_returns_empty_on_404(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """API client method swallows 404 so `prime train models` can silently
+    fall back to LoRA-only rendering on backends that haven't shipped the
+    endpoint yet."""
+    from prime_cli.api.training import HostedTrainingClient
+    from prime_cli.core import APIClient
+
+    def mock_get(self: Any, endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        raise NotFoundError("HTTP 404: not found")
+
+    monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+    client = HostedTrainingClient(APIClient())
+    assert client.list_available_fft_models(team_id=None) == []

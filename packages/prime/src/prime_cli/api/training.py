@@ -6,11 +6,12 @@ own helm release on a registered PrimeCluster. Auth is the standard API
 token; admin role is gated server-side.
 """
 
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from prime_cli.core import APIClient
+from prime_cli.core import APIClient, APIError, NotFoundError, UnauthorizedError
 
 
 class HostedTrainingRunResponse(BaseModel):
@@ -26,6 +27,38 @@ class AvailableGpuTypesResponse(BaseModel):
     """Response from GET /v1/training/available-gpu-types."""
 
     gpu_types: List[str] = Field(default_factory=list, alias="gpuTypes")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class FFTModelClusterInfo(BaseModel):
+    """One cluster the caller can dispatch an FFT run to that already has
+    the parent model cached — mirrors the backend
+    `FFTModelClusterInfo` in `platform/backend/app/packages/training/schemas.py`.
+    """
+
+    cluster_id: str = Field(..., alias="clusterId")
+    cluster_name: str = Field(..., alias="clusterName")
+    gpu_type: Optional[str] = Field(None, alias="gpuType")
+    cache_synced_at: Optional[datetime] = Field(None, alias="cacheSyncedAt")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class AvailableFFTModel(BaseModel):
+    """A model that is cached and ready for FFT dispatch on at least one
+    eligible PrimeCluster."""
+
+    name: str = Field(..., description="Model name")
+    clusters: List[FFTModelClusterInfo] = Field(default_factory=list)
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class AvailableFFTModelsResponse(BaseModel):
+    """Response from GET /v1/training/available-fft-models."""
+
+    models: List[AvailableFFTModel] = Field(default_factory=list)
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -70,6 +103,35 @@ class HostedTrainingClient:
             params["team_id"] = team_id
         response = self.client.get("/training/available-gpu-types", params=params)
         return AvailableGpuTypesResponse.model_validate(response)
+
+    def list_available_fft_models(self, team_id: Optional[str] = None) -> List[AvailableFFTModel]:
+        """GET /v1/training/available-fft-models. Models that are already
+        cached on at least one PrimeCluster the caller can dispatch a
+        full-FT run to.
+
+        Returns an empty list when the caller has no eligible clusters
+        (403), when the endpoint is not deployed yet on the target
+        backend (404) or when auth is missing (401) — the CLI is called
+        in a "silent when empty" context alongside the LoRA listing and
+        should not crash the primary output on a still-rolling-out
+        endpoint.
+        """
+        params: Dict[str, Any] = {}
+        if team_id:
+            params["team_id"] = team_id
+        try:
+            response = self.client.get("/training/available-fft-models", params=params)
+        except (NotFoundError, UnauthorizedError):
+            return []
+        except APIError as exc:
+            # 403 (not a team member) surfaces as APIError with an
+            # HTTP 403 prefix. Treat like NotFound so a personal caller
+            # querying with an unrelated team_id doesn't fail the whole
+            # command.
+            if "HTTP 403" in str(exc):
+                return []
+            raise
+        return AvailableFFTModelsResponse.model_validate(response).models
 
 
 def build_payload_from_toml(

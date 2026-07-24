@@ -86,7 +86,7 @@ async def main() -> None:
         await run_background_count_example()
     except APIError as exc:
         print(f"✗ API error: {exc}")
-        print("  Make sure PRIME_API_KEY is set or run 'prime login' before executing.")
+        print("  Run 'prime login' or pass a process-scoped PRIME_API_KEY before executing.")
     except Exception as exc:
         print(f"✗ Unexpected error: {exc}")
 

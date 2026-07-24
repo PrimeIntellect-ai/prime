@@ -16,7 +16,8 @@ from prime_sandboxes import (
 def main():
     """Basic sandbox lifecycle example"""
     try:
-        # Initialize client (uses PRIME_API_KEY env var or ~/.prime/config.json)
+        # Initialize client from prime login / active config, or from a process-scoped
+        # PRIME_API_KEY override. Standalone scripts may also pass api_key directly.
         client = APIClient()
         sandbox_client = SandboxClient(client)
 
@@ -51,7 +52,7 @@ def main():
 
     except APIError as e:
         print(f"✗ API Error: {e}")
-        print("  Make sure PRIME_API_KEY is set or run 'prime login' first")
+        print("  Run 'prime login' or pass a process-scoped PRIME_API_KEY for this script")
     except Exception as e:
         print(f"✗ Error: {e}")
 

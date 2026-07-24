@@ -428,7 +428,7 @@ def test_models_command_renders_fft_section_when_available(
     assert result.exit_code == 0, result.output
     plain = strip_ansi(result.output)
     # LoRA table survives.
-    assert "Hosted Training - Models" in plain
+    assert "LoRA" in plain
     assert "qwen/qwen3-8b" in plain
     # FFT table shows up too.
     assert "Full Finetuning" in plain
@@ -526,8 +526,8 @@ def test_models_fft_only_suppresses_lora_section(
     plain = strip_ansi(result.output)
     assert "Full Finetuning" in plain
     assert "meta-llama/Llama-3.1-8B-Instruct" in plain
-    # LoRA table title should not appear.
-    assert "Hosted Training - Models" not in plain
+    # LoRA table title should not appear when --fft-only is set.
+    assert "LoRA" not in plain
     # Only the FFT endpoint was fetched.
     assert calls == ["/training/available-fft-models"]
 

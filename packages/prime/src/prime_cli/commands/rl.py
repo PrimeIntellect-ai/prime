@@ -1725,6 +1725,10 @@ def list_models(
             _render_lora_models_table(models)
 
         if fft_models:
+            if not fft_only:
+                # Visual break between the two tables so the sections
+                # don't run into each other.
+                console.print()
             _render_fft_models_table(fft_models)
         elif fft_only:
             console.print("[yellow]No FFT models available.[/yellow]")
@@ -1746,7 +1750,9 @@ def _render_lora_models_table(models: List) -> None:
         return
 
     table = Table(
-        title="Hosted Training - Models",
+        title="Hosted Training — LoRA",
+        title_justify="left",
+        caption_justify="left",
     )
     table.add_column("Model", style="cyan")
     table.add_column("Status")
@@ -1791,10 +1797,14 @@ def _render_fft_models_table(fft_models: List) -> None:
     those into a single row with cluster+GPU joined so the table stays
     scannable when a large model is warm everywhere.
     """
-    table = Table(title="Hosted Training - Full Finetuning")
+    table = Table(
+        title="Hosted Training — Full Finetuning",
+        title_justify="left",
+        caption_justify="left",
+    )
     table.add_column("Model", style="cyan")
     table.add_column("GPU Type(s)", style="magenta")
-    table.add_column("Available On", style="green")
+    table.add_column("Cluster(s)", style="green")
 
     for model in sorted(fft_models, key=lambda m: _model_name_sort_key(m.name)):
         gpu_types = sorted({c.gpu_type for c in model.clusters if c.gpu_type})

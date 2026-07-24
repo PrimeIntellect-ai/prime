@@ -38,7 +38,7 @@ def _models_payload() -> Dict[str, Any]:
     }
 
 
-def _fft_models_payload() -> Dict[str, Any]:
+def _fft_models_payload() -> dict[str, Any]:
     return {
         "models": [
             {
@@ -74,9 +74,9 @@ def _fft_models_payload() -> Dict[str, Any]:
 
 
 def _mock_get_factory(
-    calls: List[str],
+    calls: list[str],
     *,
-    fft_payload: Dict[str, Any] | None = None,
+    fft_payload: dict[str, Any] | None = None,
 ):
     """Mock APIClient.get for the models command.
 
@@ -85,7 +85,7 @@ def _mock_get_factory(
     ``fft_payload`` to opt into a populated FFT response.
     """
 
-    def mock_get(self: Any, endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    def mock_get(self: Any, endpoint: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         calls.append(endpoint)
         if endpoint == "/rft/models":
             return _models_payload()
@@ -192,12 +192,12 @@ def test_models_table_renders_promo_arrow_and_caption(
     assert plain.count("Free RFT week") == 1
 
 
-def _lora_only_mock(payload: Dict[str, Any]):
+def _lora_only_mock(payload: dict[str, Any]):
     """Return a mock_get that serves ``payload`` for /rft/models and an
     empty FFT list for /training/available-fft-models — the shape most
     LoRA-focused tests want."""
 
-    def mock_get(self: Any, endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    def mock_get(self: Any, endpoint: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         if endpoint == "/rft/models":
             return payload
         if endpoint == "/training/available-fft-models":
@@ -417,7 +417,7 @@ def test_models_command_renders_fft_section_when_available(
 ) -> None:
     """Both LoRA and FFT tables render side by side when the FFT endpoint
     returns any results."""
-    calls: List[str] = []
+    calls: list[str] = []
     monkeypatch.setattr(
         "prime_cli.core.APIClient.get",
         _mock_get_factory(calls, fft_payload=_fft_models_payload()),
@@ -492,7 +492,7 @@ def test_models_command_survives_fft_endpoint_404(
     """Older backends that haven't shipped the FFT endpoint yet should
     still get the LoRA listing rendered — the CLI must not crash."""
 
-    def mock_get(self: Any, endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    def mock_get(self: Any, endpoint: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         if endpoint == "/rft/models":
             return _models_payload()
         if endpoint == "/training/available-fft-models":
@@ -512,9 +512,9 @@ def test_models_command_survives_fft_endpoint_404(
 def test_models_fft_only_suppresses_lora_section(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: List[str] = []
+    calls: list[str] = []
 
-    def mock_get(self: Any, endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    def mock_get(self: Any, endpoint: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         calls.append(endpoint)
         if endpoint == "/training/available-fft-models":
             return _fft_models_payload()
@@ -543,7 +543,7 @@ def test_list_available_fft_models_returns_empty_on_404(
     from prime_cli.api.training import HostedTrainingClient
     from prime_cli.core import APIClient
 
-    def mock_get(self: Any, endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    def mock_get(self: Any, endpoint: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         raise NotFoundError("HTTP 404: not found")
 
     monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
@@ -561,7 +561,7 @@ def test_list_available_fft_models_propagates_auth_error(
     from prime_cli.core import APIClient
     from prime_cli.core.client import UnauthorizedError
 
-    def mock_get(self: Any, endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    def mock_get(self: Any, endpoint: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         raise UnauthorizedError("API key unauthorized.")
 
     monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
@@ -577,7 +577,7 @@ def test_models_fft_only_surfaces_auth_error(monkeypatch: pytest.MonkeyPatch) ->
     generic 'no models' fallback."""
     from prime_cli.core.client import UnauthorizedError
 
-    def mock_get(self: Any, endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    def mock_get(self: Any, endpoint: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         if endpoint == "/training/available-fft-models":
             raise UnauthorizedError("API key unauthorized.")
         raise AssertionError(f"Unexpected endpoint: {endpoint}")
@@ -599,7 +599,7 @@ def test_models_default_hides_fft_auth_error_after_lora_succeeds(
     section is best-effort and shouldn't cascade the primary output."""
     from prime_cli.core.client import UnauthorizedError
 
-    def mock_get(self: Any, endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    def mock_get(self: Any, endpoint: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         if endpoint == "/rft/models":
             return _models_payload()
         if endpoint == "/training/available-fft-models":
@@ -626,7 +626,7 @@ def test_list_available_fft_models_converts_pydantic_error_to_apierror(
     from prime_cli.api.training import HostedTrainingClient
     from prime_cli.core import APIClient, APIError
 
-    def mock_get(self: Any, endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    def mock_get(self: Any, endpoint: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         # Missing required "clusters" list, wrong shape on "name".
         return {"models": [{"name": 12345, "clusters": "not-a-list"}]}
 
@@ -643,7 +643,7 @@ def test_models_command_survives_fft_schema_drift(
     payload, `prime train models` should still emit the LoRA table
     rather than exiting with an unhandled traceback."""
 
-    def mock_get(self: Any, endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    def mock_get(self: Any, endpoint: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         if endpoint == "/rft/models":
             return _models_payload()
         if endpoint == "/training/available-fft-models":

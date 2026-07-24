@@ -44,7 +44,7 @@ class FFTModelClusterInfo(BaseModel):
 
     cluster_id: str = Field(..., alias="clusterId")
     cluster_name: str = Field(..., alias="clusterName")
-    gpu_type: Optional[str] = Field(None, alias="gpuType")
+    gpu_type: str | None = Field(None, alias="gpuType")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -54,7 +54,7 @@ class AvailableFFTModel(BaseModel):
     eligible PrimeCluster."""
 
     name: str = Field(..., description="Model name")
-    clusters: List[FFTModelClusterInfo] = Field(default_factory=list)
+    clusters: list[FFTModelClusterInfo] = Field(default_factory=list)
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -62,7 +62,7 @@ class AvailableFFTModel(BaseModel):
 class AvailableFFTModelsResponse(BaseModel):
     """Response from GET /v1/training/available-fft-models."""
 
-    models: List[AvailableFFTModel] = Field(default_factory=list)
+    models: list[AvailableFFTModel] = Field(default_factory=list)
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -108,7 +108,7 @@ class HostedTrainingClient:
         response = self.client.get("/training/available-gpu-types", params=params)
         return AvailableGpuTypesResponse.model_validate(response)
 
-    def list_available_fft_models(self, team_id: Optional[str] = None) -> List[AvailableFFTModel]:
+    def list_available_fft_models(self, team_id: str | None = None) -> list[AvailableFFTModel]:
         """GET /v1/training/available-fft-models. Models that are already
         cached on at least one PrimeCluster the caller can dispatch a
         full-FT run to.
@@ -124,7 +124,7 @@ class HostedTrainingClient:
         `except APIError` fallback catches it — otherwise a
         non-conforming backend payload would kill the LoRA table too.
         """
-        params: Dict[str, Any] = {}
+        params: dict[str, Any] = {}
         if team_id:
             params["team_id"] = team_id
         try:

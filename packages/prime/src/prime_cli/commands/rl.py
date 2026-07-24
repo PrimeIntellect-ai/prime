@@ -1698,11 +1698,11 @@ def list_models(
         training_client = HostedTrainingClient(api_client)
         config = Config()
 
-        models: List = []
+        models: list = []
         if not fft_only:
             models = rl_client.list_models(team_id=config.team_id)
 
-        fft_models: List[AvailableFFTModel] = []
+        fft_models: list[AvailableFFTModel] = []
         try:
             fft_models = training_client.list_available_fft_models(team_id=config.team_id)
         except APIError:
@@ -1715,7 +1715,7 @@ def list_models(
             fft_models = []
 
         if output == "json":
-            payload: Dict[str, Any] = {"models": [m.model_dump() for m in models]}
+            payload: dict[str, Any] = {"models": [m.model_dump() for m in models]}
             if fft_models:
                 payload["available_fft_models"] = [m.model_dump() for m in fft_models]
             output_data_as_json(payload, console)
@@ -1742,7 +1742,7 @@ def list_models(
         raise typer.Exit(1)
 
 
-def _render_lora_models_table(models: List) -> None:
+def _render_lora_models_table(models: list) -> None:
     """Render the classic LoRA Hosted Training model listing."""
     if not models:
         console.print("[yellow]No models available for Hosted Training.[/yellow]")
@@ -1760,7 +1760,7 @@ def _render_lora_models_table(models: List) -> None:
     table.add_column("Output", style="green", justify="right")
     table.add_column("Train", style="green", justify="right")
 
-    promo_labels: List[str] = []
+    promo_labels: list[str] = []
     for model in sorted(models, key=lambda model: _model_name_sort_key(model.name)):
         if model.at_capacity:
             status = "[red]At Capacity[/red]"
@@ -1790,7 +1790,7 @@ def _render_lora_models_table(models: List) -> None:
     console.print(table)
 
 
-def _render_fft_models_table(fft_models: List) -> None:
+def _render_fft_models_table(fft_models: list) -> None:
     """Render the FFT dispatch model listing.
 
     Each model may be cached on multiple clusters/GPU types; we collapse

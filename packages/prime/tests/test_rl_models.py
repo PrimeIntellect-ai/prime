@@ -486,6 +486,50 @@ def test_models_json_omits_fft_key_when_empty(monkeypatch: pytest.MonkeyPatch) -
     assert "available_fft_models" not in data
 
 
+def test_models_json_fft_only_always_includes_fft_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With --fft-only, scripts specifically consume
+    `.available_fft_models[]`. The key must be present even when the
+    endpoint returned zero models, and the misleading `models: []` key
+    must be absent since LoRA wasn't fetched."""
+
+    def mock_get(self: Any, endpoint: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        if endpoint == "/training/available-fft-models":
+            return {"models": []}
+        raise AssertionError(f"Unexpected endpoint: {endpoint}")
+
+    monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+
+    result = CliRunner().invoke(app, ["train", "models", "--fft-only", "--output", "json"])
+
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert data == {"available_fft_models": []}
+
+
+def test_models_json_fft_only_with_data(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--fft-only --output json with populated data: still no `models`
+    key; `available_fft_models` carries the payload."""
+
+    def mock_get(self: Any, endpoint: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        if endpoint == "/training/available-fft-models":
+            return _fft_models_payload()
+        raise AssertionError(f"Unexpected endpoint: {endpoint}")
+
+    monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+
+    result = CliRunner().invoke(app, ["train", "models", "--fft-only", "--output", "json"])
+
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert "models" not in data
+    assert [m["name"] for m in data["available_fft_models"]] == [
+        "meta-llama/Llama-3.1-8B-Instruct",
+        "qwen/qwen3-8b",
+    ]
+
+
 def test_models_command_survives_fft_endpoint_404(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -1715,9 +1715,18 @@ def list_models(
             fft_models = []
 
         if output == "json":
-            payload: dict[str, Any] = {"models": [m.model_dump() for m in models]}
-            if fft_models:
-                payload["available_fft_models"] = [m.model_dump() for m in fft_models]
+            if fft_only:
+                # --fft-only: LoRA wasn't fetched so emitting `models`
+                # would be misleading. Always include the FFT key
+                # (empty allowed) so scripts using the flag can rely
+                # on `.available_fft_models[]` being present.
+                payload: dict[str, Any] = {
+                    "available_fft_models": [m.model_dump() for m in fft_models]
+                }
+            else:
+                payload = {"models": [m.model_dump() for m in models]}
+                if fft_models:
+                    payload["available_fft_models"] = [m.model_dump() for m in fft_models]
             output_data_as_json(payload, console)
             return
 

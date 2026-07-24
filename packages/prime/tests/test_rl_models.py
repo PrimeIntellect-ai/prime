@@ -614,3 +614,47 @@ def test_models_default_hides_fft_auth_error_after_lora_succeeds(
     plain = strip_ansi(result.output)
     assert "qwen/qwen3-8b" in plain
     assert "Full Finetuning" not in plain
+
+
+def test_list_available_fft_models_converts_pydantic_error_to_apierror(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A schema-drifted backend payload must surface as APIError, not
+    raw pydantic ValidationError — otherwise the command's `except
+    APIError` fallback would miss it and the LoRA table would fail to
+    render alongside the FFT section (Bugbot finding on df0e6269)."""
+    from prime_cli.api.training import HostedTrainingClient
+    from prime_cli.core import APIClient, APIError
+
+    def mock_get(self: Any, endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        # Missing required "clusters" list, wrong shape on "name".
+        return {"models": [{"name": 12345, "clusters": "not-a-list"}]}
+
+    monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+    client = HostedTrainingClient(APIClient())
+    with pytest.raises(APIError):
+        client.list_available_fft_models(team_id=None)
+
+
+def test_models_command_survives_fft_schema_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: even if the FFT endpoint returns an unparseable
+    payload, `prime train models` should still emit the LoRA table
+    rather than exiting with an unhandled traceback."""
+
+    def mock_get(self: Any, endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        if endpoint == "/rft/models":
+            return _models_payload()
+        if endpoint == "/training/available-fft-models":
+            return {"models": [{"name": 12345, "clusters": "not-a-list"}]}
+        raise AssertionError(f"Unexpected endpoint: {endpoint}")
+
+    monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+
+    result = CliRunner().invoke(app, ["train", "models"], env={"COLUMNS": "200"})
+
+    assert result.exit_code == 0, result.output
+    plain = strip_ansi(result.output)
+    assert "qwen/qwen3-8b" in plain
+    assert "Full Finetuning" not in plain

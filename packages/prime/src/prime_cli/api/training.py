@@ -9,8 +9,9 @@ token; admin role is gated server-side.
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
+from pydantic import ValidationError as PydanticValidationError
 
-from prime_cli.core import APIClient, NotFoundError
+from prime_cli.core import APIClient, APIError, NotFoundError
 
 
 class HostedTrainingRunResponse(BaseModel):
@@ -117,6 +118,11 @@ class HostedTrainingClient:
         other error (auth failure, forbidden, server errors) propagates
         — the caller decides whether to surface or hide it based on
         whether the LoRA section already ran.
+
+        A schema-drifted response (pydantic ValidationError) is
+        re-raised as APIError so the command layer's existing
+        `except APIError` fallback catches it — otherwise a
+        non-conforming backend payload would kill the LoRA table too.
         """
         params: Dict[str, Any] = {}
         if team_id:
@@ -125,7 +131,10 @@ class HostedTrainingClient:
             response = self.client.get("/training/available-fft-models", params=params)
         except NotFoundError:
             return []
-        return AvailableFFTModelsResponse.model_validate(response).models
+        try:
+            return AvailableFFTModelsResponse.model_validate(response).models
+        except PydanticValidationError as exc:
+            raise APIError(f"Failed to parse available FFT models response: {exc}") from exc
 
 
 def build_payload_from_toml(

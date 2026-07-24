@@ -70,8 +70,7 @@ RL_MODELS_JSON_HELP = json_output_help(
     "effective_training_price_per_mtok?, "
     "effective_inference_input_price_per_mtok?, "
     "effective_inference_output_price_per_mtok?, promo_label?}",
-    ".available_fft_models[]? = {name, clusters[{cluster_id, cluster_name, "
-    "gpu_type?, cache_synced_at?}]}",
+    ".available_fft_models[]? = {name, clusters[{cluster_id, cluster_name, gpu_type?}]}",
 )
 
 RL_LIST_JSON_HELP = json_output_help(
@@ -1796,26 +1795,17 @@ def _render_fft_models_table(fft_models: List) -> None:
     table.add_column("Model", style="cyan")
     table.add_column("GPU Type(s)", style="magenta")
     table.add_column("Available On", style="green")
-    table.add_column("Cache Synced", style="dim", justify="right")
 
     for model in sorted(fft_models, key=lambda m: _model_name_sort_key(m.name)):
         gpu_types = sorted({c.gpu_type for c in model.clusters if c.gpu_type})
         cluster_names = sorted({c.cluster_name for c in model.clusters})
-        latest_sync = max(
-            (c.cache_synced_at for c in model.clusters if c.cache_synced_at),
-            default=None,
-        )
         table.add_row(
             model.name,
             ", ".join(gpu_types) or "-",
             ", ".join(cluster_names) or "-",
-            latest_sync.strftime("%Y-%m-%d %H:%M") if latest_sync else "-",
         )
 
-    table.caption = (
-        "[dim]Models pre-cached on clusters you can dispatch FFT runs to. "
-        "Cache Synced shows the most recent cluster manifest.[/dim]"
-    )
+    table.caption = "[dim]Models pre-cached on clusters you can dispatch FFT runs to.[/dim]"
     console.print(table)
 
 

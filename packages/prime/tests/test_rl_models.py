@@ -467,6 +467,8 @@ def test_models_json_output_includes_available_fft_models(
     first = fft[0]
     assert [c["cluster_name"] for c in first["clusters"]] == ["athens", "berlin"]
     assert first["clusters"][0]["gpu_type"] == "H200_141GB"
+    # cache_synced_at is intentionally omitted from CLI output.
+    assert "cache_synced_at" not in first["clusters"][0]
 
 
 def test_models_json_omits_fft_key_when_empty(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -545,3 +547,68 @@ def test_list_available_fft_models_returns_empty_on_404(
     monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
     client = HostedTrainingClient(APIClient())
     assert client.list_available_fft_models(team_id=None) == []
+
+
+def test_list_available_fft_models_propagates_auth_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Auth failures must not be silently converted to an empty list —
+    otherwise `prime train models --fft-only` on an expired key would
+    exit 0 with a misleading 'No FFT models available' message."""
+    from prime_cli.api.training import HostedTrainingClient
+    from prime_cli.core import APIClient
+    from prime_cli.core.client import UnauthorizedError
+
+    def mock_get(self: Any, endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        raise UnauthorizedError("API key unauthorized.")
+
+    monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+    client = HostedTrainingClient(APIClient())
+    with pytest.raises(UnauthorizedError):
+        client.list_available_fft_models(team_id=None)
+
+
+def test_models_fft_only_surfaces_auth_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--fft-only skips the LoRA call, so an auth failure on the FFT
+    endpoint is the only signal the caller has that their token is
+    bad. It must exit non-zero with the auth error, not print the
+    generic 'no models' fallback."""
+    from prime_cli.core.client import UnauthorizedError
+
+    def mock_get(self: Any, endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        if endpoint == "/training/available-fft-models":
+            raise UnauthorizedError("API key unauthorized.")
+        raise AssertionError(f"Unexpected endpoint: {endpoint}")
+
+    monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+
+    result = CliRunner().invoke(app, ["train", "models", "--fft-only"], env={"COLUMNS": "200"})
+
+    assert result.exit_code != 0
+    assert "unauthorized" in result.output.lower()
+    assert "No FFT models available" not in result.output
+
+
+def test_models_default_hides_fft_auth_error_after_lora_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In default mode, if LoRA succeeds but the FFT call fails with
+    anything other than 404, the LoRA table must still render — the FFT
+    section is best-effort and shouldn't cascade the primary output."""
+    from prime_cli.core.client import UnauthorizedError
+
+    def mock_get(self: Any, endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        if endpoint == "/rft/models":
+            return _models_payload()
+        if endpoint == "/training/available-fft-models":
+            raise UnauthorizedError("API key unauthorized.")
+        raise AssertionError(f"Unexpected endpoint: {endpoint}")
+
+    monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+
+    result = CliRunner().invoke(app, ["train", "models"], env={"COLUMNS": "200"})
+
+    assert result.exit_code == 0, result.output
+    plain = strip_ansi(result.output)
+    assert "qwen/qwen3-8b" in plain
+    assert "Full Finetuning" not in plain

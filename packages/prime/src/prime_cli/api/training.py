@@ -6,12 +6,11 @@ own helm release on a registered PrimeCluster. Auth is the standard API
 token; admin role is gated server-side.
 """
 
-from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from prime_cli.core import APIClient, APIError, NotFoundError, UnauthorizedError
+from prime_cli.core import APIClient, NotFoundError
 
 
 class HostedTrainingRunResponse(BaseModel):
@@ -33,14 +32,18 @@ class AvailableGpuTypesResponse(BaseModel):
 
 class FFTModelClusterInfo(BaseModel):
     """One cluster the caller can dispatch an FFT run to that already has
-    the parent model cached — mirrors the backend
-    `FFTModelClusterInfo` in `platform/backend/app/packages/training/schemas.py`.
+    the parent model cached.
+
+    Intentionally narrower than the backend `FFTModelClusterInfo`
+    schema: `cache_synced_at` is dropped because cache freshness is an
+    implementation detail the user shouldn't reason about — the
+    dispatch picker already gates on PRESENT-cache clusters, so any
+    entry surfaced here is warm.
     """
 
     cluster_id: str = Field(..., alias="clusterId")
     cluster_name: str = Field(..., alias="clusterName")
     gpu_type: Optional[str] = Field(None, alias="gpuType")
-    cache_synced_at: Optional[datetime] = Field(None, alias="cacheSyncedAt")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -109,28 +112,19 @@ class HostedTrainingClient:
         cached on at least one PrimeCluster the caller can dispatch a
         full-FT run to.
 
-        Returns an empty list when the caller has no eligible clusters
-        (403), when the endpoint is not deployed yet on the target
-        backend (404) or when auth is missing (401) — the CLI is called
-        in a "silent when empty" context alongside the LoRA listing and
-        should not crash the primary output on a still-rolling-out
-        endpoint.
+        404 is swallowed to an empty list so the CLI still renders on
+        older backends that haven't shipped the endpoint yet. Every
+        other error (auth failure, forbidden, server errors) propagates
+        — the caller decides whether to surface or hide it based on
+        whether the LoRA section already ran.
         """
         params: Dict[str, Any] = {}
         if team_id:
             params["team_id"] = team_id
         try:
             response = self.client.get("/training/available-fft-models", params=params)
-        except (NotFoundError, UnauthorizedError):
+        except NotFoundError:
             return []
-        except APIError as exc:
-            # 403 (not a team member) surfaces as APIError with an
-            # HTTP 403 prefix. Treat like NotFound so a personal caller
-            # querying with an unrelated team_id doesn't fail the whole
-            # command.
-            if "HTTP 403" in str(exc):
-                return []
-            raise
         return AvailableFFTModelsResponse.model_validate(response).models
 
 

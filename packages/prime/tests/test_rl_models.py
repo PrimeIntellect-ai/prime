@@ -658,3 +658,53 @@ def test_models_command_survives_fft_schema_drift(
     plain = strip_ansi(result.output)
     assert "qwen/qwen3-8b" in plain
     assert "Full Finetuning" not in plain
+
+
+def test_models_command_suppresses_lora_empty_banner_when_fft_populated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """LoRA-empty + FFT-populated: the 'No models available for Hosted
+    Training' banner would mislead readers into thinking the whole
+    command failed. Only render the FFT section in that case."""
+
+    def mock_get(self: Any, endpoint: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        if endpoint == "/rft/models":
+            return {"models": []}
+        if endpoint == "/training/available-fft-models":
+            return _fft_models_payload()
+        raise AssertionError(f"Unexpected endpoint: {endpoint}")
+
+    monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+
+    result = CliRunner().invoke(app, ["train", "models"], env={"COLUMNS": "200"})
+
+    assert result.exit_code == 0, result.output
+    plain = strip_ansi(result.output)
+    # The misleading empty-LoRA banner must NOT appear.
+    assert "No models available for Hosted Training" not in plain
+    # FFT section still renders.
+    assert "Full Finetuning" in plain
+    assert "meta-llama/Llama-3.1-8B-Instruct" in plain
+
+
+def test_models_command_shows_lora_empty_banner_when_both_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both sections empty: the LoRA fallback banner still surfaces so
+    the user isn't left with a completely blank command output."""
+
+    def mock_get(self: Any, endpoint: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        if endpoint == "/rft/models":
+            return {"models": []}
+        if endpoint == "/training/available-fft-models":
+            return {"models": []}
+        raise AssertionError(f"Unexpected endpoint: {endpoint}")
+
+    monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+
+    result = CliRunner().invoke(app, ["train", "models"], env={"COLUMNS": "200"})
+
+    assert result.exit_code == 0, result.output
+    plain = strip_ansi(result.output)
+    assert "No models available for Hosted Training" in plain
+    assert "Full Finetuning" not in plain

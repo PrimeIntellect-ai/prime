@@ -1722,12 +1722,19 @@ def list_models(
             return
 
         if not fft_only:
-            _render_lora_models_table(models)
+            if models:
+                _render_lora_models_table(models)
+            elif not fft_models:
+                # Both sections empty — surface the LoRA fallback so
+                # the user sees *something*. When FFT has data we
+                # skip this so the FFT table isn't preceded by a
+                # misleading "no models available" banner.
+                _render_empty_lora_message()
 
         if fft_models:
-            if not fft_only:
-                # Visual break between the two tables so the sections
-                # don't run into each other.
+            if not fft_only and models:
+                # Visual break only when the LoRA table above actually
+                # rendered — otherwise we'd print a stray blank line.
                 console.print()
             _render_fft_models_table(fft_models)
         elif fft_only:
@@ -1742,13 +1749,19 @@ def list_models(
         raise typer.Exit(1)
 
 
-def _render_lora_models_table(models: list) -> None:
-    """Render the classic LoRA Hosted Training model listing."""
-    if not models:
-        console.print("[yellow]No models available for Hosted Training.[/yellow]")
-        console.print("[dim]This could mean no healthy Hosted Training clusters are running.[/dim]")
-        return
+def _render_empty_lora_message() -> None:
+    """Print the LoRA-empty fallback used when neither section has data."""
+    console.print("[yellow]No models available for Hosted Training.[/yellow]")
+    console.print("[dim]This could mean no healthy Hosted Training clusters are running.[/dim]")
 
+
+def _render_lora_models_table(models: list) -> None:
+    """Render the classic LoRA Hosted Training model listing.
+
+    Caller is responsible for handling the empty-list case (via
+    `_render_empty_lora_message`) — this helper assumes at least one
+    row to render.
+    """
     table = Table(
         title="Hosted Training — LoRA",
         title_justify="left",

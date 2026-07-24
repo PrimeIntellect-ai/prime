@@ -433,11 +433,13 @@ def test_models_command_renders_fft_section_when_available(
     # FFT table shows up too.
     assert "Full Finetuning" in plain
     assert "meta-llama/Llama-3.1-8B-Instruct" in plain
-    # Model cached on two clusters + two GPU types.
+    # Model cached on two clusters → two GPU types collapse into the row.
     assert "H100_80GB" in plain
     assert "H200_141GB" in plain
-    assert "athens" in plain
-    assert "berlin" in plain
+    # Cluster names are intentionally not rendered in the table; users
+    # dispatch by gpu_type, not by cluster.
+    assert "athens" not in plain
+    assert "berlin" not in plain
     # Both endpoints were hit.
     assert "/rft/models" in calls
     assert "/training/available-fft-models" in calls

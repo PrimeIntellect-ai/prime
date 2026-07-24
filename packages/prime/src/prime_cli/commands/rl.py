@@ -1804,15 +1804,12 @@ def _render_fft_models_table(fft_models: List) -> None:
     )
     table.add_column("Model", style="cyan")
     table.add_column("GPU Type(s)", style="magenta")
-    table.add_column("Cluster(s)", style="green")
 
     for model in sorted(fft_models, key=lambda m: _model_name_sort_key(m.name)):
         gpu_types = sorted({c.gpu_type for c in model.clusters if c.gpu_type})
-        cluster_names = sorted({c.cluster_name for c in model.clusters})
         table.add_row(
             model.name,
             ", ".join(gpu_types) or "-",
-            ", ".join(cluster_names) or "-",
         )
 
     table.caption = "[dim]Models pre-cached on clusters you can dispatch FFT runs to.[/dim]"

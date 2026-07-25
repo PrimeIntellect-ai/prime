@@ -10,6 +10,7 @@ namespace and its ServiceAccount, so the next refresh fails and any token
 already issued expires within the hour.
 """
 
+import os
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -52,6 +53,13 @@ def _build_kubeconfig(
     kubectl must not try to prompt, and `provideClusterInfo: false` because the
     plugin resolves the cluster from its own arguments.
     """
+    # `prime --context X cluster login` runs with PRIME_CONTEXT set by the root
+    # callback. The credential plugin runs much later, from kubectl, where that
+    # variable does not exist — so the flag has to be baked into the exec args
+    # or every refresh would silently hit the default context's platform.
+    prime_context = os.getenv("PRIME_CONTEXT")
+    context_args = ["--context", prime_context] if prime_context else []
+
     contexts = []
     users = []
     for grant in grants:
@@ -74,7 +82,8 @@ def _build_kubeconfig(
                     "exec": {
                         "apiVersion": "client.authentication.k8s.io/v1",
                         "command": "prime",
-                        "args": [
+                        "args": context_args
+                        + [
                             "auth",
                             "k8s-token",
                             "--cluster",

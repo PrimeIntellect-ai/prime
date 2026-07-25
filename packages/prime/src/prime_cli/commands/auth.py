@@ -78,7 +78,10 @@ def k8s_token(
     if not api_key:
         _fail("Not logged in. Run `prime login`.", EXIT_AUTH_EXPIRED)
 
-    url = f"{config.base_url}/clusters/{cluster}/kube-token"
+    # Config.base_url deliberately strips any /api/v1 suffix, and the shared
+    # APIClient re-adds it on every request — so it must be added here too, or
+    # every call 404s against the bare host.
+    url = f"{config.base_url}/api/v1/clusters/{cluster}/kube-token"
     params = {"pool": pool} if pool else None
 
     try:

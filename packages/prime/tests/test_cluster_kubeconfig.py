@@ -37,7 +37,10 @@ def patch_config(monkeypatch):
 
 
 def respond(monkeypatch, *, status_code, json_body=None, headers=None):
+    requested_urls = []
+
     def _post(url, **kwargs):
+        requested_urls.append(url)
         return httpx.Response(
             status_code=status_code,
             json=json_body if json_body is not None else {},
@@ -46,10 +49,12 @@ def respond(monkeypatch, *, status_code, json_body=None, headers=None):
         )
 
     monkeypatch.setattr("prime_cli.commands.auth.httpx.post", _post)
+    return requested_urls
 
 
 class TestKubeconfigRendering:
-    def test_exec_block_carries_no_token(self):
+    def test_exec_block_carries_no_token(self, monkeypatch):
+        monkeypatch.delenv("PRIME_CONTEXT", raising=False)
         config = _build_kubeconfig(
             cluster="alpha-cluster",
             server="https://k8s.example.com",
@@ -67,7 +72,43 @@ class TestKubeconfigRendering:
         # Never prompt: kubectl may be running with no terminal attached.
         assert exec_block["interactiveMode"] == "Never"
 
-    def test_one_context_per_pool(self):
+    def test_exec_args_carry_no_context_flag_by_default(self, monkeypatch):
+        monkeypatch.delenv("PRIME_CONTEXT", raising=False)
+        config = _build_kubeconfig(
+            cluster="c1",
+            server="https://k8s",
+            ca_data="Y2E=",
+            grants=[{"pool": "alpha", "namespace": "ada-alpha"}],
+        )
+        args = config["users"][0]["user"]["exec"]["args"]
+        assert args == ["auth", "k8s-token", "--cluster", "c1", "--pool", "alpha"]
+
+    def test_exec_args_preserve_the_prime_context(self, monkeypatch):
+        # `prime --context staging cluster login` must write a kubeconfig whose
+        # refreshes also run against staging — kubectl invokes the plugin with
+        # no PRIME_CONTEXT in its environment, so the flag has to be in the
+        # file itself.
+        monkeypatch.setenv("PRIME_CONTEXT", "staging")
+        config = _build_kubeconfig(
+            cluster="c1",
+            server="https://k8s",
+            ca_data="Y2E=",
+            grants=[{"pool": "alpha", "namespace": "ada-alpha"}],
+        )
+        args = config["users"][0]["user"]["exec"]["args"]
+        assert args == [
+            "--context",
+            "staging",
+            "auth",
+            "k8s-token",
+            "--cluster",
+            "c1",
+            "--pool",
+            "alpha",
+        ]
+
+    def test_one_context_per_pool(self, monkeypatch):
+        monkeypatch.delenv("PRIME_CONTEXT", raising=False)
         config = _build_kubeconfig(
             cluster="c1",
             server="https://k8s",
@@ -99,6 +140,15 @@ class TestCredentialPluginSuccess:
         assert result.exit_code == 0
         # kubectl parses stdout as JSON — anything else on it breaks auth.
         assert json.loads(result.stdout) == credential
+
+    def test_posts_to_the_public_api_route(self, patch_config, monkeypatch):
+        # Config.base_url strips /api/v1, so the plugin must add it back —
+        # this URL shipped without the prefix once and every call 404'd.
+        urls = respond(monkeypatch, status_code=200, json_body={"status": {}})
+
+        runner.invoke(auth_app, ["k8s-token", "--cluster", "c1"])
+
+        assert urls == ["https://api.example.com/api/v1/clusters/c1/kube-token"]
 
 
 class TestCredentialPluginFailures:

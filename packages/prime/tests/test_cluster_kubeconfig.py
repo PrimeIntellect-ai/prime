@@ -60,6 +60,7 @@ class TestKubeconfigRendering:
             server="https://k8s.example.com",
             ca_data="Y2E=",
             grants=[{"pool": "alpha", "namespace": "ada-alpha"}],
+            base_url="https://api.example.com",
         )
         rendered = yaml.safe_dump(config)
         # No credential material anywhere in the file — the only "token" that
@@ -79,6 +80,7 @@ class TestKubeconfigRendering:
             server="https://k8s",
             ca_data="Y2E=",
             grants=[{"pool": "alpha", "namespace": "ada-alpha"}],
+            base_url="https://api.example.com",
         )
         args = config["users"][0]["user"]["exec"]["args"]
         assert args == ["auth", "k8s-token", "--cluster", "c1", "--pool", "alpha"]
@@ -94,6 +96,7 @@ class TestKubeconfigRendering:
             server="https://k8s",
             ca_data="Y2E=",
             grants=[{"pool": "alpha", "namespace": "ada-alpha"}],
+            base_url="https://api.example.com",
         )
         args = config["users"][0]["user"]["exec"]["args"]
         assert args == [
@@ -107,6 +110,26 @@ class TestKubeconfigRendering:
             "alpha",
         ]
 
+    def test_exec_env_pins_the_resolved_base_url(self, monkeypatch):
+        # The --context flag alone regressed custom API URLs: reloading the
+        # built-in production context at refresh time forces base_url back to
+        # the public default. The login-time URL therefore rides in the exec
+        # env, where it outranks context resolution.
+        monkeypatch.setenv("PRIME_CONTEXT", "production")
+        config = _build_kubeconfig(
+            cluster="c1",
+            server="https://k8s",
+            ca_data="Y2E=",
+            grants=[{"pool": "alpha", "namespace": "ada-alpha"}],
+            base_url="https://api.internal.example.com",
+        )
+        exec_block = config["users"][0]["user"]["exec"]
+        assert exec_block["env"] == [
+            {"name": "PRIME_API_BASE_URL", "value": "https://api.internal.example.com"}
+        ]
+        # The context intent is preserved alongside, not replaced.
+        assert exec_block["args"][:2] == ["--context", "production"]
+
     def test_one_context_per_pool(self, monkeypatch):
         monkeypatch.delenv("PRIME_CONTEXT", raising=False)
         config = _build_kubeconfig(
@@ -117,6 +140,7 @@ class TestKubeconfigRendering:
                 {"pool": "alpha", "namespace": "ada-alpha"},
                 {"pool": "beta", "namespace": "ada-beta"},
             ],
+            base_url="https://api.example.com",
         )
         assert [c["name"] for c in config["contexts"]] == ["c1-alpha", "c1-beta"]
         assert config["contexts"][0]["context"]["namespace"] == "ada-alpha"
@@ -124,6 +148,44 @@ class TestKubeconfigRendering:
         # Each context's plugin invocation names its own pool, otherwise the
         # server would refuse the ambiguous request on every kubectl call.
         assert config["users"][1]["user"]["exec"]["args"][-1] == "beta"
+
+
+class TestCustomBaseUrlSurvivesContextRefresh:
+    """The regression this pins down: with `PRIME_CONTEXT=production` (the
+    baked-in --context flag), every kubectl refresh reloaded the built-in
+    production environment and forced base_url back to the public default —
+    ignoring a custom URL set via `prime config set-base-url`. The exec env's
+    PRIME_API_BASE_URL must outrank that reload."""
+
+    @pytest.fixture
+    def custom_url_home(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("PRIME_API_BASE_URL", raising=False)
+        monkeypatch.delenv("PRIME_BASE_URL", raising=False)
+        monkeypatch.delenv("PRIME_CONTEXT", raising=False)
+        from prime_cli.core import Config
+
+        config = Config()
+        config.set_base_url("https://api.internal.example.com")
+        return tmp_path
+
+    def test_production_context_alone_loses_the_custom_url(self, custom_url_home, monkeypatch):
+        # The failure mode being fixed, kept as documentation: context
+        # resolution at refresh time discards the custom URL.
+        from prime_cli.core import Config
+
+        monkeypatch.setenv("PRIME_CONTEXT", "production")
+        assert Config().base_url == "https://api.primeintellect.ai"
+
+    def test_exec_env_base_url_outranks_the_production_context(self, custom_url_home, monkeypatch):
+        # What actually happens at refresh time now: kubectl exports the exec
+        # env block, so the plugin's Config resolves the pinned URL even while
+        # --context production reloads the built-in environment.
+        from prime_cli.core import Config
+
+        monkeypatch.setenv("PRIME_CONTEXT", "production")
+        monkeypatch.setenv("PRIME_API_BASE_URL", "https://api.internal.example.com")
+        assert Config().base_url == "https://api.internal.example.com"
 
 
 class TestCredentialPluginSuccess:

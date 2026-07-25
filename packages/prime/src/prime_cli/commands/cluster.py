@@ -45,7 +45,12 @@ def _kubeconfig_path(cluster: str) -> Path:
 
 
 def _build_kubeconfig(
-    *, cluster: str, server: str, ca_data: str, grants: List[Dict[str, str]]
+    *,
+    cluster: str,
+    server: str,
+    ca_data: str,
+    grants: List[Dict[str, str]],
+    base_url: str,
 ) -> Dict[str, Any]:
     """Render a kubeconfig with one context per pool the user has access to.
 
@@ -59,6 +64,16 @@ def _build_kubeconfig(
     # or every refresh would silently hit the default context's platform.
     prime_context = os.getenv("PRIME_CONTEXT")
     context_args = ["--context", prime_context] if prime_context else []
+
+    # The context flag alone is not enough: reloading a context re-resolves
+    # `base_url` from the *environment's* file (or, for the built-in
+    # production context, forces the public default), which discards a custom
+    # URL set via `prime config set-base-url`. So the base URL the login
+    # itself resolved is pinned into the exec environment — PRIME_API_BASE_URL
+    # outranks every other source in `Config.base_url`, making each refresh
+    # hit the same platform the login did, while `--context` still selects the
+    # matching API key.
+    exec_env = [{"name": "PRIME_API_BASE_URL", "value": base_url}]
 
     contexts = []
     users = []
@@ -91,6 +106,7 @@ def _build_kubeconfig(
                             "--pool",
                             pool,
                         ],
+                        "env": exec_env,
                         "interactiveMode": "Never",
                         "provideClusterInfo": False,
                     }
@@ -138,6 +154,9 @@ def login(
         server=info["server"],
         ca_data=info["certificateAuthorityData"],
         grants=grants,
+        # The exact URL this login request just used — not re-derived at
+        # refresh time, where context resolution would lose a custom one.
+        base_url=client.base_url,
     )
 
     path = _kubeconfig_path(cluster)

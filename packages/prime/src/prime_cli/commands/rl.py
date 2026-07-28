@@ -70,6 +70,7 @@ RL_MODELS_JSON_HELP = json_output_help(
     "effective_training_price_per_mtok?, "
     "effective_inference_input_price_per_mtok?, "
     "effective_inference_output_price_per_mtok?, promo_label?}",
+    ".available_fft_models[]? = {name, clusters[{cluster_id, cluster_name, gpu_type?}]}",
 )
 
 RL_LIST_JSON_HELP = json_output_help(
@@ -1673,69 +1674,168 @@ def create_run(
 @app.command("models", rich_help_panel="Commands", epilog=RL_MODELS_JSON_HELP)
 def list_models(
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+    fft_only: bool = typer.Option(
+        False,
+        "--fft-only",
+        help="Suppress the LoRA/Hosted Training section and only show FFT models.",
+    ),
 ) -> None:
-    """List available models for Hosted Training."""
+    """List available models for Hosted Training.
+
+    Renders two sections when both are populated: the shared-cluster LoRA
+    models (pricing per 1M tokens) and the models pre-cached on FFT
+    dispatch clusters. The FFT section is silent when the API returns
+    nothing so users on backends without the endpoint see the pre-4782
+    output.
+    """
+    from ..api.training import AvailableFFTModel, HostedTrainingClient
+
     validate_output_format(output, console)
 
     try:
         api_client = APIClient()
         rl_client = RLClient(api_client)
+        training_client = HostedTrainingClient(api_client)
         config = Config()
 
-        models = rl_client.list_models(team_id=config.team_id)
+        models: list = []
+        if not fft_only:
+            models = rl_client.list_models(team_id=config.team_id)
+
+        fft_models: list[AvailableFFTModel] = []
+        try:
+            fft_models = training_client.list_available_fft_models(team_id=config.team_id)
+        except APIError:
+            # Never let an FFT fetch failure break the LoRA output — the
+            # endpoint is younger and may still be rolling out. When the
+            # caller explicitly asked for FFT-only we bubble up the
+            # error instead of silently hiding it.
+            if fft_only:
+                raise
+            fft_models = []
 
         if output == "json":
-            output_data_as_json({"models": [m.model_dump() for m in models]}, console)
-            return
-
-        if not models:
-            console.print("[yellow]No models available for Hosted Training.[/yellow]")
-            console.print(
-                "[dim]This could mean no healthy Hosted Training clusters are running.[/dim]"
-            )
-            return
-
-        table = Table(
-            title="Hosted Training - Models",
-        )
-        table.add_column("Model", style="cyan")
-        table.add_column("Status")
-        table.add_column("Input", style="green", justify="right")
-        table.add_column("Output", style="green", justify="right")
-        table.add_column("Train", style="green", justify="right")
-
-        promo_labels: List[str] = []
-        for model in sorted(models, key=lambda model: _model_name_sort_key(model.name)):
-            if model.at_capacity:
-                status = "[red]At Capacity[/red]"
+            if fft_only:
+                # --fft-only: LoRA wasn't fetched so emitting `models`
+                # would be misleading. Always include the FFT key
+                # (empty allowed) so scripts using the flag can rely
+                # on `.available_fft_models[]` being present.
+                payload: dict[str, Any] = {
+                    "available_fft_models": [m.model_dump() for m in fft_models]
+                }
             else:
-                status = "[green]Available[/green]"
-            list_train, eff_train = model.resolve_prices("training")
-            list_input, eff_input = model.resolve_prices("inference_input")
-            list_output, eff_output = model.resolve_prices("inference_output")
-            table.add_row(
-                model.name,
-                status,
-                format_promo_price(list_input, eff_input) or "-",
-                format_promo_price(list_output, eff_output) or "-",
-                format_promo_price(list_train, eff_train) or "-",
-            )
-            if model.promo_label and model.promo_label not in promo_labels:
-                promo_labels.append(model.promo_label)
+                payload = {"models": [m.model_dump() for m in models]}
+                if fft_models:
+                    payload["available_fft_models"] = [m.model_dump() for m in fft_models]
+            output_data_as_json(payload, console)
+            return
 
-        caption = (
-            "[dim]Prices are per 1M tokens. All models support context windows of 64K tokens.[/dim]"
-        )
-        caption_lines = [caption]
-        if promo_labels:
-            joined = ", ".join(rich_escape(label) for label in promo_labels)
-            caption_lines.append(f"[bold yellow]{joined}[/bold yellow]")
-        table.caption = "\n".join(caption_lines)
-        console.print(table)
+        if not fft_only:
+            if models:
+                _render_lora_models_table(models)
+            elif not fft_models:
+                # Both sections empty — surface the LoRA fallback so
+                # the user sees *something*. When FFT has data we
+                # skip this so the FFT table isn't preceded by a
+                # misleading "no models available" banner.
+                _render_empty_lora_message()
+
+        if fft_models:
+            if not fft_only and models:
+                # Visual break only when the LoRA table above actually
+                # rendered — otherwise we'd print a stray blank line.
+                console.print()
+            _render_fft_models_table(fft_models)
+        elif fft_only:
+            console.print("[yellow]No FFT models available.[/yellow]")
+            console.print(
+                "[dim]No dispatchable clusters have a warm model cache yet, or the "
+                "endpoint isn't deployed on this backend.[/dim]"
+            )
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
+
+
+def _render_empty_lora_message() -> None:
+    """Print the LoRA-empty fallback used when neither section has data."""
+    console.print("[yellow]No models available for Hosted Training.[/yellow]")
+    console.print("[dim]This could mean no healthy Hosted Training clusters are running.[/dim]")
+
+
+def _render_lora_models_table(models: list) -> None:
+    """Render the classic LoRA Hosted Training model listing.
+
+    Caller is responsible for handling the empty-list case (via
+    `_render_empty_lora_message`) — this helper assumes at least one
+    row to render.
+    """
+    table = Table(
+        title="Hosted Training — LoRA",
+        title_justify="left",
+        caption_justify="left",
+    )
+    table.add_column("Model", style="cyan")
+    table.add_column("Status")
+    table.add_column("Input", style="green", justify="right")
+    table.add_column("Output", style="green", justify="right")
+    table.add_column("Train", style="green", justify="right")
+
+    promo_labels: list[str] = []
+    for model in sorted(models, key=lambda model: _model_name_sort_key(model.name)):
+        if model.at_capacity:
+            status = "[red]At Capacity[/red]"
+        else:
+            status = "[green]Available[/green]"
+        list_train, eff_train = model.resolve_prices("training")
+        list_input, eff_input = model.resolve_prices("inference_input")
+        list_output, eff_output = model.resolve_prices("inference_output")
+        table.add_row(
+            model.name,
+            status,
+            format_promo_price(list_input, eff_input) or "-",
+            format_promo_price(list_output, eff_output) or "-",
+            format_promo_price(list_train, eff_train) or "-",
+        )
+        if model.promo_label and model.promo_label not in promo_labels:
+            promo_labels.append(model.promo_label)
+
+    caption = (
+        "[dim]Prices are per 1M tokens. All models support context windows of 64K tokens.[/dim]"
+    )
+    caption_lines = [caption]
+    if promo_labels:
+        joined = ", ".join(rich_escape(label) for label in promo_labels)
+        caption_lines.append(f"[bold yellow]{joined}[/bold yellow]")
+    table.caption = "\n".join(caption_lines)
+    console.print(table)
+
+
+def _render_fft_models_table(fft_models: list) -> None:
+    """Render the FFT dispatch model listing.
+
+    Each model may be cached on multiple clusters/GPU types; we collapse
+    those into a single row with cluster+GPU joined so the table stays
+    scannable when a large model is warm everywhere.
+    """
+    table = Table(
+        title="Hosted Training — Full Finetuning",
+        title_justify="left",
+        caption_justify="left",
+    )
+    table.add_column("Model", style="cyan")
+    table.add_column("GPU Type(s)", style="magenta")
+
+    for model in sorted(fft_models, key=lambda m: _model_name_sort_key(m.name)):
+        gpu_types = sorted({c.gpu_type for c in model.clusters if c.gpu_type})
+        table.add_row(
+            model.name,
+            ", ".join(gpu_types) or "-",
+        )
+
+    table.caption = "[dim]Models pre-cached on clusters you can dispatch FFT runs to.[/dim]"
+    console.print(table)
 
 
 @app.command("gpus", rich_help_panel="Commands")

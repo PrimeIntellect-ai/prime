@@ -9,8 +9,9 @@ token; admin role is gated server-side.
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
+from pydantic import ValidationError as PydanticValidationError
 
-from prime_cli.core import APIClient
+from prime_cli.core import APIClient, APIError, NotFoundError
 
 
 class HostedTrainingRunResponse(BaseModel):
@@ -26,6 +27,42 @@ class AvailableGpuTypesResponse(BaseModel):
     """Response from GET /v1/training/available-gpu-types."""
 
     gpu_types: List[str] = Field(default_factory=list, alias="gpuTypes")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class FFTModelClusterInfo(BaseModel):
+    """One cluster the caller can dispatch an FFT run to that already has
+    the parent model cached.
+
+    Intentionally narrower than the backend `FFTModelClusterInfo`
+    schema: `cache_synced_at` is dropped because cache freshness is an
+    implementation detail the user shouldn't reason about — the
+    dispatch picker already gates on PRESENT-cache clusters, so any
+    entry surfaced here is warm.
+    """
+
+    cluster_id: str = Field(..., alias="clusterId")
+    cluster_name: str = Field(..., alias="clusterName")
+    gpu_type: str | None = Field(None, alias="gpuType")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class AvailableFFTModel(BaseModel):
+    """A model that is cached and ready for FFT dispatch on at least one
+    eligible PrimeCluster."""
+
+    name: str = Field(..., description="Model name")
+    clusters: list[FFTModelClusterInfo] = Field(default_factory=list)
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class AvailableFFTModelsResponse(BaseModel):
+    """Response from GET /v1/training/available-fft-models."""
+
+    models: list[AvailableFFTModel] = Field(default_factory=list)
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -70,6 +107,34 @@ class HostedTrainingClient:
             params["team_id"] = team_id
         response = self.client.get("/training/available-gpu-types", params=params)
         return AvailableGpuTypesResponse.model_validate(response)
+
+    def list_available_fft_models(self, team_id: str | None = None) -> list[AvailableFFTModel]:
+        """GET /v1/training/available-fft-models. Models that are already
+        cached on at least one PrimeCluster the caller can dispatch a
+        full-FT run to.
+
+        404 is swallowed to an empty list so the CLI still renders on
+        older backends that haven't shipped the endpoint yet. Every
+        other error (auth failure, forbidden, server errors) propagates
+        — the caller decides whether to surface or hide it based on
+        whether the LoRA section already ran.
+
+        A schema-drifted response (pydantic ValidationError) is
+        re-raised as APIError so the command layer's existing
+        `except APIError` fallback catches it — otherwise a
+        non-conforming backend payload would kill the LoRA table too.
+        """
+        params: dict[str, Any] = {}
+        if team_id:
+            params["team_id"] = team_id
+        try:
+            response = self.client.get("/training/available-fft-models", params=params)
+        except NotFoundError:
+            return []
+        try:
+            return AvailableFFTModelsResponse.model_validate(response).models
+        except PydanticValidationError as exc:
+            raise APIError(f"Failed to parse available FFT models response: {exc}") from exc
 
 
 def build_payload_from_toml(

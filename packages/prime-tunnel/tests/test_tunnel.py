@@ -1,4 +1,6 @@
+import os
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -380,3 +382,123 @@ async def test_client_bulk_delete_status_rejects_tunnel_ids():
 
     with pytest.raises(TunnelError, match="status cannot be combined with tunnel_ids"):
         await client.bulk_delete_tunnels(tunnel_ids=["t-1"], status="disconnected")
+
+
+# -- startup login retry tests --
+
+
+def _frpc_line(level: str, msg: str) -> str:
+    return f"2026-07-28 00:00:00.000 [{level}] [client/service.go:319] {msg}"
+
+
+def test_scan_startup_line_connected():
+    from prime_tunnel.tunnel import _scan_startup_line
+
+    line = _frpc_line("I", "[t-test123] start proxy success")
+    assert _scan_startup_line(line) == "connected"
+
+
+def test_scan_startup_line_transient_failures_are_not_fatal():
+    from prime_tunnel.tunnel import _scan_startup_line
+
+    transient = [
+        _frpc_line("W", "connect to server error: dial tcp 1.2.3.4:7000: i/o timeout"),
+        _frpc_line("W", "connect to server error: Tunnel validation failed"),
+        _frpc_line("W", "login to the server failed: EOF"),
+    ]
+    for line in transient:
+        assert _scan_startup_line(line) is None
+
+
+def test_scan_startup_line_fatal_rejections():
+    from prime_tunnel.tunnel import _scan_startup_line
+
+    fatal = [
+        _frpc_line("W", "connect to server error: Tunnel is inactive"),
+        _frpc_line("W", "connect to server error: Tunnel not registered"),
+        _frpc_line("W", "connect to server error: Invalid binding secret"),
+        _frpc_line("W", "connect to server error: Invalid authentication token"),
+        _frpc_line("W", "login to the server failed: token in login doesn't match token from configuration"),
+    ]
+    for line in fatal:
+        assert _scan_startup_line(line) == "fatal"
+
+
+def test_scan_startup_line_ignores_unrelated_lines():
+    from prime_tunnel.tunnel import _scan_startup_line
+
+    assert _scan_startup_line(_frpc_line("I", "try to connect to server...")) is None
+    # Rejection reason without a login/connect failure marker is not fatal
+    assert _scan_startup_line(_frpc_line("I", "tunnel is inactive")) is None
+
+
+def test_frpc_config_disables_login_fail_exit(monkeypatch, tmp_path):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    tunnel = _make_started_tunnel()
+    config_file = tunnel._write_frpc_config()
+    content = config_file.read_text()
+    assert "loginFailExit = false" in content
+    assert 'auth.token = "tok"' in content
+
+
+def _make_fake_frpc(lines: list[str]):
+    """Fake Popen whose stdout is a real pipe (fcntl-compatible) fed with lines."""
+    read_fd, write_fd = os.pipe()
+    stdout = os.fdopen(read_fd, "r")
+    for line in lines:
+        os.write(write_fd, (line + "\n").encode())
+
+    process = MagicMock()
+    process.poll.return_value = None
+    process.stdout = stdout
+    process.stderr = None
+    return process, write_fd
+
+
+@pytest.mark.asyncio
+async def test_wait_for_connection_rides_out_transient_failure():
+    tunnel = Tunnel(local_port=8080, connection_timeout=5.0)
+    process, write_fd = _make_fake_frpc(
+        [
+            _frpc_line("W", "connect to server error: dial tcp 1.2.3.4:7000: i/o timeout"),
+            _frpc_line("I", "[t-test123] start proxy success"),
+        ]
+    )
+    tunnel._process = process
+    try:
+        await tunnel._wait_for_connection()  # should not raise
+    finally:
+        os.close(write_fd)
+        process.stdout.close()
+
+
+@pytest.mark.asyncio
+async def test_wait_for_connection_fails_fast_on_rejection():
+    from prime_tunnel.exceptions import TunnelConnectionError
+
+    tunnel = Tunnel(local_port=8080, connection_timeout=5.0)
+    process, write_fd = _make_fake_frpc(
+        [_frpc_line("W", "connect to server error: Tunnel is inactive")]
+    )
+    tunnel._process = process
+    try:
+        with pytest.raises(TunnelConnectionError, match="Tunnel is inactive"):
+            await tunnel._wait_for_connection()
+    finally:
+        os.close(write_fd)
+        process.stdout.close()
+
+
+@pytest.mark.asyncio
+async def test_wait_for_connection_times_out_on_persistent_transient_failure():
+    tunnel = Tunnel(local_port=8080, connection_timeout=0.5)
+    process, write_fd = _make_fake_frpc(
+        [_frpc_line("W", "connect to server error: dial tcp 1.2.3.4:7000: i/o timeout")]
+    )
+    tunnel._process = process
+    try:
+        with pytest.raises(TunnelTimeoutError):
+            await tunnel._wait_for_connection()
+    finally:
+        os.close(write_fd)
+        process.stdout.close()

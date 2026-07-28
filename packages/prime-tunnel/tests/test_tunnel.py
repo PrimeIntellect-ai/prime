@@ -418,7 +418,9 @@ def test_scan_startup_line_fatal_rejections():
         _frpc_line("W", "connect to server error: Tunnel not registered"),
         _frpc_line("W", "connect to server error: Invalid binding secret"),
         _frpc_line("W", "connect to server error: Invalid authentication token"),
-        _frpc_line("W", "login to the server failed: token in login doesn't match token from configuration"),
+        _frpc_line(
+            "W", "login to the server failed: token in login doesn't match token from configuration"
+        ),
     ]
     for line in fatal:
         assert _scan_startup_line(line) == "fatal"

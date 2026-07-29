@@ -24,6 +24,7 @@ from prime_sandboxes import (
     Sandbox,
     SandboxClient,
     SandboxNotRunningError,
+    StartCommand,
     UnauthorizedError,
 )
 from rich.markup import escape
@@ -160,6 +161,18 @@ def _network_access_description(
     return "Unrestricted"
 
 
+def _start_command_data(value: Any) -> Any:
+    if isinstance(value, StartCommand):
+        return value.model_dump()
+    return value
+
+
+def _format_start_command(value: Any) -> str:
+    if isinstance(value, StartCommand):
+        return json.dumps([value.executable, *value.args])
+    return str(value) if value else "N/A"
+
+
 def _format_sandbox_for_details(sandbox: Sandbox) -> Dict[str, Any]:
     """Format sandbox data for details display (both table and JSON)"""
     data: Dict[str, Any] = {
@@ -167,7 +180,7 @@ def _format_sandbox_for_details(sandbox: Sandbox) -> Dict[str, Any]:
         "name": sandbox.name,
         "type": "VM" if sandbox.vm else "Container",
         "docker_image": sandbox.docker_image,
-        "start_command": sandbox.start_command,
+        "start_command": _start_command_data(sandbox.start_command),
         "status": sandbox.status,
         "cpu_cores": sandbox.cpu_cores,
         "memory_gb": sandbox.memory_gb,
@@ -413,7 +426,7 @@ def get(
             table.add_row("Name", sandbox_data["name"])
             table.add_row("Type", sandbox_data["type"])
             table.add_row("Docker Image", sandbox_data["docker_image"])
-            table.add_row("Start Command", sandbox_data["start_command"] or "N/A")
+            table.add_row("Start Command", _format_start_command(sandbox.start_command))
 
             sandbox_status_color = status_color(sandbox_data["status"], SANDBOX_STATUS_COLORS)
             table.add_row("Status", Text(sandbox_data["status"], style=sandbox_status_color))
@@ -496,11 +509,21 @@ def create(
         None,
         help="Image to run. When using --vm, provide the VM image reference.",
     ),
+    command: Optional[List[str]] = typer.Argument(
+        None,
+        help=(
+            "Executable and arguments to start. Use '--' before the executable "
+            "when its arguments begin with '-'."
+        ),
+        metavar="[COMMAND]...",
+    ),
     name: Optional[str] = typer.Option(
         None, help="Name for the sandbox (auto-generated if not provided)"
     ),
     start_command: Optional[str] = typer.Option(
-        "tail -f /dev/null", help="Command to run in the container"
+        None,
+        "--start-command",
+        help="Legacy container-only command string",
     ),
     cpu_cores: float = typer.Option(1.0, help="Number of CPU cores"),
     memory_gb: float = typer.Option(1.0, help="Memory in GB"),
@@ -691,10 +714,37 @@ def create(
             console.print("[red]Error:[/red] --network-allow/--network-deny require --vm")
             raise typer.Exit(1)
 
+        if command and start_command is not None:
+            console.print(
+                "[red]Error:[/red] provide either trailing COMMAND arguments "
+                "or --start-command, not both"
+            )
+            raise typer.Exit(1)
+        if vm and start_command is not None:
+            console.print(
+                "[red]Error:[/red] --start-command is legacy container-only syntax. "
+                "For VMs, pass an executable after '--'."
+            )
+            raise typer.Exit(1)
+
+        resolved_start_command: StartCommand | str | None
+        if command:
+            resolved_start_command = StartCommand(
+                executable=command[0],
+                args=command[1:],
+            )
+        elif start_command is not None:
+            resolved_start_command = start_command
+        elif vm:
+            resolved_start_command = None
+        else:
+            # Preserve the existing long-running default for container callers.
+            resolved_start_command = "tail -f /dev/null"
+
         request = CreateSandboxRequest(
             name=name,
             docker_image=docker_image,
-            start_command=start_command,
+            start_command=resolved_start_command,
             cpu_cores=cpu_cores,
             memory_gb=memory_gb,
             disk_size_gb=disk_size_gb,
@@ -718,7 +768,7 @@ def create(
         console.print("\n[bold]Sandbox Configuration:[/bold]")
         console.print(f"Name: {name}")
         console.print(f"Docker Image: {docker_image}")
-        console.print(f"Start Command: {start_command or 'N/A'}")
+        console.print(f"Start Command: {_format_start_command(resolved_start_command)}")
         console.print(f"Resources: {cpu_cores} CPU, {memory_gb}GB RAM, {disk_size_gb}GB disk")
         if guaranteed:
             console.print("Scheduling: [green]Guaranteed QoS[/green]")

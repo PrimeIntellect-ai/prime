@@ -347,6 +347,115 @@ def test_sandbox_create_with_gpu_options(monkeypatch: pytest.MonkeyPatch) -> Non
     assert captured["request"].vm is True
 
 
+def test_sandbox_create_vm_accepts_fractional_disk_size_gb(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_cli(monkeypatch)
+    captured: dict[str, Any] = {}
+
+    def mock_create(self: Any, request: Any) -> Any:
+        captured["request"] = request
+        return SimpleNamespace(id="sbx-vm-disk")
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.create", mock_create)
+
+    result = runner.invoke(
+        app,
+        [
+            "sandbox",
+            "create",
+            "team-1/vm:v1",
+            "--vm",
+            "--disk-size-gb",
+            "10.0009765625",
+            "--yes",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["request"].disk_size_gb == 10241 / 1024
+    assert "10.0009765625GB disk" in strip_ansi(result.output)
+
+
+def test_sandbox_create_vm_start_command_preserves_argv(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_cli(monkeypatch)
+    captured: dict[str, Any] = {}
+
+    def mock_create(self: Any, request: Any) -> Any:
+        captured["request"] = request
+        return SimpleNamespace(id="sbx-vm-command")
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.create", mock_create)
+
+    result = runner.invoke(
+        app,
+        [
+            "sandbox",
+            "create",
+            "team-1/worker:v1",
+            "--vm",
+            "--yes",
+            "--",
+            "/worker",
+            "--platform",
+            "linux/amd64",
+            "value with spaces",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    command = captured["request"].start_command
+    assert command.executable == "/worker"
+    assert command.args == ["--platform", "linux/amd64", "value with spaces"]
+    assert '["/worker", "--platform", "linux/amd64", "value with spaces"]' in strip_ansi(
+        result.output
+    )
+
+
+def test_sandbox_create_container_keeps_legacy_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_cli(monkeypatch)
+    captured: dict[str, Any] = {}
+
+    def mock_create(self: Any, request: Any) -> Any:
+        captured["request"] = request
+        return SimpleNamespace(id="sbx-container")
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.create", mock_create)
+
+    result = runner.invoke(
+        app,
+        ["sandbox", "create", "python:3.12", "--yes"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["request"].start_command == "tail -f /dev/null"
+
+
+def test_sandbox_create_container_keeps_explicit_empty_legacy_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_cli(monkeypatch)
+    captured: dict[str, Any] = {}
+
+    def mock_create(self: Any, request: Any) -> Any:
+        captured["request"] = request
+        return SimpleNamespace(id="sbx-container")
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.create", mock_create)
+
+    result = runner.invoke(
+        app,
+        ["sandbox", "create", "python:3.12", "--start-command", "", "--yes"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["request"].start_command == ""
+
+
 def test_sandbox_create_gpu_without_docker_image(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PRIME_API_KEY", "dummy")
     monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")

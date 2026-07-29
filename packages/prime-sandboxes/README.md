@@ -25,7 +25,7 @@ pip install prime-sandboxes
 ## Quick Start
 
 ```python
-from prime_sandboxes import APIClient, SandboxClient, CreateSandboxRequest
+from prime_sandboxes import APIClient, SandboxClient, CreateSandboxRequest, StartCommand
 
 # Initialize
 client = APIClient(api_key="your-api-key")
@@ -41,6 +41,17 @@ request = CreateSandboxRequest(
 
 sandbox = sandbox_client.create(request)
 print(f"Created: {sandbox.id}")
+
+# VM workloads use a structured argv contract; no shell is implied.
+vm = sandbox_client.create(CreateSandboxRequest(
+    name="vm-workload",
+    docker_image="user-1/vm-image:latest",
+    vm=True,
+    start_command=StartCommand(
+        executable="/worker",
+        args=["--platform", "linux/amd64"],
+    ),
+))
 
 # Wait for it to be ready
 sandbox_client.wait_for_creation(sandbox.id)

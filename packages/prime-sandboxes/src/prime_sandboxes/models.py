@@ -121,13 +121,30 @@ class AdvancedConfigs(BaseModel):
     model_config = ConfigDict(extra="allow")
 
 
+class StartCommand(BaseModel):
+    """A process to start without invoking a shell."""
+
+    executable: str = Field(min_length=1)
+    args: List[str] = Field(default_factory=list)
+
+    model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="after")
+    def validate_no_nul_bytes(self) -> "StartCommand":
+        if "\x00" in self.executable:
+            raise ValueError("executable must not contain NUL bytes")
+        if any("\x00" in arg for arg in self.args):
+            raise ValueError("args must not contain NUL bytes")
+        return self
+
+
 class Sandbox(BaseModel):
     """Sandbox model"""
 
     id: str
     name: str
     docker_image: str = Field(..., alias="dockerImage")
-    start_command: Optional[str] = Field(None, alias="startCommand")
+    start_command: Optional[Union[StartCommand, str]] = Field(None, alias="startCommand")
     cpu_cores: float = Field(..., alias="cpuCores")
     memory_gb: float = Field(..., alias="memoryGB")
     disk_size_gb: float = Field(..., alias="diskSizeGB")
@@ -179,7 +196,7 @@ class CreateSandboxRequest(BaseModel):
 
     name: str
     docker_image: str
-    start_command: Optional[str] = "tail -f /dev/null"
+    start_command: Optional[Union[StartCommand, str]] = "tail -f /dev/null"
     cpu_cores: float = 1.0
     memory_gb: float = 1.0
     disk_size_gb: float = 5.0
@@ -214,6 +231,17 @@ class CreateSandboxRequest(BaseModel):
     def validate_guaranteed(self) -> "CreateSandboxRequest":
         if self.guaranteed and self.vm:
             raise ValueError("guaranteed is not supported for VM sandboxes")
+        return self
+
+    @model_validator(mode="after")
+    def validate_vm_start_command(self) -> "CreateSandboxRequest":
+        if self.vm and "start_command" not in self.model_fields_set:
+            self.start_command = None
+            return self
+        if self.vm and isinstance(self.start_command, str):
+            raise ValueError(
+                "VM sandboxes require start_command as StartCommand(executable=..., args=[...])"
+            )
         return self
 
     @model_validator(mode="after")

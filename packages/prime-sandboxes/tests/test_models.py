@@ -7,6 +7,7 @@ from prime_sandboxes.models import (
     CreateSandboxRequest,
     Sandbox,
     SandboxStatus,
+    StartCommand,
 )
 
 
@@ -28,6 +29,44 @@ def test_create_sandbox_request_defaults():
     assert request.timeout_minutes == 60
     assert request.region is None
     assert request.labels == []
+    assert request.start_command == "tail -f /dev/null"
+
+
+def test_vm_start_command_preserves_argv():
+    request = CreateSandboxRequest(
+        name="vm-workload",
+        docker_image="team/image:v1",
+        vm=True,
+        start_command=StartCommand(
+            executable="/worker",
+            args=["--platform", "linux/amd64", "value with spaces"],
+        ),
+    )
+
+    assert request.model_dump(exclude_none=True)["start_command"] == {
+        "executable": "/worker",
+        "args": ["--platform", "linux/amd64", "value with spaces"],
+    }
+
+
+def test_vm_without_start_command_does_not_inherit_container_default():
+    request = CreateSandboxRequest(
+        name="interactive-vm",
+        docker_image="team/image:v1",
+        vm=True,
+    )
+
+    assert request.start_command is None
+
+
+def test_vm_rejects_legacy_string_start_command():
+    with pytest.raises(ValidationError):
+        CreateSandboxRequest(
+            name="vm-workload",
+            docker_image="team/image:v1",
+            vm=True,
+            start_command="/worker --platform linux/amd64",
+        )
 
 
 def test_create_sandbox_request_accepts_region():

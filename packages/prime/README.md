@@ -192,6 +192,9 @@ prime sandbox create user-1/vm-image:latest --vm --gpu-count 1 --gpu-type H100_8
 # Create a CPU-only VM sandbox
 prime sandbox create user-1/vm-image:latest --vm
 
+# Create a one-shot VM workload (arguments after -- are preserved exactly)
+prime sandbox create user-1/vm-image:latest --vm -- /worker --platform linux/amd64
+
 # List sandboxes
 prime sandbox list
 

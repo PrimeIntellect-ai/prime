@@ -95,6 +95,7 @@ The SDK looks for credentials in this order:
 request = CreateSandboxRequest(
     name="my-sandbox",
     docker_image="python:3.11-slim",
+    vm=True,
     environment_vars={
         "DEBUG": "true",
         "LOG_LEVEL": "info"
@@ -107,6 +108,12 @@ request = CreateSandboxRequest(
 
 sandbox = sandbox_client.create(request)
 ```
+
+For VM sandboxes, secret values are sent only to the authenticated platform API over HTTPS. The
+platform resolves the canonical tenant from the authenticated user and optional `team_id`, then
+binds a KMS ciphertext envelope to that tenant and the new sandbox ID. The CLI and SDK never
+construct KMS AAD or accept a KMS key or pre-encrypted envelope. Environment and secret keys must
+be distinct shell variable names, and values are subject to the VM runtime's size limits.
 
 **Note:** Secrets are never displayed in logs or outputs. When retrieving sandbox details, only the secret keys are shown with values masked as `***`.
 

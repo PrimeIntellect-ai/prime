@@ -6702,8 +6702,10 @@ async def test_prime_lab_app_ladder_loads_platform_sections(tmp_path: Path) -> N
     )
 
     async with app.run_test() as pilot:
-        await pilot.pause()
-        await pilot.pause()
+        for _ in range(50):
+            if loaded_limits == [5, 10, 20]:
+                break
+            await pilot.pause()
 
     assert loaded_limits == [5, 10, 20]
 

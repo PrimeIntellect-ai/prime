@@ -347,6 +347,36 @@ def test_sandbox_create_with_gpu_options(monkeypatch: pytest.MonkeyPatch) -> Non
     assert captured["request"].vm is True
 
 
+def test_sandbox_create_vm_accepts_fractional_disk_size_gb(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_cli(monkeypatch)
+    captured: dict[str, Any] = {}
+
+    def mock_create(self: Any, request: Any) -> Any:
+        captured["request"] = request
+        return SimpleNamespace(id="sbx-vm-disk")
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.create", mock_create)
+
+    result = runner.invoke(
+        app,
+        [
+            "sandbox",
+            "create",
+            "team-1/vm:v1",
+            "--vm",
+            "--disk-size-gb",
+            "10.0009765625",
+            "--yes",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["request"].disk_size_gb == 10241 / 1024
+    assert "10.0009765625GB disk" in strip_ansi(result.output)
+
+
 def test_sandbox_create_vm_start_command_preserves_argv(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

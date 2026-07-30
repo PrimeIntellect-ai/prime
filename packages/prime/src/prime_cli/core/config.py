@@ -178,26 +178,6 @@ class Config:
         self._save_config(self.config)
 
     @property
-    def traces_url(self) -> str:
-        """Get Prime Traces service URL with precedence: env > file > base_url.
-
-        Falls back to the platform base URL until the service's production
-        routing (dedicated domain vs path under the API domain) is decided.
-        """
-        env_val = os.getenv("PRIME_TRACES_URL")
-        if env_val:
-            return env_val.rstrip("/")
-        file_val = self.config.get("traces_url")
-        if file_val:
-            return str(file_val).rstrip("/")
-        return self.base_url
-
-    def set_traces_url(self, value: str) -> None:
-        """Set Prime Traces service URL in config file"""
-        self.config["traces_url"] = value.rstrip("/")
-        self._save_config(self.config)
-
-    @property
     def ssh_key_path(self) -> str:
         """Get SSH private key path with precedence: env > file > default."""
         env_val = os.getenv("PRIME_SSH_KEY_PATH")

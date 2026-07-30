@@ -130,31 +130,6 @@ class TraceSummary(BaseModel):
     context: Dict[str, str] = Field(default_factory=dict)
 
 
-class EpisodeSummary(BaseModel):
-    """One episode's summary plus episode-owned fields.
-
-    Aggregates (total tokens, participating agents, any-trace-error) are
-    computed from member traces at read time by the service.
-    """
-
-    model_config = ConfigDict(extra="allow")
-
-    episode_id: str
-    batch_id: Optional[str] = None
-    created_at: Optional[datetime] = None
-    ingested_at: Optional[datetime] = None
-    environment_id: Optional[str] = None
-    run_id: Optional[str] = None
-    outcome: Optional[str] = None
-    has_error: Optional[bool] = None
-    error_type: Optional[str] = None
-    error_message: Optional[str] = None
-    total_tokens: Optional[int] = None
-    total_agent_time: Optional[int] = None
-    any_trace_error: Optional[bool] = None
-    participating_agents: Optional[List[str]] = None
-
-
 class TraceListPage(BaseModel):
     """One page of trace summaries. ``next_cursor`` is opaque and only valid
     with the exact filters that produced it."""
@@ -162,11 +137,4 @@ class TraceListPage(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     traces: List[TraceSummary] = Field(default_factory=list)
-    next_cursor: Optional[str] = None
-
-
-class EpisodeListPage(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    episodes: List[EpisodeSummary] = Field(default_factory=list)
     next_cursor: Optional[str] = None

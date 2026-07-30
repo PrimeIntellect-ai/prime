@@ -1,6 +1,6 @@
 # prime-traces
 
-Prime Intellect Traces SDK — upload, query and export training, evaluation and
+Prime Intellect Traces SDK — upload and query training, evaluation and
 inference traces through the Prime Traces service.
 
 ## Install
@@ -50,18 +50,10 @@ client.download_raw("8d3f1a2b...", "t.json")  # streamed, for large traces
 
 client.delete("8d3f1a2b...")
 client.delete_run("run_9f3k2m")
-
-# Stream a filtered export to disk (same filter vocabulary as list):
-client.export("high_reward.jsonl", run_id="run_9f3k2m", reward_min=0.9)
 ```
 
-Episodes are read-only resources:
-
-```python
-episodes = client.list_episodes(run_id="run_9f3k2m")
-client.get_episode(episode_id)
-client.list_episode_traces(episode_id)
-```
+The read surface is provisional: the service defines these routes but has not
+pinned response models yet, so the page shape above is a proposal to align on.
 
 ## Configuration
 
@@ -72,11 +64,15 @@ client.list_episode_traces(episode_id)
 | `PRIME_TRACES_URL`     | Base URL of the Prime Traces service; defaults to the platform API base URL. For the service's local compose stack: `http://localhost:8083` |
 | `~/.prime/config.json` | Shared prime CLI config (`api_key`, `team_id`, `traces_url`)                                                                                |
 
-## Not implemented yet (open v0 contract decisions)
+## Not implemented yet
 
-- The exports _job_ API (`POST /traces/exports`, `GET /traces/exports/{job_id}`)
-  — published as 501 by the service in v0 until export results have somewhere
-  to land. The streaming `GET /traces/export` is what `export()` wraps.
+Deferred to follow-up PRs once the service pins the corresponding responses:
+
+- Exports — the streaming `GET /traces/export` (params and format not yet
+  defined by the service) and the exports _job_ API (published as 501 by the
+  service in v0 until export results have somewhere to land).
+- Episode reads (`GET /episodes[...]`) — read-only resources; episodes are
+  written only as a side effect of episode-grouped uploads.
 - `/search` and free-text queries — deferred with the `trace_components`
   projection.
 - The `environment_id` list filter — pending its extracted column.

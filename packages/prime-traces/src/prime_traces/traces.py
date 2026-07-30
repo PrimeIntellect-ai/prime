@@ -2,14 +2,16 @@
 
 Wraps the wire client with upload batching/retry and typed read paths.
 
-The read surface (list/get envelopes) is provisional: the service PR defines
-routes but no response models yet, so the page shape here is a proposal to
-align on, not a settled contract.
+The read surface (list/get/episode envelopes, export params) is provisional:
+the service defines these routes but has not pinned response models yet, so
+the shapes here are a proposal to align on, not a settled contract.
 
-Deferred to follow-up PRs once the service pins the corresponding responses:
-exports (streaming ``GET /traces/export`` and the job API, which is 501 in
-v0), episode reads, ``/search``, the ``environment_id`` filter (no populated
-column behind it yet), and the dot-path query compiler (needs the
+Deliberately not implemented yet (open v0 contract decisions — do not freeze
+them here): the exports *job* API (``POST /traces/exports`` is published as
+501 in v0; the streaming ``GET /traces/export`` is what ``export`` wraps),
+``/search``, the ``environment_id`` filter (no populated column behind it
+yet), episode writes (episodes are read-only, written only as a side effect
+of episode-grouped uploads), and the dot-path query compiler (needs the
 server-side field registry).
 """
 
@@ -28,6 +30,8 @@ from .core.client import TracesAPIClient
 from .exceptions import RetryableAPIError
 from .models import (
     BatchReceipt,
+    EpisodeListPage,
+    EpisodeSummary,
     LineFormat,
     TraceListPage,
     TraceSummary,
@@ -255,6 +259,106 @@ class TracesClient:
         result = self.client.delete_json("/traces", params={"run_id": run_id})
         job_id = result.get("job_id")
         return str(job_id) if job_id is not None else None
+
+    # -- export -------------------------------------------------------------
+
+    def export(
+        self,
+        dest: Union[str, Path],
+        *,
+        run_id: Optional[str] = None,
+        environment_id: Optional[str] = None,
+        model_id: Optional[str] = None,
+        model_provider: Optional[str] = None,
+        task_id: Optional[str] = None,
+        reward_min: Optional[float] = None,
+        reward_max: Optional[float] = None,
+        outcome: Optional[str] = None,
+        has_error: Optional[bool] = None,
+        is_truncated: Optional[bool] = None,
+        created_after: Optional[str] = None,
+        created_before: Optional[str] = None,
+        context: Optional[Dict[str, str]] = None,
+    ) -> int:
+        """Stream a filtered export (``GET /traces/export``) to ``dest``.
+
+        Takes the same filter vocabulary as ``list`` — no pagination: the
+        export is one file, resumable by re-running. Returns bytes written.
+        Egress is metered on bytes actually sent, so a failed stream still
+        costs for the bytes that made it; always stream to disk rather than
+        buffering.
+
+        A format parameter (raw JSONL vs. column projection) is not exposed
+        yet — the service route does not define it; add it here when it lands.
+        The exports *job* API is 501 in v0 and is deliberately not wrapped.
+        """
+        params = _build_params(
+            (
+                ("run_id", run_id),
+                ("environment_id", environment_id),
+                ("model_id", model_id),
+                ("model_provider", model_provider),
+                ("task_id", task_id),
+                ("reward_min", reward_min),
+                ("reward_max", reward_max),
+                ("outcome", outcome),
+                ("has_error", has_error),
+                ("is_truncated", is_truncated),
+                ("created_after", created_after),
+                ("created_before", created_before),
+            ),
+            context,
+        )
+        written = 0
+        with open(dest, "wb") as f:
+            for chunk in self.client.stream_bytes("/traces/export", params=params):
+                f.write(chunk)
+                written += len(chunk)
+        return written
+
+    # -- episodes (read-only in v0) -----------------------------------------
+
+    def list_episodes(
+        self,
+        *,
+        run_id: Optional[str] = None,
+        environment_id: Optional[str] = None,
+        created_after: Optional[str] = None,
+        created_before: Optional[str] = None,
+        limit: Optional[int] = None,
+        cursor: Optional[str] = None,
+    ) -> EpisodeListPage:
+        params: Dict[str, object] = {}
+        for key, value in (
+            ("run_id", run_id),
+            ("environment_id", environment_id),
+            ("created_after", created_after),
+            ("created_before", created_before),
+            ("limit", limit),
+            ("cursor", cursor),
+        ):
+            if value is not None:
+                params[key] = value
+        return EpisodeListPage.model_validate(self.client.get_json("/episodes", params=params))
+
+    def get_episode(self, episode_id: str) -> EpisodeSummary:
+        return EpisodeSummary.model_validate(self.client.get_json(f"/episodes/{episode_id}"))
+
+    def list_episode_traces(
+        self,
+        episode_id: str,
+        *,
+        limit: Optional[int] = None,
+        cursor: Optional[str] = None,
+    ) -> TraceListPage:
+        params: Dict[str, object] = {}
+        if limit is not None:
+            params["limit"] = limit
+        if cursor is not None:
+            params["cursor"] = cursor
+        return TraceListPage.model_validate(
+            self.client.get_json(f"/episodes/{episode_id}/traces", params=params)
+        )
 
     def close(self) -> None:
         self.client.close()

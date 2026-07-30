@@ -28,6 +28,8 @@ from .exceptions import (
 )
 from .models import (
     BatchReceipt,
+    EpisodeListPage,
+    EpisodeSummary,
     ErrorCode,
     Execution,
     LineFormat,
@@ -54,6 +56,8 @@ __all__ = [
     "MAX_LINE_BYTES",
     # Models
     "BatchReceipt",
+    "EpisodeListPage",
+    "EpisodeSummary",
     "ErrorCode",
     "Execution",
     "LineFormat",

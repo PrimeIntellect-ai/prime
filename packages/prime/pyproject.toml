@@ -12,6 +12,7 @@ authors = [
 dependencies = [
     "prime-sandboxes>=0.2.34",
     "prime-evals>=0.2.3",
+    "prime-traces>=0.0.1",
     "prime-tunnel>=0.1.9",
     "httpx>=0.25.0",
     "pydantic>=2.0.0",
@@ -61,6 +62,7 @@ dev = [
 [tool.uv.sources]
 prime-sandboxes = { workspace = true }
 prime-evals = { workspace = true }
+prime-traces = { workspace = true }
 prime-tunnel = { workspace = true }
 verifiers = { git = "https://github.com/PrimeIntellect-ai/verifiers.git", tag = "v0.2.0" }
 

@@ -12,10 +12,11 @@ exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for 
 exclude-newer-span = "P7D"
 
 [options.exclude-newer-package]
-prime-tunnel = false
-prime-sandboxes = false
 verifiers = false
 tasksets = false
+prime-traces = false
+prime-tunnel = false
+prime-sandboxes = false
 harnesses = false
 prime-evals = false
 prime = false
@@ -25,6 +26,7 @@ members = [
     "prime",
     "prime-evals",
     "prime-sandboxes",
+    "prime-traces",
     "prime-tunnel",
 ]
 overrides = [{ name = "prime-tunnel", editable = "packages/prime-tunnel" }]
@@ -1352,6 +1354,7 @@ dependencies = [
     { name = "httpx" },
     { name = "prime-evals" },
     { name = "prime-sandboxes" },
+    { name = "prime-traces" },
     { name = "prime-tunnel" },
     { name = "pydantic" },
     { name = "pyyaml" },
@@ -1380,6 +1383,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.25.0" },
     { name = "prime-evals", editable = "packages/prime-evals" },
     { name = "prime-sandboxes", editable = "packages/prime-sandboxes" },
+    { name = "prime-traces", editable = "packages/prime-traces" },
     { name = "prime-tunnel", editable = "packages/prime-tunnel" },
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
@@ -1471,6 +1475,29 @@ requires-dist = [
     { name = "pytest-xdist", marker = "extra == 'dev'", specifier = ">=3.0.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.13.1" },
     { name = "tenacity", specifier = ">=8.0.0" },
+]
+provides-extras = ["dev"]
+
+[[package]]
+name = "prime-traces"
+source = { editable = "packages/prime-traces" }
+dependencies = [
+    { name = "httpx" },
+    { name = "pydantic" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.25.0" },
+    { name = "pydantic", specifier = ">=2.0.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.13.1" },
 ]
 provides-extras = ["dev"]
 

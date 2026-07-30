@@ -31,8 +31,9 @@ jobs:
           exit 0
         fi
 
-        # Get the list of changed files
-        CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
+        # Get the list of changed files. Only modified files count: a newly
+        # added version file is a package's initial version, not a bump.
+        CHANGED_FILES=$(git diff --diff-filter=M --name-only origin/${{ github.base_ref }}...HEAD)
 
         # Version files to check
         VERSION_FILES=(

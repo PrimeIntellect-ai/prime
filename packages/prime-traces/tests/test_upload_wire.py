@@ -169,11 +169,18 @@ class TestRetrySemantics:
 
     def test_gives_up_after_max_attempts(self, make_client, no_sleep):
         def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(429, headers={"Retry-After": "0.1"})
+            return httpx.Response(
+                429,
+                headers={"Retry-After": "0.1"},
+                json={"error": {"code": "rate_limited", "message": "slow down"}},
+            )
 
         with pytest.raises(RetryableAPIError) as exc_info:
             upload(make_client(handler), max_attempts=3)
         assert exc_info.value.status_code == 429
+        # The service code survives so callers can tell rate_limited from
+        # writer_pool_saturated / storage_unavailable / auth_unavailable.
+        assert exc_info.value.code == "rate_limited"
         assert len(no_sleep) == 2  # sleeps between attempts, not after the last
 
     def test_durable_rejection_stops_the_upload(self, make_client):

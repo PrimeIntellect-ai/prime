@@ -90,7 +90,7 @@ def raise_for_response(response: httpx.Response) -> None:
         raise LineFormatConflictError(message, status_code=status, code=code)
     if status in (429, 503):
         raise RetryableAPIError(
-            message, status_code=status, retry_after=_parse_retry_after(response)
+            message, status_code=status, code=code, retry_after=_parse_retry_after(response)
         )
     raise APIError(f"HTTP {status}: {message}", status_code=status, code=code)
 

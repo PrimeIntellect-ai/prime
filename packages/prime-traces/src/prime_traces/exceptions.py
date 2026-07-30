@@ -75,16 +75,21 @@ class LineFormatConflictError(APIError):
 
 
 class RetryableAPIError(APIError):
-    """429 or 503 — retry the exact same bytes after ``retry_after`` seconds."""
+    """429 or 503 — retry the exact same bytes after ``retry_after`` seconds.
+
+    ``code`` distinguishes what saturated: ``rate_limited``,
+    ``writer_pool_saturated``, ``storage_unavailable``, or ``auth_unavailable``.
+    """
 
     def __init__(
         self,
         message: str,
         *,
         status_code: Optional[int] = None,
+        code: Optional[str] = None,
         retry_after: Optional[float] = None,
     ):
-        super().__init__(message, status_code=status_code)
+        super().__init__(message, status_code=status_code, code=code)
         self.retry_after = retry_after
 
 

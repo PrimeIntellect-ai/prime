@@ -108,6 +108,20 @@ class TestPointReads:
         assert written == len(raw)
         assert dest.read_bytes() == raw
 
+    def test_download_raw_failure_preserves_existing_file(self, make_client, tmp_path):
+        dest = tmp_path / "trace.json"
+        dest.write_bytes(b"previous download")
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                404, json={"error": {"code": "trace_not_found", "message": "no such trace"}}
+            )
+
+        with pytest.raises(NotFoundError):
+            make_client(handler).download_raw("missing", dest)
+        assert dest.read_bytes() == b"previous download"
+        assert not (tmp_path / "trace.json.partial").exists()
+
     def test_not_found_is_typed(self, make_client):
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(404, json={"error": {"code": None, "message": "no such trace"}})
@@ -199,6 +213,18 @@ class TestExport:
         )
         assert written == len(body)
         assert dest.read_bytes() == body
+
+    def test_export_failure_preserves_existing_file(self, make_client, tmp_path):
+        dest = tmp_path / "export.jsonl"
+        dest.write_bytes(b"previous export")
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(401, json={"detail": "expired token"})
+
+        with pytest.raises(UnauthorizedError):
+            make_client(handler).export(dest, run_id="run_9f3k2m")
+        assert dest.read_bytes() == b"previous export"
+        assert not (tmp_path / "export.jsonl.partial").exists()
 
 
 class TestEpisodes:

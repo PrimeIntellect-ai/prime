@@ -20,6 +20,7 @@ from ..exceptions import (
     NotFoundError,
     PaymentRequiredError,
     RetryableAPIError,
+    TransportError,
     UnauthorizedError,
     ValidationRejectedError,
 )
@@ -144,7 +145,9 @@ class TracesAPIClient:
             req = getattr(exc, "request", None)
             method = getattr(req, "method", "?")
             url = getattr(req, "url", "?")
-            return APIError(f"Request failed: {exc.__class__.__name__} at {method} {url}: {exc}")
+            return TransportError(
+                f"Request failed: {exc.__class__.__name__} at {method} {url}: {exc}"
+            )
         return exc
 
     # -- write path ---------------------------------------------------------

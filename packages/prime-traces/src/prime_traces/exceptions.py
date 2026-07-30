@@ -88,5 +88,17 @@ class RetryableAPIError(APIError):
         self.retry_after = retry_after
 
 
-class APITimeoutError(APIError):
+class TransportError(APIError):
+    """The request failed at the transport level — connection refused, TLS
+    failure, or a stream broken before the response completed — so there is
+    no HTTP status to interpret.
+
+    For content-addressed uploads these are always safe to retry, even the
+    ambiguous ones where the request may have been processed: the same bytes
+    resolve to the same idempotency key and the service replays the prior
+    result instead of storing twice.
+    """
+
+
+class APITimeoutError(TransportError):
     """The request timed out at the transport level."""

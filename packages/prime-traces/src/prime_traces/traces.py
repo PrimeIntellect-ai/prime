@@ -25,7 +25,7 @@ from .batching import (
     read_jsonl_lines,
 )
 from .core.client import TracesAPIClient
-from .exceptions import RetryableAPIError
+from .exceptions import RetryableAPIError, TransportError
 from .models import (
     BatchReceipt,
     LineFormat,
@@ -78,7 +78,10 @@ class TracesClient:
         A durable rejection (400) stops the upload and raises
         ``ValidationRejectedError`` — correct the file and rerun; already
         committed chunks replay for free. 429/503 retry the same bytes,
-        honoring Retry-After.
+        honoring Retry-After. Transport failures (connection drops, timeouts,
+        resets) also retry the same bytes: content addressing makes even an
+        ambiguous failure safe, because a request that did land replays its
+        receipt instead of storing twice.
 
         Batches are sent sequentially in v0. The contract allows 2–8 requests
         in flight per producer; add bounded concurrency here once the service
@@ -145,11 +148,11 @@ class TracesClient:
                     context=context,
                     compress=compress,
                 )
-            except RetryableAPIError as exc:
+            except (RetryableAPIError, TransportError) as exc:
                 last_error = exc
                 if attempt == max_attempts - 1:
                     break
-                delay = exc.retry_after
+                delay = getattr(exc, "retry_after", None)
                 if delay is None:
                     delay = min(
                         _BACKOFF_CAP_SECONDS,
@@ -165,7 +168,6 @@ class TracesClient:
         self,
         *,
         run_id: Optional[str] = None,
-        environment_id: Optional[str] = None,
         model_id: Optional[str] = None,
         model_provider: Optional[str] = None,
         task_id: Optional[str] = None,
@@ -190,7 +192,6 @@ class TracesClient:
         params = _build_params(
             (
                 ("run_id", run_id),
-                ("environment_id", environment_id),
                 ("model_id", model_id),
                 ("model_provider", model_provider),
                 ("task_id", task_id),
@@ -232,11 +233,29 @@ class TracesClient:
 
     def download_raw(self, trace_id: str, dest: Union[str, Path]) -> int:
         """Stream the raw trace document to ``dest``. Returns bytes written."""
+        return self._stream_to_file(f"/traces/{trace_id}", {"raw": "true"}, dest)
+
+    def _stream_to_file(
+        self, endpoint: str, params: Optional[Dict[str, object]], dest: Union[str, Path]
+    ) -> int:
+        """Stream a response body to ``dest`` without clobbering it on failure.
+
+        Bytes land in a sibling ``.partial`` file that replaces ``dest`` only
+        after the stream ends cleanly, so a failed request — or a connection
+        cut mid-stream — never truncates an existing file at ``dest``.
+        """
+        dest = Path(dest)
+        partial = dest.with_name(dest.name + ".partial")
         written = 0
-        with open(dest, "wb") as f:
-            for chunk in self.client.stream_bytes(f"/traces/{trace_id}", params={"raw": "true"}):
-                f.write(chunk)
-                written += len(chunk)
+        try:
+            with open(partial, "wb") as f:
+                for chunk in self.client.stream_bytes(endpoint, params=params):
+                    f.write(chunk)
+                    written += len(chunk)
+        except BaseException:
+            partial.unlink(missing_ok=True)
+            raise
+        partial.replace(dest)
         return written
 
     # -- traces: delete -----------------------------------------------------

@@ -11,6 +11,7 @@ from prime_traces import (
     LineFormat,
     LineFormatConflictError,
     RetryableAPIError,
+    TransportError,
     ValidationRejectedError,
 )
 
@@ -139,6 +140,32 @@ class TestRetrySemantics:
         # Same bytes, same key, both attempts.
         assert len(set(attempts)) == 1
         assert no_sleep == [1.5]
+
+    def test_retries_transport_failures_with_same_key(self, make_client, no_sleep):
+        attempts = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            attempts.append(request.headers["Idempotency-Key"])
+            if len(attempts) == 1:
+                raise httpx.ConnectError("connection refused", request=request)
+            if len(attempts) == 2:
+                # Ambiguous: the server may have processed the request. Safe
+                # only because the same key replays the committed receipt.
+                raise httpx.ReadError("connection reset mid-response", request=request)
+            return httpx.Response(201, json=COMMITTED)
+
+        [receipt] = upload(make_client(handler))
+        assert receipt.status == "committed"
+        assert len(set(attempts)) == 1
+        assert len(no_sleep) == 2
+
+    def test_transport_failure_exhausts_attempts(self, make_client, no_sleep):
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("connection refused", request=request)
+
+        with pytest.raises(TransportError):
+            upload(make_client(handler), max_attempts=2)
+        assert len(no_sleep) == 1
 
     def test_gives_up_after_max_attempts(self, make_client, no_sleep):
         def handler(request: httpx.Request) -> httpx.Response:

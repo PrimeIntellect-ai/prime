@@ -23,6 +23,7 @@ from .exceptions import (
     PrimeTracesError,
     RetryableAPIError,
     TraceTooLargeError,
+    TransportError,
     UnauthorizedError,
     ValidationRejectedError,
 )
@@ -70,6 +71,7 @@ __all__ = [
     "PaymentRequiredError",
     "RetryableAPIError",
     "TraceTooLargeError",
+    "TransportError",
     "UnauthorizedError",
     "ValidationRejectedError",
 ]

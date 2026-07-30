@@ -286,7 +286,6 @@ class TracesClient:
         dest: Union[str, Path],
         *,
         run_id: Optional[str] = None,
-        environment_id: Optional[str] = None,
         model_id: Optional[str] = None,
         model_provider: Optional[str] = None,
         task_id: Optional[str] = None,
@@ -314,7 +313,6 @@ class TracesClient:
         params = _build_params(
             (
                 ("run_id", run_id),
-                ("environment_id", environment_id),
                 ("model_id", model_id),
                 ("model_provider", model_provider),
                 ("task_id", task_id),
@@ -328,12 +326,7 @@ class TracesClient:
             ),
             context,
         )
-        written = 0
-        with open(dest, "wb") as f:
-            for chunk in self.client.stream_bytes("/traces/export", params=params):
-                f.write(chunk)
-                written += len(chunk)
-        return written
+        return self._stream_to_file("/traces/export", params, dest)
 
     # -- episodes (read-only in v0) -----------------------------------------
 
@@ -341,7 +334,6 @@ class TracesClient:
         self,
         *,
         run_id: Optional[str] = None,
-        environment_id: Optional[str] = None,
         created_after: Optional[str] = None,
         created_before: Optional[str] = None,
         limit: Optional[int] = None,
@@ -350,7 +342,6 @@ class TracesClient:
         params: Dict[str, object] = {}
         for key, value in (
             ("run_id", run_id),
-            ("environment_id", environment_id),
             ("created_after", created_after),
             ("created_before", created_before),
             ("limit", limit),

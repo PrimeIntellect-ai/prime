@@ -101,6 +101,7 @@ class TracesAPIClient:
         self,
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
+        team_id: Optional[str] = None,
         user_agent: Optional[str] = None,
         timeout: Optional[httpx.Timeout] = None,
         transport: Optional[httpx.BaseTransport] = None,
@@ -108,14 +109,16 @@ class TracesAPIClient:
         self.config = Config()
         self.api_key = api_key or self.config.api_key
         self.base_url = (base_url or self.config.traces_url).rstrip("/")
+        # None means "resolve from config"; pass "" to force no team context.
+        self.team_id = team_id if team_id is not None else self.config.team_id
 
         # No default Content-Type here: uploads are multipart (httpx must own
         # the boundary header) and reads set JSON per-request.
         headers = {"User-Agent": user_agent or _default_user_agent()}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
-        if self.config.team_id:
-            headers["X-Prime-Team-Id"] = self.config.team_id
+        if self.team_id:
+            headers["X-Prime-Team-Id"] = self.team_id
 
         self.client = httpx.Client(
             headers=headers,

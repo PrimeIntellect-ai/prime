@@ -12,10 +12,27 @@ from prime_traces import (
 )
 from rich.table import Table
 
+from ..core import Config
 from ..utils import PlainTyper, get_console, json_output_help, output_data_as_json
 
 app = PlainTyper(help="Upload and query traces (Prime Traces)", no_args_is_help=True)
 console = get_console()
+
+
+def _traces_client() -> TracesClient:
+    """Build a client from the CLI config so `--context` is honored.
+
+    The SDK's own Config reads only ~/.prime/config.json and env vars; the CLI
+    Config additionally resolves PRIME_CONTEXT environments, so credentials and
+    URLs must flow from here — the same injection pattern as the sandbox and
+    evals commands.
+    """
+    config = Config()
+    return TracesClient(
+        api_key=config.api_key,
+        base_url=config.traces_url,
+        team_id=config.team_id,
+    )
 
 UPLOAD_JSON_HELP = json_output_help(
     ".receipts[] = {batch_id, status, digest?}",
@@ -81,7 +98,7 @@ def upload_traces(
             )
 
     try:
-        client = TracesClient()
+        client = _traces_client()
         receipts = client.upload_file(
             file,
             line_format=line_format,
@@ -126,7 +143,7 @@ def list_traces(
 ) -> None:
     """List trace summaries, newest first."""
     try:
-        client = TracesClient()
+        client = _traces_client()
         page = client.list(
             run_id=run_id,
             task_id=task_id,
@@ -182,7 +199,7 @@ def get_trace(
 ) -> None:
     """Get one trace summary, or the raw trace document with --raw."""
     try:
-        client = TracesClient()
+        client = _traces_client()
         if raw:
             if output is not None:
                 written = client.download_raw(trace_id, output)
@@ -226,7 +243,7 @@ def export_traces(
     """Stream a filtered export to a file. Same filters as `list`;
     resumable by re-running. Exports are metered on bytes transferred."""
     try:
-        client = TracesClient()
+        client = _traces_client()
         written = client.export(
             output,
             run_id=run_id,
@@ -263,7 +280,7 @@ def delete_traces(
         raise typer.Exit(0)
 
     try:
-        client = TracesClient()
+        client = _traces_client()
         if trace_id:
             client.delete(trace_id)
             console.print(f"[green]Deletion of {target} accepted[/green]")

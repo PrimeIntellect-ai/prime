@@ -1,7 +1,7 @@
 import httpx
 import pytest
 
-from prime_traces import NotFoundError, UnauthorizedError
+from prime_traces import NotFoundError, TracesAPIClient, UnauthorizedError
 
 SUMMARY = {
     "trace_id": "8d3f1a2b",
@@ -144,6 +144,37 @@ class TestDelete:
             return httpx.Response(202, json={"job_id": "job-1"})
 
         assert make_client(handler).delete_run("run_9f3k2m") == "job-1"
+
+
+class TestTeamHeader:
+    @staticmethod
+    def _client(team_id, handler):
+        return TracesAPIClient(
+            api_key="test-key",
+            base_url="http://testserver",
+            team_id=team_id,
+            transport=httpx.MockTransport(handler),
+        )
+
+    def test_sent_when_team_id_given(self):
+        captured = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["team"] = request.headers.get("X-Prime-Team-Id")
+            return httpx.Response(200, json={})
+
+        self._client("team_123", handler).get_json("/traces")
+        assert captured["team"] == "team_123"
+
+    def test_absent_when_team_id_empty(self):
+        captured = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["team"] = request.headers.get("X-Prime-Team-Id")
+            return httpx.Response(200, json={})
+
+        self._client("", handler).get_json("/traces")
+        assert captured["team"] is None
 
 
 class TestExport:

@@ -12,6 +12,9 @@ def make_client() -> Callable[..., TracesClient]:
         api_client = TracesAPIClient(
             api_key="test-key",
             base_url="http://testserver",
+            # "" forces no team header; None would fall back to the
+            # developer's real ~/.prime/config.json.
+            team_id="",
             transport=httpx.MockTransport(handler),
         )
         return TracesClient(api_client=api_client)

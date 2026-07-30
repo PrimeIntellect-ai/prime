@@ -3,12 +3,6 @@
 Prime Intellect Traces SDK — upload, query and export training, evaluation and
 inference traces through the Prime Traces service.
 
-> **Status:** scaffold. The Prime Traces service is being built in parallel
-> (`prime-traces/` in the platform repo); this SDK implements the reviewed v0
-> API contract from the Prime Traces design docs. The client-side batching and
-> wire shapes are tested; end-to-end behavior is validated against the
-> service's local compose stack as it lands.
-
 ## Install
 
 ```bash
@@ -71,16 +65,16 @@ client.list_episode_traces(episode_id)
 
 ## Configuration
 
-| Source | Meaning |
-| --- | --- |
-| `PRIME_API_KEY` | Platform API token (needs `traces:read` / `traces:write` scopes) |
-| `PRIME_TEAM_ID` | Optional team context, sent as `X-Prime-Team-Id` |
-| `PRIME_TRACES_URL` | Base URL of the Prime Traces service; defaults to the platform API base URL. For the service's local compose stack: `http://localhost:8083` |
-| `~/.prime/config.json` | Shared prime CLI config (`api_key`, `team_id`, `traces_url`) |
+| Source                 | Meaning                                                                                                                                     |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PRIME_API_KEY`        | Platform API token (needs `traces:read` / `traces:write` scopes)                                                                            |
+| `PRIME_TEAM_ID`        | Optional team context, sent as `X-Prime-Team-Id`                                                                                            |
+| `PRIME_TRACES_URL`     | Base URL of the Prime Traces service; defaults to the platform API base URL. For the service's local compose stack: `http://localhost:8083` |
+| `~/.prime/config.json` | Shared prime CLI config (`api_key`, `team_id`, `traces_url`)                                                                                |
 
 ## Not implemented yet (open v0 contract decisions)
 
-- The exports *job* API (`POST /traces/exports`, `GET /traces/exports/{job_id}`)
+- The exports _job_ API (`POST /traces/exports`, `GET /traces/exports/{job_id}`)
   — published as 501 by the service in v0 until export results have somewhere
   to land. The streaming `GET /traces/export` is what `export()` wraps.
 - `/search` and free-text queries — deferred with the `trace_components`

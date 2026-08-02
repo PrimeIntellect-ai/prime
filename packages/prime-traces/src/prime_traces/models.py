@@ -86,9 +86,10 @@ class BatchReceipt(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
+    # The batch ID *is* the content digest (64 lowercase hex, no prefix), so
+    # the service does not restate it in a separate field.
     batch_id: str
     status: str
-    digest: Optional[str] = None
 
 
 class ModelInfo(BaseModel):

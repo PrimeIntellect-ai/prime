@@ -1,15 +1,33 @@
-# prime-traces
+# Prime Traces SDK
 
-Prime Intellect Traces SDK — upload, query and export training, evaluation and
-inference traces through the Prime Traces service.
+Upload, query and export training, evaluation and inference traces through the
+Prime Traces service.
 
-## Install
+## Features
+
+- **Content-addressed uploads** - Batches are identified by the SHA-256 of
+  their exact bytes, so interrupted uploads are safe to rerun and never store
+  twice
+- **Deterministic batching** - JSONL files are split at byte thresholds without
+  rewriting a single line
+- **Typed reads** - Cursor-paginated summaries over extracted columns, raw
+  document retrieval, and streaming exports
+- **Type-safe** - Full type hints and Pydantic models
+- **No CLI dependencies** - Pure SDK, usable in producers and services
+
+## Installation
+
+```bash
+uv add prime-traces
+```
+
+or with pip:
 
 ```bash
 pip install prime-traces
 ```
 
-## Upload a completed JSONL file
+## Quick Start
 
 ```python
 from prime_traces import TracesClient, LineFormat
@@ -89,3 +107,14 @@ export parameters above are a proposal to align on, not a settled contract.
 - An async client — the other prime SDKs ship sync/async pairs, and the main
   producers (verifiers, prime-rl) are async; add once the sync surface
   settles rather than freezing a duplicated API now.
+
+## Documentation
+
+For detailed documentation, visit the
+[Prime Traces SDK documentation](https://github.com/PrimeIntellect-ai/prime/tree/main/packages/prime-traces).
+
+## Related Packages
+
+- [prime](https://github.com/PrimeIntellect-ai/prime/tree/main/packages/prime) - Prime CLI (`prime traces ...` commands)
+- [prime-sandboxes](https://github.com/PrimeIntellect-ai/prime/tree/main/packages/prime-sandboxes) - Sandboxes SDK
+- [prime-evals](https://github.com/PrimeIntellect-ai/prime/tree/main/packages/prime-evals) - Evals SDK

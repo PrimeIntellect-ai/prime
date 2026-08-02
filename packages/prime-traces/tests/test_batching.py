@@ -72,6 +72,17 @@ class TestLineValidation:
         [batch] = iter_batches([content + b"\n"], max_line_bytes=32)
         assert batch.num_lines == 1
 
+    def test_line_cap_counts_carriage_return_like_the_server(self):
+        # The server splits on LF alone, so a CRLF line keeps its \r and the
+        # \r counts against the cap; the local check must reject exactly what
+        # the server would.
+        content = b'{"p":"' + b"x" * 23 + b'"}'
+        assert len(content) == 31
+        [batch] = iter_batches([content + b"\r\n"], max_line_bytes=32)  # 31 + \r = 32
+        assert batch.num_lines == 1
+        with pytest.raises(TraceTooLargeError):
+            list(iter_batches([content + b"x" + b"\r\n"], max_line_bytes=32))  # 33
+
     def test_blank_lines_skipped(self):
         lines = [line('{"id":"a"}'), b"\n", b"   \n", line('{"id":"b"}')]
         [batch] = iter_batches(lines)

@@ -220,7 +220,7 @@ class EvalsClient:
         self,
         evaluation_id: str,
         samples: List[Dict[str, Any]],
-        max_payload_bytes: int = 25 * 1024 * 1024,
+        max_payload_bytes: int = 100 * 1024 * 1024,
         max_workers: int = 4,
         progress_callback: Optional[Callable[[int], None]] = None,
     ) -> Dict[str, Any]:
@@ -576,7 +576,7 @@ class AsyncEvalsClient:
         self,
         evaluation_id: str,
         samples: List[Dict[str, Any]],
-        max_payload_bytes: int = 25 * 1024 * 1024,
+        max_payload_bytes: int = 100 * 1024 * 1024,
         max_concurrent: int = 4,
         progress_callback: Optional[Callable[[int], None]] = None,
     ) -> Dict[str, Any]:

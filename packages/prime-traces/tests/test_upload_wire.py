@@ -141,6 +141,24 @@ class TestRetrySemantics:
         assert len(set(attempts)) == 1
         assert no_sleep == [1.5]
 
+    @pytest.mark.parametrize("status", [502, 504])
+    def test_retries_gateway_responses(self, make_client, no_sleep, status):
+        """502/504 come from a gateway, not the service — no error envelope,
+        and the first attempt may have been processed. Content addressing makes
+        the retry safe: the same key replays the committed receipt."""
+        attempts = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            attempts.append(request.headers["Idempotency-Key"])
+            if len(attempts) == 1:
+                return httpx.Response(status, text="upstream connect error")
+            return httpx.Response(201, json=COMMITTED)
+
+        [receipt] = upload(make_client(handler))
+        assert receipt.status == "committed"
+        assert len(set(attempts)) == 1
+        assert len(no_sleep) == 1
+
     def test_retries_transport_failures_with_same_key(self, make_client, no_sleep):
         attempts = []
 

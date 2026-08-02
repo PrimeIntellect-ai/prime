@@ -48,6 +48,10 @@ path = "src/prime_traces/__init__.py"
 [tool.hatch.build.targets.wheel]
 packages = ["src/prime_traces"]
 
+[tool.pytest.ini_options]
+addopts = "-v"
+testpaths = ["tests"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py310"

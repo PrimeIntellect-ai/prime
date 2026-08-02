@@ -49,8 +49,8 @@ Uploads are content-addressed: each request is identified by the SHA-256 of its
 exact uncompressed JSONL bytes and sent with an `Idempotency-Key`. Rerunning an
 interrupted upload re-reads the file, reproduces the same bytes and keys, and
 the service replays committed receipts without storing anything twice. A 400
-rejection stops the upload with a bounded error code (`ErrorCode`); 429/503 are
-retried with the same bytes, honoring `Retry-After`.
+rejection stops the upload with a bounded error code (`ErrorCode`); 429/503 and
+gateway 502/504 are retried with the same bytes, honoring `Retry-After`.
 
 ## Query
 

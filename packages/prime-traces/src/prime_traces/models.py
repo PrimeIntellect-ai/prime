@@ -28,7 +28,8 @@ class ErrorCode(str, Enum):
     Kept in lockstep with the service's ``ErrorCode``
     (``prime-traces/src/errors.py`` in the platform repo).
     Producers branch on the rejection codes — correct the file and
-    resubmit, retry unchanged, or stop; 429/503 codes are retryable.
+    resubmit, retry unchanged, or stop; 429/503 codes are retryable, as are
+    codeless gateway 502/504 responses.
     """
 
     # Batch rejections (400): nothing stored. Validation is deterministic, so

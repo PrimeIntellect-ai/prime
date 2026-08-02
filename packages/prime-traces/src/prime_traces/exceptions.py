@@ -76,11 +76,14 @@ class LineFormatConflictError(APIError):
 
 
 class RetryableAPIError(APIError):
-    """429 or 503 — retry the exact same bytes after ``retry_after`` seconds.
+    """429, 502, 503 or 504 — retry the exact same bytes after ``retry_after``
+    seconds.
 
-    ``code`` distinguishes what saturated: ``rate_limited``,
+    On 429/503 ``code`` distinguishes what saturated: ``rate_limited``,
     ``writer_pool_saturated``, ``ingest_capacity_exceeded``,
     ``ingest_unavailable``, ``storage_unavailable``, or ``auth_unavailable``.
+    502/504 come from gateways in front of the service, so they carry no
+    service code.
     """
 
     def __init__(

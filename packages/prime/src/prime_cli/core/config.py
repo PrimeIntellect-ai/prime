@@ -16,6 +16,9 @@ class ConfigModel(BaseModel):
     base_url: str = "https://api.primeintellect.ai"
     frontend_url: str = "https://app.primeintellect.ai"
     inference_url: str = "https://api.pinference.ai/api/v1"
+    # None means "not configured": the traces_url property falls back to
+    # base_url at read time, so the fallback is never frozen into the file.
+    traces_url: str | None = None
     ssh_key_path: str = str(Path.home() / ".ssh" / "id_rsa")
     current_environment: str = "production"
     share_resources_with_team: bool = False
@@ -177,24 +180,34 @@ class Config:
         self.config["inference_url"] = value
         self._save_config(self.config)
 
+    def _configured_traces_url(self) -> str | None:
+        """The explicitly configured traces URL (env > file), or None when unset.
+
+        Separate from the property so environment save/load can persist "not
+        configured" instead of freezing the base_url fallback at save time.
+        """
+        env_val = os.getenv("PRIME_TRACES_URL")
+        if env_val:
+            return self._strip_api_v1(env_val)
+        file_val = self.config.get("traces_url")
+        if file_val:
+            return self._strip_api_v1(str(file_val))
+        return None
+
     @property
     def traces_url(self) -> str:
         """Get Prime Traces service URL with precedence: env > file > base_url.
 
         Falls back to the platform base URL until the service's production
         routing (dedicated domain vs path under the API domain) is decided.
+        Strips a trailing /api/v1 like base_url does — the client appends the
+        prefix itself, and the SDK's own Config normalizes the same way.
         """
-        env_val = os.getenv("PRIME_TRACES_URL")
-        if env_val:
-            return env_val.rstrip("/")
-        file_val = self.config.get("traces_url")
-        if file_val:
-            return str(file_val).rstrip("/")
-        return self.base_url
+        return self._configured_traces_url() or self.base_url
 
     def set_traces_url(self, value: str) -> None:
-        """Set Prime Traces service URL in config file"""
-        self.config["traces_url"] = value.rstrip("/")
+        """Set Prime Traces service URL in config file; empty clears the override."""
+        self.config["traces_url"] = self._strip_api_v1(value) if value else None
         self._save_config(self.config)
 
     @property
@@ -256,6 +269,7 @@ class Config:
             "base_url": self.base_url,
             "frontend_url": self.frontend_url,
             "inference_url": self.inference_url,
+            "traces_url": self.traces_url,
             "ssh_key_path": self.ssh_key_path,
             "current_environment": self.current_environment,
             "share_resources_with_team": self.share_resources_with_team,
@@ -277,6 +291,9 @@ class Config:
             "base_url": self.base_url,
             "frontend_url": self.frontend_url,
             "inference_url": self.inference_url,
+            # The configured value, not the effective one: an environment with
+            # no traces override keeps following its base_url.
+            "traces_url": self._configured_traces_url(),
         }
         env_file.write_text(json.dumps(env_config, indent=2))
 
@@ -314,12 +331,14 @@ class Config:
                 self.set_base_url(self.DEFAULT_BASE_URL)
                 self.set_frontend_url(self.DEFAULT_FRONTEND_URL)
                 self.set_inference_url(self.DEFAULT_INFERENCE_URL)
+                self.set_traces_url("")  # No override: follow base_url
                 self.set_team(None)  # Production defaults to personal account
                 self.set_current_environment("production")
             else:
                 self.config["base_url"] = self.DEFAULT_BASE_URL
                 self.config["frontend_url"] = self.DEFAULT_FRONTEND_URL
                 self.config["inference_url"] = self.DEFAULT_INFERENCE_URL
+                self.config["traces_url"] = None
                 self.config["team_id"] = None
                 self.config["team_name"] = None
                 self.config["team_role"] = None
@@ -351,6 +370,9 @@ class Config:
                     self.set_inference_url(
                         env_config.get("inference_url", self.DEFAULT_INFERENCE_URL)
                     )
+                    # Absent means "no override": clear rather than keep the
+                    # previous environment's traces URL.
+                    self.set_traces_url(env_config.get("traces_url") or "")
                     self.set_current_environment(name)
                 else:
                     # In-memory only - don't persist to disk
@@ -367,6 +389,10 @@ class Config:
                     self.config["frontend_url"] = frontend_url.rstrip("/")
                     inference_url = env_config.get("inference_url", self.DEFAULT_INFERENCE_URL)
                     self.config["inference_url"] = inference_url.rstrip("/")
+                    traces_url = env_config.get("traces_url")
+                    self.config["traces_url"] = (
+                        self._strip_api_v1(traces_url) if traces_url else None
+                    )
                     self.config["current_environment"] = name
                 return True
         except ValueError:
@@ -391,6 +417,7 @@ class Config:
                         "base_url": self.base_url,
                         "frontend_url": self.frontend_url,
                         "inference_url": self.inference_url,
+                        "traces_url": self._configured_traces_url(),
                     }
                     env_file.write_text(json.dumps(env_config, indent=2))
             except ValueError:

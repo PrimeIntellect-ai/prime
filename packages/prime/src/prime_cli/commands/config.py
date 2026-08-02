@@ -95,6 +95,12 @@ def view() -> None:
         inf_label += " (from env var)"
     table.add_row("Inference URL", inf_label)
 
+    # Show traces URL (effective value: falls back to the base URL)
+    traces_label = settings["traces_url"]
+    if _env_set("PRIME_TRACES_URL"):
+        traces_label += " (from env var)"
+    table.add_row("Traces URL", traces_label)
+
     # Show SSH key path
     ssh_label = settings["ssh_key_path"]
     if _env_set("PRIME_SSH_KEY_PATH"):
@@ -273,6 +279,32 @@ def set_inference_url(
     console.print(f"[green]Inference URL set to: {url}[/green]")
 
 
+@app.command()
+def set_traces_url(
+    url: Optional[str] = typer.Argument(
+        None,
+        help=(
+            "URL of the Prime Traces service. Pass '' to clear the override "
+            "and follow the base URL. If not provided, you'll be prompted."
+        ),
+    ),
+) -> None:
+    """Set the Prime Traces service URL (prompts if not provided)"""
+    if url is None:
+        config = Config()
+        url = typer.prompt(
+            "Enter the URL of the Prime Traces service ('' follows the base URL)",
+            default=config.traces_url,
+        )
+
+    config = Config()
+    config.set_traces_url(url)
+    if url:
+        console.print(f"[green]Traces URL set to: {url}[/green]")
+    else:
+        console.print("[green]Traces URL override cleared; following the base URL[/green]")
+
+
 # Helper functions (not commands)
 def _set_environment(
     env: str,
@@ -384,6 +416,7 @@ def reset(
         config.set_base_url(Config.DEFAULT_BASE_URL)
         config.set_frontend_url(Config.DEFAULT_FRONTEND_URL)
         config.set_inference_url(Config.DEFAULT_INFERENCE_URL)
+        config.set_traces_url("")
         config.set_ssh_key_path(Config.DEFAULT_SSH_KEY_PATH)
         config.set_current_environment("production")
         console.print("[green]Configuration reset to defaults![/green]")

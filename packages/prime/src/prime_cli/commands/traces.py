@@ -26,13 +26,19 @@ def _traces_client() -> TracesClient:
     Config additionally resolves PRIME_CONTEXT environments, so credentials and
     URLs must flow from here — the same injection pattern as the sandbox and
     evals commands.
+
+    Every field is passed explicitly, never None: the SDK client treats None as
+    "resolve from my static config", and a context whose api_key or team is
+    unset must fail or go teamless rather than silently borrow the default
+    context's credentials.
     """
     config = Config()
     return TracesClient(
         api_key=config.api_key,
         base_url=config.traces_url,
-        team_id=config.team_id,
+        team_id=config.team_id or "",
     )
+
 
 UPLOAD_JSON_HELP = json_output_help(
     ".receipts[] = {batch_id, status, digest?}",

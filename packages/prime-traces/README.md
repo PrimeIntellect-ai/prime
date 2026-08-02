@@ -31,7 +31,7 @@ Uploads are content-addressed: each request is identified by the SHA-256 of its
 exact uncompressed JSONL bytes and sent with an `Idempotency-Key`. Rerunning an
 interrupted upload re-reads the file, reproduces the same bytes and keys, and
 the service replays committed receipts without storing anything twice. A 400
-rejection stops the upload with a durable error code (`ErrorCode`); 429/503 are
+rejection stops the upload with a bounded error code (`ErrorCode`); 429/503 are
 retried with the same bytes, honoring `Retry-After`.
 
 ## Query
@@ -78,3 +78,6 @@ Deferred to follow-up PRs once the service pins the corresponding responses:
 - The `environment_id` list filter — pending its extracted column.
 - Typed dot-path predicates (`traces.query`) — needs the server-side field
   registry.
+- An async client — the other prime SDKs ship sync/async pairs, and the main
+  producers (verifiers, prime-rl) are async; add once the sync surface
+  settles rather than freezing a duplicated API now.

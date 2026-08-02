@@ -72,8 +72,9 @@ def iter_batches(
 
     Whitespace-only lines are skipped. Each kept line contributes its exact
     bytes (terminator included; a final line without one stays without one).
-    The line-size cap is checked on the line content, excluding the
-    terminator, matching how the service stores lines.
+    The line-size cap is checked on the line content excluding the trailing
+    newline but including any carriage return before it — the service splits
+    on LF alone, so these are exactly the bytes it measures.
     """
     if target_bytes <= 0:
         raise ValueError("target_bytes must be positive")
@@ -102,7 +103,7 @@ def iter_batches(
     for line_number, line in enumerate(lines, start=1):
         if not line.strip():
             continue
-        content_size = len(line.rstrip(b"\r\n"))
+        content_size = len(line.rstrip(b"\n"))
         if content_size > max_line_bytes:
             raise TraceTooLargeError(line_number, content_size, max_line_bytes)
 

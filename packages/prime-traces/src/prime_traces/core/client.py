@@ -88,7 +88,11 @@ def raise_for_response(response: httpx.Response) -> None:
         raise ValidationRejectedError(message, status_code=status, code=code)
     if status == 409:
         raise LineFormatConflictError(message, status_code=status, code=code)
-    if status in (429, 503):
+    if status in (429, 502, 503, 504):
+        # 502/504 come from gateways in front of the service, not the service
+        # itself. Content addressing makes retrying them safe even for uploads
+        # whose first attempt may have been processed: the same bytes resolve
+        # to the same idempotency key and replay the committed receipt.
         raise RetryableAPIError(
             message, status_code=status, code=code, retry_after=_parse_retry_after(response)
         )

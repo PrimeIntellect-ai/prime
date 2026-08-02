@@ -25,13 +25,15 @@ class LineFormat(str, Enum):
 class ErrorCode(str, Enum):
     """Error codes returned by the service.
 
-    Kept in lockstep with the service's ``errors.ErrorCode``
-    (``prime-traces/src/prime_traces/errors.py`` in the platform repo).
-    Producers branch on the durable rejection codes — correct the file and
+    Kept in lockstep with the service's ``ErrorCode``
+    (``prime-traces/src/errors.py`` in the platform repo).
+    Producers branch on the rejection codes — correct the file and
     resubmit, retry unchanged, or stop; 429/503 codes are retryable.
     """
 
-    # Durable batch rejections (400): persisted and replayed for the same bytes
+    # Batch rejections (400): nothing stored. Validation is deterministic, so
+    # resubmitting the same bytes yields the same verdict; corrected content
+    # hashes to a new batch ID.
     BATCH_TOO_LARGE = "batch_too_large"
     TRACE_TOO_LARGE = "trace_too_large"
     TOO_MANY_TRACES_IN_EPISODE = "too_many_traces_in_episode"
@@ -41,6 +43,10 @@ class ErrorCode(str, Enum):
     LINE_FORMAT_MISMATCH = "line_format_mismatch"
     MALFORMED_ENCODING = "malformed_encoding"
     INVALID_TRACE = "invalid_trace"
+    # The `metadata` part itself: absent, duplicated, oversized, or the wrong
+    # shape. Separate from `invalid_trace` because the producer fixes its
+    # uploader, not its trace file.
+    INVALID_METADATA = "invalid_metadata"
     CREATED_AT_OUT_OF_WINDOW = "created_at_out_of_window"
     UNSUPPORTED_SCHEMA_VERSION = "unsupported_schema_version"
     UNKNOWN_EPISODE_REFERENCE = "unknown_episode_reference"
@@ -65,6 +71,8 @@ class ErrorCode(str, Enum):
     # Retryable (429/503) and service state
     RATE_LIMITED = "rate_limited"
     WRITER_POOL_SATURATED = "writer_pool_saturated"
+    INGEST_CAPACITY_EXCEEDED = "ingest_capacity_exceeded"
+    INGEST_UNAVAILABLE = "ingest_unavailable"
     STORAGE_UNAVAILABLE = "storage_unavailable"
     NOT_IMPLEMENTED = "not_implemented"
 

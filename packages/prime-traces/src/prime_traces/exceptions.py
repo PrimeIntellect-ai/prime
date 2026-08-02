@@ -3,9 +3,9 @@
 Two families:
 
 - Local errors raised before any request is made (``TraceTooLargeError``).
-- API errors mapped from HTTP responses. The service persists a bounded set of
-  rejection codes (see ``models.ErrorCode``); producers are expected to branch
-  on the code, not the message.
+- API errors mapped from HTTP responses. The service answers with a bounded
+  set of error codes (see ``models.ErrorCode``); producers are expected to
+  branch on the code, not the message.
 """
 
 from typing import Optional
@@ -61,11 +61,12 @@ class NotFoundError(APIError):
 
 
 class ValidationRejectedError(APIError):
-    """400 — the request was durably rejected; nothing was stored.
+    """400 — the request was rejected; nothing was stored.
 
     ``code`` carries one of the bounded rejection codes (``models.ErrorCode``).
-    The same bytes will replay the same rejection: correct the file and
-    resubmit (corrected content hashes to a new batch ID).
+    Validation is deterministic, so resubmitting the same bytes yields the
+    same verdict: correct the file and resubmit (corrected content hashes to
+    a new batch ID).
     """
 
 
@@ -78,7 +79,8 @@ class RetryableAPIError(APIError):
     """429 or 503 — retry the exact same bytes after ``retry_after`` seconds.
 
     ``code`` distinguishes what saturated: ``rate_limited``,
-    ``writer_pool_saturated``, ``storage_unavailable``, or ``auth_unavailable``.
+    ``writer_pool_saturated``, ``ingest_capacity_exceeded``,
+    ``ingest_unavailable``, ``storage_unavailable``, or ``auth_unavailable``.
     """
 
     def __init__(

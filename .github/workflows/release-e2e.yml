@@ -10,6 +10,7 @@ on:
       - "packages/prime/**"
       - "packages/prime-evals/**"
       - "packages/prime-sandboxes/**"
+      - "packages/prime-traces/**"
       - "packages/prime-tunnel/**"
       - "pyproject.toml"
       - "uv.lock"

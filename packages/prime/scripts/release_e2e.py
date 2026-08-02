@@ -372,6 +372,8 @@ def remote_script(config: RemoteConfig) -> str:
                     "-e",
                     str(SOURCE_ROOT / "packages" / "prime-sandboxes"),
                     "-e",
+                    str(SOURCE_ROOT / "packages" / "prime-traces"),
+                    "-e",
                     str(SOURCE_ROOT / "packages" / "prime-tunnel"),
                     "-e",
                     str(SOURCE_ROOT / "packages" / "prime"),

@@ -57,7 +57,11 @@ app.add_typer(
     rich_help_panel="Lab",
 )
 app.add_typer(deployments_app, name="deployments", rich_help_panel="Lab")
-app.add_typer(traces_app, name="traces", rich_help_panel="Lab")
+# Hidden until the Prime Traces service is deployed: the default traces URL
+# falls back to the platform API, which does not serve /api/v1/traces yet, so
+# an advertised command group would 404 out of the box. Works today for anyone
+# who sets PRIME_TRACES_URL; unhide when production routing lands.
+app.add_typer(traces_app, name="traces", rich_help_panel="Lab", hidden=True)
 
 # Compute commands
 app.add_typer(availability_app, name="availability", rich_help_panel="Compute")

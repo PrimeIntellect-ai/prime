@@ -7,13 +7,22 @@ from prime_traces import (
     Batch,
     BatchReceipt,
     LineFormat,
+    PaymentRequiredError,
     PrimeTracesError,
     TracesClient,
+    UnauthorizedError,
 )
+from rich.markup import escape
 from rich.table import Table
 
 from ..core import Config
-from ..utils import PlainTyper, get_console, json_output_help, output_data_as_json
+from ..utils import (
+    PlainTyper,
+    get_console,
+    json_output_help,
+    output_data_as_json,
+    validate_output_format,
+)
 
 app = PlainTyper(help="Upload and query traces (Prime Traces)", no_args_is_help=True)
 console = get_console()
@@ -41,7 +50,7 @@ def _traces_client() -> TracesClient:
 
 
 UPLOAD_JSON_HELP = json_output_help(
-    ".receipts[] = {batch_id, status, digest?}",
+    ".receipts[] = {batch_id, status}",
     ".num_batches = number",
 )
 
@@ -89,14 +98,15 @@ def upload_traces(
     no_compress: bool = typer.Option(
         False, "--no-compress", help="Skip gzip transport compression"
     ),
-    json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
     """Upload a JSONL file of traces. Safe to rerun after interruption:
     identical bytes replay their committed receipts without re-storing."""
+    validate_output_format(output, console)
     line_format = LineFormat.EPISODE if episodes else LineFormat.TRACE
 
     def on_batch(batch: Batch, receipt: BatchReceipt) -> None:
-        if not json_output:
+        if output != "json":
             console.print(
                 f"  batch {receipt.batch_id[:12]}… "
                 f"({batch.num_lines} lines, {batch.size / (1024 * 1024):.1f} MiB) "
@@ -112,11 +122,23 @@ def upload_traces(
             compress=not no_compress,
             on_batch=on_batch,
         )
+    except typer.Exit:
+        raise
+    except UnauthorizedError as e:
+        console.print(f"[red]Unauthorized:[/red] {str(e)}")
+        raise typer.Exit(1)
+    except PaymentRequiredError as e:
+        console.print(f"[red]Payment Required:[/red] {str(e)}")
+        raise typer.Exit(1)
     except PrimeTracesError as e:
-        console.print(f"[red]Upload failed: {e}[/red]")
+        console.print(f"[red]Upload failed:[/red] {str(e)}")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
+        console.print_exception(show_locals=True)
         raise typer.Exit(1)
 
-    if json_output:
+    if output == "json":
         output_data_as_json(
             {
                 "receipts": [r.model_dump() for r in receipts],
@@ -143,11 +165,15 @@ def list_traces(
         None, "--created-after", help="ISO timestamp; also the cheapest filter"
     ),
     created_before: Optional[str] = typer.Option(None, "--created-before", help="ISO timestamp"),
+    sort: Optional[str] = typer.Option(
+        None, "--sort", help="Sort key: created_at (default, newest first), reward, duration_ms"
+    ),
     limit: int = typer.Option(20, "--limit", help="Max results per page (up to 100)"),
     cursor: Optional[str] = typer.Option(None, "--cursor", help="Cursor from a previous page"),
-    json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
     """List trace summaries, newest first."""
+    validate_output_format(output, console)
     try:
         client = _traces_client()
         page = client.list(
@@ -160,14 +186,27 @@ def list_traces(
             reward_max=reward_max,
             created_after=created_after,
             created_before=created_before,
+            sort=sort,
             limit=limit,
             cursor=cursor,
         )
+    except typer.Exit:
+        raise
+    except UnauthorizedError as e:
+        console.print(f"[red]Unauthorized:[/red] {str(e)}")
+        raise typer.Exit(1)
+    except PaymentRequiredError as e:
+        console.print(f"[red]Payment Required:[/red] {str(e)}")
+        raise typer.Exit(1)
     except APIError as e:
-        console.print(f"[red]{e}[/red]")
+        console.print(f"[red]Error:[/red] {str(e)}")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
+        console.print_exception(show_locals=True)
         raise typer.Exit(1)
 
-    if json_output:
+    if output == "json":
         output_data_as_json(page.model_dump(mode="json"), console)
         return
 
@@ -198,28 +237,41 @@ def list_traces(
 def get_trace(
     trace_id: str = typer.Argument(..., help="Trace ID"),
     raw: bool = typer.Option(False, "--raw", help="Fetch the exact stored trace document"),
-    output: Optional[Path] = typer.Option(
-        None, "--output", "-o", help="With --raw: stream the document to this file"
+    dest: Optional[Path] = typer.Option(
+        None, "--dest", help="With --raw: stream the document to this file"
     ),
-    json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
     """Get one trace summary, or the raw trace document with --raw."""
+    validate_output_format(output, console)
     try:
         client = _traces_client()
         if raw:
-            if output is not None:
-                written = client.download_raw(trace_id, output)
-                console.print(f"[green]Wrote {written} bytes to {output}[/green]")
+            if dest is not None:
+                written = client.download_raw(trace_id, dest)
+                console.print(f"[green]Wrote {written} bytes to {dest}[/green]")
                 return
             # Raw documents can be tens of MiB; print verbatim, no re-encoding.
             print(client.get_raw(trace_id).decode("utf-8", errors="replace"))
             return
         summary = client.get(trace_id)
+    except typer.Exit:
+        raise
+    except UnauthorizedError as e:
+        console.print(f"[red]Unauthorized:[/red] {str(e)}")
+        raise typer.Exit(1)
+    except PaymentRequiredError as e:
+        console.print(f"[red]Payment Required:[/red] {str(e)}")
+        raise typer.Exit(1)
     except APIError as e:
-        console.print(f"[red]{e}[/red]")
+        console.print(f"[red]Error:[/red] {str(e)}")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
+        console.print_exception(show_locals=True)
         raise typer.Exit(1)
 
-    if json_output:
+    if output == "json":
         output_data_as_json(summary.model_dump(mode="json"), console)
         return
 
@@ -233,7 +285,7 @@ def get_trace(
 
 @app.command("export")
 def export_traces(
-    output: Path = typer.Argument(..., dir_okay=False, help="Destination file (JSONL)"),
+    dest: Path = typer.Argument(..., dir_okay=False, help="Destination file (JSONL)"),
     run_id: Optional[str] = typer.Option(None, "--run-id", help="Filter by run ID"),
     task_id: Optional[str] = typer.Option(None, "--task-id", help="Filter by task ID"),
     model_id: Optional[str] = typer.Option(None, "--model-id", help="Filter by model ID"),
@@ -251,7 +303,7 @@ def export_traces(
     try:
         client = _traces_client()
         written = client.export(
-            output,
+            dest,
             run_id=run_id,
             task_id=task_id,
             model_id=model_id,
@@ -262,10 +314,22 @@ def export_traces(
             created_after=created_after,
             created_before=created_before,
         )
-    except PrimeTracesError as e:
-        console.print(f"[red]Export failed: {e}[/red]")
+    except typer.Exit:
+        raise
+    except UnauthorizedError as e:
+        console.print(f"[red]Unauthorized:[/red] {str(e)}")
         raise typer.Exit(1)
-    console.print(f"[green]Wrote {written / (1024 * 1024):.1f} MiB to {output}[/green]")
+    except PaymentRequiredError as e:
+        console.print(f"[red]Payment Required:[/red] {str(e)}")
+        raise typer.Exit(1)
+    except PrimeTracesError as e:
+        console.print(f"[red]Export failed:[/red] {str(e)}")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
+        console.print_exception(show_locals=True)
+        raise typer.Exit(1)
+    console.print(f"[green]Wrote {written / (1024 * 1024):.1f} MiB to {dest}[/green]")
 
 
 @app.command("delete")
@@ -295,6 +359,18 @@ def delete_traces(
             job_id = client.delete_run(run_id)
             suffix = f" (job {job_id})" if job_id else ""
             console.print(f"[green]Deletion of {target} accepted{suffix}[/green]")
+    except typer.Exit:
+        raise
+    except UnauthorizedError as e:
+        console.print(f"[red]Unauthorized:[/red] {str(e)}")
+        raise typer.Exit(1)
+    except PaymentRequiredError as e:
+        console.print(f"[red]Payment Required:[/red] {str(e)}")
+        raise typer.Exit(1)
     except APIError as e:
-        console.print(f"[red]{e}[/red]")
+        console.print(f"[red]Error:[/red] {str(e)}")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
+        console.print_exception(show_locals=True)
         raise typer.Exit(1)

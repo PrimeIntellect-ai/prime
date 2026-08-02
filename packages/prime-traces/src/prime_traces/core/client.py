@@ -108,9 +108,13 @@ class TracesAPIClient:
         transport: Optional[httpx.BaseTransport] = None,
     ):
         self.config = Config()
-        self.api_key = api_key or self.config.api_key
+        # For api_key and team_id, None means "resolve from config" and any
+        # explicit value — including "" — is final. Injectors like the prime
+        # CLI pass their own resolved values and rely on an unset field never
+        # silently re-resolving against the SDK's static config, which may
+        # belong to a different context.
+        self.api_key = api_key if api_key is not None else self.config.api_key
         self.base_url = (base_url or self.config.traces_url).rstrip("/")
-        # None means "resolve from config"; pass "" to force no team context.
         self.team_id = team_id if team_id is not None else self.config.team_id
 
         # No default Content-Type here: uploads are multipart (httpx must own
@@ -221,9 +225,7 @@ class TracesAPIClient:
             raise APIError("API response was not a dictionary")
         return result
 
-    def delete_json(
-        self, endpoint: str, params: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
+    def delete_json(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         self._check_auth()
         try:
             response = self.client.delete(self._url(endpoint), params=params)

@@ -32,12 +32,16 @@ class ErrorCode(str, Enum):
     codeless gateway 502/504 responses.
     """
 
-    # Batch rejections (400): nothing stored. Validation is deterministic, so
+    # Upload rejections (400): nothing stored. Validation is deterministic, so
     # resubmitting the same bytes yields the same verdict; corrected content
-    # hashes to a new batch ID.
-    BATCH_TOO_LARGE = "batch_too_large"
+    # hashes to a new upload ID.
+    UPLOAD_TOO_LARGE = "upload_too_large"
     TRACE_TOO_LARGE = "trace_too_large"
     TOO_MANY_TRACES_IN_EPISODE = "too_many_traces_in_episode"
+    # Distinct from `upload_too_large`, which is about bytes: the service also
+    # caps rows per upload, because staging is charged per row and millions of
+    # tiny lines fit every byte cap.
+    TOO_MANY_TRACES_IN_UPLOAD = "too_many_traces_in_upload"
     DUPLICATE_TRACE_ID = "duplicate_trace_id"
     DUPLICATE_EPISODE_ID = "duplicate_episode_id"
     DIGEST_MISMATCH = "digest_mismatch"
@@ -78,7 +82,7 @@ class ErrorCode(str, Enum):
     NOT_IMPLEMENTED = "not_implemented"
 
 
-class BatchReceipt(BaseModel):
+class UploadReceipt(BaseModel):
     """Acknowledgment for one committed upload request.
 
     ``status == "committed"`` means every line in the request is durably
@@ -87,9 +91,9 @@ class BatchReceipt(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    # The batch ID *is* the content digest (64 lowercase hex, no prefix), so
+    # The upload ID *is* the content digest (64 lowercase hex, no prefix), so
     # the service does not restate it in a separate field.
-    batch_id: str
+    upload_id: str
     status: str
 
 
@@ -125,7 +129,7 @@ class TraceSummary(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     trace_id: str
-    batch_id: Optional[str] = None
+    upload_id: Optional[str] = None
     episode_id: Optional[str] = None
     created_at: Optional[datetime] = None
     ingested_at: Optional[datetime] = None

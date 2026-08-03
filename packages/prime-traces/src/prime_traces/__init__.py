@@ -28,7 +28,6 @@ from .exceptions import (
     ValidationRejectedError,
 )
 from .models import (
-    BatchReceipt,
     ErrorCode,
     Execution,
     LineFormat,
@@ -36,6 +35,7 @@ from .models import (
     Score,
     TraceListPage,
     TraceSummary,
+    UploadReceipt,
 )
 from .traces import TracesClient
 
@@ -54,7 +54,7 @@ __all__ = [
     "MAX_BATCH_BYTES",
     "MAX_LINE_BYTES",
     # Models
-    "BatchReceipt",
+    "UploadReceipt",
     "ErrorCode",
     "Execution",
     "LineFormat",

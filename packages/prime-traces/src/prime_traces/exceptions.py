@@ -66,7 +66,7 @@ class ValidationRejectedError(APIError):
     ``code`` carries one of the bounded rejection codes (``models.ErrorCode``).
     Validation is deterministic, so resubmitting the same bytes yields the
     same verdict: correct the file and resubmit (corrected content hashes to
-    a new batch ID).
+    a new upload ID).
     """
 
 

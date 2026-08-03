@@ -5,7 +5,7 @@ from prime_traces import NotFoundError, TracesAPIClient, UnauthorizedError
 
 SUMMARY = {
     "trace_id": "8d3f1a2b",
-    "batch_id": "5ee85e41",
+    "upload_id": "5ee85e41",
     "created_at": "2026-07-20T18:02:11.482Z",
     "ingested_at": "2026-07-20T18:06:02.117Z",
     "run_id": "run_9f3k2m",

@@ -16,7 +16,7 @@ from prime_traces import (
 )
 
 RAW = b'{"id":"a"}\n{"id":"b"}\n'
-COMMITTED = {"batch_id": "x" * 64, "status": "committed"}
+COMMITTED = {"upload_id": "x" * 64, "status": "committed"}
 
 
 def parse_multipart(content: bytes, content_type: str) -> Dict[str, Tuple[Dict[str, str], bytes]]:

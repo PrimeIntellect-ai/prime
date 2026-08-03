@@ -5,12 +5,12 @@ import typer
 from prime_traces import (
     APIError,
     Batch,
-    BatchReceipt,
     LineFormat,
     PaymentRequiredError,
     PrimeTracesError,
     TracesClient,
     UnauthorizedError,
+    UploadReceipt,
 )
 from rich.markup import escape
 from rich.table import Table
@@ -50,7 +50,7 @@ def _traces_client() -> TracesClient:
 
 
 UPLOAD_JSON_HELP = json_output_help(
-    ".receipts[] = {batch_id, status}",
+    ".receipts[] = {upload_id, status}",
     ".num_batches = number",
 )
 
@@ -105,10 +105,10 @@ def upload_traces(
     validate_output_format(output, console)
     line_format = LineFormat.EPISODE if episodes else LineFormat.TRACE
 
-    def on_batch(batch: Batch, receipt: BatchReceipt) -> None:
+    def on_batch(batch: Batch, receipt: UploadReceipt) -> None:
         if output != "json":
             console.print(
-                f"  batch {receipt.batch_id[:12]}… "
+                f"  batch {receipt.upload_id[:12]}… "
                 f"({batch.num_lines} lines, {batch.size / (1024 * 1024):.1f} MiB) "
                 f"[green]{receipt.status}[/green]"
             )

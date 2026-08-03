@@ -9,7 +9,7 @@ The contract this implements (see the Prime Traces design docs):
 - A line larger than the single-line limit is rejected locally rather than
   split: under bare-trace format the line is one trace, under episode format
   one complete episode, and neither may span requests.
-- batch_id = SHA256(exact uncompressed JSONL bytes, including newlines),
+- upload_id = SHA256(exact uncompressed JSONL bytes, including newlines),
   sent as ``Idempotency-Key: sha256:<64 lowercase hex>``. There is no client
   upload ID or checkpoint: a crashed producer re-reads the file, rebuilds the
   same bytes, and regenerates the same keys — so batching must be
@@ -25,13 +25,17 @@ from .exceptions import TraceTooLargeError
 
 MIB = 1024 * 1024
 
-#: Server-side cap on uncompressed bytes per request (-> batch_too_large).
+#: Server-side cap on uncompressed bytes per request (-> upload_too_large).
 MAX_BATCH_BYTES = 256 * MIB
 #: Server-side cap on one JSONL line (-> trace_too_large).
 MAX_LINE_BYTES = 64 * MIB
-#: Default chunk-close threshold; a batch may exceed this only when a single
-#: line does, and never exceeds MAX_BATCH_BYTES.
-DEFAULT_TARGET_BATCH_BYTES = 128 * MIB
+#: Default chunk-close threshold. Held under Cloud Run's 32 MiB request cap so
+#: a batch fits the deployed transport even with compression disabled; the
+#: 256 MiB service contract above is not reachable through that cap today. A
+#: batch may exceed this only when a single line does — such a batch (or any
+#: caller-raised target) still risks transport-level rejection before the
+#: service sees it.
+DEFAULT_TARGET_BATCH_BYTES = 30 * MIB
 
 
 @dataclass(frozen=True)

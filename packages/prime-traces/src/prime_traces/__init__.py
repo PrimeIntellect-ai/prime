@@ -28,7 +28,6 @@ from .exceptions import (
     ValidationRejectedError,
 )
 from .models import (
-    BatchReceipt,
     EpisodeListPage,
     EpisodeSummary,
     ErrorCode,
@@ -38,6 +37,7 @@ from .models import (
     Score,
     TraceListPage,
     TraceSummary,
+    UploadReceipt,
 )
 from .traces import TracesClient
 
@@ -56,7 +56,6 @@ __all__ = [
     "MAX_BATCH_BYTES",
     "MAX_LINE_BYTES",
     # Models
-    "BatchReceipt",
     "EpisodeListPage",
     "EpisodeSummary",
     "ErrorCode",
@@ -66,6 +65,7 @@ __all__ = [
     "Score",
     "TraceListPage",
     "TraceSummary",
+    "UploadReceipt",
     # Exceptions
     "PrimeTracesError",
     "APIError",

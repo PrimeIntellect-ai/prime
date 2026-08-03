@@ -29,12 +29,12 @@ from .batching import (
 from .core.client import TracesAPIClient
 from .exceptions import RetryableAPIError, TransportError
 from .models import (
-    BatchReceipt,
     EpisodeListPage,
     EpisodeSummary,
     LineFormat,
     TraceListPage,
     TraceSummary,
+    UploadReceipt,
 )
 
 DEFAULT_MAX_ATTEMPTS = 5
@@ -71,8 +71,8 @@ class TracesClient:
         compress: bool = True,
         target_batch_bytes: int = DEFAULT_TARGET_BATCH_BYTES,
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
-        on_batch: Optional[Callable[[Batch, BatchReceipt], None]] = None,
-    ) -> List[BatchReceipt]:
+        on_batch: Optional[Callable[[Batch, UploadReceipt], None]] = None,
+    ) -> List[UploadReceipt]:
         """Upload a completed JSONL file of traces (or episodes).
 
         Batches are content-addressed, so rerunning after a crash is safe:
@@ -112,10 +112,10 @@ class TracesClient:
         compress: bool = True,
         target_batch_bytes: int = DEFAULT_TARGET_BATCH_BYTES,
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
-        on_batch: Optional[Callable[[Batch, BatchReceipt], None]] = None,
-    ) -> List[BatchReceipt]:
+        on_batch: Optional[Callable[[Batch, UploadReceipt], None]] = None,
+    ) -> List[UploadReceipt]:
         """Upload an iterable of raw JSONL lines. See ``upload_file``."""
-        receipts: List[BatchReceipt] = []
+        receipts: List[UploadReceipt] = []
         for batch in iter_batches(lines, target_bytes=target_batch_bytes):
             result = self._send_with_retry(
                 batch,
@@ -125,7 +125,7 @@ class TracesClient:
                 compress=compress,
                 max_attempts=max_attempts,
             )
-            receipt = BatchReceipt.model_validate(result)
+            receipt = UploadReceipt.model_validate(result)
             receipts.append(receipt)
             if on_batch is not None:
                 on_batch(batch, receipt)

@@ -55,7 +55,7 @@ UPLOAD_JSON_HELP = json_output_help(
 )
 
 LIST_TRACES_JSON_HELP = json_output_help(
-    ".traces[] = trace summary {trace_id, run_id, task_id, score, execution, ...}",
+    ".items[] = trace summary {trace_id, run_id, task_id, score, execution, ...}",
     ".next_cursor? = string",
 )
 
@@ -218,7 +218,7 @@ def list_traces(
     table.add_column("Outcome")
     table.add_column("Created")
 
-    for summary in page.traces:
+    for summary in page.items:
         reward = summary.score.reward if summary.score else None
         table.add_row(
             summary.trace_id[:16],

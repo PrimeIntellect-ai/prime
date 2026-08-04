@@ -22,6 +22,7 @@ def _pythonpath(repo: Path) -> str:
         repo / "packages" / "prime" / "src",
         repo / "packages" / "prime-evals" / "src",
         repo / "packages" / "prime-sandboxes" / "src",
+        repo / "packages" / "prime-traces" / "src",
         repo / "packages" / "prime-tunnel" / "src",
     ]
     existing = os.environ.get("PYTHONPATH")

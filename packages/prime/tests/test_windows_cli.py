@@ -13,6 +13,7 @@ def test_prime_help_does_not_import_tunnel_package() -> None:
             str(project_root / "packages" / "prime-evals" / "src"),
             str(project_root / "packages" / "prime-mcp-server" / "src"),
             str(project_root / "packages" / "prime-sandboxes" / "src"),
+            str(project_root / "packages" / "prime-traces" / "src"),
         ]
     )
     env = {

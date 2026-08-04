@@ -292,9 +292,13 @@ def set_traces_url(
     """Set the Prime Traces service URL (prompts if not provided)"""
     if url is None:
         config = Config()
+        # Default to the *configured* override, not the effective value:
+        # when unset, traces_url falls back to the base URL, and accepting
+        # that as the prompt default would freeze the fallback as an explicit
+        # override that no longer follows base-URL changes.
         url = typer.prompt(
             "Enter the URL of the Prime Traces service ('' follows the base URL)",
-            default=config.traces_url,
+            default=config._configured_traces_url() or "",
         )
 
     config = Config()

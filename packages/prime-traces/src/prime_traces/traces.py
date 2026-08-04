@@ -2,13 +2,13 @@
 
 Wraps the wire client with upload batching/retry and typed read paths.
 
-The read surface (list/get envelopes) is provisional: the service PR defines
-routes but no response models yet, so the page shape here is a proposal to
-align on, not a settled contract.
+The read surface matches the service's pinned response models
+(``prime-traces/src/traces/models.py`` in the platform repo): pages are
+``{items, next_cursor}``, summaries nest ``model``/``score``/``execution``.
 
-Deferred to follow-up PRs once the service pins the corresponding responses:
-exports (streaming ``GET /traces/export`` and the job API, which is 501 in
-v0), episode reads, ``/search``, the ``environment_id`` filter (no populated
+Deferred to follow-up PRs: exports (streaming ``GET /traces/export`` — its
+filter vocabulary is not declared server-side yet — and the unimplemented job
+API), episode reads, ``/search``, the ``environment_id`` filter (no populated
 column behind it yet), and the dot-path query compiler (needs the
 server-side field registry).
 """
@@ -225,7 +225,7 @@ class TracesClient:
         cursor = filters.pop("cursor", None)
         while True:
             page = self.list(cursor=cursor, **filters)
-            yield from page.traces
+            yield from page.items
             if not page.next_cursor:
                 return
             cursor = page.next_cursor

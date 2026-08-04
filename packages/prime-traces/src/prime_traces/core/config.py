@@ -25,14 +25,17 @@ class Config:
 
     def _load_config(self) -> None:
         """Load configuration from file"""
+        config_data: object = {}
         if self.config_file.exists():
             try:
                 config_data = json.loads(self.config_file.read_text())
-                self.config = config_data
             except (json.JSONDecodeError, IOError):
-                self.config = {}
-        else:
-            self.config = {}
+                config_data = {}
+        # Valid JSON that is not an object (a list, a bare string) must degrade
+        # the same way invalid JSON does: every accessor assumes a dict, and
+        # the client constructs a Config even when all its parameters were
+        # passed explicitly — a crash here would take those callers down too.
+        self.config = config_data if isinstance(config_data, dict) else {}
 
     @staticmethod
     def _strip_api_v1(url: str) -> str:

@@ -38,7 +38,7 @@ gateway 502/504 are retried with the same bytes, honoring `Retry-After`.
 
 ```python
 page = client.list(run_id="run_9f3k2m", reward_min=0.9, has_error=False)
-for summary in page.traces:
+for summary in page.items:
     print(summary.trace_id, summary.score)
 
 for summary in client.iter(task_id="tb2-0187"):  # paginates for you
@@ -52,8 +52,9 @@ client.delete("8d3f1a2b...")
 client.delete_run("run_9f3k2m")
 ```
 
-The read surface is provisional: the service defines these routes but has not
-pinned response models yet, so the page shape above is a proposal to align on.
+Response shapes mirror the service's pinned models: pages are
+`{items, next_cursor}` and a summary nests `model` / `score` / `execution`,
+with unrecorded fields as `null`.
 
 ## Configuration
 

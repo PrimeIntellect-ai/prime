@@ -76,15 +76,21 @@ client.export("high_reward.jsonl", run_id="run_9f3k2m", reward_min=0.9)
 Episodes are read-only resources:
 
 ```python
-episodes = client.list_episodes(run_id="run_9f3k2m")
-client.get_episode(episode_id)
-client.list_episode_traces(episode_id)
+for episode in client.list_episodes(run_id="run_9f3k2m").items:
+    print(episode.episode_id, episode.outcome)
+
+detail = client.get_episode(episode_id)   # + member aggregate under .traces
+print(detail.error.type, detail.traces.trace_count)
+
+client.list_episode_traces(episode_id)    # member trace summaries, paginated
 ```
 
-Trace response shapes mirror the service's pinned models: pages are
-`{items, next_cursor}` and a summary nests `model` / `score` / `execution`,
-with unrecorded fields as `null`. Episode read shapes and export parameters
-are provisional pending the same reconciliation.
+Response shapes mirror the service's pinned models: pages are
+`{items, next_cursor}`, a trace summary nests `model` / `score` / `execution`,
+an episode nests `error` and (on point lookup) the member-trace aggregate
+under `traces`, and unrecorded fields come back as `null`. The one still
+provisional shape is `export()`'s filter parameters — the service route does
+not declare them yet.
 
 ## Configuration
 
@@ -98,7 +104,7 @@ are provisional pending the same reconciliation.
 ## Not implemented yet (open v0 contract decisions)
 
 - The exports _job_ API (`POST /traces/exports`, `GET /traces/exports/{job_id}`)
-  — published as 501 by the service in v0 until export results have somewhere
+  — unimplemented in the service in v0 until export results have somewhere
   to land. The streaming `GET /traces/export` is what `export()` wraps.
 - `/search` and free-text queries — deferred with the `trace_components`
   projection.

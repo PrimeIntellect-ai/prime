@@ -28,8 +28,11 @@ from .exceptions import (
     ValidationRejectedError,
 )
 from .models import (
+    EpisodeDetail,
+    EpisodeError,
     EpisodeListPage,
     EpisodeSummary,
+    EpisodeTraceAggregate,
     ErrorCode,
     Execution,
     LineFormat,
@@ -56,8 +59,11 @@ __all__ = [
     "MAX_BATCH_BYTES",
     "MAX_LINE_BYTES",
     # Models
+    "EpisodeDetail",
+    "EpisodeError",
     "EpisodeListPage",
     "EpisodeSummary",
+    "EpisodeTraceAggregate",
     "ErrorCode",
     "Execution",
     "LineFormat",

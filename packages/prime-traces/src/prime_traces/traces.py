@@ -2,10 +2,11 @@
 
 Wraps the wire client with upload batching/retry and typed read paths.
 
-The trace read surface matches the service's pinned response models
-(``prime-traces/src/traces/models.py`` in the platform repo): pages are
-``{items, next_cursor}``, summaries nest ``model``/``score``/``execution``.
-Episode read shapes are provisional pending the same reconciliation.
+The read surface matches the service's pinned response models
+(``prime-traces/src/traces/models.py`` and ``src/episodes/models.py`` in the
+platform repo): pages are ``{items, next_cursor}``, trace summaries nest
+``model``/``score``/``execution``, episodes nest ``error`` and the member
+aggregate.
 
 Deliberately not implemented (open v0 contract decisions — do not freeze
 them here): the exports *job* API (the streaming ``GET /traces/export`` is
@@ -30,8 +31,8 @@ from .batching import (
 from .core.client import TracesAPIClient
 from .exceptions import RetryableAPIError, TransportError
 from .models import (
+    EpisodeDetail,
     EpisodeListPage,
-    EpisodeSummary,
     LineFormat,
     TraceListPage,
     TraceSummary,
@@ -318,8 +319,9 @@ class TracesClient:
         buffering.
 
         A format parameter (raw JSONL vs. column projection) is not exposed
-        yet — the service route does not define it; add it here when it lands.
-        The exports *job* API is 501 in v0 and is deliberately not wrapped.
+        yet — the service route does not declare its parameters, so this
+        filter vocabulary is the one shape here that is still a proposal. The
+        exports *job* API is unimplemented in v0 and deliberately not wrapped.
         """
         params = _build_params(
             (
@@ -345,25 +347,37 @@ class TracesClient:
         self,
         *,
         run_id: Optional[str] = None,
+        environment_id: Optional[str] = None,
+        outcome: Optional[str] = None,
+        has_error: Optional[bool] = None,
         created_after: Optional[str] = None,
         created_before: Optional[str] = None,
         limit: Optional[int] = None,
         cursor: Optional[str] = None,
     ) -> EpisodeListPage:
-        params: Dict[str, object] = {}
-        for key, value in (
-            ("run_id", run_id),
-            ("created_after", created_after),
-            ("created_before", created_before),
-            ("limit", limit),
-            ("cursor", cursor),
-        ):
-            if value is not None:
-                params[key] = value
+        """The full episode filter set; episodes carry no ``context`` map."""
+        params = _build_params(
+            (
+                ("run_id", run_id),
+                ("environment_id", environment_id),
+                ("outcome", outcome),
+                ("has_error", has_error),
+                ("created_after", created_after),
+                ("created_before", created_before),
+                ("limit", limit),
+                ("cursor", cursor),
+            )
+        )
         return EpisodeListPage.model_validate(self.client.get_json("/episodes", params=params))
 
-    def get_episode(self, episode_id: str) -> EpisodeSummary:
-        return EpisodeSummary.model_validate(self.client.get_json(f"/episodes/{episode_id}"))
+    def get_episode(self, episode_id: str) -> EpisodeDetail:
+        """Episode-owned fields plus the read-time member-trace aggregate.
+
+        The response carries the episode row's own ``has_error``/``error``
+        alongside ``traces.any_trace_error``, so an environment-hook failure
+        stays visible even when every individual trace succeeded.
+        """
+        return EpisodeDetail.model_validate(self.client.get_json(f"/episodes/{episode_id}"))
 
     def list_episode_traces(
         self,

@@ -240,19 +240,72 @@ class TestExport:
 
 
 class TestEpisodes:
-    def test_episode_reads(self, make_client):
-        episode = {"episode_id": "ep-1", "run_id": "run_9f3k2m", "has_error": False}
+    # Mirrors the service's `EpisodeSummary` (prime-traces/src/episodes/
+    # models.py in the platform repo): episode-owned fields, nested `error`.
+    EPISODE = {
+        "episode_id": "ep-1",
+        "upload_id": "5ee85e41",
+        "schema_version": 1,
+        "created_at": "2026-07-20T18:02:11.482Z",
+        "ingested_at": "2026-07-20T18:06:02.117Z",
+        "run_id": "run_9f3k2m",
+        "environment_id": "terminal-bench-2",
+        "outcome": "done",
+        "has_error": False,
+        "error": {"type": None, "message": None},
+    }
+
+    def test_list_episodes_filters_and_envelope(self, make_client):
+        captured = {}
 
         def handler(request: httpx.Request) -> httpx.Response:
-            if request.url.path == "/api/v1/episodes":
-                return httpx.Response(200, json={"episodes": [episode], "next_cursor": None})
-            if request.url.path == "/api/v1/episodes/ep-1":
-                return httpx.Response(200, json=episode)
-            if request.url.path == "/api/v1/episodes/ep-1/traces":
-                return httpx.Response(200, json={"items": [SUMMARY], "next_cursor": None})
-            raise AssertionError(f"unexpected path {request.url.path}")
+            captured["params"] = dict(request.url.params)
+            return httpx.Response(200, json={"items": [self.EPISODE], "next_cursor": None})
 
-        client = make_client(handler)
-        assert client.list_episodes(run_id="run_9f3k2m").episodes[0].episode_id == "ep-1"
-        assert client.get_episode("ep-1").episode_id == "ep-1"
-        assert client.list_episode_traces("ep-1").items[0].trace_id == "8d3f1a2b"
+        page = make_client(handler).list_episodes(
+            run_id="run_9f3k2m", outcome="done", has_error=False
+        )
+        assert captured["params"] == {
+            "run_id": "run_9f3k2m",
+            "outcome": "done",
+            "has_error": "false",
+        }
+        [episode] = page.items
+        assert episode.episode_id == "ep-1"
+        assert episode.environment_id == "terminal-bench-2"
+        assert episode.error.type is None
+
+    def test_get_episode_nests_member_aggregate(self, make_client):
+        # The episode row's own error stays visible alongside the aggregate:
+        # an environment-hook failure with every member trace green.
+        detail = {
+            **self.EPISODE,
+            "has_error": True,
+            "error": {"type": "SetupError", "message": "setup hook failed"},
+            "traces": {
+                "trace_count": 2,
+                "total_tokens": 168426,
+                "total_duration_ms": 431074,
+                "any_trace_error": False,
+                "agent_names": ["judge", "solver"],
+            },
+        }
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/api/v1/episodes/ep-1"
+            return httpx.Response(200, json=detail)
+
+        episode = make_client(handler).get_episode("ep-1")
+        assert episode.has_error is True
+        assert episode.error.type == "SetupError"
+        assert episode.traces.trace_count == 2
+        assert episode.traces.any_trace_error is False
+        assert episode.traces.agent_names == ["judge", "solver"]
+
+    def test_list_episode_traces_pages_member_summaries(self, make_client):
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/api/v1/episodes/ep-1/traces"
+            return httpx.Response(200, json={"items": [SUMMARY], "next_cursor": None})
+
+        page = make_client(handler).list_episode_traces("ep-1")
+        assert page.items[0].trace_id == "8d3f1a2b"

@@ -5,8 +5,10 @@ documented to grow additively as more columns are extracted server-side, and an
 older SDK must not break when that happens.
 
 Shapes mirror the service's response models (``prime-traces/src/traces/models.py``
-in the platform repo): pages are ``{items, next_cursor}`` and a summary nests
-``model`` / ``score`` / ``execution``, with unrecorded fields as ``null``.
+and ``src/episodes/models.py`` in the platform repo): pages are
+``{items, next_cursor}``, a trace summary nests ``model``/``score``/``execution``,
+an episode nests ``error`` and (on point lookup) the ``traces`` aggregate, and
+unrecorded fields come back as ``null``.
 """
 
 from datetime import datetime
@@ -152,29 +154,56 @@ class TraceSummary(BaseModel):
     context: Dict[str, str] = Field(default_factory=dict)
 
 
-class EpisodeSummary(BaseModel):
-    """One episode's summary plus episode-owned fields.
+class EpisodeError(BaseModel):
+    model_config = ConfigDict(extra="allow")
 
-    Aggregates (total tokens, participating agents, any-trace-error) are
-    computed from member traces at read time by the service.
+    type: Optional[str] = None
+    message: Optional[str] = None
+
+
+class EpisodeSummary(BaseModel):
+    """One episode's extracted columns and episode-owned fields.
+
+    ``has_error`` and ``error`` are the episode row's own — an
+    environment-hook failure with every member trace green lives here, not in
+    the member-trace aggregate.
     """
 
     model_config = ConfigDict(extra="allow")
 
     episode_id: str
     upload_id: Optional[str] = None
+    schema_version: Optional[int] = None
     created_at: Optional[datetime] = None
     ingested_at: Optional[datetime] = None
-    environment_id: Optional[str] = None
     run_id: Optional[str] = None
+    environment_id: Optional[str] = None
     outcome: Optional[str] = None
     has_error: Optional[bool] = None
-    error_type: Optional[str] = None
-    error_message: Optional[str] = None
+    error: Optional[EpisodeError] = None
+
+
+class EpisodeTraceAggregate(BaseModel):
+    """Read-time rollup over deduplicated member traces.
+
+    A zero-trace episode is a legitimate terminal state (a failure before any
+    trace was minted still leaves its errors on the episode), so an empty
+    aggregate is not an error.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    trace_count: Optional[int] = None
     total_tokens: Optional[int] = None
-    total_agent_time: Optional[int] = None
+    total_duration_ms: Optional[int] = None
     any_trace_error: Optional[bool] = None
-    participating_agents: Optional[List[str]] = None
+    agent_names: Optional[List[str]] = None
+
+
+class EpisodeDetail(EpisodeSummary):
+    """Point-lookup response: the summary plus the member-trace aggregate."""
+
+    traces: Optional[EpisodeTraceAggregate] = None
 
 
 class TraceListPage(BaseModel):
@@ -190,5 +219,5 @@ class TraceListPage(BaseModel):
 class EpisodeListPage(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    episodes: List[EpisodeSummary] = Field(default_factory=list)
+    items: List[EpisodeSummary] = Field(default_factory=list)
     next_cursor: Optional[str] = None

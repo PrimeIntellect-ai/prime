@@ -1,5 +1,6 @@
 """Tests for container/VM command transport selection."""
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Any, cast
 
@@ -8,7 +9,7 @@ from connectrpc.code import Code
 from connectrpc.errors import ConnectError
 
 from prime_sandboxes._proto.command_session import command_session_pb2
-from prime_sandboxes.core.client import APIClient
+from prime_sandboxes.core.client import APIClient, APIError
 from prime_sandboxes.models import CommandResponse
 from prime_sandboxes.sandbox import AsyncSandboxClient, SandboxAuthCache, SandboxClient
 
@@ -141,6 +142,108 @@ async def test_async_execute_command_uses_rest_for_cpu():
 
         assert called["rest"]
         assert result.exit_code == 0
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_async_open_process_streams_vm_command_session(monkeypatch):
+    calls = []
+    start_kwargs = {}
+    input_written = asyncio.Event()
+    terminated = asyncio.Event()
+
+    class _FakeConnectClient:
+        def __init__(self, address: str):
+            self.address = address
+
+        def execute_server_stream(self, **kwargs):
+            start_kwargs.update(kwargs)
+            calls.append((kwargs["method"].name, kwargs["request"]))
+            start_response = getattr(command_session_pb2, "StartResponse")
+            command_session_event = getattr(command_session_pb2, "CommandSessionEvent")
+
+            async def events():
+                yield start_response(
+                    event=command_session_event(start=command_session_event.StartEvent(pid=42))
+                )
+                yield start_response(
+                    event=command_session_event(
+                        data=command_session_event.DataEvent(stdout=b"hello\n")
+                    )
+                )
+                yield start_response(
+                    event=command_session_event(
+                        data=command_session_event.DataEvent(stderr=b"warn\n")
+                    )
+                )
+                await input_written.wait()
+                await terminated.wait()
+                yield start_response(
+                    event=command_session_event(
+                        end=command_session_event.EndEvent(
+                            exit_code=7,
+                            exited=True,
+                            status="exit",
+                        )
+                    )
+                )
+
+            return events()
+
+        async def execute_unary(self, **kwargs):
+            calls.append((kwargs["method"].name, kwargs["request"]))
+            if kwargs["method"].name == "SendInput":
+                input_written.set()
+            elif kwargs["method"].name == "SendSignal":
+                terminated.set()
+            response_type = getattr(command_session_pb2, f"{kwargs['method'].name}Response")
+            return response_type()
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr("prime_sandboxes.sandbox.ConnectClient", _FakeConnectClient)
+
+    client = AsyncSandboxClient(api_key="test-key")
+    cast(Any, client)._auth_cache = _AsyncFakeCache(is_vm=True)
+    try:
+        process = await client.open_process(
+            "sbx-vm",
+            "cat",
+            working_dir="/workspace",
+            env={"KEY": "value"},
+        )
+        await process.write_stdin(b"input\n")
+        await process.terminate()
+        stdout = [chunk async for chunk in process.stdout]
+        stderr = [chunk async for chunk in process.stderr]
+
+        assert process.pid == 42
+        assert await process.wait() == 7
+        assert process.returncode == 7
+        assert stdout == [b"hello\n"]
+        assert stderr == [b"warn\n"]
+        assert [name for name, _ in calls] == ["Start", "SendInput", "SendSignal"]
+        assert calls[0][1].stdin is True
+        assert start_kwargs["timeout_ms"] == 24 * 60 * 60 * 1000
+        assert calls[0][1].command.cwd == "/workspace"
+        assert calls[0][1].command.envs == {"KEY": "value"}
+        assert calls[1][1].session.pid == 42
+        assert calls[1][1].input.stdin == b"input\n"
+        assert calls[2][1].session.pid == 42
+        assert calls[2][1].signal == command_session_pb2.SIGNAL_SIGTERM
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_async_open_process_rejects_container_sandbox():
+    client = AsyncSandboxClient(api_key="test-key")
+    cast(Any, client)._auth_cache = _AsyncFakeCache(is_vm=False)
+    try:
+        with pytest.raises(APIError, match="only supported for VM sandboxes"):
+            await client.open_process("sbx-container", "cat")
     finally:
         await client.aclose()
 

@@ -3,18 +3,25 @@ import pytest
 
 from prime_traces import NotFoundError, TracesAPIClient, UnauthorizedError
 
+# The pinned summary shape — mirrors the service's `TraceSummary`
+# (prime-traces/src/traces/models.py in the platform repo), including the
+# null-for-unrecorded convention.
 SUMMARY = {
     "trace_id": "8d3f1a2b",
     "upload_id": "5ee85e41",
+    "episode_id": None,
     "created_at": "2026-07-20T18:02:11.482Z",
     "ingested_at": "2026-07-20T18:06:02.117Z",
     "run_id": "run_9f3k2m",
     "environment_id": "terminal-bench-2",
     "model": {"provider": "prime", "id": "deepseek-v4-flash"},
     "task_id": "tb2-0187",
+    "agent_name": "solver",
     "score": {"reward": 0.85, "outcome": "done"},
     "execution": {"has_error": False, "is_truncated": False},
     "duration_ms": 215537,
+    "total_tokens": 84213,
+    "size_bytes": 417284,
     "context": {"source": "hosted_eval"},
 }
 
@@ -25,7 +32,7 @@ class TestList:
 
         def handler(request: httpx.Request) -> httpx.Response:
             captured["params"] = dict(request.url.params)
-            return httpx.Response(200, json={"traces": [SUMMARY], "next_cursor": None})
+            return httpx.Response(200, json={"items": [SUMMARY], "next_cursor": None})
 
         client = make_client(handler)
         page = client.list(
@@ -43,24 +50,27 @@ class TestList:
             "context.source": "hosted_eval",
             "limit": "50",
         }
-        [summary] = page.traces
+        [summary] = page.items
         assert summary.trace_id == "8d3f1a2b"
         assert summary.score.reward == 0.85
         assert summary.model.id == "deepseek-v4-flash"
+        assert summary.agent_name == "solver"
+        assert summary.total_tokens == 84213
+        assert summary.episode_id is None
 
     def test_unscored_reward_stays_none_not_zero(self, make_client):
         unscored = {**SUMMARY, "score": {"reward": None, "outcome": None}}
 
         def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(200, json={"traces": [unscored], "next_cursor": None})
+            return httpx.Response(200, json={"items": [unscored], "next_cursor": None})
 
-        [summary] = make_client(handler).list().traces
+        [summary] = make_client(handler).list().items
         assert summary.score.reward is None
 
     def test_iter_follows_cursor(self, make_client):
         pages = {
-            None: {"traces": [{**SUMMARY, "trace_id": "t1"}], "next_cursor": "c1"},
-            "c1": {"traces": [{**SUMMARY, "trace_id": "t2"}], "next_cursor": None},
+            None: {"items": [{**SUMMARY, "trace_id": "t1"}], "next_cursor": "c1"},
+            "c1": {"items": [{**SUMMARY, "trace_id": "t2"}], "next_cursor": None},
         }
 
         def handler(request: httpx.Request) -> httpx.Response:
@@ -71,12 +81,14 @@ class TestList:
         assert ids == ["t1", "t2"]
 
     def test_tolerates_additive_summary_fields(self, make_client):
-        grown = {**SUMMARY, "total_tokens": 123, "num_turns": 4}
+        # Fields the SDK has no typed slot for yet — the documented additive
+        # growth path — must not break parsing.
+        grown = {**SUMMARY, "num_turns": 4, "usage": {"prompt": 61000, "completion": 23213}}
 
         def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(200, json={"traces": [grown], "next_cursor": None})
+            return httpx.Response(200, json={"items": [grown], "next_cursor": None})
 
-        [summary] = make_client(handler).list().traces
+        [summary] = make_client(handler).list().items
         assert summary.trace_id == "8d3f1a2b"
 
 
@@ -237,10 +249,10 @@ class TestEpisodes:
             if request.url.path == "/api/v1/episodes/ep-1":
                 return httpx.Response(200, json=episode)
             if request.url.path == "/api/v1/episodes/ep-1/traces":
-                return httpx.Response(200, json={"traces": [SUMMARY], "next_cursor": None})
+                return httpx.Response(200, json={"items": [SUMMARY], "next_cursor": None})
             raise AssertionError(f"unexpected path {request.url.path}")
 
         client = make_client(handler)
         assert client.list_episodes(run_id="run_9f3k2m").episodes[0].episode_id == "ep-1"
         assert client.get_episode("ep-1").episode_id == "ep-1"
-        assert client.list_episode_traces("ep-1").traces[0].trace_id == "8d3f1a2b"
+        assert client.list_episode_traces("ep-1").items[0].trace_id == "8d3f1a2b"

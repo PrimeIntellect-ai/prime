@@ -2,16 +2,17 @@
 
 Wraps the wire client with upload batching/retry and typed read paths.
 
-The read surface (list/get/episode envelopes, export params) is provisional:
-the service defines these routes but has not pinned response models yet, so
-the shapes here are a proposal to align on, not a settled contract.
+The trace read surface matches the service's pinned response models
+(``prime-traces/src/traces/models.py`` in the platform repo): pages are
+``{items, next_cursor}``, summaries nest ``model``/``score``/``execution``.
+Episode read shapes are provisional pending the same reconciliation.
 
-Deliberately not implemented yet (open v0 contract decisions — do not freeze
-them here): the exports *job* API (``POST /traces/exports`` is published as
-501 in v0; the streaming ``GET /traces/export`` is what ``export`` wraps),
-``/search``, the ``environment_id`` filter (no populated column behind it
-yet), episode writes (episodes are read-only, written only as a side effect
-of episode-grouped uploads), and the dot-path query compiler (needs the
+Deliberately not implemented (open v0 contract decisions — do not freeze
+them here): the exports *job* API (the streaming ``GET /traces/export`` is
+what ``export`` wraps; its filter vocabulary is not declared server-side
+yet), ``/search``, the ``environment_id`` filter (no populated column behind
+it yet), episode writes (episodes are read-only, written only as a side
+effect of episode-grouped uploads), and the dot-path query compiler (needs the
 server-side field registry).
 """
 
@@ -229,7 +230,7 @@ class TracesClient:
         cursor = filters.pop("cursor", None)
         while True:
             page = self.list(cursor=cursor, **filters)
-            yield from page.traces
+            yield from page.items
             if not page.next_cursor:
                 return
             cursor = page.next_cursor

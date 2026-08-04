@@ -4,8 +4,9 @@ Response models allow extra fields (``extra="allow"``): the summary response is
 documented to grow additively as more columns are extracted server-side, and an
 older SDK must not break when that happens.
 
-The list-page envelope (``traces`` / ``next_cursor`` keys) is provisional until
-the service lands; it is asserted in one place so realignment is one edit.
+Shapes mirror the service's response models (``prime-traces/src/traces/models.py``
+in the platform repo): pages are ``{items, next_cursor}`` and a summary nests
+``model`` / ``score`` / ``execution``, with unrecorded fields as ``null``.
 """
 
 from datetime import datetime
@@ -38,6 +39,10 @@ class ErrorCode(str, Enum):
     UPLOAD_TOO_LARGE = "upload_too_large"
     TRACE_TOO_LARGE = "trace_too_large"
     TOO_MANY_TRACES_IN_EPISODE = "too_many_traces_in_episode"
+    # Every nested trace carries a copy of its episode's ID, so the service
+    # caps the ID's length rather than letting one legal line replay it
+    # hundreds of times against the row-staging budget.
+    EPISODE_ID_TOO_LONG = "episode_id_too_long"
     # Distinct from `upload_too_large`, which is about bytes: the service also
     # caps rows per upload, because staging is charged per row and millions of
     # tiny lines fit every byte cap.
@@ -121,8 +126,10 @@ class Execution(BaseModel):
 class TraceSummary(BaseModel):
     """The extracted column set for one trace — deliberately nothing more.
 
-    Token usage, node/call counts, and per-phase timing are absent because the
-    v0 extractor does not write them; fetch the raw document for those.
+    Node/call counts, per-phase timing, and the token input/output split are
+    absent because the v0 extractor does not write them; fetch the raw
+    document for those. ``total_tokens`` is the one extracted usage figure
+    (it counts re-sent context once, so it is not the sum of per-call usage).
     """
 
     model_config = ConfigDict(extra="allow")
@@ -136,9 +143,11 @@ class TraceSummary(BaseModel):
     environment_id: Optional[str] = None
     model: Optional[ModelInfo] = None
     task_id: Optional[str] = None
+    agent_name: Optional[str] = None
     score: Optional[Score] = None
     execution: Optional[Execution] = None
     duration_ms: Optional[int] = None
+    total_tokens: Optional[int] = None
     size_bytes: Optional[int] = None
     context: Dict[str, str] = Field(default_factory=dict)
 
@@ -174,7 +183,7 @@ class TraceListPage(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    traces: List[TraceSummary] = Field(default_factory=list)
+    items: List[TraceSummary] = Field(default_factory=list)
     next_cursor: Optional[str] = None
 
 

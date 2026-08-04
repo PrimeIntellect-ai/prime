@@ -56,7 +56,7 @@ gateway 502/504 are retried with the same bytes, honoring `Retry-After`.
 
 ```python
 page = client.list(run_id="run_9f3k2m", reward_min=0.9, has_error=False)
-for summary in page.traces:
+for summary in page.items:
     print(summary.trace_id, summary.score)
 
 for summary in client.iter(task_id="tb2-0187"):  # paginates for you
@@ -81,9 +81,10 @@ client.get_episode(episode_id)
 client.list_episode_traces(episode_id)
 ```
 
-The read surface is provisional: the service defines these routes but has not
-pinned response models yet, so the page envelopes, summary field nesting, and
-export parameters above are a proposal to align on, not a settled contract.
+Trace response shapes mirror the service's pinned models: pages are
+`{items, next_cursor}` and a summary nests `model` / `score` / `execution`,
+with unrecorded fields as `null`. Episode read shapes and export parameters
+are provisional pending the same reconciliation.
 
 ## Configuration
 

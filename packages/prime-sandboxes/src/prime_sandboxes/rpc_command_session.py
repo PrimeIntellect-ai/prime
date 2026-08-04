@@ -1,6 +1,6 @@
 """Command session Connect RPC helpers."""
 
-from typing import Dict, List, Optional, Protocol, cast
+from typing import Dict, List, Literal, Optional, Protocol, cast
 
 from connectrpc.method import IdempotencyLevel, MethodInfo
 from google.protobuf.message import Message
@@ -20,6 +20,22 @@ class _CommandSessionStartRequestFactory(Protocol):
     def __call__(self, *, command: _CommandSpecLike, stdin: bool) -> Message: ...
 
 
+class _CommandSessionSelectorFactory(Protocol):
+    def __call__(self, *, pid: int) -> Message: ...
+
+
+class _CommandInputFactory(Protocol):
+    def __call__(self, *, stdin: bytes) -> Message: ...
+
+
+class _CommandSessionSendInputRequestFactory(Protocol):
+    def __call__(self, *, session: Message, input: Message) -> Message: ...
+
+
+class _CommandSessionSendSignalRequestFactory(Protocol):
+    def __call__(self, *, session: Message, signal: int) -> Message: ...
+
+
 class _CommandSessionDataEventLike(Protocol):
     stdout: bytes
     stderr: bytes
@@ -33,10 +49,15 @@ class _CommandSessionEndEventLike(Protocol):
 
 
 class _CommandSessionEventLike(Protocol):
+    start: "_CommandSessionStartEventLike"
     data: _CommandSessionDataEventLike
     end: _CommandSessionEndEventLike
 
     def WhichOneof(self, field_name: str) -> str | None: ...
+
+
+class _CommandSessionStartEventLike(Protocol):
+    pid: int
 
 
 class _CommandSessionStartResponseLike(Protocol):
@@ -51,10 +72,33 @@ _COMMAND_SESSION_START_REQUEST_TYPE = cast(
 _COMMAND_SESSION_START_RESPONSE_TYPE = cast(
     type[Message], getattr(command_session_pb2, "StartResponse")
 )
+_COMMAND_SESSION_SEND_INPUT_REQUEST_TYPE = cast(
+    type[Message], getattr(command_session_pb2, "SendInputRequest")
+)
+_COMMAND_SESSION_SEND_INPUT_RESPONSE_TYPE = cast(
+    type[Message], getattr(command_session_pb2, "SendInputResponse")
+)
+_COMMAND_SESSION_SEND_SIGNAL_REQUEST_TYPE = cast(
+    type[Message], getattr(command_session_pb2, "SendSignalRequest")
+)
+_COMMAND_SESSION_SEND_SIGNAL_RESPONSE_TYPE = cast(
+    type[Message], getattr(command_session_pb2, "SendSignalResponse")
+)
 _COMMAND_SESSION_START_REQUEST_FACTORY = cast(
     _CommandSessionStartRequestFactory, _COMMAND_SESSION_START_REQUEST_TYPE
 )
 _COMMAND_SPEC_FACTORY = cast(_CommandSpecFactory, getattr(command_session_pb2, "CommandSpec"))
+_COMMAND_SESSION_SELECTOR_FACTORY = cast(
+    _CommandSessionSelectorFactory,
+    getattr(command_session_pb2, "CommandSessionSelector"),
+)
+_COMMAND_INPUT_FACTORY = cast(_CommandInputFactory, getattr(command_session_pb2, "CommandInput"))
+_COMMAND_SESSION_SEND_INPUT_REQUEST_FACTORY = cast(
+    _CommandSessionSendInputRequestFactory, _COMMAND_SESSION_SEND_INPUT_REQUEST_TYPE
+)
+_COMMAND_SESSION_SEND_SIGNAL_REQUEST_FACTORY = cast(
+    _CommandSessionSendSignalRequestFactory, _COMMAND_SESSION_SEND_SIGNAL_REQUEST_TYPE
+)
 
 
 COMMAND_SESSION_START_RPC_METHOD = MethodInfo(
@@ -65,11 +109,29 @@ COMMAND_SESSION_START_RPC_METHOD = MethodInfo(
     idempotency_level=IdempotencyLevel.UNKNOWN,
 )
 
+COMMAND_SESSION_SEND_INPUT_RPC_METHOD = MethodInfo(
+    name="SendInput",
+    service_name="command_session.CommandSession",
+    input=_COMMAND_SESSION_SEND_INPUT_REQUEST_TYPE,
+    output=_COMMAND_SESSION_SEND_INPUT_RESPONSE_TYPE,
+    idempotency_level=IdempotencyLevel.UNKNOWN,
+)
+
+COMMAND_SESSION_SEND_SIGNAL_RPC_METHOD = MethodInfo(
+    name="SendSignal",
+    service_name="command_session.CommandSession",
+    input=_COMMAND_SESSION_SEND_SIGNAL_REQUEST_TYPE,
+    output=_COMMAND_SESSION_SEND_SIGNAL_RESPONSE_TYPE,
+    idempotency_level=IdempotencyLevel.UNKNOWN,
+)
+
 
 def build_command_session_start_request(
     command: str,
     working_dir: Optional[str],
     env: Optional[Dict[str, str]],
+    *,
+    stdin: bool = False,
 ) -> Message:
     command_spec = _COMMAND_SPEC_FACTORY(
         cmd="/bin/bash",
@@ -79,7 +141,56 @@ def build_command_session_start_request(
     if working_dir is not None:
         command_spec.cwd = working_dir
 
-    return _COMMAND_SESSION_START_REQUEST_FACTORY(command=command_spec, stdin=False)
+    return _COMMAND_SESSION_START_REQUEST_FACTORY(command=command_spec, stdin=stdin)
+
+
+def build_command_session_send_input_request(pid: int, data: bytes) -> Message:
+    return _COMMAND_SESSION_SEND_INPUT_REQUEST_FACTORY(
+        session=_COMMAND_SESSION_SELECTOR_FACTORY(pid=pid),
+        input=_COMMAND_INPUT_FACTORY(stdin=data),
+    )
+
+
+def build_command_session_send_signal_request(
+    pid: int, signal: Literal["terminate", "kill"]
+) -> Message:
+    signal_value = getattr(
+        command_session_pb2,
+        "SIGNAL_SIGTERM" if signal == "terminate" else "SIGNAL_SIGKILL",
+    )
+    return _COMMAND_SESSION_SEND_SIGNAL_REQUEST_FACTORY(
+        session=_COMMAND_SESSION_SELECTOR_FACTORY(pid=pid),
+        signal=signal_value,
+    )
+
+
+def parse_command_session_start_event(
+    response: Message,
+) -> (
+    tuple[Literal["start"], int]
+    | tuple[Literal["stdout", "stderr"], bytes]
+    | tuple[Literal["end"], int]
+    | None
+):
+    start_response = cast(_CommandSessionStartResponseLike, response)
+    if not start_response.HasField("event"):
+        return None
+
+    event = start_response.event
+    event_kind = event.WhichOneof("event")
+    if event_kind == "start":
+        return "start", int(event.start.pid)
+    if event_kind == "data":
+        data_kind = event.data.WhichOneof("output")
+        if data_kind == "stdout":
+            return "stdout", bytes(event.data.stdout)
+        if data_kind == "stderr":
+            return "stderr", bytes(event.data.stderr)
+        if data_kind == "pty":
+            return "stdout", bytes(event.data.pty)
+    if event_kind == "end":
+        return "end", int(event.end.exit_code)
+    return None
 
 
 def collect_command_session_start_event(
@@ -87,22 +198,15 @@ def collect_command_session_start_event(
     stdout_parts: List[str],
     stderr_parts: List[str],
 ) -> Optional[int]:
-    start_response = cast(_CommandSessionStartResponseLike, response)
-    if not start_response.HasField("event"):
+    event = parse_command_session_start_event(response)
+    if event is None:
         return None
-
-    event = start_response.event
-    event_kind = event.WhichOneof("event")
-
-    if event_kind == "data":
-        data_kind = event.data.WhichOneof("output")
-        if data_kind == "stdout" and event.data.stdout:
-            stdout_parts.append(event.data.stdout.decode("utf-8", errors="replace"))
-        elif data_kind == "stderr" and event.data.stderr:
-            stderr_parts.append(event.data.stderr.decode("utf-8", errors="replace"))
-        elif data_kind == "pty" and event.data.pty:
-            stdout_parts.append(event.data.pty.decode("utf-8", errors="replace"))
-    elif event_kind == "end":
-        return int(event.end.exit_code)
+    kind, value = event
+    if kind == "stdout" and value:
+        stdout_parts.append(value.decode("utf-8", errors="replace"))
+    elif kind == "stderr" and value:
+        stderr_parts.append(value.decode("utf-8", errors="replace"))
+    elif kind == "end":
+        return value
 
     return None

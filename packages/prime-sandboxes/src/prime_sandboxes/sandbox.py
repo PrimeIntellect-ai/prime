@@ -58,6 +58,7 @@ from .models import (
     SSHSession,
     validate_egress_lists,
 )
+from .process import AsyncSandboxProcess
 from .rpc_command_session import (
     COMMAND_SESSION_START_RPC_METHOD,
     build_command_session_start_request,
@@ -74,6 +75,11 @@ GATEWAY_CONNECTION_RETRYABLE_EXCEPTIONS = (
     httpx.ConnectError,  # Connection refused/failed
     httpx.PoolTimeout,  # No connection available in pool
 )
+
+# connectrpc-python cancels a server stream before its first event when no
+# timeout is supplied. A live process cannot outlast the sandbox's 24-hour
+# maximum lifetime, so use that lifetime as the transport bound.
+_LIVE_PROCESS_TIMEOUT_MS = 24 * 60 * 60 * 1000
 
 
 def _network_update_payload(
@@ -1957,6 +1963,45 @@ class AsyncSandboxClient:
             timeout=timeout,
             user=user,
         )
+
+    async def open_process(
+        self,
+        sandbox_id: str,
+        command: str,
+        working_dir: Optional[str] = None,
+        env: Optional[Dict[str, str]] = None,
+        user: Optional[str] = None,
+    ) -> AsyncSandboxProcess:
+        """Start a live process in a VM sandbox.
+
+        The returned handle streams stdout and stderr, accepts stdin writes,
+        waits for the exit code, and can signal the process. Container sandboxes
+        do not expose this transport and fail fast.
+        """
+        await self._auth_cache.get_or_refresh(sandbox_id)
+        if not await self._auth_cache.is_vm(sandbox_id):
+            raise APIError("Live processes are only supported for VM sandboxes.")
+        if user is not None:
+            raise ValueError("The 'user' parameter is not supported for VM sandbox processes.")
+
+        auth = await self._auth_cache.get_or_refresh(sandbox_id)
+        gateway_url = auth["gateway_url"].rstrip("/")
+        base_url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}"
+        headers = {"Authorization": f"Bearer {auth['token']}"}
+        rpc_client = ConnectClient(base_url)
+        request = build_command_session_start_request(
+            command,
+            working_dir,
+            env,
+            stdin=True,
+        )
+        stream = rpc_client.execute_server_stream(
+            request=request,
+            method=COMMAND_SESSION_START_RPC_METHOD,
+            headers=headers,
+            timeout_ms=_LIVE_PROCESS_TIMEOUT_MS,
+        )
+        return await AsyncSandboxProcess._create(rpc_client, stream, headers)
 
     async def _execute_command_connect_rpc(
         self,

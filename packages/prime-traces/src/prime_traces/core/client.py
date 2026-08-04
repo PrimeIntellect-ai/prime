@@ -252,6 +252,10 @@ class TracesAPIClient:
                     response.read()
                     raise_for_response(response)
                 yield from response.iter_bytes()
+        except APIError:
+            # Already typed by raise_for_response; don't rewrap it as its own
+            # cause below.
+            raise
         except Exception as exc:
             raise self._wrap_transport_errors(exc) from exc
 

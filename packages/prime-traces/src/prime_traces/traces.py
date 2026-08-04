@@ -211,7 +211,12 @@ class TracesClient:
         return TraceListPage.model_validate(self.client.get_json("/traces", params=params))
 
     def iter(self, **filters) -> Iterator[TraceSummary]:
-        """Iterate all matching trace summaries across pages."""
+        """Iterate all matching trace summaries across pages.
+
+        Reads are not retried (only uploads are): a transient failure
+        mid-iteration raises to the caller, who can resume from the last
+        page by passing ``cursor=``.
+        """
         cursor = filters.pop("cursor", None)
         while True:
             page = self.list(cursor=cursor, **filters)

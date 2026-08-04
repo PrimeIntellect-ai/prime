@@ -79,7 +79,6 @@ class ErrorCode(str, Enum):
     INGEST_CAPACITY_EXCEEDED = "ingest_capacity_exceeded"
     INGEST_UNAVAILABLE = "ingest_unavailable"
     STORAGE_UNAVAILABLE = "storage_unavailable"
-    NOT_IMPLEMENTED = "not_implemented"
 
 
 class UploadReceipt(BaseModel):

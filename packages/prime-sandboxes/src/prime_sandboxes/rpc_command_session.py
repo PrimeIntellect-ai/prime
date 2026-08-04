@@ -202,11 +202,16 @@ def collect_command_session_start_event(
     if event is None:
         return None
     kind, value = event
-    if kind == "stdout" and value:
-        stdout_parts.append(value.decode("utf-8", errors="replace"))
-    elif kind == "stderr" and value:
-        stderr_parts.append(value.decode("utf-8", errors="replace"))
+    if kind == "stdout":
+        assert isinstance(value, bytes)
+        if value:
+            stdout_parts.append(value.decode("utf-8", errors="replace"))
+    elif kind == "stderr":
+        assert isinstance(value, bytes)
+        if value:
+            stderr_parts.append(value.decode("utf-8", errors="replace"))
     elif kind == "end":
+        assert isinstance(value, int)
         return value
 
     return None

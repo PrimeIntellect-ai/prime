@@ -14,12 +14,12 @@ from prime_sandboxes.models import CommandResponse
 from prime_sandboxes.sandbox import AsyncSandboxClient, SandboxAuthCache, SandboxClient
 
 
-def _auth_payload():
+def _auth_payload(token: str = "tok"):
     return {
         "gateway_url": "https://gateway.example.com",
         "user_ns": "ns",
         "job_id": "job",
-        "token": "tok",
+        "token": token,
         "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat(),
     }
 
@@ -44,6 +44,9 @@ class _AsyncFakeCache:
 
     async def is_vm(self, _sandbox_id: str) -> bool:
         return self._is_vm
+
+    async def invalidate(self, _sandbox_id: str) -> None:
+        return None
 
 
 def test_sync_execute_command_uses_connect_for_vm():
@@ -233,6 +236,191 @@ async def test_async_open_process_streams_vm_command_session(monkeypatch):
         assert calls[1][1].input.stdin == b"input\n"
         assert calls[2][1].session.pid == 42
         assert calls[2][1].signal == command_session_pb2.SIGNAL_SIGTERM
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_async_process_stream_failure_still_allows_cleanup(monkeypatch):
+    fail_stream = asyncio.Event()
+    signals = []
+
+    class _FakeConnectClient:
+        def __init__(self, _address: str):
+            pass
+
+        def execute_server_stream(self, **_kwargs):
+            start_response = getattr(command_session_pb2, "StartResponse")
+            command_session_event = getattr(command_session_pb2, "CommandSessionEvent")
+
+            async def events():
+                yield start_response(
+                    event=command_session_event(start=command_session_event.StartEvent(pid=42))
+                )
+                await fail_stream.wait()
+                raise ConnectError(Code.UNAVAILABLE, "stream lost")
+
+            return events()
+
+        async def execute_unary(self, **kwargs):
+            signals.append(kwargs["request"].signal)
+            response_type = getattr(command_session_pb2, f"{kwargs['method'].name}Response")
+            return response_type()
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr("prime_sandboxes.sandbox.ConnectClient", _FakeConnectClient)
+
+    client = AsyncSandboxClient(api_key="test-key")
+    cast(Any, client)._auth_cache = _AsyncFakeCache(is_vm=True)
+    process = await client.open_process("sbx-vm", "sleep 60")
+    try:
+        fail_stream.set()
+        with pytest.raises(APIError, match="process stream RPC failed"):
+            await process.wait()
+
+        await process.aclose()
+
+        assert signals == [
+            command_session_pb2.SIGNAL_SIGTERM,
+            command_session_pb2.SIGNAL_SIGKILL,
+        ]
+    finally:
+        await process.aclose()
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_async_process_close_completes_wait_without_exit_event(monkeypatch):
+    signals = []
+    stream_finished = asyncio.Event()
+
+    class _FakeConnectClient:
+        def __init__(self, _address: str):
+            pass
+
+        def execute_server_stream(self, **_kwargs):
+            start_response = getattr(command_session_pb2, "StartResponse")
+            command_session_event = getattr(command_session_pb2, "CommandSessionEvent")
+
+            async def events():
+                yield start_response(
+                    event=command_session_event(start=command_session_event.StartEvent(pid=42))
+                )
+                await stream_finished.wait()
+
+            return events()
+
+        async def execute_unary(self, **kwargs):
+            signals.append(kwargs["request"].signal)
+            response_type = getattr(command_session_pb2, f"{kwargs['method'].name}Response")
+            return response_type()
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr("prime_sandboxes.sandbox.ConnectClient", _FakeConnectClient)
+    monkeypatch.setattr("prime_sandboxes.process._EXIT_WAIT_SECONDS", 0)
+
+    client = AsyncSandboxClient(api_key="test-key")
+    cast(Any, client)._auth_cache = _AsyncFakeCache(is_vm=True)
+    process = await client.open_process("sbx-vm", "sleep 60")
+    try:
+        await process.aclose()
+
+        with pytest.raises(APIError, match="exit status was observed"):
+            await process.wait()
+        assert signals == [
+            command_session_pb2.SIGNAL_SIGTERM,
+            command_session_pb2.SIGNAL_SIGKILL,
+        ]
+    finally:
+        stream_finished.set()
+        await process.aclose()
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_async_process_control_rpcs_refresh_auth(monkeypatch):
+    auth_calls = 0
+    auth_invalidated = False
+    rpc_headers = []
+    input_written = asyncio.Event()
+    terminated = asyncio.Event()
+
+    class _RefreshingCache(_AsyncFakeCache):
+        async def get_or_refresh(self, _sandbox_id: str):
+            nonlocal auth_calls
+            auth_calls += 1
+            if auth_calls <= 2:
+                token = "start-token"
+            else:
+                token = "fresh-token" if auth_invalidated else "stale-token"
+            return _auth_payload(token)
+
+        async def invalidate(self, _sandbox_id: str) -> None:
+            nonlocal auth_invalidated
+            auth_invalidated = True
+
+    class _FakeConnectClient:
+        def __init__(self, _address: str):
+            pass
+
+        def execute_server_stream(self, **kwargs):
+            rpc_headers.append(("Start", kwargs["headers"]))
+            start_response = getattr(command_session_pb2, "StartResponse")
+            command_session_event = getattr(command_session_pb2, "CommandSessionEvent")
+
+            async def events():
+                yield start_response(
+                    event=command_session_event(start=command_session_event.StartEvent(pid=42))
+                )
+                await input_written.wait()
+                await terminated.wait()
+                yield start_response(
+                    event=command_session_event(
+                        end=command_session_event.EndEvent(
+                            exit_code=0,
+                            exited=True,
+                            status="exit",
+                        )
+                    )
+                )
+
+            return events()
+
+        async def execute_unary(self, **kwargs):
+            method_name = kwargs["method"].name
+            rpc_headers.append((method_name, kwargs["headers"]))
+            if kwargs["headers"]["Authorization"] == "Bearer stale-token":
+                raise ConnectError(Code.UNAUTHENTICATED, "expired token")
+            if method_name == "SendInput":
+                input_written.set()
+            else:
+                terminated.set()
+            response_type = getattr(command_session_pb2, f"{method_name}Response")
+            return response_type()
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr("prime_sandboxes.sandbox.ConnectClient", _FakeConnectClient)
+
+    client = AsyncSandboxClient(api_key="test-key")
+    cast(Any, client)._auth_cache = _RefreshingCache(is_vm=True)
+    try:
+        process = await client.open_process("sbx-vm", "cat")
+        await process.write_stdin(b"hello\n")
+        await process.terminate()
+
+        assert await process.wait() == 0
+        assert rpc_headers == [
+            ("Start", {"Authorization": "Bearer start-token"}),
+            ("SendInput", {"Authorization": "Bearer stale-token"}),
+            ("SendInput", {"Authorization": "Bearer fresh-token"}),
+            ("SendSignal", {"Authorization": "Bearer fresh-token"}),
+        ]
     finally:
         await client.aclose()
 

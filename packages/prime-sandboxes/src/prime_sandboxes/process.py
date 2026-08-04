@@ -2,7 +2,7 @@
 
 import asyncio
 import contextlib
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Literal
 
 from connectrpc.client import ConnectClient
@@ -10,17 +10,13 @@ from connectrpc.errors import ConnectError
 from google.protobuf.message import Message
 
 from .core import APIError
-from .rpc_command_session import (
-    COMMAND_SESSION_SEND_INPUT_RPC_METHOD,
-    COMMAND_SESSION_SEND_SIGNAL_RPC_METHOD,
-    build_command_session_send_input_request,
-    build_command_session_send_signal_request,
-    parse_command_session_start_event,
-)
+from .rpc_command_session import parse_command_session_start_event
 
 _EOF = object()
-_INPUT_TIMEOUT_MS = 30_000
-_SIGNAL_TIMEOUT_MS = 10_000
+_EXIT_WAIT_SECONDS = 5
+
+_WriteStdin = Callable[[int, bytes], Awaitable[None]]
+_SendSignal = Callable[[int, Literal["terminate", "kill"]], Awaitable[None]]
 
 
 class _AsyncProcessStream(AsyncIterator[bytes]):
@@ -67,15 +63,21 @@ class AsyncSandboxProcess:
 
     def __init__(
         self,
-        rpc_client: ConnectClient,
+        stream_client: ConnectClient,
         stream: AsyncIterator[Message],
-        headers: Mapping[str, str],
+        write_stdin: _WriteStdin,
+        send_signal: _SendSignal,
     ) -> None:
         self.stdout = _AsyncProcessStream()
         self.stderr = _AsyncProcessStream()
-        self._rpc_client = rpc_client
+        self._stream_client = stream_client
         self._stream = stream
-        self._headers = headers
+        self._write_stdin = write_stdin
+        self._send_process_signal = send_signal
+        self._remote_exited = False
+        self._signals_sent: set[Literal["terminate", "kill"]] = set()
+        self._closed = False
+        self._close_lock = asyncio.Lock()
         loop = asyncio.get_running_loop()
         self._started: asyncio.Future[int] = loop.create_future()
         self._exit: asyncio.Future[int] = loop.create_future()
@@ -90,11 +92,12 @@ class AsyncSandboxProcess:
     @classmethod
     async def _create(
         cls,
-        rpc_client: ConnectClient,
+        stream_client: ConnectClient,
         stream: AsyncIterator[Message],
-        headers: Mapping[str, str],
+        write_stdin: _WriteStdin,
+        send_signal: _SendSignal,
     ) -> "AsyncSandboxProcess":
-        process = cls(rpc_client, stream, headers)
+        process = cls(stream_client, stream, write_stdin, send_signal)
         try:
             await asyncio.shield(process._started)
         except asyncio.CancelledError:
@@ -129,20 +132,9 @@ class AsyncSandboxProcess:
         """Write bytes to the process's standard input."""
         if not data:
             return
-        if self._exit.done():
+        if self._closed or self._remote_exited:
             raise BrokenPipeError("process has exited")
-        request = build_command_session_send_input_request(self.pid, data)
-        try:
-            await self._rpc_client.execute_unary(
-                request=request,
-                method=COMMAND_SESSION_SEND_INPUT_RPC_METHOD,
-                headers=self._headers,
-                timeout_ms=_INPUT_TIMEOUT_MS,
-            )
-        except ConnectError as error:
-            raise APIError(
-                f"process stdin RPC failed ({error.code.value}): {error.message}"
-            ) from error
+        await self._write_stdin(self.pid, data)
 
     async def wait(self) -> int:
         """Wait for the process to exit and return its exit code."""
@@ -157,41 +149,68 @@ class AsyncSandboxProcess:
         await self._send_signal("kill")
 
     async def _send_signal(self, signal: Literal["terminate", "kill"]) -> None:
-        if self._exit.done():
+        if self._closed or self._remote_exited:
             return
-        request = build_command_session_send_signal_request(self.pid, signal)
-        try:
-            await self._rpc_client.execute_unary(
-                request=request,
-                method=COMMAND_SESSION_SEND_SIGNAL_RPC_METHOD,
-                headers=self._headers,
-                timeout_ms=_SIGNAL_TIMEOUT_MS,
-            )
-        except ConnectError as error:
-            raise APIError(
-                f"process signal RPC failed ({error.code.value}): {error.message}"
-            ) from error
+        await self._send_process_signal(self.pid, signal)
+        self._signals_sent.add(signal)
 
     async def aclose(self) -> None:
         """Stop the process if needed and release its transport."""
-        started = (
-            self._started.done()
-            and not self._started.cancelled()
-            and self._started.exception() is None
-        )
-        if started and not self._exit.done():
-            with contextlib.suppress(Exception):
-                await self.terminate()
-            try:
-                await asyncio.wait_for(asyncio.shield(self._exit), timeout=5)
-            except Exception:
-                with contextlib.suppress(Exception):
-                    await self.kill()
-        if not self._pump_task.done():
-            self._pump_task.cancel()
-        with contextlib.suppress(BaseException):
-            await self._pump_task
-        await self._rpc_client.close()
+        async with self._close_lock:
+            if self._closed:
+                return
+
+            started = (
+                self._started.done()
+                and not self._started.cancelled()
+                and self._started.exception() is None
+            )
+            if started and not self._remote_exited:
+                if "kill" in self._signals_sent:
+                    await self._wait_for_exit_event()
+                else:
+                    terminate_sent = "terminate" in self._signals_sent
+                    if not terminate_sent:
+                        try:
+                            await self.terminate()
+                            terminate_sent = True
+                        except Exception:
+                            pass
+                    if terminate_sent:
+                        await self._wait_for_exit_event()
+
+                    if not self._remote_exited:
+                        try:
+                            await self.kill()
+                        except Exception:
+                            pass
+                        else:
+                            await self._wait_for_exit_event()
+
+            if not self._pump_task.done():
+                self._pump_task.cancel()
+            with contextlib.suppress(BaseException):
+                await self._pump_task
+            if not self._exit.done():
+                self._exit.set_exception(
+                    APIError("Process closed before its exit status was observed")
+                )
+            await self._stream_client.close()
+            self._closed = True
+
+    async def _wait_for_exit_event(self) -> bool:
+        if self._remote_exited:
+            return True
+        if self._exit.done():
+            return False
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(self._exit),
+                timeout=_EXIT_WAIT_SECONDS,
+            )
+        except Exception:
+            return False
+        return self._remote_exited
 
     async def _pump(self) -> None:
         ended = False
@@ -210,6 +229,7 @@ class AsyncSandboxProcess:
                     self.stderr.feed(value)
                 elif kind == "end":
                     ended = True
+                    self._remote_exited = True
                     if not self._started.done():
                         raise APIError("Process exited before reporting its PID")
                     if not self._exit.done():
@@ -235,4 +255,4 @@ class AsyncSandboxProcess:
             if close_stream is not None:
                 with contextlib.suppress(BaseException):
                     await close_stream()
-            await self._rpc_client.close()
+            await self._stream_client.close()

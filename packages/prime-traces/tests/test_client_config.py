@@ -46,3 +46,20 @@ def test_empty_api_key_fails_loudly_at_request_time():
     api = TracesAPIClient(api_key="", base_url="http://testserver", team_id="")
     with pytest.raises(APIError, match="No API key configured"):
         api.get_json("/traces")
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "http://localhost:8083",
+        "http://localhost:8083/",
+        "http://localhost:8083/api/v1",
+        "http://localhost:8083/api/v1/",
+    ],
+)
+def test_explicit_base_url_normalized_like_config(base_url):
+    """`_url()` appends /api/v1 itself, so an explicit base_url that already
+    carries the suffix must be stripped exactly as Config strips file/env
+    values — otherwise the same URL works via config and 404s via kwarg."""
+    api = TracesAPIClient(api_key="k", base_url=base_url, team_id="")
+    assert api.base_url == "http://localhost:8083"

@@ -40,6 +40,9 @@ from .models import (
 DEFAULT_MAX_ATTEMPTS = 5
 _BACKOFF_BASE_SECONDS = 1.0
 _BACKOFF_CAP_SECONDS = 30.0
+# Retry-After is server-controlled input (and may come from a gateway's
+# HTTP-date far in the future); honor it, but never let it park the uploader.
+_RETRY_AFTER_CAP_SECONDS = 60.0
 
 
 def _build_params(
@@ -162,6 +165,8 @@ class TracesClient:
                         _BACKOFF_CAP_SECONDS,
                         _BACKOFF_BASE_SECONDS * (2**attempt),
                     ) * (0.5 + random.random())
+                else:
+                    delay = min(delay, _RETRY_AFTER_CAP_SECONDS)
                 time.sleep(delay)
         assert last_error is not None
         raise last_error

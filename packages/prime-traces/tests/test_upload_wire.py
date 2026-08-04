@@ -2,6 +2,8 @@ import gzip
 import hashlib
 import json
 import re
+from datetime import datetime, timedelta, timezone
+from email.utils import format_datetime
 from typing import Dict, Tuple
 
 import httpx
@@ -140,6 +142,74 @@ class TestRetrySemantics:
         # Same bytes, same key, both attempts.
         assert len(set(attempts)) == 1
         assert no_sleep == [1.5]
+
+    def test_retry_after_http_date_is_honored(self, make_client, no_sleep):
+        """RFC 9110 also allows Retry-After as an HTTP-date — gateways emit
+        that form — so it converts to the remaining delay instead of falling
+        back to a shorter local backoff that retries before the server asked."""
+        attempts = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            attempts.append(request.headers["Idempotency-Key"])
+            if len(attempts) == 1:
+                target = datetime.now(timezone.utc) + timedelta(seconds=30)
+                return httpx.Response(
+                    429, headers={"Retry-After": format_datetime(target, usegmt=True)}
+                )
+            return httpx.Response(201, json=COMMITTED)
+
+        [receipt] = upload(make_client(handler))
+        assert receipt.status == "committed"
+        [delay] = no_sleep
+        # Remaining time from now: allow for the seconds format_datetime drops
+        # and the wall clock advancing while the test runs.
+        assert 25 <= delay <= 30
+
+    def test_retry_after_past_http_date_retries_immediately(self, make_client, no_sleep):
+        attempts = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            attempts.append(request.headers["Idempotency-Key"])
+            if len(attempts) == 1:
+                target = datetime.now(timezone.utc) - timedelta(hours=1)
+                return httpx.Response(
+                    503, headers={"Retry-After": format_datetime(target, usegmt=True)}
+                )
+            return httpx.Response(201, json=COMMITTED)
+
+        [receipt] = upload(make_client(handler))
+        assert receipt.status == "committed"
+        assert no_sleep == [0.0]
+
+    def test_retry_after_is_capped(self, make_client, no_sleep):
+        """Retry-After is server-controlled input: honored, but bounded so a
+        misconfigured gateway cannot park the uploader for a day."""
+        attempts = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            attempts.append(request.headers["Idempotency-Key"])
+            if len(attempts) == 1:
+                return httpx.Response(503, headers={"Retry-After": "86400"})
+            return httpx.Response(201, json=COMMITTED)
+
+        [receipt] = upload(make_client(handler))
+        assert receipt.status == "committed"
+        assert no_sleep == [60.0]
+
+    def test_unparseable_retry_after_falls_back_to_backoff(self, make_client, no_sleep):
+        attempts = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            attempts.append(request.headers["Idempotency-Key"])
+            if len(attempts) == 1:
+                return httpx.Response(503, headers={"Retry-After": "soon-ish"})
+            return httpx.Response(201, json=COMMITTED)
+
+        [receipt] = upload(make_client(handler))
+        assert receipt.status == "committed"
+        # First-attempt jittered backoff: base 1.0 x (0.5..1.5).
+        [delay] = no_sleep
+        assert 0.5 <= delay <= 1.5
 
     @pytest.mark.parametrize("status", [502, 504])
     def test_retries_gateway_responses(self, make_client, no_sleep, status):

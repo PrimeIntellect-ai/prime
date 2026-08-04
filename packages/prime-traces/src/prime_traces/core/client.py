@@ -9,6 +9,8 @@ uploader owns honoring Retry-After against its own attempt budget.
 import gzip as gzip_module
 import json as json_module
 import sys
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Dict, Iterator, Optional
 
 import httpx
@@ -36,15 +38,40 @@ def _default_user_agent() -> str:
     return f"prime-traces/{__version__} python/{python_version}"
 
 
+def _normalize_base_url(url: str) -> str:
+    """The same normalization ``Config`` applies to file/env URLs.
+
+    ``_url()`` appends ``/api/v1`` itself, and URLs are commonly written with
+    the suffix already on them; without stripping it here, an explicit
+    ``base_url=`` would request ``/api/v1/api/v1/...`` while the identical
+    value via config worked.
+    """
+    return url.rstrip("/").removesuffix("/api/v1")
+
+
 def _parse_retry_after(response: httpx.Response) -> Optional[float]:
+    """Retry-After in either RFC 9110 form: delta-seconds or HTTP-date.
+
+    Gateways in front of the service emit the date form, so it converts to the
+    remaining delay rather than being dropped — dropping it would substitute a
+    shorter local backoff and retry before the server asked. Unparseable
+    values return None and callers fall back to their own backoff.
+    """
     value = response.headers.get("Retry-After")
     if value is None:
         return None
     try:
         return max(0.0, float(value))
     except ValueError:
-        # HTTP-date form; callers fall back to their own backoff.
+        pass
+    try:
+        target = parsedate_to_datetime(value)
+    except ValueError:
         return None
+    if target.tzinfo is None:
+        # RFC 5322 allows -0000, which parses naive; it means UTC.
+        target = target.replace(tzinfo=timezone.utc)
+    return max(0.0, (target - datetime.now(timezone.utc)).total_seconds())
 
 
 def _extract_error(response: httpx.Response) -> tuple[Optional[str], str]:
@@ -118,7 +145,7 @@ class TracesAPIClient:
         # silently re-resolving against the SDK's static config, which may
         # belong to a different context.
         self.api_key = api_key if api_key is not None else self.config.api_key
-        self.base_url = (base_url or self.config.traces_url).rstrip("/")
+        self.base_url = _normalize_base_url(base_url or self.config.traces_url)
         self.team_id = team_id if team_id is not None else self.config.team_id
 
         # No default Content-Type here: uploads are multipart (httpx must own

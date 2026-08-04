@@ -25,11 +25,54 @@ def test_create_sandbox_request_defaults():
     assert request.disk_size_gb == 5
     assert request.gpu_count == 0
     assert request.gpu_type is None
-    assert request.vm is False
+    # Unset vm defers the runtime choice to the server (platform default: VM).
+    assert request.vm is None
     assert request.timeout_minutes == 60
     assert request.region is None
     assert request.labels == []
     assert request.start_command == "tail -f /dev/null"
+
+
+def test_unset_vm_is_omitted_from_payload():
+    """Unset vm must be excluded from the API payload so the server default applies."""
+    request = CreateSandboxRequest(
+        name="test-sandbox",
+        docker_image="python:3.11-slim",
+    )
+
+    assert "vm" not in request.model_dump(exclude_none=True)
+
+
+def test_explicit_vm_false_is_serialized():
+    """The explicit container opt-out must survive exclude_none serialization."""
+    request = CreateSandboxRequest(
+        name="test-sandbox",
+        docker_image="python:3.11-slim",
+        vm=False,
+    )
+
+    assert request.model_dump(exclude_none=True)["vm"] is False
+
+
+def test_unset_vm_rejects_explicit_string_start_command():
+    """Explicit string start commands are container-only; require vm=False."""
+    with pytest.raises(ValidationError, match="container-only"):
+        CreateSandboxRequest(
+            name="test-sandbox",
+            docker_image="python:3.11-slim",
+            start_command="sleep infinity",
+        )
+
+
+def test_container_opt_out_keeps_explicit_string_start_command():
+    request = CreateSandboxRequest(
+        name="test-sandbox",
+        docker_image="python:3.11-slim",
+        vm=False,
+        start_command="sleep infinity",
+    )
+
+    assert request.start_command == "sleep infinity"
 
 
 def test_vm_start_command_preserves_argv():
@@ -106,15 +149,29 @@ def test_create_sandbox_request_accepts_gpu_type_for_gpu_count():
     assert request.vm is True
 
 
-def test_create_sandbox_request_requires_vm_for_gpu_count():
-    """Test vm is required when gpu_count > 0"""
+def test_create_sandbox_request_rejects_gpu_with_container_opt_out():
+    """GPUs conflict with an explicit container opt-out (vm=False)"""
     with pytest.raises(ValidationError):
         CreateSandboxRequest(
             name="gpu-sandbox",
             docker_image="python:3.11-slim",
             gpu_count=1,
             gpu_type="H100_80GB",
+            vm=False,
         )
+
+
+def test_create_sandbox_request_allows_gpu_with_unset_vm():
+    """Unset vm defers to the platform default (VM), which supports GPUs"""
+    request = CreateSandboxRequest(
+        name="gpu-sandbox",
+        docker_image="python:3.11-slim",
+        gpu_count=1,
+        gpu_type="H100_80GB",
+    )
+
+    assert request.vm is None
+    assert request.gpu_count == 1
 
 
 def test_create_sandbox_request_rejects_gpu_type_without_gpu_count():
@@ -142,6 +199,24 @@ def test_create_sandbox_request_gpu_type_none_matches_default():
 
     assert request_default.gpu_type is None
     assert request_none.gpu_type is None
+
+
+def test_guaranteed_requires_container_opt_out():
+    """guaranteed is container-only; unset vm resolves to VM on the server"""
+    with pytest.raises(ValidationError, match="vm=False"):
+        CreateSandboxRequest(
+            name="guaranteed-sandbox",
+            docker_image="python:3.11-slim",
+            guaranteed=True,
+        )
+
+    request = CreateSandboxRequest(
+        name="guaranteed-sandbox",
+        docker_image="python:3.11-slim",
+        guaranteed=True,
+        vm=False,
+    )
+    assert request.guaranteed is True
 
 
 def test_sandbox_status_enum():

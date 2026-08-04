@@ -44,11 +44,22 @@ class TestCreateSandboxRequestNetworkLists:
         assert "network_access" not in type(request).model_fields
         assert "network_access" not in request.model_dump()
 
-    def test_lists_require_vm(self):
+    def test_lists_rejected_with_container_opt_out(self):
         with pytest.raises(ValidationError, match="only supported for"):
             CreateSandboxRequest(
-                name="t", docker_image="img", network_allowlist=["api.example.com"]
+                name="t",
+                docker_image="img",
+                vm=False,
+                network_allowlist=["api.example.com"],
             )
+
+    def test_lists_accepted_with_unset_vm(self):
+        # Unset vm defers to the platform default runtime (VM), so egress
+        # lists are accepted without an explicit vm=True.
+        request = CreateSandboxRequest(
+            name="t", docker_image="img", network_allowlist=["api.example.com"]
+        )
+        assert request.network_allowlist == ["api.example.com"]
 
     def test_vm_allowlist_accepted(self):
         request = CreateSandboxRequest(

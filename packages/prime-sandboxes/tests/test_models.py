@@ -43,6 +43,27 @@ def test_unset_vm_is_omitted_from_payload():
     assert "vm" not in request.model_dump(exclude_none=True)
 
 
+def test_unset_vm_still_serializes_default_start_command():
+    """With vm unset, the container keep-alive default stays on the wire.
+
+    This is deliberate, not a leak: the server is contractually committed to
+    dropping legacy string start commands on the VM path (ingress #3817
+    compat), so a VM-resolved sandbox behaves as if no start command was set.
+    Meanwhile a container-resolved sandbox (SANDBOX_DEFAULT_VM=false rollback,
+    or an older ingress where omitted vm still means container) needs this
+    default — without it the container runs the bare image ENTRYPOINT and
+    typically exits immediately. Do not clear this default for unset vm.
+    """
+    request = CreateSandboxRequest(
+        name="test-sandbox",
+        docker_image="python:3.11-slim",
+    )
+
+    payload = request.model_dump(exclude_none=True)
+    assert payload["start_command"] == "tail -f /dev/null"
+    assert "vm" not in payload
+
+
 def test_explicit_vm_false_is_serialized():
     """The explicit container opt-out must survive exclude_none serialization."""
     request = CreateSandboxRequest(

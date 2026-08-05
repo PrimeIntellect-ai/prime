@@ -221,14 +221,14 @@ def list_traces(
     table.add_column("Created")
 
     for summary in page.items:
-        reward = summary.score.reward if summary.score else None
+        reward = summary.score.reward
         table.add_row(
             summary.trace_id[:16],
             summary.run_id or "-",
             summary.task_id or "-",
             "-" if reward is None else f"{reward:.2f}",
-            (summary.score.outcome if summary.score else None) or "-",
-            summary.created_at.isoformat() if summary.created_at else "-",
+            summary.score.outcome or "-",
+            summary.created_at.isoformat(),
         )
     console.print(table)
     if page.next_cursor:

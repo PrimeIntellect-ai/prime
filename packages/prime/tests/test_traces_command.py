@@ -2,9 +2,17 @@
 `prime --context <env> traces ...` talks to that context's deployment instead
 of silently falling back to the SDK's static config."""
 
+import json
+
+import pytest
 from prime_cli.commands import traces as traces_cmd
 from prime_cli.core import Config
 from prime_cli.core.config import ConfigModel
+from prime_cli.main import app as main_app
+from prime_traces import Batch, TraceListPage, TraceSummary, UploadReceipt
+from typer.testing import CliRunner
+
+runner = CliRunner()
 
 
 class _StubConfig:
@@ -19,7 +27,7 @@ def test_traces_client_uses_cli_config(monkeypatch):
     assert api.api_key == "ctx-key"
     assert api.base_url == "https://traces.staging.primeintellect.ai"
     assert api.team_id == "team-ctx"
-    assert api.client.headers["X-Prime-Team-Id"] == "team-ctx"
+    assert api.client.headers["X-Prime-Team-ID"] == "team-ctx"
 
 
 class _EmptyContextConfig:
@@ -51,7 +59,7 @@ def test_empty_context_never_falls_back_to_sdk_config(monkeypatch):
     assert api.api_key == ""
     assert api.team_id == ""
     assert "Authorization" not in api.client.headers
-    assert "X-Prime-Team-Id" not in api.client.headers
+    assert "X-Prime-Team-ID" not in api.client.headers
 
 
 def test_config_model_round_trips_traces_url():
@@ -82,3 +90,207 @@ def test_cli_config_traces_url_precedence(monkeypatch):
     # Env var wins over everything.
     monkeypatch.setenv("PRIME_TRACES_URL", "http://localhost:8083")
     assert config.traces_url == "http://localhost:8083"
+
+
+# ---------------------------------------------------------------------------
+# Command smoke tests: every `prime traces` command exercised through Typer
+# with a stubbed TracesClient, mirroring test_tunnel_cli.py. These catch
+# signature drift between the CLI options and the SDK methods, and pin that
+# `--output json` emits parseable JSON and nothing else.
+# ---------------------------------------------------------------------------
+
+
+def _summary(**overrides):
+    fields = {
+        "trace_id": "8d3f1a2b",
+        "upload_id": "5ee85e41",
+        "episode_id": None,
+        "created_at": "2026-07-20T18:02:11.482Z",
+        "ingested_at": "2026-07-20T18:06:02.117Z",
+        "run_id": "run_9f3k2m",
+        "environment_id": None,
+        "model": {"provider": "prime", "id": "deepseek-v4-flash"},
+        "task_id": "tb2-0187",
+        "agent_name": "solver",
+        "score": {"reward": 0.85, "outcome": "done"},
+        "execution": {"has_error": False, "is_truncated": False},
+        "duration_ms": 215537,
+        "total_tokens": 84213,
+        "size_bytes": 417284,
+        "context": {"source": "hosted_eval"},
+    }
+    fields.update(overrides)
+    return TraceSummary.model_validate(fields)
+
+
+class FakeTracesClient:
+    def __init__(self):
+        self.calls: dict = {}
+        self.receipt = UploadReceipt(upload_id="a" * 64, status="committed")
+
+    def upload_file(self, path, **kwargs):
+        self.calls["upload_file"] = {"path": path, **kwargs}
+        on_batch = kwargs.get("on_batch")
+        batch = Batch(data=b"{}\n", digest="a" * 64, num_lines=1, first_line_number=1)
+        if on_batch is not None:
+            on_batch(batch, self.receipt)
+        return [self.receipt]
+
+    def list(self, **kwargs):
+        self.calls["list"] = kwargs
+        return TraceListPage(items=[_summary()], next_cursor="cursor-1")
+
+    def get(self, trace_id):
+        self.calls["get"] = trace_id
+        return _summary(trace_id=trace_id)
+
+    def get_raw(self, trace_id):
+        self.calls["get_raw"] = trace_id
+        return b'{"version":4,"id":"%s"}' % trace_id.encode()
+
+    def download_raw(self, trace_id, dest):
+        self.calls["download_raw"] = (trace_id, dest)
+        return 29
+
+    def export(self, dest, **kwargs):
+        self.calls["export"] = {"dest": dest, **kwargs}
+        return 2 * 1024 * 1024
+
+    def delete(self, trace_id, created_at=None):
+        self.calls["delete"] = (trace_id, created_at)
+
+    def delete_run(self, run_id):
+        self.calls["delete_run"] = run_id
+        return "job-1"
+
+
+@pytest.fixture()
+def fake_client(monkeypatch):
+    monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
+    client = FakeTracesClient()
+    monkeypatch.setattr(traces_cmd, "_traces_client", lambda: client)
+    return client
+
+
+def test_upload_command_table_output(fake_client, tmp_path):
+    traces_file = tmp_path / "traces.jsonl"
+    traces_file.write_bytes(b'{"id":"a"}\n')
+
+    result = runner.invoke(
+        main_app,
+        ["traces", "upload", str(traces_file), "-c", "source=hosted_eval", "-c", "suite=s1"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Uploaded 1 batch(es)" in result.output
+    call = fake_client.calls["upload_file"]
+    assert call["context"] == {"source": "hosted_eval", "suite": "s1"}
+    assert call["compress"] is True
+    assert call["line_format"].value == "trace"
+
+
+def test_upload_command_episodes_json_output(fake_client, tmp_path):
+    traces_file = tmp_path / "episodes.jsonl"
+    traces_file.write_bytes(b'{"id":"ep"}\n')
+
+    result = runner.invoke(
+        main_app,
+        ["traces", "upload", str(traces_file), "--episodes", "--no-compress", "-o", "json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["num_batches"] == 1
+    assert payload["receipts"][0]["status"] == "committed"
+    call = fake_client.calls["upload_file"]
+    assert call["line_format"].value == "episode"
+    assert call["compress"] is False
+
+
+def test_upload_command_rejects_malformed_context(fake_client, tmp_path):
+    traces_file = tmp_path / "traces.jsonl"
+    traces_file.write_bytes(b'{"id":"a"}\n')
+
+    result = runner.invoke(main_app, ["traces", "upload", str(traces_file), "-c", "no-equals"])
+
+    assert result.exit_code == 1
+    assert "upload_file" not in fake_client.calls
+
+
+def test_list_command_forwards_filters_and_renders_table(fake_client):
+    result = runner.invoke(
+        main_app,
+        ["traces", "list", "--run-id", "run_9f3k2m", "--reward-min", "0.5", "--limit", "10"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "8d3f1a2b" in result.output
+    assert "cursor-1" in result.output  # next-page hint
+    call = fake_client.calls["list"]
+    assert call["run_id"] == "run_9f3k2m"
+    assert call["reward_min"] == 0.5
+    assert call["limit"] == 10
+
+
+def test_list_command_json_output_is_parseable(fake_client):
+    result = runner.invoke(main_app, ["traces", "list", "-o", "json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["items"][0]["trace_id"] == "8d3f1a2b"
+    assert payload["next_cursor"] == "cursor-1"
+
+
+def test_get_command_summary_and_raw(fake_client):
+    result = runner.invoke(main_app, ["traces", "get", "8d3f1a2b"])
+    assert result.exit_code == 0, result.output
+    assert fake_client.calls["get"] == "8d3f1a2b"
+
+    result = runner.invoke(main_app, ["traces", "get", "8d3f1a2b", "--raw"])
+    assert result.exit_code == 0, result.output
+    assert '"version":4' in result.output
+    assert fake_client.calls["get_raw"] == "8d3f1a2b"
+
+
+def test_get_command_raw_to_dest_streams(fake_client, tmp_path):
+    dest = tmp_path / "trace.json"
+    result = runner.invoke(main_app, ["traces", "get", "8d3f1a2b", "--raw", "--dest", str(dest)])
+
+    assert result.exit_code == 0, result.output
+    trace_id, streamed_dest = fake_client.calls["download_raw"]
+    assert trace_id == "8d3f1a2b"
+    assert streamed_dest == dest
+
+
+def test_export_command_forwards_filters(fake_client, tmp_path):
+    dest = tmp_path / "export.jsonl"
+    result = runner.invoke(main_app, ["traces", "export", str(dest), "--run-id", "run_9f3k2m"])
+
+    assert result.exit_code == 0, result.output
+    call = fake_client.calls["export"]
+    assert call["dest"] == dest
+    assert call["run_id"] == "run_9f3k2m"
+    assert "2.0 MiB" in result.output
+
+
+def test_delete_command_requires_exactly_one_target(fake_client):
+    both = runner.invoke(
+        main_app, ["traces", "delete", "8d3f1a2b", "--run-id", "run_9f3k2m", "--yes"]
+    )
+    neither = runner.invoke(main_app, ["traces", "delete", "--yes"])
+
+    assert both.exit_code == 1
+    assert neither.exit_code == 1
+    assert "delete" not in fake_client.calls
+    assert "delete_run" not in fake_client.calls
+
+
+def test_delete_command_trace_and_run(fake_client):
+    result = runner.invoke(main_app, ["traces", "delete", "8d3f1a2b", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert fake_client.calls["delete"] == ("8d3f1a2b", None)
+
+    result = runner.invoke(main_app, ["traces", "delete", "--run-id", "run_9f3k2m", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert fake_client.calls["delete_run"] == "run_9f3k2m"
+    assert "job-1" in result.output

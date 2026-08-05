@@ -39,7 +39,7 @@ def main():
             print("\nListing this run's traces...")
             page = client.list(run_id="run_example", limit=10)
             for summary in page.items:
-                print(f"  {summary.trace_id}  reward={summary.score and summary.score.reward}")
+                print(f"  {summary.trace_id}  reward={summary.score.reward}")
 
             if page.items:
                 trace_id = page.items[0].trace_id

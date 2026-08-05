@@ -1,7 +1,14 @@
 import httpx
 import pytest
 
-from prime_traces import ForbiddenError, NotFoundError, TracesAPIClient, UnauthorizedError
+from prime_traces import (
+    ForbiddenError,
+    NotFoundError,
+    RetryableAPIError,
+    TracesAPIClient,
+    TransportError,
+    UnauthorizedError,
+)
 
 # The pinned summary shape — mirrors the service's `TraceSummary`
 # (prime-traces/src/traces/models.py in the platform repo), including the
@@ -170,6 +177,119 @@ class TestPointReads:
         assert "traces:read" in str(exc_info.value)
 
 
+class TestReadRetries:
+    """Idempotent requests retry transient failures with a bounded budget,
+    mirroring the sibling SDKs (prime-sandboxes retries idempotent methods on
+    502/503/504 and transport errors)."""
+
+    _UNAVAILABLE = {"error": {"code": "storage_unavailable", "message": "storage is down"}}
+
+    def test_get_retries_transient_503_honoring_retry_after(self, make_client, no_sleep):
+        attempts = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            attempts.append(request.url.path)
+            if len(attempts) == 1:
+                return httpx.Response(503, headers={"Retry-After": "2"}, json=self._UNAVAILABLE)
+            return httpx.Response(200, json=SUMMARY)
+
+        summary = make_client(handler).get("8d3f1a2b")
+        assert summary.trace_id == "8d3f1a2b"
+        assert len(attempts) == 2
+        assert no_sleep == [2.0]
+
+    def test_get_gives_up_after_bounded_attempts(self, make_client, no_sleep):
+        attempts = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            attempts.append(request.url.path)
+            return httpx.Response(503, json=self._UNAVAILABLE)
+
+        with pytest.raises(RetryableAPIError) as exc_info:
+            make_client(handler).get("8d3f1a2b")
+        assert exc_info.value.code == "storage_unavailable"
+        assert len(attempts) == 3
+        assert len(no_sleep) == 2  # sleeps between attempts, not after the last
+
+    def test_get_does_not_retry_404(self, make_client, no_sleep):
+        attempts = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            attempts.append(request.url.path)
+            return httpx.Response(
+                404, json={"error": {"code": "trace_not_found", "message": "no such trace"}}
+            )
+
+        with pytest.raises(NotFoundError):
+            make_client(handler).get("missing")
+        assert len(attempts) == 1
+        assert no_sleep == []
+
+    def test_get_retries_transport_failures(self, make_client, no_sleep):
+        attempts = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            attempts.append(request.url.path)
+            if len(attempts) == 1:
+                raise httpx.ConnectError("connection refused", request=request)
+            return httpx.Response(200, json=SUMMARY)
+
+        assert make_client(handler).get("8d3f1a2b").trace_id == "8d3f1a2b"
+        assert len(attempts) == 2
+        assert len(no_sleep) == 1
+
+    def test_delete_retries_transient_503(self, make_client, no_sleep):
+        attempts = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            attempts.append(request.method)
+            if len(attempts) == 1:
+                return httpx.Response(503, json=self._UNAVAILABLE)
+            return httpx.Response(202)
+
+        make_client(handler).delete("8d3f1a2b")
+        assert attempts == ["DELETE", "DELETE"]
+        assert len(no_sleep) == 1
+
+    def test_stream_retries_before_first_byte(self, make_client, no_sleep, tmp_path):
+        raw = b'{"version":4,"id":"8d3f1a2b"}'
+        attempts = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            attempts.append(request.url.path)
+            if len(attempts) == 1:
+                return httpx.Response(503, json=self._UNAVAILABLE)
+            return httpx.Response(200, content=raw)
+
+        dest = tmp_path / "trace.json"
+        written = make_client(handler).download_raw("8d3f1a2b", dest)
+        assert written == len(raw)
+        assert dest.read_bytes() == raw
+        assert len(attempts) == 2
+
+    def test_stream_failure_mid_body_is_not_retried(self, make_client, no_sleep, tmp_path):
+        """Once body bytes have flowed, a transparent retry would restart the
+        document under the consumer and duplicate its prefix — so it raises,
+        and the caller re-runs against a cleaned-up ``.partial``."""
+        attempts = []
+
+        def broken_body():
+            yield b'{"version":4,'
+            raise httpx.ReadError("connection reset mid-body")
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            attempts.append(request.url.path)
+            return httpx.Response(200, content=broken_body())
+
+        dest = tmp_path / "trace.json"
+        with pytest.raises(TransportError):
+            make_client(handler).download_raw("8d3f1a2b", dest)
+        assert len(attempts) == 1
+        assert no_sleep == []
+        assert not dest.exists()
+        assert not (tmp_path / "trace.json.partial").exists()
+
+
 class TestDelete:
     def test_delete_trace_with_created_at_hint(self, make_client):
         captured = {}
@@ -207,7 +327,7 @@ class TestTeamHeader:
         captured = {}
 
         def handler(request: httpx.Request) -> httpx.Response:
-            captured["team"] = request.headers.get("X-Prime-Team-Id")
+            captured["team"] = request.headers.get("X-Prime-Team-ID")
             return httpx.Response(200, json={})
 
         self._client("team_123", handler).get_json("/traces")
@@ -217,7 +337,7 @@ class TestTeamHeader:
         captured = {}
 
         def handler(request: httpx.Request) -> httpx.Response:
-            captured["team"] = request.headers.get("X-Prime-Team-Id")
+            captured["team"] = request.headers.get("X-Prime-Team-ID")
             return httpx.Response(200, json={})
 
         self._client("", handler).get_json("/traces")

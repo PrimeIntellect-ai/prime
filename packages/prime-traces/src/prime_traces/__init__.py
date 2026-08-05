@@ -8,6 +8,7 @@ cursor-paginated summaries over extracted columns plus raw-document retrieval.
 from .batching import (
     DEFAULT_TARGET_BATCH_BYTES,
     MAX_BATCH_BYTES,
+    MAX_BATCH_LINES,
     MAX_LINE_BYTES,
     Batch,
     iter_batches,
@@ -17,6 +18,7 @@ from .core import Config, TracesAPIClient
 from .exceptions import (
     APIError,
     APITimeoutError,
+    ForbiddenError,
     LineFormatConflictError,
     NotFoundError,
     PaymentRequiredError,
@@ -52,6 +54,7 @@ __all__ = [
     "read_jsonl_lines",
     "DEFAULT_TARGET_BATCH_BYTES",
     "MAX_BATCH_BYTES",
+    "MAX_BATCH_LINES",
     "MAX_LINE_BYTES",
     # Models
     "UploadReceipt",
@@ -66,6 +69,7 @@ __all__ = [
     "PrimeTracesError",
     "APIError",
     "APITimeoutError",
+    "ForbiddenError",
     "LineFormatConflictError",
     "NotFoundError",
     "PaymentRequiredError",

@@ -29,6 +29,11 @@ MIB = 1024 * 1024
 MAX_BATCH_BYTES = 256 * MIB
 #: Server-side cap on one JSONL line (-> trace_too_large).
 MAX_LINE_BYTES = 64 * MIB
+#: Server-side cap on staged rows per request (-> too_many_traces_in_upload).
+#: Exact for bare-trace uploads, where one line is one row. Episode lines
+#: stage one episode row plus each nested trace, which opaque line bytes
+#: cannot count — there the byte caps are the practical bound.
+MAX_BATCH_LINES = 1_000_000
 #: Default chunk-close threshold. Held under Cloud Run's 32 MiB request cap so
 #: a batch fits the deployed transport even with compression disabled; the
 #: 256 MiB service contract above is not reachable through that cap today. A
@@ -71,6 +76,7 @@ def iter_batches(
     *,
     target_bytes: int = DEFAULT_TARGET_BATCH_BYTES,
     max_line_bytes: int = MAX_LINE_BYTES,
+    max_lines: int = MAX_BATCH_LINES,
 ) -> Iterator[Batch]:
     """Group JSONL lines into content-addressed request batches.
 
@@ -79,6 +85,12 @@ def iter_batches(
     The line-size cap is checked on the line content excluding the trailing
     newline but including any carriage return before it — the service splits
     on LF alone, so these are exactly the bytes it measures.
+
+    A batch also closes at ``max_lines``, mirroring the service's per-request
+    row cap: without it, a caller-raised ``target_bytes`` over a file of tiny
+    lines could build a batch the service rejects with
+    ``too_many_traces_in_upload`` — a 400 the retry semantics treat as
+    "correct the file" when the file is fine and only the chunking is not.
     """
     if target_bytes <= 0:
         raise ValueError("target_bytes must be positive")
@@ -86,6 +98,8 @@ def iter_batches(
         raise ValueError(
             f"target_bytes ({target_bytes}) exceeds the {MAX_BATCH_BYTES} byte request cap"
         )
+    if max_lines <= 0:
+        raise ValueError("max_lines must be positive")
 
     buffer: list[bytes] = []
     buffered_size = 0
@@ -111,7 +125,7 @@ def iter_batches(
         if content_size > max_line_bytes:
             raise TraceTooLargeError(line_number, content_size, max_line_bytes)
 
-        if buffer and buffered_size + len(line) > target_bytes:
+        if buffer and (buffered_size + len(line) > target_bytes or len(buffer) >= max_lines):
             yield close()
         if not buffer:
             batch_start_line = line_number

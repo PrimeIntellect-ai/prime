@@ -56,6 +56,18 @@ class TestChunkClosing:
         with pytest.raises(ValueError):
             list(iter_batches([line("{}")], target_bytes=MAX_BATCH_BYTES + 1))
 
+    def test_closes_at_max_lines(self):
+        # Mirrors the service's per-request row cap: a large byte target over
+        # tiny lines must not build a batch the service would reject with
+        # too_many_traces_in_upload.
+        lines = [line(f'{{"i":{i}}}') for i in range(5)]
+        batches = list(iter_batches(lines, target_bytes=1024, max_lines=2))
+        assert [b.num_lines for b in batches] == [2, 2, 1]
+
+    def test_non_positive_max_lines_rejected(self):
+        with pytest.raises(ValueError):
+            list(iter_batches([line("{}")], max_lines=0))
+
 
 class TestLineValidation:
     def test_oversized_line_rejected_locally(self):

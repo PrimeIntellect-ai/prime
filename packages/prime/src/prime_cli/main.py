@@ -4,6 +4,7 @@ from typing import Optional
 import typer
 
 from . import __version__
+from .commands.agent import agent_command
 from .commands.availability import app as availability_app
 from .commands.config import app as config_app
 from .commands.deployments import app as deployments_app
@@ -43,6 +44,15 @@ app = PlainTyper(
 
 # Lab commands
 app.add_typer(lab_app, name="lab", rich_help_panel="Lab")
+app.command(
+    "agent",
+    rich_help_panel="Lab",
+    add_help_option=False,
+    context_settings={
+        "allow_extra_args": True,
+        "ignore_unknown_options": True,
+    },
+)(agent_command)
 app.add_typer(env_app, name="env", rich_help_panel="Lab")
 app.command("fork", rich_help_panel="Lab", epilog=FORK_JSON_HELP)(fork_command)
 app.add_typer(evals_app, name="eval", rich_help_panel="Lab")

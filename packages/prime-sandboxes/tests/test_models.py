@@ -240,6 +240,32 @@ def test_guaranteed_requires_container_opt_out():
     assert request.guaranteed is True
 
 
+def test_registry_credentials_require_container_opt_out():
+    """registry_credentials_id is container-only; unset vm resolves to VM on the server"""
+    with pytest.raises(ValidationError, match="vm=False"):
+        CreateSandboxRequest(
+            name="private-image-sandbox",
+            docker_image="registry.example.com/private:latest",
+            registry_credentials_id="cred-123",
+        )
+
+    with pytest.raises(ValidationError, match="vm=False"):
+        CreateSandboxRequest(
+            name="private-image-sandbox",
+            docker_image="registry.example.com/private:latest",
+            registry_credentials_id="cred-123",
+            vm=True,
+        )
+
+    request = CreateSandboxRequest(
+        name="private-image-sandbox",
+        docker_image="registry.example.com/private:latest",
+        registry_credentials_id="cred-123",
+        vm=False,
+    )
+    assert request.registry_credentials_id == "cred-123"
+
+
 def test_sandbox_status_enum():
     """Test SandboxStatus enum values"""
     assert SandboxStatus.PENDING == "PENDING"

@@ -237,6 +237,15 @@ class CreateSandboxRequest(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def validate_registry_credentials(self) -> "CreateSandboxRequest":
+        if self.registry_credentials_id and self.vm is not False:
+            raise ValueError(
+                "registry_credentials_id is only supported for container "
+                "sandboxes; pass vm=False to create a container sandbox"
+            )
+        return self
+
+    @model_validator(mode="after")
     def validate_vm_start_command(self) -> "CreateSandboxRequest":
         if self.vm is False:
             return self

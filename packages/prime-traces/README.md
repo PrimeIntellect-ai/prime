@@ -108,7 +108,8 @@ not declare them yet.
   to land. The streaming `GET /traces/export` is what `export()` wraps.
 - `/search` and free-text queries — deferred with the `trace_components`
   projection.
-- The `environment_id` list filter — pending its extracted column.
+- The `environment_id` filters (traces and episodes) — pending a populated
+  extracted column.
 - Typed dot-path predicates (`traces.query`) — needs the server-side field
   registry.
 - An async client — the other prime SDKs ship sync/async pairs, and the main

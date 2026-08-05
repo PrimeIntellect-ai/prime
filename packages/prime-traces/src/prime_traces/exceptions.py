@@ -56,6 +56,16 @@ class PaymentRequiredError(APIError):
     """402 — payment required. Check billing status."""
 
 
+class ForbiddenError(APIError):
+    """403 ``forbidden`` — the credential is valid but lacks the required
+    scope on the ``traces`` key.
+
+    Distinct from 401 by design: re-authenticating with the same token never
+    helps. This is an expected path, not an edge case — hosted-eval worker
+    tokens are minted write-only, so any read they attempt lands here.
+    """
+
+
 class NotFoundError(APIError):
     """404 — the trace, episode or job does not exist for this owner."""
 

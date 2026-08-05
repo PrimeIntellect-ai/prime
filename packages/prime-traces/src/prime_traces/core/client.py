@@ -18,6 +18,7 @@ import httpx
 from ..exceptions import (
     APIError,
     APITimeoutError,
+    ForbiddenError,
     LineFormatConflictError,
     NotFoundError,
     PaymentRequiredError,
@@ -109,6 +110,10 @@ def raise_for_response(response: httpx.Response) -> None:
         raise PaymentRequiredError(
             "Payment required. Check billing status.", status_code=status, code=code
         )
+    if status == 403:
+        # The service's message names the missing scope; pass it through
+        # rather than substituting a canned line.
+        raise ForbiddenError(message, status_code=status, code=code)
     if status == 404:
         raise NotFoundError(message, status_code=status, code=code)
     if status == 400:

@@ -1,7 +1,7 @@
 import httpx
 import pytest
 
-from prime_traces import NotFoundError, TracesAPIClient, UnauthorizedError
+from prime_traces import ForbiddenError, NotFoundError, TracesAPIClient, UnauthorizedError
 
 # The pinned summary shape — mirrors the service's `TraceSummary`
 # (prime-traces/src/traces/models.py in the platform repo), including the
@@ -147,6 +147,27 @@ class TestPointReads:
 
         with pytest.raises(UnauthorizedError):
             make_client(handler).get("8d3f1a2b")
+
+    def test_forbidden_is_typed_with_server_message(self, make_client):
+        """403 is an expected path, not an edge case: hosted-eval worker
+        tokens are write-only, so any read they attempt lands here. The
+        server's message names the missing scope and must survive."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                403,
+                json={
+                    "error": {
+                        "code": "forbidden",
+                        "message": "Token is missing 'traces:read' scope",
+                    }
+                },
+            )
+
+        with pytest.raises(ForbiddenError) as exc_info:
+            make_client(handler).get("8d3f1a2b")
+        assert exc_info.value.code == "forbidden"
+        assert "traces:read" in str(exc_info.value)
 
 
 class TestDelete:

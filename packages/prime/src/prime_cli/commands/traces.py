@@ -33,8 +33,10 @@ def _traces_client() -> TracesClient:
 
     The SDK's own Config reads only ~/.prime/config.json and env vars; the CLI
     Config additionally resolves PRIME_CONTEXT environments, so credentials and
-    URLs must flow from here — the same injection pattern as the sandbox and
-    evals commands.
+    URLs must flow from here. Same goal as the client injection in the sandbox
+    and evals commands, different mechanism: those hand the SDK a pre-built
+    APIClient object, while this SDK's client takes the resolved values
+    directly.
 
     Every field is passed explicitly, never None: the SDK client treats None as
     "resolve from my static config", and a context whose api_key or team is

@@ -11,8 +11,9 @@ aggregate.
 Deliberately not implemented (open v0 contract decisions — do not freeze
 them here): the exports *job* API (the streaming ``GET /traces/export`` is
 what ``export`` wraps; its filter vocabulary is not declared server-side
-yet), ``/search``, the ``environment_id`` filter (no populated column behind
-it yet), episode writes (episodes are read-only, written only as a side
+yet), ``/search``, the ``environment_id`` filters on traces and episodes (no
+populated column behind them yet), episode writes (episodes are read-only,
+written only as a side
 effect of episode-grouped uploads), and the dot-path query compiler (needs the
 server-side field registry).
 """
@@ -347,7 +348,6 @@ class TracesClient:
         self,
         *,
         run_id: Optional[str] = None,
-        environment_id: Optional[str] = None,
         outcome: Optional[str] = None,
         has_error: Optional[bool] = None,
         created_after: Optional[str] = None,
@@ -355,11 +355,13 @@ class TracesClient:
         limit: Optional[int] = None,
         cursor: Optional[str] = None,
     ) -> EpisodeListPage:
-        """The full episode filter set; episodes carry no ``context`` map."""
+        """The server's episode filter set minus ``environment_id`` (the
+        extractor never populates that column, for episodes or traces, so the
+        filter cannot match — same reason ``list`` omits it). Episodes carry
+        no ``context`` map."""
         params = _build_params(
             (
                 ("run_id", run_id),
-                ("environment_id", environment_id),
                 ("outcome", outcome),
                 ("has_error", has_error),
                 ("created_after", created_after),

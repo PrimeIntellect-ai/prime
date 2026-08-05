@@ -271,6 +271,13 @@ class TestRetrySemantics:
         assert exc_info.value.code == "rate_limited"
         assert len(no_sleep) == 2  # sleeps between attempts, not after the last
 
+    def test_non_positive_max_attempts_rejected(self, make_client):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(201, json=COMMITTED)
+
+        with pytest.raises(ValueError, match="max_attempts"):
+            upload(make_client(handler), max_attempts=0)
+
     def test_durable_rejection_stops_the_upload(self, make_client):
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(

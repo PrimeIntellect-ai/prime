@@ -31,7 +31,7 @@ def test_none_resolves_from_config():
     assert api.base_url == "https://file.primeintellect.ai"
     assert api.team_id == "file-team"
     assert api.client.headers["Authorization"] == "Bearer file-key"
-    assert api.client.headers["X-Prime-Team-Id"] == "file-team"
+    assert api.client.headers["X-Prime-Team-ID"] == "file-team"
 
 
 def test_explicit_empty_is_final_not_a_fallback_trigger():
@@ -39,7 +39,7 @@ def test_explicit_empty_is_final_not_a_fallback_trigger():
     assert api.api_key == ""
     assert api.team_id == ""
     assert "Authorization" not in api.client.headers
-    assert "X-Prime-Team-Id" not in api.client.headers
+    assert "X-Prime-Team-ID" not in api.client.headers
 
 
 def test_empty_api_key_fails_loudly_at_request_time():

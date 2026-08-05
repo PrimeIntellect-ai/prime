@@ -1,14 +1,21 @@
 """HTTP client for the Prime Traces service.
 
 Speaks the wire contract and maps error responses to typed exceptions.
-Retry policy deliberately lives in the caller (``TracesClient``), not here:
-which responses are retryable is part of the upload contract, and the
-uploader owns honoring Retry-After against its own attempt budget.
+
+Retry policy is split by what makes a retry safe. Idempotent requests — GET,
+and DELETE, which the service accepts for already-absent rows — are retried
+here with a small fixed budget, matching the sibling SDKs (prime-sandboxes
+retries idempotent methods on 502/503/504 and transport failures). Uploads
+are POSTs whose retry safety comes from content addressing rather than the
+method, so their loop lives in ``TracesClient``, where the attempt budget is
+caller-configurable and Retry-After is honored against it.
 """
 
 import gzip as gzip_module
 import json as json_module
+import random
 import sys
+import time
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any, Dict, Iterator, Optional
@@ -29,6 +36,33 @@ from ..exceptions import (
 )
 from ..models import LineFormat
 from .config import Config
+
+#: Attempts for idempotent requests, matching prime-sandboxes'
+#: ``stop_after_attempt(3)``. Uploads have their own caller-configurable
+#: budget — see ``TracesClient._send_with_retry``.
+IDEMPOTENT_RETRY_ATTEMPTS = 3
+
+_BACKOFF_BASE_SECONDS = 1.0
+_BACKOFF_CAP_SECONDS = 30.0
+# Retry-After is server-controlled input (and may come from a gateway's
+# HTTP-date far in the future); honor it, but never let it park the client.
+_RETRY_AFTER_CAP_SECONDS = 60.0
+
+
+def retry_delay(error: Exception, attempt: int) -> float:
+    """Seconds to wait before retrying ``attempt`` (0-based).
+
+    A server-supplied Retry-After wins, capped; otherwise jittered exponential
+    backoff. Shared by the read retries here and the upload retries in
+    ``TracesClient`` so the two paths cannot drift.
+    """
+    delay = getattr(error, "retry_after", None)
+    if delay is not None:
+        return min(delay, _RETRY_AFTER_CAP_SECONDS)
+    return min(
+        _BACKOFF_CAP_SECONDS,
+        _BACKOFF_BASE_SECONDS * (2**attempt),
+    ) * (0.5 + random.random())
 
 
 def _default_user_agent() -> str:
@@ -159,7 +193,9 @@ class TracesAPIClient:
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         if self.team_id:
-            headers["X-Prime-Team-Id"] = self.team_id
+            # Spelled exactly as the service declares it (auth/dependencies.py
+            # TEAM_HEADER) — case-insensitive on the wire, greppable in code.
+            headers["X-Prime-Team-ID"] = self.team_id
 
         self.client = httpx.Client(
             headers=headers,
@@ -249,13 +285,40 @@ class TracesAPIClient:
 
     # -- read path ----------------------------------------------------------
 
+    def _idempotent_request(
+        self, method: str, endpoint: str, params: Optional[Dict[str, Any]]
+    ) -> httpx.Response:
+        """Send with bounded retries on transient failures.
+
+        Only for idempotent methods: GET, and DELETE — deletion is idempotent
+        at the API level (deleting already-absent rows is still accepted), so
+        a replayed DELETE cannot do more than the first one did.
+        """
+        for attempt in range(IDEMPOTENT_RETRY_ATTEMPTS):
+            last = attempt == IDEMPOTENT_RETRY_ATTEMPTS - 1
+            try:
+                response = self.client.request(method, self._url(endpoint), params=params)
+            except Exception as exc:
+                error = self._wrap_transport_errors(exc)
+                if error is exc:
+                    raise
+                if last:
+                    raise error from exc
+                time.sleep(retry_delay(error, attempt))
+                continue
+            try:
+                raise_for_response(response)
+            except RetryableAPIError as exc:
+                if last:
+                    raise
+                time.sleep(retry_delay(exc, attempt))
+                continue
+            return response
+        raise AssertionError("unreachable")  # pragma: no cover
+
     def get_json(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         self._check_auth()
-        try:
-            response = self.client.get(self._url(endpoint), params=params)
-        except Exception as exc:
-            raise self._wrap_transport_errors(exc) from exc
-        raise_for_response(response)
+        response = self._idempotent_request("GET", endpoint, params)
         result = response.json()
         if not isinstance(result, dict):
             raise APIError("API response was not a dictionary")
@@ -263,11 +326,7 @@ class TracesAPIClient:
 
     def delete_json(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         self._check_auth()
-        try:
-            response = self.client.delete(self._url(endpoint), params=params)
-        except Exception as exc:
-            raise self._wrap_transport_errors(exc) from exc
-        raise_for_response(response)
+        response = self._idempotent_request("DELETE", endpoint, params)
         if not response.content:
             return {}
         result = response.json()
@@ -276,20 +335,38 @@ class TracesAPIClient:
     def stream_bytes(
         self, endpoint: str, params: Optional[Dict[str, Any]] = None
     ) -> Iterator[bytes]:
-        """Stream a response body in chunks (a raw trace can be 64 MiB)."""
+        """Stream a response body in chunks (a raw trace can be 64 MiB).
+
+        Transient failures are retried only until the first body byte has been
+        yielded: a mid-stream retry would silently restart the body under the
+        consumer (``_stream_to_file`` would write the prefix twice), so once
+        bytes have flowed a failure raises and the caller re-runs.
+        """
         self._check_auth()
-        try:
-            with self.client.stream("GET", self._url(endpoint), params=params) as response:
-                if not response.is_success:
-                    response.read()
-                    raise_for_response(response)
-                yield from response.iter_bytes()
-        except APIError:
-            # Already typed by raise_for_response; don't rewrap it as its own
-            # cause below.
-            raise
-        except Exception as exc:
-            raise self._wrap_transport_errors(exc) from exc
+        for attempt in range(IDEMPOTENT_RETRY_ATTEMPTS):
+            last = attempt == IDEMPOTENT_RETRY_ATTEMPTS - 1
+            yielded = False
+            try:
+                with self.client.stream("GET", self._url(endpoint), params=params) as response:
+                    if not response.is_success:
+                        response.read()
+                        raise_for_response(response)
+                    for chunk in response.iter_bytes():
+                        yielded = True
+                        yield chunk
+                return
+            except APIError as exc:
+                # Already typed by raise_for_response.
+                if yielded or last or not isinstance(exc, RetryableAPIError):
+                    raise
+                time.sleep(retry_delay(exc, attempt))
+            except Exception as exc:
+                error = self._wrap_transport_errors(exc)
+                if error is exc:
+                    raise
+                if yielded or last:
+                    raise error from exc
+                time.sleep(retry_delay(error, attempt))
 
     def close(self) -> None:
         self.client.close()

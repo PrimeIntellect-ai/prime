@@ -18,7 +18,6 @@ effect of episode-grouped uploads), and the dot-path query compiler (needs the
 server-side field registry).
 """
 
-import random
 import time
 from pathlib import Path
 from typing import Callable, Dict, Iterable, Iterator, List, Optional, Union
@@ -29,7 +28,7 @@ from .batching import (
     iter_batches,
     read_jsonl_lines,
 )
-from .core.client import TracesAPIClient
+from .core.client import TracesAPIClient, retry_delay
 from .exceptions import RetryableAPIError, TransportError
 from .models import (
     EpisodeDetail,
@@ -41,11 +40,6 @@ from .models import (
 )
 
 DEFAULT_MAX_ATTEMPTS = 5
-_BACKOFF_BASE_SECONDS = 1.0
-_BACKOFF_CAP_SECONDS = 30.0
-# Retry-After is server-controlled input (and may come from a gateway's
-# HTTP-date far in the future); honor it, but never let it park the uploader.
-_RETRY_AFTER_CAP_SECONDS = 60.0
 
 
 def _build_params(
@@ -147,6 +141,8 @@ class TracesClient:
         compress: bool,
         max_attempts: int,
     ) -> dict:
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be at least 1")
         last_error: Optional[Exception] = None
         for attempt in range(max_attempts):
             try:
@@ -162,15 +158,7 @@ class TracesClient:
                 last_error = exc
                 if attempt == max_attempts - 1:
                     break
-                delay = getattr(exc, "retry_after", None)
-                if delay is None:
-                    delay = min(
-                        _BACKOFF_CAP_SECONDS,
-                        _BACKOFF_BASE_SECONDS * (2**attempt),
-                    ) * (0.5 + random.random())
-                else:
-                    delay = min(delay, _RETRY_AFTER_CAP_SECONDS)
-                time.sleep(delay)
+                time.sleep(retry_delay(exc, attempt))
         assert last_error is not None
         raise last_error
 
@@ -225,9 +213,9 @@ class TracesClient:
     def iter(self, **filters) -> Iterator[TraceSummary]:
         """Iterate all matching trace summaries across pages.
 
-        Reads are not retried (only uploads are): a transient failure
-        mid-iteration raises to the caller, who can resume from the last
-        page by passing ``cursor=``.
+        Transient failures are retried inside the API client with a bounded
+        budget; one that survives retries raises to the caller, who can
+        resume from the last completed page by passing ``cursor=``.
         """
         cursor = filters.pop("cursor", None)
         while True:

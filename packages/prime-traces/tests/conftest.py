@@ -47,7 +47,13 @@ def make_client() -> Callable[..., TracesClient]:
 
 @pytest.fixture(autouse=True)
 def no_sleep(monkeypatch):
-    """Record retry sleeps instead of actually sleeping."""
+    """Record retry sleeps instead of actually sleeping.
+
+    Upload retries sleep in ``traces``; idempotent read retries sleep in
+    ``core.client``. One list records both so tests assert on delays without
+    caring which loop slept.
+    """
     sleeps: list = []
     monkeypatch.setattr("prime_traces.traces.time.sleep", sleeps.append)
+    monkeypatch.setattr("prime_traces.core.client.time.sleep", sleeps.append)
     return sleeps

@@ -1,6 +1,7 @@
 """Sandbox client implementations."""
 
 import asyncio
+import contextlib
 import json
 import os
 import re
@@ -14,6 +15,8 @@ from typing import Any, Dict, List, Literal, NoReturn, Optional, TypeVar
 
 import aiofiles
 import httpx
+from pyqwest import Client as PyqwestClient
+from pyqwest import HTTPTransport
 from connectrpc.client import ConnectClient, ConnectClientSync
 from connectrpc.code import Code
 from connectrpc.errors import ConnectError
@@ -1999,7 +2002,21 @@ class AsyncSandboxClient:
         gateway_url = auth["gateway_url"].rstrip("/")
         base_url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}"
         headers = {"Authorization": f"Bearer {auth['token']}"}
-        rpc_client = ConnectClient(base_url)
+        # One dedicated HTTP connection per live process. The shared default
+        # transport multiplexes every RPC in the process onto one HTTP/2
+        # connection, and the gateway caps a connection at 100 concurrent
+        # streams. Each live process pins one stream for its whole lifetime,
+        # so accumulated processes starve stdin/signal RPCs into their
+        # deadline (deadline_exceeded) and queue new process streams for
+        # minutes. A private transport keeps a process competing only with
+        # itself; AsyncSandboxProcess releases it on close.
+        try:
+            # pyqwest >= 0.7 leaves system CA trust off for bare transports.
+            transport = HTTPTransport(tls_include_system_certs=True)
+        except TypeError:  # pyqwest 0.6.x trusts system CAs by default
+            transport = HTTPTransport()
+        http_client = PyqwestClient(transport=transport)
+        rpc_client = ConnectClient(base_url, http_client=http_client)
         request = build_command_session_start_request(
             command,
             working_dir,
@@ -2020,6 +2037,7 @@ class AsyncSandboxClient:
                 COMMAND_SESSION_SEND_INPUT_RPC_METHOD,
                 _PROCESS_INPUT_TIMEOUT_MS,
                 "stdin",
+                http_client=http_client,
             )
 
         async def send_signal(pid: int, signal: Literal["terminate", "kill"]) -> None:
@@ -2029,14 +2047,21 @@ class AsyncSandboxClient:
                 COMMAND_SESSION_SEND_SIGNAL_RPC_METHOD,
                 _PROCESS_SIGNAL_TIMEOUT_MS,
                 "signal",
+                http_client=http_client,
             )
 
-        return await AsyncSandboxProcess._create(
-            rpc_client,
-            stream,
-            write_stdin,
-            send_signal,
-        )
+        try:
+            return await AsyncSandboxProcess._create(
+                rpc_client,
+                stream,
+                write_stdin,
+                send_signal,
+                transport=transport,
+            )
+        except BaseException:
+            with contextlib.suppress(Exception):
+                await transport.aclose()
+            raise
 
     async def _execute_process_control_rpc(
         self,
@@ -2045,6 +2070,7 @@ class AsyncSandboxClient:
         method: MethodInfo[_RequestMessage, _ResponseMessage],
         timeout_ms: int,
         operation: str,
+        http_client: Optional[PyqwestClient] = None,
     ) -> None:
         """Run one live-process control RPC with current sandbox auth."""
         reauthed = False
@@ -2053,7 +2079,7 @@ class AsyncSandboxClient:
             gateway_url = auth["gateway_url"].rstrip("/")
             base_url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}"
             headers = {"Authorization": f"Bearer {auth['token']}"}
-            rpc_client = ConnectClient(base_url)
+            rpc_client = ConnectClient(base_url, http_client=http_client)
             try:
                 await rpc_client.execute_unary(
                     request=request,

@@ -3,7 +3,7 @@
 import asyncio
 import contextlib
 from collections.abc import AsyncIterator, Awaitable, Callable
-from typing import Literal
+from typing import Any, Literal
 
 from connectrpc.client import ConnectClient
 from connectrpc.errors import ConnectError
@@ -67,11 +67,13 @@ class AsyncSandboxProcess:
         stream: AsyncIterator[Message],
         write_stdin: _WriteStdin,
         send_signal: _SendSignal,
+        transport: Any = None,
     ) -> None:
         self.stdout = _AsyncProcessStream()
         self.stderr = _AsyncProcessStream()
         self._stream_client = stream_client
         self._stream = stream
+        self._transport = transport
         self._write_stdin = write_stdin
         self._send_process_signal = send_signal
         self._remote_exited = False
@@ -96,8 +98,9 @@ class AsyncSandboxProcess:
         stream: AsyncIterator[Message],
         write_stdin: _WriteStdin,
         send_signal: _SendSignal,
+        transport: Any = None,
     ) -> "AsyncSandboxProcess":
-        process = cls(stream_client, stream, write_stdin, send_signal)
+        process = cls(stream_client, stream, write_stdin, send_signal, transport)
         try:
             await asyncio.shield(process._started)
         except asyncio.CancelledError:
@@ -196,6 +199,12 @@ class AsyncSandboxProcess:
                     APIError("Process closed before its exit status was observed")
                 )
             await self._stream_client.close()
+            # Dropping the dedicated transport tears down this process's
+            # connection outright, so its gateway stream slot is released
+            # even when the stream itself is wedged.
+            if self._transport is not None:
+                with contextlib.suppress(Exception):
+                    await self._transport.aclose()
             self._closed = True
 
     async def _wait_for_exit_event(self) -> bool:

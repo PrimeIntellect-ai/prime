@@ -15,13 +15,13 @@ from typing import Any, Dict, List, Literal, NoReturn, Optional, TypeVar
 
 import aiofiles
 import httpx
-from pyqwest import Client as PyqwestClient
-from pyqwest import HTTPTransport
 from connectrpc.client import ConnectClient, ConnectClientSync
 from connectrpc.code import Code
 from connectrpc.errors import ConnectError
 from connectrpc.method import MethodInfo
 from google.protobuf.message import Message
+from pyqwest import Client as PyqwestClient
+from pyqwest import HTTPTransport
 from tenacity import (
     retry,
     retry_if_exception,

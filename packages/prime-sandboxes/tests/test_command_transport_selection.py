@@ -154,7 +154,7 @@ async def test_async_open_process_streams_vm_command_session(monkeypatch):
     terminated = asyncio.Event()
 
     class _FakeConnectClient:
-        def __init__(self, address: str):
+        def __init__(self, address: str, *, http_client=None):
             self.address = address
 
         def execute_server_stream(self, **kwargs):

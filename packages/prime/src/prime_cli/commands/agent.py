@@ -1,19 +1,25 @@
 """Prime Agent launcher."""
 
+import hashlib
 import os
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 import typer
 
+from .. import __version__
 from ..utils import get_console
 
 PRIME_AGENT_COMMAND = "prime-agent"
-PRIME_AGENT_INSTALLER_URL = "https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev/install.sh"
+PRIME_AGENT_INSTALLER_URL = "https://app.primeintellect.ai/prime-agent/install.sh"
+# Update only after reviewing a new installer published at the URL above.
+PRIME_AGENT_INSTALLER_SHA256 = (
+    "38d14a1be73b325652c7ce8342e3bf19335721837192855a7907732caf8e6d04"
+)
 MAX_INSTALLER_BYTES = 1024 * 1024
 
 console = get_console()
@@ -38,8 +44,12 @@ def _find_agent() -> str | None:
 
 
 def _download_installer() -> bytes:
+    request = Request(
+        PRIME_AGENT_INSTALLER_URL,
+        headers={"User-Agent": f"prime-cli/{__version__}"},
+    )
     try:
-        with urlopen(PRIME_AGENT_INSTALLER_URL, timeout=30) as response:
+        with urlopen(request, timeout=30) as response:
             installer = response.read(MAX_INSTALLER_BYTES + 1)
     except (HTTPError, URLError, TimeoutError, OSError) as exc:
         console.print(f"[red]Failed to download the Prime Agent installer:[/red] {exc}")
@@ -47,6 +57,11 @@ def _download_installer() -> bytes:
 
     if len(installer) > MAX_INSTALLER_BYTES:
         console.print("[red]Failed to download Prime Agent:[/red] installer is unexpectedly large.")
+        raise typer.Exit(1)
+
+    actual_sha256 = hashlib.sha256(installer).hexdigest()
+    if actual_sha256 != PRIME_AGENT_INSTALLER_SHA256:
+        console.print("[red]Failed to download Prime Agent:[/red] installer checksum mismatch.")
         raise typer.Exit(1)
 
     if not installer.startswith(b"#!/bin/sh"):
@@ -73,8 +88,8 @@ def _install_agent() -> None:
             suffix=".sh",
             delete=False,
         ) as file:
-            file.write(installer)
             installer_path = Path(file.name)
+            file.write(installer)
 
         result = subprocess.run([shell, str(installer_path)])
     except OSError as exc:
@@ -90,13 +105,10 @@ def _install_agent() -> None:
 
 def _run_agent(executable: str, args: list[str]) -> None:
     try:
-        result = subprocess.run([executable, *args])
+        os.execv(executable, [executable, *args])
     except OSError as exc:
         console.print(f"[red]Failed to launch Prime Agent:[/red] {exc}")
         raise typer.Exit(1) from exc
-
-    if result.returncode != 0:
-        raise typer.Exit(result.returncode)
 
 
 def agent_command(ctx: typer.Context) -> None:

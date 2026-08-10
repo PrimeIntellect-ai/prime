@@ -1410,7 +1410,7 @@ def _post_setup_call_to_action(options: LabSetupOptions) -> Panel:
         "[bold green]$[/bold green]", "prime eval run my-env -m openai/gpt-5.4-nano -n 5"
     )
     command_table.add_row("[bold green]$[/bold green]", "prime eval view")
-    command_table.add_row("[bold green]$[/bold green]", "prime rl run configs/rl/qwen-3-5.toml")
+    command_table.add_row("[bold green]$[/bold green]", "prime train configs/rl/qwen.toml")
     command_table.add_row(
         "[bold green]$[/bold green]", "prime gepa run my-env -m openai/gpt-5.4-nano"
     )

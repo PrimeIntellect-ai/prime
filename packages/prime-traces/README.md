@@ -10,8 +10,8 @@ Prime Traces service.
   twice
 - **Deterministic batching** - JSONL files are split at byte thresholds without
   rewriting a single line
-- **Typed reads** - Cursor-paginated summaries over extracted columns, raw
-  document retrieval, and streaming exports
+- **Typed reads** - Cursor-paginated summaries over extracted columns and raw
+  document retrieval
 - **Type-safe** - Full type hints and Pydantic models
 - **No CLI dependencies** - Pure SDK, usable in producers and services
 
@@ -66,12 +66,15 @@ summary = client.get("8d3f1a2b...")
 raw = client.get_raw("8d3f1a2b...")          # exact stored trace document
 client.download_raw("8d3f1a2b...", "t.json")  # streamed, for large traces
 
-client.delete("8d3f1a2b...")
-client.delete_run("run_9f3k2m")
-
-# Stream a filtered export to disk (same filter vocabulary as list):
-client.export("high_reward.jsonl", run_id="run_9f3k2m", reward_min=0.9)
+client.delete("8d3f1a2b...")        # NotFoundError if the owner has no such trace
+client.delete_run("run_9f3k2m")     # one mutation, synchronous, no job handle
 ```
+
+Deletion is not a no-op on absent rows: the service checks existence first and
+answers 404, so repeating a delete that already succeeded raises
+`NotFoundError`. (The design docs specify it as idempotent; this tracks the
+service as built.) A delete whose response is lost in transit is still safe —
+the retry's 404 is absorbed.
 
 Episodes are read-only resources:
 
@@ -88,9 +91,7 @@ client.list_episode_traces(episode_id)    # member trace summaries, paginated
 Response shapes mirror the service's pinned models: pages are
 `{items, next_cursor}`, a trace summary nests `model` / `score` / `execution`,
 an episode nests `error` and (on point lookup) the member-trace aggregate
-under `traces`, and unrecorded fields come back as `null`. The one still
-provisional shape is `export()`'s filter parameters — the service route does
-not declare them yet.
+under `traces`, and unrecorded fields come back as `null`.
 
 ## Configuration
 
@@ -103,9 +104,11 @@ not declare them yet.
 
 ## Not implemented yet (open v0 contract decisions)
 
-- The exports _job_ API (`POST /traces/exports`, `GET /traces/exports/{job_id}`)
-  — unimplemented in the service in v0 until export results have somewhere
-  to land. The streaming `GET /traces/export` is what `export()` wraps.
+- Exports, in any form. The service publishes `GET /traces/export` and the two
+  job routes, but all three handlers raise `NotImplementedError` — answered as
+  500, not the 501 they document — and the streaming route declares no query
+  parameters, so there is no filter vocabulary to bind to. Wrapping it now
+  would ship a method that cannot succeed.
 - `/search` and free-text queries — deferred with the `trace_components`
   projection.
 - The `environment_id` filters (traces and episodes) — pending a populated

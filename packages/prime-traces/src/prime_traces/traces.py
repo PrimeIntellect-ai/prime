@@ -9,12 +9,13 @@ platform repo): pages are ``{items, next_cursor}``, trace summaries nest
 aggregate.
 
 Deliberately not implemented (open v0 contract decisions — do not freeze
-them here): the exports *job* API (the streaming ``GET /traces/export`` is
-what ``export`` wraps; its filter vocabulary is not declared server-side
-yet), ``/search``, the ``environment_id`` filters on traces and episodes (no
-populated column behind them yet), episode writes (episodes are read-only,
-written only as a side
-effect of episode-grouped uploads), and the dot-path query compiler (needs the
+them here): exports in any form — the service publishes ``GET /traces/export``
+and the job routes, but all three handlers raise ``NotImplementedError``,
+which FastAPI answers as 500, and the streaming route declares no query
+parameters, so there is no filter vocabulary to bind to; ``/search``; the
+``environment_id`` filters on traces and episodes (no populated column behind
+them yet); episode writes (episodes are read-only, written only as a side
+effect of episode-grouped uploads); and the dot-path query compiler (needs the
 server-side field registry).
 """
 
@@ -269,66 +270,32 @@ class TracesClient:
         """Delete every stored copy of one trace (202 Accepted).
 
         ``created_at`` is an optional performance hint that lets the service
-        prune on its ordering-key prefix; correctness does not depend on it.
+        prune on its ordering-key prefix; correctness does not depend on it,
+        but a hint matching no stored copy is a 404 even when the trace exists
+        under another timestamp.
+
+        Raises ``NotFoundError`` when the owner has no such trace — including
+        on a repeat of a delete that already succeeded. The design docs
+        specify deletion as idempotent at the API level; the service checks
+        existence first and answers 404 instead. Callers treating deletion as
+        "make sure this is gone" should catch ``NotFoundError``.
         """
         params = {"created_at": created_at} if created_at else None
-        self.client.delete_json(f"/traces/{trace_id}", params=params)
+        self.client.delete(f"/traces/{trace_id}", params=params)
 
-    def delete_run(self, run_id: str) -> Optional[str]:
-        """Delete every trace in a run. Returns the async job id, if any."""
-        result = self.client.delete_json("/traces", params={"run_id": run_id})
-        job_id = result.get("job_id")
-        return str(job_id) if job_id is not None else None
+    def delete_run(self, run_id: str) -> None:
+        """Delete every trace in a run (202 Accepted).
 
-    # -- export -------------------------------------------------------------
+        One mutation over the ``run_id`` predicate, not N per-trace calls, and
+        synchronous: the service answers 202 with an empty body, so there is
+        no job to poll. (The design docs specify ``202 { job_id }``; nothing
+        server-side issues one, so no job handle is returned here rather than
+        a permanent ``None``.)
 
-    def export(
-        self,
-        dest: Union[str, Path],
-        *,
-        run_id: Optional[str] = None,
-        model_id: Optional[str] = None,
-        model_provider: Optional[str] = None,
-        task_id: Optional[str] = None,
-        reward_min: Optional[float] = None,
-        reward_max: Optional[float] = None,
-        outcome: Optional[str] = None,
-        has_error: Optional[bool] = None,
-        is_truncated: Optional[bool] = None,
-        created_after: Optional[str] = None,
-        created_before: Optional[str] = None,
-        context: Optional[Dict[str, str]] = None,
-    ) -> int:
-        """Stream a filtered export (``GET /traces/export``) to ``dest``.
-
-        Takes the same filter vocabulary as ``list`` — no pagination: the
-        export is one file, resumable by re-running. Returns bytes written.
-        Egress is metered on bytes actually sent, so a failed stream still
-        costs for the bytes that made it; always stream to disk rather than
-        buffering.
-
-        A format parameter (raw JSONL vs. column projection) is not exposed
-        yet — the service route does not declare its parameters, so this
-        filter vocabulary is the one shape here that is still a proposal. The
-        exports *job* API is unimplemented in v0 and deliberately not wrapped.
+        Episode rows are not touched. Raises ``NotFoundError`` when the run
+        holds no traces for this owner — see ``delete`` on repeats.
         """
-        params = _build_params(
-            (
-                ("run_id", run_id),
-                ("model_id", model_id),
-                ("model_provider", model_provider),
-                ("task_id", task_id),
-                ("reward_min", reward_min),
-                ("reward_max", reward_max),
-                ("outcome", outcome),
-                ("has_error", has_error),
-                ("is_truncated", is_truncated),
-                ("created_after", created_after),
-                ("created_before", created_before),
-            ),
-            context,
-        )
-        return self._stream_to_file("/traces/export", params, dest)
+        self.client.delete("/traces", params={"run_id": run_id})
 
     # -- episodes (read-only in v0) -----------------------------------------
 

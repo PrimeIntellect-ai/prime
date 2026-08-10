@@ -305,12 +305,53 @@ class TestDelete:
         assert captured["path"] == "/api/v1/traces/8d3f1a2b"
         assert captured["params"] == {"created_at": "2026-07-20T18:02:11.482Z"}
 
-    def test_delete_run_returns_job_id(self, make_client):
-        def handler(request: httpx.Request) -> httpx.Response:
-            assert dict(request.url.params) == {"run_id": "run_9f3k2m"}
-            return httpx.Response(202, json={"job_id": "job-1"})
+    def test_delete_run_sends_run_id_and_expects_no_body(self, make_client):
+        captured = {}
 
-        assert make_client(handler).delete_run("run_9f3k2m") == "job-1"
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["method"] = request.method
+            captured["path"] = request.url.path
+            captured["params"] = dict(request.url.params)
+            # The service answers 202 with an empty body: the run delete is one
+            # synchronous mutation, so there is no job handle to return.
+            return httpx.Response(202)
+
+        assert make_client(handler).delete_run("run_9f3k2m") is None
+        assert captured["method"] == "DELETE"
+        assert captured["path"] == "/api/v1/traces"
+        assert captured["params"] == {"run_id": "run_9f3k2m"}
+
+    def test_absent_trace_raises_not_found(self, make_client):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                404,
+                json={"error": {"code": "trace_not_found", "message": "No trace 'x'"}},
+            )
+
+        with pytest.raises(NotFoundError) as caught:
+            make_client(handler).delete("x")
+        assert caught.value.code == "trace_not_found"
+
+    def test_404_after_a_retried_attempt_is_treated_as_deleted(self, make_client):
+        """A delete that lands and loses its response must not report failure.
+
+        The service is not idempotent — it checks existence first and 404s when
+        nothing matches — so the retry of a delete that already succeeded sees
+        404. Absorbed, because the attempt before it is what removed the rows.
+        """
+        attempts = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            attempts.append(request.url.path)
+            if len(attempts) == 1:
+                raise httpx.ReadError("connection reset")
+            return httpx.Response(
+                404,
+                json={"error": {"code": "trace_not_found", "message": "No trace 'x'"}},
+            )
+
+        make_client(handler).delete("8d3f1a2b")
+        assert len(attempts) == 2
 
 
 class TestTeamHeader:
@@ -344,40 +385,29 @@ class TestTeamHeader:
         assert captured["team"] is None
 
 
-class TestExport:
-    def test_export_streams_filtered_body_to_file(self, make_client, tmp_path):
-        body = b'{"id":"a"}\n{"id":"b"}\n'
+class TestStreamToFile:
+    """`download_raw` is the only streamed-to-disk read in v0 — exports are
+    unimplemented server-side — so it carries the clobber-safety rules.
 
+    The pre-request failure case lives in `TestPointReads`; this is the harder
+    one, where bytes have already been written before the failure.
+    """
+
+    def test_partial_is_cleaned_up_when_the_stream_breaks_midway(self, make_client, tmp_path):
         def handler(request: httpx.Request) -> httpx.Response:
-            assert request.url.path == "/api/v1/traces/export"
-            assert dict(request.url.params) == {
-                "run_id": "run_9f3k2m",
-                "reward_min": "0.9",
-                "context.source": "hosted_eval",
-            }
-            return httpx.Response(200, content=body)
+            def body():
+                yield b'{"version":4,'
+                raise httpx.ReadError("connection reset")
 
-        dest = tmp_path / "export.jsonl"
-        written = make_client(handler).export(
-            dest,
-            run_id="run_9f3k2m",
-            reward_min=0.9,
-            context={"source": "hosted_eval"},
-        )
-        assert written == len(body)
-        assert dest.read_bytes() == body
+            return httpx.Response(200, content=body())
 
-    def test_export_failure_preserves_existing_file(self, make_client, tmp_path):
-        dest = tmp_path / "export.jsonl"
-        dest.write_bytes(b"previous export")
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(401, json={"detail": "expired token"})
-
-        with pytest.raises(UnauthorizedError):
-            make_client(handler).export(dest, run_id="run_9f3k2m")
-        assert dest.read_bytes() == b"previous export"
-        assert not (tmp_path / "export.jsonl.partial").exists()
+        dest = tmp_path / "trace.json"
+        with pytest.raises(TransportError):
+            make_client(handler).download_raw("8d3f1a2b", dest)
+        # A mid-stream failure is never retried under the consumer, so the
+        # prefix that did arrive is discarded rather than left as a document.
+        assert not dest.exists()
+        assert not (tmp_path / "trace.json.partial").exists()
 
 
 class TestEpisodes:

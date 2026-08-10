@@ -71,10 +71,19 @@ class ErrorCode(str, Enum):
     # Auth (401/403/503)
     UNAUTHENTICATED = "unauthenticated"
     FORBIDDEN = "forbidden"
+    # Distinct from `forbidden`, which is about the token: this account is not
+    # in the private beta at all. The two need different codes because they
+    # need different actions — mint a token with the right scope, versus ask to
+    # be let in. Neither is fixed by retrying. Expect this one to dominate 403s
+    # while the owner allowlist is enabled.
+    SERVICE_NOT_ENABLED = "service_not_enabled"
     AUTH_UNAVAILABLE = "auth_unavailable"
 
     # Not found (404)
     TRACE_NOT_FOUND = "trace_not_found"
+    # A run holding no traces for this owner. The store records no run entity,
+    # so "no such run" and "run already emptied" are the same observation.
+    RUN_NOT_FOUND = "run_not_found"
     EPISODE_NOT_FOUND = "episode_not_found"
     EXPORT_JOB_NOT_FOUND = "export_job_not_found"
 

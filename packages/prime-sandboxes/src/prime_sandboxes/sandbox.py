@@ -6,6 +6,7 @@ import os
 import re
 import shlex
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -1146,6 +1147,13 @@ class SandboxClient:
                 )
                 # Servers without windowed-read support omit `truncated`.
                 return response.content, bool(response.truncated)
+            except SandboxFileTooLargeError:
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    local_path = os.path.join(temp_dir, "output")
+                    self.download_file(sandbox_id, path, local_path, timeout=timeout)
+                    with open(local_path, "rb") as output:
+                        output.seek(-JOB_OUTPUT_TAIL_BYTES, os.SEEK_END)
+                        return output.read().decode(errors="replace"), True
             except SandboxFileNotFoundError:
                 return "", False
 
@@ -2350,6 +2358,13 @@ class AsyncSandboxClient:
                 )
                 # Servers without windowed-read support omit `truncated`.
                 return response.content, bool(response.truncated)
+            except SandboxFileTooLargeError:
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    local_path = os.path.join(temp_dir, "output")
+                    await self.download_file(sandbox_id, path, local_path, timeout=timeout)
+                    async with aiofiles.open(local_path, "rb") as output:
+                        await output.seek(-JOB_OUTPUT_TAIL_BYTES, os.SEEK_END)
+                        return (await output.read()).decode(errors="replace"), True
             except SandboxFileNotFoundError:
                 return "", False
 

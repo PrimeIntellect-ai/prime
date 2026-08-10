@@ -1,10 +1,12 @@
-"""Unit tests verifying that get_background_job forwards the timeout kwarg."""
+"""Unit tests for background job output retrieval."""
 
+from pathlib import Path
 from typing import Any, List, Optional, cast
 
 import pytest
 
 from prime_sandboxes.core.client import APIClient
+from prime_sandboxes.exceptions import SandboxFileTooLargeError
 from prime_sandboxes.models import BackgroundJob, ReadFileResponse
 from prime_sandboxes.sandbox import AsyncSandboxClient, SandboxClient
 
@@ -141,6 +143,46 @@ def test_sync_get_background_job_handles_legacy_read_file_response():
     assert status.stderr_truncated is False
 
 
+def test_sync_get_background_job_downloads_large_output_tail(monkeypatch):
+    client = SandboxClient(APIClient(api_key="test-key"))
+    client_any = cast(Any, client)
+    monkeypatch.setattr("prime_sandboxes.sandbox.JOB_OUTPUT_TAIL_BYTES", 6)
+
+    def fake_read_file(
+        sandbox_id: str,
+        file_path: str,
+        timeout: Optional[int] = None,
+        offset: Optional[int] = None,
+        length: Optional[int] = None,
+    ) -> ReadFileResponse:
+        if file_path.endswith(".exit"):
+            return _whole_file("0\n")
+        raise SandboxFileTooLargeError("output too large")
+
+    downloads = []
+
+    def fake_download_file(
+        sandbox_id: str,
+        file_path: str,
+        local_file_path: str,
+        timeout: Optional[int] = None,
+    ) -> None:
+        downloads.append((file_path, timeout))
+        content = b"prefixstdout" if file_path.endswith(".stdout") else b"prefixstderr"
+        Path(local_file_path).write_bytes(content)
+
+    client_any.read_file = fake_read_file
+    client_any.download_file = fake_download_file
+
+    status = client.get_background_job("sbx-123", _make_job(), timeout=45)
+
+    assert status.stdout == "stdout"
+    assert status.stderr == "stderr"
+    assert status.stdout_truncated is True
+    assert status.stderr_truncated is True
+    assert downloads == [("/tmp/job_abc.stdout", 45), ("/tmp/job_abc.stderr", 45)]
+
+
 @pytest.mark.asyncio
 async def test_async_get_background_job_handles_legacy_read_file_response():
     client = AsyncSandboxClient(api_key="test-key")
@@ -166,6 +208,47 @@ async def test_async_get_background_job_handles_legacy_read_file_response():
     assert status.stdout == "out"
     assert status.stdout_truncated is False
     assert status.stderr_truncated is False
+
+
+@pytest.mark.asyncio
+async def test_async_get_background_job_downloads_large_output_tail(monkeypatch):
+    client = AsyncSandboxClient(api_key="test-key")
+    client_any = cast(Any, client)
+    monkeypatch.setattr("prime_sandboxes.sandbox.JOB_OUTPUT_TAIL_BYTES", 6)
+
+    async def fake_read_file(
+        sandbox_id: str,
+        file_path: str,
+        timeout: Optional[int] = None,
+        offset: Optional[int] = None,
+        length: Optional[int] = None,
+    ) -> ReadFileResponse:
+        if file_path.endswith(".exit"):
+            return _whole_file("0\n")
+        raise SandboxFileTooLargeError("output too large")
+
+    downloads = []
+
+    async def fake_download_file(
+        sandbox_id: str,
+        file_path: str,
+        local_file_path: str,
+        timeout: Optional[int] = None,
+    ) -> None:
+        downloads.append((file_path, timeout))
+        content = b"prefixstdout" if file_path.endswith(".stdout") else b"prefixstderr"
+        Path(local_file_path).write_bytes(content)
+
+    client_any.read_file = fake_read_file
+    client_any.download_file = fake_download_file
+
+    status = await client.get_background_job("sbx-123", _make_job(), timeout=45)
+
+    assert status.stdout == "stdout"
+    assert status.stderr == "stderr"
+    assert status.stdout_truncated is True
+    assert status.stderr_truncated is True
+    assert downloads == [("/tmp/job_abc.stdout", 45), ("/tmp/job_abc.stderr", 45)]
 
 
 @pytest.mark.asyncio

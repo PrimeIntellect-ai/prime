@@ -2,6 +2,7 @@ import httpx
 import pytest
 
 from prime_traces import (
+    ErrorCode,
     ForbiddenError,
     NotFoundError,
     RetryableAPIError,
@@ -176,6 +177,27 @@ class TestPointReads:
         assert exc_info.value.code == "forbidden"
         assert "traces:read" in str(exc_info.value)
 
+    def test_service_not_enabled_is_a_nameable_403(self, make_client):
+        """The owner allowlist gates every public route while the beta runs, so
+        this is the 403 a new account is most likely to see — and the code has
+        to be nameable, because it is the one a caller cannot fix by minting a
+        better token."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                403,
+                json={
+                    "error": {
+                        "code": "service_not_enabled",
+                        "message": "Prime Traces is not enabled for this account",
+                    }
+                },
+            )
+
+        with pytest.raises(ForbiddenError) as exc_info:
+            make_client(handler).get("8d3f1a2b")
+        assert ErrorCode(exc_info.value.code) is ErrorCode.SERVICE_NOT_ENABLED
+
 
 class TestReadRetries:
     """Idempotent requests retry transient failures with a bounded budget,
@@ -332,7 +354,7 @@ class TestDelete:
             make_client(handler).delete("x")
         assert caught.value.code == "trace_not_found"
 
-    def test_404_after_a_retried_attempt_is_treated_as_deleted(self, make_client):
+    def test_404_after_an_ambiguous_attempt_is_treated_as_deleted(self, make_client):
         """A delete that lands and loses its response must not report failure.
 
         The service is not idempotent — it checks existence first and 404s when
@@ -353,6 +375,48 @@ class TestDelete:
         make_client(handler).delete("8d3f1a2b")
         assert len(attempts) == 2
 
+    @pytest.mark.parametrize("status", [502, 504])
+    def test_404_after_a_gateway_failure_is_treated_as_deleted(self, make_client, status):
+        """A gateway may have forwarded the request upstream before failing, so
+        502/504 is as ambiguous as a dropped connection."""
+        attempts = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            attempts.append(request.url.path)
+            if len(attempts) == 1:
+                return httpx.Response(status, text="upstream connect error")
+            return httpx.Response(
+                404,
+                json={"error": {"code": "trace_not_found", "message": "No trace 'x'"}},
+            )
+
+        make_client(handler).delete("8d3f1a2b")
+        assert len(attempts) == 2
+
+    @pytest.mark.parametrize("status", [429, 503])
+    def test_404_after_the_service_declined_is_not_absorbed(self, make_client, status):
+        """429/503 are the service refusing the work, so nothing can have been
+        deleted behind one. A 404 after it is a real "no such trace" and must
+        surface — absorbing it would report a delete that never happened as
+        accepted."""
+        attempts = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            attempts.append(request.url.path)
+            if len(attempts) == 1:
+                return httpx.Response(
+                    status,
+                    json={"error": {"code": "storage_unavailable", "message": "down"}},
+                )
+            return httpx.Response(
+                404,
+                json={"error": {"code": "run_not_found", "message": "No traces in run 'nope'"}},
+            )
+
+        with pytest.raises(NotFoundError) as caught:
+            make_client(handler).delete_run("nope")
+        assert caught.value.code == "run_not_found"
+        assert len(attempts) == 2
 
 
 class TestTeamHeader:

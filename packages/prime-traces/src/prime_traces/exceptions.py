@@ -57,17 +57,28 @@ class PaymentRequiredError(APIError):
 
 
 class ForbiddenError(APIError):
-    """403 ``forbidden`` — the credential is valid but lacks the required
-    scope on the ``traces`` key.
+    """403 — the credential is valid but the call is not allowed. Branch on
+    ``code`` (``models.ErrorCode``), because the two causes need different
+    actions and only one of them is about the token:
 
-    Distinct from 401 by design: re-authenticating with the same token never
-    helps. This is an expected path, not an edge case — hosted-eval worker
-    tokens are minted write-only, so any read they attempt lands here.
+    - ``forbidden`` — the token lacks the required scope on the ``traces``
+      key. Mint one that carries it. An expected path, not an edge case:
+      hosted-eval worker tokens are minted write-only, so any read they
+      attempt lands here.
+    - ``service_not_enabled`` — the account is not in the private beta. No
+      token fixes this; ask to be let in. While the owner allowlist is
+      enabled this is the more likely of the two.
+
+    Distinct from 401 by design: re-authenticating never helps for either.
     """
 
 
 class NotFoundError(APIError):
-    """404 — the trace, episode or job does not exist for this owner."""
+    """404 — the trace, run, episode or job does not exist for this owner.
+
+    ``code`` distinguishes them: ``trace_not_found``, ``run_not_found``,
+    ``episode_not_found``, ``export_job_not_found``.
+    """
 
 
 class ValidationRejectedError(APIError):

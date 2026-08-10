@@ -44,6 +44,13 @@ from .config import Config
 #: budget — see ``TracesClient._send_with_retry``.
 IDEMPOTENT_RETRY_ATTEMPTS = 3
 
+#: Retryable statuses that leave it unknown whether the request reached the
+#: service. 502/504 come from a gateway, which may already have forwarded the
+#: request upstream and then lost or timed out the response. 429 and 503 are
+#: deliberately absent: those are the service itself declining the work, so
+#: nothing can have happened behind them.
+_AMBIGUOUS_RETRY_STATUSES = frozenset({502, 504})
+
 _BACKOFF_BASE_SECONDS = 1.0
 _BACKOFF_CAP_SECONDS = 30.0
 # Retry-After is server-controlled input (and may come from a gateway's
@@ -293,23 +300,30 @@ class TracesAPIClient:
         endpoint: str,
         params: Optional[Dict[str, Any]],
         *,
-        absent_after_retry_is_success: bool = False,
+        absent_after_ambiguity_is_success: bool = False,
     ) -> httpx.Response:
         """Send with bounded retries on transient failures.
 
         Only for methods a replay cannot make worse: GET, and DELETE, whose
         effect is the same however many times it lands.
 
-        ``absent_after_retry_is_success`` covers the one way a replayed DELETE
-        differs from the first attempt. The design docs specify deletion as
-        idempotent at the API level ("deleting rows that are already masked or
-        absent is still accepted"), but the service checks existence first and
-        answers 404 when nothing matches. So a delete that lands and loses its
-        response to a transport reset gets 404 on the retry — a delete that
-        worked, reported as a failure. Only a 404 on a *retried* attempt is
-        absorbed: on the first attempt nothing has been sent yet, so 404 still
-        means what it says. Remove this once the service is idempotent.
+        ``absent_after_ambiguity_is_success`` covers the one way a replayed
+        DELETE differs from the first attempt. The design docs specify deletion
+        as idempotent at the API level ("deleting rows that are already masked
+        or absent is still accepted"), but the service checks existence first
+        and answers 404 when nothing matches. So a delete that lands and loses
+        its response gets 404 on the retry — a delete that worked, reported as
+        a failure.
+
+        The absorption is gated on the earlier failure being *ambiguous* — a
+        transport error, or a gateway 502/504 — because only those leave open
+        the possibility that this client already removed the rows. A 429 or
+        503 is the service declining the work outright, so a 404 behind one is
+        a genuine "no such trace", and swallowing it would report a delete that
+        never happened as accepted. Remove all of this once the service is
+        idempotent.
         """
+        ambiguous = False
         for attempt in range(IDEMPOTENT_RETRY_ATTEMPTS):
             last = attempt == IDEMPOTENT_RETRY_ATTEMPTS - 1
             try:
@@ -320,6 +334,8 @@ class TracesAPIClient:
                     raise
                 if last:
                     raise error from exc
+                # The request may have been delivered and its response lost.
+                ambiguous = True
                 time.sleep(retry_delay(error, attempt))
                 continue
             try:
@@ -327,10 +343,13 @@ class TracesAPIClient:
             except RetryableAPIError as exc:
                 if last:
                     raise
+                # Sticky: one ambiguous attempt anywhere in the sequence is
+                # enough to explain a later 404, whatever followed it.
+                ambiguous = ambiguous or exc.status_code in _AMBIGUOUS_RETRY_STATUSES
                 time.sleep(retry_delay(exc, attempt))
                 continue
             except NotFoundError:
-                if attempt == 0 or not absent_after_retry_is_success:
+                if not (ambiguous and absent_after_ambiguity_is_success):
                     raise
             return response
         raise AssertionError("unreachable")  # pragma: no cover
@@ -346,11 +365,12 @@ class TracesAPIClient:
     def delete(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> None:
         """Send a DELETE and discard the body — 202 carries none.
 
-        A 404 raised by the first attempt propagates; one raised by a retry is
-        absorbed, because the attempt before it may well have done the work.
+        A 404 propagates unless an earlier attempt failed ambiguously (a
+        transport error, or a gateway 502/504), in which case that attempt may
+        well have done the work. See ``_idempotent_request``.
         """
         self._check_auth()
-        self._idempotent_request("DELETE", endpoint, params, absent_after_retry_is_success=True)
+        self._idempotent_request("DELETE", endpoint, params, absent_after_ambiguity_is_success=True)
 
     def stream_bytes(
         self, endpoint: str, params: Optional[Dict[str, Any]] = None

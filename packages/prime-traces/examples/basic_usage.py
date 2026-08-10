@@ -81,7 +81,11 @@ def main():
             print("\nListing this run's traces...")
             page = client.list(run_id="run_example", limit=10)
             for summary in page.items:
-                print(f"  {summary.trace_id}  reward={summary.score.reward}")
+                # `score` is a nested object, and a null `reward` inside it
+                # means unscored — distinct from a scored 0.0.
+                score = summary.score
+                reward = score.reward if score else None
+                print(f"  {summary.trace_id}  reward={reward}")
 
             if page.items:
                 trace_id = page.items[0].trace_id

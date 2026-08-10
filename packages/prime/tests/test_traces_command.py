@@ -152,16 +152,11 @@ class FakeTracesClient:
         self.calls["download_raw"] = (trace_id, dest)
         return 29
 
-    def export(self, dest, **kwargs):
-        self.calls["export"] = {"dest": dest, **kwargs}
-        return 2 * 1024 * 1024
-
     def delete(self, trace_id, created_at=None):
         self.calls["delete"] = (trace_id, created_at)
 
     def delete_run(self, run_id):
         self.calls["delete_run"] = run_id
-        return "job-1"
 
 
 @pytest.fixture()
@@ -262,15 +257,11 @@ def test_get_command_raw_to_dest_streams(fake_client, tmp_path):
     assert streamed_dest == dest
 
 
-def test_export_command_forwards_filters(fake_client, tmp_path):
-    dest = tmp_path / "export.jsonl"
-    result = runner.invoke(main_app, ["traces", "export", str(dest), "--run-id", "run_9f3k2m"])
-
-    assert result.exit_code == 0, result.output
-    call = fake_client.calls["export"]
-    assert call["dest"] == dest
-    assert call["run_id"] == "run_9f3k2m"
-    assert "2.0 MiB" in result.output
+def test_export_command_is_not_registered(fake_client, tmp_path):
+    """Exports are unimplemented server-side (every handler raises, answering
+    500), so the command is deliberately absent rather than shipped broken."""
+    result = runner.invoke(main_app, ["traces", "export", str(tmp_path / "out.jsonl")])
+    assert result.exit_code != 0
 
 
 def test_delete_command_requires_exactly_one_target(fake_client):
@@ -293,4 +284,4 @@ def test_delete_command_trace_and_run(fake_client):
     result = runner.invoke(main_app, ["traces", "delete", "--run-id", "run_9f3k2m", "--yes"])
     assert result.exit_code == 0, result.output
     assert fake_client.calls["delete_run"] == "run_9f3k2m"
-    assert "job-1" in result.output
+    assert "accepted" in result.output

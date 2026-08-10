@@ -6,6 +6,7 @@ from prime_traces import (
     APIError,
     Batch,
     LineFormat,
+    NotFoundError,
     PaymentRequiredError,
     PrimeTracesError,
     TracesClient,
@@ -285,53 +286,12 @@ def get_trace(
     console.print(table)
 
 
-@app.command("export")
-def export_traces(
-    dest: Path = typer.Argument(..., dir_okay=False, help="Destination file (JSONL)"),
-    run_id: Optional[str] = typer.Option(None, "--run-id", help="Filter by run ID"),
-    task_id: Optional[str] = typer.Option(None, "--task-id", help="Filter by task ID"),
-    model_id: Optional[str] = typer.Option(None, "--model-id", help="Filter by model ID"),
-    outcome: Optional[str] = typer.Option(None, "--outcome", help="Filter by outcome"),
-    has_error: Optional[bool] = typer.Option(
-        None, "--has-error/--no-has-error", help="Filter by error status"
-    ),
-    reward_min: Optional[float] = typer.Option(None, "--reward-min", help="Minimum reward"),
-    reward_max: Optional[float] = typer.Option(None, "--reward-max", help="Maximum reward"),
-    created_after: Optional[str] = typer.Option(None, "--created-after", help="ISO timestamp"),
-    created_before: Optional[str] = typer.Option(None, "--created-before", help="ISO timestamp"),
-) -> None:
-    """Stream a filtered export to a file. Same filters as `list`;
-    resumable by re-running. Exports are metered on bytes transferred."""
-    try:
-        client = _traces_client()
-        written = client.export(
-            dest,
-            run_id=run_id,
-            task_id=task_id,
-            model_id=model_id,
-            outcome=outcome,
-            has_error=has_error,
-            reward_min=reward_min,
-            reward_max=reward_max,
-            created_after=created_after,
-            created_before=created_before,
-        )
-    except typer.Exit:
-        raise
-    except UnauthorizedError as e:
-        console.print(f"[red]Unauthorized:[/red] {str(e)}")
-        raise typer.Exit(1)
-    except PaymentRequiredError as e:
-        console.print(f"[red]Payment Required:[/red] {str(e)}")
-        raise typer.Exit(1)
-    except PrimeTracesError as e:
-        console.print(f"[red]Export failed:[/red] {str(e)}")
-        raise typer.Exit(1)
-    except Exception as e:
-        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
-        console.print_exception(show_locals=True)
-        raise typer.Exit(1)
-    console.print(f"[green]Wrote {written / (1024 * 1024):.1f} MiB to {dest}[/green]")
+# No `export` command yet. The service publishes GET /api/v1/traces/export and
+# the two job routes, but every handler raises NotImplementedError — a 500, not
+# the 501 its docstring claims — and the streaming route declares no query
+# parameters, so there is nothing for filters to bind to. Add this back when the
+# route returns a body and names its parameters; until then `list --output json`
+# plus `get --raw` is the honest export path.
 
 
 @app.command("delete")
@@ -342,7 +302,12 @@ def delete_traces(
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation"),
 ) -> None:
-    """Delete every stored copy of one trace, or a whole run with --run-id."""
+    """Delete every stored copy of one trace, or a whole run with --run-id.
+
+    202 confirms logical deletion, not physical reclamation. Deleting
+    something the owner does not have is an error, not a no-op, so repeating
+    a delete that already succeeded reports "not found".
+    """
     if bool(trace_id) == bool(run_id):
         console.print("[red]Provide exactly one of TRACE_ID or --run-id[/red]")
         raise typer.Exit(1)
@@ -355,14 +320,15 @@ def delete_traces(
         client = _traces_client()
         if trace_id:
             client.delete(trace_id)
-            console.print(f"[green]Deletion of {target} accepted[/green]")
         else:
             assert run_id is not None
-            job_id = client.delete_run(run_id)
-            suffix = f" (job {job_id})" if job_id else ""
-            console.print(f"[green]Deletion of {target} accepted{suffix}[/green]")
+            client.delete_run(run_id)
+        console.print(f"[green]Deletion of {target} accepted[/green]")
     except typer.Exit:
         raise
+    except NotFoundError as e:
+        console.print(f"[red]Not found:[/red] {str(e)}")
+        raise typer.Exit(1)
     except UnauthorizedError as e:
         console.print(f"[red]Unauthorized:[/red] {str(e)}")
         raise typer.Exit(1)

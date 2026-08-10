@@ -3,12 +3,14 @@
 Speaks the wire contract and maps error responses to typed exceptions.
 
 Retry policy is split by what makes a retry safe. Idempotent requests — GET,
-and DELETE, which the service accepts for already-absent rows — are retried
+and DELETE, whose effect is the same however many times it lands — are retried
 here with a small fixed budget, matching the sibling SDKs (prime-sandboxes
-retries idempotent methods on 502/503/504 and transport failures). Uploads
-are POSTs whose retry safety comes from content addressing rather than the
-method, so their loop lives in ``TracesClient``, where the attempt budget is
-caller-configurable and Retry-After is honored against it.
+retries idempotent methods on 502/503/504 and transport failures). DELETE needs
+one extra rule because the service is not idempotent in its *response*: see
+``_idempotent_request``. Uploads are POSTs whose retry safety comes from
+content addressing rather than the method, so their loop lives in
+``TracesClient``, where the attempt budget is caller-configurable and
+Retry-After is honored against it.
 """
 
 import gzip as gzip_module
@@ -286,13 +288,27 @@ class TracesAPIClient:
     # -- read path ----------------------------------------------------------
 
     def _idempotent_request(
-        self, method: str, endpoint: str, params: Optional[Dict[str, Any]]
+        self,
+        method: str,
+        endpoint: str,
+        params: Optional[Dict[str, Any]],
+        *,
+        absent_after_retry_is_success: bool = False,
     ) -> httpx.Response:
         """Send with bounded retries on transient failures.
 
-        Only for idempotent methods: GET, and DELETE — deletion is idempotent
-        at the API level (deleting already-absent rows is still accepted), so
-        a replayed DELETE cannot do more than the first one did.
+        Only for methods a replay cannot make worse: GET, and DELETE, whose
+        effect is the same however many times it lands.
+
+        ``absent_after_retry_is_success`` covers the one way a replayed DELETE
+        differs from the first attempt. The design docs specify deletion as
+        idempotent at the API level ("deleting rows that are already masked or
+        absent is still accepted"), but the service checks existence first and
+        answers 404 when nothing matches. So a delete that lands and loses its
+        response to a transport reset gets 404 on the retry — a delete that
+        worked, reported as a failure. Only a 404 on a *retried* attempt is
+        absorbed: on the first attempt nothing has been sent yet, so 404 still
+        means what it says. Remove this once the service is idempotent.
         """
         for attempt in range(IDEMPOTENT_RETRY_ATTEMPTS):
             last = attempt == IDEMPOTENT_RETRY_ATTEMPTS - 1
@@ -313,6 +329,9 @@ class TracesAPIClient:
                     raise
                 time.sleep(retry_delay(exc, attempt))
                 continue
+            except NotFoundError:
+                if attempt == 0 or not absent_after_retry_is_success:
+                    raise
             return response
         raise AssertionError("unreachable")  # pragma: no cover
 
@@ -324,13 +343,14 @@ class TracesAPIClient:
             raise APIError("API response was not a dictionary")
         return result
 
-    def delete_json(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def delete(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> None:
+        """Send a DELETE and discard the body — 202 carries none.
+
+        A 404 raised by the first attempt propagates; one raised by a retry is
+        absorbed, because the attempt before it may well have done the work.
+        """
         self._check_auth()
-        response = self._idempotent_request("DELETE", endpoint, params)
-        if not response.content:
-            return {}
-        result = response.json()
-        return result if isinstance(result, dict) else {}
+        self._idempotent_request("DELETE", endpoint, params, absent_after_retry_is_success=True)
 
     def stream_bytes(
         self, endpoint: str, params: Optional[Dict[str, Any]] = None

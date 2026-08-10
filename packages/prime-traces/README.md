@@ -48,9 +48,15 @@ summary = client.get("8d3f1a2b...")
 raw = client.get_raw("8d3f1a2b...")          # exact stored trace document
 client.download_raw("8d3f1a2b...", "t.json")  # streamed, for large traces
 
-client.delete("8d3f1a2b...")
-client.delete_run("run_9f3k2m")
+client.delete("8d3f1a2b...")        # NotFoundError if the owner has no such trace
+client.delete_run("run_9f3k2m")     # one mutation, synchronous, no job handle
 ```
+
+Deletion is not a no-op on absent rows: the service checks existence first and
+answers 404, so repeating a delete that already succeeded raises
+`NotFoundError`. (The design docs specify it as idempotent; this tracks the
+service as built.) A delete whose response is lost in transit is still safe —
+the retry's 404 is absorbed.
 
 Response shapes mirror the service's pinned models: pages are
 `{items, next_cursor}` and a summary nests `model` / `score` / `execution`,
@@ -69,9 +75,10 @@ with unrecorded fields as `null`.
 
 Deferred to follow-up PRs once the service pins the corresponding responses:
 
-- Exports — the streaming `GET /traces/export` (params and format not yet
-  defined by the service) and the exports _job_ API (published as 501 by the
-  service in v0 until export results have somewhere to land).
+- Exports, in any form. The service publishes `GET /traces/export` and the two
+  job routes, but all three handlers raise `NotImplementedError` — answered as
+  500, not the 501 they document — and the streaming route declares no query
+  parameters, so there is no filter vocabulary to bind to.
 - Episode reads (`GET /episodes[...]`) — read-only resources; episodes are
   written only as a side effect of episode-grouped uploads.
 - `/search` and free-text queries — deferred with the `trace_components`

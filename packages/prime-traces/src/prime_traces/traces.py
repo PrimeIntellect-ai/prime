@@ -262,16 +262,32 @@ class TracesClient:
         """Delete every stored copy of one trace (202 Accepted).
 
         ``created_at`` is an optional performance hint that lets the service
-        prune on its ordering-key prefix; correctness does not depend on it.
+        prune on its ordering-key prefix; correctness does not depend on it,
+        but a hint matching no stored copy is a 404 even when the trace exists
+        under another timestamp.
+
+        Raises ``NotFoundError`` when the owner has no such trace — including
+        on a repeat of a delete that already succeeded. The design docs
+        specify deletion as idempotent at the API level; the service checks
+        existence first and answers 404 instead. Callers treating deletion as
+        "make sure this is gone" should catch ``NotFoundError``.
         """
         params = {"created_at": created_at} if created_at else None
-        self.client.delete_json(f"/traces/{trace_id}", params=params)
+        self.client.delete(f"/traces/{trace_id}", params=params)
 
-    def delete_run(self, run_id: str) -> Optional[str]:
-        """Delete every trace in a run. Returns the async job id, if any."""
-        result = self.client.delete_json("/traces", params={"run_id": run_id})
-        job_id = result.get("job_id")
-        return str(job_id) if job_id is not None else None
+    def delete_run(self, run_id: str) -> None:
+        """Delete every trace in a run (202 Accepted).
+
+        One mutation over the ``run_id`` predicate, not N per-trace calls, and
+        synchronous: the service answers 202 with an empty body, so there is
+        no job to poll. (The design docs specify ``202 { job_id }``; nothing
+        server-side issues one, so no job handle is returned here rather than
+        a permanent ``None``.)
+
+        Episode rows are not touched. Raises ``NotFoundError`` when the run
+        holds no traces for this owner — see ``delete`` on repeats.
+        """
+        self.client.delete("/traces", params={"run_id": run_id})
 
     def close(self) -> None:
         self.client.close()

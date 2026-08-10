@@ -6,7 +6,6 @@ import os
 import re
 import shlex
 import sys
-import tempfile
 import threading
 import time
 import uuid
@@ -1148,12 +1147,7 @@ class SandboxClient:
                 # Servers without windowed-read support omit `truncated`.
                 return response.content, bool(response.truncated)
             except SandboxFileTooLargeError:
-                with tempfile.TemporaryDirectory() as temp_dir:
-                    local_path = os.path.join(temp_dir, "output")
-                    self.download_file(sandbox_id, path, local_path, timeout=timeout)
-                    with open(local_path, "rb") as output:
-                        output.seek(-JOB_OUTPUT_TAIL_BYTES, os.SEEK_END)
-                        return output.read().decode(errors="replace"), True
+                return self._download_tail(sandbox_id, path, timeout)
             except SandboxFileNotFoundError:
                 return "", False
 
@@ -1177,6 +1171,35 @@ class SandboxClient:
             stdout_truncated=stdout_truncated,
             stderr_truncated=stderr_truncated,
         )
+
+    def _download_tail(
+        self,
+        sandbox_id: str,
+        file_path: str,
+        timeout: Optional[int],
+    ) -> tuple[str, bool]:
+        auth = self._auth_cache.get_or_refresh(sandbox_id)
+        url = f"{auth['gateway_url']}/{auth['user_ns']}/{auth['job_id']}/download"
+        headers = {"Authorization": f"Bearer {auth['token']}"}
+        params = {"path": file_path, "sandbox_id": sandbox_id}
+        tail = bytearray()
+        total_size = 0
+
+        with httpx.stream(
+            "GET",
+            url,
+            headers=headers,
+            params=params,
+            timeout=timeout if timeout is not None else 300,
+        ) as response:
+            response.raise_for_status()
+            for chunk in response.iter_bytes(chunk_size=JOB_OUTPUT_TAIL_BYTES):
+                tail.extend(chunk)
+                total_size += len(chunk)
+                if len(tail) > JOB_OUTPUT_TAIL_BYTES:
+                    del tail[:-JOB_OUTPUT_TAIL_BYTES]
+
+        return tail.decode(errors="replace"), total_size > len(tail)
 
     def run_background_job(
         self,
@@ -2359,12 +2382,7 @@ class AsyncSandboxClient:
                 # Servers without windowed-read support omit `truncated`.
                 return response.content, bool(response.truncated)
             except SandboxFileTooLargeError:
-                with tempfile.TemporaryDirectory() as temp_dir:
-                    local_path = os.path.join(temp_dir, "output")
-                    await self.download_file(sandbox_id, path, local_path, timeout=timeout)
-                    async with aiofiles.open(local_path, "rb") as output:
-                        await output.seek(-JOB_OUTPUT_TAIL_BYTES, os.SEEK_END)
-                        return (await output.read()).decode(errors="replace"), True
+                return await self._download_tail(sandbox_id, path, timeout)
             except SandboxFileNotFoundError:
                 return "", False
 
@@ -2388,6 +2406,37 @@ class AsyncSandboxClient:
             stdout_truncated=stdout_truncated,
             stderr_truncated=stderr_truncated,
         )
+
+    async def _download_tail(
+        self,
+        sandbox_id: str,
+        file_path: str,
+        timeout: Optional[int],
+    ) -> tuple[str, bool]:
+        auth = await self._auth_cache.get_or_refresh(sandbox_id)
+        gateway_url = auth["gateway_url"].rstrip("/")
+        url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/download"
+        headers = {"Authorization": f"Bearer {auth['token']}"}
+        params = {"path": file_path, "sandbox_id": sandbox_id}
+        tail = bytearray()
+        total_size = 0
+
+        gateway_client = self._get_gateway_client()
+        async with gateway_client.stream(
+            "GET",
+            url,
+            headers=headers,
+            params=params,
+            timeout=timeout if timeout is not None else 300,
+        ) as response:
+            response.raise_for_status()
+            async for chunk in response.aiter_bytes(chunk_size=JOB_OUTPUT_TAIL_BYTES):
+                tail.extend(chunk)
+                total_size += len(chunk)
+                if len(tail) > JOB_OUTPUT_TAIL_BYTES:
+                    del tail[:-JOB_OUTPUT_TAIL_BYTES]
+
+        return tail.decode(errors="replace"), total_size > len(tail)
 
     async def run_background_job(
         self,

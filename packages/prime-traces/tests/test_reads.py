@@ -51,6 +51,7 @@ class TestList:
         client = make_client(handler)
         page = client.list(
             run_id="run_9f3k2m",
+            environment_id="terminal-bench-2",
             reward_min=0.5,
             has_error=False,
             context={"source": "hosted_eval"},
@@ -59,6 +60,7 @@ class TestList:
 
         assert captured["params"] == {
             "run_id": "run_9f3k2m",
+            "environment_id": "terminal-bench-2",
             "reward_min": "0.5",
             "has_error": "false",
             "context.source": "hosted_eval",
@@ -588,10 +590,14 @@ class TestEpisodes:
             return httpx.Response(200, json={"items": [self.EPISODE], "next_cursor": None})
 
         page = make_client(handler).list_episodes(
-            run_id="run_9f3k2m", outcome="done", has_error=False
+            run_id="run_9f3k2m",
+            environment_id="terminal-bench-2",
+            outcome="done",
+            has_error=False,
         )
         assert captured["params"] == {
             "run_id": "run_9f3k2m",
+            "environment_id": "terminal-bench-2",
             "outcome": "done",
             "has_error": "false",
         }
@@ -665,12 +671,49 @@ class TestEpisodes:
         with pytest.raises(ValueError, match="episode_id cannot contain '/'"):
             getattr(make_client(handler), method)("episode/child")
 
-    def test_list_episode_traces_pages_member_summaries(self, make_client):
+    def test_list_episode_traces_forwards_backend_filters(self, make_client):
+        captured = {}
+
         def handler(request: httpx.Request) -> httpx.Response:
             assert request.url.path == "/api/v1/episodes/ep-1/traces"
+            captured["params"] = dict(request.url.params)
             return httpx.Response(200, json={"items": [SUMMARY], "next_cursor": None})
 
-        page = make_client(handler).list_episode_traces("ep-1")
+        page = make_client(handler).list_episode_traces(
+            "ep-1",
+            run_id="run_9f3k2m",
+            environment_id="terminal-bench-2",
+            model_id="deepseek-v4-flash",
+            model_provider="prime",
+            task_id="tb2-0187",
+            reward_min=0.5,
+            reward_max=1.0,
+            outcome="done",
+            has_error=False,
+            is_truncated=False,
+            created_after="2026-07-01T00:00:00Z",
+            created_before="2026-08-01T00:00:00Z",
+            context={"source": "hosted_eval"},
+            limit=50,
+            cursor="next-page",
+        )
+        assert captured["params"] == {
+            "run_id": "run_9f3k2m",
+            "environment_id": "terminal-bench-2",
+            "model_id": "deepseek-v4-flash",
+            "model_provider": "prime",
+            "task_id": "tb2-0187",
+            "reward_min": "0.5",
+            "reward_max": "1.0",
+            "outcome": "done",
+            "has_error": "false",
+            "is_truncated": "false",
+            "created_after": "2026-07-01T00:00:00Z",
+            "created_before": "2026-08-01T00:00:00Z",
+            "limit": "50",
+            "cursor": "next-page",
+            "context.source": "hosted_eval",
+        }
         assert page.items[0].trace_id == "8d3f1a2b"
 
     def test_list_episode_traces_encodes_episode_id_as_one_path_segment(self, make_client):

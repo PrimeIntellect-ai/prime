@@ -12,11 +12,10 @@ Deliberately not implemented (open v0 contract decisions — do not freeze
 them here): exports in any form — the service publishes ``GET /traces/export``
 and the job routes, but all three handlers raise ``NotImplementedError``,
 which FastAPI answers as 500, and the streaming route declares no query
-parameters, so there is no filter vocabulary to bind to; ``/search``; the
-``environment_id`` filters on traces and episodes (no populated column behind
-them yet); episode writes (episodes are read-only, written only as a side
-effect of episode-grouped uploads); and the dot-path query compiler (needs the
-server-side field registry).
+parameters, so there is no filter vocabulary to bind to; ``/search``; episode
+writes (episodes are read-only, written only as a side effect of
+episode-grouped uploads); and the dot-path query compiler (needs the server-side
+field registry).
 """
 
 import json
@@ -276,6 +275,7 @@ class TracesClient:
         self,
         *,
         run_id: Optional[str] = None,
+        environment_id: Optional[str] = None,
         model_id: Optional[str] = None,
         model_provider: Optional[str] = None,
         task_id: Optional[str] = None,
@@ -300,6 +300,7 @@ class TracesClient:
         params = _build_params(
             (
                 ("run_id", run_id),
+                ("environment_id", environment_id),
                 ("model_id", model_id),
                 ("model_provider", model_provider),
                 ("task_id", task_id),
@@ -426,6 +427,7 @@ class TracesClient:
         self,
         *,
         run_id: Optional[str] = None,
+        environment_id: Optional[str] = None,
         outcome: Optional[str] = None,
         has_error: Optional[bool] = None,
         created_after: Optional[str] = None,
@@ -433,13 +435,15 @@ class TracesClient:
         limit: Optional[int] = None,
         cursor: Optional[str] = None,
     ) -> EpisodeListPage:
-        """The server's episode filter set minus ``environment_id`` (the
-        extractor never populates that column, for episodes or traces, so the
-        filter cannot match — same reason ``list`` omits it). Episodes carry
-        no ``context`` map."""
+        """List episode summaries using the server's complete filter set.
+
+        ``environment_id`` is extracted from the canonical episode
+        ``env.id``. Episodes carry no upload ``context`` map.
+        """
         params = _build_params(
             (
                 ("run_id", run_id),
+                ("environment_id", environment_id),
                 ("outcome", outcome),
                 ("has_error", has_error),
                 ("created_after", created_after),
@@ -463,14 +467,47 @@ class TracesClient:
         self,
         episode_id: str,
         *,
+        run_id: Optional[str] = None,
+        environment_id: Optional[str] = None,
+        model_id: Optional[str] = None,
+        model_provider: Optional[str] = None,
+        task_id: Optional[str] = None,
+        reward_min: Optional[float] = None,
+        reward_max: Optional[float] = None,
+        outcome: Optional[str] = None,
+        has_error: Optional[bool] = None,
+        is_truncated: Optional[bool] = None,
+        created_after: Optional[str] = None,
+        created_before: Optional[str] = None,
+        context: Optional[Dict[str, str]] = None,
         limit: Optional[int] = None,
         cursor: Optional[str] = None,
     ) -> TraceListPage:
-        params: Dict[str, object] = {}
-        if limit is not None:
-            params["limit"] = limit
-        if cursor is not None:
-            params["cursor"] = cursor
+        """List an episode's member traces in upload order.
+
+        The filter vocabulary matches the backend member-trace route and the
+        top-level trace listing, except that member traces have no ``sort``
+        option.
+        """
+        params = _build_params(
+            (
+                ("run_id", run_id),
+                ("environment_id", environment_id),
+                ("model_id", model_id),
+                ("model_provider", model_provider),
+                ("task_id", task_id),
+                ("reward_min", reward_min),
+                ("reward_max", reward_max),
+                ("outcome", outcome),
+                ("has_error", has_error),
+                ("is_truncated", is_truncated),
+                ("created_after", created_after),
+                ("created_before", created_before),
+                ("limit", limit),
+                ("cursor", cursor),
+            ),
+            context,
+        )
         return TraceListPage.model_validate(
             self.client.get_json(f"{_episode_endpoint(episode_id)}/traces", params=params)
         )

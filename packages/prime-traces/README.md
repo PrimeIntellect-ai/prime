@@ -119,7 +119,10 @@ accepts path-valued route parameters.
 Episodes are read-only resources:
 
 ```python
-page = client.list_episodes(run_id="run_9f3k2m")
+page = client.list_episodes(
+    run_id="run_9f3k2m",
+    environment_id="terminal-bench-2",
+)
 for episode in page.items:
     print(episode.episode_id, episode.outcome)
 
@@ -128,7 +131,8 @@ if page.items:
     detail = client.get_episode(episode_id)  # + member aggregate under .traces
     print(detail.error.type, detail.traces.trace_count)
 
-    client.list_episode_traces(episode_id)  # member trace summaries, paginated
+    # Member trace summaries use the trace filters (except sort) and pagination.
+    client.list_episode_traces(episode_id, has_error=True)
 ```
 
 Response shapes mirror the service's pinned models: pages are
@@ -154,8 +158,6 @@ under `traces`, and unrecorded fields come back as `null`.
   would ship a method that cannot succeed.
 - `/search` and free-text queries — deferred with the `trace_components`
   projection.
-- The `environment_id` filters (traces and episodes) — pending a populated
-  extracted column.
 - Typed dot-path predicates (`traces.query`) — needs the server-side field
   registry.
 - An async client — the other prime SDKs ship sync/async pairs, and the main

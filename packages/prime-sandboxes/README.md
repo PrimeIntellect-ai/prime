@@ -18,6 +18,7 @@ uv pip install prime-sandboxes
 ```
 
 Or with pip:
+
 ```bash
 pip install prime-sandboxes
 ```
@@ -31,7 +32,8 @@ from prime_sandboxes import APIClient, SandboxClient, CreateSandboxRequest, Star
 client = APIClient(api_key="your-api-key")
 sandbox_client = SandboxClient(client)
 
-# Create a sandbox
+# Create a sandbox. Leaving `vm` unset uses the platform default runtime:
+# VM-backed sandboxes (public beta).
 request = CreateSandboxRequest(
     name="my-sandbox",
     docker_image="python:3.11-slim",
@@ -51,6 +53,15 @@ vm = sandbox_client.create(CreateSandboxRequest(
         executable="/worker",
         args=["--platform", "linux/amd64"],
     ),
+))
+
+# Opt out to a container sandbox explicitly with `vm=False` (containers
+# support string start commands, SSH, and port exposure).
+container = sandbox_client.create(CreateSandboxRequest(
+    name="container-workload",
+    docker_image="python:3.11-slim",
+    vm=False,
+    start_command="python -m http.server 8080",
 ))
 
 # Wait for it to be ready

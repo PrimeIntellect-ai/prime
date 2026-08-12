@@ -75,7 +75,7 @@ def _parse_context(values: List[str]) -> Optional[Dict[str, str]]:
     for item in values:
         key, sep, value = item.partition("=")
         if not sep or not key:
-            console.print(f"[red]Invalid --context '{item}'; expected key=value[/red]")
+            console.print(f"[red]Invalid --context '{escape(item)}'; expected key=value[/red]")
             raise typer.Exit(1)
         context[key] = value
     return context
@@ -112,9 +112,9 @@ def upload_traces(
     def on_batch(batch: Batch, receipt: UploadReceipt) -> None:
         if output != "json":
             console.print(
-                f"  batch {receipt.upload_id[:12]}… "
+                f"  batch {escape(receipt.upload_id[:12])}… "
                 f"({batch.num_lines} lines, {batch.size / (1024 * 1024):.1f} MiB) "
-                f"[green]{receipt.status}[/green]"
+                f"[green]{escape(receipt.status)}[/green]"
             )
 
     try:
@@ -129,13 +129,13 @@ def upload_traces(
     except typer.Exit:
         raise
     except UnauthorizedError as e:
-        console.print(f"[red]Unauthorized:[/red] {str(e)}")
+        console.print(f"[red]Unauthorized:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except PaymentRequiredError as e:
-        console.print(f"[red]Payment Required:[/red] {str(e)}")
+        console.print(f"[red]Payment Required:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except PrimeTracesError as e:
-        console.print(f"[red]Upload failed:[/red] {str(e)}")
+        console.print(f"[red]Upload failed:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
@@ -151,7 +151,7 @@ def upload_traces(
             console,
         )
     else:
-        console.print(f"[green]Uploaded {len(receipts)} batch(es) from {file}[/green]")
+        console.print(f"[green]Uploaded {len(receipts)} batch(es) from {escape(str(file))}[/green]")
 
 
 @app.command("list", epilog=LIST_TRACES_JSON_HELP)
@@ -197,13 +197,13 @@ def list_traces(
     except typer.Exit:
         raise
     except UnauthorizedError as e:
-        console.print(f"[red]Unauthorized:[/red] {str(e)}")
+        console.print(f"[red]Unauthorized:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except PaymentRequiredError as e:
-        console.print(f"[red]Payment Required:[/red] {str(e)}")
+        console.print(f"[red]Payment Required:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except APIError as e:
-        console.print(f"[red]Error:[/red] {str(e)}")
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
@@ -234,7 +234,7 @@ def list_traces(
         )
     console.print(table)
     if page.next_cursor:
-        console.print(f"[dim]More results: --cursor {page.next_cursor}[/dim]")
+        console.print(f"[dim]More results: --cursor {escape(page.next_cursor)}[/dim]")
 
 
 @app.command("get", epilog=GET_TRACE_JSON_HELP)
@@ -257,7 +257,7 @@ def get_trace(
         if raw:
             if dest is not None:
                 written = client.download_raw(trace_id, dest)
-                console.print(f"[green]Wrote {written} bytes to {dest}[/green]")
+                console.print(f"[green]Wrote {written} bytes to {escape(str(dest))}[/green]")
                 return
             # Raw documents can be tens of MiB. Preserve their exact bytes and
             # do not append a newline so redirected output is a faithful copy.
@@ -269,13 +269,13 @@ def get_trace(
     except typer.Exit:
         raise
     except UnauthorizedError as e:
-        console.print(f"[red]Unauthorized:[/red] {str(e)}")
+        console.print(f"[red]Unauthorized:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except PaymentRequiredError as e:
-        console.print(f"[red]Payment Required:[/red] {str(e)}")
+        console.print(f"[red]Payment Required:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except APIError as e:
-        console.print(f"[red]Error:[/red] {str(e)}")
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
@@ -331,20 +331,20 @@ def delete_traces(
         else:
             assert run_id is not None
             client.delete_run(run_id)
-        console.print(f"[green]Deletion of {target} accepted[/green]")
+        console.print(f"[green]Deletion of {escape(target)} accepted[/green]")
     except typer.Exit:
         raise
     except NotFoundError as e:
-        console.print(f"[red]Not found:[/red] {str(e)}")
+        console.print(f"[red]Not found:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except UnauthorizedError as e:
-        console.print(f"[red]Unauthorized:[/red] {str(e)}")
+        console.print(f"[red]Unauthorized:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except PaymentRequiredError as e:
-        console.print(f"[red]Payment Required:[/red] {str(e)}")
+        console.print(f"[red]Payment Required:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except APIError as e:
-        console.print(f"[red]Error:[/red] {str(e)}")
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")

@@ -9,7 +9,7 @@ from prime_cli.commands import traces as traces_cmd
 from prime_cli.core import Config
 from prime_cli.core.config import ConfigModel
 from prime_cli.main import app as main_app
-from prime_traces import Batch, TraceListPage, TraceSummary, UploadReceipt
+from prime_traces import APIError, Batch, TraceListPage, TraceSummary, UploadReceipt
 from typer.testing import CliRunner
 
 runner = CliRunner()
@@ -253,6 +253,19 @@ def test_list_command_json_output_is_parseable(fake_client):
     assert payload["next_cursor"] == "cursor-1"
 
 
+def test_api_error_messages_are_rendered_as_literal_text(fake_client):
+    def fail_list(**kwargs):
+        raise APIError("invalid filter [/]")
+
+    fake_client.list = fail_list
+
+    result = runner.invoke(main_app, ["traces", "list"])
+
+    assert result.exit_code == 1
+    assert "Error: invalid filter [/]" in result.output
+    assert "MarkupError" not in result.output
+
+
 def test_table_output_treats_trace_values_as_literal_text(fake_client):
     markup = "[/]"
     fake_client.list = lambda **kwargs: TraceListPage(
@@ -348,3 +361,11 @@ def test_delete_command_trace_and_run(fake_client):
     assert result.exit_code == 0, result.output
     assert fake_client.calls["delete_run"] == "run_9f3k2m"
     assert "accepted" in result.output
+
+
+def test_delete_success_treats_target_as_literal_text(fake_client):
+    result = runner.invoke(main_app, ["traces", "delete", "[red]", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert fake_client.calls["delete"] == ("[red]", None)
+    assert "Deletion of trace [red] accepted" in result.output

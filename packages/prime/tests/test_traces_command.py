@@ -92,6 +92,36 @@ def test_cli_config_traces_url_precedence(monkeypatch):
     assert config.traces_url == "http://localhost:8083"
 
 
+def test_traces_config_outputs_treat_url_as_literal_text(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
+    traces_url = "https://traces.example/[/]"
+
+    configured = runner.invoke(main_app, ["config", "set-traces-url", traces_url])
+    viewed = runner.invoke(main_app, ["config", "view"])
+    viewed_plain = runner.invoke(main_app, ["config", "view", "--plain"])
+
+    assert configured.exit_code == 0, configured.output
+    assert traces_url in configured.output
+    assert viewed.exit_code == 0, viewed.output
+    assert traces_url in viewed.output
+    assert viewed_plain.exit_code == 0, viewed_plain.output
+    assert traces_url in viewed_plain.output
+
+
+def test_set_traces_url_prompt_can_clear_existing_override(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
+    config = Config()
+    config.set_traces_url("https://traces.example")
+
+    result = runner.invoke(main_app, ["config", "set-traces-url"], input="-\n")
+
+    assert result.exit_code == 0, result.output
+    assert "override cleared" in result.output
+    assert Config()._configured_traces_url() is None
+
+
 # ---------------------------------------------------------------------------
 # Command smoke tests: every `prime traces` command exercised through Typer
 # with a stubbed TracesClient, mirroring test_tunnel_cli.py. These catch
@@ -331,6 +361,17 @@ def test_get_command_raw_to_dest_streams(fake_client, tmp_path):
     trace_id, streamed_dest = fake_client.calls["download_raw"]
     assert trace_id == "8d3f1a2b"
     assert streamed_dest == dest
+
+
+def test_get_command_raw_to_dest_honors_json_output(fake_client, tmp_path):
+    dest = tmp_path / "trace.json"
+    result = runner.invoke(
+        main_app,
+        ["traces", "get", "8d3f1a2b", "--raw", "--dest", str(dest), "-o", "json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == {"dest": str(dest), "bytes_written": 29}
 
 
 def test_export_command_is_not_registered(fake_client, tmp_path):

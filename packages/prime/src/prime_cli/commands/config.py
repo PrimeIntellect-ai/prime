@@ -3,7 +3,9 @@ import re
 from typing import Optional
 
 import typer
+from rich.markup import escape
 from rich.table import Table
+from rich.text import Text
 
 from prime_cli.core import Config
 
@@ -99,7 +101,7 @@ def view() -> None:
     traces_label = settings["traces_url"]
     if _env_set("PRIME_TRACES_URL"):
         traces_label += " (from env var)"
-    table.add_row("Traces URL", traces_label)
+    table.add_row("Traces URL", Text(traces_label))
 
     # Show SSH key path
     ssh_label = settings["ssh_key_path"]
@@ -284,7 +286,7 @@ def set_traces_url(
     url: Optional[str] = typer.Argument(
         None,
         help=(
-            "URL of the Prime Traces service. Pass '' to clear the override "
+            "URL of the Prime Traces service. Pass '' or - to clear the override "
             "and follow the base URL. If not provided, you'll be prompted."
         ),
     ),
@@ -297,14 +299,17 @@ def set_traces_url(
         # that as the prompt default would freeze the fallback as an explicit
         # override that no longer follows base-URL changes.
         url = typer.prompt(
-            "Enter the URL of the Prime Traces service ('' follows the base URL)",
+            "Enter the URL of the Prime Traces service ('-' follows the base URL)",
             default=config._configured_traces_url() or "",
         )
+
+    if url == "-":
+        url = ""
 
     config = Config()
     config.set_traces_url(url)
     if url:
-        console.print(f"[green]Traces URL set to: {url}[/green]")
+        console.print(f"[green]Traces URL set to: {escape(url)}[/green]")
     else:
         console.print("[green]Traces URL override cleared; following the base URL[/green]")
 

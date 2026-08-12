@@ -64,7 +64,8 @@ LIST_TRACES_JSON_HELP = json_output_help(
 )
 
 GET_TRACE_JSON_HELP = json_output_help(
-    ". = trace summary object; with --raw, the exact stored trace document",
+    ". = trace summary object; with --raw and no --dest, the exact stored trace document",
+    "with --raw --dest: {dest, bytes_written}",
 )
 
 
@@ -257,7 +258,13 @@ def get_trace(
         if raw:
             if dest is not None:
                 written = client.download_raw(trace_id, dest)
-                console.print(f"[green]Wrote {written} bytes to {escape(str(dest))}[/green]")
+                if output == "json":
+                    output_data_as_json(
+                        {"dest": str(dest), "bytes_written": written},
+                        console,
+                    )
+                else:
+                    console.print(f"[green]Wrote {written} bytes to {escape(str(dest))}[/green]")
                 return
             # Raw documents can be tens of MiB. Preserve their exact bytes and
             # do not append a newline so redirected output is a faithful copy.

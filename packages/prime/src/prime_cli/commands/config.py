@@ -308,6 +308,7 @@ def set_traces_url(
 
     config = Config()
     config.set_traces_url(url)
+    config.update_current_environment_file()
     if url:
         console.print(f"[green]Traces URL set to: {escape(url)}[/green]")
     else:

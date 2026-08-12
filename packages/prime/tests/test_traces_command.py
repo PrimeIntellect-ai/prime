@@ -122,6 +122,23 @@ def test_set_traces_url_prompt_can_clear_existing_override(monkeypatch, tmp_path
     assert Config()._configured_traces_url() is None
 
 
+def test_set_traces_url_persists_in_active_environment(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
+    config = Config()
+    config.save_environment("staging")
+    config.load_environment("staging")
+
+    traces_url = "https://traces.staging.example"
+    result = runner.invoke(main_app, ["config", "set-traces-url", traces_url])
+
+    assert result.exit_code == 0, result.output
+    config = Config()
+    config.load_environment("production")
+    config.load_environment("staging")
+    assert config.traces_url == traces_url
+
+
 # ---------------------------------------------------------------------------
 # Command smoke tests: every `prime traces` command exercised through Typer
 # with a stubbed TracesClient, mirroring test_tunnel_cli.py. These catch

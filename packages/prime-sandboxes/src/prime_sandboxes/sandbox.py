@@ -1257,6 +1257,9 @@ class SandboxClient:
                 in polls of the legacy fixed-interval schedule (see
                 `_creation_timeout_seconds`). Status polls now back off, so this
                 bounds elapsed time rather than the literal number of requests.
+                Reaching RUNNING starts a fresh budget of the same size for the
+                reachability phase, so a wait that gets that far can take up to
+                twice this long.
             stability_checks: Number of consecutive successful reachability checks required
             image_build_timeout_seconds: Separate wall-clock budget while the
                 platform auto-builds the VM image for a first-use image (the
@@ -1267,9 +1270,14 @@ class SandboxClient:
         image_build_deadline: Optional[float] = None
         deadline = time.monotonic() + _creation_timeout_seconds(max_attempts)
         poll_index = 0
+        reachability_phase = False
         while time.monotonic() < deadline:
             sandbox = self.get(sandbox_id)
             if sandbox.status == "RUNNING":
+                if not reachability_phase:
+                    reachability_phase = True
+                    deadline = time.monotonic() + _creation_timeout_seconds(max_attempts)
+                    poll_index = 0
                 if self._is_sandbox_reachable(sandbox_id):
                     consecutive_successes += 1
                     if consecutive_successes >= stability_checks:
@@ -2472,6 +2480,9 @@ class AsyncSandboxClient:
                 in polls of the legacy fixed-interval schedule (see
                 `_creation_timeout_seconds`). Status polls now back off, so this
                 bounds elapsed time rather than the literal number of requests.
+                Reaching RUNNING starts a fresh budget of the same size for the
+                reachability phase, so a wait that gets that far can take up to
+                twice this long.
             stability_checks: Number of consecutive successful reachability checks required
             image_build_timeout_seconds: Separate wall-clock budget while the
                 platform auto-builds the VM image for a first-use image (the
@@ -2482,9 +2493,14 @@ class AsyncSandboxClient:
         image_build_deadline: Optional[float] = None
         deadline = time.monotonic() + _creation_timeout_seconds(max_attempts)
         poll_index = 0
+        reachability_phase = False
         while time.monotonic() < deadline:
             sandbox = await self.get(sandbox_id)
             if sandbox.status == "RUNNING":
+                if not reachability_phase:
+                    reachability_phase = True
+                    deadline = time.monotonic() + _creation_timeout_seconds(max_attempts)
+                    poll_index = 0
                 if await self._is_sandbox_reachable(sandbox_id):
                     consecutive_successes += 1
                     if consecutive_successes >= stability_checks:

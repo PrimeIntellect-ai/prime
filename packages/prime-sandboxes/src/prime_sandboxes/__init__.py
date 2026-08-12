@@ -67,9 +67,10 @@ from .models import (
     UpdateImagesResponse,
     UpdateSandboxRequest,
 )
+from .process import AsyncSandboxProcess
 from .sandbox import AsyncSandboxClient, AsyncTemplateClient, SandboxClient, TemplateClient
 
-__version__ = "0.2.34"
+__version__ = "0.2.35"
 
 # Deprecated alias for backward compatibility
 TimeoutError = APITimeoutError
@@ -82,6 +83,7 @@ __all__ = [
     # Sandbox Clients
     "SandboxClient",
     "AsyncSandboxClient",
+    "AsyncSandboxProcess",
     "TemplateClient",
     "AsyncTemplateClient",
     "ImageClient",

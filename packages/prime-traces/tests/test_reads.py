@@ -2,6 +2,7 @@ import httpx
 import pytest
 
 from prime_traces import (
+    AmbiguousDeleteError,
     ErrorCode,
     ForbiddenError,
     NotFoundError,
@@ -32,6 +33,9 @@ SUMMARY = {
     "size_bytes": 417284,
     "context": {"source": "hosted_eval"},
 }
+
+RESERVED_TRACE_ID = "trace?with#reserved%chars and space"
+ENCODED_TRACE_PATH = b"/api/v1/traces/trace%3Fwith%23reserved%25chars%20and%20space"
 
 
 class TestList:
@@ -108,6 +112,31 @@ class TestPointReads:
 
         assert make_client(handler).get("8d3f1a2b").task_id == "tb2-0187"
 
+    def test_get_encodes_trace_id_as_one_path_segment(self, make_client):
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.raw_path == ENCODED_TRACE_PATH
+            return httpx.Response(200, json=SUMMARY)
+
+        make_client(handler).get(RESERVED_TRACE_ID)
+
+    def test_get_rejects_trace_id_with_slash_before_request(self, make_client):
+        def handler(request: httpx.Request) -> httpx.Response:
+            pytest.fail(f"unexpected request: {request.url}")
+
+        with pytest.raises(ValueError, match="cannot contain '/'"):
+            make_client(handler).get("trace/child")
+
+    @pytest.mark.parametrize(
+        ("trace_id", "encoded"),
+        [(".", b"%2E"), ("..", b"%2E%2E")],
+    )
+    def test_get_preserves_dot_only_trace_id_segment(self, make_client, trace_id, encoded):
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.raw_path == b"/api/v1/traces/" + encoded
+            return httpx.Response(200, json={**SUMMARY, "trace_id": trace_id})
+
+        assert make_client(handler).get(trace_id).trace_id == trace_id
+
     def test_get_raw_streams_document(self, make_client):
         raw = b'{"version":4,"id":"8d3f1a2b","nodes":[]}'
 
@@ -116,6 +145,13 @@ class TestPointReads:
             return httpx.Response(200, content=raw)
 
         assert make_client(handler).get_raw("8d3f1a2b") == raw
+
+    def test_get_raw_encodes_trace_id_before_adding_query(self, make_client):
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.raw_path == ENCODED_TRACE_PATH + b"?raw=true"
+            return httpx.Response(200, content=b"{}")
+
+        make_client(handler).get_raw(RESERVED_TRACE_ID)
 
     def test_download_raw_writes_file(self, make_client, tmp_path):
         raw = b'{"version":4,"id":"8d3f1a2b"}'
@@ -128,9 +164,19 @@ class TestPointReads:
         assert written == len(raw)
         assert dest.read_bytes() == raw
 
+    def test_download_raw_encodes_trace_id_as_one_path_segment(self, make_client, tmp_path):
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.raw_path == ENCODED_TRACE_PATH + b"?raw=true"
+            return httpx.Response(200, content=b"{}")
+
+        make_client(handler).download_raw(RESERVED_TRACE_ID, tmp_path / "trace.json")
+
     def test_download_raw_failure_preserves_existing_file(self, make_client, tmp_path):
         dest = tmp_path / "trace.json"
         dest.write_bytes(b"previous download")
+        unrelated_partial = tmp_path / "trace.json.partial"
+        unrelated_partial.write_bytes(b"unrelated partial data")
+        files_before = set(tmp_path.iterdir())
 
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(
@@ -140,7 +186,8 @@ class TestPointReads:
         with pytest.raises(NotFoundError):
             make_client(handler).download_raw("missing", dest)
         assert dest.read_bytes() == b"previous download"
-        assert not (tmp_path / "trace.json.partial").exists()
+        assert unrelated_partial.read_bytes() == b"unrelated partial data"
+        assert set(tmp_path.iterdir()) == files_before
 
     def test_not_found_is_typed(self, make_client):
         def handler(request: httpx.Request) -> httpx.Response:
@@ -200,9 +247,8 @@ class TestPointReads:
 
 
 class TestReadRetries:
-    """Idempotent requests retry transient failures with a bounded budget,
-    mirroring the sibling SDKs (prime-sandboxes retries idempotent methods on
-    502/503/504 and transport errors)."""
+    """Reads retry transient failures with a bounded budget; deletes retry
+    only when the first request is known not to have taken effect."""
 
     _UNAVAILABLE = {"error": {"code": "storage_unavailable", "message": "storage is down"}}
 
@@ -327,6 +373,13 @@ class TestDelete:
         assert captured["path"] == "/api/v1/traces/8d3f1a2b"
         assert captured["params"] == {"created_at": "2026-07-20T18:02:11.482Z"}
 
+    def test_delete_encodes_trace_id_as_one_path_segment(self, make_client):
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.raw_path == ENCODED_TRACE_PATH
+            return httpx.Response(202)
+
+        make_client(handler).delete(RESERVED_TRACE_ID)
+
     def test_delete_run_sends_run_id_and_expects_no_body(self, make_client):
         captured = {}
 
@@ -354,44 +407,71 @@ class TestDelete:
             make_client(handler).delete("x")
         assert caught.value.code == "trace_not_found"
 
-    def test_404_after_an_ambiguous_attempt_is_treated_as_deleted(self, make_client):
-        """A delete that lands and loses its response must not report failure.
+    def test_ambiguous_transport_failure_is_not_retried(self, make_client, no_sleep):
+        """A replay could delete a trace written after the first attempt."""
+        attempts = []
 
-        The service is not idempotent — it checks existence first and 404s when
-        nothing matches — so the retry of a delete that already succeeded sees
-        404. Absorbed, because the attempt before it is what removed the rows.
-        """
+        def handler(request: httpx.Request) -> httpx.Response:
+            attempts.append(request.url.path)
+            raise httpx.ReadError("connection reset", request=request)
+
+        with pytest.raises(AmbiguousDeleteError) as caught:
+            make_client(handler).delete("8d3f1a2b")
+        assert caught.value.status_code is None
+        assert len(attempts) == 1
+        assert no_sleep == []
+
+    @pytest.mark.parametrize(
+        "error_type",
+        [httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout],
+    )
+    def test_404_after_a_pre_delivery_failure_is_not_absorbed(self, make_client, error_type):
         attempts = []
 
         def handler(request: httpx.Request) -> httpx.Response:
             attempts.append(request.url.path)
             if len(attempts) == 1:
-                raise httpx.ReadError("connection reset")
+                raise error_type("request was not sent", request=request)
             return httpx.Response(
                 404,
                 json={"error": {"code": "trace_not_found", "message": "No trace 'x'"}},
             )
 
-        make_client(handler).delete("8d3f1a2b")
+        with pytest.raises(NotFoundError):
+            make_client(handler).delete("8d3f1a2b")
         assert len(attempts) == 2
 
-    @pytest.mark.parametrize("status", [502, 504])
-    def test_404_after_a_gateway_failure_is_treated_as_deleted(self, make_client, status):
-        """A gateway may have forwarded the request upstream before failing, so
-        502/504 is as ambiguous as a dropped connection."""
+    @pytest.mark.parametrize("status", [502, 503, 504])
+    def test_ambiguous_gateway_failure_is_not_retried(self, make_client, no_sleep, status):
+        """A gateway may have forwarded the request before losing its response."""
         attempts = []
 
         def handler(request: httpx.Request) -> httpx.Response:
             attempts.append(request.url.path)
-            if len(attempts) == 1:
-                return httpx.Response(status, text="upstream connect error")
+            return httpx.Response(status, text="upstream response lost")
+
+        with pytest.raises(AmbiguousDeleteError) as caught:
+            make_client(handler).delete_run("run_9f3k2m")
+        assert caught.value.status_code == status
+        assert len(attempts) == 1
+        assert no_sleep == []
+
+    def test_unknown_code_503_delete_is_not_retried(self, make_client, no_sleep):
+        attempts = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            attempts.append(request.url.path)
             return httpx.Response(
-                404,
-                json={"error": {"code": "trace_not_found", "message": "No trace 'x'"}},
+                503,
+                json={"error": {"code": "unknown_overload", "message": "try later"}},
             )
 
-        make_client(handler).delete("8d3f1a2b")
-        assert len(attempts) == 2
+        with pytest.raises(AmbiguousDeleteError) as caught:
+            make_client(handler).delete("8d3f1a2b")
+        assert caught.value.status_code == 503
+        assert caught.value.code == "unknown_overload"
+        assert len(attempts) == 1
+        assert no_sleep == []
 
     @pytest.mark.parametrize("status", [429, 503])
     def test_404_after_the_service_declined_is_not_absorbed(self, make_client, status):

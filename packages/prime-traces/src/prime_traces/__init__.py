@@ -16,6 +16,7 @@ from .batching import (
 )
 from .core import Config, TracesAPIClient
 from .exceptions import (
+    AmbiguousDeleteError,
     APIError,
     APITimeoutError,
     ForbiddenError,
@@ -44,7 +45,7 @@ from .models import (
     TraceSummary,
     UploadReceipt,
 )
-from .traces import TracesClient
+from .traces import SupportsToRecord, TraceRecord, TracesClient
 
 __version__ = "0.0.1"
 
@@ -53,6 +54,8 @@ __all__ = [
     "TracesClient",
     "TracesAPIClient",
     "Config",
+    "SupportsToRecord",
+    "TraceRecord",
     # Batching
     "Batch",
     "iter_batches",
@@ -79,6 +82,7 @@ __all__ = [
     "PrimeTracesError",
     "APIError",
     "APITimeoutError",
+    "AmbiguousDeleteError",
     "ForbiddenError",
     "LineFormatConflictError",
     "NotFoundError",

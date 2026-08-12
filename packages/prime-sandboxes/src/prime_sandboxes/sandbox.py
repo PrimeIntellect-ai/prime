@@ -1,6 +1,7 @@
 """Sandbox client implementations."""
 
 import asyncio
+import functools
 import json
 import os
 import re
@@ -13,12 +14,15 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Literal, NoReturn, Optional, TypeVar
 
 import aiofiles
+import certifi
 import httpx
 from connectrpc.client import ConnectClient, ConnectClientSync
 from connectrpc.code import Code
 from connectrpc.errors import ConnectError
 from connectrpc.method import MethodInfo
 from google.protobuf.message import Message
+from pyqwest import Client as HTTPClient
+from pyqwest import HTTPTransport
 from tenacity import (
     retry,
     retry_if_exception,
@@ -91,6 +95,18 @@ _PROCESS_SIGNAL_TIMEOUT_MS = 10_000
 
 _RequestMessage = TypeVar("_RequestMessage", bound=Message)
 _ResponseMessage = TypeVar("_ResponseMessage", bound=Message)
+
+
+@functools.lru_cache(maxsize=1)
+def _ca_bundle() -> bytes:
+    with open(certifi.where(), "rb") as ca_file:
+        return ca_file.read()
+
+
+def _live_process_transport() -> HTTPTransport:
+    # A bare HTTPTransport carries no trust roots on some pyqwest versions
+    # (only the default singleton does), so pass certifi's bundle explicitly.
+    return HTTPTransport(tls_ca_cert=_ca_bundle())
 
 
 def _network_update_payload(
@@ -1999,7 +2015,15 @@ class AsyncSandboxClient:
         gateway_url = auth["gateway_url"].rstrip("/")
         base_url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}"
         headers = {"Authorization": f"Bearer {auth['token']}"}
-        rpc_client = ConnectClient(base_url)
+        # Each live process gets its own transport: the session stream occupies one
+        # HTTP/2 stream for the process's whole lifetime, and the gateway caps
+        # concurrent streams per connection. On the shared default transport, enough
+        # concurrent live processes exhaust that cap and every later gateway RPC
+        # (stdin, signals, new sessions) queues until its deadline. The process's
+        # control RPCs reuse the same transport so they cannot starve either.
+        transport = _live_process_transport()
+        http_client = HTTPClient(transport=transport)
+        rpc_client = ConnectClient(base_url, http_client=http_client)
         request = build_command_session_start_request(
             command,
             working_dir,
@@ -2020,6 +2044,7 @@ class AsyncSandboxClient:
                 COMMAND_SESSION_SEND_INPUT_RPC_METHOD,
                 _PROCESS_INPUT_TIMEOUT_MS,
                 "stdin",
+                http_client=http_client,
             )
 
         async def send_signal(pid: int, signal: Literal["terminate", "kill"]) -> None:
@@ -2029,6 +2054,7 @@ class AsyncSandboxClient:
                 COMMAND_SESSION_SEND_SIGNAL_RPC_METHOD,
                 _PROCESS_SIGNAL_TIMEOUT_MS,
                 "signal",
+                http_client=http_client,
             )
 
         return await AsyncSandboxProcess._create(
@@ -2036,6 +2062,7 @@ class AsyncSandboxClient:
             stream,
             write_stdin,
             send_signal,
+            transport=transport,
         )
 
     async def _execute_process_control_rpc(
@@ -2045,6 +2072,7 @@ class AsyncSandboxClient:
         method: MethodInfo[_RequestMessage, _ResponseMessage],
         timeout_ms: int,
         operation: str,
+        http_client: Optional[HTTPClient] = None,
     ) -> None:
         """Run one live-process control RPC with current sandbox auth."""
         reauthed = False
@@ -2053,7 +2081,7 @@ class AsyncSandboxClient:
             gateway_url = auth["gateway_url"].rstrip("/")
             base_url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}"
             headers = {"Authorization": f"Bearer {auth['token']}"}
-            rpc_client = ConnectClient(base_url)
+            rpc_client = ConnectClient(base_url, http_client=http_client)
             try:
                 await rpc_client.execute_unary(
                     request=request,

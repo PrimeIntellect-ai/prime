@@ -8,6 +8,7 @@ from typing import Literal
 from connectrpc.client import ConnectClient
 from connectrpc.errors import ConnectError
 from google.protobuf.message import Message
+from pyqwest import HTTPTransport
 
 from .core import APIError
 from .rpc_command_session import parse_command_session_start_event
@@ -67,11 +68,13 @@ class AsyncSandboxProcess:
         stream: AsyncIterator[Message],
         write_stdin: _WriteStdin,
         send_signal: _SendSignal,
+        transport: HTTPTransport | None = None,
     ) -> None:
         self.stdout = _AsyncProcessStream()
         self.stderr = _AsyncProcessStream()
         self._stream_client = stream_client
         self._stream = stream
+        self._transport = transport
         self._write_stdin = write_stdin
         self._send_process_signal = send_signal
         self._remote_exited = False
@@ -96,8 +99,9 @@ class AsyncSandboxProcess:
         stream: AsyncIterator[Message],
         write_stdin: _WriteStdin,
         send_signal: _SendSignal,
+        transport: HTTPTransport | None = None,
     ) -> "AsyncSandboxProcess":
-        process = cls(stream_client, stream, write_stdin, send_signal)
+        process = cls(stream_client, stream, write_stdin, send_signal, transport)
         try:
             await asyncio.shield(process._started)
         except asyncio.CancelledError:
@@ -196,7 +200,14 @@ class AsyncSandboxProcess:
                     APIError("Process closed before its exit status was observed")
                 )
             await self._stream_client.close()
+            await self._close_transport()
             self._closed = True
+
+    async def _close_transport(self) -> None:
+        transport, self._transport = self._transport, None
+        if transport is not None:
+            with contextlib.suppress(Exception):
+                await transport.aclose()
 
     async def _wait_for_exit_event(self) -> bool:
         if self._remote_exited:
@@ -256,3 +267,6 @@ class AsyncSandboxProcess:
                 with contextlib.suppress(BaseException):
                     await close_stream()
             await self._stream_client.close()
+            # Callers that only consume the streams never reach aclose(), so a
+            # process-owned transport is released here too once the stream ends.
+            await self._close_transport()

@@ -49,7 +49,15 @@ def _build_params(
 
 def _trace_endpoint(trace_id: str) -> str:
     """Build a trace endpoint with the ID encoded as one path segment."""
-    return f"/traces/{quote(trace_id, safe='')}"
+    encoded = quote(trace_id, safe="")
+    # RFC 3986 leaves periods unescaped even with ``safe=""``. A segment that
+    # is exactly "." or ".." is special, though: HTTP clients normalize it
+    # away before sending the request, which would target the collection or API
+    # root instead of the requested trace. Percent-encode those two IDs
+    # explicitly so they remain ordinary path-segment values on the wire.
+    if encoded in {".", ".."}:
+        encoded = encoded.replace(".", "%2E")
+    return f"/traces/{encoded}"
 
 
 class TracesClient:

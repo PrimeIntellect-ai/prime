@@ -118,6 +118,17 @@ class TestPointReads:
 
         make_client(handler).get(RESERVED_TRACE_ID)
 
+    @pytest.mark.parametrize(
+        ("trace_id", "encoded"),
+        [(".", b"%2E"), ("..", b"%2E%2E")],
+    )
+    def test_get_preserves_dot_only_trace_id_segment(self, make_client, trace_id, encoded):
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.raw_path == b"/api/v1/traces/" + encoded
+            return httpx.Response(200, json={**SUMMARY, "trace_id": trace_id})
+
+        assert make_client(handler).get(trace_id).trace_id == trace_id
+
     def test_get_raw_streams_document(self, make_client):
         raw = b'{"version":4,"id":"8d3f1a2b","nodes":[]}'
 

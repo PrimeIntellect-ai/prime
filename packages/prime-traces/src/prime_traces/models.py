@@ -43,6 +43,7 @@ class ErrorCode(str, Enum):
     # caps the ID's length rather than letting one legal line replay it
     # hundreds of times against the row-staging budget.
     EPISODE_ID_TOO_LONG = "episode_id_too_long"
+    ENVIRONMENT_ID_TOO_LONG = "environment_id_too_long"
     # Distinct from `upload_too_large`, which is about bytes: the service also
     # caps rows per upload, because staging is charged per row and millions of
     # tiny lines fit every byte cap.

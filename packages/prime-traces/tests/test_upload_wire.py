@@ -10,6 +10,7 @@ import httpx
 import pytest
 
 from prime_traces import (
+    ErrorCode,
     LineFormat,
     LineFormatConflictError,
     RetryableAPIError,
@@ -313,6 +314,22 @@ class TestRetrySemantics:
         with pytest.raises(ValidationRejectedError) as exc_info:
             upload(make_client(handler))
         assert exc_info.value.code == "invalid_trace"
+
+    def test_environment_id_too_long_rejection_code_is_nameable(self, make_client):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                400,
+                json={
+                    "error": {
+                        "code": "environment_id_too_long",
+                        "message": "Episode 'env.id' exceeds the limit",
+                    }
+                },
+            )
+
+        with pytest.raises(ValidationRejectedError) as exc_info:
+            upload(make_client(handler), line_format=LineFormat.EPISODE)
+        assert ErrorCode(exc_info.value.code) is ErrorCode.ENVIRONMENT_ID_TOO_LONG
 
     def test_line_format_conflict_is_typed(self, make_client):
         def handler(request: httpx.Request) -> httpx.Response:

@@ -1303,7 +1303,13 @@ class SandboxClient:
                 poll_index = 0
                 continue
 
-            time.sleep(_creation_poll_delay(poll_index))
+            # Never sleep past the deadline. The loop only re-checks it on the
+            # next iteration, so an uncapped backoff delay would let the wait
+            # run up to CREATION_POLL_MAX_DELAY (plus jitter) beyond the budget.
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(_creation_poll_delay(poll_index), remaining))
             poll_index += 1
         raise SandboxNotRunningError(sandbox_id, "Timeout during sandbox creation")
 
@@ -2512,7 +2518,13 @@ class AsyncSandboxClient:
                 poll_index = 0
                 continue
 
-            await asyncio.sleep(_creation_poll_delay(poll_index))
+            # Never sleep past the deadline. The loop only re-checks it on the
+            # next iteration, so an uncapped backoff delay would let the wait
+            # run up to CREATION_POLL_MAX_DELAY (plus jitter) beyond the budget.
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(_creation_poll_delay(poll_index), remaining))
             poll_index += 1
         raise SandboxNotRunningError(sandbox_id, "Timeout during sandbox creation")
 

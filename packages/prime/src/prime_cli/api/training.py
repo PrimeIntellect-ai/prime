@@ -146,6 +146,7 @@ def build_payload_from_toml(
     wandb_api_key: Optional[str] = None,
     hf_token: Optional[str] = None,
     gpu_type: Optional[str] = None,
+    secrets: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """Build the /v1/training/runs payload from a prime-rl-style TOML dict.
 
@@ -157,7 +158,11 @@ def build_payload_from_toml(
     behaviour as `uv run rl @ rl.toml`.
 
     What stays out of `config`:
-      - secrets (wandb / hf): materialised into a per-run k8s Secret,
+      - secrets (wandb / hf, plus any caller-supplied env vars):
+        materialised into a per-run k8s Secret. WANDB_API_KEY and
+        HF_TOKEN keep their dedicated fields; everything else rides
+        along in `secrets` and the chart projects it onto the pods as
+        `secretKeyRef` env entries,
       - run name: lives on the platform's RFTRun row, not the TOML,
       - team_id: links the RFTRun to a team for billing/access scoping,
       - image_tag: chart-level (which prime-rl image to pull),
@@ -180,4 +185,9 @@ def build_payload_from_toml(
         payload["hfToken"] = hf_token
     if gpu_type:
         payload["gpuType"] = gpu_type
+    # Omit the key entirely when there's nothing to send — the backend
+    # treats absent and empty as the same thing, and an empty map would
+    # otherwise trip its "arbitrary secrets" path for no reason.
+    if secrets:
+        payload["secrets"] = secrets
     return payload

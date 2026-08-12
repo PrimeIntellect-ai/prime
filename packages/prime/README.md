@@ -183,17 +183,17 @@ prime pods terminate <pod-id>
 Isolated environments for running code remotely:
 
 ```bash
-# Create a sandbox (VM-backed by default, public beta)
+# Create a sandbox
 prime sandbox create python:3.11
 
 # Create a VM sandbox with GPUs
 prime sandbox create user-1/vm-image:latest --vm --gpu-count 1 --gpu-type H100_80GB
 
-# Create a one-shot VM workload (arguments after -- are preserved exactly)
-prime sandbox create user-1/vm-image:latest -- /worker --platform linux/amd64
+# Create a CPU-only VM sandbox
+prime sandbox create user-1/vm-image:latest --vm
 
-# Opt out to a container sandbox (supports SSH, port exposure, string start commands)
-prime sandbox create python:3.11 --container
+# Create a one-shot VM workload (arguments after -- are preserved exactly)
+prime sandbox create user-1/vm-image:latest --vm -- /worker --platform linux/amd64
 
 # List sandboxes
 prime sandbox list

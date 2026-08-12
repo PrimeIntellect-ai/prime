@@ -253,6 +253,31 @@ def test_list_command_json_output_is_parseable(fake_client):
     assert payload["next_cursor"] == "cursor-1"
 
 
+def test_table_output_treats_trace_values_as_literal_text(fake_client):
+    markup = "[/]"
+    fake_client.list = lambda **kwargs: TraceListPage(
+        items=[
+            _summary(
+                trace_id=markup,
+                run_id=markup,
+                task_id=markup,
+                score={"reward": 0.85, "outcome": markup},
+            )
+        ],
+        next_cursor=None,
+    )
+    fake_client.get = lambda trace_id: _summary(trace_id=trace_id, run_id=markup)
+
+    listed = runner.invoke(main_app, ["traces", "list"])
+    fetched = runner.invoke(main_app, ["traces", "get", "[red]trace"])
+
+    assert listed.exit_code == 0, listed.output
+    assert markup in listed.output
+    assert fetched.exit_code == 0, fetched.output
+    assert "[red]trace" in fetched.output
+    assert markup in fetched.output
+
+
 def test_get_command_summary_and_raw(fake_client):
     result = runner.invoke(main_app, ["traces", "get", "8d3f1a2b"])
     assert result.exit_code == 0, result.output

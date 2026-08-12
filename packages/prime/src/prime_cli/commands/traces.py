@@ -225,12 +225,12 @@ def list_traces(
     for summary in page.items:
         reward = summary.score.reward
         table.add_row(
-            summary.trace_id[:16],
-            summary.run_id or "-",
-            summary.task_id or "-",
+            escape(summary.trace_id[:16]),
+            escape(summary.run_id or "-"),
+            escape(summary.task_id or "-"),
             "-" if reward is None else f"{reward:.2f}",
-            summary.score.outcome or "-",
-            summary.created_at.isoformat(),
+            escape(summary.score.outcome or "-"),
+            escape(summary.created_at.isoformat()),
         )
     console.print(table)
     if page.next_cursor:
@@ -286,11 +286,11 @@ def get_trace(
         output_data_as_json(summary.model_dump(mode="json"), console)
         return
 
-    table = Table(title=f"Trace {trace_id}")
+    table = Table(title=f"Trace {escape(trace_id)}")
     table.add_column("Field", style="cyan")
     table.add_column("Value", style="green")
     for field, value in summary.model_dump(mode="json").items():
-        table.add_row(field, "-" if value is None else str(value))
+        table.add_row(escape(field), "-" if value is None else escape(str(value)))
     console.print(table)
 
 

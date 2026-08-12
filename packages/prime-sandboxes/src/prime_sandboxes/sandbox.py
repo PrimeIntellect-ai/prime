@@ -4,6 +4,7 @@ import asyncio
 import functools
 import json
 import os
+import random
 import re
 import shlex
 import sys
@@ -163,6 +164,39 @@ AUTH_REFRESH_MARGIN_SECONDS = 60
 
 # Max bytes of stdout/stderr returned per background-job status check
 JOB_OUTPUT_TAIL_BYTES = 10 * 1024 * 1024
+
+# Creation status-poll pacing. Sandbox creation is polled with exponential
+# backoff plus jitter rather than at a fixed interval
+CREATION_POLL_INITIAL_DELAY = 1.0
+CREATION_POLL_MAX_DELAY = 10.0
+CREATION_POLL_BACKOFF_FACTOR = 1.5
+# Fraction of the computed delay applied as +/- jitter.
+CREATION_POLL_JITTER = 0.25
+# Legacy fixed schedule (1s for the first 5 polls, then 2s) that `max_attempts`
+# used to describe. Retained only to derive the same wall-clock budget.
+_LEGACY_FAST_POLLS = 5
+
+
+def _creation_poll_delay(poll_index: int) -> float:
+    """Jittered exponential backoff delay for the Nth creation status poll."""
+    delay = min(
+        CREATION_POLL_INITIAL_DELAY * (CREATION_POLL_BACKOFF_FACTOR**poll_index),
+        CREATION_POLL_MAX_DELAY,
+    )
+    jitter = delay * CREATION_POLL_JITTER
+    return max(0.0, delay + random.uniform(-jitter, jitter))
+
+
+def _creation_timeout_seconds(max_attempts: int) -> float:
+    """Wall-clock budget the legacy fixed-interval schedule gave `max_attempts`.
+
+    Backoff means attempts no longer map 1:1 to elapsed time, so the budget is
+    derived once here and enforced as a deadline. This keeps the effective
+    timeout of every existing caller unchanged.
+    """
+    if max_attempts <= _LEGACY_FAST_POLLS:
+        return float(max_attempts)
+    return float(_LEGACY_FAST_POLLS + (max_attempts - _LEGACY_FAST_POLLS) * 2)
 
 
 def _is_retryable_gateway_error(exc: BaseException) -> bool:
@@ -1235,26 +1269,37 @@ class SandboxClient:
 
         Args:
             sandbox_id: The sandbox ID to wait for
-            max_attempts: Maximum polling attempts
+            max_attempts: Defines the wall-clock budget for the wait, expressed
+                in polls of the legacy fixed-interval schedule (see
+                `_creation_timeout_seconds`). Status polls now back off, so this
+                bounds elapsed time rather than the literal number of requests.
+                Reaching RUNNING starts a fresh budget of the same size for the
+                reachability phase, so a wait that gets that far can take up to
+                twice this long.
             stability_checks: Number of consecutive successful reachability checks required
             image_build_timeout_seconds: Separate wall-clock budget while the
                 platform auto-builds the VM image for a first-use image (the
                 sandbox stays PENDING with pending_image_build_id set). That
-                phase polls slowly and does not consume max_attempts.
+                phase polls slowly and does not consume the creation budget.
         """
         consecutive_successes = 0
         image_build_deadline: Optional[float] = None
-        attempt = 0
-        while attempt < max_attempts:
+        deadline = time.monotonic() + _creation_timeout_seconds(max_attempts)
+        poll_index = 0
+        reachability_phase = False
+        while time.monotonic() < deadline:
             sandbox = self.get(sandbox_id)
             if sandbox.status == "RUNNING":
+                if not reachability_phase:
+                    reachability_phase = True
+                    deadline = time.monotonic() + _creation_timeout_seconds(max_attempts)
+                    poll_index = 0
                 if self._is_sandbox_reachable(sandbox_id):
                     consecutive_successes += 1
                     if consecutive_successes >= stability_checks:
                         return
                     # Small delay between stability checks
                     time.sleep(0.5)
-                    attempt += 1
                     continue
                 else:
                     # Reset counter if check fails
@@ -1268,7 +1313,9 @@ class SandboxClient:
                 _raise_not_running_error(sandbox.id, ctx)
             elif _is_waiting_for_image_build(sandbox):
                 # The platform is building the VM image for this sandbox; it
-                # starts on its own once the build completes.
+                # starts on its own once the build completes. This phase runs on
+                # its own budget, so hold the creation deadline back while it
+                # lasts and reset the backoff for when the sandbox starts.
                 if image_build_deadline is None:
                     image_build_deadline = time.monotonic() + image_build_timeout_seconds
                 if time.monotonic() >= image_build_deadline:
@@ -1276,12 +1323,18 @@ class SandboxClient:
                         sandbox_id, "Timeout waiting for the VM image build"
                     )
                 time.sleep(10)
+                deadline = time.monotonic() + _creation_timeout_seconds(max_attempts)
+                poll_index = 0
                 continue
 
-            attempt += 1
-            # Aggressive polling for first 5 attempts (5 seconds), then back off
-            sleep_time = 1 if attempt <= 5 else 2
-            time.sleep(sleep_time)
+            # Never sleep past the deadline. The loop only re-checks it on the
+            # next iteration, so an uncapped backoff delay would let the wait
+            # run up to CREATION_POLL_MAX_DELAY (plus jitter) beyond the budget.
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(_creation_poll_delay(poll_index), remaining))
+            poll_index += 1
         raise SandboxNotRunningError(sandbox_id, "Timeout during sandbox creation")
 
     def bulk_wait_for_creation(
@@ -2451,26 +2504,37 @@ class AsyncSandboxClient:
 
         Args:
             sandbox_id: The sandbox ID to wait for
-            max_attempts: Maximum polling attempts
+            max_attempts: Defines the wall-clock budget for the wait, expressed
+                in polls of the legacy fixed-interval schedule (see
+                `_creation_timeout_seconds`). Status polls now back off, so this
+                bounds elapsed time rather than the literal number of requests.
+                Reaching RUNNING starts a fresh budget of the same size for the
+                reachability phase, so a wait that gets that far can take up to
+                twice this long.
             stability_checks: Number of consecutive successful reachability checks required
             image_build_timeout_seconds: Separate wall-clock budget while the
                 platform auto-builds the VM image for a first-use image (the
                 sandbox stays PENDING with pending_image_build_id set). That
-                phase polls slowly and does not consume max_attempts.
+                phase polls slowly and does not consume the creation budget.
         """
         consecutive_successes = 0
         image_build_deadline: Optional[float] = None
-        attempt = 0
-        while attempt < max_attempts:
+        deadline = time.monotonic() + _creation_timeout_seconds(max_attempts)
+        poll_index = 0
+        reachability_phase = False
+        while time.monotonic() < deadline:
             sandbox = await self.get(sandbox_id)
             if sandbox.status == "RUNNING":
+                if not reachability_phase:
+                    reachability_phase = True
+                    deadline = time.monotonic() + _creation_timeout_seconds(max_attempts)
+                    poll_index = 0
                 if await self._is_sandbox_reachable(sandbox_id):
                     consecutive_successes += 1
                     if consecutive_successes >= stability_checks:
                         return
                     # Small delay between stability checks
                     await asyncio.sleep(0.5)
-                    attempt += 1
                     continue
                 else:
                     # Reset counter if check fails
@@ -2484,7 +2548,9 @@ class AsyncSandboxClient:
                 _raise_not_running_error(sandbox.id, ctx)
             elif _is_waiting_for_image_build(sandbox):
                 # The platform is building the VM image for this sandbox; it
-                # starts on its own once the build completes.
+                # starts on its own once the build completes. This phase runs on
+                # its own budget, so hold the creation deadline back while it
+                # lasts and reset the backoff for when the sandbox starts.
                 if image_build_deadline is None:
                     image_build_deadline = time.monotonic() + image_build_timeout_seconds
                 if time.monotonic() >= image_build_deadline:
@@ -2492,11 +2558,18 @@ class AsyncSandboxClient:
                         sandbox_id, "Timeout waiting for the VM image build"
                     )
                 await asyncio.sleep(10)
+                deadline = time.monotonic() + _creation_timeout_seconds(max_attempts)
+                poll_index = 0
                 continue
 
-            attempt += 1
-            sleep_time = 1 if attempt <= 5 else 2
-            await asyncio.sleep(sleep_time)
+            # Never sleep past the deadline. The loop only re-checks it on the
+            # next iteration, so an uncapped backoff delay would let the wait
+            # run up to CREATION_POLL_MAX_DELAY (plus jitter) beyond the budget.
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(_creation_poll_delay(poll_index), remaining))
+            poll_index += 1
         raise SandboxNotRunningError(sandbox_id, "Timeout during sandbox creation")
 
     async def bulk_wait_for_creation(

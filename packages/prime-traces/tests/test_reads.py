@@ -166,6 +166,9 @@ class TestPointReads:
     def test_download_raw_failure_preserves_existing_file(self, make_client, tmp_path):
         dest = tmp_path / "trace.json"
         dest.write_bytes(b"previous download")
+        unrelated_partial = tmp_path / "trace.json.partial"
+        unrelated_partial.write_bytes(b"unrelated partial data")
+        files_before = set(tmp_path.iterdir())
 
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(
@@ -175,7 +178,8 @@ class TestPointReads:
         with pytest.raises(NotFoundError):
             make_client(handler).download_raw("missing", dest)
         assert dest.read_bytes() == b"previous download"
-        assert not (tmp_path / "trace.json.partial").exists()
+        assert unrelated_partial.read_bytes() == b"unrelated partial data"
+        assert set(tmp_path.iterdir()) == files_before
 
     def test_not_found_is_typed(self, make_client):
         def handler(request: httpx.Request) -> httpx.Response:

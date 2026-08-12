@@ -13,6 +13,7 @@ column behind it yet), and the dot-path query compiler (needs the
 server-side field registry).
 """
 
+import tempfile
 import time
 from pathlib import Path
 from typing import Callable, Dict, Iterable, Iterator, List, Optional, Union
@@ -252,22 +253,31 @@ class TracesClient:
     ) -> int:
         """Stream a response body to ``dest`` without clobbering it on failure.
 
-        Bytes land in a sibling ``.partial`` file that replaces ``dest`` only
-        after the stream ends cleanly, so a failed request — or a connection
-        cut mid-stream — never truncates an existing file at ``dest``.
+        Bytes land in a uniquely named sibling temporary file that replaces
+        ``dest`` only after the stream ends cleanly, so a failed request — or a
+        connection cut mid-stream — never truncates an existing file at
+        ``dest`` or another download's temporary file.
         """
         dest = Path(dest)
-        partial = dest.with_name(dest.name + ".partial")
+        partial: Optional[Path] = None
         written = 0
         try:
-            with open(partial, "wb") as f:
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                dir=dest.parent,
+                prefix=".prime-traces-",
+                suffix=".partial",
+                delete=False,
+            ) as f:
+                partial = Path(f.name)
                 for chunk in self.client.stream_bytes(endpoint, params=params):
                     f.write(chunk)
                     written += len(chunk)
+            partial.replace(dest)
         except BaseException:
-            partial.unlink(missing_ok=True)
+            if partial is not None:
+                partial.unlink(missing_ok=True)
             raise
-        partial.replace(dest)
         return written
 
     # -- traces: delete -----------------------------------------------------

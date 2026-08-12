@@ -2,15 +2,13 @@
 
 Speaks the wire contract and maps error responses to typed exceptions.
 
-Retry policy is split by what makes a retry safe. Idempotent requests — GET,
-and DELETE, whose effect is the same however many times it lands — are retried
-here with a small fixed budget, matching the sibling SDKs (prime-sandboxes
-retries idempotent methods on 502/503/504 and transport failures). DELETE needs
-one extra rule because the service is not idempotent in its *response*: see
-``_idempotent_request``. Uploads are POSTs whose retry safety comes from
-content addressing rather than the method, so their loop lives in
-``TracesClient``, where the attempt budget is caller-configurable and
-Retry-After is honored against it.
+Retry policy is split by what makes a retry safe. GET requests are retried here
+with a small fixed budget. DELETE requests use the same budget only for
+failures known to happen before delivery or explicit service refusals; an
+ambiguous replay could delete data written after the first attempt. Uploads are
+POSTs whose retry safety comes from content addressing rather than the method,
+so their loop lives in ``TracesClient``, where the attempt budget is
+caller-configurable and Retry-After is honored against it.
 """
 
 import gzip as gzip_module
@@ -25,6 +23,7 @@ from typing import Any, Dict, Iterator, Optional
 import httpx
 
 from ..exceptions import (
+    AmbiguousDeleteError,
     APIError,
     APITimeoutError,
     ForbiddenError,
@@ -317,30 +316,17 @@ class TracesAPIClient:
         method: str,
         endpoint: str,
         params: Optional[Dict[str, Any]],
-        *,
-        absent_after_ambiguity_is_success: bool = False,
     ) -> httpx.Response:
-        """Send with bounded retries on transient failures.
+        """Send with bounded retries when replay is known to be safe.
 
-        Only for methods a replay cannot make worse: GET, and DELETE, whose
-        effect is the same however many times it lands.
-
-        ``absent_after_ambiguity_is_success`` covers the one way a replayed
-        DELETE differs from the first attempt. The design docs specify deletion
-        as idempotent at the API level ("deleting rows that are already masked
-        or absent is still accepted"), but the service checks existence first
-        and answers 404 when nothing matches. So a delete that lands and loses
-        its response gets 404 on the retry — a delete that worked, reported as
-        a failure.
-
-        The absorption is gated on the earlier failure being *ambiguous* — a
-        transport failure during or after request delivery, or a gateway
-        502/504 — because only those leave open the possibility that this
-        client already removed the rows. Connection/pool failures, 429 and 503
-        cannot hide a completed delete, so a 404 behind one is genuine.
-        Remove all of this once the service is idempotent.
+        GET requests retry every transient failure. DELETE requests retry only
+        failures known to happen before delivery, plus 429/503 responses where
+        the service declined the operation. A response-path transport failure
+        or gateway 502/504 is ambiguous: the deletion may already have landed,
+        and replaying it could delete a trace uploaded between attempts. Those
+        failures therefore surface to the caller without a transparent retry.
         """
-        ambiguous = False
+        is_delete = method.upper() == "DELETE"
         for attempt in range(IDEMPOTENT_RETRY_ATTEMPTS):
             last = attempt == IDEMPOTENT_RETRY_ATTEMPTS - 1
             try:
@@ -349,27 +335,25 @@ class TracesAPIClient:
                 error = self._wrap_transport_errors(exc)
                 if error is exc:
                     raise
+                if is_delete and isinstance(exc, _AMBIGUOUS_TRANSPORT_ERRORS):
+                    raise AmbiguousDeleteError(f"Delete outcome is unknown: {error}") from exc
                 if last:
                     raise error from exc
-                # Only failures during/after delivery can hide a completed
-                # DELETE. Connect and pool failures happen before any request
-                # reaches the service, so they must not suppress a later 404.
-                ambiguous = ambiguous or isinstance(exc, _AMBIGUOUS_TRANSPORT_ERRORS)
                 time.sleep(retry_delay(error, attempt))
                 continue
             try:
                 raise_for_response(response)
             except RetryableAPIError as exc:
+                if is_delete and exc.status_code in _AMBIGUOUS_RETRY_STATUSES:
+                    raise AmbiguousDeleteError(
+                        f"Delete outcome is unknown after HTTP {exc.status_code}: {exc}",
+                        status_code=exc.status_code,
+                        code=exc.code,
+                    ) from exc
                 if last:
                     raise
-                # Sticky: one ambiguous attempt anywhere in the sequence is
-                # enough to explain a later 404, whatever followed it.
-                ambiguous = ambiguous or exc.status_code in _AMBIGUOUS_RETRY_STATUSES
                 time.sleep(retry_delay(exc, attempt))
                 continue
-            except NotFoundError:
-                if not (ambiguous and absent_after_ambiguity_is_success):
-                    raise
             return response
         raise AssertionError("unreachable")  # pragma: no cover
 
@@ -384,20 +368,12 @@ class TracesAPIClient:
     def delete(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> None:
         """Send a DELETE and discard the body — 202 carries none.
 
-        A 404 propagates unless an earlier attempt failed ambiguously (a
-        transport error, or a gateway 502/504), in which case that attempt may
-        well have done the work. A ``created_at`` precision hint disables that
-        absorption: its 404 can mean the hint never matched while the trace
-        still exists. See ``_idempotent_request``.
+        Pre-delivery failures and explicit 429/503 refusals are retried. An
+        ambiguous failure that may hide a completed deletion is returned to the
+        caller: replaying it could delete data written after the first attempt.
         """
         self._check_auth()
-        has_created_at_hint = params is not None and params.get("created_at") is not None
-        self._idempotent_request(
-            "DELETE",
-            endpoint,
-            params,
-            absent_after_ambiguity_is_success=not has_created_at_hint,
-        )
+        self._idempotent_request("DELETE", endpoint, params)
 
     def stream_bytes(
         self, endpoint: str, params: Optional[Dict[str, Any]] = None

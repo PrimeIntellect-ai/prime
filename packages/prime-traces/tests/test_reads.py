@@ -2,6 +2,7 @@ import httpx
 import pytest
 
 from prime_traces import (
+    AmbiguousDeleteError,
     ErrorCode,
     ForbiddenError,
     NotFoundError,
@@ -33,8 +34,8 @@ SUMMARY = {
     "context": {"source": "hosted_eval"},
 }
 
-RESERVED_TRACE_ID = "trace/with?reserved#chars%and space"
-ENCODED_TRACE_PATH = b"/api/v1/traces/trace%2Fwith%3Freserved%23chars%25and%20space"
+RESERVED_TRACE_ID = "trace?with#reserved%chars and space"
+ENCODED_TRACE_PATH = b"/api/v1/traces/trace%3Fwith%23reserved%25chars%20and%20space"
 
 
 class TestList:
@@ -117,6 +118,13 @@ class TestPointReads:
             return httpx.Response(200, json=SUMMARY)
 
         make_client(handler).get(RESERVED_TRACE_ID)
+
+    def test_get_rejects_trace_id_with_slash_before_request(self, make_client):
+        def handler(request: httpx.Request) -> httpx.Response:
+            pytest.fail(f"unexpected request: {request.url}")
+
+        with pytest.raises(ValueError, match="cannot contain '/'"):
+            make_client(handler).get("trace/child")
 
     @pytest.mark.parametrize(
         ("trace_id", "encoded"),
@@ -239,9 +247,8 @@ class TestPointReads:
 
 
 class TestReadRetries:
-    """Idempotent requests retry transient failures with a bounded budget,
-    mirroring the sibling SDKs (prime-sandboxes retries idempotent methods on
-    502/503/504 and transport errors)."""
+    """Reads retry transient failures with a bounded budget; deletes retry
+    only when the first request is known not to have taken effect."""
 
     _UNAVAILABLE = {"error": {"code": "storage_unavailable", "message": "storage is down"}}
 
@@ -400,48 +407,19 @@ class TestDelete:
             make_client(handler).delete("x")
         assert caught.value.code == "trace_not_found"
 
-    def test_404_after_an_ambiguous_attempt_is_treated_as_deleted(self, make_client):
-        """A delete that lands and loses its response must not report failure.
-
-        The service is not idempotent — it checks existence first and 404s when
-        nothing matches — so the retry of a delete that already succeeded sees
-        404. Absorbed, because the attempt before it is what removed the rows.
-        """
+    def test_ambiguous_transport_failure_is_not_retried(self, make_client, no_sleep):
+        """A replay could delete a trace written after the first attempt."""
         attempts = []
 
         def handler(request: httpx.Request) -> httpx.Response:
             attempts.append(request.url.path)
-            if len(attempts) == 1:
-                raise httpx.ReadError("connection reset")
-            return httpx.Response(
-                404,
-                json={"error": {"code": "trace_not_found", "message": "No trace 'x'"}},
-            )
+            raise httpx.ReadError("connection reset", request=request)
 
-        make_client(handler).delete("8d3f1a2b")
-        assert len(attempts) == 2
-
-    @pytest.mark.parametrize("failure", ["gateway", "transport"])
-    def test_hinted_delete_does_not_absorb_404_after_ambiguous_attempt(self, make_client, failure):
-        attempts = []
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            attempts.append(dict(request.url.params))
-            if len(attempts) == 1:
-                if failure == "transport":
-                    raise httpx.ReadError("connection reset", request=request)
-                return httpx.Response(502, text="upstream response lost")
-            return httpx.Response(
-                404,
-                json={"error": {"code": "trace_not_found", "message": "hint did not match"}},
-            )
-
-        with pytest.raises(NotFoundError):
-            make_client(handler).delete("8d3f1a2b", created_at="2026-07-20T18:02:11.482Z")
-        assert attempts == [
-            {"created_at": "2026-07-20T18:02:11.482Z"},
-            {"created_at": "2026-07-20T18:02:11.482Z"},
-        ]
+        with pytest.raises(AmbiguousDeleteError) as caught:
+            make_client(handler).delete("8d3f1a2b")
+        assert caught.value.status_code is None
+        assert len(attempts) == 1
+        assert no_sleep == []
 
     @pytest.mark.parametrize(
         "error_type",
@@ -464,22 +442,19 @@ class TestDelete:
         assert len(attempts) == 2
 
     @pytest.mark.parametrize("status", [502, 504])
-    def test_404_after_a_gateway_failure_is_treated_as_deleted(self, make_client, status):
-        """A gateway may have forwarded the request upstream before failing, so
-        502/504 is as ambiguous as a dropped connection."""
+    def test_ambiguous_gateway_failure_is_not_retried(self, make_client, no_sleep, status):
+        """A gateway may have forwarded the request before losing its response."""
         attempts = []
 
         def handler(request: httpx.Request) -> httpx.Response:
             attempts.append(request.url.path)
-            if len(attempts) == 1:
-                return httpx.Response(status, text="upstream connect error")
-            return httpx.Response(
-                404,
-                json={"error": {"code": "trace_not_found", "message": "No trace 'x'"}},
-            )
+            return httpx.Response(status, text="upstream response lost")
 
-        make_client(handler).delete("8d3f1a2b")
-        assert len(attempts) == 2
+        with pytest.raises(AmbiguousDeleteError) as caught:
+            make_client(handler).delete_run("run_9f3k2m")
+        assert caught.value.status_code == status
+        assert len(attempts) == 1
+        assert no_sleep == []
 
     @pytest.mark.parametrize("status", [429, 503])
     def test_404_after_the_service_declined_is_not_absorbed(self, make_client, status):

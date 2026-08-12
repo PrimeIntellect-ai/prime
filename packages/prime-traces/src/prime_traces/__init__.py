@@ -16,6 +16,7 @@ from .batching import (
 )
 from .core import Config, TracesAPIClient
 from .exceptions import (
+    AmbiguousDeleteError,
     APIError,
     APITimeoutError,
     ForbiddenError,
@@ -69,6 +70,7 @@ __all__ = [
     "PrimeTracesError",
     "APIError",
     "APITimeoutError",
+    "AmbiguousDeleteError",
     "ForbiddenError",
     "LineFormatConflictError",
     "NotFoundError",

@@ -50,6 +50,12 @@ def _build_params(
 
 def _trace_endpoint(trace_id: str) -> str:
     """Build a trace endpoint with the ID encoded as one path segment."""
+    if "/" in trace_id:
+        # ASGI decodes %2F before Starlette route matching, so the service's
+        # /traces/{trace_id} route sees an extra path segment and returns 404.
+        # Fail locally until that route accepts a path-valued parameter rather
+        # than issuing a request that cannot address the uploaded trace.
+        raise ValueError("trace_id cannot contain '/' until the service supports path-valued IDs")
     encoded = quote(trace_id, safe="")
     # RFC 3986 leaves periods unescaped even with ``safe=""``. A segment that
     # is exactly "." or ".." is special, though: HTTP clients normalize it
@@ -288,10 +294,12 @@ class TracesClient:
         ``created_at`` is an optional performance hint that lets the service
         prune on its ordering-key prefix; correctness does not depend on it,
         but a hint matching no stored copy is a 404 even when the trace exists
-        under another timestamp. For that reason, a hinted delete also
-        preserves a 404 received after an ambiguous first attempt: the client
-        cannot prove whether that attempt deleted the trace or never reached
-        the service, so reporting success could leave a trace behind.
+        under another timestamp.
+
+        Ambiguous transport and gateway failures raise
+        ``AmbiguousDeleteError`` without retrying: the first request may
+        already have deleted this trace, and replaying it could delete a new
+        copy uploaded between attempts.
 
         Raises ``NotFoundError`` when the owner has no such trace — including
         on a repeat of a delete that already succeeded. The design docs
@@ -312,7 +320,9 @@ class TracesClient:
         a permanent ``None``.)
 
         Episode rows are not touched. Raises ``NotFoundError`` when the run
-        holds no traces for this owner — see ``delete`` on repeats.
+        holds no traces for this owner — see ``delete`` on repeats. An
+        ``AmbiguousDeleteError`` is not retried because a replay could delete
+        traces added to the run after the first request.
         """
         self.client.delete("/traces", params={"run_id": run_id})
 

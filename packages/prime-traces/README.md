@@ -1,7 +1,7 @@
 # Prime Traces SDK
 
-Upload, query and export training, evaluation and inference traces through the
-Prime Traces service.
+Upload and query training, evaluation and inference traces through the Prime
+Traces service.
 
 ## Features
 
@@ -111,20 +111,24 @@ gateway 502/503/504 responses are surfaced as `AmbiguousDeleteError` without
 replaying the deletion, because a retry could delete a trace written after the
 first request.
 
-Point reads and deletes currently reject trace IDs containing `/`. ASGI decodes
-an encoded slash before matching the service's `/{trace_id}` route, so those IDs
-cannot be addressed until the service accepts a path-valued route parameter.
+Trace point reads/deletes and episode point/member reads currently reject IDs
+containing `/`. ASGI decodes an encoded slash before matching the service's
+`/{resource_id}` routes, so those IDs cannot be addressed until the service
+accepts path-valued route parameters.
 
 Episodes are read-only resources:
 
 ```python
-for episode in client.list_episodes(run_id="run_9f3k2m").items:
+page = client.list_episodes(run_id="run_9f3k2m")
+for episode in page.items:
     print(episode.episode_id, episode.outcome)
 
-detail = client.get_episode(episode_id)   # + member aggregate under .traces
-print(detail.error.type, detail.traces.trace_count)
+if page.items:
+    episode_id = page.items[0].episode_id
+    detail = client.get_episode(episode_id)  # + member aggregate under .traces
+    print(detail.error.type, detail.traces.trace_count)
 
-client.list_episode_traces(episode_id)    # member trace summaries, paginated
+    client.list_episode_traces(episode_id)  # member trace summaries, paginated
 ```
 
 Response shapes mirror the service's pinned models: pages are

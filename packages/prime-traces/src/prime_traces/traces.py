@@ -99,15 +99,17 @@ def _build_params(
     return params
 
 
-def _trace_endpoint(trace_id: str) -> str:
-    """Build a trace endpoint with the ID encoded as one path segment."""
-    if "/" in trace_id:
+def _encoded_id_segment(identifier: str, *, parameter_name: str) -> str:
+    """Encode a resource ID as one URL path segment."""
+    if "/" in identifier:
         # ASGI decodes %2F before Starlette route matching, so the service's
-        # /traces/{trace_id} route sees an extra path segment and returns 404.
+        # /{resource}/{id} routes see an extra path segment and return 404.
         # Fail locally until that route accepts a path-valued parameter rather
-        # than issuing a request that cannot address the uploaded trace.
-        raise ValueError("trace_id cannot contain '/' until the service supports path-valued IDs")
-    encoded = quote(trace_id, safe="")
+        # than issuing a request that cannot address the uploaded resource.
+        raise ValueError(
+            f"{parameter_name} cannot contain '/' until the service supports path-valued IDs"
+        )
+    encoded = quote(identifier, safe="")
     # RFC 3986 leaves periods unescaped even with ``safe=""``. A segment that
     # is exactly "." or ".." is special, though: HTTP clients normalize it
     # away before sending the request, which would target the collection or API
@@ -115,7 +117,17 @@ def _trace_endpoint(trace_id: str) -> str:
     # explicitly so they remain ordinary path-segment values on the wire.
     if encoded in {".", ".."}:
         encoded = encoded.replace(".", "%2E")
-    return f"/traces/{encoded}"
+    return encoded
+
+
+def _trace_endpoint(trace_id: str) -> str:
+    """Build a trace endpoint with the ID encoded as one path segment."""
+    return f"/traces/{_encoded_id_segment(trace_id, parameter_name='trace_id')}"
+
+
+def _episode_endpoint(episode_id: str) -> str:
+    """Build an episode endpoint with the ID encoded as one path segment."""
+    return f"/episodes/{_encoded_id_segment(episode_id, parameter_name='episode_id')}"
 
 
 class TracesClient:
@@ -445,7 +457,7 @@ class TracesClient:
         alongside ``traces.any_trace_error``, so an environment-hook failure
         stays visible even when every individual trace succeeded.
         """
-        return EpisodeDetail.model_validate(self.client.get_json(f"/episodes/{episode_id}"))
+        return EpisodeDetail.model_validate(self.client.get_json(_episode_endpoint(episode_id)))
 
     def list_episode_traces(
         self,
@@ -460,7 +472,7 @@ class TracesClient:
         if cursor is not None:
             params["cursor"] = cursor
         return TraceListPage.model_validate(
-            self.client.get_json(f"/episodes/{episode_id}/traces", params=params)
+            self.client.get_json(f"{_episode_endpoint(episode_id)}/traces", params=params)
         )
 
     def close(self) -> None:

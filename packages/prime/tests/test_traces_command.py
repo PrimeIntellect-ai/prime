@@ -212,6 +212,23 @@ def test_upload_command_rejects_malformed_context(fake_client, tmp_path):
     assert "upload_file" not in fake_client.calls
 
 
+def test_unexpected_error_does_not_dump_sdk_locals(fake_client, tmp_path):
+    traces_file = tmp_path / "traces.jsonl"
+    traces_file.write_bytes(b'{"id":"a"}\n')
+
+    def fail_upload(*args, **kwargs):
+        secret_trace = "sensitive-trace-" + "payload"
+        assert secret_trace
+        raise RuntimeError("malformed receipt")
+
+    fake_client.upload_file = fail_upload
+    result = runner.invoke(main_app, ["traces", "upload", str(traces_file)])
+
+    assert result.exit_code == 1
+    assert "Unexpected error: malformed receipt" in result.output
+    assert "sensitive-trace-payload" not in result.output
+
+
 def test_list_command_forwards_filters_and_renders_table(fake_client):
     result = runner.invoke(
         main_app,
@@ -245,6 +262,27 @@ def test_get_command_summary_and_raw(fake_client):
     assert result.exit_code == 0, result.output
     assert '"version":4' in result.output
     assert fake_client.calls["get_raw"] == "8d3f1a2b"
+
+
+def test_get_command_raw_stdout_preserves_exact_bytes(fake_client):
+    raw = b'{"version":4}\n\xff'
+    fake_client.get_raw = lambda trace_id: raw
+
+    result = runner.invoke(main_app, ["traces", "get", "8d3f1a2b", "--raw"])
+
+    assert result.exit_code == 0
+    assert result.stdout_bytes == raw
+
+
+def test_get_command_rejects_dest_without_raw(fake_client, tmp_path):
+    dest = tmp_path / "trace.json"
+
+    result = runner.invoke(main_app, ["traces", "get", "8d3f1a2b", "--dest", str(dest)])
+
+    assert result.exit_code == 1
+    assert "--dest requires --raw" in result.output
+    assert "get" not in fake_client.calls
+    assert not dest.exists()
 
 
 def test_get_command_raw_to_dest_streams(fake_client, tmp_path):

@@ -1,6 +1,7 @@
 from pathlib import Path
 from typing import Dict, List, Optional
 
+import click
 import typer
 from prime_traces import (
     APIError,
@@ -138,7 +139,7 @@ def upload_traces(
         raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
-        console.print_exception(show_locals=True)
+        console.print_exception()
         raise typer.Exit(1)
 
     if output == "json":
@@ -206,7 +207,7 @@ def list_traces(
         raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
-        console.print_exception(show_locals=True)
+        console.print_exception()
         raise typer.Exit(1)
 
     if output == "json":
@@ -247,6 +248,10 @@ def get_trace(
 ) -> None:
     """Get one trace summary, or the raw trace document with --raw."""
     validate_output_format(output, console)
+    if dest is not None and not raw:
+        console.print("[red]--dest requires --raw[/red]")
+        raise typer.Exit(1)
+
     try:
         client = _traces_client()
         if raw:
@@ -254,8 +259,11 @@ def get_trace(
                 written = client.download_raw(trace_id, dest)
                 console.print(f"[green]Wrote {written} bytes to {dest}[/green]")
                 return
-            # Raw documents can be tens of MiB; print verbatim, no re-encoding.
-            print(client.get_raw(trace_id).decode("utf-8", errors="replace"))
+            # Raw documents can be tens of MiB. Preserve their exact bytes and
+            # do not append a newline so redirected output is a faithful copy.
+            stdout = click.get_binary_stream("stdout")
+            stdout.write(client.get_raw(trace_id))
+            stdout.flush()
             return
         summary = client.get(trace_id)
     except typer.Exit:
@@ -271,7 +279,7 @@ def get_trace(
         raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
-        console.print_exception(show_locals=True)
+        console.print_exception()
         raise typer.Exit(1)
 
     if output == "json":
@@ -340,5 +348,5 @@ def delete_traces(
         raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
-        console.print_exception(show_locals=True)
+        console.print_exception()
         raise typer.Exit(1)

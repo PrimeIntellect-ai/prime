@@ -13,10 +13,11 @@ column behind it yet), and the dot-path query compiler (needs the
 server-side field registry).
 """
 
+import json
 import tempfile
 import time
 from pathlib import Path
-from typing import Callable, Dict, Iterable, Iterator, List, Optional, Union
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Protocol, Union
 from urllib.parse import quote
 
 from .batching import (
@@ -35,6 +36,48 @@ from .models import (
 )
 
 DEFAULT_MAX_ATTEMPTS = 5
+
+
+class SupportsToRecord(Protocol):
+    """An in-memory trace or episode that can produce its JSON record.
+
+    Verifiers ``Trace`` / ``Episode`` and prime-rl ``Rollout`` objects satisfy
+    this protocol without prime-traces importing either producer package.
+    """
+
+    def to_record(self) -> Mapping[str, Any]: ...
+
+
+TraceRecord = Union[Mapping[str, Any], SupportsToRecord]
+
+
+def _record_lines(records: Iterable[TraceRecord]) -> Iterator[bytes]:
+    """Serialize in-memory records lazily as compact UTF-8 JSONL lines."""
+    for record_number, record in enumerate(records, start=1):
+        if isinstance(record, Mapping):
+            value = record
+        else:
+            to_record = getattr(record, "to_record", None)
+            if not callable(to_record):
+                raise TypeError(
+                    f"Record {record_number} must be a mapping or implement to_record()"
+                )
+            value = to_record()
+            if not isinstance(value, Mapping):
+                raise TypeError(f"Record {record_number} to_record() must return a mapping")
+
+        # Compact separators match common JSONL writers, ensure_ascii=False
+        # keeps the wire representation UTF-8, and allow_nan=False prevents
+        # emitting JavaScript-only NaN/Infinity values that strict JSON rejects.
+        yield (
+            json.dumps(
+                dict(value),
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            + b"\n"
+        )
 
 
 def _build_params(
@@ -74,6 +117,37 @@ class TracesClient:
         self.client = api_client or TracesAPIClient(**client_kwargs)
 
     # -- upload -------------------------------------------------------------
+
+    def upload_records(
+        self,
+        records: Iterable[TraceRecord],
+        *,
+        line_format: LineFormat = LineFormat.TRACE,
+        context: Optional[Dict[str, str]] = None,
+        schema_version: int = 1,
+        compress: bool = True,
+        target_batch_bytes: int = DEFAULT_TARGET_BATCH_BYTES,
+        max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+        on_batch: Optional[Callable[[Batch, UploadReceipt], None]] = None,
+    ) -> List[UploadReceipt]:
+        """Upload trace or episode records directly from memory.
+
+        Each input may be a JSON-compatible mapping or an object implementing
+        ``to_record()``, including verifiers ``Trace`` / ``Episode`` and
+        prime-rl ``Rollout`` objects. Records are serialized lazily and passed
+        through the same bounded batching path as JSONL files, so the complete
+        input is never buffered or written to disk.
+        """
+        return self.upload_lines(
+            _record_lines(records),
+            line_format=line_format,
+            context=context,
+            schema_version=schema_version,
+            compress=compress,
+            target_batch_bytes=target_batch_bytes,
+            max_attempts=max_attempts,
+            on_batch=on_batch,
+        )
 
     def upload_file(
         self,

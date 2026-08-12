@@ -51,6 +51,56 @@ def upload(client, **kwargs):
 
 
 class TestRequestShape:
+    def test_upload_records_serializes_mappings_and_to_record_objects(self, make_client):
+        captured = {}
+
+        class RecordObject:
+            def to_record(self):
+                return {"id": "b", "nested": {"ok": True}}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["request"] = request
+            captured["content"] = request.content
+            return httpx.Response(201, json=COMMITTED)
+
+        [receipt] = make_client(handler).upload_records(
+            [{"id": "a", "label": "café"}, RecordObject()],
+            context={"source": "prime-rl"},
+            compress=False,
+        )
+
+        expected = b'{"id":"a","label":"caf\xc3\xa9"}\n{"id":"b","nested":{"ok":true}}\n'
+        request = captured["request"]
+        assert request.headers["Idempotency-Key"] == (
+            f"sha256:{hashlib.sha256(expected).hexdigest()}"
+        )
+        parts = parse_multipart(captured["content"], request.headers["content-type"])
+        assert parts["traces"][1] == expected
+        assert json.loads(parts["metadata"][1]) == {
+            "schema_version": 1,
+            "context": {"source": "prime-rl"},
+        }
+        assert receipt.status == "committed"
+
+    @pytest.mark.parametrize(
+        ("record", "message"),
+        [
+            (object(), "must be a mapping or implement to_record"),
+            (
+                type("BadRecord", (), {"to_record": lambda self: ["not", "a", "mapping"]})(),
+                "to_record\\(\\) must return a mapping",
+            ),
+        ],
+    )
+    def test_upload_records_rejects_unsupported_inputs_before_request(
+        self, make_client, record, message
+    ):
+        def handler(request: httpx.Request) -> httpx.Response:
+            pytest.fail(f"unexpected request: {request.url}")
+
+        with pytest.raises(TypeError, match=message):
+            make_client(handler).upload_records([record])
+
     def test_bare_trace_upload_without_compression(self, make_client):
         captured = {}
 

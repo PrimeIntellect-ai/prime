@@ -40,7 +40,7 @@ from .models import (
     TraceSummary,
     UploadReceipt,
 )
-from .traces import TracesClient
+from .traces import SupportsToRecord, TraceRecord, TracesClient
 
 __version__ = "0.0.1"
 
@@ -49,6 +49,8 @@ __all__ = [
     "TracesClient",
     "TracesAPIClient",
     "Config",
+    "SupportsToRecord",
+    "TraceRecord",
     # Batching
     "Batch",
     "iter_batches",

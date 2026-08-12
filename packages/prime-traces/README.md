@@ -9,6 +9,36 @@ inference traces through the Prime Traces service.
 pip install prime-traces
 ```
 
+## Upload from memory
+
+`upload_records` accepts JSON-compatible mappings as well as objects exposing
+`to_record()`. Verifiers `Trace` / `Episode` and prime-rl `Rollout` objects
+provide that method, so producers can upload completed records without writing
+an intermediate JSONL file:
+
+```python
+from prime_traces import LineFormat, TracesClient
+
+client = TracesClient()  # PRIME_API_KEY / ~/.prime/config.json
+
+# Iterable[vf.Trace] or Iterable[prime_rl.orchestrator.types.Rollout]
+receipts = client.upload_records(
+    traces,
+    context={"source": "prime-rl", "run_id": "run_9f3k2m"},
+)
+
+# Iterable[vf.Episode] for multi-agent runs
+receipts = client.upload_records(
+    episodes,
+    line_format=LineFormat.EPISODE,
+    context={"source": "verifiers"},
+)
+```
+
+Records are serialized lazily and fed into bounded batches, so this neither
+buffers the complete iterable nor round-trips through the filesystem. Callers
+that already have encoded JSONL bytes can use `upload_lines` directly.
+
 ## Upload a completed JSONL file
 
 ```python

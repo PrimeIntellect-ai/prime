@@ -93,6 +93,13 @@ _LIVE_PROCESS_TIMEOUT_MS = 24 * 60 * 60 * 1000
 _PROCESS_INPUT_TIMEOUT_MS = 30_000
 _PROCESS_SIGNAL_TIMEOUT_MS = 10_000
 
+# A background-job launch is fire-and-forget and returns immediately, so a timeout on it is a
+# transport blip, not a slow command; retry it. (A dead sandbox raises SandboxNotRunningError
+# rather than CommandTimeoutError, so this only retries genuine transport failures.)
+_BG_LAUNCH_TIMEOUT = 30
+_BG_LAUNCH_ATTEMPTS = 3
+_BG_LAUNCH_BACKOFF = 0.5
+
 _RequestMessage = TypeVar("_RequestMessage", bound=Message)
 _ResponseMessage = TypeVar("_ResponseMessage", bound=Message)
 
@@ -1114,7 +1121,14 @@ class SandboxClient:
 
         # Outer nohup redirects to /dev/null since output goes to log files inside sh -c
         bg_cmd = f"nohup sh -c {quoted_sh_command} < /dev/null > /dev/null 2>&1 &"
-        self.execute_command(sandbox_id, bg_cmd, timeout=30, user=user)
+        for attempt in range(_BG_LAUNCH_ATTEMPTS):
+            try:
+                self.execute_command(sandbox_id, bg_cmd, timeout=_BG_LAUNCH_TIMEOUT, user=user)
+                break
+            except CommandTimeoutError:
+                if attempt == _BG_LAUNCH_ATTEMPTS - 1:
+                    raise
+                time.sleep(_BG_LAUNCH_BACKOFF * 2**attempt)
 
         return BackgroundJob(
             job_id=job_id,
@@ -2330,7 +2344,14 @@ class AsyncSandboxClient:
 
         # Outer nohup redirects to /dev/null since output goes to log files inside sh -c
         bg_cmd = f"nohup sh -c {quoted_sh_command} < /dev/null > /dev/null 2>&1 &"
-        await self.execute_command(sandbox_id, bg_cmd, timeout=30, user=user)
+        for attempt in range(_BG_LAUNCH_ATTEMPTS):
+            try:
+                await self.execute_command(sandbox_id, bg_cmd, timeout=_BG_LAUNCH_TIMEOUT, user=user)
+                break
+            except CommandTimeoutError:
+                if attempt == _BG_LAUNCH_ATTEMPTS - 1:
+                    raise
+                await asyncio.sleep(_BG_LAUNCH_BACKOFF * 2**attempt)
 
         return BackgroundJob(
             job_id=job_id,

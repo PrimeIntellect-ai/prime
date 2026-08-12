@@ -94,6 +94,7 @@ async def main() -> None:
                         name=f"sandbox-{i}",
                         docker_image="python:3.11-slim",
                         start_command="tail -f /dev/null",
+                        vm=False,  # string start commands are container-only
                         cpu_cores=1,
                         memory_gb=1,
                         timeout_minutes=10,

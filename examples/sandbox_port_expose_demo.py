@@ -53,6 +53,7 @@ def main() -> None:
             name="port-expose-demo",
             docker_image="python:3.11-slim",
             start_command="tail -f /dev/null",
+            vm=False,  # string start commands are container-only
             cpu_cores=1,
             memory_gb=2,
             timeout_minutes=30,

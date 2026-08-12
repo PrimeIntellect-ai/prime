@@ -22,7 +22,6 @@ async def main() -> None:
                     name="async-demo-python-1",
                     docker_image="python:3.11-slim",
                     start_command="tail -f /dev/null",
-                    vm=False,  # string start commands are container-only
                     cpu_cores=1,
                     memory_gb=1,
                     timeout_minutes=120,
@@ -31,7 +30,6 @@ async def main() -> None:
                     name="async-demo-node-2",
                     docker_image="node:20-slim",
                     start_command="tail -f /dev/null",
-                    vm=False,  # string start commands are container-only
                     cpu_cores=1,
                     memory_gb=1,
                     timeout_minutes=120,

@@ -202,7 +202,7 @@ class CreateSandboxRequest(BaseModel):
     disk_size_gb: float = 5.0
     gpu_count: int = 0
     gpu_type: Optional[str] = None
-    vm: Optional[bool] = None
+    vm: bool = False
     network_allowlist: Optional[List[str]] = None
     network_denylist: Optional[List[str]] = None
     timeout_minutes: int = 60
@@ -221,53 +221,32 @@ class CreateSandboxRequest(BaseModel):
     def validate_gpu_fields(self) -> "CreateSandboxRequest":
         if self.gpu_count > 0 and not self.gpu_type:
             raise ValueError("gpu_type is required when gpu_count is greater than 0")
-        if self.gpu_count > 0 and self.vm is False:
-            raise ValueError("gpu_count is not supported with vm=False")
+        if self.gpu_count > 0 and not self.vm:
+            raise ValueError("gpu_count is only supported when vm is true")
         if self.gpu_count == 0 and self.gpu_type is not None:
             raise ValueError("gpu_type requires gpu_count greater than 0")
         return self
 
     @model_validator(mode="after")
     def validate_guaranteed(self) -> "CreateSandboxRequest":
-        if self.guaranteed and self.vm is not False:
-            raise ValueError(
-                "guaranteed is not supported for VM sandboxes; pass vm=False "
-                "to create a container sandbox"
-            )
-        return self
-
-    @model_validator(mode="after")
-    def validate_registry_credentials(self) -> "CreateSandboxRequest":
-        if self.registry_credentials_id and self.vm is not False:
-            raise ValueError(
-                "registry_credentials_id is only supported for container "
-                "sandboxes; pass vm=False to create a container sandbox"
-            )
+        if self.guaranteed and self.vm:
+            raise ValueError("guaranteed is not supported for VM sandboxes")
         return self
 
     @model_validator(mode="after")
     def validate_vm_start_command(self) -> "CreateSandboxRequest":
-        if self.vm is False:
+        if self.vm and "start_command" not in self.model_fields_set:
+            self.start_command = None
             return self
-        if "start_command" not in self.model_fields_set:
-            if self.vm is True:
-                self.start_command = None
-            return self
-        if isinstance(self.start_command, str):
-            if self.vm is True:
-                raise ValueError(
-                    "VM sandboxes require start_command as StartCommand(executable=..., args=[...])"
-                )
+        if self.vm and isinstance(self.start_command, str):
             raise ValueError(
-                "String start_command values are container-only. Pass vm=False "
-                "to create a container sandbox, or use "
-                "StartCommand(executable=..., args=[...]) for VM sandboxes."
+                "VM sandboxes require start_command as StartCommand(executable=..., args=[...])"
             )
         return self
 
     @model_validator(mode="after")
     def validate_network_lists(self) -> "CreateSandboxRequest":
-        if self.vm is False and (
+        if not self.vm and (
             self.network_allowlist is not None or self.network_denylist is not None
         ):
             raise ValueError(
@@ -281,11 +260,6 @@ class CreateSandboxRequest(BaseModel):
     def validate_idle_timeout(self) -> "CreateSandboxRequest":
         if self.idle_timeout_minutes is None:
             return self
-        if self.vm is not False:
-            raise ValueError(
-                "idle_timeout_minutes is only supported for container "
-                "sandboxes; pass vm=False to create a container sandbox"
-            )
         if self.idle_timeout_minutes < 1:
             raise ValueError("idle_timeout_minutes must be >= 1")
         if self.timeout_minutes > 0 and self.idle_timeout_minutes > self.timeout_minutes:

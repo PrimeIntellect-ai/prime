@@ -144,6 +144,7 @@ request = CreateSandboxRequest(
     name="my-sandbox",
     docker_image="python:3.11-slim",
     start_command="python app.py",
+    vm=False,  # string start commands are container-only
     cpu_cores=2,
     memory_gb=4,
     disk_size_gb=20,

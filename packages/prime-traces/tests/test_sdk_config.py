@@ -35,6 +35,15 @@ def test_invalid_config_json_degrades_to_empty():
     assert Config().config == {}
 
 
+def test_non_utf8_config_degrades_to_empty():
+    path = _write_config("")
+    path.write_bytes(b"\xff")
+    assert Config().config == {}
+    # Config loading must not take down a client whose values are all explicit.
+    api = TracesAPIClient(api_key="k", base_url="http://testserver", team_id="")
+    assert api.api_key == "k"
+
+
 def test_config_values_read_from_file():
     _write_config(
         json.dumps({"api_key": "file-key", "traces_url": "https://traces.example/api/v1"})

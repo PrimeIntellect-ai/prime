@@ -19,9 +19,12 @@ effect of episode-grouped uploads); and the dot-path query compiler (needs the
 server-side field registry).
 """
 
+import json
+import tempfile
 import time
 from pathlib import Path
-from typing import Callable, Dict, Iterable, Iterator, List, Optional, Union
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Protocol, Union
+from urllib.parse import quote
 
 from .batching import (
     DEFAULT_TARGET_BATCH_BYTES,
@@ -43,6 +46,48 @@ from .models import (
 DEFAULT_MAX_ATTEMPTS = 5
 
 
+class SupportsToRecord(Protocol):
+    """An in-memory trace or episode that can produce its JSON record.
+
+    Verifiers ``Trace`` / ``Episode`` and prime-rl ``Rollout`` objects satisfy
+    this protocol without prime-traces importing either producer package.
+    """
+
+    def to_record(self) -> Mapping[str, Any]: ...
+
+
+TraceRecord = Union[Mapping[str, Any], SupportsToRecord]
+
+
+def _record_lines(records: Iterable[TraceRecord]) -> Iterator[bytes]:
+    """Serialize in-memory records lazily as compact UTF-8 JSONL lines."""
+    for record_number, record in enumerate(records, start=1):
+        if isinstance(record, Mapping):
+            value = record
+        else:
+            to_record = getattr(record, "to_record", None)
+            if not callable(to_record):
+                raise TypeError(
+                    f"Record {record_number} must be a mapping or implement to_record()"
+                )
+            value = to_record()
+            if not isinstance(value, Mapping):
+                raise TypeError(f"Record {record_number} to_record() must return a mapping")
+
+        # Compact separators match common JSONL writers, ensure_ascii=False
+        # keeps the wire representation UTF-8, and allow_nan=False prevents
+        # emitting JavaScript-only NaN/Infinity values that strict JSON rejects.
+        yield (
+            json.dumps(
+                dict(value),
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            + b"\n"
+        )
+
+
 def _build_params(
     pairs: Iterable[tuple], context: Optional[Dict[str, str]] = None
 ) -> Dict[str, object]:
@@ -54,6 +99,25 @@ def _build_params(
     return params
 
 
+def _trace_endpoint(trace_id: str) -> str:
+    """Build a trace endpoint with the ID encoded as one path segment."""
+    if "/" in trace_id:
+        # ASGI decodes %2F before Starlette route matching, so the service's
+        # /traces/{trace_id} route sees an extra path segment and returns 404.
+        # Fail locally until that route accepts a path-valued parameter rather
+        # than issuing a request that cannot address the uploaded trace.
+        raise ValueError("trace_id cannot contain '/' until the service supports path-valued IDs")
+    encoded = quote(trace_id, safe="")
+    # RFC 3986 leaves periods unescaped even with ``safe=""``. A segment that
+    # is exactly "." or ".." is special, though: HTTP clients normalize it
+    # away before sending the request, which would target the collection or API
+    # root instead of the requested trace. Percent-encode those two IDs
+    # explicitly so they remain ordinary path-segment values on the wire.
+    if encoded in {".", ".."}:
+        encoded = encoded.replace(".", "%2E")
+    return f"/traces/{encoded}"
+
+
 class TracesClient:
     """Client for the Prime Traces API."""
 
@@ -61,6 +125,37 @@ class TracesClient:
         self.client = api_client or TracesAPIClient(**client_kwargs)
 
     # -- upload -------------------------------------------------------------
+
+    def upload_records(
+        self,
+        records: Iterable[TraceRecord],
+        *,
+        line_format: LineFormat = LineFormat.TRACE,
+        context: Optional[Dict[str, str]] = None,
+        schema_version: int = 1,
+        compress: bool = True,
+        target_batch_bytes: int = DEFAULT_TARGET_BATCH_BYTES,
+        max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+        on_batch: Optional[Callable[[Batch, UploadReceipt], None]] = None,
+    ) -> List[UploadReceipt]:
+        """Upload trace or episode records directly from memory.
+
+        Each input may be a JSON-compatible mapping or an object implementing
+        ``to_record()``, including verifiers ``Trace`` / ``Episode`` and
+        prime-rl ``Rollout`` objects. Records are serialized lazily and passed
+        through the same bounded batching path as JSONL files, so the complete
+        input is never buffered or written to disk.
+        """
+        return self.upload_lines(
+            _record_lines(records),
+            line_format=line_format,
+            context=context,
+            schema_version=schema_version,
+            compress=compress,
+            target_batch_bytes=target_batch_bytes,
+            max_attempts=max_attempts,
+            on_batch=on_batch,
+        )
 
     def upload_file(
         self,
@@ -228,40 +323,49 @@ class TracesClient:
 
     def get(self, trace_id: str) -> TraceSummary:
         """Get one trace summary."""
-        return TraceSummary.model_validate(self.client.get_json(f"/traces/{trace_id}"))
+        return TraceSummary.model_validate(self.client.get_json(_trace_endpoint(trace_id)))
 
     def get_raw(self, trace_id: str) -> bytes:
         """Get the stored raw trace document, buffered in memory.
 
         A trace can be tens of MiB; prefer ``download_raw`` for large traces.
         """
-        return b"".join(self.client.stream_bytes(f"/traces/{trace_id}", params={"raw": "true"}))
+        return b"".join(self.client.stream_bytes(_trace_endpoint(trace_id), params={"raw": "true"}))
 
     def download_raw(self, trace_id: str, dest: Union[str, Path]) -> int:
         """Stream the raw trace document to ``dest``. Returns bytes written."""
-        return self._stream_to_file(f"/traces/{trace_id}", {"raw": "true"}, dest)
+        return self._stream_to_file(_trace_endpoint(trace_id), {"raw": "true"}, dest)
 
     def _stream_to_file(
         self, endpoint: str, params: Optional[Dict[str, object]], dest: Union[str, Path]
     ) -> int:
         """Stream a response body to ``dest`` without clobbering it on failure.
 
-        Bytes land in a sibling ``.partial`` file that replaces ``dest`` only
-        after the stream ends cleanly, so a failed request — or a connection
-        cut mid-stream — never truncates an existing file at ``dest``.
+        Bytes land in a uniquely named sibling temporary file that replaces
+        ``dest`` only after the stream ends cleanly, so a failed request — or a
+        connection cut mid-stream — never truncates an existing file at
+        ``dest`` or another download's temporary file.
         """
         dest = Path(dest)
-        partial = dest.with_name(dest.name + ".partial")
+        partial: Optional[Path] = None
         written = 0
         try:
-            with open(partial, "wb") as f:
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                dir=dest.parent,
+                prefix=".prime-traces-",
+                suffix=".partial",
+                delete=False,
+            ) as f:
+                partial = Path(f.name)
                 for chunk in self.client.stream_bytes(endpoint, params=params):
                     f.write(chunk)
                     written += len(chunk)
+            partial.replace(dest)
         except BaseException:
-            partial.unlink(missing_ok=True)
+            if partial is not None:
+                partial.unlink(missing_ok=True)
             raise
-        partial.replace(dest)
         return written
 
     # -- traces: delete -----------------------------------------------------
@@ -274,6 +378,11 @@ class TracesClient:
         but a hint matching no stored copy is a 404 even when the trace exists
         under another timestamp.
 
+        Ambiguous transport and gateway failures raise
+        ``AmbiguousDeleteError`` without retrying: the first request may
+        already have deleted this trace, and replaying it could delete a new
+        copy uploaded between attempts.
+
         Raises ``NotFoundError`` when the owner has no such trace — including
         on a repeat of a delete that already succeeded. The design docs
         specify deletion as idempotent at the API level; the service checks
@@ -281,7 +390,7 @@ class TracesClient:
         "make sure this is gone" should catch ``NotFoundError``.
         """
         params = {"created_at": created_at} if created_at else None
-        self.client.delete(f"/traces/{trace_id}", params=params)
+        self.client.delete(_trace_endpoint(trace_id), params=params)
 
     def delete_run(self, run_id: str) -> None:
         """Delete every trace in a run (202 Accepted).
@@ -293,7 +402,9 @@ class TracesClient:
         a permanent ``None``.)
 
         Episode rows are not touched. Raises ``NotFoundError`` when the run
-        holds no traces for this owner — see ``delete`` on repeats.
+        holds no traces for this owner — see ``delete`` on repeats. An
+        ``AmbiguousDeleteError`` is not retried because a replay could delete
+        traces added to the run after the first request.
         """
         self.client.delete("/traces", params={"run_id": run_id})
 

@@ -29,7 +29,7 @@ class Config:
         if self.config_file.exists():
             try:
                 config_data = json.loads(self.config_file.read_text())
-            except (json.JSONDecodeError, IOError):
+            except (json.JSONDecodeError, OSError, UnicodeDecodeError):
                 config_data = {}
         # Valid JSON that is not an object (a list, a bare string) must degrade
         # the same way invalid JSON does: every accessor assumes a dict, and

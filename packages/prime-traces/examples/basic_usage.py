@@ -9,7 +9,6 @@ PRIME_TRACES_URL at the Prime Traces service — e.g. the service's local
 compose stack: PRIME_TRACES_URL=http://localhost:8083
 """
 
-import json
 import tempfile
 import time
 from pathlib import Path
@@ -17,11 +16,11 @@ from pathlib import Path
 from prime_traces import APIError, ForbiddenError, TracesClient, ValidationRejectedError
 
 
-def sample_trace(trace_id: str, reward: float, started_at: float) -> bytes:
-    """One line of a completed Verifiers JSONL file.
+def sample_trace(trace_id: str, reward: float, started_at: float) -> dict:
+    """One in-memory Verifiers-compatible trace record.
 
     Trimmed to the fields the service's extractor reads, which is a small
-    subset of a real v1 record — the raw line is stored verbatim either way,
+    subset of a real v1 record — the serialized record is stored verbatim,
     and every summary column is a projection of it. Two of these are not
     optional: a non-empty string ``id``, and a numeric ``timing.start`` inside
     the accepted window (generous lookback, tight lookahead — producers upload
@@ -29,7 +28,7 @@ def sample_trace(trace_id: str, reward: float, started_at: float) -> bytes:
     A line missing either is rejected with ``invalid_trace`` /
     ``created_at_out_of_window`` and the whole request stores nothing.
     """
-    record = {
+    return {
         "version": 4,
         "id": trace_id,
         "run": {"id": "run_example"},
@@ -53,26 +52,25 @@ def sample_trace(trace_id: str, reward: float, started_at: float) -> bytes:
         "timing": {"start": started_at, "scoring": {"end": started_at + 12.5}},
         "info": {},
     }
-    return json.dumps(record).encode() + b"\n"
 
 
 def main():
-    # A completed Verifiers JSONL file: one complete trace per line. For
-    # episode-grouped files, pass line_format=LineFormat.EPISODE instead.
+    # Verifiers Trace objects and prime-rl Rollouts can be passed directly;
+    # both expose the same to_record() protocol accepted by upload_records.
     started_at = time.time()
-    traces_file = Path(tempfile.mkdtemp()) / "traces.jsonl"
-    traces_file.write_bytes(
-        sample_trace("3f2a9c1e", reward=0.85, started_at=started_at)
-        + sample_trace("b81d4e77", reward=0.40, started_at=started_at + 1.0)
-    )
+    traces = [
+        sample_trace("3f2a9c1e", reward=0.85, started_at=started_at),
+        sample_trace("b81d4e77", reward=0.40, started_at=started_at + 1.0),
+    ]
+    output_dir = Path(tempfile.mkdtemp())
 
     with TracesClient() as client:
         try:
             print("Uploading...")
             # Content-addressed: rerunning this replays committed receipts
             # without storing anything twice.
-            receipts = client.upload_file(
-                traces_file,
+            receipts = client.upload_records(
+                traces,
                 context={"source": "example", "suite_commit": "a1f39c2"},
             )
             for receipt in receipts:
@@ -90,7 +88,7 @@ def main():
             if page.items:
                 trace_id = page.items[0].trace_id
                 print(f"\nFetching raw document for {trace_id}...")
-                dest = traces_file.with_name("trace.json")
+                dest = output_dir / "trace.json"
                 written = client.download_raw(trace_id, dest)
                 print(f"✓ wrote {written} bytes to {dest}")
 

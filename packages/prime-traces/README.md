@@ -29,6 +29,38 @@ pip install prime-traces
 
 ## Quick Start
 
+### Upload from memory
+
+`upload_records` accepts JSON-compatible mappings as well as objects exposing
+`to_record()`. Verifiers `Trace` / `Episode` and prime-rl `Rollout` objects
+provide that method, so producers can upload completed records without writing
+an intermediate JSONL file:
+
+```python
+from prime_traces import LineFormat, TracesClient
+
+client = TracesClient()  # PRIME_API_KEY / ~/.prime/config.json
+
+# Iterable[vf.Trace] or Iterable[prime_rl.orchestrator.types.Rollout]
+receipts = client.upload_records(
+    traces,
+    context={"source": "prime-rl", "run_id": "run_9f3k2m"},
+)
+
+# Iterable[vf.Episode] for multi-agent runs
+receipts = client.upload_records(
+    episodes,
+    line_format=LineFormat.EPISODE,
+    context={"source": "verifiers"},
+)
+```
+
+Records are serialized lazily and fed into bounded batches, so this neither
+buffers the complete iterable nor round-trips through the filesystem. Callers
+that already have encoded JSONL bytes can use `upload_lines` directly.
+
+### Upload a completed JSONL file
+
 ```python
 from prime_traces import TracesClient, LineFormat
 
@@ -73,8 +105,15 @@ client.delete_run("run_9f3k2m")     # one mutation, synchronous, no job handle
 Deletion is not a no-op on absent rows: the service checks existence first and
 answers 404, so repeating a delete that already succeeded raises
 `NotFoundError`. (The design docs specify it as idempotent; this tracks the
-service as built.) A delete whose response is lost in transit is still safe —
-the retry's 404 is absorbed.
+service as built.) Failures known to occur before delivery, 429 responses, and
+service-coded 503 refusals are retried. Ambiguous response-path failures and
+gateway 502/503/504 responses are surfaced as `AmbiguousDeleteError` without
+replaying the deletion, because a retry could delete a trace written after the
+first request.
+
+Point reads and deletes currently reject trace IDs containing `/`. ASGI decodes
+an encoded slash before matching the service's `/{trace_id}` route, so those IDs
+cannot be addressed until the service accepts a path-valued route parameter.
 
 Episodes are read-only resources:
 

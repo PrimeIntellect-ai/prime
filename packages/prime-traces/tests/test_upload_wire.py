@@ -10,6 +10,7 @@ import httpx
 import pytest
 
 from prime_traces import (
+    ErrorCode,
     LineFormat,
     LineFormatConflictError,
     RetryableAPIError,
@@ -50,6 +51,56 @@ def upload(client, **kwargs):
 
 
 class TestRequestShape:
+    def test_upload_records_serializes_mappings_and_to_record_objects(self, make_client):
+        captured = {}
+
+        class RecordObject:
+            def to_record(self):
+                return {"id": "b", "nested": {"ok": True}}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["request"] = request
+            captured["content"] = request.content
+            return httpx.Response(201, json=COMMITTED)
+
+        [receipt] = make_client(handler).upload_records(
+            [{"id": "a", "label": "café"}, RecordObject()],
+            context={"source": "prime-rl"},
+            compress=False,
+        )
+
+        expected = b'{"id":"a","label":"caf\xc3\xa9"}\n{"id":"b","nested":{"ok":true}}\n'
+        request = captured["request"]
+        assert request.headers["Idempotency-Key"] == (
+            f"sha256:{hashlib.sha256(expected).hexdigest()}"
+        )
+        parts = parse_multipart(captured["content"], request.headers["content-type"])
+        assert parts["traces"][1] == expected
+        assert json.loads(parts["metadata"][1]) == {
+            "schema_version": 1,
+            "context": {"source": "prime-rl"},
+        }
+        assert receipt.status == "committed"
+
+    @pytest.mark.parametrize(
+        ("record", "message"),
+        [
+            (object(), "must be a mapping or implement to_record"),
+            (
+                type("BadRecord", (), {"to_record": lambda self: ["not", "a", "mapping"]})(),
+                "to_record\\(\\) must return a mapping",
+            ),
+        ],
+    )
+    def test_upload_records_rejects_unsupported_inputs_before_request(
+        self, make_client, record, message
+    ):
+        def handler(request: httpx.Request) -> httpx.Response:
+            pytest.fail(f"unexpected request: {request.url}")
+
+        with pytest.raises(TypeError, match=message):
+            make_client(handler).upload_records([record])
+
     def test_bare_trace_upload_without_compression(self, make_client):
         captured = {}
 
@@ -211,6 +262,31 @@ class TestRetrySemantics:
         [delay] = no_sleep
         assert 0.5 <= delay <= 1.5
 
+    @pytest.mark.parametrize("parse_error", [TypeError, OverflowError])
+    def test_retry_after_parser_failure_falls_back_to_backoff(
+        self, make_client, no_sleep, monkeypatch, parse_error
+    ):
+        attempts = []
+
+        def fail_to_parse(_value):
+            raise parse_error("malformed date")
+
+        monkeypatch.setattr(
+            "prime_traces.core.client.parsedate_to_datetime",
+            fail_to_parse,
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            attempts.append(request.headers["Idempotency-Key"])
+            if len(attempts) == 1:
+                return httpx.Response(503, headers={"Retry-After": "not-a-date"})
+            return httpx.Response(201, json=COMMITTED)
+
+        [receipt] = upload(make_client(handler))
+        assert receipt.status == "committed"
+        [delay] = no_sleep
+        assert 0.5 <= delay <= 1.5
+
     @pytest.mark.parametrize("status", [502, 504])
     def test_retries_gateway_responses(self, make_client, no_sleep, status):
         """502/504 come from a gateway, not the service — no error envelope,
@@ -288,6 +364,22 @@ class TestRetrySemantics:
         with pytest.raises(ValidationRejectedError) as exc_info:
             upload(make_client(handler))
         assert exc_info.value.code == "invalid_trace"
+
+    def test_environment_id_too_long_rejection_code_is_nameable(self, make_client):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                400,
+                json={
+                    "error": {
+                        "code": "environment_id_too_long",
+                        "message": "Episode 'env.id' exceeds the limit",
+                    }
+                },
+            )
+
+        with pytest.raises(ValidationRejectedError) as exc_info:
+            upload(make_client(handler), line_format=LineFormat.EPISODE)
+        assert ErrorCode(exc_info.value.code) is ErrorCode.ENVIRONMENT_ID_TOO_LONG
 
     def test_line_format_conflict_is_typed(self, make_client):
         def handler(request: httpx.Request) -> httpx.Response:

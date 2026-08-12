@@ -48,6 +48,15 @@ class APIError(PrimeTracesError):
         super().__init__(message)
 
 
+class AmbiguousDeleteError(APIError):
+    """A DELETE may have completed even though its response was lost.
+
+    Retrying blindly is unsafe: a trace may have been re-uploaded, or a new
+    trace may have joined the run, after the first request. Inspect the current
+    state before deciding whether another deletion is appropriate.
+    """
+
+
 class UnauthorizedError(APIError):
     """401 — the credential was rejected. Stop rather than retry."""
 

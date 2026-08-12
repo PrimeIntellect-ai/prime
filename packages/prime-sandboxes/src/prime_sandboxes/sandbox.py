@@ -10,13 +10,15 @@ import threading
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, NoReturn, Optional
+from typing import Any, Dict, List, Literal, NoReturn, Optional, TypeVar
 
 import aiofiles
 import httpx
 from connectrpc.client import ConnectClient, ConnectClientSync
 from connectrpc.code import Code
 from connectrpc.errors import ConnectError
+from connectrpc.method import MethodInfo
+from google.protobuf.message import Message
 from tenacity import (
     retry,
     retry_if_exception,
@@ -58,8 +60,13 @@ from .models import (
     SSHSession,
     validate_egress_lists,
 )
+from .process import AsyncSandboxProcess
 from .rpc_command_session import (
+    COMMAND_SESSION_SEND_INPUT_RPC_METHOD,
+    COMMAND_SESSION_SEND_SIGNAL_RPC_METHOD,
     COMMAND_SESSION_START_RPC_METHOD,
+    build_command_session_send_input_request,
+    build_command_session_send_signal_request,
     build_command_session_start_request,
     collect_command_session_start_event,
 )
@@ -74,6 +81,16 @@ GATEWAY_CONNECTION_RETRYABLE_EXCEPTIONS = (
     httpx.ConnectError,  # Connection refused/failed
     httpx.PoolTimeout,  # No connection available in pool
 )
+
+# connectrpc-python cancels a server stream before its first event when no
+# timeout is supplied. A live process cannot outlast the sandbox's 24-hour
+# maximum lifetime, so use that lifetime as the transport bound.
+_LIVE_PROCESS_TIMEOUT_MS = 24 * 60 * 60 * 1000
+_PROCESS_INPUT_TIMEOUT_MS = 30_000
+_PROCESS_SIGNAL_TIMEOUT_MS = 10_000
+
+_RequestMessage = TypeVar("_RequestMessage", bound=Message)
+_ResponseMessage = TypeVar("_ResponseMessage", bound=Message)
 
 
 def _network_update_payload(
@@ -1957,6 +1974,105 @@ class AsyncSandboxClient:
             timeout=timeout,
             user=user,
         )
+
+    async def open_process(
+        self,
+        sandbox_id: str,
+        command: str,
+        working_dir: Optional[str] = None,
+        env: Optional[Dict[str, str]] = None,
+        user: Optional[str] = None,
+    ) -> AsyncSandboxProcess:
+        """Start a live process in a VM sandbox.
+
+        The returned handle streams stdout and stderr, accepts stdin writes,
+        waits for the exit code, and can signal the process. Container sandboxes
+        do not expose this transport and fail fast.
+        """
+        await self._auth_cache.get_or_refresh(sandbox_id)
+        if not await self._auth_cache.is_vm(sandbox_id):
+            raise APIError("Live processes are only supported for VM sandboxes.")
+        if user is not None:
+            raise ValueError("The 'user' parameter is not supported for VM sandbox processes.")
+
+        auth = await self._auth_cache.get_or_refresh(sandbox_id)
+        gateway_url = auth["gateway_url"].rstrip("/")
+        base_url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}"
+        headers = {"Authorization": f"Bearer {auth['token']}"}
+        rpc_client = ConnectClient(base_url)
+        request = build_command_session_start_request(
+            command,
+            working_dir,
+            env,
+            stdin=True,
+        )
+        stream = rpc_client.execute_server_stream(
+            request=request,
+            method=COMMAND_SESSION_START_RPC_METHOD,
+            headers=headers,
+            timeout_ms=_LIVE_PROCESS_TIMEOUT_MS,
+        )
+
+        async def write_stdin(pid: int, data: bytes) -> None:
+            await self._execute_process_control_rpc(
+                sandbox_id,
+                build_command_session_send_input_request(pid, data),
+                COMMAND_SESSION_SEND_INPUT_RPC_METHOD,
+                _PROCESS_INPUT_TIMEOUT_MS,
+                "stdin",
+            )
+
+        async def send_signal(pid: int, signal: Literal["terminate", "kill"]) -> None:
+            await self._execute_process_control_rpc(
+                sandbox_id,
+                build_command_session_send_signal_request(pid, signal),
+                COMMAND_SESSION_SEND_SIGNAL_RPC_METHOD,
+                _PROCESS_SIGNAL_TIMEOUT_MS,
+                "signal",
+            )
+
+        return await AsyncSandboxProcess._create(
+            rpc_client,
+            stream,
+            write_stdin,
+            send_signal,
+        )
+
+    async def _execute_process_control_rpc(
+        self,
+        sandbox_id: str,
+        request: _RequestMessage,
+        method: MethodInfo[_RequestMessage, _ResponseMessage],
+        timeout_ms: int,
+        operation: str,
+    ) -> None:
+        """Run one live-process control RPC with current sandbox auth."""
+        reauthed = False
+        while True:
+            auth = await self._auth_cache.get_or_refresh(sandbox_id)
+            gateway_url = auth["gateway_url"].rstrip("/")
+            base_url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}"
+            headers = {"Authorization": f"Bearer {auth['token']}"}
+            rpc_client = ConnectClient(base_url)
+            try:
+                await rpc_client.execute_unary(
+                    request=request,
+                    method=method,
+                    headers=headers,
+                    timeout_ms=timeout_ms,
+                )
+                return
+            except ConnectError as error:
+                if error.code == Code.UNAUTHENTICATED and await self._should_retry_401(
+                    sandbox_id, reauthed
+                ):
+                    reauthed = True
+                    continue
+                raise APIError(
+                    f"process {operation} RPC failed ({error.code.value}): {error.message}"
+                ) from error
+            finally:
+                await rpc_client.close()
 
     async def _execute_command_connect_rpc(
         self,

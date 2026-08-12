@@ -441,7 +441,7 @@ class TestDelete:
             make_client(handler).delete("8d3f1a2b")
         assert len(attempts) == 2
 
-    @pytest.mark.parametrize("status", [502, 504])
+    @pytest.mark.parametrize("status", [502, 503, 504])
     def test_ambiguous_gateway_failure_is_not_retried(self, make_client, no_sleep, status):
         """A gateway may have forwarded the request before losing its response."""
         attempts = []
@@ -453,6 +453,23 @@ class TestDelete:
         with pytest.raises(AmbiguousDeleteError) as caught:
             make_client(handler).delete_run("run_9f3k2m")
         assert caught.value.status_code == status
+        assert len(attempts) == 1
+        assert no_sleep == []
+
+    def test_unknown_code_503_delete_is_not_retried(self, make_client, no_sleep):
+        attempts = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            attempts.append(request.url.path)
+            return httpx.Response(
+                503,
+                json={"error": {"code": "unknown_overload", "message": "try later"}},
+            )
+
+        with pytest.raises(AmbiguousDeleteError) as caught:
+            make_client(handler).delete("8d3f1a2b")
+        assert caught.value.status_code == 503
+        assert caught.value.code == "unknown_overload"
         assert len(attempts) == 1
         assert no_sleep == []
 

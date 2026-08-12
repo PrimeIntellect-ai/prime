@@ -35,7 +35,7 @@ from ..exceptions import (
     UnauthorizedError,
     ValidationRejectedError,
 )
-from ..models import LineFormat
+from ..models import ErrorCode, LineFormat
 from .config import Config
 
 #: Attempts for idempotent requests, matching prime-sandboxes'
@@ -45,10 +45,23 @@ IDEMPOTENT_RETRY_ATTEMPTS = 3
 
 #: Retryable statuses that leave it unknown whether the request reached the
 #: service. 502/504 come from a gateway, which may already have forwarded the
-#: request upstream and then lost or timed out the response. 429 and 503 are
-#: deliberately absent: those are the service itself declining the work, so
-#: nothing can have happened behind them.
+#: request upstream and then lost or timed out the response.
 _AMBIGUOUS_RETRY_STATUSES = frozenset({502, 504})
+
+#: Codes proving that a retryable response came from the service while it was
+#: declining the request. A codeless or unknown-code 503 may instead have come
+#: from an intermediary after the request was forwarded, so DELETE must treat
+#: that outcome as ambiguous rather than replaying the operation.
+_SERVICE_REFUSAL_CODES = frozenset(
+    {
+        ErrorCode.RATE_LIMITED.value,
+        ErrorCode.WRITER_POOL_SATURATED.value,
+        ErrorCode.INGEST_CAPACITY_EXCEEDED.value,
+        ErrorCode.INGEST_UNAVAILABLE.value,
+        ErrorCode.STORAGE_UNAVAILABLE.value,
+        ErrorCode.AUTH_UNAVAILABLE.value,
+    }
+)
 
 #: Transport failures that can happen after a request has started crossing the
 #: network. A DELETE behind one of these may have completed even though the
@@ -320,11 +333,12 @@ class TracesAPIClient:
         """Send with bounded retries when replay is known to be safe.
 
         GET requests retry every transient failure. DELETE requests retry only
-        failures known to happen before delivery, plus 429/503 responses where
-        the service declined the operation. A response-path transport failure
-        or gateway 502/504 is ambiguous: the deletion may already have landed,
-        and replaying it could delete a trace uploaded between attempts. Those
-        failures therefore surface to the caller without a transparent retry.
+        failures known to happen before delivery, plus 429 and service-coded
+        503 responses where the service declined the operation. A response-path
+        transport failure or gateway 502/503/504 is ambiguous: the deletion may
+        already have landed, and replaying it could delete a trace uploaded
+        between attempts. Those failures therefore surface to the caller
+        without a transparent retry.
         """
         is_delete = method.upper() == "DELETE"
         for attempt in range(IDEMPOTENT_RETRY_ATTEMPTS):
@@ -344,7 +358,10 @@ class TracesAPIClient:
             try:
                 raise_for_response(response)
             except RetryableAPIError as exc:
-                if is_delete and exc.status_code in _AMBIGUOUS_RETRY_STATUSES:
+                ambiguous_status = exc.status_code in _AMBIGUOUS_RETRY_STATUSES or (
+                    exc.status_code == 503 and exc.code not in _SERVICE_REFUSAL_CODES
+                )
+                if is_delete and ambiguous_status:
                     raise AmbiguousDeleteError(
                         f"Delete outcome is unknown after HTTP {exc.status_code}: {exc}",
                         status_code=exc.status_code,
@@ -368,9 +385,10 @@ class TracesAPIClient:
     def delete(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> None:
         """Send a DELETE and discard the body — 202 carries none.
 
-        Pre-delivery failures and explicit 429/503 refusals are retried. An
-        ambiguous failure that may hide a completed deletion is returned to the
-        caller: replaying it could delete data written after the first attempt.
+        Pre-delivery failures, 429 responses, and service-coded 503 refusals are
+        retried. An ambiguous failure that may hide a completed deletion is
+        returned to the caller: replaying it could delete data written after
+        the first attempt.
         """
         self._check_auth()
         self._idempotent_request("DELETE", endpoint, params)

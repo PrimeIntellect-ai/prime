@@ -55,10 +55,11 @@ client.delete_run("run_9f3k2m")     # one mutation, synchronous, no job handle
 Deletion is not a no-op on absent rows: the service checks existence first and
 answers 404, so repeating a delete that already succeeded raises
 `NotFoundError`. (The design docs specify it as idempotent; this tracks the
-service as built.) Failures known to occur before delivery and explicit 429/503
-refusals are retried. Ambiguous response-path or gateway failures are surfaced
-as `AmbiguousDeleteError` without replaying the deletion, because a retry could
-delete a trace written after the first request.
+service as built.) Failures known to occur before delivery, 429 responses, and
+service-coded 503 refusals are retried. Ambiguous response-path failures and
+gateway 502/503/504 responses are surfaced as `AmbiguousDeleteError` without
+replaying the deletion, because a retry could delete a trace written after the
+first request.
 
 Point reads and deletes currently reject trace IDs containing `/`. ASGI decodes
 an encoded slash before matching the service's `/{trace_id}` route, so those IDs

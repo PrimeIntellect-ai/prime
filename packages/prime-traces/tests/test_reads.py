@@ -33,6 +33,9 @@ SUMMARY = {
     "context": {"source": "hosted_eval"},
 }
 
+RESERVED_TRACE_ID = "trace/with?reserved#chars%and space"
+ENCODED_TRACE_PATH = b"/api/v1/traces/trace%2Fwith%3Freserved%23chars%25and%20space"
+
 
 class TestList:
     def test_filters_encode_as_documented_query_params(self, make_client):
@@ -108,6 +111,13 @@ class TestPointReads:
 
         assert make_client(handler).get("8d3f1a2b").task_id == "tb2-0187"
 
+    def test_get_encodes_trace_id_as_one_path_segment(self, make_client):
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.raw_path == ENCODED_TRACE_PATH
+            return httpx.Response(200, json=SUMMARY)
+
+        make_client(handler).get(RESERVED_TRACE_ID)
+
     def test_get_raw_streams_document(self, make_client):
         raw = b'{"version":4,"id":"8d3f1a2b","nodes":[]}'
 
@@ -116,6 +126,13 @@ class TestPointReads:
             return httpx.Response(200, content=raw)
 
         assert make_client(handler).get_raw("8d3f1a2b") == raw
+
+    def test_get_raw_encodes_trace_id_before_adding_query(self, make_client):
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.raw_path == ENCODED_TRACE_PATH + b"?raw=true"
+            return httpx.Response(200, content=b"{}")
+
+        make_client(handler).get_raw(RESERVED_TRACE_ID)
 
     def test_download_raw_writes_file(self, make_client, tmp_path):
         raw = b'{"version":4,"id":"8d3f1a2b"}'
@@ -127,6 +144,13 @@ class TestPointReads:
         written = make_client(handler).download_raw("8d3f1a2b", dest)
         assert written == len(raw)
         assert dest.read_bytes() == raw
+
+    def test_download_raw_encodes_trace_id_as_one_path_segment(self, make_client, tmp_path):
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.raw_path == ENCODED_TRACE_PATH + b"?raw=true"
+            return httpx.Response(200, content=b"{}")
+
+        make_client(handler).download_raw(RESERVED_TRACE_ID, tmp_path / "trace.json")
 
     def test_download_raw_failure_preserves_existing_file(self, make_client, tmp_path):
         dest = tmp_path / "trace.json"
@@ -327,6 +351,13 @@ class TestDelete:
         assert captured["path"] == "/api/v1/traces/8d3f1a2b"
         assert captured["params"] == {"created_at": "2026-07-20T18:02:11.482Z"}
 
+    def test_delete_encodes_trace_id_as_one_path_segment(self, make_client):
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.raw_path == ENCODED_TRACE_PATH
+            return httpx.Response(202)
+
+        make_client(handler).delete(RESERVED_TRACE_ID)
+
     def test_delete_run_sends_run_id_and_expects_no_body(self, make_client):
         captured = {}
 
@@ -373,6 +404,48 @@ class TestDelete:
             )
 
         make_client(handler).delete("8d3f1a2b")
+        assert len(attempts) == 2
+
+    @pytest.mark.parametrize("failure", ["gateway", "transport"])
+    def test_hinted_delete_does_not_absorb_404_after_ambiguous_attempt(self, make_client, failure):
+        attempts = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            attempts.append(dict(request.url.params))
+            if len(attempts) == 1:
+                if failure == "transport":
+                    raise httpx.ReadError("connection reset", request=request)
+                return httpx.Response(502, text="upstream response lost")
+            return httpx.Response(
+                404,
+                json={"error": {"code": "trace_not_found", "message": "hint did not match"}},
+            )
+
+        with pytest.raises(NotFoundError):
+            make_client(handler).delete("8d3f1a2b", created_at="2026-07-20T18:02:11.482Z")
+        assert attempts == [
+            {"created_at": "2026-07-20T18:02:11.482Z"},
+            {"created_at": "2026-07-20T18:02:11.482Z"},
+        ]
+
+    @pytest.mark.parametrize(
+        "error_type",
+        [httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout],
+    )
+    def test_404_after_a_pre_delivery_failure_is_not_absorbed(self, make_client, error_type):
+        attempts = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            attempts.append(request.url.path)
+            if len(attempts) == 1:
+                raise error_type("request was not sent", request=request)
+            return httpx.Response(
+                404,
+                json={"error": {"code": "trace_not_found", "message": "No trace 'x'"}},
+            )
+
+        with pytest.raises(NotFoundError):
+            make_client(handler).delete("8d3f1a2b")
         assert len(attempts) == 2
 
     @pytest.mark.parametrize("status", [502, 504])

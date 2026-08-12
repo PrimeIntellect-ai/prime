@@ -211,6 +211,31 @@ class TestRetrySemantics:
         [delay] = no_sleep
         assert 0.5 <= delay <= 1.5
 
+    @pytest.mark.parametrize("parse_error", [TypeError, OverflowError])
+    def test_retry_after_parser_failure_falls_back_to_backoff(
+        self, make_client, no_sleep, monkeypatch, parse_error
+    ):
+        attempts = []
+
+        def fail_to_parse(_value):
+            raise parse_error("malformed date")
+
+        monkeypatch.setattr(
+            "prime_traces.core.client.parsedate_to_datetime",
+            fail_to_parse,
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            attempts.append(request.headers["Idempotency-Key"])
+            if len(attempts) == 1:
+                return httpx.Response(503, headers={"Retry-After": "not-a-date"})
+            return httpx.Response(201, json=COMMITTED)
+
+        [receipt] = upload(make_client(handler))
+        assert receipt.status == "committed"
+        [delay] = no_sleep
+        assert 0.5 <= delay <= 1.5
+
     @pytest.mark.parametrize("status", [502, 504])
     def test_retries_gateway_responses(self, make_client, no_sleep, status):
         """502/504 come from a gateway, not the service — no error envelope,

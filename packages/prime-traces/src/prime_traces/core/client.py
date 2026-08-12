@@ -51,6 +51,21 @@ IDEMPOTENT_RETRY_ATTEMPTS = 3
 #: nothing can have happened behind them.
 _AMBIGUOUS_RETRY_STATUSES = frozenset({502, 504})
 
+#: Transport failures that can happen after a request has started crossing the
+#: network. A DELETE behind one of these may have completed even though the
+#: client did not receive its response. Connection establishment, proxy setup,
+#: pool acquisition and local protocol failures are deliberately absent: the
+#: service cannot have processed a request that was never sent.
+_AMBIGUOUS_TRANSPORT_ERRORS = (
+    httpx.CloseError,
+    httpx.DecodingError,
+    httpx.ReadError,
+    httpx.ReadTimeout,
+    httpx.RemoteProtocolError,
+    httpx.WriteError,
+    httpx.WriteTimeout,
+)
+
 _BACKOFF_BASE_SECONDS = 1.0
 _BACKOFF_CAP_SECONDS = 30.0
 # Retry-After is server-controlled input (and may come from a gateway's
@@ -110,7 +125,10 @@ def _parse_retry_after(response: httpx.Response) -> Optional[float]:
         pass
     try:
         target = parsedate_to_datetime(value)
-    except ValueError:
+    except (TypeError, ValueError, OverflowError):
+        # Treat every malformed-date failure as an unusable hint. CPython
+        # normally raises ValueError, but out-of-range components can raise
+        # OverflowError and parser implementations may surface TypeError.
         return None
     if target.tzinfo is None:
         # RFC 5322 allows -0000, which parses naive; it means UTC.
@@ -316,12 +334,11 @@ class TracesAPIClient:
         a failure.
 
         The absorption is gated on the earlier failure being *ambiguous* — a
-        transport error, or a gateway 502/504 — because only those leave open
-        the possibility that this client already removed the rows. A 429 or
-        503 is the service declining the work outright, so a 404 behind one is
-        a genuine "no such trace", and swallowing it would report a delete that
-        never happened as accepted. Remove all of this once the service is
-        idempotent.
+        transport failure during or after request delivery, or a gateway
+        502/504 — because only those leave open the possibility that this
+        client already removed the rows. Connection/pool failures, 429 and 503
+        cannot hide a completed delete, so a 404 behind one is genuine.
+        Remove all of this once the service is idempotent.
         """
         ambiguous = False
         for attempt in range(IDEMPOTENT_RETRY_ATTEMPTS):
@@ -334,8 +351,10 @@ class TracesAPIClient:
                     raise
                 if last:
                     raise error from exc
-                # The request may have been delivered and its response lost.
-                ambiguous = True
+                # Only failures during/after delivery can hide a completed
+                # DELETE. Connect and pool failures happen before any request
+                # reaches the service, so they must not suppress a later 404.
+                ambiguous = ambiguous or isinstance(exc, _AMBIGUOUS_TRANSPORT_ERRORS)
                 time.sleep(retry_delay(error, attempt))
                 continue
             try:
@@ -367,10 +386,18 @@ class TracesAPIClient:
 
         A 404 propagates unless an earlier attempt failed ambiguously (a
         transport error, or a gateway 502/504), in which case that attempt may
-        well have done the work. See ``_idempotent_request``.
+        well have done the work. A ``created_at`` precision hint disables that
+        absorption: its 404 can mean the hint never matched while the trace
+        still exists. See ``_idempotent_request``.
         """
         self._check_auth()
-        self._idempotent_request("DELETE", endpoint, params, absent_after_ambiguity_is_success=True)
+        has_created_at_hint = params is not None and params.get("created_at") is not None
+        self._idempotent_request(
+            "DELETE",
+            endpoint,
+            params,
+            absent_after_ambiguity_is_success=not has_created_at_hint,
+        )
 
     def stream_bytes(
         self, endpoint: str, params: Optional[Dict[str, Any]] = None

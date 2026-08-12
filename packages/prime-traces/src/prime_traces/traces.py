@@ -16,6 +16,7 @@ server-side field registry).
 import time
 from pathlib import Path
 from typing import Callable, Dict, Iterable, Iterator, List, Optional, Union
+from urllib.parse import quote
 
 from .batching import (
     DEFAULT_TARGET_BATCH_BYTES,
@@ -44,6 +45,11 @@ def _build_params(
         for key, value in context.items():
             params[f"context.{key}"] = value
     return params
+
+
+def _trace_endpoint(trace_id: str) -> str:
+    """Build a trace endpoint with the ID encoded as one path segment."""
+    return f"/traces/{quote(trace_id, safe='')}"
 
 
 class TracesClient:
@@ -220,18 +226,18 @@ class TracesClient:
 
     def get(self, trace_id: str) -> TraceSummary:
         """Get one trace summary."""
-        return TraceSummary.model_validate(self.client.get_json(f"/traces/{trace_id}"))
+        return TraceSummary.model_validate(self.client.get_json(_trace_endpoint(trace_id)))
 
     def get_raw(self, trace_id: str) -> bytes:
         """Get the stored raw trace document, buffered in memory.
 
         A trace can be tens of MiB; prefer ``download_raw`` for large traces.
         """
-        return b"".join(self.client.stream_bytes(f"/traces/{trace_id}", params={"raw": "true"}))
+        return b"".join(self.client.stream_bytes(_trace_endpoint(trace_id), params={"raw": "true"}))
 
     def download_raw(self, trace_id: str, dest: Union[str, Path]) -> int:
         """Stream the raw trace document to ``dest``. Returns bytes written."""
-        return self._stream_to_file(f"/traces/{trace_id}", {"raw": "true"}, dest)
+        return self._stream_to_file(_trace_endpoint(trace_id), {"raw": "true"}, dest)
 
     def _stream_to_file(
         self, endpoint: str, params: Optional[Dict[str, object]], dest: Union[str, Path]
@@ -264,7 +270,10 @@ class TracesClient:
         ``created_at`` is an optional performance hint that lets the service
         prune on its ordering-key prefix; correctness does not depend on it,
         but a hint matching no stored copy is a 404 even when the trace exists
-        under another timestamp.
+        under another timestamp. For that reason, a hinted delete also
+        preserves a 404 received after an ambiguous first attempt: the client
+        cannot prove whether that attempt deleted the trace or never reached
+        the service, so reporting success could leave a trace behind.
 
         Raises ``NotFoundError`` when the owner has no such trace — including
         on a repeat of a delete that already succeeded. The design docs
@@ -273,7 +282,7 @@ class TracesClient:
         "make sure this is gone" should catch ``NotFoundError``.
         """
         params = {"created_at": created_at} if created_at else None
-        self.client.delete(f"/traces/{trace_id}", params=params)
+        self.client.delete(_trace_endpoint(trace_id), params=params)
 
     def delete_run(self, run_id: str) -> None:
         """Delete every trace in a run (202 Accepted).

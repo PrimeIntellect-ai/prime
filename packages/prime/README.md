@@ -187,7 +187,7 @@ Isolated environments for running code remotely:
 prime sandbox create python:3.11
 
 # Create a VM sandbox with GPUs
-prime sandbox create user-1/vm-image:latest --vm --gpu-count 1 --gpu-type H100_80GB
+prime sandbox create user-1/vm-image:latest --vm --gpu-count 1 --gpu-type RTX_PRO_6000
 
 # Create a one-shot VM workload (arguments after -- are preserved exactly)
 prime sandbox create user-1/vm-image:latest -- /worker --platform linux/amd64

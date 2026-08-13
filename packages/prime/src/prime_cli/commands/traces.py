@@ -28,6 +28,7 @@ from ..utils import (
 
 app = PlainTyper(help="Upload and query traces (Prime Traces)", no_args_is_help=True)
 console = get_console()
+error_console = get_console(stderr=True)
 
 
 def _traces_client() -> TracesClient:
@@ -76,7 +77,9 @@ def _parse_context(values: List[str]) -> Optional[Dict[str, str]]:
     for item in values:
         key, sep, value = item.partition("=")
         if not sep or not key:
-            console.print(f"[red]Invalid --context '{escape(item)}'; expected key=value[/red]")
+            error_console.print(
+                f"[red]Invalid --context '{escape(item)}'; expected key=value[/red]"
+            )
             raise typer.Exit(1)
         context[key] = value
     return context
@@ -107,7 +110,7 @@ def upload_traces(
 ) -> None:
     """Upload a JSONL file of traces. Safe to rerun after interruption:
     identical bytes replay their committed receipts without re-storing."""
-    validate_output_format(output, console)
+    validate_output_format(output, error_console)
     line_format = LineFormat.EPISODE if episodes else LineFormat.TRACE
 
     def on_batch(batch: Batch, receipt: UploadReceipt) -> None:
@@ -130,17 +133,17 @@ def upload_traces(
     except typer.Exit:
         raise
     except UnauthorizedError as e:
-        console.print(f"[red]Unauthorized:[/red] {escape(str(e))}")
+        error_console.print(f"[red]Unauthorized:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except PaymentRequiredError as e:
-        console.print(f"[red]Payment Required:[/red] {escape(str(e))}")
+        error_console.print(f"[red]Payment Required:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except PrimeTracesError as e:
-        console.print(f"[red]Upload failed:[/red] {escape(str(e))}")
+        error_console.print(f"[red]Upload failed:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except Exception as e:
-        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
-        console.print_exception()
+        error_console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
+        error_console.print_exception()
         raise typer.Exit(1)
 
     if output == "json":
@@ -178,7 +181,7 @@ def list_traces(
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
     """List trace summaries, newest first."""
-    validate_output_format(output, console)
+    validate_output_format(output, error_console)
     try:
         client = _traces_client()
         page = client.list(
@@ -198,17 +201,17 @@ def list_traces(
     except typer.Exit:
         raise
     except UnauthorizedError as e:
-        console.print(f"[red]Unauthorized:[/red] {escape(str(e))}")
+        error_console.print(f"[red]Unauthorized:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except PaymentRequiredError as e:
-        console.print(f"[red]Payment Required:[/red] {escape(str(e))}")
+        error_console.print(f"[red]Payment Required:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except APIError as e:
-        console.print(f"[red]Error:[/red] {escape(str(e))}")
+        error_console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except Exception as e:
-        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
-        console.print_exception()
+        error_console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
+        error_console.print_exception()
         raise typer.Exit(1)
 
     if output == "json":
@@ -248,9 +251,9 @@ def get_trace(
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
     """Get one trace summary, or the raw trace document with --raw."""
-    validate_output_format(output, console)
+    validate_output_format(output, error_console)
     if dest is not None and not raw:
-        console.print("[red]--dest requires --raw[/red]")
+        error_console.print("[red]--dest requires --raw[/red]")
         raise typer.Exit(1)
 
     try:
@@ -276,17 +279,17 @@ def get_trace(
     except typer.Exit:
         raise
     except UnauthorizedError as e:
-        console.print(f"[red]Unauthorized:[/red] {escape(str(e))}")
+        error_console.print(f"[red]Unauthorized:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except PaymentRequiredError as e:
-        console.print(f"[red]Payment Required:[/red] {escape(str(e))}")
+        error_console.print(f"[red]Payment Required:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except APIError as e:
-        console.print(f"[red]Error:[/red] {escape(str(e))}")
+        error_console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except Exception as e:
-        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
-        console.print_exception()
+        error_console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
+        error_console.print_exception()
         raise typer.Exit(1)
 
     if output == "json":
@@ -324,7 +327,7 @@ def delete_traces(
     a delete that already succeeded reports "not found".
     """
     if bool(trace_id) == bool(run_id):
-        console.print("[red]Provide exactly one of TRACE_ID or --run-id[/red]")
+        error_console.print("[red]Provide exactly one of TRACE_ID or --run-id[/red]")
         raise typer.Exit(1)
 
     target = f"trace {trace_id}" if trace_id else f"every trace in run {run_id}"
@@ -342,18 +345,18 @@ def delete_traces(
     except typer.Exit:
         raise
     except NotFoundError as e:
-        console.print(f"[red]Not found:[/red] {escape(str(e))}")
+        error_console.print(f"[red]Not found:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except UnauthorizedError as e:
-        console.print(f"[red]Unauthorized:[/red] {escape(str(e))}")
+        error_console.print(f"[red]Unauthorized:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except PaymentRequiredError as e:
-        console.print(f"[red]Payment Required:[/red] {escape(str(e))}")
+        error_console.print(f"[red]Payment Required:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except APIError as e:
-        console.print(f"[red]Error:[/red] {escape(str(e))}")
+        error_console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except Exception as e:
-        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
-        console.print_exception()
+        error_console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
+        error_console.print_exception()
         raise typer.Exit(1)

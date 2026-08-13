@@ -363,6 +363,19 @@ def test_api_error_messages_are_rendered_as_literal_text(fake_client):
     assert "MarkupError" not in result.output
 
 
+def test_json_error_keeps_stdout_machine_readable(fake_client):
+    def fail_list(**kwargs):
+        raise APIError("invalid filter")
+
+    fake_client.list = fail_list
+
+    result = runner.invoke(main_app, ["traces", "list", "-o", "json"])
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert "Error: invalid filter" in result.stderr
+
+
 def test_table_output_treats_trace_values_as_literal_text(fake_client):
     markup = "[/]"
     fake_client.list = lambda **kwargs: TraceListPage(
@@ -407,6 +420,19 @@ def test_get_command_raw_stdout_preserves_exact_bytes(fake_client):
 
     assert result.exit_code == 0
     assert result.stdout_bytes == raw
+
+
+def test_get_command_raw_error_keeps_stdout_clean(fake_client):
+    def fail_get_raw(trace_id):
+        raise APIError(f"trace {trace_id} not found")
+
+    fake_client.get_raw = fail_get_raw
+
+    result = runner.invoke(main_app, ["traces", "get", "missing", "--raw"])
+
+    assert result.exit_code == 1
+    assert result.stdout_bytes == b""
+    assert "Error: trace missing not found" in result.stderr
 
 
 def test_get_command_rejects_dest_without_raw(fake_client, tmp_path):

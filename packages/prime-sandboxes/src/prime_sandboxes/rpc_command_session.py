@@ -84,6 +84,12 @@ _COMMAND_SESSION_SEND_SIGNAL_REQUEST_TYPE = cast(
 _COMMAND_SESSION_SEND_SIGNAL_RESPONSE_TYPE = cast(
     type[Message], getattr(command_session_pb2, "SendSignalResponse")
 )
+_COMMAND_SESSION_CONNECT_REQUEST_TYPE = cast(
+    type[Message], getattr(command_session_pb2, "ConnectRequest")
+)
+_COMMAND_SESSION_CONNECT_RESPONSE_TYPE = cast(
+    type[Message], getattr(command_session_pb2, "ConnectResponse")
+)
 _COMMAND_SESSION_START_REQUEST_FACTORY = cast(
     _CommandSessionStartRequestFactory, _COMMAND_SESSION_START_REQUEST_TYPE
 )
@@ -125,6 +131,16 @@ COMMAND_SESSION_SEND_SIGNAL_RPC_METHOD = MethodInfo(
     idempotency_level=IdempotencyLevel.UNKNOWN,
 )
 
+# Re-attach to an already-running session's output stream (server-streaming), selected by pid.
+# Used to resume a live process after its Start stream drops on a transient link fault.
+COMMAND_SESSION_CONNECT_RPC_METHOD = MethodInfo(
+    name="Connect",
+    service_name="command_session.CommandSession",
+    input=_COMMAND_SESSION_CONNECT_REQUEST_TYPE,
+    output=_COMMAND_SESSION_CONNECT_RESPONSE_TYPE,
+    idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+)
+
 
 def build_command_session_start_request(
     command: str,
@@ -142,6 +158,12 @@ def build_command_session_start_request(
         command_spec.cwd = working_dir
 
     return _COMMAND_SESSION_START_REQUEST_FACTORY(command=command_spec, stdin=stdin)
+
+
+def build_command_session_connect_request(pid: int) -> Message:
+    return _COMMAND_SESSION_CONNECT_REQUEST_TYPE(
+        session=_COMMAND_SESSION_SELECTOR_FACTORY(pid=pid)
+    )
 
 
 def build_command_session_send_input_request(pid: int, data: bytes) -> Message:

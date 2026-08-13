@@ -3,6 +3,7 @@
 import asyncio
 import functools
 import json
+import logging
 import os
 import random
 import re
@@ -12,6 +13,7 @@ import threading
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
+from collections.abc import AsyncIterator
 from typing import Any, Dict, List, Literal, NoReturn, Optional, TypeVar
 
 import aiofiles
@@ -65,11 +67,23 @@ from .models import (
     SSHSession,
     validate_egress_lists,
 )
+from ._reliability import (
+    BG_LAUNCH_TIMEOUT,
+    PROCESS_INPUT_TIMEOUT_MS,
+    PROCESS_SIGNAL_TIMEOUT_MS,
+    RPC_BACKOFF_BASE,
+    RPC_MAX_ATTEMPTS,
+    STREAM_POOL_IDLE_TIMEOUT,
+    STREAM_TCP_KEEPALIVE,
+    is_transient_rpc_error,
+)
 from .process import AsyncSandboxProcess
 from .rpc_command_session import (
+    COMMAND_SESSION_CONNECT_RPC_METHOD,
     COMMAND_SESSION_SEND_INPUT_RPC_METHOD,
     COMMAND_SESSION_SEND_SIGNAL_RPC_METHOD,
     COMMAND_SESSION_START_RPC_METHOD,
+    build_command_session_connect_request,
     build_command_session_send_input_request,
     build_command_session_send_signal_request,
     build_command_session_start_request,
@@ -91,8 +105,11 @@ GATEWAY_CONNECTION_RETRYABLE_EXCEPTIONS = (
 # timeout is supplied. A live process cannot outlast the sandbox's 24-hour
 # maximum lifetime, so use that lifetime as the transport bound.
 _LIVE_PROCESS_TIMEOUT_MS = 24 * 60 * 60 * 1000
-_PROCESS_INPUT_TIMEOUT_MS = 30_000
-_PROCESS_SIGNAL_TIMEOUT_MS = 10_000
+# Control-RPC deadlines are env-tunable (see _reliability); aliased here for locality.
+_PROCESS_INPUT_TIMEOUT_MS = PROCESS_INPUT_TIMEOUT_MS
+_PROCESS_SIGNAL_TIMEOUT_MS = PROCESS_SIGNAL_TIMEOUT_MS
+
+logger = logging.getLogger(__name__)
 
 _RequestMessage = TypeVar("_RequestMessage", bound=Message)
 _ResponseMessage = TypeVar("_ResponseMessage", bound=Message)
@@ -107,7 +124,17 @@ def _ca_bundle() -> bytes:
 def _live_process_transport() -> HTTPTransport:
     # A bare HTTPTransport carries no trust roots on some pyqwest versions
     # (only the default singleton does), so pass certifi's bundle explicitly.
-    return HTTPTransport(tls_ca_cert=_ca_bundle())
+    #
+    # Keep the long-lived output stream connection warm so a brief idle stall (the agent waiting
+    # between turns) is not torn down: frequent TCP keepalive probes detect/keep the path, and a
+    # generous pool-idle timeout avoids reaping the connection under the stream. There is no
+    # per-read deadline (read_timeout=None) — the stream's own deadline and the server's keepalive
+    # events bound it, and a genuine drop is recovered by re-attaching (see AsyncSandboxProcess).
+    return HTTPTransport(
+        tls_ca_cert=_ca_bundle(),
+        tcp_keepalive_interval=STREAM_TCP_KEEPALIVE,
+        pool_idle_timeout=STREAM_POOL_IDLE_TIMEOUT,
+    )
 
 
 def _network_update_payload(
@@ -1148,7 +1175,17 @@ class SandboxClient:
 
         # Outer nohup redirects to /dev/null since output goes to log files inside sh -c
         bg_cmd = f"nohup sh -c {quoted_sh_command} < /dev/null > /dev/null 2>&1 &"
-        self.execute_command(sandbox_id, bg_cmd, timeout=30, user=user)
+        # The launch returns immediately, so a timeout is a transport blip, not a slow command;
+        # retry it. Re-issuing the identical command is safe (same job_id/log files); a dead
+        # sandbox raises SandboxNotRunningError (not transient), which fails fast.
+        for attempt in range(RPC_MAX_ATTEMPTS):
+            try:
+                self.execute_command(sandbox_id, bg_cmd, timeout=BG_LAUNCH_TIMEOUT, user=user)
+                break
+            except Exception as error:
+                if attempt == RPC_MAX_ATTEMPTS - 1 or not is_transient_rpc_error(error):
+                    raise
+                time.sleep(RPC_BACKOFF_BASE * 2**attempt)
 
         return BackgroundJob(
             job_id=job_id,
@@ -2110,12 +2147,28 @@ class AsyncSandboxClient:
                 http_client=http_client,
             )
 
+        async def reconnect(pid: int) -> AsyncIterator[Message]:
+            # Re-attach to the still-running process by pid after a transient stream drop. Fresh
+            # auth (the token may have rotated during the outage), same warm transport.
+            auth = await self._auth_cache.get_or_refresh(sandbox_id)
+            base_url = (
+                f"{auth['gateway_url'].rstrip('/')}/{auth['user_ns']}/{auth['job_id']}"
+            )
+            client = ConnectClient(base_url, http_client=http_client)
+            return client.execute_server_stream(
+                request=build_command_session_connect_request(pid),
+                method=COMMAND_SESSION_CONNECT_RPC_METHOD,
+                headers={"Authorization": f"Bearer {auth['token']}"},
+                timeout_ms=_LIVE_PROCESS_TIMEOUT_MS,
+            )
+
         return await AsyncSandboxProcess._create(
             rpc_client,
             stream,
             write_stdin,
             send_signal,
             transport=transport,
+            reconnect=reconnect,
         )
 
     async def _execute_process_control_rpc(
@@ -2127,8 +2180,14 @@ class AsyncSandboxClient:
         operation: str,
         http_client: Optional[HTTPClient] = None,
     ) -> None:
-        """Run one live-process control RPC with current sandbox auth."""
+        """Run one live-process control RPC with current sandbox auth.
+
+        Idempotent (a signal or a bounded stdin write), so a transient transport fault
+        (DEADLINE_EXCEEDED / UNAVAILABLE / reset) is retried with backoff instead of killing the
+        rollout mid-turn; an expired token is refreshed. A permanent fault fails fast.
+        """
         reauthed = False
+        transient_attempts = 0
         while True:
             auth = await self._auth_cache.get_or_refresh(sandbox_id)
             gateway_url = auth["gateway_url"].rstrip("/")
@@ -2148,6 +2207,20 @@ class AsyncSandboxClient:
                     sandbox_id, reauthed
                 ):
                     reauthed = True
+                    continue
+                if (
+                    is_transient_rpc_error(error)
+                    and transient_attempts < RPC_MAX_ATTEMPTS - 1
+                ):
+                    transient_attempts += 1
+                    logger.warning(
+                        "process %s RPC transient failure (%s); retry %d/%d",
+                        operation,
+                        error.code.value,
+                        transient_attempts,
+                        RPC_MAX_ATTEMPTS - 1,
+                    )
+                    await asyncio.sleep(RPC_BACKOFF_BASE * 2 ** (transient_attempts - 1))
                     continue
                 raise APIError(
                     f"process {operation} RPC failed ({error.code.value}): {error.message}"
@@ -2383,7 +2456,17 @@ class AsyncSandboxClient:
 
         # Outer nohup redirects to /dev/null since output goes to log files inside sh -c
         bg_cmd = f"nohup sh -c {quoted_sh_command} < /dev/null > /dev/null 2>&1 &"
-        await self.execute_command(sandbox_id, bg_cmd, timeout=30, user=user)
+        # The launch returns immediately, so a timeout is a transport blip, not a slow command;
+        # retry it. Re-issuing the identical command is safe (same job_id/log files); a dead
+        # sandbox raises SandboxNotRunningError (not transient), which fails fast.
+        for attempt in range(RPC_MAX_ATTEMPTS):
+            try:
+                await self.execute_command(sandbox_id, bg_cmd, timeout=BG_LAUNCH_TIMEOUT, user=user)
+                break
+            except Exception as error:
+                if attempt == RPC_MAX_ATTEMPTS - 1 or not is_transient_rpc_error(error):
+                    raise
+                await asyncio.sleep(RPC_BACKOFF_BASE * 2**attempt)
 
         return BackgroundJob(
             job_id=job_id,

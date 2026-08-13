@@ -17,13 +17,7 @@ _PRIME_ENV_VARS = (
 
 @pytest.fixture(autouse=True)
 def isolated_prime_config(monkeypatch, tmp_path):
-    """Keep tests hermetic: never read the developer's real ~/.prime or env.
-
-    `TracesAPIClient` constructs a `Config` even when every parameter is
-    explicit, so without this a malformed local config.json (or a PRIME_* var
-    in the developer's shell) leaks into — or crashes — unrelated tests.
-    Mirrors the home-isolation fixture in prime-sandboxes' conftest.
-    """
+    """Keep tests hermetic: never read the developer's real ~/.prime or env."""
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     for name in _PRIME_ENV_VARS:
         monkeypatch.delenv(name, raising=False)
@@ -47,12 +41,7 @@ def make_client() -> Callable[..., TracesClient]:
 
 @pytest.fixture(autouse=True)
 def no_sleep(monkeypatch):
-    """Record retry sleeps instead of actually sleeping.
-
-    Upload retries sleep in ``traces``; idempotent read retries sleep in
-    ``core.client``. One list records both so tests assert on delays without
-    caring which loop slept.
-    """
+    """Record retry sleeps instead of actually sleeping."""
     sleeps: list = []
     monkeypatch.setattr("prime_traces.traces.time.sleep", sleeps.append)
     monkeypatch.setattr("prime_traces.core.client.time.sleep", sleeps.append)

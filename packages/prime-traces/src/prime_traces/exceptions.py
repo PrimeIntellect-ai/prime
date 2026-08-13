@@ -1,12 +1,4 @@
-"""Exceptions for the Prime Traces SDK.
-
-Two families:
-
-- Local errors raised before any request is made (``TraceTooLargeError``).
-- API errors mapped from HTTP responses. The service answers with a bounded
-  set of error codes (see ``models.ErrorCode``); producers are expected to
-  branch on the code, not the message.
-"""
+"""Exceptions for the Prime Traces SDK."""
 
 from typing import Optional
 

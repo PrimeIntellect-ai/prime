@@ -1,15 +1,4 @@
-"""HTTP client for the Prime Traces service.
-
-Speaks the wire contract and maps error responses to typed exceptions.
-
-Retry policy is split by what makes a retry safe. GET requests are retried here
-with a small fixed budget. DELETE requests use the same budget only for
-failures known to happen before delivery or explicit service refusals; an
-ambiguous replay could delete data written after the first attempt. Uploads are
-POSTs whose retry safety comes from content addressing rather than the method,
-so their loop lives in ``TracesClient``, where the attempt budget is
-caller-configurable and Retry-After is honored against it.
-"""
+"""HTTP client for the Prime Traces service."""
 
 import gzip as gzip_module
 import json as json_module
@@ -38,20 +27,14 @@ from ..exceptions import (
 from ..models import ErrorCode, LineFormat
 from .config import Config
 
-#: Attempts for idempotent requests, matching prime-sandboxes'
-#: ``stop_after_attempt(3)``. Uploads have their own caller-configurable
-#: budget — see ``TracesClient._send_with_retry``.
 IDEMPOTENT_RETRY_ATTEMPTS = 3
 
-#: Retryable statuses that leave it unknown whether the request reached the
-#: service. 502/504 come from a gateway, which may already have forwarded the
-#: request upstream and then lost or timed out the response.
+# Retryable statuses that leave it unknown whether the request reached the
+# service.
 _AMBIGUOUS_RETRY_STATUSES = frozenset({502, 504})
 
-#: Codes proving that a retryable response came from the service while it was
-#: declining the request. A codeless or unknown-code 503 may instead have come
-#: from an intermediary after the request was forwarded, so DELETE must treat
-#: that outcome as ambiguous rather than replaying the operation.
+# Codes proving that a retryable response came from the service while it was
+# declining the request
 _SERVICE_REFUSAL_CODES = frozenset(
     {
         ErrorCode.RATE_LIMITED.value,
@@ -63,11 +46,8 @@ _SERVICE_REFUSAL_CODES = frozenset(
     }
 )
 
-#: Transport failures that can happen after a request has started crossing the
-#: network. A DELETE behind one of these may have completed even though the
-#: client did not receive its response. Connection establishment, proxy setup,
-#: pool acquisition and local protocol failures are deliberately absent: the
-#: service cannot have processed a request that was never sent.
+# Transport failures that can happen after a request has started crossing the
+# network.
 _AMBIGUOUS_TRANSPORT_ERRORS = (
     httpx.CloseError,
     httpx.DecodingError,
@@ -80,18 +60,11 @@ _AMBIGUOUS_TRANSPORT_ERRORS = (
 
 _BACKOFF_BASE_SECONDS = 1.0
 _BACKOFF_CAP_SECONDS = 30.0
-# Retry-After is server-controlled input (and may come from a gateway's
-# HTTP-date far in the future); honor it, but never let it park the client.
 _RETRY_AFTER_CAP_SECONDS = 60.0
 
 
 def retry_delay(error: Exception, attempt: int) -> float:
-    """Seconds to wait before retrying ``attempt`` (0-based).
-
-    A server-supplied Retry-After wins, capped; otherwise jittered exponential
-    backoff. Shared by the read retries here and the upload retries in
-    ``TracesClient`` so the two paths cannot drift.
-    """
+    """Seconds to wait before retrying."""
     delay = getattr(error, "retry_after", None)
     if delay is not None:
         return min(delay, _RETRY_AFTER_CAP_SECONDS)
@@ -110,24 +83,11 @@ def _default_user_agent() -> str:
 
 
 def _normalize_base_url(url: str) -> str:
-    """The same normalization ``Config`` applies to file/env URLs.
-
-    ``_url()`` appends ``/api/v1`` itself, and URLs are commonly written with
-    the suffix already on them; without stripping it here, an explicit
-    ``base_url=`` would request ``/api/v1/api/v1/...`` while the identical
-    value via config worked.
-    """
+    """The same normalization ``Config`` applies to file/env URLs."""
     return url.rstrip("/").removesuffix("/api/v1")
 
 
 def _parse_retry_after(response: httpx.Response) -> Optional[float]:
-    """Retry-After in either RFC 9110 form: delta-seconds or HTTP-date.
-
-    Gateways in front of the service emit the date form, so it converts to the
-    remaining delay rather than being dropped — dropping it would substitute a
-    shorter local backoff and retry before the server asked. Unparseable
-    values return None and callers fall back to their own backoff.
-    """
     value = response.headers.get("Retry-After")
     if value is None:
         return None
@@ -138,22 +98,14 @@ def _parse_retry_after(response: httpx.Response) -> Optional[float]:
     try:
         target = parsedate_to_datetime(value)
     except (TypeError, ValueError, OverflowError):
-        # Treat every malformed-date failure as an unusable hint. CPython
-        # normally raises ValueError, but out-of-range components can raise
-        # OverflowError and parser implementations may surface TypeError.
         return None
     if target.tzinfo is None:
-        # RFC 5322 allows -0000, which parses naive; it means UTC.
         target = target.replace(tzinfo=timezone.utc)
     return max(0.0, (target - datetime.now(timezone.utc)).total_seconds())
 
 
 def _extract_error(response: httpx.Response) -> tuple[Optional[str], str]:
-    """Return (code, message) from an error body.
-
-    The service envelope is {"error": {"code", "message"}}; fall back to
-    FastAPI's {"detail": ...} and then raw text so nothing is swallowed.
-    """
+    """Return (code, message) from an error body."""
     try:
         body = response.json()
     except ValueError:
@@ -194,10 +146,6 @@ def raise_for_response(response: httpx.Response) -> None:
     if status == 409:
         raise LineFormatConflictError(message, status_code=status, code=code)
     if status in (429, 502, 503, 504):
-        # 502/504 come from gateways in front of the service, not the service
-        # itself. Content addressing makes retrying them safe even for uploads
-        # whose first attempt may have been processed: the same bytes resolve
-        # to the same idempotency key and replay the committed receipt.
         raise RetryableAPIError(
             message, status_code=status, code=code, retry_after=_parse_retry_after(response)
         )
@@ -217,11 +165,6 @@ class TracesAPIClient:
         transport: Optional[httpx.BaseTransport] = None,
     ):
         self.config = Config()
-        # For api_key and team_id, None means "resolve from config" and any
-        # explicit value — including "" — is final. Injectors like the prime
-        # CLI pass their own resolved values and rely on an unset field never
-        # silently re-resolving against the SDK's static config, which may
-        # belong to a different context.
         self.api_key = api_key if api_key is not None else self.config.api_key
         self.base_url = _normalize_base_url(base_url or self.config.traces_url)
         self.team_id = team_id if team_id is not None else self.config.team_id
@@ -232,8 +175,6 @@ class TracesAPIClient:
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         if self.team_id:
-            # Spelled exactly as the service declares it (auth/dependencies.py
-            # TEAM_HEADER) — case-insensitive on the wire, greppable in code.
             headers["X-Prime-Team-ID"] = self.team_id
 
         self.client = httpx.Client(
@@ -383,26 +324,14 @@ class TracesAPIClient:
         return result
 
     def delete(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> None:
-        """Send a DELETE and discard the body — 202 carries none.
-
-        Pre-delivery failures, 429 responses, and service-coded 503 refusals are
-        retried. An ambiguous failure that may hide a completed deletion is
-        returned to the caller: replaying it could delete data written after
-        the first attempt.
-        """
+        """Send a DELETE and discard the body — 202 carries none."""
         self._check_auth()
         self._idempotent_request("DELETE", endpoint, params)
 
     def stream_bytes(
         self, endpoint: str, params: Optional[Dict[str, Any]] = None
     ) -> Iterator[bytes]:
-        """Stream a response body in chunks (a raw trace can be 64 MiB).
-
-        Transient failures are retried only until the first body byte has been
-        yielded: a mid-stream retry would silently restart the body under the
-        consumer (``_stream_to_file`` would write the prefix twice), so once
-        bytes have flowed a failure raises and the caller re-runs.
-        """
+        """Stream a response body in chunks (a raw trace can be 64 MiB)."""
         self._check_auth()
         for attempt in range(IDEMPOTENT_RETRY_ATTEMPTS):
             last = attempt == IDEMPOTENT_RETRY_ATTEMPTS - 1

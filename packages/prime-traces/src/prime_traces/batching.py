@@ -1,20 +1,4 @@
-"""Client-side batching for content-addressed uploads.
-
-The contract this implements (see the Prime Traces design docs):
-
-- The SDK reads a completed JSONL file line by line; lines are opaque bytes.
-  It never parses trace JSON, so it needs no dependency on verifiers.
-- A request chunk closes at its uncompressed-byte threshold. Boundaries are
-  measured in uncompressed bytes because compression ratios vary widely.
-- A line larger than the single-line limit is rejected locally rather than
-  split: under bare-trace format the line is one trace, under episode format
-  one complete episode, and neither may span requests.
-- upload_id = SHA256(exact uncompressed JSONL bytes, including newlines),
-  sent as ``Idempotency-Key: sha256:<64 lowercase hex>``. There is no client
-  upload ID or checkpoint: a crashed producer re-reads the file, rebuilds the
-  same bytes, and regenerates the same keys — so batching must be
-  deterministic for a given input.
-"""
+"""Client-side batching for content-addressed uploads."""
 
 import hashlib
 from dataclasses import dataclass
@@ -25,21 +9,21 @@ from .exceptions import TraceTooLargeError
 
 MIB = 1024 * 1024
 
-#: Server-side cap on uncompressed bytes per request (-> upload_too_large).
+# Server-side cap on uncompressed bytes per request (-> upload_too_large).
 MAX_BATCH_BYTES = 256 * MIB
-#: Server-side cap on one JSONL line (-> trace_too_large).
+# Server-side cap on one JSONL line (-> trace_too_large).
 MAX_LINE_BYTES = 64 * MIB
-#: Server-side cap on staged rows per request (-> too_many_traces_in_upload).
-#: Exact for bare-trace uploads, where one line is one row. Episode lines
-#: stage one episode row plus each nested trace, which opaque line bytes
-#: cannot count — there the byte caps are the practical bound.
+# Server-side cap on staged rows per request (-> too_many_traces_in_upload).
+# Exact for bare-trace uploads, where one line is one row. Episode lines
+# stage one episode row plus each nested trace, which opaque line bytes
+# cannot count — there the byte caps are the practical bound.
 MAX_BATCH_LINES = 1_000_000
-#: Default chunk-close threshold. Held under Cloud Run's 32 MiB request cap so
-#: a batch fits the deployed transport even with compression disabled; the
-#: 256 MiB service contract above is not reachable through that cap today. A
-#: batch may exceed this only when a single line does — such a batch (or any
-#: caller-raised target) still risks transport-level rejection before the
-#: service sees it.
+# Default chunk-close threshold. Held under Cloud Run's 32 MiB request cap so
+# a batch fits the deployed transport even with compression disabled; the
+# 256 MiB service contract above is not reachable through that cap today. A
+# batch may exceed this only when a single line does — such a batch (or any
+# caller-raised target) still risks transport-level rejection before the
+# service sees it.
 DEFAULT_TARGET_BATCH_BYTES = 30 * MIB
 
 
@@ -78,20 +62,7 @@ def iter_batches(
     max_line_bytes: int = MAX_LINE_BYTES,
     max_lines: int = MAX_BATCH_LINES,
 ) -> Iterator[Batch]:
-    """Group JSONL lines into content-addressed request batches.
-
-    Whitespace-only lines are skipped. Each kept line contributes its exact
-    bytes (terminator included; a final line without one stays without one).
-    The line-size cap is checked on the line content excluding the trailing
-    newline but including any carriage return before it — the service splits
-    on LF alone, so these are exactly the bytes it measures.
-
-    A batch also closes at ``max_lines``, mirroring the service's per-request
-    row cap: without it, a caller-raised ``target_bytes`` over a file of tiny
-    lines could build a batch the service rejects with
-    ``too_many_traces_in_upload`` — a 400 the retry semantics treat as
-    "correct the file" when the file is fine and only the chunking is not.
-    """
+    """Group JSONL lines into content-addressed request batches."""
     if target_bytes <= 0:
         raise ValueError("target_bytes must be positive")
     if target_bytes > MAX_BATCH_BYTES:

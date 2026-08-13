@@ -214,6 +214,57 @@ class Config:
         self.config["traces_url"] = self._strip_api_v1(value) if value else None
         self._save_config(self.config)
 
+    def set_traces_url_for_active_environment(self, value: str) -> None:
+        """Persist only the traces URL for the command's selected environment.
+
+        ``PRIME_CONTEXT`` overlays a saved environment onto ``self.config`` in
+        memory. Saving that resolved dictionary would make the temporary
+        context the default configuration. Likewise,
+        ``update_current_environment_file()`` reads environment-precedence
+        properties and can persist temporary credentials alongside an
+        unrelated traces URL change. Update only the raw traces field in the
+        intended files instead.
+        """
+        traces_url = self._strip_api_v1(value) if value else None
+        selected_environment = self.current_environment
+        context_override = os.getenv("PRIME_CONTEXT")
+
+        root_config = json.loads(self.config_file.read_text())
+        if not isinstance(root_config, dict):
+            raise ValueError(f"Invalid configuration in {self.config_file}")
+        root_environment = str(root_config.get("current_environment", "production"))
+
+        if (
+            context_override
+            and selected_environment == "production"
+            and root_environment.casefold() != "production"
+        ):
+            raise ValueError(
+                "Cannot persist production traces settings while another environment is active; "
+                "run 'prime config use production' first"
+            )
+
+        update_root = (
+            not context_override
+            or root_environment.casefold() == selected_environment.casefold()
+        )
+
+        if update_root:
+            root_config["traces_url"] = traces_url
+            self.config_file.write_text(json.dumps(root_config, indent=2))
+
+        if selected_environment != "production":
+            sanitized = self._sanitize_environment_name(selected_environment)
+            env_file = self.environments_dir / f"{sanitized}.json"
+            if env_file.exists():
+                env_config = json.loads(env_file.read_text())
+                if not isinstance(env_config, dict):
+                    raise ValueError(f"Invalid configuration in {env_file}")
+                env_config["traces_url"] = traces_url
+                env_file.write_text(json.dumps(env_config, indent=2))
+
+        self.config["traces_url"] = traces_url
+
     @property
     def ssh_key_path(self) -> str:
         """Get SSH private key path with precedence: env > file > default."""

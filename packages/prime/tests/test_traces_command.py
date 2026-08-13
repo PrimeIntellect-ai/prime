@@ -158,6 +158,88 @@ def test_set_traces_url_does_not_persist_env_override(monkeypatch, tmp_path):
     assert config.traces_url == traces_url
 
 
+def test_set_traces_url_with_context_does_not_replace_default_config(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
+    # The CLI callback sets this directly; record the pre-test value so the
+    # monkeypatch fixture restores it even after the callback replaces it.
+    monkeypatch.setenv("PRIME_CONTEXT", "")
+    config = Config()
+    config.set_api_key("staging-key")
+    config.set_base_url("https://api.staging.example")
+    config.save_environment("staging")
+    staging_file = config.environments_dir / "staging.json"
+    staging_before = json.loads(staging_file.read_text())
+
+    config.load_environment("production")
+    config.set_api_key("production-key")
+    root_before = json.loads(config.config_file.read_text())
+
+    traces_url = "https://traces.staging.example"
+    result = runner.invoke(
+        main_app,
+        ["--context", "staging", "config", "set-traces-url", traces_url],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(config.config_file.read_text()) == root_before
+    assert json.loads(staging_file.read_text()) == {
+        **staging_before,
+        "traces_url": traces_url,
+    }
+
+
+def test_set_traces_url_does_not_persist_unrelated_env_overrides(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
+    config = Config()
+    config.set_api_key("saved-key")
+    config.set_team("saved-team")
+    config.set_base_url("https://api.saved.example")
+    config.save_environment("staging")
+    config.load_environment("staging")
+    staging_file = config.environments_dir / "staging.json"
+    staging_before = json.loads(staging_file.read_text())
+
+    monkeypatch.setenv("PRIME_API_KEY", "temporary-key")
+    monkeypatch.setenv("PRIME_TEAM_ID", "temporary-team")
+    monkeypatch.setenv("PRIME_API_BASE_URL", "https://api.temporary.example")
+
+    traces_url = "https://traces.staging.example"
+    result = runner.invoke(main_app, ["config", "set-traces-url", traces_url])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(staging_file.read_text()) == {
+        **staging_before,
+        "traces_url": traces_url,
+    }
+
+
+def test_set_traces_url_rejects_unstored_production_context(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
+    monkeypatch.setenv("PRIME_CONTEXT", "")
+    config = Config()
+    config.save_environment("staging")
+    config.load_environment("staging")
+    root_before = json.loads(config.config_file.read_text())
+
+    result = runner.invoke(
+        main_app,
+        [
+            "--context",
+            "production",
+            "config",
+            "set-traces-url",
+            "https://traces.production.example",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "run 'prime config use production' first" in result.output
+    assert json.loads(config.config_file.read_text()) == root_before
+
+
 def test_logout_preserves_active_environment_traces_url(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")

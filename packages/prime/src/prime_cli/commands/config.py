@@ -307,8 +307,11 @@ def set_traces_url(
         url = ""
 
     config = Config()
-    config.set_traces_url(url)
-    config.update_current_environment_file()
+    try:
+        config.set_traces_url_for_active_environment(url)
+    except ValueError as e:
+        console.print(f"[red]Error: {escape(str(e))}[/red]")
+        raise typer.Exit(1)
     if url:
         console.print(f"[green]Traces URL set to: {escape(url)}[/green]")
     else:

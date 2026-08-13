@@ -32,20 +32,7 @@ error_console = get_console(stderr=True)
 
 
 def _traces_client() -> TracesClient:
-    """Build a client from the CLI config so `--context` is honored.
-
-    The SDK's own Config reads only ~/.prime/config.json and env vars; the CLI
-    Config additionally resolves PRIME_CONTEXT environments, so credentials and
-    URLs must flow from here. Same goal as the client injection in the sandbox
-    and evals commands, different mechanism: those hand the SDK a pre-built
-    APIClient object, while this SDK's client takes the resolved values
-    directly.
-
-    Every field is passed explicitly, never None: the SDK client treats None as
-    "resolve from my static config", and a context whose api_key or team is
-    unset must fail or go teamless rather than silently borrow the default
-    context's credentials.
-    """
+    """Build a client from the CLI config."""
     config = Config()
     return TracesClient(
         api_key=config.api_key,
@@ -302,14 +289,6 @@ def get_trace(
     for field, value in summary.model_dump(mode="json").items():
         table.add_row(escape(field), "-" if value is None else escape(str(value)))
     console.print(table)
-
-
-# No `export` command yet. The service publishes GET /api/v1/traces/export and
-# the two job routes, but every handler raises NotImplementedError — a 500, not
-# the 501 its docstring claims — and the streaming route declares no query
-# parameters, so there is nothing for filters to bind to. Add this back when the
-# route returns a body and names its parameters; until then `list --output json`
-# plus `get --raw` is the honest export path.
 
 
 @app.command("delete")

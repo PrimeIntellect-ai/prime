@@ -16,8 +16,6 @@ class ConfigModel(BaseModel):
     base_url: str = "https://api.primeintellect.ai"
     frontend_url: str = "https://app.primeintellect.ai"
     inference_url: str = "https://api.pinference.ai/api/v1"
-    # None means "not configured": the traces_url property falls back to
-    # base_url at read time, so the fallback is never frozen into the file.
     traces_url: str | None = None
     ssh_key_path: str = str(Path.home() / ".ssh" / "id_rsa")
     current_environment: str = "production"
@@ -181,11 +179,7 @@ class Config:
         self._save_config(self.config)
 
     def _configured_traces_url(self) -> str | None:
-        """The explicitly configured traces URL (env > file), or None when unset.
-
-        Separate from the property so environment save/load can persist "not
-        configured" instead of freezing the base_url fallback at save time.
-        """
+        """The explicitly configured traces URL (env > file), or None when unset."""
         env_val = os.getenv("PRIME_TRACES_URL")
         if env_val:
             return self._strip_api_v1(env_val)
@@ -200,13 +194,7 @@ class Config:
 
     @property
     def traces_url(self) -> str:
-        """Get Prime Traces service URL with precedence: env > file > base_url.
-
-        Falls back to the platform base URL until the service's production
-        routing (dedicated domain vs path under the API domain) is decided.
-        Strips a trailing /api/v1 like base_url does — the client appends the
-        prefix itself, and the SDK's own Config normalizes the same way.
-        """
+        """Get Prime Traces service URL with precedence: env > file > base_url."""
         return self._configured_traces_url() or self.base_url
 
     def set_traces_url(self, value: str) -> None:
@@ -215,16 +203,7 @@ class Config:
         self._save_config(self.config)
 
     def set_traces_url_for_active_environment(self, value: str) -> None:
-        """Persist only the traces URL for the command's selected environment.
-
-        ``PRIME_CONTEXT`` overlays a saved environment onto ``self.config`` in
-        memory. Saving that resolved dictionary would make the temporary
-        context the default configuration. Likewise,
-        ``update_current_environment_file()`` reads environment-precedence
-        properties and can persist temporary credentials alongside an
-        unrelated traces URL change. Update only the raw traces field in the
-        intended files instead.
-        """
+        """Persist only the traces URL for the command's selected environment."""
         traces_url = self._strip_api_v1(value) if value else None
         selected_environment = self.current_environment
         context_override = os.getenv("PRIME_CONTEXT")
@@ -346,8 +325,6 @@ class Config:
             "base_url": self.base_url,
             "frontend_url": self.frontend_url,
             "inference_url": self.inference_url,
-            # The configured value, not the effective one: an environment with
-            # no traces override keeps following its base_url.
             "traces_url": self._configured_traces_url(),
         }
         env_file.write_text(json.dumps(env_config, indent=2))
@@ -425,8 +402,6 @@ class Config:
                     self.set_inference_url(
                         env_config.get("inference_url", self.DEFAULT_INFERENCE_URL)
                     )
-                    # Absent means "no override": clear rather than keep the
-                    # previous environment's traces URL.
                     self.set_traces_url(env_config.get("traces_url") or "")
                     self.set_current_environment(name)
                 else:
@@ -472,9 +447,6 @@ class Config:
                         "base_url": self.base_url,
                         "frontend_url": self.frontend_url,
                         "inference_url": self.inference_url,
-                        # Environment variables are temporary overrides and
-                        # must not leak into a saved context when login/team
-                        # commands refresh the environment file.
                         "traces_url": self._stored_traces_url(),
                     }
                     env_file.write_text(json.dumps(env_config, indent=2))

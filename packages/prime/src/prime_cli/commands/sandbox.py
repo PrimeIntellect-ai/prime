@@ -507,7 +507,7 @@ def get(
 def create(
     docker_image: Optional[str] = typer.Argument(
         None,
-        help="Image to run. When using --vm, provide the VM image reference.",
+        help="Image to run. For VM sandboxes (the default), provide the VM image reference.",
     ),
     command: Optional[List[str]] = typer.Argument(
         None,
@@ -523,7 +523,7 @@ def create(
     start_command: Optional[str] = typer.Option(
         None,
         "--start-command",
-        help="Legacy container-only command string",
+        help="Legacy container-only command string (requires --container)",
     ),
     cpu_cores: float = typer.Option(1.0, help="Number of CPU cores"),
     memory_gb: float = typer.Option(1.0, help="Memory in GB"),
@@ -532,12 +532,16 @@ def create(
     gpu_type: Optional[str] = typer.Option(
         None,
         "--gpu-type",
-        help="GPU type/model (e.g. H100_80GB, A100_80GB). Required when --gpu-count > 0",
+        help="GPU type/model (e.g. RTX_PRO_6000, H200_141GB). Required when --gpu-count > 0",
     ),
-    vm: bool = typer.Option(
-        False,
-        "--vm",
-        help="Create a VM-backed sandbox on the VM sandbox infra. Required when requesting GPUs.",
+    vm: Optional[bool] = typer.Option(
+        None,
+        "--vm/--container",
+        help=(
+            "Sandbox runtime. VM-backed sandboxes are the default (public beta); "
+            "pass --container to opt out to a container sandbox. VMs are "
+            "required when requesting GPUs."
+        ),
     ),
     network_allow: Optional[List[str]] = typer.Option(
         None,
@@ -596,8 +600,8 @@ def create(
         "--guaranteed",
         help=(
             "Admin/manager only. Schedule with CPU/memory requests equal to limits "
-            "(Guaranteed QoS), bypassing the default oversubscription. Not supported "
-            "with --vm."
+            "(Guaranteed QoS), bypassing the default oversubscription. Container "
+            "sandboxes only (requires --container)."
         ),
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
@@ -625,6 +629,13 @@ def create(
                 key, value = secret_var.split("=", 1)
                 secrets_vars[key] = value
 
+        # Resolve the sandbox runtime. VM is the platform default (public
+        # beta); explicit --vm/--container flags always win. The resolved
+        # value is sent to the API so the created runtime never depends on
+        # server-side defaults changing underneath a deployed CLI.
+        runtime_defaulted = vm is None
+        use_vm = True if runtime_defaulted else vm
+
         if gpu_count > 0 and not gpu_type:
             console.print(
                 "[red]GPU type is required when requesting GPUs.[/red] "
@@ -632,9 +643,9 @@ def create(
             )
             raise typer.Exit(1)
 
-        if gpu_count > 0 and not vm:
+        if gpu_count > 0 and not use_vm:
             console.print(
-                "[red]GPUs require VM sandboxes.[/red] Pass --vm whenever using --gpu-count."
+                "[red]GPUs require VM sandboxes.[/red] Drop --container when using --gpu-count."
             )
             raise typer.Exit(1)
 
@@ -645,18 +656,44 @@ def create(
             )
             raise typer.Exit(1)
 
-        if guaranteed and vm:
-            console.print(
-                "[red]--guaranteed is not supported for VM sandboxes.[/red] "
-                "Drop --vm or drop --guaranteed."
-            )
+        if guaranteed and use_vm:
+            if runtime_defaulted:
+                console.print(
+                    "[red]--guaranteed is only supported for container sandboxes.[/red] "
+                    "Add --container to opt out of the default VM runtime."
+                )
+            else:
+                console.print(
+                    "[red]--guaranteed is not supported for VM sandboxes.[/red] "
+                    "Drop --vm or drop --guaranteed."
+                )
+            raise typer.Exit(1)
+
+        if registry_credentials_id and use_vm:
+            if runtime_defaulted:
+                console.print(
+                    "[red]--registry-credentials-id is only supported for container "
+                    "sandboxes.[/red] Add --container to opt out of the default VM runtime."
+                )
+            else:
+                console.print(
+                    "[red]--registry-credentials-id is not supported for VM sandboxes.[/red] "
+                    "Drop --vm or drop --registry-credentials-id."
+                )
             raise typer.Exit(1)
 
         if idle_timeout_minutes is not None:
-            if idle_timeout_minutes < 1:
+            if use_vm:
+                console.print(
+                    "[yellow]Warning:[/yellow] --idle-timeout-minutes is not supported "
+                    "for VM sandboxes and will be ignored. Add --container to use "
+                    "idle-based termination."
+                )
+                idle_timeout_minutes = None
+            elif idle_timeout_minutes < 1:
                 console.print("[red]--idle-timeout-minutes must be at least 1.[/red]")
                 raise typer.Exit(1)
-            if timeout_minutes > 0 and idle_timeout_minutes > timeout_minutes:
+            elif timeout_minutes > 0 and idle_timeout_minutes > timeout_minutes:
                 console.print(
                     "[red]--idle-timeout-minutes must be <= --timeout-minutes "
                     f"(got idle={idle_timeout_minutes}, lifetime={timeout_minutes}).[/red]"
@@ -674,7 +711,7 @@ def create(
             if gpu_count > 0 and gpu_type:
                 gpu_slug = "".join(c if c.isalnum() or c == "-" else "-" for c in gpu_type.lower())
                 base_name = f"gpu-{'-'.join(filter(None, gpu_slug.split('-')))}"
-            elif vm:
+            elif use_vm:
                 image_parts = docker_image.split("/")[-1].split(":")[0]
                 image_slug = "".join(
                     c if c.isalnum() or c == "-" else "-" for c in image_parts.lower()
@@ -710,8 +747,11 @@ def create(
                 "[red]Error:[/red] --network-allow and --network-deny are mutually exclusive"
             )
             raise typer.Exit(1)
-        if (network_allow is not None or network_deny is not None) and not vm:
-            console.print("[red]Error:[/red] --network-allow/--network-deny require --vm")
+        if (network_allow is not None or network_deny is not None) and not use_vm:
+            console.print(
+                "[red]Error:[/red] --network-allow/--network-deny require a VM "
+                "sandbox; drop --container"
+            )
             raise typer.Exit(1)
 
         if command and start_command is not None:
@@ -720,11 +760,18 @@ def create(
                 "or --start-command, not both"
             )
             raise typer.Exit(1)
-        if vm and start_command is not None:
-            console.print(
-                "[red]Error:[/red] --start-command is legacy container-only syntax. "
-                "For VMs, pass an executable after '--'."
-            )
+        if use_vm and start_command is not None:
+            if runtime_defaulted:
+                console.print(
+                    "[red]Error:[/red] --start-command is legacy container-only syntax. "
+                    "Pass an executable after '--' for VM sandboxes (the default), "
+                    "or add --container to create a container sandbox."
+                )
+            else:
+                console.print(
+                    "[red]Error:[/red] --start-command is legacy container-only syntax. "
+                    "For VMs, pass an executable after '--'."
+                )
             raise typer.Exit(1)
 
         resolved_start_command: StartCommand | str | None
@@ -735,7 +782,7 @@ def create(
             )
         elif start_command is not None:
             resolved_start_command = start_command
-        elif vm:
+        elif use_vm:
             resolved_start_command = None
         else:
             # Preserve the existing long-running default for container callers.
@@ -750,7 +797,7 @@ def create(
             disk_size_gb=disk_size_gb,
             gpu_count=gpu_count,
             gpu_type=gpu_type,
-            vm=vm,
+            vm=use_vm,
             network_allowlist=network_allow,
             network_denylist=network_deny,
             timeout_minutes=timeout_minutes,
@@ -772,7 +819,8 @@ def create(
         console.print(f"Resources: {cpu_cores} CPU, {memory_gb}GB RAM, {disk_size_gb}GB disk")
         if guaranteed:
             console.print("Scheduling: [green]Guaranteed QoS[/green]")
-        console.print(f"VM: {'Enabled' if vm else 'Disabled'}")
+        runtime_label = "VM (default)" if runtime_defaulted else ("VM" if use_vm else "Container")
+        console.print(f"Runtime: {runtime_label}")
         if gpu_count > 0:
             console.print(f"GPUs: {gpu_type} x{gpu_count}")
         if network_allow is not None:

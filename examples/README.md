@@ -137,7 +137,8 @@ from prime_sandboxes import APIClient, SandboxClient, CreateSandboxRequest, Star
 client = APIClient()
 sandbox_client = SandboxClient(client)
 
-# Create sandbox
+# Create sandbox. Leaving `vm` unset uses the platform default runtime:
+# VM-backed sandboxes (public beta).
 request = CreateSandboxRequest(
     name="my-sandbox",
     docker_image="python:3.11-slim",
@@ -154,22 +155,25 @@ sandbox = sandbox_client.create(request)
 print(f"Created sandbox: {sandbox.id}")
 ```
 
-VM sandboxes are opt-in with `vm=True`. They take a structured argv start command
-(`StartCommand`) instead of a command string, and support GPUs and network rules:
+VM sandboxes take a structured argv start command (`StartCommand`) instead of a command
+string, and support GPUs and network rules:
 
 ```python
 vm_request = CreateSandboxRequest(
     name="my-vm-sandbox",
     docker_image="user-1/vm-image:latest",
-    vm=True,
+    vm=True,  # redundant with the default, but explicit for VM-only features
     start_command=StartCommand(executable="python", args=["serve.py", "--port", "8000"]),
     gpu_count=1,
-    gpu_type="RTX_PRO_6000",  # required when gpu_count > 0; GPUs require vm=True
+    gpu_type="RTX_PRO_6000",  # required when gpu_count > 0
     network_allowlist=["api.openai.com"],  # mutually exclusive with network_denylist
 )
 
 vm = sandbox_client.create(vm_request)
 ```
+
+Pass `vm=False` for a container sandbox, which is currently the only runtime that supports
+SSH, port exposure, string start commands, idle timeout, and private-registry credentials.
 
 ### CLI Command Reference
 
@@ -180,18 +184,18 @@ prime sandbox list [--team-id TEAM] [--status STATUS] [--label LABEL] [--page N]
 # Create sandbox
 prime sandbox create IMAGE [OPTIONS]
 
-# Create VM sandbox with GPUs (GPUs require --vm, and --gpu-type when --gpu-count > 0)
+# Opt out to a container sandbox (SSH, port exposure, string start commands, idle timeout)
+prime sandbox create python:3.11-slim --container
+
+# Create VM sandbox with GPUs (--gpu-type is required when --gpu-count > 0)
 prime sandbox create user-1/vm-image:latest --vm --gpu-count 1 --gpu-type RTX_PRO_6000
 
-# Create CPU-only VM sandbox
-prime sandbox create user-1/vm-image:latest --vm
-
 # VM start command: each argv token is separate after --, no shell is involved
-prime sandbox create user-1/vm-image:latest --vm -- python serve.py --port 8000
+prime sandbox create user-1/vm-image:latest -- python serve.py --port 8000
 
-# Restrict VM egress (--network-allow/--network-deny are VM only, repeatable, mutually exclusive)
-prime sandbox create user-1/vm-image:latest --vm --network-allow api.openai.com
-prime sandbox create user-1/vm-image:latest --vm --network-deny 0.0.0.0/0
+# Restrict egress (--network-allow/--network-deny are repeatable and mutually exclusive)
+prime sandbox create user-1/vm-image:latest --network-allow api.openai.com
+prime sandbox create user-1/vm-image:latest --network-deny 0.0.0.0/0
 
 # With environment variables and secrets:
 prime sandbox create python:3.11-slim --env KEY=VALUE --secret API_KEY=secret123
@@ -205,7 +209,7 @@ prime sandbox run SANDBOX_ID -- python script.py
 # Get sandbox details
 prime sandbox get SANDBOX_ID [--output json]
 
-# Show or replace VM network rules (VM only)
+# Show or replace network rules (not available on container sandboxes)
 prime sandbox network SANDBOX_ID
 prime sandbox network SANDBOX_ID --allow api.openai.com,10.0.0.0/8
 
@@ -237,7 +241,7 @@ prime images push myapp:v1.0.0 --context ./app --dockerfile ./app/Dockerfile
 # Copy an existing public image into Prime instead of building
 prime images push myubuntu:22.04 --source-image ubuntu:22.04
 
-# Pre-build the VM artifact for an existing image (otherwise the first --vm
+# Pre-build the VM artifact for an existing image (otherwise the first VM
 # sandbox using that image triggers a one-time conversion)
 prime images build-vm myapp:v1.0.0
 

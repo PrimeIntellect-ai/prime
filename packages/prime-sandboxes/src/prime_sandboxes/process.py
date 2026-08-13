@@ -2,22 +2,32 @@
 
 import asyncio
 import contextlib
+import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
-from typing import Literal
+from typing import Literal, Optional
 
 from connectrpc.client import ConnectClient
 from connectrpc.errors import ConnectError
 from google.protobuf.message import Message
 from pyqwest import HTTPTransport
 
+from ._reliability import (
+    STREAM_MAX_RECONNECTS,
+    STREAM_RECONNECT_BACKOFF_BASE,
+    is_transient_rpc_error,
+)
 from .core import APIError
 from .rpc_command_session import parse_command_session_start_event
+
+logger = logging.getLogger(__name__)
 
 _EOF = object()
 _EXIT_WAIT_SECONDS = 5
 
 _WriteStdin = Callable[[int, bytes], Awaitable[None]]
 _SendSignal = Callable[[int, Literal["terminate", "kill"]], Awaitable[None]]
+# Re-attach to the running process's output stream by pid (Connect RPC), returning a fresh stream.
+_Reconnect = Callable[[int], Awaitable[AsyncIterator[Message]]]
 
 
 class _AsyncProcessStream(AsyncIterator[bytes]):
@@ -69,6 +79,7 @@ class AsyncSandboxProcess:
         write_stdin: _WriteStdin,
         send_signal: _SendSignal,
         transport: HTTPTransport | None = None,
+        reconnect: Optional[_Reconnect] = None,
     ) -> None:
         self.stdout = _AsyncProcessStream()
         self.stderr = _AsyncProcessStream()
@@ -77,6 +88,7 @@ class AsyncSandboxProcess:
         self._transport = transport
         self._write_stdin = write_stdin
         self._send_process_signal = send_signal
+        self._reconnect = reconnect
         self._remote_exited = False
         self._signals_sent: set[Literal["terminate", "kill"]] = set()
         self._closed = False
@@ -100,8 +112,11 @@ class AsyncSandboxProcess:
         write_stdin: _WriteStdin,
         send_signal: _SendSignal,
         transport: HTTPTransport | None = None,
+        reconnect: Optional[_Reconnect] = None,
     ) -> "AsyncSandboxProcess":
-        process = cls(stream_client, stream, write_stdin, send_signal, transport)
+        process = cls(
+            stream_client, stream, write_stdin, send_signal, transport, reconnect
+        )
         try:
             await asyncio.shield(process._started)
         except asyncio.CancelledError:
@@ -223,29 +238,81 @@ class AsyncSandboxProcess:
             return False
         return self._remote_exited
 
+    def _can_reconnect(
+        self, ended: bool, reconnects: int, error: BaseException
+    ) -> bool:
+        """Whether a dropped output stream can be re-attached to the running process.
+
+        Only for a transient transport fault, once we have a pid (so Connect has a target) and
+        before the process has exited, within the reconnect budget.
+        """
+        return (
+            not ended
+            and self._reconnect is not None
+            and self._started.done()
+            and not self._started.cancelled()
+            and self._started.exception() is None
+            and not self._remote_exited
+            and reconnects < STREAM_MAX_RECONNECTS
+            and is_transient_rpc_error(error)
+        )
+
+    async def _aclose_stream(self) -> None:
+        close = getattr(self._stream, "aclose", None)
+        if close is not None:
+            with contextlib.suppress(BaseException):
+                await close()
+
     async def _pump(self) -> None:
         ended = False
+        reconnects = 0
         try:
-            async for response in self._stream:
-                event = parse_command_session_start_event(response)
-                if event is None:
-                    continue
-                kind, value = event
-                if kind == "start":
-                    if not self._started.done():
-                        self._started.set_result(value)
-                elif kind == "stdout":
-                    self.stdout.feed(value)
-                elif kind == "stderr":
-                    self.stderr.feed(value)
-                elif kind == "end":
-                    ended = True
-                    self._remote_exited = True
-                    if not self._started.done():
-                        raise APIError("Process exited before reporting its PID")
-                    if not self._exit.done():
-                        self._exit.set_result(value)
+            while True:
+                try:
+                    async for response in self._stream:
+                        event = parse_command_session_start_event(response)
+                        if event is None:
+                            continue
+                        kind, value = event
+                        if kind == "start":
+                            # A reconnected (Connect) stream re-announces the pid; keep the first.
+                            if not self._started.done():
+                                self._started.set_result(value)
+                        elif kind == "stdout":
+                            self.stdout.feed(value)
+                        elif kind == "stderr":
+                            self.stderr.feed(value)
+                        elif kind == "end":
+                            ended = True
+                            self._remote_exited = True
+                            if not self._started.done():
+                                raise APIError("Process exited before reporting its PID")
+                            if not self._exit.done():
+                                self._exit.set_result(value)
+                            break
                     break
+                except asyncio.CancelledError:
+                    raise
+                except BaseException as error:
+                    if not self._can_reconnect(ended, reconnects, error):
+                        raise
+                    reconnects += 1
+                    delay = STREAM_RECONNECT_BACKOFF_BASE * 2 ** (reconnects - 1)
+                    logger.warning(
+                        "live process %s stream dropped (%s); re-attaching %d/%d in %.1fs",
+                        self.pid,
+                        error,
+                        reconnects,
+                        STREAM_MAX_RECONNECTS,
+                        delay,
+                    )
+                    await self._aclose_stream()
+                    await asyncio.sleep(delay)
+                    # Re-attach to the SAME running process by pid and resume consuming its
+                    # output. The gateway tails from now, so output emitted during the blackout
+                    # is not replayed; in practice the process is idle mid-turn when the link
+                    # stalls, so nothing is lost — and a resumed rollout beats a dead one.
+                    self._stream = await self._reconnect(self.pid)
             if not ended:
                 raise APIError("Process stream ended without an exit event")
         except asyncio.CancelledError:

@@ -226,7 +226,7 @@ def list_traces(
     for summary in page.items:
         reward = summary.score.reward
         table.add_row(
-            escape(summary.trace_id[:16]),
+            escape(summary.trace_id),
             escape(summary.run_id or "-"),
             escape(summary.task_id or "-"),
             "-" if reward is None else f"{reward:.2f}",

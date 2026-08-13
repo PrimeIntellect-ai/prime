@@ -189,6 +189,10 @@ class Config:
         env_val = os.getenv("PRIME_TRACES_URL")
         if env_val:
             return self._strip_api_v1(env_val)
+        return self._stored_traces_url()
+
+    def _stored_traces_url(self) -> str | None:
+        """The traces URL stored in the config file, excluding env overrides."""
         file_val = self.config.get("traces_url")
         if file_val:
             return self._strip_api_v1(str(file_val))
@@ -417,7 +421,10 @@ class Config:
                         "base_url": self.base_url,
                         "frontend_url": self.frontend_url,
                         "inference_url": self.inference_url,
-                        "traces_url": self._configured_traces_url(),
+                        # Environment variables are temporary overrides and
+                        # must not leak into a saved context when login/team
+                        # commands refresh the environment file.
+                        "traces_url": self._stored_traces_url(),
                     }
                     env_file.write_text(json.dumps(env_config, indent=2))
             except ValueError:

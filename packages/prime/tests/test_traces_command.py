@@ -139,6 +139,43 @@ def test_set_traces_url_persists_in_active_environment(monkeypatch, tmp_path):
     assert config.traces_url == traces_url
 
 
+def test_set_traces_url_does_not_persist_env_override(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
+    config = Config()
+    config.save_environment("staging")
+    config.load_environment("staging")
+    monkeypatch.setenv("PRIME_TRACES_URL", "https://temporary.example")
+
+    traces_url = "https://traces.staging.example"
+    result = runner.invoke(main_app, ["config", "set-traces-url", traces_url])
+
+    assert result.exit_code == 0, result.output
+    monkeypatch.delenv("PRIME_TRACES_URL")
+    config = Config()
+    config.load_environment("production")
+    config.load_environment("staging")
+    assert config.traces_url == traces_url
+
+
+def test_logout_preserves_active_environment_traces_url(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
+    config = Config()
+    config.set_api_key("secret")
+    config.set_traces_url("https://traces.staging.example")
+    config.save_environment("staging")
+    config.load_environment("staging")
+
+    result = runner.invoke(main_app, ["logout", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    config = Config()
+    config.load_environment("production")
+    config.load_environment("staging")
+    assert config.traces_url == "https://traces.staging.example"
+
+
 # ---------------------------------------------------------------------------
 # Command smoke tests: every `prime traces` command exercised through Typer
 # with a stubbed TracesClient, mirroring test_tunnel_cli.py. These catch
@@ -289,6 +326,19 @@ def test_list_command_forwards_filters_and_renders_table(fake_client):
     assert call["run_id"] == "run_9f3k2m"
     assert call["reward_min"] == 0.5
     assert call["limit"] == 10
+
+
+def test_list_command_renders_full_trace_id(fake_client):
+    trace_id = "trace-0123456789abcdef0123456789abcdef"
+    fake_client.list = lambda **kwargs: TraceListPage(
+        items=[_summary(trace_id=trace_id)],
+        next_cursor=None,
+    )
+
+    result = runner.invoke(main_app, ["traces", "list"])
+
+    assert result.exit_code == 0, result.output
+    assert trace_id in result.output
 
 
 def test_list_command_json_output_is_parseable(fake_client):

@@ -41,6 +41,7 @@ def _clear_env_file(config: Config) -> None:
                 "base_url": raw.get("base_url", Config.DEFAULT_BASE_URL),
                 "frontend_url": raw.get("frontend_url", Config.DEFAULT_FRONTEND_URL),
                 "inference_url": raw.get("inference_url", Config.DEFAULT_INFERENCE_URL),
+                "traces_url": raw.get("traces_url"),
             },
             indent=2,
         )

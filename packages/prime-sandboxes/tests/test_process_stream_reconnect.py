@@ -43,12 +43,21 @@ async def _drain(stream):
     return out
 
 
+# Both production stream-break variants must trigger a reconnect: UNAVAILABLE "... timed out"
+# and INTERNAL "Error reading content".
+_STREAM_FAULTS = [
+    ConnectError(Code.UNAVAILABLE, "error reading a body from connection: timed out"),
+    ConnectError(Code.INTERNAL, "Error reading content"),
+]
+
+
 @pytest.mark.asyncio
-async def test_stream_reconnects_and_resumes_after_transient_drop():
+@pytest.mark.parametrize("fault", _STREAM_FAULTS, ids=["unavailable_timeout", "internal_reading_content"])
+async def test_stream_reconnects_and_resumes_after_transient_drop(fault):
     async def faulty():
         yield _start(42)
         yield _stdout(b"before\n")
-        raise ConnectError(Code.UNAVAILABLE, "error reading a body from connection: timed out")
+        raise fault
 
     async def resumed():
         yield _start(42)  # Connect re-announces the pid; already known, ignored

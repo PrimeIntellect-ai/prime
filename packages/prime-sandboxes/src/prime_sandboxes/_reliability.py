@@ -55,13 +55,18 @@ STREAM_TCP_KEEPALIVE = _env_float("PRIME_SANDBOX_STREAM_TCP_KEEPALIVE", 15.0)
 STREAM_POOL_IDLE_TIMEOUT = _env_float("PRIME_SANDBOX_STREAM_POOL_IDLE_TIMEOUT", 300.0)
 
 # Connect codes that mean "the link hiccuped", not "the request is wrong". UNAUTHENTICATED is
-# excluded on purpose: it is handled by the token-refresh retry, not this backoff.
-_TRANSIENT_CODES = frozenset({Code.DEADLINE_EXCEEDED, Code.UNAVAILABLE, Code.ABORTED})
+# excluded on purpose: it is handled by the token-refresh retry, not this backoff. INTERNAL is
+# included because a broken output stream surfaces as INTERNAL "Error reading content" (observed
+# in production), the same transient stream-break class as UNAVAILABLE "... timed out".
+_TRANSIENT_CODES = frozenset(
+    {Code.DEADLINE_EXCEEDED, Code.UNAVAILABLE, Code.ABORTED, Code.INTERNAL}
+)
 
 # Substrings of a transport error that mean the same, seen on both ConnectError and APIError.
 _TRANSIENT_MARKERS = (
     "timed out",
     "reading a body",
+    "reading content",
     "connection reset",
     "connection closed",
     "broken pipe",

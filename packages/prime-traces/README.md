@@ -1,15 +1,23 @@
-# prime-traces
+# Prime Traces SDK
 
-Prime Intellect Traces SDK — upload and query training, evaluation and
-inference traces through the Prime Traces service.
+Upload and query training, evaluation and inference traces through the Prime
+Traces service.
 
-## Install
+## Installation
+
+```bash
+uv add prime-traces
+```
+
+or with pip:
 
 ```bash
 pip install prime-traces
 ```
 
-## Upload from memory
+## Quick Start
+
+### Upload from memory
 
 `upload_records` accepts JSON-compatible mappings as well as objects exposing
 `to_record()`. Verifiers `Trace` / `Episode` and prime-rl `Rollout` objects
@@ -35,11 +43,7 @@ receipts = client.upload_records(
 )
 ```
 
-Records are serialized lazily and fed into bounded batches, so this neither
-buffers the complete iterable nor round-trips through the filesystem. Callers
-that already have encoded JSONL bytes can use `upload_lines` directly.
-
-## Upload a completed JSONL file
+### Upload a completed JSONL file
 
 ```python
 from prime_traces import TracesClient, LineFormat
@@ -56,13 +60,6 @@ receipts = client.upload_file(
     context={"source": "hosted_eval", "suite_commit": "a1f39c2"},
 )
 ```
-
-Uploads are content-addressed: each request is identified by the SHA-256 of its
-exact uncompressed JSONL bytes and sent with an `Idempotency-Key`. Rerunning an
-interrupted upload re-reads the file, reproduces the same bytes and keys, and
-the service replays committed receipts without storing anything twice. A 400
-rejection stops the upload with a bounded error code (`ErrorCode`); 429/503 and
-gateway 502/504 are retried with the same bytes, honoring `Retry-After`.
 
 ## Query
 
@@ -82,22 +79,24 @@ client.delete("8d3f1a2b...")        # NotFoundError if the owner has no such tra
 client.delete_run("run_9f3k2m")     # one mutation, synchronous, no job handle
 ```
 
-Deletion is not a no-op on absent rows: the service checks existence first and
-answers 404, so repeating a delete that already succeeded raises
-`NotFoundError`. (The design docs specify it as idempotent; this tracks the
-service as built.) Failures known to occur before delivery, 429 responses, and
-service-coded 503 refusals are retried. Ambiguous response-path failures and
-gateway 502/503/504 responses are surfaced as `AmbiguousDeleteError` without
-replaying the deletion, because a retry could delete a trace written after the
-first request.
+Episodes are read-only resources:
 
-Point reads and deletes currently reject trace IDs containing `/`. ASGI decodes
-an encoded slash before matching the service's `/{trace_id}` route, so those IDs
-cannot be addressed until the service accepts a path-valued route parameter.
+```python
+page = client.list_episodes(
+    run_id="run_9f3k2m",
+    environment_id="terminal-bench-2",
+)
+for episode in page.items:
+    print(episode.episode_id, episode.outcome)
 
-Response shapes mirror the service's pinned models: pages are
-`{items, next_cursor}` and a summary nests `model` / `score` / `execution`,
-with unrecorded fields as `null`.
+if page.items:
+    episode_id = page.items[0].episode_id
+    detail = client.get_episode(episode_id)  # + member aggregate under .traces
+    print(detail.error.type, detail.traces.trace_count)
+
+    # Member trace summaries use the trace filters (except sort) and pagination.
+    client.list_episode_traces(episode_id, has_error=True)
+```
 
 ## Configuration
 
@@ -108,21 +107,28 @@ with unrecorded fields as `null`.
 | `PRIME_TRACES_URL`     | Base URL of the Prime Traces service; defaults to the platform API base URL. For the service's local compose stack: `http://localhost:8083` |
 | `~/.prime/config.json` | Shared prime CLI config (`api_key`, `team_id`, `traces_url`)                                                                                |
 
-## Not implemented yet
-
-Deferred to follow-up PRs once the service pins the corresponding responses:
+## Not implemented yet (open v0 contract decisions)
 
 - Exports, in any form. The service publishes `GET /traces/export` and the two
   job routes, but all three handlers raise `NotImplementedError` — answered as
   500, not the 501 they document — and the streaming route declares no query
-  parameters, so there is no filter vocabulary to bind to.
-- Episode reads (`GET /episodes[...]`) — read-only resources; episodes are
-  written only as a side effect of episode-grouped uploads.
+  parameters, so there is no filter vocabulary to bind to. Wrapping it now
+  would ship a method that cannot succeed.
 - `/search` and free-text queries — deferred with the `trace_components`
   projection.
-- The `environment_id` list filter — pending its extracted column.
 - Typed dot-path predicates (`traces.query`) — needs the server-side field
   registry.
 - An async client — the other prime SDKs ship sync/async pairs, and the main
   producers (verifiers, prime-rl) are async; add once the sync surface
   settles rather than freezing a duplicated API now.
+
+## Documentation
+
+For detailed documentation, visit the
+[Prime Traces SDK documentation](https://github.com/PrimeIntellect-ai/prime/tree/main/packages/prime-traces).
+
+## Related Packages
+
+- [prime](https://github.com/PrimeIntellect-ai/prime/tree/main/packages/prime) - Prime CLI (`prime traces ...` commands)
+- [prime-sandboxes](https://github.com/PrimeIntellect-ai/prime/tree/main/packages/prime-sandboxes) - Sandboxes SDK
+- [prime-evals](https://github.com/PrimeIntellect-ai/prime/tree/main/packages/prime-evals) - Evals SDK

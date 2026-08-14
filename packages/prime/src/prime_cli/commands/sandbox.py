@@ -565,7 +565,7 @@ def create(
         "--idle-timeout-minutes",
         help=(
             "Terminate the sandbox if no /exec, /upload, /download, or "
-            "/read-file request is seen for this many minutes. Disabled by default."
+            "/read-file operation is active for this many minutes. Disabled by default."
         ),
     ),
     team_id: Optional[str] = typer.Option(
@@ -683,14 +683,7 @@ def create(
             raise typer.Exit(1)
 
         if idle_timeout_minutes is not None:
-            if use_vm:
-                console.print(
-                    "[yellow]Warning:[/yellow] --idle-timeout-minutes is not supported "
-                    "for VM sandboxes and will be ignored. Add --container to use "
-                    "idle-based termination."
-                )
-                idle_timeout_minutes = None
-            elif idle_timeout_minutes < 1:
+            if idle_timeout_minutes < 1:
                 console.print("[red]--idle-timeout-minutes must be at least 1.[/red]")
                 raise typer.Exit(1)
             elif timeout_minutes > 0 and idle_timeout_minutes > timeout_minutes:

@@ -266,30 +266,28 @@ def test_registry_credentials_require_container_opt_out():
     assert request.registry_credentials_id == "cred-123"
 
 
-def test_idle_timeout_requires_container_opt_out():
-    """idle_timeout_minutes is container-only; unset vm resolves to VM on the server"""
-    with pytest.raises(ValidationError, match="vm=False"):
-        CreateSandboxRequest(
-            name="idle-sandbox",
-            docker_image="python:3.11-slim",
-            idle_timeout_minutes=10,
-        )
-
-    with pytest.raises(ValidationError, match="vm=False"):
-        CreateSandboxRequest(
-            name="idle-sandbox",
-            docker_image="python:3.11-slim",
-            idle_timeout_minutes=10,
-            vm=True,
-        )
-
-    request = CreateSandboxRequest(
+def test_idle_timeout_supports_vm_and_container():
+    """idle_timeout_minutes is supported by either sandbox runtime."""
+    default_vm = CreateSandboxRequest(
+        name="idle-sandbox",
+        docker_image="python:3.11-slim",
+        idle_timeout_minutes=10,
+    )
+    vm = CreateSandboxRequest(
+        name="idle-sandbox",
+        docker_image="python:3.11-slim",
+        idle_timeout_minutes=10,
+        vm=True,
+    )
+    container = CreateSandboxRequest(
         name="idle-sandbox",
         docker_image="python:3.11-slim",
         idle_timeout_minutes=10,
         vm=False,
     )
-    assert request.idle_timeout_minutes == 10
+    assert default_vm.idle_timeout_minutes == 10
+    assert vm.idle_timeout_minutes == 10
+    assert container.idle_timeout_minutes == 10
 
 
 def test_sandbox_status_enum():

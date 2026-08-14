@@ -16,6 +16,8 @@ dependencies = [
     "tenacity>=8.0.0",
     "connect-python>=0.8.0",
     "protobuf>=6.31.1",
+    "pyqwest>=0.6.0",
+    "certifi",
 ]
 keywords = ["sandboxes", "remote-execution", "containers", "cloud", "sdk"]
 classifiers = [

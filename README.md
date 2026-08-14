@@ -258,15 +258,17 @@ uv run pytest packages/prime/tests
 uv run pytest packages/prime-sandboxes/tests
 ```
 
-All packages (prime-core, prime-sandboxes, prime) are installed in editable mode. Changes to code are immediately reflected.
+All workspace packages (`prime`, `prime-sandboxes`, `prime-evals`, `prime-tunnel`) are installed in editable mode. Changes to code are immediately reflected.
 
 ### Releasing
 
-This monorepo contains two independently versioned packages: `prime` (CLI + full SDK) and `prime-sandboxes` (lightweight SDK).
+This monorepo contains independently versioned packages: `prime` (CLI + full SDK), `prime-sandboxes`, `prime-evals`, and `prime-tunnel` (lightweight SDKs).
 
 Versions are single-sourced from each package's `__init__.py` file:
 - **prime**: `packages/prime/src/prime_cli/__init__.py`
 - **prime-sandboxes**: `packages/prime-sandboxes/src/prime_sandboxes/__init__.py`
+- **prime-evals**: `packages/prime-evals/src/prime_evals/__init__.py`
+- **prime-tunnel**: `packages/prime-tunnel/src/prime_tunnel/__init__.py`
 
 #### To release a new version:
 

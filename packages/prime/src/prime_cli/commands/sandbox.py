@@ -532,7 +532,7 @@ def create(
     gpu_type: Optional[str] = typer.Option(
         None,
         "--gpu-type",
-        help="GPU type/model (e.g. H100_80GB, A100_80GB). Required when --gpu-count > 0",
+        help="GPU type/model (e.g. RTX_PRO_6000, H200_141GB). Required when --gpu-count > 0",
     ),
     vm: Optional[bool] = typer.Option(
         None,

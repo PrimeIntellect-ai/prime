@@ -198,9 +198,9 @@ for s in sandboxes.sandboxes:
 Use `start_background_job` to run long-running tasks that continue after the API call returns. Poll for completion with `get_background_job`.
 
 ```python
-from prime_sandboxes import SandboxClient, CreateSandboxRequest
+from prime_sandboxes import APIClient, SandboxClient, CreateSandboxRequest
 
-sandbox_client = SandboxClient()
+sandbox_client = SandboxClient(APIClient())
 
 # Create sandbox with extended timeout
 sandbox = sandbox_client.create(CreateSandboxRequest(

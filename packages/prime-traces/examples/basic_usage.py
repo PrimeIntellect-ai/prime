@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-"""Basic usage example for the prime-traces SDK."""
+"""
+Basic usage example for the prime-traces SDK.
+
+This demonstrates the standalone SDK without any CLI dependencies.
+
+Credentials come from PRIME_API_KEY / ~/.prime/config.json. Point
+PRIME_TRACES_URL at the Prime Traces service — e.g. the service's local
+compose stack: PRIME_TRACES_URL=http://localhost:8083
+"""
 
 import tempfile
 import time
@@ -9,7 +17,17 @@ from prime_traces import APIError, ForbiddenError, TracesClient, ValidationRejec
 
 
 def sample_trace(trace_id: str, reward: float, started_at: float) -> dict:
-    """One in-memory Verifiers-compatible trace record."""
+    """One in-memory Verifiers-compatible trace record.
+
+    Trimmed to the fields the service's extractor reads, which is a small
+    subset of a real v1 record — the serialized record is stored verbatim,
+    and every summary column is a projection of it. Two of these are not
+    optional: a non-empty string ``id``, and a numeric ``timing.start`` inside
+    the accepted window (generous lookback, tight lookahead — producers upload
+    completed files, so an old run is ordinary and a future one never is).
+    A line missing either is rejected with ``invalid_trace`` /
+    ``created_at_out_of_window`` and the whole request stores nothing.
+    """
     return {
         "version": 4,
         "id": trace_id,
@@ -28,6 +46,9 @@ def sample_trace(trace_id: str, reward: float, started_at: float) -> dict:
         "stop_condition": "done",
         "ok": True,
         "errors": [],
+        # `timing.start` is the producer's wall clock and becomes `created_at`;
+        # `timing.scoring.end` is the last phase, so duration_ms comes from the
+        # two together.
         "timing": {"start": started_at, "scoring": {"end": started_at + 12.5}},
         "info": {},
     }
@@ -46,6 +67,8 @@ def main():
     with TracesClient() as client:
         try:
             print("Uploading...")
+            # Content-addressed: rerunning this replays committed receipts
+            # without storing anything twice.
             receipts = client.upload_records(
                 traces,
                 context={"source": "example", "suite_commit": "a1f39c2"},
@@ -56,6 +79,8 @@ def main():
             print("\nListing this run's traces...")
             page = client.list(run_id="run_example", limit=10)
             for summary in page.items:
+                # `score` is a nested object, and a null `reward` inside it
+                # means unscored — distinct from a scored 0.0.
                 score = summary.score
                 reward = score.reward if score else None
                 print(f"  {summary.trace_id}  reward={reward}")

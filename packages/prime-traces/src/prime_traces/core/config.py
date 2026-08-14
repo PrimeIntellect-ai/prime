@@ -1,4 +1,8 @@
-"""Lightweight configuration for the Prime Traces SDK."""
+"""Lightweight configuration for the Prime Traces SDK.
+
+Mirrors the other prime SDK packages: reads ~/.prime/config.json plus
+environment variables, env taking precedence.
+"""
 
 import json
 import os
@@ -27,6 +31,10 @@ class Config:
                 config_data = json.loads(self.config_file.read_text())
             except (json.JSONDecodeError, OSError, UnicodeDecodeError):
                 config_data = {}
+        # Valid JSON that is not an object (a list, a bare string) must degrade
+        # the same way invalid JSON does: every accessor assumes a dict, and
+        # the client constructs a Config even when all its parameters were
+        # passed explicitly — a crash here would take those callers down too.
         self.config = config_data if isinstance(config_data, dict) else {}
 
     @staticmethod
@@ -56,7 +64,18 @@ class Config:
 
     @property
     def traces_url(self) -> str:
-        """Base URL of the Prime Traces service."""
+        """Base URL of the Prime Traces service.
+
+        Prime Traces is a separately deployed service, so it gets its own
+        override: precedence is PRIME_TRACES_URL > config "traces_url" >
+        the platform base URL. The fallback assumes the service is
+        path-routed under the platform domain; whether production uses that
+        or a dedicated domain is still an open deployment decision, and this
+        property is the single place that absorbs it.
+
+        For local development against the service's compose stack:
+        PRIME_TRACES_URL=http://localhost:8083
+        """
         env_val = os.getenv("PRIME_TRACES_URL")
         if env_val:
             return self._strip_api_v1(env_val)

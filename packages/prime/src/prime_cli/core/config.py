@@ -16,6 +16,7 @@ class ConfigModel(BaseModel):
     base_url: str = "https://api.primeintellect.ai"
     frontend_url: str = "https://app.primeintellect.ai"
     inference_url: str = "https://api.pinference.ai/api/v1"
+    traces_url: str | None = None
     ssh_key_path: str = str(Path.home() / ".ssh" / "id_rsa")
     current_environment: str = "production"
     share_resources_with_team: bool = False
@@ -177,6 +178,72 @@ class Config:
         self.config["inference_url"] = value
         self._save_config(self.config)
 
+    def _configured_traces_url(self) -> str | None:
+        """The explicitly configured traces URL (env > file), or None when unset."""
+        env_val = os.getenv("PRIME_TRACES_URL")
+        if env_val:
+            return self._strip_api_v1(env_val)
+        return self._stored_traces_url()
+
+    def _stored_traces_url(self) -> str | None:
+        """The traces URL stored in the config file, excluding env overrides."""
+        file_val = self.config.get("traces_url")
+        if file_val:
+            return self._strip_api_v1(str(file_val))
+        return None
+
+    @property
+    def traces_url(self) -> str:
+        """Get Prime Traces service URL with precedence: env > file > base_url."""
+        return self._configured_traces_url() or self.base_url
+
+    def set_traces_url(self, value: str) -> None:
+        """Set Prime Traces service URL in config file; empty clears the override."""
+        self.config["traces_url"] = self._strip_api_v1(value) if value else None
+        self._save_config(self.config)
+
+    def set_traces_url_for_active_environment(self, value: str) -> None:
+        """Persist only the traces URL for the command's selected environment."""
+        traces_url = self._strip_api_v1(value) if value else None
+        selected_environment = self.current_environment
+        context_override = os.getenv("PRIME_CONTEXT")
+
+        root_config = json.loads(self.config_file.read_text())
+        if not isinstance(root_config, dict):
+            raise ValueError(f"Invalid configuration in {self.config_file}")
+        root_environment = str(root_config.get("current_environment", "production"))
+
+        if (
+            context_override
+            and selected_environment == "production"
+            and root_environment.casefold() != "production"
+        ):
+            raise ValueError(
+                "Cannot persist production traces settings while another environment is active; "
+                "run 'prime config use production' first"
+            )
+
+        update_root = (
+            not context_override
+            or root_environment.casefold() == selected_environment.casefold()
+        )
+
+        if update_root:
+            root_config["traces_url"] = traces_url
+            self.config_file.write_text(json.dumps(root_config, indent=2))
+
+        if selected_environment != "production":
+            sanitized = self._sanitize_environment_name(selected_environment)
+            env_file = self.environments_dir / f"{sanitized}.json"
+            if env_file.exists():
+                env_config = json.loads(env_file.read_text())
+                if not isinstance(env_config, dict):
+                    raise ValueError(f"Invalid configuration in {env_file}")
+                env_config["traces_url"] = traces_url
+                env_file.write_text(json.dumps(env_config, indent=2))
+
+        self.config["traces_url"] = traces_url
+
     @property
     def ssh_key_path(self) -> str:
         """Get SSH private key path with precedence: env > file > default."""
@@ -236,6 +303,7 @@ class Config:
             "base_url": self.base_url,
             "frontend_url": self.frontend_url,
             "inference_url": self.inference_url,
+            "traces_url": self.traces_url,
             "ssh_key_path": self.ssh_key_path,
             "current_environment": self.current_environment,
             "share_resources_with_team": self.share_resources_with_team,
@@ -257,6 +325,7 @@ class Config:
             "base_url": self.base_url,
             "frontend_url": self.frontend_url,
             "inference_url": self.inference_url,
+            "traces_url": self._configured_traces_url(),
         }
         env_file.write_text(json.dumps(env_config, indent=2))
 
@@ -294,12 +363,14 @@ class Config:
                 self.set_base_url(self.DEFAULT_BASE_URL)
                 self.set_frontend_url(self.DEFAULT_FRONTEND_URL)
                 self.set_inference_url(self.DEFAULT_INFERENCE_URL)
+                self.set_traces_url("")  # No override: follow base_url
                 self.set_team(None)  # Production defaults to personal account
                 self.set_current_environment("production")
             else:
                 self.config["base_url"] = self.DEFAULT_BASE_URL
                 self.config["frontend_url"] = self.DEFAULT_FRONTEND_URL
                 self.config["inference_url"] = self.DEFAULT_INFERENCE_URL
+                self.config["traces_url"] = None
                 self.config["team_id"] = None
                 self.config["team_name"] = None
                 self.config["team_role"] = None
@@ -331,6 +402,7 @@ class Config:
                     self.set_inference_url(
                         env_config.get("inference_url", self.DEFAULT_INFERENCE_URL)
                     )
+                    self.set_traces_url(env_config.get("traces_url") or "")
                     self.set_current_environment(name)
                 else:
                     # In-memory only - don't persist to disk
@@ -347,6 +419,10 @@ class Config:
                     self.config["frontend_url"] = frontend_url.rstrip("/")
                     inference_url = env_config.get("inference_url", self.DEFAULT_INFERENCE_URL)
                     self.config["inference_url"] = inference_url.rstrip("/")
+                    traces_url = env_config.get("traces_url")
+                    self.config["traces_url"] = (
+                        self._strip_api_v1(traces_url) if traces_url else None
+                    )
                     self.config["current_environment"] = name
                 return True
         except ValueError:
@@ -371,6 +447,7 @@ class Config:
                         "base_url": self.base_url,
                         "frontend_url": self.frontend_url,
                         "inference_url": self.inference_url,
+                        "traces_url": self._stored_traces_url(),
                     }
                     env_file.write_text(json.dumps(env_config, indent=2))
             except ValueError:

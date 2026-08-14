@@ -26,6 +26,7 @@ from .commands.sandbox import app as sandbox_app
 from .commands.secrets import app as secret_app
 from .commands.switch import app as switch_app
 from .commands.teams import app as teams_app
+from .commands.traces import app as traces_app
 from .commands.tunnel import app as tunnel_app
 from .commands.upgrade import app as upgrade_app
 from .commands.wallet import WALLET_JSON_HELP, wallet_command
@@ -56,6 +57,11 @@ app.add_typer(
     rich_help_panel="Lab",
 )
 app.add_typer(deployments_app, name="deployments", rich_help_panel="Lab")
+# Hidden until the Prime Traces service is deployed: the default traces URL
+# falls back to the platform API, which does not serve /api/v1/traces yet, so
+# an advertised command group would 404 out of the box. Works today for anyone
+# who sets PRIME_TRACES_URL; unhide when production routing lands.
+app.add_typer(traces_app, name="traces", rich_help_panel="Lab", hidden=True)
 
 # Compute commands
 app.add_typer(availability_app, name="availability", rich_help_panel="Compute")

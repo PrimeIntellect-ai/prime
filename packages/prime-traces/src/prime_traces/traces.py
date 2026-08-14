@@ -1,4 +1,22 @@
-"""High-level client for Prime Traces."""
+"""High-level client for Prime Traces.
+
+Wraps the wire client with upload batching/retry and typed read paths.
+
+The read surface matches the service's pinned response models
+(``prime-traces/src/traces/models.py`` and ``src/episodes/models.py`` in the
+platform repo): pages are ``{items, next_cursor}``, trace summaries nest
+``model``/``score``/``execution``, episodes nest ``error`` and the member
+aggregate.
+
+Deliberately not implemented (open v0 contract decisions — do not freeze
+them here): exports in any form — the service publishes ``GET /traces/export``
+and the job routes, but all three handlers raise ``NotImplementedError``,
+which FastAPI answers as 500, and the streaming route declares no query
+parameters, so there is no filter vocabulary to bind to; ``/search``; episode
+writes (episodes are read-only, written only as a side effect of
+episode-grouped uploads); and the dot-path query compiler (needs the server-side
+field registry).
+"""
 
 import json
 import tempfile
@@ -176,7 +194,7 @@ class TracesClient:
         ambiguous failure safe, because a request that did land replays its
         receipt instead of storing twice.
 
-        Batches are sent sequentially in v0. The contract allows 2-8 requests
+        Batches are sent sequentially in v0. The contract allows 2–8 requests
         in flight per producer; add bounded concurrency here once the service
         is up and throughput is measured.
         """
@@ -403,7 +421,7 @@ class TracesClient:
         """
         self.client.delete("/traces", params={"run_id": run_id})
 
-    # -- episodes -----------------------------------------------------------
+    # -- episodes (read-only in v0) -----------------------------------------
 
     def list_episodes(
         self,

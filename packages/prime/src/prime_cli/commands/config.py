@@ -3,7 +3,9 @@ import re
 from typing import Optional
 
 import typer
+from rich.markup import escape
 from rich.table import Table
+from rich.text import Text
 
 from prime_cli.core import Config
 
@@ -94,6 +96,12 @@ def view() -> None:
     if _env_set("PRIME_INFERENCE_URL"):
         inf_label += " (from env var)"
     table.add_row("Inference URL", inf_label)
+
+    # Show traces URL (effective value: falls back to the base URL)
+    traces_label = settings["traces_url"]
+    if _env_set("PRIME_TRACES_URL"):
+        traces_label += " (from env var)"
+    table.add_row("Traces URL", Text(traces_label))
 
     # Show SSH key path
     ssh_label = settings["ssh_key_path"]
@@ -273,6 +281,39 @@ def set_inference_url(
     console.print(f"[green]Inference URL set to: {url}[/green]")
 
 
+@app.command()
+def set_traces_url(
+    url: Optional[str] = typer.Argument(
+        None,
+        help=(
+            "URL of the Prime Traces service. Pass '' or - to clear the override "
+            "and follow the base URL. If not provided, you'll be prompted."
+        ),
+    ),
+) -> None:
+    """Set the Prime Traces service URL (prompts if not provided)"""
+    if url is None:
+        config = Config()
+        url = typer.prompt(
+            "Enter the URL of the Prime Traces service ('-' follows the base URL)",
+            default=config._configured_traces_url() or "",
+        )
+
+    if url == "-":
+        url = ""
+
+    config = Config()
+    try:
+        config.set_traces_url_for_active_environment(url)
+    except ValueError as e:
+        console.print(f"[red]Error: {escape(str(e))}[/red]")
+        raise typer.Exit(1)
+    if url:
+        console.print(f"[green]Traces URL set to: {escape(url)}[/green]")
+    else:
+        console.print("[green]Traces URL override cleared; following the base URL[/green]")
+
+
 # Helper functions (not commands)
 def _set_environment(
     env: str,
@@ -384,6 +425,7 @@ def reset(
         config.set_base_url(Config.DEFAULT_BASE_URL)
         config.set_frontend_url(Config.DEFAULT_FRONTEND_URL)
         config.set_inference_url(Config.DEFAULT_INFERENCE_URL)
+        config.set_traces_url("")
         config.set_ssh_key_path(Config.DEFAULT_SSH_KEY_PATH)
         config.set_current_environment("production")
         console.print("[green]Configuration reset to defaults![/green]")

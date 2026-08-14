@@ -3,6 +3,18 @@
 Upload and query training, evaluation and inference traces through the Prime
 Traces service.
 
+## Features
+
+- **Content-addressed uploads** - Batches are identified by the SHA-256 of
+  their exact bytes, so interrupted uploads are safe to rerun and never store
+  twice
+- **Deterministic batching** - JSONL files are split at byte thresholds without
+  rewriting a single line
+- **Typed reads** - Cursor-paginated summaries over extracted columns and raw
+  document retrieval
+- **Type-safe** - Full type hints and Pydantic models
+- **No CLI dependencies** - Pure SDK, usable in producers and services
+
 ## Installation
 
 ```bash
@@ -43,6 +55,10 @@ receipts = client.upload_records(
 )
 ```
 
+Records are serialized lazily and fed into bounded batches, so this neither
+buffers the complete iterable nor round-trips through the filesystem. Callers
+that already have encoded JSONL bytes can use `upload_lines` directly.
+
 ### Upload a completed JSONL file
 
 ```python
@@ -60,6 +76,13 @@ receipts = client.upload_file(
     context={"source": "hosted_eval", "suite_commit": "a1f39c2"},
 )
 ```
+
+Uploads are content-addressed: each request is identified by the SHA-256 of its
+exact uncompressed JSONL bytes and sent with an `Idempotency-Key`. Rerunning an
+interrupted upload re-reads the file, reproduces the same bytes and keys, and
+the service replays committed receipts without storing anything twice. A 400
+rejection stops the upload with a bounded error code (`ErrorCode`); 429/503 and
+gateway 502/504 are retried with the same bytes, honoring `Retry-After`.
 
 ## Query
 
@@ -79,6 +102,20 @@ client.delete("8d3f1a2b...")        # NotFoundError if the owner has no such tra
 client.delete_run("run_9f3k2m")     # one mutation, synchronous, no job handle
 ```
 
+Deletion is not a no-op on absent rows: the service checks existence first and
+answers 404, so repeating a delete that already succeeded raises
+`NotFoundError`. (The design docs specify it as idempotent; this tracks the
+service as built.) Failures known to occur before delivery, 429 responses, and
+service-coded 503 refusals are retried. Ambiguous response-path failures and
+gateway 502/503/504 responses are surfaced as `AmbiguousDeleteError` without
+replaying the deletion, because a retry could delete a trace written after the
+first request.
+
+Trace point reads/deletes and episode point/member reads currently reject IDs
+containing `/`. ASGI decodes an encoded slash before matching the service's
+`/{resource_id}` routes, so those IDs cannot be addressed until the service
+accepts path-valued route parameters.
+
 Episodes are read-only resources:
 
 ```python
@@ -97,6 +134,11 @@ if page.items:
     # Member trace summaries use the trace filters (except sort) and pagination.
     client.list_episode_traces(episode_id, has_error=True)
 ```
+
+Response shapes mirror the service's pinned models: pages are
+`{items, next_cursor}`, a trace summary nests `model` / `score` / `execution`,
+an episode nests `error` and (on point lookup) the member-trace aggregate
+under `traces`, and unrecorded fields come back as `null`.
 
 ## Configuration
 

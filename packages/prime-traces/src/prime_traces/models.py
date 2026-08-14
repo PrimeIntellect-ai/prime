@@ -1,4 +1,13 @@
-"""Pydantic models for the Prime Traces API."""
+"""Pydantic models for the Prime Traces API.
+
+Shapes mirror the service's response models (``prime-traces/src/traces/models.py``
+and ``src/episodes/models.py`` in the platform repo), including their
+required/nullable split: a field the service always sends is required here —
+so contract drift fails loudly in tests instead of propagating ``None`` — and
+a field the service sends as ``null`` for "not recorded" is ``Optional``.
+``extra="allow"`` covers the one documented evolution path, additive growth:
+new summary columns must not break an older SDK.
+"""
 
 from datetime import datetime
 from enum import Enum
@@ -15,7 +24,14 @@ class LineFormat(str, Enum):
 
 
 class ErrorCode(str, Enum):
-    """Error codes returned by the service."""
+    """Error codes returned by the service.
+
+    Kept in lockstep with the service's ``ErrorCode``
+    (``prime-traces/src/errors.py`` in the platform repo).
+    Producers branch on the rejection codes — correct the file and
+    resubmit, retry unchanged, or stop; 429/503 codes are retryable, as are
+    codeless gateway 502/504 responses.
+    """
 
     # Upload rejections (400): nothing stored. Validation is deterministic, so
     # resubmitting the same bytes yields the same verdict; corrected content
@@ -81,10 +97,16 @@ class ErrorCode(str, Enum):
 
 
 class UploadReceipt(BaseModel):
-    """Acknowledgment for one committed upload request."""
+    """Acknowledgment for one committed upload request.
+
+    ``status == "committed"`` means every line in the request is durably
+    stored — there is no partial success to interpret.
+    """
 
     model_config = ConfigDict(extra="allow")
 
+    # The upload ID *is* the content digest (64 lowercase hex, no prefix), so
+    # the service does not restate it in a separate field.
     upload_id: str
     status: str
 

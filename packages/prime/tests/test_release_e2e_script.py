@@ -85,6 +85,7 @@ def test_remote_script_compiles_and_keeps_cleanup_best_effort(tmp_path):
     py_compile.compile(str(remote_path), doraise=True)
     assert "def best_effort_cancel_hosted_evals" in script
     assert "def installed_runtime_regression_checks" in script
+    assert '"prime-traces"' in script
     assert "prime_tunnel.Tunnel must accept labels" in script
     assert "old prime-evals push_samples compatibility failed" in script
     assert "Warning: failed to delete temporary environment" in script
@@ -147,6 +148,7 @@ def test_release_e2e_workflow_uses_standard_name_and_safe_inputs():
 
     assert not OLD_WORKFLOW_PATH.exists()
     assert workflow.startswith("name: Release E2E Tests")
+    assert '"packages/prime-traces/**"' in workflow
     assert '"packages/prime-tunnel/**"' in workflow
     assert '".github/workflows/release-e2e.yml"' in workflow
     assert "HOSTED_MODE: ${{ inputs.hosted_mode || 'submit' }}" in workflow

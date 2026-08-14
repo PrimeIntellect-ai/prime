@@ -35,6 +35,7 @@ prime           = false
 prime-sandboxes = false
 prime-tunnel    = false
 prime-evals     = false
+prime-traces    = false
 verifiers       = false
 tasksets        = false
 harnesses       = false
@@ -48,6 +49,7 @@ pythonpath = [
     "packages/prime/src",
     "packages/prime-sandboxes/src",
     "packages/prime-evals/src",
+    "packages/prime-traces/src",
 ]
 testpaths = [
     "packages/*/tests",

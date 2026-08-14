@@ -1,17 +1,4 @@
-"""High-level client for Prime Traces.
-
-Wraps the wire client with upload batching/retry and typed read paths.
-
-The read surface matches the service's pinned response models
-(``prime-traces/src/traces/models.py`` in the platform repo): pages are
-``{items, next_cursor}``, summaries nest ``model``/``score``/``execution``.
-
-Deferred to follow-up PRs: exports (streaming ``GET /traces/export`` — its
-filter vocabulary is not declared server-side yet — and the unimplemented job
-API), episode reads, ``/search``, the ``environment_id`` filter (no populated
-column behind it yet), and the dot-path query compiler (needs the
-server-side field registry).
-"""
+"""High-level client for Prime Traces."""
 
 import json
 import tempfile
@@ -29,6 +16,8 @@ from .batching import (
 from .core.client import TracesAPIClient, retry_delay
 from .exceptions import RetryableAPIError, TransportError
 from .models import (
+    EpisodeDetail,
+    EpisodeListPage,
     LineFormat,
     TraceListPage,
     TraceSummary,
@@ -91,15 +80,17 @@ def _build_params(
     return params
 
 
-def _trace_endpoint(trace_id: str) -> str:
-    """Build a trace endpoint with the ID encoded as one path segment."""
-    if "/" in trace_id:
+def _encoded_id_segment(identifier: str, *, parameter_name: str) -> str:
+    """Encode a resource ID as one URL path segment."""
+    if "/" in identifier:
         # ASGI decodes %2F before Starlette route matching, so the service's
-        # /traces/{trace_id} route sees an extra path segment and returns 404.
+        # /{resource}/{id} routes see an extra path segment and return 404.
         # Fail locally until that route accepts a path-valued parameter rather
-        # than issuing a request that cannot address the uploaded trace.
-        raise ValueError("trace_id cannot contain '/' until the service supports path-valued IDs")
-    encoded = quote(trace_id, safe="")
+        # than issuing a request that cannot address the uploaded resource.
+        raise ValueError(
+            f"{parameter_name} cannot contain '/' until the service supports path-valued IDs"
+        )
+    encoded = quote(identifier, safe="")
     # RFC 3986 leaves periods unescaped even with ``safe=""``. A segment that
     # is exactly "." or ".." is special, though: HTTP clients normalize it
     # away before sending the request, which would target the collection or API
@@ -107,7 +98,17 @@ def _trace_endpoint(trace_id: str) -> str:
     # explicitly so they remain ordinary path-segment values on the wire.
     if encoded in {".", ".."}:
         encoded = encoded.replace(".", "%2E")
-    return f"/traces/{encoded}"
+    return encoded
+
+
+def _trace_endpoint(trace_id: str) -> str:
+    """Build a trace endpoint with the ID encoded as one path segment."""
+    return f"/traces/{_encoded_id_segment(trace_id, parameter_name='trace_id')}"
+
+
+def _episode_endpoint(episode_id: str) -> str:
+    """Build an episode endpoint with the ID encoded as one path segment."""
+    return f"/episodes/{_encoded_id_segment(episode_id, parameter_name='episode_id')}"
 
 
 class TracesClient:
@@ -175,7 +176,7 @@ class TracesClient:
         ambiguous failure safe, because a request that did land replays its
         receipt instead of storing twice.
 
-        Batches are sent sequentially in v0. The contract allows 2–8 requests
+        Batches are sent sequentially in v0. The contract allows 2-8 requests
         in flight per producer; add bounded concurrency here once the service
         is up and throughput is measured.
         """
@@ -256,6 +257,7 @@ class TracesClient:
         self,
         *,
         run_id: Optional[str] = None,
+        environment_id: Optional[str] = None,
         model_id: Optional[str] = None,
         model_provider: Optional[str] = None,
         task_id: Optional[str] = None,
@@ -280,6 +282,7 @@ class TracesClient:
         params = _build_params(
             (
                 ("run_id", run_id),
+                ("environment_id", environment_id),
                 ("model_id", model_id),
                 ("model_provider", model_provider),
                 ("task_id", task_id),
@@ -399,6 +402,97 @@ class TracesClient:
         traces added to the run after the first request.
         """
         self.client.delete("/traces", params={"run_id": run_id})
+
+    # -- episodes -----------------------------------------------------------
+
+    def list_episodes(
+        self,
+        *,
+        run_id: Optional[str] = None,
+        environment_id: Optional[str] = None,
+        outcome: Optional[str] = None,
+        has_error: Optional[bool] = None,
+        created_after: Optional[str] = None,
+        created_before: Optional[str] = None,
+        limit: Optional[int] = None,
+        cursor: Optional[str] = None,
+    ) -> EpisodeListPage:
+        """List episode summaries using the server's complete filter set.
+
+        ``environment_id`` is extracted from the canonical episode
+        ``env.id``. Episodes carry no upload ``context`` map.
+        """
+        params = _build_params(
+            (
+                ("run_id", run_id),
+                ("environment_id", environment_id),
+                ("outcome", outcome),
+                ("has_error", has_error),
+                ("created_after", created_after),
+                ("created_before", created_before),
+                ("limit", limit),
+                ("cursor", cursor),
+            )
+        )
+        return EpisodeListPage.model_validate(self.client.get_json("/episodes", params=params))
+
+    def get_episode(self, episode_id: str) -> EpisodeDetail:
+        """Episode-owned fields plus the read-time member-trace aggregate.
+
+        The response carries the episode row's own ``has_error``/``error``
+        alongside ``traces.any_trace_error``, so an environment-hook failure
+        stays visible even when every individual trace succeeded.
+        """
+        return EpisodeDetail.model_validate(self.client.get_json(_episode_endpoint(episode_id)))
+
+    def list_episode_traces(
+        self,
+        episode_id: str,
+        *,
+        run_id: Optional[str] = None,
+        environment_id: Optional[str] = None,
+        model_id: Optional[str] = None,
+        model_provider: Optional[str] = None,
+        task_id: Optional[str] = None,
+        reward_min: Optional[float] = None,
+        reward_max: Optional[float] = None,
+        outcome: Optional[str] = None,
+        has_error: Optional[bool] = None,
+        is_truncated: Optional[bool] = None,
+        created_after: Optional[str] = None,
+        created_before: Optional[str] = None,
+        context: Optional[Dict[str, str]] = None,
+        limit: Optional[int] = None,
+        cursor: Optional[str] = None,
+    ) -> TraceListPage:
+        """List an episode's member traces in upload order.
+
+        The filter vocabulary matches the backend member-trace route and the
+        top-level trace listing, except that member traces have no ``sort``
+        option.
+        """
+        params = _build_params(
+            (
+                ("run_id", run_id),
+                ("environment_id", environment_id),
+                ("model_id", model_id),
+                ("model_provider", model_provider),
+                ("task_id", task_id),
+                ("reward_min", reward_min),
+                ("reward_max", reward_max),
+                ("outcome", outcome),
+                ("has_error", has_error),
+                ("is_truncated", is_truncated),
+                ("created_after", created_after),
+                ("created_before", created_before),
+                ("limit", limit),
+                ("cursor", cursor),
+            ),
+            context,
+        )
+        return TraceListPage.model_validate(
+            self.client.get_json(f"{_episode_endpoint(episode_id)}/traces", params=params)
+        )
 
     def close(self) -> None:
         self.client.close()

@@ -4,7 +4,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Dict, List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
 
 class LineFormat(str, Enum):
@@ -92,23 +92,23 @@ class UploadReceipt(BaseModel):
 class ModelInfo(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    provider: Optional[str] = None
-    id: Optional[str] = None
+    provider: Optional[str]
+    id: Optional[str]
 
 
 class Score(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     # None means unscored, which is distinct from a scored 0.0.
-    reward: Optional[float] = None
-    outcome: Optional[str] = None
+    reward: Optional[float]
+    outcome: Optional[str]
 
 
 class Execution(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    has_error: Optional[bool] = None
-    is_truncated: Optional[bool] = None
+    has_error: bool
+    is_truncated: bool
 
 
 class TraceSummary(BaseModel):
@@ -118,33 +118,95 @@ class TraceSummary(BaseModel):
     absent because the v0 extractor does not write them; fetch the raw
     document for those. ``total_tokens`` is the one extracted usage figure
     (it counts re-sent context once, so it is not the sum of per-call usage).
+
+    Every field is present on every service response; the ``Optional`` ones
+    are those the service nulls for "not recorded".
     """
 
     model_config = ConfigDict(extra="allow")
 
     trace_id: str
-    upload_id: Optional[str] = None
-    episode_id: Optional[str] = None
-    created_at: Optional[datetime] = None
-    ingested_at: Optional[datetime] = None
-    run_id: Optional[str] = None
-    environment_id: Optional[str] = None
-    model: Optional[ModelInfo] = None
-    task_id: Optional[str] = None
-    agent_name: Optional[str] = None
-    score: Optional[Score] = None
-    execution: Optional[Execution] = None
-    duration_ms: Optional[int] = None
-    total_tokens: Optional[int] = None
-    size_bytes: Optional[int] = None
-    context: Dict[str, str] = Field(default_factory=dict)
+    upload_id: str
+    episode_id: Optional[str]
+    created_at: datetime
+    ingested_at: datetime
+    run_id: Optional[str]
+    environment_id: Optional[str]
+    model: ModelInfo
+    task_id: Optional[str]
+    agent_name: Optional[str]
+    score: Score
+    execution: Execution
+    duration_ms: int
+    total_tokens: int
+    size_bytes: int
+    context: Dict[str, str]
+
+
+class EpisodeError(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    type: Optional[str]
+    message: Optional[str]
+
+
+class EpisodeSummary(BaseModel):
+    """One episode's extracted columns and episode-owned fields.
+
+    ``has_error`` and ``error`` are the episode row's own — an
+    environment-hook failure with every member trace green lives here, not in
+    the member-trace aggregate.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    episode_id: str
+    upload_id: str
+    schema_version: int
+    created_at: datetime
+    ingested_at: datetime
+    run_id: Optional[str]
+    environment_id: Optional[str]
+    outcome: Optional[str]
+    has_error: bool
+    error: EpisodeError
+
+
+class EpisodeTraceAggregate(BaseModel):
+    """Read-time rollup over deduplicated member traces.
+
+    A zero-trace episode is a legitimate terminal state (a failure before any
+    trace was minted still leaves its errors on the episode), so an empty
+    aggregate is not an error.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    trace_count: int
+    total_tokens: int
+    total_duration_ms: int
+    any_trace_error: bool
+    agent_names: List[str]
+
+
+class EpisodeDetail(EpisodeSummary):
+    """Point-lookup response: the summary plus the member-trace aggregate."""
+
+    traces: EpisodeTraceAggregate
 
 
 class TraceListPage(BaseModel):
     """One page of trace summaries. ``next_cursor`` is opaque and only valid
-    with the exact filters that produced it."""
+    with the exact filters that produced it; ``None`` marks the last page."""
 
     model_config = ConfigDict(extra="allow")
 
-    items: List[TraceSummary] = Field(default_factory=list)
-    next_cursor: Optional[str] = None
+    items: List[TraceSummary]
+    next_cursor: Optional[str]
+
+
+class EpisodeListPage(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    items: List[EpisodeSummary]
+    next_cursor: Optional[str]

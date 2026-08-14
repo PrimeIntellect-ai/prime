@@ -31,6 +31,11 @@ from .exceptions import (
     ValidationRejectedError,
 )
 from .models import (
+    EpisodeDetail,
+    EpisodeError,
+    EpisodeListPage,
+    EpisodeSummary,
+    EpisodeTraceAggregate,
     ErrorCode,
     Execution,
     LineFormat,
@@ -60,7 +65,11 @@ __all__ = [
     "MAX_BATCH_LINES",
     "MAX_LINE_BYTES",
     # Models
-    "UploadReceipt",
+    "EpisodeDetail",
+    "EpisodeError",
+    "EpisodeListPage",
+    "EpisodeSummary",
+    "EpisodeTraceAggregate",
     "ErrorCode",
     "Execution",
     "LineFormat",
@@ -68,6 +77,7 @@ __all__ = [
     "Score",
     "TraceListPage",
     "TraceSummary",
+    "UploadReceipt",
     # Exceptions
     "PrimeTracesError",
     "APIError",

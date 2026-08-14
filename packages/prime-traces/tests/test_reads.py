@@ -36,6 +36,8 @@ SUMMARY = {
 
 RESERVED_TRACE_ID = "trace?with#reserved%chars and space"
 ENCODED_TRACE_PATH = b"/api/v1/traces/trace%3Fwith%23reserved%25chars%20and%20space"
+RESERVED_EPISODE_ID = "episode?with#reserved%chars and space"
+ENCODED_EPISODE_PATH = b"/api/v1/episodes/episode%3Fwith%23reserved%25chars%20and%20space"
 
 
 class TestList:
@@ -49,6 +51,7 @@ class TestList:
         client = make_client(handler)
         page = client.list(
             run_id="run_9f3k2m",
+            environment_id="terminal-bench-2",
             reward_min=0.5,
             has_error=False,
             context={"source": "hosted_eval"},
@@ -57,6 +60,7 @@ class TestList:
 
         assert captured["params"] == {
             "run_id": "run_9f3k2m",
+            "environment_id": "terminal-bench-2",
             "reward_min": "0.5",
             "has_error": "false",
             "context.source": "hosted_eval",
@@ -528,3 +532,194 @@ class TestTeamHeader:
 
         self._client("", handler).get_json("/traces")
         assert captured["team"] is None
+
+
+class TestStreamToFile:
+    """`download_raw` is the only streamed-to-disk read in v0 — exports are
+    unimplemented server-side — so it carries the clobber-safety rules.
+
+    The pre-request failure case lives in `TestPointReads`; this is the harder
+    one, where bytes have already been written before the failure.
+    """
+
+    def test_partial_is_cleaned_up_when_the_stream_breaks_midway(self, make_client, tmp_path):
+        def handler(request: httpx.Request) -> httpx.Response:
+            def body():
+                yield b'{"version":4,'
+                raise httpx.ReadError("connection reset")
+
+            return httpx.Response(200, content=body())
+
+        dest = tmp_path / "trace.json"
+        with pytest.raises(TransportError):
+            make_client(handler).download_raw("8d3f1a2b", dest)
+        # A mid-stream failure is never retried under the consumer, so the
+        # prefix that did arrive is discarded rather than left as a document.
+        assert not dest.exists()
+        assert not (tmp_path / "trace.json.partial").exists()
+
+
+class TestEpisodes:
+    # Mirrors the service's `EpisodeSummary` (prime-traces/src/episodes/
+    # models.py in the platform repo): episode-owned fields, nested `error`.
+    EPISODE = {
+        "episode_id": "ep-1",
+        "upload_id": "5ee85e41",
+        "schema_version": 1,
+        "created_at": "2026-07-20T18:02:11.482Z",
+        "ingested_at": "2026-07-20T18:06:02.117Z",
+        "run_id": "run_9f3k2m",
+        "environment_id": "terminal-bench-2",
+        "outcome": "done",
+        "has_error": False,
+        "error": {"type": None, "message": None},
+    }
+    EMPTY_AGGREGATE = {
+        "trace_count": 0,
+        "total_tokens": 0,
+        "total_duration_ms": 0,
+        "any_trace_error": False,
+        "agent_names": [],
+    }
+
+    def test_list_episodes_filters_and_envelope(self, make_client):
+        captured = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["params"] = dict(request.url.params)
+            return httpx.Response(200, json={"items": [self.EPISODE], "next_cursor": None})
+
+        page = make_client(handler).list_episodes(
+            run_id="run_9f3k2m",
+            environment_id="terminal-bench-2",
+            outcome="done",
+            has_error=False,
+        )
+        assert captured["params"] == {
+            "run_id": "run_9f3k2m",
+            "environment_id": "terminal-bench-2",
+            "outcome": "done",
+            "has_error": "false",
+        }
+        [episode] = page.items
+        assert episode.episode_id == "ep-1"
+        assert episode.environment_id == "terminal-bench-2"
+        assert episode.error.type is None
+
+    def test_get_episode_nests_member_aggregate(self, make_client):
+        # The episode row's own error stays visible alongside the aggregate:
+        # an environment-hook failure with every member trace green.
+        detail = {
+            **self.EPISODE,
+            "has_error": True,
+            "error": {"type": "SetupError", "message": "setup hook failed"},
+            "traces": {
+                "trace_count": 2,
+                "total_tokens": 168426,
+                "total_duration_ms": 431074,
+                "any_trace_error": False,
+                "agent_names": ["judge", "solver"],
+            },
+        }
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/api/v1/episodes/ep-1"
+            return httpx.Response(200, json=detail)
+
+        episode = make_client(handler).get_episode("ep-1")
+        assert episode.has_error is True
+        assert episode.error.type == "SetupError"
+        assert episode.traces.trace_count == 2
+        assert episode.traces.any_trace_error is False
+        assert episode.traces.agent_names == ["judge", "solver"]
+
+    def test_get_episode_encodes_episode_id_as_one_path_segment(self, make_client):
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.raw_path == ENCODED_EPISODE_PATH
+            return httpx.Response(
+                200,
+                json={
+                    **self.EPISODE,
+                    "episode_id": RESERVED_EPISODE_ID,
+                    "traces": self.EMPTY_AGGREGATE,
+                },
+            )
+
+        assert make_client(handler).get_episode(RESERVED_EPISODE_ID).episode_id == (
+            RESERVED_EPISODE_ID
+        )
+
+    @pytest.mark.parametrize(
+        ("episode_id", "encoded"),
+        [(".", b"%2E"), ("..", b"%2E%2E")],
+    )
+    def test_get_episode_preserves_dot_only_id_segment(self, make_client, episode_id, encoded):
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.raw_path == b"/api/v1/episodes/" + encoded
+            return httpx.Response(
+                200,
+                json={**self.EPISODE, "episode_id": episode_id, "traces": self.EMPTY_AGGREGATE},
+            )
+
+        assert make_client(handler).get_episode(episode_id).episode_id == episode_id
+
+    @pytest.mark.parametrize("method", ["get_episode", "list_episode_traces"])
+    def test_episode_reads_reject_episode_id_with_slash_before_request(self, make_client, method):
+        def handler(request: httpx.Request) -> httpx.Response:
+            pytest.fail(f"unexpected request: {request.url}")
+
+        with pytest.raises(ValueError, match="episode_id cannot contain '/'"):
+            getattr(make_client(handler), method)("episode/child")
+
+    def test_list_episode_traces_forwards_backend_filters(self, make_client):
+        captured = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/api/v1/episodes/ep-1/traces"
+            captured["params"] = dict(request.url.params)
+            return httpx.Response(200, json={"items": [SUMMARY], "next_cursor": None})
+
+        page = make_client(handler).list_episode_traces(
+            "ep-1",
+            run_id="run_9f3k2m",
+            environment_id="terminal-bench-2",
+            model_id="deepseek-v4-flash",
+            model_provider="prime",
+            task_id="tb2-0187",
+            reward_min=0.5,
+            reward_max=1.0,
+            outcome="done",
+            has_error=False,
+            is_truncated=False,
+            created_after="2026-07-01T00:00:00Z",
+            created_before="2026-08-01T00:00:00Z",
+            context={"source": "hosted_eval"},
+            limit=50,
+            cursor="next-page",
+        )
+        assert captured["params"] == {
+            "run_id": "run_9f3k2m",
+            "environment_id": "terminal-bench-2",
+            "model_id": "deepseek-v4-flash",
+            "model_provider": "prime",
+            "task_id": "tb2-0187",
+            "reward_min": "0.5",
+            "reward_max": "1.0",
+            "outcome": "done",
+            "has_error": "false",
+            "is_truncated": "false",
+            "created_after": "2026-07-01T00:00:00Z",
+            "created_before": "2026-08-01T00:00:00Z",
+            "limit": "50",
+            "cursor": "next-page",
+            "context.source": "hosted_eval",
+        }
+        assert page.items[0].trace_id == "8d3f1a2b"
+
+    def test_list_episode_traces_encodes_episode_id_as_one_path_segment(self, make_client):
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.raw_path == ENCODED_EPISODE_PATH + b"/traces"
+            return httpx.Response(200, json={"items": [SUMMARY], "next_cursor": None})
+
+        page = make_client(handler).list_episode_traces(RESERVED_EPISODE_ID)
+        assert page.items[0].trace_id == "8d3f1a2b"

@@ -18,6 +18,7 @@ def shared_sandbox(sandbox_client):
             CreateSandboxRequest(
                 name="test-cmd-exec",
                 docker_image="python:3.11-slim",
+                vm=False,
                 cpu_cores=1,
                 memory_gb=2,
                 timeout_minutes=60,

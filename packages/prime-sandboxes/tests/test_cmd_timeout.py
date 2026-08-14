@@ -17,6 +17,7 @@ def test_command_timeout():
             CreateSandboxRequest(
                 name="test-sandbox",
                 docker_image="python:3.11-slim",
+                vm=False,
                 cpu_cores=1,
                 memory_gb=2,
                 timeout_minutes=60,

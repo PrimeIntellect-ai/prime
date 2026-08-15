@@ -775,6 +775,41 @@ def test_sandbox_create_vm_without_gpu(monkeypatch: pytest.MonkeyPatch) -> None:
     assert captured["request"].memory_gb == 1.0
 
 
+def test_sandbox_create_vm_supports_idle_timeout_with_unlimited_lifetime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_cli(monkeypatch)
+    captured: dict[str, Any] = {}
+
+    def mock_create(self: Any, request: Any) -> Any:
+        captured["request"] = request
+        return SimpleNamespace(id="sbx-vm-idle")
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.create", mock_create)
+
+    result = runner.invoke(
+        app,
+        [
+            "sandbox",
+            "create",
+            "python:3.12",
+            "--vm",
+            "--timeout-minutes",
+            "-1",
+            "--idle-timeout-minutes",
+            "10",
+            "--yes",
+        ],
+    )
+
+    output = strip_ansi(result.output)
+    assert result.exit_code == 0, result.output
+    assert "Idle Timeout: 10 minutes" in output
+    assert captured["request"].vm is True
+    assert captured["request"].timeout_minutes == -1
+    assert captured["request"].idle_timeout_minutes == 10
+
+
 def test_sandbox_delete_by_label_scopes_to_caller(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

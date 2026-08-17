@@ -1,5 +1,14 @@
 import httpx
 import pytest
+from _samples import (
+    EMPTY_AGGREGATE,
+    ENCODED_EPISODE_PATH,
+    ENCODED_TRACE_PATH,
+    EPISODE,
+    RESERVED_EPISODE_ID,
+    RESERVED_TRACE_ID,
+    SUMMARY,
+)
 
 from prime_traces import (
     AmbiguousDeleteError,
@@ -11,33 +20,6 @@ from prime_traces import (
     TransportError,
     UnauthorizedError,
 )
-
-# The pinned summary shape — mirrors the service's `TraceSummary`
-# (prime-traces/src/traces/models.py in the platform repo), including the
-# null-for-unrecorded convention.
-SUMMARY = {
-    "trace_id": "8d3f1a2b",
-    "upload_id": "5ee85e41",
-    "episode_id": None,
-    "created_at": "2026-07-20T18:02:11.482Z",
-    "ingested_at": "2026-07-20T18:06:02.117Z",
-    "run_id": "run_9f3k2m",
-    "environment_id": "terminal-bench-2",
-    "model": {"provider": "prime", "id": "deepseek-v4-flash"},
-    "task_id": "tb2-0187",
-    "agent_name": "solver",
-    "score": {"reward": 0.85, "outcome": "done"},
-    "execution": {"has_error": False, "is_truncated": False},
-    "duration_ms": 215537,
-    "total_tokens": 84213,
-    "size_bytes": 417284,
-    "context": {"source": "hosted_eval"},
-}
-
-RESERVED_TRACE_ID = "trace?with#reserved%chars and space"
-ENCODED_TRACE_PATH = b"/api/v1/traces/trace%3Fwith%23reserved%25chars%20and%20space"
-RESERVED_EPISODE_ID = "episode?with#reserved%chars and space"
-ENCODED_EPISODE_PATH = b"/api/v1/episodes/episode%3Fwith%23reserved%25chars%20and%20space"
 
 
 class TestList:
@@ -560,34 +542,12 @@ class TestStreamToFile:
 
 
 class TestEpisodes:
-    # Mirrors the service's `EpisodeSummary` (prime-traces/src/episodes/
-    # models.py in the platform repo): episode-owned fields, nested `error`.
-    EPISODE = {
-        "episode_id": "ep-1",
-        "upload_id": "5ee85e41",
-        "schema_version": 1,
-        "created_at": "2026-07-20T18:02:11.482Z",
-        "ingested_at": "2026-07-20T18:06:02.117Z",
-        "run_id": "run_9f3k2m",
-        "environment_id": "terminal-bench-2",
-        "outcome": "done",
-        "has_error": False,
-        "error": {"type": None, "message": None},
-    }
-    EMPTY_AGGREGATE = {
-        "trace_count": 0,
-        "total_tokens": 0,
-        "total_duration_ms": 0,
-        "any_trace_error": False,
-        "agent_names": [],
-    }
-
     def test_list_episodes_filters_and_envelope(self, make_client):
         captured = {}
 
         def handler(request: httpx.Request) -> httpx.Response:
             captured["params"] = dict(request.url.params)
-            return httpx.Response(200, json={"items": [self.EPISODE], "next_cursor": None})
+            return httpx.Response(200, json={"items": [EPISODE], "next_cursor": None})
 
         page = make_client(handler).list_episodes(
             run_id="run_9f3k2m",
@@ -610,7 +570,7 @@ class TestEpisodes:
         # The episode row's own error stays visible alongside the aggregate:
         # an environment-hook failure with every member trace green.
         detail = {
-            **self.EPISODE,
+            **EPISODE,
             "has_error": True,
             "error": {"type": "SetupError", "message": "setup hook failed"},
             "traces": {
@@ -639,9 +599,9 @@ class TestEpisodes:
             return httpx.Response(
                 200,
                 json={
-                    **self.EPISODE,
+                    **EPISODE,
                     "episode_id": RESERVED_EPISODE_ID,
-                    "traces": self.EMPTY_AGGREGATE,
+                    "traces": EMPTY_AGGREGATE,
                 },
             )
 
@@ -658,7 +618,7 @@ class TestEpisodes:
             assert request.url.raw_path == b"/api/v1/episodes/" + encoded
             return httpx.Response(
                 200,
-                json={**self.EPISODE, "episode_id": episode_id, "traces": self.EMPTY_AGGREGATE},
+                json={**EPISODE, "episode_id": episode_id, "traces": EMPTY_AGGREGATE},
             )
 
         assert make_client(handler).get_episode(episode_id).episode_id == episode_id

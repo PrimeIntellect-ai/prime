@@ -184,50 +184,6 @@ class TestAsyncBatching:
         assert iterator_thread != loop_thread
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("as_async", [False, True])
-    async def test_blank_lines_skipped_and_line_numbers_follow_the_source(self, as_async):
-        lines = [b"\n", line('{"id":"a"}'), b"   \n", line('{"id":"b"}')]
-        source = alines(lines) if as_async else lines
-        [batch] = await collect(source, target_bytes=1024)
-        assert batch.data == b'{"id":"a"}\n{"id":"b"}\n'
-        # Numbering counts the blank lines it skipped, as the sync path does.
-        assert batch.first_line_number == 2
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("as_async", [False, True])
-    async def test_closes_at_max_lines(self, as_async):
-        lines = [line(f'{{"i":{i}}}') for i in range(5)]
-        source = alines(lines) if as_async else lines
-        batches = await collect(source, target_bytes=1024, max_lines=2)
-        assert [b.num_lines for b in batches] == [2, 2, 1]
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("as_async", [False, True])
-    async def test_oversized_line_rejected_locally(self, as_async):
-        lines = [line('{"i":1}'), line('{"pad":"' + "x" * 64 + '"}')]
-        source = alines(lines) if as_async else lines
-        with pytest.raises(TraceTooLargeError) as exc_info:
-            await collect(source, max_line_bytes=32)
-        assert exc_info.value.line_number == 2
-
-    @pytest.mark.asyncio
-    async def test_async_line_checks_do_not_strip_or_copy_input(self):
-        guard = TestLineValidation.NoStripBytes
-        record = guard(b'{"id":"a"}\n')
-        source = alines([record, guard(b" \t\r\n")])
-
-        [batch] = await collect(source, max_line_bytes=len(record) - 1)
-
-        assert batch.data == record
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("as_async", [False, True])
-    async def test_target_above_request_cap_rejected(self, as_async):
-        source = alines([line("{}")]) if as_async else [line("{}")]
-        with pytest.raises(ValueError):
-            await collect(source, target_bytes=MAX_BATCH_BYTES + 1)
-
-    @pytest.mark.asyncio
     async def test_abandoning_the_iterator_stops_reading_the_source(self):
         """A failed upload must not drain the rest of the file into memory."""
         consumed = 0

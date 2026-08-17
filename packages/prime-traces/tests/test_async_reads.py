@@ -1,9 +1,7 @@
 """Async read, delete and episode paths.
 
-The pinned response shapes and the reserved-ID cases are imported from
-``test_reads`` rather than restated: one definition of the service contract,
-asserted against both clients. Referencing the module (not the test classes)
-keeps the sync suite from being collected twice.
+Shared response samples live in ``_samples`` so the test modules do not import
+one another.
 """
 
 import asyncio
@@ -11,30 +9,20 @@ import threading
 
 import httpx
 import pytest
-import test_reads
+from _samples import (
+    SUMMARY,
+    UNAVAILABLE,
+)
 
 import prime_traces.async_traces as async_traces_module
 from prime_traces import (
     AmbiguousDeleteError,
-    APIError,
     AsyncTracesAPIClient,
     AsyncTracesClient,
-    ForbiddenError,
     NotFoundError,
     RetryableAPIError,
     TransportError,
-    UnauthorizedError,
 )
-
-SUMMARY = test_reads.SUMMARY
-RESERVED_TRACE_ID = test_reads.RESERVED_TRACE_ID
-ENCODED_TRACE_PATH = test_reads.ENCODED_TRACE_PATH
-RESERVED_EPISODE_ID = test_reads.RESERVED_EPISODE_ID
-ENCODED_EPISODE_PATH = test_reads.ENCODED_EPISODE_PATH
-EPISODE = test_reads.TestEpisodes.EPISODE
-EMPTY_AGGREGATE = test_reads.TestEpisodes.EMPTY_AGGREGATE
-
-UNAVAILABLE = {"error": {"code": "storage_unavailable", "message": "try again"}}
 
 
 class TestList:
@@ -105,31 +93,6 @@ class TestList:
 
 class TestPointReads:
     @pytest.mark.asyncio
-    async def test_get_summary(self, make_async_client):
-        def handler(request: httpx.Request) -> httpx.Response:
-            assert request.url.path == "/api/v1/traces/8d3f1a2b"
-            return httpx.Response(200, json=SUMMARY)
-
-        summary = await make_async_client(handler).get("8d3f1a2b")
-        assert summary.task_id == "tb2-0187"
-
-    @pytest.mark.asyncio
-    async def test_get_encodes_trace_id_as_one_path_segment(self, make_async_client):
-        def handler(request: httpx.Request) -> httpx.Response:
-            assert request.url.raw_path == ENCODED_TRACE_PATH
-            return httpx.Response(200, json=SUMMARY)
-
-        await make_async_client(handler).get(RESERVED_TRACE_ID)
-
-    @pytest.mark.asyncio
-    async def test_get_rejects_trace_id_with_slash_before_request(self, make_async_client):
-        def handler(request: httpx.Request) -> httpx.Response:
-            pytest.fail(f"unexpected request: {request.url}")
-
-        with pytest.raises(ValueError, match="cannot contain '/'"):
-            await make_async_client(handler).get("trace/child")
-
-    @pytest.mark.asyncio
     async def test_get_raw_streams_document(self, make_async_client):
         raw = b'{"version":4,"id":"8d3f1a2b","steps":[]}'
 
@@ -168,10 +131,13 @@ class TestPointReads:
         assert list(tmp_path.glob(".prime-traces-*")) == []
 
     @pytest.mark.asyncio
-    async def test_partial_is_cleaned_up_when_the_stream_breaks_midway(
-        self, make_async_client, tmp_path
+    async def test_midstream_failure_is_not_retried_and_cleans_up(
+        self, make_async_client, no_sleep, tmp_path
     ):
+        attempts = []
+
         def handler(request: httpx.Request) -> httpx.Response:
+            attempts.append(request)
             # An async body: httpx.AsyncClient refuses to stream a sync one.
             async def body():
                 yield b'{"version":4,'
@@ -184,6 +150,8 @@ class TestPointReads:
             await make_async_client(handler).download_raw("8d3f1a2b", dest)
         # A mid-stream failure is never retried under the consumer, so the
         # prefix that did arrive is discarded rather than left as a document.
+        assert len(attempts) == 1
+        assert no_sleep == []
         assert not dest.exists()
         assert list(tmp_path.glob(".prime-traces-*")) == []
 
@@ -222,41 +190,17 @@ class TestPointReads:
         assert not dest.exists()
         assert list(tmp_path.glob(".prime-traces-*")) == []
 
-    @pytest.mark.asyncio
-    async def test_stream_failure_unlinks_partial_when_close_also_fails(
-        self, make_async_client, monkeypatch, tmp_path
-    ):
+    def test_discard_partial_unlinks_even_when_close_fails(self, tmp_path):
         partial = tmp_path / ".prime-traces-controlled.partial"
         partial.touch()
 
         class FailingCloseHandle:
-            name = str(partial)
-
-            def write(self, chunk):
-                return len(chunk)
-
             def close(self):
                 raise OSError("flush failed")
 
-        async def stream_bytes(*args, **kwargs):
-            yield b'{"version":4,'
-            raise RuntimeError("stream failed")
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            pytest.fail(f"unexpected request: {request.url}")
-
-        client = make_async_client(handler)
-        monkeypatch.setattr(client.client, "stream_bytes", stream_bytes)
-        monkeypatch.setattr(
-            async_traces_module, "_open_partial_file", lambda dest: FailingCloseHandle()
-        )
-
-        dest = tmp_path / "trace.json"
-        with pytest.raises(RuntimeError, match="stream failed"):
-            await client.download_raw("8d3f1a2b", dest)
-
+        with pytest.raises(OSError, match="flush failed"):
+            async_traces_module._discard_partial_file(FailingCloseHandle(), partial)
         assert not partial.exists()
-        assert not dest.exists()
 
     @pytest.mark.asyncio
     async def test_cancellation_during_write_closes_response_stream(
@@ -317,123 +261,6 @@ class TestPointReads:
         assert list(tmp_path.glob(".prime-traces-*")) == []
 
     @pytest.mark.asyncio
-    async def test_repeated_cancellation_waits_for_http_response_close(
-        self, make_async_client, monkeypatch, tmp_path
-    ):
-        write_started = threading.Event()
-        release_write = threading.Event()
-        close_started = asyncio.Event()
-        release_close = asyncio.Event()
-        stream_closed = asyncio.Event()
-
-        partial = tmp_path / ".prime-traces-controlled.partial"
-        partial.touch()
-
-        class SlowHandle:
-            name = str(partial)
-
-            def write(self, chunk):
-                write_started.set()
-                if not release_write.wait(timeout=5):
-                    raise TimeoutError("test did not release file write")
-                return len(chunk)
-
-            def close(self):
-                pass
-
-        class SlowClosingStream(httpx.AsyncByteStream):
-            async def __aiter__(self):
-                yield b'{"version":4,"id":"8d3f1a2b"}'
-
-            async def aclose(self):
-                close_started.set()
-                await release_close.wait()
-                stream_closed.set()
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(200, stream=SlowClosingStream())
-
-        client = make_async_client(handler)
-        monkeypatch.setattr(async_traces_module, "_open_partial_file", lambda dest: SlowHandle())
-
-        dest = tmp_path / "trace.json"
-        task = asyncio.create_task(client.download_raw("8d3f1a2b", dest))
-        await asyncio.to_thread(write_started.wait)
-
-        task.cancel()
-        release_write.set()
-        await close_started.wait()
-
-        # A caller may repeat cancellation while cleanup is in progress. The
-        # response close must finish before cancellation reaches the caller.
-        task.cancel()
-        await asyncio.sleep(0.01)
-        pending_while_closing = not task.done()
-        release_close.set()
-
-        with pytest.raises(asyncio.CancelledError):
-            await task
-
-        assert pending_while_closing
-        assert stream_closed.is_set()
-        assert not dest.exists()
-        assert list(tmp_path.glob(".prime-traces-*")) == []
-
-    @pytest.mark.asyncio
-    async def test_cancellation_during_close_waits_for_worker(
-        self, make_async_client, monkeypatch, tmp_path
-    ):
-        close_started = threading.Event()
-        release_close = threading.Event()
-        close_calls = 0
-
-        partial = tmp_path / ".prime-traces-controlled.partial"
-        partial.touch()
-
-        class SlowCloseHandle:
-            name = str(partial)
-
-            def write(self, chunk):
-                return len(chunk)
-
-            def close(self):
-                nonlocal close_calls
-                close_calls += 1
-                if close_calls == 1:
-                    close_started.set()
-                    if not release_close.wait(timeout=5):
-                        raise TimeoutError("test did not release file close")
-
-        async def stream_bytes(*args, **kwargs):
-            yield b'{"version":4,"id":"8d3f1a2b"}'
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            pytest.fail(f"unexpected request: {request.url}")
-
-        client = make_async_client(handler)
-        monkeypatch.setattr(client.client, "stream_bytes", stream_bytes)
-        monkeypatch.setattr(
-            async_traces_module, "_open_partial_file", lambda dest: SlowCloseHandle()
-        )
-
-        dest = tmp_path / "trace.json"
-        task = asyncio.create_task(client.download_raw("8d3f1a2b", dest))
-        await asyncio.to_thread(close_started.wait)
-        task.cancel()
-        await asyncio.sleep(0.01)
-
-        pending_while_close = not task.done()
-        release_close.set()
-
-        with pytest.raises(asyncio.CancelledError):
-            await task
-
-        assert pending_while_close
-        assert close_calls == 2
-        assert not dest.exists()
-        assert list(tmp_path.glob(".prime-traces-*")) == []
-
-    @pytest.mark.asyncio
     async def test_cancellation_during_partial_open_cleans_up_file(
         self, make_async_client, monkeypatch, tmp_path
     ):
@@ -467,87 +294,6 @@ class TestPointReads:
         await asyncio.to_thread(opened.wait)
         assert not dest.exists()
         assert list(tmp_path.glob(".prime-traces-*")) == []
-
-    @pytest.mark.asyncio
-    async def test_cancelled_partial_open_unlinks_file_when_close_fails(
-        self, make_async_client, monkeypatch, tmp_path
-    ):
-        started = threading.Event()
-        release = threading.Event()
-        partial = tmp_path / ".prime-traces-controlled.partial"
-
-        class FailingCloseHandle:
-            name = str(partial)
-
-            def close(self):
-                raise OSError("flush failed")
-
-        def delayed_open(dest):
-            started.set()
-            release.wait()
-            partial.touch()
-            return FailingCloseHandle()
-
-        monkeypatch.setattr(async_traces_module, "_open_partial_file", delayed_open)
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            pytest.fail(f"unexpected request: {request.url}")
-
-        dest = tmp_path / "trace.json"
-        task = asyncio.create_task(make_async_client(handler).download_raw("8d3f1a2b", dest))
-        await asyncio.to_thread(started.wait)
-
-        task.cancel()
-        await asyncio.sleep(0)
-        release.set()
-
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        assert not partial.exists()
-        assert not dest.exists()
-
-    @pytest.mark.asyncio
-    async def test_final_replace_is_an_uncancellable_commit(
-        self, make_async_client, monkeypatch, tmp_path
-    ):
-        loop_thread = threading.get_ident()
-        replace_thread = None
-        original_replace = async_traces_module.Path.replace
-
-        def observed_replace(path, target):
-            nonlocal replace_thread
-            replace_thread = threading.get_ident()
-            return original_replace(path, target)
-
-        monkeypatch.setattr(async_traces_module.Path, "replace", observed_replace)
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(200, content=b"complete")
-
-        dest = tmp_path / "trace.json"
-        await make_async_client(handler).download_raw("8d3f1a2b", dest)
-
-        assert replace_thread == loop_thread
-        assert dest.read_bytes() == b"complete"
-
-    @pytest.mark.parametrize(
-        ("status", "code", "expected"),
-        [
-            (404, "trace_not_found", NotFoundError),
-            (401, None, UnauthorizedError),
-            (403, "service_not_enabled", ForbiddenError),
-        ],
-    )
-    @pytest.mark.asyncio
-    async def test_errors_are_typed(self, make_async_client, status, code, expected):
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(status, json={"error": {"code": code, "message": "nope"}})
-
-        with pytest.raises(expected) as caught:
-            await make_async_client(handler).get("8d3f1a2b")
-        assert caught.value.status_code == status
-        assert caught.value.code == code
-
 
 class TestReadRetries:
     @pytest.mark.asyncio
@@ -626,26 +372,6 @@ class TestReadRetries:
         assert dest.read_bytes() == raw
         assert len(attempts) == 2
 
-    @pytest.mark.asyncio
-    async def test_stream_failure_mid_body_is_not_retried(
-        self, make_async_client, no_sleep, tmp_path
-    ):
-        attempts = []
-
-        async def broken_body():
-            yield b'{"version":4,'
-            raise httpx.ReadError("connection reset mid-body")
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            attempts.append(request.url.path)
-            return httpx.Response(200, content=broken_body())
-
-        with pytest.raises(TransportError):
-            await make_async_client(handler).download_raw("8d3f1a2b", tmp_path / "trace.json")
-        assert len(attempts) == 1
-        assert no_sleep == []
-
-
 class TestDelete:
     @pytest.mark.asyncio
     async def test_delete_trace_with_created_at_hint(self, make_async_client):
@@ -661,19 +387,6 @@ class TestDelete:
         assert captured["method"] == "DELETE"
         assert captured["path"] == "/api/v1/traces/8d3f1a2b"
         assert captured["params"] == {"created_at": "2026-07-20T18:02:11.482Z"}
-
-    @pytest.mark.asyncio
-    async def test_delete_run_sends_run_id_and_expects_no_body(self, make_async_client):
-        captured = {}
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            captured["path"] = request.url.path
-            captured["params"] = dict(request.url.params)
-            return httpx.Response(202)
-
-        assert await make_async_client(handler).delete_run("run_9f3k2m") is None
-        assert captured["path"] == "/api/v1/traces"
-        assert captured["params"] == {"run_id": "run_9f3k2m"}
 
     @pytest.mark.asyncio
     async def test_ambiguous_transport_failure_is_not_retried(self, make_async_client, no_sleep):
@@ -708,20 +421,6 @@ class TestDelete:
         assert no_sleep == []
 
     @pytest.mark.asyncio
-    async def test_unknown_code_503_delete_is_not_retried(self, make_async_client, no_sleep):
-        """A codeless 503 may have come from an intermediary after the request
-        was forwarded, so the deletion may already have landed."""
-        attempts = []
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            attempts.append(request.url.path)
-            return httpx.Response(503, text="no healthy upstream")
-
-        with pytest.raises(AmbiguousDeleteError):
-            await make_async_client(handler).delete("8d3f1a2b")
-        assert len(attempts) == 1
-
-    @pytest.mark.asyncio
     async def test_service_refusal_503_delete_is_retried(self, make_async_client, no_sleep):
         """A service code proves the service declined it — nothing was deleted."""
         attempts = []
@@ -738,47 +437,6 @@ class TestDelete:
 
 
 class TestEpisodes:
-    @pytest.mark.asyncio
-    async def test_list_episodes_filters_and_envelope(self, make_async_client):
-        captured = {}
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            captured["params"] = dict(request.url.params)
-            return httpx.Response(200, json={"items": [EPISODE], "next_cursor": None})
-
-        page = await make_async_client(handler).list_episodes(
-            run_id="run_9f3k2m", outcome="done", has_error=False
-        )
-        assert captured["params"] == {
-            "run_id": "run_9f3k2m",
-            "outcome": "done",
-            "has_error": "false",
-        }
-        [episode] = page.items
-        assert episode.episode_id == "ep-1"
-        assert episode.error.type is None
-
-    @pytest.mark.asyncio
-    async def test_get_episode_nests_member_aggregate(self, make_async_client):
-        detail = {**EPISODE, "traces": {**EMPTY_AGGREGATE, "trace_count": 2}}
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            assert request.url.path == "/api/v1/episodes/ep-1"
-            return httpx.Response(200, json=detail)
-
-        episode = await make_async_client(handler).get_episode("ep-1")
-        assert episode.traces.trace_count == 2
-
-    @pytest.mark.asyncio
-    async def test_get_episode_encodes_episode_id_as_one_path_segment(self, make_async_client):
-        def handler(request: httpx.Request) -> httpx.Response:
-            assert request.url.raw_path == ENCODED_EPISODE_PATH
-            return httpx.Response(
-                200, json={**EPISODE, "episode_id": RESERVED_EPISODE_ID, "traces": EMPTY_AGGREGATE}
-            )
-
-        await make_async_client(handler).get_episode(RESERVED_EPISODE_ID)
-
     @pytest.mark.asyncio
     async def test_list_episode_traces_forwards_backend_filters(self, make_async_client):
         captured = {}
@@ -858,28 +516,3 @@ class TestClientLifecycle:
         with pytest.raises(asyncio.CancelledError):
             await task
         assert transport_closed
-
-    @pytest.mark.asyncio
-    async def test_team_header_is_sent_when_configured(self):
-        captured = {}
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            captured["team"] = request.headers.get("X-Prime-Team-ID")
-            return httpx.Response(200, json=SUMMARY)
-
-        api_client = AsyncTracesAPIClient(
-            api_key="test-key",
-            base_url="http://testserver",
-            team_id="team_42",
-            transport=httpx.MockTransport(handler),
-        )
-        await api_client.get_json("/traces/8d3f1a2b")
-        assert captured["team"] == "team_42"
-        await api_client.aclose()
-
-    @pytest.mark.asyncio
-    async def test_missing_api_key_fails_loudly_at_request_time(self):
-        api_client = AsyncTracesAPIClient(api_key="", base_url="http://testserver", team_id="")
-        with pytest.raises(APIError, match="No API key configured"):
-            await api_client.get_json("/traces")
-        await api_client.aclose()

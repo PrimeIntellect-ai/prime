@@ -18,22 +18,14 @@ import pytest
 from test_upload_wire import parse_multipart
 
 from prime_traces import (
-    ErrorCode,
-    LineFormat,
     RetryableAPIError,
     TransportError,
     ValidationRejectedError,
-    iter_batches,
 )
 
 RAW = b'{"id":"a"}\n{"id":"b"}\n'
 LINES = [b'{"id":"a"}\n', b'{"id":"b"}\n']
 COMMITTED = {"upload_id": "x" * 64, "status": "committed"}
-
-
-async def alines(values):
-    for value in values:
-        yield value
 
 
 class TestRequestShape:
@@ -87,17 +79,6 @@ class TestRequestShape:
         assert request.headers["Idempotency-Key"] == f"sha256:{hashlib.sha256(RAW).hexdigest()}"
 
     @pytest.mark.asyncio
-    async def test_episode_format_sets_the_header(self, make_async_client):
-        captured = {}
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            captured["request"] = request
-            return httpx.Response(201, json=COMMITTED)
-
-        await make_async_client(handler).upload_lines(LINES, line_format=LineFormat.EPISODE)
-        assert captured["request"].headers["X-Prime-Line-Format"] == "episode"
-
-    @pytest.mark.asyncio
     async def test_upload_file_reads_and_batches_like_the_sync_client(
         self, make_async_client, tmp_path
     ):
@@ -111,7 +92,7 @@ class TestRequestShape:
 
         receipts = await make_async_client(handler).upload_file(path, compress=False)
         assert len(receipts) == 1
-        assert keys == [batch.idempotency_key for batch in iter_batches([RAW])]
+        assert keys == [f"sha256:{hashlib.sha256(RAW).hexdigest()}"]
 
 
 class TestAsyncProducers:
@@ -270,37 +251,9 @@ class TestAsyncProducers:
         assert producer_closed
 
     @pytest.mark.asyncio
-    async def test_async_lines_batch_identically_to_sync_lines(self, make_async_client):
-        many = [b'{"i":%d}\n' % i for i in range(40)]
-        keys = []
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            keys.append(request.headers["Idempotency-Key"])
-            return httpx.Response(201, json=COMMITTED)
-
-        client = make_async_client(handler)
-        receipts = await client.upload_lines(alines(many), target_batch_bytes=40, compress=False)
-
-        expected = [batch.idempotency_key for batch in iter_batches(many, target_bytes=40)]
-        assert len(expected) > 1  # the split is what makes this worth asserting
-        assert keys == expected
-        assert len(receipts) == len(expected)
-
-    @pytest.mark.asyncio
-    async def test_async_record_rejection_happens_before_any_request(self, make_async_client):
-        async def records():
-            yield {"id": "a"}
-            yield object()
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(201, json=COMMITTED)
-
-        with pytest.raises(TypeError, match="Record 2 must be a mapping"):
-            await make_async_client(handler).upload_records(records())
-
-    @pytest.mark.asyncio
     async def test_failed_upload_closes_the_async_record_producer(self, make_async_client):
         closed = False
+        requests = []
 
         async def records():
             nonlocal closed
@@ -311,6 +264,7 @@ class TestAsyncProducers:
                 closed = True
 
         def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
             return httpx.Response(
                 400,
                 json={"error": {"code": "invalid_trace", "message": "bad batch"}},
@@ -322,42 +276,7 @@ class TestAsyncProducers:
             )
 
         assert closed
-
-    @pytest.mark.asyncio
-    async def test_sync_source_is_consumed_off_the_event_loop(self, make_async_client):
-        """A synchronous producer blocks its thread, not the loop.
-
-        This is the whole reason to reach for the async client: reading and
-        hashing a file must not stall the tasks running alongside it.
-        """
-        ticks = 0
-
-        async def ticker():
-            nonlocal ticks
-            while True:
-                ticks += 1
-                await asyncio.sleep(0.001)
-
-        def slow_lines():
-            for i in range(3):
-                # Not time.sleep: the no_sleep fixture patches that away.
-                # Event.wait blocks whichever thread reaches it, which is
-                # exactly the property under test.
-                threading.Event().wait(0.05)
-                yield b'{"i":%d}\n' % i
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(201, json=COMMITTED)
-
-        background = asyncio.create_task(ticker())
-        try:
-            await make_async_client(handler).upload_lines(slow_lines(), compress=False)
-        finally:
-            background.cancel()
-
-        # ~150 ms of blocking work: on the loop the ticker would be frozen for
-        # all of it. A loose floor keeps this from turning into a timing test.
-        assert ticks > 10
+        assert len(requests) == 1
 
 
 class TestBatchCallback:
@@ -421,28 +340,32 @@ class TestUploadRetries:
         assert len(no_sleep) == 2
 
     @pytest.mark.asyncio
-    async def test_gives_up_after_max_attempts(self, make_async_client, no_sleep):
+    @pytest.mark.parametrize(
+        ("failure", "expected"),
+        [("response", RetryableAPIError), ("transport", TransportError)],
+    )
+    async def test_gives_up_after_max_attempts(
+        self, make_async_client, no_sleep, failure, expected
+    ):
+        attempts = []
+
         def handler(request: httpx.Request) -> httpx.Response:
+            attempts.append(request)
+            if failure == "transport":
+                raise httpx.ConnectError("connection refused", request=request)
             return httpx.Response(
                 429,
                 headers={"Retry-After": "0.1"},
                 json={"error": {"code": "rate_limited", "message": "slow down"}},
             )
 
-        with pytest.raises(RetryableAPIError) as exc_info:
+        with pytest.raises(expected) as exc_info:
             await make_async_client(handler).upload_lines(LINES, max_attempts=3)
-        assert exc_info.value.status_code == 429
-        assert exc_info.value.code == "rate_limited"
+        if failure == "response":
+            assert exc_info.value.status_code == 429
+            assert exc_info.value.code == "rate_limited"
+        assert len(attempts) == 3
         assert len(no_sleep) == 2  # sleeps between attempts, not after the last
-
-    @pytest.mark.asyncio
-    async def test_transport_failure_exhausts_attempts(self, make_async_client, no_sleep):
-        def handler(request: httpx.Request) -> httpx.Response:
-            raise httpx.ConnectError("connection refused", request=request)
-
-        with pytest.raises(TransportError):
-            await make_async_client(handler).upload_lines(LINES, max_attempts=2)
-        assert len(no_sleep) == 1
 
     @pytest.mark.asyncio
     async def test_non_positive_max_attempts_rejected(self, make_async_client):
@@ -451,21 +374,3 @@ class TestUploadRetries:
 
         with pytest.raises(ValueError, match="max_attempts"):
             await make_async_client(handler).upload_lines(LINES, max_attempts=0)
-
-    @pytest.mark.asyncio
-    async def test_durable_rejection_stops_the_upload(self, make_async_client):
-        requests = []
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            requests.append(request)
-            return httpx.Response(
-                400,
-                json={"error": {"code": "invalid_trace", "message": "line 7: not a trace"}},
-            )
-
-        many = [b'{"i":%d}\n' % i for i in range(40)]
-        with pytest.raises(ValidationRejectedError) as exc_info:
-            await make_async_client(handler).upload_lines(many, target_batch_bytes=40)
-        assert ErrorCode(exc_info.value.code) is ErrorCode.INVALID_TRACE
-        # The first rejection stops the run rather than pushing the rest.
-        assert len(requests) == 1

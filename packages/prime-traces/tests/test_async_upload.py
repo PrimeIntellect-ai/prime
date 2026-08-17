@@ -168,6 +168,49 @@ class TestAsyncProducers:
         assert serialization_thread != loop_thread
 
     @pytest.mark.asyncio
+    async def test_cancellation_waits_for_async_record_serialization(self, make_async_client):
+        serialization_started = threading.Event()
+        release_serialization = threading.Event()
+        serialization_finished = threading.Event()
+        producer_closed = False
+
+        class SlowRecord:
+            def to_record(self):
+                serialization_started.set()
+                release_serialization.wait()
+                serialization_finished.set()
+                return {"id": "a"}
+
+        async def records():
+            nonlocal producer_closed
+            try:
+                yield SlowRecord()
+            finally:
+                producer_closed = True
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            pytest.fail(f"unexpected request: {request.url}")
+
+        task = asyncio.create_task(
+            make_async_client(handler).upload_records(records(), compress=False)
+        )
+        await asyncio.to_thread(serialization_started.wait)
+
+        task.cancel()
+        await asyncio.sleep(0.01)
+
+        assert not task.done()
+        assert not serialization_finished.is_set()
+        assert not producer_closed
+
+        release_serialization.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert serialization_finished.is_set()
+        assert producer_closed
+
+    @pytest.mark.asyncio
     async def test_async_lines_batch_identically_to_sync_lines(self, make_async_client):
         many = [b'{"i":%d}\n' % i for i in range(40)]
         keys = []

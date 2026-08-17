@@ -81,7 +81,7 @@ async def _arecord_lines(records: AsyncIterable[TraceRecord]) -> AsyncIterator[b
     try:
         async for record in iterator:
             record_number += 1
-            yield await asyncio.to_thread(_encode_record, record, record_number)
+            yield await _run_sync_operation_safely(_encode_record, record, record_number)
     finally:
         close = getattr(iterator, "aclose", None)
         if close is not None:
@@ -158,14 +158,14 @@ async def _open_partial_file_safely(dest: Path):
         raise
 
 
-async def _run_file_operation_safely(operation: Callable[..., Any], *args: Any) -> Any:
-    """Run a file operation in a worker without abandoning it on cancellation.
+async def _run_sync_operation_safely(operation: Callable[..., Any], *args: Any) -> Any:
+    """Run synchronous work in a worker without abandoning it on cancellation.
 
     Cancelling an await of ``to_thread`` does not stop a worker that has already
-    started. Keep the worker task shielded and wait for it to relinquish the
-    file before propagating cancellation, so cleanup never races with an
-    outstanding write or close. Waiting remains asynchronous, which keeps the
-    event loop responsive even when the filesystem is slow.
+    started. Keep the worker task shielded and wait for it to finish before
+    propagating cancellation, so producer or file cleanup never races with
+    outstanding synchronous work. Waiting remains asynchronous, which keeps
+    the event loop responsive while the worker finishes.
     """
     operation_task = asyncio.create_task(asyncio.to_thread(operation, *args))
     try:
@@ -187,8 +187,8 @@ async def _run_file_operation_safely(operation: Callable[..., Any], *args: Any) 
                 operation_task.result()
             except BaseException:
                 # Cancellation remains the caller-visible outcome. Retrieving
-                # a concurrent filesystem error prevents an unobserved-task
-                # warning while the outer cleanup still closes the handle.
+                # a concurrent operation error prevents an unobserved-task
+                # warning while the outer cleanup releases owned resources.
                 pass
         raise
 
@@ -443,9 +443,9 @@ class AsyncTracesClient:
             stream = self.client.stream_bytes(endpoint, params=params)
             async with aclosing(stream) as chunks:
                 async for chunk in chunks:
-                    await _run_file_operation_safely(handle.write, chunk)
+                    await _run_sync_operation_safely(handle.write, chunk)
                     written += len(chunk)
-            await _run_file_operation_safely(handle.close)
+            await _run_sync_operation_safely(handle.close)
             # Replacing a sibling file is a fast, atomic metadata operation.
             # Keep this commit step on the event-loop thread so cancellation
             # cannot report failure after a detached worker replaced ``dest``.

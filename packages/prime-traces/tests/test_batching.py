@@ -282,3 +282,48 @@ class TestAsyncBatching:
         with pytest.raises(asyncio.CancelledError):
             await task
         assert closed.is_set()
+
+    @pytest.mark.asyncio
+    async def test_repeated_cancellation_waits_for_async_source_cleanup(self):
+        close_started = asyncio.Event()
+        release_close = asyncio.Event()
+        closed = False
+
+        class SlowSource:
+            def __init__(self):
+                self.first = True
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.first:
+                    self.first = False
+                    return line("{}")
+                await asyncio.Event().wait()
+
+            async def aclose(self):
+                nonlocal closed
+                close_started.set()
+                await release_close.wait()
+                closed = True
+
+        batches = aiter_batches(SlowSource())
+        task = asyncio.create_task(batches.__anext__())
+        await asyncio.sleep(0)
+
+        task.cancel()
+        await close_started.wait()
+
+        # A second cancellation must not interrupt a source that is still
+        # releasing its files, connections or producer tasks.
+        task.cancel()
+        await asyncio.sleep(0.01)
+        assert not task.done()
+        assert not closed
+
+        release_close.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert closed

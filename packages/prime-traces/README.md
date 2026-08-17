@@ -92,7 +92,7 @@ asyncio.run(main())
 
 | Source                 | Meaning                                                                |
 | ---------------------- | ---------------------------------------------------------------------- |
-| `PRIME_API_KEY`        | Platform API token, needs the `traces` scope                           |
+| `PRIME_API_KEY`        | Platform API token, needs `traces:read` / `traces:write` scopes        |
 | `PRIME_TRACES_URL`     | Base URL of the Prime Traces service (**required** during closed beta) |
 | `PRIME_TEAM_ID`        | Optional team context, sent as `X-Prime-Team-ID`                       |
 | `~/.prime/config.json` | Shared prime CLI config (`api_key`, `team_id`, `traces_url`)           |
@@ -107,8 +107,8 @@ Precedence is constructor argument → environment variable → config file.
 
 ## Examples
 
-Runnable scripts covering upload, query, episodes and error handling live in
-[`examples/`](./examples).
+The runnable [`basic_usage.py`](./examples/basic_usage.py) example covers
+upload, query, downloads and error handling.
 
 ## Related packages
 

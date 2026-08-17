@@ -22,7 +22,7 @@ import threading
 from collections.abc import AsyncIterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import AsyncGenerator, Callable, Generator, Iterable, Iterator, Union
+from typing import AsyncGenerator, Awaitable, Callable, Generator, Iterable, Iterator, Union
 
 from .exceptions import TraceTooLargeError
 
@@ -96,6 +96,36 @@ async def _run_sync_cleanup_safely(operation: Callable[[], None]) -> None:
     source is still open in the background.
     """
     operation_task = asyncio.create_task(asyncio.to_thread(operation))
+    try:
+        await asyncio.shield(operation_task)
+    except asyncio.CancelledError:
+        while not operation_task.done():
+            try:
+                await asyncio.shield(operation_task)
+            except asyncio.CancelledError:
+                continue
+            except BaseException:
+                break
+
+        if not operation_task.cancelled():
+            try:
+                operation_task.result()
+            except BaseException:
+                # Cancellation remains caller-visible. Retrieving a concurrent
+                # cleanup error also prevents an unobserved-task warning.
+                pass
+        raise
+
+
+async def _run_async_cleanup_safely(operation: Callable[[], Awaitable[None]]) -> None:
+    """Finish async source cleanup before propagating cancellation.
+
+    A repeated cancellation request can otherwise interrupt an iterator's
+    ``aclose()`` while it is releasing files, connections or producer tasks.
+    Shield the close task and wait through further cancellation requests so
+    the source is closed before its consumer regains control.
+    """
+    operation_task = asyncio.create_task(operation())
     try:
         await asyncio.shield(operation_task)
     except asyncio.CancelledError:
@@ -283,4 +313,4 @@ async def aiter_batches(
             # that may own files, connections or producer tasks.
             close = getattr(iterator, "aclose", None)
             if close is not None:
-                await close()
+                await _run_async_cleanup_safely(close)

@@ -46,6 +46,19 @@ MAX_BATCH_LINES = 1_000_000
 DEFAULT_TARGET_BATCH_BYTES = 30 * MIB
 
 
+def _is_blank_line(line: bytes) -> bool:
+    """Whether ``line`` contains only ASCII whitespace, without copying it."""
+    return not line or line.isspace()
+
+
+def _line_content_size(line: bytes) -> int:
+    """Return the byte length after trailing LF terminators, without slicing."""
+    end = len(line)
+    while end and line[end - 1] == 0x0A:
+        end -= 1
+    return end
+
+
 @dataclass(frozen=True)
 class Batch:
     """One upload request's exact bytes and content-addressed identity."""
@@ -105,7 +118,7 @@ class _BatchBuilder:
 
     def closes_before(self, line_number: int, line: bytes) -> bool:
         """Validate ``line``, then report whether it must start a new batch."""
-        content_size = len(line.rstrip(b"\n"))
+        content_size = _line_content_size(line)
         if content_size > self._max_line_bytes:
             raise TraceTooLargeError(line_number, content_size, self._max_line_bytes)
         return bool(self._buffer) and (
@@ -162,7 +175,7 @@ def iter_batches(
         target_bytes=target_bytes, max_line_bytes=max_line_bytes, max_lines=max_lines
     )
     for line_number, line in enumerate(lines, start=1):
-        if not line.strip():
+        if _is_blank_line(line):
             continue
         if builder.closes_before(line_number, line):
             yield builder.close()
@@ -226,7 +239,7 @@ async def aiter_batches(
         try:
             async for line in iterator:
                 line_number += 1
-                if not line.strip():
+                if _is_blank_line(line):
                     continue
                 if builder.closes_before(line_number, line):
                     yield await asyncio.to_thread(builder.close)

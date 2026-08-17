@@ -82,6 +82,13 @@ class TestChunkClosing:
 
 
 class TestLineValidation:
+    class NoStripBytes(bytes):
+        def strip(self, *args, **kwargs):
+            raise AssertionError("batching must not copy a line with strip()")
+
+        def rstrip(self, *args, **kwargs):
+            raise AssertionError("batching must not copy a line with rstrip()")
+
     def test_oversized_line_rejected_locally(self):
         big = line('{"pad":"' + "x" * 64 + '"}')
         with pytest.raises(TraceTooLargeError) as exc_info:
@@ -112,6 +119,14 @@ class TestLineValidation:
         [batch] = iter_batches(lines)
         assert batch.num_lines == 2
         assert batch.data == b'{"id":"a"}\n{"id":"b"}\n'
+
+    def test_line_checks_do_not_strip_or_copy_input(self):
+        record = self.NoStripBytes(b'{"id":"a"}\n')
+        blank = self.NoStripBytes(b" \t\r\n")
+
+        [batch] = iter_batches([record, blank], max_line_bytes=len(record) - 1)
+
+        assert batch.data == record
 
 
 class TestFileReading:
@@ -177,6 +192,16 @@ class TestAsyncBatching:
         with pytest.raises(TraceTooLargeError) as exc_info:
             await collect(source, max_line_bytes=32)
         assert exc_info.value.line_number == 2
+
+    @pytest.mark.asyncio
+    async def test_async_line_checks_do_not_strip_or_copy_input(self):
+        guard = TestLineValidation.NoStripBytes
+        record = guard(b'{"id":"a"}\n')
+        source = alines([record, guard(b" \t\r\n")])
+
+        [batch] = await collect(source, max_line_bytes=len(record) - 1)
+
+        assert batch.data == record
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("as_async", [False, True])

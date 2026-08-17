@@ -22,7 +22,7 @@ import threading
 from collections.abc import AsyncIterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import AsyncIterator, Generator, Iterable, Iterator, Union
+from typing import AsyncGenerator, Generator, Iterable, Iterator, Union
 
 from .exceptions import TraceTooLargeError
 
@@ -178,7 +178,7 @@ async def aiter_batches(
     target_bytes: int = DEFAULT_TARGET_BATCH_BYTES,
     max_line_bytes: int = MAX_LINE_BYTES,
     max_lines: int = MAX_BATCH_LINES,
-) -> AsyncIterator[Batch]:
+) -> AsyncGenerator[Batch, None]:
     """Async counterpart of ``iter_batches``, accepting either kind of input.
 
     Batching is CPU- and disk-bound, not I/O-concurrent, so the work is moved
@@ -222,13 +222,22 @@ async def aiter_batches(
             target_bytes=target_bytes, max_line_bytes=max_line_bytes, max_lines=max_lines
         )
         line_number = 0
-        async for line in lines:
-            line_number += 1
-            if not line.strip():
-                continue
-            if builder.closes_before(line_number, line):
-                yield await asyncio.to_thread(builder.close)
-            builder.add(line_number, line)
+        iterator = aiter(lines)
+        try:
+            async for line in iterator:
+                line_number += 1
+                if not line.strip():
+                    continue
+                if builder.closes_before(line_number, line):
+                    yield await asyncio.to_thread(builder.close)
+                builder.add(line_number, line)
 
-        if builder.pending:
-            yield await asyncio.to_thread(builder.close)
+            if builder.pending:
+                yield await asyncio.to_thread(builder.close)
+        finally:
+            # ``async for`` does not close an iterator when this batching
+            # generator is abandoned. Propagate cleanup to async generators
+            # that may own files, connections or producer tasks.
+            close = getattr(iterator, "aclose", None)
+            if close is not None:
+                await close()

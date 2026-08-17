@@ -222,6 +222,30 @@ class TestPointReads:
         assert not dest.exists()
         assert list(tmp_path.glob(".prime-traces-*")) == []
 
+    @pytest.mark.asyncio
+    async def test_final_replace_is_an_uncancellable_commit(
+        self, make_async_client, monkeypatch, tmp_path
+    ):
+        loop_thread = threading.get_ident()
+        replace_thread = None
+        original_replace = async_traces_module.Path.replace
+
+        def observed_replace(path, target):
+            nonlocal replace_thread
+            replace_thread = threading.get_ident()
+            return original_replace(path, target)
+
+        monkeypatch.setattr(async_traces_module.Path, "replace", observed_replace)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=b"complete")
+
+        dest = tmp_path / "trace.json"
+        await make_async_client(handler).download_raw("8d3f1a2b", dest)
+
+        assert replace_thread == loop_thread
+        assert dest.read_bytes() == b"complete"
+
     @pytest.mark.parametrize(
         ("status", "code", "expected"),
         [

@@ -197,6 +197,31 @@ class TestAsyncProducers:
             await make_async_client(handler).upload_records(records())
 
     @pytest.mark.asyncio
+    async def test_failed_upload_closes_the_async_record_producer(self, make_async_client):
+        closed = False
+
+        async def records():
+            nonlocal closed
+            try:
+                for i in range(20):
+                    yield {"id": i}
+            finally:
+                closed = True
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                400,
+                json={"error": {"code": "invalid_trace", "message": "bad batch"}},
+            )
+
+        with pytest.raises(ValidationRejectedError):
+            await make_async_client(handler).upload_records(
+                records(), target_batch_bytes=40, compress=False
+            )
+
+        assert closed
+
+    @pytest.mark.asyncio
     async def test_sync_source_is_consumed_off_the_event_loop(self, make_async_client):
         """A synchronous producer blocks its thread, not the loop.
 

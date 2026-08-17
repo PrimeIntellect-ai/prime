@@ -204,6 +204,24 @@ class TestAsyncBatching:
         assert consumed < len(self.LINES)
 
     @pytest.mark.asyncio
+    async def test_abandoning_the_iterator_closes_an_async_source(self):
+        closed = False
+
+        async def source():
+            nonlocal closed
+            try:
+                for value in self.LINES:
+                    yield value
+            finally:
+                closed = True
+
+        batches = aiter_batches(source(), target_bytes=200)
+        await batches.__anext__()
+        await batches.aclose()
+
+        assert closed
+
+    @pytest.mark.asyncio
     async def test_cancellation_waits_for_sync_source_before_closing_iterator(self):
         """Cancellation must not close a generator still running in a worker."""
         started = threading.Event()

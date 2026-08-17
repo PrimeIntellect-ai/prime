@@ -28,6 +28,7 @@ import asyncio
 import inspect
 import tempfile
 from collections.abc import AsyncIterable
+from contextlib import aclosing
 from pathlib import Path
 from typing import (
     Any,
@@ -76,9 +77,15 @@ BatchCallback = Callable[[Batch, UploadReceipt], Union[None, Awaitable[None]]]
 async def _arecord_lines(records: AsyncIterable[TraceRecord]) -> AsyncIterator[bytes]:
     """Serialize records from an async producer as they arrive."""
     record_number = 0
-    async for record in records:
-        record_number += 1
-        yield await asyncio.to_thread(_encode_record, record, record_number)
+    iterator = aiter(records)
+    try:
+        async for record in iterator:
+            record_number += 1
+            yield await asyncio.to_thread(_encode_record, record, record_number)
+    finally:
+        close = getattr(iterator, "aclose", None)
+        if close is not None:
+            await close()
 
 
 def _record_lines_for(
@@ -232,21 +239,22 @@ class AsyncTracesClient:
     ) -> List[UploadReceipt]:
         """Upload raw JSONL lines, sync or async. See ``upload_file``."""
         receipts: List[UploadReceipt] = []
-        async for batch in aiter_batches(lines, target_bytes=target_batch_bytes):
-            result = await self._send_with_retry(
-                batch,
-                line_format=line_format,
-                context=context,
-                schema_version=schema_version,
-                compress=compress,
-                max_attempts=max_attempts,
-            )
-            receipt = UploadReceipt.model_validate(result)
-            receipts.append(receipt)
-            if on_batch is not None:
-                outcome = on_batch(batch, receipt)
-                if inspect.isawaitable(outcome):
-                    await outcome
+        async with aclosing(aiter_batches(lines, target_bytes=target_batch_bytes)) as batches:
+            async for batch in batches:
+                result = await self._send_with_retry(
+                    batch,
+                    line_format=line_format,
+                    context=context,
+                    schema_version=schema_version,
+                    compress=compress,
+                    max_attempts=max_attempts,
+                )
+                receipt = UploadReceipt.model_validate(result)
+                receipts.append(receipt)
+                if on_batch is not None:
+                    outcome = on_batch(batch, receipt)
+                    if inspect.isawaitable(outcome):
+                        await outcome
         return receipts
 
     async def _send_with_retry(
@@ -391,7 +399,10 @@ class AsyncTracesClient:
                 await asyncio.to_thread(handle.write, chunk)
                 written += len(chunk)
             await asyncio.to_thread(handle.close)
-            await asyncio.to_thread(partial.replace, dest)
+            # Replacing a sibling file is a fast, atomic metadata operation.
+            # Keep this commit step on the event-loop thread so cancellation
+            # cannot report failure after a detached worker replaced ``dest``.
+            partial.replace(dest)
         except BaseException:
             handle.close()
             partial.unlink(missing_ok=True)

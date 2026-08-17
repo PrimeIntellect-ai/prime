@@ -22,7 +22,16 @@ import threading
 from collections.abc import AsyncIterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import AsyncGenerator, Awaitable, Callable, Generator, Iterable, Iterator, Union
+from typing import (
+    AsyncGenerator,
+    Awaitable,
+    Callable,
+    Generator,
+    Iterable,
+    Iterator,
+    Optional,
+    Union,
+)
 
 from .exceptions import TraceTooLargeError
 
@@ -263,8 +272,23 @@ async def aiter_batches(
     replaying the receipts of the batches it already committed.
     """
     if not isinstance(lines, AsyncIterable):
+        active_source: Optional[Iterator[bytes]] = None
+
+        def source_lines() -> Generator[bytes, None, None]:
+            nonlocal active_source
+            # Construct the source iterator lazily so even user-defined
+            # ``__iter__`` work stays off the event loop. Keep it separately so
+            # cleanup can close it after this proxy or ``iter_batches`` exits.
+            active_source = iter(lines)
+            for line in active_source:
+                yield line
+
+        source_iterator = source_lines()
         iterator = iter_batches(
-            lines, target_bytes=target_bytes, max_line_bytes=max_line_bytes, max_lines=max_lines
+            source_iterator,
+            target_bytes=target_bytes,
+            max_line_bytes=max_line_bytes,
+            max_lines=max_lines,
         )
         iterator_lock = threading.Lock()
 
@@ -277,7 +301,19 @@ async def aiter_batches(
 
         def close_iterator() -> None:
             with iterator_lock:
-                iterator.close()
+                try:
+                    iterator.close()
+                finally:
+                    # ``iter_batches`` uses an ordinary ``for`` loop, whose
+                    # generator close does not propagate to the iterator it is
+                    # consuming. Close both the lazy proxy and the actual source
+                    # so retained file or producer iterators release resources.
+                    try:
+                        source_iterator.close()
+                    finally:
+                        close = getattr(active_source, "close", None)
+                        if close is not None:
+                            close()
 
         try:
             while True:

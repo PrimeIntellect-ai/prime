@@ -45,6 +45,7 @@ from typing import (
 from .batching import (
     DEFAULT_TARGET_BATCH_BYTES,
     Batch,
+    _run_async_cleanup_safely,
     aiter_batches,
     read_jsonl_lines,
 )
@@ -85,7 +86,7 @@ async def _arecord_lines(records: AsyncIterable[TraceRecord]) -> AsyncIterator[b
     finally:
         close = getattr(iterator, "aclose", None)
         if close is not None:
-            await close()
+            await _run_async_cleanup_safely(close)
 
 
 def _record_lines_for(

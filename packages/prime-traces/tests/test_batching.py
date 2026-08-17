@@ -167,6 +167,23 @@ class TestAsyncBatching:
         assert actual == expected
 
     @pytest.mark.asyncio
+    async def test_sync_source_iterator_is_created_off_the_event_loop(self):
+        loop_thread = threading.get_ident()
+        iterator_thread = None
+        lines = self.LINES
+
+        class Source:
+            def __iter__(self):
+                nonlocal iterator_thread
+                iterator_thread = threading.get_ident()
+                return iter(lines)
+
+        await collect(Source(), target_bytes=200)
+
+        assert iterator_thread is not None
+        assert iterator_thread != loop_thread
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("as_async", [False, True])
     async def test_blank_lines_skipped_and_line_numbers_follow_the_source(self, as_async):
         lines = [b"\n", line('{"id":"a"}'), b"   \n", line('{"id":"b"}')]
@@ -227,6 +244,51 @@ class TestAsyncBatching:
 
         # Enough for the first batch and its lookahead, nowhere near the file.
         assert consumed < len(self.LINES)
+
+    @pytest.mark.asyncio
+    async def test_abandoning_the_iterator_closes_a_retained_sync_source(self):
+        closed = False
+
+        def source():
+            nonlocal closed
+            try:
+                yield from self.LINES
+            finally:
+                closed = True
+
+        retained_source = source()
+        batches = aiter_batches(retained_source, target_bytes=200)
+        await batches.__anext__()
+        await batches.aclose()
+
+        assert closed
+
+    @pytest.mark.asyncio
+    async def test_source_error_closes_a_retained_sync_source(self):
+        closed = False
+
+        class FailingSource:
+            def __init__(self):
+                self.first = True
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                if self.first:
+                    self.first = False
+                    return line("{}")
+                raise RuntimeError("source failed")
+
+            def close(self):
+                nonlocal closed
+                closed = True
+
+        retained_source = FailingSource()
+        with pytest.raises(RuntimeError, match="source failed"):
+            await collect(retained_source)
+
+        assert closed
 
     @pytest.mark.asyncio
     async def test_abandoning_the_iterator_closes_an_async_source(self):

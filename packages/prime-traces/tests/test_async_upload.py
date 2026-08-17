@@ -211,6 +211,65 @@ class TestAsyncProducers:
         assert producer_closed
 
     @pytest.mark.asyncio
+    async def test_repeated_cancellation_waits_for_async_record_producer_close(
+        self, make_async_client
+    ):
+        serialization_started = threading.Event()
+        release_serialization = threading.Event()
+        close_started = asyncio.Event()
+        release_close = asyncio.Event()
+        producer_closed = False
+
+        class SlowRecord:
+            def to_record(self):
+                serialization_started.set()
+                release_serialization.wait()
+                return {"id": "a"}
+
+        class SlowClosingRecords:
+            def __init__(self):
+                self.first = True
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.first:
+                    self.first = False
+                    return SlowRecord()
+                raise StopAsyncIteration
+
+            async def aclose(self):
+                nonlocal producer_closed
+                close_started.set()
+                await release_close.wait()
+                producer_closed = True
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            pytest.fail(f"unexpected request: {request.url}")
+
+        task = asyncio.create_task(
+            make_async_client(handler).upload_records(SlowClosingRecords(), compress=False)
+        )
+        await asyncio.to_thread(serialization_started.wait)
+
+        task.cancel()
+        release_serialization.set()
+        await close_started.wait()
+
+        # A second cancellation while producer cleanup is awaiting must not
+        # detach the close task and return control with producer resources open.
+        task.cancel()
+        await asyncio.sleep(0.01)
+        assert not task.done()
+        assert not producer_closed
+
+        release_close.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert producer_closed
+
+    @pytest.mark.asyncio
     async def test_async_lines_batch_identically_to_sync_lines(self, make_async_client):
         many = [b'{"i":%d}\n' % i for i in range(40)]
         keys = []

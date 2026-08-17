@@ -65,6 +65,29 @@ detail = client.get_episode(episode_id)      # + member aggregate under .traces
 members = client.list_episode_traces(episode_id, has_error=True)
 ```
 
+## Async
+
+`AsyncTracesClient` mirrors `TracesClient` method for method.
+
+```python
+import asyncio
+from prime_traces import AsyncTracesClient
+
+async def main():
+    async with AsyncTracesClient() as client:
+        await client.upload_records(traces, context={"source": "prime-rl"})
+
+        page, episodes = await asyncio.gather(   # reads overlap
+            client.list(run_id="run_9f3k2m"),
+            client.list_episodes(run_id="run_9f3k2m"),
+        )
+
+        async for summary in client.iter(task_id="tb2-0187"):
+            ...
+
+asyncio.run(main())
+```
+
 ## Configuration
 
 | Source                 | Meaning                                                                |
@@ -81,7 +104,6 @@ Precedence is constructor argument → environment variable → config file.
 - **Exports** — the service route exists but is unimplemented, so wrapping it
   would ship a method that cannot succeed.
 - **Search and free-text queries.**
-- **An async client** — coming once the sync surface settles.
 
 ## Examples
 

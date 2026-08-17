@@ -1,37 +1,54 @@
-"""High-level client for Prime Traces.
+"""Async high-level client for Prime Traces.
 
-Wraps the wire client with upload batching/retry and typed read paths.
+The asyncio counterpart of ``traces.TracesClient``, with the same method
+names, arguments, return types and failure semantics. Everything that decides
+*what* a call does — filter encoding, ID encoding, record serialization,
+batching, retry classification — is imported from the sync modules rather than
+restated, so the two surfaces cannot answer the same question differently. The
+async client owns only the awaiting, plus two things a sync client never has
+to think about:
 
-The read surface matches the service's pinned response models
-(``prime-traces/src/traces/models.py`` and ``src/episodes/models.py`` in the
-platform repo): pages are ``{items, next_cursor}``, trace summaries nest
-``model``/``score``/``execution``, episodes nest ``error`` and the member
-aggregate.
+- Blocking work is moved off the event loop. Reading a JSONL file, hashing a
+  batch, gzipping a body and writing a download to disk all happen in worker
+  threads, so one 30 MiB upload does not stall every other task in the
+  process.
+- Producers may be async. ``upload_records`` and ``upload_lines`` accept an
+  async iterable as readily as a sync one, so rollouts can stream straight
+  from an async generator without being collected first.
 
-Deliberately not implemented (open v0 contract decisions — do not freeze
-them here): exports in any form — the service publishes ``GET /traces/export``
-and the job routes, but all three handlers raise ``NotImplementedError``,
-which FastAPI answers as 500, and the streaming route declares no query
-parameters, so there is no filter vocabulary to bind to; ``/search``; episode
-writes (episodes are read-only, written only as a side effect of
-episode-grouped uploads); and the dot-path query compiler (needs the server-side
-field registry).
+Uploads still send one batch at a time. The contract allows 2–8 requests in
+flight per producer, but that is a throughput decision to make against the
+running service, and a concurrent version has to answer what a durable
+rejection means for batches already in flight — so the ordering, the receipt
+sequence and the stop-on-400 behaviour stay identical to the sync client for
+now.
 """
 
-import json
+import asyncio
+import inspect
 import tempfile
-import time
+from collections.abc import AsyncIterable
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Protocol, Union
-from urllib.parse import quote
+from typing import (
+    Any,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Optional,
+    Union,
+)
 
 from .batching import (
     DEFAULT_TARGET_BATCH_BYTES,
     Batch,
-    iter_batches,
+    aiter_batches,
     read_jsonl_lines,
 )
-from .core.client import TracesAPIClient, retry_delay
+from .core.async_client import AsyncTracesAPIClient, retry_sleep
+from .core.client import retry_delay
 from .exceptions import RetryableAPIError, TransportError
 from .models import (
     EpisodeDetail,
@@ -41,113 +58,66 @@ from .models import (
     TraceSummary,
     UploadReceipt,
 )
+from .traces import (
+    DEFAULT_MAX_ATTEMPTS,
+    TraceRecord,
+    _build_params,
+    _encode_record,
+    _episode_endpoint,
+    _record_lines,
+    _trace_endpoint,
+)
 
-DEFAULT_MAX_ATTEMPTS = 5
-
-
-class SupportsToRecord(Protocol):
-    """An in-memory trace or episode that can produce its JSON record.
-
-    Verifiers ``Trace`` / ``Episode`` and prime-rl ``Rollout`` objects satisfy
-    this protocol without prime-traces importing either producer package.
-    """
-
-    def to_record(self) -> Mapping[str, Any]: ...
-
-
-TraceRecord = Union[Mapping[str, Any], SupportsToRecord]
+#: An ``on_batch`` hook may be a plain callable or a coroutine function; the
+#: uploader awaits whatever it returns if that turns out to be awaitable.
+BatchCallback = Callable[[Batch, UploadReceipt], Union[None, Awaitable[None]]]
 
 
-def _encode_record(record: TraceRecord, record_number: int) -> bytes:
-    """Serialize one in-memory record as a compact UTF-8 JSONL line.
-
-    Shared with the async client so both surfaces produce byte-identical
-    lines — and therefore the same content-addressed upload IDs — for the
-    same records.
-    """
-    if isinstance(record, Mapping):
-        value = record
-    else:
-        to_record = getattr(record, "to_record", None)
-        if not callable(to_record):
-            raise TypeError(f"Record {record_number} must be a mapping or implement to_record()")
-        value = to_record()
-        if not isinstance(value, Mapping):
-            raise TypeError(f"Record {record_number} to_record() must return a mapping")
-
-    # Compact separators match common JSONL writers, ensure_ascii=False
-    # keeps the wire representation UTF-8, and allow_nan=False prevents
-    # emitting JavaScript-only NaN/Infinity values that strict JSON rejects.
-    return (
-        json.dumps(
-            dict(value),
-            ensure_ascii=False,
-            allow_nan=False,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        + b"\n"
-    )
-
-
-def _record_lines(records: Iterable[TraceRecord]) -> Iterator[bytes]:
-    """Serialize in-memory records lazily as compact UTF-8 JSONL lines."""
-    for record_number, record in enumerate(records, start=1):
+async def _arecord_lines(records: AsyncIterable[TraceRecord]) -> AsyncIterator[bytes]:
+    """Serialize records from an async producer as they arrive."""
+    record_number = 0
+    async for record in records:
+        record_number += 1
         yield _encode_record(record, record_number)
 
 
-def _build_params(
-    pairs: Iterable[tuple], context: Optional[Dict[str, str]] = None
-) -> Dict[str, object]:
-    """Drop unset filters and expand the context map to ``context.<key>``."""
-    params: Dict[str, object] = {key: value for key, value in pairs if value is not None}
-    if context:
-        for key, value in context.items():
-            params[f"context.{key}"] = value
-    return params
+def _record_lines_for(
+    records: Union[Iterable[TraceRecord], AsyncIterable[TraceRecord]],
+) -> Union[Iterable[bytes], AsyncIterator[bytes]]:
+    """Encode records, preserving whether the source is sync or async.
+
+    ``aiter_batches`` consumes a synchronous source entirely in a worker
+    thread, so handing it the sync generator — rather than adapting it to an
+    async one here — is what keeps ``json.dumps`` over large records off the
+    event loop.
+    """
+    if isinstance(records, AsyncIterable):
+        return _arecord_lines(records)
+    return _record_lines(records)
 
 
-def _encoded_id_segment(identifier: str, *, parameter_name: str) -> str:
-    """Encode a resource ID as one URL path segment."""
-    if "/" in identifier:
-        # ASGI decodes %2F before Starlette route matching, so the service's
-        # /{resource}/{id} routes see an extra path segment and return 404.
-        # Fail locally until that route accepts a path-valued parameter rather
-        # than issuing a request that cannot address the uploaded resource.
-        raise ValueError(
-            f"{parameter_name} cannot contain '/' until the service supports path-valued IDs"
-        )
-    encoded = quote(identifier, safe="")
-    # RFC 3986 leaves periods unescaped even with ``safe=""``. A segment that
-    # is exactly "." or ".." is special, though: HTTP clients normalize it
-    # away before sending the request, which would target the collection or API
-    # root instead of the requested trace. Percent-encode those two IDs
-    # explicitly so they remain ordinary path-segment values on the wire.
-    if encoded in {".", ".."}:
-        encoded = encoded.replace(".", "%2E")
-    return encoded
+def _open_partial_file(dest: Path):
+    """Open the sibling temporary file a download is staged through."""
+    return tempfile.NamedTemporaryFile(
+        mode="wb",
+        dir=dest.parent,
+        prefix=".prime-traces-",
+        suffix=".partial",
+        delete=False,
+    )
 
 
-def _trace_endpoint(trace_id: str) -> str:
-    """Build a trace endpoint with the ID encoded as one path segment."""
-    return f"/traces/{_encoded_id_segment(trace_id, parameter_name='trace_id')}"
+class AsyncTracesClient:
+    """Async client for the Prime Traces API."""
 
-
-def _episode_endpoint(episode_id: str) -> str:
-    """Build an episode endpoint with the ID encoded as one path segment."""
-    return f"/episodes/{_encoded_id_segment(episode_id, parameter_name='episode_id')}"
-
-
-class TracesClient:
-    """Client for the Prime Traces API."""
-
-    def __init__(self, api_client: Optional[TracesAPIClient] = None, **client_kwargs):
-        self.client = api_client or TracesAPIClient(**client_kwargs)
+    def __init__(self, api_client: Optional[AsyncTracesAPIClient] = None, **client_kwargs):
+        self.client = api_client or AsyncTracesAPIClient(**client_kwargs)
 
     # -- upload -------------------------------------------------------------
 
-    def upload_records(
+    async def upload_records(
         self,
-        records: Iterable[TraceRecord],
+        records: Union[Iterable[TraceRecord], AsyncIterable[TraceRecord]],
         *,
         line_format: LineFormat = LineFormat.TRACE,
         context: Optional[Dict[str, str]] = None,
@@ -155,18 +125,18 @@ class TracesClient:
         compress: bool = True,
         target_batch_bytes: int = DEFAULT_TARGET_BATCH_BYTES,
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
-        on_batch: Optional[Callable[[Batch, UploadReceipt], None]] = None,
+        on_batch: Optional[BatchCallback] = None,
     ) -> List[UploadReceipt]:
         """Upload trace or episode records directly from memory.
 
         Each input may be a JSON-compatible mapping or an object implementing
         ``to_record()``, including verifiers ``Trace`` / ``Episode`` and
-        prime-rl ``Rollout`` objects. Records are serialized lazily and passed
-        through the same bounded batching path as JSONL files, so the complete
-        input is never buffered or written to disk.
+        prime-rl ``Rollout`` objects. The records may arrive from an async
+        producer: an async generator of rollouts uploads incrementally, in
+        bounded batches, without ever being collected into a list.
         """
-        return self.upload_lines(
-            _record_lines(records),
+        return await self.upload_lines(
+            _record_lines_for(records),
             line_format=line_format,
             context=context,
             schema_version=schema_version,
@@ -176,7 +146,7 @@ class TracesClient:
             on_batch=on_batch,
         )
 
-    def upload_file(
+    async def upload_file(
         self,
         path: Union[str, Path],
         *,
@@ -186,7 +156,7 @@ class TracesClient:
         compress: bool = True,
         target_batch_bytes: int = DEFAULT_TARGET_BATCH_BYTES,
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
-        on_batch: Optional[Callable[[Batch, UploadReceipt], None]] = None,
+        on_batch: Optional[BatchCallback] = None,
     ) -> List[UploadReceipt]:
         """Upload a completed JSONL file of traces (or episodes).
 
@@ -202,11 +172,10 @@ class TracesClient:
         ambiguous failure safe, because a request that did land replays its
         receipt instead of storing twice.
 
-        Batches are sent sequentially in v0. The contract allows 2–8 requests
-        in flight per producer; add bounded concurrency here once the service
-        is up and throughput is measured.
+        The file is read in a worker thread, so a large upload does not block
+        the loop between requests.
         """
-        return self.upload_lines(
+        return await self.upload_lines(
             read_jsonl_lines(path),
             line_format=line_format,
             context=context,
@@ -217,9 +186,9 @@ class TracesClient:
             on_batch=on_batch,
         )
 
-    def upload_lines(
+    async def upload_lines(
         self,
-        lines: Iterable[bytes],
+        lines: Union[Iterable[bytes], AsyncIterable[bytes]],
         *,
         line_format: LineFormat = LineFormat.TRACE,
         context: Optional[Dict[str, str]] = None,
@@ -227,12 +196,12 @@ class TracesClient:
         compress: bool = True,
         target_batch_bytes: int = DEFAULT_TARGET_BATCH_BYTES,
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
-        on_batch: Optional[Callable[[Batch, UploadReceipt], None]] = None,
+        on_batch: Optional[BatchCallback] = None,
     ) -> List[UploadReceipt]:
-        """Upload an iterable of raw JSONL lines. See ``upload_file``."""
+        """Upload raw JSONL lines, sync or async. See ``upload_file``."""
         receipts: List[UploadReceipt] = []
-        for batch in iter_batches(lines, target_bytes=target_batch_bytes):
-            result = self._send_with_retry(
+        async for batch in aiter_batches(lines, target_bytes=target_batch_bytes):
+            result = await self._send_with_retry(
                 batch,
                 line_format=line_format,
                 context=context,
@@ -243,10 +212,12 @@ class TracesClient:
             receipt = UploadReceipt.model_validate(result)
             receipts.append(receipt)
             if on_batch is not None:
-                on_batch(batch, receipt)
+                outcome = on_batch(batch, receipt)
+                if inspect.isawaitable(outcome):
+                    await outcome
         return receipts
 
-    def _send_with_retry(
+    async def _send_with_retry(
         self,
         batch: Batch,
         *,
@@ -261,7 +232,7 @@ class TracesClient:
         last_error: Optional[Exception] = None
         for attempt in range(max_attempts):
             try:
-                return self.client.upload_batch(
+                return await self.client.upload_batch(
                     batch.data,
                     batch.idempotency_key,
                     line_format=line_format,
@@ -273,13 +244,13 @@ class TracesClient:
                 last_error = exc
                 if attempt == max_attempts - 1:
                     break
-                time.sleep(retry_delay(exc, attempt))
+                await retry_sleep(retry_delay(exc, attempt))
         assert last_error is not None
         raise last_error
 
     # -- traces: read -------------------------------------------------------
 
-    def list(
+    async def list(
         self,
         *,
         run_id: Optional[str] = None,
@@ -325,9 +296,9 @@ class TracesClient:
             ),
             context,
         )
-        return TraceListPage.model_validate(self.client.get_json("/traces", params=params))
+        return TraceListPage.model_validate(await self.client.get_json("/traces", params=params))
 
-    def iter(self, **filters) -> Iterator[TraceSummary]:
+    async def iter(self, **filters: Any) -> AsyncIterator[TraceSummary]:
         """Iterate all matching trace summaries across pages.
 
         Transient failures are retried inside the API client with a bounded
@@ -336,28 +307,35 @@ class TracesClient:
         """
         cursor = filters.pop("cursor", None)
         while True:
-            page = self.list(cursor=cursor, **filters)
-            yield from page.items
+            page = await self.list(cursor=cursor, **filters)
+            for summary in page.items:
+                yield summary
             if not page.next_cursor:
                 return
             cursor = page.next_cursor
 
-    def get(self, trace_id: str) -> TraceSummary:
+    async def get(self, trace_id: str) -> TraceSummary:
         """Get one trace summary."""
-        return TraceSummary.model_validate(self.client.get_json(_trace_endpoint(trace_id)))
+        return TraceSummary.model_validate(await self.client.get_json(_trace_endpoint(trace_id)))
 
-    def get_raw(self, trace_id: str) -> bytes:
+    async def get_raw(self, trace_id: str) -> bytes:
         """Get the stored raw trace document, buffered in memory.
 
         A trace can be tens of MiB; prefer ``download_raw`` for large traces.
         """
-        return b"".join(self.client.stream_bytes(_trace_endpoint(trace_id), params={"raw": "true"}))
+        chunks = [
+            chunk
+            async for chunk in self.client.stream_bytes(
+                _trace_endpoint(trace_id), params={"raw": "true"}
+            )
+        ]
+        return b"".join(chunks)
 
-    def download_raw(self, trace_id: str, dest: Union[str, Path]) -> int:
+    async def download_raw(self, trace_id: str, dest: Union[str, Path]) -> int:
         """Stream the raw trace document to ``dest``. Returns bytes written."""
-        return self._stream_to_file(_trace_endpoint(trace_id), {"raw": "true"}, dest)
+        return await self._stream_to_file(_trace_endpoint(trace_id), {"raw": "true"}, dest)
 
-    def _stream_to_file(
+    async def _stream_to_file(
         self, endpoint: str, params: Optional[Dict[str, object]], dest: Union[str, Path]
     ) -> int:
         """Stream a response body to ``dest`` without clobbering it on failure.
@@ -366,32 +344,31 @@ class TracesClient:
         ``dest`` only after the stream ends cleanly, so a failed request — or a
         connection cut mid-stream — never truncates an existing file at
         ``dest`` or another download's temporary file.
+
+        Writes go to a worker thread so a large download does not block the
+        loop between chunks. The cleanup path stays synchronous on purpose: it
+        also runs when the task is being cancelled, where awaiting again would
+        abandon the partial file on disk.
         """
         dest = Path(dest)
-        partial: Optional[Path] = None
+        handle = await asyncio.to_thread(_open_partial_file, dest)
+        partial = Path(handle.name)
         written = 0
         try:
-            with tempfile.NamedTemporaryFile(
-                mode="wb",
-                dir=dest.parent,
-                prefix=".prime-traces-",
-                suffix=".partial",
-                delete=False,
-            ) as f:
-                partial = Path(f.name)
-                for chunk in self.client.stream_bytes(endpoint, params=params):
-                    f.write(chunk)
-                    written += len(chunk)
-            partial.replace(dest)
+            async for chunk in self.client.stream_bytes(endpoint, params=params):
+                await asyncio.to_thread(handle.write, chunk)
+                written += len(chunk)
+            await asyncio.to_thread(handle.close)
+            await asyncio.to_thread(partial.replace, dest)
         except BaseException:
-            if partial is not None:
-                partial.unlink(missing_ok=True)
+            handle.close()
+            partial.unlink(missing_ok=True)
             raise
         return written
 
     # -- traces: delete -----------------------------------------------------
 
-    def delete(self, trace_id: str, *, created_at: Optional[str] = None) -> None:
+    async def delete(self, trace_id: str, *, created_at: Optional[str] = None) -> None:
         """Delete every stored copy of one trace (202 Accepted).
 
         ``created_at`` is an optional performance hint that lets the service
@@ -405,33 +382,29 @@ class TracesClient:
         copy uploaded between attempts.
 
         Raises ``NotFoundError`` when the owner has no such trace — including
-        on a repeat of a delete that already succeeded. The design docs
-        specify deletion as idempotent at the API level; the service checks
-        existence first and answers 404 instead. Callers treating deletion as
-        "make sure this is gone" should catch ``NotFoundError``.
+        on a repeat of a delete that already succeeded. Callers treating
+        deletion as "make sure this is gone" should catch ``NotFoundError``.
         """
         params = {"created_at": created_at} if created_at else None
-        self.client.delete(_trace_endpoint(trace_id), params=params)
+        await self.client.delete(_trace_endpoint(trace_id), params=params)
 
-    def delete_run(self, run_id: str) -> None:
+    async def delete_run(self, run_id: str) -> None:
         """Delete every trace in a run (202 Accepted).
 
         One mutation over the ``run_id`` predicate, not N per-trace calls, and
-        synchronous: the service answers 202 with an empty body, so there is
-        no job to poll. (The design docs specify ``202 { job_id }``; nothing
-        server-side issues one, so no job handle is returned here rather than
-        a permanent ``None``.)
+        synchronous on the service side: it answers 202 with an empty body, so
+        there is no job to poll.
 
         Episode rows are not touched. Raises ``NotFoundError`` when the run
         holds no traces for this owner — see ``delete`` on repeats. An
         ``AmbiguousDeleteError`` is not retried because a replay could delete
         traces added to the run after the first request.
         """
-        self.client.delete("/traces", params={"run_id": run_id})
+        await self.client.delete("/traces", params={"run_id": run_id})
 
     # -- episodes (read-only in v0) -----------------------------------------
 
-    def list_episodes(
+    async def list_episodes(
         self,
         *,
         run_id: Optional[str] = None,
@@ -460,18 +433,22 @@ class TracesClient:
                 ("cursor", cursor),
             )
         )
-        return EpisodeListPage.model_validate(self.client.get_json("/episodes", params=params))
+        return EpisodeListPage.model_validate(
+            await self.client.get_json("/episodes", params=params)
+        )
 
-    def get_episode(self, episode_id: str) -> EpisodeDetail:
+    async def get_episode(self, episode_id: str) -> EpisodeDetail:
         """Episode-owned fields plus the read-time member-trace aggregate.
 
         The response carries the episode row's own ``has_error``/``error``
         alongside ``traces.any_trace_error``, so an environment-hook failure
         stays visible even when every individual trace succeeded.
         """
-        return EpisodeDetail.model_validate(self.client.get_json(_episode_endpoint(episode_id)))
+        return EpisodeDetail.model_validate(
+            await self.client.get_json(_episode_endpoint(episode_id))
+        )
 
-    def list_episode_traces(
+    async def list_episode_traces(
         self,
         episode_id: str,
         *,
@@ -517,14 +494,14 @@ class TracesClient:
             context,
         )
         return TraceListPage.model_validate(
-            self.client.get_json(f"{_episode_endpoint(episode_id)}/traces", params=params)
+            await self.client.get_json(f"{_episode_endpoint(episode_id)}/traces", params=params)
         )
 
-    def close(self) -> None:
-        self.client.close()
+    async def aclose(self) -> None:
+        await self.client.aclose()
 
-    def __enter__(self) -> "TracesClient":
+    async def __aenter__(self) -> "AsyncTracesClient":
         return self
 
-    def __exit__(self, *exc_info) -> None:
-        self.close()
+    async def __aexit__(self, *exc_info) -> None:
+        await self.aclose()

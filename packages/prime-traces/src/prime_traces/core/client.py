@@ -9,6 +9,10 @@ ambiguous replay could delete data written after the first attempt. Uploads are
 POSTs whose retry safety comes from content addressing rather than the method,
 so their loop lives in ``TracesClient``, where the attempt budget is
 caller-configurable and Retry-After is honored against it.
+
+The response mapping, the retry classification and the client configuration in
+this module are the single source of truth for both transports: the async
+client in ``core.async_client`` differs only in how it awaits I/O.
 """
 
 import gzip as gzip_module
@@ -68,7 +72,7 @@ _SERVICE_REFUSAL_CODES = frozenset(
 #: client did not receive its response. Connection establishment, proxy setup,
 #: pool acquisition and local protocol failures are deliberately absent: the
 #: service cannot have processed a request that was never sent.
-_AMBIGUOUS_TRANSPORT_ERRORS = (
+AMBIGUOUS_TRANSPORT_ERRORS = (
     httpx.CloseError,
     httpx.DecodingError,
     httpx.ReadError,
@@ -99,6 +103,19 @@ def retry_delay(error: Exception, attempt: int) -> float:
         _BACKOFF_CAP_SECONDS,
         _BACKOFF_BASE_SECONDS * (2**attempt),
     ) * (0.5 + random.random())
+
+
+def is_ambiguous_delete_failure(error: RetryableAPIError) -> bool:
+    """Whether a retryable response leaves a DELETE's outcome unknown.
+
+    A codeless or unknown-code 503 may have come from an intermediary after
+    the request was forwarded, so it is ambiguous in the same way 502/504 are.
+    A service refusal code proves the service declined the operation, which
+    makes replaying it safe.
+    """
+    return error.status_code in _AMBIGUOUS_RETRY_STATUSES or (
+        error.status_code == 503 and error.code not in _SERVICE_REFUSAL_CODES
+    )
 
 
 def _default_user_agent() -> str:
@@ -204,17 +221,22 @@ def raise_for_response(response: httpx.Response) -> None:
     raise APIError(f"HTTP {status}: {message}", status_code=status, code=code)
 
 
-class TracesAPIClient:
-    """Thin synchronous client for the Prime Traces REST API."""
+#: Generous read/write budget: one request body can be 256 MiB.
+DEFAULT_TIMEOUT = httpx.Timeout(120.0, connect=10.0)
+
+
+class BaseTracesAPIClient:
+    """Configuration, headers, routing and error wrapping for both transports.
+
+    Everything here is transport-independent, so the sync and async clients
+    cannot drift on how a credential, a team or a base URL is resolved.
+    """
 
     def __init__(
         self,
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
         team_id: Optional[str] = None,
-        user_agent: Optional[str] = None,
-        timeout: Optional[httpx.Timeout] = None,
-        transport: Optional[httpx.BaseTransport] = None,
     ):
         self.config = Config()
         # For api_key and team_id, None means "resolve from config" and any
@@ -226,6 +248,7 @@ class TracesAPIClient:
         self.base_url = _normalize_base_url(base_url or self.config.traces_url)
         self.team_id = team_id if team_id is not None else self.config.team_id
 
+    def _default_headers(self, user_agent: Optional[str]) -> Dict[str, str]:
         # No default Content-Type here: uploads are multipart (httpx must own
         # the boundary header) and reads set JSON per-request.
         headers = {"User-Agent": user_agent or _default_user_agent()}
@@ -235,14 +258,7 @@ class TracesAPIClient:
             # Spelled exactly as the service declares it (auth/dependencies.py
             # TEAM_HEADER) — case-insensitive on the wire, greppable in code.
             headers["X-Prime-Team-ID"] = self.team_id
-
-        self.client = httpx.Client(
-            headers=headers,
-            follow_redirects=True,
-            # Generous read/write budget: one request body can be 256 MiB.
-            timeout=timeout or httpx.Timeout(120.0, connect=10.0),
-            transport=transport,
-        )
+        return headers
 
     def _check_auth(self) -> None:
         if not self.api_key:
@@ -265,6 +281,75 @@ class TracesAPIClient:
             )
         return exc
 
+    def _multipart_files(
+        self,
+        body: bytes,
+        *,
+        schema_version: int,
+        context: Optional[Dict[str, str]],
+        compressed: Optional[bytes],
+    ) -> Dict[str, Any]:
+        """Build the upload's multipart parts.
+
+        ``compressed`` is the gzip member when compressing, else None. Gzip is
+        transport-only: the digest and all limits are defined over the
+        uncompressed bytes, so compressing changes nothing but upload time.
+        """
+        metadata: Dict[str, Any] = {"schema_version": schema_version}
+        if context:
+            metadata["context"] = context
+
+        if compressed is not None:
+            traces_part: Any = (
+                "traces.jsonl",
+                compressed,
+                "application/x-ndjson",
+                {"Content-Encoding": "gzip"},
+            )
+        else:
+            traces_part = ("traces.jsonl", body, "application/x-ndjson")
+
+        return {
+            "metadata": (None, json_module.dumps(metadata).encode(), "application/json"),
+            "traces": traces_part,
+        }
+
+    @staticmethod
+    def _upload_headers(idempotency_key: str, line_format: LineFormat) -> Dict[str, str]:
+        headers = {"Idempotency-Key": idempotency_key}
+        if line_format is LineFormat.EPISODE:
+            headers["X-Prime-Line-Format"] = LineFormat.EPISODE.value
+        return headers
+
+    @staticmethod
+    def _upload_result(response: httpx.Response) -> Dict[str, Any]:
+        raise_for_response(response)
+        result = response.json()
+        if not isinstance(result, dict):
+            raise APIError("API response was not a dictionary")
+        return result
+
+
+class TracesAPIClient(BaseTracesAPIClient):
+    """Thin synchronous client for the Prime Traces REST API."""
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
+        team_id: Optional[str] = None,
+        user_agent: Optional[str] = None,
+        timeout: Optional[httpx.Timeout] = None,
+        transport: Optional[httpx.BaseTransport] = None,
+    ):
+        super().__init__(api_key=api_key, base_url=base_url, team_id=team_id)
+        self.client = httpx.Client(
+            headers=self._default_headers(user_agent),
+            follow_redirects=True,
+            timeout=timeout or DEFAULT_TIMEOUT,
+            transport=transport,
+        )
+
     # -- write path ---------------------------------------------------------
 
     def upload_batch(
@@ -286,41 +371,22 @@ class TracesAPIClient:
         """
         self._check_auth()
 
-        metadata: Dict[str, Any] = {"schema_version": schema_version}
-        if context:
-            metadata["context"] = context
-
-        headers = {"Idempotency-Key": idempotency_key}
-        if line_format is LineFormat.EPISODE:
-            headers["X-Prime-Line-Format"] = LineFormat.EPISODE.value
-
-        if compress:
-            # mtime=0 keeps the compressed bytes reproducible across retries.
-            traces_content = gzip_module.compress(body, mtime=0)
-            traces_part = (
-                "traces.jsonl",
-                traces_content,
-                "application/x-ndjson",
-                {"Content-Encoding": "gzip"},
-            )
-        else:
-            traces_part = ("traces.jsonl", body, "application/x-ndjson")  # type: ignore[assignment]
-
-        files = {
-            "metadata": (None, json_module.dumps(metadata).encode(), "application/json"),
-            "traces": traces_part,
-        }
+        # mtime=0 keeps the compressed bytes reproducible across retries.
+        compressed = gzip_module.compress(body, mtime=0) if compress else None
+        files = self._multipart_files(
+            body, schema_version=schema_version, context=context, compressed=compressed
+        )
 
         try:
-            response = self.client.post(self._url("/traces"), headers=headers, files=files)
+            response = self.client.post(
+                self._url("/traces"),
+                headers=self._upload_headers(idempotency_key, line_format),
+                files=files,
+            )
         except Exception as exc:
             raise self._wrap_transport_errors(exc) from exc
 
-        raise_for_response(response)
-        result = response.json()
-        if not isinstance(result, dict):
-            raise APIError("API response was not a dictionary")
-        return result
+        return self._upload_result(response)
 
     # -- read path ----------------------------------------------------------
 
@@ -349,7 +415,7 @@ class TracesAPIClient:
                 error = self._wrap_transport_errors(exc)
                 if error is exc:
                     raise
-                if is_delete and isinstance(exc, _AMBIGUOUS_TRANSPORT_ERRORS):
+                if is_delete and isinstance(exc, AMBIGUOUS_TRANSPORT_ERRORS):
                     raise AmbiguousDeleteError(f"Delete outcome is unknown: {error}") from exc
                 if last:
                     raise error from exc
@@ -358,10 +424,7 @@ class TracesAPIClient:
             try:
                 raise_for_response(response)
             except RetryableAPIError as exc:
-                ambiguous_status = exc.status_code in _AMBIGUOUS_RETRY_STATUSES or (
-                    exc.status_code == 503 and exc.code not in _SERVICE_REFUSAL_CODES
-                )
-                if is_delete and ambiguous_status:
+                if is_delete and is_ambiguous_delete_failure(exc):
                     raise AmbiguousDeleteError(
                         f"Delete outcome is unknown after HTTP {exc.status_code}: {exc}",
                         status_code=exc.status_code,

@@ -134,7 +134,10 @@ async def _run_async_cleanup_safely(operation: Callable[[], Awaitable[None]]) ->
     Shield the close task and wait through further cancellation requests so
     the source is closed before its consumer regains control.
     """
-    operation_task = asyncio.create_task(operation())
+    # ``aclose`` is an optional duck-typed hook on user-provided sources. It
+    # may return any Awaitable (including a Future), while ``create_task`` only
+    # accepts coroutine objects.
+    operation_task = asyncio.ensure_future(operation())
     try:
         await asyncio.shield(operation_task)
     except asyncio.CancelledError:

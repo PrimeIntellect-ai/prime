@@ -813,6 +813,53 @@ class TestClientLifecycle:
         assert api_client.client.is_closed
 
     @pytest.mark.asyncio
+    async def test_repeated_cancellation_waits_for_transport_close(self):
+        close_started = asyncio.Event()
+        release_close = asyncio.Event()
+        transport_closed = False
+
+        class SlowClosingTransport(httpx.AsyncBaseTransport):
+            async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+                return httpx.Response(200, json=SUMMARY)
+
+            async def aclose(self) -> None:
+                nonlocal transport_closed
+                close_started.set()
+                await release_close.wait()
+                transport_closed = True
+
+        api_client = AsyncTracesAPIClient(
+            api_key="test-key",
+            base_url="http://testserver",
+            team_id="",
+            transport=SlowClosingTransport(),
+        )
+        context_entered = asyncio.Event()
+
+        async def use_client():
+            async with api_client:
+                context_entered.set()
+                await asyncio.Event().wait()
+
+        task = asyncio.create_task(use_client())
+        await context_entered.wait()
+
+        # The first cancellation exits the context; the second arrives while
+        # the transport is still releasing pooled resources.
+        task.cancel()
+        await close_started.wait()
+        task.cancel()
+        await asyncio.sleep(0.01)
+
+        assert not task.done()
+        assert not transport_closed
+
+        release_close.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert transport_closed
+
+    @pytest.mark.asyncio
     async def test_team_header_is_sent_when_configured(self):
         captured = {}
 

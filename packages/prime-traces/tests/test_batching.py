@@ -309,6 +309,35 @@ class TestAsyncBatching:
         assert closed
 
     @pytest.mark.asyncio
+    async def test_async_source_close_may_return_a_future(self):
+        closed = False
+
+        class FutureClosingSource:
+            def __init__(self):
+                self.first = True
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.first:
+                    self.first = False
+                    return line("{}")
+                raise StopAsyncIteration
+
+            def aclose(self):
+                nonlocal closed
+                closed = True
+                future = asyncio.get_running_loop().create_future()
+                future.set_result(None)
+                return future
+
+        [batch] = await collect(FutureClosingSource())
+
+        assert batch.data == line("{}")
+        assert closed
+
+    @pytest.mark.asyncio
     async def test_repeated_cancellation_waits_for_sync_source_cleanup(self):
         """Cancellation must not abandon a generator running in a worker."""
         started = threading.Event()

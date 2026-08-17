@@ -48,7 +48,7 @@ async def _run_async_cleanup_safely(operation: Callable[[], Awaitable[None]]) ->
     cancellation requests so an HTTP response cannot remain checked out from
     the connection pool.
     """
-    operation_task = asyncio.create_task(operation())
+    operation_task = asyncio.ensure_future(operation())
     try:
         await asyncio.shield(operation_task)
     except asyncio.CancelledError:
@@ -231,7 +231,7 @@ class AsyncTracesAPIClient(BaseTracesAPIClient):
                 await retry_sleep(retry_delay(error, attempt))
 
     async def aclose(self) -> None:
-        await self.client.aclose()
+        await _run_async_cleanup_safely(self.client.aclose)
 
     async def __aenter__(self) -> "AsyncTracesAPIClient":
         return self

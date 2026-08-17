@@ -78,7 +78,7 @@ async def _arecord_lines(records: AsyncIterable[TraceRecord]) -> AsyncIterator[b
     record_number = 0
     async for record in records:
         record_number += 1
-        yield _encode_record(record, record_number)
+        yield await asyncio.to_thread(_encode_record, record, record_number)
 
 
 def _record_lines_for(
@@ -105,6 +105,38 @@ def _open_partial_file(dest: Path):
         suffix=".partial",
         delete=False,
     )
+
+
+async def _open_partial_file_safely(dest: Path):
+    """Open a partial file without leaking it when the caller is cancelled.
+
+    Cancelling ``to_thread`` does not stop a worker that is already running.
+    Shield the worker and, if cancellation arrives, wait until it relinquishes
+    the handle before closing and unlinking the file it may have created.
+    """
+    open_task = asyncio.create_task(asyncio.to_thread(_open_partial_file, dest))
+    try:
+        return await asyncio.shield(open_task)
+    except asyncio.CancelledError:
+        # Repeated cancellation requests must not cancel ``open_task`` either;
+        # without its result there is no path to the delete=False filename.
+        while not open_task.done():
+            try:
+                await asyncio.shield(open_task)
+            except asyncio.CancelledError:
+                continue
+            except BaseException:
+                break
+
+        if not open_task.cancelled():
+            try:
+                handle = open_task.result()
+            except BaseException:
+                pass
+            else:
+                handle.close()
+                Path(handle.name).unlink(missing_ok=True)
+        raise
 
 
 class AsyncTracesClient:
@@ -351,7 +383,7 @@ class AsyncTracesClient:
         abandon the partial file on disk.
         """
         dest = Path(dest)
-        handle = await asyncio.to_thread(_open_partial_file, dest)
+        handle = await _open_partial_file_safely(dest)
         partial = Path(handle.name)
         written = 0
         try:

@@ -6,10 +6,14 @@ asserted against both clients. Referencing the module (not the test classes)
 keeps the sync suite from being collected twice.
 """
 
+import asyncio
+import threading
+
 import httpx
 import pytest
 import test_reads
 
+import prime_traces.async_traces as async_traces_module
 from prime_traces import (
     AmbiguousDeleteError,
     APIError,
@@ -180,6 +184,41 @@ class TestPointReads:
             await make_async_client(handler).download_raw("8d3f1a2b", dest)
         # A mid-stream failure is never retried under the consumer, so the
         # prefix that did arrive is discarded rather than left as a document.
+        assert not dest.exists()
+        assert list(tmp_path.glob(".prime-traces-*")) == []
+
+    @pytest.mark.asyncio
+    async def test_cancellation_during_partial_open_cleans_up_file(
+        self, make_async_client, monkeypatch, tmp_path
+    ):
+        started = threading.Event()
+        release = threading.Event()
+        opened = threading.Event()
+        original_open = async_traces_module._open_partial_file
+
+        def delayed_open(dest):
+            started.set()
+            release.wait()
+            handle = original_open(dest)
+            opened.set()
+            return handle
+
+        monkeypatch.setattr(async_traces_module, "_open_partial_file", delayed_open)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            pytest.fail(f"unexpected request: {request.url}")
+
+        dest = tmp_path / "trace.json"
+        task = asyncio.create_task(make_async_client(handler).download_raw("8d3f1a2b", dest))
+        await asyncio.to_thread(started.wait)
+
+        task.cancel()
+        await asyncio.sleep(0)
+        release.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.to_thread(opened.wait)
         assert not dest.exists()
         assert list(tmp_path.glob(".prime-traces-*")) == []
 

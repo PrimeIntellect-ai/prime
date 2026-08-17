@@ -146,6 +146,28 @@ class TestAsyncProducers:
         assert receipt.status == "committed"
 
     @pytest.mark.asyncio
+    async def test_async_record_serialization_runs_off_the_event_loop(self, make_async_client):
+        loop_thread = threading.get_ident()
+        serialization_thread = None
+
+        class RecordObject:
+            def to_record(self):
+                nonlocal serialization_thread
+                serialization_thread = threading.get_ident()
+                return {"id": "a"}
+
+        async def records():
+            yield RecordObject()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(201, json=COMMITTED)
+
+        await make_async_client(handler).upload_records(records(), compress=False)
+
+        assert serialization_thread is not None
+        assert serialization_thread != loop_thread
+
+    @pytest.mark.asyncio
     async def test_async_lines_batch_identically_to_sync_lines(self, make_async_client):
         many = [b'{"i":%d}\n' % i for i in range(40)]
         keys = []

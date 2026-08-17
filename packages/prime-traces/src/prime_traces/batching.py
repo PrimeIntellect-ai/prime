@@ -18,10 +18,11 @@ The contract this implements (see the Prime Traces design docs):
 
 import asyncio
 import hashlib
+import threading
 from collections.abc import AsyncIterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import AsyncIterator, Iterable, Iterator, Union
+from typing import AsyncIterator, Generator, Iterable, Iterator, Union
 
 from .exceptions import TraceTooLargeError
 
@@ -142,7 +143,7 @@ def iter_batches(
     target_bytes: int = DEFAULT_TARGET_BATCH_BYTES,
     max_line_bytes: int = MAX_LINE_BYTES,
     max_lines: int = MAX_BATCH_LINES,
-) -> Iterator[Batch]:
+) -> Generator[Batch, None, None]:
     """Group JSONL lines into content-addressed request batches.
 
     Whitespace-only lines are skipped. Each kept line contributes its exact
@@ -192,17 +193,30 @@ async def aiter_batches(
         iterator = iter_batches(
             lines, target_bytes=target_bytes, max_line_bytes=max_line_bytes, max_lines=max_lines
         )
+        iterator_lock = threading.Lock()
+
+        def next_batch() -> Union[Batch, None]:
+            # Cancelling ``to_thread`` does not stop the worker. Serialize
+            # ``next`` and ``close`` so cleanup cannot close a generator that
+            # the worker is still executing.
+            with iterator_lock:
+                return next(iterator, None)
+
+        def close_iterator() -> None:
+            with iterator_lock:
+                iterator.close()
+
         try:
             while True:
                 # `next` re-enters the generator in a worker thread, one batch
                 # at a time, so an aborted upload stops reading the source
                 # instead of draining it into memory.
-                batch = await asyncio.to_thread(next, iterator, None)
+                batch = await asyncio.to_thread(next_batch)
                 if batch is None:
                     return
                 yield batch
         finally:
-            iterator.close()
+            await asyncio.to_thread(close_iterator)
     else:
         builder = _BatchBuilder(
             target_bytes=target_bytes, max_line_bytes=max_line_bytes, max_lines=max_lines

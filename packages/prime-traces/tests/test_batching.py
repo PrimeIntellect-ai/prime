@@ -1,4 +1,6 @@
+import asyncio
 import hashlib
+import threading
 
 import pytest
 
@@ -200,3 +202,32 @@ class TestAsyncBatching:
 
         # Enough for the first batch and its lookahead, nowhere near the file.
         assert consumed < len(self.LINES)
+
+    @pytest.mark.asyncio
+    async def test_cancellation_waits_for_sync_source_before_closing_iterator(self):
+        """Cancellation must not close a generator still running in a worker."""
+        started = threading.Event()
+        release = threading.Event()
+        closed = threading.Event()
+
+        def slow_lines():
+            try:
+                started.set()
+                release.wait()
+                yield line("{}")
+            finally:
+                closed.set()
+
+        batches = aiter_batches(slow_lines())
+        task = asyncio.create_task(batches.__anext__())
+        await asyncio.to_thread(started.wait)
+
+        task.cancel()
+        # Let cancellation enter aiter_batches while next_batch still owns the
+        # synchronous generator, reproducing the old close-while-running race.
+        await asyncio.sleep(0)
+        release.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert closed.is_set()

@@ -281,11 +281,6 @@ class CreateSandboxRequest(BaseModel):
     def validate_idle_timeout(self) -> "CreateSandboxRequest":
         if self.idle_timeout_minutes is None:
             return self
-        if self.vm is not False:
-            raise ValueError(
-                "idle_timeout_minutes is only supported for container "
-                "sandboxes; pass vm=False to create a container sandbox"
-            )
         if self.idle_timeout_minutes < 1:
             raise ValueError("idle_timeout_minutes must be >= 1")
         if self.timeout_minutes > 0 and self.idle_timeout_minutes > self.timeout_minutes:

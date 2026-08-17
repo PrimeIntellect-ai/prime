@@ -12,6 +12,7 @@ def test_create_sandbox_with_custom_config(sandbox_client):
             CreateSandboxRequest(
                 name="test-custom-config",
                 docker_image="python:3.11-slim",
+                vm=False,
                 cpu_cores=2,
                 memory_gb=4,
                 disk_size_gb=10,
@@ -49,6 +50,7 @@ def test_get_sandbox(sandbox_client):
             CreateSandboxRequest(
                 name="test-get-sandbox",
                 docker_image="python:3.11-slim",
+                vm=False,
             )
         )
         print(f"✓ Created sandbox: {sandbox.id}")
@@ -81,6 +83,7 @@ def test_list_sandboxes(sandbox_client):
             CreateSandboxRequest(
                 name="test-list-sandbox",
                 docker_image="python:3.11-slim",
+                vm=False,
                 labels=["test-list"],
             )
         )
@@ -124,6 +127,7 @@ def test_list_sandboxes_with_label_filter(sandbox_client, unique_id):
             CreateSandboxRequest(
                 name=f"test-label-filter-{unique_id}",
                 docker_image="python:3.11-slim",
+                vm=False,
                 labels=[test_label],
             )
         )
@@ -162,6 +166,7 @@ def test_delete_sandbox(sandbox_client):
         CreateSandboxRequest(
             name="test-delete",
             docker_image="python:3.11-slim",
+            vm=False,
         )
     )
     sandbox_id = sandbox.id
@@ -194,6 +199,7 @@ def test_bulk_delete_by_ids(sandbox_client):
                 CreateSandboxRequest(
                     name=f"test-bulk-delete-{i}",
                     docker_image="python:3.11-slim",
+                    vm=False,
                 )
             )
             sandboxes.append(sandbox)
@@ -233,6 +239,7 @@ def test_bulk_delete_by_labels(sandbox_client, unique_id):
                 CreateSandboxRequest(
                     name=f"test-bulk-delete-label-{unique_id}-{i}",
                     docker_image="python:3.11-slim",
+                    vm=False,
                     labels=[test_label],
                 )
             )
@@ -267,6 +274,7 @@ def test_get_logs(sandbox_client):
             CreateSandboxRequest(
                 name="test-logs",
                 docker_image="python:3.11-slim",
+                vm=False,
             )
         )
         print(f"✓ Created sandbox: {sandbox.id}")
@@ -303,6 +311,7 @@ def test_wait_for_creation(sandbox_client):
             CreateSandboxRequest(
                 name="test-wait",
                 docker_image="python:3.11-slim",
+                vm=False,
             )
         )
         print(f"✓ Created sandbox: {sandbox.id}")
@@ -341,6 +350,7 @@ def test_sandbox_lifecycle(sandbox_client):
             CreateSandboxRequest(
                 name="test-lifecycle",
                 docker_image="python:3.11-slim",
+                vm=False,
                 labels=["lifecycle-test"],
             )
         )

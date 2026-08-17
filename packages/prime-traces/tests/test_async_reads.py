@@ -223,6 +223,42 @@ class TestPointReads:
         assert list(tmp_path.glob(".prime-traces-*")) == []
 
     @pytest.mark.asyncio
+    async def test_stream_failure_unlinks_partial_when_close_also_fails(
+        self, make_async_client, monkeypatch, tmp_path
+    ):
+        partial = tmp_path / ".prime-traces-controlled.partial"
+        partial.touch()
+
+        class FailingCloseHandle:
+            name = str(partial)
+
+            def write(self, chunk):
+                return len(chunk)
+
+            def close(self):
+                raise OSError("flush failed")
+
+        async def stream_bytes(*args, **kwargs):
+            yield b'{"version":4,'
+            raise RuntimeError("stream failed")
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            pytest.fail(f"unexpected request: {request.url}")
+
+        client = make_async_client(handler)
+        monkeypatch.setattr(client.client, "stream_bytes", stream_bytes)
+        monkeypatch.setattr(
+            async_traces_module, "_open_partial_file", lambda dest: FailingCloseHandle()
+        )
+
+        dest = tmp_path / "trace.json"
+        with pytest.raises(RuntimeError, match="stream failed"):
+            await client.download_raw("8d3f1a2b", dest)
+
+        assert not partial.exists()
+        assert not dest.exists()
+
+    @pytest.mark.asyncio
     async def test_cancellation_during_write_closes_response_stream(
         self, make_async_client, monkeypatch, tmp_path
     ):
@@ -276,6 +312,69 @@ class TestPointReads:
 
         assert pending_while_write
         assert not closed_before_write_finished
+        assert stream_closed.is_set()
+        assert not dest.exists()
+        assert list(tmp_path.glob(".prime-traces-*")) == []
+
+    @pytest.mark.asyncio
+    async def test_repeated_cancellation_waits_for_http_response_close(
+        self, make_async_client, monkeypatch, tmp_path
+    ):
+        write_started = threading.Event()
+        release_write = threading.Event()
+        close_started = asyncio.Event()
+        release_close = asyncio.Event()
+        stream_closed = asyncio.Event()
+
+        partial = tmp_path / ".prime-traces-controlled.partial"
+        partial.touch()
+
+        class SlowHandle:
+            name = str(partial)
+
+            def write(self, chunk):
+                write_started.set()
+                if not release_write.wait(timeout=5):
+                    raise TimeoutError("test did not release file write")
+                return len(chunk)
+
+            def close(self):
+                pass
+
+        class SlowClosingStream(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield b'{"version":4,"id":"8d3f1a2b"}'
+
+            async def aclose(self):
+                close_started.set()
+                await release_close.wait()
+                stream_closed.set()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, stream=SlowClosingStream())
+
+        client = make_async_client(handler)
+        monkeypatch.setattr(async_traces_module, "_open_partial_file", lambda dest: SlowHandle())
+
+        dest = tmp_path / "trace.json"
+        task = asyncio.create_task(client.download_raw("8d3f1a2b", dest))
+        await asyncio.to_thread(write_started.wait)
+
+        task.cancel()
+        release_write.set()
+        await close_started.wait()
+
+        # A caller may repeat cancellation while cleanup is in progress. The
+        # response close must finish before cancellation reaches the caller.
+        task.cancel()
+        await asyncio.sleep(0.01)
+        pending_while_closing = not task.done()
+        release_close.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert pending_while_closing
         assert stream_closed.is_set()
         assert not dest.exists()
         assert list(tmp_path.glob(".prime-traces-*")) == []
@@ -368,6 +467,44 @@ class TestPointReads:
         await asyncio.to_thread(opened.wait)
         assert not dest.exists()
         assert list(tmp_path.glob(".prime-traces-*")) == []
+
+    @pytest.mark.asyncio
+    async def test_cancelled_partial_open_unlinks_file_when_close_fails(
+        self, make_async_client, monkeypatch, tmp_path
+    ):
+        started = threading.Event()
+        release = threading.Event()
+        partial = tmp_path / ".prime-traces-controlled.partial"
+
+        class FailingCloseHandle:
+            name = str(partial)
+
+            def close(self):
+                raise OSError("flush failed")
+
+        def delayed_open(dest):
+            started.set()
+            release.wait()
+            partial.touch()
+            return FailingCloseHandle()
+
+        monkeypatch.setattr(async_traces_module, "_open_partial_file", delayed_open)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            pytest.fail(f"unexpected request: {request.url}")
+
+        dest = tmp_path / "trace.json"
+        task = asyncio.create_task(make_async_client(handler).download_raw("8d3f1a2b", dest))
+        await asyncio.to_thread(started.wait)
+
+        task.cancel()
+        await asyncio.sleep(0)
+        release.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert not partial.exists()
+        assert not dest.exists()
 
     @pytest.mark.asyncio
     async def test_final_replace_is_an_uncancellable_commit(

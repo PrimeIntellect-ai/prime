@@ -114,6 +114,14 @@ def _open_partial_file(dest: Path):
     )
 
 
+def _discard_partial_file(handle: Any, partial: Path) -> None:
+    """Close a staged download and unlink it even when close/flush fails."""
+    try:
+        handle.close()
+    finally:
+        partial.unlink(missing_ok=True)
+
+
 async def _open_partial_file_safely(dest: Path):
     """Open a partial file without leaking it when the caller is cancelled.
 
@@ -141,8 +149,12 @@ async def _open_partial_file_safely(dest: Path):
             except BaseException:
                 pass
             else:
-                handle.close()
-                Path(handle.name).unlink(missing_ok=True)
+                try:
+                    _discard_partial_file(handle, Path(handle.name))
+                except BaseException:
+                    # Cancellation is the caller-visible outcome. Cleanup is
+                    # best-effort, but close must never prevent the unlink.
+                    pass
         raise
 
 
@@ -439,8 +451,12 @@ class AsyncTracesClient:
             # cannot report failure after a detached worker replaced ``dest``.
             partial.replace(dest)
         except BaseException:
-            handle.close()
-            partial.unlink(missing_ok=True)
+            try:
+                _discard_partial_file(handle, partial)
+            except BaseException:
+                # Preserve the stream, filesystem or cancellation failure that
+                # brought us here; cleanup has still attempted both operations.
+                pass
             raise
         return written
 

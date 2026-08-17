@@ -13,7 +13,7 @@ streamed download to disk. Everything else here is I/O the loop can await.
 
 import asyncio
 import gzip as gzip_module
-from typing import Any, AsyncIterator, Dict, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, Optional
 
 import httpx
 
@@ -38,6 +38,36 @@ async def retry_sleep(seconds: float) -> None:
     other coroutine in the process.
     """
     await asyncio.sleep(seconds)
+
+
+async def _run_async_cleanup_safely(operation: Callable[[], Awaitable[None]]) -> None:
+    """Finish async resource cleanup before propagating cancellation.
+
+    A caller may cancel a task again while its first cancellation is already
+    unwinding. Run cleanup in a shielded task and wait through repeated
+    cancellation requests so an HTTP response cannot remain checked out from
+    the connection pool.
+    """
+    operation_task = asyncio.create_task(operation())
+    try:
+        await asyncio.shield(operation_task)
+    except asyncio.CancelledError:
+        while not operation_task.done():
+            try:
+                await asyncio.shield(operation_task)
+            except asyncio.CancelledError:
+                continue
+            except BaseException:
+                break
+
+        if not operation_task.cancelled():
+            try:
+                operation_task.result()
+            except BaseException:
+                # Cancellation remains caller-visible. Retrieving a concurrent
+                # close error also prevents an unobserved-task warning.
+                pass
+        raise
 
 
 class AsyncTracesAPIClient(BaseTracesAPIClient):
@@ -173,15 +203,19 @@ class AsyncTracesAPIClient(BaseTracesAPIClient):
             last = attempt == IDEMPOTENT_RETRY_ATTEMPTS - 1
             yielded = False
             try:
-                async with self.client.stream(
-                    "GET", self._url(endpoint), params=params
-                ) as response:
+                # Own the response directly instead of using ``client.stream``
+                # so its close can be protected from repeated cancellation.
+                request = self.client.build_request("GET", self._url(endpoint), params=params)
+                response = await self.client.send(request, stream=True)
+                try:
                     if not response.is_success:
                         await response.aread()
                         raise_for_response(response)
                     async for chunk in response.aiter_bytes():
                         yielded = True
                         yield chunk
+                finally:
+                    await _run_async_cleanup_safely(response.aclose)
                 return
             except APIError as exc:
                 # Already typed by raise_for_response.

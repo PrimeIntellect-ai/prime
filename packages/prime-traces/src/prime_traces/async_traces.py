@@ -363,13 +363,10 @@ class AsyncTracesClient:
 
         A trace can be tens of MiB; prefer ``download_raw`` for large traces.
         """
-        chunks = [
-            chunk
-            async for chunk in self.client.stream_bytes(
-                _trace_endpoint(trace_id), params={"raw": "true"}
-            )
-        ]
-        return b"".join(chunks)
+        stream = self.client.stream_bytes(_trace_endpoint(trace_id), params={"raw": "true"})
+        async with aclosing(stream) as chunks:
+            buffered = [chunk async for chunk in chunks]
+        return b"".join(buffered)
 
     async def download_raw(self, trace_id: str, dest: Union[str, Path]) -> int:
         """Stream the raw trace document to ``dest``. Returns bytes written."""
@@ -386,18 +383,21 @@ class AsyncTracesClient:
         ``dest`` or another download's temporary file.
 
         Writes go to a worker thread so a large download does not block the
-        loop between chunks. The cleanup path stays synchronous on purpose: it
-        also runs when the task is being cancelled, where awaiting again would
-        abandon the partial file on disk.
+        loop between chunks. File cleanup stays synchronous on purpose: it also
+        runs when the task is being cancelled, where awaiting again would
+        abandon the partial file on disk. The response iterator is explicitly
+        closed before that cleanup so it cannot retain a pooled connection.
         """
         dest = Path(dest)
         handle = await _open_partial_file_safely(dest)
         partial = Path(handle.name)
         written = 0
         try:
-            async for chunk in self.client.stream_bytes(endpoint, params=params):
-                await asyncio.to_thread(handle.write, chunk)
-                written += len(chunk)
+            stream = self.client.stream_bytes(endpoint, params=params)
+            async with aclosing(stream) as chunks:
+                async for chunk in chunks:
+                    await asyncio.to_thread(handle.write, chunk)
+                    written += len(chunk)
             await asyncio.to_thread(handle.close)
             # Replacing a sibling file is a fast, atomic metadata operation.
             # Keep this commit step on the event-loop thread so cancellation

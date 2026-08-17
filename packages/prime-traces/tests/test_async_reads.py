@@ -188,6 +188,81 @@ class TestPointReads:
         assert list(tmp_path.glob(".prime-traces-*")) == []
 
     @pytest.mark.asyncio
+    async def test_local_write_failure_closes_response_stream(
+        self, make_async_client, monkeypatch, tmp_path
+    ):
+        stream_closed = asyncio.Event()
+
+        async def stream_bytes(*args, **kwargs):
+            try:
+                yield b'{"version":4,'
+                yield b'"id":"8d3f1a2b"}'
+            finally:
+                stream_closed.set()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            pytest.fail(f"unexpected request: {request.url}")
+
+        client = make_async_client(handler)
+        monkeypatch.setattr(client.client, "stream_bytes", stream_bytes)
+        original_to_thread = asyncio.to_thread
+
+        async def fail_file_write(function, *args, **kwargs):
+            if getattr(function, "__name__", None) == "write":
+                raise OSError("disk full")
+            return await original_to_thread(function, *args, **kwargs)
+
+        monkeypatch.setattr(async_traces_module.asyncio, "to_thread", fail_file_write)
+
+        dest = tmp_path / "trace.json"
+        with pytest.raises(OSError, match="disk full"):
+            await client.download_raw("8d3f1a2b", dest)
+
+        assert stream_closed.is_set()
+        assert not dest.exists()
+        assert list(tmp_path.glob(".prime-traces-*")) == []
+
+    @pytest.mark.asyncio
+    async def test_cancellation_during_write_closes_response_stream(
+        self, make_async_client, monkeypatch, tmp_path
+    ):
+        stream_closed = asyncio.Event()
+        write_started = asyncio.Event()
+
+        async def stream_bytes(*args, **kwargs):
+            try:
+                yield b'{"version":4,"id":"8d3f1a2b"}'
+            finally:
+                stream_closed.set()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            pytest.fail(f"unexpected request: {request.url}")
+
+        client = make_async_client(handler)
+        monkeypatch.setattr(client.client, "stream_bytes", stream_bytes)
+        original_to_thread = asyncio.to_thread
+
+        async def stall_file_write(function, *args, **kwargs):
+            if getattr(function, "__name__", None) == "write":
+                write_started.set()
+                await asyncio.Event().wait()
+            return await original_to_thread(function, *args, **kwargs)
+
+        monkeypatch.setattr(async_traces_module.asyncio, "to_thread", stall_file_write)
+
+        dest = tmp_path / "trace.json"
+        task = asyncio.create_task(client.download_raw("8d3f1a2b", dest))
+        await write_started.wait()
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert stream_closed.is_set()
+        assert not dest.exists()
+        assert list(tmp_path.glob(".prime-traces-*")) == []
+
+    @pytest.mark.asyncio
     async def test_cancellation_during_partial_open_cleans_up_file(
         self, make_async_client, monkeypatch, tmp_path
     ):

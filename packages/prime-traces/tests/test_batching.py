@@ -247,8 +247,8 @@ class TestAsyncBatching:
         assert closed
 
     @pytest.mark.asyncio
-    async def test_cancellation_waits_for_sync_source_before_closing_iterator(self):
-        """Cancellation must not close a generator still running in a worker."""
+    async def test_repeated_cancellation_waits_for_sync_source_cleanup(self):
+        """Cancellation must not abandon a generator running in a worker."""
         started = threading.Event()
         release = threading.Event()
         closed = threading.Event()
@@ -269,6 +269,14 @@ class TestAsyncBatching:
         # Let cancellation enter aiter_batches while next_batch still owns the
         # synchronous generator, reproducing the old close-while-running race.
         await asyncio.sleep(0)
+
+        # A second cancellation must not detach the close worker while it is
+        # waiting for next_batch to release the iterator lock.
+        task.cancel()
+        await asyncio.sleep(0.01)
+        assert not task.done()
+        assert not closed.is_set()
+
         release.set()
 
         with pytest.raises(asyncio.CancelledError):

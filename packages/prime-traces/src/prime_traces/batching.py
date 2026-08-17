@@ -22,7 +22,7 @@ import threading
 from collections.abc import AsyncIterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import AsyncGenerator, Generator, Iterable, Iterator, Union
+from typing import AsyncGenerator, Callable, Generator, Iterable, Iterator, Union
 
 from .exceptions import TraceTooLargeError
 
@@ -85,6 +85,36 @@ def read_jsonl_lines(path: Union[str, Path]) -> Iterator[bytes]:
     """
     with open(path, "rb") as f:
         yield from f
+
+
+async def _run_sync_cleanup_safely(operation: Callable[[], None]) -> None:
+    """Finish worker-thread cleanup before propagating cancellation.
+
+    Cancelling ``to_thread`` only cancels the coroutine waiting for the worker;
+    it does not stop the worker itself. Shield its task and wait through repeat
+    cancellation requests so callers cannot regain control while a synchronous
+    source is still open in the background.
+    """
+    operation_task = asyncio.create_task(asyncio.to_thread(operation))
+    try:
+        await asyncio.shield(operation_task)
+    except asyncio.CancelledError:
+        while not operation_task.done():
+            try:
+                await asyncio.shield(operation_task)
+            except asyncio.CancelledError:
+                continue
+            except BaseException:
+                break
+
+        if not operation_task.cancelled():
+            try:
+                operation_task.result()
+            except BaseException:
+                # Cancellation remains caller-visible. Retrieving a concurrent
+                # cleanup error also prevents an unobserved-task warning.
+                pass
+        raise
 
 
 class _BatchBuilder:
@@ -229,7 +259,7 @@ async def aiter_batches(
                     return
                 yield batch
         finally:
-            await asyncio.to_thread(close_iterator)
+            await _run_sync_cleanup_safely(close_iterator)
     else:
         builder = _BatchBuilder(
             target_bytes=target_bytes, max_line_bytes=max_line_bytes, max_lines=max_lines

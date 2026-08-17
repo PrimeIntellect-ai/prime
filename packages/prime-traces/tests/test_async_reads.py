@@ -227,7 +227,24 @@ class TestPointReads:
         self, make_async_client, monkeypatch, tmp_path
     ):
         stream_closed = asyncio.Event()
-        write_started = asyncio.Event()
+        write_started = threading.Event()
+        release_write = threading.Event()
+        close_called = threading.Event()
+
+        partial = tmp_path / ".prime-traces-controlled.partial"
+        partial.touch()
+
+        class SlowHandle:
+            name = str(partial)
+
+            def write(self, chunk):
+                write_started.set()
+                if not release_write.wait(timeout=5):
+                    raise TimeoutError("test did not release file write")
+                return len(chunk)
+
+            def close(self):
+                close_called.set()
 
         async def stream_bytes(*args, **kwargs):
             try:
@@ -240,25 +257,80 @@ class TestPointReads:
 
         client = make_async_client(handler)
         monkeypatch.setattr(client.client, "stream_bytes", stream_bytes)
-        original_to_thread = asyncio.to_thread
-
-        async def stall_file_write(function, *args, **kwargs):
-            if getattr(function, "__name__", None) == "write":
-                write_started.set()
-                await asyncio.Event().wait()
-            return await original_to_thread(function, *args, **kwargs)
-
-        monkeypatch.setattr(async_traces_module.asyncio, "to_thread", stall_file_write)
+        monkeypatch.setattr(async_traces_module, "_open_partial_file", lambda dest: SlowHandle())
 
         dest = tmp_path / "trace.json"
         task = asyncio.create_task(client.download_raw("8d3f1a2b", dest))
-        await write_started.wait()
+        await asyncio.to_thread(write_started.wait)
         task.cancel()
+        # Give cancellation time to reach the shielded write. The event loop
+        # must remain responsive while the real worker thread stays blocked.
+        await asyncio.sleep(0.01)
+
+        pending_while_write = not task.done()
+        closed_before_write_finished = close_called.is_set()
+        release_write.set()
 
         with pytest.raises(asyncio.CancelledError):
             await task
 
+        assert pending_while_write
+        assert not closed_before_write_finished
         assert stream_closed.is_set()
+        assert not dest.exists()
+        assert list(tmp_path.glob(".prime-traces-*")) == []
+
+    @pytest.mark.asyncio
+    async def test_cancellation_during_close_waits_for_worker(
+        self, make_async_client, monkeypatch, tmp_path
+    ):
+        close_started = threading.Event()
+        release_close = threading.Event()
+        close_calls = 0
+
+        partial = tmp_path / ".prime-traces-controlled.partial"
+        partial.touch()
+
+        class SlowCloseHandle:
+            name = str(partial)
+
+            def write(self, chunk):
+                return len(chunk)
+
+            def close(self):
+                nonlocal close_calls
+                close_calls += 1
+                if close_calls == 1:
+                    close_started.set()
+                    if not release_close.wait(timeout=5):
+                        raise TimeoutError("test did not release file close")
+
+        async def stream_bytes(*args, **kwargs):
+            yield b'{"version":4,"id":"8d3f1a2b"}'
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            pytest.fail(f"unexpected request: {request.url}")
+
+        client = make_async_client(handler)
+        monkeypatch.setattr(client.client, "stream_bytes", stream_bytes)
+        monkeypatch.setattr(
+            async_traces_module, "_open_partial_file", lambda dest: SlowCloseHandle()
+        )
+
+        dest = tmp_path / "trace.json"
+        task = asyncio.create_task(client.download_raw("8d3f1a2b", dest))
+        await asyncio.to_thread(close_started.wait)
+        task.cancel()
+        await asyncio.sleep(0.01)
+
+        pending_while_close = not task.done()
+        release_close.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert pending_while_close
+        assert close_calls == 2
         assert not dest.exists()
         assert list(tmp_path.glob(".prime-traces-*")) == []
 

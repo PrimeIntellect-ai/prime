@@ -146,6 +146,41 @@ async def _open_partial_file_safely(dest: Path):
         raise
 
 
+async def _run_file_operation_safely(operation: Callable[..., Any], *args: Any) -> Any:
+    """Run a file operation in a worker without abandoning it on cancellation.
+
+    Cancelling an await of ``to_thread`` does not stop a worker that has already
+    started. Keep the worker task shielded and wait for it to relinquish the
+    file before propagating cancellation, so cleanup never races with an
+    outstanding write or close. Waiting remains asynchronous, which keeps the
+    event loop responsive even when the filesystem is slow.
+    """
+    operation_task = asyncio.create_task(asyncio.to_thread(operation, *args))
+    try:
+        return await asyncio.shield(operation_task)
+    except asyncio.CancelledError:
+        # Repeated cancellation requests must not detach the worker from the
+        # file it still owns. Preserve cancellation, but only after the worker
+        # has completed and cleanup can safely use the handle.
+        while not operation_task.done():
+            try:
+                await asyncio.shield(operation_task)
+            except asyncio.CancelledError:
+                continue
+            except BaseException:
+                break
+
+        if not operation_task.cancelled():
+            try:
+                operation_task.result()
+            except BaseException:
+                # Cancellation remains the caller-visible outcome. Retrieving
+                # a concurrent filesystem error prevents an unobserved-task
+                # warning while the outer cleanup still closes the handle.
+                pass
+        raise
+
+
 class AsyncTracesClient:
     """Async client for the Prime Traces API."""
 
@@ -396,9 +431,9 @@ class AsyncTracesClient:
             stream = self.client.stream_bytes(endpoint, params=params)
             async with aclosing(stream) as chunks:
                 async for chunk in chunks:
-                    await asyncio.to_thread(handle.write, chunk)
+                    await _run_file_operation_safely(handle.write, chunk)
                     written += len(chunk)
-            await asyncio.to_thread(handle.close)
+            await _run_file_operation_safely(handle.close)
             # Replacing a sibling file is a fast, atomic metadata operation.
             # Keep this commit step on the event-loop thread so cancellation
             # cannot report failure after a detached worker replaced ``dest``.

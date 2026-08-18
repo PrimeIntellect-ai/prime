@@ -23,7 +23,7 @@ def test_prime_requires_runtime_sdks_with_cli_feature_support() -> None:
     pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
 
     assert "prime-evals>=0.2.3" in pyproject["project"]["dependencies"]
-    assert "prime-traces>=0.0.2" in pyproject["project"]["dependencies"]
+    assert "prime-traces>=0.0.1" in pyproject["project"]["dependencies"]
     assert "prime-tunnel>=0.1.9" in pyproject["project"]["dependencies"]
 
 

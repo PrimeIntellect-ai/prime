@@ -13,6 +13,10 @@ on:
         description: 'Tag to create release from (e.g. v1.2.3)'
         required: false
         type: string
+      force_release:
+        description: 'Force release even if tag exists'
+        required: false
+        default: 'false'
 
 jobs:
   tag-and-release:
@@ -32,7 +36,7 @@ jobs:
 
       # Get version from package source on push
       - name: Get version from packages/prime/src/prime_cli/__init__.py
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' || inputs.tag == ''
         id: auto_version
         run: |
           VERSION=$(grep -E "^__version__[[:space:]]*=" packages/prime/src/prime_cli/__init__.py | head -n1 | sed -E "s/^__version__[[:space:]]*=[[:space:]]*['\"]([^'\"]+)['\"].*/\1/")
@@ -77,6 +81,40 @@ jobs:
             echo "exists=false" >> $GITHUB_OUTPUT
           fi
 
+      # Setup Python for build
+      - name: Set up Python
+        if: steps.check_tag.outputs.exists != 'true' || inputs.force_release == 'true'
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      # Install uv and build tools
+      - name: Install uv
+        if: steps.check_tag.outputs.exists != 'true' || inputs.force_release == 'true'
+        uses: astral-sh/setup-uv@v3
+        
+      # Build package
+      - name: Build package
+        if: steps.check_tag.outputs.exists != 'true' || inputs.force_release == 'true'
+        working-directory: packages/prime
+        run: |
+          uv build --out-dir dist
+
+      - name: Upload build artifacts
+        if: steps.check_tag.outputs.exists != 'true' || inputs.force_release == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: packages/prime/dist/*
+
+      # Publish to PyPI via Trusted Publishing (OIDC)
+      - name: Publish to PyPI
+        if: steps.check_tag.outputs.exists != 'true' || inputs.force_release == 'true'
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: packages/prime/dist
+          skip-existing: true
+
       # Create new tag if it doesn't exist
       - name: Create tag
         if: steps.check_tag.outputs.exists != 'true'
@@ -86,32 +124,6 @@ jobs:
           git tag -a "v${{ steps.version.outputs.version }}" -m "Release v${{ steps.version.outputs.version }}"
           git push origin "v${{ steps.version.outputs.version }}"
 
-      # Setup Python for build
-      - name: Set up Python
-        if: steps.check_tag.outputs.exists != 'true'
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
-
-      # Install uv and build tools
-      - name: Install uv
-        if: steps.check_tag.outputs.exists != 'true'
-        uses: astral-sh/setup-uv@v3
-        
-      # Build package
-      - name: Build package
-        if: steps.check_tag.outputs.exists != 'true'
-        working-directory: packages/prime
-        run: |
-          uv build --out-dir dist
-
-      - name: Upload build artifacts
-        if: steps.check_tag.outputs.exists != 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: dist
-          path: packages/prime/dist/*
-
       # Create GitHub Release
       - name: Create GitHub Release
         if: steps.check_tag.outputs.exists != 'true'
@@ -120,13 +132,6 @@ jobs:
           tag_name: v${{ steps.version.outputs.version }}
           files: packages/prime/dist/*
           generate_release_notes: true
-
-      # Publish to PyPI via Trusted Publishing (OIDC)
-      - name: Publish to PyPI
-        if: steps.check_tag.outputs.exists != 'true'
-        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
-        with:
-          packages-dir: packages/prime/dist
 
       - name: Notify Slack
         if: steps.check_tag.outputs.exists != 'true'
@@ -172,7 +177,7 @@ jobs:
       - name: Set release status
         id: release_status
         run: |
-          if [ "${{ steps.check_tag.outputs.exists }}" = "true" ]; then
+          if [ "${{ steps.check_tag.outputs.exists }}" = "true" ] && [ "${{ inputs.force_release }}" != "true" ]; then
             echo "created=false" >> "$GITHUB_OUTPUT"
           else
             echo "created=true" >> "$GITHUB_OUTPUT"

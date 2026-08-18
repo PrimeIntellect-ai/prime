@@ -81,6 +81,12 @@ jobs:
             echo "exists=false" >> $GITHUB_OUTPUT
           fi
 
+      # A forced release must build the tagged source, not whatever the
+      # dispatch ref currently points at
+      - name: Check out existing tag
+        if: steps.check_tag.outputs.exists == 'true' && inputs.force_release == 'true'
+        run: git checkout --detach "v${{ steps.version.outputs.version }}"
+
       # Setup Python for build
       - name: Set up Python
         if: steps.check_tag.outputs.exists != 'true' || inputs.force_release == 'true'

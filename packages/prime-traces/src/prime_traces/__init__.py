@@ -5,16 +5,18 @@ Prime Traces service. Uploads are content-addressed JSONL batches; reads are
 cursor-paginated summaries over extracted columns plus raw-document retrieval.
 """
 
+from .async_traces import AsyncTracesClient
 from .batching import (
     DEFAULT_TARGET_BATCH_BYTES,
     MAX_BATCH_BYTES,
     MAX_BATCH_LINES,
     MAX_LINE_BYTES,
     Batch,
+    aiter_batches,
     iter_batches,
     read_jsonl_lines,
 )
-from .core import Config, TracesAPIClient
+from .core import AsyncTracesAPIClient, Config, TracesAPIClient
 from .exceptions import (
     AmbiguousDeleteError,
     APIError,
@@ -53,11 +55,14 @@ __all__ = [
     # Clients & config
     "TracesClient",
     "TracesAPIClient",
+    "AsyncTracesClient",
+    "AsyncTracesAPIClient",
     "Config",
     "SupportsToRecord",
     "TraceRecord",
     # Batching
     "Batch",
+    "aiter_batches",
     "iter_batches",
     "read_jsonl_lines",
     "DEFAULT_TARGET_BATCH_BYTES",

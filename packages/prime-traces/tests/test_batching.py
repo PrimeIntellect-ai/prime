@@ -1,10 +1,13 @@
+import asyncio
 import hashlib
+import threading
 
 import pytest
 
 from prime_traces import (
     MAX_BATCH_BYTES,
     TraceTooLargeError,
+    aiter_batches,
     iter_batches,
     read_jsonl_lines,
 )
@@ -12,6 +15,15 @@ from prime_traces import (
 
 def line(payload: str) -> bytes:
     return payload.encode() + b"\n"
+
+
+async def alines(values):
+    for value in values:
+        yield value
+
+
+async def collect(source, **kwargs):
+    return [batch async for batch in aiter_batches(source, **kwargs)]
 
 
 class TestBatchIdentity:
@@ -70,6 +82,13 @@ class TestChunkClosing:
 
 
 class TestLineValidation:
+    class NoStripBytes(bytes):
+        def strip(self, *args, **kwargs):
+            raise AssertionError("batching must not copy a line with strip()")
+
+        def rstrip(self, *args, **kwargs):
+            raise AssertionError("batching must not copy a line with rstrip()")
+
     def test_oversized_line_rejected_locally(self):
         big = line('{"pad":"' + "x" * 64 + '"}')
         with pytest.raises(TraceTooLargeError) as exc_info:
@@ -101,6 +120,14 @@ class TestLineValidation:
         assert batch.num_lines == 2
         assert batch.data == b'{"id":"a"}\n{"id":"b"}\n'
 
+    def test_line_checks_do_not_strip_or_copy_input(self):
+        record = self.NoStripBytes(b'{"id":"a"}\n')
+        blank = self.NoStripBytes(b" \t\r\n")
+
+        [batch] = iter_batches([record, blank], max_line_bytes=len(record) - 1)
+
+        assert batch.data == record
+
 
 class TestFileReading:
     def test_round_trip_preserves_bytes(self, tmp_path):
@@ -110,3 +137,240 @@ class TestFileReading:
         [batch] = iter_batches(read_jsonl_lines(path))
         assert batch.data == content
         assert batch.num_lines == 3
+
+
+class TestAsyncBatching:
+    """`aiter_batches` must be a scheduling change, not a batching change.
+
+    A producer that switches to the async client — or resumes an interrupted
+    upload from the other one — has to reproduce the same upload IDs, so every
+    closing rule is asserted to agree with `iter_batches` rather than merely
+    to look reasonable.
+    """
+
+    LINES = [line(f'{{"id":"{i}","pad":"{"x" * 40}"}}') for i in range(50)]
+
+    def identity(self, batches):
+        return [(b.digest, b.num_lines, b.first_line_number) for b in batches]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("target_bytes", [200, 4096])
+    async def test_async_source_batches_identically(self, target_bytes):
+        expected = self.identity(iter_batches(self.LINES, target_bytes=target_bytes))
+        actual = self.identity(await collect(alines(self.LINES), target_bytes=target_bytes))
+        assert actual == expected
+
+    @pytest.mark.asyncio
+    async def test_sync_source_batches_identically(self):
+        expected = self.identity(iter_batches(self.LINES, target_bytes=200))
+        actual = self.identity(await collect(self.LINES, target_bytes=200))
+        assert actual == expected
+
+    @pytest.mark.asyncio
+    async def test_sync_source_iterator_is_created_off_the_event_loop(self):
+        loop_thread = threading.get_ident()
+        iterator_thread = None
+        lines = self.LINES
+
+        class Source:
+            def __iter__(self):
+                nonlocal iterator_thread
+                iterator_thread = threading.get_ident()
+                return iter(lines)
+
+        await collect(Source(), target_bytes=200)
+
+        assert iterator_thread is not None
+        assert iterator_thread != loop_thread
+
+    @pytest.mark.asyncio
+    async def test_abandoning_the_iterator_stops_reading_the_source(self):
+        """A failed upload must not drain the rest of the file into memory."""
+        consumed = 0
+
+        def counted():
+            nonlocal consumed
+            for value in self.LINES:
+                consumed += 1
+                yield value
+
+        batches = aiter_batches(counted(), target_bytes=200)
+        await batches.__anext__()
+        await batches.aclose()
+
+        # Enough for the first batch and its lookahead, nowhere near the file.
+        assert consumed < len(self.LINES)
+
+    @pytest.mark.asyncio
+    async def test_abandoning_the_iterator_closes_a_retained_sync_source(self):
+        closed = False
+
+        def source():
+            nonlocal closed
+            try:
+                yield from self.LINES
+            finally:
+                closed = True
+
+        retained_source = source()
+        batches = aiter_batches(retained_source, target_bytes=200)
+        await batches.__anext__()
+        await batches.aclose()
+
+        assert closed
+
+    @pytest.mark.asyncio
+    async def test_source_error_closes_a_retained_sync_source(self):
+        closed = False
+
+        class FailingSource:
+            def __init__(self):
+                self.first = True
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                if self.first:
+                    self.first = False
+                    return line("{}")
+                raise RuntimeError("source failed")
+
+            def close(self):
+                nonlocal closed
+                closed = True
+
+        retained_source = FailingSource()
+        with pytest.raises(RuntimeError, match="source failed"):
+            await collect(retained_source)
+
+        assert closed
+
+    @pytest.mark.asyncio
+    async def test_abandoning_the_iterator_closes_an_async_source(self):
+        closed = False
+
+        async def source():
+            nonlocal closed
+            try:
+                for value in self.LINES:
+                    yield value
+            finally:
+                closed = True
+
+        batches = aiter_batches(source(), target_bytes=200)
+        await batches.__anext__()
+        await batches.aclose()
+
+        assert closed
+
+    @pytest.mark.asyncio
+    async def test_async_source_close_may_return_a_future(self):
+        closed = False
+
+        class FutureClosingSource:
+            def __init__(self):
+                self.first = True
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.first:
+                    self.first = False
+                    return line("{}")
+                raise StopAsyncIteration
+
+            def aclose(self):
+                nonlocal closed
+                closed = True
+                future = asyncio.get_running_loop().create_future()
+                future.set_result(None)
+                return future
+
+        [batch] = await collect(FutureClosingSource())
+
+        assert batch.data == line("{}")
+        assert closed
+
+    @pytest.mark.asyncio
+    async def test_repeated_cancellation_waits_for_sync_source_cleanup(self):
+        """Cancellation must not abandon a generator running in a worker."""
+        started = threading.Event()
+        release = threading.Event()
+        closed = threading.Event()
+
+        def slow_lines():
+            try:
+                started.set()
+                release.wait()
+                yield line("{}")
+            finally:
+                closed.set()
+
+        batches = aiter_batches(slow_lines())
+        task = asyncio.create_task(batches.__anext__())
+        await asyncio.to_thread(started.wait)
+
+        task.cancel()
+        # Let cancellation enter aiter_batches while next_batch still owns the
+        # synchronous generator, reproducing the old close-while-running race.
+        await asyncio.sleep(0)
+
+        # A second cancellation must not detach the close worker while it is
+        # waiting for next_batch to release the iterator lock.
+        task.cancel()
+        await asyncio.sleep(0.01)
+        assert not task.done()
+        assert not closed.is_set()
+
+        release.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert closed.is_set()
+
+    @pytest.mark.asyncio
+    async def test_repeated_cancellation_waits_for_async_source_cleanup(self):
+        close_started = asyncio.Event()
+        release_close = asyncio.Event()
+        closed = False
+
+        class SlowSource:
+            def __init__(self):
+                self.first = True
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.first:
+                    self.first = False
+                    return line("{}")
+                await asyncio.Event().wait()
+
+            async def aclose(self):
+                nonlocal closed
+                close_started.set()
+                await release_close.wait()
+                closed = True
+
+        batches = aiter_batches(SlowSource())
+        task = asyncio.create_task(batches.__anext__())
+        await asyncio.sleep(0)
+
+        task.cancel()
+        await close_started.wait()
+
+        # A second cancellation must not interrupt a source that is still
+        # releasing its files, connections or producer tasks.
+        task.cancel()
+        await asyncio.sleep(0.01)
+        assert not task.done()
+        assert not closed
+
+        release_close.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert closed

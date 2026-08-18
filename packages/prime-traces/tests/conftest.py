@@ -4,7 +4,12 @@ from typing import Callable
 import httpx
 import pytest
 
-from prime_traces import TracesAPIClient, TracesClient
+from prime_traces import (
+    AsyncTracesAPIClient,
+    AsyncTracesClient,
+    TracesAPIClient,
+    TracesClient,
+)
 
 _PRIME_ENV_VARS = (
     "PRIME_API_KEY",
@@ -45,15 +50,42 @@ def make_client() -> Callable[..., TracesClient]:
     return _make
 
 
+@pytest.fixture
+def make_async_client() -> Callable[..., AsyncTracesClient]:
+    """The async twin of ``make_client``, over the same MockTransport."""
+
+    def _make(handler: Callable[[httpx.Request], httpx.Response]) -> AsyncTracesClient:
+        api_client = AsyncTracesAPIClient(
+            api_key="test-key",
+            base_url="http://testserver",
+            # "" forces no team header rather than resolving from config.
+            team_id="",
+            transport=httpx.MockTransport(handler),
+        )
+        return AsyncTracesClient(api_client=api_client)
+
+    return _make
+
+
 @pytest.fixture(autouse=True)
 def no_sleep(monkeypatch):
     """Record retry sleeps instead of actually sleeping.
 
     Upload retries sleep in ``traces``; idempotent read retries sleep in
     ``core.client``. One list records both so tests assert on delays without
-    caring which loop slept.
+    caring which loop slept — and the async clients feed the same list, so a
+    delay assertion holds for whichever surface the test drives.
     """
     sleeps: list = []
     monkeypatch.setattr("prime_traces.traces.time.sleep", sleeps.append)
     monkeypatch.setattr("prime_traces.core.client.time.sleep", sleeps.append)
+
+    async def record(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    # ``retry_sleep`` exists to be replaceable here: patching ``asyncio.sleep``
+    # itself would reach every coroutine in the process, including the test
+    # framework's own.
+    monkeypatch.setattr("prime_traces.core.async_client.retry_sleep", record)
+    monkeypatch.setattr("prime_traces.async_traces.retry_sleep", record)
     return sleeps

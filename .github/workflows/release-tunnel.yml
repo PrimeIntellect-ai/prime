@@ -62,6 +62,13 @@ jobs:
         run: |
           uv build --out-dir dist
 
+      - name: Publish to PyPI
+        if: steps.check_tag.outputs.exists != 'true' || inputs.force_release == 'true'
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: packages/prime-tunnel/dist
+          skip-existing: true
+
       - name: Create tag
         if: steps.check_tag.outputs.exists != 'true'
         run: |
@@ -70,9 +77,3 @@ jobs:
           git config user.email 'github-actions[bot]@users.noreply.github.com'
           git tag -a "$TAG" -m "Release $TAG"
           git push origin "$TAG"
-
-      - name: Publish to PyPI
-        if: steps.check_tag.outputs.exists != 'true' || inputs.force_release == 'true'
-        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
-        with:
-          packages-dir: packages/prime-tunnel/dist

@@ -1,28 +1,4 @@
-"""Async high-level client for Prime Traces.
-
-The asyncio counterpart of ``traces.TracesClient``, with the same method
-names, arguments, return types and failure semantics. Everything that decides
-*what* a call does — filter encoding, ID encoding, record serialization,
-batching, retry classification — is imported from the sync modules rather than
-restated, so the two surfaces cannot answer the same question differently. The
-async client owns only the awaiting, plus two things a sync client never has
-to think about:
-
-- Blocking work is moved off the event loop. Reading a JSONL file, hashing a
-  batch, gzipping a body and writing a download to disk all happen in worker
-  threads, so one 30 MiB upload does not stall every other task in the
-  process.
-- Producers may be async. ``upload_records`` and ``upload_lines`` accept an
-  async iterable as readily as a sync one, so rollouts can stream straight
-  from an async generator without being collected first.
-
-Uploads still send one batch at a time. The contract allows 2–8 requests in
-flight per producer, but that is a throughput decision to make against the
-running service, and a concurrent version has to answer what a durable
-rejection means for batches already in flight — so the ordering, the receipt
-sequence and the stop-on-400 behaviour stay identical to the sync client for
-now.
-"""
+"""Async high-level client for Prime Traces."""
 
 import asyncio
 import inspect

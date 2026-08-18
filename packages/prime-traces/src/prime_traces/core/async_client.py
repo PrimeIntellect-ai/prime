@@ -1,15 +1,4 @@
-"""Async HTTP client for the Prime Traces service.
-
-The asyncio counterpart of ``core.client.TracesAPIClient``. It shares that
-module's configuration, response mapping and retry classification, so the two
-transports cannot disagree about what a response means or when a replay is
-safe; only the awaiting differs.
-
-Two kinds of work are handed to worker threads rather than run on the event
-loop: gzipping an upload body (a batch is tens of MiB, and compressing one
-inline would stall every other task for as long as it takes) and writing a
-streamed download to disk. Everything else here is I/O the loop can await.
-"""
+"""Async HTTP client for the Prime Traces service."""
 
 import asyncio
 import gzip as gzip_module
@@ -132,13 +121,7 @@ class AsyncTracesAPIClient(BaseTracesAPIClient):
         endpoint: str,
         params: Optional[Dict[str, Any]],
     ) -> httpx.Response:
-        """Send with bounded retries when replay is known to be safe.
-
-        Same policy as the sync client: GET retries every transient failure,
-        DELETE retries only failures that could not have reached the service
-        plus explicit service refusals, and anything that may hide a completed
-        deletion surfaces as ``AmbiguousDeleteError``.
-        """
+        """Send with bounded retries when replay is known to be safe."""
         is_delete = method.upper() == "DELETE"
         for attempt in range(IDEMPOTENT_RETRY_ATTEMPTS):
             last = attempt == IDEMPOTENT_RETRY_ATTEMPTS - 1
@@ -181,23 +164,14 @@ class AsyncTracesAPIClient(BaseTracesAPIClient):
         return result
 
     async def delete(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> None:
-        """Send a DELETE and discard the body — 202 carries none.
-
-        See the sync client: an ambiguous failure that may hide a completed
-        deletion is returned to the caller rather than replayed.
-        """
+        """Send a DELETE and discard the body — 202 carries none."""
         self._check_auth()
         await self._idempotent_request("DELETE", endpoint, params)
 
     async def stream_bytes(
         self, endpoint: str, params: Optional[Dict[str, Any]] = None
     ) -> AsyncIterator[bytes]:
-        """Stream a response body in chunks (a raw trace can be 64 MiB).
-
-        As in the sync client, transient failures are retried only until the
-        first body byte has been yielded: a mid-stream retry would silently
-        restart the body under the consumer.
-        """
+        """Stream a response body in chunks (a raw trace can be 64 MiB)."""
         self._check_auth()
         for attempt in range(IDEMPOTENT_RETRY_ATTEMPTS):
             last = attempt == IDEMPOTENT_RETRY_ATTEMPTS - 1

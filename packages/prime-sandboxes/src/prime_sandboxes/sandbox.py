@@ -388,7 +388,17 @@ def _is_retryable_reachability_error(exc: BaseException) -> bool:
     ):
         return False
     if any(isinstance(error, SandboxNotRunningError) for error in chain):
-        return False
+        # A RUNNING control-plane status can briefly lead gateway registration.
+        # Command execution maps that gateway miss to SandboxNotRunningError for
+        # normal operations, but creation reachability checks must keep polling.
+        return any(
+            (isinstance(error, ConnectError) and error.code == Code.NOT_FOUND)
+            or (
+                isinstance(error, httpx.HTTPStatusError)
+                and _is_gateway_sandbox_not_found(error.response)
+            )
+            for error in chain
+        )
 
     for error in chain:
         if isinstance(error, CommandTimeoutError):

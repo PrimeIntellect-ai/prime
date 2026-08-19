@@ -19,6 +19,12 @@ class SandboxFileTooLargeError(APIError):
     pass
 
 
+class BatchStatusUnsupportedError(APIError):
+    """Raised when a required platform or VM batch-status endpoint is unavailable."""
+
+    pass
+
+
 class SandboxNotRunningError(RuntimeError):
     """Raised when an operation requires a RUNNING sandbox but it is not running."""
 

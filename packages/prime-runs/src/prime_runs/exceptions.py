@@ -67,6 +67,27 @@ class TransportError(RunAPIError):
     """The request failed below HTTP — connection refused, TLS failure, timeout."""
 
 
+def is_transient(exc: BaseException) -> bool:
+    """Whether a failure is about this moment rather than this run.
+
+    The distinction decides whether a sink is retired. A gated account or a bad
+    credential will fail identically on every future batch, so the sink should
+    stop. A gateway blip or a dropped connection will not, and retiring a sink
+    for one of those means a single 502 empties the rest of the run's dashboard.
+
+    Covers the traces service's exception family as well as this package's,
+    since both reach the uploader through the same path.
+    """
+    if isinstance(exc, (RetryableAPIError, TransportError)):
+        return True
+    try:
+        from prime_traces.exceptions import RetryableAPIError as TracesRetryable
+        from prime_traces.exceptions import TransportError as TracesTransport
+    except ImportError:  # pragma: no cover - dependency is declared
+        return False
+    return isinstance(exc, (TracesRetryable, TracesTransport))
+
+
 class EnvironmentResolutionError(PrimeRunsError):
     """An environment named in ``init()`` could not be resolved to a hub ID.
 

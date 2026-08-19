@@ -325,3 +325,27 @@ def test_a_forked_child_joins_the_run_without_duplicating_the_parents_records(tm
     ids = [json.loads(line)["id"] for line in lines]
 
     assert sorted(ids) == sorted([f"parent-{n}" for n in range(5)] + ["child-1"])
+
+
+def test_offline_records_are_on_disk_before_any_flush(tmp_path):
+    """Nothing may sit in a process-local write buffer.
+
+    A buffered writer holds records in memory until it decides to flush, and a
+    fork copies that buffer — after which both processes eventually write it and
+    every buffered record lands in the file twice. Reading the file back through
+    a separate handle, with no flush and no close, is what proves the buffer is
+    not there to be copied.
+    """
+    run = pr.init(mode="offline", dir=str(tmp_path))
+    run.log_traces([{"id": "t1"}])
+    run.flush()
+
+    path = tmp_path / run.id / "records" / "trace.jsonl"
+    assert path.read_text().count('"t1"') == 1
+
+    run.log_traces([{"id": "t2"}])
+    run.flush()
+    assert path.read_text().count('"t2"') == 1
+
+    run.finish()
+    assert len(path.read_text().splitlines()) == 2

@@ -233,3 +233,94 @@ def test_one_registered_object_raising_does_not_block_the_others():
     _fork._reset_all()
 
     assert fine.reset == 1
+
+
+def test_a_transient_failure_drops_the_batch_but_keeps_the_sink():
+    """One gateway blip must not empty the rest of the run's dashboard. The
+    batch is already lost; retiring the sink loses every batch after it too."""
+    from prime_runs.exceptions import RetryableAPIError
+
+    class BlipSink(FakeSink):
+        def write(self, records, *, line_format=None, step=None) -> None:
+            raise RetryableAPIError("bad gateway", status_code=502)
+
+    sink = BlipSink("blippy")
+    worker = UploadWorker([sink])
+
+    worker.submit(WriteItem(records=[{"id": 1}, {"id": 2}]))
+    drain(worker)
+
+    assert sink.enabled is True
+    assert worker.dropped == 2
+    worker.close()
+
+
+def test_a_sustained_outage_eventually_retires_the_sink():
+    """A blip is forgiven; hours of re-attempting every batch is not useful."""
+    from prime_runs.exceptions import TransportError
+    from prime_runs.worker import TRANSIENT_FAILURE_LIMIT
+
+    class DeadSink(FakeSink):
+        def write(self, records, *, line_format=None, step=None) -> None:
+            raise TransportError("connection refused")
+
+    sink = DeadSink("dead")
+    worker = UploadWorker([sink])
+
+    for _ in range(TRANSIENT_FAILURE_LIMIT):
+        worker.submit(WriteItem(records=[{"id": 1}]))
+    drain(worker)
+
+    assert sink.enabled is False
+    worker.close()
+
+
+def test_a_success_forgives_earlier_blips():
+    """Strikes are consecutive: an intermittent gateway must never accumulate
+    its way to a retirement across an otherwise healthy run."""
+    from prime_runs.exceptions import RetryableAPIError
+    from prime_runs.worker import TRANSIENT_FAILURE_LIMIT
+
+    class FlakySink(FakeSink):
+        """Fails every other batch, forever."""
+
+        def __init__(self) -> None:
+            super().__init__("flaky")
+            self.calls = 0
+
+        def write(self, records, *, line_format=None, step=None) -> None:
+            self.calls += 1
+            if self.calls % 2 == 1:
+                raise RetryableAPIError("bad gateway", status_code=502)
+            super().write(records, line_format=line_format, step=step)
+
+    sink = FlakySink()
+    worker = UploadWorker([sink])
+
+    # Far more failures than the limit, but never two in a row.
+    for _ in range(TRANSIENT_FAILURE_LIMIT * 4):
+        worker.submit(WriteItem(records=[{"id": 1}]))
+    drain(worker)
+
+    assert sink.calls == TRANSIENT_FAILURE_LIMIT * 4
+    assert sink.enabled is True
+    assert len(sink.batches) == TRANSIENT_FAILURE_LIMIT * 2
+    worker.close()
+
+
+def test_a_permanent_failure_retires_the_sink_immediately():
+    """A gated account or a rejected credential fails identically forever."""
+    from prime_runs.exceptions import UnauthorizedError
+
+    class DeniedSink(FakeSink):
+        def write(self, records, *, line_format=None, step=None) -> None:
+            raise UnauthorizedError("nope", status_code=401)
+
+    sink = DeniedSink("denied")
+    worker = UploadWorker([sink])
+
+    worker.submit(WriteItem(records=[{"id": 1}]))
+    drain(worker)
+
+    assert sink.enabled is False
+    worker.close()

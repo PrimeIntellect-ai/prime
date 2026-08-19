@@ -28,11 +28,16 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, List, Optional, Sequence
 
 from . import _fork
+from .exceptions import is_transient
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_QUEUE_SIZE = 256
 DEFAULT_PUT_TIMEOUT = 5.0
+#: Consecutive transient failures before a sink is retired. One gateway blip
+#: must not empty the rest of a run's dashboard; a sustained outage should still
+#: stop the SDK from re-attempting every batch for hours.
+TRANSIENT_FAILURE_LIMIT = 3
 
 
 @dataclass
@@ -84,6 +89,7 @@ class UploadWorker:
         self._stopping = threading.Event()
         self._lock = threading.Lock()
         self.dropped = 0
+        self._transient_failures: dict = {}
         self._pid = os.getpid()
         _fork.register(self)
 
@@ -125,7 +131,9 @@ class UploadWorker:
             try:
                 sink.write(item.records, line_format=item.line_format, step=item.step)
             except Exception as exc:  # noqa: BLE001 - one sink failing must not stop the others
-                self._fail_sink(sink, exc)
+                self._fail_sink(sink, exc, dropped=len(item.records))
+            else:
+                self._transient_failures.pop(getattr(sink, "name", id(sink)), None)
 
     def _write_metrics(self, item: MetricItem) -> None:
         if self._metric_writer is None:
@@ -151,23 +159,62 @@ class UploadWorker:
             except Exception as exc:  # noqa: BLE001
                 self._fail_sink(sink, exc)
 
-    def _fail_sink(self, sink: Any, exc: Exception) -> None:
-        """Disable a sink that raised, and report it exactly once.
+    def _fail_sink(self, sink: Any, exc: Exception, *, dropped: int = 0) -> None:
+        """Handle a sink that raised, and report it.
 
-        Not retried here: the transports already retry internally (traces on
-        content-addressed uploads, the platform client on 429/5xx), so an error
-        that reaches this point has already exhausted its budget. Continuing to
-        call a sink in that state produces one log line per batch for the rest
-        of the run and hides whatever failed first.
+        The batch is gone either way — the transports already retried internally
+        (traces on content-addressed uploads, the platform client on whatever it
+        can safely replay), so an error reaching this point has exhausted its
+        budget. What is decided here is whether the *sink* is finished:
+
+        - A permanent failure — a gated account, a rejected credential — will
+          fail identically on every future batch, so the sink stops. Continuing
+          would produce one log line per batch for the rest of the run and bury
+          whatever failed first.
+        - A transient one gets ``TRANSIENT_FAILURE_LIMIT`` consecutive strikes,
+          reset by any success. Retiring a sink on a single gateway blip would
+          leave the rest of the run missing from the dashboard, which is a much
+          larger loss than the one batch that actually failed.
         """
         name = getattr(sink, "name", type(sink).__name__)
-        sink.enabled = False
-        logger.warning("Sink %s disabled after an error: %s: %s", name, type(exc).__name__, exc)
-        if self._on_error is not None:
-            try:
-                self._on_error(name, exc)
-            except Exception:  # noqa: BLE001 - the handler is the caller's problem
-                logger.debug("Error handler raised while reporting a sink failure", exc_info=True)
+        self.dropped += dropped
+
+        if is_transient(exc):
+            strikes = self._transient_failures.get(name, 0) + 1
+            self._transient_failures[name] = strikes
+            if strikes < TRANSIENT_FAILURE_LIMIT:
+                logger.warning(
+                    "Sink %s dropped a batch of %d record(s) (%s: %s); "
+                    "strike %d of %d, still enabled.",
+                    name,
+                    dropped,
+                    type(exc).__name__,
+                    exc,
+                    strikes,
+                    TRANSIENT_FAILURE_LIMIT,
+                )
+                self._notify(name, exc)
+                return
+            sink.enabled = False
+            logger.warning(
+                "Sink %s disabled after %d consecutive transient failures: %s: %s",
+                name,
+                strikes,
+                type(exc).__name__,
+                exc,
+            )
+        else:
+            sink.enabled = False
+            logger.warning("Sink %s disabled after an error: %s: %s", name, type(exc).__name__, exc)
+        self._notify(name, exc)
+
+    def _notify(self, name: str, exc: Exception) -> None:
+        if self._on_error is None:
+            return
+        try:
+            self._on_error(name, exc)
+        except Exception:  # noqa: BLE001 - the handler is the caller's problem
+            logger.debug("Error handler raised while reporting a sink failure", exc_info=True)
 
     # ------------------------------------------------------------------ queue
 

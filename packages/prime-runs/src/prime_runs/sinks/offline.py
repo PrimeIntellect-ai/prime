@@ -10,7 +10,7 @@ and does not change on sync.
 import json
 import logging
 from pathlib import Path
-from typing import Any, Mapping, Optional, Sequence, TextIO, Union
+from typing import Any, BinaryIO, Mapping, Optional, Sequence, Union
 
 from .. import _fork
 from .base import Sink, to_mapping
@@ -29,16 +29,18 @@ class OfflineSink(Sink):
         self._stamp_run = stamp_run
         self._run_id: Optional[str] = None
         self._run_kind: Optional[str] = None
-        self._handles: dict[str, TextIO] = {}
+        self._handles: dict[str, BinaryIO] = {}
         self.records_written = 0
         _fork.register(self)
 
     def reset_after_fork(self) -> None:
         """Abandon inherited file handles; ``_handle`` reopens on next write.
 
-        Dropped without flushing or closing: the inherited buffer holds records
-        the parent has not written yet and will write itself, so flushing it
-        here would put every one of them in the file twice.
+        Dropping a buffered file object would not be enough on its own: on
+        CPython the last reference going away closes it, and ``close()``
+        *flushes* — writing out the parent's copied buffer and duplicating every
+        record in it. The handles are unbuffered (see ``_handle``) precisely so
+        that there is never anything in that buffer to duplicate.
         """
         self._handles = {}
 
@@ -69,22 +71,28 @@ class OfflineSink(Sink):
                 if self._run_kind:
                     run["type"] = self._run_kind
                 mapping["run"] = run
-            handle.write(
-                json.dumps(mapping, ensure_ascii=False, separators=(",", ":"), default=str) + "\n"
-            )
+            line = json.dumps(mapping, ensure_ascii=False, separators=(",", ":"), default=str)
+            _write_all(handle, (line + "\n").encode("utf-8"))
             self.records_written += 1
 
-    def _handle(self, name: str) -> TextIO:
+    def _handle(self, name: str) -> BinaryIO:
+        """An unbuffered append-mode handle for one line format.
+
+        Unbuffered on purpose. A buffered writer keeps records in process memory
+        until it decides to flush, and a fork copies that buffer — after which
+        both processes eventually write it, putting every record in the file
+        twice. Writing straight through means the only copy of a record lives in
+        the file, and ``O_APPEND`` keeps concurrent writers from interleaving.
+        """
         handle = self._handles.get(name)
         if handle is None:
             self._records_dir.mkdir(parents=True, exist_ok=True)
-            handle = (self._records_dir / f"{name}.jsonl").open("a", encoding="utf-8")
+            handle = open(self._records_dir / f"{name}.jsonl", "ab", buffering=0)
             self._handles[name] = handle
         return handle
 
     def flush(self) -> None:
-        for handle in self._handles.values():
-            handle.flush()
+        """Nothing is held back — every write already went to the file."""
 
     def close(self) -> None:
         for handle in self._handles.values():
@@ -93,6 +101,15 @@ class OfflineSink(Sink):
             except OSError as exc:  # pragma: no cover - teardown must not raise
                 logger.debug("Error closing an offline record file: %s", exc)
         self._handles.clear()
+
+
+def _write_all(handle: BinaryIO, data: bytes) -> None:
+    """Write every byte. A raw handle may report a short write."""
+    while data:
+        written = handle.write(data)
+        if not written:  # pragma: no cover - only on a non-blocking handle
+            raise OSError("offline record write made no progress")
+        data = data[written:]
 
 
 def _infer_format(record: Any) -> str:

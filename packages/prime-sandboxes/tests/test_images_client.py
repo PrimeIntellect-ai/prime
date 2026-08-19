@@ -1,4 +1,8 @@
+import asyncio
+from types import SimpleNamespace
 from typing import Any
+
+import pytest
 
 from prime_sandboxes import (
     APIClient,
@@ -6,7 +10,12 @@ from prime_sandboxes import (
     BuildImageRequest,
     BuildImageResponse,
     BulkImageTransferResponse,
+    ImageArtifactType,
+    ImageBuildStatus,
     ImageClient,
+    ImageListItem,
+    ImageListResponse,
+    ImageOwnerType,
     ImageUpdateItem,
     ImageUpdatePatch,
     ImageUpdateSource,
@@ -19,9 +28,16 @@ from prime_sandboxes import (
 
 
 class DummyAPIClient(APIClient):
-    def __init__(self, response: dict[str, Any], captured: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        response: dict[str, Any],
+        captured: dict[str, Any] | None = None,
+        *,
+        team_id: str | None = None,
+    ) -> None:
         self.response = response
         self.captured = captured
+        self.config = SimpleNamespace(team_id=team_id)
 
     def request(
         self,
@@ -34,7 +50,135 @@ class DummyAPIClient(APIClient):
             self.captured["method"] = method
             self.captured["path"] = path
             self.captured["json"] = json
+            if params is not None:
+                self.captured["params"] = params
         return self.response
+
+
+def _image_list_response() -> dict[str, Any]:
+    return {
+        "data": [
+            {
+                "id": "image-container",
+                "artifactType": "CONTAINER_IMAGE",
+                "imageName": "ubuntu",
+                "imageTag": "22.04",
+                "status": "COMPLETED",
+                "fullImagePath": "registry.test/ubuntu:22.04",
+                "sizeBytes": 1024,
+                "visibility": "PUBLIC",
+                "createdAt": "2026-01-01T00:00:00Z",
+                "pushedAt": "2026-01-01T00:01:00Z",
+                "ownerType": "platform",
+                "displayRef": "ubuntu:22.04",
+            },
+            {
+                "id": "image-vm",
+                "artifactType": "VM_SANDBOX",
+                "imageName": "ubuntu",
+                "imageTag": "22.04",
+                "status": "COMPLETED",
+                "fullImagePath": "vm/ubuntu:22.04",
+                "errorMessage": None,
+                "sizeBytes": 2048,
+                "visibility": "PUBLIC",
+                "createdAt": "2026-01-01T00:00:00Z",
+                "startedAt": None,
+                "completedAt": None,
+                "pushedAt": "2026-01-01T00:02:00Z",
+                "teamId": None,
+                "ownerType": "platform",
+                "displayRef": "ubuntu:22.04",
+            },
+        ],
+        "totalCount": 1,
+        "offset": 25,
+        "limit": 1,
+        "status": "ok",
+    }
+
+
+def test_image_client_list_forwards_query_and_parses_artifact_rows():
+    captured: dict[str, Any] = {}
+    client = ImageClient(
+        DummyAPIClient(_image_list_response(), captured, team_id="team-configured")
+    )
+
+    response = client.list(team_id="team-explicit", search="ubuntu", offset=25, limit=1)
+
+    assert captured == {
+        "method": "GET",
+        "path": "/images",
+        "json": None,
+        "params": {
+            "teamId": "team-explicit",
+            "search": "ubuntu",
+            "offset": 25,
+            "limit": 1,
+        },
+    }
+    assert isinstance(response, ImageListResponse)
+    assert response.total_count == 1
+    assert response.status == "ok"
+    assert len(response.data) == 2
+    assert isinstance(response.data[0], ImageListItem)
+    assert response.data[0].artifact_type == ImageArtifactType.CONTAINER_IMAGE
+    assert response.data[1].artifact_type == ImageArtifactType.VM_SANDBOX
+    assert response.data[1].status == ImageBuildStatus.COMPLETED
+    assert response.data[1].owner_type == ImageOwnerType.PLATFORM
+    assert response.data[1].display_ref == "ubuntu:22.04"
+    assert response.model_dump(by_alias=True)["totalCount"] == 1
+    assert response.data[1].model_dump(by_alias=True)["artifactType"] == "VM_SANDBOX"
+
+
+def test_image_client_list_uses_configured_team_by_default():
+    captured: dict[str, Any] = {}
+    response = {"data": [], "total_count": 0, "offset": 0, "limit": 100}
+    client = ImageClient(DummyAPIClient(response, captured, team_id="team-configured"))
+
+    result = client.list()
+
+    assert result.total_count == 0
+    assert captured["params"] == {"offset": 0, "limit": 100, "teamId": "team-configured"}
+
+
+def test_image_client_list_allows_missing_total_count():
+    response = ImageClient(DummyAPIClient({"data": [], "offset": 0, "limit": 100})).list()
+
+    assert response.total_count is None
+    assert "totalCount" not in response.model_dump(by_alias=True, exclude_unset=True)
+
+
+def test_image_client_list_platform_ignores_configured_team():
+    captured: dict[str, Any] = {}
+    response = {"data": [], "totalCount": 0, "offset": 0, "limit": 250}
+    client = ImageClient(DummyAPIClient(response, captured, team_id="team-configured"))
+
+    client.list(platform=True, limit=250)
+
+    assert captured["params"] == {"offset": 0, "limit": 250, "ownerScope": "platform"}
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"offset": -1}, "offset"),
+        ({"limit": 0}, "limit"),
+        ({"limit": 251}, "limit"),
+        ({"platform": True, "team_id": "team-explicit"}, "team_id"),
+        ({"platform": True, "team_id": ""}, "team_id"),
+    ],
+)
+def test_image_client_list_validates_query(kwargs: dict[str, Any], message: str):
+    captured: dict[str, Any] = {}
+    client = ImageClient(
+        DummyAPIClient({"data": [], "totalCount": 0, "offset": 0, "limit": 100}, captured)
+    )
+
+    with pytest.raises(ValueError, match=message):
+        client.list(**kwargs)
+
+    assert captured == {}
 
 
 def test_image_client_transfer_image_payload_and_response():
@@ -223,9 +367,16 @@ def test_image_client_build_vm_image_accepts_platform_owner_scope():
 
 
 class DummyAsyncAPIClient:
-    def __init__(self, response: dict[str, Any], captured: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        response: dict[str, Any],
+        captured: dict[str, Any] | None = None,
+        *,
+        team_id: str | None = None,
+    ) -> None:
         self.response = response
         self.captured = captured
+        self.config = SimpleNamespace(team_id=team_id)
 
     async def request(
         self,
@@ -238,7 +389,89 @@ class DummyAsyncAPIClient:
             self.captured["method"] = method
             self.captured["path"] = path
             self.captured["json"] = json
+            if params is not None:
+                self.captured["params"] = params
         return self.response
+
+
+def test_async_image_client_list_forwards_query_and_parses_response():
+    captured: dict[str, Any] = {}
+    client = AsyncImageClient(  # type: ignore[arg-type]
+        DummyAsyncAPIClient(_image_list_response(), captured, team_id="team-configured")
+    )
+
+    response = asyncio.run(
+        client.list(team_id="team-explicit", search="ubuntu", offset=25, limit=1)
+    )
+
+    assert captured["method"] == "GET"
+    assert captured["path"] == "/images"
+    assert captured["params"] == {
+        "offset": 25,
+        "limit": 1,
+        "teamId": "team-explicit",
+        "search": "ubuntu",
+    }
+    assert response.total_count == 1
+    assert len(response.data) == 2
+    assert response.data[1].artifact_type == ImageArtifactType.VM_SANDBOX
+    assert response.data[1].status == ImageBuildStatus.COMPLETED
+
+
+def test_async_image_client_list_uses_configured_team_by_default():
+    captured: dict[str, Any] = {}
+    response = {"data": [], "totalCount": 0, "offset": 0, "limit": 100}
+    client = AsyncImageClient(  # type: ignore[arg-type]
+        DummyAsyncAPIClient(response, captured, team_id="team-configured")
+    )
+
+    result = asyncio.run(client.list())
+
+    assert result.data == []
+    assert captured["params"] == {"offset": 0, "limit": 100, "teamId": "team-configured"}
+
+
+def test_async_image_client_list_allows_missing_total_count():
+    client = AsyncImageClient(  # type: ignore[arg-type]
+        DummyAsyncAPIClient({"data": [], "offset": 0, "limit": 100})
+    )
+
+    response = asyncio.run(client.list())
+
+    assert response.total_count is None
+
+
+def test_async_image_client_list_platform_ignores_configured_team():
+    captured: dict[str, Any] = {}
+    response = {"data": [], "totalCount": 0, "offset": 0, "limit": 1}
+    client = AsyncImageClient(  # type: ignore[arg-type]
+        DummyAsyncAPIClient(response, captured, team_id="team-configured")
+    )
+
+    asyncio.run(client.list(platform=True, limit=1))
+
+    assert captured["params"] == {"offset": 0, "limit": 1, "ownerScope": "platform"}
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"offset": -1},
+        {"limit": 0},
+        {"limit": 251},
+        {"platform": True, "team_id": "team-explicit"},
+    ],
+)
+def test_async_image_client_list_validates_query(kwargs: dict[str, Any]):
+    captured: dict[str, Any] = {}
+    client = AsyncImageClient(  # type: ignore[arg-type]
+        DummyAsyncAPIClient({"data": [], "totalCount": 0, "offset": 0, "limit": 100}, captured)
+    )
+
+    with pytest.raises(ValueError):
+        asyncio.run(client.list(**kwargs))
+
+    assert captured == {}
 
 
 def test_async_image_client_build_vm_image_accepts_platform_owner_scope():

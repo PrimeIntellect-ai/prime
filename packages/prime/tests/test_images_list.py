@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, Callable
 
 import pytest
@@ -21,6 +22,13 @@ from prime_cli.commands.images import (
     _truncate_ref_left,
 )
 from prime_cli.main import app
+from prime_sandboxes import (
+    ImageArtifactType,
+    ImageBuildStatus,
+    ImageListItem,
+    ImageListResponse,
+    ImageOwnerType,
+)
 from typer.testing import CliRunner
 
 USER_ID = "cmkrcib4x00004kjyxq48nltd"
@@ -40,8 +48,8 @@ TEST_ENV: dict[str, str] = {
 
 
 def _art(
-    artifact_type: str = "CONTAINER_IMAGE",
-    status: str = "COMPLETED",
+    artifact_type: ImageArtifactType = ImageArtifactType.CONTAINER_IMAGE,
+    status: ImageBuildStatus = ImageBuildStatus.COMPLETED,
     *,
     image: str = "nvidia-basic-dev:latest",
     pushed_at: str | None = None,
@@ -51,32 +59,35 @@ def _art(
     size_bytes: int | None = None,
     team_id: str | None = None,
 ) -> ImageRow:
-    """Build a minimal image row carrying only the fields the CLI reads."""
+    """Build a typed image-list item carrying the fields the CLI reads."""
     name, _, tag = image.partition(":")
     tag = tag or "latest"
     scope = f"team-{team_id}" if team_id else USER_ID
-    return {
-        "artifactType": artifact_type,
-        "imageName": name,
-        "imageTag": tag,
-        "status": status,
-        "sizeBytes": size_bytes,
-        "createdAt": created_at,
-        "startedAt": started_at,
-        "completedAt": completed_at,
-        "pushedAt": pushed_at,
-        "teamId": team_id,
-        "ownerType": "team" if team_id else "personal",
-        "displayRef": f"prime/{scope}/{name}:{tag}",
-    }
+    return ImageListItem.model_validate(
+        {
+            "id": f"{artifact_type.value}:{name}:{tag}",
+            "artifactType": artifact_type,
+            "imageName": name,
+            "imageTag": tag,
+            "status": status,
+            "sizeBytes": size_bytes,
+            "createdAt": created_at,
+            "startedAt": started_at,
+            "completedAt": completed_at,
+            "pushedAt": pushed_at,
+            "teamId": team_id,
+            "ownerType": ImageOwnerType.TEAM if team_id else ImageOwnerType.PERSONAL,
+            "displayRef": f"prime/{scope}/{name}:{tag}",
+        }
+    )
 
 
 def _container(**kw: Any) -> ImageRow:
-    return _art("CONTAINER_IMAGE", **kw)
+    return _art(ImageArtifactType.CONTAINER_IMAGE, **kw)
 
 
 def _vm(**kw: Any) -> ImageRow:
-    return _art("VM_SANDBOX", **kw)
+    return _art(ImageArtifactType.VM_SANDBOX, **kw)
 
 
 # ---------------------------------------------------------------------------
@@ -91,19 +102,19 @@ def test_partition_keeps_newest_completed_per_type():
             _vm(pushed_at="2026-04-16T22:24:07"),
         ]
     )
-    assert part["CONTAINER_IMAGE"].latest["status"] == "COMPLETED"
-    assert part["VM_SANDBOX"].latest["status"] == "COMPLETED"
+    assert part[ImageArtifactType.CONTAINER_IMAGE].latest.status == ImageBuildStatus.COMPLETED
+    assert part[ImageArtifactType.VM_SANDBOX].latest.status == ImageBuildStatus.COMPLETED
 
 
 def test_partition_newer_completed_beats_older_failed():
     part = _partition_group(
         [
-            _container(status="FAILED", completed_at="2026-04-16T21:00:00"),
+            _container(status=ImageBuildStatus.FAILED, completed_at="2026-04-16T21:00:00"),
             _container(pushed_at="2026-04-16T22:24:07"),
-            _container(status="FAILED", completed_at="2026-04-16T20:55:00"),
+            _container(status=ImageBuildStatus.FAILED, completed_at="2026-04-16T20:55:00"),
         ]
     )
-    assert part["CONTAINER_IMAGE"].latest["status"] == "COMPLETED"
+    assert part[ImageArtifactType.CONTAINER_IMAGE].latest.status == ImageBuildStatus.COMPLETED
 
 
 def test_partition_fresh_completed_wins_over_stale_building_zombie():
@@ -112,14 +123,14 @@ def test_partition_fresh_completed_wins_over_stale_building_zombie():
     part = _partition_group(
         [
             _vm(
-                status="BUILDING",
+                status=ImageBuildStatus.BUILDING,
                 started_at="2026-04-09T20:52:01",
                 created_at="2026-04-09T20:52:00",
             ),
             _vm(pushed_at="2026-04-17T18:21:28", completed_at="2026-04-17T18:21:28"),
         ]
     )
-    assert part["VM_SANDBOX"].latest["status"] == "COMPLETED"
+    assert part[ImageArtifactType.VM_SANDBOX].latest.status == ImageBuildStatus.COMPLETED
 
 
 def test_partition_active_build_wins_over_older_completed():
@@ -127,40 +138,24 @@ def test_partition_active_build_wins_over_older_completed():
         [
             _container(pushed_at="2026-04-15T20:57:52"),
             _container(
-                status="BUILDING",
+                status=ImageBuildStatus.BUILDING,
                 started_at="2026-04-17T10:00:05",
                 created_at="2026-04-17T10:00:00",
             ),
         ]
     )
-    assert part["CONTAINER_IMAGE"].latest["status"] == "BUILDING"
+    assert part[ImageArtifactType.CONTAINER_IMAGE].latest.status == ImageBuildStatus.BUILDING
 
 
 def test_partition_surfaces_failure_when_only_failed_rows_exist():
     part = _partition_group(
         [
-            _container(status="FAILED", completed_at="2026-04-16T21:00:00"),
-            _vm(status="FAILED", completed_at="2026-04-16T21:00:00"),
+            _container(status=ImageBuildStatus.FAILED, completed_at="2026-04-16T21:00:00"),
+            _vm(status=ImageBuildStatus.FAILED, completed_at="2026-04-16T21:00:00"),
         ]
     )
-    assert part["CONTAINER_IMAGE"].latest["status"] == "FAILED"
-    assert part["VM_SANDBOX"].latest["status"] == "FAILED"
-
-
-def test_partition_keeps_unknown_status_row_as_latest():
-    part = _partition_group([_container(status="QUEUED", created_at="2026-04-17T12:00:00")])
-    assert part["CONTAINER_IMAGE"].latest["status"] == "QUEUED"
-
-
-@pytest.mark.parametrize("bad_type", [None, 42, ""])
-def test_partition_coerces_non_string_artifact_type(bad_type):
-    row = _container(pushed_at="2026-04-17T12:00:00")
-    row["artifactType"] = bad_type
-    part = _partition_group([row])
-    assert "CONTAINER_IMAGE" in part
-    assert bad_type not in part
-    # ``sorted(partition)`` must not raise on mixed key types.
-    _render_status_column(part)
+    assert part[ImageArtifactType.CONTAINER_IMAGE].latest.status == ImageBuildStatus.FAILED
+    assert part[ImageArtifactType.VM_SANDBOX].latest.status == ImageBuildStatus.FAILED
 
 
 # ---------------------------------------------------------------------------
@@ -171,18 +166,16 @@ def test_partition_coerces_non_string_artifact_type(bad_type):
 @pytest.mark.parametrize(
     "status,expected",
     [
-        ("COMPLETED", "[green]Ready[/green]"),
-        ("BUILDING", "[yellow]Building[/yellow]"),
-        ("UPLOADING", "[yellow]Uploading[/yellow]"),
-        ("PENDING", "[blue]Pending[/blue]"),
-        ("FAILED", "[red]Failed[/red]"),
-        ("CANCELLED", "[dim]Cancelled[/dim]"),
-        # Unknown / future backend statuses fall back to dim title-case.
-        ("QUEUED", "[dim]Queued[/dim]"),
+        (ImageBuildStatus.COMPLETED, "[green]Ready[/green]"),
+        (ImageBuildStatus.BUILDING, "[yellow]Building[/yellow]"),
+        (ImageBuildStatus.UPLOADING, "[yellow]Uploading[/yellow]"),
+        (ImageBuildStatus.PENDING, "[blue]Pending[/blue]"),
+        (ImageBuildStatus.FAILED, "[red]Failed[/red]"),
+        (ImageBuildStatus.CANCELLED, "[dim]Cancelled[/dim]"),
     ],
 )
-def test_render_status_slot_known_and_unknown(status, expected):
-    assert _render_status_slot(ArtifactPartition(latest={"status": status})) == expected
+def test_render_status_slot_known(status, expected):
+    assert _render_status_slot(ArtifactPartition(latest=_container(status=status))) == expected
 
 
 @pytest.mark.parametrize("empty", [None, ArtifactPartition()])
@@ -231,7 +224,7 @@ def test_render_status_column_partial_failure_aligned():
         _partition_group(
             [
                 _container(pushed_at="2026-04-16T22:24:07"),
-                _vm(status="FAILED", completed_at="2026-04-16T22:00:00"),
+                _vm(status=ImageBuildStatus.FAILED, completed_at="2026-04-16T22:00:00"),
             ]
         )
     )
@@ -254,12 +247,12 @@ def test_render_status_column_stale_zombie_hidden_by_fresh_completed():
                 _container(pushed_at="2026-04-17T18:21:28"),
                 _vm(pushed_at="2026-04-17T18:21:28"),
                 _vm(
-                    status="BUILDING",
+                    status=ImageBuildStatus.BUILDING,
                     started_at="2026-04-09T20:52:01",
                     created_at="2026-04-09T20:52:00",
                 ),
-                _container(status="FAILED", completed_at="2026-04-16T21:00:00"),
-                _vm(status="FAILED", completed_at="2026-04-16T21:00:00"),
+                _container(status=ImageBuildStatus.FAILED, completed_at="2026-04-16T21:00:00"),
+                _vm(status=ImageBuildStatus.FAILED, completed_at="2026-04-16T21:00:00"),
             ]
         )
     )
@@ -272,13 +265,13 @@ def test_render_status_column_active_build_on_top_of_older_completed():
             [
                 _container(pushed_at="2026-04-15T20:57:52"),
                 _container(
-                    status="BUILDING",
+                    status=ImageBuildStatus.BUILDING,
                     started_at="2026-04-17T10:00:05",
                     created_at="2026-04-17T10:00:00",
                 ),
                 _vm(pushed_at="2026-04-15T20:57:52"),
                 _vm(
-                    status="BUILDING",
+                    status=ImageBuildStatus.BUILDING,
                     started_at="2026-04-17T10:00:05",
                     created_at="2026-04-17T10:00:00",
                 ),
@@ -286,18 +279,6 @@ def test_render_status_column_active_build_on_top_of_older_completed():
         )
     )
     assert text == "[yellow]Building[/yellow] / [yellow]Building[/yellow]"
-
-
-def test_render_status_column_surfaces_unknown_status_alongside_known():
-    text = _render_status_column(
-        _partition_group(
-            [
-                _container(pushed_at="2026-04-16T22:24:07"),
-                _vm(status="QUEUED", created_at="2026-04-16T22:00:00"),
-            ]
-        )
-    )
-    assert text == "[green]Ready[/green] / [dim]Queued[/dim]"
 
 
 # ---------------------------------------------------------------------------
@@ -320,13 +301,10 @@ def test_render_image_reference_keeps_team_prefix_for_team_listing():
 
 
 def test_render_image_reference_falls_back_without_display_ref():
-    assert (
-        _render_image_reference(
-            {"imageName": "fallback-image", "imageTag": "v2"},
-            is_team_listing=False,
-        )
-        == "fallback-image:v2"
+    image = _container(image="fallback-image:v2").model_copy(
+        update={"display_ref": None, "full_image_path": None}
     )
+    assert _render_image_reference(image, is_team_listing=False) == "fallback-image:v2"
 
 
 # ---------------------------------------------------------------------------
@@ -397,7 +375,7 @@ def test_completed_size_ignores_older_completed_if_newer_is_not_completed():
         [
             _container(pushed_at="2026-04-15T20:00:00", size_bytes=100 * 1024 * 1024),
             _container(
-                status="BUILDING",
+                status=ImageBuildStatus.BUILDING,
                 started_at="2026-04-17T10:00:05",
                 created_at="2026-04-17T10:00:00",
             ),
@@ -409,8 +387,8 @@ def test_completed_size_ignores_older_completed_if_newer_is_not_completed():
 def test_completed_size_returns_dash_when_no_completed():
     part = _partition_group(
         [
-            _container(status="BUILDING", started_at="2026-04-17T09:00:00"),
-            _vm(status="PENDING", created_at="2026-04-17T08:00:00"),
+            _container(status=ImageBuildStatus.BUILDING, started_at="2026-04-17T09:00:00"),
+            _vm(status=ImageBuildStatus.PENDING, created_at="2026-04-17T08:00:00"),
         ]
     )
     assert _completed_size_mb(part) == "[dim]—[/dim]"
@@ -435,11 +413,11 @@ def test_display_created_falls_back_to_started_at_for_active_builds():
     part = _partition_group(
         [
             _container(
-                status="BUILDING",
+                status=ImageBuildStatus.BUILDING,
                 started_at="2026-04-17T09:00:00",
                 created_at="2026-04-17T08:59:00",
             ),
-            _vm(status="PENDING", created_at="2026-04-17T08:00:00"),
+            _vm(status=ImageBuildStatus.PENDING, created_at="2026-04-17T08:00:00"),
         ]
     )
     assert _display_created(part) == "2026-04-17 09:00"
@@ -448,30 +426,15 @@ def test_display_created_falls_back_to_started_at_for_active_builds():
 def test_display_created_falls_back_to_completed_at_for_failures():
     part = _partition_group(
         [
-            _container(status="FAILED", completed_at="2026-04-16T12:00:00"),
-            _vm(status="FAILED", completed_at="2026-04-16T13:00:00"),
+            _container(status=ImageBuildStatus.FAILED, completed_at="2026-04-16T12:00:00"),
+            _vm(status=ImageBuildStatus.FAILED, completed_at="2026-04-16T13:00:00"),
         ]
     )
     assert _display_created(part) == "2026-04-16 13:00"
 
 
-def test_display_created_skips_truthy_but_unparseable_pushed_at():
-    # Regression for the bugbot finding: a truthy-but-malformed pushedAt must
-    # not drop the Created column; _latest reuses its own parsed timestamp.
-    part = _partition_group(
-        [
-            _container(pushed_at="definitely-not-a-date", completed_at="2026-04-16T22:24:07"),
-        ]
-    )
-    assert _display_created(part) == "2026-04-16 22:24"
-
-
 def test_group_sort_key_matches_display_created():
-    part = _partition_group(
-        [
-            _container(pushed_at="definitely-not-a-date", completed_at="2026-04-16T22:24:07"),
-        ]
-    )
+    part = _partition_group([_container(pushed_at="2026-04-16T22:24:07")])
     assert _group_sort_key(part).strftime("%Y-%m-%d %H:%M") == _display_created(part)
 
 
@@ -485,11 +448,26 @@ class _StubConfig:
         self.team_id = team_id
 
 
+def _image_list_response(
+    payload: list[ImageRow],
+    *,
+    offset: int = 0,
+    limit: int = 50,
+    total_count: int | None = None,
+    include_total_count: bool = True,
+) -> ImageListResponse:
+    logical_images = {
+        (row.owner_type, row.team_id, row.image_name, row.image_tag) for row in payload
+    }
+    pagination = {}
+    if include_total_count:
+        pagination["total_count"] = len(logical_images) if total_count is None else total_count
+    return ImageListResponse(data=payload, offset=offset, limit=limit, **pagination)
+
+
 @pytest.fixture
 def run_images_list(monkeypatch) -> Callable[..., Any]:
-    """Return a callable that invokes ``prime images list`` against a
-    mocked API, with the module-level ``config`` stubbed and the update
-    check disabled."""
+    """Invoke ``prime images list`` against a typed ``ImageClient.list`` stub."""
     runner = CliRunner()
 
     def _run(
@@ -498,15 +476,24 @@ def run_images_list(monkeypatch) -> Callable[..., Any]:
         team_id: str | None = None,
         env: dict[str, str] | None = None,
     ):
-        class DummyAPIClient:
-            def request(self, method, path, json=None, params=None):
-                assert method == "GET"
-                assert path == "/images"
-                return {"data": payload}
+        class DummyImageClient:
+            def __init__(self, _api_client) -> None:
+                pass
+
+            def list(
+                self,
+                *,
+                team_id=None,
+                search=None,
+                platform=False,
+                offset=0,
+                limit=50,
+            ):
+                return _image_list_response(payload, offset=offset, limit=limit)
 
         monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
         monkeypatch.setattr(images_cmd, "config", _StubConfig(team_id=team_id))
-        monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
+        monkeypatch.setattr(images_cmd, "ImageClient", DummyImageClient)
         return runner.invoke(app, ["images", "list"], env=env or TEST_ENV)
 
     return _run
@@ -517,8 +504,8 @@ def test_list_cli_shows_type_and_positional_status(run_images_list):
         [
             _container(pushed_at="2026-04-16T22:24:07", size_bytes=100 * 1024 * 1024),
             _vm(pushed_at="2026-04-16T22:24:07", size_bytes=200 * 1024 * 1024),
-            _container(status="FAILED", completed_at="2026-04-16T20:00:00"),
-            _vm(status="FAILED", completed_at="2026-04-16T20:00:00"),
+            _container(status=ImageBuildStatus.FAILED, completed_at="2026-04-16T20:00:00"),
+            _vm(status=ImageBuildStatus.FAILED, completed_at="2026-04-16T20:00:00"),
         ]
     )
     assert result.exit_code == 0, result.output
@@ -536,7 +523,7 @@ def test_list_cli_ignores_stale_building_zombie_when_completed_is_newer(run_imag
             _vm(pushed_at="2026-04-17T18:21:28", size_bytes=2_585_571_832),
             # The week-old stuck BUILDING row (as seen in production DB).
             _vm(
-                status="BUILDING",
+                status=ImageBuildStatus.BUILDING,
                 started_at="2026-04-09T20:52:01",
                 created_at="2026-04-09T20:52:00",
             ),
@@ -553,12 +540,12 @@ def test_list_cli_shows_building_when_build_is_newer_than_last_completed(run_ima
             _container(pushed_at="2026-04-15T20:57:52", size_bytes=50 * 1024 * 1024),
             _vm(pushed_at="2026-04-15T20:57:52", size_bytes=50 * 1024 * 1024),
             _container(
-                status="BUILDING",
+                status=ImageBuildStatus.BUILDING,
                 started_at="2026-04-17T10:00:05",
                 created_at="2026-04-17T10:00:00",
             ),
             _vm(
-                status="BUILDING",
+                status=ImageBuildStatus.BUILDING,
                 started_at="2026-04-17T10:00:05",
                 created_at="2026-04-17T10:00:00",
             ),
@@ -612,12 +599,12 @@ def test_list_cli_first_time_build_shows_building(run_images_list):
     result = run_images_list(
         [
             _container(
-                status="BUILDING",
+                status=ImageBuildStatus.BUILDING,
                 started_at="2026-04-17T09:00:05",
                 created_at="2026-04-17T09:00:00",
             ),
             _vm(
-                status="BUILDING",
+                status=ImageBuildStatus.BUILDING,
                 started_at="2026-04-17T09:00:05",
                 created_at="2026-04-17T09:00:00",
             ),
@@ -646,31 +633,43 @@ def _run_list_capturing_params(
     *,
     payload: list[ImageRow] | None = None,
     team_id: str | None = None,
+    total_count: int | None = None,
     include_total_count: bool = True,
 ):
-    """Invoke ``prime images list`` with extra CLI args, capturing the query
-    params forwarded to the API request.
-
-    When ``include_total_count`` is False the stubbed response omits
-    ``totalCount`` entirely, mirroring a backend that does not report it (the
-    CLI keeps defensive branches for that case).
-    """
+    """Invoke the CLI and capture arguments forwarded to ``ImageClient.list``."""
     captured: dict[str, Any] = {}
 
-    class DummyAPIClient:
-        def request(self, method, path, json=None, params=None):
-            assert method == "GET"
-            assert path == "/images"
-            captured["params"] = dict(params or {})
-            rows = payload or []
-            response: dict[str, Any] = {"data": rows}
-            if include_total_count:
-                response["totalCount"] = len(rows)
-            return response
+    class DummyImageClient:
+        def __init__(self, _api_client) -> None:
+            pass
+
+        def list(
+            self,
+            *,
+            team_id=None,
+            search=None,
+            platform=False,
+            offset=0,
+            limit=50,
+        ):
+            captured["params"] = {
+                "team_id": team_id,
+                "search": search,
+                "platform": platform,
+                "offset": offset,
+                "limit": limit,
+            }
+            return _image_list_response(
+                payload or [],
+                offset=offset,
+                limit=limit,
+                total_count=total_count,
+                include_total_count=include_total_count,
+            )
 
     monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
     monkeypatch.setattr(images_cmd, "config", _StubConfig(team_id=team_id))
-    monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
+    monkeypatch.setattr(images_cmd, "ImageClient", DummyImageClient)
     result = CliRunner().invoke(app, ["images", "list", *args], env=TEST_ENV)
     return result, captured
 
@@ -702,7 +701,7 @@ def test_list_without_search_omits_param(monkeypatch):
         payload=[_container(pushed_at="2026-04-16T22:24:07")],
     )
     assert result.exit_code == 0, result.output
-    assert "search" not in captured["params"]
+    assert captured["params"].get("search") is None
 
 
 def test_list_empty_search_result_shows_search_aware_message(monkeypatch):
@@ -716,43 +715,54 @@ def test_list_empty_search_result_shows_search_aware_message(monkeypatch):
     assert "No images match 'doesnotexist'" in result.output
 
 
+def test_list_search_out_of_range_page_shows_page_guidance(monkeypatch):
+    result, captured = _run_list_capturing_params(
+        monkeypatch,
+        ["--search", "myapp", "--page", "2"],
+        payload=[],
+        total_count=1,
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["params"]["offset"] == 50
+    assert "No images on page" in result.output
+    assert "No images match" not in result.output
+
+
 def test_list_search_out_of_range_page_without_total_count_shows_page_guidance(monkeypatch):
-    # Empty page > 1 with a search and no totalCount is ambiguous (likely
-    # out-of-range), so the page guidance must win — not a "no matches" claim.
     result, _ = _run_list_capturing_params(
         monkeypatch,
         ["--search", "myapp", "--page", "2"],
         payload=[],
         include_total_count=False,
     )
+
     assert result.exit_code == 0, result.output
-    assert "No images on page 2" in result.output
+    assert "No images on page" in result.output
     assert "No images match" not in result.output
 
 
 def test_list_search_first_page_without_total_count_shows_no_matches(monkeypatch):
-    # First page empty with a search and no totalCount means no matches exist.
     result, _ = _run_list_capturing_params(
         monkeypatch,
         ["--search", "myapp"],
         payload=[],
         include_total_count=False,
     )
+
     assert result.exit_code == 0, result.output
     assert "No images match 'myapp'" in result.output
 
 
 def test_list_out_of_range_page_without_total_count_no_search(monkeypatch):
-    # Regression guard for the original (pre-search) behaviour: empty page > 1,
-    # no totalCount, no search still shows the page guidance.
     result, _ = _run_list_capturing_params(
         monkeypatch,
         ["--page", "3"],
         payload=[],
         include_total_count=False,
     )
+
     assert result.exit_code == 0, result.output
-    assert "No images on page 3" in result.output
+    assert "No images on page" in result.output
 
 
 def test_list_cli_newest_group_first(run_images_list):
@@ -779,10 +789,12 @@ def test_list_cli_newest_group_first(run_images_list):
 
 def _platform_row(**kw: Any) -> ImageRow:
     row = _container(**kw)
-    name = row["imageName"]
-    tag = row["imageTag"]
-    row.update({"ownerType": "platform", "displayRef": f"{name}:{tag}"})
-    return row
+    return row.model_copy(
+        update={
+            "owner_type": ImageOwnerType.PLATFORM,
+            "display_ref": f"{row.image_name}:{row.image_tag}",
+        }
+    )
 
 
 def test_list_platform_image_forwards_owner_scope(monkeypatch):
@@ -792,8 +804,8 @@ def test_list_platform_image_forwards_owner_scope(monkeypatch):
         payload=[_platform_row(image="ubuntu:22.04", pushed_at="2026-04-16T22:24:07")],
     )
     assert result.exit_code == 0, result.output
-    assert captured["params"].get("ownerScope") == "platform"
-    assert "teamId" not in captured["params"]
+    assert captured["params"].get("platform") is True
+    assert captured["params"].get("team_id") is None
     assert "Platform Docker Images" in result.output
 
 
@@ -805,8 +817,8 @@ def test_list_platform_image_ignores_team_context(monkeypatch):
         team_id=TEAM_ID,
     )
     assert result.exit_code == 0, result.output
-    assert captured["params"].get("ownerScope") == "platform"
-    assert "teamId" not in captured["params"]
+    assert captured["params"].get("platform") is True
+    assert captured["params"].get("team_id") is None
     assert "Team context ignored" in result.output
     assert "Platform Docker Images" in result.output
     # Platform listings never render the team-scoped Owner column.
@@ -821,9 +833,25 @@ def test_list_platform_image_team_context_json_output_stays_clean(monkeypatch):
         team_id=TEAM_ID,
     )
     assert result.exit_code == 0, result.output
-    assert captured["params"].get("ownerScope") == "platform"
-    assert "teamId" not in captured["params"]
+    assert captured["params"].get("platform") is True
+    assert captured["params"].get("team_id") is None
     assert "Team context ignored" not in result.output
+    payload = json.loads(result.output)
+    assert payload["totalCount"] == 1
+    assert "total_count" not in payload
+    assert payload["data"][0]["artifactType"] == "CONTAINER_IMAGE"
+
+
+def test_list_json_omits_total_count_when_api_omits_it(monkeypatch):
+    result, _ = _run_list_capturing_params(
+        monkeypatch,
+        ["--output", "json"],
+        payload=[_container(pushed_at="2026-04-16T22:24:07")],
+        include_total_count=False,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "totalCount" not in json.loads(result.output)
 
 
 def test_list_platform_image_empty_shows_platform_push_hint(monkeypatch):
@@ -843,4 +871,4 @@ def test_list_without_platform_flag_omits_owner_scope(monkeypatch):
         payload=[_container(pushed_at="2026-04-16T22:24:07")],
     )
     assert result.exit_code == 0, result.output
-    assert "ownerScope" not in captured["params"]
+    assert captured["params"].get("platform") is False

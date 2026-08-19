@@ -1,0 +1,286 @@
+"""Coverage for `prime cluster login` and the `prime auth k8s-token` plugin.
+
+The plugin's contract is unusually strict because kubectl, not a human, is the
+caller: stdout is protocol, and the exit code is how anything wrapping it tells
+"retry later" from "this will never work". Those are the properties worth
+pinning down — a regression in them shows up as a confusing kubectl error
+rather than a test failure anywhere else.
+"""
+
+import json
+
+import httpx
+import pytest
+import yaml
+from prime_cli.commands.auth import (
+    EXIT_AMBIGUOUS,
+    EXIT_AUTH_EXPIRED,
+    EXIT_FORBIDDEN,
+    EXIT_RATE_LIMITED,
+    EXIT_UNREACHABLE,
+)
+from prime_cli.commands.auth import app as auth_app
+from prime_cli.commands.cluster import _build_kubeconfig
+from typer.testing import CliRunner
+
+runner = CliRunner()
+
+
+class _FakeConfig:
+    api_key = "test-key"
+    base_url = "https://api.example.com"
+
+
+@pytest.fixture
+def patch_config(monkeypatch):
+    monkeypatch.setattr("prime_cli.commands.auth.Config", lambda: _FakeConfig())
+
+
+def respond(monkeypatch, *, status_code, json_body=None, headers=None):
+    requested_urls = []
+
+    def _post(url, **kwargs):
+        requested_urls.append(url)
+        return httpx.Response(
+            status_code=status_code,
+            json=json_body if json_body is not None else {},
+            headers=headers or {},
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr("prime_cli.commands.auth.httpx.post", _post)
+    return requested_urls
+
+
+class TestKubeconfigRendering:
+    def test_exec_block_carries_no_token(self, monkeypatch):
+        monkeypatch.delenv("PRIME_CONTEXT", raising=False)
+        config = _build_kubeconfig(
+            cluster="alpha-cluster",
+            server="https://k8s.example.com",
+            ca_data="Y2E=",
+            grants=[{"pool": "alpha", "namespace": "ada-alpha"}],
+            base_url="https://api.example.com",
+        )
+        rendered = yaml.safe_dump(config)
+        # No credential material anywhere in the file — the only "token" that
+        # may appear is the plugin's own subcommand name.
+        assert "token:" not in rendered
+        assert "client-certificate" not in rendered
+        exec_block = config["users"][0]["user"]["exec"]
+        assert exec_block["command"] == "prime"
+        assert exec_block["args"][:2] == ["auth", "k8s-token"]
+        # Never prompt: kubectl may be running with no terminal attached.
+        assert exec_block["interactiveMode"] == "Never"
+
+    def test_exec_args_carry_no_context_flag_by_default(self, monkeypatch):
+        monkeypatch.delenv("PRIME_CONTEXT", raising=False)
+        config = _build_kubeconfig(
+            cluster="c1",
+            server="https://k8s",
+            ca_data="Y2E=",
+            grants=[{"pool": "alpha", "namespace": "ada-alpha"}],
+            base_url="https://api.example.com",
+        )
+        args = config["users"][0]["user"]["exec"]["args"]
+        assert args == ["auth", "k8s-token", "--cluster", "c1", "--pool", "alpha"]
+
+    def test_exec_args_preserve_the_prime_context(self, monkeypatch):
+        # `prime --context staging cluster login` must write a kubeconfig whose
+        # refreshes also run against staging — kubectl invokes the plugin with
+        # no PRIME_CONTEXT in its environment, so the flag has to be in the
+        # file itself.
+        monkeypatch.setenv("PRIME_CONTEXT", "staging")
+        config = _build_kubeconfig(
+            cluster="c1",
+            server="https://k8s",
+            ca_data="Y2E=",
+            grants=[{"pool": "alpha", "namespace": "ada-alpha"}],
+            base_url="https://api.example.com",
+        )
+        args = config["users"][0]["user"]["exec"]["args"]
+        assert args == [
+            "--context",
+            "staging",
+            "auth",
+            "k8s-token",
+            "--cluster",
+            "c1",
+            "--pool",
+            "alpha",
+        ]
+
+    def test_exec_env_pins_the_resolved_base_url(self, monkeypatch):
+        # The --context flag alone regressed custom API URLs: reloading the
+        # built-in production context at refresh time forces base_url back to
+        # the public default. The login-time URL therefore rides in the exec
+        # env, where it outranks context resolution.
+        monkeypatch.setenv("PRIME_CONTEXT", "production")
+        config = _build_kubeconfig(
+            cluster="c1",
+            server="https://k8s",
+            ca_data="Y2E=",
+            grants=[{"pool": "alpha", "namespace": "ada-alpha"}],
+            base_url="https://api.internal.example.com",
+        )
+        exec_block = config["users"][0]["user"]["exec"]
+        assert exec_block["env"] == [
+            {"name": "PRIME_API_BASE_URL", "value": "https://api.internal.example.com"}
+        ]
+        # The context intent is preserved alongside, not replaced.
+        assert exec_block["args"][:2] == ["--context", "production"]
+
+    def test_one_context_per_pool(self, monkeypatch):
+        monkeypatch.delenv("PRIME_CONTEXT", raising=False)
+        config = _build_kubeconfig(
+            cluster="c1",
+            server="https://k8s",
+            ca_data="Y2E=",
+            grants=[
+                {"pool": "alpha", "namespace": "ada-alpha"},
+                {"pool": "beta", "namespace": "ada-beta"},
+            ],
+            base_url="https://api.example.com",
+        )
+        assert [c["name"] for c in config["contexts"]] == ["c1-alpha", "c1-beta"]
+        assert config["contexts"][0]["context"]["namespace"] == "ada-alpha"
+        assert config["current-context"] == "c1-alpha"
+        # Each context's plugin invocation names its own pool, otherwise the
+        # server would refuse the ambiguous request on every kubectl call.
+        assert config["users"][1]["user"]["exec"]["args"][-1] == "beta"
+
+
+class TestCustomBaseUrlSurvivesContextRefresh:
+    """The regression this pins down: with `PRIME_CONTEXT=production` (the
+    baked-in --context flag), every kubectl refresh reloaded the built-in
+    production environment and forced base_url back to the public default —
+    ignoring a custom URL set via `prime config set-base-url`. The exec env's
+    PRIME_API_BASE_URL must outrank that reload."""
+
+    @pytest.fixture
+    def custom_url_home(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("PRIME_API_BASE_URL", raising=False)
+        monkeypatch.delenv("PRIME_BASE_URL", raising=False)
+        monkeypatch.delenv("PRIME_CONTEXT", raising=False)
+        from prime_cli.core import Config
+
+        config = Config()
+        config.set_base_url("https://api.internal.example.com")
+        return tmp_path
+
+    def test_production_context_alone_loses_the_custom_url(self, custom_url_home, monkeypatch):
+        # The failure mode being fixed, kept as documentation: context
+        # resolution at refresh time discards the custom URL.
+        from prime_cli.core import Config
+
+        monkeypatch.setenv("PRIME_CONTEXT", "production")
+        assert Config().base_url == "https://api.primeintellect.ai"
+
+    def test_exec_env_base_url_outranks_the_production_context(self, custom_url_home, monkeypatch):
+        # What actually happens at refresh time now: kubectl exports the exec
+        # env block, so the plugin's Config resolves the pinned URL even while
+        # --context production reloads the built-in environment.
+        from prime_cli.core import Config
+
+        monkeypatch.setenv("PRIME_CONTEXT", "production")
+        monkeypatch.setenv("PRIME_API_BASE_URL", "https://api.internal.example.com")
+        assert Config().base_url == "https://api.internal.example.com"
+
+
+class TestCredentialPluginSuccess:
+    def test_writes_only_the_credential_to_stdout(self, patch_config, monkeypatch):
+        credential = {
+            "apiVersion": "client.authentication.k8s.io/v1",
+            "kind": "ExecCredential",
+            "status": {"token": "abc", "expirationTimestamp": "2026-07-25T07:00:00Z"},
+        }
+        respond(monkeypatch, status_code=200, json_body=credential)
+
+        result = runner.invoke(auth_app, ["k8s-token", "--cluster", "c1"])
+
+        assert result.exit_code == 0
+        # kubectl parses stdout as JSON — anything else on it breaks auth.
+        assert json.loads(result.stdout) == credential
+
+    def test_posts_to_the_public_api_route(self, patch_config, monkeypatch):
+        # Config.base_url strips /api/v1, so the plugin must add it back —
+        # this URL shipped without the prefix once and every call 404'd.
+        urls = respond(monkeypatch, status_code=200, json_body={"status": {}})
+
+        runner.invoke(auth_app, ["k8s-token", "--cluster", "c1"])
+
+        assert urls == ["https://api.example.com/api/v1/clusters/c1/kube-token"]
+
+
+class TestCredentialPluginFailures:
+    """Each status maps to a distinct exit code so a caller can tell whether
+    retrying is pointless."""
+
+    def test_revoked_grant_is_permanent(self, patch_config, monkeypatch):
+        respond(
+            monkeypatch,
+            status_code=403,
+            json_body={"detail": "No active cluster access grant"},
+        )
+        result = runner.invoke(auth_app, ["k8s-token", "--cluster", "c1"])
+        assert result.exit_code == EXIT_FORBIDDEN
+        assert result.stdout.strip() == ""
+
+    def test_expired_platform_auth_points_at_prime_login(self, patch_config, monkeypatch):
+        respond(monkeypatch, status_code=401)
+        result = runner.invoke(auth_app, ["k8s-token", "--cluster", "c1"])
+        assert result.exit_code == EXIT_AUTH_EXPIRED
+
+    def test_rate_limited_reports_retry_after(self, patch_config, monkeypatch):
+        respond(monkeypatch, status_code=429, headers={"Retry-After": "42"})
+        result = runner.invoke(auth_app, ["k8s-token", "--cluster", "c1"])
+        assert result.exit_code == EXIT_RATE_LIMITED
+
+    def test_rate_limited_without_retry_after_still_exits_cleanly(self, patch_config, monkeypatch):
+        respond(monkeypatch, status_code=429)
+        result = runner.invoke(auth_app, ["k8s-token", "--cluster", "c1"])
+        assert result.exit_code == EXIT_RATE_LIMITED
+
+    def test_ambiguous_pool_is_its_own_code(self, patch_config, monkeypatch):
+        respond(
+            monkeypatch,
+            status_code=409,
+            json_body={"detail": "You have access to several pools (alpha, beta)."},
+        )
+        result = runner.invoke(auth_app, ["k8s-token", "--cluster", "c1"])
+        assert result.exit_code == EXIT_AMBIGUOUS
+
+    def test_server_error_is_transient(self, patch_config, monkeypatch):
+        respond(monkeypatch, status_code=503)
+        result = runner.invoke(auth_app, ["k8s-token", "--cluster", "c1"])
+        assert result.exit_code == EXIT_UNREACHABLE
+
+    def test_unreachable_platform_is_transient(self, patch_config, monkeypatch):
+        def _post(url, **kwargs):
+            raise httpx.ConnectError("connection refused")
+
+        monkeypatch.setattr("prime_cli.commands.auth.httpx.post", _post)
+        result = runner.invoke(auth_app, ["k8s-token", "--cluster", "c1"])
+        assert result.exit_code == EXIT_UNREACHABLE
+
+    def test_malformed_credential_is_not_passed_through(self, patch_config, monkeypatch):
+        # A 200 with the wrong shape must not reach kubectl as if it were valid.
+        respond(monkeypatch, status_code=200, json_body={"nope": True})
+        result = runner.invoke(auth_app, ["k8s-token", "--cluster", "c1"])
+        assert result.exit_code == EXIT_UNREACHABLE
+        assert result.stdout.strip() == ""
+
+    def test_missing_api_key_does_not_call_the_platform(self, monkeypatch):
+        class _NoKey:
+            api_key = ""
+            base_url = "https://api.example.com"
+
+        monkeypatch.setattr("prime_cli.commands.auth.Config", lambda: _NoKey())
+
+        def _explode(*args, **kwargs):
+            raise AssertionError("should not have made a request")
+
+        monkeypatch.setattr("prime_cli.commands.auth.httpx.post", _explode)
+        result = runner.invoke(auth_app, ["k8s-token", "--cluster", "c1"])
+        assert result.exit_code == EXIT_AUTH_EXPIRED

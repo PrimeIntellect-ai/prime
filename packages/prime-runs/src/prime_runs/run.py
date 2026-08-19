@@ -24,6 +24,7 @@ import threading
 import time
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Union
 
+from . import _fork
 from ._http import DEFAULT_TIMEOUT, UPLOAD_TIMEOUT, PlatformClient
 from .backends import Backend, EvalsBackend, OfflineBackend
 from .config import Config
@@ -137,6 +138,7 @@ class Run:
         # the process from installing its own.
         self._signal_handler = self._handle_signal
         self._previous_signal_handlers: Dict[int, Any] = {}
+        _fork.register(self)
 
     # -------------------------------------------------------------- identity
 
@@ -169,7 +171,7 @@ class Run:
     @property
     def is_primary(self) -> bool:
         """Whether this process owns the run's lifecycle (rank 0, or single-process)."""
-        return self._is_primary
+        return self._owns_lifecycle
 
     @property
     def finished(self) -> bool:
@@ -454,6 +456,20 @@ class Run:
             except (ValueError, OSError):  # pragma: no cover
                 continue
         self._previous_signal_handlers.clear()
+
+    def reset_after_fork(self) -> None:
+        """Make an inherited handle safe to use in a forked child.
+
+        The child may keep using this handle, but the process that created the
+        run remains responsible for its lifecycle. In particular, the child's
+        inherited signal and atexit callbacks must never finalize the parent's
+        still-running run. The lock also has to be replaced because it may have
+        been owned at fork time by a thread that no longer exists.
+        """
+        self._finish_lock = threading.RLock()
+        self._is_primary = False
+        self._owns_lifecycle = False
+        self._deferred_error = None
 
     def _on_process_exit(self) -> None:
         """Last resort: the process is exiting and nobody called ``finish()``.
@@ -834,7 +850,7 @@ def _resolve_mode(
                 "recording this run offline instead."
             )
             mode = "offline"
-    if mode == "online" and not is_primary and not run_id:
+    if mode in ("online", "offline") and not is_primary and not run_id:
         # A non-primary rank with no run to join would create a second run for
         # the same job. Recording nothing is better than that.
         logger.debug("Non-primary rank with no %s; disabling this run handle", RUN_ID_ENV)

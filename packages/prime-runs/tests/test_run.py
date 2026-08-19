@@ -315,6 +315,19 @@ def test_a_process_that_exits_without_finishing_reports_crashed():
     assert backend.finalized[0]["status"] is RunStatus.CRASHED
 
 
+def test_a_forked_handle_gets_a_fresh_lock_and_loses_lifecycle_ownership():
+    backend = FakeBackend()
+    run = make_run(backend)
+    inherited_lock = run._finish_lock
+
+    run.reset_after_fork()
+
+    assert run._finish_lock is not inherited_lock
+    assert run.is_primary is False
+    run.finish()
+    assert backend.finalized == []
+
+
 def test_a_backend_failure_does_not_escape_into_the_producer_by_default():
     """Six hours of rollouts must not be lost to a 502 on a telemetry call."""
     backend = FakeBackend(fail_on="finalize")

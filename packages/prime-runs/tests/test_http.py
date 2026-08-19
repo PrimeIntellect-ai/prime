@@ -105,6 +105,29 @@ def test_transport_failures_are_retried_and_typed(no_sleep):
     assert len(no_sleep) == 1
 
 
+def test_an_omitted_request_timeout_keeps_the_clients_default():
+    seen = []
+
+    def handler(request):
+        seen.append(request.extensions["timeout"])
+        return httpx.Response(200, json={"ok": True})
+
+    transport = httpx.MockTransport(handler)
+    http_client = httpx.Client(
+        transport=transport,
+        timeout=httpx.Timeout(17.0, connect=3.0),
+    )
+    client = PlatformClient(
+        api_key="test-key",
+        base_url="http://testserver",
+        client=http_client,
+    )
+
+    assert client.get("/evaluations/x") == {"ok": True}
+    assert seen == [{"connect": 3.0, "read": 17.0, "write": 17.0, "pool": 17.0}]
+    http_client.close()
+
+
 def test_an_empty_body_is_a_valid_response():
     client = client_for(lambda request: httpx.Response(204))
 

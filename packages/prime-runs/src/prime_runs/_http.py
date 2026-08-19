@@ -176,14 +176,17 @@ class PlatformClient:
         for attempt in range(1, attempts + 1):
             ambiguous = True
             try:
-                response = self._client.request(
-                    method,
-                    url,
-                    content=body,
-                    headers=headers,
-                    params=dict(params) if params else None,
-                    timeout=timeout,
-                )
+                request_kwargs: Dict[str, Any] = {
+                    "content": body,
+                    "headers": headers,
+                    "params": dict(params) if params else None,
+                }
+                # ``None`` disables httpx timeouts; it does not mean "use the
+                # client's default". Omit the override so ordinary lifecycle
+                # calls retain the timeout configured in ``_new_client``.
+                if timeout is not None:
+                    request_kwargs["timeout"] = timeout
+                response = self._client.request(method, url, **request_kwargs)
             except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as exc:
                 # No connection was ever established, so the server saw nothing.
                 ambiguous = False

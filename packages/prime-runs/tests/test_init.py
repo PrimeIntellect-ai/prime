@@ -136,6 +136,18 @@ def test_a_non_primary_rank_with_no_run_to_join_records_nothing(monkeypatch, tmp
     run.finish()
 
 
+def test_a_non_primary_offline_rank_without_a_run_to_join_records_nothing(monkeypatch, tmp_path):
+    """An offline rank must not create a run it is forbidden to finalize."""
+    monkeypatch.setenv("RANK", "3")
+
+    run = pr.init(mode="offline", dir=str(tmp_path))
+
+    assert run.mode == "disabled"
+    assert run.is_primary is False
+    run.finish()
+    assert not list(tmp_path.iterdir())
+
+
 def test_a_run_id_in_the_environment_is_joined_not_recreated(monkeypatch, tmp_path):
     monkeypatch.setenv("DP_RANK", "2")
     monkeypatch.setenv(RUN_ID_ENV, "offline-shared")
@@ -264,6 +276,7 @@ def test_an_id_inherited_from_a_parent_process_is_joined(monkeypatch, tmp_path):
     run = pr.init(mode="offline", dir=str(tmp_path))
 
     assert run.id == "offline-from-parent"
+    assert run.is_primary is False
     run.finish()
 
 
@@ -310,8 +323,16 @@ def test_a_forked_child_joins_the_run_without_duplicating_the_parents_records(tm
             child = pr.init(mode="offline", dir=str(tmp_path), handle_signals=False)
             if child.id != run.id:
                 code = 1
+            if child.is_primary:
+                code = 3
             child.log_traces([{"id": "child-1"}])
             child.finish()
+            # The original handle is inherited too. Its atexit callback must be
+            # harmless in the child: the parent still owns this lifecycle.
+            run._on_process_exit()
+            state = json.loads((tmp_path / run.id / "run.json").read_text())
+            if state["status"] != RunStatus.RUNNING.value:
+                code = 4
         except BaseException:
             code = 2
         finally:

@@ -8,6 +8,7 @@ import pytest
 from connectrpc.code import Code
 from connectrpc.errors import ConnectError
 
+from prime_sandboxes._connectrpc import GOOGLE_PROTOBUF_BINARY_CODEC
 from prime_sandboxes._proto.command_session import command_session_pb2
 from prime_sandboxes.core.client import APIClient, APIError
 from prime_sandboxes.models import CommandResponse
@@ -149,14 +150,15 @@ async def test_async_execute_command_uses_rest_for_cpu():
 @pytest.mark.asyncio
 async def test_async_open_process_streams_vm_command_session(monkeypatch):
     calls = []
+    client_init_kwargs = {}
     start_kwargs = {}
     input_written = asyncio.Event()
     terminated = asyncio.Event()
 
     class _FakeConnectClient:
-        def __init__(self, address: str, http_client=None):
+        def __init__(self, address: str, **kwargs):
             self.address = address
-            self.http_client = http_client
+            client_init_kwargs.update(kwargs)
 
         def execute_server_stream(self, **kwargs):
             start_kwargs.update(kwargs)
@@ -228,6 +230,8 @@ async def test_async_open_process_streams_vm_command_session(monkeypatch):
         assert [name for name, _ in calls] == ["Start", "SendInput", "SendSignal"]
         assert calls[0][1].stdin is True
         assert start_kwargs["timeout_ms"] == 24 * 60 * 60 * 1000
+        assert client_init_kwargs["codec"] is GOOGLE_PROTOBUF_BINARY_CODEC
+        assert client_init_kwargs["send_compression"] is None
         assert calls[0][1].command.cwd == "/workspace"
         assert calls[0][1].command.envs == {"KEY": "value"}
         assert calls[1][1].session.pid == 42
@@ -298,9 +302,12 @@ def test_auth_cache_stores_vm_flag_for_reuse(tmp_path):
 
 
 def test_sync_connect_execution_collects_stdout_stderr(monkeypatch):
+    client_init_kwargs = {}
+
     class _FakeConnectClient:
-        def __init__(self, address: str):
+        def __init__(self, address: str, **kwargs):
             self.address = address
+            client_init_kwargs.update(kwargs)
 
         def execute_server_stream(self, **_kwargs):
             start_response = getattr(command_session_pb2, "StartResponse")
@@ -337,11 +344,13 @@ def test_sync_connect_execution_collects_stdout_stderr(monkeypatch):
     assert result.stdout == "hello\n"
     assert result.stderr == "warn\n"
     assert result.exit_code == 7
+    assert client_init_kwargs["codec"] is GOOGLE_PROTOBUF_BINARY_CODEC
+    assert client_init_kwargs["send_compression"] is None
 
 
 def test_sync_connect_execution_maps_deadline_to_timeout(monkeypatch):
     class _FakeConnectClient:
-        def __init__(self, _address: str):
+        def __init__(self, _address: str, **_kwargs):
             pass
 
         def execute_server_stream(self, **_kwargs):

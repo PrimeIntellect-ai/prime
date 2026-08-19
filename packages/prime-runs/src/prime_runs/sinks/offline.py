@@ -1,0 +1,90 @@
+"""Local JSONL sink, written in the wire format Prime Traces accepts.
+
+Deliberately not a debug dump: the files this writes are valid trace/episode
+JSONL, so ``prime_traces.TracesClient.upload_file`` can send them later
+untouched. That is what makes an offline run a *deferred* run rather than a
+different one — the run ID stamped into the records was issued at ``init()``
+and does not change on sync.
+"""
+
+import json
+import logging
+from pathlib import Path
+from typing import Any, Mapping, Optional, Sequence, TextIO, Union
+
+from .base import Sink, to_mapping
+
+logger = logging.getLogger(__name__)
+
+
+class OfflineSink(Sink):
+    """Appends records to ``<dir>/<run_id>/records/<line_format>.jsonl``."""
+
+    name = "offline"
+
+    def __init__(self, directory: Union[str, Path], *, stamp_run: bool = True) -> None:
+        self.enabled = True
+        self.directory = Path(directory)
+        self._stamp_run = stamp_run
+        self._run_id: Optional[str] = None
+        self._run_kind: Optional[str] = None
+        self._handles: dict[str, TextIO] = {}
+        self.records_written = 0
+
+    def start(self, run_id: str, context: Mapping[str, str]) -> None:
+        self._run_id = run_id
+        self._run_kind = context.get("run_kind")
+        self._records_dir.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def _records_dir(self) -> Path:
+        return self.directory / (self._run_id or "unknown") / "records"
+
+    def write(
+        self,
+        records: Sequence[Any],
+        *,
+        line_format: Optional[str] = None,
+        step: Optional[int] = None,
+    ) -> None:
+        if not self.enabled or not records:
+            return
+        name = str(getattr(line_format, "value", line_format) or _infer_format(records[0]))
+        handle = self._handle(name)
+        for record in records:
+            mapping = dict(to_mapping(record))
+            if self._stamp_run and not mapping.get("run") and self._run_id:
+                run: dict[str, Any] = {"id": self._run_id}
+                if self._run_kind:
+                    run["type"] = self._run_kind
+                mapping["run"] = run
+            handle.write(
+                json.dumps(mapping, ensure_ascii=False, separators=(",", ":"), default=str) + "\n"
+            )
+            self.records_written += 1
+
+    def _handle(self, name: str) -> TextIO:
+        handle = self._handles.get(name)
+        if handle is None:
+            self._records_dir.mkdir(parents=True, exist_ok=True)
+            handle = (self._records_dir / f"{name}.jsonl").open("a", encoding="utf-8")
+            self._handles[name] = handle
+        return handle
+
+    def flush(self) -> None:
+        for handle in self._handles.values():
+            handle.flush()
+
+    def close(self) -> None:
+        for handle in self._handles.values():
+            try:
+                handle.close()
+            except OSError as exc:  # pragma: no cover - teardown must not raise
+                logger.debug("Error closing an offline record file: %s", exc)
+        self._handles.clear()
+
+
+def _infer_format(record: Any) -> str:
+    if isinstance(record, Mapping):
+        return "episode" if "traces" in record else "trace"
+    return "episode" if hasattr(record, "traces") else "trace"

@@ -1,0 +1,167 @@
+"""The background uploader: backpressure, containment, fork safety."""
+
+import queue
+import threading
+
+from conftest import FakeSink
+
+from prime_runs.worker import MetricItem, UploadWorker, WriteItem
+
+
+def drain(worker: UploadWorker) -> None:
+    assert worker.flush(timeout=5.0)
+
+
+def test_records_reach_every_enabled_sink():
+    sinks = [FakeSink("a"), FakeSink("b")]
+    worker = UploadWorker(sinks)
+
+    worker.submit(WriteItem(records=[{"id": 1}], line_format="trace", step=3))
+    drain(worker)
+
+    for sink in sinks:
+        assert sink.batches == [([{"id": 1}], "trace", 3)]
+    worker.close()
+
+
+def test_a_disabled_sink_is_skipped():
+    live, dead = FakeSink("live"), FakeSink("dead")
+    dead.enabled = False
+    worker = UploadWorker([live, dead])
+
+    worker.submit(WriteItem(records=[{"id": 1}]))
+    drain(worker)
+
+    assert live.batches and not dead.batches
+    worker.close()
+
+
+def test_one_sink_failing_does_not_stop_the_others():
+    broken, healthy = FakeSink("broken", fail_on_write=True), FakeSink("healthy")
+    reported = []
+    worker = UploadWorker([broken, healthy], on_error=lambda name, exc: reported.append(name))
+
+    worker.submit(WriteItem(records=[{"id": 1}]))
+    drain(worker)
+
+    assert healthy.batches
+    assert broken.enabled is False
+    assert reported == ["broken"]
+    worker.close()
+
+
+def test_a_failed_sink_is_not_called_again():
+    """One log line per batch for the rest of a run hides whatever failed first."""
+    broken = FakeSink("broken", fail_on_write=True)
+    reported = []
+    worker = UploadWorker([broken], on_error=lambda name, exc: reported.append(name))
+
+    for _ in range(3):
+        worker.submit(WriteItem(records=[{"id": 1}]))
+    drain(worker)
+
+    assert reported == ["broken"]
+    worker.close()
+
+
+def test_a_full_queue_drops_rather_than_blocking_the_producer():
+    """Stalling a training run to protect telemetry is the wrong trade."""
+
+    class BlockingSink(FakeSink):
+        def __init__(self) -> None:
+            super().__init__("blocking")
+            self.entered = threading.Event()
+            self.released = threading.Event()
+
+        def write(self, records, *, line_format=None, step=None) -> None:
+            self.entered.set()
+            self.released.wait(5.0)
+            super().write(records, line_format=line_format, step=step)
+
+    sink = BlockingSink()
+    worker = UploadWorker([sink], max_queue_size=1, put_timeout=0.05)
+
+    # First item is picked up and wedges the uploader inside sink.write().
+    assert worker.submit(WriteItem(records=[{"id": 0}]))
+    assert sink.entered.wait(5.0), "the uploader never reached the sink"
+    # Second fills the one-slot queue; third has nowhere to go.
+    worker.submit(WriteItem(records=[{"id": 1}]))
+    accepted = worker.submit(WriteItem(records=[{"id": 2}, {"id": 3}]))
+
+    assert accepted is False
+    assert worker.dropped == 2
+
+    sink.released.set()
+    worker.close()
+
+
+def test_metrics_ride_the_same_queue_when_the_backend_stores_a_time_series():
+    points = []
+    worker = UploadWorker([], metric_writer=lambda metrics, step: points.append((metrics, step)))
+
+    worker.submit(MetricItem(metrics={"loss": 0.5}, step=7))
+    drain(worker)
+
+    assert points == [({"loss": 0.5}, 7)]
+    worker.close()
+
+
+def test_a_metric_write_that_raises_does_not_kill_the_uploader():
+    sink = FakeSink()
+
+    def explode(metrics, step):
+        raise RuntimeError("nope")
+
+    worker = UploadWorker([sink], metric_writer=explode)
+    worker.submit(MetricItem(metrics={"loss": 0.5}, step=1))
+    worker.submit(WriteItem(records=[{"id": 1}]))
+    drain(worker)
+
+    assert sink.batches, "the uploader survived the metric failure"
+    worker.close()
+
+
+def test_close_drains_then_closes_every_sink():
+    sink = FakeSink()
+    worker = UploadWorker([sink])
+
+    worker.submit(WriteItem(records=[{"id": 1}]))
+    worker.close()
+
+    assert sink.batches
+    assert sink.closed is True
+
+
+def test_submitting_after_close_is_refused():
+    worker = UploadWorker([FakeSink()])
+    worker.close()
+
+    assert worker.submit(WriteItem(records=[{"id": 1}])) is False
+
+
+def test_flush_without_a_running_thread_still_flushes_the_sinks():
+    sink = FakeSink()
+    worker = UploadWorker([sink])
+
+    assert worker.flush(timeout=1.0) is True
+    assert sink.flushes == 1
+
+
+def test_a_forked_child_starts_over_instead_of_re_uploading_the_parents_queue():
+    """The queued records belong to the parent, which still has a live thread.
+
+    Inheriting them would upload each record twice; inheriting the lock could
+    deadlock the child on its first write.
+    """
+    sink = FakeSink()
+    worker = UploadWorker([sink], max_queue_size=4)
+    worker._queue.put(WriteItem(records=[{"id": "parents"}]))
+    old_queue = worker._queue
+
+    worker._reinit_after_fork()
+
+    assert worker._queue is not old_queue
+    assert worker._queue.empty()
+    assert worker._thread is None
+    assert isinstance(worker._queue, queue.Queue)
+    assert isinstance(worker._lock, type(threading.Lock())) or worker._lock is not None

@@ -60,8 +60,8 @@ class EvalsBackend:
     # ------------------------------------------------------------------ create
 
     def create(self, spec: RunSpec) -> RunHandle:
-        environment_ids = self._resolve_environments(spec.environments)
-        if not environment_ids:
+        environments = self._resolve_environments(spec.environments)
+        if not environments:
             raise ConfigurationError(
                 "An eval run needs at least one environment. Pass "
                 'environments=["my-env"] to init().'
@@ -70,7 +70,7 @@ class EvalsBackend:
         run_name: str = spec.name or _default_name(spec)
         payload: Dict[str, Any] = {
             "name": run_name,
-            "environments": [{"id": environment_id} for environment_id in environment_ids],
+            "environments": environments,
             "tags": list(spec.tags),
         }
         _set_if(payload, "model_name", spec.model)
@@ -124,6 +124,12 @@ class EvalsBackend:
         config: Optional[Dict[str, Any]] = None,
         summary: Optional[Dict[str, Any]] = None,
     ) -> None:
+        """Persist config and/or summary.
+
+        ``config`` must be the run's whole config: the service writes metadata
+        with ``{"$set": {"metadata": ...}}``, which replaces the stored document
+        rather than merging into it.
+        """
         payload: Dict[str, Any] = {}
         _set_if(payload, "metadata", config or None)
         _set_if(payload, "metrics", summary or None)
@@ -147,13 +153,14 @@ class EvalsBackend:
         status: RunStatus,
         summary: Optional[Dict[str, Any]] = None,
         error: Optional[str] = None,
+        config: Optional[Dict[str, Any]] = None,
     ) -> None:
         if status is RunStatus.COMPLETED:
             body: Dict[str, Any] = {}
             _set_if(body, "metrics", summary or None)
             self._client.post(f"/evaluations/{run_id}/finalize", json_body=body or {"metrics": {}})
             return
-        self._report_failure(run_id, status=status, summary=summary, error=error)
+        self._report_failure(run_id, status=status, summary=summary, error=error, config=config)
 
     def _report_failure(
         self,
@@ -162,6 +169,7 @@ class EvalsBackend:
         status: RunStatus,
         summary: Optional[Dict[str, Any]],
         error: Optional[str],
+        config: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Mark a run failed, or record why we could not."""
         terminal = {
@@ -195,7 +203,14 @@ class EvalsBackend:
 
         # Fallback: the run cannot be moved out of RUNNING, but the failure is
         # at least recorded where an operator and the dashboard can both read it.
-        self.update(run_id, config={"prime_runs": terminal}, summary=summary)
+        # The terminal block is merged into the full config because this PUT
+        # replaces the stored metadata document — sending it alone would erase
+        # everything finish() just wrote.
+        self.update(
+            run_id,
+            config={**(config or {}), "prime_runs": terminal},
+            summary=summary,
+        )
         logger.warning(
             "Run %s %s, but the platform has no way to mark an evaluation failed; "
             "it will keep showing as running. Recorded the failure in metadata.prime_runs.",
@@ -208,32 +223,40 @@ class EvalsBackend:
 
     # ----------------------------------------------------------- environments
 
-    def _resolve_environments(self, refs: List[EnvironmentRef]) -> List[str]:
-        """Environment IDs for the hub references a producer named.
+    def _resolve_environments(self, refs: List[EnvironmentRef]) -> List[Dict[str, Any]]:
+        """Hub references as the API's ``EnvironmentReference`` objects.
+
+        ``version_id`` is carried through when the producer pinned one — the
+        API accepts it, and dropping it would silently attach the run to
+        whatever version the hub resolves today, which is the difference
+        between a reproducible eval and one that quietly moved.
 
         Unlike the old client, a reference that cannot be resolved raises
         instead of being skipped: dropping one silently produces a run attached
         to the wrong environments, which looks like a successful upload and is
         found much later.
         """
-        resolved: List[str] = []
+        resolved: List[Dict[str, Any]] = []
         for ref in refs:
-            if ref.id:
-                resolved.append(ref.id)
-                continue
-            body: Dict[str, Any] = {"name": ref.name}
-            _set_if(body, "team_id", self._team_id)
-            try:
-                response = self._client.post("/environmentshub/resolve", json_body=body)
-            except RunAPIError as exc:
-                raise EnvironmentResolutionError(
-                    f"Could not resolve environment {ref.name!r}: {exc}"
-                ) from exc
-            environment_id = (response.get("data") or {}).get("id")
-            if not environment_id:
-                raise EnvironmentResolutionError(f"Hub returned no id for environment {ref.name!r}")
-            resolved.append(environment_id)
+            entry: Dict[str, Any] = {"id": ref.id or self._lookup_environment(ref)}
+            _set_if(entry, "version_id", ref.version_id)
+            resolved.append(entry)
         return resolved
+
+    def _lookup_environment(self, ref: EnvironmentRef) -> str:
+        """Resolve one environment name to a hub ID (get-or-create)."""
+        body: Dict[str, Any] = {"name": ref.name}
+        _set_if(body, "team_id", self._team_id)
+        try:
+            response = self._client.post("/environmentshub/resolve", json_body=body)
+        except RunAPIError as exc:
+            raise EnvironmentResolutionError(
+                f"Could not resolve environment {ref.name!r}: {exc}"
+            ) from exc
+        environment_id = (response.get("data") or {}).get("id")
+        if not environment_id:
+            raise EnvironmentResolutionError(f"Hub returned no id for environment {ref.name!r}")
+        return str(environment_id)
 
 
 def _set_if(payload: Dict[str, Any], key: str, value: Any) -> None:

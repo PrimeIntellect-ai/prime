@@ -167,3 +167,44 @@ def test_attach_survives_a_read_failure(make_platform_client, eval_routes):
 
     assert handle.id == "eval-abc"
     assert handle.url == "https://app.example/dashboard/evaluations/eval-abc"
+
+
+def test_a_pinned_environment_version_reaches_the_api(make_platform_client, eval_routes):
+    """The API's EnvironmentReference carries version_id. Dropping it attaches
+    the run to whatever version the hub resolves today — the difference between
+    a reproducible eval and one that quietly moved."""
+    backend, handler = make_backend(make_platform_client, eval_routes)
+
+    backend.create(RunSpec(name="r", environments=[EnvironmentRef(id="env-1", version_id="v-7")]))
+
+    assert handler.bodies_for("/api/v1/evaluations/")[0]["environments"] == [
+        {"id": "env-1", "version_id": "v-7"}
+    ]
+
+
+def test_a_version_pin_survives_hub_resolution(make_platform_client, eval_routes):
+    backend, handler = make_backend(make_platform_client, eval_routes)
+
+    backend.create(RunSpec(name="r", environments=[EnvironmentRef(name="gsm8k", version_id="v-7")]))
+
+    assert handler.bodies_for("/api/v1/evaluations/")[0]["environments"] == [
+        {"id": "env-123", "version_id": "v-7"}
+    ]
+
+
+def test_the_failure_fallback_preserves_the_run_config(make_platform_client, eval_routes):
+    """The service writes metadata with a document-level $set, so a PUT carrying
+    only the terminal block would erase everything finish() just wrote."""
+    backend, handler = make_backend(make_platform_client, eval_routes)
+
+    backend.finalize(
+        "eval-abc",
+        status=RunStatus.FAILED,
+        error="boom",
+        config={"num_rollouts": 4, "model": "Qwen3-8B"},
+    )
+
+    metadata = handler.bodies_for("/api/v1/evaluations/eval-abc")[0]["metadata"]
+    assert metadata["num_rollouts"] == 4
+    assert metadata["model"] == "Qwen3-8B"
+    assert metadata["prime_runs"]["status"] == "failed"

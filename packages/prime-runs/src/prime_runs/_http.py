@@ -22,6 +22,7 @@ from typing import Any, Dict, Mapping, Optional, Union
 
 import httpx
 
+from . import _fork
 from .exceptions import (
     NotFoundError,
     PaymentRequiredError,
@@ -94,14 +95,33 @@ class PlatformClient:
         self.api_prefix = f"{self.base_url}/api/v1"
         self.max_attempts = max(1, max_attempts)
         self._owns_client = client is None
-        self._client = client or httpx.Client(
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "User-Agent": _user_agent(),
-            },
+        self._headers = {
+            "Authorization": f"Bearer {api_key}",
+            "User-Agent": _user_agent(),
+        }
+        self._timeout = timeout
+        self._client = client or self._new_client()
+        if self._owns_client:
+            # An injected client belongs to the caller (tests, the CLI); only a
+            # pool we opened ourselves is ours to rebuild after a fork.
+            _fork.register(self)
+
+    def _new_client(self) -> httpx.Client:
+        return httpx.Client(
+            headers=dict(self._headers),
             follow_redirects=True,
-            timeout=timeout,
+            timeout=self._timeout,
         )
+
+    def reset_after_fork(self) -> None:
+        """Rebuild the connection pool in a forked child.
+
+        The inherited pool's sockets are the parent's: writing them would
+        interleave two processes' requests into one HTTP stream. The old client
+        is dropped rather than closed, because closing can send ``close_notify``
+        on a connection the parent is still reading.
+        """
+        self._client = self._new_client()
 
     def request(
         self,

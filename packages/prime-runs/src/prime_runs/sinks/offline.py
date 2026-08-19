@@ -12,6 +12,7 @@ import logging
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence, TextIO, Union
 
+from .. import _fork
 from .base import Sink, to_mapping
 
 logger = logging.getLogger(__name__)
@@ -30,6 +31,16 @@ class OfflineSink(Sink):
         self._run_kind: Optional[str] = None
         self._handles: dict[str, TextIO] = {}
         self.records_written = 0
+        _fork.register(self)
+
+    def reset_after_fork(self) -> None:
+        """Abandon inherited file handles; ``_handle`` reopens on next write.
+
+        Dropped without flushing or closing: the inherited buffer holds records
+        the parent has not written yet and will write itself, so flushing it
+        here would put every one of them in the file twice.
+        """
+        self._handles = {}
 
     def start(self, run_id: str, context: Mapping[str, str]) -> None:
         self._run_id = run_id

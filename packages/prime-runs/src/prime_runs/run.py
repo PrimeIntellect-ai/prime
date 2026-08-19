@@ -24,7 +24,7 @@ import threading
 import time
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Union
 
-from ._http import DEFAULT_TIMEOUT, PlatformClient
+from ._http import DEFAULT_TIMEOUT, UPLOAD_TIMEOUT, PlatformClient
 from .backends import Backend, EvalsBackend, OfflineBackend
 from .config import Config
 from .exceptions import ConfigurationError, RunFinishedError
@@ -39,6 +39,18 @@ MODE_ENV = "PRIME_RUNS_MODE"
 #: Rank variables, in the order prime-rl sets them. Rank 0 owns the lifecycle.
 RANK_ENV_VARS = ("RANK", "DP_RANK", "LOCAL_RANK")
 DEFAULT_SUMMARY_FLUSH_SECONDS = 10.0
+#: How long ``finish()`` waits for queued records. Derived from the upload
+#: timeout rather than picked: a single in-flight sample POST is allowed 300s,
+#: so a shorter budget here would routinely abandon an upload that was about to
+#: succeed and then finalize the run without it.
+DEFAULT_FINISH_TIMEOUT = float(UPLOAD_TIMEOUT.read or 300.0)
+
+#: Run IDs this process exported into ``PRIME_RUN_ID``, mapped to the PID that
+#: exported them. The PID is the whole point: it is what distinguishes "my
+#: parent opened this run and I should join it" from "I opened this run a moment
+#: ago and the variable is still lying around". A forked child sees a different
+#: PID and correctly treats the entry as inherited.
+_exported_run_ids: Dict[str, int] = {}
 
 
 class Run:
@@ -63,6 +75,7 @@ class Run:
         is_primary: bool = True,
         owns_lifecycle: bool = True,
         summary_flush_seconds: float = DEFAULT_SUMMARY_FLUSH_SECONDS,
+        finish_timeout: float = DEFAULT_FINISH_TIMEOUT,
         queue_size: Optional[int] = None,
     ) -> None:
         self._backend = backend
@@ -82,6 +95,7 @@ class Run:
         self.errors: List[str] = []
 
         self._summary_flush_seconds = summary_flush_seconds
+        self._finish_timeout = finish_timeout
         self._last_summary_flush = time.monotonic()
         self._summary_dirty = False
         self._config_dirty = False
@@ -252,8 +266,14 @@ class Run:
 
         # Order matters: records first, so a dashboard that reacts to the
         # terminal status never sees a finished run with samples still landing.
-        self._worker.flush(timeout=60.0)
-        self._worker.close()
+        if not self._worker.flush(timeout=self._finish_timeout):
+            logger.warning(
+                "Run %s: uploads did not drain within %ss; finalizing anyway. "
+                "Some records may be missing from this run.",
+                self.id,
+                self._finish_timeout,
+            )
+        self._worker.close(timeout=self._finish_timeout)
 
         if self._owns_lifecycle:
             self._report_guarded(
@@ -271,12 +291,14 @@ class Run:
                     status=resolved,
                     summary=self.summary or None,
                     error=error or (self.errors[0] if self.errors else None),
+                    config=self.config or None,
                 ),
             )
         self._report_guarded("closing the backend", self._backend.close)
 
         atexit.unregister(self._atexit_hook)
         self._restore_signal_handlers()
+        self._retract_run_id()
 
         if self._worker.dropped:
             logger.warning(
@@ -302,9 +324,10 @@ class Run:
         if exc_type is None:
             self.finish()
         elif isinstance(exc, KeyboardInterrupt):
-            # An interrupt is a decision, not a fault. Recording it as FAILED
-            # would put every cancelled run in the same bucket as broken ones.
-            self.finish(status=RunStatus.FAILED, error="interrupted")
+            # An interrupt is a decision, not a fault, so it must not land in
+            # the same bucket as broken ones. Matches the SIGINT handler, which
+            # normally gets there first when signal handling is on.
+            self.finish(status=RunStatus.CRASHED, error="interrupted")
         else:
             self.finish(status=RunStatus.FAILED, error=_describe(exc))
         return False
@@ -336,9 +359,16 @@ class Run:
 
     def _handle_signal(self, signum: int, frame: Any) -> None:
         name = signal.Signals(signum).name
-        if not self._finished:
-            self.finish(status=RunStatus.FAILED, error=f"received {name}")
+        # Read the displaced handler *before* finishing: finish() restores and
+        # then clears this table, so looking it up afterwards always yields
+        # SIG_DFL — which re-raises the signal at its default disposition and
+        # kills the process instead of running the handler the app installed.
         previous = self._previous_signal_handlers.get(signum, signal.SIG_DFL)
+        if not self._finished:
+            # CRASHED, not FAILED: the producer never said the run failed, it was
+            # stopped from outside its own control flow. Same bucket as the
+            # atexit path, and deliberately not the bucket a broken eval lands in.
+            self.finish(status=RunStatus.CRASHED, error=f"received {name}")
         signal.signal(signum, previous)
         if callable(previous):
             previous(signum, frame)
@@ -365,6 +395,19 @@ class Run:
             return
         logger.warning("Run %s was never finished; reporting it as crashed", self.id)
         self.finish(status=RunStatus.CRASHED, error="process exited without finishing the run")
+
+    def _retract_run_id(self) -> None:
+        """Stop advertising a finished run to processes started from here.
+
+        Only retracts what this run published: if the value now points somewhere
+        else, another run owns it and clearing it would orphan that one's
+        children.
+        """
+        if not self._owns_lifecycle:
+            return
+        if os.environ.get(RUN_ID_ENV) == self.id:
+            os.environ.pop(RUN_ID_ENV, None)
+        _exported_run_ids.pop(self.id, None)
 
     def _require_live(self, operation: str) -> None:
         if self._finished:
@@ -476,7 +519,13 @@ def init(
     )
 
     is_primary = _is_primary_rank()
-    inherited_id = id or os.getenv(RUN_ID_ENV) or None
+    joined_id = _inherited_run_id()
+    inherited_id = id or joined_id
+    # Owning the lifecycle means "this call is responsible for creating and
+    # finalizing the run". An explicit `id=` is a deliberate resume, so it owns.
+    # An ID picked up from the environment belongs to whoever exported it, so it
+    # does not. (A non-primary rank never owns either way — see Run.__init__.)
+    owns_lifecycle = id is not None or joined_id is None
     resolved_mode = _resolve_mode(mode, api_key=api_key, is_primary=is_primary, run_id=inherited_id)
 
     if resolved_mode == "disabled":
@@ -498,7 +547,7 @@ def init(
             resolved_mode,
             on_error,
             is_primary,
-            True,
+            owns_lifecycle,
             queue_size,
         )
         _announce(run, handle_signals)
@@ -517,7 +566,6 @@ def init(
 
     client = PlatformClient(api_key=api_key, base_url=base_url, timeout=DEFAULT_TIMEOUT)
     backend = EvalsBackend(client, frontend_url=resolved_config.frontend_url, team_id=team_id)
-    owns_lifecycle = inherited_id is None
     handle = backend.attach(inherited_id) if inherited_id else backend.create(spec)
 
     if sinks is None:
@@ -577,13 +625,31 @@ def _announce(run: Run, handle_signals: bool) -> None:
     Exporting ``PRIME_RUN_ID`` is how forked workers and subprocess launchers
     join the run their parent created instead of each opening their own — the
     same trick prime-rl's monitor used with ``RUN_ID``, generalized so every
-    producer gets it.
+    producer gets it. The PID is recorded alongside so that *this* process does
+    not later mistake its own export for a parent's.
     """
-    os.environ.setdefault(RUN_ID_ENV, run.id)
+    os.environ[RUN_ID_ENV] = run.id
+    _exported_run_ids[run.id] = os.getpid()
     if handle_signals:
         run.install_signal_handlers()
     if run.url:
         logger.info("Run %s: %s", run.id, run.url)
+
+
+def _inherited_run_id() -> Optional[str]:
+    """A run ID this process should join, or ``None`` to open a fresh run.
+
+    ``PRIME_RUN_ID`` set by an ancestor means "join that run". The same variable
+    set by an earlier ``init()`` *in this process* means nothing of the sort —
+    without this check, a second eval in one process would silently attach to
+    the first, and would never create or finalize a run of its own.
+    """
+    value = os.getenv(RUN_ID_ENV)
+    if not value:
+        return None
+    if _exported_run_ids.get(value) == os.getpid():
+        return None
+    return value
 
 
 class _DisabledBackend:

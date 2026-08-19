@@ -85,11 +85,19 @@ Set the mode explicitly, or through `$PRIME_RUNS_MODE`.
 - **Applies backpressure.** The upload queue is bounded; if a producer durably
   outruns the uploader, records are dropped and counted (`run.dropped_records`)
   rather than stalling the run.
-- **Survives forks.** A forked child gets a fresh uploader instead of inheriting
-  the parent's queue and locks.
+- **Waits for its own uploads.** `finish()` gives queued records the same budget
+  a single upload gets (300s, `finish_timeout=`) and says so in a warning if
+  they do not drain, rather than finalizing over records still in flight.
+- **Survives forks.** A forked child gets a fresh uploader, a fresh connection
+  pool and fresh file handles instead of writing the parent's — which would
+  interleave two processes into one HTTP stream and flush the parent's buffered
+  records a second time. It also joins the parent's run rather than opening
+  its own.
 - **Reports a terminal status.** Context manager, `atexit` and signal handlers
-  all route to the same idempotent `finish()`, so a killed process is recorded as
-  crashed rather than left running forever.
+  all route to the same idempotent `finish()`. A run the producer decided had
+  failed is `failed`; one stopped from outside its control flow — Ctrl-C,
+  SIGTERM, an exit that never reached `finish()` — is `crashed`. Neither is
+  left running forever.
 - **Knows about ranks.** Rank 0 owns creation and finalization; other ranks join
   through `PRIME_RUN_ID` and upload their own records.
 

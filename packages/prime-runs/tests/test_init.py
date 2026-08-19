@@ -229,3 +229,99 @@ def test_the_end_to_end_shape_a_producer_writes(online):
     assert finalize["metrics"]["avg_reward"] == 1.0
     assert run.status is RunStatus.COMPLETED
     assert run.errors == []
+
+
+# ------------------------------------------------------- run id inheritance
+
+
+def test_a_second_init_in_one_process_opens_its_own_run(tmp_path):
+    """init() exports PRIME_RUN_ID for child processes. Reading our own export
+    back would silently attach the second eval to the first, and it would never
+    create or finalize a run of its own."""
+    first = pr.init(mode="offline", dir=str(tmp_path))
+    first.finish()
+
+    second = pr.init(mode="offline", dir=str(tmp_path))
+    second.finish()
+
+    assert second.id != first.id
+    assert (tmp_path / second.id / "run.json").exists()
+
+
+def test_a_finished_run_stops_advertising_itself(tmp_path):
+    run = pr.init(mode="offline", dir=str(tmp_path))
+    assert os.environ[RUN_ID_ENV] == run.id
+
+    run.finish()
+
+    assert RUN_ID_ENV not in os.environ
+
+
+def test_an_id_inherited_from_a_parent_process_is_joined(monkeypatch, tmp_path):
+    """The env var without a matching PID belongs to an ancestor."""
+    monkeypatch.setenv(RUN_ID_ENV, "offline-from-parent")
+
+    run = pr.init(mode="offline", dir=str(tmp_path))
+
+    assert run.id == "offline-from-parent"
+    run.finish()
+
+
+def test_an_explicit_id_is_a_resume_and_still_finalizes(online):
+    """Resuming after a crash has to be able to close the run out; only an ID
+    picked up from the environment belongs to someone else."""
+    run, handler = online(id="eval-abc")
+
+    run.finish(summary={"avg_reward": 1.0})
+
+    assert "POST /api/v1/evaluations/eval-abc/finalize" in handler.paths()
+
+
+def test_an_id_inherited_from_the_environment_does_not_finalize(monkeypatch, online):
+    monkeypatch.setenv(RUN_ID_ENV, "eval-abc")
+
+    run, handler = online()
+    run.finish()
+
+    assert "POST /api/v1/evaluations/eval-abc/finalize" not in handler.paths()
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="fork is POSIX-only")
+# Forking a threaded process is exactly the situation under test — hosted evals
+# do it, and the uploader thread is why the SDK needs a fork hook at all.
+@pytest.mark.filterwarnings("ignore:This process .* is multi-threaded:DeprecationWarning")
+def test_a_forked_child_joins_the_run_without_duplicating_the_parents_records(tmp_path):
+    """The end-to-end shape hosted evals actually hit.
+
+    At fork time the parent has records in the upload queue and bytes in the
+    sink's write buffer. The child inherits copies of both; writing them would
+    put every one of those records in the file twice, and opening its own run
+    would split one job across two.
+    """
+    import json
+
+    run = pr.init(mode="offline", dir=str(tmp_path), handle_signals=False)
+    run.log_traces([{"id": f"parent-{n}"} for n in range(5)])
+
+    pid = os.fork()
+    if pid == 0:  # pragma: no cover - asserted through the child's exit code
+        code = 0
+        try:
+            child = pr.init(mode="offline", dir=str(tmp_path), handle_signals=False)
+            if child.id != run.id:
+                code = 1
+            child.log_traces([{"id": "child-1"}])
+            child.finish()
+        except BaseException:
+            code = 2
+        finally:
+            os._exit(code)
+
+    _, status = os.waitpid(pid, 0)
+    assert os.waitstatus_to_exitcode(status) == 0, "the child did not join the parent's run"
+    run.finish()
+
+    lines = (tmp_path / run.id / "records" / "trace.jsonl").read_text().splitlines()
+    ids = [json.loads(line)["id"] for line in lines]
+
+    assert sorted(ids) == sorted([f"parent-{n}" for n in range(5)] + ["child-1"])

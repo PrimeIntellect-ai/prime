@@ -27,6 +27,8 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable, List, Optional, Sequence
 
+from . import _fork
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_QUEUE_SIZE = 256
@@ -83,7 +85,7 @@ class UploadWorker:
         self._lock = threading.Lock()
         self.dropped = 0
         self._pid = os.getpid()
-        self._register_fork_hook()
+        _fork.register(self)
 
     # ----------------------------------------------------------------- thread
 
@@ -220,7 +222,16 @@ class UploadWorker:
                 logger.warning("Upload queue saturated at close; some records may be lost")
             thread.join(timeout)
             if thread.is_alive():
-                logger.warning("Uploader did not stop within %ss; abandoning it", timeout)
+                # Closing the sinks now would pull an httpx client, or a file
+                # handle, out from under a request that is still running on that
+                # thread — turning a slow upload into a crash inside a daemon
+                # thread nobody is watching. Leave them to the interpreter.
+                logger.warning(
+                    "Uploader still running after %ss; leaving it and its sinks open. "
+                    "Records still in flight may not finish before the process exits.",
+                    timeout,
+                )
+                return
         self._thread = None
         for sink in self.sinks:
             try:
@@ -230,18 +241,15 @@ class UploadWorker:
 
     # ------------------------------------------------------------------- fork
 
-    def _register_fork_hook(self) -> None:
-        if not hasattr(os, "register_at_fork"):  # pragma: no cover - Windows
-            return
-        os.register_at_fork(after_in_child=self._reinit_after_fork)
-
-    def _reinit_after_fork(self) -> None:
+    def reset_after_fork(self) -> None:
         """Give the child a clean uploader.
 
         Everything queued at fork time belongs to the parent, which still has a
         live thread and will send it. Inheriting that queue would upload each
         record twice; inheriting the lock could deadlock the child on its first
-        write.
+        write. The sinks reset themselves through the same hook — their sockets
+        and file buffers are the parent's too, and using those from two
+        processes interleaves one HTTP stream or writes one buffer twice.
         """
         self._pid = os.getpid()
         self._queue = queue.Queue(maxsize=self.max_queue_size)

@@ -1,5 +1,6 @@
 """The run handle: lifecycle, containment, ranks, terminal status."""
 
+import signal
 from typing import Any, Dict, List, Optional
 
 import pytest
@@ -34,10 +35,12 @@ class FakeBackend:
     def log_metrics(self, run_id, metrics, step=None) -> None:
         self.points.append((metrics, step))
 
-    def finalize(self, run_id, *, status, summary=None, error=None) -> None:
+    def finalize(self, run_id, *, status, summary=None, error=None, config=None) -> None:
         if self.fail_on == "finalize":
             raise RuntimeError("finalize exploded")
-        self.finalized.append({"status": status, "summary": summary, "error": error})
+        self.finalized.append(
+            {"status": status, "summary": summary, "error": error, "config": config}
+        )
 
     def close(self) -> None:
         self.closed = True
@@ -161,9 +164,9 @@ def test_finish_flushes_records_before_reporting_the_terminal_status():
             super().write(records, line_format=line_format, step=step)
 
     class OrderedBackend(FakeBackend):
-        def finalize(self, run_id, *, status, summary=None, error=None) -> None:
+        def finalize(self, run_id, *, status, summary=None, error=None, config=None) -> None:
             order.append("finalize")
-            super().finalize(run_id, status=status, summary=summary, error=error)
+            super().finalize(run_id, status=status, summary=summary, error=error, config=config)
 
     run = make_run(OrderedBackend(), sinks=[OrderedSink()])
     run.log_traces([{"id": "t1"}])
@@ -214,13 +217,57 @@ def test_an_exception_inside_the_block_fails_the_run_and_still_propagates():
 
 
 def test_an_interrupt_is_recorded_as_a_decision_not_a_fault():
+    """Ctrl-C must not land in the same bucket as a broken eval — and it must
+    agree with the SIGINT handler, which normally gets there first."""
     backend = FakeBackend()
 
     with pytest.raises(KeyboardInterrupt):
         with make_run(backend):
             raise KeyboardInterrupt
 
+    assert backend.finalized[0]["status"] is RunStatus.CRASHED
     assert backend.finalized[0]["error"] == "interrupted"
+
+
+def test_a_termination_signal_reports_crashed_like_atexit_does():
+    """The producer never said the run failed; it was stopped from outside."""
+    backend = FakeBackend()
+    run = make_run(backend)
+    chained = []
+    # Stand in for the handler the SDK displaced. Anything but SIG_DFL, which
+    # would re-raise the signal and take the test runner down with it.
+    run._previous_signal_handlers[signal.SIGTERM] = lambda *a: chained.append(a)
+
+    run._handle_signal(signal.SIGTERM, None)
+
+    assert backend.finalized[0]["status"] is RunStatus.CRASHED
+    assert "SIGTERM" in backend.finalized[0]["error"]
+    assert chained, "the displaced handler still runs"
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+
+
+def test_finish_hands_the_full_config_to_finalize():
+    """The evaluations API replaces metadata wholesale, so a backend recording
+    terminal state inside it needs the whole picture to merge into."""
+    backend = FakeBackend()
+    run = make_run(backend)
+    run.update_config({"num_rollouts": 4})
+
+    run.finish(status=RunStatus.FAILED, error="boom")
+
+    assert backend.finalized[0]["config"]["num_rollouts"] == 4
+
+
+def test_finish_warns_when_uploads_do_not_drain(caplog):
+    """Finalizing over an unfinished upload silently drops records."""
+    run = make_run(sinks=[FakeSink()])
+    run._finish_timeout = 0.01
+    run._worker.flush = lambda timeout=None: False
+
+    with caplog.at_level("WARNING"):
+        run.finish()
+
+    assert "did not drain" in caplog.text
 
 
 def test_a_process_that_exits_without_finishing_reports_crashed():

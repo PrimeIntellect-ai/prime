@@ -18,6 +18,7 @@ and uses ``context`` only for provenance.
 import logging
 from typing import Any, Dict, Mapping, Optional, Sequence
 
+from .. import _fork
 from .base import Sink
 
 logger = logging.getLogger(__name__)
@@ -40,6 +41,7 @@ class TracesSink(Sink):
     ) -> None:
         self.enabled = True
         self._client = client
+        self._injected_client = client is not None
         # Left unset, prime-traces resolves its own endpoint. That matters:
         # the service has its own URL (PRIME_TRACES_URL / config `traces_url`)
         # which is not necessarily the platform API's, and passing the
@@ -57,6 +59,7 @@ class TracesSink(Sink):
         self._run_kind: Optional[str] = None
         self._context: Dict[str, str] = {}
         self.receipts: list = []
+        _fork.register(self)
 
     # ------------------------------------------------------------------ setup
 
@@ -64,16 +67,36 @@ class TracesSink(Sink):
         self._run_id = run_id
         self._run_kind = context.get("run_kind")
         self._context = {key: str(value) for key, value in context.items() if value is not None}
-        if self._client is None:
-            try:
-                from prime_traces import TracesClient
-            except ImportError as exc:  # pragma: no cover - dependency is declared
-                self._disable(f"prime-traces is not installed ({exc})")
-                return
-            try:
-                self._client = TracesClient(**self._client_kwargs)
-            except Exception as exc:  # noqa: BLE001 - construction must not kill a run
-                self._disable(f"could not construct the traces client ({exc})")
+        self._ensure_client()
+
+    def _ensure_client(self) -> bool:
+        """Build the traces client if we do not have one. Lazy so that a fork
+        reset — which drops the inherited client — is repaired on next write."""
+        if self._client is not None:
+            return True
+        if self._injected_client:
+            # The caller handed us a client and a fork took it away. Rebuilding
+            # would silently swap their transport for a default one.
+            return False
+        try:
+            from prime_traces import TracesClient
+        except ImportError as exc:  # pragma: no cover - dependency is declared
+            self._disable(f"prime-traces is not installed ({exc})")
+            return False
+        try:
+            self._client = TracesClient(**self._client_kwargs)
+        except Exception as exc:  # noqa: BLE001 - construction must not kill a run
+            self._disable(f"could not construct the traces client ({exc})")
+            return False
+        return True
+
+    def reset_after_fork(self) -> None:
+        """Drop the inherited traces client; the next write builds a fresh one.
+
+        Not closed: the child's copy of the socket is the parent's connection,
+        and shutting it down here would cut the parent off mid-upload.
+        """
+        self._client = None
 
     # ------------------------------------------------------------------ write
 
@@ -84,7 +107,7 @@ class TracesSink(Sink):
         line_format: Optional[str] = None,
         step: Optional[int] = None,
     ) -> None:
-        if not self.enabled or not records or self._client is None:
+        if not self.enabled or not records or not self._ensure_client():
             return
 
         from prime_traces import LineFormat

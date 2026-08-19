@@ -45,7 +45,12 @@ class Backend(Protocol):
         config: Optional[Dict[str, Any]] = None,
         summary: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Persist config (inputs) and/or summary (outputs) mid-run."""
+        """Persist config (inputs) and/or summary (outputs) mid-run.
+
+        ``config`` is the run's *whole* config, not a patch. The evaluations API
+        stores metadata with a document-level ``$set``, so a partial write
+        replaces whatever was there — every caller must send the full picture.
+        """
         ...
 
     def log_metrics(self, run_id: str, metrics: Dict[str, Any], step: Optional[int] = None) -> None:
@@ -59,8 +64,14 @@ class Backend(Protocol):
         status: RunStatus,
         summary: Optional[Dict[str, Any]] = None,
         error: Optional[str] = None,
+        config: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Close the run out. Called exactly once per run."""
+        """Close the run out. Called exactly once per run.
+
+        ``config`` is passed so a backend that has to record the terminal state
+        *inside* metadata can merge it into the full config rather than
+        replacing the document with one key.
+        """
         ...
 
     def close(self) -> None:

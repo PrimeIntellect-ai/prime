@@ -107,6 +107,12 @@ def eval_routes() -> Dict[str, Any]:
             "evaluation_id": "eval-abc",
             "status": "PROCESSING",
         },
+        "GET /api/v1/evaluations/eval-abc": {
+            "evaluation_id": "eval-abc",
+            "name": "test-run",
+            "status": "RUNNING",
+            "viewer_url": "https://app.example/dashboard/evaluations/eval-abc",
+        },
         "PUT /api/v1/evaluations/eval-abc": {
             "evaluation_id": "eval-abc",
             "name": "test-run",

@@ -108,8 +108,11 @@ class OfflineBackend:
         status: RunStatus,
         summary: Optional[Dict[str, Any]] = None,
         error: Optional[str] = None,
+        config: Optional[Dict[str, Any]] = None,
     ) -> None:
         state = self._read_state(run_id)
+        if config:
+            state.setdefault("config", {}).update(config)
         state["status"] = status.value
         state["finished_at"] = _now()
         if error:

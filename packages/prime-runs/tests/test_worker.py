@@ -158,10 +158,78 @@ def test_a_forked_child_starts_over_instead_of_re_uploading_the_parents_queue():
     worker._queue.put(WriteItem(records=[{"id": "parents"}]))
     old_queue = worker._queue
 
-    worker._reinit_after_fork()
+    worker.reset_after_fork()
 
     assert worker._queue is not old_queue
     assert worker._queue.empty()
     assert worker._thread is None
     assert isinstance(worker._queue, queue.Queue)
     assert isinstance(worker._lock, type(threading.Lock())) or worker._lock is not None
+
+
+def test_close_leaves_sinks_open_when_the_uploader_will_not_stop(caplog):
+    """Closing them would pull an httpx client or a file handle out from under
+    a request still running on that thread."""
+
+    class WedgedSink(FakeSink):
+        def __init__(self) -> None:
+            super().__init__("wedged")
+            self.released = threading.Event()
+
+        def write(self, records, *, line_format=None, step=None) -> None:
+            self.released.wait(10.0)
+
+    sink = WedgedSink()
+    worker = UploadWorker([sink])
+    worker.submit(WriteItem(records=[{"id": 1}]))
+
+    with caplog.at_level("WARNING"):
+        worker.close(timeout=0.2)
+
+    assert sink.closed is False
+    assert "leaving it and its sinks open" in caplog.text
+    sink.released.set()
+
+
+def test_a_forked_child_resets_every_registered_holder_of_a_connection():
+    """One process-wide hook, not one per object: a per-instance
+    register_at_fork can never be undone, so it would pin every run the process
+    ever opened and re-run hooks for runs that finished hours ago."""
+    from prime_runs import _fork
+
+    class Holder:
+        def __init__(self) -> None:
+            self.reset = 0
+
+        def reset_after_fork(self) -> None:
+            self.reset += 1
+
+    holder = Holder()
+    _fork.register(holder)
+
+    _fork._reset_all()
+
+    assert holder.reset == 1
+
+
+def test_one_registered_object_raising_does_not_block_the_others():
+    from prime_runs import _fork
+
+    class Boom:
+        def reset_after_fork(self) -> None:
+            raise RuntimeError("nope")
+
+    class Fine:
+        def __init__(self) -> None:
+            self.reset = 0
+
+        def reset_after_fork(self) -> None:
+            self.reset += 1
+
+    fine = Fine()
+    _fork.register(Boom())
+    _fork.register(fine)
+
+    _fork._reset_all()
+
+    assert fine.reset == 1

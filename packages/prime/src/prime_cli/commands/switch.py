@@ -1,12 +1,12 @@
 from typing import Optional
 
+import questionary
 import typer
-from click.exceptions import Abort
 
 from prime_cli.core import Config
 
 from ..client import APIClient, APIError
-from ..utils import PlainTyper, get_console
+from ..utils import PlainTyper, ask_select, get_console
 from .teams import fetch_teams
 
 app = PlainTyper(
@@ -16,6 +16,19 @@ app = PlainTyper(
 console = get_console()
 
 PERSONAL_TARGET = "personal"
+
+
+def _account_choices(teams: list[dict], current_team_id: Optional[str]) -> list[questionary.Choice]:
+    personal_label = "Personal (current)" if current_team_id is None else "Personal"
+    choices = [questionary.Choice(personal_label, value=PERSONAL_TARGET)]
+    for team in teams:
+        name = team.get("name", "Unknown")
+        slug = str(team.get("slug") or "").strip()
+        role = str(team.get("role", "member")).lower()
+        current = " (current)" if team.get("teamId") == current_team_id else ""
+        details = f"slug: {slug}, role: {role}" if slug else f"role: {role}"
+        choices.append(questionary.Choice(f"{name} ({details}){current}", value=team))
+    return choices
 
 
 def _select_team_by_target(teams: list[dict], target: str) -> Optional[dict]:
@@ -102,31 +115,13 @@ def switch(
         _switch_to_team(config, selected_team)
         return
 
-    console.print("\n[bold]Switch account:[/bold]\n")
     current_team_id = config.team_id
+    choices = _account_choices(teams, current_team_id)
 
-    personal_label = "Personal"
-    if current_team_id is None:
-        personal_label += " [green](current)[/green]"
-    console.print(f"  [cyan](1)[/cyan] {personal_label}")
-
-    for idx, team in enumerate(teams, start=2):
-        name = team.get("name", "Unknown")
-        slug = str(team.get("slug") or "").strip()
-        role = str(team.get("role", "member")).lower()
-        current_badge = " [green](current)[/green]" if team.get("teamId") == current_team_id else ""
-        details = f"slug: {slug}, role: {role}" if slug else f"role: {role}"
-        console.print(f"  [cyan]({idx})[/cyan] {name} [dim]({details})[/dim]{current_badge}")
-
-    while True:
-        try:
-            selection = typer.prompt("Select", type=int, default=1)
-            if selection == 1:
-                _switch_to_personal(config)
-                return
-            if 2 <= selection <= len(teams) + 1:
-                _switch_to_team(config, teams[selection - 2])
-                return
-            console.print(f"[red]Invalid selection. Enter 1-{len(teams) + 1}.[/red]")
-        except Abort:
-            raise typer.Exit(1)
+    selected = ask_select("Switch account", choices)
+    if selected is None:
+        raise typer.Exit(1)
+    if selected == "personal":
+        _switch_to_personal(config)
+        return
+    _switch_to_team(config, selected)

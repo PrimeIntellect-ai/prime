@@ -202,35 +202,28 @@ class TestEnvVarCreate:
         assert output["name"] == "NEW_VAR"
         assert "id" in output
 
-    def test_create_variable_interactive_cancel_name(self) -> None:
+    def test_create_variable_interactive_cancel_name(self, keys: Any) -> None:
         """Test that create can be cancelled during name prompt."""
-        result = runner.invoke(
-            app,
-            ["env", "var", "create", "testuser/test-env"],
-            input="\n",
-        )
+        keys.send(keys.ENTER)
+        result = runner.invoke(app, ["env", "var", "create", "testuser/test-env"])
 
         assert result.exit_code == 0
         assert "Cancelled" in result.output
 
-    def test_create_variable_interactive_cancel_value(self, mock_env_var_api: None) -> None:
+    def test_create_variable_interactive_cancel_value(
+        self, mock_env_var_api: None, keys: Any
+    ) -> None:
         """Test that create can be cancelled during value prompt."""
-        result = runner.invoke(
-            app,
-            ["env", "var", "create", "testuser/test-env", "-n", "NEW_VAR"],
-            input="\n",
-        )
+        keys.send(keys.ENTER)
+        result = runner.invoke(app, ["env", "var", "create", "testuser/test-env", "-n", "NEW_VAR"])
 
         assert result.exit_code == 0
         assert "Cancelled" in result.output
 
-    def test_create_variable_interactive(self, mock_env_var_api: None) -> None:
+    def test_create_variable_interactive(self, mock_env_var_api: None, keys: Any) -> None:
         """Test creating a variable interactively."""
-        result = runner.invoke(
-            app,
-            ["env", "var", "create", "testuser/test-env"],
-            input="NEW_VAR\nmy-value\n",
-        )
+        keys.text("NEW_VAR").text("my-value")
+        result = runner.invoke(app, ["env", "var", "create", "testuser/test-env"])
 
         assert result.exit_code == 0, f"Failed: {result.output}"
         assert "Created variable 'NEW_VAR'" in result.output
@@ -415,23 +408,23 @@ class TestEnvVarDelete:
         assert result.exit_code == 0, f"Failed: {result.output}"
         assert "Variable deleted" in result.output
 
-    def test_delete_variable_cancelled(self, mock_env_var_api: None) -> None:
+    def test_delete_variable_cancelled(self, mock_env_var_api: None, keys: Any) -> None:
         """Test cancelling variable deletion."""
+        keys.confirm(False)
         result = runner.invoke(
-            app,
-            ["env", "var", "delete", "var-id-1234567890", "testuser/test-env"],
-            input="n\n",
+            app, ["env", "var", "delete", "var-id-1234567890", "testuser/test-env"]
         )
 
         assert result.exit_code == 0
         assert "Cancelled" in result.output
 
-    def test_delete_variable_confirmed_interactively(self, mock_env_var_api: None) -> None:
+    def test_delete_variable_confirmed_interactively(
+        self, mock_env_var_api: None, keys: Any
+    ) -> None:
         """Test confirming deletion interactively."""
+        keys.confirm(True)
         result = runner.invoke(
-            app,
-            ["env", "var", "delete", "var-id-1234567890", "testuser/test-env"],
-            input="y\n",
+            app, ["env", "var", "delete", "var-id-1234567890", "testuser/test-env"]
         )
         assert result.exit_code == 0, f"Failed: {result.output}"
         assert "Variable deleted" in result.output

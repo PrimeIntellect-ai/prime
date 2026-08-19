@@ -65,7 +65,7 @@ def test_train_init_defaults_to_rl_toml() -> None:
         assert Path("rl.toml").exists()
 
 
-def test_train_request_submits_model_request(monkeypatch) -> None:
+def test_train_request_submits_model_request(monkeypatch, keys: Any) -> None:
     captured: dict[str, Any] = {}
 
     def mock_post(self: Any, endpoint: str, json: dict[str, Any] | None = None) -> dict:
@@ -75,10 +75,10 @@ def test_train_request_submits_model_request(monkeypatch) -> None:
 
     monkeypatch.setattr("prime_cli.client.APIClient.post", mock_post)
 
+    keys.text("openai/gpt-oss-120b, meta-llama/Llama-4").text("SFT distillation")
     result = runner.invoke(
         app,
         ["train", "request"],
-        input="openai/gpt-oss-120b, meta-llama/Llama-4\nSFT distillation\n",
         env={**TEST_ENV, "PRIME_API_KEY": "test-key"},
     )
 

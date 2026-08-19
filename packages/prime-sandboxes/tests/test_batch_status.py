@@ -24,8 +24,9 @@ def _job(sandbox_id: str, job_id: str) -> BackgroundJob:
 
 
 class _SyncPlatformClient:
-    def __init__(self) -> None:
+    def __init__(self, error_sandbox_id: Optional[str] = None) -> None:
         self.calls: list[tuple[str, str, dict[str, Any]]] = []
+        self.error_sandbox_id = error_sandbox_id
 
     def request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
         self.calls.append((method, path, kwargs))
@@ -40,14 +41,26 @@ class _SyncPlatformClient:
                     "pending_image_build_id": None,
                 }
                 for sandbox_id in sandbox_ids
+                if sandbox_id != self.error_sandbox_id
             ],
-            "errors": [],
+            "errors": (
+                [
+                    {
+                        "sandbox_id": self.error_sandbox_id,
+                        "code": "NOT_FOUND",
+                        "message": "Sandbox not found",
+                    }
+                ]
+                if self.error_sandbox_id in sandbox_ids
+                else []
+            ),
         }
 
 
 class _AsyncPlatformClient:
-    def __init__(self) -> None:
+    def __init__(self, error_sandbox_id: Optional[str] = None) -> None:
         self.calls: list[tuple[str, str, dict[str, Any]]] = []
+        self.error_sandbox_id = error_sandbox_id
 
     async def request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
         self.calls.append((method, path, kwargs))
@@ -62,8 +75,19 @@ class _AsyncPlatformClient:
                     "pending_image_build_id": None,
                 }
                 for sandbox_id in sandbox_ids
+                if sandbox_id != self.error_sandbox_id
             ],
-            "errors": [],
+            "errors": (
+                [
+                    {
+                        "sandbox_id": self.error_sandbox_id,
+                        "code": "NOT_FOUND",
+                        "message": "Sandbox not found",
+                    }
+                ]
+                if self.error_sandbox_id in sandbox_ids
+                else []
+            ),
         }
 
     async def aclose(self) -> None:
@@ -71,9 +95,14 @@ class _AsyncPlatformClient:
 
 
 class _SyncBackgroundJobPlatformClient:
-    def __init__(self, reject_as_container: bool = False) -> None:
+    def __init__(
+        self,
+        reject_as_container: bool = False,
+        error_job_id: Optional[str] = None,
+    ) -> None:
         self.calls: list[tuple[str, str, dict[str, Any]]] = []
         self.reject_as_container = reject_as_container
+        self.error_job_id = error_job_id
 
     def request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
         self.calls.append((method, path, kwargs))
@@ -99,22 +128,50 @@ class _SyncBackgroundJobPlatformClient:
                     "exit_code": 7 if job["job_id"] == "feedface" else None,
                 }
                 for job in jobs
+                if job["job_id"] != self.error_job_id
             ],
-            "errors": [],
+            "errors": (
+                [
+                    {
+                        **next(job for job in jobs if job["job_id"] == self.error_job_id),
+                        "code": "RUNTIME_ERROR",
+                        "message": "Runtime lookup failed",
+                    }
+                ]
+                if any(job["job_id"] == self.error_job_id for job in jobs)
+                else []
+            ),
         }
 
 
 class _AsyncBackgroundJobPlatformClient:
-    def __init__(self) -> None:
+    def __init__(self, error_job_id: Optional[str] = None) -> None:
         self.calls: list[tuple[str, str, dict[str, Any]]] = []
+        self.error_job_id = error_job_id
 
     async def request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
         self.calls.append((method, path, kwargs))
         return {
             "statuses": [
-                {**job, "completed": False, "exit_code": None} for job in kwargs["json"]["jobs"]
+                {**job, "completed": False, "exit_code": None}
+                for job in kwargs["json"]["jobs"]
+                if job["job_id"] != self.error_job_id
             ],
-            "errors": [],
+            "errors": (
+                [
+                    {
+                        **next(
+                            job
+                            for job in kwargs["json"]["jobs"]
+                            if job["job_id"] == self.error_job_id
+                        ),
+                        "code": "RUNTIME_ERROR",
+                        "message": "Runtime lookup failed",
+                    }
+                ]
+                if any(job["job_id"] == self.error_job_id for job in kwargs["json"]["jobs"])
+                else []
+            ),
         }
 
     async def aclose(self) -> None:
@@ -173,6 +230,24 @@ def test_concurrent_sync_creation_waits_share_one_platform_batch() -> None:
     assert kwargs["idempotent_post"] is True
 
 
+def test_sync_creation_batch_errors_only_fail_the_matching_waiter() -> None:
+    client = SandboxClient(APIClient(api_key="test-key"))
+    client.client.client.close()
+    platform = _SyncPlatformClient(error_sandbox_id="sandbox-b")
+    cast(Any, client).client = platform
+    cast(Any, client)._is_sandbox_reachable = lambda _sandbox_id: True
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        running = executor.submit(client.wait_for_creation, "sandbox-a")
+        missing = executor.submit(client.wait_for_creation, "sandbox-b")
+
+        assert running.result() is None
+        with pytest.raises(APIError, match="sandbox-b: NOT_FOUND"):
+            missing.result()
+
+    assert len(platform.calls) == 1
+
+
 @pytest.mark.asyncio
 async def test_concurrent_async_creation_waits_share_one_platform_batch() -> None:
     client = AsyncSandboxClient(api_key="test-key")
@@ -194,6 +269,32 @@ async def test_concurrent_async_creation_waits_share_one_platform_batch() -> Non
 
     assert len(platform.calls) == 1
     assert set(platform.calls[0][2]["json"]["sandbox_ids"]) == {"sandbox-a", "sandbox-b"}
+
+
+@pytest.mark.asyncio
+async def test_async_creation_batch_errors_only_fail_the_matching_waiter() -> None:
+    client = AsyncSandboxClient(api_key="test-key")
+    await client.client.aclose()
+    platform = _AsyncPlatformClient(error_sandbox_id="sandbox-b")
+    cast(Any, client).client = platform
+
+    async def reachable(_sandbox_id: str) -> bool:
+        return True
+
+    cast(Any, client)._is_sandbox_reachable = reachable
+    try:
+        results = await asyncio.gather(
+            client.wait_for_creation("sandbox-a"),
+            client.wait_for_creation("sandbox-b"),
+            return_exceptions=True,
+        )
+    finally:
+        await client.aclose()
+
+    assert results[0] is None
+    assert isinstance(results[1], APIError)
+    assert "sandbox-b: NOT_FOUND" in str(results[1])
+    assert len(platform.calls) == 1
 
 
 def test_sync_creation_batch_capability_falls_back_once_per_client() -> None:
@@ -337,6 +438,29 @@ def test_concurrent_sync_background_waiters_share_one_platform_batch() -> None:
     }
 
 
+def test_sync_background_batch_errors_only_fail_the_matching_waiter() -> None:
+    client = SandboxClient(APIClient(api_key="test-key"))
+    client.client.client.close()
+    platform = _SyncBackgroundJobPlatformClient(error_job_id="cafebabe")
+    cast(Any, client).client = platform
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        running = executor.submit(
+            cast(Any, client)._background_job_status_batcher.get,
+            ("sandbox-a", "deadbeef"),
+        )
+        failed = executor.submit(
+            cast(Any, client)._background_job_status_batcher.get,
+            ("sandbox-b", "cafebabe"),
+        )
+
+        assert not running.result().completed
+        with pytest.raises(APIError, match="sandbox-b/cafebabe"):
+            failed.result()
+
+    assert len(platform.calls) == 1
+
+
 @pytest.mark.asyncio
 async def test_async_get_background_jobs_uses_one_platform_batch() -> None:
     client = AsyncSandboxClient(api_key="test-key")
@@ -382,3 +506,25 @@ async def test_concurrent_async_background_waiters_share_one_platform_batch() ->
         ("sandbox-a", "deadbeef"),
         ("sandbox-b", "cafebabe"),
     }
+
+
+@pytest.mark.asyncio
+async def test_async_background_batch_errors_only_fail_the_matching_waiter() -> None:
+    client = AsyncSandboxClient(api_key="test-key")
+    await client.client.aclose()
+    platform = _AsyncBackgroundJobPlatformClient(error_job_id="cafebabe")
+    cast(Any, client).client = platform
+    try:
+        results = await asyncio.gather(
+            cast(Any, client)._background_job_status_batcher.get(("sandbox-a", "deadbeef")),
+            cast(Any, client)._background_job_status_batcher.get(("sandbox-b", "cafebabe")),
+            return_exceptions=True,
+        )
+    finally:
+        await client.aclose()
+
+    assert isinstance(results[0], BackgroundJobStatus)
+    assert not results[0].completed
+    assert isinstance(results[1], APIError)
+    assert "sandbox-b/cafebabe" in str(results[1])
+    assert len(platform.calls) == 1

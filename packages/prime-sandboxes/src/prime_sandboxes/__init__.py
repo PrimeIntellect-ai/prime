@@ -79,7 +79,7 @@ from .models import (
 from .process import AsyncSandboxProcess
 from .sandbox import AsyncSandboxClient, AsyncTemplateClient, SandboxClient, TemplateClient
 
-__version__ = "0.2.38"
+__version__ = "0.2.39"
 
 # Deprecated alias for backward compatibility
 TimeoutError = APITimeoutError

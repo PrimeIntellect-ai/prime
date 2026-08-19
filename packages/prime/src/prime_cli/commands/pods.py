@@ -440,7 +440,11 @@ def create(
     env_vars = []
     if env:
         for env_var in env:
-            key, value = env_var.split("=")
+            if "=" not in env_var:
+                console.print("[red]Environment variables must be in KEY=VALUE format[/red]")
+                raise typer.Exit(1)
+            # Split on the first '=' only so values may contain '=' (e.g. URLs)
+            key, value = env_var.split("=", 1)
             env_vars.append({"key": key, "value": value})
 
     # Resolve team_id

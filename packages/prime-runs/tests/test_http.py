@@ -5,19 +5,21 @@ import pytest
 
 from prime_runs._http import PlatformClient, encode_json, retry_delay
 from prime_runs.exceptions import (
+    ForbiddenError,
     NotFoundError,
     PaymentRequiredError,
     RetryableAPIError,
     RunAPIError,
     TransportError,
     UnauthorizedError,
+    is_transient,
 )
 
 
-def client_for(handler, **kwargs) -> PlatformClient:
+def client_for(handler, *, base_url: str = "http://testserver", **kwargs) -> PlatformClient:
     return PlatformClient(
         api_key="test-key",
-        base_url="http://testserver",
+        base_url=base_url,
         client=httpx.Client(transport=httpx.MockTransport(handler)),
         **kwargs,
     )
@@ -28,6 +30,7 @@ def client_for(handler, **kwargs) -> PlatformClient:
     [
         (401, UnauthorizedError),
         (402, PaymentRequiredError),
+        (403, ForbiddenError),
         (404, NotFoundError),
         (400, RunAPIError),
         (422, RunAPIError),
@@ -41,6 +44,17 @@ def test_status_codes_map_to_types_callers_can_branch_on(status, expected):
 
     assert caught.value.status_code == status
     assert "nope" in str(caught.value)
+
+
+def test_a_forbidden_response_is_permanent_so_a_sink_retires_on_it():
+    """403 is the gated-account signal. Retrying it for the rest of a run would
+    log one failure per batch and never succeed."""
+    client = client_for(lambda request: httpx.Response(403, json={"code": "service_not_enabled"}))
+
+    with pytest.raises(ForbiddenError) as caught:
+        client.get("/evaluations/x")
+
+    assert not is_transient(caught.value)
 
 
 def test_an_unauthorized_error_says_what_to_do_about_it():
@@ -170,6 +184,23 @@ def test_a_post_declared_idempotent_still_retries(no_sleep):
     client = client_for(lambda request: responses.pop(0))
 
     assert client.post("/environmentshub/resolve", json_body={}, idempotent=True)
+
+
+@pytest.mark.parametrize(
+    "given",
+    [
+        "http://testserver",
+        "http://testserver/",
+        "http://testserver/api/v1",
+        "http://testserver/api/v1/",
+    ],
+)
+def test_a_base_url_written_with_the_api_prefix_is_not_doubled(given):
+    """``Config`` strips the suffix, so an explicit ``base_url=`` that does not
+    would 404 on exactly the value that works through the environment."""
+    assert client_for(lambda request: httpx.Response(200, json={}), base_url=given).api_prefix == (
+        "http://testserver/api/v1"
+    )
 
 
 def test_idempotent_methods_still_replay_ambiguous_failures(no_sleep):

@@ -44,6 +44,17 @@ class PaymentRequiredError(RunAPIError):
     """402 — payment required. Check billing status."""
 
 
+class ForbiddenError(RunAPIError):
+    """403 — authenticated, but not allowed to do this.
+
+    Distinct from 401 because the credential is fine and re-authenticating will
+    not help: the run belongs to another owner, the team header names a team the
+    key cannot act for, or the feature is gated to an allowlist. Named to match
+    ``prime_traces.ForbiddenError``, which the traces sink already branches on
+    to retire itself when an account is outside the closed beta.
+    """
+
+
 class NotFoundError(RunAPIError):
     """404 — the run, environment or evaluation does not exist for this owner."""
 

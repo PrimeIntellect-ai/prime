@@ -30,6 +30,7 @@ from .config import Config
 from .exceptions import (
     ConfigurationError,
     EnvironmentResolutionError,
+    ForbiddenError,
     NotFoundError,
     PaymentRequiredError,
     PrimeRunsError,
@@ -88,6 +89,7 @@ __all__ = [
     "EnvironmentResolutionError",
     "RunAPIError",
     "RunFinishedError",
+    "ForbiddenError",
     "NotFoundError",
     "PaymentRequiredError",
     "RetryableAPIError",

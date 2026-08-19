@@ -13,10 +13,13 @@ authors = [
 # verifiers can never depend on `prime` — and verifiers is a first-class
 # consumer of this SDK. Nothing here may pull in prime, verifiers, typer,
 # rich or textual, directly or transitively.
+#
+# Kept to what is actually imported. The other SDKs carry `pydantic` (they model
+# response bodies) and `tenacity` (they retry through it); this package models
+# nothing and hand-rolls its retry loop in `_http.py`, so neither belongs in the
+# dependency tree of a package that lands inside verifiers and prime-rl.
 dependencies = [
     "httpx>=0.25.0",
-    "pydantic>=2.0.0",
-    "tenacity>=9.1.2",
     "prime-traces>=0.0.2",
 ]
 keywords = ["evals", "evaluations", "training", "runs", "traces", "observability"]
@@ -29,6 +32,7 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Topic :: Scientific/Engineering :: Artificial Intelligence"
 ]

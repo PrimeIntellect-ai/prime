@@ -101,6 +101,26 @@ Set the mode explicitly, or through `$PRIME_RUNS_MODE`.
 - **Knows about ranks.** Rank 0 owns creation and finalization; other ranks join
   through `PRIME_RUN_ID` and upload their own records.
 
+## Using it from async code
+
+There is no `AsyncRun`, unlike the async clients in `prime-traces`,
+`prime-evals` and `prime-sandboxes`. The uploader thread is what replaces it:
+`log()`, `log_traces()` and `update_config()` are queue puts, not requests, so
+calling them straight from a coroutine does no network I/O on the event loop.
+
+Three calls do block, and all three are worth knowing about:
+
+| call | blocks on | when it matters |
+| --- | --- | --- |
+| `init()` | create + environment resolution | once, at startup |
+| `finish()` | draining the queue, then finalize | once, at shutdown |
+| `log_traces()` | up to `put_timeout` (5s) **only if the queue is full** | a producer durably outrunning the uploader |
+
+The first two are run boundaries — `await asyncio.to_thread(run.finish)` if a
+stall there would matter. The third is the one to watch in a hot rollout loop:
+the block is the backpressure, and past it the batch is dropped and counted in
+`run.dropped_records`. Raise `queue_size=` before reaching for a thread.
+
 ## Configuration
 
 Resolved from environment variables first, then `~/.prime/config.json`:
@@ -147,6 +167,33 @@ Both are duck-typed: verifiers `Trace`/`Episode` and prime-rl `Rollout` satisfy
 them structurally, and no producer package is imported. This is a leaf package by
 design — the `prime` CLI depends on `verifiers`, so verifiers can never depend on
 `prime`.
+
+## How this differs from the other prime SDKs
+
+`prime-sandboxes`, `prime-traces`, `prime-evals` and `prime-tunnel` are all built
+the same way: a `core/` subpackage holding an `APIClient` and a `Config`, pydantic
+models for the responses, and a sync/async client pair as the thing you import.
+Three deliberate departures here, so the difference reads as a choice rather than
+an oversight:
+
+- **The client is private.** `init()` is the surface, not a client object, so the
+  HTTP layer lives in `_http.py` rather than `core/client.py` and `PlatformClient`
+  is not exported. Config still is, and is the same class as everywhere else —
+  `~/.prime/config.json`, env wins, same variable names.
+- **Responses are not modeled.** The platform returns more fields than any
+  producer reads; freezing them in pydantic would make every backend addition a
+  breaking SDK release. Backends take the two or three fields they need and
+  return a `RunHandle`. That is why the local types are dataclasses and why
+  pydantic is not a dependency.
+- **No async client.** See [Using it from async code](#using-it-from-async-code)
+  — the background uploader covers the case an async client would exist for.
+
+## Related packages
+
+- [prime-traces](../prime-traces) — the traces service client this SDK streams
+  through, and the direct API for querying or exporting what a run produced.
+- [prime](../prime) — the CLI and full SDK. Depends on this package's consumers,
+  never the other way around.
 
 ## Status
 

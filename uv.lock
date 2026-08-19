@@ -1453,8 +1453,6 @@ source = { editable = "packages/prime-runs" }
 dependencies = [
     { name = "httpx" },
     { name = "prime-traces" },
-    { name = "pydantic" },
-    { name = "tenacity" },
 ]
 
 [package.optional-dependencies]
@@ -1468,11 +1466,9 @@ dev = [
 requires-dist = [
     { name = "httpx", specifier = ">=0.25.0" },
     { name = "prime-traces", editable = "packages/prime-traces" },
-    { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.13.1" },
-    { name = "tenacity", specifier = ">=9.1.2" },
 ]
 provides-extras = ["dev"]
 

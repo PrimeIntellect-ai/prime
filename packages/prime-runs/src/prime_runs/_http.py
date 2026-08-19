@@ -31,6 +31,7 @@ import httpx
 
 from . import _fork
 from .exceptions import (
+    ForbiddenError,
     NotFoundError,
     PaymentRequiredError,
     RetryableAPIError,
@@ -78,6 +79,18 @@ def _parse_retry_after(response: httpx.Response) -> Optional[float]:
         return None
 
 
+def normalize_base_url(url: str) -> str:
+    """The same normalization ``Config`` applies to file/env URLs.
+
+    ``PlatformClient`` appends ``/api/v1`` itself, and platform URLs are
+    commonly written with the suffix already on them. Without stripping it here
+    an explicit ``base_url=`` would request ``/api/v1/api/v1/...`` while the
+    identical value read from ``PRIME_API_BASE_URL`` worked — the config path
+    strips it and the constructor path did not.
+    """
+    return url.rstrip("/").removesuffix("/api/v1")
+
+
 def encode_json(value: Any) -> bytes:
     """Compact UTF-8 JSON, matching the encoding used to size batches.
 
@@ -102,7 +115,7 @@ class PlatformClient:
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
         client: Optional[httpx.Client] = None,
     ) -> None:
-        self.base_url = base_url.rstrip("/")
+        self.base_url = normalize_base_url(base_url)
         self.api_prefix = f"{self.base_url}/api/v1"
         self.max_attempts = max(1, max_attempts)
         self._owns_client = client is None
@@ -276,6 +289,8 @@ def _map_error(response: httpx.Response) -> RunAPIError:
         )
     if status == 402:
         return PaymentRequiredError(message, status_code=status, code=code)
+    if status == 403:
+        return ForbiddenError(message, status_code=status, code=code)
     if status == 404:
         return NotFoundError(message, status_code=status, code=code)
     return RunAPIError(message, status_code=status, code=code)

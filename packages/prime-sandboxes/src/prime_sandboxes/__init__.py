@@ -14,6 +14,7 @@ from .core import (
     UnauthorizedError,
 )
 from .exceptions import (
+    BatchStatusUnsupportedError,
     CommandTimeoutError,
     DownloadTimeoutError,
     SandboxFileNotFoundError,
@@ -29,6 +30,7 @@ from .models import (
     AdvancedConfigs,
     BackgroundJob,
     BackgroundJobStatus,
+    BatchSandboxStatusResponse,
     BuildImageRequest,
     BuildImageResponse,
     BulkDeleteSandboxRequest,
@@ -59,6 +61,8 @@ from .models import (
     SandboxEgressPolicy,
     SandboxListResponse,
     SandboxStatus,
+    SandboxStatusLookupError,
+    SandboxStatusSnapshot,
     SSHSession,
     StartCommand,
     TeamImageOwner,
@@ -108,6 +112,9 @@ __all__ = [
     "AdvancedConfigs",
     "BackgroundJob",
     "BackgroundJobStatus",
+    "BatchSandboxStatusResponse",
+    "SandboxStatusSnapshot",
+    "SandboxStatusLookupError",
     "BuildImageRequest",
     "BuildImageResponse",
     "BulkImageTransferResponse",
@@ -132,6 +139,7 @@ __all__ = [
     "SSHSession",
     # Exceptions
     "APIError",
+    "BatchStatusUnsupportedError",
     "UnauthorizedError",
     "PaymentRequiredError",
     "SandboxFileNotFoundError",

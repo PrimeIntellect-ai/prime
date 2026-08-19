@@ -162,7 +162,7 @@ for i in range(5):
     ))
     sandbox_ids.append(sandbox.id)
 
-# Wait for all to be ready
+# Wait for up to 100 sandboxes with one batched lifecycle-status request per poll
 statuses = sandbox_client.bulk_wait_for_creation(sandbox_ids)
 
 # Delete by IDs or labels
@@ -219,6 +219,11 @@ job = sandbox_client.start_background_job(
 )
 print(f"Job started: {job.job_id}")
 
+# VM sandboxes can check up to 100 SDK-started jobs across sandboxes with one
+# platform request. Results preserve input order; completed jobs include the
+# same bounded stdout/stderr tails as get_background_job().
+statuses = sandbox_client.get_background_jobs([job])
+
 # Poll for completion
 import time
 while True:
@@ -233,6 +238,9 @@ while True:
 # Download results
 sandbox_client.download_file(sandbox.id, "/app/model.pt", "./model.pt")
 ```
+
+`get_background_jobs` is VM-only. Container sandboxes retain the existing
+`get_background_job` polling behavior.
 
 #### Async version
 

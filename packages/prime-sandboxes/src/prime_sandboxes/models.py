@@ -191,6 +191,31 @@ class SandboxListResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class SandboxStatusSnapshot(BaseModel):
+    """Lightweight sandbox lifecycle state returned by a batch status lookup."""
+
+    sandbox_id: str
+    status: SandboxStatus
+    error_type: Optional[str] = None
+    error_message: Optional[str] = None
+    pending_image_build_id: Optional[str] = None
+
+
+class SandboxStatusLookupError(BaseModel):
+    """Per-sandbox error returned by a batch status lookup."""
+
+    sandbox_id: str
+    code: Literal["NOT_FOUND", "FORBIDDEN", "MANAGED"]
+    message: str
+
+
+class BatchSandboxStatusResponse(BaseModel):
+    """Ordered results from a batch sandbox lifecycle status lookup."""
+
+    statuses: List[SandboxStatusSnapshot]
+    errors: List[SandboxStatusLookupError]
+
+
 class CreateSandboxRequest(BaseModel):
     """Create sandbox request model"""
 
@@ -684,3 +709,35 @@ class BackgroundJobStatus(BaseModel):
     stderr: Optional[str] = None
     stdout_truncated: bool = False
     stderr_truncated: bool = False
+
+
+class BackgroundJobStatusSnapshot(BaseModel):
+    """Completion state returned by a platform VM background-job lookup."""
+
+    sandbox_id: str
+    job_id: str
+    completed: bool
+    exit_code: Optional[int] = None
+
+
+class BackgroundJobStatusLookupError(BaseModel):
+    """Per-job error returned by a platform VM background-job lookup."""
+
+    sandbox_id: str
+    job_id: str
+    code: Literal[
+        "NOT_FOUND",
+        "FORBIDDEN",
+        "MANAGED",
+        "NOT_VM",
+        "NOT_RUNNING",
+        "RUNTIME_ERROR",
+    ]
+    message: str
+
+
+class BatchBackgroundJobStatusResponse(BaseModel):
+    """Ordered results from a platform VM background-job lookup."""
+
+    statuses: List[BackgroundJobStatusSnapshot]
+    errors: List[BackgroundJobStatusLookupError]

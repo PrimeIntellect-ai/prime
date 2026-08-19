@@ -11,8 +11,22 @@ import sys
 import threading
 import time
 import uuid
+from concurrent.futures import Future
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Literal, NoReturn, Optional, TypeVar
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    Dict,
+    Generic,
+    Hashable,
+    List,
+    Literal,
+    NoReturn,
+    Optional,
+    TypeVar,
+)
 
 import aiofiles
 import certifi
@@ -34,6 +48,7 @@ from tenacity import (
 
 from .core import APIClient, APIError, AsyncAPIClient
 from .exceptions import (
+    BatchStatusUnsupportedError,
     CommandTimeoutError,
     DownloadTimeoutError,
     SandboxFileNotFoundError,
@@ -47,6 +62,8 @@ from .exceptions import (
 from .models import (
     BackgroundJob,
     BackgroundJobStatus,
+    BatchBackgroundJobStatusResponse,
+    BatchSandboxStatusResponse,
     BulkDeleteSandboxRequest,
     BulkDeleteSandboxResponse,
     CommandResponse,
@@ -62,6 +79,7 @@ from .models import (
     Sandbox,
     SandboxListResponse,
     SandboxLogsResponse,
+    SandboxStatusSnapshot,
     SSHSession,
     validate_egress_lists,
 )
@@ -96,6 +114,15 @@ _PROCESS_SIGNAL_TIMEOUT_MS = 10_000
 
 _RequestMessage = TypeVar("_RequestMessage", bound=Message)
 _ResponseMessage = TypeVar("_ResponseMessage", bound=Message)
+_BatchKey = TypeVar("_BatchKey", bound=Hashable)
+_BatchValue = TypeVar("_BatchValue")
+
+
+@dataclass(frozen=True)
+class _BatchItemError:
+    """An error for one key in an otherwise successful transport batch."""
+
+    error: Exception
 
 
 @functools.lru_cache(maxsize=1)
@@ -165,6 +192,12 @@ AUTH_REFRESH_MARGIN_SECONDS = 60
 # Max bytes of stdout/stderr returned per background-job status check
 JOB_OUTPUT_TAIL_BYTES = 10 * 1024 * 1024
 
+# Platform batch-status contracts cap one request at 100 identifiers. Concurrent
+# single-item waits are collected briefly so callers share a request without
+# adding a persistent worker to the client lifecycle.
+MAX_STATUS_BATCH_SIZE = 100
+STATUS_BATCH_WINDOW_SECONDS = 0.025
+
 # Creation status-poll pacing. Sandbox creation is polled with exponential
 # backoff plus jitter rather than at a fixed interval
 CREATION_POLL_INITIAL_DELAY = 1.0
@@ -175,6 +208,126 @@ CREATION_POLL_JITTER = 0.25
 # Legacy fixed schedule (1s for the first 5 polls, then 2s) that `max_attempts`
 # used to describe. Retained only to derive the same wall-clock budget.
 _LEGACY_FAST_POLLS = 5
+
+
+class _SyncRequestBatcher(Generic[_BatchKey, _BatchValue]):
+    """Coalesce concurrent sync lookups into bounded calls."""
+
+    def __init__(
+        self,
+        fetch: Callable[[List[_BatchKey]], Dict[_BatchKey, _BatchValue | _BatchItemError]],
+    ) -> None:
+        self._fetch = fetch
+        self._lock = threading.Lock()
+        self._pending: Dict[_BatchKey, List[Future[_BatchValue]]] = {}
+        self._dispatching = False
+
+    def get(self, key: _BatchKey) -> _BatchValue:
+        """Return one result, sharing a batch with concurrent callers."""
+        future: Future[_BatchValue] = Future()
+        with self._lock:
+            self._pending.setdefault(key, []).append(future)
+            leader = not self._dispatching
+            if leader:
+                self._dispatching = True
+
+        if leader:
+            time.sleep(STATUS_BATCH_WINDOW_SECONDS)
+            self._dispatch()
+
+        return future.result()
+
+    def _dispatch(self) -> None:
+        """Drain all currently pending lookups in bounded chunks."""
+        while True:
+            with self._lock:
+                keys = list(self._pending)[:MAX_STATUS_BATCH_SIZE]
+                if not keys:
+                    self._dispatching = False
+                    return
+                waiters = {key: self._pending.pop(key) for key in keys}
+
+            try:
+                results = self._fetch(keys)
+            except Exception as exc:
+                for key_waiters in waiters.values():
+                    for waiter in key_waiters:
+                        waiter.set_exception(exc)
+                continue
+
+            for key, key_waiters in waiters.items():
+                if key not in results:
+                    exc = APIError(f"Batch status response omitted {key!r}")
+                    for waiter in key_waiters:
+                        waiter.set_exception(exc)
+                    continue
+                result = results[key]
+                if isinstance(result, _BatchItemError):
+                    for waiter in key_waiters:
+                        waiter.set_exception(result.error)
+                    continue
+                for waiter in key_waiters:
+                    waiter.set_result(result)
+
+
+class _AsyncRequestBatcher(Generic[_BatchKey, _BatchValue]):
+    """Coalesce concurrent async lookups into bounded calls."""
+
+    def __init__(
+        self,
+        fetch: Callable[
+            [List[_BatchKey]],
+            Awaitable[Dict[_BatchKey, _BatchValue | _BatchItemError]],
+        ],
+    ) -> None:
+        self._fetch = fetch
+        self._pending: Dict[_BatchKey, List[asyncio.Future[_BatchValue]]] = {}
+        self._dispatch_task: Optional[asyncio.Task[None]] = None
+
+    async def get(self, key: _BatchKey) -> _BatchValue:
+        """Return one result, sharing a batch with concurrent callers."""
+        future = asyncio.get_running_loop().create_future()
+        self._pending.setdefault(key, []).append(future)
+        if self._dispatch_task is None:
+            self._dispatch_task = asyncio.create_task(self._dispatch())
+        return await future
+
+    async def _dispatch(self) -> None:
+        """Drain all currently pending lookups in bounded chunks."""
+        await asyncio.sleep(STATUS_BATCH_WINDOW_SECONDS)
+        try:
+            while self._pending:
+                keys = list(self._pending)[:MAX_STATUS_BATCH_SIZE]
+                waiters = {key: self._pending.pop(key) for key in keys}
+                try:
+                    results = await self._fetch(keys)
+                except Exception as exc:
+                    for key_waiters in waiters.values():
+                        for waiter in key_waiters:
+                            if not waiter.done():
+                                waiter.set_exception(exc)
+                    continue
+
+                for key, key_waiters in waiters.items():
+                    if key not in results:
+                        exc = APIError(f"Batch status response omitted {key!r}")
+                        for waiter in key_waiters:
+                            if not waiter.done():
+                                waiter.set_exception(exc)
+                        continue
+                    result = results[key]
+                    if isinstance(result, _BatchItemError):
+                        for waiter in key_waiters:
+                            if not waiter.done():
+                                waiter.set_exception(result.error)
+                        continue
+                    for waiter in key_waiters:
+                        if not waiter.done():
+                            waiter.set_result(result)
+        finally:
+            self._dispatch_task = None
+            if self._pending:
+                self._dispatch_task = asyncio.create_task(self._dispatch())
 
 
 def _creation_poll_delay(poll_index: int) -> float:
@@ -272,6 +425,55 @@ def _validate_env_key(key: str) -> str:
     if not _ENV_VAR_PATTERN.fullmatch(key):
         raise ValueError(f"Invalid environment variable name: {key!r}")
     return key
+
+
+def _validate_unique_batch_values(values: List[str], field_name: str) -> None:
+    """Validate the shared bounded, non-empty, unique batch contract."""
+    if not values or len(values) > MAX_STATUS_BATCH_SIZE:
+        raise ValueError(f"{field_name} must contain between 1 and {MAX_STATUS_BATCH_SIZE} entries")
+    if len(values) != len(set(values)):
+        raise ValueError(f"{field_name} must be unique")
+
+
+def _canonical_background_job(sandbox_id: str, job_id: str) -> BackgroundJob:
+    """Build the canonical SDK background-job handle for a VM batch lookup."""
+    return BackgroundJob(
+        job_id=job_id,
+        sandbox_id=sandbox_id,
+        stdout_log_file=f"/tmp/job_{job_id}.stdout.log",
+        stderr_log_file=f"/tmp/job_{job_id}.stderr.log",
+        exit_file=f"/tmp/job_{job_id}.exit",
+    )
+
+
+def _validate_background_job_batch(jobs: List[BackgroundJob]) -> None:
+    """Validate VM batching is limited to canonical SDK job handles."""
+    if not jobs or len(jobs) > MAX_STATUS_BATCH_SIZE:
+        raise ValueError(f"jobs must contain between 1 and {MAX_STATUS_BATCH_SIZE} entries")
+
+    keys = []
+    for job in jobs:
+        if not re.fullmatch(r"[0-9A-Fa-f]{8}", job.job_id):
+            raise ValueError(f"Invalid background job ID: {job.job_id}")
+        if job != _canonical_background_job(job.sandbox_id, job.job_id):
+            raise ValueError(
+                "Batch status requires an unmodified BackgroundJob returned by "
+                "start_background_job()."
+            )
+        keys.append((job.sandbox_id, job.job_id))
+    if len(keys) != len(set(keys)):
+        raise ValueError("jobs must be unique")
+
+
+def _sandbox_to_status_snapshot(sandbox: Sandbox) -> SandboxStatusSnapshot:
+    """Convert a legacy full-sandbox lookup into the lightweight batch shape."""
+    return SandboxStatusSnapshot(
+        sandbox_id=sandbox.id,
+        status=sandbox.status,
+        error_type=sandbox.error_type,
+        error_message=sandbox.error_message,
+        pending_image_build_id=sandbox.pending_image_build_id,
+    )
 
 
 def _build_terminated_message(command: str, ctx: dict) -> str:
@@ -600,36 +802,8 @@ class AsyncSandboxAuthCache:
             await self._save_cache()
 
 
-def _is_waiting_for_image_build(sandbox: Sandbox) -> bool:
+def _is_waiting_for_image_build(sandbox: Sandbox | SandboxStatusSnapshot) -> bool:
     return sandbox.status == "PENDING" and bool(getattr(sandbox, "pending_image_build_id", None))
-
-
-def _check_sandbox_statuses(
-    sandboxes: List[Sandbox], target_ids: set
-) -> tuple[int, List[tuple], Dict[str, str], int]:
-    """Helper function to check sandbox statuses
-
-    Returns:
-        tuple of (running_count, failed_sandboxes, final_statuses,
-        image_build_waiting_count)
-    """
-    running_count = 0
-    failed_sandboxes = []
-    final_statuses = {}
-    image_build_waiting = 0
-
-    for sandbox in sandboxes:
-        if sandbox.id in target_ids:
-            if sandbox.status == "RUNNING":
-                running_count += 1
-                final_statuses[sandbox.id] = sandbox.status
-            elif sandbox.status in ["ERROR", "TERMINATED", "TIMEOUT"]:
-                failed_sandboxes.append((sandbox.id, sandbox.status))
-                final_statuses[sandbox.id] = sandbox.status
-            elif _is_waiting_for_image_build(sandbox):
-                image_build_waiting += 1
-
-    return running_count, failed_sandboxes, final_statuses, image_build_waiting
 
 
 class SandboxClient:
@@ -641,6 +815,12 @@ class SandboxClient:
             self.client.config.config_dir / "sandbox_auth_cache.json",
             self.client,
         )
+        self._sandbox_status_batcher = _SyncRequestBatcher(self._fetch_sandbox_statuses)
+        self._background_job_status_batcher = _SyncRequestBatcher(
+            self._fetch_background_job_statuses
+        )
+        self._sandbox_status_batch_supported: Optional[bool] = None
+        self._background_job_status_batch_supported: Optional[bool] = None
 
     @staticmethod
     @_gateway_post_retry
@@ -821,6 +1001,57 @@ class SandboxClient:
         """Get a specific sandbox"""
         response = self.client.request("GET", f"/sandbox/{sandbox_id}")
         return Sandbox.model_validate(response)
+
+    def get_sandbox_statuses(self, sandbox_ids: List[str]) -> BatchSandboxStatusResponse:
+        """Get lightweight lifecycle state for up to 100 sandboxes."""
+        _validate_unique_batch_values(sandbox_ids, "sandbox_ids")
+        if self._sandbox_status_batch_supported is False:
+            raise BatchStatusUnsupportedError(
+                "The platform does not support batch sandbox status lookups."
+            )
+        try:
+            response = self.client.request(
+                "POST",
+                "/sandbox/status:batchGet",
+                json={"sandbox_ids": sandbox_ids},
+                idempotent_post=True,
+            )
+        except APIError as exc:
+            if "HTTP 404" in str(exc) or "HTTP 405" in str(exc):
+                self._sandbox_status_batch_supported = False
+                raise BatchStatusUnsupportedError(
+                    "The platform does not support batch sandbox status lookups."
+                ) from exc
+            raise
+        self._sandbox_status_batch_supported = True
+        return BatchSandboxStatusResponse.model_validate(response)
+
+    def _fetch_sandbox_statuses(
+        self, sandbox_ids: List[str]
+    ) -> Dict[str, SandboxStatusSnapshot | _BatchItemError]:
+        """Fetch one coalesced lifecycle batch for concurrent waiters."""
+        try:
+            response = self.get_sandbox_statuses(sandbox_ids)
+        except BatchStatusUnsupportedError:
+            results: Dict[str, SandboxStatusSnapshot | _BatchItemError] = {}
+            for sandbox_id in sandbox_ids:
+                try:
+                    results[sandbox_id] = _sandbox_to_status_snapshot(self.get(sandbox_id))
+                except Exception as exc:
+                    results[sandbox_id] = _BatchItemError(exc)
+            return results
+
+        results: Dict[str, SandboxStatusSnapshot | _BatchItemError] = {
+            snapshot.sandbox_id: snapshot for snapshot in response.statuses
+        }
+        for error in response.errors:
+            results[error.sandbox_id] = _BatchItemError(
+                APIError(
+                    f"Sandbox status lookup failed for {error.sandbox_id}: "
+                    f"{error.code}: {error.message}"
+                )
+            )
+        return results
 
     def delete(self, sandbox_id: str) -> Dict[str, Any]:
         """Delete a sandbox"""
@@ -1220,6 +1451,178 @@ class SandboxClient:
             stderr_truncated=stderr_truncated,
         )
 
+    def _request_background_job_status_batch(
+        self,
+        jobs: List[BackgroundJob],
+        timeout: Optional[int] = None,
+    ) -> Optional[BatchBackgroundJobStatusResponse]:
+        """Return one raw platform batch, or None when the endpoint is unavailable."""
+        if self._background_job_status_batch_supported is False:
+            return None
+        try:
+            response = self.client.request(
+                "POST",
+                "/sandbox/background-jobs/status:batchGet",
+                json={
+                    "jobs": [{"sandbox_id": job.sandbox_id, "job_id": job.job_id} for job in jobs]
+                },
+                timeout=timeout if timeout is not None else 30,
+                idempotent_post=True,
+            )
+        except APIError as exc:
+            if "HTTP 404" in str(exc) or "HTTP 405" in str(exc):
+                self._background_job_status_batch_supported = False
+                return None
+            raise
+        self._background_job_status_batch_supported = True
+        return BatchBackgroundJobStatusResponse.model_validate(response)
+
+    def get_background_jobs(
+        self,
+        jobs: List[BackgroundJob],
+        timeout: Optional[int] = None,
+    ) -> List[BackgroundJobStatus]:
+        """Get ordered status for up to 100 jobs across VM sandboxes.
+
+        One platform request checks all canonical exit-code files. Output is
+        fetched with the existing bounded-tail behavior once a job completes.
+        Container sandboxes intentionally continue to use get_background_job().
+        """
+        _validate_background_job_batch(jobs)
+        body = self._request_background_job_status_batch(jobs, timeout)
+        if body is None:
+            return self._get_background_jobs_legacy(jobs, timeout)
+        if body.errors:
+            details = "; ".join(
+                f"{error.sandbox_id}/{error.job_id}: {error.message}" for error in body.errors
+            )
+            if any(error.code == "NOT_VM" for error in body.errors):
+                raise BatchStatusUnsupportedError(details)
+            raise APIError(f"Background job batch status failed: {details}")
+        runtime_statuses = {(status.sandbox_id, status.job_id): status for status in body.statuses}
+
+        results = []
+        for job in jobs:
+            runtime_status = runtime_statuses.get((job.sandbox_id, job.job_id))
+            if runtime_status is None:
+                raise APIError(f"VM batch status response omitted job {job.job_id}")
+            if not runtime_status.completed:
+                results.append(BackgroundJobStatus(job_id=job.job_id, completed=False))
+                continue
+            if runtime_status.exit_code is None:
+                raise APIError(f"Completed VM background job {job.job_id} omitted exit_code")
+            results.append(
+                self._get_completed_background_job_output(
+                    job.sandbox_id,
+                    job,
+                    runtime_status.exit_code,
+                    timeout,
+                )
+            )
+        return results
+
+    def _get_background_jobs_legacy(
+        self,
+        jobs: List[BackgroundJob],
+        timeout: Optional[int],
+    ) -> List[BackgroundJobStatus]:
+        """Use VM-only per-job reads when the platform batch API is unavailable."""
+        for sandbox_id in dict.fromkeys(job.sandbox_id for job in jobs):
+            self._auth_cache.get_or_refresh(sandbox_id)
+            if not self._auth_cache.is_vm(sandbox_id):
+                raise BatchStatusUnsupportedError(
+                    "Batched background job status is only supported for VM sandboxes."
+                )
+        return [self.get_background_job(job.sandbox_id, job, timeout=timeout) for job in jobs]
+
+    def _get_completed_background_job_output(
+        self,
+        sandbox_id: str,
+        job: BackgroundJob,
+        exit_code: int,
+        timeout: Optional[int],
+    ) -> BackgroundJobStatus:
+        """Read bounded stdout and stderr tails for one completed job."""
+
+        def read_output_tail(path: str) -> tuple[str, bool]:
+            try:
+                response = self.read_file(
+                    sandbox_id,
+                    path,
+                    timeout=timeout,
+                    offset=-JOB_OUTPUT_TAIL_BYTES,
+                    length=JOB_OUTPUT_TAIL_BYTES,
+                )
+                return response.content, bool(response.truncated)
+            except SandboxFileNotFoundError:
+                return "", False
+
+        stdout, stdout_truncated = read_output_tail(job.stdout_log_file)
+        stderr, stderr_truncated = read_output_tail(job.stderr_log_file)
+        return BackgroundJobStatus(
+            job_id=job.job_id,
+            completed=True,
+            exit_code=exit_code,
+            stdout=stdout,
+            stderr=stderr,
+            stdout_truncated=stdout_truncated,
+            stderr_truncated=stderr_truncated,
+        )
+
+    def _fetch_background_job_statuses(
+        self, keys: List[tuple[str, str]]
+    ) -> Dict[tuple[str, str], BackgroundJobStatus | _BatchItemError]:
+        """Fetch one coalesced VM job batch for concurrent run waiters."""
+        jobs = [_canonical_background_job(sandbox_id, job_id) for sandbox_id, job_id in keys]
+        body = self._request_background_job_status_batch(jobs)
+        if body is None:
+            results: Dict[tuple[str, str], BackgroundJobStatus | _BatchItemError] = {}
+            for job in jobs:
+                key = (job.sandbox_id, job.job_id)
+                try:
+                    results[key] = self._get_background_jobs_legacy([job], None)[0]
+                except Exception as exc:
+                    results[key] = _BatchItemError(exc)
+            return results
+
+        results: Dict[tuple[str, str], BackgroundJobStatus | _BatchItemError] = {}
+        for error in body.errors:
+            key = (error.sandbox_id, error.job_id)
+            details = f"{error.sandbox_id}/{error.job_id}: {error.message}"
+            exc = (
+                BatchStatusUnsupportedError(details)
+                if error.code == "NOT_VM"
+                else APIError(f"Background job batch status failed: {details}")
+            )
+            results[key] = _BatchItemError(exc)
+
+        runtime_statuses = {(status.sandbox_id, status.job_id): status for status in body.statuses}
+        for job in jobs:
+            key = (job.sandbox_id, job.job_id)
+            if key in results:
+                continue
+            runtime_status = runtime_statuses.get(key)
+            if runtime_status is None:
+                continue
+            if not runtime_status.completed:
+                results[key] = BackgroundJobStatus(job_id=job.job_id, completed=False)
+                continue
+            if runtime_status.exit_code is None:
+                results[key] = _BatchItemError(
+                    APIError(f"Completed VM background job {job.job_id} omitted exit_code")
+                )
+                continue
+            try:
+                results[key] = self._get_completed_background_job_output(
+                    job.sandbox_id,
+                    job,
+                    runtime_status.exit_code,
+                    None,
+                )
+            except Exception as exc:
+                results[key] = _BatchItemError(exc)
+        return results
+
     def run_background_job(
         self,
         sandbox_id: str,
@@ -1250,9 +1653,13 @@ class SandboxClient:
             CommandTimeoutError: If command doesn't complete within timeout
         """
         job = self.start_background_job(sandbox_id, command, working_dir=working_dir, env=env)
+        use_batch_status = self._auth_cache.is_vm(sandbox_id)
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            status = self.get_background_job(sandbox_id, job)
+            if use_batch_status:
+                status = self._background_job_status_batcher.get((sandbox_id, job.job_id))
+            else:
+                status = self.get_background_job(sandbox_id, job)
             if status.completed:
                 return status
             time.sleep(poll_interval)
@@ -1288,7 +1695,7 @@ class SandboxClient:
         poll_index = 0
         reachability_phase = False
         while time.monotonic() < deadline:
-            sandbox = self.get(sandbox_id)
+            sandbox = self._sandbox_status_batcher.get(sandbox_id)
             if sandbox.status == "RUNNING":
                 if not reachability_phase:
                     reachability_phase = True
@@ -1310,7 +1717,7 @@ class SandboxClient:
                     "error_type": sandbox.error_type,
                     "error_message": sandbox.error_message,
                 }
-                _raise_not_running_error(sandbox.id, ctx)
+                _raise_not_running_error(sandbox.sandbox_id, ctx)
             elif _is_waiting_for_image_build(sandbox):
                 # The platform is building the VM image for this sandbox; it
                 # starts on its own once the build completes. This phase runs on
@@ -1343,46 +1750,55 @@ class SandboxClient:
         max_attempts: int = 60,
         image_build_timeout_seconds: int = 3000,
     ) -> Dict[str, str]:
-        """Wait for multiple sandboxes to be running using list endpoint to avoid rate limits.
+        """Wait for up to 100 sandboxes using the batch lifecycle endpoint.
 
         Sandboxes PENDING on an automatic VM image build (first use of an
         image) are waited on a separate slower budget bounded by
         image_build_timeout_seconds instead of consuming max_attempts.
         """
-        sandbox_id_set = set(sandbox_ids)
-        final_statuses = {}
+        _validate_unique_batch_values(sandbox_ids, "sandbox_ids")
+        final_statuses: Dict[str, str] = {}
         image_build_deadline: Optional[float] = None
 
         attempt = 0
         while attempt < max_attempts:
+            try:
+                response = self.get_sandbox_statuses(sandbox_ids)
+            except BatchStatusUnsupportedError:
+                outcomes = self._fetch_sandbox_statuses(sandbox_ids)
+                snapshots = []
+                for sandbox_id in sandbox_ids:
+                    outcome = outcomes[sandbox_id]
+                    if isinstance(outcome, _BatchItemError):
+                        raise outcome.error
+                    snapshots.append(outcome)
+                response = BatchSandboxStatusResponse(
+                    statuses=snapshots,
+                    errors=[],
+                )
+            except Exception as exc:
+                if "429" in str(exc) or "Too Many Requests" in str(exc):
+                    time.sleep(min(2**attempt, 60))
+                    continue
+                raise
+
+            if response.errors:
+                failures = [(error.sandbox_id, error.code) for error in response.errors]
+                raise RuntimeError(f"Sandboxes unavailable: {failures}")
+
             total_running = 0
             all_failed = []
             total_image_build_waiting = 0
-            page = 1
-
-            while True:
-                try:
-                    list_response = self.list(per_page=100, page=page)
-                except Exception as e:
-                    if "429" in str(e) or "Too Many Requests" in str(e):
-                        wait_time = min(2**attempt, 60)
-                        time.sleep(wait_time)
-                        continue
-                    raise
-
-                running_count, failed_sandboxes, page_statuses, image_build_waiting = (
-                    _check_sandbox_statuses(list_response.sandboxes, sandbox_id_set)
-                )
-
-                total_running += running_count
-                all_failed.extend(failed_sandboxes)
-                final_statuses.update(page_statuses)
-                total_image_build_waiting += image_build_waiting
-
-                if len(final_statuses) == len(sandbox_ids) or not list_response.has_next:
-                    break
-
-                page += 1
+            for snapshot in response.statuses:
+                status_value = snapshot.status.value
+                if status_value == "RUNNING":
+                    total_running += 1
+                    final_statuses[snapshot.sandbox_id] = status_value
+                elif status_value in ["ERROR", "TERMINATED", "TIMEOUT"]:
+                    all_failed.append((snapshot.sandbox_id, status_value))
+                    final_statuses[snapshot.sandbox_id] = status_value
+                elif _is_waiting_for_image_build(snapshot):
+                    total_image_build_waiting += 1
 
             if all_failed:
                 raise RuntimeError(f"Sandboxes failed: {all_failed}")
@@ -1413,7 +1829,7 @@ class SandboxClient:
             sleep_time = 1 if attempt <= 5 else 2
             time.sleep(sleep_time)
 
-        for sandbox_id in sandbox_id_set:
+        for sandbox_id in sandbox_ids:
             if sandbox_id not in final_statuses:
                 final_statuses[sandbox_id] = "TIMEOUT"
 
@@ -1749,6 +2165,12 @@ class AsyncSandboxClient:
         # Shared httpx client for gateway operations (upload/download/execute)
         # Initialized lazily to allow connection pooling and reuse
         self._gateway_client: Optional[httpx.AsyncClient] = None
+        self._sandbox_status_batcher = _AsyncRequestBatcher(self._fetch_sandbox_statuses)
+        self._background_job_status_batcher = _AsyncRequestBatcher(
+            self._fetch_background_job_statuses
+        )
+        self._sandbox_status_batch_supported: Optional[bool] = None
+        self._background_job_status_batch_supported: Optional[bool] = None
 
     def _get_gateway_client(self) -> httpx.AsyncClient:
         """Get or create the shared gateway client for connection pooling
@@ -1945,6 +2367,61 @@ class AsyncSandboxClient:
         """Get a specific sandbox"""
         response = await self.client.request("GET", f"/sandbox/{sandbox_id}")
         return Sandbox.model_validate(response)
+
+    async def get_sandbox_statuses(self, sandbox_ids: List[str]) -> BatchSandboxStatusResponse:
+        """Get lightweight lifecycle state for up to 100 sandboxes."""
+        _validate_unique_batch_values(sandbox_ids, "sandbox_ids")
+        if self._sandbox_status_batch_supported is False:
+            raise BatchStatusUnsupportedError(
+                "The platform does not support batch sandbox status lookups."
+            )
+        try:
+            response = await self.client.request(
+                "POST",
+                "/sandbox/status:batchGet",
+                json={"sandbox_ids": sandbox_ids},
+                idempotent_post=True,
+            )
+        except APIError as exc:
+            if "HTTP 404" in str(exc) or "HTTP 405" in str(exc):
+                self._sandbox_status_batch_supported = False
+                raise BatchStatusUnsupportedError(
+                    "The platform does not support batch sandbox status lookups."
+                ) from exc
+            raise
+        self._sandbox_status_batch_supported = True
+        return BatchSandboxStatusResponse.model_validate(response)
+
+    async def _fetch_sandbox_statuses(
+        self, sandbox_ids: List[str]
+    ) -> Dict[str, SandboxStatusSnapshot | _BatchItemError]:
+        """Fetch one coalesced lifecycle batch for concurrent waiters."""
+        try:
+            response = await self.get_sandbox_statuses(sandbox_ids)
+        except BatchStatusUnsupportedError:
+            sandboxes = await asyncio.gather(
+                *(self.get(sandbox_id) for sandbox_id in sandbox_ids),
+                return_exceptions=True,
+            )
+            results: Dict[str, SandboxStatusSnapshot | _BatchItemError] = {}
+            for sandbox_id, sandbox in zip(sandbox_ids, sandboxes):
+                if isinstance(sandbox, Exception):
+                    results[sandbox_id] = _BatchItemError(sandbox)
+                else:
+                    results[sandbox_id] = _sandbox_to_status_snapshot(sandbox)
+            return results
+
+        results: Dict[str, SandboxStatusSnapshot | _BatchItemError] = {
+            snapshot.sandbox_id: snapshot for snapshot in response.statuses
+        }
+        for error in response.errors:
+            results[error.sandbox_id] = _BatchItemError(
+                APIError(
+                    f"Sandbox status lookup failed for {error.sandbox_id}: "
+                    f"{error.code}: {error.message}"
+                )
+            )
+        return results
 
     async def delete(self, sandbox_id: str) -> Dict[str, Any]:
         """Delete a sandbox"""
@@ -2455,6 +2932,183 @@ class AsyncSandboxClient:
             stderr_truncated=stderr_truncated,
         )
 
+    async def _request_background_job_status_batch(
+        self,
+        jobs: List[BackgroundJob],
+        timeout: Optional[int] = None,
+    ) -> Optional[BatchBackgroundJobStatusResponse]:
+        """Return one raw platform batch, or None when the endpoint is unavailable."""
+        if self._background_job_status_batch_supported is False:
+            return None
+        try:
+            response = await self.client.request(
+                "POST",
+                "/sandbox/background-jobs/status:batchGet",
+                json={
+                    "jobs": [{"sandbox_id": job.sandbox_id, "job_id": job.job_id} for job in jobs]
+                },
+                timeout=timeout if timeout is not None else 30,
+                idempotent_post=True,
+            )
+        except APIError as exc:
+            if "HTTP 404" in str(exc) or "HTTP 405" in str(exc):
+                self._background_job_status_batch_supported = False
+                return None
+            raise
+        self._background_job_status_batch_supported = True
+        return BatchBackgroundJobStatusResponse.model_validate(response)
+
+    async def get_background_jobs(
+        self,
+        jobs: List[BackgroundJob],
+        timeout: Optional[int] = None,
+    ) -> List[BackgroundJobStatus]:
+        """Get ordered status for up to 100 jobs across VM sandboxes."""
+        _validate_background_job_batch(jobs)
+        body = await self._request_background_job_status_batch(jobs, timeout)
+        if body is None:
+            return await self._get_background_jobs_legacy(jobs, timeout)
+        if body.errors:
+            details = "; ".join(
+                f"{error.sandbox_id}/{error.job_id}: {error.message}" for error in body.errors
+            )
+            if any(error.code == "NOT_VM" for error in body.errors):
+                raise BatchStatusUnsupportedError(details)
+            raise APIError(f"Background job batch status failed: {details}")
+        runtime_statuses = {(status.sandbox_id, status.job_id): status for status in body.statuses}
+
+        async def build_status(job: BackgroundJob) -> BackgroundJobStatus:
+            runtime_status = runtime_statuses.get((job.sandbox_id, job.job_id))
+            if runtime_status is None:
+                raise APIError(f"VM batch status response omitted job {job.job_id}")
+            if not runtime_status.completed:
+                return BackgroundJobStatus(job_id=job.job_id, completed=False)
+            if runtime_status.exit_code is None:
+                raise APIError(f"Completed VM background job {job.job_id} omitted exit_code")
+            return await self._get_completed_background_job_output(
+                job.sandbox_id,
+                job,
+                runtime_status.exit_code,
+                timeout,
+            )
+
+        return list(await asyncio.gather(*(build_status(job) for job in jobs)))
+
+    async def _get_background_jobs_legacy(
+        self,
+        jobs: List[BackgroundJob],
+        timeout: Optional[int],
+    ) -> List[BackgroundJobStatus]:
+        """Use VM-only per-job reads when the platform batch API is unavailable."""
+        for sandbox_id in dict.fromkeys(job.sandbox_id for job in jobs):
+            await self._auth_cache.get_or_refresh(sandbox_id)
+            if not await self._auth_cache.is_vm(sandbox_id):
+                raise BatchStatusUnsupportedError(
+                    "Batched background job status is only supported for VM sandboxes."
+                )
+        return list(
+            await asyncio.gather(
+                *(self.get_background_job(job.sandbox_id, job, timeout=timeout) for job in jobs)
+            )
+        )
+
+    async def _get_completed_background_job_output(
+        self,
+        sandbox_id: str,
+        job: BackgroundJob,
+        exit_code: int,
+        timeout: Optional[int],
+    ) -> BackgroundJobStatus:
+        """Read bounded stdout and stderr tails for one completed job."""
+
+        async def read_output_tail(path: str) -> tuple[str, bool]:
+            try:
+                response = await self.read_file(
+                    sandbox_id,
+                    path,
+                    timeout=timeout,
+                    offset=-JOB_OUTPUT_TAIL_BYTES,
+                    length=JOB_OUTPUT_TAIL_BYTES,
+                )
+                return response.content, bool(response.truncated)
+            except SandboxFileNotFoundError:
+                return "", False
+
+        stdout, stderr = await asyncio.gather(
+            read_output_tail(job.stdout_log_file),
+            read_output_tail(job.stderr_log_file),
+        )
+        return BackgroundJobStatus(
+            job_id=job.job_id,
+            completed=True,
+            exit_code=exit_code,
+            stdout=stdout[0],
+            stderr=stderr[0],
+            stdout_truncated=stdout[1],
+            stderr_truncated=stderr[1],
+        )
+
+    async def _fetch_background_job_statuses(
+        self, keys: List[tuple[str, str]]
+    ) -> Dict[tuple[str, str], BackgroundJobStatus | _BatchItemError]:
+        """Fetch one coalesced VM job batch for concurrent run waiters."""
+        jobs = [_canonical_background_job(sandbox_id, job_id) for sandbox_id, job_id in keys]
+        body = await self._request_background_job_status_batch(jobs)
+        if body is None:
+
+            async def get_legacy_status(
+                job: BackgroundJob,
+            ) -> BackgroundJobStatus | _BatchItemError:
+                try:
+                    return (await self._get_background_jobs_legacy([job], None))[0]
+                except Exception as exc:
+                    return _BatchItemError(exc)
+
+            statuses = await asyncio.gather(*(get_legacy_status(job) for job in jobs))
+            return {(job.sandbox_id, job.job_id): status for job, status in zip(jobs, statuses)}
+
+        results: Dict[tuple[str, str], BackgroundJobStatus | _BatchItemError] = {}
+        for error in body.errors:
+            key = (error.sandbox_id, error.job_id)
+            details = f"{error.sandbox_id}/{error.job_id}: {error.message}"
+            exc = (
+                BatchStatusUnsupportedError(details)
+                if error.code == "NOT_VM"
+                else APIError(f"Background job batch status failed: {details}")
+            )
+            results[key] = _BatchItemError(exc)
+
+        runtime_statuses = {(status.sandbox_id, status.job_id): status for status in body.statuses}
+
+        async def build_status(job: BackgroundJob) -> BackgroundJobStatus | _BatchItemError | None:
+            key = (job.sandbox_id, job.job_id)
+            if key in results:
+                return None
+            runtime_status = runtime_statuses.get(key)
+            if runtime_status is None:
+                return None
+            if not runtime_status.completed:
+                return BackgroundJobStatus(job_id=job.job_id, completed=False)
+            if runtime_status.exit_code is None:
+                return _BatchItemError(
+                    APIError(f"Completed VM background job {job.job_id} omitted exit_code")
+                )
+            try:
+                return await self._get_completed_background_job_output(
+                    job.sandbox_id,
+                    job,
+                    runtime_status.exit_code,
+                    None,
+                )
+            except Exception as exc:
+                return _BatchItemError(exc)
+
+        statuses = await asyncio.gather(*(build_status(job) for job in jobs))
+        for job, status in zip(jobs, statuses):
+            if status is not None:
+                results[(job.sandbox_id, job.job_id)] = status
+        return results
+
     async def run_background_job(
         self,
         sandbox_id: str,
@@ -2485,9 +3139,13 @@ class AsyncSandboxClient:
             CommandTimeoutError: If command doesn't complete within timeout
         """
         job = await self.start_background_job(sandbox_id, command, working_dir=working_dir, env=env)
+        use_batch_status = await self._auth_cache.is_vm(sandbox_id)
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            status = await self.get_background_job(sandbox_id, job)
+            if use_batch_status:
+                status = await self._background_job_status_batcher.get((sandbox_id, job.job_id))
+            else:
+                status = await self.get_background_job(sandbox_id, job)
             if status.completed:
                 return status
             await asyncio.sleep(poll_interval)
@@ -2523,7 +3181,7 @@ class AsyncSandboxClient:
         poll_index = 0
         reachability_phase = False
         while time.monotonic() < deadline:
-            sandbox = await self.get(sandbox_id)
+            sandbox = await self._sandbox_status_batcher.get(sandbox_id)
             if sandbox.status == "RUNNING":
                 if not reachability_phase:
                     reachability_phase = True
@@ -2545,7 +3203,7 @@ class AsyncSandboxClient:
                     "error_type": sandbox.error_type,
                     "error_message": sandbox.error_message,
                 }
-                _raise_not_running_error(sandbox.id, ctx)
+                _raise_not_running_error(sandbox.sandbox_id, ctx)
             elif _is_waiting_for_image_build(sandbox):
                 # The platform is building the VM image for this sandbox; it
                 # starts on its own once the build completes. This phase runs on
@@ -2578,47 +3236,56 @@ class AsyncSandboxClient:
         max_attempts: int = 60,
         image_build_timeout_seconds: int = 3000,
     ) -> Dict[str, str]:
-        """Wait for multiple sandboxes to be running using list endpoint.
+        """Wait for up to 100 sandboxes using the batch lifecycle endpoint.
 
         Sandboxes PENDING on an automatic VM image build (first use of an
         image) are waited on a separate slower budget bounded by
         image_build_timeout_seconds instead of consuming max_attempts.
         """
 
-        sandbox_id_set = set(sandbox_ids)
-        final_statuses = {}
+        _validate_unique_batch_values(sandbox_ids, "sandbox_ids")
+        final_statuses: Dict[str, str] = {}
         image_build_deadline: Optional[float] = None
 
         attempt = 0
         while attempt < max_attempts:
+            try:
+                response = await self.get_sandbox_statuses(sandbox_ids)
+            except BatchStatusUnsupportedError:
+                outcomes = await self._fetch_sandbox_statuses(sandbox_ids)
+                snapshots = []
+                for sandbox_id in sandbox_ids:
+                    outcome = outcomes[sandbox_id]
+                    if isinstance(outcome, _BatchItemError):
+                        raise outcome.error
+                    snapshots.append(outcome)
+                response = BatchSandboxStatusResponse(
+                    statuses=snapshots,
+                    errors=[],
+                )
+            except Exception as exc:
+                if "429" in str(exc) or "Too Many Requests" in str(exc):
+                    await asyncio.sleep(min(2**attempt, 60))
+                    continue
+                raise
+
+            if response.errors:
+                failures = [(error.sandbox_id, error.code) for error in response.errors]
+                raise RuntimeError(f"Sandboxes unavailable: {failures}")
+
             total_running = 0
             all_failed = []
             total_image_build_waiting = 0
-            page = 1
-
-            while True:
-                try:
-                    list_response = await self.list(per_page=100, page=page)
-                except Exception as e:
-                    if "429" in str(e) or "Too Many Requests" in str(e):
-                        wait_time = min(2**attempt, 60)
-                        await asyncio.sleep(wait_time)
-                        continue
-                    raise
-
-                running_count, failed_sandboxes, page_statuses, image_build_waiting = (
-                    _check_sandbox_statuses(list_response.sandboxes, sandbox_id_set)
-                )
-
-                total_running += running_count
-                all_failed.extend(failed_sandboxes)
-                final_statuses.update(page_statuses)
-                total_image_build_waiting += image_build_waiting
-
-                if len(final_statuses) == len(sandbox_ids) or not list_response.has_next:
-                    break
-
-                page += 1
+            for snapshot in response.statuses:
+                status_value = snapshot.status.value
+                if status_value == "RUNNING":
+                    total_running += 1
+                    final_statuses[snapshot.sandbox_id] = status_value
+                elif status_value in ["ERROR", "TERMINATED", "TIMEOUT"]:
+                    all_failed.append((snapshot.sandbox_id, status_value))
+                    final_statuses[snapshot.sandbox_id] = status_value
+                elif _is_waiting_for_image_build(snapshot):
+                    total_image_build_waiting += 1
 
             if all_failed:
                 raise RuntimeError(f"Sandboxes failed: {all_failed}")
@@ -2649,7 +3316,7 @@ class AsyncSandboxClient:
             sleep_time = 1 if attempt <= 5 else 2
             await asyncio.sleep(sleep_time)
 
-        for sandbox_id in sandbox_id_set:
+        for sandbox_id in sandbox_ids:
             if sandbox_id not in final_statuses:
                 final_statuses[sandbox_id] = "TIMEOUT"
 

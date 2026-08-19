@@ -19,6 +19,12 @@ class SandboxFileTooLargeError(APIError):
     pass
 
 
+class BatchStatusUnsupportedError(APIError):
+    """Raised when batch status is unsupported for the requested sandbox runtime."""
+
+    pass
+
+
 class SandboxNotRunningError(RuntimeError):
     """Raised when an operation requires a RUNNING sandbox but it is not running."""
 

@@ -711,15 +711,33 @@ class BackgroundJobStatus(BaseModel):
     stderr_truncated: bool = False
 
 
-class BackgroundJobRuntimeStatus(BaseModel):
-    """Runtime-only completion state returned by a VM batch lookup."""
+class BackgroundJobStatusSnapshot(BaseModel):
+    """Completion state returned by a platform VM background-job lookup."""
 
+    sandbox_id: str
     job_id: str
     completed: bool
     exit_code: Optional[int] = None
 
 
-class BatchBackgroundJobRuntimeStatusResponse(BaseModel):
-    """Ordered runtime-only completion states for VM background jobs."""
+class BackgroundJobStatusLookupError(BaseModel):
+    """Per-job error returned by a platform VM background-job lookup."""
 
-    jobs: List[BackgroundJobRuntimeStatus]
+    sandbox_id: str
+    job_id: str
+    code: Literal[
+        "NOT_FOUND",
+        "FORBIDDEN",
+        "MANAGED",
+        "NOT_VM",
+        "NOT_RUNNING",
+        "RUNTIME_ERROR",
+    ]
+    message: str
+
+
+class BatchBackgroundJobStatusResponse(BaseModel):
+    """Ordered results from a platform VM background-job lookup."""
+
+    statuses: List[BackgroundJobStatusSnapshot]
+    errors: List[BackgroundJobStatusLookupError]

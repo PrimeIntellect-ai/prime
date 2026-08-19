@@ -60,9 +60,8 @@ from .exceptions import (
 )
 from .models import (
     BackgroundJob,
-    BackgroundJobRuntimeStatus,
     BackgroundJobStatus,
-    BatchBackgroundJobRuntimeStatusResponse,
+    BatchBackgroundJobStatusResponse,
     BatchSandboxStatusResponse,
     BulkDeleteSandboxRequest,
     BulkDeleteSandboxResponse,
@@ -185,9 +184,9 @@ AUTH_REFRESH_MARGIN_SECONDS = 60
 # Max bytes of stdout/stderr returned per background-job status check
 JOB_OUTPUT_TAIL_BYTES = 10 * 1024 * 1024
 
-# Both the platform and VM runtime batch-status contracts cap one request at 100
-# identifiers. Concurrent single-item waits are collected briefly so callers
-# share a request without adding a persistent worker to the client lifecycle.
+# Platform batch-status contracts cap one request at 100 identifiers. Concurrent
+# single-item waits are collected briefly so callers share a request without
+# adding a persistent worker to the client lifecycle.
 MAX_STATUS_BATCH_SIZE = 100
 STATUS_BATCH_WINDOW_SECONDS = 0.025
 
@@ -415,7 +414,7 @@ def _validate_unique_batch_values(values: List[str], field_name: str) -> None:
 
 
 def _canonical_background_job(sandbox_id: str, job_id: str) -> BackgroundJob:
-    """Build the canonical SDK background-job handle for a VM runtime lookup."""
+    """Build the canonical SDK background-job handle for a VM batch lookup."""
     return BackgroundJob(
         job_id=job_id,
         sandbox_id=sandbox_id,
@@ -426,7 +425,7 @@ def _canonical_background_job(sandbox_id: str, job_id: str) -> BackgroundJob:
 
 
 def _validate_background_job_batch(jobs: List[BackgroundJob]) -> None:
-    """Validate VM runtime batching is limited to canonical SDK job handles."""
+    """Validate VM batching is limited to canonical SDK job handles."""
     if not jobs or len(jobs) > MAX_STATUS_BATCH_SIZE:
         raise ValueError(f"jobs must contain between 1 and {MAX_STATUS_BATCH_SIZE} entries")
 
@@ -829,21 +828,6 @@ class SandboxClient:
         """Make a POST request to the gateway with retry on connection errors only."""
         with httpx.Client(timeout=timeout) as client:
             return client.post(url, json=json, files=files, params=params, headers=headers)
-
-    @staticmethod
-    @_read_file_retry
-    def _gateway_idempotent_post(
-        url: str,
-        headers: Dict[str, str],
-        timeout: float,
-        json: Dict[str, Any],
-    ) -> httpx.Response:
-        """Make an idempotent gateway POST with transient retries."""
-        with httpx.Client(timeout=timeout) as client:
-            response = client.post(url, json=json, headers=headers)
-        if response.status_code == 408 or response.status_code in RETRYABLE_5XX_STATUSES:
-            response.raise_for_status()
-        return response
 
     @staticmethod
     @_gateway_retry
@@ -1440,28 +1424,38 @@ class SandboxClient:
         jobs: List[BackgroundJob],
         timeout: Optional[int] = None,
     ) -> List[BackgroundJobStatus]:
-        """Get ordered status for up to 100 background jobs in VM sandboxes.
+        """Get ordered status for up to 100 jobs across VM sandboxes.
 
-        The runtime batch call reads only canonical exit-code files. Output is
+        One platform request checks all canonical exit-code files. Output is
         fetched with the existing bounded-tail behavior once a job completes.
         Container sandboxes intentionally continue to use get_background_job().
         """
         _validate_background_job_batch(jobs)
-        jobs_by_sandbox: Dict[str, List[BackgroundJob]] = {}
-        for job in jobs:
-            jobs_by_sandbox.setdefault(job.sandbox_id, []).append(job)
-
-        runtime_statuses: Dict[tuple[str, str], BackgroundJobRuntimeStatus] = {}
-        for sandbox_id, sandbox_jobs in jobs_by_sandbox.items():
-            self._auth_cache.get_or_refresh(sandbox_id)
-            if not self._auth_cache.is_vm(sandbox_id):
+        try:
+            response = self.client.request(
+                "POST",
+                "/sandbox/background-jobs/status:batchGet",
+                json={
+                    "jobs": [{"sandbox_id": job.sandbox_id, "job_id": job.job_id} for job in jobs]
+                },
+                timeout=timeout if timeout is not None else 30,
+                idempotent_post=True,
+            )
+        except APIError as exc:
+            if "HTTP 404" in str(exc):
                 raise BatchStatusUnsupportedError(
-                    "Batched background job status is only supported for VM sandboxes."
-                )
-            for status in self._get_background_job_runtime_statuses(
-                sandbox_id, sandbox_jobs, timeout
-            ):
-                runtime_statuses[(sandbox_id, status.job_id)] = status
+                    "The platform does not support batch background job status lookups."
+                ) from exc
+            raise
+        body = BatchBackgroundJobStatusResponse.model_validate(response)
+        if body.errors:
+            details = "; ".join(
+                f"{error.sandbox_id}/{error.job_id}: {error.message}" for error in body.errors
+            )
+            if any(error.code == "NOT_VM" for error in body.errors):
+                raise BatchStatusUnsupportedError(details)
+            raise APIError(f"Background job batch status failed: {details}")
+        runtime_statuses = {(status.sandbox_id, status.job_id): status for status in body.statuses}
 
         results = []
         for job in jobs:
@@ -1482,50 +1476,6 @@ class SandboxClient:
                 )
             )
         return results
-
-    def _get_background_job_runtime_statuses(
-        self,
-        sandbox_id: str,
-        jobs: List[BackgroundJob],
-        timeout: Optional[int],
-    ) -> List[BackgroundJobRuntimeStatus]:
-        """Call the VM sandboxd batch completion endpoint."""
-        effective_timeout = timeout if timeout is not None else 30
-        reauthed = False
-        for _ in range(MAX_GATEWAY_ATTEMPTS):
-            auth = self._auth_cache.get_or_refresh(sandbox_id)
-            gateway_url = auth["gateway_url"].rstrip("/")
-            url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/background-jobs/status"
-            headers = {"Authorization": f"Bearer {auth['token']}"}
-            try:
-                response = self._gateway_idempotent_post(
-                    url,
-                    headers=headers,
-                    timeout=effective_timeout,
-                    json={"job_ids": [job.job_id for job in jobs]},
-                )
-                response.raise_for_status()
-                body = BatchBackgroundJobRuntimeStatusResponse.model_validate(response.json())
-                return body.jobs
-            except httpx.TimeoutException as exc:
-                raise APIError(
-                    f"VM background job status timed out after {effective_timeout}s"
-                ) from exc
-            except httpx.HTTPStatusError as exc:
-                status_code = exc.response.status_code
-                if status_code == 401 and self._should_retry_401(sandbox_id, reauthed):
-                    reauthed = True
-                    continue
-                if status_code == 404:
-                    raise BatchStatusUnsupportedError(
-                        "This VM sandbox does not support batched background job status."
-                    ) from exc
-                raise APIError(
-                    f"VM background job status failed: HTTP {status_code}: {exc.response.text}"
-                ) from exc
-            except httpx.RequestError as exc:
-                raise APIError(f"VM background job status request failed: {exc}") from exc
-        raise APIError("VM background job status failed after retries")
 
     def _get_completed_background_job_output(
         self,
@@ -2135,21 +2085,6 @@ class AsyncSandboxClient:
         return await gateway_client.post(
             url, json=json, files=files, params=params, headers=headers, timeout=timeout
         )
-
-    @_read_file_retry
-    async def _gateway_idempotent_post(
-        self,
-        url: str,
-        headers: Dict[str, str],
-        timeout: float,
-        json: Dict[str, Any],
-    ) -> httpx.Response:
-        """Make an idempotent gateway POST with transient retries."""
-        gateway_client = self._get_gateway_client()
-        response = await gateway_client.post(url, json=json, headers=headers, timeout=timeout)
-        if response.status_code == 408 or response.status_code in RETRYABLE_5XX_STATUSES:
-            response.raise_for_status()
-        return response
 
     @_gateway_retry
     async def _gateway_get(
@@ -2857,36 +2792,33 @@ class AsyncSandboxClient:
         jobs: List[BackgroundJob],
         timeout: Optional[int] = None,
     ) -> List[BackgroundJobStatus]:
-        """Get ordered status for up to 100 background jobs in VM sandboxes."""
+        """Get ordered status for up to 100 jobs across VM sandboxes."""
         _validate_background_job_batch(jobs)
-        jobs_by_sandbox: Dict[str, List[BackgroundJob]] = {}
-        for job in jobs:
-            jobs_by_sandbox.setdefault(job.sandbox_id, []).append(job)
-
-        async def fetch_sandbox_jobs(
-            sandbox_id: str, sandbox_jobs: List[BackgroundJob]
-        ) -> tuple[str, List[BackgroundJobRuntimeStatus]]:
-            await self._auth_cache.get_or_refresh(sandbox_id)
-            if not await self._auth_cache.is_vm(sandbox_id):
+        try:
+            response = await self.client.request(
+                "POST",
+                "/sandbox/background-jobs/status:batchGet",
+                json={
+                    "jobs": [{"sandbox_id": job.sandbox_id, "job_id": job.job_id} for job in jobs]
+                },
+                timeout=timeout if timeout is not None else 30,
+                idempotent_post=True,
+            )
+        except APIError as exc:
+            if "HTTP 404" in str(exc):
                 raise BatchStatusUnsupportedError(
-                    "Batched background job status is only supported for VM sandboxes."
-                )
-            statuses = await self._get_background_job_runtime_statuses(
-                sandbox_id, sandbox_jobs, timeout
+                    "The platform does not support batch background job status lookups."
+                ) from exc
+            raise
+        body = BatchBackgroundJobStatusResponse.model_validate(response)
+        if body.errors:
+            details = "; ".join(
+                f"{error.sandbox_id}/{error.job_id}: {error.message}" for error in body.errors
             )
-            return sandbox_id, statuses
-
-        grouped_statuses = await asyncio.gather(
-            *(
-                fetch_sandbox_jobs(sandbox_id, sandbox_jobs)
-                for sandbox_id, sandbox_jobs in jobs_by_sandbox.items()
-            )
-        )
-        runtime_statuses = {
-            (sandbox_id, status.job_id): status
-            for sandbox_id, statuses in grouped_statuses
-            for status in statuses
-        }
+            if any(error.code == "NOT_VM" for error in body.errors):
+                raise BatchStatusUnsupportedError(details)
+            raise APIError(f"Background job batch status failed: {details}")
+        runtime_statuses = {(status.sandbox_id, status.job_id): status for status in body.statuses}
 
         async def build_status(job: BackgroundJob) -> BackgroundJobStatus:
             runtime_status = runtime_statuses.get((job.sandbox_id, job.job_id))
@@ -2904,50 +2836,6 @@ class AsyncSandboxClient:
             )
 
         return list(await asyncio.gather(*(build_status(job) for job in jobs)))
-
-    async def _get_background_job_runtime_statuses(
-        self,
-        sandbox_id: str,
-        jobs: List[BackgroundJob],
-        timeout: Optional[int],
-    ) -> List[BackgroundJobRuntimeStatus]:
-        """Call the VM sandboxd batch completion endpoint."""
-        effective_timeout = timeout if timeout is not None else 30
-        reauthed = False
-        for _ in range(MAX_GATEWAY_ATTEMPTS):
-            auth = await self._auth_cache.get_or_refresh(sandbox_id)
-            gateway_url = auth["gateway_url"].rstrip("/")
-            url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/background-jobs/status"
-            headers = {"Authorization": f"Bearer {auth['token']}"}
-            try:
-                response = await self._gateway_idempotent_post(
-                    url,
-                    headers=headers,
-                    timeout=effective_timeout,
-                    json={"job_ids": [job.job_id for job in jobs]},
-                )
-                response.raise_for_status()
-                body = BatchBackgroundJobRuntimeStatusResponse.model_validate(response.json())
-                return body.jobs
-            except httpx.TimeoutException as exc:
-                raise APIError(
-                    f"VM background job status timed out after {effective_timeout}s"
-                ) from exc
-            except httpx.HTTPStatusError as exc:
-                status_code = exc.response.status_code
-                if status_code == 401 and await self._should_retry_401(sandbox_id, reauthed):
-                    reauthed = True
-                    continue
-                if status_code == 404:
-                    raise BatchStatusUnsupportedError(
-                        "This VM sandbox does not support batched background job status."
-                    ) from exc
-                raise APIError(
-                    f"VM background job status failed: HTTP {status_code}: {exc.response.text}"
-                ) from exc
-            except httpx.RequestError as exc:
-                raise APIError(f"VM background job status request failed: {exc}") from exc
-        raise APIError("VM background job status failed after retries")
 
     async def _get_completed_background_job_output(
         self,

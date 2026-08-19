@@ -1,27 +1,15 @@
-"""Focused tests for platform and VM runtime batch status calls."""
+"""Focused tests for platform lifecycle and VM background-job batch calls."""
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
 from typing import Any, Optional, cast
 
-import httpx
 import pytest
 
 from prime_sandboxes import BatchStatusUnsupportedError
 from prime_sandboxes.core.client import APIClient
 from prime_sandboxes.models import BackgroundJob, ReadFileResponse
 from prime_sandboxes.sandbox import AsyncSandboxClient, SandboxClient
-
-
-def _auth_payload() -> dict[str, Any]:
-    return {
-        "gateway_url": "https://gateway.example.com",
-        "user_ns": "ns",
-        "job_id": "runtime",
-        "token": "token",
-        "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat(),
-    }
 
 
 def _job(sandbox_id: str, job_id: str) -> BackgroundJob:
@@ -81,31 +69,54 @@ class _AsyncPlatformClient:
         return None
 
 
-class _SyncAuthCache:
-    def __init__(self, is_vm: bool = True) -> None:
-        self._is_vm = is_vm
+class _SyncBackgroundJobPlatformClient:
+    def __init__(self, reject_as_container: bool = False) -> None:
+        self.calls: list[tuple[str, str, dict[str, Any]]] = []
+        self.reject_as_container = reject_as_container
 
-    def get_or_refresh(self, _sandbox_id: str) -> dict[str, Any]:
-        return _auth_payload()
+    def request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append((method, path, kwargs))
+        jobs = kwargs["json"]["jobs"]
+        if self.reject_as_container:
+            return {
+                "statuses": [],
+                "errors": [
+                    {
+                        **jobs[0],
+                        "code": "NOT_VM",
+                        "message": (
+                            "Batched background job status is only supported for VM sandboxes"
+                        ),
+                    }
+                ],
+            }
+        return {
+            "statuses": [
+                {
+                    **job,
+                    "completed": job["job_id"] == "feedface",
+                    "exit_code": 7 if job["job_id"] == "feedface" else None,
+                }
+                for job in jobs
+            ],
+            "errors": [],
+        }
 
-    def is_vm(self, _sandbox_id: str) -> bool:
-        return self._is_vm
 
-    def invalidate(self, _sandbox_id: str) -> None:
-        return None
+class _AsyncBackgroundJobPlatformClient:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, dict[str, Any]]] = []
 
+    async def request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append((method, path, kwargs))
+        return {
+            "statuses": [
+                {**job, "completed": False, "exit_code": None} for job in kwargs["json"]["jobs"]
+            ],
+            "errors": [],
+        }
 
-class _AsyncAuthCache:
-    def __init__(self, is_vm: bool = True) -> None:
-        self._is_vm = is_vm
-
-    async def get_or_refresh(self, _sandbox_id: str) -> dict[str, Any]:
-        return _auth_payload()
-
-    async def is_vm(self, _sandbox_id: str) -> bool:
-        return self._is_vm
-
-    async def invalidate(self, _sandbox_id: str) -> None:
+    async def aclose(self) -> None:
         return None
 
 
@@ -155,28 +166,11 @@ async def test_concurrent_async_creation_waits_share_one_platform_batch() -> Non
     assert set(platform.calls[0][2]["json"]["sandbox_ids"]) == {"sandbox-a", "sandbox-b"}
 
 
-def test_sync_get_background_jobs_uses_one_vm_runtime_batch_and_reads_completed_output() -> None:
+def test_sync_get_background_jobs_uses_one_platform_batch_across_vm_sandboxes() -> None:
     client = SandboxClient(APIClient(api_key="test-key"))
-    cast(Any, client)._auth_cache = _SyncAuthCache()
-    calls: list[dict[str, Any]] = []
-
-    def post(
-        url: str,
-        headers: dict[str, str],
-        timeout: float,
-        json: dict[str, Any],
-    ) -> httpx.Response:
-        calls.append({"url": url, "headers": headers, "timeout": timeout, "json": json})
-        return httpx.Response(
-            200,
-            json={
-                "jobs": [
-                    {"job_id": "deadbeef", "completed": False},
-                    {"job_id": "feedface", "completed": True, "exit_code": 7},
-                ]
-            },
-            request=httpx.Request("POST", url),
-        )
+    client.client.client.close()
+    platform = _SyncBackgroundJobPlatformClient()
+    cast(Any, client).client = platform
 
     def read_file(
         _sandbox_id: str,
@@ -188,14 +182,23 @@ def test_sync_get_background_jobs_uses_one_vm_runtime_batch_and_reads_completed_
         content = "stdout" if path.endswith("stdout.log") else "stderr"
         return ReadFileResponse(content=content, size=len(content), truncated=False)
 
-    cast(Any, client)._gateway_idempotent_post = post
     cast(Any, client).read_file = read_file
-    jobs = [_job("sandbox-vm", "deadbeef"), _job("sandbox-vm", "feedface")]
+    jobs = [_job("sandbox-a", "deadbeef"), _job("sandbox-b", "feedface")]
 
     statuses = client.get_background_jobs(jobs, timeout=12)
 
-    assert calls[0]["json"] == {"job_ids": ["deadbeef", "feedface"]}
-    assert calls[0]["timeout"] == 12
+    assert len(platform.calls) == 1
+    method, path, kwargs = platform.calls[0]
+    assert method == "POST"
+    assert path == "/sandbox/background-jobs/status:batchGet"
+    assert kwargs["json"] == {
+        "jobs": [
+            {"sandbox_id": "sandbox-a", "job_id": "deadbeef"},
+            {"sandbox_id": "sandbox-b", "job_id": "feedface"},
+        ]
+    }
+    assert kwargs["timeout"] == 12
+    assert kwargs["idempotent_post"] is True
     assert not statuses[0].completed
     assert statuses[1].completed
     assert statuses[1].exit_code == 7
@@ -205,37 +208,82 @@ def test_sync_get_background_jobs_uses_one_vm_runtime_batch_and_reads_completed_
 
 def test_sync_get_background_jobs_rejects_container_sandboxes() -> None:
     client = SandboxClient(APIClient(api_key="test-key"))
-    cast(Any, client)._auth_cache = _SyncAuthCache(is_vm=False)
+    client.client.client.close()
+    cast(Any, client).client = _SyncBackgroundJobPlatformClient(reject_as_container=True)
 
     with pytest.raises(BatchStatusUnsupportedError, match="only supported for VM"):
         client.get_background_jobs([_job("sandbox-container", "deadbeef")])
 
 
+def test_concurrent_sync_background_waiters_share_one_platform_batch() -> None:
+    client = SandboxClient(APIClient(api_key="test-key"))
+    client.client.client.close()
+    platform = _SyncBackgroundJobPlatformClient()
+    cast(Any, client).client = platform
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(
+                cast(Any, client)._background_job_status_batcher.get,
+                key,
+            )
+            for key in [
+                ("sandbox-a", "deadbeef"),
+                ("sandbox-b", "cafebabe"),
+            ]
+        ]
+        for future in futures:
+            assert not future.result().completed
+
+    assert len(platform.calls) == 1
+    assert {(job["sandbox_id"], job["job_id"]) for job in platform.calls[0][2]["json"]["jobs"]} == {
+        ("sandbox-a", "deadbeef"),
+        ("sandbox-b", "cafebabe"),
+    }
+
+
 @pytest.mark.asyncio
-async def test_async_get_background_jobs_uses_vm_runtime_batch() -> None:
+async def test_async_get_background_jobs_uses_one_platform_batch() -> None:
     client = AsyncSandboxClient(api_key="test-key")
     await client.client.aclose()
-    cast(Any, client)._auth_cache = _AsyncAuthCache()
-    calls: list[dict[str, Any]] = []
-
-    async def post(
-        url: str,
-        headers: dict[str, str],
-        timeout: float,
-        json: dict[str, Any],
-    ) -> httpx.Response:
-        calls.append({"url": url, "headers": headers, "timeout": timeout, "json": json})
-        return httpx.Response(
-            200,
-            json={"jobs": [{"job_id": "deadbeef", "completed": False}]},
-            request=httpx.Request("POST", url),
-        )
-
-    cast(Any, client)._gateway_idempotent_post = post
+    platform = _AsyncBackgroundJobPlatformClient()
+    cast(Any, client).client = platform
     try:
-        statuses = await client.get_background_jobs([_job("sandbox-vm", "deadbeef")])
+        statuses = await client.get_background_jobs(
+            [_job("sandbox-a", "deadbeef"), _job("sandbox-b", "feedface")]
+        )
     finally:
         await client.aclose()
 
-    assert calls[0]["json"] == {"job_ids": ["deadbeef"]}
+    assert len(platform.calls) == 1
+    assert platform.calls[0][1] == "/sandbox/background-jobs/status:batchGet"
+    assert platform.calls[0][2]["json"] == {
+        "jobs": [
+            {"sandbox_id": "sandbox-a", "job_id": "deadbeef"},
+            {"sandbox_id": "sandbox-b", "job_id": "feedface"},
+        ]
+    }
     assert not statuses[0].completed
+    assert not statuses[1].completed
+
+
+@pytest.mark.asyncio
+async def test_concurrent_async_background_waiters_share_one_platform_batch() -> None:
+    client = AsyncSandboxClient(api_key="test-key")
+    await client.client.aclose()
+    platform = _AsyncBackgroundJobPlatformClient()
+    cast(Any, client).client = platform
+    try:
+        statuses = await asyncio.gather(
+            cast(Any, client)._background_job_status_batcher.get(("sandbox-a", "deadbeef")),
+            cast(Any, client)._background_job_status_batcher.get(("sandbox-b", "cafebabe")),
+        )
+    finally:
+        await client.aclose()
+
+    assert all(not status.completed for status in statuses)
+    assert len(platform.calls) == 1
+    assert {(job["sandbox_id"], job["job_id"]) for job in platform.calls[0][2]["json"]["jobs"]} == {
+        ("sandbox-a", "deadbeef"),
+        ("sandbox-b", "cafebabe"),
+    }

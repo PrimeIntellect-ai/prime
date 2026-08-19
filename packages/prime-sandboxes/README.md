@@ -219,9 +219,9 @@ job = sandbox_client.start_background_job(
 )
 print(f"Job started: {job.job_id}")
 
-# VM sandboxes can check up to 100 SDK-started jobs at once. Results preserve
-# input order; completed jobs include the same bounded stdout/stderr tails as
-# get_background_job().
+# VM sandboxes can check up to 100 SDK-started jobs across sandboxes with one
+# platform request. Results preserve input order; completed jobs include the
+# same bounded stdout/stderr tails as get_background_job().
 statuses = sandbox_client.get_background_jobs([job])
 
 # Poll for completion

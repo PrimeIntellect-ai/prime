@@ -806,34 +806,6 @@ def _is_waiting_for_image_build(sandbox: Sandbox | SandboxStatusSnapshot) -> boo
     return sandbox.status == "PENDING" and bool(getattr(sandbox, "pending_image_build_id", None))
 
 
-def _check_sandbox_statuses(
-    sandboxes: List[Sandbox], target_ids: set
-) -> tuple[int, List[tuple], Dict[str, str], int]:
-    """Helper function to check sandbox statuses
-
-    Returns:
-        tuple of (running_count, failed_sandboxes, final_statuses,
-        image_build_waiting_count)
-    """
-    running_count = 0
-    failed_sandboxes = []
-    final_statuses = {}
-    image_build_waiting = 0
-
-    for sandbox in sandboxes:
-        if sandbox.id in target_ids:
-            if sandbox.status == "RUNNING":
-                running_count += 1
-                final_statuses[sandbox.id] = sandbox.status
-            elif sandbox.status in ["ERROR", "TERMINATED", "TIMEOUT"]:
-                failed_sandboxes.append((sandbox.id, sandbox.status))
-                final_statuses[sandbox.id] = sandbox.status
-            elif _is_waiting_for_image_build(sandbox):
-                image_build_waiting += 1
-
-    return running_count, failed_sandboxes, final_statuses, image_build_waiting
-
-
 class SandboxClient:
     """Client for sandbox API operations"""
 

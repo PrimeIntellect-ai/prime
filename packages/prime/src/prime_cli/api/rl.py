@@ -66,6 +66,7 @@ class RLRun(BaseModel):
     name: Optional[str] = Field(None, description="Run name")
     user_id: str = Field(..., alias="userId")
     team_id: Optional[str] = Field(None, alias="teamId")
+    project_id: Optional[str] = Field(None, alias="projectId")
     cluster_id: Optional[str] = Field(None, alias="rftClusterId")
     status: str = Field(..., description="Run status")
     # Discriminator: SHARED_RFT_HOSTED (LoRA) | DEDICATED_FULL_FT (own
@@ -199,6 +200,7 @@ class RLClient:
         wandb_run_name: Optional[str] = None,
         secrets: Optional[Dict[str, str]] = None,
         team_id: Optional[str] = None,
+        project_id: Optional[str] = None,
         eval_config: Optional[Dict[str, Any]] = None,
         val_config: Optional[Dict[str, Any]] = None,
         pre_batch_filters: Optional[List[Dict[str, Any]]] = None,
@@ -257,6 +259,9 @@ class RLClient:
 
             if team_id:
                 payload["team_id"] = team_id
+
+            if project_id:
+                payload["project_id"] = project_id
 
             if max_tokens:
                 payload["max_tokens"] = max_tokens
@@ -375,6 +380,35 @@ class RLClient:
             if hasattr(e, "response") and hasattr(e.response, "text"):
                 raise APIError(f"Failed to restart Hosted Training run: {e.response.text}")
             raise APIError(f"Failed to restart Hosted Training run: {str(e)}")
+
+    def update_run_project(
+        self,
+        run_id: str,
+        project_id: Optional[str],
+        *,
+        operation: str = "set",
+        move_adapters: bool = True,
+    ) -> tuple[RLRun, int]:
+        """Update Hosted Training run project memberships."""
+        try:
+            response = self.client.request(
+                "PATCH",
+                f"/rft/runs/{run_id}/project",
+                json={
+                    "projectId": project_id,
+                    "operation": operation,
+                    "moveAdapters": move_adapters,
+                },
+            )
+            run = RLRun.model_validate(response.get("run"))
+            adapters_updated = int(
+                response.get("adaptersUpdated", response.get("adapters_updated", 0))
+            )
+            return run, adapters_updated
+        except Exception as e:
+            if hasattr(e, "response") and hasattr(e.response, "text"):
+                raise APIError(f"Failed to update Hosted Training run project: {e.response.text}")
+            raise APIError(f"Failed to update Hosted Training run project: {str(e)}")
 
     def list_checkpoints(
         self, run_id: str, status_filter: Optional[str] = None

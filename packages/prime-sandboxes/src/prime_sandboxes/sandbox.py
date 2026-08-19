@@ -443,6 +443,17 @@ def _validate_background_job_batch(jobs: List[BackgroundJob]) -> None:
         raise ValueError("jobs must be unique")
 
 
+def _sandbox_to_status_snapshot(sandbox: Sandbox) -> SandboxStatusSnapshot:
+    """Convert a legacy full-sandbox lookup into the lightweight batch shape."""
+    return SandboxStatusSnapshot(
+        sandbox_id=sandbox.id,
+        status=sandbox.status,
+        error_type=sandbox.error_type,
+        error_message=sandbox.error_message,
+        pending_image_build_id=sandbox.pending_image_build_id,
+    )
+
+
 def _build_terminated_message(command: str, ctx: dict) -> str:
     """Build helpful error message for terminated sandbox."""
     cmd_preview = command[:50] + "..." if len(command) > 50 else command
@@ -814,6 +825,8 @@ class SandboxClient:
         self._background_job_status_batcher = _SyncRequestBatcher(
             self._fetch_background_job_statuses
         )
+        self._sandbox_status_batch_supported: Optional[bool] = None
+        self._background_job_status_batch_supported: Optional[bool] = None
 
     @staticmethod
     @_gateway_post_retry
@@ -998,6 +1011,10 @@ class SandboxClient:
     def get_sandbox_statuses(self, sandbox_ids: List[str]) -> BatchSandboxStatusResponse:
         """Get lightweight lifecycle state for up to 100 sandboxes."""
         _validate_unique_batch_values(sandbox_ids, "sandbox_ids")
+        if self._sandbox_status_batch_supported is False:
+            raise BatchStatusUnsupportedError(
+                "The platform does not support batch sandbox status lookups."
+            )
         try:
             response = self.client.request(
                 "POST",
@@ -1006,16 +1023,24 @@ class SandboxClient:
                 idempotent_post=True,
             )
         except APIError as exc:
-            if "HTTP 404" in str(exc):
+            if "HTTP 404" in str(exc) or "HTTP 405" in str(exc):
+                self._sandbox_status_batch_supported = False
                 raise BatchStatusUnsupportedError(
                     "The platform does not support batch sandbox status lookups."
                 ) from exc
             raise
+        self._sandbox_status_batch_supported = True
         return BatchSandboxStatusResponse.model_validate(response)
 
     def _fetch_sandbox_statuses(self, sandbox_ids: List[str]) -> Dict[str, SandboxStatusSnapshot]:
         """Fetch one coalesced lifecycle batch for concurrent waiters."""
-        response = self.get_sandbox_statuses(sandbox_ids)
+        try:
+            response = self.get_sandbox_statuses(sandbox_ids)
+        except BatchStatusUnsupportedError:
+            return {
+                sandbox_id: _sandbox_to_status_snapshot(self.get(sandbox_id))
+                for sandbox_id in sandbox_ids
+            }
         if response.errors:
             details = ", ".join(f"{error.sandbox_id}={error.code}" for error in response.errors)
             raise APIError(f"Batch sandbox status lookup failed: {details}")
@@ -1431,6 +1456,8 @@ class SandboxClient:
         Container sandboxes intentionally continue to use get_background_job().
         """
         _validate_background_job_batch(jobs)
+        if self._background_job_status_batch_supported is False:
+            return self._get_background_jobs_legacy(jobs, timeout)
         try:
             response = self.client.request(
                 "POST",
@@ -1442,11 +1469,11 @@ class SandboxClient:
                 idempotent_post=True,
             )
         except APIError as exc:
-            if "HTTP 404" in str(exc):
-                raise BatchStatusUnsupportedError(
-                    "The platform does not support batch background job status lookups."
-                ) from exc
+            if "HTTP 404" in str(exc) or "HTTP 405" in str(exc):
+                self._background_job_status_batch_supported = False
+                return self._get_background_jobs_legacy(jobs, timeout)
             raise
+        self._background_job_status_batch_supported = True
         body = BatchBackgroundJobStatusResponse.model_validate(response)
         if body.errors:
             details = "; ".join(
@@ -1476,6 +1503,20 @@ class SandboxClient:
                 )
             )
         return results
+
+    def _get_background_jobs_legacy(
+        self,
+        jobs: List[BackgroundJob],
+        timeout: Optional[int],
+    ) -> List[BackgroundJobStatus]:
+        """Use VM-only per-job reads when the platform batch API is unavailable."""
+        for sandbox_id in dict.fromkeys(job.sandbox_id for job in jobs):
+            self._auth_cache.get_or_refresh(sandbox_id)
+            if not self._auth_cache.is_vm(sandbox_id):
+                raise BatchStatusUnsupportedError(
+                    "Batched background job status is only supported for VM sandboxes."
+                )
+        return [self.get_background_job(job.sandbox_id, job, timeout=timeout) for job in jobs]
 
     def _get_completed_background_job_output(
         self,
@@ -1660,6 +1701,12 @@ class SandboxClient:
         while attempt < max_attempts:
             try:
                 response = self.get_sandbox_statuses(sandbox_ids)
+            except BatchStatusUnsupportedError:
+                snapshots = self._fetch_sandbox_statuses(sandbox_ids)
+                response = BatchSandboxStatusResponse(
+                    statuses=[snapshots[sandbox_id] for sandbox_id in sandbox_ids],
+                    errors=[],
+                )
             except Exception as exc:
                 if "429" in str(exc) or "Too Many Requests" in str(exc):
                     time.sleep(min(2**attempt, 60))
@@ -2053,6 +2100,8 @@ class AsyncSandboxClient:
         self._background_job_status_batcher = _AsyncRequestBatcher(
             self._fetch_background_job_statuses
         )
+        self._sandbox_status_batch_supported: Optional[bool] = None
+        self._background_job_status_batch_supported: Optional[bool] = None
 
     def _get_gateway_client(self) -> httpx.AsyncClient:
         """Get or create the shared gateway client for connection pooling
@@ -2253,6 +2302,10 @@ class AsyncSandboxClient:
     async def get_sandbox_statuses(self, sandbox_ids: List[str]) -> BatchSandboxStatusResponse:
         """Get lightweight lifecycle state for up to 100 sandboxes."""
         _validate_unique_batch_values(sandbox_ids, "sandbox_ids")
+        if self._sandbox_status_batch_supported is False:
+            raise BatchStatusUnsupportedError(
+                "The platform does not support batch sandbox status lookups."
+            )
         try:
             response = await self.client.request(
                 "POST",
@@ -2261,18 +2314,24 @@ class AsyncSandboxClient:
                 idempotent_post=True,
             )
         except APIError as exc:
-            if "HTTP 404" in str(exc):
+            if "HTTP 404" in str(exc) or "HTTP 405" in str(exc):
+                self._sandbox_status_batch_supported = False
                 raise BatchStatusUnsupportedError(
                     "The platform does not support batch sandbox status lookups."
                 ) from exc
             raise
+        self._sandbox_status_batch_supported = True
         return BatchSandboxStatusResponse.model_validate(response)
 
     async def _fetch_sandbox_statuses(
         self, sandbox_ids: List[str]
     ) -> Dict[str, SandboxStatusSnapshot]:
         """Fetch one coalesced lifecycle batch for concurrent waiters."""
-        response = await self.get_sandbox_statuses(sandbox_ids)
+        try:
+            response = await self.get_sandbox_statuses(sandbox_ids)
+        except BatchStatusUnsupportedError:
+            sandboxes = await asyncio.gather(*(self.get(sandbox_id) for sandbox_id in sandbox_ids))
+            return {sandbox.id: _sandbox_to_status_snapshot(sandbox) for sandbox in sandboxes}
         if response.errors:
             details = ", ".join(f"{error.sandbox_id}={error.code}" for error in response.errors)
             raise APIError(f"Batch sandbox status lookup failed: {details}")
@@ -2794,6 +2853,8 @@ class AsyncSandboxClient:
     ) -> List[BackgroundJobStatus]:
         """Get ordered status for up to 100 jobs across VM sandboxes."""
         _validate_background_job_batch(jobs)
+        if self._background_job_status_batch_supported is False:
+            return await self._get_background_jobs_legacy(jobs, timeout)
         try:
             response = await self.client.request(
                 "POST",
@@ -2805,11 +2866,11 @@ class AsyncSandboxClient:
                 idempotent_post=True,
             )
         except APIError as exc:
-            if "HTTP 404" in str(exc):
-                raise BatchStatusUnsupportedError(
-                    "The platform does not support batch background job status lookups."
-                ) from exc
+            if "HTTP 404" in str(exc) or "HTTP 405" in str(exc):
+                self._background_job_status_batch_supported = False
+                return await self._get_background_jobs_legacy(jobs, timeout)
             raise
+        self._background_job_status_batch_supported = True
         body = BatchBackgroundJobStatusResponse.model_validate(response)
         if body.errors:
             details = "; ".join(
@@ -2836,6 +2897,24 @@ class AsyncSandboxClient:
             )
 
         return list(await asyncio.gather(*(build_status(job) for job in jobs)))
+
+    async def _get_background_jobs_legacy(
+        self,
+        jobs: List[BackgroundJob],
+        timeout: Optional[int],
+    ) -> List[BackgroundJobStatus]:
+        """Use VM-only per-job reads when the platform batch API is unavailable."""
+        for sandbox_id in dict.fromkeys(job.sandbox_id for job in jobs):
+            await self._auth_cache.get_or_refresh(sandbox_id)
+            if not await self._auth_cache.is_vm(sandbox_id):
+                raise BatchStatusUnsupportedError(
+                    "Batched background job status is only supported for VM sandboxes."
+                )
+        return list(
+            await asyncio.gather(
+                *(self.get_background_job(job.sandbox_id, job, timeout=timeout) for job in jobs)
+            )
+        )
 
     async def _get_completed_background_job_output(
         self,
@@ -3023,6 +3102,12 @@ class AsyncSandboxClient:
         while attempt < max_attempts:
             try:
                 response = await self.get_sandbox_statuses(sandbox_ids)
+            except BatchStatusUnsupportedError:
+                snapshots = await self._fetch_sandbox_statuses(sandbox_ids)
+                response = BatchSandboxStatusResponse(
+                    statuses=[snapshots[sandbox_id] for sandbox_id in sandbox_ids],
+                    errors=[],
+                )
             except Exception as exc:
                 if "429" in str(exc) or "Too Many Requests" in str(exc):
                     await asyncio.sleep(min(2**attempt, 60))

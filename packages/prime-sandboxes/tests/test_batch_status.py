@@ -2,13 +2,14 @@
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 from typing import Any, Optional, cast
 
 import pytest
 
 from prime_sandboxes import BatchStatusUnsupportedError
-from prime_sandboxes.core.client import APIClient
-from prime_sandboxes.models import BackgroundJob, ReadFileResponse
+from prime_sandboxes.core.client import APIClient, APIError
+from prime_sandboxes.models import BackgroundJob, BackgroundJobStatus, ReadFileResponse
 from prime_sandboxes.sandbox import AsyncSandboxClient, SandboxClient
 
 
@@ -120,6 +121,35 @@ class _AsyncBackgroundJobPlatformClient:
         return None
 
 
+class _SyncUnsupportedPlatformClient:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def request(self, _method: str, _path: str, **_kwargs: Any) -> dict[str, Any]:
+        self.calls += 1
+        raise APIError("HTTP 405: Method Not Allowed")
+
+
+class _AsyncUnsupportedPlatformClient:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def request(self, _method: str, _path: str, **_kwargs: Any) -> dict[str, Any]:
+        self.calls += 1
+        raise APIError("HTTP 405: Method Not Allowed")
+
+    async def aclose(self) -> None:
+        return None
+
+
+class _SyncVMAuthCache:
+    def get_or_refresh(self, _sandbox_id: str) -> dict[str, Any]:
+        return {}
+
+    def is_vm(self, _sandbox_id: str) -> bool:
+        return True
+
+
 def test_concurrent_sync_creation_waits_share_one_platform_batch() -> None:
     client = SandboxClient(APIClient(api_key="test-key"))
     client.client.client.close()
@@ -164,6 +194,53 @@ async def test_concurrent_async_creation_waits_share_one_platform_batch() -> Non
 
     assert len(platform.calls) == 1
     assert set(platform.calls[0][2]["json"]["sandbox_ids"]) == {"sandbox-a", "sandbox-b"}
+
+
+def test_sync_creation_batch_capability_falls_back_once_per_client() -> None:
+    client = SandboxClient(APIClient(api_key="test-key"))
+    client.client.client.close()
+    platform = _SyncUnsupportedPlatformClient()
+    cast(Any, client).client = platform
+    cast(Any, client).get = lambda sandbox_id: SimpleNamespace(
+        id=sandbox_id,
+        status="RUNNING",
+        error_type=None,
+        error_message=None,
+        pending_image_build_id=None,
+    )
+
+    for _ in range(2):
+        statuses = cast(Any, client)._fetch_sandbox_statuses(["sandbox-a"])
+        assert statuses["sandbox-a"].status == "RUNNING"
+
+    assert platform.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_async_creation_batch_capability_falls_back_once_per_client() -> None:
+    client = AsyncSandboxClient(api_key="test-key")
+    await client.client.aclose()
+    platform = _AsyncUnsupportedPlatformClient()
+    cast(Any, client).client = platform
+
+    async def get_sandbox(sandbox_id: str):
+        return SimpleNamespace(
+            id=sandbox_id,
+            status="RUNNING",
+            error_type=None,
+            error_message=None,
+            pending_image_build_id=None,
+        )
+
+    cast(Any, client).get = get_sandbox
+    try:
+        for _ in range(2):
+            statuses = await cast(Any, client)._fetch_sandbox_statuses(["sandbox-a"])
+            assert statuses["sandbox-a"].status == "RUNNING"
+    finally:
+        await client.aclose()
+
+    assert platform.calls == 1
 
 
 def test_sync_get_background_jobs_uses_one_platform_batch_across_vm_sandboxes() -> None:
@@ -213,6 +290,24 @@ def test_sync_get_background_jobs_rejects_container_sandboxes() -> None:
 
     with pytest.raises(BatchStatusUnsupportedError, match="only supported for VM"):
         client.get_background_jobs([_job("sandbox-container", "deadbeef")])
+
+
+def test_sync_background_batch_capability_falls_back_once_per_client() -> None:
+    client = SandboxClient(APIClient(api_key="test-key"))
+    client.client.client.close()
+    platform = _SyncUnsupportedPlatformClient()
+    cast(Any, client).client = platform
+    cast(Any, client)._auth_cache = _SyncVMAuthCache()
+    cast(Any, client).get_background_job = lambda _sandbox_id, job, timeout=None: (
+        BackgroundJobStatus(job_id=job.job_id, completed=False)
+    )
+    jobs = [_job("sandbox-a", "deadbeef"), _job("sandbox-b", "cafebabe")]
+
+    for _ in range(2):
+        statuses = client.get_background_jobs(jobs)
+        assert all(not status.completed for status in statuses)
+
+    assert platform.calls == 1
 
 
 def test_concurrent_sync_background_waiters_share_one_platform_batch() -> None:

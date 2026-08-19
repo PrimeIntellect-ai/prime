@@ -436,6 +436,74 @@ class ImageVisibility(str, Enum):
     PUBLIC = "PUBLIC"
 
 
+class ImageBuildStatus(str, Enum):
+    """Status of an image artifact build."""
+
+    PENDING = "PENDING"
+    UPLOADING = "UPLOADING"
+    BUILDING = "BUILDING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+
+
+class ImageArtifactType(str, Enum):
+    """Artifact produced for an image."""
+
+    CONTAINER_IMAGE = "CONTAINER_IMAGE"
+    VM_SANDBOX = "VM_SANDBOX"
+
+
+class ImageOwnerType(str, Enum):
+    """Scope that owns an image."""
+
+    PERSONAL = "personal"
+    TEAM = "team"
+    PLATFORM = "platform"
+
+
+class ImageListItem(BaseModel):
+    """One artifact row returned by the image-list endpoint."""
+
+    id: str
+    artifact_type: ImageArtifactType = Field(
+        default=ImageArtifactType.CONTAINER_IMAGE,
+        alias="artifactType",
+    )
+    image_name: str = Field(..., alias="imageName")
+    image_tag: str = Field(..., alias="imageTag")
+    status: ImageBuildStatus
+    full_image_path: Optional[str] = Field(default=None, alias="fullImagePath")
+    error_message: Optional[str] = Field(default=None, alias="errorMessage")
+    size_bytes: Optional[int] = Field(default=None, alias="sizeBytes")
+    visibility: ImageVisibility = ImageVisibility.PRIVATE
+    created_at: datetime = Field(..., alias="createdAt")
+    started_at: Optional[datetime] = Field(default=None, alias="startedAt")
+    completed_at: Optional[datetime] = Field(default=None, alias="completedAt")
+    pushed_at: Optional[datetime] = Field(default=None, alias="pushedAt")
+    team_id: Optional[str] = Field(default=None, alias="teamId")
+    owner_type: ImageOwnerType = Field(default=ImageOwnerType.PERSONAL, alias="ownerType")
+    display_ref: Optional[str] = Field(default=None, alias="displayRef")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class ImageListResponse(BaseModel):
+    """A logical-image page and its artifact rows.
+
+    When present, ``total_count`` counts logical images. ``data`` can contain
+    more rows than ``limit`` when a logical image has multiple artifact types.
+    """
+
+    data: List[ImageListItem]
+    total_count: Optional[int] = Field(default=None, alias="totalCount")
+    offset: int
+    limit: int
+    status: Optional[str] = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class BuildImageRequest(BaseModel):
     image_name: Optional[str] = None
     image_tag: Optional[str] = None

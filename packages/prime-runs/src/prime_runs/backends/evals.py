@@ -25,6 +25,7 @@ from ..exceptions import (
     EnvironmentResolutionError,
     NotFoundError,
     RunAPIError,
+    is_transient,
 )
 from ..models import EnvironmentRef, RunHandle, RunSpec, RunStatus
 
@@ -106,6 +107,10 @@ class EvalsBackend:
             # Attach is a convenience — a resume or a non-primary rank joining.
             # Losing the run's name to a transient read is not worth failing on;
             # the ID is what everything downstream actually needs.
+            if not is_transient(exc) and not (
+                exc.status_code is not None and exc.status_code >= 500
+            ):
+                raise
             logger.debug("Could not read evaluation %s on attach: %s", run_id, exc)
             return RunHandle(id=run_id, url=self.url_for(run_id))
         return RunHandle(

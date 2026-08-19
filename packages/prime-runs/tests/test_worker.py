@@ -5,7 +5,7 @@ import threading
 
 from conftest import FakeSink
 
-from prime_runs.worker import MetricItem, UploadWorker, WriteItem
+from prime_runs.worker import MetricItem, RunUpdateItem, UploadWorker, WriteItem
 
 
 def drain(worker: UploadWorker) -> None:
@@ -103,6 +103,19 @@ def test_metrics_ride_the_same_queue_when_the_backend_stores_a_time_series():
     drain(worker)
 
     assert points == [({"loss": 0.5}, 7)]
+    worker.close()
+
+
+def test_run_updates_ride_the_uploader_queue():
+    updates = []
+    worker = UploadWorker(
+        [], update_writer=lambda config, summary: updates.append((config, summary))
+    )
+
+    worker.submit(RunUpdateItem(config={"seed": 7}, summary={"reward": 0.5}))
+    drain(worker)
+
+    assert updates == [({"seed": 7}, {"reward": 0.5})]
     worker.close()
 
 

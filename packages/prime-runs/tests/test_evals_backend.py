@@ -5,7 +5,13 @@ import pytest
 from conftest import RecordingHandler
 
 from prime_runs.backends import EvalsBackend
-from prime_runs.exceptions import ConfigurationError, EnvironmentResolutionError
+from prime_runs.exceptions import (
+    ConfigurationError,
+    EnvironmentResolutionError,
+    ForbiddenError,
+    PaymentRequiredError,
+    UnauthorizedError,
+)
 from prime_runs.models import EnvironmentRef, RunSpec, RunStatus
 
 
@@ -167,6 +173,27 @@ def test_attach_survives_a_read_failure(make_platform_client, eval_routes):
 
     assert handle.id == "eval-abc"
     assert handle.url == "https://app.example/dashboard/evaluations/eval-abc"
+
+
+@pytest.mark.parametrize(
+    ("status_code", "error_type"),
+    [
+        (401, UnauthorizedError),
+        (402, PaymentRequiredError),
+        (403, ForbiddenError),
+    ],
+)
+def test_attach_propagates_permanent_access_failures(
+    make_platform_client, eval_routes, status_code, error_type
+):
+    routes = dict(eval_routes)
+    routes["GET /api/v1/evaluations/eval-abc"] = lambda request: httpx.Response(
+        status_code, json={"detail": "denied"}
+    )
+    backend, _ = make_backend(make_platform_client, routes)
+
+    with pytest.raises(error_type):
+        backend.attach("eval-abc")
 
 
 def test_a_pinned_environment_version_reaches_the_api(make_platform_client, eval_routes):

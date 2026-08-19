@@ -58,6 +58,14 @@ class MetricItem:
 
 
 @dataclass
+class RunUpdateItem:
+    """A config/summary snapshot destined for the run lifecycle backend."""
+
+    config: Optional[dict] = None
+    summary: Optional[dict] = None
+
+
+@dataclass
 class _Flush:
     """A barrier the caller waits on."""
 
@@ -75,6 +83,7 @@ class UploadWorker:
         put_timeout: float = DEFAULT_PUT_TIMEOUT,
         on_error: Optional[Callable[[str, Exception], None]] = None,
         metric_writer: Optional[Callable[[dict, Optional[int]], None]] = None,
+        update_writer: Optional[Callable[[Optional[dict], Optional[dict]], None]] = None,
     ) -> None:
         self.sinks = sinks
         self.max_queue_size = max_queue_size
@@ -84,6 +93,9 @@ class UploadWorker:
         # same queue as records, so a per-step log() in a training loop costs a
         # queue put rather than an HTTP round trip.
         self._metric_writer = metric_writer
+        # Eval summaries have no time-series endpoint, but they still belong on
+        # this thread: periodic persistence must never block the producer loop.
+        self._update_writer = update_writer
         self._queue: "queue.Queue[Any]" = queue.Queue(maxsize=max_queue_size)
         self._thread: Optional[threading.Thread] = None
         self._stopping = threading.Event()
@@ -125,6 +137,9 @@ class UploadWorker:
                 if isinstance(item, MetricItem):
                     self._write_metrics(item)
                     continue
+                if isinstance(item, RunUpdateItem):
+                    self._write_update(item)
+                    continue
                 self._dispatch(item)
             except Exception as exc:  # noqa: BLE001 - the thread must outlive one bad batch
                 logger.debug("Uploader iteration failed: %s", exc)
@@ -156,6 +171,19 @@ class UploadWorker:
                     self._on_error("metrics", exc)
                 except Exception:  # noqa: BLE001
                     logger.debug("Error handler raised while reporting metrics", exc_info=True)
+
+    def _write_update(self, item: RunUpdateItem) -> None:
+        if self._update_writer is None:
+            return
+        try:
+            self._update_writer(item.config, item.summary)
+        except Exception as exc:  # noqa: BLE001 - updates must not kill the uploader
+            logger.warning("Dropped a run metadata update: %s: %s", type(exc).__name__, exc)
+            if self._on_error is not None:
+                try:
+                    self._on_error("run metadata", exc)
+                except Exception:  # noqa: BLE001
+                    logger.debug("Error handler raised while reporting a run update", exc_info=True)
 
     def _flush_sinks(self) -> None:
         for sink in self.sinks:
@@ -242,7 +270,14 @@ class UploadWorker:
             self._queue.put(item, timeout=self.put_timeout)
             return True
         except queue.Full:
-            count = len(item.records) if isinstance(item, WriteItem) else 1
+            if not isinstance(item, WriteItem):
+                logger.warning(
+                    "Upload queue full after %.1fs; could not queue %s",
+                    self.put_timeout,
+                    type(item).__name__,
+                )
+                return False
+            count = len(item.records)
             self.dropped += count
             logger.warning(
                 "Upload queue full after %.1fs; dropped %d item(s) (%d total). "

@@ -30,7 +30,7 @@ from .config import Config
 from .exceptions import ConfigurationError, RunFinishedError
 from .models import EnvironmentRef, Mode, OnError, RunHandle, RunKind, RunSpec, RunStatus
 from .sinks import EvalSamplesSink, OfflineSink, Sink, TracesSink
-from .worker import MetricItem, UploadWorker, WriteItem
+from .worker import MetricItem, RunUpdateItem, UploadWorker, WriteItem
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +104,8 @@ class Run:
         self._last_summary_flush = time.monotonic()
         self._summary_dirty = False
         self._config_dirty = False
+        self._pending_metrics: Dict[str, Any] = {}
+        self._pending_metric_step: Optional[int] = None
         self._finish_lock = threading.RLock()
         self._finished = False
 
@@ -115,6 +117,7 @@ class Run:
             sinks,
             on_error=self._record_sink_error,
             metric_writer=self._write_metrics if backend.supports_step_metrics else None,
+            update_writer=self._write_run_update,
             **worker_kwargs,
         )
         context = _sink_context(spec, handle)
@@ -227,9 +230,17 @@ class Run:
         self.summary.update(cleaned)
         self._summary_dirty = True
         if not commit:
+            if self._backend.supports_step_metrics:
+                self._pending_metrics.update(cleaned)
+                if step is not None:
+                    self._pending_metric_step = step
             return
         if self._backend.supports_step_metrics:
-            self._worker.submit(MetricItem(metrics=cleaned, step=step))
+            committed = {**self._pending_metrics, **cleaned}
+            committed_step = step if step is not None else self._pending_metric_step
+            self._pending_metrics.clear()
+            self._pending_metric_step = None
+            self._worker.submit(MetricItem(metrics=committed, step=committed_step))
             return
         self._maybe_flush_summary()
 
@@ -284,12 +295,14 @@ class Run:
         with self._finish_lock:
             if self._finished:
                 return
+            resolved = RunStatus(status) if not isinstance(status, RunStatus) else status
             self._finished = True
 
-        resolved = RunStatus(status) if not isinstance(status, RunStatus) else status
         if summary:
             self.summary.update(_clean_metrics(summary))
         self._status = resolved
+
+        finish_error: Optional[BaseException] = None
 
         # Order matters: records first, so a dashboard that reacts to the
         # terminal status never sees a finished run with samples still landing.
@@ -303,15 +316,16 @@ class Run:
         self._worker.close(timeout=self._finish_timeout)
 
         if self._owns_lifecycle:
-            self._report_guarded(
+            finish_error = self._finish_guarded(
                 "updating the run",
                 lambda: self._backend.update(
                     self.id,
                     config=self.config if (self._config_dirty or self.config) else None,
                     summary=self.summary or None,
                 ),
+                finish_error,
             )
-            self._report_guarded(
+            finish_error = self._finish_guarded(
                 "finalizing the run",
                 lambda: self._backend.finalize(
                     self.id,
@@ -320,8 +334,11 @@ class Run:
                     error=error or (self.errors[0] if self.errors else None),
                     config=self.config or None,
                 ),
+                finish_error,
             )
-        self._report_guarded("closing the backend", self._backend.close)
+        finish_error = self._finish_guarded(
+            "closing the backend", self._backend.close, finish_error
+        )
 
         atexit.unregister(self._atexit_hook)
         self._restore_signal_handlers()
@@ -342,6 +359,8 @@ class Run:
             )
         # Last, so a run that failed to upload is still closed out properly
         # before the failure reaches the caller.
+        if finish_error is not None:
+            raise finish_error
         self._raise_deferred()
 
     def fail(self, error: Union[str, BaseException]) -> None:
@@ -354,8 +373,13 @@ class Run:
         Under ``on_error="raise"`` this is the first place an upload failure can
         surface, since the failure itself happened on the uploader thread.
         """
+        update_queued = self._queue_run_update()
         flushed = self._worker.flush(timeout=timeout)
-        self._flush_summary()
+        # A periodic update can lose a race for the last queue slot. Once the
+        # barrier drains that backlog, give the still-dirty snapshot one more
+        # chance so an explicit flush keeps its persistence guarantee.
+        if flushed and not update_queued and self._queue_run_update():
+            flushed = self._worker.flush(timeout=timeout)
         self._raise_deferred()
         return flushed
 
@@ -471,24 +495,40 @@ class Run:
     def _write_metrics(self, metrics: Dict[str, Any], step: Optional[int]) -> None:
         self._backend.log_metrics(self.id, metrics, step)
 
+    def _write_run_update(
+        self,
+        config: Optional[Dict[str, Any]],
+        summary: Optional[Dict[str, Any]],
+    ) -> None:
+        self._backend.update(self.id, config=config, summary=summary)
+
     def _maybe_flush_summary(self) -> None:
         now = time.monotonic()
         if now - self._last_summary_flush < self._summary_flush_seconds:
             return
-        self._flush_summary()
+        self._queue_run_update()
 
-    def _flush_summary(self) -> None:
+    def _queue_run_update(self) -> bool:
         if not (self._summary_dirty or self._config_dirty) or not self._owns_lifecycle:
-            return
-        config = self.config if self._config_dirty else None
-        summary = self.summary if self._summary_dirty else None
-        self._last_summary_flush = time.monotonic()
-        self._summary_dirty = False
-        self._config_dirty = False
-        self._report_guarded(
-            "flushing run metrics",
-            lambda: self._backend.update(self.id, config=config, summary=summary),
+            return True
+        config_dirty = self._config_dirty
+        summary_dirty = self._summary_dirty
+        item = RunUpdateItem(
+            config=dict(self.config) if config_dirty else None,
+            summary=dict(self.summary) if summary_dirty else None,
         )
+        # Clear before the potentially blocking queue put. If another producer
+        # thread logs while this one waits, its new dirty bit must survive.
+        if config_dirty:
+            self._config_dirty = False
+        if summary_dirty:
+            self._summary_dirty = False
+        if not self._worker.submit(item):
+            self._config_dirty = self._config_dirty or config_dirty
+            self._summary_dirty = self._summary_dirty or summary_dirty
+            return False
+        self._last_summary_flush = time.monotonic()
+        return True
 
     def _record_sink_error(self, sink_name: str, exc: Exception) -> None:
         """Called on the uploader thread when a sink gives up."""
@@ -508,11 +548,22 @@ class Run:
         self._deferred_error = None
         raise exc
 
-    def _report_guarded(self, what: str, call: Any) -> None:
+    def _finish_guarded(
+        self,
+        what: str,
+        call: Any,
+        first_error: Optional[BaseException],
+    ) -> Optional[BaseException]:
+        """Run one teardown step without letting it skip the steps after it."""
         try:
             call()
-        except Exception as exc:  # noqa: BLE001 - routed through the error policy
-            self._report(what, exc)
+        except Exception as exc:  # noqa: BLE001 - teardown must continue
+            message = f"{what} failed: {type(exc).__name__}: {exc}"
+            self.errors.append(message)
+            if self._on_error == "raise":
+                return first_error or exc
+            logger.warning("Run %s: %s", self._handle.id, message)
+        return first_error
 
     def _report(self, what: str, exc: Exception) -> None:
         message = f"{what} failed: {type(exc).__name__}: {exc}"

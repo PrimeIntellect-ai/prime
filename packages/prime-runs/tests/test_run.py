@@ -1,6 +1,7 @@
 """The run handle: lifecycle, containment, ranks, terminal status."""
 
 import signal
+import threading
 from typing import Any, Dict, List, Optional
 
 import pytest
@@ -112,6 +113,7 @@ def test_metrics_land_in_the_summary_when_the_backend_has_no_time_series():
 
     run.log({"reward": 0.5}, step=1)
     run.log({"reward": 0.75}, step=2)
+    run.flush()
 
     assert run.summary["reward"] == 0.75
     assert backend.points == []
@@ -139,6 +141,38 @@ def test_commit_false_stages_without_writing():
 
     assert backend.points == []
     assert run.summary["loss"] == 2.0
+    run.finish()
+
+
+def test_commit_false_merges_staged_metrics_into_the_next_point():
+    backend = FakeBackend(supports_step_metrics=True)
+    run = make_run(backend)
+
+    run.log({"loss": 2.0}, step=7, commit=False)
+    run.log({"reward": 0.5})
+    run.flush()
+
+    assert backend.points == [({"loss": 2.0, "reward": 0.5}, 7)]
+    run.finish()
+
+
+def test_periodic_summary_updates_run_on_the_uploader_thread():
+    caller_thread = threading.get_ident()
+    update_threads = []
+
+    class ThreadRecordingBackend(FakeBackend):
+        def update(self, run_id, *, config=None, summary=None) -> None:
+            update_threads.append(threading.get_ident())
+            super().update(run_id, config=config, summary=summary)
+
+    backend = ThreadRecordingBackend(supports_step_metrics=False)
+    run = make_run(backend, summary_flush_seconds=0.0)
+
+    run.log({"reward": 0.5})
+    run.flush()
+
+    assert update_threads
+    assert all(thread_id != caller_thread for thread_id in update_threads)
     run.finish()
 
 
@@ -297,6 +331,19 @@ def test_on_error_raise_surfaces_the_failure_for_tests_and_ci():
 
     with pytest.raises(RuntimeError, match="finalize exploded"):
         run.finish()
+
+    assert backend.closed is True
+
+
+def test_update_failure_in_raise_mode_still_finalizes_and_closes():
+    backend = FakeBackend(fail_on="update")
+    run = make_run(backend, on_error="raise")
+
+    with pytest.raises(RuntimeError, match="update exploded"):
+        run.finish()
+
+    assert len(backend.finalized) == 1
+    assert backend.closed is True
 
 
 def test_a_sink_error_is_recorded_on_the_run():

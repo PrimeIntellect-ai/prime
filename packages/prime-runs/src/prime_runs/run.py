@@ -174,8 +174,24 @@ class Run:
 
     @property
     def dropped_records(self) -> int:
-        """Records the uploader could not keep up with. Should be zero."""
+        """Records that reached no sink because the queue was full.
+
+        Backpressure only: the producer durably outran the uploader. A record
+        counted here was stored nowhere. Contrast ``failed_records``, which is
+        per-sink and usually means the record is still safe in another sink.
+        """
         return self._worker.dropped
+
+    @property
+    def failed_records(self) -> Dict[str, int]:
+        """Records each sink could not store, by sink name.
+
+        Not summed into one number and not merged into ``dropped_records``: with
+        traces and the sample table both enabled, the same batch failing on one
+        sink says nothing about whether the other stored it, so a single total
+        would report data missing that is not actually gone.
+        """
+        return dict(self._worker.failed_records)
 
     def __repr__(self) -> str:
         return (
@@ -313,7 +329,16 @@ class Run:
 
         if self._worker.dropped:
             logger.warning(
-                "Run %s finished with %d dropped record(s)", self.id, self._worker.dropped
+                "Run %s finished with %d record(s) that reached no sink; the producer "
+                "outran the uploader.",
+                self.id,
+                self._worker.dropped,
+            )
+        for sink_name, count in self._worker.failed_records.items():
+            # Deliberately phrased per sink: another sink may hold these records,
+            # so claiming they are missing from the run would overstate the loss.
+            logger.warning(
+                "Run %s: the %s sink could not store %d record(s)", self.id, sink_name, count
             )
         # Last, so a run that failed to upload is still closed out properly
         # before the failure reaches the caller.

@@ -88,7 +88,14 @@ class UploadWorker:
         self._thread: Optional[threading.Thread] = None
         self._stopping = threading.Event()
         self._lock = threading.Lock()
+        # Two different losses, deliberately not merged. `dropped` is records
+        # never handed to any sink because the queue was full — the producer
+        # outran the uploader. `failed_records` is records a *particular* sink
+        # could not store, which says nothing about the others: with traces and
+        # the sample table both enabled, one sink failing usually means the
+        # records are still safe in the other.
         self.dropped = 0
+        self.failed_records: dict = {}
         self._transient_failures: dict = {}
         self._pid = os.getpid()
         _fork.register(self)
@@ -177,7 +184,8 @@ class UploadWorker:
           larger loss than the one batch that actually failed.
         """
         name = getattr(sink, "name", type(sink).__name__)
-        self.dropped += dropped
+        if dropped:
+            self.failed_records[name] = self.failed_records.get(name, 0) + dropped
 
         if is_transient(exc):
             strikes = self._transient_failures.get(name, 0) + 1

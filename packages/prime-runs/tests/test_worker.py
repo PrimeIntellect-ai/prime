@@ -251,7 +251,10 @@ def test_a_transient_failure_drops_the_batch_but_keeps_the_sink():
     drain(worker)
 
     assert sink.enabled is True
-    assert worker.dropped == 2
+    # Per sink, and not folded into `dropped`: the queue accepted these records
+    # fine, and with both sinks enabled the other one may well have stored them.
+    assert worker.failed_records == {"blippy": 2}
+    assert worker.dropped == 0
     worker.close()
 
 
@@ -323,4 +326,26 @@ def test_a_permanent_failure_retires_the_sink_immediately():
     drain(worker)
 
     assert sink.enabled is False
+    worker.close()
+
+
+def test_a_failed_batch_is_counted_once_per_sink_not_once_per_run():
+    """Default online runs write to two sinks. Adding both to one total would
+    report twice the loss, and would report loss at all when the other sink
+    stored the records."""
+    from prime_runs.exceptions import RetryableAPIError
+
+    class BlipSink(FakeSink):
+        def write(self, records, *, line_format=None, step=None) -> None:
+            raise RetryableAPIError("bad gateway", status_code=502)
+
+    broken, healthy = BlipSink("broken"), FakeSink("healthy")
+    worker = UploadWorker([broken, healthy])
+
+    worker.submit(WriteItem(records=[{"id": 1}, {"id": 2}]))
+    drain(worker)
+
+    assert worker.failed_records == {"broken": 2}
+    assert worker.dropped == 0
+    assert healthy.batches, "the healthy sink stored them"
     worker.close()

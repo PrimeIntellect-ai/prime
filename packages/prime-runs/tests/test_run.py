@@ -340,3 +340,65 @@ def test_dropped_records_are_reported_on_the_handle():
 
     assert run.dropped_records == 3
     run.finish()
+
+
+def test_an_upload_failure_reaches_the_caller_in_raise_mode():
+    """A sink fails on the uploader thread, where raising reaches nobody. Under
+    on_error="raise" the failure has to surface where a test is looking."""
+    run = make_run(sinks=[FakeSink("broken", fail_on_write=True)], on_error="raise")
+
+    run.log_traces([{"id": "t1"}])
+    with pytest.raises(RuntimeError, match="sink is broken"):
+        run.flush()
+
+    run.finish()
+
+
+def test_an_upload_failure_surfaces_from_finish_too():
+    run = make_run(sinks=[FakeSink("broken", fail_on_write=True)], on_error="raise")
+    run.log_traces([{"id": "t1"}])
+
+    with pytest.raises(RuntimeError, match="sink is broken"):
+        run.finish()
+
+    # Still closed out: the failure is reported after teardown, not instead of it.
+    assert run.finished
+
+
+def test_an_upload_failure_is_reported_once():
+    run = make_run(sinks=[FakeSink("broken", fail_on_write=True)], on_error="raise")
+    run.log_traces([{"id": "t1"}])
+
+    with pytest.raises(RuntimeError):
+        run.flush()
+    run.flush()  # nothing left to raise
+
+    run.finish()
+
+
+def test_signal_handlers_are_restored_when_the_run_finishes():
+    """`self._handle_signal` builds a new bound method on every access, so an
+    identity check against a fresh one never matches — leaving the handler
+    installed, pinning the finished run, and blocking the next run in the
+    process from installing its own."""
+    original = signal.getsignal(signal.SIGTERM)
+    run = make_run()
+    run.install_signal_handlers()
+    assert signal.getsignal(signal.SIGTERM) is run._signal_handler
+
+    run.finish()
+
+    assert signal.getsignal(signal.SIGTERM) is original
+
+
+def test_a_later_run_can_install_its_own_handlers():
+    first = make_run()
+    first.install_signal_handlers()
+    first.finish()
+
+    second = make_run()
+    second.install_signal_handlers()
+
+    assert signal.getsignal(signal.SIGTERM) is second._signal_handler
+    second.finish()
+    assert signal.getsignal(signal.SIGTERM) is signal.SIG_DFL

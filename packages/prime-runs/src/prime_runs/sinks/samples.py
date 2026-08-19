@@ -8,9 +8,11 @@ the Viewer API reads traces natively. Retiring it is a one-line change to the
 default sink list, with nothing to do in verifiers or prime-rl.
 
 Its known weakness is why traces is the primary: ``POST /samples`` *appends*,
-so a retried request whose response was lost duplicates rows. Content-addressed
-uploads do not have that problem, which is exactly the property the traces sink
-was built on.
+so a request whose response was lost cannot be safely replayed. The client
+therefore does not retry it through an ambiguous failure — losing a batch is
+recoverable, duplicated rows silently skew every average on the dashboard.
+Content-addressed uploads have neither problem, which is exactly the property
+the traces sink was built on.
 """
 
 import logging
@@ -61,6 +63,9 @@ class EvalSamplesSink(Sink):
                 f"/evaluations/{self._run_id}/samples",
                 content=encode_json({"samples": batch}),
                 timeout=UPLOAD_TIMEOUT,
+                # Appends. Left non-replayable (the POST default) so a lost
+                # response cannot turn into duplicate rows.
+                idempotent=False,
             )
             self.samples_written += len(batch)
 

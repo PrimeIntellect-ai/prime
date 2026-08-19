@@ -93,6 +93,11 @@ class Run:
         self.config: Dict[str, Any] = dict(spec.config)
         self.summary: Dict[str, Any] = dict(spec.summary)
         self.errors: List[str] = []
+        # Raised at the next synchronization point the caller controls. A sink
+        # fails on the uploader thread, where raising reaches nobody — so under
+        # on_error="raise" the exception is held and re-raised from flush() or
+        # finish(), which is where a test or a CI job is actually looking.
+        self._deferred_error: Optional[BaseException] = None
 
         self._summary_flush_seconds = summary_flush_seconds
         self._finish_timeout = finish_timeout
@@ -122,6 +127,12 @@ class Run:
 
         self._atexit_hook = self._on_process_exit
         atexit.register(self._atexit_hook)
+        # Bound once and kept. ``self._handle_signal`` builds a *new* bound
+        # method on every attribute access, so an ``is`` comparison against a
+        # freshly-made one is always False — which is how handlers end up
+        # installed forever, pinning a finished run and blocking the next run in
+        # the process from installing its own.
+        self._signal_handler = self._handle_signal
         self._previous_signal_handlers: Dict[int, Any] = {}
 
     # -------------------------------------------------------------- identity
@@ -304,15 +315,23 @@ class Run:
             logger.warning(
                 "Run %s finished with %d dropped record(s)", self.id, self._worker.dropped
             )
+        # Last, so a run that failed to upload is still closed out properly
+        # before the failure reaches the caller.
+        self._raise_deferred()
 
     def fail(self, error: Union[str, BaseException]) -> None:
         """Close the run out as failed."""
         self.finish(status=RunStatus.FAILED, error=_describe(error))
 
     def flush(self, timeout: Optional[float] = 30.0) -> bool:
-        """Block until queued records have been written. Mostly for tests."""
+        """Block until queued records have been written.
+
+        Under ``on_error="raise"`` this is the first place an upload failure can
+        surface, since the failure itself happened on the uploader thread.
+        """
         flushed = self._worker.flush(timeout=timeout)
         self._flush_summary()
+        self._raise_deferred()
         return flushed
 
     # -------------------------------------------------------- context manager
@@ -352,7 +371,7 @@ class Run:
             if current not in (signal.SIG_DFL, signal.default_int_handler):
                 continue
             try:
-                signal.signal(signum, self._handle_signal)
+                signal.signal(signum, self._signal_handler)
             except (ValueError, OSError):  # pragma: no cover
                 continue
             self._previous_signal_handlers[signum] = current
@@ -368,7 +387,10 @@ class Run:
             # CRASHED, not FAILED: the producer never said the run failed, it was
             # stopped from outside its own control flow. Same bucket as the
             # atexit path, and deliberately not the bucket a broken eval lands in.
-            self.finish(status=RunStatus.CRASHED, error=f"received {name}")
+            try:
+                self.finish(status=RunStatus.CRASHED, error=f"received {name}")
+            except Exception as exc:  # noqa: BLE001 - the signal must still chain
+                logger.warning("Run %s: reporting %s failed: %s", self.id, name, exc)
         signal.signal(signum, previous)
         if callable(previous):
             previous(signum, frame)
@@ -378,7 +400,7 @@ class Run:
     def _restore_signal_handlers(self) -> None:
         for signum, previous in self._previous_signal_handlers.items():
             try:
-                if signal.getsignal(signum) is self._handle_signal:
+                if signal.getsignal(signum) is self._signal_handler:
                     signal.signal(signum, previous)
             except (ValueError, OSError):  # pragma: no cover
                 continue
@@ -394,7 +416,12 @@ class Run:
         if self._finished:
             return
         logger.warning("Run %s was never finished; reporting it as crashed", self.id)
-        self.finish(status=RunStatus.CRASHED, error="process exited without finishing the run")
+        # on_error="raise" must not turn interpreter shutdown into a traceback
+        # from atexit; the run is already being reported as crashed.
+        try:
+            self.finish(status=RunStatus.CRASHED, error="process exited without finishing the run")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Run %s: reporting the crash failed: %s", self.id, exc)
 
     def _retract_run_id(self) -> None:
         """Stop advertising a finished run to processes started from here.
@@ -439,7 +466,22 @@ class Run:
         )
 
     def _record_sink_error(self, sink_name: str, exc: Exception) -> None:
-        self._report(f"writing to the {sink_name} sink", exc)
+        """Called on the uploader thread when a sink gives up."""
+        message = f"writing to the {sink_name} sink failed: {type(exc).__name__}: {exc}"
+        self.errors.append(message)
+        if self._on_error == "raise":
+            if self._deferred_error is None:
+                self._deferred_error = exc
+            return
+        logger.warning("Run %s: %s", self._handle.id, message)
+
+    def _raise_deferred(self) -> None:
+        """Re-raise the first upload failure, once."""
+        exc = self._deferred_error
+        if exc is None:
+            return
+        self._deferred_error = None
+        raise exc
 
     def _report_guarded(self, what: str, call: Any) -> None:
         try:

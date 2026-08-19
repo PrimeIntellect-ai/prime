@@ -81,6 +81,9 @@ class EvalsBackend:
         _set_if(payload, "metrics", spec.summary or None)
         _set_if(payload, "team_id", spec.team_id or self._team_id)
 
+        # Not replayable: POST defaults to idempotent=False here on purpose. If
+        # the platform created the run and the response was lost, a retry would
+        # create a second one and only the second would be tracked.
         response = self._client.post("/evaluations/", json_body=payload)
         run_id = response.get("evaluation_id")
         if not run_id:
@@ -158,7 +161,12 @@ class EvalsBackend:
         if status is RunStatus.COMPLETED:
             body: Dict[str, Any] = {}
             _set_if(body, "metrics", summary or None)
-            self._client.post(f"/evaluations/{run_id}/finalize", json_body=body or {"metrics": {}})
+            # Setting a terminal state: replaying it lands on the same state.
+            self._client.post(
+                f"/evaluations/{run_id}/finalize",
+                json_body=body or {"metrics": {}},
+                idempotent=True,
+            )
             return
         self._report_failure(run_id, status=status, summary=summary, error=error, config=config)
 
@@ -185,6 +193,7 @@ class EvalsBackend:
                     f"/evaluations/{run_id}/status",
                     json_body={"status": _PLATFORM_STATUS[status], "error": error},
                     max_attempts=1,
+                    idempotent=True,
                 )
                 return
             except NotFoundError:
@@ -248,7 +257,10 @@ class EvalsBackend:
         body: Dict[str, Any] = {"name": ref.name}
         _set_if(body, "team_id", self._team_id)
         try:
-            response = self._client.post("/environmentshub/resolve", json_body=body)
+            # Get-or-create: a replay returns the same environment.
+            response = self._client.post(
+                "/environmentshub/resolve", json_body=body, idempotent=True
+            )
         except RunAPIError as exc:
             raise EnvironmentResolutionError(
                 f"Could not resolve environment {ref.name!r}: {exc}"

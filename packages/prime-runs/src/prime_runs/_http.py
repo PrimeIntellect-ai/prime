@@ -9,10 +9,17 @@ host, a credential and a retry policy. Two things it does that a bare
 - retries 429/502/503/504 and transport failures with exponential backoff,
   honouring ``Retry-After`` when the server sends one.
 
-Retries are safe here because every call it makes is either idempotent (PUT,
-GET) or create-shaped and guarded upstream: run creation happens exactly once
-per ``init()``, and sample POSTs that get retried after a lost response are the
-known duplicate-append case the traces sink exists to replace.
+Retry safety is decided per call, not per client. A failure is *ambiguous* when
+the request may already have been processed — a gateway 502/504, a read timeout,
+a stream broken after the bytes went out. Replaying an ambiguous failure is fine
+for a GET or a PUT and is not fine for ``POST /evaluations/``: if the platform
+created the run and the response was lost, the retry creates a second one and
+the SDK only ever knows about the second, leaving an orphaned duplicate.
+
+So callers declare intent with ``idempotent=``. Unambiguous failures — a
+connection that was never established, a 429 refused before any work — are
+replayed for every method, because there is nothing on the other side to
+duplicate.
 """
 
 import json
@@ -37,6 +44,10 @@ DEFAULT_TIMEOUT = httpx.Timeout(60.0, connect=10.0)
 # answering, so uploads get their own, much longer budget.
 UPLOAD_TIMEOUT = httpx.Timeout(300.0, connect=10.0)
 RETRY_STATUS = frozenset({429, 502, 503, 504})
+#: Refused before the server did any work, so replaying cannot duplicate
+#: anything. 503 is deliberately *not* here: without a service error code it may
+#: equally have come from an intermediary after the request was forwarded.
+UNAMBIGUOUS_RETRY_STATUS = frozenset({429})
 DEFAULT_MAX_ATTEMPTS = 5
 MAX_BACKOFF_SECONDS = 16.0
 
@@ -133,15 +144,24 @@ class PlatformClient:
         params: Optional[Mapping[str, Any]] = None,
         timeout: Union[httpx.Timeout, float, None] = None,
         max_attempts: Optional[int] = None,
+        idempotent: Optional[bool] = None,
     ) -> Dict[str, Any]:
-        """Send one request, retrying transient failures. Returns the JSON body."""
+        """Send one request, retrying transient failures. Returns the JSON body.
+
+        ``idempotent`` says whether replaying this request is safe when the
+        outcome is unknown. It defaults to ``method != "POST"``; a POST that is
+        in fact safe to replay (get-or-create, setting a terminal state) should
+        pass ``idempotent=True`` explicitly.
+        """
         url = f"{self.api_prefix}{path}"
         body = content if content is not None else (encode_json(json_body) if json_body else None)
         headers = {"Content-Type": "application/json"} if body is not None else None
         attempts = max_attempts or self.max_attempts
+        replayable = idempotent if idempotent is not None else method.upper() != "POST"
 
         last_error: Optional[Exception] = None
         for attempt in range(1, attempts + 1):
+            ambiguous = True
             try:
                 response = self._client.request(
                     method,
@@ -151,12 +171,17 @@ class PlatformClient:
                     params=dict(params) if params else None,
                     timeout=timeout,
                 )
+            except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as exc:
+                # No connection was ever established, so the server saw nothing.
+                ambiguous = False
+                last_error = TransportError(f"{method} {path} failed to connect: {exc}")
             except httpx.TimeoutException as exc:
                 last_error = TransportError(f"{method} {path} timed out: {exc}")
             except httpx.RequestError as exc:
                 last_error = TransportError(f"{method} {path} failed: {type(exc).__name__}: {exc}")
             else:
                 if response.status_code in RETRY_STATUS:
+                    ambiguous = response.status_code not in UNAMBIGUOUS_RETRY_STATUS
                     last_error = RetryableAPIError(
                         _error_message(response),
                         status_code=response.status_code,
@@ -169,6 +194,11 @@ class PlatformClient:
                     return _decode(response)
 
             if attempt == attempts:
+                break
+            if ambiguous and not replayable:
+                # The request may already have been processed and replaying it
+                # would create a second resource. Surfacing the failure is the
+                # lesser harm: the caller can look, a duplicate cannot be undone.
                 break
             after = getattr(last_error, "retry_after", None)
             time.sleep(retry_delay(attempt, after))

@@ -108,3 +108,73 @@ def test_encoding_refuses_values_json_cannot_carry():
     """Bare ``NaN`` is JavaScript, not JSON; it comes back as an opaque 400."""
     with pytest.raises(ValueError):
         encode_json({"reward": float("nan")})
+
+
+def test_an_ambiguous_failure_does_not_replay_a_create(no_sleep):
+    """If the platform created the run and the response was lost, a retry makes
+    a second one and only the second is tracked — an orphaned duplicate run."""
+    attempts = []
+
+    def handler(request):
+        attempts.append(request)
+        return httpx.Response(502, text="bad gateway")
+
+    with pytest.raises(RetryableAPIError):
+        client_for(handler, max_attempts=5).post("/evaluations/", json_body={"name": "r"})
+
+    assert len(attempts) == 1
+    assert no_sleep == []
+
+
+def test_a_refusal_is_replayed_even_for_a_create(no_sleep):
+    """429 is refused before the server does any work, so there is nothing on
+    the other side to duplicate."""
+    responses = [httpx.Response(429), httpx.Response(201, json={"evaluation_id": "e1"})]
+
+    client = client_for(lambda request: responses.pop(0))
+
+    assert client.post("/evaluations/", json_body={"name": "r"})["evaluation_id"] == "e1"
+
+
+def test_a_connection_that_was_never_made_is_replayed_for_a_create(no_sleep):
+    """Nothing reached the server, so replaying cannot duplicate anything."""
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        if len(calls) == 1:
+            raise httpx.ConnectError("refused", request=request)
+        return httpx.Response(201, json={"evaluation_id": "e1"})
+
+    assert client_for(handler).post("/evaluations/", json_body={"name": "r"})
+
+
+def test_a_read_timeout_does_not_replay_a_create(no_sleep):
+    """The bytes went out; the platform may have processed them."""
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        raise httpx.ReadTimeout("slow", request=request)
+
+    with pytest.raises(TransportError):
+        client_for(handler, max_attempts=5).post("/evaluations/", json_body={"name": "r"})
+
+    assert len(calls) == 1
+
+
+def test_a_post_declared_idempotent_still_retries(no_sleep):
+    """Get-or-create and terminal-state writes are safe to replay."""
+    responses = [httpx.Response(502), httpx.Response(200, json={"data": {"id": "env-1"}})]
+
+    client = client_for(lambda request: responses.pop(0))
+
+    assert client.post("/environmentshub/resolve", json_body={}, idempotent=True)
+
+
+def test_idempotent_methods_still_replay_ambiguous_failures(no_sleep):
+    responses = [httpx.Response(504), httpx.Response(200, json={"ok": True})]
+
+    client = client_for(lambda request: responses.pop(0))
+
+    assert client.put("/evaluations/x", json_body={"metrics": {}}) == {"ok": True}

@@ -4,7 +4,7 @@ import pytest
 
 from prime_sandboxes._connectrpc import (
     GOOGLE_PROTOBUF_BINARY_CODEC,
-    _validate_connectrpc_runtime,
+    _reject_legacy_connect_python,
 )
 from prime_sandboxes.rpc_command_session import build_command_session_start_request
 
@@ -18,11 +18,6 @@ def test_google_protobuf_command_request_round_trips() -> None:
     assert decoded == request
 
 
-def test_legacy_and_current_connect_distributions_are_rejected() -> None:
-    with pytest.raises(RuntimeError, match="Both provide the 'connectrpc' Python package"):
-        _validate_connectrpc_runtime("0.11.1", "0.9.0", "0.11.1")
-
-
-def test_stale_connect_module_files_are_rejected() -> None:
-    with pytest.raises(RuntimeError, match="does not match the installed distribution"):
-        _validate_connectrpc_runtime("0.11.1", None, "0.9.0")
+def test_legacy_connect_distribution_is_rejected() -> None:
+    with pytest.raises(RuntimeError, match="Legacy connect-python=0.9.0"):
+        _reject_legacy_connect_python("0.9.0")

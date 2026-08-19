@@ -28,6 +28,7 @@ from .exceptions import (
 from .images import AsyncImageClient, ImageClient
 from .models import (
     AdvancedConfigs,
+    AuthorizeSSHForVMResponse,
     BackgroundJob,
     BackgroundJobStatus,
     BatchSandboxStatusResponse,
@@ -137,6 +138,7 @@ __all__ = [
     "ExposedPort",
     "ListExposedPortsResponse",
     "SSHSession",
+    "AuthorizeSSHForVMResponse",
     # Exceptions
     "APIError",
     "BatchStatusUnsupportedError",

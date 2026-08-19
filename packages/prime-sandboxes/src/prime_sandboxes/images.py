@@ -7,10 +7,39 @@ from .models import (
     BuildImageRequest,
     BuildImageResponse,
     BulkImageTransferResponse,
+    ImageListResponse,
     ImageVisibility,
     UpdateImagesRequest,
     UpdateImagesResponse,
 )
+
+
+def _list_params(
+    *,
+    configured_team_id: Optional[str],
+    team_id: Optional[str],
+    search: Optional[str],
+    platform: bool,
+    offset: int,
+    limit: int,
+) -> dict[str, object]:
+    if offset < 0:
+        raise ValueError("offset must be greater than or equal to 0")
+    if limit < 1 or limit > 250:
+        raise ValueError("limit must be between 1 and 250")
+    if platform and team_id is not None:
+        raise ValueError("team_id cannot be set when platform=True")
+
+    params: dict[str, object] = {"offset": offset, "limit": limit}
+    if platform:
+        params["ownerScope"] = "platform"
+    else:
+        resolved_team_id = team_id if team_id is not None else configured_team_id
+        if resolved_team_id:
+            params["teamId"] = resolved_team_id
+    if search is not None:
+        params["search"] = search
+    return params
 
 
 class ImageClient:
@@ -18,6 +47,27 @@ class ImageClient:
 
     def __init__(self, api_client: Optional[APIClient] = None):
         self.client = api_client or APIClient()
+
+    def list(
+        self,
+        *,
+        team_id: Optional[str] = None,
+        search: Optional[str] = None,
+        platform: bool = False,
+        offset: int = 0,
+        limit: int = 100,
+    ) -> ImageListResponse:
+        """List image artifact rows in a logical-image page."""
+        params = _list_params(
+            configured_team_id=self.client.config.team_id,
+            team_id=team_id,
+            search=search,
+            platform=platform,
+            offset=offset,
+            limit=limit,
+        )
+        response = self.client.request("GET", "/images", params=params)
+        return ImageListResponse.model_validate(response)
 
     def initiate_build(
         self, request: BuildImageRequest
@@ -95,6 +145,27 @@ class AsyncImageClient:
 
     def __init__(self, api_client: Optional[AsyncAPIClient] = None):
         self.client = api_client or AsyncAPIClient()
+
+    async def list(
+        self,
+        *,
+        team_id: Optional[str] = None,
+        search: Optional[str] = None,
+        platform: bool = False,
+        offset: int = 0,
+        limit: int = 100,
+    ) -> ImageListResponse:
+        """List image artifact rows in a logical-image page."""
+        params = _list_params(
+            configured_team_id=self.client.config.team_id,
+            team_id=team_id,
+            search=search,
+            platform=platform,
+            offset=offset,
+            limit=limit,
+        )
+        response = await self.client.request("GET", "/images", params=params)
+        return ImageListResponse.model_validate(response)
 
     async def initiate_build(
         self, request: BuildImageRequest

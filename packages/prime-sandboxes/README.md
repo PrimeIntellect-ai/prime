@@ -100,6 +100,22 @@ async def main():
 asyncio.run(main())
 ```
 
+## List Platform Images
+
+Use a platform admin or manager key with sandbox-read access to list platform images:
+
+```python
+from prime_sandboxes import ImageArtifactType, ImageBuildStatus, ImageClient
+
+page = ImageClient().list(platform=True)
+vm_images = [
+    image.display_ref
+    for image in page.data
+    if image.artifact_type == ImageArtifactType.VM_SANDBOX
+    and image.status == ImageBuildStatus.COMPLETED
+]
+```
+
 ## Authentication
 
 The SDK looks for credentials in this order:

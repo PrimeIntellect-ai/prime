@@ -166,11 +166,12 @@ class EvalsBackend:
         if status is RunStatus.COMPLETED:
             body: Dict[str, Any] = {}
             _set_if(body, "metrics", summary or None)
-            # Setting a terminal state: replaying it lands on the same state.
+            # Finalization also enqueues the platform's asynchronous statistics
+            # task. A lost response leaves the outcome ambiguous, so replaying
+            # this POST can enqueue the work twice.
             self._client.post(
                 f"/evaluations/{run_id}/finalize",
                 json_body=body or {"metrics": {}},
-                idempotent=True,
             )
             return
         self._report_failure(run_id, status=status, summary=summary, error=error, config=config)

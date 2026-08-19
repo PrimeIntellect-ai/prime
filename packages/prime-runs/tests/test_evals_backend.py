@@ -10,6 +10,7 @@ from prime_runs.exceptions import (
     EnvironmentResolutionError,
     ForbiddenError,
     PaymentRequiredError,
+    RetryableAPIError,
     UnauthorizedError,
 )
 from prime_runs.models import EnvironmentRef, RunSpec, RunStatus
@@ -105,6 +106,18 @@ def test_finalizing_a_completed_run_posts_its_metrics(make_platform_client, eval
     assert handler.bodies_for("/api/v1/evaluations/eval-abc/finalize")[0] == {
         "metrics": {"avg_reward": 0.75}
     }
+
+
+def test_an_ambiguous_finalize_failure_is_not_replayed(make_platform_client, eval_routes):
+    """Finalization enqueues asynchronous processing, so a retry can enqueue it twice."""
+    routes = dict(eval_routes)
+    routes["POST /api/v1/evaluations/eval-abc/finalize"] = lambda request: httpx.Response(502)
+    backend, handler = make_backend(make_platform_client, routes)
+
+    with pytest.raises(RetryableAPIError):
+        backend.finalize("eval-abc", status=RunStatus.COMPLETED)
+
+    assert handler.paths().count("POST /api/v1/evaluations/eval-abc/finalize") == 1
 
 
 def test_a_failed_run_falls_back_to_metadata_when_the_status_endpoint_is_missing(

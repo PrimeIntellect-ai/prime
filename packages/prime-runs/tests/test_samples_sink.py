@@ -34,6 +34,19 @@ def test_rollout_numbering_is_continuous_across_streamed_batches(make_platform_c
     assert [body["samples"][0]["rollout_number"] for body in posted] == [1, 2]
 
 
+def test_individual_traces_are_projected_with_continuous_rollout_numbers(
+    make_platform_client, eval_routes
+):
+    sink, handler = make_sink(make_platform_client, eval_routes)
+
+    sink.write([make_trace(trace_id="trace-1", idx=0)])
+    sink.write([make_trace(trace_id="trace-2", idx=0)])
+
+    posted = handler.bodies_for("/api/v1/evaluations/eval-abc/samples")
+    assert [body["samples"][0]["sample_id"] for body in posted] == ["trace-1", "trace-2"]
+    assert [body["samples"][0]["rollout_number"] for body in posted] == [1, 2]
+
+
 def test_a_producer_that_already_speaks_v0_is_passed_through(make_platform_client, eval_routes):
     sink, handler = make_sink(make_platform_client, eval_routes)
 

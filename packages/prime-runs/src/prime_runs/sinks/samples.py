@@ -19,7 +19,7 @@ import logging
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from .._http import UPLOAD_TIMEOUT, PlatformClient, encode_json
-from ..projection import batch_samples, build_samples
+from ..projection import batch_samples, build_samples, trace_to_sample
 from .base import Sink
 
 logger = logging.getLogger(__name__)
@@ -70,19 +70,19 @@ class EvalSamplesSink(Sink):
             self.samples_written += len(batch)
 
     def _to_samples(self, records: Sequence[Any]) -> List[Dict[str, Any]]:
-        """Split a batch into episodes to project and samples to pass through.
+        """Project native episodes/traces and pass through existing samples.
 
         A producer that already speaks the v0 sample format (a dict with
         ``sample_id``) sends it unchanged; anything with ``traces`` is a native
-        episode and gets projected. Anything else is skipped loudly rather than
-        posted as a malformed row the API would reject for the whole batch.
+        episode, and anything with ``branches`` is a native trace. Anything else
+        is skipped loudly rather than posted as a malformed row the API would
+        reject for the whole batch.
         """
-        episodes: List[Any] = []
-        passthrough: List[Dict[str, Any]] = []
+        samples: List[Dict[str, Any]] = []
         for record in records:
             if isinstance(record, Mapping):
                 if "sample_id" in record:
-                    passthrough.append(dict(record))
+                    samples.append(dict(record))
                 elif "traces" in record:
                     logger.debug(
                         "Skipping a pre-serialized episode: this sink projects native "
@@ -92,10 +92,14 @@ class EvalSamplesSink(Sink):
                     logger.debug("Skipping a record with no sample_id and no traces")
                 continue
             if hasattr(record, "traces"):
-                episodes.append(record)
+                samples.extend(build_samples([record], self._rollout_numbers))
+            elif hasattr(record, "branches"):
+                idx = record.task.data.idx
+                self._rollout_numbers[idx] = number = self._rollout_numbers.get(idx, 0) + 1
+                samples.append(trace_to_sample(record, rollout_number=number))
             else:
-                logger.debug("Skipping %s: not an episode", type(record).__name__)
-        return build_samples(episodes, self._rollout_numbers) + passthrough
+                logger.debug("Skipping %s: not an episode or trace", type(record).__name__)
+        return samples
 
     def flush(self) -> None:
         """Writes are synchronous; the uploader thread owns the asynchrony."""

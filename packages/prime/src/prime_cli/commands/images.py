@@ -808,10 +808,16 @@ def list_images(
             limit=num,
         )
         images = response.data
-        total_count = response.total_count
+        has_total_count = response.total_count is not None
+        total_count = (
+            response.total_count if response.total_count is not None else offset + len(images)
+        )
 
         if output == "json":
-            output_data_as_json(response.model_dump(by_alias=True, mode="json"), console)
+            output_data_as_json(
+                response.model_dump(by_alias=True, mode="json", exclude_unset=True),
+                console,
+            )
             return
 
         push_hint: str = (
@@ -820,7 +826,7 @@ def list_images(
             else "Push an image with: [bold]prime images push <name>:<tag>[/bold]"
         )
         if not images:
-            if total_count == 0:
+            if has_total_count and total_count == 0:
                 if search:
                     console.print(f"[yellow]No images match '{search}'.[/yellow]")
                     console.print(
@@ -829,11 +835,20 @@ def list_images(
                 else:
                     console.print("[yellow]No images or builds found.[/yellow]")
                     console.print(push_hint)
-            else:
+            elif has_total_count:
                 console.print(
                     f"[yellow]No images on page {page}. Total: {total_count} image(s).[/yellow]"
                 )
                 console.print("Try [bold]--page 1[/bold] to start from the beginning.")
+            elif page > 1:
+                console.print(f"[yellow]No images on page {page}.[/yellow]")
+                console.print("Try [bold]--page 1[/bold] to start from the beginning.")
+            elif search:
+                console.print(f"[yellow]No images match '{search}'.[/yellow]")
+                console.print("Try a different search term or run without [bold]--search[/bold].")
+            else:
+                console.print("[yellow]No images or builds found.[/yellow]")
+                console.print(push_hint)
             return
 
         # Table output
@@ -916,17 +931,25 @@ def list_images(
         console.print(table)
         console.print()
         shown_groups = len(grouped)
-        has_next = offset + shown_groups < total_count
+        if has_total_count:
+            has_next = offset + shown_groups < total_count
+        else:
+            has_next = shown_groups >= num
         if has_next or page > 1:
             start = offset + 1
             end = offset + shown_groups
-            console.print(
-                f"[dim]Page {page} • showing {start}-{end} of {total_count} image(s)[/dim]"
-            )
+            if has_total_count:
+                console.print(
+                    f"[dim]Page {page} • showing {start}-{end} of {total_count} image(s)[/dim]"
+                )
+            else:
+                console.print(f"[dim]Page {page} • showing {start}-{end}[/dim]")
             if has_next:
                 console.print(f"[dim]Use --page {page + 1} to see more.[/dim]")
-        else:
+        elif has_total_count:
             console.print(f"[dim]Total: {total_count} image(s)[/dim]")
+        else:
+            console.print(f"[dim]Total: {shown_groups} image(s)[/dim]")
         console.print()
 
     except UnauthorizedError:

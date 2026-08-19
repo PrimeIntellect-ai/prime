@@ -454,16 +454,15 @@ def _image_list_response(
     offset: int = 0,
     limit: int = 50,
     total_count: int | None = None,
+    include_total_count: bool = True,
 ) -> ImageListResponse:
     logical_images = {
         (row.owner_type, row.team_id, row.image_name, row.image_tag) for row in payload
     }
-    return ImageListResponse(
-        data=payload,
-        total_count=len(logical_images) if total_count is None else total_count,
-        offset=offset,
-        limit=limit,
-    )
+    pagination = {}
+    if include_total_count:
+        pagination["total_count"] = len(logical_images) if total_count is None else total_count
+    return ImageListResponse(data=payload, offset=offset, limit=limit, **pagination)
 
 
 @pytest.fixture
@@ -635,6 +634,7 @@ def _run_list_capturing_params(
     payload: list[ImageRow] | None = None,
     team_id: str | None = None,
     total_count: int | None = None,
+    include_total_count: bool = True,
 ):
     """Invoke the CLI and capture arguments forwarded to ``ImageClient.list``."""
     captured: dict[str, Any] = {}
@@ -660,7 +660,11 @@ def _run_list_capturing_params(
                 "limit": limit,
             }
             return _image_list_response(
-                payload or [], offset=offset, limit=limit, total_count=total_count
+                payload or [],
+                offset=offset,
+                limit=limit,
+                total_count=total_count,
+                include_total_count=include_total_count,
             )
 
     monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
@@ -722,6 +726,43 @@ def test_list_search_out_of_range_page_shows_page_guidance(monkeypatch):
     assert captured["params"]["offset"] == 50
     assert "No images on page" in result.output
     assert "No images match" not in result.output
+
+
+def test_list_search_out_of_range_page_without_total_count_shows_page_guidance(monkeypatch):
+    result, _ = _run_list_capturing_params(
+        monkeypatch,
+        ["--search", "myapp", "--page", "2"],
+        payload=[],
+        include_total_count=False,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "No images on page" in result.output
+    assert "No images match" not in result.output
+
+
+def test_list_search_first_page_without_total_count_shows_no_matches(monkeypatch):
+    result, _ = _run_list_capturing_params(
+        monkeypatch,
+        ["--search", "myapp"],
+        payload=[],
+        include_total_count=False,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "No images match 'myapp'" in result.output
+
+
+def test_list_out_of_range_page_without_total_count_no_search(monkeypatch):
+    result, _ = _run_list_capturing_params(
+        monkeypatch,
+        ["--page", "3"],
+        payload=[],
+        include_total_count=False,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "No images on page" in result.output
 
 
 def test_list_cli_newest_group_first(run_images_list):
@@ -799,6 +840,18 @@ def test_list_platform_image_team_context_json_output_stays_clean(monkeypatch):
     assert payload["totalCount"] == 1
     assert "total_count" not in payload
     assert payload["data"][0]["artifactType"] == "CONTAINER_IMAGE"
+
+
+def test_list_json_omits_total_count_when_api_omits_it(monkeypatch):
+    result, _ = _run_list_capturing_params(
+        monkeypatch,
+        ["--output", "json"],
+        payload=[_container(pushed_at="2026-04-16T22:24:07")],
+        include_total_count=False,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "totalCount" not in json.loads(result.output)
 
 
 def test_list_platform_image_empty_shows_platform_push_hint(monkeypatch):

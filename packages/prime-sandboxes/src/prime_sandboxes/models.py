@@ -491,12 +491,12 @@ class ImageListItem(BaseModel):
 class ImageListResponse(BaseModel):
     """A logical-image page and its artifact rows.
 
-    ``total_count`` counts logical images. ``data`` can contain more rows than
-    ``limit`` when a logical image has multiple artifact types.
+    When present, ``total_count`` counts logical images. ``data`` can contain
+    more rows than ``limit`` when a logical image has multiple artifact types.
     """
 
     data: List[ImageListItem]
-    total_count: int = Field(..., alias="totalCount")
+    total_count: Optional[int] = Field(default=None, alias="totalCount")
     offset: int
     limit: int
     status: Optional[str] = None

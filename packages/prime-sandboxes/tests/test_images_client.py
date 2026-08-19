@@ -142,6 +142,13 @@ def test_image_client_list_uses_configured_team_by_default():
     assert captured["params"] == {"offset": 0, "limit": 100, "teamId": "team-configured"}
 
 
+def test_image_client_list_allows_missing_total_count():
+    response = ImageClient(DummyAPIClient({"data": [], "offset": 0, "limit": 100})).list()
+
+    assert response.total_count is None
+    assert "totalCount" not in response.model_dump(by_alias=True, exclude_unset=True)
+
+
 def test_image_client_list_platform_ignores_configured_team():
     captured: dict[str, Any] = {}
     response = {"data": [], "totalCount": 0, "offset": 0, "limit": 250}
@@ -422,6 +429,16 @@ def test_async_image_client_list_uses_configured_team_by_default():
 
     assert result.data == []
     assert captured["params"] == {"offset": 0, "limit": 100, "teamId": "team-configured"}
+
+
+def test_async_image_client_list_allows_missing_total_count():
+    client = AsyncImageClient(  # type: ignore[arg-type]
+        DummyAsyncAPIClient({"data": [], "offset": 0, "limit": 100})
+    )
+
+    response = asyncio.run(client.list())
+
+    assert response.total_count is None
 
 
 def test_async_image_client_list_platform_ignores_configured_team():

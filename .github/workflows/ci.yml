@@ -126,6 +126,14 @@ jobs:
       working-directory: packages/prime-sandboxes
       run: uv sync --all-extras
 
+    - name: Verify wheel dependency and protobuf compatibility
+      working-directory: packages/prime-sandboxes
+      run: |
+        uv build --wheel --out-dir dist
+        uv venv --python "${{ matrix.python-version }}" .wheel-venv
+        uv pip install --python .wheel-venv/bin/python dist/*.whl
+        .wheel-venv/bin/python tests/connectrpc_install_smoke.py
+
     - name: Run tests
       working-directory: packages/prime-sandboxes
       env:

@@ -46,6 +46,7 @@ from tenacity import (
     wait_exponential,
 )
 
+from ._connectrpc import GOOGLE_PROTOBUF_BINARY_CODEC
 from .core import APIClient, APIError, AsyncAPIClient
 from .exceptions import (
     BatchStatusUnsupportedError,
@@ -364,6 +365,64 @@ def _is_retryable_gateway_error(exc: BaseException) -> bool:
             return False
         return True
     return False
+
+
+def _exception_chain(exc: BaseException) -> List[BaseException]:
+    """Return an exception and its explicit causes without looping."""
+    chain: List[BaseException] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        chain.append(current)
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return chain
+
+
+def _is_retryable_reachability_error(exc: BaseException) -> bool:
+    """Retry transport readiness failures, but surface local SDK defects."""
+    chain = _exception_chain(exc)
+    if any(
+        isinstance(error, (AttributeError, ImportError, ModuleNotFoundError, TypeError))
+        for error in chain
+    ):
+        return False
+    if any(isinstance(error, SandboxNotRunningError) for error in chain):
+        return False
+
+    for error in chain:
+        if isinstance(error, CommandTimeoutError):
+            return True
+        if isinstance(error, ConnectError):
+            return error.code in {Code.ABORTED, Code.DEADLINE_EXCEEDED, Code.UNAVAILABLE}
+        if isinstance(error, httpx.HTTPStatusError):
+            status = error.response.status_code
+            return status in {408, 409} or status in RETRYABLE_5XX_STATUSES
+        if isinstance(
+            error,
+            GATEWAY_IDEMPOTENT_RETRYABLE_EXCEPTIONS + (httpx.ConnectTimeout, httpx.ReadTimeout),
+        ):
+            return True
+    return False
+
+
+def _reachability_timeout_error(
+    sandbox_id: str,
+    timeout_seconds: float,
+    last_error: BaseException | None,
+) -> SandboxNotRunningError:
+    message = (
+        f"Sandbox {sandbox_id} reached RUNNING but did not become reachable through the "
+        f"gateway within {timeout_seconds:g}s"
+    )
+    if last_error is not None:
+        message += f". Last error: {last_error.__class__.__name__}: {last_error}"
+    return SandboxNotRunningError(
+        sandbox_id,
+        status="RUNNING",
+        error_type="GATEWAY_REACHABILITY_TIMEOUT",
+        message=message,
+    )
 
 
 def _is_retryable_read_file_error(exc: BaseException) -> bool:
@@ -868,11 +927,8 @@ class SandboxClient:
 
     def _is_sandbox_reachable(self, sandbox_id: str, timeout: int = 10) -> bool:
         """Test if a sandbox is reachable by executing a simple echo command"""
-        try:
-            self.execute_command(sandbox_id, "echo 'sandbox ready'", timeout=timeout)
-            return True
-        except Exception:
-            return False
+        self.execute_command(sandbox_id, "echo 'sandbox ready'", timeout=timeout)
+        return True
 
     def _get_sandbox_error_context(self, sandbox_id: str) -> dict:
         """Fetch sandbox error context from the lightweight server endpoint."""
@@ -1173,7 +1229,11 @@ class SandboxClient:
             exit_code: Optional[int] = None
             stream_started = False
 
-            rpc_client = ConnectClientSync(base_url)
+            rpc_client = ConnectClientSync(
+                base_url,
+                codec=GOOGLE_PROTOBUF_BINARY_CODEC,
+                send_compression=None,
+            )
             try:
                 stream = rpc_client.execute_server_stream(
                     request=request,
@@ -1691,17 +1751,26 @@ class SandboxClient:
         """
         consecutive_successes = 0
         image_build_deadline: Optional[float] = None
-        deadline = time.monotonic() + _creation_timeout_seconds(max_attempts)
+        timeout_seconds = _creation_timeout_seconds(max_attempts)
+        deadline = time.monotonic() + timeout_seconds
         poll_index = 0
         reachability_phase = False
+        last_reachability_error: BaseException | None = None
         while time.monotonic() < deadline:
             sandbox = self._sandbox_status_batcher.get(sandbox_id)
             if sandbox.status == "RUNNING":
                 if not reachability_phase:
                     reachability_phase = True
-                    deadline = time.monotonic() + _creation_timeout_seconds(max_attempts)
+                    deadline = time.monotonic() + timeout_seconds
                     poll_index = 0
-                if self._is_sandbox_reachable(sandbox_id):
+                try:
+                    reachable = self._is_sandbox_reachable(sandbox_id)
+                except Exception as error:
+                    if not _is_retryable_reachability_error(error):
+                        raise
+                    last_reachability_error = error
+                    reachable = False
+                if reachable:
                     consecutive_successes += 1
                     if consecutive_successes >= stability_checks:
                         return
@@ -1727,10 +1796,11 @@ class SandboxClient:
                     image_build_deadline = time.monotonic() + image_build_timeout_seconds
                 if time.monotonic() >= image_build_deadline:
                     raise SandboxNotRunningError(
-                        sandbox_id, "Timeout waiting for the VM image build"
+                        sandbox_id,
+                        message="Timeout waiting for the VM image build",
                     )
                 time.sleep(10)
-                deadline = time.monotonic() + _creation_timeout_seconds(max_attempts)
+                deadline = time.monotonic() + timeout_seconds
                 poll_index = 0
                 continue
 
@@ -1742,7 +1812,17 @@ class SandboxClient:
                 break
             time.sleep(min(_creation_poll_delay(poll_index), remaining))
             poll_index += 1
-        raise SandboxNotRunningError(sandbox_id, "Timeout during sandbox creation")
+        if reachability_phase:
+            error = _reachability_timeout_error(
+                sandbox_id,
+                timeout_seconds,
+                last_reachability_error,
+            )
+            raise error from last_reachability_error
+        raise SandboxNotRunningError(
+            sandbox_id,
+            message=f"Sandbox did not reach RUNNING within {timeout_seconds:g}s",
+        )
 
     def bulk_wait_for_creation(
         self,
@@ -1758,6 +1838,7 @@ class SandboxClient:
         """
         _validate_unique_batch_values(sandbox_ids, "sandbox_ids")
         final_statuses: Dict[str, str] = {}
+        last_reachability_errors: Dict[str, BaseException] = {}
         image_build_deadline: Optional[float] = None
 
         attempt = 0
@@ -1807,7 +1888,14 @@ class SandboxClient:
                 all_reachable = True
                 for sandbox_id in sandbox_ids:
                     if final_statuses.get(sandbox_id) == "RUNNING":
-                        if not self._is_sandbox_reachable(sandbox_id):
+                        try:
+                            reachable = self._is_sandbox_reachable(sandbox_id)
+                        except Exception as error:
+                            if not _is_retryable_reachability_error(error):
+                                raise
+                            last_reachability_errors[sandbox_id] = error
+                            reachable = False
+                        if not reachable:
                             all_reachable = False
                             final_statuses.pop(sandbox_id, None)
 
@@ -1833,7 +1921,16 @@ class SandboxClient:
             if sandbox_id not in final_statuses:
                 final_statuses[sandbox_id] = "TIMEOUT"
 
-        raise RuntimeError(f"Timeout waiting for sandboxes to be ready. Status: {final_statuses}")
+        detail = ""
+        if last_reachability_errors:
+            errors = {
+                sandbox_id: f"{error.__class__.__name__}: {error}"
+                for sandbox_id, error in last_reachability_errors.items()
+            }
+            detail = f" Last reachability errors: {errors}"
+        raise RuntimeError(
+            f"Timeout waiting for sandboxes to be ready. Status: {final_statuses}.{detail}"
+        )
 
     def upload_file(
         self,
@@ -2236,11 +2333,8 @@ class AsyncSandboxClient:
 
     async def _is_sandbox_reachable(self, sandbox_id: str, timeout: int = 10) -> bool:
         """Test if a sandbox is reachable by executing a simple echo command"""
-        try:
-            await self.execute_command(sandbox_id, "echo 'sandbox ready'", timeout=timeout)
-            return True
-        except Exception:
-            return False
+        await self.execute_command(sandbox_id, "echo 'sandbox ready'", timeout=timeout)
+        return True
 
     async def _get_sandbox_error_context(self, sandbox_id: str) -> dict:
         """Fetch sandbox error context from the lightweight server endpoint."""
@@ -2553,7 +2647,12 @@ class AsyncSandboxClient:
         # control RPCs reuse the same transport so they cannot starve either.
         transport = _live_process_transport()
         http_client = HTTPClient(transport=transport)
-        rpc_client = ConnectClient(base_url, http_client=http_client)
+        rpc_client = ConnectClient(
+            base_url,
+            codec=GOOGLE_PROTOBUF_BINARY_CODEC,
+            send_compression=None,
+            http_client=http_client,
+        )
         request = build_command_session_start_request(
             command,
             working_dir,
@@ -2611,7 +2710,12 @@ class AsyncSandboxClient:
             gateway_url = auth["gateway_url"].rstrip("/")
             base_url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}"
             headers = {"Authorization": f"Bearer {auth['token']}"}
-            rpc_client = ConnectClient(base_url, http_client=http_client)
+            rpc_client = ConnectClient(
+                base_url,
+                codec=GOOGLE_PROTOBUF_BINARY_CODEC,
+                send_compression=None,
+                http_client=http_client,
+            )
             try:
                 await rpc_client.execute_unary(
                     request=request,
@@ -2654,7 +2758,11 @@ class AsyncSandboxClient:
             exit_code: Optional[int] = None
             stream_started = False
 
-            rpc_client = ConnectClient(base_url)
+            rpc_client = ConnectClient(
+                base_url,
+                codec=GOOGLE_PROTOBUF_BINARY_CODEC,
+                send_compression=None,
+            )
             try:
                 stream = rpc_client.execute_server_stream(
                     request=request,
@@ -3177,17 +3285,26 @@ class AsyncSandboxClient:
         """
         consecutive_successes = 0
         image_build_deadline: Optional[float] = None
-        deadline = time.monotonic() + _creation_timeout_seconds(max_attempts)
+        timeout_seconds = _creation_timeout_seconds(max_attempts)
+        deadline = time.monotonic() + timeout_seconds
         poll_index = 0
         reachability_phase = False
+        last_reachability_error: BaseException | None = None
         while time.monotonic() < deadline:
             sandbox = await self._sandbox_status_batcher.get(sandbox_id)
             if sandbox.status == "RUNNING":
                 if not reachability_phase:
                     reachability_phase = True
-                    deadline = time.monotonic() + _creation_timeout_seconds(max_attempts)
+                    deadline = time.monotonic() + timeout_seconds
                     poll_index = 0
-                if await self._is_sandbox_reachable(sandbox_id):
+                try:
+                    reachable = await self._is_sandbox_reachable(sandbox_id)
+                except Exception as error:
+                    if not _is_retryable_reachability_error(error):
+                        raise
+                    last_reachability_error = error
+                    reachable = False
+                if reachable:
                     consecutive_successes += 1
                     if consecutive_successes >= stability_checks:
                         return
@@ -3213,10 +3330,11 @@ class AsyncSandboxClient:
                     image_build_deadline = time.monotonic() + image_build_timeout_seconds
                 if time.monotonic() >= image_build_deadline:
                     raise SandboxNotRunningError(
-                        sandbox_id, "Timeout waiting for the VM image build"
+                        sandbox_id,
+                        message="Timeout waiting for the VM image build",
                     )
                 await asyncio.sleep(10)
-                deadline = time.monotonic() + _creation_timeout_seconds(max_attempts)
+                deadline = time.monotonic() + timeout_seconds
                 poll_index = 0
                 continue
 
@@ -3228,7 +3346,17 @@ class AsyncSandboxClient:
                 break
             await asyncio.sleep(min(_creation_poll_delay(poll_index), remaining))
             poll_index += 1
-        raise SandboxNotRunningError(sandbox_id, "Timeout during sandbox creation")
+        if reachability_phase:
+            error = _reachability_timeout_error(
+                sandbox_id,
+                timeout_seconds,
+                last_reachability_error,
+            )
+            raise error from last_reachability_error
+        raise SandboxNotRunningError(
+            sandbox_id,
+            message=f"Sandbox did not reach RUNNING within {timeout_seconds:g}s",
+        )
 
     async def bulk_wait_for_creation(
         self,
@@ -3245,6 +3373,7 @@ class AsyncSandboxClient:
 
         _validate_unique_batch_values(sandbox_ids, "sandbox_ids")
         final_statuses: Dict[str, str] = {}
+        last_reachability_errors: Dict[str, BaseException] = {}
         image_build_deadline: Optional[float] = None
 
         attempt = 0
@@ -3294,7 +3423,14 @@ class AsyncSandboxClient:
                 all_reachable = True
                 for sandbox_id in sandbox_ids:
                     if final_statuses.get(sandbox_id) == "RUNNING":
-                        if not await self._is_sandbox_reachable(sandbox_id):
+                        try:
+                            reachable = await self._is_sandbox_reachable(sandbox_id)
+                        except Exception as error:
+                            if not _is_retryable_reachability_error(error):
+                                raise
+                            last_reachability_errors[sandbox_id] = error
+                            reachable = False
+                        if not reachable:
                             all_reachable = False
                             final_statuses.pop(sandbox_id, None)
 
@@ -3320,7 +3456,16 @@ class AsyncSandboxClient:
             if sandbox_id not in final_statuses:
                 final_statuses[sandbox_id] = "TIMEOUT"
 
-        raise RuntimeError(f"Timeout waiting for sandboxes to be ready. Status: {final_statuses}")
+        detail = ""
+        if last_reachability_errors:
+            errors = {
+                sandbox_id: f"{error.__class__.__name__}: {error}"
+                for sandbox_id, error in last_reachability_errors.items()
+            }
+            detail = f" Last reachability errors: {errors}"
+        raise RuntimeError(
+            f"Timeout waiting for sandboxes to be ready. Status: {final_statuses}.{detail}"
+        )
 
     async def upload_file(
         self,

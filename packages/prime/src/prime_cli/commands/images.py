@@ -13,7 +13,11 @@ from prime_sandboxes import (
     APIError,
     BulkImageTransferResponse,
     Config,
+    ImageArtifactType,
+    ImageBuildStatus,
     ImageClient,
+    ImageListItem,
+    ImageOwnerType,
     ImageUpdateItem,
     ImageUpdatePatch,
     ImageUpdateResult,
@@ -51,7 +55,7 @@ config = Config()
 
 
 LIST_IMAGES_JSON_HELP = json_output_help(
-    "Raw API response is printed unchanged.",
+    "The typed API response is printed with camelCase field aliases.",
     ".data[] = {displayRef?, fullImagePath?, imageName, imageTag, status, "
     "artifactType, ownerType, visibility, sizeBytes?, createdAt, pushedAt?}",
 )
@@ -60,10 +64,7 @@ LIST_IMAGES_JSON_HELP = json_output_help(
 # Helpers for rendering `prime images list`
 # ---------------------------------------------------------------------------
 
-# Raw artifact row as returned by ``GET /v1/images``. The backend schema is
-# documented in ``LIST_IMAGES_JSON_HELP`` above; we keep the dict shape loose
-# here because the server may add new optional fields over time.
-ImageRow = dict[str, Any]
+ImageRow = ImageListItem
 
 
 @dataclass
@@ -85,174 +86,88 @@ class ArtifactPartition:
 
 
 # Mapping of artifact type (e.g. ``CONTAINER_IMAGE``) to its partition bucket.
-PartitionMap = dict[str, ArtifactPartition]
-
-# Timestamp priority used when picking the single latest row per artifact
-# type. ``pushedAt`` wins for completed uploads; ``completedAt`` covers
-# failed/cancelled terminal states; ``startedAt`` and ``createdAt`` are
-# ultimate fallbacks for rows that never finished.
-_LATEST_ROW_KEYS: tuple[str, ...] = ("pushedAt", "completedAt", "startedAt", "createdAt")
+PartitionMap = dict[ImageArtifactType, ArtifactPartition]
 
 
-def _parse_ts(value: Any) -> Optional[datetime]:
-    """Parse an ISO8601 timestamp (possibly ``Z`` suffixed) as a tz-aware UTC datetime.
-
-    Naive timestamps (the backend emits ``createdAt`` as naive UTC, e.g. from
-    ``datetime.utcnow()``) are treated as UTC so comparisons across the dataset
-    are consistent. Returns ``None`` on failure.
-    """
-    if not value:
-        return None
-    try:
-        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except Exception:
-        return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt
+def _aware_utc(value: datetime) -> datetime:
+    """Return a timezone-aware timestamp for stable comparisons."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
 
 
-def _latest(rows: list[ImageRow], *keys: str) -> Optional[tuple[ImageRow, Optional[datetime]]]:
-    """Return the row whose first parseable timestamp (across ``keys``) is newest.
+def _row_timestamp(row: ImageRow) -> datetime:
+    """Return the first available timestamp in display-priority order."""
+    value = row.pushed_at or row.completed_at or row.started_at or row.created_at
+    return _aware_utc(value)
 
-    Each row is evaluated by walking ``keys`` in order and taking the first
-    value that ``_parse_ts`` accepts. This means an unparseable-but-truthy
-    value (e.g. a malformed date string) is skipped rather than short-circuiting
-    selection — and the *same* parsed timestamp is returned alongside the row
-    so callers don't re-read a potentially different field.
 
-    The returned ``datetime`` is ``None`` only in the fallback case where no
-    row had any parseable timestamp; we still return the first row so Size /
-    Reference fields can be derived, but callers should treat "no timestamp"
-    as a signal to fall through to a lower-priority tier.
-
-    Returns ``None`` if ``rows`` is empty.
-    """
+def _latest(rows: list[ImageRow]) -> Optional[tuple[ImageRow, datetime]]:
+    """Return the newest row and the timestamp used to select it."""
     if not rows:
         return None
-    best: Optional[ImageRow] = None
-    best_ts: Optional[datetime] = None
-    for row in rows:
-        ts: Optional[datetime] = None
-        for k in keys:
-            ts = _parse_ts(row.get(k))
-            if ts is not None:
-                break
-        if ts is None:
-            continue
-        if best_ts is None or ts > best_ts:
-            best = row
-            best_ts = ts
-    if best is None:
-        return rows[0], None
-    return best, best_ts
-
-
-def _coerce_artifact_type(value: Any) -> str:
-    """Normalise an ``artifactType`` value into a usable string key.
-
-    Defensive against a malformed backend payload (``null``, missing, or a
-    non-string value) so that downstream ``sorted(partition)`` and label
-    rendering never blow up on mixed key types.
-    """
-    if isinstance(value, str) and value:
-        return value
-    return "CONTAINER_IMAGE"
-
-
-def _pick_row(rows: list[ImageRow], *keys: str) -> Optional[ImageRow]:
-    """Return just the row component from ``_latest`` (drops the timestamp)."""
-    result = _latest(rows, *keys)
-    return result[0] if result is not None else None
+    row = max(rows, key=_row_timestamp)
+    return row, _row_timestamp(row)
 
 
 def _partition_group(artifacts: list[ImageRow]) -> PartitionMap:
-    """Group artifact rows by type, keeping only the most recent row per type.
-
-    For a single ``imageName:imageTag`` the backend returns one row per
-    (build, artifact type) plus any completed artifacts from the user images
-    table. We pick the single newest row per artifact type (ordered by
-    ``pushedAt → completedAt → startedAt → createdAt``) and render its raw
-    ``status`` verbatim. Older rows — including stuck ``BUILDING`` zombies
-    and stale failures — are simply not considered.
-    """
-    by_type: dict[str, list[ImageRow]] = {}
-    for art in artifacts:
-        t = _coerce_artifact_type(art.get("artifactType"))
-        by_type.setdefault(t, []).append(art)
+    """Group artifact rows by type, keeping only the most recent row per type."""
+    by_type: dict[ImageArtifactType, list[ImageRow]] = {}
+    for artifact in artifacts:
+        by_type.setdefault(artifact.artifact_type, []).append(artifact)
 
     result: PartitionMap = {}
-    for art_type, rows in by_type.items():
-        latest_row = _pick_row(rows, *_LATEST_ROW_KEYS)
-        result[art_type] = ArtifactPartition(latest=latest_row)
+    for artifact_type, rows in by_type.items():
+        latest = _latest(rows)
+        if latest is not None:
+            result[artifact_type] = ArtifactPartition(latest=latest[0])
     return result
 
 
-_TYPE_LABELS: tuple[tuple[str, str], ...] = (
-    ("CONTAINER_IMAGE", "[cyan]Container[/cyan]"),
-    ("VM_SANDBOX", "[magenta]VM[/magenta]"),
+_TYPE_LABELS: tuple[tuple[ImageArtifactType, str], ...] = (
+    (ImageArtifactType.CONTAINER_IMAGE, "[cyan]Container[/cyan]"),
+    (ImageArtifactType.VM_SANDBOX, "[magenta]VM[/magenta]"),
 )
 
 
-def _ordered_present_types(partition: PartitionMap) -> list[tuple[str, str]]:
-    """Return artifact types present in ``partition`` in display order.
-
-    Container first, then VM, then any future types in sorted order. Types
-    whose per-artifact partition bucket is completely empty (no completed,
-    no active, no failed_only, no other) are skipped so we don't render
-    dead slots.
-    """
-    ordered: list[tuple[str, str]] = []
-    for art_type, label in _TYPE_LABELS:
-        part = partition.get(art_type)
-        if part is not None and not part.is_empty():
-            ordered.append((art_type, label))
-    for art_type in sorted(partition):
-        if art_type in {"CONTAINER_IMAGE", "VM_SANDBOX"}:
-            continue
-        if not partition[art_type].is_empty():
-            label = f"[white]{str(art_type).replace('_', ' ').title()}[/white]"
-            ordered.append((art_type, label))
-    return ordered
+def _ordered_present_types(
+    partition: PartitionMap,
+) -> list[tuple[ImageArtifactType, str]]:
+    """Return present artifact types in display order."""
+    return [
+        (artifact_type, label)
+        for artifact_type, label in _TYPE_LABELS
+        if not partition.get(artifact_type, ArtifactPartition()).is_empty()
+    ]
 
 
 def _render_type_column(partition: PartitionMap) -> str:
     """Build the Type cell: ``Container / VM`` with color, only for types present."""
-    parts = [label for _art_type, label in _ordered_present_types(partition)]
+    parts = [label for _artifact_type, label in _ordered_present_types(partition)]
     return " / ".join(parts) if parts else "[dim]—[/dim]"
 
 
-_STATUS_LABELS: dict[str, str] = {
-    "COMPLETED": "[green]Ready[/green]",
-    "BUILDING": "[yellow]Building[/yellow]",
-    "UPLOADING": "[yellow]Uploading[/yellow]",
-    "PENDING": "[blue]Pending[/blue]",
-    "FAILED": "[red]Failed[/red]",
-    "CANCELLED": "[dim]Cancelled[/dim]",
+_STATUS_LABELS: dict[ImageBuildStatus, str] = {
+    ImageBuildStatus.COMPLETED: "[green]Ready[/green]",
+    ImageBuildStatus.BUILDING: "[yellow]Building[/yellow]",
+    ImageBuildStatus.UPLOADING: "[yellow]Uploading[/yellow]",
+    ImageBuildStatus.PENDING: "[blue]Pending[/blue]",
+    ImageBuildStatus.FAILED: "[red]Failed[/red]",
+    ImageBuildStatus.CANCELLED: "[dim]Cancelled[/dim]",
 }
 
 
-def _render_visibility(value: Any) -> str:
-    try:
-        visibility = ImageVisibility(str(value or ImageVisibility.PRIVATE.value).upper())
-    except ValueError:
-        visibility = ImageVisibility.PRIVATE
-
+def _render_visibility(visibility: ImageVisibility) -> str:
     if visibility == ImageVisibility.PUBLIC:
         return "[green]Public[/green]"
     return "[dim]Private[/dim]"
 
 
 def _render_status_slot(part: Optional[ArtifactPartition]) -> str:
-    """Render the raw status of the latest row for this artifact type.
-
-    Unknown statuses (e.g. a future backend addition) are rendered as a
-    dim title-cased label rather than being dropped.
-    """
+    """Render the status of the latest row for one artifact type."""
     if part is None or part.latest is None:
         return "[dim]—[/dim]"
-    status = str(part.latest.get("status") or "UNKNOWN")
-    return _STATUS_LABELS.get(status, f"[dim]{status.title()}[/dim]")
+    return _STATUS_LABELS[part.latest.status]
 
 
 def _render_status_column(partition: PartitionMap) -> str:
@@ -283,11 +198,7 @@ def _render_image_reference(img: ImageRow, *, is_team_listing: bool) -> str:
     *owner prefix* is what gets clipped, not the image ``name:tag``.
     """
     del is_team_listing
-    return (
-        img.get("displayRef")
-        or img.get("fullImagePath")
-        or f"{img.get('imageName', 'unknown')}:{img.get('imageTag', 'latest')}"
-    )
+    return img.display_ref or img.full_image_path or f"{img.image_name}:{img.image_tag}"
 
 
 def _truncate_ref_left(ref: str, max_width: Optional[int]) -> str:
@@ -343,9 +254,9 @@ def _completed_size_mb(partition: PartitionMap) -> str:
     total = 0
     for part in partition.values():
         row = part.latest
-        if row is None or row.get("status") != "COMPLETED":
+        if row is None or row.status != ImageBuildStatus.COMPLETED:
             continue
-        total += row.get("sizeBytes") or 0
+        total += row.size_bytes or 0
     if total <= 0:
         return "[dim]—[/dim]"
     return f"{total / 1024 / 1024:.1f} MB"
@@ -358,7 +269,7 @@ def _pick_display_datetime(partition: PartitionMap) -> Optional[datetime]:
     ]
     if not latest_rows:
         return None
-    result = _latest(latest_rows, *_LATEST_ROW_KEYS)
+    result = _latest(latest_rows)
     if result is None:
         return None
     return result[1]
@@ -889,26 +800,18 @@ def list_images(
         )
         console.print()
     try:
-        client = APIClient()
-
         offset = (page - 1) * num
-
-        # Build query params
-        params: dict[str, str] = {"limit": str(num), "offset": str(offset)}
-        if platform_image:
-            params["ownerScope"] = "platform"
-        elif config.team_id:
-            params["teamId"] = config.team_id
-        if search:
-            params["search"] = search
-
-        response = client.request("GET", "/images", params=params)
-        images: list[ImageRow] = response.get("data", [])
-        has_total_count: bool = "totalCount" in response
-        total_count: int = int(response.get("totalCount", offset + len(images)))
+        response = ImageClient(APIClient()).list(
+            search=search,
+            platform=platform_image,
+            offset=offset,
+            limit=num,
+        )
+        images = response.data
+        total_count = response.total_count
 
         if output == "json":
-            output_data_as_json(response, console)
+            output_data_as_json(response.model_dump(by_alias=True, mode="json"), console)
             return
 
         push_hint: str = (
@@ -917,7 +820,7 @@ def list_images(
             else "Push an image with: [bold]prime images push <name>:<tag>[/bold]"
         )
         if not images:
-            if has_total_count and total_count == 0:
+            if total_count == 0:
                 if search:
                     console.print(f"[yellow]No images match '{search}'.[/yellow]")
                     console.print(
@@ -926,20 +829,11 @@ def list_images(
                 else:
                     console.print("[yellow]No images or builds found.[/yellow]")
                     console.print(push_hint)
-            elif has_total_count:
+            else:
                 console.print(
                     f"[yellow]No images on page {page}. Total: {total_count} image(s).[/yellow]"
                 )
                 console.print("Try [bold]--page 1[/bold] to start from the beginning.")
-            elif page > 1:
-                console.print(f"[yellow]No images on page {page}.[/yellow]")
-                console.print("Try [bold]--page 1[/bold] to start from the beginning.")
-            elif search:
-                console.print(f"[yellow]No images match '{search}'.[/yellow]")
-                console.print("Try a different search term or run without [bold]--search[/bold].")
-            else:
-                console.print("[yellow]No images or builds found.[/yellow]")
-                console.print(push_hint)
             return
 
         # Table output
@@ -954,10 +848,10 @@ def list_images(
             title = "Personal Docker Images"
 
         grouped: dict[str, list[ImageRow]] = {}
-        for img in images:
-            owner_scope = img.get("teamId") or img.get("ownerType", "personal")
-            key = f"{owner_scope}/{img.get('imageName', '')}:{img.get('imageTag', 'latest')}"
-            grouped.setdefault(key, []).append(img)
+        for image in images:
+            owner_scope = image.team_id or image.owner_type.value
+            key = f"{owner_scope}/{image.image_name}:{image.image_tag}"
+            grouped.setdefault(key, []).append(image)
 
         ref_max_width: int = _image_ref_column_width(
             console.size.width, is_team_listing=is_team_listing
@@ -989,13 +883,13 @@ def list_images(
         sortable.sort(key=lambda item: item[0], reverse=True)
 
         for _ts, artifacts, partition in sortable:
-            # Pick a representative row for the Image Reference / Owner
-            # columns. Prefer the latest container artifact row so the
-            # reference always resolves to something the user can copy-paste,
-            # then fall back to the latest VM row, then to any raw artifact.
-            container_latest = (partition.get("CONTAINER_IMAGE") or ArtifactPartition()).latest
-            vm_latest = (partition.get("VM_SANDBOX") or ArtifactPartition()).latest
-            preferred: ImageRow = container_latest or vm_latest or next(iter(artifacts), {})
+            # Prefer the latest container row for a copyable image reference,
+            # then fall back to the latest VM row or the first artifact.
+            container_latest = (
+                partition.get(ImageArtifactType.CONTAINER_IMAGE) or ArtifactPartition()
+            ).latest
+            vm_latest = (partition.get(ImageArtifactType.VM_SANDBOX) or ArtifactPartition()).latest
+            preferred = container_latest or vm_latest or artifacts[0]
 
             image_ref: str = _truncate_ref_left(
                 _render_image_reference(preferred, is_team_listing=is_team_listing),
@@ -1003,17 +897,16 @@ def list_images(
             )
             type_display: str = _render_type_column(partition)
             status_display: str = _render_status_column(partition)
-            visibility_display: str = _render_visibility(preferred.get("visibility"))
+            visibility_display: str = _render_visibility(preferred.visibility)
             size_mb: str = _completed_size_mb(partition)
             date_str: str = _display_created(partition)
 
             row: list[str] = [image_ref, type_display]
             if is_team_listing:
-                owner_type = preferred.get(
-                    "ownerType", "team" if preferred.get("teamId") else "personal"
-                )
-                owner_display: str = (
-                    "[blue]Team[/blue]" if owner_type == "team" else "[dim]Personal[/dim]"
+                owner_display = (
+                    "[blue]Team[/blue]"
+                    if preferred.owner_type == ImageOwnerType.TEAM
+                    else "[dim]Personal[/dim]"
                 )
                 row.append(owner_display)
             row.extend([status_display, visibility_display, size_mb, date_str])
@@ -1023,25 +916,17 @@ def list_images(
         console.print(table)
         console.print()
         shown_groups = len(grouped)
-        if has_total_count:
-            has_next = offset + shown_groups < total_count
-        else:
-            has_next = shown_groups >= num
+        has_next = offset + shown_groups < total_count
         if has_next or page > 1:
             start = offset + 1
             end = offset + shown_groups
-            if has_total_count:
-                console.print(
-                    f"[dim]Page {page} • showing {start}-{end} of {total_count} image(s)[/dim]"
-                )
-            else:
-                console.print(f"[dim]Page {page} • showing {start}-{end}[/dim]")
+            console.print(
+                f"[dim]Page {page} • showing {start}-{end} of {total_count} image(s)[/dim]"
+            )
             if has_next:
                 console.print(f"[dim]Use --page {page + 1} to see more.[/dim]")
-        elif has_total_count:
-            console.print(f"[dim]Total: {total_count} image(s)[/dim]")
         else:
-            console.print(f"[dim]Total: {shown_groups} image(s)[/dim]")
+            console.print(f"[dim]Total: {total_count} image(s)[/dim]")
         console.print()
 
     except UnauthorizedError:

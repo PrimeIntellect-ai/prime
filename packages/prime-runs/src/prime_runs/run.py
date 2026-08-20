@@ -138,6 +138,13 @@ class Run:
         # the process from installing its own.
         self._signal_handler = self._handle_signal
         self._previous_signal_handlers: Dict[int, Any] = {}
+        # ``signal.signal`` can only run on the main thread. If finish() runs in
+        # an executor, or this object is inherited across a fork, its handler
+        # may remain as the process disposition until the main thread gets a
+        # chance to replace it. Marking forked handlers as relinquishable lets
+        # a child run take ownership without mistaking the inherited callback
+        # for an application-installed handler.
+        self._signal_handler_stale = False
         _fork.register(self)
 
     # -------------------------------------------------------------- identity
@@ -410,10 +417,12 @@ class Run:
 
         try:
             self.finish(status=status, error=error)
-        except BaseException as finish_error:
+        except Exception as finish_error:
             # The producer exception is the reason this context is unwinding.
             # A telemetry teardown error must not replace it, even in strict
             # mode; finish() has already recorded the failure on the run.
+            # Control-flow exceptions such as KeyboardInterrupt and SystemExit
+            # deliberately bypass this handler so teardown cannot swallow them.
             logger.warning(
                 "Run %s: finishing after %s also failed: %s: %s",
                 self.id,
@@ -429,10 +438,11 @@ class Run:
     def install_signal_handlers(self) -> None:
         """Report a terminal status when the process is killed.
 
-        Only installed on the main thread, and only over a *default* handler:
-        replacing a handler the application chose would be worse than missing a
-        status. The previous handler is always called afterwards, so SIGINT
-        still raises ``KeyboardInterrupt`` and SIGTERM still terminates.
+        Only installed on the main thread, and only over a *default* handler or
+        one relinquished by a finished/forked ``Run``. Replacing a handler the
+        application chose would be worse than missing a status. The previous
+        handler is always called afterwards, so SIGINT still raises
+        ``KeyboardInterrupt`` and SIGTERM still terminates.
         """
         if threading.current_thread() is not threading.main_thread():
             return
@@ -441,13 +451,27 @@ class Run:
                 current = signal.getsignal(signum)
             except (ValueError, OSError):  # pragma: no cover - platform dependent
                 continue
+            previous = current
+            relinquished_owner: Optional[Run] = None
             if current not in (signal.SIG_DFL, signal.default_int_handler):
-                continue
+                owner = getattr(current, "__self__", None)
+                if (
+                    isinstance(owner, Run)
+                    and current is owner._signal_handler
+                    and (owner._finished or owner._signal_handler_stale)
+                    and signum in owner._previous_signal_handlers
+                ):
+                    previous = owner._previous_signal_handlers[signum]
+                    relinquished_owner = owner
+                else:
+                    continue
             try:
                 signal.signal(signum, self._signal_handler)
             except (ValueError, OSError):  # pragma: no cover
                 continue
-            self._previous_signal_handlers[signum] = current
+            self._previous_signal_handlers[signum] = previous
+            if relinquished_owner is not None:
+                relinquished_owner._previous_signal_handlers.pop(signum, None)
 
     def _handle_signal(self, signum: int, frame: Any) -> None:
         name = signal.Signals(signum).name
@@ -471,13 +495,17 @@ class Run:
             os.kill(os.getpid(), signum)
 
     def _restore_signal_handlers(self) -> None:
+        remaining: Dict[int, Any] = {}
         for signum, previous in self._previous_signal_handlers.items():
             try:
                 if signal.getsignal(signum) is self._signal_handler:
                     signal.signal(signum, previous)
             except (ValueError, OSError):  # pragma: no cover
-                continue
-        self._previous_signal_handlers.clear()
+                # Most commonly finish() was deliberately run in an executor.
+                # Keep the displaced handler so the main thread can restore it
+                # from the signal callback or hand it to the next Run.
+                remaining[signum] = previous
+        self._previous_signal_handlers = remaining
 
     def reset_after_fork(self) -> None:
         """Make an inherited handle safe to use in a forked child.
@@ -492,6 +520,7 @@ class Run:
         self._is_primary = False
         self._owns_lifecycle = False
         self._deferred_error = None
+        self._signal_handler_stale = True
 
     def _on_process_exit(self) -> None:
         """Last resort: the process is exiting and nobody called ``finish()``.

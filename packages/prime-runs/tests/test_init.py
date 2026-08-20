@@ -370,3 +370,20 @@ def test_offline_records_are_on_disk_before_any_flush(tmp_path):
 
     run.finish()
     assert len(path.read_text().splitlines()) == 2
+
+
+def test_offline_records_reject_nonfinite_json_instead_of_writing_invalid_jsonl(tmp_path):
+    run = pr.init(
+        mode="offline",
+        dir=str(tmp_path),
+        handle_signals=False,
+        on_error="raise",
+    )
+    run.log_traces([{"id": "bad", "reward": float("nan")}])
+
+    with pytest.raises(ValueError, match="Out of range float values"):
+        run.flush()
+
+    path = tmp_path / run.id / "records" / "trace.jsonl"
+    assert path.read_text() == ""
+    run.finish()

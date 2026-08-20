@@ -19,7 +19,7 @@ import logging
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from .._http import UPLOAD_TIMEOUT, PlatformClient, encode_json
-from ..projection import batch_samples, build_samples, trace_to_sample
+from ..projection import batch_samples, build_samples, record_to_samples, trace_to_sample
 from .base import Sink
 
 logger = logging.getLogger(__name__)
@@ -73,23 +73,18 @@ class EvalSamplesSink(Sink):
         """Project native episodes/traces and pass through existing samples.
 
         A producer that already speaks the v0 sample format (a dict with
-        ``sample_id``) sends it unchanged; anything with ``traces`` is a native
-        episode, and anything with ``branches`` is a native trace. Anything else
-        is skipped loudly rather than posted as a malformed row the API would
-        reject for the whole batch.
+        ``sample_id``) sends it unchanged. Serialized trace and episode records
+        are projected alongside their native object forms; unsupported mappings
+        fail explicitly so a gated traces sink cannot turn data loss into a
+        successful-looking empty run.
         """
         samples: List[Dict[str, Any]] = []
         for record in records:
             if isinstance(record, Mapping):
                 if "sample_id" in record:
                     samples.append(dict(record))
-                elif "traces" in record:
-                    logger.debug(
-                        "Skipping a pre-serialized episode: this sink projects native "
-                        "episode objects, not their JSON records"
-                    )
                 else:
-                    logger.debug("Skipping a record with no sample_id and no traces")
+                    samples.extend(record_to_samples(record, self._rollout_numbers))
                 continue
             if hasattr(record, "traces"):
                 samples.extend(build_samples([record], self._rollout_numbers))
@@ -98,7 +93,10 @@ class EvalSamplesSink(Sink):
                 self._rollout_numbers[idx] = number = self._rollout_numbers.get(idx, 0) + 1
                 samples.append(trace_to_sample(record, rollout_number=number))
             else:
-                logger.debug("Skipping %s: not an episode or trace", type(record).__name__)
+                raise TypeError(
+                    f"EvalSamplesSink cannot project {type(record).__name__}; expected a "
+                    "mapping, trace, or episode"
+                )
         return samples
 
     def flush(self) -> None:

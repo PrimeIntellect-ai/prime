@@ -23,6 +23,8 @@ from .base import Sink
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_RECEIPT_HISTORY_SIZE = 100
+
 
 class TracesSink(Sink):
     """Uploads records through the Prime Traces service."""
@@ -38,7 +40,10 @@ class TracesSink(Sink):
         team_id: Optional[str] = None,
         stamp_run: bool = True,
         compress: bool = True,
+        receipt_history_size: int = DEFAULT_RECEIPT_HISTORY_SIZE,
     ) -> None:
+        if receipt_history_size < 0:
+            raise ValueError("receipt_history_size must be non-negative")
         self.enabled = True
         self._client = client
         self._injected_client = client is not None
@@ -59,6 +64,8 @@ class TracesSink(Sink):
         self._run_kind: Optional[str] = None
         self._context: Dict[str, str] = {}
         self.receipts: list = []
+        self.receipts_received = 0
+        self._receipt_history_size = receipt_history_size
         _fork.register(self)
 
     # ------------------------------------------------------------------ setup
@@ -119,11 +126,13 @@ class TracesSink(Sink):
 
         payload = [self._prepare(record) for record in records]
         try:
-            receipts = self._client.upload_records(
-                payload,
-                line_format=resolved,
-                context=context or None,
-                compress=self._compress,
+            receipts = list(
+                self._client.upload_records(
+                    payload,
+                    line_format=resolved,
+                    context=context or None,
+                    compress=self._compress,
+                )
             )
         except Exception as exc:  # noqa: BLE001 - classified below
             if self._is_gated(exc):
@@ -133,7 +142,10 @@ class TracesSink(Sink):
                 )
                 return
             raise
-        self.receipts.extend(receipts)
+        self.receipts_received += len(receipts)
+        if self._receipt_history_size:
+            self.receipts.extend(receipts)
+            del self.receipts[: -self._receipt_history_size]
 
     def _prepare(self, record: Any) -> Any:
         """Stamp the run onto plain mappings that do not already carry one.

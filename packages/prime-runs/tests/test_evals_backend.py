@@ -166,6 +166,34 @@ def test_a_status_endpoint_that_exists_is_used_instead_of_the_fallback(
     assert "PUT /api/v1/evaluations/eval-abc" not in handler.paths()
 
 
+def test_a_transient_status_failure_is_retried(make_platform_client, eval_routes):
+    routes = dict(eval_routes)
+    responses = [httpx.Response(503), httpx.Response(200, json={"evaluation_id": "eval-abc"})]
+    routes["POST /api/v1/evaluations/eval-abc/status"] = lambda request: responses.pop(0)
+    backend, handler = make_backend(make_platform_client, routes)
+
+    backend.finalize("eval-abc", status=RunStatus.FAILED, error="boom")
+
+    assert handler.paths().count("POST /api/v1/evaluations/eval-abc/status") == 2
+    assert "PUT /api/v1/evaluations/eval-abc" not in handler.paths()
+
+
+def test_exhausted_status_retries_fall_back_to_metadata(make_platform_client, eval_routes, caplog):
+    routes = dict(eval_routes)
+    routes["POST /api/v1/evaluations/eval-abc/status"] = lambda request: httpx.Response(503)
+    handler = RecordingHandler(routes)
+    client = make_platform_client(handler, max_attempts=2)
+    backend = EvalsBackend(client, frontend_url="https://app.example")
+
+    with caplog.at_level("WARNING"):
+        backend.finalize("eval-abc", status=RunStatus.FAILED, error="boom")
+
+    assert handler.paths().count("POST /api/v1/evaluations/eval-abc/status") == 2
+    terminal = handler.bodies_for("/api/v1/evaluations/eval-abc")[0]["metadata"]["prime_runs"]
+    assert terminal["status"] == "failed"
+    assert "remained unavailable after retries" in caplog.text
+
+
 def test_update_sends_nothing_when_there_is_nothing_to_send(make_platform_client, eval_routes):
     backend, handler = make_backend(make_platform_client, eval_routes)
 

@@ -2,6 +2,7 @@
 
 import signal
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
 
 import pytest
@@ -275,6 +276,24 @@ def test_a_finish_failure_does_not_mask_the_context_exception():
     assert backend.closed is True
 
 
+@pytest.mark.parametrize("teardown_error", [KeyboardInterrupt, SystemExit])
+def test_teardown_does_not_swallow_control_flow_exceptions(teardown_error):
+    run = make_run()
+    original_finish = run.finish
+
+    def interrupt_finish(*args, **kwargs):
+        raise teardown_error()
+
+    run.finish = interrupt_finish
+    try:
+        with pytest.raises(teardown_error):
+            with run:
+                raise ValueError("rollout blew up")
+    finally:
+        run.finish = original_finish
+        run.finish()
+
+
 def test_an_interrupt_is_recorded_as_a_decision_not_a_fault():
     """Ctrl-C must not land in the same bucket as a broken eval — and it must
     agree with the SIGINT handler, which normally gets there first."""
@@ -487,3 +506,37 @@ def test_a_later_run_can_install_its_own_handlers():
     assert signal.getsignal(signal.SIGTERM) is second._signal_handler
     second.finish()
     assert signal.getsignal(signal.SIGTERM) is signal.SIG_DFL
+
+
+def test_a_run_finished_in_an_executor_relinquishes_handlers_to_the_next_run():
+    original = signal.getsignal(signal.SIGTERM)
+    first = make_run()
+    first.install_signal_handlers()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        executor.submit(first.finish).result()
+
+    # Python forbids signal.signal() off the main thread, so restoration is
+    # deferred rather than forgetting which handler was displaced.
+    assert signal.getsignal(signal.SIGTERM) is first._signal_handler
+    second = make_run()
+    second.install_signal_handlers()
+    assert signal.getsignal(signal.SIGTERM) is second._signal_handler
+
+    second.finish()
+    assert signal.getsignal(signal.SIGTERM) is original
+
+
+def test_a_child_run_can_replace_an_inherited_signal_handler():
+    original = signal.getsignal(signal.SIGTERM)
+    inherited = make_run()
+    inherited.install_signal_handlers()
+    inherited.reset_after_fork()
+
+    child = make_run()
+    child.install_signal_handlers()
+
+    assert signal.getsignal(signal.SIGTERM) is child._signal_handler
+    child.finish()
+    inherited.finish()
+    assert signal.getsignal(signal.SIGTERM) is original

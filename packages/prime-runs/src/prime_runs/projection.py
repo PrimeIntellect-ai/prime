@@ -17,7 +17,7 @@ something woven through the run lifecycle.
 """
 
 import logging
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 from ._http import encode_json
 
@@ -111,6 +111,283 @@ def trace_to_sample(
         if reward is not None:
             sample.setdefault(name, reward.score)
     return sample
+
+
+def trace_record_to_sample(
+    trace: Mapping[str, Any], rollout_number: int = 1, episode_id: Optional[str] = None
+) -> Dict[str, Any]:
+    """Project a serialized trace without importing its producer package.
+
+    Verifiers persists its message graph as ``nodes``/``calls`` rather than the
+    derived ``branches`` property used by :func:`trace_to_sample`. Older records
+    may carry branches directly, so both representations are accepted. Sparse
+    trace mappings still produce a visible row as long as they have an ID;
+    fields the legacy viewer cannot derive remain empty instead of making the
+    entire record disappear.
+    """
+    trace_id = trace.get("id")
+    if not trace_id:
+        raise TypeError("serialized trace records must contain a non-empty 'id'")
+
+    task_container = _as_mapping(trace.get("task"))
+    task = dict(_as_mapping(task_container.get("data")))
+    agent = _as_mapping(trace.get("agent"))
+    branches = _serialized_branches(trace)
+    rewards = _as_mapping(trace.get("rewards"))
+    errors = trace.get("errors")
+    last_error = trace.get("last_error")
+    if last_error is None and isinstance(errors, list) and errors:
+        last_error = errors[-1]
+    stop_condition = trace.get("stop_condition")
+
+    sample: Dict[str, Any] = {
+        "sample_id": trace_id,
+        "example_id": task.get("idx"),
+        "rollout_number": rollout_number,
+        "episode_id": episode_id,
+        "agent": agent.get("name"),
+        "trainable": agent.get("trainable", True),
+        "task": task,
+        "prompt": [],
+        "completion": branches[-1]["messages"] if branches else [],
+        "answer": task.get("answer"),
+        "tool_defs": _mapping_list(trace.get("tools")) or None,
+        "reward": trace["reward"] if "reward" in trace else _total_reward(rewards),
+        "timing": dict(_as_mapping(trace.get("timing"))) or None,
+        "is_completed": trace.get("is_completed", False),
+        "is_truncated": trace.get("is_truncated", _is_truncated(stop_condition, trace)),
+        "metrics": dict(_as_mapping(trace.get("metrics"))),
+        "error": dict(last_error) if isinstance(last_error, Mapping) else last_error,
+        "stop_condition": stop_condition,
+        "trajectory": branches,
+        "token_usage": dict(_as_mapping(trace.get("usage"))) or _aggregate_usage(trace),
+        "info": dict(_as_mapping(trace.get("info"))) or None,
+    }
+    for name, reward in rewards.items():
+        if reward is None:
+            continue
+        score = reward.get("score") if isinstance(reward, Mapping) else reward
+        sample.setdefault(name, score)
+    return sample
+
+
+def record_to_samples(
+    record: Mapping[str, Any], rollout_numbers: Optional[Dict[Any, int]] = None
+) -> List[Dict[str, Any]]:
+    """Project one serialized trace or episode to legacy viewer samples."""
+    counts = rollout_numbers if rollout_numbers is not None else {}
+    if "traces" not in record:
+        task = _as_mapping(_as_mapping(record.get("task")).get("data"))
+        idx = task.get("idx")
+        rollout_key = idx if idx is not None else record.get("id")
+        counts[rollout_key] = number = counts.get(rollout_key, 0) + 1
+        return [trace_record_to_sample(record, rollout_number=number)]
+
+    episode_id = record.get("id")
+    if not episode_id:
+        raise TypeError("serialized episode records must contain a non-empty 'id'")
+    raw_traces = record.get("traces")
+    if not isinstance(raw_traces, list):
+        raise TypeError("serialized episode 'traces' must be a list")
+    traces: List[Mapping[str, Any]] = []
+    for trace in raw_traces:
+        if not isinstance(trace, Mapping):
+            raise TypeError("serialized episode traces must be mappings")
+        traces.append(trace)
+    if not traces:
+        return []
+
+    summary_index = next(
+        (
+            index
+            for index, trace in enumerate(traces)
+            if _as_mapping(trace.get("agent")).get("trainable", True)
+        ),
+        0,
+    )
+    summary_task = _as_mapping(_as_mapping(traces[summary_index].get("task")).get("data"))
+    idx = summary_task.get("idx")
+    rollout_key = idx if idx is not None else episode_id
+    counts[rollout_key] = number = counts.get(rollout_key, 0) + 1
+    sample = trace_record_to_sample(traces[summary_index], number, str(episode_id))
+    sample["sample_id"] = episode_id
+    sample["info"] = {
+        **(sample["info"] or {}),
+        "native_wrapper": dict(record),
+        "native_trace_index": summary_index,
+    }
+    if ENVELOPE_BYTES + json_bytes(sample) <= MAX_SAMPLES_PAYLOAD_BYTES:
+        return [sample]
+
+    logger.warning(
+        "Episode %s exceeds the platform sample limit; uploading projected traces",
+        episode_id,
+    )
+    return [trace_record_to_sample(trace, number, str(episode_id)) for trace in traces]
+
+
+def _as_mapping(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _mapping_list(value: Any) -> List[Dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value if isinstance(item, Mapping)]
+
+
+def _serialized_branches(trace: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    raw_branches = trace.get("branches")
+    if isinstance(raw_branches, list):
+        return [
+            {
+                "messages": _mapping_list(_as_mapping(branch).get("messages")),
+                "num_input_tokens": _as_mapping(branch).get("num_input_tokens", 0),
+                "num_output_tokens": _as_mapping(branch).get("num_output_tokens", 0),
+            }
+            for branch in raw_branches
+            if isinstance(branch, Mapping)
+        ]
+
+    raw_nodes = trace.get("nodes")
+    if not isinstance(raw_nodes, list):
+        return []
+    nodes = [_as_mapping(node) for node in raw_nodes]
+    parents = {node.get("parent") for node in nodes if isinstance(node.get("parent"), int)}
+    leaves = [index for index in range(len(nodes)) if index not in parents]
+    calls = trace.get("calls")
+    calls_by_node = (
+        {
+            call.get("node"): call
+            for call in calls
+            if isinstance(call, Mapping) and isinstance(call.get("node"), int)
+        }
+        if isinstance(calls, list)
+        else {}
+    )
+
+    branches: List[Dict[str, Any]] = []
+    for leaf in leaves:
+        path: List[int] = []
+        seen = set()
+        node_index: Any = leaf
+        while (
+            isinstance(node_index, int) and 0 <= node_index < len(nodes) and node_index not in seen
+        ):
+            seen.add(node_index)
+            path.append(node_index)
+            node_index = nodes[node_index].get("parent")
+        path.reverse()
+        branch_calls = [calls_by_node[index] for index in path if index in calls_by_node]
+        input_tokens, output_tokens = _branch_token_counts(branch_calls)
+        branches.append(
+            {
+                "messages": [
+                    dict(message)
+                    for index in path
+                    if isinstance((message := nodes[index].get("message")), Mapping)
+                ],
+                "num_input_tokens": input_tokens,
+                "num_output_tokens": output_tokens,
+            }
+        )
+    return branches
+
+
+def _branch_token_counts(calls: Sequence[Mapping[str, Any]]) -> tuple[int, int]:
+    input_tokens = 0
+    output_tokens = 0
+    previous_total = 0
+    for call in calls:
+        usage = _as_mapping(call.get("usage"))
+        current_input, current_output = _usage_counts(usage)
+        input_tokens += max(0, current_input - previous_total)
+        output_tokens += current_output
+        previous_total = int(usage.get("total_tokens", current_input + current_output) or 0)
+    return input_tokens, output_tokens
+
+
+def _aggregate_usage(trace: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    calls = trace.get("calls")
+    if not isinstance(calls, list):
+        return None
+    usages = [usage for call in calls if (usage := _as_mapping(_as_mapping(call).get("usage")))]
+    if not usages:
+        return None
+    if any("prompt_tokens" in usage or "completion_tokens" in usage for usage in usages):
+        result: Dict[str, Any] = {
+            "prompt_tokens": sum(int(usage.get("prompt_tokens", 0) or 0) for usage in usages),
+            "completion_tokens": sum(
+                int(usage.get("completion_tokens", 0) or 0) for usage in usages
+            ),
+        }
+        for key in ("cached_input_tokens", "reasoning_tokens", "cost"):
+            values = [usage[key] for usage in usages if usage.get(key) is not None]
+            if values:
+                result[key] = sum(values)
+        return result
+
+    input_tokens = 0
+    output_tokens = 0
+    for usage in usages:
+        current_input, current_output = _usage_counts(usage)
+        input_tokens += current_input
+        output_tokens += current_output
+    if not input_tokens and not output_tokens:
+        return None
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": input_tokens + output_tokens,
+    }
+
+
+def _usage_counts(usage: Mapping[str, Any]) -> tuple[int, int]:
+    if "input_tokens" in usage:
+        input_tokens = int(usage.get("input_tokens", 0) or 0)
+    else:
+        input_tokens = int(usage.get("prompt_tokens", 0) or 0) + int(
+            usage.get("cached_input_tokens", 0) or 0
+        )
+    output_tokens = int(usage.get("output_tokens", usage.get("completion_tokens", 0)) or 0)
+    return input_tokens, output_tokens
+
+
+def _total_reward(rewards: Mapping[str, Any]) -> float:
+    total = 0.0
+    for reward in rewards.values():
+        if reward is None:
+            continue
+        if isinstance(reward, Mapping):
+            total += float(reward.get("score", 0.0) or 0.0) * float(
+                reward.get("weight", 1.0) or 0.0
+            )
+        else:
+            total += float(reward)
+    return total
+
+
+def _is_truncated(stop_condition: Any, trace: Mapping[str, Any]) -> bool:
+    if stop_condition in {
+        "max_turns",
+        "max_input_tokens",
+        "max_output_tokens",
+        "max_total_tokens",
+        "context_length",
+    }:
+        return True
+    calls = trace.get("calls")
+    if not isinstance(calls, list):
+        return False
+    last_successful = next(
+        (
+            call
+            for call in reversed(calls)
+            if isinstance(call, Mapping) and call.get("error") is None
+        ),
+        None,
+    )
+    return bool(last_successful and last_successful.get("finish_reason") == "length")
 
 
 def episode_to_samples(episode: Any, rollout_number: int) -> List[Dict[str, Any]]:

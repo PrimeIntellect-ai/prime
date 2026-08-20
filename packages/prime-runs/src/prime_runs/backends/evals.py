@@ -198,7 +198,6 @@ class EvalsBackend:
                 self._client.post(
                     f"/evaluations/{run_id}/status",
                     json_body={"status": _PLATFORM_STATUS[status], "error": error},
-                    max_attempts=1,
                     idempotent=True,
                 )
                 return
@@ -211,10 +210,17 @@ class EvalsBackend:
                     "recording terminal state in metadata instead"
                 )
             except RunAPIError as exc:
-                if exc.status_code not in (405, 422):
+                if is_transient(exc) or (exc.status_code is not None and exc.status_code >= 500):
+                    logger.warning(
+                        "Status endpoint remained unavailable after retries (%s); "
+                        "recording terminal state in metadata instead",
+                        exc,
+                    )
+                elif exc.status_code not in (405, 422):
                     raise
-                self._status_endpoint_missing = True
-                logger.debug("Status endpoint rejected the request (%s); using metadata", exc)
+                else:
+                    self._status_endpoint_missing = True
+                    logger.debug("Status endpoint rejected the request (%s); using metadata", exc)
 
         # Fallback: the run cannot be moved out of RUNNING, but the failure is
         # at least recorded where an operator and the dashboard can both read it.
@@ -227,8 +233,8 @@ class EvalsBackend:
             summary=summary,
         )
         logger.warning(
-            "Run %s %s, but the platform has no way to mark an evaluation failed; "
-            "it will keep showing as running. Recorded the failure in metadata.prime_runs.",
+            "Run %s %s, but its evaluation status could not be updated; it will keep "
+            "showing as running. Recorded the failure in metadata.prime_runs.",
             run_id,
             status.value,
         )

@@ -7,12 +7,12 @@ different one — the run ID stamped into the records was issued at ``init()``
 and does not change on sync.
 """
 
-import json
 import logging
 from pathlib import Path
 from typing import Any, BinaryIO, Mapping, Optional, Sequence, Union
 
 from .. import _fork
+from .._http import encode_json
 from .base import Sink, to_mapping
 
 logger = logging.getLogger(__name__)
@@ -71,8 +71,10 @@ class OfflineSink(Sink):
                 if self._run_kind:
                     run["type"] = self._run_kind
                 mapping["run"] = run
-            line = json.dumps(mapping, ensure_ascii=False, separators=(",", ":"), default=str)
-            _write_all(handle, (line + "\n").encode("utf-8"))
+            # Match the online JSON encoder exactly. In particular, rejecting
+            # NaN/Infinity here prevents creating an archive that exists but
+            # cannot later be uploaded by Prime Traces' strict parser.
+            _write_all(handle, encode_json(mapping) + b"\n")
             self.records_written += 1
 
     def _handle(self, name: str) -> BinaryIO:

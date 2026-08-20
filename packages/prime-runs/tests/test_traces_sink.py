@@ -128,6 +128,17 @@ def test_a_disabled_sink_stops_calling_the_service():
     assert client.calls == []
 
 
+def test_receipt_history_is_bounded_while_the_total_is_retained():
+    client = FakeTracesClient()
+    sink = make_sink(client, receipt_history_size=2)
+
+    for index in range(5):
+        sink.write([{"id": f"t{index}"}])
+
+    assert sink.receipts_received == 5
+    assert len(sink.receipts) == 2
+
+
 def test_closing_the_sink_closes_the_client():
     client = FakeTracesClient()
     sink = make_sink(client)

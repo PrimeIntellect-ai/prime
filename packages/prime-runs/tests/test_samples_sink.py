@@ -1,5 +1,6 @@
 """The legacy sample sink that keeps today's viewer working."""
 
+import pytest
 from _fakes import make_episode, make_trace
 from conftest import RecordingHandler
 
@@ -56,12 +57,59 @@ def test_a_producer_that_already_speaks_v0_is_passed_through(make_platform_clien
     assert body["samples"] == [{"sample_id": "s1", "reward": 1.0}]
 
 
-def test_records_this_sink_cannot_project_are_skipped_not_posted(make_platform_client, eval_routes):
-    """A malformed row would be rejected for the whole batch, taking the valid
-    rows with it."""
+def test_serialized_trace_records_are_projected(make_platform_client, eval_routes):
     sink, handler = make_sink(make_platform_client, eval_routes)
 
-    sink.write([{"unrelated": True}])
+    sink.write([make_trace(trace_id="serialized-trace", reward=0.75).to_record()])
+
+    body = handler.bodies_for("/api/v1/evaluations/eval-abc/samples")[0]
+    assert body["samples"][0]["sample_id"] == "serialized-trace"
+    assert body["samples"][0]["reward"] == 0.75
+
+
+def test_serialized_episode_records_keep_the_native_wrapper(make_platform_client, eval_routes):
+    sink, handler = make_sink(make_platform_client, eval_routes)
+    record = make_episode("serialized-episode", [make_trace()]).to_record()
+
+    sink.write([record])
+
+    sample = handler.bodies_for("/api/v1/evaluations/eval-abc/samples")[0]["samples"][0]
+    assert sample["sample_id"] == "serialized-episode"
+    assert sample["info"]["native_wrapper"] == record
+
+
+def test_serialized_message_graphs_recover_the_viewer_completion(make_platform_client, eval_routes):
+    sink, handler = make_sink(make_platform_client, eval_routes)
+    record = {
+        "id": "graph-trace",
+        "task": {"data": {"idx": 7, "answer": "42"}},
+        "agent": {"name": "solver", "trainable": True},
+        "nodes": [
+            {"parent": None, "message": {"role": "user", "content": "6 * 7?"}},
+            {"parent": 0, "message": {"role": "assistant", "content": "42"}},
+        ],
+        "calls": [
+            {
+                "node": 1,
+                "usage": {"prompt_tokens": 4, "completion_tokens": 1},
+            }
+        ],
+        "rewards": {"correct": {"score": 1.0, "weight": 1.0}},
+    }
+
+    sink.write([record])
+
+    sample = handler.bodies_for("/api/v1/evaluations/eval-abc/samples")[0]["samples"][0]
+    assert sample["example_id"] == 7
+    assert sample["completion"][-1] == {"role": "assistant", "content": "42"}
+    assert sample["reward"] == 1.0
+
+
+def test_records_this_sink_cannot_project_fail_explicitly(make_platform_client, eval_routes):
+    sink, handler = make_sink(make_platform_client, eval_routes)
+
+    with pytest.raises(TypeError, match="non-empty 'id'"):
+        sink.write([{"unrelated": True}])
 
     assert handler.requests == []
 

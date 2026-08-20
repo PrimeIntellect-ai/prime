@@ -129,6 +129,45 @@ def test_a_model_contributes_only_the_fields_someone_set():
     assert _normalize_config(model) == {"model": "Qwen/Qwen3-8B", "max_steps": 1000}
 
 
+def test_a_dump_that_cannot_serialize_says_so_instead_of_dumping_everything():
+    """The recovery on offer — dump every field — is the exact outcome passing a
+    model was meant to avoid, so it must never be reached by guessing at why a
+    call failed. A broken serializer is the caller's bug and surfaces as itself."""
+
+    class Broken:
+        def model_dump(self, mode=None, exclude_unset=False):
+            raise TypeError("serializer blew up")
+
+    with pytest.raises(TypeError, match="serializer blew up"):
+        _normalize_config(Broken())
+
+
+def test_a_dump_without_exclude_unset_falls_back_loudly(caplog):
+    """Degrading to the full config is allowed, going quiet about it is not."""
+
+    class Old:
+        def model_dump(self):
+            return {"model": "Qwen/Qwen3-8B", "seed": 0}
+
+    with caplog.at_level("WARNING"):
+        assert _normalize_config(Old()) == {"model": "Qwen/Qwen3-8B", "seed": 0}
+
+    assert "exclude_unset" in caplog.text
+    assert "defaults included" in caplog.text
+
+
+def test_a_dump_taking_kwargs_is_given_the_keywords():
+    seen = {}
+
+    class Flexible:
+        def model_dump(self, **kwargs):
+            seen.update(kwargs)
+            return {"a": 1}
+
+    assert _normalize_config(Flexible()) == {"a": 1}
+    assert seen == {"mode": "json", "exclude_unset": True}
+
+
 def test_a_mapping_is_taken_exactly_as_given():
     """The caller already decided what to say; second-guessing it would be worse."""
     assert _normalize_config({"a": 1, "b": None}) == {"a": 1, "b": None}

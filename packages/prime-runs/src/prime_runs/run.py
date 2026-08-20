@@ -16,6 +16,7 @@ a locally issued ID through the same path, so there is one code path, not two.
 """
 
 import atexit
+import inspect
 import logging
 import math
 import os
@@ -1085,6 +1086,25 @@ def _merge_mapping(target: Dict[str, Any], value: Any) -> None:
         target.update(value)
 
 
+def _accepts_exclude_unset(dump: Any) -> bool:
+    """Whether a ``model_dump`` takes the keywords we want to hand it.
+
+    Asked of the signature rather than discovered by catching ``TypeError``.
+    Catching would mean inferring *why* a call failed from its exception type,
+    and the only available recovery — dumping every field — is precisely the
+    outcome this whole path exists to avoid. So a wrong inference degrades
+    silently, in the one direction that matters. A real serialization failure
+    should surface as itself.
+    """
+    try:
+        params = inspect.signature(dump).parameters
+    except (TypeError, ValueError):  # pragma: no cover - uninspectable callables
+        return False
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return True
+    return {"mode", "exclude_unset"} <= params.keys()
+
+
 def _normalize_config(value: Any) -> Dict[str, Any]:
     """A producer's config as a plain dict, in the most faithful form available.
 
@@ -1121,9 +1141,16 @@ def _normalize_config(value: Any) -> Dict[str, Any]:
         return {CONFIG_SOURCE_KEY: source.to_dict()}
     dump = getattr(value, "model_dump", None)
     if callable(dump):
-        try:
+        if _accepts_exclude_unset(dump):
             dumped = dump(mode="json", exclude_unset=True)
-        except TypeError:  # pragma: no cover - a model_dump with a different signature
+        else:
+            # Not silent: the fallback records every default, which is the exact
+            # outcome the caller was trying to avoid by handing us a model.
+            logger.warning(
+                "%s.model_dump() does not accept exclude_unset; recording the fully "
+                "resolved config instead, defaults included.",
+                type(value).__name__,
+            )
             dumped = dump()
         if isinstance(dumped, Mapping):
             return dict(dumped)

@@ -140,7 +140,11 @@ class TracesSink(Sink):
                     f"Prime Traces is not enabled for this account ({exc}); "
                     "falling back to the remaining sinks"
                 )
-                return
+                # The worker contains this error in the default warn mode and
+                # continues with the remaining sinks. Raising is still required
+                # so strict callers see the failed batch and loss accounting is
+                # updated instead of reporting a successful traces-only run.
+                raise
             raise
         self.receipts_received += len(receipts)
         if self._receipt_history_size:

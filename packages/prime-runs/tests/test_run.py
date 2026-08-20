@@ -2,15 +2,18 @@
 
 import signal
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
 
 import pytest
 from conftest import FakeSink
+from prime_traces.exceptions import ForbiddenError
 
 from prime_runs.exceptions import RunFinishedError
 from prime_runs.models import RunHandle, RunSpec, RunStatus
 from prime_runs.run import Run
+from prime_runs.sinks import TracesSink
 
 
 class FakeBackend:
@@ -222,6 +225,45 @@ def test_finish_is_idempotent():
     assert backend.finalized[0]["summary"] == {"avg_reward": 1.0}
 
 
+def test_concurrent_finish_waits_for_the_first_teardown_to_complete():
+    class BlockingBackend(FakeBackend):
+        def __init__(self) -> None:
+            super().__init__()
+            self.finalize_started = threading.Event()
+            self.release_finalize = threading.Event()
+
+        def finalize(self, run_id, *, status, summary=None, error=None, config=None) -> None:
+            self.finalize_started.set()
+            assert self.release_finalize.wait(2.0)
+            super().finalize(
+                run_id, status=status, summary=summary, error=error, config=config
+            )
+
+    backend = BlockingBackend()
+    run = make_run(backend)
+    second_started = threading.Event()
+
+    def finish_second() -> None:
+        second_started.set()
+        run.finish(status=RunStatus.FAILED)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(run.finish)
+        assert backend.finalize_started.wait(2.0)
+        assert run.finished is False
+
+        second = executor.submit(finish_second)
+        assert second_started.wait(2.0)
+        assert second.done() is False
+
+        backend.release_finalize.set()
+        first.result(timeout=2.0)
+        second.result(timeout=2.0)
+
+    assert run.finished is True
+    assert [entry["status"] for entry in backend.finalized] == [RunStatus.COMPLETED]
+
+
 @pytest.mark.parametrize("status", [RunStatus.RUNNING, "running"])
 def test_finish_rejects_a_nonterminal_status_without_closing_the_run(status):
     backend = FakeBackend()
@@ -346,6 +388,27 @@ def test_finish_warns_when_uploads_do_not_drain(caplog):
         run.finish()
 
     assert "did not drain" in caplog.text
+
+
+def test_finish_uses_one_timeout_budget_for_flush_and_close():
+    run = make_run()
+    run._finish_timeout = 0.1
+    observed = {}
+
+    def slow_flush(timeout=None):
+        observed["flush"] = timeout
+        time.sleep(0.02)
+        return False
+
+    def record_close(timeout=None):
+        observed["close"] = timeout
+
+    run._worker.flush = slow_flush
+    run._worker.close = record_close
+
+    run.finish()
+
+    assert 0.0 <= observed["close"] < observed["flush"] <= run._finish_timeout
 
 
 def test_a_process_that_exits_without_finishing_reports_crashed():
@@ -478,6 +541,48 @@ def test_an_upload_failure_is_reported_once():
     run.flush()  # nothing left to raise
 
     run.finish()
+
+
+def test_a_gated_trace_upload_reaches_strict_callers_and_loss_accounting():
+    class GatedClient:
+        def upload_records(self, records, **kwargs):
+            raise ForbiddenError(
+                "not in beta", status_code=403, code="service_not_enabled"
+            )
+
+        def close(self) -> None:
+            pass
+
+    run = make_run(sinks=[TracesSink(client=GatedClient())], on_error="raise")
+    run.log_traces([{"id": "t1"}])
+
+    with pytest.raises(ForbiddenError, match="not in beta"):
+        run.finish()
+
+    assert run.failed_records == {"traces": 1}
+
+
+def test_a_signal_interrupting_finish_is_chained_after_teardown(monkeypatch):
+    events = []
+
+    class SignallingBackend(FakeBackend):
+        def finalize(self, run_id, *, status, summary=None, error=None, config=None) -> None:
+            events.append("finalize-start")
+            run._handle_signal(signal.SIGTERM, None)
+            events.append("finalize-end")
+            super().finalize(
+                run_id, status=status, summary=summary, error=error, config=config
+            )
+
+    backend = SignallingBackend()
+    run = make_run(backend)
+    run._previous_signal_handlers[signal.SIGTERM] = lambda *_: events.append("signal")
+    monkeypatch.setattr("prime_runs.run.signal.signal", lambda *_: None)
+
+    run.finish()
+
+    assert events == ["finalize-start", "finalize-end", "signal"]
+    assert backend.closed is True
 
 
 def test_signal_handlers_are_restored_when_the_run_finishes():

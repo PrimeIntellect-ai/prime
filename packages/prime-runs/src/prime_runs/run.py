@@ -108,7 +108,15 @@ class Run:
         self._pending_metrics: Dict[str, Any] = {}
         self._pending_metric_step: Optional[int] = None
         self._finish_lock = threading.RLock()
+        self._finish_condition = threading.Condition(self._finish_lock)
+        self._finishing = False
+        self._finishing_thread_id: Optional[int] = None
         self._finished = False
+        # A Python signal handler can interrupt finish() on the same thread.
+        # Re-entering teardown would duplicate finalization, while chaining the
+        # signal immediately would kill the process before teardown completes.
+        # Keep the first such signal and deliver it once the run is closed.
+        self._pending_signal: Optional[tuple[int, Any, Any]] = None
 
         sinks = sinks or []
         worker_kwargs: Dict[str, Any] = {}
@@ -299,33 +307,68 @@ class Run:
 
         ``status`` must be one of the terminal :class:`RunStatus` values.
         Safe to call from ``__exit__``, an atexit hook and a signal handler at
-        once — whichever gets there first reports the status, and the rest
-        return.
+        once — whichever gets there first reports the status, and the rest wait
+        for that teardown to complete.
         """
-        with self._finish_lock:
+        thread_id = threading.get_ident()
+        with self._finish_condition:
+            while self._finishing and not self._finished:
+                # A signal handler can interrupt this very finish() call. It
+                # cannot wait for itself, so _handle_signal defers chaining the
+                # signal and this nested call simply yields to the active one.
+                if self._finishing_thread_id == thread_id:
+                    return
+                self._finish_condition.wait()
             if self._finished:
                 return
             resolved = RunStatus(status) if not isinstance(status, RunStatus) else status
             if not resolved.is_terminal():
                 raise ValueError(f"finish() requires a terminal status, got {resolved.value!r}")
-            self._finished = True
+            self._finishing = True
+            self._finishing_thread_id = thread_id
+
+        try:
+            self._finish_once(summary, resolved, error)
+        finally:
+            with self._finish_condition:
+                self._finishing = False
+                self._finishing_thread_id = None
+                self._finished = True
+                pending_signal = self._pending_signal
+                self._pending_signal = None
+                self._finish_condition.notify_all()
+
+            if pending_signal is not None:
+                self._chain_signal(*pending_signal)
+
+    def _finish_once(
+        self,
+        summary: Optional[Mapping[str, Any]],
+        resolved: RunStatus,
+        error: Optional[str],
+    ) -> None:
+        """Perform the single teardown owned by the first ``finish()`` caller."""
 
         if summary:
             self.summary.update(_clean_metrics(summary))
         self._status = resolved
 
         finish_error: Optional[BaseException] = None
+        deadline = time.monotonic() + max(0.0, self._finish_timeout)
+
+        def remaining_finish_time() -> float:
+            return max(0.0, deadline - time.monotonic())
 
         # Order matters: records first, so a dashboard that reacts to the
         # terminal status never sees a finished run with samples still landing.
-        if not self._worker.flush(timeout=self._finish_timeout):
+        if not self._worker.flush(timeout=remaining_finish_time()):
             logger.warning(
                 "Run %s: uploads did not drain within %ss; finalizing anyway. "
                 "Some records may be missing from this run.",
                 self.id,
                 self._finish_timeout,
             )
-        self._worker.close(timeout=self._finish_timeout)
+        self._worker.close(timeout=remaining_finish_time())
 
         if self._owns_lifecycle:
             finish_error = self._finish_guarded(
@@ -480,7 +523,13 @@ class Run:
         # SIG_DFL — which re-raises the signal at its default disposition and
         # kills the process instead of running the handler the app installed.
         previous = self._previous_signal_handlers.get(signum, signal.SIG_DFL)
-        if not self._finished:
+        with self._finish_condition:
+            if self._finishing and self._finishing_thread_id == threading.get_ident():
+                if self._pending_signal is None:
+                    self._pending_signal = (signum, frame, previous)
+                return
+            finished = self._finished
+        if not finished:
             # CRASHED, not FAILED: the producer never said the run failed, it was
             # stopped from outside its own control flow. Same bucket as the
             # atexit path, and deliberately not the bucket a broken eval lands in.
@@ -488,6 +537,11 @@ class Run:
                 self.finish(status=RunStatus.CRASHED, error=f"received {name}")
             except Exception as exc:  # noqa: BLE001 - the signal must still chain
                 logger.warning("Run %s: reporting %s failed: %s", self.id, name, exc)
+        self._chain_signal(signum, frame, previous)
+
+    @staticmethod
+    def _chain_signal(signum: int, frame: Any, previous: Any) -> None:
+        """Restore and invoke the handler displaced by this run."""
         signal.signal(signum, previous)
         if callable(previous):
             previous(signum, frame)
@@ -517,6 +571,10 @@ class Run:
         been owned at fork time by a thread that no longer exists.
         """
         self._finish_lock = threading.RLock()
+        self._finish_condition = threading.Condition(self._finish_lock)
+        self._finishing = False
+        self._finishing_thread_id = None
+        self._pending_signal = None
         self._is_primary = False
         self._owns_lifecycle = False
         self._deferred_error = None
@@ -553,7 +611,7 @@ class Run:
         _exported_run_ids.pop(self.id, None)
 
     def _require_live(self, operation: str) -> None:
-        if self._finished:
+        if self._finishing or self._finished:
             raise RunFinishedError(
                 f"{operation}() was called on run {self.id}, which is already finished. "
                 "The platform has closed this run out; start a new one."
@@ -761,7 +819,10 @@ def init(
             # Both transports run during the transition: traces is the system of
             # record, the sample table is what today's viewer reads, and Prime
             # Traces is still gated to an account allowlist.
-            run_sinks.append(EvalSamplesSink(client))
+            samples_client = PlatformClient(
+                api_key=api_key, base_url=base_url, timeout=DEFAULT_TIMEOUT
+            )
+            run_sinks.append(EvalSamplesSink(samples_client, close_client=True))
     else:
         run_sinks = list(sinks)
 

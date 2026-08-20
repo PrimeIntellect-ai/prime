@@ -30,9 +30,10 @@ class EvalSamplesSink(Sink):
 
     name = "eval_samples"
 
-    def __init__(self, client: PlatformClient) -> None:
+    def __init__(self, client: PlatformClient, *, close_client: bool = False) -> None:
         self.enabled = True
         self._client = client
+        self._close_client = close_client
         self._run_id: Optional[str] = None
         # Carried across calls so a streaming producer numbers rollouts the same
         # way a one-shot upload does: the Nth episode for an example is rollout N,
@@ -103,4 +104,5 @@ class EvalSamplesSink(Sink):
         """Writes are synchronous; the uploader thread owns the asynchrony."""
 
     def close(self) -> None:
-        """The platform client is shared with the backend, which closes it."""
+        if self._close_client:
+            self._client.close()

@@ -93,7 +93,7 @@ def test_producer_objects_are_passed_through_untouched():
     assert client.calls[0][0][0] is trace
 
 
-def test_a_gated_account_disables_the_sink_instead_of_failing_the_run(caplog):
+def test_a_gated_account_disables_the_sink_and_reports_the_failed_batch(caplog):
     """Prime Traces is in closed beta; no runtime action fixes a 403, so
     retrying it for the rest of the run only produces noise."""
     client = FakeTracesClient(
@@ -102,7 +102,8 @@ def test_a_gated_account_disables_the_sink_instead_of_failing_the_run(caplog):
     sink = make_sink(client)
 
     with caplog.at_level("WARNING"):
-        sink.write([{"id": "t1"}])
+        with pytest.raises(ForbiddenError, match="not in beta"):
+            sink.write([{"id": "t1"}])
 
     assert sink.enabled is False
     assert "not enabled" in caplog.text

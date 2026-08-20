@@ -177,8 +177,9 @@ def online(monkeypatch, make_platform_client, eval_routes):
 
     def _init(routes=None, **kwargs):
         handler = RecordingHandler(routes or eval_routes)
-        client = make_platform_client(handler)
-        monkeypatch.setattr("prime_runs.run.PlatformClient", lambda **_: client)
+        monkeypatch.setattr(
+            "prime_runs.run.PlatformClient", lambda **_: make_platform_client(handler)
+        )
         run = pr.init(
             name="test-run",
             environments=["gsm8k"],
@@ -191,6 +192,57 @@ def online(monkeypatch, make_platform_client, eval_routes):
         return run, handler
 
     return _init
+
+
+def test_samples_use_a_separate_client_from_run_finalization(
+    monkeypatch, make_platform_client, eval_routes
+):
+    handler = RecordingHandler(eval_routes)
+
+    class TrackingClient:
+        def __init__(self):
+            self._delegate = make_platform_client(handler)
+            self.closed = False
+
+        def get(self, *args, **kwargs):
+            return self._delegate.get(*args, **kwargs)
+
+        def post(self, *args, **kwargs):
+            return self._delegate.post(*args, **kwargs)
+
+        def put(self, *args, **kwargs):
+            return self._delegate.put(*args, **kwargs)
+
+        def close(self):
+            self.closed = True
+
+    clients = []
+
+    def make_client(**kwargs):
+        client = TrackingClient()
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr("prime_runs.run.PlatformClient", make_client)
+    run = pr.init(
+        name="test-run",
+        environments=["gsm8k"],
+        api_key="test-key",
+        traces=False,
+        handle_signals=False,
+    )
+    assert len(clients) == 2
+
+    # Model UploadWorker.close() timing out: it intentionally leaves its sink
+    # open, while lifecycle finalization still closes the backend transport.
+    run._worker.close = lambda timeout=None: None
+    run.finish()
+
+    backend_client, samples_client = clients
+    assert backend_client.closed is True
+    assert samples_client.closed is False
+    run._worker.sinks[0].close()
+    assert samples_client.closed is True
 
 
 def test_an_online_run_returns_the_platforms_id_and_viewer_url(online):

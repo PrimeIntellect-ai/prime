@@ -221,6 +221,21 @@ def test_finish_is_idempotent():
     assert backend.finalized[0]["summary"] == {"avg_reward": 1.0}
 
 
+@pytest.mark.parametrize("status", [RunStatus.RUNNING, "running"])
+def test_finish_rejects_a_nonterminal_status_without_closing_the_run(status):
+    backend = FakeBackend()
+    run = make_run(backend)
+
+    with pytest.raises(ValueError, match="requires a terminal status"):
+        run.finish(status=status)
+
+    assert not run.finished
+    assert backend.finalized == []
+
+    run.finish()
+    assert backend.finalized[0]["status"] is RunStatus.COMPLETED
+
+
 def test_logging_after_finish_is_a_producer_bug():
     run = make_run()
     run.finish()
@@ -248,6 +263,16 @@ def test_an_exception_inside_the_block_fails_the_run_and_still_propagates():
 
     assert backend.finalized[0]["status"] is RunStatus.FAILED
     assert "rollout blew up" in backend.finalized[0]["error"]
+
+
+def test_a_finish_failure_does_not_mask_the_context_exception():
+    backend = FakeBackend(fail_on="finalize")
+
+    with pytest.raises(ValueError, match="rollout blew up"):
+        with make_run(backend, on_error="raise"):
+            raise ValueError("rollout blew up")
+
+    assert backend.closed is True
 
 
 def test_an_interrupt_is_recorded_as_a_decision_not_a_fault():

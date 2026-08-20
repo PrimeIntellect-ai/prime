@@ -290,6 +290,7 @@ class Run:
     ) -> None:
         """Flush everything and close the run out. Idempotent.
 
+        ``status`` must be one of the terminal :class:`RunStatus` values.
         Safe to call from ``__exit__``, an atexit hook and a signal handler at
         once — whichever gets there first reports the status, and the rest
         return.
@@ -298,6 +299,8 @@ class Run:
             if self._finished:
                 return
             resolved = RunStatus(status) if not isinstance(status, RunStatus) else status
+            if not resolved.is_terminal():
+                raise ValueError(f"finish() requires a terminal status, got {resolved.value!r}")
             self._finished = True
 
         if summary:
@@ -393,13 +396,32 @@ class Run:
     def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> bool:
         if exc_type is None:
             self.finish()
-        elif isinstance(exc, KeyboardInterrupt):
+            return False
+
+        if isinstance(exc, KeyboardInterrupt):
             # An interrupt is a decision, not a fault, so it must not land in
             # the same bucket as broken ones. Matches the SIGINT handler, which
             # normally gets there first when signal handling is on.
-            self.finish(status=RunStatus.CRASHED, error="interrupted")
+            status = RunStatus.CRASHED
+            error = "interrupted"
         else:
-            self.finish(status=RunStatus.FAILED, error=_describe(exc))
+            status = RunStatus.FAILED
+            error = _describe(exc)
+
+        try:
+            self.finish(status=status, error=error)
+        except BaseException as finish_error:
+            # The producer exception is the reason this context is unwinding.
+            # A telemetry teardown error must not replace it, even in strict
+            # mode; finish() has already recorded the failure on the run.
+            logger.warning(
+                "Run %s: finishing after %s also failed: %s: %s",
+                self.id,
+                exc_type.__name__,
+                type(finish_error).__name__,
+                finish_error,
+                exc_info=True,
+            )
         return False
 
     # ------------------------------------------------------------- internals

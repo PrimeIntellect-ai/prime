@@ -61,39 +61,38 @@ join the run their parent opened instead of each opening their own.
 
 ## Config
 
-A run records its configuration two ways, because they answer different questions.
+One parameter, in whatever form you have it — the same shape `environments=`
+already has.
 
 ```python
-run = pr.init(
-    ...,
-    config=cfg,                     # structured — queryable
-    config_source="eval.toml",      # verbatim — readable
-)
+pr.init(config="eval.toml")   # the file the run was launched from
+pr.init(config={"n": 4})      # a mapping
+pr.init(config=cfg)           # a pydantic model
 ```
 
-**`config_source`** is the file the run was launched from — `uv run eval @
-eval.toml`, `uv run rl @ train.toml` — stored byte for byte, comments and section
-grouping intact. That file *is* the run's real configuration, and it is the thing
-worth putting in front of a person. Pass a path (a `str` or `Path` is always a
-path, never inline text); pass `pr.ConfigSource(text=..., format=...)` if you
-already hold it in memory. It lands under the reserved `config_source` key inside
-the run's config, so every write that carries the config carries it too —
-including the offline archive.
-
-**`config`** is the structured form. A mapping is stored exactly as given. A
-pydantic model is dumped with `exclude_unset=True`, so only fields somebody
-actually set are recorded:
-
-| you pass | you get |
+| you pass | what is stored |
 | --- | --- |
-| `config={"n": 4}` | `{"n": 4}` |
-| `config=cfg` (a model) | only the fields set on `cfg` |
-| `config=cfg.model_dump()` | every field, defaults included |
+| a path | the file, byte for byte, under `config_source` |
+| a mapping | exactly as given |
+| a pydantic model | only the fields somebody set (`exclude_unset=True`) |
+| `cfg.model_dump()` | every field, defaults included |
 
-A resolved dump of a deep config tree is hundreds of lines nobody chose, and a
-reader scrolling it cannot tell which three values were the experiment. The
-shorter call gives the more useful answer; the full dump is still available to
-anyone who explicitly asks for it.
+**A path** is the common case: both producers are launched from one user-authored
+file (`uv run eval @ eval.toml`, `uv run rl @ train.toml`), and that file *is* the
+run's configuration. It is kept verbatim — comments, key order and section
+grouping included, none of which survive a dict round-trip. A `str` or `Path` is
+always a path, never inline text; use `pr.ConfigSource(text=...)` if you already
+hold the contents. It is stored, not parsed: parsing would buy a second
+representation of something the platform can already read, at the cost of a TOML
+dependency in a package that deliberately has two.
+
+**A pydantic model** is dumped with `exclude_unset=True` because a resolved dump
+of a deep config tree is hundreds of lines nobody chose, and a reader scrolling it
+cannot tell which three values were the experiment. The full dump is still one
+explicit `cfg.model_dump()` away — the shorter call gives the more useful answer.
+
+Values land in the run's config either way, so a run launched from a file that
+also wants a derived value adds it with `run.update_config({...})`.
 
 Nothing is redacted. A config file holding a secret puts that secret on the run's
 page — keep credentials in the environment, not in the file.

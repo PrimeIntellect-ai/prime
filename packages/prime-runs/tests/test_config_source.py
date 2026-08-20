@@ -31,7 +31,7 @@ num_examples = 1
 """
 
 
-# ------------------------------------------------------------------ coercion
+# ------------------------------------------------------ the config-file form
 
 
 def test_a_path_is_read_verbatim(tmp_path):
@@ -88,7 +88,7 @@ def test_a_binary_file_is_refused(tmp_path):
 
 
 def test_an_unusable_type_says_what_was_expected():
-    with pytest.raises(TypeError, match="config_source must be"):
+    with pytest.raises(TypeError, match="config source must be"):
         ConfigSource.coerce(object())
 
 
@@ -144,14 +144,35 @@ def test_no_config_is_an_empty_config():
 
 
 def test_an_unusable_config_says_what_was_expected():
-    with pytest.raises(TypeError, match="config must be a mapping"):
+    with pytest.raises(TypeError, match="config must be a path"):
         _normalize_config(object())
+
+
+def test_a_path_becomes_a_stored_source(tmp_path):
+    """One parameter, three forms — the same shape ``environments=`` already has."""
+    path = tmp_path / "eval.toml"
+    path.write_text(EVAL_TOML)
+
+    assert _normalize_config(path) == {
+        CONFIG_SOURCE_KEY: {"format": "toml", "text": EVAL_TOML, "filename": "eval.toml"}
+    }
+    assert _normalize_config(str(path))[CONFIG_SOURCE_KEY]["text"] == EVAL_TOML
+    assert _normalize_config(ConfigSource(text="a = 1"))[CONFIG_SOURCE_KEY]["text"] == "a = 1"
+
+
+def test_a_mapping_that_looks_like_a_source_is_still_just_a_mapping():
+    """Form is decided by type, never by inspecting keys — so a config that
+    happens to have a ``text`` field is not mistaken for a launch file."""
+    assert _normalize_config({"text": "hello", "format": "toml"}) == {
+        "text": "hello",
+        "format": "toml",
+    }
 
 
 # -------------------------------------------------------------- through init
 
 
-def test_an_offline_run_stores_the_source_next_to_the_config(tmp_path):
+def test_an_offline_run_stores_the_launch_file(tmp_path):
     path = tmp_path / "eval.toml"
     path.write_text(EVAL_TOML)
 
@@ -160,24 +181,37 @@ def test_an_offline_run_stores_the_source_next_to_the_config(tmp_path):
         environments=["gsm8k"],
         mode="offline",
         dir=str(tmp_path / "runs"),
-        config={"num_examples": 1},
-        config_source=path,
+        config=path,
     )
     run.finish()
 
     state = json.loads((tmp_path / "runs" / run.id / "run.json").read_text())
     stored = state["spec"]["config"]
-    # Both, not either: the structured form stays queryable, the source stays readable.
-    assert stored["num_examples"] == 1
     assert stored[CONFIG_SOURCE_KEY]["text"] == EVAL_TOML
     assert stored[CONFIG_SOURCE_KEY]["filename"] == "eval.toml"
+
+
+def test_extra_values_can_be_merged_onto_a_launch_file(tmp_path):
+    """One parameter takes one form. A run launched from a file that also wants
+    a derived value adds it explicitly, rather than the SDK growing a second
+    config argument for a case that is not the common one."""
+    path = tmp_path / "eval.toml"
+    path.write_text(EVAL_TOML)
+
+    run = pr.init(environments=["gsm8k"], mode="offline", dir=str(tmp_path), config=path)
+    run.update_config({"resolved_model": "deepseek/deepseek-v4-flash"})
+    run.finish()
+
+    state = json.loads((tmp_path / run.id / "run.json").read_text())
+    assert state["config"]["resolved_model"] == "deepseek/deepseek-v4-flash"
+    assert state["config"][CONFIG_SOURCE_KEY]["text"] == EVAL_TOML
 
 
 def test_the_run_reports_its_own_source(tmp_path):
     path = tmp_path / "train.toml"
     path.write_text(EVAL_TOML)
 
-    run = pr.init(environments=["gsm8k"], mode="offline", dir=str(tmp_path), config_source=path)
+    run = pr.init(environments=["gsm8k"], mode="offline", dir=str(tmp_path), config=path)
 
     assert run.config_source.filename == "train.toml"
     assert run.config_source.text == EVAL_TOML
@@ -203,8 +237,7 @@ def test_an_online_run_sends_the_source_in_create_metadata(
         name="tb2",
         environments=["gsm8k"],
         api_key="test-key",
-        config={"num_examples": 1},
-        config_source=path,
+        config=path,
         sinks=[],
     )
     run.finish()
@@ -212,7 +245,7 @@ def test_an_online_run_sends_the_source_in_create_metadata(
     create = next(r for r in handler.requests if r.url.path == "/api/v1/evaluations/")
     metadata = json.loads(create.content)["metadata"]
     assert metadata[CONFIG_SOURCE_KEY]["text"] == EVAL_TOML
-    assert metadata["num_examples"] == 1
+    assert metadata[CONFIG_SOURCE_KEY]["format"] == "toml"
 
 
 def test_the_source_survives_the_failure_fallback(tmp_path):
@@ -221,7 +254,7 @@ def test_the_source_survives_the_failure_fallback(tmp_path):
     path = tmp_path / "eval.toml"
     path.write_text(EVAL_TOML)
 
-    run = pr.init(environments=["gsm8k"], mode="offline", dir=str(tmp_path), config_source=path)
+    run = pr.init(environments=["gsm8k"], mode="offline", dir=str(tmp_path), config=path)
     run.fail("something broke")
 
     state = json.loads((tmp_path / run.id / "run.json").read_text())

@@ -87,12 +87,13 @@ class EnvironmentRef:
 
 
 CONFIG_SOURCE_KEY = "config_source"
-"""Reserved key inside a run's config holding :class:`ConfigSource` as a dict.
+"""Where a config file lands inside a run's config, as a :class:`ConfigSource` dict.
 
-It rides *inside* the config rather than beside it so that every path which
-already carries the config carries the source too — create, the periodic update,
-finalize, the failure fallback, and the offline archive — with no extra
-plumbing and no chance of one of them forgetting it.
+Inside the config rather than beside it, so every path that already carries the
+config carries the file too — create, the periodic update, finalize, the failure
+fallback, and the offline archive — with no extra plumbing and no chance of one
+of them forgetting it. It is also the one key a config-tab renderer has to know
+about: present means "show this verbatim", absent means "show the structure".
 """
 
 MAX_CONFIG_SOURCE_BYTES = 256 * 1024
@@ -118,8 +119,9 @@ class ConfigSource:
     answers "what did every knob end up as", not "what did someone write", and
     it loses comments, key order and section grouping on the way through.
 
-    So this is stored verbatim, next to (not instead of) the structured config.
-    The structured form stays queryable; this form stays readable.
+    So when ``init(config=...)`` is given a path, this is what gets stored: the
+    bytes, not a parse of them. Callers without a file pass a mapping or a model
+    to the same parameter and get the structured form instead.
 
     Nothing here is redacted. A config file that carries a secret will carry it
     onto the run's page, the same way it already reaches anyone who can read the
@@ -158,23 +160,21 @@ class ConfigSource:
             raw = resolved.read_bytes()
         except FileNotFoundError as exc:
             raise ConfigurationError(
-                f"config_source={str(path)!r} does not exist. Pass the path to the file the "
-                "run was started from, or a ConfigSource(text=...) if it is already in memory."
+                f"config={str(path)!r} does not exist. Pass the path to the file the run was "
+                "started from, or a ConfigSource(text=...) if it is already in memory."
             ) from exc
         except OSError as exc:
-            raise ConfigurationError(
-                f"config_source={str(path)!r} could not be read: {exc}"
-            ) from exc
+            raise ConfigurationError(f"config={str(path)!r} could not be read: {exc}") from exc
         if len(raw) > MAX_CONFIG_SOURCE_BYTES:
             raise ConfigurationError(
-                f"config_source={str(path)!r} is {len(raw)} bytes, over the "
+                f"config={str(path)!r} is {len(raw)} bytes, over the "
                 f"{MAX_CONFIG_SOURCE_BYTES}-byte limit for a stored run config."
             )
         try:
             text = raw.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise ConfigurationError(
-                f"config_source={str(path)!r} is not UTF-8 text; a run config must be readable."
+                f"config={str(path)!r} is not UTF-8 text; a run config must be readable."
             ) from exc
         return cls(
             text=text,
@@ -184,7 +184,7 @@ class ConfigSource:
 
     @classmethod
     def coerce(cls, value: Any) -> Optional["ConfigSource"]:
-        """Normalize whatever ``init(config_source=...)`` was given.
+        """Normalize the config-file form of ``init(config=...)``.
 
         A ``str`` or ``PathLike`` is a *path*, never inline text — that is how
         every caller will reach for it, and guessing between the two would turn
@@ -196,12 +196,13 @@ class ConfigSource:
         if isinstance(value, Mapping):
             source = cls.from_mapping(value)
             if source is None:
-                raise ValueError("config_source mapping must contain a 'text' string")
+                raise ValueError("a config-source mapping must contain a 'text' string")
             return source
         if isinstance(value, (str, os.PathLike)):
             return cls.from_file(value)
         raise TypeError(
-            f"config_source must be a path, a ConfigSource or a mapping, got {type(value).__name__}"
+            "a config source must be a path, a ConfigSource or a mapping, "
+            f"got {type(value).__name__}"
         )
 
     def __post_init__(self) -> None:
@@ -209,7 +210,7 @@ class ConfigSource:
             raise TypeError("ConfigSource.text must be a string")
         if len(self.text.encode("utf-8")) > MAX_CONFIG_SOURCE_BYTES:
             raise ConfigurationError(
-                f"config_source is over the {MAX_CONFIG_SOURCE_BYTES}-byte limit "
+                f"the config source is over the {MAX_CONFIG_SOURCE_BYTES}-byte limit "
                 "for a stored run config."
             )
 

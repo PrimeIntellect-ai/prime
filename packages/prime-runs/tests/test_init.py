@@ -378,14 +378,9 @@ def test_resuming_preserves_existing_config_and_summary(online, eval_routes):
         "metrics": {"old_reward": 0.5, "overridden": "old"},
     }
 
-    run, handler = online(
-        routes=routes,
-        id="eval-abc",
-        config={"overridden": "new"},
-        summary={"overridden": "new"},
-    )
+    run, handler = online(routes=routes, id="eval-abc", config={"overridden": "new"})
     run.update_config({"after_resume": True})
-    run.log({"new_reward": 1.0})
+    run.log({"overridden": "new", "new_reward": 1.0})
     run.finish()
 
     update = handler.bodies_for("/api/v1/evaluations/eval-abc")[0]
@@ -394,6 +389,7 @@ def test_resuming_preserves_existing_config_and_summary(online, eval_routes):
         "overridden": "new",
         "after_resume": True,
     }
+    # Recovered metrics survive; anything logged after the resume wins.
     assert update["metrics"] == {
         "old_reward": 0.5,
         "overridden": "new",

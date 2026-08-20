@@ -238,7 +238,8 @@ def test_an_online_run_sends_the_source_in_create_metadata(
         environments=["gsm8k"],
         api_key="test-key",
         config=path,
-        sinks=[],
+        traces=False,
+        samples=False,
     )
     run.finish()
 

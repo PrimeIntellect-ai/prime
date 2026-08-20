@@ -104,7 +104,7 @@ class Run:
 
         attached_config, attached_summary = _attached_state(handle)
         self.config: Dict[str, Any] = {**attached_config, **spec.config}
-        self.summary: Dict[str, Any] = {**attached_summary, **spec.summary}
+        self.summary: Dict[str, Any] = dict(attached_summary)
         self.errors: List[str] = []
         # Raised at the next synchronization point the caller controls. A sink
         # fails on the uploader thread, where raising reaches nobody — so under
@@ -325,9 +325,6 @@ class Run:
         if not batch:
             return
         self._worker.submit(WriteItem(records=batch, line_format=line_format, step=step))
-
-    # Producers that think in episodes rather than traces; same path.
-    log_episodes = log_traces
 
     def log_samples(self, records: Iterable[Any], *, step: Optional[int] = None) -> None:
         """Alias for :meth:`log_traces`, matching prime-rl's ``Monitor`` vocabulary."""
@@ -775,11 +772,9 @@ def init(
     environments: Optional[Sequence[Any]] = None,
     model: Optional[str] = None,
     framework: Optional[str] = None,
-    dataset: Optional[str] = None,
     description: Optional[str] = None,
     tags: Optional[Sequence[str]] = None,
     config: Optional[Any] = None,
-    summary: Optional[Mapping[str, Any]] = None,
     id: Optional[str] = None,
     mode: Optional[Mode] = None,
     dir: Optional[str] = None,
@@ -789,7 +784,6 @@ def init(
     traces_url: Optional[str] = None,
     traces: bool = True,
     samples: bool = True,
-    sinks: Optional[List[Sink]] = None,
     on_error: OnError = "warn",
     handle_signals: bool = True,
     queue_size: Optional[int] = None,
@@ -828,12 +822,10 @@ def init(
         environments=[EnvironmentRef.coerce(entry) for entry in (environments or [])],
         model=model,
         framework=framework,
-        dataset=dataset,
         description=description,
         tags=list(tags or []),
         team_id=team_id,
         config=_normalize_config(config),
-        summary=dict(summary or {}),
     )
 
     is_primary = _is_primary_rank()
@@ -865,7 +857,7 @@ def init(
     if resolved_mode == "offline":
         offline = OfflineBackend(dir)
         handle = offline.attach(inherited_id) if inherited_id else offline.create(spec)
-        run_sinks = sinks if sinks is not None else [OfflineSink(offline.directory)]
+        run_sinks: List[Sink] = [OfflineSink(offline.directory)]
         run = _build(
             spec,
             offline,
@@ -896,20 +888,15 @@ def init(
     backend = EvalsBackend(client, frontend_url=resolved_config.frontend_url, team_id=team_id)
     handle = backend.attach(inherited_id) if inherited_id else backend.create(spec)
 
-    if sinks is None:
-        run_sinks = []
-        if traces:
-            run_sinks.append(TracesSink(api_key=api_key, traces_url=traces_url, team_id=team_id))
-        if samples:
-            # Both transports run during the transition: traces is the system of
-            # record, the sample table is what today's viewer reads, and Prime
-            # Traces is still gated to an account allowlist.
-            samples_client = PlatformClient(
-                api_key=api_key, base_url=base_url, timeout=DEFAULT_TIMEOUT
-            )
-            run_sinks.append(EvalSamplesSink(samples_client, close_client=True))
-    else:
-        run_sinks = list(sinks)
+    run_sinks = []
+    if traces:
+        run_sinks.append(TracesSink(api_key=api_key, traces_url=traces_url, team_id=team_id))
+    if samples:
+        # Both transports run during the transition: traces is the system of
+        # record, the sample table is what today's viewer reads, and Prime
+        # Traces is still gated to an account allowlist.
+        samples_client = PlatformClient(api_key=api_key, base_url=base_url, timeout=DEFAULT_TIMEOUT)
+        run_sinks.append(EvalSamplesSink(samples_client, close_client=True))
 
     run = _build(
         spec,

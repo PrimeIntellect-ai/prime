@@ -75,11 +75,13 @@ class EvalsBackend:
             "tags": list(spec.tags),
         }
         _set_if(payload, "model_name", spec.model)
-        _set_if(payload, "dataset", spec.dataset or _first_environment_name(spec))
+        # Derived, not asked for: the API has the column and it is always the
+        # environment under a different name, so making producers repeat it
+        # bought nothing.
+        _set_if(payload, "dataset", _first_environment_name(spec))
         _set_if(payload, "framework", spec.framework)
         _set_if(payload, "description", spec.description)
         _set_if(payload, "metadata", spec.config or None)
-        _set_if(payload, "metrics", spec.summary or None)
         _set_if(payload, "team_id", spec.team_id or self._team_id)
 
         # Not replayable: POST defaults to idempotent=False here on purpose. If

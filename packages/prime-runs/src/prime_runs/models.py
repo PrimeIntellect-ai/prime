@@ -229,15 +229,13 @@ class RunSpec:
     environments: List[EnvironmentRef] = field(default_factory=list)
     model: Optional[str] = None
     framework: Optional[str] = None
-    dataset: Optional[str] = None
     description: Optional[str] = None
     tags: List[str] = field(default_factory=list)
     team_id: Optional[str] = None
-    # W&B's split, which maps cleanly onto the platform's existing columns:
-    # `config` is what you set going in (-> metadata), `summary` is what came
-    # out (-> metrics).
+    # Only the inputs. A run's outputs (-> the platform's `metrics`) are not
+    # here because a run being opened does not have any yet; they accumulate on
+    # the handle and are written by update() and finalize().
     config: Dict[str, Any] = field(default_factory=dict)
-    summary: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

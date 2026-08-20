@@ -189,8 +189,7 @@ a traces-only client would leave non-allowlisted accounts with an empty
 dashboard. When the Viewer API reads traces natively, the default sink list drops
 one entry — and no producer changes.
 
-Turn either off with `pr.init(traces=False)` / `pr.init(samples=False)`, or pass
-`sinks=[...]` to supply your own.
+Turn either off with `pr.init(traces=False)` / `pr.init(samples=False)`.
 
 ## Also here
 

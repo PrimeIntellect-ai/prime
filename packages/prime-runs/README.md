@@ -59,6 +59,45 @@ than a scan over upload metadata.
 `init()` also exports `PRIME_RUN_ID`, so forked workers and subprocess launchers
 join the run their parent opened instead of each opening their own.
 
+## Config
+
+A run records its configuration two ways, because they answer different questions.
+
+```python
+run = pr.init(
+    ...,
+    config=cfg,                     # structured — queryable
+    config_source="eval.toml",      # verbatim — readable
+)
+```
+
+**`config_source`** is the file the run was launched from — `uv run eval @
+eval.toml`, `uv run rl @ train.toml` — stored byte for byte, comments and section
+grouping intact. That file *is* the run's real configuration, and it is the thing
+worth putting in front of a person. Pass a path (a `str` or `Path` is always a
+path, never inline text); pass `pr.ConfigSource(text=..., format=...)` if you
+already hold it in memory. It lands under the reserved `config_source` key inside
+the run's config, so every write that carries the config carries it too —
+including the offline archive.
+
+**`config`** is the structured form. A mapping is stored exactly as given. A
+pydantic model is dumped with `exclude_unset=True`, so only fields somebody
+actually set are recorded:
+
+| you pass | you get |
+| --- | --- |
+| `config={"n": 4}` | `{"n": 4}` |
+| `config=cfg` (a model) | only the fields set on `cfg` |
+| `config=cfg.model_dump()` | every field, defaults included |
+
+A resolved dump of a deep config tree is hundreds of lines nobody chose, and a
+reader scrolling it cannot tell which three values were the experiment. The
+shorter call gives the more useful answer; the full dump is still available to
+anyone who explicitly asks for it.
+
+Nothing is redacted. A config file holding a secret puts that secret on the run's
+page — keep credentials in the environment, not in the file.
+
 ## Modes
 
 | mode | what happens |

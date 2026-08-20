@@ -41,6 +41,8 @@ from .exceptions import (
     UnauthorizedError,
 )
 from .models import (
+    CONFIG_SOURCE_KEY,
+    ConfigSource,
     EnvironmentRef,
     Mode,
     OnError,
@@ -63,6 +65,8 @@ __all__ = [
     "projection",
     # Types
     "Config",
+    "ConfigSource",
+    "CONFIG_SOURCE_KEY",
     "EnvironmentRef",
     "Mode",
     "OnError",

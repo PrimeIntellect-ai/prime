@@ -30,7 +30,17 @@ from .backends import Backend, EvalsBackend, OfflineBackend
 from .backends.offline import DEFAULT_DIR_ENV
 from .config import Config
 from .exceptions import ConfigurationError, RunFinishedError
-from .models import EnvironmentRef, Mode, OnError, RunHandle, RunKind, RunSpec, RunStatus
+from .models import (
+    CONFIG_SOURCE_KEY,
+    ConfigSource,
+    EnvironmentRef,
+    Mode,
+    OnError,
+    RunHandle,
+    RunKind,
+    RunSpec,
+    RunStatus,
+)
 from .sinks import EvalSamplesSink, OfflineSink, Sink, TracesSink
 from .worker import MetricItem, RunUpdateItem, UploadWorker, WriteItem
 
@@ -199,6 +209,16 @@ class Run:
     @property
     def kind(self) -> RunKind:
         return self._spec.kind
+
+    @property
+    def config_source(self) -> Optional[ConfigSource]:
+        """The config file this run was launched from, if one was given.
+
+        Read back out of ``config`` rather than cached, so a resumed run reports
+        the source recovered from the platform and not an empty one.
+        """
+        raw = self.config.get(CONFIG_SOURCE_KEY)
+        return ConfigSource.from_mapping(raw) if isinstance(raw, Mapping) else None
 
     @property
     def mode(self) -> Mode:
@@ -758,7 +778,8 @@ def init(
     dataset: Optional[str] = None,
     description: Optional[str] = None,
     tags: Optional[Sequence[str]] = None,
-    config: Optional[Mapping[str, Any]] = None,
+    config: Optional[Any] = None,
+    config_source: Optional[Any] = None,
     summary: Optional[Mapping[str, Any]] = None,
     id: Optional[str] = None,
     mode: Optional[Mode] = None,
@@ -790,6 +811,15 @@ def init(
     ``id`` attaches to an existing run instead of creating one, for resuming
     after a crash and for non-primary ranks joining a run rank 0 created.
 
+    ``config`` is what the run was configured *with*. Pass a plain mapping and it
+    is stored as given; pass a pydantic model and only the fields someone
+    actually set are stored — see :func:`_normalize_config` for why that default
+    is the useful one.
+
+    ``config_source`` is the path to the file the run was launched from
+    (``eval.toml``, ``train.toml``), stored verbatim alongside the structured
+    config so a reader sees what was written rather than what it expanded into.
+
     ``finish_timeout`` is the total number of seconds ``finish()`` gives queued
     uploads to drain and close before finalizing the run anyway.
     """
@@ -797,6 +827,11 @@ def init(
     api_key = api_key if api_key is not None else resolved_config.api_key
     base_url = base_url or resolved_config.base_url
     team_id = team_id if team_id is not None else resolved_config.team_id
+
+    run_config = _normalize_config(config)
+    source = ConfigSource.coerce(config_source)
+    if source is not None:
+        run_config[CONFIG_SOURCE_KEY] = source.to_dict()
 
     spec = RunSpec(
         name=name,
@@ -808,7 +843,7 @@ def init(
         description=description,
         tags=list(tags or []),
         team_id=team_id,
-        config=dict(config or {}),
+        config=run_config,
         summary=dict(summary or {}),
     )
 
@@ -1072,6 +1107,36 @@ def _attached_state(handle: RunHandle) -> tuple[Dict[str, Any], Dict[str, Any]]:
 def _merge_mapping(target: Dict[str, Any], value: Any) -> None:
     if isinstance(value, Mapping):
         target.update(value)
+
+
+def _normalize_config(value: Any) -> Dict[str, Any]:
+    """A producer's config as a plain dict, preferring what was actually set.
+
+    A mapping is taken as given — the caller already decided what it wanted to
+    say. A pydantic model is dumped with ``exclude_unset=True``, which is the
+    whole point of accepting one: a resolved dump of a deep config tree is
+    hundreds of lines of defaults nobody chose, and a reader scrolling it cannot
+    tell which three values were the experiment. ``exclude_unset`` leaves
+    exactly the fields someone typed.
+
+    A caller who genuinely wants every resolved default can still pass
+    ``cfg.model_dump()`` explicitly. That asymmetry is deliberate: the shorter
+    call should give the more useful answer.
+    """
+    if value is None:
+        return {}
+    if isinstance(value, Mapping):
+        return dict(value)
+    dump = getattr(value, "model_dump", None)
+    if callable(dump):
+        try:
+            dumped = dump(mode="json", exclude_unset=True)
+        except TypeError:  # pragma: no cover - a model_dump with a different signature
+            dumped = dump()
+        if isinstance(dumped, Mapping):
+            return dict(dumped)
+        raise TypeError(f"{type(value).__name__}.model_dump() did not return a mapping")
+    raise TypeError(f"config must be a mapping or a pydantic model, got {type(value).__name__}")
 
 
 def _describe(error: Union[str, BaseException]) -> str:

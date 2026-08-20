@@ -84,17 +84,19 @@ class TracesSink(Sink):
         if self._injected_client:
             # The caller handed us a client and a fork took it away. Rebuilding
             # would silently swap their transport for a default one.
-            return False
+            exc = RuntimeError("an injected traces client cannot be reused after a fork")
+            self._disable(str(exc))
+            raise exc
         try:
             from prime_traces import TracesClient
         except ImportError as exc:  # pragma: no cover - dependency is declared
             self._disable(f"prime-traces is not installed ({exc})")
-            return False
+            raise
         try:
             self._client = TracesClient(**self._client_kwargs)
-        except Exception as exc:  # noqa: BLE001 - construction must not kill a run
+        except Exception as exc:  # noqa: BLE001 - the run applies its error policy
             self._disable(f"could not construct the traces client ({exc})")
-            return False
+            raise
         return True
 
     def reset_after_fork(self) -> None:

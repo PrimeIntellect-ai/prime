@@ -306,6 +306,11 @@ def _first_environment_name(spec: RunSpec) -> Optional[str]:
     for ref in spec.environments:
         if ref.name:
             return ref.name
+        if ref.slug:
+            # Published environments are addressed as ``owner/name``, but the
+            # name portion is still the dataset/run-name fallback used for
+            # ordinary environment references.
+            return ref.slug.split("/", 1)[1]
     return None
 
 

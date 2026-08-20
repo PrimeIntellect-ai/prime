@@ -149,8 +149,10 @@ def test_closing_the_sink_closes_the_client():
     assert client.closed is True
 
 
-def test_a_missing_traces_client_disables_the_sink_rather_than_raising(monkeypatch, caplog):
-    """Construction failures must not take down a run that has not started."""
+def test_a_missing_traces_client_disables_the_sink_and_reports_the_failure(
+    monkeypatch, caplog
+):
+    """The run applies warn/raise policy, so the sink must surface this failure."""
 
     def explode(**kwargs):
         raise RuntimeError("no credentials")
@@ -159,6 +161,7 @@ def test_a_missing_traces_client_disables_the_sink_rather_than_raising(monkeypat
     sink = TracesSink()
 
     with caplog.at_level("WARNING"):
-        sink.start("run-1", {"run_kind": "eval"})
+        with pytest.raises(RuntimeError, match="no credentials"):
+            sink.start("run-1", {"run_kind": "eval"})
 
     assert sink.enabled is False

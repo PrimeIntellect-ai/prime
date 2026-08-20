@@ -8,9 +8,10 @@ from _fakes import make_episode, make_trace
 from conftest import RecordingHandler
 
 import prime_runs as pr
+from prime_runs.backends.offline import DEFAULT_DIR_ENV
 from prime_runs.exceptions import ConfigurationError
 from prime_runs.models import RunStatus
-from prime_runs.run import RUN_ID_ENV
+from prime_runs.run import MODE_ENV, RUN_ID_ENV, _exported_run_ids
 
 # ------------------------------------------------------------------- offline
 
@@ -166,6 +167,33 @@ def test_init_publishes_the_run_id_for_child_processes(tmp_path):
 
     assert os.environ[RUN_ID_ENV] == run.id
     run.finish()
+
+
+def test_a_child_inherits_the_resolved_offline_mode_and_directory(monkeypatch, tmp_path):
+    """An API key must not make the child switch an explicit offline parent online."""
+    monkeypatch.setenv("PRIME_API_KEY", "test-key")
+    monkeypatch.setattr(
+        "prime_runs.run.PlatformClient",
+        lambda **_: pytest.fail("the inherited child unexpectedly selected online mode"),
+    )
+    parent = pr.init(mode="offline", dir=str(tmp_path))
+
+    assert os.environ[MODE_ENV] == "offline"
+    assert os.environ[DEFAULT_DIR_ENV] == str(tmp_path.resolve())
+
+    # Emulate the PID distinction a real child process inherits.
+    _exported_run_ids[parent.id] = os.getpid() - 1
+    child = pr.init(handle_signals=False)
+    child.log_traces([{"id": "from-child"}])
+    child.finish()
+    parent.finish()
+
+    assert child.id == parent.id
+    assert child.mode == "offline"
+    assert (tmp_path / parent.id / "records" / "trace.jsonl").exists()
+    assert RUN_ID_ENV not in os.environ
+    assert MODE_ENV not in os.environ
+    assert DEFAULT_DIR_ENV not in os.environ
 
 
 # ------------------------------------------------------------------- online

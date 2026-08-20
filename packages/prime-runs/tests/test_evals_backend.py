@@ -71,6 +71,22 @@ def test_a_published_environment_slug_uses_owner_aware_lookup(
     ]
 
 
+def test_a_published_environment_slug_supplies_dataset_and_default_name(
+    make_platform_client, eval_routes
+):
+    routes = dict(eval_routes)
+    routes["GET /api/v1/environmentshub/alice/gsm8k/@latest"] = {
+        "data": {"id": "env-published"}
+    }
+    backend, handler = make_backend(make_platform_client, routes)
+
+    backend.create(RunSpec(environments=[EnvironmentRef.coerce("alice/gsm8k")]))
+
+    created = handler.bodies_for("/api/v1/evaluations/")[0]
+    assert created["dataset"] == "gsm8k"
+    assert created["name"].startswith("gsm8k-")
+
+
 def test_an_unresolvable_environment_fails_the_run_rather_than_being_skipped(
     make_platform_client, eval_routes
 ):

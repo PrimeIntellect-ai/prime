@@ -27,6 +27,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Union
 from . import _fork
 from ._http import DEFAULT_TIMEOUT, UPLOAD_TIMEOUT, PlatformClient
 from .backends import Backend, EvalsBackend, OfflineBackend
+from .backends.offline import DEFAULT_DIR_ENV
 from .config import Config
 from .exceptions import ConfigurationError, RunFinishedError
 from .models import EnvironmentRef, Mode, OnError, RunHandle, RunKind, RunSpec, RunStatus
@@ -118,6 +119,29 @@ class Run:
         # signal immediately would kill the process before teardown completes.
         # Keep the first such signal and deliver it once the run is closed.
         self._pending_signal: Optional[tuple[int, Any, Any]] = None
+        # ``_announce`` publishes enough context for child processes to join
+        # this exact run. Keep the previous values so finishing a nested or
+        # sequential run restores the caller's environment instead of leaking
+        # our resolved mode and offline directory into the next run.
+        self._published_join_env: Dict[str, str] = {}
+        self._previous_join_env: Dict[str, Optional[str]] = {}
+
+        self._atexit_hook = self._on_process_exit
+        # Bound once and kept. ``self._handle_signal`` builds a *new* bound
+        # method on every attribute access, so an ``is`` comparison against a
+        # freshly-made one is always False — which is how handlers end up
+        # installed forever, pinning a finished run and blocking the next run in
+        # the process from installing its own.
+        self._signal_handler = self._handle_signal
+        self._previous_signal_handlers: Dict[int, Any] = {}
+        # ``signal.signal`` can only run on the main thread. If finish() runs in
+        # an executor, or this object is inherited across a fork, its handler
+        # may remain as the process disposition until the main thread gets a
+        # chance to replace it. Marking forked handlers as relinquishable lets
+        # a child run take ownership without mistaking the inherited callback
+        # for an application-installed handler.
+        self._signal_handler_stale = False
+        _fork.register(self)
 
         sinks = sinks or []
         worker_kwargs: Dict[str, Any] = {}
@@ -136,25 +160,25 @@ class Run:
                 sink.start(handle.id, context)
             except Exception as exc:  # noqa: BLE001 - a bad sink is not a bad run
                 sink.enabled = False
-                self._report(f"starting sink {getattr(sink, 'name', sink)}", exc)
+                try:
+                    self._report(f"starting sink {getattr(sink, 'name', sink)}", exc)
+                except Exception:
+                    # The backend may already have created a remote run. In
+                    # strict mode the caller never receives this handle, so
+                    # close it out before propagating the startup failure.
+                    try:
+                        self.finish(status=RunStatus.FAILED, error=_describe(exc))
+                    except Exception as cleanup_exc:  # noqa: BLE001 - preserve the cause
+                        logger.warning(
+                            "Run %s: cleanup after sink startup failure also failed: %s: %s",
+                            self.id,
+                            type(cleanup_exc).__name__,
+                            cleanup_exc,
+                            exc_info=True,
+                        )
+                    raise
 
-        self._atexit_hook = self._on_process_exit
         atexit.register(self._atexit_hook)
-        # Bound once and kept. ``self._handle_signal`` builds a *new* bound
-        # method on every attribute access, so an ``is`` comparison against a
-        # freshly-made one is always False — which is how handlers end up
-        # installed forever, pinning a finished run and blocking the next run in
-        # the process from installing its own.
-        self._signal_handler = self._handle_signal
-        self._previous_signal_handlers: Dict[int, Any] = {}
-        # ``signal.signal`` can only run on the main thread. If finish() runs in
-        # an executor, or this object is inherited across a fork, its handler
-        # may remain as the process disposition until the main thread gets a
-        # chance to replace it. Marking forked handlers as relinquishable lets
-        # a child run take ownership without mistaking the inherited callback
-        # for an application-installed handler.
-        self._signal_handler_stale = False
-        _fork.register(self)
 
     # -------------------------------------------------------------- identity
 
@@ -398,7 +422,7 @@ class Run:
 
         atexit.unregister(self._atexit_hook)
         self._restore_signal_handlers()
-        self._retract_run_id()
+        self._retract_join_context()
 
         if self._worker.dropped:
             logger.warning(
@@ -598,17 +622,39 @@ class Run:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Run %s: reporting the crash failed: %s", self.id, exc)
 
-    def _retract_run_id(self) -> None:
+    def _publish_join_context(self) -> None:
+        """Publish the resolved context a child needs to join this run."""
+        values = {
+            RUN_ID_ENV: self.id,
+            MODE_ENV: self.mode,
+        }
+        if self.mode == "offline" and isinstance(self._backend, OfflineBackend):
+            # Resolve the path because a subprocess may use a different cwd.
+            values[DEFAULT_DIR_ENV] = str(self._backend.directory.resolve())
+
+        for name, value in values.items():
+            self._previous_join_env.setdefault(name, os.environ.get(name))
+            self._published_join_env[name] = value
+            os.environ[name] = value
+        _exported_run_ids[self.id] = os.getpid()
+
+    def _retract_join_context(self) -> None:
         """Stop advertising a finished run to processes started from here.
 
-        Only retracts what this run published: if the value now points somewhere
-        else, another run owns it and clearing it would orphan that one's
+        Only restores values this run still owns: if one now points somewhere
+        else, another run owns it and changing it would orphan that one's
         children.
         """
         if not self._owns_lifecycle:
             return
-        if os.environ.get(RUN_ID_ENV) == self.id:
-            os.environ.pop(RUN_ID_ENV, None)
+        for name, published in self._published_join_env.items():
+            if os.environ.get(name) != published:
+                continue
+            previous = self._previous_join_env.get(name)
+            if previous is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = previous
         _exported_run_ids.pop(self.id, None)
 
     def _require_live(self, operation: str) -> None:
@@ -884,16 +930,13 @@ def _build(
 
 
 def _announce(run: Run, handle_signals: bool) -> None:
-    """Publish the run ID to child processes and arm crash reporting.
+    """Publish the run's join context to child processes and arm crash reporting.
 
-    Exporting ``PRIME_RUN_ID`` is how forked workers and subprocess launchers
-    join the run their parent created instead of each opening their own — the
-    same trick prime-rl's monitor used with ``RUN_ID``, generalized so every
-    producer gets it. The PID is recorded alongside so that *this* process does
-    not later mistake its own export for a parent's.
+    The ID says which run to attach to; the resolved mode and offline directory
+    say where it lives. The PID is recorded alongside so that *this* process
+    does not later mistake its own export for a parent's.
     """
-    os.environ[RUN_ID_ENV] = run.id
-    _exported_run_ids[run.id] = os.getpid()
+    run._publish_join_context()
     if handle_signals:
         run.install_signal_handlers()
     if run.url:

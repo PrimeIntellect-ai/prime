@@ -455,6 +455,29 @@ def test_on_error_raise_surfaces_the_failure_for_tests_and_ci():
     assert backend.closed is True
 
 
+def test_strict_sink_start_failure_closes_the_created_run():
+    class StartFailingSink(FakeSink):
+        def start(self, run_id, context) -> None:
+            raise RuntimeError("could not start sink")
+
+    backend = FakeBackend()
+    sink = StartFailingSink()
+
+    with pytest.raises(RuntimeError, match="could not start sink"):
+        make_run(backend, sinks=[sink], on_error="raise")
+
+    assert backend.finalized == [
+        {
+            "status": RunStatus.FAILED,
+            "summary": None,
+            "error": "RuntimeError: could not start sink",
+            "config": None,
+        }
+    ]
+    assert backend.closed is True
+    assert sink.closed is True
+
+
 def test_update_failure_in_raise_mode_still_finalizes_and_closes():
     backend = FakeBackend(fail_on="update")
     run = make_run(backend, on_error="raise")

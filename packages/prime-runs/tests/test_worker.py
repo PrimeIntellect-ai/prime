@@ -8,6 +8,18 @@ from conftest import FakeSink
 from prime_runs.worker import MetricItem, RunUpdateItem, UploadWorker, WriteItem
 
 
+class BlockingSink(FakeSink):
+    def __init__(self) -> None:
+        super().__init__("blocking")
+        self.entered = threading.Event()
+        self.released = threading.Event()
+
+    def write(self, records, *, line_format=None, step=None) -> None:
+        self.entered.set()
+        self.released.wait(5.0)
+        super().write(records, line_format=line_format, step=step)
+
+
 def drain(worker: UploadWorker) -> None:
     assert worker.flush(timeout=5.0)
 
@@ -66,18 +78,6 @@ def test_a_failed_sink_is_not_called_again():
 
 def test_a_full_queue_drops_rather_than_blocking_the_producer():
     """Stalling a training run to protect telemetry is the wrong trade."""
-
-    class BlockingSink(FakeSink):
-        def __init__(self) -> None:
-            super().__init__("blocking")
-            self.entered = threading.Event()
-            self.released = threading.Event()
-
-        def write(self, records, *, line_format=None, step=None) -> None:
-            self.entered.set()
-            self.released.wait(5.0)
-            super().write(records, line_format=line_format, step=step)
-
     sink = BlockingSink()
     worker = UploadWorker([sink], max_queue_size=1, put_timeout=0.05)
 
@@ -93,6 +93,44 @@ def test_a_full_queue_drops_rather_than_blocking_the_producer():
 
     sink.released.set()
     worker.close()
+
+
+def test_flush_uses_the_drain_budget_to_get_behind_a_full_queue():
+    sink = BlockingSink()
+    worker = UploadWorker([sink], max_queue_size=1, put_timeout=0.01)
+    assert worker.submit(WriteItem(records=[{"id": 0}]))
+    assert sink.entered.wait(1.0)
+    assert worker.submit(WriteItem(records=[{"id": 1}]))
+
+    release = threading.Timer(0.05, sink.released.set)
+    release.start()
+    try:
+        assert worker.flush(timeout=0.5) is True
+    finally:
+        sink.released.set()
+        release.join()
+        worker.close(timeout=1.0)
+
+    assert [batch[0][0]["id"] for batch in sink.batches] == [0, 1]
+
+
+def test_close_uses_its_budget_to_queue_the_stop_behind_pending_records():
+    sink = BlockingSink()
+    worker = UploadWorker([sink], max_queue_size=1, put_timeout=0.01)
+    assert worker.submit(WriteItem(records=[{"id": 0}]))
+    assert sink.entered.wait(1.0)
+    assert worker.submit(WriteItem(records=[{"id": 1}]))
+
+    release = threading.Timer(0.05, sink.released.set)
+    release.start()
+    try:
+        worker.close(timeout=0.5)
+    finally:
+        sink.released.set()
+        release.join()
+
+    assert [batch[0][0]["id"] for batch in sink.batches] == [0, 1]
+    assert sink.closed is True
 
 
 def test_metrics_ride_the_same_queue_when_the_backend_stores_a_time_series():

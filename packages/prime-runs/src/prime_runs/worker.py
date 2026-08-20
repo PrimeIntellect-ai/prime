@@ -24,6 +24,7 @@ import logging
 import os
 import queue
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, List, Optional, Sequence
 
@@ -70,6 +71,18 @@ class _Flush:
     """A barrier the caller waits on."""
 
     event: threading.Event = field(default_factory=threading.Event)
+
+
+def _deadline(timeout: Optional[float]) -> Optional[float]:
+    if timeout is None:
+        return None
+    return time.monotonic() + max(0.0, timeout)
+
+
+def _remaining(deadline: Optional[float]) -> Optional[float]:
+    if deadline is None:
+        return None
+    return max(0.0, deadline - time.monotonic())
 
 
 class UploadWorker:
@@ -293,24 +306,32 @@ class UploadWorker:
         if self._thread is None or not self._thread.is_alive():
             self._flush_sinks()
             return True
+        deadline = _deadline(timeout)
         barrier = _Flush()
         try:
-            self._queue.put(barrier, timeout=self.put_timeout)
+            # Synchronization belongs to the caller's drain budget, not the
+            # short producer backpressure budget. A full queue is precisely
+            # when finish() most needs to wait for room for this barrier.
+            self._queue.put(barrier, timeout=_remaining(deadline))
         except queue.Full:
-            logger.warning("Could not enqueue a flush barrier; the queue is saturated")
+            logger.warning("Could not enqueue a flush barrier before the drain timeout")
             return False
-        return barrier.event.wait(timeout)
+        return barrier.event.wait(_remaining(deadline))
 
     def close(self, timeout: Optional[float] = 30.0) -> None:
         """Drain, stop the thread, and close every sink."""
         self._stopping.set()
         thread = self._thread
         if thread is not None and thread.is_alive():
+            deadline = _deadline(timeout)
             try:
-                self._queue.put(None, timeout=self.put_timeout)
+                # The sentinel sits behind every accepted item. Give it the
+                # close budget so a temporarily full queue can make room and
+                # then drain in FIFO order before the thread exits.
+                self._queue.put(None, timeout=_remaining(deadline))
             except queue.Full:
-                logger.warning("Upload queue saturated at close; some records may be lost")
-            thread.join(timeout)
+                logger.warning("Upload queue remained saturated through the close timeout")
+            thread.join(_remaining(deadline))
             if thread.is_alive():
                 # Closing the sinks now would pull an httpx client, or a file
                 # handle, out from under a request that is still running on that

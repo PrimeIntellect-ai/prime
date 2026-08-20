@@ -54,6 +54,23 @@ def test_an_explicit_environment_id_skips_the_hub(make_platform_client, eval_rou
     assert handler.bodies_for("/api/v1/evaluations/")[0]["environments"] == [{"id": "env-999"}]
 
 
+@pytest.mark.parametrize("environment", ["alice/gsm8k", {"slug": "alice/gsm8k"}])
+def test_a_published_environment_slug_uses_owner_aware_lookup(
+    make_platform_client, eval_routes, environment
+):
+    routes = dict(eval_routes)
+    routes["GET /api/v1/environmentshub/alice/gsm8k/@latest"] = {"data": {"id": "env-published"}}
+    backend, handler = make_backend(make_platform_client, routes)
+
+    backend.create(RunSpec(name="r", environments=[EnvironmentRef.coerce(environment)]))
+
+    assert handler.paths()[0] == "GET /api/v1/environmentshub/alice/gsm8k/@latest"
+    assert "POST /api/v1/environmentshub/resolve" not in handler.paths()
+    assert handler.bodies_for("/api/v1/evaluations/")[0]["environments"] == [
+        {"id": "env-published"}
+    ]
+
+
 def test_an_unresolvable_environment_fails_the_run_rather_than_being_skipped(
     make_platform_client, eval_routes
 ):

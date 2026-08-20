@@ -265,7 +265,21 @@ class EvalsBackend:
         return resolved
 
     def _lookup_environment(self, ref: EnvironmentRef) -> str:
-        """Resolve one environment name to a hub ID (get-or-create)."""
+        """Resolve one environment reference to a hub ID."""
+        if ref.slug:
+            owner_slug, name = ref.slug.split("/", 1)
+            try:
+                response = self._client.get(f"/environmentshub/{owner_slug}/{name}/@latest")
+            except RunAPIError as exc:
+                raise EnvironmentResolutionError(
+                    f"Could not resolve environment {ref.slug!r}: {exc}"
+                ) from exc
+            details = response.get("data") or response
+            environment_id = details.get("id")
+            if not environment_id:
+                raise EnvironmentResolutionError(f"Hub returned no id for environment {ref.slug!r}")
+            return str(environment_id)
+
         body: Dict[str, Any] = {"name": ref.name}
         _set_if(body, "team_id", self._team_id)
         try:

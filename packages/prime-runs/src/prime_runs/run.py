@@ -91,8 +91,9 @@ class Run:
         self._owns_lifecycle = owns_lifecycle and is_primary
         self._status = RunStatus.RUNNING
 
-        self.config: Dict[str, Any] = dict(spec.config)
-        self.summary: Dict[str, Any] = dict(spec.summary)
+        attached_config, attached_summary = _attached_state(handle)
+        self.config: Dict[str, Any] = {**attached_config, **spec.config}
+        self.summary: Dict[str, Any] = {**attached_summary, **spec.summary}
         self.errors: List[str] = []
         # Raised at the next synchronization point the caller controls. A sink
         # fails on the uploader thread, where raising reaches nobody — so under
@@ -726,6 +727,7 @@ def init(
     on_error: OnError = "warn",
     handle_signals: bool = True,
     queue_size: Optional[int] = None,
+    finish_timeout: float = DEFAULT_FINISH_TIMEOUT,
 ) -> Run:
     """Start a run and return a handle to it.
 
@@ -741,6 +743,9 @@ def init(
 
     ``id`` attaches to an existing run instead of creating one, for resuming
     after a crash and for non-primary ranks joining a run rank 0 created.
+
+    ``finish_timeout`` is the total number of seconds ``finish()`` gives queued
+    uploads to drain and close before finalizing the run anyway.
     """
     resolved_config = Config()
     api_key = api_key if api_key is not None else resolved_config.api_key
@@ -775,7 +780,16 @@ def init(
         backend: Backend = _DisabledBackend()
         handle = RunHandle(id=inherited_id or _local_id(), name=name)
         return _build(
-            spec, backend, handle, [], resolved_mode, on_error, is_primary, False, queue_size
+            spec,
+            backend,
+            handle,
+            [],
+            resolved_mode,
+            on_error,
+            is_primary,
+            False,
+            queue_size,
+            finish_timeout,
         )
 
     if resolved_mode == "offline":
@@ -792,6 +806,7 @@ def init(
             is_primary,
             owns_lifecycle,
             queue_size,
+            finish_timeout,
         )
         _announce(run, handle_signals)
         return run
@@ -836,6 +851,7 @@ def init(
         is_primary,
         owns_lifecycle,
         queue_size,
+        finish_timeout,
     )
     _announce(run, handle_signals)
     return run
@@ -851,6 +867,7 @@ def _build(
     is_primary: bool,
     owns_lifecycle: bool,
     queue_size: Optional[int],
+    finish_timeout: float,
 ) -> Run:
     return Run(
         backend=backend,
@@ -862,6 +879,7 @@ def _build(
         is_primary=is_primary,
         owns_lifecycle=owns_lifecycle,
         queue_size=queue_size,
+        finish_timeout=finish_timeout,
     )
 
 
@@ -983,6 +1001,34 @@ def _sink_context(spec: RunSpec, handle: RunHandle) -> Dict[str, str]:
     if spec.model:
         context["model"] = spec.model
     return context
+
+
+def _attached_state(handle: RunHandle) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    """Recover config and summary from an attached backend response.
+
+    Online evaluations expose them as ``metadata`` and ``metrics``. Offline
+    archives keep their initial values under ``spec`` and subsequent values at
+    the top level. Supporting both shapes keeps resume lossless for either
+    backend; values supplied to the new ``init()`` call are merged afterwards
+    and therefore win.
+    """
+    config: Dict[str, Any] = {}
+    summary: Dict[str, Any] = {}
+    raw = handle.raw
+    nested_spec = raw.get("spec")
+    if isinstance(nested_spec, Mapping):
+        _merge_mapping(config, nested_spec.get("config"))
+        _merge_mapping(summary, nested_spec.get("summary"))
+    _merge_mapping(config, raw.get("config"))
+    _merge_mapping(config, raw.get("metadata"))
+    _merge_mapping(summary, raw.get("summary"))
+    _merge_mapping(summary, raw.get("metrics"))
+    return config, summary
+
+
+def _merge_mapping(target: Dict[str, Any], value: Any) -> None:
+    if isinstance(value, Mapping):
+        target.update(value)
 
 
 def _describe(error: Union[str, BaseException]) -> str:

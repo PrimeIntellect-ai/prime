@@ -342,6 +342,44 @@ def test_an_explicit_id_is_a_resume_and_still_finalizes(online):
     assert "POST /api/v1/evaluations/eval-abc/finalize" in handler.paths()
 
 
+def test_resuming_preserves_existing_config_and_summary(online, eval_routes):
+    routes = dict(eval_routes)
+    routes["GET /api/v1/evaluations/eval-abc"] = {
+        **routes["GET /api/v1/evaluations/eval-abc"],
+        "metadata": {"before_crash": True, "overridden": "old"},
+        "metrics": {"old_reward": 0.5, "overridden": "old"},
+    }
+
+    run, handler = online(
+        routes=routes,
+        id="eval-abc",
+        config={"overridden": "new"},
+        summary={"overridden": "new"},
+    )
+    run.update_config({"after_resume": True})
+    run.log({"new_reward": 1.0})
+    run.finish()
+
+    update = handler.bodies_for("/api/v1/evaluations/eval-abc")[0]
+    assert update["metadata"] == {
+        "before_crash": True,
+        "overridden": "new",
+        "after_resume": True,
+    }
+    assert update["metrics"] == {
+        "old_reward": 0.5,
+        "overridden": "new",
+        "new_reward": 1.0,
+    }
+
+
+def test_init_forwards_the_finish_timeout(tmp_path):
+    run = pr.init(mode="offline", dir=str(tmp_path), finish_timeout=0.25)
+
+    assert run._finish_timeout == 0.25
+    run.finish()
+
+
 def test_an_id_inherited_from_the_environment_does_not_finalize(monkeypatch, online):
     monkeypatch.setenv(RUN_ID_ENV, "eval-abc")
 

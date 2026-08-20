@@ -46,22 +46,25 @@ class EnvironmentRef:
     """An environment as a producer names it, before hub resolution.
 
     ``id`` short-circuits resolution; ``name`` goes through the hub's
-    get-or-create so a local run uploads without a prior ``prime env push``.
+    get-or-create so a local run uploads without a prior ``prime env push``;
+    ``slug`` looks up an already-published ``owner/name`` environment.
     """
 
     name: Optional[str] = None
     id: Optional[str] = None
     version_id: Optional[str] = None
+    slug: Optional[str] = None
 
     @classmethod
     def coerce(cls, value: Any) -> "EnvironmentRef":
         if isinstance(value, EnvironmentRef):
             return value
         if isinstance(value, str):
-            return cls(name=value)
+            return cls(slug=value) if "/" in value else cls(name=value)
         if isinstance(value, dict):
             return cls(
                 name=value.get("name"),
+                slug=value.get("slug"),
                 id=value.get("id"),
                 version_id=value.get("version_id"),
             )
@@ -71,8 +74,12 @@ class EnvironmentRef:
         )
 
     def __post_init__(self) -> None:
-        if not self.name and not self.id:
-            raise ValueError("EnvironmentRef needs a name or an id")
+        if not self.name and not self.slug and not self.id:
+            raise ValueError("EnvironmentRef needs a name, slug or id")
+        if self.slug:
+            owner, name = self.slug.split("/", 1) if "/" in self.slug else ("", "")
+            if not owner or not name:
+                raise ValueError("EnvironmentRef slug must use owner/name format")
 
 
 @dataclass

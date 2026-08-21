@@ -85,20 +85,39 @@ def test_producer_objects_are_passed_through_untouched():
     assert client.calls[0][0][0] is trace
 
 
-def test_a_gated_account_disables_the_sink_and_reports_the_failed_batch(caplog):
-    """Prime Traces is in closed beta; no runtime action fixes a 403, so
-    retrying it for the rest of the run only produces noise."""
+def test_an_account_outside_the_beta_retires_the_sink_without_a_failure(caplog):
+    """Prime Traces is in closed beta. For everyone outside it there was never
+    anywhere for these records to go, so the sink turns itself off quietly:
+    no exception for the worker to count, nothing above INFO in the log."""
     client = FakeTracesClient(
         raises=ForbiddenError("not in beta", status_code=403, code="service_not_enabled")
     )
     sink = make_sink(client)
 
+    with caplog.at_level("INFO"):
+        sink.write([{"id": "t1"}])
+        sink.write([{"id": "t2"}])
+
+    assert sink.enabled is False
+    assert len(client.calls) == 1
+    assert "not enabled" in caplog.text
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+def test_a_credential_without_the_traces_scope_is_still_a_failure(caplog):
+    """The other 403 is fixable — mint a token with the scope — so it is raised
+    for loss accounting and strict callers, and the sink still retires."""
+    client = FakeTracesClient(
+        raises=ForbiddenError("missing scope: traces", status_code=403, code="forbidden")
+    )
+    sink = make_sink(client)
+
     with caplog.at_level("WARNING"):
-        with pytest.raises(ForbiddenError, match="not in beta"):
+        with pytest.raises(ForbiddenError, match="missing scope"):
             sink.write([{"id": "t1"}])
 
     assert sink.enabled is False
-    assert "not enabled" in caplog.text
+    assert "cannot write traces" in caplog.text
 
 
 def test_a_transient_failure_is_raised_so_the_worker_can_report_it():

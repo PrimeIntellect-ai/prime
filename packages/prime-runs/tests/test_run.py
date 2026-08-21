@@ -439,18 +439,36 @@ def test_an_upload_failure_is_reported_once():
     run.finish()
 
 
-def test_a_gated_trace_upload_reaches_strict_callers_and_loss_accounting():
-    class GatedClient:
-        def upload_records(self, records, **kwargs):
-            raise ForbiddenError("not in beta", status_code=403, code="service_not_enabled")
+class _ForbiddenClient:
+    def __init__(self, code: str) -> None:
+        self.code = code
 
-        def close(self) -> None:
-            pass
+    def upload_records(self, records, **kwargs):
+        raise ForbiddenError("403", status_code=403, code=self.code)
 
-    run = make_run(sinks=[TracesSink(client=GatedClient())], on_error="raise")
+    def close(self) -> None:
+        pass
+
+
+def test_an_account_outside_the_beta_is_not_a_failed_run():
+    """Nothing was lost — the records went to every sink that applies to this
+    account — so the run finishes clean even under ``on_error="raise"``."""
+    sink = TracesSink(client=_ForbiddenClient("service_not_enabled"))
+    run = make_run(sinks=[sink], on_error="raise")
     run.log_traces([{"id": "t1"}])
 
-    with pytest.raises(ForbiddenError, match="not in beta"):
+    run.finish()
+
+    assert run.failed_records == {}
+    assert run.errors == []
+    assert sink.enabled is False
+
+
+def test_a_credential_without_the_traces_scope_reaches_strict_callers_and_loss_accounting():
+    run = make_run(sinks=[TracesSink(client=_ForbiddenClient("forbidden"))], on_error="raise")
+    run.log_traces([{"id": "t1"}])
+
+    with pytest.raises(ForbiddenError):
         run.finish()
 
     assert run.failed_records == {"traces": 1}

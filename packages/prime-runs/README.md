@@ -122,8 +122,10 @@ Or pass `api_key=`, `base_url=`, `team_id=` to `init()`.
 An online run writes every record to two sinks: Prime Traces (the system of
 record — streaming, episode-aware, content-addressed and therefore idempotent
 on retry) and the flat v0 sample table today's viewer reads. Both run because
-Prime Traces is gated to an allowlist; when the viewer reads traces natively the
-default sink list drops one entry and no producer changes.
+Prime Traces is gated to an allowlist; an account outside it has the traces sink
+turn itself off at the first upload — not counted as a failure, since nothing was
+lost. When the viewer reads traces natively the default sink list drops one entry
+and no producer changes.
 
 `prime_runs.projection` holds `trace_to_sample` / `build_samples`, the v0
 projection moved here from verifiers. `prime_runs.metrics.from_episodes` is the

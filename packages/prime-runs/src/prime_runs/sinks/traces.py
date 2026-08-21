@@ -105,14 +105,20 @@ class TracesSink(Sink):
                     compress=self._compress,
                 )
             )
-        except Exception as exc:
-            if self._is_gated(exc):
-                self._disable(
+        except ForbiddenError as exc:
+            # No runtime action fixes a 403, so the sink retires either way.
+            # What differs is whether the batch counts as lost.
+            if _is_not_enabled(exc):
+                # Outside the beta: there was never anywhere for these records
+                # to go, so nothing was lost. Not a warning, not a failure.
+                self._retire_quietly(
                     f"Prime Traces is not enabled for this account ({exc}); "
-                    "falling back to the remaining sinks"
+                    "continuing with the remaining sinks"
                 )
-            # Re-raised either way so the worker's loss accounting and strict
-            # callers see the failed batch.
+                return
+            # A credential without the traces scope is something the caller
+            # can fix; raised so loss accounting and strict callers see it.
+            self._disable(f"this credential cannot write traces ({exc})")
             raise
         self.receipts_received += len(receipts)
         if self._receipt_history_size:
@@ -144,8 +150,15 @@ class TracesSink(Sink):
             logger.warning("Traces sink disabled: %s", reason)
         self.enabled = False
 
-    @staticmethod
-    def _is_gated(exc: Exception) -> bool:
-        """A 403 (``service_not_enabled``, or a write-only token) is not
-        fixable at runtime, so the sink turns itself off instead of retrying."""
-        return isinstance(exc, ForbiddenError)
+    def _retire_quietly(self, reason: str) -> None:
+        if self.enabled:
+            logger.info("Traces sink off: %s", reason)
+        self.enabled = False
+
+
+def _is_not_enabled(exc: ForbiddenError) -> bool:
+    """``service_not_enabled``: the account is outside the private beta. The
+    other 403, ``forbidden``, means the token lacks the ``traces`` scope."""
+    from prime_traces import ErrorCode
+
+    return exc.code == ErrorCode.SERVICE_NOT_ENABLED.value

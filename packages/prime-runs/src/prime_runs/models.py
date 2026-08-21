@@ -1,10 +1,7 @@
 """Types shared across backends, sinks and the ``Run`` handle.
 
-Only the values that cross a module boundary live here. Response bodies are
-deliberately *not* modeled: the platform returns more fields than any producer
-reads, and freezing them in pydantic here would make every backend addition a
-breaking SDK release. Backends pull the two or three fields they need and hand
-back a ``RunHandle``.
+Response bodies are deliberately not modeled: backends pull the two or three
+fields they need and hand back a ``RunHandle``.
 """
 
 import os
@@ -15,25 +12,21 @@ from typing import Any, Dict, List, Literal, Mapping, Optional, Union
 
 from .exceptions import ConfigurationError
 
-RunKind = Literal["eval", "train"]
-"""Which run system owns the lifecycle. Selects the backend."""
-
 Mode = Literal["online", "offline", "disabled"]
-"""``online`` talks to the platform, ``offline`` writes a local run directory
-that can be synced later, ``disabled`` makes every call a no-op while keeping
-the same object shape so producer code needs no branching."""
+"""``online`` talks to the platform, ``offline`` writes a local run directory,
+``disabled`` makes every call a no-op with the same object shape."""
 
 OnError = Literal["warn", "raise"]
+
+RUN_KIND = "eval"
+"""Stamped as ``run.type`` on records and sent as upload provenance."""
 
 
 class RunStatus(str, Enum):
     """Terminal state a producer can report.
 
-    ``crashed`` is distinct from ``failed``: ``failed`` means the producer
-    decided the run failed, ``crashed`` means the process exited without ever
-    saying. Only the second one is inferred by the SDK (atexit / signal), and
-    the distinction is what tells an operator whether to look at the run's own
-    error or at the machine it ran on.
+    ``failed`` means the producer said the run failed; ``crashed`` means the
+    process exited without saying (only the SDK's atexit hook reports it).
     """
 
     RUNNING = "running"
@@ -50,8 +43,7 @@ class EnvironmentRef:
     """An environment as a producer names it, before hub resolution.
 
     ``id`` short-circuits resolution; ``name`` goes through the hub's
-    get-or-create so a local run uploads without a prior ``prime env push``;
-    ``slug`` looks up an already-published ``owner/name`` environment.
+    get-or-create; ``slug`` looks up a published ``owner/name`` environment.
     """
 
     name: Optional[str] = None
@@ -87,19 +79,12 @@ class EnvironmentRef:
 
 
 CONFIG_SOURCE_KEY = "config_source"
-"""Where a config file lands inside a run's config, as a :class:`ConfigSource` dict.
-
-Inside the config rather than beside it, so every path that already carries the
-config carries the file too — create, the periodic update, finalize, the failure
-fallback, and the offline archive — with no extra plumbing and no chance of one
-of them forgetting it. It is also the one key a config-tab renderer has to know
-about: present means "show this verbatim", absent means "show the structure".
-"""
+"""Where a config file lands inside a run's config, as a :class:`ConfigSource`
+dict. Present means "render this verbatim"; absent means "render the structure"."""
 
 MAX_CONFIG_SOURCE_BYTES = 256 * 1024
-"""Ceiling on a stored config file. A hand-written run config is single-digit
-kilobytes; anything past this is a dataset or a log that would bloat the run's
-metadata document, so it is refused loudly at ``init()`` rather than truncated."""
+"""A hand-written run config is kilobytes; anything past this is refused at
+``init()`` rather than truncated."""
 
 _CONFIG_SOURCE_FORMATS = {
     ".toml": "toml",
@@ -113,19 +98,9 @@ _CONFIG_SOURCE_FORMATS = {
 class ConfigSource:
     """The config file a run was started from, kept byte-for-byte.
 
-    Both producers are now launched from one user-authored file — ``uv run eval
-    @ eval.toml``, ``uv run rl @ train.toml`` — and that file *is* the run's
-    real configuration. A resolved model dump is a different artifact: it
-    answers "what did every knob end up as", not "what did someone write", and
-    it loses comments, key order and section grouping on the way through.
-
-    So when ``init(config=...)`` is given a path, this is what gets stored: the
-    bytes, not a parse of them. Callers without a file pass a mapping or a model
-    to the same parameter and get the structured form instead.
-
-    Nothing here is redacted. A config file that carries a secret will carry it
-    onto the run's page, the same way it already reaches anyone who can read the
-    repository it lives in — keep credentials in the environment, not the file.
+    That file *is* the run's configuration — comments, key order and section
+    grouping included — where a resolved model dump is a different artifact.
+    Nothing here is redacted: keep credentials in the environment, not the file.
     """
 
     text: str
@@ -186,10 +161,8 @@ class ConfigSource:
     def coerce(cls, value: Any) -> Optional["ConfigSource"]:
         """Normalize the config-file form of ``init(config=...)``.
 
-        A ``str`` or ``PathLike`` is a *path*, never inline text — that is how
-        every caller will reach for it, and guessing between the two would turn
-        a mistyped filename into a run whose config tab shows the filename.
-        Inline text goes through ``ConfigSource(text=...)`` explicitly.
+        A ``str`` or ``PathLike`` is a *path*, never inline text; inline text
+        goes through ``ConfigSource(text=...)`` explicitly.
         """
         if value is None or isinstance(value, cls):
             return value
@@ -217,24 +190,17 @@ class ConfigSource:
 
 @dataclass
 class RunSpec:
-    """Everything a backend needs to open a run, in producer vocabulary.
-
-    This is the argument surface of ``init()`` after normalization — backends
-    translate it into whatever their API family calls these things, which is
-    the whole reason eval and training runs can share one handle.
-    """
+    """Everything a backend needs to open a run: ``init()``'s arguments after
+    normalization. ``config`` is the run's inputs; outputs accumulate on the
+    handle as ``summary``."""
 
     name: Optional[str] = None
-    kind: RunKind = "eval"
     environments: List[EnvironmentRef] = field(default_factory=list)
     model: Optional[str] = None
     framework: Optional[str] = None
     description: Optional[str] = None
     tags: List[str] = field(default_factory=list)
     team_id: Optional[str] = None
-    # Only the inputs. A run's outputs (-> the platform's `metrics`) are not
-    # here because a run being opened does not have any yet; they accumulate on
-    # the handle and are written by update() and finalize().
     config: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -245,4 +211,3 @@ class RunHandle:
     id: str
     name: Optional[str] = None
     url: Optional[str] = None
-    raw: Dict[str, Any] = field(default_factory=dict)

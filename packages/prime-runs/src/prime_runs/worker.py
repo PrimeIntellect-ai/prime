@@ -1,27 +1,16 @@
-"""Background uploader: the thread that keeps the network off the rollout loop.
+"""Background uploader: one daemon thread draining a bounded queue into sinks.
 
-Three things a producer should never have to think about, handled once here:
+Backpressure: the queue is bounded, so a producer that outruns the uploader
+blocks briefly and then drops (counted) rather than stalling the run.
 
-**Backpressure.** The queue is bounded. Verifiers' uploader held every episode
-of a run in memory and posted them all at the end, which is fine at a hundred
-episodes and is an OOM at a hundred thousand. A bounded queue trades that for a
-short block, and — past the block — a counted drop, because stalling a training
-run to protect telemetry is the wrong trade in the other direction.
+Fork safety: a forked child inherits the queue's memory but not the thread.
+The child starts over empty; the queued records belong to the parent.
 
-**Fork safety.** Hosted evals fork after the SDK is initialized. A forked child
-inherits the queue's *memory* but not the thread that drains it, so anything
-already queued would sit there forever and any lock held mid-write stays held.
-The child therefore starts over with an empty queue and a fresh thread, and
-drops what it inherited: those records belong to the parent, which is still
-running and will upload them itself.
-
-**Containment.** A sink that raises is retried once, then disabled for the rest
-of the run with the error reported through the run's error handler. The upload
-thread never propagates into the producer, and never dies quietly either.
+Containment: a sink that raises is given a few consecutive transient strikes,
+then disabled for the rest of the run. The thread never dies on one bad batch.
 """
 
 import logging
-import os
 import queue
 import threading
 import time
@@ -35,35 +24,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_QUEUE_SIZE = 256
 DEFAULT_PUT_TIMEOUT = 5.0
-#: Consecutive transient failures before a sink is retired. One gateway blip
-#: must not empty the rest of a run's dashboard; a sustained outage should still
-#: stop the SDK from re-attempting every batch for hours.
+#: Consecutive transient failures before a sink is retired.
 TRANSIENT_FAILURE_LIMIT = 3
-
-
-@dataclass
-class WriteItem:
-    """One batch of records destined for every enabled sink."""
-
-    records: Sequence[Any]
-    line_format: Optional[str] = None
-    step: Optional[int] = None
-
-
-@dataclass
-class MetricItem:
-    """One ``log()`` call destined for a backend that stores a time series."""
-
-    metrics: dict
-    step: Optional[int] = None
-
-
-@dataclass
-class RunUpdateItem:
-    """A config/summary snapshot destined for the run lifecycle backend."""
-
-    config: Optional[dict] = None
-    summary: Optional[dict] = None
 
 
 @dataclass
@@ -86,7 +48,7 @@ def _remaining(deadline: Optional[float]) -> Optional[float]:
 
 
 class UploadWorker:
-    """Drains a bounded queue into a list of sinks on one daemon thread."""
+    """Drains a bounded queue of record batches into a list of sinks."""
 
     def __init__(
         self,
@@ -95,34 +57,21 @@ class UploadWorker:
         max_queue_size: int = DEFAULT_QUEUE_SIZE,
         put_timeout: float = DEFAULT_PUT_TIMEOUT,
         on_error: Optional[Callable[[str, Exception], None]] = None,
-        metric_writer: Optional[Callable[[dict, Optional[int]], None]] = None,
-        update_writer: Optional[Callable[[Optional[dict], Optional[dict]], None]] = None,
     ) -> None:
         self.sinks = sinks
         self.max_queue_size = max_queue_size
         self.put_timeout = put_timeout
         self._on_error = on_error
-        # Set when the backend stores a real time series. Metrics then ride the
-        # same queue as records, so a per-step log() in a training loop costs a
-        # queue put rather than an HTTP round trip.
-        self._metric_writer = metric_writer
-        # Eval summaries have no time-series endpoint, but they still belong on
-        # this thread: periodic persistence must never block the producer loop.
-        self._update_writer = update_writer
         self._queue: "queue.Queue[Any]" = queue.Queue(maxsize=max_queue_size)
         self._thread: Optional[threading.Thread] = None
         self._stopping = threading.Event()
         self._lock = threading.Lock()
-        # Two different losses, deliberately not merged. `dropped` is records
-        # never handed to any sink because the queue was full — the producer
-        # outran the uploader. `failed_records` is records a *particular* sink
-        # could not store, which says nothing about the others: with traces and
-        # the sample table both enabled, one sink failing usually means the
-        # records are still safe in the other.
+        #: Records never handed to any sink because the queue was full.
         self.dropped = 0
+        #: Records a particular sink could not store, by sink name. Kept apart
+        #: from ``dropped``: another sink may well have stored them.
         self.failed_records: dict = {}
         self._transient_failures: dict = {}
-        self._pid = os.getpid()
         _fork.register(self)
 
     # ----------------------------------------------------------------- thread
@@ -146,57 +95,23 @@ class UploadWorker:
                 if isinstance(item, _Flush):
                     self._flush_sinks()
                     item.event.set()
-                    continue
-                if isinstance(item, MetricItem):
-                    self._write_metrics(item)
-                    continue
-                if isinstance(item, RunUpdateItem):
-                    self._write_update(item)
-                    continue
-                self._dispatch(item)
+                else:
+                    self._dispatch(item)
             except Exception as exc:  # noqa: BLE001 - the thread must outlive one bad batch
                 logger.debug("Uploader iteration failed: %s", exc)
             finally:
                 self._queue.task_done()
 
-    def _dispatch(self, item: WriteItem) -> None:
+    def _dispatch(self, records: Sequence[Any]) -> None:
         for sink in self.sinks:
             if not getattr(sink, "enabled", True):
                 continue
             try:
-                sink.write(item.records, line_format=item.line_format, step=item.step)
+                sink.write(records)
             except Exception as exc:  # noqa: BLE001 - one sink failing must not stop the others
-                self._fail_sink(sink, exc, dropped=len(item.records))
+                self._fail_sink(sink, exc, dropped=len(records))
             else:
                 self._transient_failures.pop(getattr(sink, "name", id(sink)), None)
-
-    def _write_metrics(self, item: MetricItem) -> None:
-        if self._metric_writer is None:
-            return
-        try:
-            self._metric_writer(item.metrics, item.step)
-        except Exception as exc:  # noqa: BLE001 - metrics must not kill the uploader
-            logger.warning(
-                "Dropped metrics for step %s: %s: %s", item.step, type(exc).__name__, exc
-            )
-            if self._on_error is not None:
-                try:
-                    self._on_error("metrics", exc)
-                except Exception:  # noqa: BLE001
-                    logger.debug("Error handler raised while reporting metrics", exc_info=True)
-
-    def _write_update(self, item: RunUpdateItem) -> None:
-        if self._update_writer is None:
-            return
-        try:
-            self._update_writer(item.config, item.summary)
-        except Exception as exc:  # noqa: BLE001 - updates must not kill the uploader
-            logger.warning("Dropped a run metadata update: %s: %s", type(exc).__name__, exc)
-            if self._on_error is not None:
-                try:
-                    self._on_error("run metadata", exc)
-                except Exception:  # noqa: BLE001
-                    logger.debug("Error handler raised while reporting a run update", exc_info=True)
 
     def _flush_sinks(self) -> None:
         for sink in self.sinks:
@@ -208,22 +123,9 @@ class UploadWorker:
                 self._fail_sink(sink, exc)
 
     def _fail_sink(self, sink: Any, exc: Exception, *, dropped: int = 0) -> None:
-        """Handle a sink that raised, and report it.
-
-        The batch is gone either way — the transports already retried internally
-        (traces on content-addressed uploads, the platform client on whatever it
-        can safely replay), so an error reaching this point has exhausted its
-        budget. What is decided here is whether the *sink* is finished:
-
-        - A permanent failure — a gated account, a rejected credential — will
-          fail identically on every future batch, so the sink stops. Continuing
-          would produce one log line per batch for the rest of the run and bury
-          whatever failed first.
-        - A transient one gets ``TRANSIENT_FAILURE_LIMIT`` consecutive strikes,
-          reset by any success. Retiring a sink on a single gateway blip would
-          leave the rest of the run missing from the dashboard, which is a much
-          larger loss than the one batch that actually failed.
-        """
+        """The batch is gone (the transports already retried). Decide whether
+        the sink is too: permanent failures retire it at once, transient ones
+        after ``TRANSIENT_FAILURE_LIMIT`` consecutive strikes."""
         name = getattr(sink, "name", type(sink).__name__)
         if dropped:
             self.failed_records[name] = self.failed_records.get(name, 0) + dropped
@@ -267,30 +169,19 @@ class UploadWorker:
 
     # ------------------------------------------------------------------ queue
 
-    def submit(self, item: Any) -> bool:
-        """Hand a batch or a metric point to the uploader.
-
-        ``False`` means it was dropped: the queue stayed full for the whole
-        timeout, so the producer is durably outrunning the uploader. Blocking
-        further would turn a telemetry backlog into a stalled training run.
-        """
+    def submit(self, records: Sequence[Any]) -> bool:
+        """Hand a batch to the uploader. ``False`` means it was dropped: the
+        queue stayed full for the whole put timeout."""
         if self._stopping.is_set():
             return False
         thread = self._thread
         if thread is None or not thread.is_alive():
             self.start()
         try:
-            self._queue.put(item, timeout=self.put_timeout)
+            self._queue.put(records, timeout=self.put_timeout)
             return True
         except queue.Full:
-            if not isinstance(item, WriteItem):
-                logger.warning(
-                    "Upload queue full after %.1fs; could not queue %s",
-                    self.put_timeout,
-                    type(item).__name__,
-                )
-                return False
-            count = len(item.records)
+            count = len(records)
             self.dropped += count
             logger.warning(
                 "Upload queue full after %.1fs; dropped %d item(s) (%d total). "
@@ -309,9 +200,8 @@ class UploadWorker:
         deadline = _deadline(timeout)
         barrier = _Flush()
         try:
-            # Synchronization belongs to the caller's drain budget, not the
-            # short producer backpressure budget. A full queue is precisely
-            # when finish() most needs to wait for room for this barrier.
+            # The barrier gets the caller's drain budget, not the short
+            # producer put timeout: a full queue is when finish() most needs it.
             self._queue.put(barrier, timeout=_remaining(deadline))
         except queue.Full:
             logger.warning("Could not enqueue a flush barrier before the drain timeout")
@@ -325,18 +215,13 @@ class UploadWorker:
         if thread is not None and thread.is_alive():
             deadline = _deadline(timeout)
             try:
-                # The sentinel sits behind every accepted item. Give it the
-                # close budget so a temporarily full queue can make room and
-                # then drain in FIFO order before the thread exits.
                 self._queue.put(None, timeout=_remaining(deadline))
             except queue.Full:
                 logger.warning("Upload queue remained saturated through the close timeout")
             thread.join(_remaining(deadline))
             if thread.is_alive():
-                # Closing the sinks now would pull an httpx client, or a file
-                # handle, out from under a request that is still running on that
-                # thread — turning a slow upload into a crash inside a daemon
-                # thread nobody is watching. Leave them to the interpreter.
+                # Closing the sinks now would pull a client or file handle out
+                # from under a request still running on that thread.
                 logger.warning(
                     "Uploader still running after %ss; leaving it and its sinks open. "
                     "Records still in flight may not finish before the process exits.",
@@ -353,16 +238,7 @@ class UploadWorker:
     # ------------------------------------------------------------------- fork
 
     def reset_after_fork(self) -> None:
-        """Give the child a clean uploader.
-
-        Everything queued at fork time belongs to the parent, which still has a
-        live thread and will send it. Inheriting that queue would upload each
-        record twice; inheriting the lock could deadlock the child on its first
-        write. The sinks reset themselves through the same hook — their sockets
-        and file buffers are the parent's too, and using those from two
-        processes interleaves one HTTP stream or writes one buffer twice.
-        """
-        self._pid = os.getpid()
+        """Give the child a clean uploader; what was queued belongs to the parent."""
         self._queue = queue.Queue(maxsize=self.max_queue_size)
         self._thread = None
         self._stopping = threading.Event()

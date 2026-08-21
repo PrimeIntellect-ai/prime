@@ -1,25 +1,13 @@
 """Shared HTTP client for the platform run APIs.
 
-One client for all backends and the legacy samples sink, because they share a
-host, a credential and a retry policy. Two things it does that a bare
-``httpx.Client`` does not:
+Maps status codes onto :mod:`prime_runs.exceptions` and retries 429/502/503/504
+and transport failures with backoff, honouring ``Retry-After``.
 
-- maps status codes onto :mod:`prime_runs.exceptions` so callers branch on a
-  type rather than on a message;
-- retries 429/502/503/504 and transport failures with exponential backoff,
-  honouring ``Retry-After`` when the server sends one.
-
-Retry safety is decided per call, not per client. A failure is *ambiguous* when
-the request may already have been processed — a gateway 502/504, a read timeout,
-a stream broken after the bytes went out. Replaying an ambiguous failure is fine
-for a GET or a PUT and is not fine for ``POST /evaluations/``: if the platform
-created the run and the response was lost, the retry creates a second one and
-the SDK only ever knows about the second, leaving an orphaned duplicate.
-
-So callers declare intent with ``idempotent=``. Unambiguous failures — a
-connection that was never established, a 429 refused before any work — are
-replayed for every method, because there is nothing on the other side to
-duplicate.
+Retry safety is decided per call. A failure is *ambiguous* when the request
+may already have been processed (a 502/504, a read timeout). Replaying one is
+fine for a GET or PUT and not for ``POST /evaluations/``, which would create a
+second run. Callers declare intent with ``idempotent=``; unambiguous failures
+(connect errors, 429) are replayed for every method.
 """
 
 import json
@@ -41,13 +29,11 @@ from .exceptions import (
 )
 
 DEFAULT_TIMEOUT = httpx.Timeout(60.0, connect=10.0)
-# Sample batches are megabytes and the platform fans them out to storage before
-# answering, so uploads get their own, much longer budget.
+# Sample batches are megabytes; uploads get a longer budget.
 UPLOAD_TIMEOUT = httpx.Timeout(300.0, connect=10.0)
 RETRY_STATUS = frozenset({429, 502, 503, 504})
-#: Refused before the server did any work, so replaying cannot duplicate
-#: anything. 503 is deliberately *not* here: without a service error code it may
-#: equally have come from an intermediary after the request was forwarded.
+#: Refused before any work was done, so replaying cannot duplicate anything.
+#: 503 is excluded: it may come from an intermediary after forwarding.
 UNAMBIGUOUS_RETRY_STATUS = frozenset({429})
 DEFAULT_MAX_ATTEMPTS = 5
 MAX_BACKOFF_SECONDS = 16.0
@@ -74,30 +60,18 @@ def _parse_retry_after(response: httpx.Response) -> Optional[float]:
     try:
         return float(raw)
     except ValueError:
-        # HTTP-date form. Not worth parsing for a backoff hint — fall back to
-        # the exponential schedule rather than guessing a clock skew.
+        # HTTP-date form; fall back to the exponential schedule.
         return None
 
 
 def normalize_base_url(url: str) -> str:
-    """The same normalization ``Config`` applies to file/env URLs.
-
-    ``PlatformClient`` appends ``/api/v1`` itself, and platform URLs are
-    commonly written with the suffix already on them. Without stripping it here
-    an explicit ``base_url=`` would request ``/api/v1/api/v1/...`` while the
-    identical value read from ``PRIME_API_BASE_URL`` worked — the config path
-    strips it and the constructor path did not.
-    """
+    """Strip a trailing ``/api/v1``; the client appends it itself."""
     return url.rstrip("/").removesuffix("/api/v1")
 
 
 def encode_json(value: Any) -> bytes:
-    """Compact UTF-8 JSON, matching the encoding used to size batches.
-
-    ``allow_nan=False`` matters: a NaN reward serialized as JavaScript's bare
-    ``NaN`` is rejected by strict JSON parsers server-side, and the failure
-    surfaces as an opaque 400 on a payload the producer cannot inspect.
-    """
+    """Compact UTF-8 JSON. ``allow_nan=False``: strict parsers server-side
+    reject bare ``NaN`` and the failure is an opaque 400."""
     return json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode(
         "utf-8"
     )
@@ -126,8 +100,7 @@ class PlatformClient:
         self._timeout = timeout
         self._client = client or self._new_client()
         if self._owns_client:
-            # An injected client belongs to the caller (tests, the CLI); only a
-            # pool we opened ourselves is ours to rebuild after a fork.
+            # Only a pool we opened ourselves is ours to rebuild after a fork.
             _fork.register(self)
 
     def _new_client(self) -> httpx.Client:
@@ -138,13 +111,8 @@ class PlatformClient:
         )
 
     def reset_after_fork(self) -> None:
-        """Rebuild the connection pool in a forked child.
-
-        The inherited pool's sockets are the parent's: writing them would
-        interleave two processes' requests into one HTTP stream. The old client
-        is dropped rather than closed, because closing can send ``close_notify``
-        on a connection the parent is still reading.
-        """
+        """Rebuild the pool in a forked child. The old one is dropped, not
+        closed: closing could send ``close_notify`` on the parent's socket."""
         self._client = self._new_client()
 
     def request(
@@ -161,10 +129,8 @@ class PlatformClient:
     ) -> Dict[str, Any]:
         """Send one request, retrying transient failures. Returns the JSON body.
 
-        ``idempotent`` says whether replaying this request is safe when the
-        outcome is unknown. It defaults to ``method != "POST"``; a POST that is
-        in fact safe to replay (get-or-create, setting a terminal state) should
-        pass ``idempotent=True`` explicitly.
+        ``idempotent`` defaults to ``method != "POST"``; a POST that is safe to
+        replay (get-or-create) passes ``idempotent=True`` explicitly.
         """
         url = f"{self.api_prefix}{path}"
         body = content if content is not None else (encode_json(json_body) if json_body else None)
@@ -181,9 +147,7 @@ class PlatformClient:
                     "headers": headers,
                     "params": dict(params) if params else None,
                 }
-                # ``None`` disables httpx timeouts; it does not mean "use the
-                # client's default". Omit the override so ordinary lifecycle
-                # calls retain the timeout configured in ``_new_client``.
+                # ``None`` would disable httpx timeouts, not restore the default.
                 if timeout is not None:
                     request_kwargs["timeout"] = timeout
                 response = self._client.request(method, url, **request_kwargs)
@@ -212,9 +176,7 @@ class PlatformClient:
             if attempt == attempts:
                 break
             if ambiguous and not replayable:
-                # The request may already have been processed and replaying it
-                # would create a second resource. Surfacing the failure is the
-                # lesser harm: the caller can look, a duplicate cannot be undone.
+                # Possibly processed already; a duplicate cannot be undone.
                 break
             after = getattr(last_error, "retry_after", None)
             time.sleep(retry_delay(attempt, after))

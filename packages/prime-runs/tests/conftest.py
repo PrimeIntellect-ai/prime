@@ -15,18 +15,14 @@ _PRIME_ENV_VARS = (
     "PRIME_BASE_URL",
     "PRIME_TRACES_URL",
     "PRIME_FRONTEND_URL",
-    "PRIME_RUN_ID",
     "PRIME_RUNS_MODE",
     "PRIME_RUNS_DIR",
-    "RANK",
-    "DP_RANK",
-    "LOCAL_RANK",
 )
 
 
 @pytest.fixture(autouse=True)
 def isolated_prime_config(monkeypatch, tmp_path):
-    """Never read the developer's real ~/.prime, env vars or rank."""
+    """Never read the developer's real ~/.prime or env vars."""
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     for name in _PRIME_ENV_VARS:
         monkeypatch.delenv(name, raising=False)
@@ -107,12 +103,6 @@ def eval_routes() -> Dict[str, Any]:
             "evaluation_id": "eval-abc",
             "status": "PROCESSING",
         },
-        "GET /api/v1/evaluations/eval-abc": {
-            "evaluation_id": "eval-abc",
-            "name": "test-run",
-            "status": "RUNNING",
-            "viewer_url": "https://app.example/dashboard/evaluations/eval-abc",
-        },
         "PUT /api/v1/evaluations/eval-abc": {
             "evaluation_id": "eval-abc",
             "name": "test-run",
@@ -137,10 +127,10 @@ class FakeSink:
     def start(self, run_id: str, context: Dict[str, str]) -> None:
         self.started.append((run_id, dict(context)))
 
-    def write(self, records, *, line_format=None, step=None) -> None:
+    def write(self, records) -> None:
         if self.fail_on_write:
             raise RuntimeError("sink is broken")
-        self.batches.append((list(records), line_format, step))
+        self.batches.append(list(records))
 
     def flush(self) -> None:
         self.flushes += 1

@@ -1,4 +1,4 @@
-"""Run lifecycle backends, one per platform run system."""
+"""Run lifecycle backends."""
 
 from .base import Backend
 from .evals import EvalsBackend

@@ -1,9 +1,5 @@
-"""Lightweight configuration for the Prime Runs SDK.
-
-Same shape as the other prime SDK packages: reads ``~/.prime/config.json``
-plus environment variables, env taking precedence. Adds ``frontend_url``
-(where run URLs point) on top of the shared platform settings.
-"""
+"""Configuration: ``~/.prime/config.json`` plus environment variables, env
+taking precedence. Same shape as the other prime SDKs, plus ``frontend_url``."""
 
 import json
 import os
@@ -64,11 +60,7 @@ class Config:
 
     @property
     def frontend_url(self) -> str:
-        """Dashboard base URL, used to build the run URL a producer prints.
-
-        The platform returns a ``viewer_url`` on create; this is the fallback
-        for responses that omit it and for offline/legacy paths.
-        """
+        """Dashboard base URL; fallback when a create response omits ``viewer_url``."""
         env_val = os.getenv("PRIME_FRONTEND_URL")
         if env_val:
             return env_val.rstrip("/")

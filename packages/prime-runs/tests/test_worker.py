@@ -5,7 +5,7 @@ import threading
 
 from conftest import FakeSink
 
-from prime_runs.worker import MetricItem, RunUpdateItem, UploadWorker, WriteItem
+from prime_runs.worker import UploadWorker
 
 
 class BlockingSink(FakeSink):
@@ -14,10 +14,10 @@ class BlockingSink(FakeSink):
         self.entered = threading.Event()
         self.released = threading.Event()
 
-    def write(self, records, *, line_format=None, step=None) -> None:
+    def write(self, records) -> None:
         self.entered.set()
         self.released.wait(5.0)
-        super().write(records, line_format=line_format, step=step)
+        super().write(records)
 
 
 def drain(worker: UploadWorker) -> None:
@@ -28,11 +28,11 @@ def test_records_reach_every_enabled_sink():
     sinks = [FakeSink("a"), FakeSink("b")]
     worker = UploadWorker(sinks)
 
-    worker.submit(WriteItem(records=[{"id": 1}], line_format="trace", step=3))
+    worker.submit([{"id": 1}])
     drain(worker)
 
     for sink in sinks:
-        assert sink.batches == [([{"id": 1}], "trace", 3)]
+        assert sink.batches == [[{"id": 1}]]
     worker.close()
 
 
@@ -41,7 +41,7 @@ def test_a_disabled_sink_is_skipped():
     dead.enabled = False
     worker = UploadWorker([live, dead])
 
-    worker.submit(WriteItem(records=[{"id": 1}]))
+    worker.submit([{"id": 1}])
     drain(worker)
 
     assert live.batches and not dead.batches
@@ -53,7 +53,7 @@ def test_one_sink_failing_does_not_stop_the_others():
     reported = []
     worker = UploadWorker([broken, healthy], on_error=lambda name, exc: reported.append(name))
 
-    worker.submit(WriteItem(records=[{"id": 1}]))
+    worker.submit([{"id": 1}])
     drain(worker)
 
     assert healthy.batches
@@ -69,7 +69,7 @@ def test_a_failed_sink_is_not_called_again():
     worker = UploadWorker([broken], on_error=lambda name, exc: reported.append(name))
 
     for _ in range(3):
-        worker.submit(WriteItem(records=[{"id": 1}]))
+        worker.submit([{"id": 1}])
     drain(worker)
 
     assert reported == ["broken"]
@@ -82,11 +82,11 @@ def test_a_full_queue_drops_rather_than_blocking_the_producer():
     worker = UploadWorker([sink], max_queue_size=1, put_timeout=0.05)
 
     # First item is picked up and wedges the uploader inside sink.write().
-    assert worker.submit(WriteItem(records=[{"id": 0}]))
+    assert worker.submit([{"id": 0}])
     assert sink.entered.wait(5.0), "the uploader never reached the sink"
     # Second fills the one-slot queue; third has nowhere to go.
-    worker.submit(WriteItem(records=[{"id": 1}]))
-    accepted = worker.submit(WriteItem(records=[{"id": 2}, {"id": 3}]))
+    worker.submit([{"id": 1}])
+    accepted = worker.submit([{"id": 2}, {"id": 3}])
 
     assert accepted is False
     assert worker.dropped == 2
@@ -98,9 +98,9 @@ def test_a_full_queue_drops_rather_than_blocking_the_producer():
 def test_flush_uses_the_drain_budget_to_get_behind_a_full_queue():
     sink = BlockingSink()
     worker = UploadWorker([sink], max_queue_size=1, put_timeout=0.01)
-    assert worker.submit(WriteItem(records=[{"id": 0}]))
+    assert worker.submit([{"id": 0}])
     assert sink.entered.wait(1.0)
-    assert worker.submit(WriteItem(records=[{"id": 1}]))
+    assert worker.submit([{"id": 1}])
 
     release = threading.Timer(0.05, sink.released.set)
     release.start()
@@ -111,15 +111,15 @@ def test_flush_uses_the_drain_budget_to_get_behind_a_full_queue():
         release.join()
         worker.close(timeout=1.0)
 
-    assert [batch[0][0]["id"] for batch in sink.batches] == [0, 1]
+    assert [batch[0]["id"] for batch in sink.batches] == [0, 1]
 
 
 def test_close_uses_its_budget_to_queue_the_stop_behind_pending_records():
     sink = BlockingSink()
     worker = UploadWorker([sink], max_queue_size=1, put_timeout=0.01)
-    assert worker.submit(WriteItem(records=[{"id": 0}]))
+    assert worker.submit([{"id": 0}])
     assert sink.entered.wait(1.0)
-    assert worker.submit(WriteItem(records=[{"id": 1}]))
+    assert worker.submit([{"id": 1}])
 
     release = threading.Timer(0.05, sink.released.set)
     release.start()
@@ -129,54 +129,15 @@ def test_close_uses_its_budget_to_queue_the_stop_behind_pending_records():
         sink.released.set()
         release.join()
 
-    assert [batch[0][0]["id"] for batch in sink.batches] == [0, 1]
+    assert [batch[0]["id"] for batch in sink.batches] == [0, 1]
     assert sink.closed is True
-
-
-def test_metrics_ride_the_same_queue_when_the_backend_stores_a_time_series():
-    points = []
-    worker = UploadWorker([], metric_writer=lambda metrics, step: points.append((metrics, step)))
-
-    worker.submit(MetricItem(metrics={"loss": 0.5}, step=7))
-    drain(worker)
-
-    assert points == [({"loss": 0.5}, 7)]
-    worker.close()
-
-
-def test_run_updates_ride_the_uploader_queue():
-    updates = []
-    worker = UploadWorker(
-        [], update_writer=lambda config, summary: updates.append((config, summary))
-    )
-
-    worker.submit(RunUpdateItem(config={"seed": 7}, summary={"reward": 0.5}))
-    drain(worker)
-
-    assert updates == [({"seed": 7}, {"reward": 0.5})]
-    worker.close()
-
-
-def test_a_metric_write_that_raises_does_not_kill_the_uploader():
-    sink = FakeSink()
-
-    def explode(metrics, step):
-        raise RuntimeError("nope")
-
-    worker = UploadWorker([sink], metric_writer=explode)
-    worker.submit(MetricItem(metrics={"loss": 0.5}, step=1))
-    worker.submit(WriteItem(records=[{"id": 1}]))
-    drain(worker)
-
-    assert sink.batches, "the uploader survived the metric failure"
-    worker.close()
 
 
 def test_close_drains_then_closes_every_sink():
     sink = FakeSink()
     worker = UploadWorker([sink])
 
-    worker.submit(WriteItem(records=[{"id": 1}]))
+    worker.submit([{"id": 1}])
     worker.close()
 
     assert sink.batches
@@ -187,7 +148,7 @@ def test_submitting_after_close_is_refused():
     worker = UploadWorker([FakeSink()])
     worker.close()
 
-    assert worker.submit(WriteItem(records=[{"id": 1}])) is False
+    assert worker.submit([{"id": 1}]) is False
 
 
 def test_flush_without_a_running_thread_still_flushes_the_sinks():
@@ -206,7 +167,7 @@ def test_a_forked_child_starts_over_instead_of_re_uploading_the_parents_queue():
     """
     sink = FakeSink()
     worker = UploadWorker([sink], max_queue_size=4)
-    worker._queue.put(WriteItem(records=[{"id": "parents"}]))
+    worker._queue.put([{"id": "parents"}])
     old_queue = worker._queue
 
     worker.reset_after_fork()
@@ -227,12 +188,12 @@ def test_close_leaves_sinks_open_when_the_uploader_will_not_stop(caplog):
             super().__init__("wedged")
             self.released = threading.Event()
 
-        def write(self, records, *, line_format=None, step=None) -> None:
+        def write(self, records) -> None:
             self.released.wait(10.0)
 
     sink = WedgedSink()
     worker = UploadWorker([sink])
-    worker.submit(WriteItem(records=[{"id": 1}]))
+    worker.submit([{"id": 1}])
 
     with caplog.at_level("WARNING"):
         worker.close(timeout=0.2)
@@ -292,13 +253,13 @@ def test_a_transient_failure_drops_the_batch_but_keeps_the_sink():
     from prime_runs.exceptions import RetryableAPIError
 
     class BlipSink(FakeSink):
-        def write(self, records, *, line_format=None, step=None) -> None:
+        def write(self, records) -> None:
             raise RetryableAPIError("bad gateway", status_code=502)
 
     sink = BlipSink("blippy")
     worker = UploadWorker([sink])
 
-    worker.submit(WriteItem(records=[{"id": 1}, {"id": 2}]))
+    worker.submit([{"id": 1}, {"id": 2}])
     drain(worker)
 
     assert sink.enabled is True
@@ -315,14 +276,14 @@ def test_a_sustained_outage_eventually_retires_the_sink():
     from prime_runs.worker import TRANSIENT_FAILURE_LIMIT
 
     class DeadSink(FakeSink):
-        def write(self, records, *, line_format=None, step=None) -> None:
+        def write(self, records) -> None:
             raise TransportError("connection refused")
 
     sink = DeadSink("dead")
     worker = UploadWorker([sink])
 
     for _ in range(TRANSIENT_FAILURE_LIMIT):
-        worker.submit(WriteItem(records=[{"id": 1}]))
+        worker.submit([{"id": 1}])
     drain(worker)
 
     assert sink.enabled is False
@@ -342,18 +303,18 @@ def test_a_success_forgives_earlier_blips():
             super().__init__("flaky")
             self.calls = 0
 
-        def write(self, records, *, line_format=None, step=None) -> None:
+        def write(self, records) -> None:
             self.calls += 1
             if self.calls % 2 == 1:
                 raise RetryableAPIError("bad gateway", status_code=502)
-            super().write(records, line_format=line_format, step=step)
+            super().write(records)
 
     sink = FlakySink()
     worker = UploadWorker([sink])
 
     # Far more failures than the limit, but never two in a row.
     for _ in range(TRANSIENT_FAILURE_LIMIT * 4):
-        worker.submit(WriteItem(records=[{"id": 1}]))
+        worker.submit([{"id": 1}])
     drain(worker)
 
     assert sink.calls == TRANSIENT_FAILURE_LIMIT * 4
@@ -367,13 +328,13 @@ def test_a_permanent_failure_retires_the_sink_immediately():
     from prime_runs.exceptions import UnauthorizedError
 
     class DeniedSink(FakeSink):
-        def write(self, records, *, line_format=None, step=None) -> None:
+        def write(self, records) -> None:
             raise UnauthorizedError("nope", status_code=401)
 
     sink = DeniedSink("denied")
     worker = UploadWorker([sink])
 
-    worker.submit(WriteItem(records=[{"id": 1}]))
+    worker.submit([{"id": 1}])
     drain(worker)
 
     assert sink.enabled is False
@@ -387,13 +348,13 @@ def test_a_failed_batch_is_counted_once_per_sink_not_once_per_run():
     from prime_runs.exceptions import RetryableAPIError
 
     class BlipSink(FakeSink):
-        def write(self, records, *, line_format=None, step=None) -> None:
+        def write(self, records) -> None:
             raise RetryableAPIError("bad gateway", status_code=502)
 
     broken, healthy = BlipSink("broken"), FakeSink("healthy")
     worker = UploadWorker([broken, healthy])
 
-    worker.submit(WriteItem(records=[{"id": 1}, {"id": 2}]))
+    worker.submit([{"id": 1}, {"id": 2}])
     drain(worker)
 
     assert worker.failed_records == {"broken": 2}

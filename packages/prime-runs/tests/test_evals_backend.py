@@ -8,10 +8,7 @@ from prime_runs.backends import EvalsBackend
 from prime_runs.exceptions import (
     ConfigurationError,
     EnvironmentResolutionError,
-    ForbiddenError,
-    PaymentRequiredError,
     RetryableAPIError,
-    UnauthorizedError,
 )
 from prime_runs.models import EnvironmentRef, RunSpec, RunStatus
 
@@ -75,9 +72,7 @@ def test_a_published_environment_slug_supplies_dataset_and_default_name(
     make_platform_client, eval_routes
 ):
     routes = dict(eval_routes)
-    routes["GET /api/v1/environmentshub/alice/gsm8k/@latest"] = {
-        "data": {"id": "env-published"}
-    }
+    routes["GET /api/v1/environmentshub/alice/gsm8k/@latest"] = {"data": {"id": "env-published"}}
     backend, handler = make_backend(make_platform_client, routes)
 
     backend.create(RunSpec(environments=[EnvironmentRef.coerce("alice/gsm8k")]))
@@ -153,78 +148,20 @@ def test_an_ambiguous_finalize_failure_is_not_replayed(make_platform_client, eva
     assert handler.paths().count("POST /api/v1/evaluations/eval-abc/finalize") == 1
 
 
-def test_a_failed_run_falls_back_to_metadata_when_the_status_endpoint_is_missing(
-    make_platform_client, eval_routes, caplog
-):
-    """The platform has no producer-facing way to fail an evaluation yet.
-
-    Until it does, the run cannot leave RUNNING — but the failure must still be
-    recorded somewhere an operator and the dashboard can both read it, and the
-    SDK must say plainly that the run will keep showing as running.
-    """
+def test_a_failed_run_is_recorded_in_metadata(make_platform_client, eval_routes, caplog):
+    """The platform has no producer-facing way to fail an evaluation. The run
+    cannot leave RUNNING, but the failure is recorded where an operator and the
+    dashboard can read it, and the SDK says the run will keep showing as running."""
     backend, handler = make_backend(make_platform_client, eval_routes)
 
     with caplog.at_level("WARNING"):
         backend.finalize("eval-abc", status=RunStatus.FAILED, error="boom")
 
-    assert "POST /api/v1/evaluations/eval-abc/status" in handler.paths()
+    assert "POST /api/v1/evaluations/eval-abc/finalize" not in handler.paths()
     terminal = handler.bodies_for("/api/v1/evaluations/eval-abc")[0]["metadata"]["prime_runs"]
     assert terminal["status"] == "failed"
     assert terminal["error"] == "boom"
     assert "keep showing as running" in caplog.text
-
-
-def test_the_missing_status_endpoint_is_probed_once_per_backend(make_platform_client, eval_routes):
-    backend, handler = make_backend(make_platform_client, eval_routes)
-
-    backend.finalize("eval-abc", status=RunStatus.FAILED, error="one")
-    backend.finalize("eval-abc", status=RunStatus.CRASHED, error="two")
-
-    assert handler.paths().count("POST /api/v1/evaluations/eval-abc/status") == 1
-
-
-def test_a_status_endpoint_that_exists_is_used_instead_of_the_fallback(
-    make_platform_client, eval_routes
-):
-    routes = dict(eval_routes)
-    routes["POST /api/v1/evaluations/eval-abc/status"] = {"evaluation_id": "eval-abc"}
-    backend, handler = make_backend(make_platform_client, routes)
-
-    backend.finalize("eval-abc", status=RunStatus.FAILED, error="boom")
-
-    assert handler.bodies_for("/api/v1/evaluations/eval-abc/status")[0] == {
-        "status": "FAILED",
-        "error": "boom",
-    }
-    assert "PUT /api/v1/evaluations/eval-abc" not in handler.paths()
-
-
-def test_a_transient_status_failure_is_retried(make_platform_client, eval_routes):
-    routes = dict(eval_routes)
-    responses = [httpx.Response(503), httpx.Response(200, json={"evaluation_id": "eval-abc"})]
-    routes["POST /api/v1/evaluations/eval-abc/status"] = lambda request: responses.pop(0)
-    backend, handler = make_backend(make_platform_client, routes)
-
-    backend.finalize("eval-abc", status=RunStatus.FAILED, error="boom")
-
-    assert handler.paths().count("POST /api/v1/evaluations/eval-abc/status") == 2
-    assert "PUT /api/v1/evaluations/eval-abc" not in handler.paths()
-
-
-def test_exhausted_status_retries_fall_back_to_metadata(make_platform_client, eval_routes, caplog):
-    routes = dict(eval_routes)
-    routes["POST /api/v1/evaluations/eval-abc/status"] = lambda request: httpx.Response(503)
-    handler = RecordingHandler(routes)
-    client = make_platform_client(handler, max_attempts=2)
-    backend = EvalsBackend(client, frontend_url="https://app.example")
-
-    with caplog.at_level("WARNING"):
-        backend.finalize("eval-abc", status=RunStatus.FAILED, error="boom")
-
-    assert handler.paths().count("POST /api/v1/evaluations/eval-abc/status") == 2
-    terminal = handler.bodies_for("/api/v1/evaluations/eval-abc")[0]["metadata"]["prime_runs"]
-    assert terminal["status"] == "failed"
-    assert "remained unavailable after retries" in caplog.text
 
 
 def test_update_sends_nothing_when_there_is_nothing_to_send(make_platform_client, eval_routes):
@@ -233,41 +170,6 @@ def test_update_sends_nothing_when_there_is_nothing_to_send(make_platform_client
     backend.update("eval-abc")
 
     assert handler.requests == []
-
-
-def test_attach_survives_a_read_failure(make_platform_client, eval_routes):
-    """Losing a run's name to a transient read is not worth failing a resume on."""
-    routes = dict(eval_routes)
-    routes["GET /api/v1/evaluations/eval-abc"] = lambda request: httpx.Response(
-        500, json={"detail": "nope"}
-    )
-    backend, _ = make_backend(make_platform_client, routes)
-
-    handle = backend.attach("eval-abc")
-
-    assert handle.id == "eval-abc"
-    assert handle.url == "https://app.example/dashboard/evaluations/eval-abc"
-
-
-@pytest.mark.parametrize(
-    ("status_code", "error_type"),
-    [
-        (401, UnauthorizedError),
-        (402, PaymentRequiredError),
-        (403, ForbiddenError),
-    ],
-)
-def test_attach_propagates_permanent_access_failures(
-    make_platform_client, eval_routes, status_code, error_type
-):
-    routes = dict(eval_routes)
-    routes["GET /api/v1/evaluations/eval-abc"] = lambda request: httpx.Response(
-        status_code, json={"detail": "denied"}
-    )
-    backend, _ = make_backend(make_platform_client, routes)
-
-    with pytest.raises(error_type):
-        backend.attach("eval-abc")
 
 
 def test_a_pinned_environment_version_reaches_the_api(make_platform_client, eval_routes):

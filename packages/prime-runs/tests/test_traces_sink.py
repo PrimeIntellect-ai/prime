@@ -36,14 +36,13 @@ def test_records_go_out_with_provenance_but_not_the_join_key():
     client = FakeTracesClient()
     sink = make_sink(client)
 
-    sink.write([{"id": "t1", "run": {"id": "run-1"}}], step=4)
+    sink.write([{"id": "t1", "run": {"id": "run-1"}}])
 
     _, kwargs = client.calls[0]
     assert kwargs["context"] == {
         "source": "prime-runs",
         "run_kind": "eval",
         "framework": "verifiers",
-        "step": "4",
     }
     assert "run_id" not in kwargs["context"]
 
@@ -54,18 +53,11 @@ def test_the_line_format_is_inferred_from_the_records():
 
     sink.write([make_trace()])
     sink.write([make_episode()])
+    sink.write([{"id": "t", "traces": []}])
 
     assert client.calls[0][1]["line_format"] is LineFormat.TRACE
     assert client.calls[1][1]["line_format"] is LineFormat.EPISODE
-
-
-def test_an_explicit_line_format_wins():
-    client = FakeTracesClient()
-    sink = make_sink(client)
-
-    sink.write([{"id": "t1"}], line_format="episode")
-
-    assert client.calls[0][1]["line_format"] is LineFormat.EPISODE
+    assert client.calls[2][1]["line_format"] is LineFormat.EPISODE
 
 
 def test_a_bare_mapping_gets_the_run_stamped_onto_a_copy():
@@ -149,9 +141,7 @@ def test_closing_the_sink_closes_the_client():
     assert client.closed is True
 
 
-def test_a_missing_traces_client_disables_the_sink_and_reports_the_failure(
-    monkeypatch, caplog
-):
+def test_a_missing_traces_client_disables_the_sink_and_reports_the_failure(monkeypatch, caplog):
     """The run applies warn/raise policy, so the sink must surface this failure."""
 
     def explode(**kwargs):

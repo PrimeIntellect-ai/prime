@@ -1,17 +1,9 @@
-"""Offline runs: a local directory that looks exactly like a platform run.
-
-This is not a debugging affordance, it is the reason producers can delete their
-``--no-push`` branching. A run that never reaches the network still has an ID,
-a status, a config, a summary and a metrics stream, so the call sites above it
-are identical whether or not anyone is logged in. The locally issued ID is used
-as the run ID everywhere — including inside the trace documents — so a later
-sync attaches the archive to a platform run without rewriting a single record.
+"""Offline runs: a local directory with the same lifecycle as a platform run.
 
 Layout, one directory per run::
 
-    <dir>/<run_id>/run.json       spec + status + timestamps
-    <dir>/<run_id>/metrics.jsonl  one JSON object per log() call
-    <dir>/<run_id>/records/       whatever the offline sink wrote
+    <dir>/<run_id>/run.json   spec + status + timestamps
+    <dir>/<run_id>/records/   whatever the offline sink wrote
 """
 
 import json
@@ -43,9 +35,6 @@ def new_run_id() -> str:
 class OfflineBackend:
     """Run lifecycle recorded on the local filesystem."""
 
-    kind = "offline"
-    supports_step_metrics = True
-
     def __init__(self, directory: Union[str, Path, None] = None) -> None:
         self.directory = Path(directory) if directory is not None else default_dir()
 
@@ -60,24 +49,12 @@ class OfflineBackend:
         state: Dict[str, Any] = {
             "id": run_id,
             "name": run_name,
-            "kind": spec.kind,
             "status": RunStatus.RUNNING.value,
             "created_at": _now(),
             "spec": _spec_to_json(spec),
         }
         self._write_state(run_id, state)
-        return RunHandle(id=run_id, name=run_name, url=str(path.resolve()), raw=state)
-
-    def attach(self, run_id: str) -> RunHandle:
-        path = self.run_dir(run_id)
-        path.mkdir(parents=True, exist_ok=True)
-        state = self._read_state(run_id)
-        return RunHandle(
-            id=run_id,
-            name=str(state.get("name") or run_id),
-            url=str(path.resolve()),
-            raw=state,
-        )
+        return RunHandle(id=run_id, name=run_name, url=str(path.resolve()))
 
     def update(
         self,
@@ -93,13 +70,6 @@ class OfflineBackend:
             state.setdefault("summary", {}).update(summary)
         state["updated_at"] = _now()
         self._write_state(run_id, state)
-
-    def log_metrics(self, run_id: str, metrics: Dict[str, Any], step: Optional[int] = None) -> None:
-        line = {"step": step, "timestamp": _now(), **metrics}
-        path = self.run_dir(run_id) / "metrics.jsonl"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(line, ensure_ascii=False, default=str) + "\n")
 
     def finalize(
         self,
@@ -122,7 +92,7 @@ class OfflineBackend:
         self._write_state(run_id, state)
 
     def close(self) -> None:
-        """Nothing to release — every write is already flushed to disk."""
+        """Every write is already on disk."""
 
     # ------------------------------------------------------------------ state
 
@@ -143,8 +113,7 @@ class OfflineBackend:
     def _write_state(self, run_id: str, state: Dict[str, Any]) -> None:
         path = self._state_path(run_id)
         path.parent.mkdir(parents=True, exist_ok=True)
-        # Write-then-rename: a crash mid-write must not leave the run's own
-        # record truncated, since it is the only description of what ran.
+        # Write-then-rename so a crash mid-write never truncates the record.
         temp = path.with_suffix(".json.tmp")
         temp.write_text(json.dumps(state, indent=2, ensure_ascii=False, default=str), "utf-8")
         temp.replace(path)

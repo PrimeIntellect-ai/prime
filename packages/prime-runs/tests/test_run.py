@@ -1,6 +1,5 @@
-"""The run handle: lifecycle, containment, ranks, terminal status."""
+"""The run handle: lifecycle, containment, terminal status."""
 
-import signal
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -17,28 +16,19 @@ from prime_runs.sinks import TracesSink
 
 
 class FakeBackend:
-    def __init__(self, supports_step_metrics: bool = False, fail_on: Optional[str] = None) -> None:
-        self.kind = "eval"
-        self.supports_step_metrics = supports_step_metrics
+    def __init__(self, fail_on: Optional[str] = None) -> None:
         self.fail_on = fail_on
         self.updates: List[Dict[str, Any]] = []
-        self.points: List[Any] = []
         self.finalized: List[Dict[str, Any]] = []
         self.closed = False
 
     def create(self, spec: RunSpec) -> RunHandle:
         return RunHandle(id="run-1", name=spec.name, url="https://app.example/run-1")
 
-    def attach(self, run_id: str) -> RunHandle:
-        return RunHandle(id=run_id)
-
     def update(self, run_id, *, config=None, summary=None) -> None:
         if self.fail_on == "update":
             raise RuntimeError("update exploded")
         self.updates.append({"config": config, "summary": summary})
-
-    def log_metrics(self, run_id, metrics, step=None) -> None:
-        self.points.append((metrics, step))
 
     def finalize(self, run_id, *, status, summary=None, error=None, config=None) -> None:
         if self.fail_on == "finalize":
@@ -51,9 +41,9 @@ class FakeBackend:
         self.closed = True
 
 
-def make_run(backend=None, sinks=None, **kwargs) -> Run:
+def make_run(backend=None, sinks=None, config=None, **kwargs) -> Run:
     backend = backend or FakeBackend()
-    spec = RunSpec(name="test-run", kind="eval", framework="verifiers", model="Qwen3-8B")
+    spec = RunSpec(name="test-run", framework="verifiers", model="Qwen3-8B", config=config or {})
     return Run(
         backend=backend,
         handle=backend.create(spec),
@@ -69,7 +59,6 @@ def test_the_handle_exposes_what_a_producer_prints():
     assert run.id == "run-1"
     assert run.url == "https://app.example/run-1"
     assert run.status is RunStatus.RUNNING
-    assert run.is_primary is True
     run.finish()
 
 
@@ -91,11 +80,10 @@ def test_traces_reach_the_sinks_while_the_run_is_still_going():
     sink = FakeSink()
     run = make_run(sinks=[sink])
 
-    run.log_traces([{"id": "t1"}], step=2)
+    run.log_traces([{"id": "t1"}])
     run.flush()
 
-    assert sink.batches[0][0] == [{"id": "t1"}]
-    assert sink.batches[0][2] == 2
+    assert sink.batches == [[{"id": "t1"}]]
     assert not run.finished
     run.finish()
 
@@ -111,84 +99,16 @@ def test_an_empty_batch_is_not_sent():
     run.finish()
 
 
-def test_metrics_land_in_the_summary_when_the_backend_has_no_time_series():
-    backend = FakeBackend(supports_step_metrics=False)
-    run = make_run(backend, summary_flush_seconds=0.0)
-
-    run.log({"reward": 0.5}, step=1)
-    run.log({"reward": 0.75}, step=2)
-    run.flush()
-
-    assert run.summary["reward"] == 0.75
-    assert backend.points == []
-    assert backend.updates, "the summary was flushed"
-    run.finish()
-
-
-def test_metrics_become_a_time_series_when_the_backend_has_one():
-    backend = FakeBackend(supports_step_metrics=True)
-    run = make_run(backend)
-
-    run.log({"loss": 2.0}, step=1)
-    run.flush()
-
-    assert backend.points == [({"loss": 2.0}, 1)]
-    run.finish()
-
-
-def test_commit_false_stages_without_writing():
-    backend = FakeBackend(supports_step_metrics=True)
-    run = make_run(backend)
-
-    run.log({"loss": 2.0}, step=1, commit=False)
-    run.flush()
-
-    assert backend.points == []
-    assert run.summary["loss"] == 2.0
-    run.finish()
-
-
-def test_commit_false_merges_staged_metrics_into_the_next_point():
-    backend = FakeBackend(supports_step_metrics=True)
-    run = make_run(backend)
-
-    run.log({"loss": 2.0}, step=7, commit=False)
-    run.log({"reward": 0.5})
-    run.flush()
-
-    assert backend.points == [({"loss": 2.0, "reward": 0.5}, 7)]
-    run.finish()
-
-
-def test_periodic_summary_updates_run_on_the_uploader_thread():
-    caller_thread = threading.get_ident()
-    update_threads = []
-
-    class ThreadRecordingBackend(FakeBackend):
-        def update(self, run_id, *, config=None, summary=None) -> None:
-            update_threads.append(threading.get_ident())
-            super().update(run_id, config=config, summary=summary)
-
-    backend = ThreadRecordingBackend(supports_step_metrics=False)
-    run = make_run(backend, summary_flush_seconds=0.0)
-
-    run.log({"reward": 0.5})
-    run.flush()
-
-    assert update_threads
-    assert all(thread_id != caller_thread for thread_id in update_threads)
-    run.finish()
-
-
-def test_non_finite_metrics_are_dropped_rather_than_failing_the_request():
+def test_non_finite_summary_values_are_dropped_rather_than_failing_the_request():
     """A diverged loss serializes as bare ``NaN``, which strict JSON rejects —
     the whole request fails on a payload nobody can inspect."""
-    run = make_run(summary_flush_seconds=0.0)
+    backend = FakeBackend()
+    run = make_run(backend)
 
-    run.log({"loss": float("nan"), "grad": float("inf"), "reward": 0.5})
+    run.finish(summary={"loss": float("nan"), "grad": float("inf"), "reward": 0.5})
 
     assert run.summary == {"reward": 0.5}
-    run.finish()
+    assert backend.finalized[0]["summary"] == {"reward": 0.5}
 
 
 def test_finish_flushes_records_before_reporting_the_terminal_status():
@@ -197,9 +117,9 @@ def test_finish_flushes_records_before_reporting_the_terminal_status():
     order: List[str] = []
 
     class OrderedSink(FakeSink):
-        def write(self, records, *, line_format=None, step=None) -> None:
+        def write(self, records) -> None:
             order.append("write")
-            super().write(records, line_format=line_format, step=step)
+            super().write(records)
 
     class OrderedBackend(FakeBackend):
         def finalize(self, run_id, *, status, summary=None, error=None, config=None) -> None:
@@ -235,9 +155,7 @@ def test_concurrent_finish_waits_for_the_first_teardown_to_complete():
         def finalize(self, run_id, *, status, summary=None, error=None, config=None) -> None:
             self.finalize_started.set()
             assert self.release_finalize.wait(2.0)
-            super().finalize(
-                run_id, status=status, summary=summary, error=error, config=config
-            )
+            super().finalize(run_id, status=status, summary=summary, error=error, config=config)
 
     backend = BlockingBackend()
     run = make_run(backend)
@@ -284,15 +202,13 @@ def test_logging_after_finish_is_a_producer_bug():
     run.finish()
 
     with pytest.raises(RunFinishedError):
-        run.log({"reward": 1.0})
-    with pytest.raises(RunFinishedError):
         run.log_traces([{"id": "t1"}])
 
 
 def test_the_context_manager_completes_a_clean_run():
     backend = FakeBackend()
     with make_run(backend) as run:
-        run.log({"reward": 1.0})
+        run.log_traces([{"id": "t1"}])
 
     assert backend.finalized[0]["status"] is RunStatus.COMPLETED
 
@@ -337,8 +253,7 @@ def test_teardown_does_not_swallow_control_flow_exceptions(teardown_error):
 
 
 def test_an_interrupt_is_recorded_as_a_decision_not_a_fault():
-    """Ctrl-C must not land in the same bucket as a broken eval — and it must
-    agree with the SIGINT handler, which normally gets there first."""
+    """Ctrl-C must not land in the same bucket as a broken eval."""
     backend = FakeBackend()
 
     with pytest.raises(KeyboardInterrupt):
@@ -349,29 +264,11 @@ def test_an_interrupt_is_recorded_as_a_decision_not_a_fault():
     assert backend.finalized[0]["error"] == "interrupted"
 
 
-def test_a_termination_signal_reports_crashed_like_atexit_does():
-    """The producer never said the run failed; it was stopped from outside."""
-    backend = FakeBackend()
-    run = make_run(backend)
-    chained = []
-    # Stand in for the handler the SDK displaced. Anything but SIG_DFL, which
-    # would re-raise the signal and take the test runner down with it.
-    run._previous_signal_handlers[signal.SIGTERM] = lambda *a: chained.append(a)
-
-    run._handle_signal(signal.SIGTERM, None)
-
-    assert backend.finalized[0]["status"] is RunStatus.CRASHED
-    assert "SIGTERM" in backend.finalized[0]["error"]
-    assert chained, "the displaced handler still runs"
-    signal.signal(signal.SIGTERM, signal.SIG_DFL)
-
-
 def test_finish_hands_the_full_config_to_finalize():
     """The evaluations API replaces metadata wholesale, so a backend recording
     terminal state inside it needs the whole picture to merge into."""
     backend = FakeBackend()
-    run = make_run(backend)
-    run.update_config({"num_rollouts": 4})
+    run = make_run(backend, config={"num_rollouts": 4})
 
     run.finish(status=RunStatus.FAILED, error="boom")
 
@@ -423,6 +320,7 @@ def test_a_process_that_exits_without_finishing_reports_crashed():
 
 
 def test_a_forked_handle_gets_a_fresh_lock_and_loses_lifecycle_ownership():
+    """The child's inherited atexit hook must never finalize the parent's run."""
     backend = FakeBackend()
     run = make_run(backend)
     inherited_lock = run._finish_lock
@@ -430,9 +328,9 @@ def test_a_forked_handle_gets_a_fresh_lock_and_loses_lifecycle_ownership():
     run.reset_after_fork()
 
     assert run._finish_lock is not inherited_lock
-    assert run.is_primary is False
     run.finish()
     assert backend.finalized == []
+    assert backend.closed is True
 
 
 def test_a_backend_failure_does_not_escape_into_the_producer_by_default():
@@ -499,31 +397,6 @@ def test_a_sink_error_is_recorded_on_the_run():
     run.finish()
 
 
-def test_a_non_primary_rank_does_not_close_the_shared_run():
-    """Eight ranks racing to finalize produce seven confusing failures."""
-    backend = FakeBackend()
-    run = make_run(backend, is_primary=False)
-
-    run.log({"reward": 1.0})
-    run.finish()
-
-    assert backend.finalized == []
-    assert backend.updates == []
-    assert run.is_primary is False
-
-
-def test_a_non_primary_rank_still_uploads_its_own_records():
-    """The point of eight ranks is that they contribute to one run."""
-    sink = FakeSink()
-    run = make_run(sinks=[sink], is_primary=False)
-
-    run.log_traces([{"id": "t1"}])
-    run.flush()
-
-    assert sink.batches
-    run.finish()
-
-
 def test_dropped_records_are_reported_on_the_handle():
     run = make_run()
     run._worker.dropped = 3
@@ -569,9 +442,7 @@ def test_an_upload_failure_is_reported_once():
 def test_a_gated_trace_upload_reaches_strict_callers_and_loss_accounting():
     class GatedClient:
         def upload_records(self, records, **kwargs):
-            raise ForbiddenError(
-                "not in beta", status_code=403, code="service_not_enabled"
-            )
+            raise ForbiddenError("not in beta", status_code=403, code="service_not_enabled")
 
         def close(self) -> None:
             pass
@@ -583,88 +454,3 @@ def test_a_gated_trace_upload_reaches_strict_callers_and_loss_accounting():
         run.finish()
 
     assert run.failed_records == {"traces": 1}
-
-
-def test_a_signal_interrupting_finish_is_chained_after_teardown(monkeypatch):
-    events = []
-
-    class SignallingBackend(FakeBackend):
-        def finalize(self, run_id, *, status, summary=None, error=None, config=None) -> None:
-            events.append("finalize-start")
-            run._handle_signal(signal.SIGTERM, None)
-            events.append("finalize-end")
-            super().finalize(
-                run_id, status=status, summary=summary, error=error, config=config
-            )
-
-    backend = SignallingBackend()
-    run = make_run(backend)
-    run._previous_signal_handlers[signal.SIGTERM] = lambda *_: events.append("signal")
-    monkeypatch.setattr("prime_runs.run.signal.signal", lambda *_: None)
-
-    run.finish()
-
-    assert events == ["finalize-start", "finalize-end", "signal"]
-    assert backend.closed is True
-
-
-def test_signal_handlers_are_restored_when_the_run_finishes():
-    """`self._handle_signal` builds a new bound method on every access, so an
-    identity check against a fresh one never matches — leaving the handler
-    installed, pinning the finished run, and blocking the next run in the
-    process from installing its own."""
-    original = signal.getsignal(signal.SIGTERM)
-    run = make_run()
-    run.install_signal_handlers()
-    assert signal.getsignal(signal.SIGTERM) is run._signal_handler
-
-    run.finish()
-
-    assert signal.getsignal(signal.SIGTERM) is original
-
-
-def test_a_later_run_can_install_its_own_handlers():
-    first = make_run()
-    first.install_signal_handlers()
-    first.finish()
-
-    second = make_run()
-    second.install_signal_handlers()
-
-    assert signal.getsignal(signal.SIGTERM) is second._signal_handler
-    second.finish()
-    assert signal.getsignal(signal.SIGTERM) is signal.SIG_DFL
-
-
-def test_a_run_finished_in_an_executor_relinquishes_handlers_to_the_next_run():
-    original = signal.getsignal(signal.SIGTERM)
-    first = make_run()
-    first.install_signal_handlers()
-
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        executor.submit(first.finish).result()
-
-    # Python forbids signal.signal() off the main thread, so restoration is
-    # deferred rather than forgetting which handler was displaced.
-    assert signal.getsignal(signal.SIGTERM) is first._signal_handler
-    second = make_run()
-    second.install_signal_handlers()
-    assert signal.getsignal(signal.SIGTERM) is second._signal_handler
-
-    second.finish()
-    assert signal.getsignal(signal.SIGTERM) is original
-
-
-def test_a_child_run_can_replace_an_inherited_signal_handler():
-    original = signal.getsignal(signal.SIGTERM)
-    inherited = make_run()
-    inherited.install_signal_handlers()
-    inherited.reset_after_fork()
-
-    child = make_run()
-    child.install_signal_handlers()
-
-    assert signal.getsignal(signal.SIGTERM) is child._signal_handler
-    child.finish()
-    inherited.finish()
-    assert signal.getsignal(signal.SIGTERM) is original

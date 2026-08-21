@@ -1,26 +1,15 @@
 """One process-wide ``os.register_at_fork`` hook, shared by everything stateful.
 
-Hosted evals fork after the SDK is initialized, and a forked child inherits far
-more than the queue: it gets copies of every open socket and every buffered file
-handle. Using those is not merely untidy — two processes writing the same TCP
-connection interleave bytes into one HTTP stream, and a duplicated write buffer
-gets flushed twice, once from each side.
+A forked child inherits copies of every open socket and buffered file handle.
+Anything holding a connection or a file registers here and gets told to start
+over in the child. Two rules for ``reset_after_fork``:
 
-So anything holding a connection or a file registers here and gets told to start
-over in the child. Two rules for a ``reset_after_fork`` implementation:
+- **Drop, do not close.** Closing an inherited transport can send bytes down a
+  socket the parent is still using.
+- **Do not flush.** An inherited buffer holds records the parent will write.
 
-- **Drop, do not close.** Closing an inherited transport can send bytes — a TLS
-  ``close_notify``, an HTTP ``Connection: close`` — down a socket the parent is
-  still using. Release the reference and let the child's copies of the
-  descriptors go when it exits.
-- **Do not flush.** A buffer inherited from the parent holds records the parent
-  has not written yet and will write itself. Flushing it in the child writes
-  them a second time.
-
-Registration is weak and the hook is installed once. A per-object
-``register_at_fork`` call cannot be undone, so registering per instance would
-pin every run the process ever opened in memory and re-run hooks for runs that
-finished hours ago.
+Registration is weak and the hook is installed once: ``register_at_fork``
+cannot be undone, so per-instance registration would pin every run forever.
 """
 
 import logging

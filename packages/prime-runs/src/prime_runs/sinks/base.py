@@ -1,20 +1,17 @@
-"""The contract a sample sink implements.
+"""The contract a record sink implements, plus the record helpers sinks share.
 
-A sink moves *records* — traces, episodes, rollouts — to wherever they are
-stored. It knows nothing about run lifecycle; a backend closing a run and a
-sink flushing its last batch are separate events on purpose.
+A sink moves records — traces, episodes — to wherever they are stored. It knows
+nothing about run lifecycle. Sinks are independent of each other: during the
+transition the traces sink and the legacy eval-samples sink both run, and
+retiring one is a change to the default sink list, not to any producer.
 
-Sinks are independent of backends and of each other. During the transition both
-the traces sink and the legacy eval-samples sink run at once, so the dashboard
-keeps working for accounts outside the traces beta while traces becomes the
-system of record. When the Viewer API reads traces natively, the default sink
-list drops one entry — and no producer changes.
-
-Every sink must be *degradable*: a sink that cannot write sets ``enabled =
-False`` and says why, once. A run whose traces are gated is still a valid run.
+Every sink must be degradable: one that cannot write sets ``enabled = False``
+and says why, once.
 """
 
-from typing import Any, Mapping, Optional, Protocol, Sequence, runtime_checkable
+from typing import Any, Dict, Mapping, Protocol, Sequence, runtime_checkable
+
+from ..models import RUN_KIND
 
 
 @runtime_checkable
@@ -28,13 +25,7 @@ class Sink(Protocol):
         """Bind the sink to a run before the first write."""
         ...
 
-    def write(
-        self,
-        records: Sequence[Any],
-        *,
-        line_format: Optional[str] = None,
-        step: Optional[int] = None,
-    ) -> None:
+    def write(self, records: Sequence[Any]) -> None:
         """Send one batch. Called from the uploader thread, never inline."""
         ...
 
@@ -48,12 +39,8 @@ class Sink(Protocol):
 
 
 def to_mapping(record: Any) -> Mapping[str, Any]:
-    """The JSON mapping for a record, whatever shape the producer handed us.
-
-    Mirrors ``prime_traces.SupportsToRecord``: verifiers ``Trace``/``Episode``
-    and prime-rl ``Rollout`` all implement ``to_record()``, and plain dicts pass
-    straight through.
-    """
+    """The JSON mapping for a record: a dict passes through, anything else must
+    implement ``to_record()`` (verifiers ``Trace``/``Episode`` do)."""
     if isinstance(record, Mapping):
         return record
     to_record = getattr(record, "to_record", None)
@@ -63,3 +50,19 @@ def to_mapping(record: Any) -> Mapping[str, Any]:
             return value
         raise TypeError(f"{type(record).__name__}.to_record() must return a mapping")
     raise TypeError(f"{type(record).__name__} is not a mapping and has no to_record()")
+
+
+def is_episode(record: Any) -> bool:
+    """Whether a record (object or mapping) is an episode rather than a trace."""
+    if isinstance(record, Mapping):
+        return "traces" in record
+    return hasattr(record, "traces")
+
+
+def stamp_run(mapping: Mapping[str, Any], run_id: str) -> Dict[str, Any]:
+    """A copy of ``mapping`` carrying ``run`` if it did not already. Producer
+    objects are never stamped — they carry their own ``run`` — but a bare dict
+    with no ``run.id`` is an orphaned, unqueryable upload."""
+    if mapping.get("run"):
+        return dict(mapping)
+    return {**mapping, "run": {"id": run_id, "type": RUN_KIND}}

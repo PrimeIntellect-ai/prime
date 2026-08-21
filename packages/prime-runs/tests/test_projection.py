@@ -12,7 +12,6 @@ from prime_runs.projection import (
     MAX_SAMPLES_PAYLOAD_BYTES,
     batch_samples,
     build_samples,
-    is_episode,
     summary_trace_index,
     trace_to_sample,
 )
@@ -136,6 +135,10 @@ def test_batch_samples_returns_nothing_for_no_samples():
     assert batch_samples([]) == []
 
 
-def test_is_episode_distinguishes_episodes_from_traces():
+def test_is_episode_distinguishes_episodes_from_traces_in_either_form():
+    from prime_runs.sinks import is_episode
+
     assert is_episode(make_episode())
     assert not is_episode(make_trace())
+    assert is_episode({"id": "e", "traces": []})
+    assert not is_episode({"id": "t"})

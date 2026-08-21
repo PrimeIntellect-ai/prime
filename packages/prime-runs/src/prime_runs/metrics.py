@@ -1,14 +1,6 @@
-"""Run-level aggregates over native episodes.
-
-Opt-in, not automatic. The SDK does not decide what a run's headline number is
-— that judgement belongs next to the producer, which knows which agents are
-being scored and what counts as an error. This module ships the aggregation
-verifiers already used, so callers migrating off ``verifiers.v1.utils.platform``
-keep byte-identical dashboard numbers, and anyone else can pass their own dict
-to ``run.finish(summary=...)``.
-
-Duck-typed like :mod:`prime_runs.projection`: no producer package is imported.
-"""
+"""Run-level aggregates over native episodes — the aggregation verifiers used,
+so migrated runs keep identical dashboard numbers. Opt-in: pass the result to
+``run.finish(summary=...)``. Duck-typed; no producer package is imported."""
 
 from typing import Any, Dict, Optional, Sequence
 

@@ -9,12 +9,11 @@ Every sink must be degradable: one that cannot write sets ``enabled = False``
 and says why, once.
 """
 
-from typing import Any, Dict, Mapping, Protocol, Sequence, runtime_checkable
+from typing import Any, Dict, Mapping, Protocol, Sequence
 
 from ..models import RUN_KIND
 
 
-@runtime_checkable
 class Sink(Protocol):
     """A destination for run records."""
 

@@ -4,7 +4,7 @@ import httpx
 import pytest
 from conftest import RecordingHandler
 
-from prime_runs.backends import EvalsBackend
+from prime_runs.backend import EvalsBackend
 from prime_runs.exceptions import (
     ConfigurationError,
     EnvironmentResolutionError,

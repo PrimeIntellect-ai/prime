@@ -32,7 +32,6 @@ from .exceptions import (
     UnauthorizedError,
 )
 from .models import CONFIG_SOURCE_KEY, ConfigSource, EnvironmentRef, RunStatus
-from .projection import build_samples, trace_to_sample
 from .run import MODE_ENV, Run, init
 
 __version__ = "0.1.0"
@@ -47,8 +46,6 @@ __all__ = [
     "MODE_ENV",
     "metrics",
     "projection",
-    "build_samples",
-    "trace_to_sample",
     "PrimeRunsError",
     "ConfigurationError",
     "EnvironmentResolutionError",

@@ -1,22 +1,68 @@
-"""Eval runs over ``/api/v1/evaluations/*``, plus environment resolution
-through the hub's get-or-create so a local run uploads without ``prime env push``.
+"""Run backends: the contract, the evaluations backend, and the disabled no-op.
 
-The eval API has no producer-facing way to mark a run failed: ``finalize``
-moves a run to COMPLETED and ``UpdateEvaluationRequest`` carries no status. A
-failed or crashed run therefore keeps showing as running; the terminal state is
-recorded in ``metadata.prime_runs`` so it is at least visible.
+A backend owns the *lifecycle* of a run — creating it, updating what is known
+about it, closing it out with a terminal status. It does not move records;
+that is a sink's job (see :mod:`prime_runs.sinks`).
+
+:class:`EvalsBackend` works over ``/api/v1/evaluations/*``, resolving
+environments through the hub's get-or-create so a local run uploads without
+``prime env push``. The eval API has no producer-facing way to mark a run
+failed: ``finalize`` moves a run to COMPLETED and ``UpdateEvaluationRequest``
+carries no status. A failed or crashed run therefore keeps showing as running;
+the terminal state is recorded in ``metadata.prime_runs`` so it is at least
+visible.
 """
 
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Protocol
 
-from .._http import PlatformClient
-from ..exceptions import APIError, ConfigurationError, EnvironmentResolutionError
-from ..models import EnvironmentRef, RunHandle, RunSpec, RunStatus
+from ._http import PlatformClient
+from .exceptions import APIError, ConfigurationError, EnvironmentResolutionError
+from .models import EnvironmentRef, RunHandle, RunSpec, RunStatus
 
 logger = logging.getLogger(__name__)
+
+
+class Backend(Protocol):
+    def create(self, spec: RunSpec) -> RunHandle:
+        """Open a new run and return its identity."""
+        ...
+
+    def update(
+        self,
+        run_id: str,
+        *,
+        config: Optional[Dict[str, Any]] = None,
+        summary: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Persist config (inputs) and/or summary (outputs).
+
+        ``config`` is the run's *whole* config, not a patch: the evaluations API
+        replaces the stored metadata document.
+        """
+        ...
+
+    def finalize(
+        self,
+        run_id: str,
+        *,
+        status: RunStatus,
+        summary: Optional[Dict[str, Any]] = None,
+        error: Optional[str] = None,
+        config: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Close the run out. Called exactly once per run. ``config`` is passed
+        so a backend recording terminal state inside metadata can merge it."""
+        ...
+
+    def close(self) -> None:
+        """Release transport resources."""
+        ...
+
+
+# ------------------------------------------------------------------- evals
 
 
 class EvalsBackend:
@@ -197,3 +243,27 @@ def _default_name(spec: RunSpec) -> str:
     """The API requires a name; lead with the environment so runs sort together."""
     stem = _first_environment_name(spec) or spec.framework or "eval"
     return f"{stem}-{uuid.uuid4().hex[:8]}"
+
+
+# ---------------------------------------------------------------- disabled
+
+
+def disabled_run_id() -> str:
+    """A locally issued ID, visibly distinct from a platform one."""
+    return f"disabled-{uuid.uuid4().hex[:16]}"
+
+
+class DisabledBackend:
+    """No-op lifecycle, so ``mode="disabled"`` needs no branching upstream."""
+
+    def create(self, spec: RunSpec) -> RunHandle:
+        return RunHandle(id=disabled_run_id())
+
+    def update(self, run_id: str, **kwargs: Any) -> None:
+        return None
+
+    def finalize(self, run_id: str, **kwargs: Any) -> None:
+        return None
+
+    def close(self) -> None:
+        return None

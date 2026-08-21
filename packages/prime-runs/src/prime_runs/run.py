@@ -15,12 +15,11 @@ import math
 import os
 import threading
 import time
-import uuid
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Union
 
 from . import _fork
 from ._http import DEFAULT_TIMEOUT, UPLOAD_TIMEOUT, PlatformClient
-from .backends import Backend, EvalsBackend
+from .backend import Backend, DisabledBackend, EvalsBackend, disabled_run_id
 from .config import Config
 from .exceptions import ConfigurationError, RunFinishedError
 from .models import (
@@ -400,8 +399,8 @@ def init(
     backend: Backend
     sinks: List[Sink]
     if resolved_mode == "disabled":
-        backend = _DisabledBackend()
-        handle = RunHandle(id=_disabled_run_id(), name=name)
+        backend = DisabledBackend()
+        handle = RunHandle(id=disabled_run_id(), name=name)
         sinks = []
     else:
         if not api_key:
@@ -427,27 +426,6 @@ def init(
     if run.url:
         logger.info("Run %s: %s", run.id, run.url)
     return run
-
-
-def _disabled_run_id() -> str:
-    """A locally issued ID, visibly distinct from a platform one."""
-    return f"disabled-{uuid.uuid4().hex[:16]}"
-
-
-class _DisabledBackend:
-    """No-op lifecycle, so ``mode="disabled"`` needs no branching upstream."""
-
-    def create(self, spec: RunSpec) -> RunHandle:
-        return RunHandle(id=_disabled_run_id())
-
-    def update(self, run_id: str, **kwargs: Any) -> None:
-        return None
-
-    def finalize(self, run_id: str, **kwargs: Any) -> None:
-        return None
-
-    def close(self) -> None:
-        return None
 
 
 def _resolve_mode(mode: Optional[Mode], *, api_key: str) -> Mode:

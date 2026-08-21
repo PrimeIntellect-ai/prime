@@ -40,11 +40,6 @@ def _user_agent() -> str:
     return f"prime-runs/{__version__} python/{py}"
 
 
-def normalize_base_url(url: str) -> str:
-    """Strip a trailing ``/api/v1``; the client appends it itself."""
-    return url.rstrip("/").removesuffix("/api/v1")
-
-
 def encode_json(value: Any) -> bytes:
     """Compact UTF-8 JSON. ``allow_nan=False``: strict parsers server-side
     reject bare ``NaN`` and the failure is an opaque 400."""
@@ -65,7 +60,9 @@ class PlatformClient:
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
         client: Optional[httpx.Client] = None,
     ) -> None:
-        self.base_url = normalize_base_url(base_url)
+        # Strip a trailing /api/v1 — the same normalization prime_traces applies —
+        # so an explicit base_url written with the suffix does not double it.
+        self.base_url = base_url.rstrip("/").removesuffix("/api/v1")
         self.api_prefix = f"{self.base_url}/api/v1"
         self.max_attempts = max(1, max_attempts)
         self._owns_client = client is None

@@ -59,9 +59,25 @@ def is_episode(record: Any) -> bool:
 
 
 def stamp_run(mapping: Mapping[str, Any], run_id: str) -> Dict[str, Any]:
-    """A copy of ``mapping`` carrying ``run`` if it did not already. Producer
-    objects are never stamped — they carry their own ``run`` — but a bare dict
-    with no ``run.id`` is an orphaned, unqueryable upload."""
-    if mapping.get("run"):
-        return dict(mapping)
-    return {**mapping, "run": {"id": run_id, "type": RUN_KIND}}
+    """A copy of ``mapping`` carrying ``run`` at the top level, and on every
+    member trace of an episode that lacks one.
+
+    A record that already names a run keeps it; one without is stamped, since
+    an upload with no ``run.id`` is orphaned and unqueryable. Members matter
+    because the traces service derives ``run_id`` from ``trace.run.id`` only —
+    the episode envelope's ``run`` is never read — while producers (verifiers)
+    record the run on the episode and nowhere else.
+    """
+    stamped = dict(mapping)
+    if not stamped.get("run"):
+        stamped["run"] = {"id": run_id, "type": RUN_KIND}
+    members = stamped.get("traces")
+    if isinstance(members, list):
+        run = stamped["run"]
+        stamped["traces"] = [
+            {**member, "run": run}
+            if isinstance(member, Mapping) and not member.get("run")
+            else member
+            for member in members
+        ]
+    return stamped

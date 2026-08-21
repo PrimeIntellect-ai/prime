@@ -12,7 +12,7 @@ from typing import Any, Dict, Mapping, Optional, Sequence
 
 from .. import _fork
 from ..exceptions import ForbiddenError
-from .base import Sink, is_episode, stamp_run
+from .base import Sink, is_episode, stamp_run, to_mapping
 
 logger = logging.getLogger(__name__)
 
@@ -126,10 +126,13 @@ class TracesSink(Sink):
             del self.receipts[: -self._receipt_history_size]
 
     def _prepare(self, record: Any) -> Any:
-        """Stamp the run onto bare mappings; producer objects pass through."""
-        if not isinstance(record, Mapping) or self._run_id is None:
+        """The wire mapping for a record, carrying the run on the envelope and
+        on every member trace. Producer objects go through their own
+        ``to_record()`` here rather than inside the transport — same bytes,
+        but the members are reachable for stamping."""
+        if self._run_id is None:
             return record
-        return stamp_run(record, self._run_id)
+        return stamp_run(to_mapping(record), self._run_id)
 
     def flush(self) -> None:
         """Uploads are synchronous; nothing is held back here."""

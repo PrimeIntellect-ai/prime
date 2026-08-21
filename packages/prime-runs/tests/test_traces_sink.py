@@ -73,16 +73,64 @@ def test_a_bare_mapping_gets_the_run_stamped_onto_a_copy():
     assert original == {"id": "t1"}, "the caller's dict was not mutated"
 
 
-def test_producer_objects_are_passed_through_untouched():
-    """Verifiers and prime-rl stamp the run at rollout time; rewriting their
-    objects here is how a second source of truth appears."""
+def test_a_record_that_names_its_run_keeps_it():
+    """Producers stamp the run at rollout time; the sink never overrides a
+    ``run`` that is already there, which is how a second source of truth
+    would appear."""
+    client = FakeTracesClient()
+    sink = make_sink(client)
+
+    sink.write([{"id": "t1", "run": {"id": "theirs", "type": "eval"}}])
+
+    assert client.calls[0][0][0]["run"] == {"id": "theirs", "type": "eval"}
+
+
+def test_an_episode_s_run_reaches_every_member_trace():
+    """The traces service derives ``run_id`` from ``trace.run.id`` only and never
+    reads the envelope's ``run``, while verifiers records the run on the episode
+    and its ``Trace`` has no ``run`` field at all. Without this, every row of an
+    episode upload lands with an empty ``run_id`` (seen live, 2026-08-21)."""
+    client = FakeTracesClient()
+    sink = make_sink(client)
+    episode = make_episode("ep-1", [make_trace(trace_id="a"), make_trace(trace_id="b")])
+
+    sink.write([episode])
+
+    sent = client.calls[0][0][0]
+    assert sent["run"] == {"id": "run-1", "type": "eval"}
+    assert [member["run"] for member in sent["traces"]] == [sent["run"], sent["run"]]
+    assert [member["id"] for member in sent["traces"]] == ["a", "b"]
+
+
+def test_a_member_that_names_its_own_run_is_left_alone():
+    client = FakeTracesClient()
+    sink = make_sink(client)
+    theirs = {"id": "other-run", "type": "eval"}
+    episode = {
+        "id": "ep-1",
+        "run": {"id": "env-run", "type": "eval"},
+        "traces": [{"id": "a"}, {"id": "b", "run": theirs}],
+    }
+
+    sink.write([episode])
+
+    members = client.calls[0][0][0]["traces"]
+    assert members[0]["run"] == {"id": "env-run", "type": "eval"}
+    assert members[1]["run"] == theirs
+    assert episode["traces"][0] == {"id": "a"}, "the caller's members were not mutated"
+
+
+def test_producer_objects_are_serialized_once_through_to_record():
+    """The sink calls ``to_record()`` itself so members are reachable; the bytes
+    the transport sees are the same ones it would have produced."""
     client = FakeTracesClient()
     sink = make_sink(client)
     trace = make_trace()
 
     sink.write([trace])
 
-    assert client.calls[0][0][0] is trace
+    sent = client.calls[0][0][0]
+    assert sent == {**trace.to_record(), "run": {"id": "run-1", "type": "eval"}}
 
 
 def test_an_account_outside_the_beta_retires_the_sink_without_a_failure(caplog):

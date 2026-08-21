@@ -35,6 +35,10 @@ class _Flush:
     event: threading.Event = field(default_factory=threading.Event)
 
 
+def _sink_name(sink: Any) -> str:
+    return getattr(sink, "name", type(sink).__name__)
+
+
 def _deadline(timeout: Optional[float]) -> Optional[float]:
     if timeout is None:
         return None
@@ -72,6 +76,10 @@ class UploadWorker:
         #: from ``dropped``: another sink may well have stored them.
         self.failed_records: dict = {}
         self._transient_failures: dict = {}
+        #: Sinks this worker retired after a failure. Records that skip one of
+        #: these are lost to it and counted; a sink that switched itself off
+        #: without raising (nowhere for the records to go) is not in here.
+        self._retired: set = set()
         _fork.register(self)
 
     # ----------------------------------------------------------------- thread
@@ -105,13 +113,16 @@ class UploadWorker:
     def _dispatch(self, records: Sequence[Any]) -> None:
         for sink in self.sinks:
             if not getattr(sink, "enabled", True):
+                name = _sink_name(sink)
+                if name in self._retired:
+                    self.failed_records[name] = self.failed_records.get(name, 0) + len(records)
                 continue
             try:
                 sink.write(records)
             except Exception as exc:  # noqa: BLE001 - one sink failing must not stop the others
                 self._fail_sink(sink, exc, dropped=len(records))
             else:
-                self._transient_failures.pop(getattr(sink, "name", id(sink)), None)
+                self._transient_failures.pop(_sink_name(sink), None)
 
     def _flush_sinks(self) -> None:
         for sink in self.sinks:
@@ -126,7 +137,7 @@ class UploadWorker:
         """The batch is gone (the transports already retried). Decide whether
         the sink is too: permanent failures retire it at once, transient ones
         after ``TRANSIENT_FAILURE_LIMIT`` consecutive strikes."""
-        name = getattr(sink, "name", type(sink).__name__)
+        name = _sink_name(sink)
         if dropped:
             self.failed_records[name] = self.failed_records.get(name, 0) + dropped
 
@@ -147,6 +158,7 @@ class UploadWorker:
                 self._notify(name, exc)
                 return
             sink.enabled = False
+            self._retired.add(name)
             logger.warning(
                 "Sink %s disabled after %d consecutive transient failures: %s: %s",
                 name,
@@ -156,6 +168,7 @@ class UploadWorker:
             )
         else:
             sink.enabled = False
+            self._retired.add(name)
             logger.warning("Sink %s disabled after an error: %s: %s", name, type(exc).__name__, exc)
         self._notify(name, exc)
 

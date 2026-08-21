@@ -76,6 +76,40 @@ def test_a_failed_sink_is_not_called_again():
     worker.close()
 
 
+def test_records_that_skip_a_sink_retired_by_error_are_counted_as_lost_to_it():
+    """After the first failed batch the sink is off, but the producer keeps
+    logging; every later batch is just as lost to that sink as the first. Live
+    run 2026-08-21: five episodes, footer said "1 failed via traces"."""
+    broken = FakeSink("broken", fail_on_write=True)
+    worker = UploadWorker([broken])
+
+    for _ in range(5):
+        worker.submit([{"id": 1}])
+    drain(worker)
+
+    assert worker.failed_records == {"broken": 5}
+    worker.close()
+
+
+def test_records_that_skip_a_sink_which_switched_itself_off_are_not_counted():
+    """A sink that retires quietly (nowhere for the records to go, e.g. outside
+    the traces beta) lost nothing, and must not start a failure count."""
+
+    class QuietSink(FakeSink):
+        def write(self, records) -> None:
+            self.enabled = False  # retires without raising, like service_not_enabled
+
+    quiet = QuietSink("quiet")
+    worker = UploadWorker([quiet])
+
+    for _ in range(3):
+        worker.submit([{"id": 1}])
+    drain(worker)
+
+    assert worker.failed_records == {}
+    worker.close()
+
+
 def test_a_full_queue_drops_rather_than_blocking_the_producer():
     """Stalling a training run to protect telemetry is the wrong trade."""
     sink = BlockingSink()

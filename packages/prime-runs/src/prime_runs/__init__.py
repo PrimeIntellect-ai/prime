@@ -19,6 +19,7 @@ are duck-typed through ``to_record()``.
 
 from . import metrics, projection
 from .exceptions import (
+    APIError,
     ConfigurationError,
     EnvironmentResolutionError,
     ForbiddenError,
@@ -26,7 +27,6 @@ from .exceptions import (
     PaymentRequiredError,
     PrimeRunsError,
     RetryableAPIError,
-    RunAPIError,
     RunFinishedError,
     TransportError,
     UnauthorizedError,
@@ -52,7 +52,7 @@ __all__ = [
     "PrimeRunsError",
     "ConfigurationError",
     "EnvironmentResolutionError",
-    "RunAPIError",
+    "APIError",
     "RunFinishedError",
     "ForbiddenError",
     "NotFoundError",

@@ -84,7 +84,8 @@ degrades to offline with a warning.
 - **Contains its own errors.** With the default `on_error="warn"`, nothing the
   platform raises escapes into your loop. Use `on_error="raise"` in tests and
   CI, where a silent upload failure is the bug; failures surface from `flush()`
-  and `finish()`.
+  and `finish()`. Platform errors are the `prime_traces` exception family
+  (`pr.APIError` and friends), so one set of `except` clauses covers both SDKs.
 - **Applies backpressure.** The upload queue is bounded; a producer that
   durably outruns the uploader has records dropped and counted
   (`run.dropped_records`) rather than stalled. Per-sink losses are in

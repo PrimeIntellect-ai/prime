@@ -1,83 +1,50 @@
-"""Exceptions for the Prime Runs SDK. Nothing here escapes into a producer
-loop by default (``on_error="warn"``); callers opting into ``on_error="raise"``
-can branch on these types."""
+"""Exceptions for the Prime Runs SDK.
 
-from typing import Optional
+Two families. Errors raised here, before any request is made, derive from
+:class:`PrimeRunsError`. Errors from the platform derive from
+``prime_traces.APIError``: both SDKs talk to the same platform with the same
+credential, and the uploader already handles the traces family, so one
+vocabulary serves both. Nothing in either family escapes into a producer loop
+under the default ``on_error="warn"``. To catch everything the SDK can raise
+under ``on_error="raise"``::
+
+    except (pr.PrimeRunsError, pr.APIError):
+"""
+
+from prime_traces.exceptions import (
+    APIError,
+    APITimeoutError,
+    ForbiddenError,
+    NotFoundError,
+    PaymentRequiredError,
+    RetryableAPIError,
+    TransportError,
+    UnauthorizedError,
+)
+
+__all__ = [
+    "APIError",
+    "APITimeoutError",
+    "ConfigurationError",
+    "EnvironmentResolutionError",
+    "ForbiddenError",
+    "NotFoundError",
+    "PaymentRequiredError",
+    "PrimeRunsError",
+    "RetryableAPIError",
+    "RunFinishedError",
+    "TransportError",
+    "UnauthorizedError",
+    "is_transient",
+]
 
 
 class PrimeRunsError(Exception):
-    """Base exception for the Prime Runs SDK."""
+    """Base for errors raised by the SDK itself, before any request is made."""
 
 
 class ConfigurationError(PrimeRunsError):
-    """Missing API key, unreadable config file, unknown mode. Raised before
-    any request is made."""
-
-
-class RunAPIError(PrimeRunsError):
-    """An HTTP error response from a run backend."""
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        status_code: Optional[int] = None,
-        code: Optional[str] = None,
-    ):
-        self.status_code = status_code
-        self.code = code
-        super().__init__(message)
-
-
-class UnauthorizedError(RunAPIError):
-    """401 — the credential was rejected. Stop rather than retry."""
-
-
-class PaymentRequiredError(RunAPIError):
-    """402 — payment required. Check billing status."""
-
-
-class ForbiddenError(RunAPIError):
-    """403 — authenticated, but not allowed: another owner's run, a team the
-    key cannot act for, or a feature gated to an allowlist. Named to match
-    ``prime_traces.ForbiddenError``."""
-
-
-class NotFoundError(RunAPIError):
-    """404 — the run, environment or evaluation does not exist for this owner."""
-
-
-class RetryableAPIError(RunAPIError):
-    """429/5xx — retry the same request after ``retry_after`` seconds."""
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        status_code: Optional[int] = None,
-        code: Optional[str] = None,
-        retry_after: Optional[float] = None,
-    ):
-        super().__init__(message, status_code=status_code, code=code)
-        self.retry_after = retry_after
-
-
-class TransportError(RunAPIError):
-    """The request failed below HTTP — connection refused, TLS failure, timeout."""
-
-
-def is_transient(exc: BaseException) -> bool:
-    """Whether a failure is about this moment (retry later) rather than this
-    run (stop). Decides whether a sink is retired. Covers the traces service's
-    exception family too, since both reach the uploader through one path."""
-    if isinstance(exc, (RetryableAPIError, TransportError)):
-        return True
-    try:
-        from prime_traces.exceptions import RetryableAPIError as TracesRetryable
-        from prime_traces.exceptions import TransportError as TracesTransport
-    except ImportError:  # pragma: no cover - dependency is declared
-        return False
-    return isinstance(exc, (TracesRetryable, TracesTransport))
+    """Missing API key, unreadable config file, unknown mode."""
 
 
 class EnvironmentResolutionError(PrimeRunsError):
@@ -87,3 +54,9 @@ class EnvironmentResolutionError(PrimeRunsError):
 
 class RunFinishedError(PrimeRunsError):
     """A finished run was written to again: a producer bug."""
+
+
+def is_transient(exc: BaseException) -> bool:
+    """Whether a failure is about this moment (retry later) rather than this
+    run (stop). Decides whether a sink is retired."""
+    return isinstance(exc, (RetryableAPIError, TransportError))

@@ -1,13 +1,12 @@
-"""Shared HTTP client for the platform run APIs.
+"""HTTP client for the platform run APIs.
 
-Maps status codes onto :mod:`prime_runs.exceptions` and retries 429/502/503/504
-and transport failures with backoff, honouring ``Retry-After``.
-
-Retry safety is decided per call. A failure is *ambiguous* when the request
-may already have been processed (a 502/504, a read timeout). Replaying one is
-fine for a GET or PUT and not for ``POST /evaluations/``, which would create a
-second run. Callers declare intent with ``idempotent=``; unambiguous failures
-(connect errors, 429) are replayed for every method.
+Error mapping, backoff and the transport-failure classification come from
+``prime_traces.core.client``; what is local is the retry *policy*, because it
+is decided per call. A failure is *ambiguous* when the request may already have
+been processed (a 502/504, a read timeout). Replaying one is fine for a GET or
+PUT and not for ``POST /evaluations/``, which would create a second run.
+Callers declare intent with ``idempotent=``; unambiguous failures (connect
+errors, 429) are replayed for every method.
 """
 
 import json
@@ -16,27 +15,22 @@ import time
 from typing import Any, Dict, Mapping, Optional, Union
 
 import httpx
+from prime_traces.core.client import (
+    AMBIGUOUS_TRANSPORT_ERRORS,
+    raise_for_response,
+    retry_delay,
+)
 
 from . import _fork
-from .exceptions import (
-    ForbiddenError,
-    NotFoundError,
-    PaymentRequiredError,
-    RetryableAPIError,
-    RunAPIError,
-    TransportError,
-    UnauthorizedError,
-)
+from .exceptions import APIError, APITimeoutError, RetryableAPIError, TransportError
 
 DEFAULT_TIMEOUT = httpx.Timeout(60.0, connect=10.0)
 # Sample batches are megabytes; uploads get a longer budget.
 UPLOAD_TIMEOUT = httpx.Timeout(300.0, connect=10.0)
-RETRY_STATUS = frozenset({429, 502, 503, 504})
 #: Refused before any work was done, so replaying cannot duplicate anything.
 #: 503 is excluded: it may come from an intermediary after forwarding.
 UNAMBIGUOUS_RETRY_STATUS = frozenset({429})
 DEFAULT_MAX_ATTEMPTS = 5
-MAX_BACKOFF_SECONDS = 16.0
 
 
 def _user_agent() -> str:
@@ -44,24 +38,6 @@ def _user_agent() -> str:
 
     py = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
     return f"prime-runs/{__version__} python/{py}"
-
-
-def retry_delay(attempt: int, retry_after: Optional[float]) -> float:
-    """Seconds to wait before ``attempt`` (1-based). Server wins if it spoke."""
-    if retry_after is not None and retry_after >= 0:
-        return min(retry_after, MAX_BACKOFF_SECONDS)
-    return min(2.0 ** (attempt - 1), MAX_BACKOFF_SECONDS)
-
-
-def _parse_retry_after(response: httpx.Response) -> Optional[float]:
-    raw = response.headers.get("retry-after")
-    if not raw:
-        return None
-    try:
-        return float(raw)
-    except ValueError:
-        # HTTP-date form; fall back to the exponential schedule.
-        return None
 
 
 def normalize_base_url(url: str) -> str:
@@ -134,55 +110,42 @@ class PlatformClient:
         """
         url = f"{self.api_prefix}{path}"
         body = content if content is not None else (encode_json(json_body) if json_body else None)
-        headers = {"Content-Type": "application/json"} if body is not None else None
+        request_kwargs: Dict[str, Any] = {
+            "content": body,
+            "headers": {"Content-Type": "application/json"} if body is not None else None,
+            "params": dict(params) if params else None,
+        }
+        # ``None`` would disable httpx timeouts, not restore the default.
+        if timeout is not None:
+            request_kwargs["timeout"] = timeout
         attempts = max_attempts or self.max_attempts
         replayable = idempotent if idempotent is not None else method.upper() != "POST"
 
-        last_error: Optional[Exception] = None
-        for attempt in range(1, attempts + 1):
-            ambiguous = True
+        for attempt in range(attempts):
+            error: APIError
             try:
-                request_kwargs: Dict[str, Any] = {
-                    "content": body,
-                    "headers": headers,
-                    "params": dict(params) if params else None,
-                }
-                # ``None`` would disable httpx timeouts, not restore the default.
-                if timeout is not None:
-                    request_kwargs["timeout"] = timeout
                 response = self._client.request(method, url, **request_kwargs)
-            except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as exc:
-                # No connection was ever established, so the server saw nothing.
-                ambiguous = False
-                last_error = TransportError(f"{method} {path} failed to connect: {exc}")
             except httpx.TimeoutException as exc:
-                last_error = TransportError(f"{method} {path} timed out: {exc}")
+                error = APITimeoutError(f"{method} {path} timed out: {exc}")
+                ambiguous = isinstance(exc, AMBIGUOUS_TRANSPORT_ERRORS)
             except httpx.RequestError as exc:
-                last_error = TransportError(f"{method} {path} failed: {type(exc).__name__}: {exc}")
+                error = TransportError(f"{method} {path} failed: {type(exc).__name__}: {exc}")
+                ambiguous = isinstance(exc, AMBIGUOUS_TRANSPORT_ERRORS)
             else:
-                if response.status_code in RETRY_STATUS:
-                    ambiguous = response.status_code not in UNAMBIGUOUS_RETRY_STATUS
-                    last_error = RetryableAPIError(
-                        _error_message(response),
-                        status_code=response.status_code,
-                        code=_error_code(response),
-                        retry_after=_parse_retry_after(response),
-                    )
-                elif response.is_error:
-                    raise _map_error(response)
+                try:
+                    raise_for_response(response)
+                except RetryableAPIError as exc:
+                    error = exc
+                    ambiguous = exc.status_code not in UNAMBIGUOUS_RETRY_STATUS
                 else:
                     return _decode(response)
 
-            if attempt == attempts:
-                break
-            if ambiguous and not replayable:
+            last = attempt == attempts - 1
+            if last or (ambiguous and not replayable):
                 # Possibly processed already; a duplicate cannot be undone.
-                break
-            after = getattr(last_error, "retry_after", None)
-            time.sleep(retry_delay(attempt, after))
-
-        assert last_error is not None
-        raise last_error
+                raise error
+            time.sleep(retry_delay(error, attempt))
+        raise AssertionError("unreachable")  # pragma: no cover
 
     def get(self, path: str, **kwargs: Any) -> Dict[str, Any]:
         return self.request("GET", path, **kwargs)
@@ -210,52 +173,8 @@ def _decode(response: httpx.Response) -> Dict[str, Any]:
     try:
         payload = response.json()
     except ValueError as exc:
-        raise RunAPIError(
+        raise APIError(
             f"{response.request.method} {response.request.url.path} returned non-JSON "
             f"({response.status_code}): {response.text[:200]!r}"
         ) from exc
     return payload if isinstance(payload, dict) else {"data": payload}
-
-
-def _error_body(response: httpx.Response) -> Dict[str, Any]:
-    try:
-        payload = response.json()
-    except ValueError:
-        return {}
-    return payload if isinstance(payload, dict) else {}
-
-
-def _error_code(response: httpx.Response) -> Optional[str]:
-    body = _error_body(response)
-    code = body.get("code") or body.get("error_code")
-    return str(code) if code else None
-
-
-def _error_message(response: httpx.Response) -> str:
-    body = _error_body(response)
-    detail = body.get("detail") or body.get("message") or body.get("error")
-    if detail is None:
-        detail = response.text[:200] or response.reason_phrase
-    return (
-        f"HTTP {response.status_code} from "
-        f"{response.request.method} {response.request.url.path}: {detail}"
-    )
-
-
-def _map_error(response: httpx.Response) -> RunAPIError:
-    message = _error_message(response)
-    code = _error_code(response)
-    status = response.status_code
-    if status == 401:
-        return UnauthorizedError(
-            f"{message} — check PRIME_API_KEY or run `prime login`.",
-            status_code=status,
-            code=code,
-        )
-    if status == 402:
-        return PaymentRequiredError(message, status_code=status, code=code)
-    if status == 403:
-        return ForbiddenError(message, status_code=status, code=code)
-    if status == 404:
-        return NotFoundError(message, status_code=status, code=code)
-    return RunAPIError(message, status_code=status, code=code)

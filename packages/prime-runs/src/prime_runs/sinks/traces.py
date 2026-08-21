@@ -11,6 +11,7 @@ import logging
 from typing import Any, Dict, Mapping, Optional, Sequence
 
 from .. import _fork
+from ..exceptions import ForbiddenError
 from .base import Sink, is_episode, stamp_run
 
 logger = logging.getLogger(__name__)
@@ -147,8 +148,4 @@ class TracesSink(Sink):
     def _is_gated(exc: Exception) -> bool:
         """A 403 (``service_not_enabled``, or a write-only token) is not
         fixable at runtime, so the sink turns itself off instead of retrying."""
-        try:
-            from prime_traces.exceptions import ForbiddenError
-        except ImportError:  # pragma: no cover - dependency is declared
-            return False
         return isinstance(exc, ForbiddenError)

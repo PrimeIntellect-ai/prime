@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from .._http import PlatformClient
-from ..exceptions import ConfigurationError, EnvironmentResolutionError, RunAPIError
+from ..exceptions import APIError, ConfigurationError, EnvironmentResolutionError
 from ..models import EnvironmentRef, RunHandle, RunSpec, RunStatus
 
 logger = logging.getLogger(__name__)
@@ -62,7 +62,7 @@ class EvalsBackend:
         response = self._client.post("/evaluations/", json_body=payload)
         run_id = response.get("evaluation_id")
         if not run_id:
-            raise RunAPIError(
+            raise APIError(
                 f"POST /evaluations/ returned no evaluation_id (keys: {sorted(response)})"
             )
         return RunHandle(
@@ -152,7 +152,7 @@ class EvalsBackend:
             owner_slug, name = ref.slug.split("/", 1)
             try:
                 response = self._client.get(f"/environmentshub/{owner_slug}/{name}/@latest")
-            except RunAPIError as exc:
+            except APIError as exc:
                 raise EnvironmentResolutionError(
                     f"Could not resolve environment {ref.slug!r}: {exc}"
                 ) from exc
@@ -169,7 +169,7 @@ class EvalsBackend:
             response = self._client.post(
                 "/environmentshub/resolve", json_body=body, idempotent=True
             )
-        except RunAPIError as exc:
+        except APIError as exc:
             raise EnvironmentResolutionError(
                 f"Could not resolve environment {ref.name!r}: {exc}"
             ) from exc

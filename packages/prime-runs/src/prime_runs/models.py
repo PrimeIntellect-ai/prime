@@ -12,9 +12,9 @@ from typing import Any, Dict, List, Literal, Mapping, Optional, Union
 
 from .exceptions import ConfigurationError
 
-Mode = Literal["online", "offline", "disabled"]
-"""``online`` talks to the platform, ``offline`` writes a local run directory,
-``disabled`` makes every call a no-op with the same object shape."""
+Mode = Literal["online", "disabled"]
+"""``online`` talks to the platform; ``disabled`` makes every call a no-op with
+the same object shape."""
 
 OnError = Literal["warn", "raise"]
 

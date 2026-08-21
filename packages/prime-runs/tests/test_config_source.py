@@ -145,26 +145,33 @@ def test_a_mapping_that_looks_like_a_source_is_still_just_a_mapping():
 # -------------------------------------------------------------- through init
 
 
-def test_an_offline_run_stores_the_launch_file(tmp_path):
+@pytest.fixture
+def online(monkeypatch, make_platform_client, eval_routes):
+    handler = RecordingHandler(eval_routes)
+    monkeypatch.setattr("prime_runs.run.PlatformClient", lambda **_: make_platform_client(handler))
+    monkeypatch.setattr("prime_traces.TracesClient", lambda **_: object())
+
+    def _init(**kwargs):
+        return pr.init(name="tb2", environments=["gsm8k"], api_key="test-key", **kwargs), handler
+
+    return _init
+
+
+def test_an_online_run_sends_the_source_in_create_metadata(tmp_path, online):
     path = tmp_path / "eval.toml"
     path.write_text(EVAL_TOML)
 
-    run = pr.init(
-        name="tb2",
-        environments=["gsm8k"],
-        mode="offline",
-        dir=str(tmp_path / "runs"),
-        config=path,
-    )
+    run, handler = online(config=path)
     run.finish()
 
-    state = json.loads((tmp_path / "runs" / run.id / "run.json").read_text())
-    stored = state["spec"]["config"]
-    assert stored[CONFIG_SOURCE_KEY]["text"] == EVAL_TOML
-    assert stored[CONFIG_SOURCE_KEY]["filename"] == "eval.toml"
+    create = next(r for r in handler.requests if r.url.path == "/api/v1/evaluations/")
+    metadata = json.loads(create.content)["metadata"]
+    assert metadata[CONFIG_SOURCE_KEY]["text"] == EVAL_TOML
+    assert metadata[CONFIG_SOURCE_KEY]["format"] == "toml"
+    assert metadata[CONFIG_SOURCE_KEY]["filename"] == "eval.toml"
 
 
-def test_extra_values_can_be_merged_onto_a_launch_file(tmp_path):
+def test_extra_values_can_be_merged_onto_a_launch_file(tmp_path, online):
     """A run launched from a file that also wants structured values passes a
     mapping carrying the source under ``CONFIG_SOURCE_KEY`` — what verifiers does."""
     path = tmp_path / "eval.toml"
@@ -174,12 +181,13 @@ def test_extra_values_can_be_merged_onto_a_launch_file(tmp_path):
         CONFIG_SOURCE_KEY: ConfigSource.from_file(path).to_dict(),
     }
 
-    run = pr.init(environments=["gsm8k"], mode="offline", dir=str(tmp_path), config=config)
+    run, handler = online(config=config)
     run.finish()
 
-    state = json.loads((tmp_path / run.id / "run.json").read_text())
-    assert state["config"]["model"] == "deepseek/deepseek-v4-flash"
-    assert state["config"][CONFIG_SOURCE_KEY]["text"] == EVAL_TOML
+    create = next(r for r in handler.requests if r.url.path == "/api/v1/evaluations/")
+    metadata = json.loads(create.content)["metadata"]
+    assert metadata["model"] == "deepseek/deepseek-v4-flash"
+    assert metadata[CONFIG_SOURCE_KEY]["text"] == EVAL_TOML
     assert run.config_source.filename == "eval.toml"
 
 
@@ -187,49 +195,32 @@ def test_the_run_reports_its_own_source(tmp_path):
     path = tmp_path / "train.toml"
     path.write_text(EVAL_TOML)
 
-    run = pr.init(environments=["gsm8k"], mode="offline", dir=str(tmp_path), config=path)
+    run = pr.init(environments=["gsm8k"], mode="disabled", config=path)
 
     assert run.config_source.filename == "train.toml"
     assert run.config_source.text == EVAL_TOML
     run.finish()
 
 
-def test_a_run_without_a_source_reports_none(tmp_path):
-    run = pr.init(environments=["gsm8k"], mode="offline", dir=str(tmp_path))
+def test_a_run_without_a_source_reports_none():
+    run = pr.init(environments=["gsm8k"], mode="disabled")
 
     assert run.config_source is None
     run.finish()
 
 
-def test_an_online_run_sends_the_source_in_create_metadata(
-    tmp_path, monkeypatch, make_platform_client, eval_routes
-):
-    path = tmp_path / "eval.toml"
-    path.write_text(EVAL_TOML)
-    handler = RecordingHandler(eval_routes)
-    monkeypatch.setattr("prime_runs.run.PlatformClient", lambda **_: make_platform_client(handler))
-
-    monkeypatch.setattr("prime_traces.TracesClient", lambda **_: object())
-    run = pr.init(name="tb2", environments=["gsm8k"], api_key="test-key", config=path)
-    run.finish()
-
-    create = next(r for r in handler.requests if r.url.path == "/api/v1/evaluations/")
-    metadata = json.loads(create.content)["metadata"]
-    assert metadata[CONFIG_SOURCE_KEY]["text"] == EVAL_TOML
-    assert metadata[CONFIG_SOURCE_KEY]["format"] == "toml"
-
-
-def test_the_source_survives_the_failure_fallback(tmp_path):
+def test_the_source_survives_the_failure_fallback(tmp_path, online):
     """The fallback rewrites metadata to record a terminal state. It merges into
     the whole config, so the source must still be there afterwards."""
     path = tmp_path / "eval.toml"
     path.write_text(EVAL_TOML)
 
-    run = pr.init(environments=["gsm8k"], mode="offline", dir=str(tmp_path), config=path)
+    run, handler = online(config=path)
     run.fail("something broke")
 
-    state = json.loads((tmp_path / run.id / "run.json").read_text())
-    assert state["config"][CONFIG_SOURCE_KEY]["text"] == EVAL_TOML
+    update = handler.bodies_for("/api/v1/evaluations/eval-abc")[-1]
+    assert update["metadata"][CONFIG_SOURCE_KEY]["text"] == EVAL_TOML
+    assert update["metadata"]["prime_runs"]["status"] == "failed"
 
 
 def test_a_spec_defaults_to_no_source():

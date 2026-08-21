@@ -72,11 +72,10 @@ Nothing is redacted — keep credentials in the environment, not in the file.
 | mode | what happens |
 | --- | --- |
 | `online` | the run lives on the platform (default when an API key is present) |
-| `offline` | the run lives in a local directory (`dir=` / `PRIME_RUNS_DIR`) |
 | `disabled` | every call is a no-op, with the same object shape |
 
 Set the mode explicitly, or through `$PRIME_RUNS_MODE`. A missing API key
-degrades to offline with a warning.
+disables the run with a warning — it never silently writes somewhere else.
 
 ## What the run handle does for you
 
@@ -115,9 +114,8 @@ Resolved from environment variables first, then `~/.prime/config.json`:
 | platform API | `PRIME_API_BASE_URL` | `https://api.primeintellect.ai` |
 | dashboard | `PRIME_FRONTEND_URL` | `https://app.primeintellect.ai` |
 | traces service | `PRIME_TRACES_URL` | resolved by `prime-traces` |
-| offline runs | `PRIME_RUNS_DIR` | `./prime-runs` |
 
-Or pass `api_key=`, `base_url=`, `team_id=`, `dir=` to `init()`.
+Or pass `api_key=`, `base_url=`, `team_id=` to `init()`.
 
 ## Transports
 

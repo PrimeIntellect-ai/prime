@@ -6,8 +6,7 @@ a process that dies still reports a terminal status.
 
 ``init()`` is called *before* rollouts start, and the ID it returns is *the* run
 ID everywhere — including inside every trace document the producer writes.
-Nothing is re-stamped afterwards. Offline runs get a locally issued ID through
-the same path.
+Nothing is re-stamped afterwards.
 """
 
 import atexit
@@ -16,11 +15,12 @@ import math
 import os
 import threading
 import time
+import uuid
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Union
 
 from . import _fork
 from ._http import DEFAULT_TIMEOUT, UPLOAD_TIMEOUT, PlatformClient
-from .backends import Backend, EvalsBackend, OfflineBackend, new_run_id
+from .backends import Backend, EvalsBackend
 from .config import Config
 from .exceptions import ConfigurationError, RunFinishedError
 from .models import (
@@ -34,7 +34,7 @@ from .models import (
     RunSpec,
     RunStatus,
 )
-from .sinks import EvalSamplesSink, OfflineSink, Sink, TracesSink
+from .sinks import EvalSamplesSink, Sink, TracesSink
 from .worker import UploadWorker
 
 logger = logging.getLogger(__name__)
@@ -118,7 +118,7 @@ class Run:
 
     @property
     def url(self) -> Optional[str]:
-        """Where to open this run — a dashboard URL, or a local path offline."""
+        """The dashboard URL; ``None`` when disabled."""
         return self._handle.url
 
     @property
@@ -365,7 +365,6 @@ def init(
     tags: Optional[Sequence[str]] = None,
     config: Optional[Any] = None,
     mode: Optional[Mode] = None,
-    dir: Optional[str] = None,
     team_id: Optional[str] = None,
     api_key: Optional[str] = None,
     base_url: Optional[str] = None,
@@ -377,9 +376,9 @@ def init(
     in the run should carry, and the URL is what a producer prints.
 
     ``mode`` defaults to ``$PRIME_RUNS_MODE``, else online when there is an API
-    key and offline when there is not. ``config`` is what the run was configured
-    with: the path to the file it was launched from (stored byte for byte under
-    ``config_source``), or a mapping taken as given.
+    key and disabled (with a warning) when there is not. ``config`` is what the
+    run was configured with: the path to the file it was launched from (stored
+    byte for byte under ``config_source``), or a mapping taken as given.
     """
     settings = Config()
     api_key = api_key if api_key is not None else settings.api_key
@@ -402,18 +401,13 @@ def init(
     sinks: List[Sink]
     if resolved_mode == "disabled":
         backend = _DisabledBackend()
-        handle = RunHandle(id=new_run_id(), name=name)
+        handle = RunHandle(id=_disabled_run_id(), name=name)
         sinks = []
-    elif resolved_mode == "offline":
-        offline = OfflineBackend(dir)
-        backend = offline
-        handle = offline.create(spec)
-        sinks = [OfflineSink(offline.directory)]
     else:
         if not api_key:
             raise ConfigurationError(
                 'mode="online" needs an API key. Set PRIME_API_KEY, run `prime login`, '
-                'or pass mode="offline".'
+                'or pass mode="disabled".'
             )
         client = PlatformClient(api_key=api_key, base_url=base_url, timeout=DEFAULT_TIMEOUT)
         backend = EvalsBackend(client, frontend_url=settings.frontend_url, team_id=team_id)
@@ -435,11 +429,16 @@ def init(
     return run
 
 
+def _disabled_run_id() -> str:
+    """A locally issued ID, visibly distinct from a platform one."""
+    return f"disabled-{uuid.uuid4().hex[:16]}"
+
+
 class _DisabledBackend:
     """No-op lifecycle, so ``mode="disabled"`` needs no branching upstream."""
 
     def create(self, spec: RunSpec) -> RunHandle:
-        return RunHandle(id=new_run_id())
+        return RunHandle(id=_disabled_run_id())
 
     def update(self, run_id: str, **kwargs: Any) -> None:
         return None
@@ -456,17 +455,17 @@ def _resolve_mode(mode: Optional[Mode], *, api_key: str) -> Mode:
         env_mode = os.getenv(MODE_ENV)
         if env_mode:
             mode = env_mode.strip().lower()  # type: ignore[assignment]
-    if mode not in (None, "online", "offline", "disabled"):
-        raise ConfigurationError(f"mode={mode!r} is not one of 'online', 'offline' or 'disabled'")
+    if mode not in (None, "online", "disabled"):
+        raise ConfigurationError(f"mode={mode!r} is not one of 'online' or 'disabled'")
     if mode is None:
         if api_key:
             mode = "online"
         else:
             logger.warning(
                 "No API key found (set PRIME_API_KEY or run `prime login`); "
-                "recording this run offline instead."
+                "this run will not be tracked."
             )
-            mode = "offline"
+            mode = "disabled"
     return mode  # type: ignore[return-value]
 
 

@@ -157,9 +157,11 @@ class Run:
     def log_traces(self, traces: Iterable[Any]) -> None:
         """Hand bare traces to the sinks. Returns immediately.
 
-        Accepts verifiers ``Trace`` objects or plain JSON mappings. Call this
-        as rollouts complete; nothing is buffered until the end. A rollout
-        that is an episode (a group of traces) goes through :meth:`log_episodes`.
+        Accepts verifiers ``Trace`` objects or plain JSON mappings. Both reach
+        Prime Traces; the v0 sample table is projected from *episodes*, so a
+        bare trace has no row there. A rollout that is an episode (a group of
+        traces) goes through :meth:`log_episodes`. Call this as rollouts
+        complete; nothing is buffered until the end.
         """
         self._require_live("log_traces")
         self._submit(traces)
@@ -169,6 +171,9 @@ class Run:
 
         Accepts verifiers ``Episode`` objects or plain JSON mappings with a
         ``traces`` list. The episode's ``run`` reaches every member trace.
+        Both reach Prime Traces; the v0 sample table (what today's viewer
+        reads) is projected from episode *objects* only — a JSON episode has
+        no row there, which the samples sink warns about once.
         """
         self._require_live("log_episodes")
         self._submit(episodes)

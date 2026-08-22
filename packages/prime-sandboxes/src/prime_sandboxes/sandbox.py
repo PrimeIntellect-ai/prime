@@ -1,6 +1,7 @@
 """Sandbox client implementations."""
 
 import asyncio
+import contextlib
 import functools
 import json
 import os
@@ -8,6 +9,7 @@ import random
 import re
 import shlex
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -187,6 +189,11 @@ MAX_409_RETRIES = 4
 RETRY_409_BASE_DELAY = 0.25  # 250ms, 500ms, 1000ms, 2000ms with exponential backoff
 MAX_GATEWAY_ATTEMPTS = MAX_409_RETRIES + 1
 
+# Keep file transfers bounded in memory. This is deliberately an internal
+# implementation detail: upload_file/download_file continue to accept paths,
+# while upload_bytes/read_file remain available for callers that need bytes.
+GATEWAY_TRANSFER_CHUNK_SIZE = 16 * 1024 * 1024
+
 # Refresh cached gateway auth this many seconds before its reported expiry.
 AUTH_REFRESH_MARGIN_SECONDS = 60
 
@@ -198,6 +205,17 @@ JOB_OUTPUT_TAIL_BYTES = 10 * 1024 * 1024
 # adding a persistent worker to the client lifecycle.
 MAX_STATUS_BATCH_SIZE = 100
 STATUS_BATCH_WINDOW_SECONDS = 0.025
+
+
+def _rewind_upload_files(files: Optional[Dict[str, Any]]) -> None:
+    """Reset multipart file objects before each low-level request retry."""
+    if not files:
+        return
+    for value in files.values():
+        file = value[1] if isinstance(value, tuple) and len(value) > 1 else value
+        if hasattr(file, "seek"):
+            file.seek(0)
+
 
 # Creation status-poll pacing. Sandbox creation is polled with exponential
 # backoff plus jitter rather than at a fixed interval
@@ -902,6 +920,7 @@ class SandboxClient:
         params: Optional[Dict[str, Any]] = None,
     ) -> httpx.Response:
         """Make a POST request to the gateway with retry on connection errors only."""
+        _rewind_upload_files(files)
         with httpx.Client(timeout=timeout) as client:
             return client.post(url, json=json, files=files, params=params, headers=headers)
 
@@ -919,6 +938,33 @@ class SandboxClient:
         if response.status_code in RETRYABLE_5XX_STATUSES:
             response.raise_for_status()
         return response
+
+    @staticmethod
+    @_gateway_retry
+    def _gateway_stream_to_file(
+        url: str,
+        headers: Dict[str, str],
+        params: Dict[str, Any],
+        timeout: float,
+        local_file_path: str,
+    ) -> None:
+        """Stream a gateway response to a temporary file with transient retries."""
+        try:
+            with httpx.Client(timeout=timeout) as client:
+                with client.stream("GET", url, params=params, headers=headers) as response:
+                    # Error responses must be read before raising so callers can
+                    # safely include response.text in their APIError messages.
+                    if response.is_error:
+                        response.read()
+                        response.raise_for_status()
+
+                    with open(local_file_path, "wb") as file:
+                        for chunk in response.iter_bytes(GATEWAY_TRANSFER_CHUNK_SIZE):
+                            file.write(chunk)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(local_file_path)
+            raise
 
     @staticmethod
     @_read_file_retry
@@ -1955,9 +2001,6 @@ class SandboxClient:
 
         effective_timeout = timeout if timeout is not None else 300
 
-        with open(local_file_path, "rb") as f:
-            file_content = f.read()
-
         reauthed = False
         attempt = 0
         for _ in range(MAX_GATEWAY_ATTEMPTS):
@@ -1965,11 +2008,12 @@ class SandboxClient:
             url = f"{auth['gateway_url']}/{auth['user_ns']}/{auth['job_id']}/upload"
             headers = {"Authorization": f"Bearer {auth['token']}"}
             try:
-                files = {"file": (os.path.basename(local_file_path), file_content)}
-                params = {"path": file_path, "sandbox_id": sandbox_id}
-                response = self._gateway_post(
-                    url, headers=headers, timeout=effective_timeout, files=files, params=params
-                )
+                with open(local_file_path, "rb") as file:
+                    files = {"file": (os.path.basename(local_file_path), file)}
+                    params = {"path": file_path, "sandbox_id": sandbox_id}
+                    response = self._gateway_post(
+                        url, headers=headers, timeout=effective_timeout, files=files, params=params
+                    )
                 response.raise_for_status()
                 return FileUploadResponse.model_validate(response.json())
             except httpx.TimeoutException as e:
@@ -2070,22 +2114,32 @@ class SandboxClient:
 
         reauthed = False
         attempt = 0
+        temp_file_path: Optional[str] = None
         for _ in range(MAX_GATEWAY_ATTEMPTS):
+            temp_file_path = None
             auth = self._auth_cache.get_or_refresh(sandbox_id)
             url = f"{auth['gateway_url']}/{auth['user_ns']}/{auth['job_id']}/download"
             headers = {"Authorization": f"Bearer {auth['token']}"}
             try:
-                response = self._gateway_get(
-                    url, headers=headers, params=params, timeout=effective_timeout
-                )
-                response.raise_for_status()
-
                 dir_path = os.path.dirname(local_file_path)
-                if dir_path:
-                    os.makedirs(dir_path, exist_ok=True)
-
-                with open(local_file_path, "wb") as f:
-                    f.write(response.content)
+                os.makedirs(dir_path or ".", exist_ok=True)
+                temp_file = tempfile.NamedTemporaryFile(
+                    mode="wb",
+                    prefix=f".{os.path.basename(local_file_path)}.",
+                    suffix=".tmp",
+                    dir=dir_path or ".",
+                    delete=False,
+                )
+                temp_file_path = temp_file.name
+                temp_file.close()
+                self._gateway_stream_to_file(
+                    url,
+                    headers=headers,
+                    params=params,
+                    timeout=effective_timeout,
+                    local_file_path=temp_file_path,
+                )
+                os.replace(temp_file_path, local_file_path)
                 return
             except httpx.TimeoutException as e:
                 raise DownloadTimeoutError(sandbox_id, file_path, effective_timeout) from e
@@ -2111,6 +2165,10 @@ class SandboxClient:
                 ) from e
             except Exception as e:
                 raise APIError(f"Download failed: {e.__class__.__name__}: {e}") from e
+            finally:
+                if temp_file_path is not None:
+                    with contextlib.suppress(OSError):
+                        os.unlink(temp_file_path)
 
         raise APIError("Download failed after retries")
 
@@ -2306,6 +2364,7 @@ class AsyncSandboxClient:
         params: Optional[Dict[str, Any]] = None,
     ) -> httpx.Response:
         """Make a POST request to the gateway with retry on connection errors only."""
+        _rewind_upload_files(files)
         gateway_client = self._get_gateway_client()
         return await gateway_client.post(
             url, json=json, files=files, params=params, headers=headers, timeout=timeout
@@ -2325,6 +2384,35 @@ class AsyncSandboxClient:
         if response.status_code in RETRYABLE_5XX_STATUSES:
             response.raise_for_status()
         return response
+
+    @_gateway_retry
+    async def _gateway_stream_to_file(
+        self,
+        url: str,
+        headers: Dict[str, str],
+        params: Dict[str, Any],
+        timeout: float,
+        local_file_path: str,
+    ) -> None:
+        """Stream a gateway response to a temporary file with transient retries."""
+        try:
+            gateway_client = self._get_gateway_client()
+            async with gateway_client.stream(
+                "GET", url, params=params, headers=headers, timeout=timeout
+            ) as response:
+                # Error responses must be read before raising so callers can
+                # safely include response.text in their APIError messages.
+                if response.is_error:
+                    await response.aread()
+                    response.raise_for_status()
+
+                async with aiofiles.open(local_file_path, "wb") as file:
+                    async for chunk in response.aiter_bytes(GATEWAY_TRANSFER_CHUNK_SIZE):
+                        await file.write(chunk)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(local_file_path)
+            raise
 
     @_read_file_retry
     async def _gateway_read_file_get(
@@ -3486,8 +3574,8 @@ class AsyncSandboxClient:
     ) -> FileUploadResponse:
         """Upload a file to a sandbox via gateway (async)
 
-        Uses aiofiles for non-blocking file I/O, then passes content to httpx.
-        File content is loaded into memory, suitable for typical sandbox files.
+        Streams a file object through httpx so file size does not determine
+        client memory usage.
 
         Args:
             sandbox_id: The sandbox ID
@@ -3502,10 +3590,6 @@ class AsyncSandboxClient:
 
         effective_timeout = timeout if timeout is not None else 300
 
-        # Read file asynchronously (non-blocking I/O)
-        async with aiofiles.open(local_file_path, "rb") as f:
-            file_content = await f.read()
-
         reauthed = False
         attempt = 0
         for _ in range(MAX_GATEWAY_ATTEMPTS):
@@ -3514,10 +3598,11 @@ class AsyncSandboxClient:
             url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/upload"
             headers = {"Authorization": f"Bearer {auth['token']}"}
             try:
-                files = {"file": (os.path.basename(local_file_path), file_content)}
-                response = await self._gateway_post(
-                    url, headers=headers, timeout=effective_timeout, files=files, params=params
-                )
+                with open(local_file_path, "rb") as file:
+                    files = {"file": (os.path.basename(local_file_path), file)}
+                    response = await self._gateway_post(
+                        url, headers=headers, timeout=effective_timeout, files=files, params=params
+                    )
                 response.raise_for_status()
                 return FileUploadResponse.model_validate(response.json())
             except httpx.TimeoutException as e:
@@ -3621,25 +3706,34 @@ class AsyncSandboxClient:
 
         reauthed = False
         attempt = 0
+        temp_file_path: Optional[str] = None
         for _ in range(MAX_GATEWAY_ATTEMPTS):
+            temp_file_path = None
             auth = await self._auth_cache.get_or_refresh(sandbox_id)
             gateway_url = auth["gateway_url"].rstrip("/")
             url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/download"
             headers = {"Authorization": f"Bearer {auth['token']}"}
             try:
-                response = await self._gateway_get(
-                    url, headers=headers, params=params, timeout=effective_timeout
-                )
-                response.raise_for_status()
-                content = response.content
-
                 dir_path = os.path.dirname(local_file_path)
-                if dir_path:
-                    await asyncio.to_thread(os.makedirs, dir_path, exist_ok=True)
-
-                # Write file asynchronously (non-blocking I/O)
-                async with aiofiles.open(local_file_path, "wb") as f:
-                    await f.write(content)
+                await asyncio.to_thread(os.makedirs, dir_path or ".", exist_ok=True)
+                temp_file = await asyncio.to_thread(
+                    tempfile.NamedTemporaryFile,
+                    mode="wb",
+                    prefix=f".{os.path.basename(local_file_path)}.",
+                    suffix=".tmp",
+                    dir=dir_path or ".",
+                    delete=False,
+                )
+                temp_file_path = temp_file.name
+                temp_file.close()
+                await self._gateway_stream_to_file(
+                    url,
+                    headers=headers,
+                    params=params,
+                    timeout=effective_timeout,
+                    local_file_path=temp_file_path,
+                )
+                await asyncio.to_thread(os.replace, temp_file_path, local_file_path)
                 return
             except httpx.TimeoutException as e:
                 raise DownloadTimeoutError(sandbox_id, file_path, effective_timeout) from e
@@ -3667,6 +3761,10 @@ class AsyncSandboxClient:
                 ) from e
             except Exception as e:
                 raise APIError(f"Download failed: {e.__class__.__name__}: {e}") from e
+            finally:
+                if temp_file_path is not None:
+                    with contextlib.suppress(OSError):
+                        os.unlink(temp_file_path)
 
         raise APIError("Download failed after retries")
 

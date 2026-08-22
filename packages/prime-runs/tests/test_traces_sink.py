@@ -214,7 +214,7 @@ def test_a_missing_traces_client_disables_the_sink_and_reports_the_failure(monke
     def explode(**kwargs):
         raise RuntimeError("no credentials")
 
-    monkeypatch.setattr("prime_traces.TracesClient", explode)
+    monkeypatch.setattr("prime_runs.sinks.traces.TracesClient", explode)
     sink = TracesSink()
 
     with caplog.at_level("WARNING"):

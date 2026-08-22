@@ -15,10 +15,11 @@ import queue
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, List, Optional, Sequence
+from typing import Any, Callable, Optional, Sequence
 
 from . import _fork
 from .exceptions import is_transient
+from .sinks.base import Sink
 
 logger = logging.getLogger(__name__)
 
@@ -33,10 +34,6 @@ class _Flush:
     """A barrier the caller waits on."""
 
     event: threading.Event = field(default_factory=threading.Event)
-
-
-def _sink_name(sink: Any) -> str:
-    return getattr(sink, "name", type(sink).__name__)
 
 
 def _deadline(timeout: Optional[float]) -> Optional[float]:
@@ -56,7 +53,7 @@ class UploadWorker:
 
     def __init__(
         self,
-        sinks: List[Any],
+        sinks: Sequence[Sink],
         *,
         max_queue_size: int = DEFAULT_QUEUE_SIZE,
         put_timeout: float = DEFAULT_PUT_TIMEOUT,
@@ -112,32 +109,32 @@ class UploadWorker:
 
     def _dispatch(self, records: Sequence[Any]) -> None:
         for sink in self.sinks:
-            if not getattr(sink, "enabled", True):
-                name = _sink_name(sink)
-                if name in self._retired:
-                    self.failed_records[name] = self.failed_records.get(name, 0) + len(records)
+            if not sink.enabled:
+                if sink.name in self._retired:
+                    count = self.failed_records.get(sink.name, 0)
+                    self.failed_records[sink.name] = count + len(records)
                 continue
             try:
                 sink.write(records)
             except Exception as exc:  # noqa: BLE001 - one sink failing must not stop the others
                 self._fail_sink(sink, exc, dropped=len(records))
             else:
-                self._transient_failures.pop(_sink_name(sink), None)
+                self._transient_failures.pop(sink.name, None)
 
     def _flush_sinks(self) -> None:
         for sink in self.sinks:
-            if not getattr(sink, "enabled", True):
+            if not sink.enabled:
                 continue
             try:
                 sink.flush()
             except Exception as exc:  # noqa: BLE001
                 self._fail_sink(sink, exc)
 
-    def _fail_sink(self, sink: Any, exc: Exception, *, dropped: int = 0) -> None:
+    def _fail_sink(self, sink: Sink, exc: Exception, *, dropped: int = 0) -> None:
         """The batch is gone (the transports already retried). Decide whether
         the sink is too: permanent failures retire it at once, transient ones
         after ``TRANSIENT_FAILURE_LIMIT`` consecutive strikes."""
-        name = _sink_name(sink)
+        name = sink.name
         if dropped:
             self.failed_records[name] = self.failed_records.get(name, 0) + dropped
 
@@ -246,7 +243,7 @@ class UploadWorker:
             try:
                 sink.close()
             except Exception as exc:  # noqa: BLE001 - teardown must not raise
-                logger.debug("Error closing sink %s: %s", getattr(sink, "name", sink), exc)
+                logger.debug("Error closing sink %s: %s", sink.name, exc)
 
     # ------------------------------------------------------------------- fork
 

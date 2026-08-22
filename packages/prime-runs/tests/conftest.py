@@ -1,7 +1,7 @@
 """Shared fixtures. Every test is hermetic: no network, no real ~/.prime."""
 
 from pathlib import Path
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Mapping, Sequence
 
 import httpx
 import pytest
@@ -123,10 +123,10 @@ class FakeSink:
         self.flushes = 0
         self.closed = False
 
-    def start(self, run_id: str, context: Dict[str, str]) -> None:
+    def start(self, run_id: str, context: Mapping[str, str]) -> None:
         self.started.append((run_id, dict(context)))
 
-    def write(self, records) -> None:
+    def write(self, records: Sequence[Any]) -> None:
         if self.fail_on_write:
             raise RuntimeError("sink is broken")
         self.batches.append(list(records))

@@ -10,6 +10,8 @@ service indexes; ``context`` is upload-scoped provenance only.
 import logging
 from typing import Any, Dict, Mapping, Optional, Sequence
 
+from prime_traces import ErrorCode, LineFormat, TracesClient
+
 from .. import _fork
 from ..exceptions import ForbiddenError
 from .base import Sink, is_episode, stamp_run, to_mapping
@@ -69,11 +71,6 @@ class TracesSink(Sink):
             self._disable(str(exc))
             raise exc
         try:
-            from prime_traces import TracesClient
-        except ImportError as exc:  # pragma: no cover - dependency is declared
-            self._disable(f"prime-traces is not installed ({exc})")
-            raise
-        try:
             self._client = TracesClient(**self._client_kwargs)
         except Exception as exc:  # noqa: BLE001 - the run applies its error policy
             self._disable(f"could not construct the traces client ({exc})")
@@ -89,8 +86,6 @@ class TracesSink(Sink):
     def write(self, records: Sequence[Any]) -> None:
         if not self.enabled or not records or not self._ensure_client():
             return
-
-        from prime_traces import LineFormat
 
         # The same bytes under a different format are rejected as a conflict,
         # so infer from the first record, which is stable within a batch.
@@ -140,7 +135,7 @@ class TracesSink(Sink):
     def close(self) -> None:
         client = self._client
         self._client = None
-        if client is not None and hasattr(client, "close"):
+        if client is not None:
             try:
                 client.close()
             except Exception as exc:  # noqa: BLE001 - teardown must not raise
@@ -162,6 +157,4 @@ class TracesSink(Sink):
 def _is_not_enabled(exc: ForbiddenError) -> bool:
     """``service_not_enabled``: the account is outside the private beta. The
     other 403, ``forbidden``, means the token lacks the ``traces`` scope."""
-    from prime_traces import ErrorCode
-
     return exc.code == ErrorCode.SERVICE_NOT_ENABLED.value

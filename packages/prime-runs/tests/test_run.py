@@ -99,6 +99,37 @@ def test_an_empty_batch_is_not_sent():
     run.finish()
 
 
+def test_episodes_take_the_same_path_as_traces():
+    sink = FakeSink()
+    run = make_run(sinks=[sink])
+
+    run.log_episodes([{"id": "ep-1", "traces": [{"id": "t1"}]}])
+    run.flush()
+
+    assert sink.batches == [[{"id": "ep-1", "traces": [{"id": "t1"}]}]]
+    run.finish()
+
+
+def test_summary_can_be_built_up_before_finish():
+    backend = FakeBackend()
+    run = make_run(backend)
+
+    run.update_summary({"avg_reward": 0.5, "loss": float("nan")})
+    run.update_summary({"avg_error": 0.0})
+    run.finish(summary={"avg_reward": 0.75})
+
+    assert run.summary == {"avg_reward": 0.75, "avg_error": 0.0}
+    assert backend.finalized[0]["summary"] == {"avg_reward": 0.75, "avg_error": 0.0}
+
+
+def test_a_finished_run_refuses_more_summary():
+    run = make_run()
+    run.finish()
+
+    with pytest.raises(RunFinishedError):
+        run.update_summary({"late": 1.0})
+
+
 def test_non_finite_summary_values_are_dropped_rather_than_failing_the_request():
     """A diverged loss serializes as bare ``NaN``, which strict JSON rejects —
     the whole request fails on a payload nobody can inspect."""

@@ -2,12 +2,20 @@
 so migrated runs keep identical dashboard numbers. Opt-in: pass the result to
 ``run.finish(summary=...)``. Duck-typed; no producer package is imported."""
 
-from typing import Any, Dict, Optional, Sequence
+from typing import Any, Dict, Optional, Sequence, TypedDict
 
 
-def from_episodes(
-    episodes: Sequence[Any], traces: Optional[Sequence[Any]] = None
-) -> Dict[str, Any]:
+class RunSummary(TypedDict):
+    """The run-level aggregates the eval dashboard reads. A summary may carry
+    more than this — ``finish(summary=...)`` stores whatever it is given — but
+    these three are what the dashboard renders."""
+
+    avg_reward: float
+    avg_metrics: Dict[str, float]
+    avg_error: float
+
+
+def from_episodes(episodes: Sequence[Any], traces: Optional[Sequence[Any]] = None) -> RunSummary:
     """Run-level aggregates in the shape the eval dashboard reads.
 
     Rewards and metrics aggregate over the trainable traces only — fixed agents

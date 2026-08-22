@@ -21,7 +21,7 @@ run = pr.init(
 print(run.url)   # https://app.primeintellect.ai/dashboard/evaluations/eval-...
 
 for episode in rollouts:          # episodes carry run.id — see "Identity" below
-    run.log_traces([episode])
+    run.log_episodes([episode])   # bare traces go through log_traces()
 
 run.finish(summary=pr.metrics.from_episodes(episodes))
 ```
@@ -29,7 +29,10 @@ run.finish(summary=pr.metrics.from_episodes(episodes))
 `init()` opens the run and returns a handle carrying its ID and dashboard URL.
 Records stream out on a background thread while the run proceeds, so the
 dashboard fills in as rollouts land. `finish()` closes the run out; a `with`
-block does that for you, including when the body raises.
+block does that for you, including when the body raises. Run-level outputs go
+in `finish(summary=...)`, or incrementally through `update_summary()`;
+`metrics.from_episodes()` returns them in the shape the dashboard reads
+(`metrics.RunSummary`).
 
 ## Identity
 
@@ -98,8 +101,8 @@ disables the run with a warning — it never silently writes somewhere else.
 
 ## From async code
 
-`log_traces()` is a queue put, not a request, so it is safe to call from a
-coroutine; it blocks only if the queue is full (up to 5s), which is the
+`log_traces()` / `log_episodes()` are a queue put, not a request, so they are
+safe to call from a coroutine; it blocks only if the queue is full (up to 5s), which is the
 backpressure. `init()` and `finish()` do network I/O — wrap them in
 `asyncio.to_thread` if a stall there would matter.
 

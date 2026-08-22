@@ -94,7 +94,7 @@ class Run:
                 sink.start(handle.id, context)
             except Exception as exc:  # noqa: BLE001 - a bad sink is not a bad run
                 sink.enabled = False
-                self._note(f"starting sink {getattr(sink, 'name', sink)}", exc)
+                self._note(f"starting sink {sink.name}", exc)
                 if self._on_error == "raise":
                     # The backend may already have created a remote run; close
                     # it out before the failure reaches the caller. finish()
@@ -154,16 +154,38 @@ class Run:
 
     # ------------------------------------------------------------------- log
 
-    def log_traces(self, records: Iterable[Any]) -> None:
-        """Hand traces or episodes to the sinks. Returns immediately.
+    def log_traces(self, traces: Iterable[Any]) -> None:
+        """Hand bare traces to the sinks. Returns immediately.
 
-        Accepts verifiers ``Trace``/``Episode`` objects or plain JSON mappings.
-        Call this as rollouts complete; nothing is buffered until the end.
+        Accepts verifiers ``Trace`` objects or plain JSON mappings. Call this
+        as rollouts complete; nothing is buffered until the end. A rollout
+        that is an episode (a group of traces) goes through :meth:`log_episodes`.
         """
         self._require_live("log_traces")
+        self._submit(traces)
+
+    def log_episodes(self, episodes: Iterable[Any]) -> None:
+        """Hand episodes — grouped traces — to the sinks. Returns immediately.
+
+        Accepts verifiers ``Episode`` objects or plain JSON mappings with a
+        ``traces`` list. The episode's ``run`` reaches every member trace.
+        """
+        self._require_live("log_episodes")
+        self._submit(episodes)
+
+    def _submit(self, records: Iterable[Any]) -> None:
         batch = list(records)
         if batch:
             self._worker.submit(batch)
+
+    def update_summary(self, values: Mapping[str, Any]) -> None:
+        """Merge run-level outputs into :attr:`summary` ahead of :meth:`finish`.
+
+        Non-finite numbers are dropped here, as they are for
+        ``finish(summary=...)``; writing to ``summary`` directly skips that.
+        """
+        self._require_live("update_summary")
+        self.summary.update(_clean_metrics(values))
 
     def flush(self, timeout: Optional[float] = 30.0) -> bool:
         """Block until queued records have been written. Under

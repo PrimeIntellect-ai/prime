@@ -1,0 +1,74 @@
+[project]
+name = "prime-runs"
+# Version is single-sourced from src/prime_runs/__init__.py via Hatch
+dynamic = ["version"]
+description = "Prime Intellect Runs SDK - Track eval and training runs on the Prime platform"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    { name = "Prime Intellect", email = "contact@primeintellect.ai" }
+]
+# Deliberately a leaf package. The `prime` CLI depends on `verifiers`, so
+# verifiers can never depend on `prime` — and verifiers is a first-class
+# consumer of this SDK. Nothing here may pull in prime, verifiers, typer,
+# rich or textual, directly or transitively.
+#
+# Kept to what is actually imported. This package models no response bodies
+# (so no direct `pydantic`; it arrives transitively through prime-traces) and
+# takes its error mapping and backoff from `prime_traces.core` rather than
+# `tenacity`. Nothing is added to what verifiers and prime-rl already carry.
+dependencies = [
+    "httpx>=0.25.0",
+    "prime-traces>=0.0.2",
+]
+keywords = ["evals", "evaluations", "training", "runs", "traces", "observability"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence"
+]
+
+[project.urls]
+Homepage = "https://github.com/PrimeIntellect-ai/prime"
+Documentation = "https://github.com/PrimeIntellect-ai/prime/tree/main/packages/prime-runs"
+Repository = "https://github.com/PrimeIntellect-ai/prime.git"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.23.0",
+    "ruff>=0.13.1",
+]
+
+[tool.uv.sources]
+prime-traces = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/prime_runs/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/prime_runs"]
+
+[tool.pytest.ini_options]
+addopts = "-v"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+extend-select = ["E", "F", "I"]

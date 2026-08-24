@@ -1105,6 +1105,10 @@ def _dispatch_full_finetune_run(
     # shared shell history/CI logs without buying anything for the user.
     console.print(f"[green]Dispatched[/green] hosted run [bold]{result.run_id}[/bold]")
 
+    dashboard_url = f"{app_config.frontend_url}/dashboard/training/{result.run_id}"
+    console.print("\n[cyan]Monitor run at:[/cyan]")
+    console.print(f"  [link={dashboard_url}]{dashboard_url}[/link]")
+
 
 def load_config(path: str) -> RLConfig:
     """Load config from TOML file."""

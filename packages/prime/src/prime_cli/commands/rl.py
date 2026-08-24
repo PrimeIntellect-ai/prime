@@ -880,35 +880,67 @@ def _peek_toml(config_path: str) -> Dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def _is_full_finetune(cfg: Dict[str, Any]) -> bool:
-    """A config is full-FT iff it carries one of:
+def _has_full_finetune_deployment(cfg: Dict[str, Any]) -> bool:
+    """True iff `cfg` carries a `[deployment]` table sizing the run — either
+    single-node (`num_train_gpus` / `num_infer_gpus`), multi-node
+    (`num_train_nodes` / `num_infer_nodes`), or an explicit
+    `[deployment].type` of `single_node` / `multi_node`.
 
-    - top-level `type = "full_finetune"` (mirrors prime-rl's discriminator)
-    - a `[deployment]` table with a sizing field — either single-node
-      (`num_train_gpus` / `num_infer_gpus`) or multi-node
-      (`num_train_nodes` / `num_infer_nodes`) — or an explicit
-      `[deployment].type` of `single_node` / `multi_node`.
-
-    Previously only the single-node sizing fields triggered detection, so
-    canonical multi-node prime-rl shapes (e.g. `qwen30b_math/rl.toml`,
-    which uses `num_train_nodes` / `num_infer_nodes`) silently fell
-    through to the LoRA dispatch path.
+    `[deployment]` is a full-FT-only prime-rl concept: RLConfig (the LoRA
+    schema) has no such field and forbids extras, so its presence is
+    unambiguous full-FT intent even without `--full-finetune` on the
+    command line.
     """
-    if cfg.get("type") == "full_finetune":
-        return True
     deploy = cfg.get("deployment")
-    if isinstance(deploy, dict):
-        if deploy.get("type") in ("single_node", "multi_node"):
-            return True
-        sizing_keys = (
-            "num_train_gpus",
-            "num_infer_gpus",
-            "num_train_nodes",
-            "num_infer_nodes",
+    if not isinstance(deploy, dict):
+        return False
+    if deploy.get("type") in ("single_node", "multi_node"):
+        return True
+    sizing_keys = (
+        "num_train_gpus",
+        "num_infer_gpus",
+        "num_train_nodes",
+        "num_infer_nodes",
+    )
+    return any(k in deploy for k in sizing_keys)
+
+
+def _is_full_finetune(cfg: Dict[str, Any], *, flag: bool) -> bool:
+    """Dispatch as full-FT if `--full-finetune`/`--fft` was passed, or if
+    the config's `[deployment]` block already sizes the run. Either is
+    sufficient on its own — the flag lets a config without `[deployment]`
+    yet still be routed (and get `_validate_full_finetune_deployment`'s
+    clear error instead of silently landing on the LoRA path).
+    """
+    return flag or _has_full_finetune_deployment(cfg)
+
+
+def _validate_full_finetune_deployment(cfg: Dict[str, Any], config_path: str) -> None:
+    """Full-FT dispatch requires an explicit `[deployment]` table sizing the
+    run. Guards the `--full-finetune`-without-`[deployment]` case — the
+    auto-detect path in `_has_full_finetune_deployment` never reaches here
+    without sizing already present.
+    """
+    if not _has_full_finetune_deployment(cfg):
+        console.print(
+            f"[red]Error:[/red] --full-finetune requires an explicit [deployment] "
+            f"block in {config_path} (num_train_gpus/num_infer_gpus for "
+            "single-node, or num_train_nodes/num_infer_nodes for multi-node)."
         )
-        if any(k in deploy for k in sizing_keys):
-            return True
-    return False
+        raise typer.Exit(1)
+
+
+def _warn_legacy_full_finetune_type(cfg: Dict[str, Any], config_path: str) -> None:
+    """`type = "full_finetune"` used to be how dispatch routing was decided;
+    --full-finetune/--fft now owns that decision entirely, so a leftover
+    `type` key in a full-FT config is dead weight. Warn so configs get
+    cleaned up instead of silently accumulating a field nothing reads."""
+    if "type" in cfg:
+        console.print(
+            f'[yellow]Warning:[/yellow] `type = "{cfg["type"]}"` in {config_path} '
+            "is no longer used — dispatch routing is decided by "
+            "--full-finetune/--fft on the command line. Remove it from the config."
+        )
 
 
 def _dispatch_full_finetune_run(
@@ -1036,6 +1068,8 @@ def _dispatch_full_finetune_run(
     if isinstance(orch_section, dict):
         _remove_deprecated_config_keys(orch_section)
 
+    _warn_legacy_full_finetune_type(raw_cfg, config_path)
+
     # Strip CLI-only secret-loading keys before shipping the TOML to the
     # backend. `env_file` / `env_files` only meaningfully exist on the
     # caller's filesystem — the hosted pod doesn't see them, and prime-rl
@@ -1044,10 +1078,12 @@ def _dispatch_full_finetune_run(
     # confuses prime-rl (unknown field) or silently sends it chasing
     # phantom paths. `image_tag` is similarly chart-level — the backend
     # parses it off the request body, not the embedded prime-rl config.
+    # `type` is stripped here too rather than left for the backend's
+    # legacy CLI-metadata cleanup to silently absorb.
     config_payload = {
         k: v
         for k, v in raw_cfg.items()
-        if k not in ("env_file", "env_files", "image_tag", "gpu_type")
+        if k not in ("env_file", "env_files", "image_tag", "gpu_type", "type")
     }
 
     payload = build_payload_from_toml(
@@ -1296,23 +1332,35 @@ def create_run(
             "default (no preference, auto-pick)."
         ),
     ),
+    full_finetune: bool = typer.Option(
+        False,
+        "--full-finetune",
+        "--fft",
+        help=(
+            "Dispatch this config as a full fine-tune on a dedicated cluster "
+            "(every parameter updated) instead of a shared-deployment LoRA "
+            "run. Usually unnecessary — a config with a [deployment] block "
+            "is auto-detected as full-FT. Requires an explicit [deployment] "
+            "block in the TOML either way."
+        ),
+    ),
 ) -> None:
     """Launch a Hosted Training run from a config file.
 
     Example:
 
         prime train config.toml
+        prime train config.toml --full-finetune
     """
     validate_output_format(output, console)
 
-    # Peek at the raw TOML BEFORE the strict-schema RLConfig parse so a
-    # full-FT config (`type = "full_finetune"` or a `[deployment]` block
-    # with num_train_gpus/num_infer_gpus) can bypass the LoRA-shared
-    # validators and dispatch on the hosted full-FT endpoint instead.
-    # Backwards-compatible: configs without these markers take the LoRA
-    # path exactly as before.
+    # Dispatch routing: --full-finetune/--fft, or an unambiguous
+    # `[deployment]` block (full-FT-only — RLConfig/the LoRA schema has no
+    # such field). No longer sniffs `type` — prime-rl owns the config
+    # schema, so a leftover `type` field is dead weight, not a signal.
     raw_cfg = _peek_toml(config_path)
-    if _is_full_finetune(raw_cfg):
+    if _is_full_finetune(raw_cfg, flag=full_finetune):
+        _validate_full_finetune_deployment(raw_cfg, config_path)
         _dispatch_full_finetune_run(
             raw_cfg=raw_cfg,
             config_path=config_path,

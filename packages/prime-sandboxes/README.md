@@ -256,7 +256,10 @@ sandbox_client.download_file(sandbox.id, "/app/model.pt", "./model.pt")
 ```
 
 `get_background_jobs` is VM-only. Container sandboxes retain the existing
-`get_background_job` polling behavior.
+`get_background_job` polling behavior. Once an exit code is observed, completion
+remains authoritative even if output retrieval exhausts its bounded retry
+deadline: the unavailable stream is `None` and its `stdout_error` or
+`stderr_error` field describes the retrieval failure.
 
 #### Async version
 

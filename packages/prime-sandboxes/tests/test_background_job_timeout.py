@@ -4,7 +4,7 @@ from typing import Any, List, Optional, cast
 
 import pytest
 
-from prime_sandboxes.core.client import APIClient
+from prime_sandboxes.core.client import APIClient, APIError
 from prime_sandboxes.models import BackgroundJob, ReadFileResponse
 from prime_sandboxes.sandbox import AsyncSandboxClient, SandboxClient
 
@@ -139,6 +139,35 @@ def test_sync_get_background_job_handles_legacy_read_file_response():
     assert status.stderr == "out"
     assert status.stdout_truncated is False
     assert status.stderr_truncated is False
+
+
+def test_sync_output_error_preserves_completed_exit_code():
+    client = SandboxClient(APIClient(api_key="test-key"))
+    client_any = cast(Any, client)
+
+    def fake_read_file(
+        sandbox_id: str,
+        file_path: str,
+        timeout: Optional[int] = None,
+        offset: Optional[int] = None,
+        length: Optional[int] = None,
+    ) -> ReadFileResponse:
+        if file_path.endswith(".exit"):
+            return _whole_file("7\n")
+        if file_path.endswith(".stdout"):
+            raise APIError("Read file failed: ConnectError")
+        return _whole_file("stderr")
+
+    client_any.read_file = fake_read_file
+
+    status = client.get_background_job("sbx-123", _make_job())
+
+    assert status.completed
+    assert status.exit_code == 7
+    assert status.stdout is None
+    assert status.stdout_error == "APIError: Read file failed: ConnectError"
+    assert status.stderr == "stderr"
+    assert status.stderr_error is None
 
 
 @pytest.mark.asyncio

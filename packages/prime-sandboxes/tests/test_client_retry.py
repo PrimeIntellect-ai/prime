@@ -886,3 +886,37 @@ class TestReadFileRetry:
         assert "Read file timed out after 12s" in message
         assert f"({expected_name})" in message
         assert "/tmp/job.exit" in message
+
+    def test_read_file_connection_error_surfaces_nested_os_errno(self, monkeypatch):
+        """Transport wrappers retain the actionable nested socket errno."""
+        import errno
+
+        from prime_sandboxes.sandbox import SandboxClient
+
+        request = httpx.Request("GET", "https://gateway.example/read-file")
+
+        def raise_connect_error(url, headers, params, timeout):
+            try:
+                raise OSError(errno.EMFILE, "Too many open files")
+            except OSError as os_error:
+                raise httpx.ConnectError(
+                    "All connection attempts failed",
+                    request=request,
+                ) from os_error
+
+        monkeypatch.setattr(
+            SandboxClient,
+            "_gateway_read_file_get",
+            staticmethod(raise_connect_error),
+        )
+
+        client = SandboxClient.__new__(SandboxClient)
+        client._auth_cache = DummySandboxAuthCache()
+
+        with pytest.raises(APIError) as exc_info:
+            client.read_file("sandbox-123", "/tmp/job.stdout.log")
+
+        message = str(exc_info.value)
+        assert "ConnectError" in message
+        assert "errno=24" in message
+        assert "Too many open files" in message

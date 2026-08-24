@@ -3,6 +3,7 @@
 import asyncio
 import functools
 import json
+import math
 import os
 import random
 import re
@@ -44,6 +45,7 @@ from tenacity import (
     retry_if_exception_type,
     stop_after_attempt,
     wait_exponential,
+    wait_random_exponential,
 )
 
 from ._connectrpc import GOOGLE_PROTOBUF_BINARY_CODEC
@@ -192,6 +194,12 @@ AUTH_REFRESH_MARGIN_SECONDS = 60
 
 # Max bytes of stdout/stderr returned per background-job status check
 JOB_OUTPUT_TAIL_BYTES = 10 * 1024 * 1024
+
+# Keep a batch of simultaneously completed jobs from turning into a burst of
+# gateway connections. Output reads share this client-wide limit and each job
+# gets one deadline for its sequential stdout/stderr retrieval.
+MAX_CONCURRENT_BACKGROUND_JOB_OUTPUT_READS = 20
+BACKGROUND_JOB_OUTPUT_FETCH_TIMEOUT_SECONDS = 45.0
 
 # Platform batch-status contracts cap one request at 100 identifiers. Concurrent
 # single-item waits are collected briefly so callers share a request without
@@ -379,6 +387,31 @@ def _exception_chain(exc: BaseException) -> List[BaseException]:
     return chain
 
 
+def _format_exception_diagnostic(exc: BaseException) -> str:
+    """Include nested OS errno details that transport wrappers otherwise hide."""
+    diagnostic = f"{exc.__class__.__name__}: {exc}"
+    os_causes: List[str] = []
+    seen: set[int] = set()
+    pending: List[BaseException] = [exc]
+    while pending:
+        error = pending.pop()
+        if id(error) in seen:
+            continue
+        seen.add(id(error))
+        if isinstance(error, OSError) and error.errno is not None:
+            detail = f"{error.__class__.__name__}(errno={error.errno}): {error}"
+            if detail not in os_causes:
+                os_causes.append(detail)
+        cause = error.__cause__ or error.__context__
+        if cause is not None:
+            pending.append(cause)
+        grouped = getattr(error, "exceptions", ())
+        pending.extend(child for child in reversed(grouped) if isinstance(child, BaseException))
+    if os_causes:
+        diagnostic += f"; OS cause: {'; '.join(os_causes)}"
+    return diagnostic
+
+
 def _is_retryable_reachability_error(exc: BaseException) -> bool:
     """Retry transport readiness failures, but surface local SDK defects."""
     chain = _exception_chain(exc)
@@ -473,7 +506,7 @@ _gateway_post_retry = retry(
 _read_file_retry = retry(
     retry=retry_if_exception(_is_retryable_read_file_error),
     stop=stop_after_attempt(4),
-    wait=wait_exponential(multiplier=1, min=1, max=30),
+    wait=wait_random_exponential(multiplier=1, min=1, max=30),
     reraise=True,
 )
 
@@ -887,6 +920,9 @@ class SandboxClient:
         self._sandbox_status_batcher = _SyncRequestBatcher(self._fetch_sandbox_statuses)
         self._background_job_status_batcher = _SyncRequestBatcher(
             self._fetch_background_job_statuses
+        )
+        self._background_job_output_semaphore = threading.BoundedSemaphore(
+            MAX_CONCURRENT_BACKGROUND_JOB_OUTPUT_READS
         )
         self._sandbox_status_batch_supported: Optional[bool] = None
         self._background_job_status_batch_supported: Optional[bool] = None
@@ -1470,9 +1506,8 @@ class SandboxClient:
         Args:
             sandbox_id: The sandbox ID
             job: The BackgroundJob handle from start_background_job()
-            timeout: Optional per-call timeout (in seconds) forwarded to the
-                underlying read_file calls. When None, the APIClient default
-                applies.
+            timeout: Optional output-retrieval deadline in seconds after the
+                exit file is observed. When None, a bounded SDK default applies.
 
         Returns:
             BackgroundJobStatus with completed flag, and exit_code/stdout if
@@ -1486,20 +1521,6 @@ class SandboxClient:
             except SandboxFileNotFoundError:
                 return ""
 
-        def read_output_tail(path: str) -> "tuple[str, bool]":
-            try:
-                response = self.read_file(
-                    sandbox_id,
-                    path,
-                    timeout=timeout,
-                    offset=-JOB_OUTPUT_TAIL_BYTES,
-                    length=JOB_OUTPUT_TAIL_BYTES,
-                )
-                # Servers without windowed-read support omit `truncated`.
-                return response.content, bool(response.truncated)
-            except SandboxFileNotFoundError:
-                return "", False
-
         exit_content = read_or_empty(job.exit_file)
         if not exit_content.strip():
             return BackgroundJobStatus(job_id=job.job_id, completed=False)
@@ -1509,16 +1530,11 @@ class SandboxClient:
         except ValueError:
             return BackgroundJobStatus(job_id=job.job_id, completed=False)
 
-        stdout, stdout_truncated = read_output_tail(job.stdout_log_file)
-        stderr, stderr_truncated = read_output_tail(job.stderr_log_file)
-        return BackgroundJobStatus(
-            job_id=job.job_id,
-            completed=True,
-            exit_code=exit_code,
-            stdout=stdout,
-            stderr=stderr,
-            stdout_truncated=stdout_truncated,
-            stderr_truncated=stderr_truncated,
+        return self._get_completed_background_job_output(
+            sandbox_id,
+            job,
+            exit_code,
+            timeout,
         )
 
     def _request_background_job_status_batch(
@@ -1612,29 +1628,55 @@ class SandboxClient:
         exit_code: int,
         timeout: Optional[int],
     ) -> BackgroundJobStatus:
-        """Read bounded stdout and stderr tails for one completed job."""
+        """Read sequential output tails without invalidating known completion."""
 
-        def read_output_tail(path: str) -> tuple[str, bool]:
+        output_timeout = (
+            float(timeout) if timeout is not None else BACKGROUND_JOB_OUTPUT_FETCH_TIMEOUT_SECONDS
+        )
+        deadline = time.monotonic() + max(0.0, output_timeout)
+
+        def deadline_error() -> str:
+            return f"Output retrieval deadline exceeded after {output_timeout:g}s"
+
+        def read_output_tail(path: str) -> tuple[Optional[str], bool, Optional[str]]:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None, False, deadline_error()
+            if not self._background_job_output_semaphore.acquire(timeout=remaining):
+                return None, False, deadline_error()
             try:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None, False, deadline_error()
+                request_timeout = max(
+                    1,
+                    min(timeout if timeout is not None else 30, math.ceil(remaining)),
+                )
                 response = self.read_file(
                     sandbox_id,
                     path,
-                    timeout=timeout,
+                    timeout=request_timeout,
                     offset=-JOB_OUTPUT_TAIL_BYTES,
                     length=JOB_OUTPUT_TAIL_BYTES,
                 )
-                return response.content, bool(response.truncated)
+                return response.content, bool(response.truncated), None
             except SandboxFileNotFoundError:
-                return "", False
+                return "", False, None
+            except APIError as exc:
+                return None, False, _format_exception_diagnostic(exc)
+            finally:
+                self._background_job_output_semaphore.release()
 
-        stdout, stdout_truncated = read_output_tail(job.stdout_log_file)
-        stderr, stderr_truncated = read_output_tail(job.stderr_log_file)
+        stdout, stdout_truncated, stdout_error = read_output_tail(job.stdout_log_file)
+        stderr, stderr_truncated, stderr_error = read_output_tail(job.stderr_log_file)
         return BackgroundJobStatus(
             job_id=job.job_id,
             completed=True,
             exit_code=exit_code,
             stdout=stdout,
             stderr=stderr,
+            stdout_error=stdout_error,
+            stderr_error=stderr_error,
             stdout_truncated=stdout_truncated,
             stderr_truncated=stderr_truncated,
         )
@@ -2182,7 +2224,7 @@ class SandboxClient:
                 method = getattr(req, "method", "?")
                 u = getattr(req, "url", "?")
                 raise APIError(
-                    f"Read file failed: {e.__class__.__name__} at {method} {u}: {e}"
+                    f"Read file failed at {method} {u}: {_format_exception_diagnostic(e)}"
                 ) from e
             except Exception as e:
                 raise APIError(f"Read file failed: {e.__class__.__name__}: {e}") from e
@@ -2275,6 +2317,9 @@ class AsyncSandboxClient:
         self._sandbox_status_batcher = _AsyncRequestBatcher(self._fetch_sandbox_statuses)
         self._background_job_status_batcher = _AsyncRequestBatcher(
             self._fetch_background_job_statuses
+        )
+        self._background_job_output_semaphore = asyncio.Semaphore(
+            MAX_CONCURRENT_BACKGROUND_JOB_OUTPUT_READS
         )
         self._sandbox_status_batch_supported: Optional[bool] = None
         self._background_job_status_batch_supported: Optional[bool] = None
@@ -2999,9 +3044,8 @@ class AsyncSandboxClient:
         Args:
             sandbox_id: The sandbox ID
             job: The BackgroundJob handle from start_background_job()
-            timeout: Optional per-call timeout (in seconds) forwarded to the
-                underlying read_file calls. When None, the APIClient default
-                applies.
+            timeout: Optional output-retrieval deadline in seconds after the
+                exit file is observed. When None, a bounded SDK default applies.
 
         Returns:
             BackgroundJobStatus with completed flag, and exit_code/stdout if
@@ -3015,20 +3059,6 @@ class AsyncSandboxClient:
             except SandboxFileNotFoundError:
                 return ""
 
-        async def read_output_tail(path: str) -> "tuple[str, bool]":
-            try:
-                response = await self.read_file(
-                    sandbox_id,
-                    path,
-                    timeout=timeout,
-                    offset=-JOB_OUTPUT_TAIL_BYTES,
-                    length=JOB_OUTPUT_TAIL_BYTES,
-                )
-                # Servers without windowed-read support omit `truncated`.
-                return response.content, bool(response.truncated)
-            except SandboxFileNotFoundError:
-                return "", False
-
         exit_content = await read_or_empty(job.exit_file)
         if not exit_content.strip():
             return BackgroundJobStatus(job_id=job.job_id, completed=False)
@@ -3038,16 +3068,11 @@ class AsyncSandboxClient:
         except ValueError:
             return BackgroundJobStatus(job_id=job.job_id, completed=False)
 
-        stdout, stdout_truncated = await read_output_tail(job.stdout_log_file)
-        stderr, stderr_truncated = await read_output_tail(job.stderr_log_file)
-        return BackgroundJobStatus(
-            job_id=job.job_id,
-            completed=True,
-            exit_code=exit_code,
-            stdout=stdout,
-            stderr=stderr,
-            stdout_truncated=stdout_truncated,
-            stderr_truncated=stderr_truncated,
+        return await self._get_completed_background_job_output(
+            sandbox_id,
+            job,
+            exit_code,
+            timeout,
         )
 
     async def _request_background_job_status_batch(
@@ -3137,33 +3162,66 @@ class AsyncSandboxClient:
         exit_code: int,
         timeout: Optional[int],
     ) -> BackgroundJobStatus:
-        """Read bounded stdout and stderr tails for one completed job."""
+        """Read sequential output tails without invalidating known completion."""
 
-        async def read_output_tail(path: str) -> tuple[str, bool]:
-            try:
-                response = await self.read_file(
-                    sandbox_id,
-                    path,
-                    timeout=timeout,
-                    offset=-JOB_OUTPUT_TAIL_BYTES,
-                    length=JOB_OUTPUT_TAIL_BYTES,
-                )
-                return response.content, bool(response.truncated)
-            except SandboxFileNotFoundError:
-                return "", False
-
-        stdout, stderr = await asyncio.gather(
-            read_output_tail(job.stdout_log_file),
-            read_output_tail(job.stderr_log_file),
+        output_timeout = (
+            float(timeout) if timeout is not None else BACKGROUND_JOB_OUTPUT_FETCH_TIMEOUT_SECONDS
         )
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(0.0, output_timeout)
+
+        def deadline_error() -> str:
+            return f"Output retrieval deadline exceeded after {output_timeout:g}s"
+
+        async def read_output_tail(
+            path: str,
+        ) -> tuple[Optional[str], bool, Optional[str]]:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return None, False, deadline_error()
+
+            async def fetch() -> ReadFileResponse:
+                async with self._background_job_output_semaphore:
+                    remaining_after_acquire = deadline - loop.time()
+                    if remaining_after_acquire <= 0:
+                        raise asyncio.TimeoutError
+                    request_timeout = max(
+                        1,
+                        min(
+                            timeout if timeout is not None else 30,
+                            math.ceil(remaining_after_acquire),
+                        ),
+                    )
+                    return await self.read_file(
+                        sandbox_id,
+                        path,
+                        timeout=request_timeout,
+                        offset=-JOB_OUTPUT_TAIL_BYTES,
+                        length=JOB_OUTPUT_TAIL_BYTES,
+                    )
+
+            try:
+                response = await asyncio.wait_for(fetch(), timeout=remaining)
+                return response.content, bool(response.truncated), None
+            except SandboxFileNotFoundError:
+                return "", False, None
+            except asyncio.TimeoutError:
+                return None, False, deadline_error()
+            except APIError as exc:
+                return None, False, _format_exception_diagnostic(exc)
+
+        stdout, stdout_truncated, stdout_error = await read_output_tail(job.stdout_log_file)
+        stderr, stderr_truncated, stderr_error = await read_output_tail(job.stderr_log_file)
         return BackgroundJobStatus(
             job_id=job.job_id,
             completed=True,
             exit_code=exit_code,
-            stdout=stdout[0],
-            stderr=stderr[0],
-            stdout_truncated=stdout[1],
-            stderr_truncated=stderr[1],
+            stdout=stdout,
+            stderr=stderr,
+            stdout_error=stdout_error,
+            stderr_error=stderr_error,
+            stdout_truncated=stdout_truncated,
+            stderr_truncated=stderr_truncated,
         )
 
     async def _fetch_background_job_statuses(
@@ -3737,7 +3795,7 @@ class AsyncSandboxClient:
                 method = getattr(req, "method", "?")
                 u = getattr(req, "url", "?")
                 raise APIError(
-                    f"Read file failed: {e.__class__.__name__} at {method} {u}: {e}"
+                    f"Read file failed at {method} {u}: {_format_exception_diagnostic(e)}"
                 ) from e
             except Exception as e:
                 raise APIError(f"Read file failed: {e.__class__.__name__}: {e}") from e

@@ -1,6 +1,7 @@
 """Focused tests for platform lifecycle and VM background-job batch calls."""
 
 import asyncio
+import errno
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from typing import Any, Optional, cast
@@ -145,15 +146,24 @@ class _SyncBackgroundJobPlatformClient:
 
 
 class _AsyncBackgroundJobPlatformClient:
-    def __init__(self, error_job_id: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        error_job_id: Optional[str] = None,
+        complete_all: bool = False,
+    ) -> None:
         self.calls: list[tuple[str, str, dict[str, Any]]] = []
         self.error_job_id = error_job_id
+        self.complete_all = complete_all
 
     async def request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
         self.calls.append((method, path, kwargs))
         return {
             "statuses": [
-                {**job, "completed": False, "exit_code": None}
+                {
+                    **job,
+                    "completed": self.complete_all,
+                    "exit_code": 0 if self.complete_all else None,
+                }
                 for job in kwargs["json"]["jobs"]
                 if job["job_id"] != self.error_job_id
             ],
@@ -484,6 +494,118 @@ async def test_async_get_background_jobs_uses_one_platform_batch() -> None:
     }
     assert not statuses[0].completed
     assert not statuses[1].completed
+
+
+@pytest.mark.asyncio
+async def test_async_completed_output_reads_are_client_bounded_and_sequential() -> None:
+    client = AsyncSandboxClient(api_key="test-key")
+    await client.client.aclose()
+    platform = _AsyncBackgroundJobPlatformClient(complete_all=True)
+    cast(Any, client).client = platform
+
+    active_reads = 0
+    peak_reads = 0
+    paths_by_sandbox: dict[str, list[str]] = {}
+
+    async def read_file(
+        sandbox_id: str,
+        path: str,
+        timeout: Optional[int] = None,
+        offset: Optional[int] = None,
+        length: Optional[int] = None,
+    ) -> ReadFileResponse:
+        nonlocal active_reads, peak_reads
+        paths_by_sandbox.setdefault(sandbox_id, []).append(path)
+        active_reads += 1
+        peak_reads = max(peak_reads, active_reads)
+        try:
+            await asyncio.sleep(0.01)
+            return ReadFileResponse(content=path, size=len(path), truncated=False)
+        finally:
+            active_reads -= 1
+
+    cast(Any, client).read_file = read_file
+    jobs = [_job(f"sandbox-{index}", f"{index:08x}") for index in range(100)]
+    try:
+        statuses = await client.get_background_jobs(jobs)
+    finally:
+        await client.aclose()
+
+    assert all(status.completed and status.exit_code == 0 for status in statuses)
+    assert peak_reads == 20
+    assert sum(len(paths) for paths in paths_by_sandbox.values()) == 200
+    for job in jobs:
+        assert paths_by_sandbox[job.sandbox_id] == [
+            job.stdout_log_file,
+            job.stderr_log_file,
+        ]
+
+
+@pytest.mark.asyncio
+async def test_async_output_error_preserves_completion_and_surfaces_errno() -> None:
+    client = AsyncSandboxClient(api_key="test-key")
+    await client.client.aclose()
+    cast(Any, client).client = _AsyncBackgroundJobPlatformClient(complete_all=True)
+
+    async def read_file(
+        _sandbox_id: str,
+        path: str,
+        timeout: Optional[int] = None,
+        offset: Optional[int] = None,
+        length: Optional[int] = None,
+    ) -> ReadFileResponse:
+        if path.endswith("stdout.log"):
+            try:
+                try:
+                    raise OSError(errno.EMFILE, "Too many open files")
+                except OSError as os_error:
+                    raise RuntimeError("All connection attempts failed") from os_error
+            except RuntimeError as transport_error:
+                raise APIError("Read file failed: ConnectError") from transport_error
+        return ReadFileResponse(content="stderr", size=6, truncated=False)
+
+    cast(Any, client).read_file = read_file
+    try:
+        status = (await client.get_background_jobs([_job("sandbox-a", "feedface")]))[0]
+    finally:
+        await client.aclose()
+
+    assert status.completed
+    assert status.exit_code == 0
+    assert status.stdout is None
+    assert status.stdout_error is not None
+    assert "errno=24" in status.stdout_error
+    assert "Too many open files" in status.stdout_error
+    assert status.stderr == "stderr"
+    assert status.stderr_error is None
+
+
+@pytest.mark.asyncio
+async def test_async_output_deadline_preserves_completion() -> None:
+    client = AsyncSandboxClient(api_key="test-key")
+    await client.client.aclose()
+    cast(Any, client).client = _AsyncBackgroundJobPlatformClient(complete_all=True)
+
+    async def unexpected_read(*_args: Any, **_kwargs: Any) -> ReadFileResponse:
+        raise AssertionError("expired output deadline must not start a read")
+
+    cast(Any, client).read_file = unexpected_read
+    try:
+        status = (
+            await client.get_background_jobs(
+                [_job("sandbox-a", "feedface")],
+                timeout=0,
+            )
+        )[0]
+    finally:
+        await client.aclose()
+
+    assert status.completed
+    assert status.exit_code == 0
+    assert status.stdout is None
+    assert status.stderr is None
+    assert status.stdout_error == "Output retrieval deadline exceeded after 0s"
+    assert status.stderr_error == "Output retrieval deadline exceeded after 0s"
 
 
 @pytest.mark.asyncio

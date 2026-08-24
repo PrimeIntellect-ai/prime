@@ -880,35 +880,36 @@ def _peek_toml(config_path: str) -> Dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def _is_full_finetune(cfg: Dict[str, Any]) -> bool:
-    """A config is full-FT iff it carries one of:
+def _validate_full_finetune_deployment(cfg: Dict[str, Any], config_path: str) -> None:
+    """`--full-finetune` dispatch requires an explicit `[deployment]` table
+    sizing the run — either single-node (`num_train_gpus` / `num_infer_gpus`),
+    multi-node (`num_train_nodes` / `num_infer_nodes`), or an explicit
+    `[deployment].type` of `single_node` / `multi_node`.
 
-    - top-level `type = "full_finetune"` (mirrors prime-rl's discriminator)
-    - a `[deployment]` table with a sizing field — either single-node
-      (`num_train_gpus` / `num_infer_gpus`) or multi-node
-      (`num_train_nodes` / `num_infer_nodes`) — or an explicit
-      `[deployment].type` of `single_node` / `multi_node`.
-
-    Previously only the single-node sizing fields triggered detection, so
-    canonical multi-node prime-rl shapes (e.g. `qwen30b_math/rl.toml`,
-    which uses `num_train_nodes` / `num_infer_nodes`) silently fell
-    through to the LoRA dispatch path.
+    Dispatch routing itself is decided purely by the `--full-finetune` CLI
+    flag, not by sniffing the TOML — prime-rl owns the config schema, so the
+    platform-specific dispatch decision belongs on the command line (same as
+    `--image-tag` / `--gpu-type`), not in a `type = "full_finetune"` field
+    inside the file. This check only guards against dispatching a full-FT
+    run the backend can't size.
     """
-    if cfg.get("type") == "full_finetune":
-        return True
     deploy = cfg.get("deployment")
-    if isinstance(deploy, dict):
-        if deploy.get("type") in ("single_node", "multi_node"):
-            return True
-        sizing_keys = (
-            "num_train_gpus",
-            "num_infer_gpus",
-            "num_train_nodes",
-            "num_infer_nodes",
+    sizing_keys = (
+        "num_train_gpus",
+        "num_infer_gpus",
+        "num_train_nodes",
+        "num_infer_nodes",
+    )
+    has_sizing = isinstance(deploy, dict) and (
+        deploy.get("type") in ("single_node", "multi_node") or any(k in deploy for k in sizing_keys)
+    )
+    if not has_sizing:
+        console.print(
+            f"[red]Error:[/red] --full-finetune requires an explicit [deployment] "
+            f"block in {config_path} (num_train_gpus/num_infer_gpus for "
+            "single-node, or num_train_nodes/num_infer_nodes for multi-node)."
         )
-        if any(k in deploy for k in sizing_keys):
-            return True
-    return False
+        raise typer.Exit(1)
 
 
 def _dispatch_full_finetune_run(
@@ -1296,23 +1297,33 @@ def create_run(
             "default (no preference, auto-pick)."
         ),
     ),
+    full_finetune: bool = typer.Option(
+        False,
+        "--full-finetune",
+        "--fft",
+        help=(
+            "Dispatch this config as a full fine-tune on a dedicated cluster "
+            "(every parameter updated) instead of a shared-deployment LoRA "
+            "run. Requires an explicit [deployment] block in the TOML."
+        ),
+    ),
 ) -> None:
     """Launch a Hosted Training run from a config file.
 
     Example:
 
         prime train config.toml
+        prime train config.toml --full-finetune
     """
     validate_output_format(output, console)
 
-    # Peek at the raw TOML BEFORE the strict-schema RLConfig parse so a
-    # full-FT config (`type = "full_finetune"` or a `[deployment]` block
-    # with num_train_gpus/num_infer_gpus) can bypass the LoRA-shared
-    # validators and dispatch on the hosted full-FT endpoint instead.
-    # Backwards-compatible: configs without these markers take the LoRA
-    # path exactly as before.
+    # Dispatch routing is decided purely by --full-finetune, not by
+    # sniffing the TOML for `type`/`[deployment]` — prime-rl owns the
+    # config schema, so a config that validates locally must validate
+    # identically here regardless of which dispatch path it takes.
     raw_cfg = _peek_toml(config_path)
-    if _is_full_finetune(raw_cfg):
+    if full_finetune:
+        _validate_full_finetune_deployment(raw_cfg, config_path)
         _dispatch_full_finetune_run(
             raw_cfg=raw_cfg,
             config_path=config_path,

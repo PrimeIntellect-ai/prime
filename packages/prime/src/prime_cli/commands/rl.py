@@ -912,6 +912,19 @@ def _validate_full_finetune_deployment(cfg: Dict[str, Any], config_path: str) ->
         raise typer.Exit(1)
 
 
+def _warn_legacy_full_finetune_type(cfg: Dict[str, Any], config_path: str) -> None:
+    """`type = "full_finetune"` used to be how dispatch routing was decided;
+    --full-finetune/--fft now owns that decision entirely, so a leftover
+    `type` key in a full-FT config is dead weight. Warn so configs get
+    cleaned up instead of silently accumulating a field nothing reads."""
+    if "type" in cfg:
+        console.print(
+            f'[yellow]Warning:[/yellow] `type = "{cfg["type"]}"` in {config_path} '
+            "is no longer used — dispatch routing is decided by "
+            "--full-finetune/--fft on the command line. Remove it from the config."
+        )
+
+
 def _dispatch_full_finetune_run(
     *,
     raw_cfg: Dict[str, Any],
@@ -1037,6 +1050,8 @@ def _dispatch_full_finetune_run(
     if isinstance(orch_section, dict):
         _remove_deprecated_config_keys(orch_section)
 
+    _warn_legacy_full_finetune_type(raw_cfg, config_path)
+
     # Strip CLI-only secret-loading keys before shipping the TOML to the
     # backend. `env_file` / `env_files` only meaningfully exist on the
     # caller's filesystem — the hosted pod doesn't see them, and prime-rl
@@ -1045,10 +1060,12 @@ def _dispatch_full_finetune_run(
     # confuses prime-rl (unknown field) or silently sends it chasing
     # phantom paths. `image_tag` is similarly chart-level — the backend
     # parses it off the request body, not the embedded prime-rl config.
+    # `type` is stripped here too rather than left for the backend's
+    # legacy CLI-metadata cleanup to silently absorb.
     config_payload = {
         k: v
         for k, v in raw_cfg.items()
-        if k not in ("env_file", "env_files", "image_tag", "gpu_type")
+        if k not in ("env_file", "env_files", "image_tag", "gpu_type", "type")
     }
 
     payload = build_payload_from_toml(

@@ -8,6 +8,7 @@ from prime_cli.commands.rl import (
     RLConfig,
     _flatten_config_schema,
     _validate_full_finetune_deployment,
+    _warn_legacy_full_finetune_type,
     generate_rl_config_template,
     load_config,
 )
@@ -692,3 +693,31 @@ def test_validate_full_finetune_deployment_empty_deployment_rejected() -> None:
     # `[deployment]` with no recognised sizing fields isn't enough.
     with pytest.raises(typer.Exit):
         _validate_full_finetune_deployment({"deployment": {}}, "rl.toml")
+
+
+def test_warn_legacy_full_finetune_type_warns_on_leftover_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    printed: list[str] = []
+    monkeypatch.setattr(
+        "prime_cli.commands.rl.console.print",
+        lambda *args, **_: printed.append(" ".join(str(a) for a in args)),
+    )
+
+    _warn_legacy_full_finetune_type({"type": "full_finetune"}, "rl.toml")
+
+    assert any("type" in line and "no longer used" in line for line in printed)
+
+
+def test_warn_legacy_full_finetune_type_silent_without_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    printed: list[str] = []
+    monkeypatch.setattr(
+        "prime_cli.commands.rl.console.print",
+        lambda *args, **_: printed.append(" ".join(str(a) for a in args)),
+    )
+
+    _warn_legacy_full_finetune_type({"deployment": {"num_train_gpus": 1}}, "rl.toml")
+
+    assert printed == []

@@ -7,6 +7,7 @@ from prime_cli.commands.rl import (
     EnvConfig,
     RLConfig,
     _flatten_config_schema,
+    _is_full_finetune,
     _validate_full_finetune_deployment,
     _warn_legacy_full_finetune_type,
     generate_rl_config_template,
@@ -693,6 +694,31 @@ def test_validate_full_finetune_deployment_empty_deployment_rejected() -> None:
     # `[deployment]` with no recognised sizing fields isn't enough.
     with pytest.raises(typer.Exit):
         _validate_full_finetune_deployment({"deployment": {}}, "rl.toml")
+
+
+def test_is_full_finetune_auto_detects_deployment_without_flag() -> None:
+    cfg = {"deployment": {"num_train_gpus": 1, "num_infer_gpus": 1}}
+    assert _is_full_finetune(cfg, flag=False) is True
+
+
+def test_is_full_finetune_flag_routes_without_deployment() -> None:
+    lora_shaped_cfg = {"model": "Qwen/Qwen3.5-4B"}
+    assert _is_full_finetune(lora_shaped_cfg, flag=True) is True
+
+
+def test_is_full_finetune_lora_config_without_flag_rejected() -> None:
+    lora_cfg = {
+        "model": "Qwen/Qwen3.5-4B",
+        "max_steps": 50,
+        "batch_size": 128,
+        "rollouts_per_example": 8,
+    }
+    assert _is_full_finetune(lora_cfg, flag=False) is False
+
+
+def test_is_full_finetune_empty_deployment_without_flag_rejected() -> None:
+    # `[deployment]` with no recognised sizing fields isn't a signal on its own.
+    assert _is_full_finetune({"deployment": {}}, flag=False) is False
 
 
 def test_warn_legacy_full_finetune_type_warns_on_leftover_type(

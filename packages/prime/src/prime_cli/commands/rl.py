@@ -880,30 +880,48 @@ def _peek_toml(config_path: str) -> Dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def _validate_full_finetune_deployment(cfg: Dict[str, Any], config_path: str) -> None:
-    """`--full-finetune` dispatch requires an explicit `[deployment]` table
-    sizing the run — either single-node (`num_train_gpus` / `num_infer_gpus`),
-    multi-node (`num_train_nodes` / `num_infer_nodes`), or an explicit
+def _has_full_finetune_deployment(cfg: Dict[str, Any]) -> bool:
+    """True iff `cfg` carries a `[deployment]` table sizing the run — either
+    single-node (`num_train_gpus` / `num_infer_gpus`), multi-node
+    (`num_train_nodes` / `num_infer_nodes`), or an explicit
     `[deployment].type` of `single_node` / `multi_node`.
 
-    Dispatch routing itself is decided purely by the `--full-finetune` CLI
-    flag, not by sniffing the TOML — prime-rl owns the config schema, so the
-    platform-specific dispatch decision belongs on the command line (same as
-    `--image-tag` / `--gpu-type`), not in a `type = "full_finetune"` field
-    inside the file. This check only guards against dispatching a full-FT
-    run the backend can't size.
+    `[deployment]` is a full-FT-only prime-rl concept: RLConfig (the LoRA
+    schema) has no such field and forbids extras, so its presence is
+    unambiguous full-FT intent even without `--full-finetune` on the
+    command line.
     """
     deploy = cfg.get("deployment")
+    if not isinstance(deploy, dict):
+        return False
+    if deploy.get("type") in ("single_node", "multi_node"):
+        return True
     sizing_keys = (
         "num_train_gpus",
         "num_infer_gpus",
         "num_train_nodes",
         "num_infer_nodes",
     )
-    has_sizing = isinstance(deploy, dict) and (
-        deploy.get("type") in ("single_node", "multi_node") or any(k in deploy for k in sizing_keys)
-    )
-    if not has_sizing:
+    return any(k in deploy for k in sizing_keys)
+
+
+def _is_full_finetune(cfg: Dict[str, Any], *, flag: bool) -> bool:
+    """Dispatch as full-FT if `--full-finetune`/`--fft` was passed, or if
+    the config's `[deployment]` block already sizes the run. Either is
+    sufficient on its own — the flag lets a config without `[deployment]`
+    yet still be routed (and get `_validate_full_finetune_deployment`'s
+    clear error instead of silently landing on the LoRA path).
+    """
+    return flag or _has_full_finetune_deployment(cfg)
+
+
+def _validate_full_finetune_deployment(cfg: Dict[str, Any], config_path: str) -> None:
+    """Full-FT dispatch requires an explicit `[deployment]` table sizing the
+    run. Guards the `--full-finetune`-without-`[deployment]` case — the
+    auto-detect path in `_has_full_finetune_deployment` never reaches here
+    without sizing already present.
+    """
+    if not _has_full_finetune_deployment(cfg):
         console.print(
             f"[red]Error:[/red] --full-finetune requires an explicit [deployment] "
             f"block in {config_path} (num_train_gpus/num_infer_gpus for "
@@ -1321,7 +1339,9 @@ def create_run(
         help=(
             "Dispatch this config as a full fine-tune on a dedicated cluster "
             "(every parameter updated) instead of a shared-deployment LoRA "
-            "run. Requires an explicit [deployment] block in the TOML."
+            "run. Usually unnecessary — a config with a [deployment] block "
+            "is auto-detected as full-FT. Requires an explicit [deployment] "
+            "block in the TOML either way."
         ),
     ),
 ) -> None:
@@ -1334,12 +1354,12 @@ def create_run(
     """
     validate_output_format(output, console)
 
-    # Dispatch routing is decided purely by --full-finetune, not by
-    # sniffing the TOML for `type`/`[deployment]` — prime-rl owns the
-    # config schema, so a config that validates locally must validate
-    # identically here regardless of which dispatch path it takes.
+    # Dispatch routing: --full-finetune/--fft, or an unambiguous
+    # `[deployment]` block (full-FT-only — RLConfig/the LoRA schema has no
+    # such field). No longer sniffs `type` — prime-rl owns the config
+    # schema, so a leftover `type` field is dead weight, not a signal.
     raw_cfg = _peek_toml(config_path)
-    if full_finetune:
+    if _is_full_finetune(raw_cfg, flag=full_finetune):
         _validate_full_finetune_deployment(raw_cfg, config_path)
         _dispatch_full_finetune_run(
             raw_cfg=raw_cfg,

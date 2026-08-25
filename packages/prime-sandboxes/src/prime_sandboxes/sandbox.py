@@ -2698,6 +2698,8 @@ class AsyncSandboxClient:
             send_compression=None,
             http_client=http_client,
         )
+        # The SDK tag lets reconnect find a Start whose PID response was lost. Remove tag/List
+        # recovery once sandboxd provides idempotent Start/create-or-attach semantics.
         process_tag = f"prime-sdk-{uuid.uuid4().hex}"
         request = build_command_session_start_request(
             command,

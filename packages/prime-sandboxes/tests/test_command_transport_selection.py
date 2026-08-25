@@ -275,7 +275,7 @@ async def test_process_reconnect_discovers_pid_by_tag_and_refreshes_rejected_aut
             return True
 
     class _FakeConnectClient:
-        def __init__(self, _address: str, http_client=None):
+        def __init__(self, _address: str, **_kwargs):
             pass
 
         def execute_server_stream(self, **kwargs):

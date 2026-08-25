@@ -94,3 +94,81 @@ def test_train_request_submits_model_request(monkeypatch) -> None:
         "Models:\nopenai/gpt-oss-120b, meta-llama/Llama-4\n\n"
         "Context:\nSFT distillation"
     )
+
+
+def _fake_run_payload(status: str, run_id: str = "run-1") -> dict[str, Any]:
+    return {
+        "id": run_id,
+        "userId": "user-1",
+        "status": status,
+        "createdAt": "2026-08-25T00:00:00Z",
+        "updatedAt": "2026-08-25T00:00:00Z",
+    }
+
+
+def test_train_stop_returns_immediately_when_already_terminal(monkeypatch) -> None:
+    calls: list[tuple[str, str]] = []
+
+    def mock_request(self, method, endpoint, params=None, json=None, timeout=None):
+        calls.append((method, endpoint))
+        return {"run": _fake_run_payload("STOPPED")}
+
+    monkeypatch.setattr("prime_cli.core.client.APIClient.request", mock_request)
+    monkeypatch.setattr("time.sleep", lambda seconds: None)
+
+    result = runner.invoke(
+        app,
+        ["train", "stop", "run-1", "--force"],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "stopped successfully" in result.output
+    assert calls == [("PUT", "/rft/runs/run-1/stop")], (
+        "a stop that already returns a terminal status should not poll at all"
+    )
+
+
+def test_train_stop_polls_until_terminal(monkeypatch) -> None:
+    statuses = iter(["RUNNING", "RUNNING", "STOPPED"])
+    calls: list[tuple[str, str]] = []
+
+    def mock_request(self, method, endpoint, params=None, json=None, timeout=None):
+        calls.append((method, endpoint))
+        return {"run": _fake_run_payload(next(statuses))}
+
+    monkeypatch.setattr("prime_cli.core.client.APIClient.request", mock_request)
+    monkeypatch.setattr("time.sleep", lambda seconds: None)
+
+    result = runner.invoke(
+        app,
+        ["train", "stop", "run-1", "--force"],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "stopped successfully" in result.output
+    assert calls == [
+        ("PUT", "/rft/runs/run-1/stop"),
+        ("GET", "/rft/runs/run-1"),
+        ("GET", "/rft/runs/run-1"),
+    ]
+
+
+def test_train_stop_gives_up_after_max_polls(monkeypatch) -> None:
+    def mock_request(self, method, endpoint, params=None, json=None, timeout=None):
+        return {"run": _fake_run_payload("RUNNING")}
+
+    monkeypatch.setattr("prime_cli.core.client.APIClient.request", mock_request)
+    monkeypatch.setattr("time.sleep", lambda seconds: None)
+    monkeypatch.setattr("prime_cli.commands.rl.HOSTED_TRAINING_STOP_MAX_POLLS", 2)
+
+    result = runner.invoke(
+        app,
+        ["train", "stop", "run-1", "--force"],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "did not reach a terminal state" in result.output
+    assert "prime train get run-1" in result.output

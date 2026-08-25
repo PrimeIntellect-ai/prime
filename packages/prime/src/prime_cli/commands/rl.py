@@ -110,6 +110,11 @@ HOSTED_TRAINING_LOG_STARTUP_POLL_SECONDS = 10
 HOSTED_TRAINING_LOG_STARTUP_POLLS = 18
 HOSTED_TRAINING_LOG_FOLLOW_POLL_SECONDS = 5
 
+HOSTED_TRAINING_STOP_POLL_SECONDS = 3
+HOSTED_TRAINING_STOP_MAX_POLLS = 60
+
+TERMINAL_RUN_STATUSES = {"STOPPED", "FAILED", "COMPLETED"}
+
 # Log level colors for rich console
 LEVEL_STYLES = {
     "DEBUG": "dim",
@@ -2310,10 +2315,30 @@ def stop_run(
         api_client = APIClient()
         rl_client = RLClient(api_client)
 
-        run = rl_client.stop_run(run_id)
+        with console.status("[bold blue]Stopping run...", spinner="dots"):
+            run = rl_client.stop_run(run_id)
 
+            attempts = 0
+            while (
+                run.status.upper() not in TERMINAL_RUN_STATUSES
+                and attempts < HOSTED_TRAINING_STOP_MAX_POLLS
+            ):
+                time.sleep(HOSTED_TRAINING_STOP_POLL_SECONDS)
+                run = rl_client.get_run(run_id)
+                attempts += 1
+
+        if run.status.upper() not in TERMINAL_RUN_STATUSES:
+            console.print(
+                f"[yellow]Run {run_id} did not reach a terminal state after "
+                f"{HOSTED_TRAINING_STOP_MAX_POLLS * HOSTED_TRAINING_STOP_POLL_SECONDS}s "
+                f"- it's still being torn down in the background.[/yellow]"
+            )
+            console.print(f"Check status with: prime train get {run_id}")
+            raise typer.Exit(0)
+
+        color = _get_status_color(run.status)
         console.print(f"[green]✓ Run {run_id} stopped successfully[/green]")
-        console.print(f"Status: {run.status}")
+        console.print(f"Status: [{color}]{run.status}[/{color}]")
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")

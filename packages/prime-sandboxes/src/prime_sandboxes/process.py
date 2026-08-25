@@ -290,7 +290,7 @@ class AsyncSandboxProcess:
                             ended = True
                             self._remote_exited = True
                             if not self._started.done():
-                                raise APIError("Process exited before reporting its PID")
+                                raise APIError("Process ended before reporting its PID")
                             if not self._exit.done():
                                 self._exit.set_result(value)
                             break
@@ -300,6 +300,8 @@ class AsyncSandboxProcess:
                     error = stream_error
 
                 if ended:
+                    if error is not None:
+                        raise error
                     break
                 if not self._can_reconnect(reconnects, error):
                     if error is not None:

@@ -1,5 +1,7 @@
 """Live-process output streams re-attach to the running process after a drop."""
 
+import asyncio
+
 import pytest
 from connectrpc.code import Code
 from connectrpc.errors import ConnectError
@@ -150,6 +152,23 @@ async def test_stream_reconnects_before_pid_is_received(monkeypatch):
     assert await proc.wait() == 0
     assert reconnect_calls == [None, None]
     await proc.aclose()
+
+
+@pytest.mark.asyncio
+async def test_end_before_pid_fails_instead_of_hanging():
+    async def ended_before_start():
+        yield _end(0)
+
+    with pytest.raises(APIError, match="ended before reporting its PID"):
+        await asyncio.wait_for(
+            AsyncSandboxProcess._create(
+                _FakeStreamClient(),
+                ended_before_start(),
+                _noop_stdin,
+                _noop_signal,
+            ),
+            timeout=1,
+        )
 
 
 @pytest.mark.asyncio

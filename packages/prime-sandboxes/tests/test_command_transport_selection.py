@@ -253,6 +253,89 @@ async def test_async_open_process_rejects_container_sandbox():
         await client.aclose()
 
 
+@pytest.mark.asyncio
+async def test_process_reconnect_discovers_pid_by_tag_and_refreshes_rejected_auth(monkeypatch):
+    discovery_tokens = []
+    connected_pids = []
+    process_tags = []
+
+    class _RejectedTokenCache:
+        def __init__(self):
+            self.invalidations = 0
+
+        async def get_or_refresh(self, _sandbox_id: str):
+            auth = _auth_payload()
+            auth["token"] = "stale" if self.invalidations == 0 else "fresh"
+            return auth
+
+        async def invalidate(self, _sandbox_id: str):
+            self.invalidations += 1
+
+        async def is_vm(self, _sandbox_id: str):
+            return True
+
+    class _FakeConnectClient:
+        def __init__(self, _address: str, http_client=None):
+            pass
+
+        def execute_server_stream(self, **kwargs):
+            method = kwargs["method"].name
+            if method == "Start":
+                process_tags.append(kwargs["request"].tag)
+            else:
+                connected_pids.append(kwargs["request"].session.pid)
+
+            async def events():
+                if method == "Start":
+                    raise ConnectError(Code.UNAVAILABLE, "stream dropped")
+                yield command_session_pb2.ConnectResponse(
+                    event=command_session_pb2.CommandSessionEvent(
+                        start=command_session_pb2.CommandSessionEvent.StartEvent(pid=42)
+                    )
+                )
+                yield command_session_pb2.ConnectResponse(
+                    event=command_session_pb2.CommandSessionEvent(
+                        end=command_session_pb2.CommandSessionEvent.EndEvent(exit_code=0)
+                    )
+                )
+
+            return events()
+
+        async def execute_unary(self, **kwargs):
+            token = kwargs["headers"]["Authorization"]
+            discovery_tokens.append(token)
+            if token == "Bearer stale":
+                raise ConnectError(Code.UNAUTHENTICATED, "expired token")
+            return command_session_pb2.ListResponse(
+                sessions=[
+                    command_session_pb2.CommandSessionInfo(pid=7, tag="other-process"),
+                    command_session_pb2.CommandSessionInfo(pid=42, tag=process_tags[0]),
+                ]
+            )
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr("prime_sandboxes.sandbox.ConnectClient", _FakeConnectClient)
+    monkeypatch.setattr("prime_sandboxes.process._STREAM_RECONNECT_BACKOFF_SECONDS", 0)
+
+    client = AsyncSandboxClient(api_key="test-key")
+    cache = _RejectedTokenCache()
+    cast(Any, client)._auth_cache = cache
+    try:
+        process = await client.open_process("sbx-vm", "sleep 1")
+
+        assert await process.wait() == 0
+        assert len(process_tags) == 1
+        assert process_tags[0].startswith("prime-sdk-")
+        assert discovery_tokens == ["Bearer stale", "Bearer fresh"]
+        assert connected_pids == [42]
+        assert cache.invalidations == 1
+        await process.aclose()
+    finally:
+        await client.aclose()
+
+
 def test_auth_cache_stores_vm_flag_for_reuse(tmp_path):
     class _FakeAPIClient:
         def __init__(self):

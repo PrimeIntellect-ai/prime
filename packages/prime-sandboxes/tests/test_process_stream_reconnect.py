@@ -1,4 +1,4 @@
-"""A live-process output stream re-attaches after a transient mid-stream drop (mode #3)."""
+"""Live-process output streams re-attach to the running process after a drop."""
 
 import pytest
 from connectrpc.code import Code
@@ -43,8 +43,6 @@ async def _drain(stream):
     return out
 
 
-# Both production stream-break variants must trigger a reconnect: UNAVAILABLE "... timed out"
-# and INTERNAL "Error reading content".
 _STREAM_FAULTS = [
     ConnectError(Code.UNAVAILABLE, "error reading a body from connection: timed out"),
     ConnectError(Code.INTERNAL, "Error reading content"),
@@ -52,8 +50,12 @@ _STREAM_FAULTS = [
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("fault", _STREAM_FAULTS, ids=["unavailable_timeout", "internal_reading_content"])
-async def test_stream_reconnects_and_resumes_after_transient_drop(fault):
+@pytest.mark.parametrize(
+    "fault", _STREAM_FAULTS, ids=["unavailable_timeout", "internal_reading_content"]
+)
+async def test_stream_reconnects_and_resumes_after_drop(fault, monkeypatch):
+    monkeypatch.setattr("prime_sandboxes.process._STREAM_RECONNECT_BACKOFF_SECONDS", 0)
+
     async def faulty():
         yield _start(42)
         yield _stdout(b"before\n")
@@ -66,7 +68,7 @@ async def test_stream_reconnects_and_resumes_after_transient_drop(fault):
 
     reconnect_calls = []
 
-    async def reconnect(pid):
+    def reconnect(pid):
         reconnect_calls.append(pid)
         return resumed()
 
@@ -76,15 +78,83 @@ async def test_stream_reconnects_and_resumes_after_transient_drop(fault):
     stdout = await _drain(proc.stdout)
     rc = await proc.wait()
 
-    assert reconnect_calls == [42]  # re-attached to the same pid
+    assert reconnect_calls == [42]
     assert rc == 0  # exit observed on the resumed stream
     assert stdout == b"before\nafter\n"  # output from both segments
     await proc.aclose()
 
 
 @pytest.mark.asyncio
+async def test_stream_reconnects_after_clean_eof(monkeypatch):
+    monkeypatch.setattr("prime_sandboxes.process._STREAM_RECONNECT_BACKOFF_SECONDS", 0)
+
+    async def ended_without_exit():
+        yield _start(42)
+        yield _stdout(b"before\n")
+
+    async def resumed():
+        yield _start(42)
+        yield _stdout(b"after\n")
+        yield _end(0)
+
+    reconnect_calls = []
+
+    def reconnect(pid):
+        reconnect_calls.append(pid)
+        return resumed()
+
+    proc = await AsyncSandboxProcess._create(
+        _FakeStreamClient(),
+        ended_without_exit(),
+        _noop_stdin,
+        _noop_signal,
+        reconnect=reconnect,
+    )
+
+    assert await _drain(proc.stdout) == b"before\nafter\n"
+    assert await proc.wait() == 0
+    assert reconnect_calls == [42]
+    await proc.aclose()
+
+
+@pytest.mark.asyncio
+async def test_stream_reconnects_before_pid_is_received(monkeypatch):
+    monkeypatch.setattr("prime_sandboxes.process._STREAM_RECONNECT_BACKOFF_SECONDS", 0)
+
+    async def dropped_before_start():
+        raise ConnectError(Code.UNAVAILABLE, "stream dropped")
+        yield _start(42)
+
+    reconnect_calls = []
+
+    def reconnect(pid):
+        reconnect_calls.append(pid)
+
+        async def stream():
+            if len(reconnect_calls) == 1:
+                raise ConnectError(Code.NOT_FOUND, "process not registered yet")
+            yield _start(42)
+            yield _end(0)
+
+        return stream()
+
+    proc = await AsyncSandboxProcess._create(
+        _FakeStreamClient(),
+        dropped_before_start(),
+        _noop_stdin,
+        _noop_signal,
+        reconnect=reconnect,
+    )
+
+    assert proc.pid == 42
+    assert await proc.wait() == 0
+    assert reconnect_calls == [None, None]
+    await proc.aclose()
+
+
+@pytest.mark.asyncio
 async def test_stream_without_reconnect_still_fails():
-    # No reconnect callable -> a transient drop is fatal (baseline behaviour preserved).
+    # No reconnect callable preserves the previous fatal behavior.
     async def faulty():
         yield _start(7)
         raise ConnectError(Code.UNAVAILABLE, "error reading a body from connection: timed out")
@@ -105,7 +175,7 @@ async def test_permanent_fault_is_not_reconnected():
 
     calls = []
 
-    async def reconnect(pid):
+    def reconnect(pid):
         calls.append(pid)
         raise AssertionError("should not reconnect on a permanent fault")
 

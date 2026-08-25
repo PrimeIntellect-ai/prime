@@ -2318,26 +2318,40 @@ def stop_run(
         with console.status("[bold blue]Stopping run...", spinner="dots"):
             run = rl_client.stop_run(run_id)
 
-            attempts = 0
-            while (
-                run.status.upper() not in TERMINAL_RUN_STATUSES
-                and attempts < HOSTED_TRAINING_STOP_MAX_POLLS
-            ):
-                time.sleep(HOSTED_TRAINING_STOP_POLL_SECONDS)
-                run = rl_client.get_run(run_id)
-                attempts += 1
+            # Monotonic deadline (not an attempt counter) so a slow or
+            # stalled get_run call can't push the total wait past the
+            # advertised cap - the per-request timeout below is capped to
+            # whatever's left on the deadline too.
+            stop_budget_seconds = HOSTED_TRAINING_STOP_MAX_POLLS * HOSTED_TRAINING_STOP_POLL_SECONDS
+            deadline = time.monotonic() + stop_budget_seconds
+            while run.status.upper() not in TERMINAL_RUN_STATUSES:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(HOSTED_TRAINING_STOP_POLL_SECONDS, remaining))
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                run = rl_client.get_run(run_id, timeout=max(1, int(remaining)))
 
-        if run.status.upper() not in TERMINAL_RUN_STATUSES:
+        status_upper = run.status.upper()
+        if status_upper not in TERMINAL_RUN_STATUSES:
             console.print(
                 f"[yellow]Run {run_id} did not reach a terminal state after "
-                f"{HOSTED_TRAINING_STOP_MAX_POLLS * HOSTED_TRAINING_STOP_POLL_SECONDS}s "
-                f"- it's still being torn down in the background.[/yellow]"
+                f"{stop_budget_seconds:.0f}s - it's still being torn down in the "
+                f"background.[/yellow]"
             )
             console.print(f"Check status with: prime train get {run_id}")
             raise typer.Exit(0)
 
         color = _get_status_color(run.status)
-        console.print(f"[green]✓ Run {run_id} stopped successfully[/green]")
+        if status_upper == "STOPPED":
+            console.print(f"[green]✓ Run {run_id} stopped successfully[/green]")
+        else:
+            console.print(
+                f"[yellow]Run {run_id} reached a terminal state before the stop "
+                f"completed - it was not actively stopped.[/yellow]"
+            )
         console.print(f"Status: [{color}]{run.status}[/{color}]")
 
     except APIError as e:

@@ -395,10 +395,15 @@ class RLClient:
                 raise APIError(f"Failed to list checkpoints: {e.response.text}")
             raise APIError(f"Failed to list checkpoints: {str(e)}")
 
-    def get_run(self, run_id: str) -> RLRun:
-        """Get details of a specific Hosted Training run."""
+    def get_run(self, run_id: str, timeout: Optional[int] = None) -> RLRun:
+        """Get details of a specific Hosted Training run.
+
+        `timeout` bounds this specific request (e.g. so a caller polling
+        against a wall-clock deadline can't have a single stalled request
+        blow past it) - the client-wide default applies when omitted.
+        """
         try:
-            response = self.client.get(f"/rft/runs/{run_id}")
+            response = self.client.request("GET", f"/rft/runs/{run_id}", timeout=timeout)
             return RLRun.model_validate(response.get("run"))
         except APIError:
             # Preserve typed subclasses (NotFoundError, UnauthorizedError, …)

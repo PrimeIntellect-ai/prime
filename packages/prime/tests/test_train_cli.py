@@ -138,7 +138,11 @@ def test_train_stop_polls_until_terminal(monkeypatch) -> None:
         return {"run": _fake_run_payload(next(statuses))}
 
     monkeypatch.setattr("prime_cli.core.client.APIClient.request", mock_request)
-    monkeypatch.setattr("time.sleep", lambda seconds: None)
+    # Poll loop now runs against a real monotonic deadline (so a stalled
+    # request can't push the total wait past the advertised cap) - shrink
+    # the interval instead of faking time.sleep away, or the deadline
+    # check would busy-loop for real wall-clock seconds with no delay.
+    monkeypatch.setattr("prime_cli.commands.rl.HOSTED_TRAINING_STOP_POLL_SECONDS", 0.01)
 
     result = runner.invoke(
         app,
@@ -160,7 +164,7 @@ def test_train_stop_gives_up_after_max_polls(monkeypatch) -> None:
         return {"run": _fake_run_payload("RUNNING")}
 
     monkeypatch.setattr("prime_cli.core.client.APIClient.request", mock_request)
-    monkeypatch.setattr("time.sleep", lambda seconds: None)
+    monkeypatch.setattr("prime_cli.commands.rl.HOSTED_TRAINING_STOP_POLL_SECONDS", 0.01)
     monkeypatch.setattr("prime_cli.commands.rl.HOSTED_TRAINING_STOP_MAX_POLLS", 2)
 
     result = runner.invoke(
@@ -171,4 +175,28 @@ def test_train_stop_gives_up_after_max_polls(monkeypatch) -> None:
 
     assert result.exit_code == 0, result.output
     assert "did not reach a terminal state" in result.output
-    assert "prime train get run-1" in result.output
+
+
+def test_train_stop_reports_non_stopped_terminal_status_accurately(monkeypatch) -> None:
+    """A run that transitions to FAILED/COMPLETED while stop is polling
+    was not actively stopped - the CLI must not claim success."""
+    statuses = iter(["RUNNING", "FAILED"])
+
+    def mock_request(self, method, endpoint, params=None, json=None, timeout=None):
+        return {"run": _fake_run_payload(next(statuses))}
+
+    monkeypatch.setattr("prime_cli.core.client.APIClient.request", mock_request)
+    monkeypatch.setattr("prime_cli.commands.rl.HOSTED_TRAINING_STOP_POLL_SECONDS", 0.01)
+
+    result = runner.invoke(
+        app,
+        ["train", "stop", "run-1", "--force"],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key"},
+    )
+
+    normalized_output = " ".join(result.output.split())
+
+    assert result.exit_code == 0, result.output
+    assert "stopped successfully" not in normalized_output
+    assert "was not actively stopped" in normalized_output
+    assert "FAILED" in normalized_output

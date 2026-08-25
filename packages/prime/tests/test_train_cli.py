@@ -225,3 +225,28 @@ def test_train_stop_survives_a_stalled_poll_request(monkeypatch) -> None:
     assert result.exit_code == 0, result.output
     assert "did not reach a terminal state" in result.output
     assert "Error:" not in result.output
+
+
+def test_train_stop_survives_any_poll_api_error(monkeypatch) -> None:
+    """Not just timeouts - any APIError on a follow-up status poll (a
+    transient connection failure, a 5xx, ...) is inconclusive about the
+    stop, not a failed stop, since stop_run already succeeded."""
+    from prime_cli.core import APIError
+
+    def mock_request(self, method, endpoint, params=None, json=None, timeout=None):
+        if method == "PUT":
+            return {"run": _fake_run_payload("RUNNING")}
+        raise APIError("HTTP 502: Bad Gateway")
+
+    monkeypatch.setattr("prime_cli.core.client.APIClient.request", mock_request)
+    monkeypatch.setattr("prime_cli.commands.rl.HOSTED_TRAINING_STOP_POLL_SECONDS", 0.01)
+
+    result = runner.invoke(
+        app,
+        ["train", "stop", "run-1", "--force"],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "did not reach a terminal state" in result.output
+    assert "Error:" not in result.output

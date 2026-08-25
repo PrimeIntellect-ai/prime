@@ -20,7 +20,7 @@ from rich.table import Table
 from prime_cli.core import Config
 
 from ..api.rl import EnvServerInfo, RLClient, RLRun
-from ..client import APIClient, APIError, APITimeoutError, ValidationError
+from ..client import APIClient, APIError, ValidationError
 from ..utils import (
     DefaultCommandGroup,
     PlainTyper,
@@ -2334,10 +2334,11 @@ def stop_run(
                     break
                 try:
                     run = rl_client.get_run(run_id, timeout=max(1, int(remaining)))
-                except APITimeoutError:
+                except APIError:
                     # The stop itself already succeeded (rl_client.stop_run
-                    # returned above) - a stalled status poll is the
-                    # deadline doing its job, not a failed stop. Fall
+                    # returned above) - a timeout, transient connection
+                    # failure, or 5xx on a *follow-up status poll* is
+                    # inconclusive about the stop, not a failed stop. Fall
                     # through to the same give-up messaging as running out
                     # of poll budget, instead of a hard error.
                     break

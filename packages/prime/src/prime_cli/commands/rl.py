@@ -20,7 +20,7 @@ from rich.table import Table
 from prime_cli.core import Config
 
 from ..api.rl import EnvServerInfo, RLClient, RLRun
-from ..client import APIClient, APIError, ValidationError
+from ..client import APIClient, APIError, APITimeoutError, ValidationError
 from ..utils import (
     DefaultCommandGroup,
     PlainTyper,
@@ -2332,7 +2332,15 @@ def stop_run(
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
-                run = rl_client.get_run(run_id, timeout=max(1, int(remaining)))
+                try:
+                    run = rl_client.get_run(run_id, timeout=max(1, int(remaining)))
+                except APITimeoutError:
+                    # The stop itself already succeeded (rl_client.stop_run
+                    # returned above) - a stalled status poll is the
+                    # deadline doing its job, not a failed stop. Fall
+                    # through to the same give-up messaging as running out
+                    # of poll budget, instead of a hard error.
+                    break
 
         status_upper = run.status.upper()
         if status_upper not in TERMINAL_RUN_STATUSES:

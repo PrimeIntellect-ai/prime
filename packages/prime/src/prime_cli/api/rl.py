@@ -403,7 +403,11 @@ class RLClient:
         blow past it) - the client-wide default applies when omitted.
         """
         try:
-            response = self.client.request("GET", f"/rft/runs/{run_id}", timeout=timeout)
+            # Only forward `timeout` when a caller actually set it, so
+            # existing callers/mocks that don't expect the kwarg at all
+            # see the exact same call shape as before.
+            kwargs = {"timeout": timeout} if timeout is not None else {}
+            response = self.client.get(f"/rft/runs/{run_id}", **kwargs)
             return RLRun.model_validate(response.get("run"))
         except APIError:
             # Preserve typed subclasses (NotFoundError, UnauthorizedError, …)

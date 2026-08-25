@@ -200,3 +200,28 @@ def test_train_stop_reports_non_stopped_terminal_status_accurately(monkeypatch) 
     assert "stopped successfully" not in normalized_output
     assert "was not actively stopped" in normalized_output
     assert "FAILED" in normalized_output
+
+
+def test_train_stop_survives_a_stalled_poll_request(monkeypatch) -> None:
+    """A poll request that itself times out (deadline enforced at the
+    transport level) must not be reported as a failed stop - stop_run
+    already succeeded before polling started."""
+    from prime_cli.core import APITimeoutError
+
+    def mock_request(self, method, endpoint, params=None, json=None, timeout=None):
+        if method == "PUT":
+            return {"run": _fake_run_payload("RUNNING")}
+        raise APITimeoutError("Request timed out")
+
+    monkeypatch.setattr("prime_cli.core.client.APIClient.request", mock_request)
+    monkeypatch.setattr("prime_cli.commands.rl.HOSTED_TRAINING_STOP_POLL_SECONDS", 0.01)
+
+    result = runner.invoke(
+        app,
+        ["train", "stop", "run-1", "--force"],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "did not reach a terminal state" in result.output
+    assert "Error:" not in result.output

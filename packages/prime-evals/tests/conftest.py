@@ -13,4 +13,5 @@ def isolated_prime_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Pa
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("PRIME_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("PRIME_API_KEY", raising=False)
     return tmp_path

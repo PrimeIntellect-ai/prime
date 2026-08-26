@@ -12,8 +12,10 @@ from prime_sandboxes import Config
 @pytest.fixture(autouse=True)
 def fake_home(monkeypatch, tmp_path):
     """The conftest only isolates the working directory; these tests also
-    need ~ to be the tmp dir so "global" means a file they control."""
+    need ~ to be the tmp dir so "global" means a file they control, and no
+    PRIME_API_KEY in the environment (CI sets one) since env beats the file."""
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.delenv("PRIME_API_KEY", raising=False)
 
 
 def _write(directory: Path, **values: object) -> Path:

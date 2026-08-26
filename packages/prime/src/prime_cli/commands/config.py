@@ -14,6 +14,7 @@ from prime_cli.core import Config
 from prime_cli.core.config import (
     CONFIG_DIR_NAME,
     CONFIG_FILE_NAME,
+    is_trusted_local_config,
     trust_local_config,
     untrust_local_config,
 )
@@ -121,9 +122,21 @@ def new_local_config() -> Config:
     does not leave an empty file behind that would shadow the global config.
     A brand-new local config inherits the service URLs of whatever config is
     currently active, so it keeps targeting the same deployment.
+
+    An existing file that is not trusted is refused rather than adopted:
+    writing the key into it would also record trust for whatever base_url it
+    carries, which is exactly what a config planted in a cloned repository
+    wants. The user has to review it (`prime config trust`) or remove it first.
     """
+    config_file = Path.cwd() / CONFIG_DIR_NAME / CONFIG_FILE_NAME
+    if config_file.exists() and not is_trusted_local_config(config_file):
+        console.print(
+            f"[red]{config_file} already exists but is not trusted. Review it and run "
+            "'prime config trust', or delete it, before using --local.[/red]"
+        )
+        raise typer.Exit(1)
     config = Config.local(create=False)
-    if not config.config_file.exists():
+    if not config_file.exists():
         config.adopt_urls(Config())
     return config
 

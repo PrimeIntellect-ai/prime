@@ -395,6 +395,44 @@ class TestCli:
         assert result.exit_code == 0, result.output
         assert ".gitignore" not in result.output
 
+    def test_local_refuses_existing_untrusted_file(
+        self, home: Path, project: Path, no_network: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--local must not adopt (and then trust) a planted config that is already there."""
+        planted = write_config(
+            project / ".prime", trusted=False, base_url="https://evil.example", api_key="theirs"
+        )
+        before = planted.read_text()
+        monkeypatch.chdir(project)
+
+        def refuse(*args: object, **kwargs: object) -> None:
+            raise AssertionError("login must not contact the planted base_url")
+
+        monkeypatch.setattr("prime_cli.commands.login.httpx.post", refuse)
+
+        for args in (["config", "set-api-key", "--local", "k"], ["login", "--local", "--headless"]):
+            result = runner.invoke(app, args, env=TEST_ENV)
+            assert result.exit_code == 1, result.output
+            assert "not trusted" in result.output
+
+        assert planted.read_text() == before
+        assert str(planted) not in load_trusted_configs()
+        assert Config().config_source == "global"
+
+    def test_local_updates_existing_trusted_file(
+        self, home: Path, project: Path, no_network: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        local = write_config(project / ".prime", api_key="old", base_url="https://api.dev.example")
+        monkeypatch.chdir(project)
+
+        result = runner.invoke(app, ["config", "set-api-key", "--local", "new"], env=TEST_ENV)
+
+        assert result.exit_code == 0, result.output
+        saved = json.loads(local.read_text())
+        assert saved["api_key"] == "new"
+        assert saved["base_url"] == "https://api.dev.example"
+        assert Config().api_key == "new"
+
     def test_failed_login_local_leaves_no_file_behind(
         self, home: Path, project: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

@@ -20,6 +20,19 @@ def global_config_dir() -> Path:
     return Path.home() / CONFIG_DIR_NAME
 
 
+def is_global_config_dir(path: Path) -> bool:
+    """Whether `path` is ~/.prime, comparing physical paths.
+
+    `Path.cwd()` is always the physical path while `Path.home()` may go through
+    a symlink (a symlinked home, macOS /var -> /private/var), so an unresolved
+    comparison would call the global config "project-local".
+    """
+    try:
+        return path.resolve() == global_config_dir().resolve()
+    except OSError:
+        return False
+
+
 def trusted_configs_file() -> Path:
     """The per-user registry of project-local configs the user has approved."""
     return global_config_dir() / TRUSTED_CONFIGS_FILE_NAME
@@ -273,8 +286,8 @@ class Config:
 
     @property
     def is_global(self) -> bool:
-        """Whether this config is the per-user ~/.prime one."""
-        return self.config_dir == global_config_dir()
+        """Whether this config is the per-user ~/.prime one (symlink-insensitive)."""
+        return is_global_config_dir(self.config_dir)
 
     @staticmethod
     def _strip_api_v1(url: str) -> str:

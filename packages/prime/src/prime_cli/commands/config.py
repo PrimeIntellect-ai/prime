@@ -14,7 +14,7 @@ from prime_cli.core import Config
 from prime_cli.core.config import (
     CONFIG_DIR_NAME,
     CONFIG_FILE_NAME,
-    global_config_dir,
+    is_global_config_dir,
     is_trusted_local_config,
     trust_local_config,
     untrust_local_config,
@@ -135,8 +135,11 @@ def new_local_config() -> Config:
     config_file = config_dir / CONFIG_FILE_NAME
     # From the home directory, --local simply means the global config, which is
     # trusted as such and never in the registry.
-    is_global = config_dir.resolve() == global_config_dir().resolve()
-    if config_file.exists() and not is_global and not is_trusted_local_config(config_file):
+    if (
+        config_file.exists()
+        and not is_global_config_dir(config_dir)
+        and not is_trusted_local_config(config_file)
+    ):
         console.print(
             f"[red]{config_file} already exists but is not trusted. Review it and run "
             "'prime config trust', or delete it, before using --local.[/red]"

@@ -447,6 +447,26 @@ class TestCli:
         assert load_trusted_configs() == {}
         assert "project-local" not in result.output
 
+    def test_local_from_symlinked_home_is_still_the_global_config(
+        self, tmp_path: Path, home: Path, no_network: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Path.cwd() is the physical path while Path.home() may go through a
+        symlink; the global check must not depend on which spelling it sees."""
+        link = tmp_path / "home-link"
+        link.symlink_to(home, target_is_directory=True)
+        monkeypatch.setenv("HOME", str(link))
+        monkeypatch.setattr(Path, "home", lambda: link)
+        global_file = write_config(link / ".prime", api_key="old")
+        monkeypatch.chdir(home)  # physical path
+
+        result = runner.invoke(app, ["config", "set-api-key", "--local", "new"], env=TEST_ENV)
+
+        assert result.exit_code == 0, result.output
+        assert json.loads(global_file.read_text())["api_key"] == "new"
+        assert load_trusted_configs() == {}
+        assert "project-local" not in result.output
+        assert Config.local(create=False).is_global
+
     def test_failed_login_local_leaves_no_file_behind(
         self, home: Path, project: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

@@ -433,6 +433,20 @@ class TestCli:
         assert saved["base_url"] == "https://api.dev.example"
         assert Config().api_key == "new"
 
+    def test_local_from_home_directory_is_the_global_config(
+        self, home: Path, no_network: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """~/.prime is never in the trust registry; --local there must not refuse it."""
+        global_file = write_config(home / ".prime", api_key="old")
+        monkeypatch.chdir(home)
+
+        result = runner.invoke(app, ["config", "set-api-key", "--local", "new"], env=TEST_ENV)
+
+        assert result.exit_code == 0, result.output
+        assert json.loads(global_file.read_text())["api_key"] == "new"
+        assert load_trusted_configs() == {}
+        assert "project-local" not in result.output
+
     def test_failed_login_local_leaves_no_file_behind(
         self, home: Path, project: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

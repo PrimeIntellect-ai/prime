@@ -14,6 +14,7 @@ from prime_cli.core import Config
 from prime_cli.core.config import (
     CONFIG_DIR_NAME,
     CONFIG_FILE_NAME,
+    global_config_dir,
     is_trusted_local_config,
     trust_local_config,
     untrust_local_config,
@@ -99,6 +100,8 @@ def print_local_config_notice(config: Config) -> None:
     enclosing repo rather than only the config's parent, and let git decide
     whether the file is actually ignored.
     """
+    if config.is_global:
+        return
     console.print(f"[blue]Using project-local config: {config.config_file}[/blue]")
     config_dir = config.config_dir.resolve()
     repo_root = _git_repo_root(config_dir.parent)
@@ -128,8 +131,12 @@ def new_local_config() -> Config:
     carries, which is exactly what a config planted in a cloned repository
     wants. The user has to review it (`prime config trust`) or remove it first.
     """
-    config_file = Path.cwd() / CONFIG_DIR_NAME / CONFIG_FILE_NAME
-    if config_file.exists() and not is_trusted_local_config(config_file):
+    config_dir = Path.cwd() / CONFIG_DIR_NAME
+    config_file = config_dir / CONFIG_FILE_NAME
+    # From the home directory, --local simply means the global config, which is
+    # trusted as such and never in the registry.
+    is_global = config_dir.resolve() == global_config_dir().resolve()
+    if config_file.exists() and not is_global and not is_trusted_local_config(config_file):
         console.print(
             f"[red]{config_file} already exists but is not trusted. Review it and run "
             "'prime config trust', or delete it, before using --local.[/red]"

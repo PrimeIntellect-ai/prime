@@ -141,14 +141,26 @@ command or SDK call run from that directory — or any directory below it — us
 it. Resolution order:
 
 1. `PRIME_CONFIG_DIR` — explicit config directory
-2. The nearest ancestor of the working directory containing `.prime/config.json`
-   (the search stops at your home directory and ignores files owned by other users)
+2. The nearest ancestor of the working directory containing a **trusted**
+   `.prime/config.json` (the search stops at your home directory and ignores
+   files owned by other users)
 3. `~/.prime/config.json`
+
+A project-local config is only used once you have trusted it. Files written by
+`prime login --local` / `prime config set-api-key --local` are trusted
+automatically; one you create by hand needs `prime config trust` (run in the
+project, or pass its path). Trust is tied to the file's content, so if it
+changes — say a `git pull` rewrote it — commands warn and ignore it until you
+trust it again. This is what stops a `.prime/config.json` committed to a
+repository you clone from pointing your `PRIME_API_KEY` at someone else's
+server. `prime config untrust` withdraws approval.
 
 A project-local config replaces the global one entirely; it is not merged with
 it. `PRIME_API_KEY` and the other `PRIME_*` environment variables still take
-precedence over either file. `prime config view` shows which file is active.
-Add `.prime/` to the project's `.gitignore` so the key is never committed.
+precedence over either file. `prime config view` shows which file is active and
+lists any untrusted files it skipped. Add `.prime/` to the project's
+`.gitignore` so the key is never committed — the `--local` commands warn if the
+enclosing repository does not ignore it.
 
 ### Environments Hub
 

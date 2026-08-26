@@ -99,9 +99,9 @@ asyncio.run(main())
 | `PRIME_CONFIG_DIR`     | Optional explicit config directory                                     |
 
 Precedence is constructor argument → environment variable → config file. The
-config file is the nearest `.prime/config.json` at or above the working
-directory (a project-local config from `prime login --local`), falling back to
-`~/.prime/config.json`.
+config file is the nearest trusted `.prime/config.json` at or above the working
+directory (a project-local config from `prime login --local`, or one approved
+with `prime config trust`), falling back to `~/.prime/config.json`.
 
 ## Not yet available
 

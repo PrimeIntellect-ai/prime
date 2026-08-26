@@ -1,19 +1,28 @@
+import hashlib
 import json
 import os
 import re
+import sys
+import warnings
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, Optional
 
 from pydantic import BaseModel, ConfigDict
 
 CONFIG_DIR_ENV_VAR = "PRIME_CONFIG_DIR"
 CONFIG_DIR_NAME = ".prime"
 CONFIG_FILE_NAME = "config.json"
+TRUSTED_CONFIGS_FILE_NAME = "trusted_configs.json"
 
 
 def global_config_dir() -> Path:
     """The per-user config directory, ~/.prime."""
     return Path.home() / CONFIG_DIR_NAME
+
+
+def trusted_configs_file() -> Path:
+    """The per-user registry of project-local configs the user has approved."""
+    return global_config_dir() / TRUSTED_CONFIGS_FILE_NAME
 
 
 def _owned_by_current_user(path: Path) -> bool:
@@ -33,40 +42,144 @@ def _owned_by_current_user(path: Path) -> bool:
         return False
 
 
-def find_local_config_dir(start: Path | None = None) -> Path | None:
-    """Find the nearest project-local config directory, or None.
+def _file_digest(path: Path) -> str | None:
+    try:
+        return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
 
-    Walks from `start` (default: the working directory) up through its parents
-    looking for `.prime/config.json`. The walk stops at the home directory:
-    `~/.prime` is the global config, and anything above home is not the user's
-    project. Only files owned by the current user count.
+
+def load_trusted_configs() -> dict[str, str]:
+    """Resolved config.json path -> content digest, for every approved local config."""
+    try:
+        data = json.loads(trusted_configs_file().read_text())
+    except (OSError, ValueError):
+        return {}
+    trusted = data.get("trusted") if isinstance(data, dict) else None
+    if not isinstance(trusted, dict):
+        return {}
+    return {str(path): str(digest) for path, digest in trusted.items()}
+
+
+def _save_trusted_configs(trusted: dict[str, str]) -> None:
+    global_config_dir().mkdir(parents=True, exist_ok=True)
+    _write_private_json(trusted_configs_file(), {"version": 1, "trusted": trusted})
+
+
+def is_trusted_local_config(config_file: Path) -> bool:
+    """Whether the user approved this file *with its current content*.
+
+    Ownership alone is not enough: a `.prime/config.json` committed to a
+    repository the user clones is owned by the user, and could redirect an
+    environment-provided PRIME_API_KEY to an attacker's base_url. So a
+    discovered local config is only honored after `prime config trust`, and
+    the approval is tied to a content digest — if the file changes (e.g. via
+    `git pull`) it has to be trusted again. Files the CLI writes itself
+    (`prime login --local`, `prime config set-api-key --local`) are trusted
+    as part of the write.
+    """
+    digest = _file_digest(config_file)
+    if digest is None:
+        return False
+    return load_trusted_configs().get(str(config_file.resolve())) == digest
+
+
+def trust_local_config(config_file: Path) -> Path:
+    """Approve `config_file` for discovery; returns its resolved path."""
+    config_file = config_file.resolve()
+    digest = _file_digest(config_file)
+    if digest is None:
+        raise ValueError(f"Cannot read {config_file}")
+    if not _owned_by_current_user(config_file):
+        raise ValueError(f"Refusing to trust {config_file}: not owned by the current user")
+    trusted = load_trusted_configs()
+    trusted[str(config_file)] = digest
+    _save_trusted_configs(trusted)
+    return config_file
+
+
+def untrust_local_config(config_file: Path) -> bool:
+    """Withdraw approval; returns whether the file was trusted before."""
+    trusted = load_trusted_configs()
+    removed = trusted.pop(str(config_file.resolve()), None) is not None
+    if removed:
+        _save_trusted_configs(trusted)
+    return removed
+
+
+def _candidate_local_config_files(start: Path | None = None) -> Iterator[Path]:
+    """Owned `.prime/config.json` files from `start` upward, nearest first.
+
+    The walk stops at the home directory: `~/.prime` is the global config, and
+    anything above home is not the user's project.
     """
     try:
         current = (start or Path.cwd()).resolve()
         home = Path.home().resolve()
     except OSError:
-        return None
+        return
     for directory in (current, *current.parents):
         if directory == home:
             break
         config_file = directory / CONFIG_DIR_NAME / CONFIG_FILE_NAME
         if config_file.is_file() and _owned_by_current_user(config_file):
-            return directory / CONFIG_DIR_NAME
-    return None
+            yield config_file
 
 
-def resolve_config_dir() -> tuple[Path, str]:
-    """Choose the config directory: PRIME_CONFIG_DIR > project-local > ~/.prime.
+def discover_local_config(start: Path | None = None) -> tuple[Path | None, list[Path]]:
+    """The nearest *trusted* project-local config dir, plus untrusted files passed over.
 
-    Returns the directory and its source: "env", "local", or "global".
+    Untrusted candidates are skipped rather than stopping the search, so a
+    file planted in a nested directory cannot mask the user's own trusted one
+    further up.
+    """
+    untrusted: list[Path] = []
+    for config_file in _candidate_local_config_files(start):
+        if is_trusted_local_config(config_file):
+            return config_file.parent, untrusted
+        untrusted.append(config_file)
+    return None, untrusted
+
+
+def find_local_config_dir(start: Path | None = None) -> Path | None:
+    """Find the nearest trusted project-local config directory, or None."""
+    return discover_local_config(start)[0]
+
+
+def resolve_config_dir() -> tuple[Path, str, list[Path]]:
+    """Choose the config directory: PRIME_CONFIG_DIR > trusted project-local > ~/.prime.
+
+    Returns the directory, its source ("env", "local", or "global"), and any
+    untrusted project-local config files that were ignored on the way.
     """
     explicit = os.getenv(CONFIG_DIR_ENV_VAR)
     if explicit and explicit.strip():
-        return Path(explicit.strip()).expanduser(), "env"
-    local = find_local_config_dir()
+        return Path(explicit.strip()).expanduser(), "env", []
+    local, untrusted = discover_local_config()
     if local is not None:
-        return local, "local"
-    return global_config_dir(), "global"
+        return local, "local", untrusted
+    return global_config_dir(), "global", untrusted
+
+
+UNTRUSTED_CONFIG_WARNING = "Ignoring untrusted project config"
+_warned_untrusted: set[Path] = set()
+
+# The SDKs bundled into the CLI resolve the same config and each raise a
+# RuntimeWarning for an ignored local file; the CLI prints one line instead.
+# This module loads before any command module constructs an SDK client.
+warnings.filterwarnings("ignore", message=UNTRUSTED_CONFIG_WARNING)
+
+
+def _warn_untrusted(untrusted: list[Path]) -> None:
+    """Tell the user (once per file per process) that a local config was ignored."""
+    for config_file in untrusted:
+        if config_file in _warned_untrusted:
+            continue
+        _warned_untrusted.add(config_file)
+        sys.stderr.write(
+            f"{UNTRUSTED_CONFIG_WARNING} {config_file}; "
+            f"run 'prime config trust {config_file.parent.parent}' to use it.\n"
+        )
 
 
 def _write_private_json(path: Path, data: dict) -> None:
@@ -104,23 +217,30 @@ class Config:
     DEFAULT_INFERENCE_URL: str = "https://api.pinference.ai/api/v1"
     DEFAULT_SSH_KEY_PATH: str = str(Path.home() / ".ssh" / "id_rsa")
 
-    def __init__(self, config_dir: Path | str | None = None) -> None:
+    def __init__(self, config_dir: Path | str | None = None, *, create: bool = True) -> None:
         """Load config from `config_dir`, or from the resolved location when omitted.
 
         Resolution order: `PRIME_CONFIG_DIR`, then the nearest ancestor of the
-        working directory holding `.prime/config.json` (see
-        `find_local_config_dir`), then `~/.prime`. A project-local config is a
+        working directory holding a *trusted* `.prime/config.json` (see
+        `discover_local_config`), then `~/.prime`. A project-local config is a
         complete replacement for the global one, never merged with it.
+
+        With `create=False` nothing is written until the first `set_*` call, so
+        a flow that may still fail (e.g. login) does not leave a default file
+        behind that would shadow the global config.
         """
+        self.untrusted_local_configs: list[Path] = []
         if config_dir is not None:
             self.config_dir = Path(config_dir).expanduser()
             self.config_source = "explicit"
         else:
-            self.config_dir, self.config_source = resolve_config_dir()
+            self.config_dir, self.config_source, self.untrusted_local_configs = resolve_config_dir()
         self.config_file = self.config_dir / CONFIG_FILE_NAME
         self.environments_dir = self.config_dir / "environments"
-        self._ensure_config_dir()
+        if create:
+            self._ensure_config_dir()
         self._load_config()
+        _warn_untrusted(self.untrusted_local_configs)
 
         # Check for PRIME_CONTEXT env var to temporarily override config
         context = os.getenv("PRIME_CONTEXT")
@@ -128,14 +248,28 @@ class Config:
             self.load_environment(context, persist=False)
 
     @classmethod
-    def local(cls, directory: Path | str | None = None) -> "Config":
+    def local(cls, directory: Path | str | None = None, *, create: bool = True) -> "Config":
         """A Config stored in `<directory>/.prime` (default: the working directory).
 
-        Creates the directory and a default config file if they don't exist, so
-        subsequent `Config()` calls from anywhere under `directory` discover it.
+        Writing to it (or constructing with `create=True`) creates the file and
+        trusts it, so subsequent `Config()` calls from anywhere under
+        `directory` discover it.
         """
         root = Path(directory) if directory is not None else Path.cwd()
-        return cls(config_dir=root / CONFIG_DIR_NAME)
+        return cls(config_dir=root / CONFIG_DIR_NAME, create=create)
+
+    def adopt_urls(self, other: "Config") -> None:
+        """Copy the stored service URLs (not credentials) from another config.
+
+        Used when creating a project-local config so it keeps pointing at the
+        same deployment the user already had configured (e.g. a dev base_url)
+        instead of silently resetting to production. In-memory only; persisted
+        by the next `set_*` call.
+        """
+        for key in ("base_url", "frontend_url", "inference_url", "traces_url"):
+            value = other.config.get(key)
+            if value:
+                self.config[key] = value
 
     @property
     def is_global(self) -> bool:
@@ -147,10 +281,13 @@ class Config:
         # make base_url consistent even if user passed a /api/v1 variant
         return url.rstrip("/").removesuffix("/api/v1")
 
-    def _ensure_config_dir(self) -> None:
-        """Create config directory if it doesn't exist"""
+    def _ensure_dirs(self) -> None:
         self.config_dir.mkdir(parents=True, exist_ok=True)
         self.environments_dir.mkdir(exist_ok=True)
+
+    def _ensure_config_dir(self) -> None:
+        """Create config directory and a default config file if they don't exist"""
+        self._ensure_dirs()
         if not self.config_file.exists():
             self._save_config(
                 ConfigModel(
@@ -175,8 +312,20 @@ class Config:
 
     def _save_config(self, config: dict) -> None:
         """Save configuration to file"""
+        self._ensure_dirs()
         _write_private_json(self.config_file, config)
         self.config = config
+        self._record_trust()
+
+    def _record_trust(self) -> None:
+        """Re-approve a project-local config after the CLI itself changed it.
+
+        Trust is bound to the file's content digest, so every write by the CLI
+        has to refresh it. Only discovered/explicit project configs need this;
+        the global config and an explicit PRIME_CONFIG_DIR are trusted as such.
+        """
+        if self.config_source in ("local", "explicit") and not self.is_global:
+            trust_local_config(self.config_file)
 
     @property
     def api_key(self) -> str:
@@ -330,6 +479,7 @@ class Config:
         if update_root:
             root_config["traces_url"] = traces_url
             _write_private_json(self.config_file, root_config)
+            self._record_trust()
 
         if selected_environment != "production":
             sanitized = self._sanitize_environment_name(selected_environment)
@@ -414,6 +564,7 @@ class Config:
             raise ValueError("Cannot save custom environment with reserved name 'production'")
 
         sanitized_name = self._sanitize_environment_name(name)
+        self._ensure_dirs()
         env_file = self.environments_dir / f"{sanitized_name}.json"
         env_config = {
             "api_key": self.api_key,

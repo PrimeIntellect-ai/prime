@@ -14,7 +14,7 @@ from prime_cli.core import Config
 
 from ..client import APIClient, APIError
 from ..utils import PlainTyper, get_console
-from .config import LOCAL_OPTION_HELP, print_local_config_notice
+from .config import LOCAL_OPTION_HELP, new_local_config, print_local_config_notice
 from .teams import fetch_teams
 
 app = PlainTyper(help="Login to Prime Intellect")
@@ -129,7 +129,8 @@ def login(
     local: bool = typer.Option(False, "--local", help=LOCAL_OPTION_HELP),
 ) -> None:
     """Login to Prime Intellect"""
-    config = Config.local() if local else Config()
+    # A new local config is not written until login succeeds (see new_local_config).
+    config = new_local_config() if local else Config()
     if local:
         print_local_config_notice(config)
     settings = config.view()

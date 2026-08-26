@@ -1,5 +1,8 @@
 import os
 import re
+import shutil
+import subprocess
+from pathlib import Path
 from typing import Optional
 
 import typer
@@ -8,6 +11,12 @@ from rich.table import Table
 from rich.text import Text
 
 from prime_cli.core import Config
+from prime_cli.core.config import (
+    CONFIG_DIR_NAME,
+    CONFIG_FILE_NAME,
+    trust_local_config,
+    untrust_local_config,
+)
 
 from ..client import APIClient, APIError
 from ..utils import PlainTyper, get_console
@@ -19,6 +28,10 @@ console = get_console()
 LOCAL_OPTION_HELP = (
     "Use a project-local config at ./.prime/config.json instead of ~/.prime/config.json. "
     "Commands run from this directory (or any directory below it) will use it."
+)
+
+TRUST_PATH_HELP = (
+    "Project directory (or its .prime/ or config.json). Defaults to the current directory."
 )
 
 CONFIG_SOURCE_LABELS = {
@@ -35,23 +48,94 @@ def describe_config_file(config: Config) -> str:
     return f"{config.config_file} ({label})"
 
 
-def print_local_config_notice(config: Config) -> None:
-    """Tell the user where a project-local config landed and how to keep it out of git."""
-    console.print(f"[blue]Using project-local config: {config.config_file}[/blue]")
-    project_root = config.config_dir.parent
-    if not (project_root / ".git").exists():
-        return
-    gitignore = project_root / ".gitignore"
+def _git_repo_root(path: Path) -> Optional[Path]:
+    """The nearest enclosing git repository root (`.git` dir or worktree file), or None."""
+    for directory in (path, *path.parents):
+        if (directory / ".git").exists():
+            return directory
+    return None
+
+
+def _is_git_ignored(repo_root: Path, path: Path) -> Optional[bool]:
+    """Ask git whether `path` is ignored; None when git can't tell us."""
+    git = shutil.which("git")
+    if git is None:
+        return None
     try:
-        patterns = gitignore.read_text().splitlines() if gitignore.is_file() else []
-    except OSError:
-        patterns = []
-    if any(line.strip().strip("/") in (".prime", ".prime/") for line in patterns):
+        result = subprocess.run(
+            [git, "-C", str(repo_root), "check-ignore", "-q", "--", str(path)],
+            capture_output=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    return None
+
+
+def _gitignore_mentions_prime(repo_root: Path, config_dir: Path) -> bool:
+    """Fallback without git: scan .gitignore files between the repo root and the config."""
+    for directory in (config_dir.parent, *config_dir.parent.parents):
+        gitignore = directory / ".gitignore"
+        try:
+            patterns = gitignore.read_text().splitlines() if gitignore.is_file() else []
+        except OSError:
+            patterns = []
+        if any(line.strip().strip("/") in (".prime", ".prime/") for line in patterns):
+            return True
+        if directory == repo_root:
+            break
+    return False
+
+
+def print_local_config_notice(config: Config) -> None:
+    """Tell the user where a project-local config landed and how to keep it out of git.
+
+    The config may sit in a subdirectory of a repository, so look for the
+    enclosing repo rather than only the config's parent, and let git decide
+    whether the file is actually ignored.
+    """
+    console.print(f"[blue]Using project-local config: {config.config_file}[/blue]")
+    config_dir = config.config_dir.resolve()
+    repo_root = _git_repo_root(config_dir.parent)
+    if repo_root is None:
+        return
+    ignored = _is_git_ignored(repo_root, config_dir / CONFIG_FILE_NAME)
+    if ignored is None:
+        ignored = _gitignore_mentions_prime(repo_root, config_dir)
+    if ignored:
         return
     console.print(
-        "[yellow]Warning: .prime/ is not in .gitignore — add it so your API key "
-        "is never committed.[/yellow]"
+        "[yellow]Warning: .prime/ is not ignored by the git repository at "
+        f"{repo_root} — add it to .gitignore so your API key is never committed.[/yellow]"
     )
+
+
+def new_local_config() -> Config:
+    """A project-local Config for the working directory that is not written yet.
+
+    Nothing touches disk until the first `set_*` call, so an aborted login
+    does not leave an empty file behind that would shadow the global config.
+    A brand-new local config inherits the service URLs of whatever config is
+    currently active, so it keeps targeting the same deployment.
+    """
+    config = Config.local(create=False)
+    if not config.config_file.exists():
+        config.adopt_urls(Config())
+    return config
+
+
+def _resolve_local_config_file(path: Optional[Path]) -> Path:
+    """Accept a project dir, its .prime dir, or the config.json itself."""
+    target = (path or Path.cwd()).expanduser()
+    if target.is_file():
+        return target
+    if target.name == CONFIG_DIR_NAME:
+        return target / CONFIG_FILE_NAME
+    return target / CONFIG_DIR_NAME / CONFIG_FILE_NAME
 
 
 # Team ID validation pattern: CUID (v1)
@@ -86,6 +170,8 @@ def view() -> None:
         return any((val := os.getenv(n)) and val.strip() for n in names)
 
     table.add_row("Config File", describe_config_file(config))
+    for ignored in config.untrusted_local_configs:
+        table.add_row("Ignored Config", f"{ignored} (untrusted; see 'prime config trust')")
 
     # Show current environment
     table.add_row("Current Environment", settings["current_environment"])
@@ -174,7 +260,7 @@ def set_api_key(
             default="",
         )
 
-    config = Config.local() if local else Config()
+    config = new_local_config() if local else Config()
     config.set_api_key(api_key)
     if local:
         print_local_config_notice(config)
@@ -472,6 +558,40 @@ def reset(
         config.set_ssh_key_path(Config.DEFAULT_SSH_KEY_PATH)
         config.set_current_environment("production")
         console.print("[green]Configuration reset to defaults![/green]")
+
+
+@app.command()
+def trust(
+    path: Optional[Path] = typer.Argument(None, help=TRUST_PATH_HELP),
+) -> None:
+    """Allow a project-local .prime/config.json to be used by commands run below it.
+
+    Discovered project configs are ignored until trusted, because one committed
+    to a repository you clone could redirect your API key elsewhere. Trust is
+    tied to the file's content: if it changes, run this again.
+    """
+    config_file = _resolve_local_config_file(path)
+    if not config_file.is_file():
+        console.print(f"[red]No config file at {config_file}[/red]")
+        raise typer.Exit(1)
+    try:
+        resolved = trust_local_config(config_file)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
+    console.print(f"[green]Trusted project config {resolved}[/green]")
+
+
+@app.command()
+def untrust(
+    path: Optional[Path] = typer.Argument(None, help=TRUST_PATH_HELP),
+) -> None:
+    """Stop using a project-local .prime/config.json."""
+    config_file = _resolve_local_config_file(path)
+    if untrust_local_config(config_file):
+        console.print(f"[green]Untrusted project config {config_file.resolve()}[/green]")
+    else:
+        console.print(f"[yellow]{config_file.resolve()} was not trusted[/yellow]")
 
 
 # Environment commands

@@ -82,9 +82,10 @@ prime login --local
 Get your API key from the [Prime Intellect Dashboard](https://app.primeintellect.ai).
 
 `prime login --local` writes `./.prime/config.json`; commands run from that
-directory or below use it instead of `~/.prime/config.json`. Set
-`PRIME_CONFIG_DIR` to point at a config directory explicitly. `prime config view`
-shows which file is active.
+directory or below use it instead of `~/.prime/config.json`. A local config you
+wrote by hand must be approved once with `prime config trust` (approval is tied
+to the file's content). Set `PRIME_CONFIG_DIR` to point at a config directory
+explicitly. `prime config view` shows which file is active.
 
 ### Basic Usage
 

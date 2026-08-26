@@ -96,8 +96,12 @@ asyncio.run(main())
 | `PRIME_TRACES_URL`     | Base URL of the Prime Traces service (**required** during closed beta) |
 | `PRIME_TEAM_ID`        | Optional team context, sent as `X-Prime-Team-ID`                       |
 | `~/.prime/config.json` | Shared prime CLI config (`api_key`, `team_id`, `traces_url`)           |
+| `PRIME_CONFIG_DIR`     | Optional explicit config directory                                     |
 
-Precedence is constructor argument → environment variable → config file.
+Precedence is constructor argument → environment variable → config file. The
+config file is the nearest `.prime/config.json` at or above the working
+directory (a project-local config from `prime login --local`), falling back to
+`~/.prime/config.json`.
 
 ## Not yet available
 

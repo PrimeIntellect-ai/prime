@@ -16,6 +16,44 @@ from .teams import fetch_teams
 app = PlainTyper(help="Configure the CLI", no_args_is_help=True)
 console = get_console()
 
+LOCAL_OPTION_HELP = (
+    "Use a project-local config at ./.prime/config.json instead of ~/.prime/config.json. "
+    "Commands run from this directory (or any directory below it) will use it."
+)
+
+CONFIG_SOURCE_LABELS = {
+    "env": "from PRIME_CONFIG_DIR",
+    "local": "project-local",
+    "global": "global",
+    "explicit": "project-local",
+}
+
+
+def describe_config_file(config: Config) -> str:
+    """The active config file path plus how it was chosen, for display."""
+    label = CONFIG_SOURCE_LABELS.get(config.config_source, config.config_source)
+    return f"{config.config_file} ({label})"
+
+
+def print_local_config_notice(config: Config) -> None:
+    """Tell the user where a project-local config landed and how to keep it out of git."""
+    console.print(f"[blue]Using project-local config: {config.config_file}[/blue]")
+    project_root = config.config_dir.parent
+    if not (project_root / ".git").exists():
+        return
+    gitignore = project_root / ".gitignore"
+    try:
+        patterns = gitignore.read_text().splitlines() if gitignore.is_file() else []
+    except OSError:
+        patterns = []
+    if any(line.strip().strip("/") in (".prime", ".prime/") for line in patterns):
+        return
+    console.print(
+        "[yellow]Warning: .prime/ is not in .gitignore — add it so your API key "
+        "is never committed.[/yellow]"
+    )
+
+
 # Team ID validation pattern: CUID (v1)
 TEAM_ID_PATTERN = re.compile(r"^c[a-z0-9]{24}$")
 
@@ -46,6 +84,8 @@ def view() -> None:
 
     def _env_set(*names: str) -> bool:
         return any((val := os.getenv(n)) and val.strip() for n in names)
+
+    table.add_row("Config File", describe_config_file(config))
 
     # Show current environment
     table.add_row("Current Environment", settings["current_environment"])
@@ -122,6 +162,7 @@ def set_api_key(
         None,
         help="Your Prime Intellect API key. If not provided, you'll be prompted securely.",
     ),
+    local: bool = typer.Option(False, "--local", help=LOCAL_OPTION_HELP),
 ) -> None:
     """Set your API key (prompts securely if not provided)"""
     if api_key is None:
@@ -133,8 +174,10 @@ def set_api_key(
             default="",
         )
 
-    config = Config()
+    config = Config.local() if local else Config()
     config.set_api_key(api_key)
+    if local:
+        print_local_config_notice(config)
 
     if api_key:
         masked_key = f"{api_key[:6]}***{api_key[-4:]}" if len(api_key) > 10 else "***"

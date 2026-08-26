@@ -74,9 +74,17 @@ prime config set-api-key
 
 # Or use environment variable
 export PRIME_API_KEY="your-api-key-here"
+
+# Or keep credentials with a project instead of in ~/.prime (shared machines)
+prime login --local
 ```
 
 Get your API key from the [Prime Intellect Dashboard](https://app.primeintellect.ai).
+
+`prime login --local` writes `./.prime/config.json`; commands run from that
+directory or below use it instead of `~/.prime/config.json`. Set
+`PRIME_CONFIG_DIR` to point at a config directory explicitly. `prime config view`
+shows which file is active.
 
 ### Basic Usage
 

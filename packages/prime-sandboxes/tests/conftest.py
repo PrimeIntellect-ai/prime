@@ -22,6 +22,15 @@ def sandbox_client(tmp_path_factory):
         yield SandboxClient(client)
 
 
+@pytest.fixture(autouse=True)
+def isolated_config_discovery(monkeypatch, tmp_path):
+    """Config discovery walks up from the working directory looking for a
+    project-local .prime/config.json; keep it away from the developer's real
+    ~/.prime by starting each test in a fresh tmp dir."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PRIME_CONFIG_DIR", raising=False)
+
+
 @pytest.fixture
 def unique_id():
     """Generate a unique ID for each test to avoid collisions in parallel runs"""

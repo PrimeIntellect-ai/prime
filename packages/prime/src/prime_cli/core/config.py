@@ -6,6 +6,80 @@ from typing import Optional
 
 from pydantic import BaseModel, ConfigDict
 
+CONFIG_DIR_ENV_VAR = "PRIME_CONFIG_DIR"
+CONFIG_DIR_NAME = ".prime"
+CONFIG_FILE_NAME = "config.json"
+
+
+def global_config_dir() -> Path:
+    """The per-user config directory, ~/.prime."""
+    return Path.home() / CONFIG_DIR_NAME
+
+
+def _owned_by_current_user(path: Path) -> bool:
+    """True when `path` (following symlinks) is owned by the running user.
+
+    Project-local configs are picked up by walking parent directories, so on a
+    shared machine anyone who can write to an ancestor could plant one that
+    points the CLI at their account. Refusing files we don't own closes that.
+    Windows has no uid model; the check is skipped there.
+    """
+    getuid = getattr(os, "getuid", None)
+    if getuid is None:
+        return True
+    try:
+        return path.stat().st_uid == getuid()
+    except OSError:
+        return False
+
+
+def find_local_config_dir(start: Path | None = None) -> Path | None:
+    """Find the nearest project-local config directory, or None.
+
+    Walks from `start` (default: the working directory) up through its parents
+    looking for `.prime/config.json`. The walk stops at the home directory:
+    `~/.prime` is the global config, and anything above home is not the user's
+    project. Only files owned by the current user count.
+    """
+    try:
+        current = (start or Path.cwd()).resolve()
+        home = Path.home().resolve()
+    except OSError:
+        return None
+    for directory in (current, *current.parents):
+        if directory == home:
+            break
+        config_file = directory / CONFIG_DIR_NAME / CONFIG_FILE_NAME
+        if config_file.is_file() and _owned_by_current_user(config_file):
+            return directory / CONFIG_DIR_NAME
+    return None
+
+
+def resolve_config_dir() -> tuple[Path, str]:
+    """Choose the config directory: PRIME_CONFIG_DIR > project-local > ~/.prime.
+
+    Returns the directory and its source: "env", "local", or "global".
+    """
+    explicit = os.getenv(CONFIG_DIR_ENV_VAR)
+    if explicit and explicit.strip():
+        return Path(explicit.strip()).expanduser(), "env"
+    local = find_local_config_dir()
+    if local is not None:
+        return local, "local"
+    return global_config_dir(), "global"
+
+
+def _write_private_json(path: Path, data: dict) -> None:
+    """Write JSON readable only by the owner; these files hold API keys."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(json.dumps(data, indent=2))
+    try:
+        # Pre-existing files keep their old mode through O_CREAT; tighten them too.
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
 
 class ConfigModel(BaseModel):
     api_key: str = ""
@@ -30,9 +104,20 @@ class Config:
     DEFAULT_INFERENCE_URL: str = "https://api.pinference.ai/api/v1"
     DEFAULT_SSH_KEY_PATH: str = str(Path.home() / ".ssh" / "id_rsa")
 
-    def __init__(self) -> None:
-        self.config_dir = Path.home() / ".prime"
-        self.config_file = self.config_dir / "config.json"
+    def __init__(self, config_dir: Path | str | None = None) -> None:
+        """Load config from `config_dir`, or from the resolved location when omitted.
+
+        Resolution order: `PRIME_CONFIG_DIR`, then the nearest ancestor of the
+        working directory holding `.prime/config.json` (see
+        `find_local_config_dir`), then `~/.prime`. A project-local config is a
+        complete replacement for the global one, never merged with it.
+        """
+        if config_dir is not None:
+            self.config_dir = Path(config_dir).expanduser()
+            self.config_source = "explicit"
+        else:
+            self.config_dir, self.config_source = resolve_config_dir()
+        self.config_file = self.config_dir / CONFIG_FILE_NAME
         self.environments_dir = self.config_dir / "environments"
         self._ensure_config_dir()
         self._load_config()
@@ -42,6 +127,21 @@ class Config:
         if context:
             self.load_environment(context, persist=False)
 
+    @classmethod
+    def local(cls, directory: Path | str | None = None) -> "Config":
+        """A Config stored in `<directory>/.prime` (default: the working directory).
+
+        Creates the directory and a default config file if they don't exist, so
+        subsequent `Config()` calls from anywhere under `directory` discover it.
+        """
+        root = Path(directory) if directory is not None else Path.cwd()
+        return cls(config_dir=root / CONFIG_DIR_NAME)
+
+    @property
+    def is_global(self) -> bool:
+        """Whether this config is the per-user ~/.prime one."""
+        return self.config_dir == global_config_dir()
+
     @staticmethod
     def _strip_api_v1(url: str) -> str:
         # make base_url consistent even if user passed a /api/v1 variant
@@ -49,7 +149,7 @@ class Config:
 
     def _ensure_config_dir(self) -> None:
         """Create config directory if it doesn't exist"""
-        self.config_dir.mkdir(exist_ok=True)
+        self.config_dir.mkdir(parents=True, exist_ok=True)
         self.environments_dir.mkdir(exist_ok=True)
         if not self.config_file.exists():
             self._save_config(
@@ -75,7 +175,7 @@ class Config:
 
     def _save_config(self, config: dict) -> None:
         """Save configuration to file"""
-        self.config_file.write_text(json.dumps(config, indent=2))
+        _write_private_json(self.config_file, config)
         self.config = config
 
     @property
@@ -224,13 +324,12 @@ class Config:
             )
 
         update_root = (
-            not context_override
-            or root_environment.casefold() == selected_environment.casefold()
+            not context_override or root_environment.casefold() == selected_environment.casefold()
         )
 
         if update_root:
             root_config["traces_url"] = traces_url
-            self.config_file.write_text(json.dumps(root_config, indent=2))
+            _write_private_json(self.config_file, root_config)
 
         if selected_environment != "production":
             sanitized = self._sanitize_environment_name(selected_environment)
@@ -240,7 +339,7 @@ class Config:
                 if not isinstance(env_config, dict):
                     raise ValueError(f"Invalid configuration in {env_file}")
                 env_config["traces_url"] = traces_url
-                env_file.write_text(json.dumps(env_config, indent=2))
+                _write_private_json(env_file, env_config)
 
         self.config["traces_url"] = traces_url
 
@@ -327,7 +426,7 @@ class Config:
             "inference_url": self.inference_url,
             "traces_url": self._configured_traces_url(),
         }
-        env_file.write_text(json.dumps(env_config, indent=2))
+        _write_private_json(env_file, env_config)
 
     def delete_environment(self, name: str) -> None:
         """Delete a saved environment configuration."""
@@ -449,7 +548,7 @@ class Config:
                         "inference_url": self.inference_url,
                         "traces_url": self._stored_traces_url(),
                     }
-                    env_file.write_text(json.dumps(env_config, indent=2))
+                    _write_private_json(env_file, env_config)
             except ValueError:
                 # Skip updating if environment name is invalid
                 pass

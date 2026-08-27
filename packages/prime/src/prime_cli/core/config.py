@@ -302,6 +302,20 @@ def _refuse_unsafe_write(path: Path, *, allow_symlink: bool) -> None:
         raise PermissionError(f"Refusing to write {path}: it is not owned by the current user")
 
 
+_warned_skipped_writes: set[Path] = set()
+
+
+def _warn_skipped_environment_write(env_file: Path) -> None:
+    """Tell the user (once per file per process) an environment file was left alone."""
+    if env_file in _warned_skipped_writes:
+        return
+    _warned_skipped_writes.add(env_file)
+    sys.stderr.write(
+        f"Not updating untrusted environment file {env_file}; review it and run "
+        f"'prime config trust {env_file.parent.parent.parent}' first.\n"
+    )
+
+
 def _write_private_json(path: Path, data: dict, *, allow_symlink: bool = False) -> None:
     """Write JSON readable only by the owner; these files hold API keys."""
     _refuse_unsafe_write(path, allow_symlink=allow_symlink)
@@ -718,6 +732,13 @@ class Config:
         sanitized_name = self._sanitize_environment_name(name)
         self._ensure_dirs()
         env_file = self.environments_dir / f"{sanitized_name}.json"
+        if env_file.exists() and not self._environment_file_is_trusted(env_file):
+            # Overwriting would put the API key into a file the repository
+            # controls (it may be tracked) and then record it as trusted.
+            raise ValueError(
+                f"Environment file {env_file} exists but is not trusted; review it and run "
+                f"'prime config trust {self.config_dir.parent}' first, or delete it"
+            )
         env_config = {
             "api_key": self.api_key,
             "team_id": self.team_id,
@@ -856,6 +877,12 @@ class Config:
                 sanitized_name = self._sanitize_environment_name(self.current_environment)
                 env_file = self.environments_dir / f"{sanitized_name}.json"
                 if env_file.exists():
+                    if not self._environment_file_is_trusted(env_file):
+                        # Implicit side effect of login/set-*: don't fail the
+                        # command, but never copy the key into a file the
+                        # repository rewrote (it may be tracked).
+                        _warn_skipped_environment_write(env_file)
+                        return
                     if from_env:
                         env_config = {
                             "api_key": self.api_key,

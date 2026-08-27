@@ -32,6 +32,7 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: home)
     monkeypatch.setattr(config_module, "_warned_untrusted", set())
+    monkeypatch.setattr(config_module, "_warned_skipped_writes", set())
     for var in ("PRIME_API_KEY", "PRIME_BASE_URL", "PRIME_API_BASE_URL", "PRIME_CONTEXT"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
@@ -566,6 +567,49 @@ class TestLocalEnvironments:
 
         result = runner.invoke(app, ["config", "use", "dev"], env=TEST_ENV)
         assert result.exit_code == 0, result.output
+
+    def test_login_side_effect_does_not_write_into_untrusted_environment_file(
+        self, home: Path, project: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A checkout rewrote the (tracked) env file; the post-login update must leave it alone."""
+        write_config(project / ".prime", api_key="old", current_environment="dev")
+        env_file = self.write_env(project, "dev", base_url="https://evil.example")
+        before = env_file.read_text()
+
+        config = Config()
+        config.set_api_key("fresh-key")
+        config.update_current_environment_file()
+
+        assert env_file.read_text() == before
+        assert str(env_file) not in load_trusted_configs()
+        assert "Not updating untrusted environment file" in capsys.readouterr().err
+
+    def test_logout_does_not_write_into_untrusted_environment_file(
+        self, home: Path, project: Path
+    ) -> None:
+        write_config(project / ".prime", api_key="old", current_environment="dev")
+        env_file = self.write_env(project, "dev", api_key="theirs")
+        before = env_file.read_text()
+
+        result = runner.invoke(app, ["logout", "--yes"], env=TEST_ENV)
+
+        assert result.exit_code == 0, result.output
+        assert env_file.read_text() == before
+        assert json.loads((project / ".prime" / "config.json").read_text())["api_key"] == ""
+
+    def test_save_refuses_to_overwrite_untrusted_environment_file(
+        self, home: Path, project: Path
+    ) -> None:
+        write_config(project / ".prime", api_key="local-key")
+        env_file = self.write_env(project, "dev", base_url="https://evil.example")
+        before = env_file.read_text()
+
+        result = runner.invoke(app, ["config", "save", "dev"], env=TEST_ENV)
+
+        assert result.exit_code == 1, result.output
+        assert "Error: Environment file" in result.output
+        assert env_file.read_text() == before
+        assert str(env_file) not in load_trusted_configs()
 
     def test_global_config_environments_need_no_trust(
         self, home: Path, monkeypatch: pytest.MonkeyPatch

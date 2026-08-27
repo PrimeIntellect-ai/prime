@@ -653,6 +653,33 @@ class TestLocalEnvironments:
         assert Config().base_url == "https://api.dev.example"
 
 
+def test_permissive_legacy_config_is_replaced_not_rewritten(home: Path) -> None:
+    """A 0644 file from an older CLI must never hold the new key, even briefly."""
+    legacy = write_config(home / ".prime", api_key="old")
+    legacy.chmod(0o644)
+    old_inode = legacy.stat().st_ino
+
+    Config().set_api_key("new")
+
+    assert stat.S_IMODE(legacy.stat().st_mode) == 0o600
+    assert legacy.stat().st_ino != old_inode  # atomic replace, not in-place truncate
+    assert json.loads(legacy.read_text())["api_key"] == "new"
+    assert not list((home / ".prime").glob("*.tmp"))
+
+
+def test_trust_registry_is_replaced_atomically(home: Path, project: Path) -> None:
+    registry = home / ".prime" / "trusted_configs.json"
+    write_config(project / ".prime", api_key="a")
+    first_inode = registry.stat().st_ino
+
+    Config().set_api_key("b")  # refreshes the trust entry
+
+    assert registry.stat().st_ino != first_inode
+    assert stat.S_IMODE(registry.stat().st_mode) == 0o600
+    assert not list((home / ".prime").glob("*.tmp"))
+    assert Config().api_key == "b"
+
+
 def test_global_config_file_is_created_private(home: Path) -> None:
     config = Config()
 

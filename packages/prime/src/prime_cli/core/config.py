@@ -3,6 +3,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import warnings
 from pathlib import Path
 from typing import Iterator, Optional
@@ -324,16 +325,31 @@ def _warn_skipped_environment_write(env_file: Path) -> None:
 
 
 def _write_private_json(path: Path, data: dict, *, allow_symlink: bool = False) -> None:
-    """Write JSON readable only by the owner; these files hold API keys."""
+    """Write JSON readable only by the owner, atomically; these files hold API keys.
+
+    The content goes to a fresh 0600 temporary file in the same directory
+    which is then renamed over the target, so:
+    - a legacy permissive file (say 0644) never holds the new secret, not
+      even between write and chmod — it is replaced, not rewritten;
+    - readers (the SDKs load the trust registry on every `Config()`) see
+      either the old or the new content, never an empty or partial file.
+    A user-owned symlink in the global config dir is honored by replacing
+    its target; project-local symlinks were refused before we get here.
+    """
     _refuse_unsafe_write(path, allow_symlink=allow_symlink)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.write(json.dumps(data, indent=2))
+    target = path.resolve() if path.is_symlink() else path
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
     try:
-        # Pre-existing files keep their old mode through O_CREAT; tighten them too.
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps(data, indent=2))
+        os.chmod(tmp_name, 0o600)  # mkstemp already uses 0600; be explicit
+        os.replace(tmp_name, target)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 class ConfigModel(BaseModel):

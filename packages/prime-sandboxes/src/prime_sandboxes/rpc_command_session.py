@@ -35,7 +35,7 @@ class _CommandSessionSendInputRequestFactory(Protocol):
 
 
 class _CommandSessionSendSignalRequestFactory(Protocol):
-    def __call__(self, *, session: Message, signal: int) -> Message: ...
+    def __call__(self, *, session: Message, signal: int, signal_uuid: str) -> Message: ...
 
 
 class _CommandSessionConnectRequestFactory(Protocol):
@@ -190,7 +190,7 @@ def build_command_session_send_input_request(
 
 
 def build_command_session_send_signal_request(
-    session_uuid: str, signal: Literal["terminate", "kill"]
+    session_uuid: str, signal: Literal["terminate", "kill"], signal_uuid: str
 ) -> Message:
     signal_value = getattr(
         command_session_pb2,
@@ -199,6 +199,7 @@ def build_command_session_send_signal_request(
     return _COMMAND_SESSION_SEND_SIGNAL_REQUEST_FACTORY(
         session=_COMMAND_SESSION_SELECTOR_FACTORY(session_uuid=session_uuid),
         signal=signal_value,
+        signal_uuid=signal_uuid,
     )
 
 

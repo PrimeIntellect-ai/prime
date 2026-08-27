@@ -2740,9 +2740,10 @@ class AsyncSandboxClient:
             )
 
         async def send_signal(signal: Literal["terminate", "kill"]) -> None:
+            # signal_uuid is minted once per logical signal; retries reuse it verbatim.
             await self._execute_process_control_rpc(
                 sandbox_id,
-                build_command_session_send_signal_request(session_uuid, signal),
+                build_command_session_send_signal_request(session_uuid, signal, str(uuid.uuid4())),
                 COMMAND_SESSION_SEND_SIGNAL_RPC_METHOD,
                 _PROCESS_SIGNAL_TIMEOUT_MS,
                 "signal",
@@ -2811,8 +2812,8 @@ class AsyncSandboxClient:
 
         Transient faults are retried with backoff. Retries are safe on sandboxd
         builds with idempotent command sessions: requests address the session by
-        UUID, a duplicated stdin write is deduplicated by its input_uuid, and a
-        repeated signal is harmless.
+        UUID, and a duplicated stdin write or signal is deduplicated by its
+        input_uuid or signal_uuid.
         """
         reauthed = False
         failures = 0

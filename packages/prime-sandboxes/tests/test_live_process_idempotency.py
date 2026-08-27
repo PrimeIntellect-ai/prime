@@ -3,7 +3,8 @@
 Start carries a session_uuid (create-or-attach; see also the Start-retry test in
 test_command_transport_selection.py), stdin writes carry an input_uuid
 (duplicate applies are acknowledged, not repeated), and signals address the
-session by id, so every transient link fault is retried instead of surfacing.
+session by id and carry a signal_uuid (duplicate deliveries are acknowledged,
+not repeated), so every transient link fault is retried instead of surfacing.
 """
 
 import asyncio
@@ -156,6 +157,10 @@ async def test_stdin_retry_reuses_input_uuid_and_signal_retry_succeeds(monkeypat
         fake.unary_faults = [ConnectError(Code.DEADLINE_EXCEEDED, "deadline")]
         await process.terminate()
         assert len(fake.signal_requests) == 2  # transient fault, retried
+        # The retried signal reused the signal_uuid, so the server could
+        # acknowledge a duplicate delivery without signaling again.
+        assert fake.signal_requests[0].signal_uuid
+        assert fake.signal_requests[0].signal_uuid == fake.signal_requests[1].signal_uuid
 
         assert await process.wait() == 0
         await process.aclose()

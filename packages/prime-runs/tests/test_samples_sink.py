@@ -54,7 +54,10 @@ def test_records_this_sink_cannot_project_are_skipped_not_fatal(
 
     with caplog.at_level("WARNING"):
         sink.write(
-            [{"id": "ep-json", "traces": [{"id": "t"}]}, make_episode("ep-1", [make_trace()])]
+            [
+                make_episode("ep-1", [make_trace()]),
+                {"id": "ep-json", "traces": [{"id": "t"}]},
+            ]
         )
         sink.write([make_trace()])
 
@@ -63,7 +66,13 @@ def test_records_this_sink_cannot_project_are_skipped_not_fatal(
     assert len(handler.bodies_for("/api/v1/evaluations/eval-abc/samples")) == 1
     assert sink.skipped == 2
     assert sink.enabled is True
-    assert sum("no projection" in r.getMessage() for r in caplog.records) == 1
+    warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if "no projection" in record.getMessage()
+    ]
+    assert len(warnings) == 1
+    assert "(dict)" in warnings[0]
 
 
 def test_an_empty_batch_makes_no_request(make_platform_client, eval_routes):

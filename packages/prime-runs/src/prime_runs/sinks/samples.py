@@ -65,6 +65,7 @@ class EvalSamplesSink(Sink):
         record shape, which is worse than one missing row."""
         samples: List[Dict[str, Any]] = []
         skipped = 0
+        first_skipped_type: Optional[str] = None
         for record in records:
             if isinstance(record, Mapping) and "sample_id" in record:
                 samples.append(dict(record))
@@ -72,6 +73,8 @@ class EvalSamplesSink(Sink):
                 samples.extend(build_samples([record], self._rollout_numbers))
             else:
                 skipped += 1
+                if first_skipped_type is None:
+                    first_skipped_type = type(record).__name__
         if skipped:
             if not self.skipped:
                 logger.warning(
@@ -79,7 +82,7 @@ class EvalSamplesSink(Sink):
                     "in this batch (%s) have no projection and reach Prime Traces only. "
                     "Further skips are counted, not logged.",
                     skipped,
-                    type(records[0]).__name__,
+                    first_skipped_type,
                 )
             self.skipped += skipped
         return samples

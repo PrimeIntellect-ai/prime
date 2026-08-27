@@ -109,6 +109,31 @@ def test_an_online_run_returns_the_platforms_id_and_viewer_url(online):
     run.finish()
 
 
+def test_a_failed_create_closes_the_platform_client(monkeypatch):
+    class FailingClient:
+        def __init__(self):
+            self.closed = False
+
+        def post(self, *args, **kwargs):
+            raise pr.APIError("create failed")
+
+        def close(self):
+            self.closed = True
+
+    client = FailingClient()
+    monkeypatch.setattr("prime_runs.run.PlatformClient", lambda **_: client)
+
+    with pytest.raises(pr.APIError, match="create failed"):
+        pr.init(
+            name="test-run",
+            environments=[{"id": "env-123"}],
+            api_key="test-key",
+            mode="online",
+        )
+
+    assert client.closed is True
+
+
 def test_an_online_run_has_both_transports_by_default(
     monkeypatch, make_platform_client, eval_routes
 ):

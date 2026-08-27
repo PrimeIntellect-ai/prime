@@ -437,7 +437,19 @@ def init(
             )
         client = PlatformClient(api_key=api_key, base_url=base_url, timeout=DEFAULT_TIMEOUT)
         backend = EvalsBackend(client, frontend_url=settings.frontend_url, team_id=team_id)
-        handle = backend.create(spec)
+        try:
+            handle = backend.create(spec)
+        except BaseException:
+            # Ownership has not reached a Run yet, so nothing else can release
+            # the connection pool when environment resolution or creation fails.
+            try:
+                backend.close()
+            except Exception as close_error:  # noqa: BLE001 - preserve the create failure
+                logger.debug(
+                    "Error closing the platform client after run creation failed: %s",
+                    close_error,
+                )
+            raise
         # Both transports run during the transition: traces is the system of
         # record, the sample table is what today's viewer reads.
         sinks = [TracesSink(api_key=api_key, team_id=team_id), EvalSamplesSink(client)]

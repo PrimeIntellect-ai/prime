@@ -67,6 +67,10 @@ def is_trusted_local_config(config_file: Path) -> bool:
     the approval is tied to a content digest — if the file changes it has to
     be trusted again. The SDK only reads the registry; the CLI maintains it.
     """
+    if config_file.is_symlink() or config_file.parent.is_symlink():
+        # Project files reached through a symlink are never trusted (the CLI
+        # applies the same rule, and refuses to write through them).
+        return False
     if not _owned_by_current_user(config_file):
         # A trusted path swapped for someone else's file (same bytes or not)
         # is not the file the user approved.

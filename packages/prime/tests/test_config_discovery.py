@@ -491,6 +491,55 @@ class TestLocalEnvironments:
         assert "symlink" in result.output
         assert not (project / "leak.json").exists()
 
+    def test_save_refuses_symlinked_environments_directory(
+        self, home: Path, project: Path, tmp_path: Path
+    ) -> None:
+        write_config(project / ".prime", api_key="local-key")
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (project / ".prime" / "environments").symlink_to(outside, target_is_directory=True)
+
+        result = runner.invoke(app, ["config", "save", "dev"], env=TEST_ENV)
+
+        assert result.exit_code == 1, result.output
+        assert "symlink" in result.output
+        assert not (outside / "dev.json").exists()
+
+    def test_symlinked_file_is_never_trusted_even_if_target_is(
+        self, home: Path, project: Path, tmp_path: Path
+    ) -> None:
+        """Registry entries key on the resolved path; a link to a trusted target
+        must not ride on that entry."""
+        real = write_config(tmp_path / "real" / ".prime", api_key="real-key")
+        (project / ".prime").mkdir(parents=True)
+        link = project / ".prime" / "config.json"
+        link.symlink_to(real)
+
+        assert not is_trusted_local_config(link)
+        assert Config().config_source == "global"
+        result = runner.invoke(app, ["config", "trust", str(project)], env=TEST_ENV)
+        assert result.exit_code == 1, result.output
+        assert "symlink" in result.output
+
+    def test_set_traces_url_refuses_symlinked_environment_before_any_write(
+        self, home: Path, project: Path, tmp_path: Path
+    ) -> None:
+        root = write_config(project / ".prime", api_key="local-key", current_environment="dev")
+        real_env = tmp_path / "real-dev.json"
+        real_env.write_text(json.dumps({"base_url": "https://api.dev.example"}))
+        env_dir = project / ".prime" / "environments"
+        env_dir.mkdir()
+        (env_dir / "dev.json").symlink_to(real_env)
+        before_root, before_env = root.read_text(), real_env.read_text()
+
+        result = runner.invoke(
+            app, ["config", "set-traces-url", "https://traces.example"], env=TEST_ENV
+        )
+
+        assert result.exit_code != 0, result.output
+        assert root.read_text() == before_root
+        assert real_env.read_text() == before_env
+
     def test_trust_skips_symlinked_environment_files(self, home: Path, project: Path) -> None:
         write_config(project / ".prime", trusted=False, api_key="local-key")
         real = self.write_env(project, "real", base_url="https://api.dev.example")
@@ -700,6 +749,26 @@ class TestCli:
         assert "symlink" in result.output
         assert not (project / "leak.json").exists()
         assert load_trusted_configs() == {}
+
+    def test_local_refuses_symlinked_prime_directory(
+        self,
+        home: Path,
+        project: Path,
+        tmp_path: Path,
+        no_network: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """`.prime -> ../outside` shipped in a repo must not redirect the write either."""
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (project / ".prime").symlink_to(outside, target_is_directory=True)
+        monkeypatch.chdir(project)
+
+        result = runner.invoke(app, ["config", "set-api-key", "--local", "k"], env=TEST_ENV)
+
+        assert result.exit_code == 1, result.output
+        assert "symlink" in result.output
+        assert not (outside / "config.json").exists()
 
     def test_local_updates_existing_trusted_file(
         self, home: Path, project: Path, no_network: None, monkeypatch: pytest.MonkeyPatch

@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict
 CONFIG_DIR_ENV_VAR = "PRIME_CONFIG_DIR"
 CONFIG_DIR_NAME = ".prime"
 CONFIG_FILE_NAME = "config.json"
+ENVIRONMENTS_DIR_NAME = "environments"
 TRUSTED_CONFIGS_FILE_NAME = "trusted_configs.json"
 
 
@@ -53,6 +54,26 @@ def _owned_by_current_user(path: Path) -> bool:
         return path.stat().st_uid == getuid()
     except OSError:
         return False
+
+
+def _project_config_dir_of(path: Path) -> Path:
+    """The `.prime` directory a config.json or environments/<name>.json belongs to."""
+    if path.parent.name == ENVIRONMENTS_DIR_NAME:
+        return path.parent.parent
+    return path.parent
+
+
+def involves_symlink(path: Path) -> bool:
+    """Whether `path`, its parent directory, or its `.prime` directory is a symlink.
+
+    Project-local files are never trusted or written through symlinks: a
+    cloned repository can ship `.prime`, `.prime/environments`, or the file
+    itself as a link that redirects a credential write outside the ignored
+    tree (or onto an existing file). Checking only the leaf is not enough.
+    """
+    config_dir = _project_config_dir_of(path)
+    candidates = {path, path.parent, config_dir}
+    return any(candidate.is_symlink() for candidate in candidates)
 
 
 def is_owned_by_current_user(path: Path) -> bool:
@@ -102,6 +123,10 @@ def is_trusted_local_file(path: Path) -> bool:
     (`.prime/environments/<name>.json`): `PRIME_CONTEXT` / `prime config use`
     load URLs from them, so they are part of the same trust boundary.
     """
+    if involves_symlink(path):
+        # Never trusted, so never discovered or loaded — and therefore never
+        # written to, which is the property that matters (see involves_symlink).
+        return False
     if not _owned_by_current_user(path):
         # A trusted path swapped for someone else's file (same bytes or not)
         # is not the file the user approved.
@@ -117,15 +142,21 @@ is_trusted_local_config = is_trusted_local_file
 
 def _local_environment_files(config_file: Path) -> list[Path]:
     """The named environment files that belong to a local config."""
-    environments_dir = config_file.parent / "environments"
-    if not environments_dir.is_dir():
+    environments_dir = config_file.parent / ENVIRONMENTS_DIR_NAME
+    if not environments_dir.is_dir() or environments_dir.is_symlink():
         return []
     # Symlinked environment files are never written to and never trusted.
-    return sorted(p for p in environments_dir.glob("*.json") if p.is_file() and not p.is_symlink())
+    return sorted(
+        p for p in environments_dir.glob("*.json") if p.is_file() and not involves_symlink(p)
+    )
 
 
 def trust_local_file(path: Path) -> Path:
     """Approve a single file with its current content; returns its resolved path."""
+    if involves_symlink(path):
+        raise ValueError(
+            f"Refusing to trust {path}: it, its directory, or its .prime directory is a symlink"
+        )
     path = path.resolve()
     digest = _file_digest(path)
     if digest is None:
@@ -253,13 +284,15 @@ def _refuse_unsafe_write(path: Path, *, allow_symlink: bool) -> None:
     target exists. A brand-new path is fine. Windows has no uid model; the
     ownership part is skipped there.
     """
+    if not allow_symlink and involves_symlink(path):
+        raise PermissionError(
+            f"Refusing to write {path}: it, its directory, or its .prime directory is a symlink"
+        )
     try:
         stats = [path.lstat()]
     except FileNotFoundError:
         return
     if path.is_symlink():
-        if not allow_symlink:
-            raise PermissionError(f"Refusing to write through symlink {path}")
         try:
             stats.append(path.stat())
         except FileNotFoundError:

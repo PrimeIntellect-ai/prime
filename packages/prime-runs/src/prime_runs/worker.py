@@ -6,8 +6,9 @@ blocks briefly and then drops (counted) rather than stalling the run.
 Fork safety: a forked child inherits the queue's memory but not the thread.
 The child starts over empty; the queued records belong to the parent.
 
-Containment: a sink that raises is given a few consecutive transient strikes,
-then disabled for the rest of the run. The thread never dies on one bad batch.
+Containment: record-specific failures drop only their batch. A sink-wide
+failure disables the sink, while transient failures get a few consecutive
+strikes first. The thread never dies on one bad batch.
 """
 
 import logging
@@ -18,7 +19,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Optional, Sequence
 
 from . import _fork
-from .exceptions import is_transient
+from .exceptions import is_record_rejection, is_transient
 from .sinks.base import Sink
 
 logger = logging.getLogger(__name__)
@@ -131,12 +132,27 @@ class UploadWorker:
                 self._fail_sink(sink, exc)
 
     def _fail_sink(self, sink: Sink, exc: Exception, *, dropped: int = 0) -> None:
-        """The batch is gone (the transports already retried). Decide whether
-        the sink is too: permanent failures retire it at once, transient ones
-        after ``TRANSIENT_FAILURE_LIMIT`` consecutive strikes."""
+        """Account for a failed operation and decide whether to retire its sink.
+
+        Record-specific failures drop only the current batch. Sink-wide
+        permanent failures retire immediately; transient failures retire after
+        ``TRANSIENT_FAILURE_LIMIT`` consecutive strikes.
+        """
         name = sink.name
         if dropped:
             self.failed_records[name] = self.failed_records.get(name, 0) + dropped
+
+        if dropped and is_record_rejection(exc):
+            logger.warning(
+                "Sink %s rejected a batch of %d record(s) (%s: %s); "
+                "still enabled for later records.",
+                name,
+                dropped,
+                type(exc).__name__,
+                exc,
+            )
+            self._notify(name, exc)
+            return
 
         if is_transient(exc):
             strikes = self._transient_failures.get(name, 0) + 1

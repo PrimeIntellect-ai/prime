@@ -15,11 +15,14 @@ from prime_traces.exceptions import (
     APIError,
     APITimeoutError,
     ForbiddenError,
+    LineFormatConflictError,
     NotFoundError,
     PaymentRequiredError,
     RetryableAPIError,
+    TraceTooLargeError,
     TransportError,
     UnauthorizedError,
+    ValidationRejectedError,
 )
 
 __all__ = [
@@ -28,13 +31,17 @@ __all__ = [
     "ConfigurationError",
     "EnvironmentResolutionError",
     "ForbiddenError",
+    "LineFormatConflictError",
     "NotFoundError",
     "PaymentRequiredError",
     "PrimeRunsError",
     "RetryableAPIError",
     "RunFinishedError",
+    "TraceTooLargeError",
     "TransportError",
     "UnauthorizedError",
+    "ValidationRejectedError",
+    "is_record_rejection",
     "is_transient",
 ]
 
@@ -54,6 +61,28 @@ class EnvironmentResolutionError(PrimeRunsError):
 
 class RunFinishedError(PrimeRunsError):
     """A finished run was written to again: a producer bug."""
+
+
+def is_record_rejection(exc: BaseException) -> bool:
+    """Whether a failed write is specific to the submitted record batch.
+
+    A later batch can still succeed after serialization, size, or validation
+    failures, so these errors must not retire an otherwise healthy sink.
+    """
+    if isinstance(
+        exc,
+        (
+            TypeError,
+            ValueError,
+            TraceTooLargeError,
+            ValidationRejectedError,
+            LineFormatConflictError,
+        ),
+    ):
+        return True
+    # The legacy samples API returns framework-generated 413/422 responses,
+    # which the shared traces mapper intentionally leaves as plain APIError.
+    return isinstance(exc, APIError) and exc.status_code in (413, 422)
 
 
 def is_transient(exc: BaseException) -> bool:

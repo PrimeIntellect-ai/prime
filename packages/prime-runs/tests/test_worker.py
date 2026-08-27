@@ -3,8 +3,10 @@
 import queue
 import threading
 
+import pytest
 from conftest import FakeSink
 
+from prime_runs.exceptions import APIError, ValidationRejectedError
 from prime_runs.worker import UploadWorker
 
 
@@ -301,6 +303,45 @@ def test_a_transient_failure_drops_the_batch_but_keeps_the_sink():
     # fine, and with both sinks enabled the other one may well have stored them.
     assert worker.failed_records == {"blippy": 2}
     assert worker.dropped == 0
+    worker.close()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ValueError("Out of range float values are not JSON compliant"),
+        ValidationRejectedError("invalid record", status_code=400),
+        APIError("unprocessable record", status_code=422),
+    ],
+    ids=["local-encoding", "traces-validation", "samples-validation"],
+)
+def test_a_record_rejection_drops_only_its_batch(error):
+    """Malformed content must not prevent later valid records from uploading."""
+
+    class RejectOnceSink(FakeSink):
+        def __init__(self) -> None:
+            super().__init__("reject-once")
+            self.calls = 0
+
+        def write(self, records) -> None:
+            self.calls += 1
+            if self.calls == 1:
+                raise error
+            super().write(records)
+
+    sink = RejectOnceSink()
+    reported = []
+    worker = UploadWorker([sink], on_error=lambda name, exc: reported.append((name, exc)))
+
+    worker.submit([{"id": "bad"}])
+    worker.submit([{"id": "good"}])
+    drain(worker)
+
+    assert sink.enabled is True
+    assert sink.calls == 2
+    assert sink.batches == [[{"id": "good"}]]
+    assert worker.failed_records == {"reject-once": 1}
+    assert reported == [("reject-once", error)]
     worker.close()
 
 

@@ -1,6 +1,6 @@
 """Command-session RPC helpers."""
 
-from typing import Dict, List, Literal, Optional, Protocol, cast
+from typing import Dict, List, Literal, Optional, Protocol, Sequence, cast
 
 from connectrpc.code import Code
 from connectrpc.errors import ConnectError
@@ -43,6 +43,16 @@ class _CommandSessionSendSignalRequestFactory(Protocol):
 
 class _CommandSessionConnectRequestFactory(Protocol):
     def __call__(self, *, session: Message) -> Message: ...
+
+
+class _CommandSessionInfoLike(Protocol):
+    pid: int
+    session_uuid: str
+    command: _CommandSpecLike
+
+
+class _CommandSessionListResponseLike(Protocol):
+    sessions: Sequence[_CommandSessionInfoLike]
 
 
 class _CommandSessionDataEventLike(Protocol):
@@ -99,6 +109,12 @@ _COMMAND_SESSION_CONNECT_REQUEST_TYPE = cast(
 _COMMAND_SESSION_CONNECT_RESPONSE_TYPE = cast(
     type[Message], getattr(command_session_pb2, "ConnectResponse")
 )
+_COMMAND_SESSION_LIST_REQUEST_TYPE = cast(
+    type[Message], getattr(command_session_pb2, "ListRequest")
+)
+_COMMAND_SESSION_LIST_RESPONSE_TYPE = cast(
+    type[Message], getattr(command_session_pb2, "ListResponse")
+)
 _COMMAND_SESSION_START_REQUEST_FACTORY = cast(
     _CommandSessionStartRequestFactory, _COMMAND_SESSION_START_REQUEST_TYPE
 )
@@ -149,6 +165,16 @@ COMMAND_SESSION_CONNECT_RPC_METHOD = MethodInfo(
     service_name="command_session.CommandSession",
     input=_COMMAND_SESSION_CONNECT_REQUEST_TYPE,
     output=_COMMAND_SESSION_CONNECT_RESPONSE_TYPE,
+    idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+)
+
+# Live-process introspection: pid, session_uuid, and command for each running
+# process. Permanent public API; exited sessions are not listed.
+COMMAND_SESSION_LIST_RPC_METHOD = MethodInfo(
+    name="List",
+    service_name="command_session.CommandSession",
+    input=_COMMAND_SESSION_LIST_REQUEST_TYPE,
+    output=_COMMAND_SESSION_LIST_RESPONSE_TYPE,
     idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
 )
 
@@ -209,6 +235,10 @@ def build_command_session_start_request(
         stdin=stdin,
         session_uuid=session_uuid,
     )
+
+
+def build_command_session_list_request() -> Message:
+    return _COMMAND_SESSION_LIST_REQUEST_TYPE()
 
 
 def build_command_session_connect_request(*, session_uuid: str) -> Message:

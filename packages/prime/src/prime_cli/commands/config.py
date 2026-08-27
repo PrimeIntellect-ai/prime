@@ -134,6 +134,13 @@ def new_local_config() -> Config:
     """
     config_dir = Path.cwd() / CONFIG_DIR_NAME
     config_file = config_dir / CONFIG_FILE_NAME
+    if config_file.is_symlink() and not is_global_config_dir(config_dir):
+        # A cloned repo can ship a (dangling) symlink to redirect the write.
+        console.print(
+            f"[red]{config_file} is a symlink; refusing to write credentials through it. "
+            "Remove it before using --local.[/red]"
+        )
+        raise typer.Exit(1)
     if config_file.exists() and not is_owned_by_current_user(config_file):
         console.print(
             f"[red]{config_file} is not owned by you; refusing to write credentials into it. "
@@ -507,7 +514,7 @@ def _save_environment(
         console.print(f"[green]Saved current configuration as environment '{name}'![/green]")
         console.print("[yellow]Note: This includes your API key and team ID[/yellow]")
         console.print(f"[blue]Use 'prime config use {name}' to load it later[/blue]")
-    except ValueError as e:
+    except (ValueError, PermissionError) as e:
         console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1)
 

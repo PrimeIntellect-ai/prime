@@ -317,25 +317,50 @@ def test_writes_refuse_symlinks_owned_by_another_user(
     real_uid = os.getuid()
     monkeypatch.setattr(os, "getuid", lambda: real_uid + 1)
 
-    with pytest.raises(PermissionError, match="not owned"):
+    with pytest.raises(PermissionError, match="symlink"):
         config.set_api_key("x")
 
     assert json.loads(target.read_text()) == {"api_key": "precious"}
 
 
-def test_writes_follow_symlinks_the_user_owns(home: Path, project: Path, tmp_path: Path) -> None:
-    """Dotfile-style symlinked configs keep working."""
-    (project / ".prime").mkdir(parents=True)
+def test_global_config_writes_follow_symlinks_the_user_owns(home: Path, tmp_path: Path) -> None:
+    """Dotfile-style symlinked ~/.prime/config.json keeps working."""
+    (home / ".prime").mkdir()
     target = tmp_path / "dotfiles" / "prime.json"
     target.parent.mkdir()
     target.write_text(json.dumps({"api_key": "old"}))
-    link = project / ".prime" / "config.json"
+    link = home / ".prime" / "config.json"
     link.symlink_to(target)
 
-    Config(config_dir=project / ".prime").set_api_key("new")
+    Config().set_api_key("new")
 
     assert link.is_symlink()
     assert json.loads(target.read_text())["api_key"] == "new"
+
+
+def test_project_config_writes_never_follow_symlinks(
+    home: Path, project: Path, tmp_path: Path
+) -> None:
+    """Even a user-owned symlink: a cloned repo's links are user-owned too."""
+    (project / ".prime").mkdir(parents=True)
+    target = tmp_path / "elsewhere.json"
+    target.write_text(json.dumps({"api_key": "precious"}))
+    (project / ".prime" / "config.json").symlink_to(target)
+
+    with pytest.raises(PermissionError, match="symlink"):
+        Config(config_dir=project / ".prime").set_api_key("x")
+
+    assert json.loads(target.read_text()) == {"api_key": "precious"}
+
+
+def test_global_config_writes_refuse_dangling_symlinks(home: Path, tmp_path: Path) -> None:
+    (home / ".prime").mkdir()
+    (home / ".prime" / "config.json").symlink_to(tmp_path / "nowhere.json")
+
+    with pytest.raises(PermissionError, match="dangling"):
+        Config(config_dir=home / ".prime", create=False).set_api_key("x")
+
+    assert not (tmp_path / "nowhere.json").exists()
 
 
 class TestLocalEnvironments:
@@ -450,6 +475,48 @@ class TestLocalEnvironments:
         assert env_file.read_text() == before_env
         assert root.read_text() == before_root  # refused before any write, not half-applied
         assert str(env_file) not in load_trusted_configs()
+
+    def test_save_refuses_symlinked_environment_file(
+        self, home: Path, project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`environments/dev.json -> ../../leak.json` shipped in a repo must not redirect `save`."""
+        write_config(project / ".prime", api_key="local-key")
+        env_dir = project / ".prime" / "environments"
+        env_dir.mkdir()
+        (env_dir / "dev.json").symlink_to(Path("..") / ".." / "leak.json")
+
+        result = runner.invoke(app, ["config", "save", "dev"], env=TEST_ENV)
+
+        assert result.exit_code == 1, result.output
+        assert "symlink" in result.output
+        assert not (project / "leak.json").exists()
+
+    def test_trust_skips_symlinked_environment_files(self, home: Path, project: Path) -> None:
+        write_config(project / ".prime", trusted=False, api_key="local-key")
+        real = self.write_env(project, "real", base_url="https://api.dev.example")
+        (project / ".prime" / "environments" / "linked.json").symlink_to(real)
+
+        result = runner.invoke(app, ["config", "trust", str(project)], env=TEST_ENV)
+
+        assert result.exit_code == 0, result.output
+        trusted = load_trusted_configs()
+        assert str(real) in trusted
+        assert str(project / ".prime" / "environments" / "linked.json") not in trusted
+
+    def test_logout_keeps_environment_file_trusted(
+        self, home: Path, project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        write_config(project / ".prime", api_key="local-key")
+        assert runner.invoke(app, ["config", "save", "dev"], env=TEST_ENV).exit_code == 0
+        assert runner.invoke(app, ["config", "use", "dev"], env=TEST_ENV).exit_code == 0
+
+        result = runner.invoke(app, ["logout", "--yes"], env=TEST_ENV)
+        assert result.exit_code == 0, result.output
+        env_file = project / ".prime" / "environments" / "dev.json"
+        assert json.loads(env_file.read_text())["api_key"] == ""
+
+        result = runner.invoke(app, ["config", "use", "dev"], env=TEST_ENV)
+        assert result.exit_code == 0, result.output
 
     def test_global_config_environments_need_no_trust(
         self, home: Path, monkeypatch: pytest.MonkeyPatch
@@ -618,6 +685,21 @@ class TestCli:
         assert result.exit_code == 1, result.output
         assert "not owned by you" in result.output
         assert planted.read_text() == before
+
+    def test_local_refuses_dangling_symlink_config(
+        self, home: Path, project: Path, no_network: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A cloned `.prime/config.json -> ../leak.json` must not redirect the credential write."""
+        (project / ".prime").mkdir(parents=True)
+        (project / ".prime" / "config.json").symlink_to(Path("..") / "leak.json")
+        monkeypatch.chdir(project)
+
+        result = runner.invoke(app, ["config", "set-api-key", "--local", "k"], env=TEST_ENV)
+
+        assert result.exit_code == 1, result.output
+        assert "symlink" in result.output
+        assert not (project / "leak.json").exists()
+        assert load_trusted_configs() == {}
 
     def test_local_updates_existing_trusted_file(
         self, home: Path, project: Path, no_network: None, monkeypatch: pytest.MonkeyPatch

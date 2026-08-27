@@ -81,7 +81,9 @@ def load_trusted_configs() -> dict[str, str]:
 
 def _save_trusted_configs(trusted: dict[str, str]) -> None:
     global_config_dir().mkdir(parents=True, exist_ok=True)
-    _write_private_json(trusted_configs_file(), {"version": 1, "trusted": trusted})
+    _write_private_json(
+        trusted_configs_file(), {"version": 1, "trusted": trusted}, allow_symlink=True
+    )
 
 
 def is_trusted_local_file(path: Path) -> bool:
@@ -118,7 +120,8 @@ def _local_environment_files(config_file: Path) -> list[Path]:
     environments_dir = config_file.parent / "environments"
     if not environments_dir.is_dir():
         return []
-    return sorted(p for p in environments_dir.glob("*.json") if p.is_file())
+    # Symlinked environment files are never written to and never trusted.
+    return sorted(p for p in environments_dir.glob("*.json") if p.is_file() and not p.is_symlink())
 
 
 def trust_local_file(path: Path) -> Path:
@@ -236,33 +239,39 @@ def _warn_untrusted(untrusted: list[Path], kind: str = "project config") -> None
         )
 
 
-def _refuse_unless_owned(path: Path) -> None:
-    """Refuse to write into a file (or through a symlink) the current user doesn't own.
+def _refuse_unsafe_write(path: Path, *, allow_symlink: bool) -> None:
+    """Refuse to write into a file the current user doesn't own, or through a symlink.
 
     On a shared machine someone with write access to the directory could swap
-    the file for their own, or for a symlink pointing anywhere; O_TRUNC would
-    then hand them the secret or clobber the target. A brand-new path is fine.
-    Windows has no uid model; the check is skipped there.
+    the file for their own; O_TRUNC would then hand them the secret. A symlink
+    is worse: a cloned repository can ship `.prime/config.json -> ../leak.json`
+    (dangling, so the path looks absent) and the write would create a
+    credential file outside the ignored `.prime/` directory — or clobber
+    whatever an existing link points at. Project-local config dirs therefore
+    never write through symlinks; the global `~/.prime` may, for users who
+    keep dotfiles symlinked, as long as link and target are theirs and the
+    target exists. A brand-new path is fine. Windows has no uid model; the
+    ownership part is skipped there.
     """
-    getuid = getattr(os, "getuid", None)
-    if getuid is None:
-        return
     try:
         stats = [path.lstat()]
     except FileNotFoundError:
         return
     if path.is_symlink():
+        if not allow_symlink:
+            raise PermissionError(f"Refusing to write through symlink {path}")
         try:
             stats.append(path.stat())
         except FileNotFoundError:
-            pass  # dangling symlink owned by the user: creating the target is intended
-    if any(st.st_uid != getuid() for st in stats):
+            raise PermissionError(f"Refusing to write through dangling symlink {path}") from None
+    getuid = getattr(os, "getuid", None)
+    if getuid is not None and any(st.st_uid != getuid() for st in stats):
         raise PermissionError(f"Refusing to write {path}: it is not owned by the current user")
 
 
-def _write_private_json(path: Path, data: dict) -> None:
+def _write_private_json(path: Path, data: dict, *, allow_symlink: bool = False) -> None:
     """Write JSON readable only by the owner; these files hold API keys."""
-    _refuse_unless_owned(path)
+    _refuse_unsafe_write(path, allow_symlink=allow_symlink)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
         f.write(json.dumps(data, indent=2))
@@ -389,10 +398,14 @@ class Config:
         else:
             self.config = {}
 
+    def _write_json(self, path: Path, data: dict) -> None:
+        """Owner-only JSON write; symlinks are only followed for the global config."""
+        _write_private_json(path, data, allow_symlink=self.is_global)
+
     def _save_config(self, config: dict) -> None:
         """Save configuration to file"""
         self._ensure_dirs()
-        _write_private_json(self.config_file, config)
+        self._write_json(self.config_file, config)
         self.config = config
         self._record_trust()
 
@@ -586,7 +599,7 @@ class Config:
 
         if update_root:
             root_config["traces_url"] = traces_url
-            _write_private_json(self.config_file, root_config)
+            self._write_json(self.config_file, root_config)
             self._record_trust()
 
         if env_file is not None:
@@ -594,7 +607,7 @@ class Config:
             if not isinstance(env_config, dict):
                 raise ValueError(f"Invalid configuration in {env_file}")
             env_config["traces_url"] = traces_url
-            _write_private_json(env_file, env_config)
+            self._write_json(env_file, env_config)
             self._record_trust(env_file)
 
         self.config["traces_url"] = traces_url
@@ -683,7 +696,7 @@ class Config:
             "inference_url": self.inference_url,
             "traces_url": self._configured_traces_url(),
         }
-        _write_private_json(env_file, env_config)
+        self._write_json(env_file, env_config)
         self._record_trust(env_file)
 
     def delete_environment(self, name: str) -> None:
@@ -796,26 +809,46 @@ class Config:
             raise
         return False
 
-    def update_current_environment_file(self) -> None:
-        """Update the current environment's saved file with current config"""
+    def update_current_environment_file(self, *, from_env: bool = True) -> None:
+        """Update the current environment's saved file with current config.
+
+        With `from_env=False` the raw stored values are written instead of the
+        env-precedence properties, so PRIME_* shell variables can't leak back
+        onto disk (logout relies on this). Either way the write goes through
+        the private writer and refreshes the file's trust entry.
+        """
         if self.current_environment != "production":
             # Only update custom environments, not the built-in production
             try:
                 sanitized_name = self._sanitize_environment_name(self.current_environment)
                 env_file = self.environments_dir / f"{sanitized_name}.json"
                 if env_file.exists():
-                    env_config = {
-                        "api_key": self.api_key,
-                        "team_id": self.team_id,
-                        "team_name": None if self.team_id_from_env else self.team_name,
-                        "team_role": None if self.team_id_from_env else self.team_role,
-                        "user_id": self.user_id,
-                        "base_url": self.base_url,
-                        "frontend_url": self.frontend_url,
-                        "inference_url": self.inference_url,
-                        "traces_url": self._stored_traces_url(),
-                    }
-                    _write_private_json(env_file, env_config)
+                    if from_env:
+                        env_config = {
+                            "api_key": self.api_key,
+                            "team_id": self.team_id,
+                            "team_name": None if self.team_id_from_env else self.team_name,
+                            "team_role": None if self.team_id_from_env else self.team_role,
+                            "user_id": self.user_id,
+                            "base_url": self.base_url,
+                            "frontend_url": self.frontend_url,
+                            "inference_url": self.inference_url,
+                            "traces_url": self._stored_traces_url(),
+                        }
+                    else:
+                        raw = self.config
+                        env_config = {
+                            "api_key": raw.get("api_key", ""),
+                            "team_id": raw.get("team_id"),
+                            "team_name": raw.get("team_name"),
+                            "team_role": raw.get("team_role"),
+                            "user_id": raw.get("user_id"),
+                            "base_url": raw.get("base_url", self.DEFAULT_BASE_URL),
+                            "frontend_url": raw.get("frontend_url", self.DEFAULT_FRONTEND_URL),
+                            "inference_url": raw.get("inference_url", self.DEFAULT_INFERENCE_URL),
+                            "traces_url": raw.get("traces_url"),
+                        }
+                    self._write_json(env_file, env_config)
                     self._record_trust(env_file)
             except ValueError:
                 # Skip updating if environment name is invalid

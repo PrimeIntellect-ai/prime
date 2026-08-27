@@ -7,13 +7,12 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Literal
 
 from connectrpc.client import ConnectClient
-from connectrpc.code import Code
 from connectrpc.errors import ConnectError
 from google.protobuf.message import Message
 from pyqwest import HTTPTransport
 
 from .core import APIError
-from .rpc_command_session import parse_command_session_start_event
+from .rpc_command_session import is_recoverable_stream_fault, parse_command_session_start_event
 
 logger = logging.getLogger(__name__)
 
@@ -27,10 +26,6 @@ _SendSignal = Callable[[Literal["terminate", "kill"]], Awaitable[None]]
 # The argument is whether a StartEvent has been observed yet; the callee picks
 # between retrying Start (create-or-attach) and Connect-ing to the session.
 _Reconnect = Callable[[bool], AsyncIterator[Message]]
-
-# Stream faults that recovery cannot fix: the session is gone (NOT_FOUND) or the
-# retried Start conflicts with the session's original spec (FAILED_PRECONDITION).
-_STREAM_FATAL_CODES = frozenset({Code.NOT_FOUND, Code.FAILED_PRECONDITION})
 
 
 class _AsyncProcessStream(AsyncIterator[bytes]):
@@ -243,7 +238,7 @@ class AsyncSandboxProcess:
         """Whether the stream fault is recoverable and reconnect budget remains."""
         if self._reconnect is None or self._remote_exited or reconnects >= _STREAM_MAX_RECONNECTS:
             return False
-        return not (isinstance(error, ConnectError) and error.code in _STREAM_FATAL_CODES)
+        return is_recoverable_stream_fault(error)
 
     async def _aclose_stream(self) -> None:
         close = getattr(self._stream, "aclose", None)
@@ -265,8 +260,10 @@ class AsyncSandboxProcess:
         )
         await self._aclose_stream()
         await asyncio.sleep(delay)
-        # Re-attachment never replays output emitted while detached; only the
-        # StartEvent and a retained EndEvent are, so a missed exit is still observed.
+        # Re-attachment — a retried Start before the pid was seen, Connect after —
+        # never replays output emitted while detached. Both arms re-announce the
+        # StartEvent and replay the retained EndEvent of a session that exited
+        # within sandboxd's retention window, so a missed exit is still observed.
         self._stream = reconnect(self._started.done())
 
     async def _pump(self) -> None:

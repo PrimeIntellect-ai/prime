@@ -8,44 +8,16 @@ not repeated), so every transient link fault is retried instead of surfacing.
 """
 
 import asyncio
-from datetime import datetime, timedelta, timezone
 from typing import Any, cast
 
 import pytest
+from conftest import _AsyncFakeCache, _end_event, _start_event, _stdout_event
 from connectrpc.code import Code
 from connectrpc.errors import ConnectError
 
 from prime_sandboxes._proto.command_session import command_session_pb2 as pb
 from prime_sandboxes.core import APIError
 from prime_sandboxes.sandbox import AsyncSandboxClient
-
-_EV = pb.CommandSessionEvent
-
-
-def _start_event(pid, response_type=pb.StartResponse):
-    return response_type(event=_EV(start=_EV.StartEvent(pid=pid)))
-
-
-def _stdout_event(data, response_type=pb.StartResponse):
-    return response_type(event=_EV(data=_EV.DataEvent(stdout=data)))
-
-
-def _end_event(code, response_type=pb.StartResponse):
-    return response_type(event=_EV(end=_EV.EndEvent(exit_code=code)))
-
-
-class _AsyncFakeCache:
-    async def get_or_refresh(self, _sandbox_id: str):
-        return {
-            "gateway_url": "https://gateway.example.com",
-            "user_ns": "ns",
-            "job_id": "job",
-            "token": "tok",
-            "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat(),
-        }
-
-    async def is_vm(self, _sandbox_id: str) -> bool:
-        return True
 
 
 async def _open_process(monkeypatch, fake_client_factory, command="cat"):
@@ -78,7 +50,9 @@ async def test_reconnect_selects_session_uuid_and_replays_exit(monkeypatch):
                     raise ConnectError(Code.UNAVAILABLE, "stream dropped")
                 selector = kwargs["request"].session
                 connect_selectors.append((selector.WhichOneof("selector"), selector.session_uuid))
-                # The process exited while detached; sandboxd replays the retained end.
+                # The process exited while detached; Connect replays the retained
+                # start and end events, mirroring sandboxd since the Connect
+                # retained-exit fix in platform PR #4735 (same source as Start replay).
                 yield _start_event(42, pb.ConnectResponse)
                 yield _end_event(5, pb.ConnectResponse)
 

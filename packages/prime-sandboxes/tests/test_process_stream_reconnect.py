@@ -3,26 +3,12 @@
 import asyncio
 
 import pytest
+from conftest import _end_event, _start_event, _stdout_event
 from connectrpc.code import Code
 from connectrpc.errors import ConnectError
 
-from prime_sandboxes._proto.command_session import command_session_pb2 as pb
 from prime_sandboxes.core import APIError
 from prime_sandboxes.process import AsyncSandboxProcess
-
-_EV = pb.CommandSessionEvent
-
-
-def _start(pid):
-    return pb.StartResponse(event=_EV(start=_EV.StartEvent(pid=pid)))
-
-
-def _stdout(data):
-    return pb.StartResponse(event=_EV(data=_EV.DataEvent(stdout=data)))
-
-
-def _end(code):
-    return pb.StartResponse(event=_EV(end=_EV.EndEvent(exit_code=code)))
 
 
 class _FakeStreamClient:
@@ -59,14 +45,14 @@ async def test_stream_reconnects_and_resumes_after_drop(fault, monkeypatch):
     monkeypatch.setattr("prime_sandboxes.process._STREAM_RECONNECT_BACKOFF_SECONDS", 0)
 
     async def faulty():
-        yield _start(42)
-        yield _stdout(b"before\n")
+        yield _start_event(42)
+        yield _stdout_event(b"before\n")
         raise fault
 
     async def resumed():
-        yield _start(42)  # Connect re-announces the pid; already known, ignored
-        yield _stdout(b"after\n")
-        yield _end(0)
+        yield _start_event(42)  # Connect re-announces the pid; already known, ignored
+        yield _stdout_event(b"after\n")
+        yield _end_event(0)
 
     reconnect_calls = []
 
@@ -91,13 +77,13 @@ async def test_stream_reconnects_after_clean_eof(monkeypatch):
     monkeypatch.setattr("prime_sandboxes.process._STREAM_RECONNECT_BACKOFF_SECONDS", 0)
 
     async def ended_without_exit():
-        yield _start(42)
-        yield _stdout(b"before\n")
+        yield _start_event(42)
+        yield _stdout_event(b"before\n")
 
     async def resumed():
-        yield _start(42)
-        yield _stdout(b"after\n")
-        yield _end(0)
+        yield _start_event(42)
+        yield _stdout_event(b"after\n")
+        yield _end_event(0)
 
     reconnect_calls = []
 
@@ -125,7 +111,7 @@ async def test_stream_recovers_before_pid_is_received(monkeypatch):
 
     async def dropped_before_start():
         raise ConnectError(Code.UNAVAILABLE, "stream dropped")
-        yield _start(42)
+        yield _start_event(42)
 
     reconnect_calls = []
 
@@ -134,8 +120,8 @@ async def test_stream_recovers_before_pid_is_received(monkeypatch):
         reconnect_calls.append(started)
 
         async def stream():
-            yield _start(42)
-            yield _end(0)
+            yield _start_event(42)
+            yield _end_event(0)
 
         return stream()
 
@@ -158,14 +144,14 @@ async def test_reconnect_after_exit_replays_end_event(monkeypatch):
     monkeypatch.setattr("prime_sandboxes.process._STREAM_RECONNECT_BACKOFF_SECONDS", 0)
 
     async def dropped_mid_stream():
-        yield _start(42)
-        yield _stdout(b"before\n")
+        yield _start_event(42)
+        yield _stdout_event(b"before\n")
         raise ConnectError(Code.UNAVAILABLE, "stream dropped")
 
     async def replayed_after_exit():
         # sandboxd retains exited sessions briefly; Connect replays the exit.
-        yield _start(42)
-        yield _end(3)
+        yield _start_event(42)
+        yield _end_event(3)
 
     proc = await AsyncSandboxProcess._create(
         _FakeStreamClient(),
@@ -183,7 +169,7 @@ async def test_reconnect_after_exit_replays_end_event(monkeypatch):
 @pytest.mark.asyncio
 async def test_end_before_pid_fails_instead_of_hanging():
     async def ended_before_start():
-        yield _end(0)
+        yield _end_event(0)
 
     with pytest.raises(APIError, match="ended before reporting its PID"):
         await asyncio.wait_for(
@@ -201,7 +187,7 @@ async def test_end_before_pid_fails_instead_of_hanging():
 async def test_stream_without_reconnect_still_fails():
     # No reconnect callable preserves the previous fatal behavior.
     async def faulty():
-        yield _start(7)
+        yield _start_event(7)
         raise ConnectError(Code.UNAVAILABLE, "error reading a body from connection: timed out")
 
     proc = await AsyncSandboxProcess._create(
@@ -223,7 +209,7 @@ async def test_stream_without_reconnect_still_fails():
 )
 async def test_permanent_fault_is_not_reconnected(fault):
     async def faulty():
-        yield _start(9)
+        yield _start_event(9)
         raise fault
 
     calls = []

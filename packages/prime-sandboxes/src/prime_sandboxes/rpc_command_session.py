@@ -2,9 +2,12 @@
 
 from typing import Dict, List, Literal, Optional, Protocol, cast
 
+from connectrpc.code import Code
+from connectrpc.errors import ConnectError
 from connectrpc.method import IdempotencyLevel, MethodInfo
 from google.protobuf.message import Message
 
+from ._connectrpc import PYQWEST_BODY_READ_ERROR_MARKERS
 from ._proto.command_session import command_session_pb2
 
 
@@ -150,11 +153,46 @@ COMMAND_SESSION_CONNECT_RPC_METHOD = MethodInfo(
 )
 
 
+# The two fault predicates below classify command-session RPC failures for
+# retry, with deliberately opposite polarity. Stream re-attach (Connect, or a
+# create-or-attach Start resending the identical request) is idempotent, so
+# is_recoverable_stream_fault is a deny-list: retry everything except the codes
+# command_session.proto promises as definitive answers. A unary control RPC's
+# unknown fault may itself be a definitive answer, so is_transient_control_fault
+# is an allow-list: fail fast on everything except known link faults.
+
+# Stream faults recovery cannot fix, per command_session.proto's code promises:
+# NOT_FOUND (the session is gone or its retention expired) and
+# FAILED_PRECONDITION (a Start reusing the session_uuid with a different spec —
+# a guard for a future non-identical retry; today's reconnect resends the
+# identical request, so the server cannot answer it with a spec conflict).
+_STREAM_FATAL_CODES = frozenset({Code.NOT_FOUND, Code.FAILED_PRECONDITION})
+
+# Link faults a unary control RPC may retry; pyqwest body-read faults surface
+# as ConnectError INTERNAL and are matched by message marker instead.
+_TRANSIENT_CONTROL_CODES = frozenset({Code.DEADLINE_EXCEEDED, Code.UNAVAILABLE})
+
+
+def is_recoverable_stream_fault(error: BaseException | None) -> bool:
+    """Whether a dropped command-session stream may be re-attached (None: clean EOF)."""
+    return not (isinstance(error, ConnectError) and error.code in _STREAM_FATAL_CODES)
+
+
+def is_transient_control_fault(error: ConnectError) -> bool:
+    """Whether a unary control-RPC fault is a link hiccup rather than a definitive answer."""
+    if error.code in _TRANSIENT_CONTROL_CODES:
+        return True
+    message = (error.message or "").lower()
+    return error.code == Code.INTERNAL and any(
+        marker in message for marker in PYQWEST_BODY_READ_ERROR_MARKERS
+    )
+
+
 def build_command_session_start_request(
+    *,
     command: str,
     working_dir: Optional[str],
     env: Optional[Dict[str, str]],
-    *,
     stdin: bool = False,
     session_uuid: str | None = None,
 ) -> Message:
@@ -173,14 +211,14 @@ def build_command_session_start_request(
     )
 
 
-def build_command_session_connect_request(session_uuid: str) -> Message:
+def build_command_session_connect_request(*, session_uuid: str) -> Message:
     return _COMMAND_SESSION_CONNECT_REQUEST_FACTORY(
         session=_COMMAND_SESSION_SELECTOR_FACTORY(session_uuid=session_uuid)
     )
 
 
 def build_command_session_send_input_request(
-    session_uuid: str, data: bytes, input_uuid: str
+    *, session_uuid: str, data: bytes, input_uuid: str
 ) -> Message:
     return _COMMAND_SESSION_SEND_INPUT_REQUEST_FACTORY(
         session=_COMMAND_SESSION_SELECTOR_FACTORY(session_uuid=session_uuid),
@@ -190,7 +228,7 @@ def build_command_session_send_input_request(
 
 
 def build_command_session_send_signal_request(
-    session_uuid: str, signal: Literal["terminate", "kill"], signal_uuid: str
+    *, session_uuid: str, signal: Literal["terminate", "kill"], signal_uuid: str
 ) -> Message:
     signal_value = getattr(
         command_session_pb2,

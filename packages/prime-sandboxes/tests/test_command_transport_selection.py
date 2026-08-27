@@ -234,9 +234,12 @@ async def test_async_open_process_streams_vm_command_session(monkeypatch):
         assert client_init_kwargs["send_compression"] is None
         assert calls[0][1].command.cwd == "/workspace"
         assert calls[0][1].command.envs == {"KEY": "value"}
-        assert calls[1][1].session.pid == 42
+        session_uuid = calls[0][1].session_uuid
+        assert session_uuid  # Start carries the client-generated idempotency key
+        assert calls[1][1].session.session_uuid == session_uuid
         assert calls[1][1].input.stdin == b"input\n"
-        assert calls[2][1].session.pid == 42
+        assert calls[1][1].input_uuid  # each stdin write carries its own idempotency key
+        assert calls[2][1].session.session_uuid == session_uuid
         assert calls[2][1].signal == command_session_pb2.SIGNAL_SIGTERM
     finally:
         await client.aclose()
@@ -254,10 +257,9 @@ async def test_async_open_process_rejects_container_sandbox():
 
 
 @pytest.mark.asyncio
-async def test_process_reconnect_discovers_pid_by_tag_and_refreshes_rejected_auth(monkeypatch):
-    discovery_tokens = []
-    connected_pids = []
-    process_tags = []
+async def test_process_recovery_retries_start_and_refreshes_rejected_auth(monkeypatch):
+    start_requests = []
+    retry_tokens = []
 
     class _RejectedTokenCache:
         def __init__(self):
@@ -279,39 +281,30 @@ async def test_process_reconnect_discovers_pid_by_tag_and_refreshes_rejected_aut
             pass
 
         def execute_server_stream(self, **kwargs):
-            method = kwargs["method"].name
-            if method == "Start":
-                process_tags.append(kwargs["request"].tag)
-            else:
-                connected_pids.append(kwargs["request"].session.pid)
+            assert kwargs["method"].name == "Start"
+            start_requests.append(kwargs["request"])
+            attempt = len(start_requests)
+            token = kwargs["headers"]["Authorization"]
+            if attempt > 1:
+                retry_tokens.append(token)
 
             async def events():
-                if method == "Start":
+                if attempt == 1:
                     raise ConnectError(Code.UNAVAILABLE, "stream dropped")
-                yield command_session_pb2.ConnectResponse(
+                if token == "Bearer stale":
+                    raise ConnectError(Code.UNAUTHENTICATED, "expired token")
+                yield command_session_pb2.StartResponse(
                     event=command_session_pb2.CommandSessionEvent(
                         start=command_session_pb2.CommandSessionEvent.StartEvent(pid=42)
                     )
                 )
-                yield command_session_pb2.ConnectResponse(
+                yield command_session_pb2.StartResponse(
                     event=command_session_pb2.CommandSessionEvent(
                         end=command_session_pb2.CommandSessionEvent.EndEvent(exit_code=0)
                     )
                 )
 
             return events()
-
-        async def execute_unary(self, **kwargs):
-            token = kwargs["headers"]["Authorization"]
-            discovery_tokens.append(token)
-            if token == "Bearer stale":
-                raise ConnectError(Code.UNAUTHENTICATED, "expired token")
-            return command_session_pb2.ListResponse(
-                sessions=[
-                    command_session_pb2.CommandSessionInfo(pid=7, tag="other-process"),
-                    command_session_pb2.CommandSessionInfo(pid=42, tag=process_tags[0]),
-                ]
-            )
 
         async def close(self):
             pass
@@ -326,10 +319,12 @@ async def test_process_reconnect_discovers_pid_by_tag_and_refreshes_rejected_aut
         process = await client.open_process("sbx-vm", "sleep 1")
 
         assert await process.wait() == 0
-        assert len(process_tags) == 1
-        assert process_tags[0].startswith("prime-sdk-")
-        assert discovery_tokens == ["Bearer stale", "Bearer fresh"]
-        assert connected_pids == [42]
+        # The PID was never observed, so recovery re-issues Start; the shared
+        # session_uuid turns the retries into create-or-attach instead of respawns.
+        assert len(start_requests) == 3
+        assert len({request.session_uuid for request in start_requests}) == 1
+        assert start_requests[0].session_uuid
+        assert retry_tokens == ["Bearer stale", "Bearer fresh"]
         assert cache.invalidations == 1
         await process.aclose()
     finally:

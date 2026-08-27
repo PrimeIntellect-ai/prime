@@ -1,6 +1,6 @@
 """Command-session RPC helpers."""
 
-from typing import Dict, List, Literal, Optional, Protocol, Sequence, cast
+from typing import Dict, List, Literal, Optional, Protocol, cast
 
 from connectrpc.method import IdempotencyLevel, MethodInfo
 from google.protobuf.message import Message
@@ -18,12 +18,12 @@ class _CommandSpecFactory(Protocol):
 
 class _CommandSessionStartRequestFactory(Protocol):
     def __call__(
-        self, *, command: _CommandSpecLike, stdin: bool, tag: str | None = None
+        self, *, command: _CommandSpecLike, stdin: bool, session_uuid: str | None = None
     ) -> Message: ...
 
 
 class _CommandSessionSelectorFactory(Protocol):
-    def __call__(self, *, pid: int) -> Message: ...
+    def __call__(self, *, session_uuid: str) -> Message: ...
 
 
 class _CommandInputFactory(Protocol):
@@ -31,7 +31,7 @@ class _CommandInputFactory(Protocol):
 
 
 class _CommandSessionSendInputRequestFactory(Protocol):
-    def __call__(self, *, session: Message, input: Message) -> Message: ...
+    def __call__(self, *, session: Message, input: Message, input_uuid: str) -> Message: ...
 
 
 class _CommandSessionSendSignalRequestFactory(Protocol):
@@ -40,15 +40,6 @@ class _CommandSessionSendSignalRequestFactory(Protocol):
 
 class _CommandSessionConnectRequestFactory(Protocol):
     def __call__(self, *, session: Message) -> Message: ...
-
-
-class _CommandSessionInfoLike(Protocol):
-    pid: int
-    tag: str
-
-
-class _CommandSessionListResponseLike(Protocol):
-    sessions: Sequence[_CommandSessionInfoLike]
 
 
 class _CommandSessionDataEventLike(Protocol):
@@ -105,12 +96,6 @@ _COMMAND_SESSION_CONNECT_REQUEST_TYPE = cast(
 _COMMAND_SESSION_CONNECT_RESPONSE_TYPE = cast(
     type[Message], getattr(command_session_pb2, "ConnectResponse")
 )
-_COMMAND_SESSION_LIST_REQUEST_TYPE = cast(
-    type[Message], getattr(command_session_pb2, "ListRequest")
-)
-_COMMAND_SESSION_LIST_RESPONSE_TYPE = cast(
-    type[Message], getattr(command_session_pb2, "ListResponse")
-)
 _COMMAND_SESSION_START_REQUEST_FACTORY = cast(
     _CommandSessionStartRequestFactory, _COMMAND_SESSION_START_REQUEST_TYPE
 )
@@ -164,14 +149,6 @@ COMMAND_SESSION_CONNECT_RPC_METHOD = MethodInfo(
     idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
 )
 
-COMMAND_SESSION_LIST_RPC_METHOD = MethodInfo(
-    name="List",
-    service_name="command_session.CommandSession",
-    input=_COMMAND_SESSION_LIST_REQUEST_TYPE,
-    output=_COMMAND_SESSION_LIST_RESPONSE_TYPE,
-    idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
-)
-
 
 def build_command_session_start_request(
     command: str,
@@ -179,7 +156,7 @@ def build_command_session_start_request(
     env: Optional[Dict[str, str]],
     *,
     stdin: bool = False,
-    tag: str | None = None,
+    session_uuid: str | None = None,
 ) -> Message:
     command_spec = _COMMAND_SPEC_FACTORY(
         cmd="/bin/bash",
@@ -192,41 +169,35 @@ def build_command_session_start_request(
     return _COMMAND_SESSION_START_REQUEST_FACTORY(
         command=command_spec,
         stdin=stdin,
-        tag=tag,
+        session_uuid=session_uuid,
     )
 
 
-def build_command_session_connect_request(pid: int) -> Message:
+def build_command_session_connect_request(session_uuid: str) -> Message:
     return _COMMAND_SESSION_CONNECT_REQUEST_FACTORY(
-        session=_COMMAND_SESSION_SELECTOR_FACTORY(pid=pid)
+        session=_COMMAND_SESSION_SELECTOR_FACTORY(session_uuid=session_uuid)
     )
 
 
-def build_command_session_list_request() -> Message:
-    return _COMMAND_SESSION_LIST_REQUEST_TYPE()
-
-
-def find_command_session_pid(response: Message, tag: str) -> int | None:
-    sessions = cast(_CommandSessionListResponseLike, response).sessions
-    return next((int(session.pid) for session in sessions if session.tag == tag), None)
-
-
-def build_command_session_send_input_request(pid: int, data: bytes) -> Message:
+def build_command_session_send_input_request(
+    session_uuid: str, data: bytes, input_uuid: str
+) -> Message:
     return _COMMAND_SESSION_SEND_INPUT_REQUEST_FACTORY(
-        session=_COMMAND_SESSION_SELECTOR_FACTORY(pid=pid),
+        session=_COMMAND_SESSION_SELECTOR_FACTORY(session_uuid=session_uuid),
         input=_COMMAND_INPUT_FACTORY(stdin=data),
+        input_uuid=input_uuid,
     )
 
 
 def build_command_session_send_signal_request(
-    pid: int, signal: Literal["terminate", "kill"]
+    session_uuid: str, signal: Literal["terminate", "kill"]
 ) -> Message:
     signal_value = getattr(
         command_session_pb2,
         "SIGNAL_SIGTERM" if signal == "terminate" else "SIGNAL_SIGKILL",
     )
     return _COMMAND_SESSION_SEND_SIGNAL_REQUEST_FACTORY(
-        session=_COMMAND_SESSION_SELECTOR_FACTORY(pid=pid),
+        session=_COMMAND_SESSION_SELECTOR_FACTORY(session_uuid=session_uuid),
         signal=signal_value,
     )
 

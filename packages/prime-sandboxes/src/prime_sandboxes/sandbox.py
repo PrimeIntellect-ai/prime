@@ -88,17 +88,14 @@ from .models import (
 from .process import AsyncSandboxProcess
 from .rpc_command_session import (
     COMMAND_SESSION_CONNECT_RPC_METHOD,
-    COMMAND_SESSION_LIST_RPC_METHOD,
     COMMAND_SESSION_SEND_INPUT_RPC_METHOD,
     COMMAND_SESSION_SEND_SIGNAL_RPC_METHOD,
     COMMAND_SESSION_START_RPC_METHOD,
     build_command_session_connect_request,
-    build_command_session_list_request,
     build_command_session_send_input_request,
     build_command_session_send_signal_request,
     build_command_session_start_request,
     collect_command_session_start_event,
-    find_command_session_pid,
 )
 
 # Connection-level errors: request never reached the server, so retry is safe
@@ -118,9 +115,12 @@ GATEWAY_CONNECTION_RETRYABLE_EXCEPTIONS = (
 _LIVE_PROCESS_TIMEOUT_MS = 24 * 60 * 60 * 1000
 _PROCESS_INPUT_TIMEOUT_MS = 30_000
 _PROCESS_SIGNAL_TIMEOUT_MS = 10_000
-_PROCESS_DISCOVERY_TIMEOUT_MS = 10_000
 _LIVE_PROCESS_TCP_KEEPALIVE_SECONDS = 15.0
 _LIVE_PROCESS_POOL_IDLE_TIMEOUT_SECONDS = 300.0
+
+# Live-process control RPC retry budget (see _execute_process_control_rpc).
+_PROCESS_CONTROL_RPC_ATTEMPTS = 3
+_PROCESS_CONTROL_RETRY_INITIAL_DELAY = 0.5
 _BACKGROUND_JOB_LAUNCH_ATTEMPTS = 3
 _BACKGROUND_JOB_LAUNCH_BACKOFF_SECONDS = 0.5
 _BACKGROUND_JOB_LAUNCH_TIMEOUT_SECONDS = 30
@@ -367,6 +367,18 @@ def _creation_timeout_seconds(max_attempts: int) -> float:
     if max_attempts <= _LEGACY_FAST_POLLS:
         return float(max_attempts)
     return float(_LEGACY_FAST_POLLS + (max_attempts - _LEGACY_FAST_POLLS) * 2)
+
+
+def _is_transient_connect_error(error: ConnectError) -> bool:
+    """Whether a Connect-RPC fault is a link hiccup rather than a definitive answer.
+
+    Anything else (NOT_FOUND, FAILED_PRECONDITION, ...) fails fast. INTERNAL
+    "Error reading content" is a broken response-body read, the same transient
+    class as UNAVAILABLE "... timed out" (both observed in production).
+    """
+    if error.code in (Code.DEADLINE_EXCEEDED, Code.UNAVAILABLE):
+        return True
+    return error.code == Code.INTERNAL and "error reading content" in (error.message or "").lower()
 
 
 def _is_retryable_gateway_error(exc: BaseException) -> bool:
@@ -2670,9 +2682,9 @@ class AsyncSandboxClient:
 
         The returned handle streams stdout and stderr, accepts stdin writes,
         waits for the exit code, and can signal the process. Container sandboxes
-        do not expose this transport and fail fast. If the initial stream drops
-        before reporting a PID, recovery can find the session only while it is
-        still running because sandboxd does not retain completed sessions.
+        do not expose this transport and fail fast. If the stream drops, the SDK
+        re-attaches by the session's idempotency key; sandboxd retains exited
+        sessions briefly, so even an exit missed while detached is replayed.
         """
         await self._auth_cache.get_or_refresh(sandbox_id)
         if not await self._auth_cache.is_vm(sandbox_id):
@@ -2698,15 +2710,16 @@ class AsyncSandboxClient:
             send_compression=None,
             http_client=http_client,
         )
-        # The SDK tag lets reconnect find a Start whose PID response was lost. Remove tag/List
-        # recovery once sandboxd provides idempotent Start/create-or-attach semantics.
-        process_tag = f"prime-sdk-{uuid.uuid4().hex}"
+        # session_uuid is the Start idempotency key: re-issuing the same request
+        # attaches to (or replays) the session instead of spawning a second
+        # process. The server requires the canonical UUID form.
+        session_uuid = str(uuid.uuid4())
         request = build_command_session_start_request(
             command,
             working_dir,
             env,
             stdin=True,
-            tag=process_tag,
+            session_uuid=session_uuid,
         )
         stream = rpc_client.execute_server_stream(
             request=request,
@@ -2715,27 +2728,28 @@ class AsyncSandboxClient:
             timeout_ms=_LIVE_PROCESS_TIMEOUT_MS,
         )
 
-        async def write_stdin(pid: int, data: bytes) -> None:
+        async def write_stdin(data: bytes) -> None:
+            # input_uuid is minted once per logical write; retries reuse it verbatim.
             await self._execute_process_control_rpc(
                 sandbox_id,
-                build_command_session_send_input_request(pid, data),
+                build_command_session_send_input_request(session_uuid, data, str(uuid.uuid4())),
                 COMMAND_SESSION_SEND_INPUT_RPC_METHOD,
                 _PROCESS_INPUT_TIMEOUT_MS,
                 "stdin",
                 http_client=http_client,
             )
 
-        async def send_signal(pid: int, signal: Literal["terminate", "kill"]) -> None:
+        async def send_signal(signal: Literal["terminate", "kill"]) -> None:
             await self._execute_process_control_rpc(
                 sandbox_id,
-                build_command_session_send_signal_request(pid, signal),
+                build_command_session_send_signal_request(session_uuid, signal),
                 COMMAND_SESSION_SEND_SIGNAL_RPC_METHOD,
                 _PROCESS_SIGNAL_TIMEOUT_MS,
                 "signal",
                 http_client=http_client,
             )
 
-        async def reconnect(pid: int | None) -> AsyncIterator[Message]:
+        async def reconnect(started: bool) -> AsyncIterator[Message]:
             reauthed = False
             while True:
                 auth = await self._auth_cache.get_or_refresh(sandbox_id)
@@ -2746,20 +2760,19 @@ class AsyncSandboxClient:
                     send_compression=None,
                     http_client=http_client,
                 )
+                # Before a StartEvent it is unknown whether the process was ever
+                # spawned, so retry Start (create-or-attach); afterwards Connect
+                # re-attaches, replaying the EndEvent if the process has exited.
+                if started:
+                    method = COMMAND_SESSION_CONNECT_RPC_METHOD
+                    reattach_request = build_command_session_connect_request(session_uuid)
+                else:
+                    method = COMMAND_SESSION_START_RPC_METHOD
+                    reattach_request = request
                 try:
-                    if pid is None:
-                        sessions = await client.execute_unary(
-                            request=build_command_session_list_request(),
-                            method=COMMAND_SESSION_LIST_RPC_METHOD,
-                            headers={"Authorization": f"Bearer {auth['token']}"},
-                            timeout_ms=_PROCESS_DISCOVERY_TIMEOUT_MS,
-                        )
-                        pid = find_command_session_pid(sessions, process_tag)
-                        if pid is None:
-                            raise ConnectError(Code.NOT_FOUND, "live process not found")
                     stream = client.execute_server_stream(
-                        request=build_command_session_connect_request(pid),
-                        method=COMMAND_SESSION_CONNECT_RPC_METHOD,
+                        request=reattach_request,
+                        method=method,
                         headers={"Authorization": f"Bearer {auth['token']}"},
                         timeout_ms=_LIVE_PROCESS_TIMEOUT_MS,
                     )
@@ -2794,8 +2807,15 @@ class AsyncSandboxClient:
         operation: str,
         http_client: Optional[HTTPClient] = None,
     ) -> None:
-        """Run one live-process control RPC with current sandbox auth."""
+        """Run one live-process control RPC with current sandbox auth.
+
+        Transient faults are retried with backoff. Retries are safe on sandboxd
+        builds with idempotent command sessions: requests address the session by
+        UUID, a duplicated stdin write is deduplicated by its input_uuid, and a
+        repeated signal is harmless.
+        """
         reauthed = False
+        failures = 0
         while True:
             auth = await self._auth_cache.get_or_refresh(sandbox_id)
             gateway_url = auth["gateway_url"].rstrip("/")
@@ -2820,6 +2840,10 @@ class AsyncSandboxClient:
                     sandbox_id, reauthed
                 ):
                     reauthed = True
+                    continue
+                failures += 1
+                if failures < _PROCESS_CONTROL_RPC_ATTEMPTS and _is_transient_connect_error(error):
+                    await asyncio.sleep(_PROCESS_CONTROL_RETRY_INITIAL_DELAY * 2 ** (failures - 1))
                     continue
                 raise APIError(
                     f"process {operation} RPC failed ({error.code.value}): {error.message}"

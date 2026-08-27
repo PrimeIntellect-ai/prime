@@ -258,33 +258,78 @@ def test_logging_that_started_first_is_queued_before_concurrent_finish():
     backend = SignalingBackend()
     sink = FakeSink()
     run = make_run(backend, sinks=[sink])
-    iteration_started = threading.Event()
-    release_record = threading.Event()
+    submit_started = threading.Event()
+    release_submit = threading.Event()
     finish_called = threading.Event()
+    original_submit = run._worker.submit
 
-    def records():
-        iteration_started.set()
-        assert release_record.wait(2.0)
-        yield {"id": "t1"}
+    def blocking_submit(records):
+        submit_started.set()
+        assert release_submit.wait(2.0)
+        return original_submit(records)
+
+    run._worker.submit = blocking_submit
 
     def finish_run() -> None:
         finish_called.set()
         run.finish()
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        logging = executor.submit(run.log_traces, records())
-        assert iteration_started.wait(2.0)
+        logging = executor.submit(run.log_traces, [{"id": "t1"}])
+        assert submit_started.wait(2.0)
         finishing = executor.submit(finish_run)
         assert finish_called.wait(2.0)
         try:
             assert not backend.finalize_started.wait(0.1)
         finally:
-            release_record.set()
+            release_submit.set()
         logging.result(timeout=2.0)
         finishing.result(timeout=2.0)
 
     assert sink.batches == [[{"id": "t1"}]]
     assert sink.closed is True
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        lambda run: run.log_traces([{"id": "t1"}]),
+        lambda run: run.log_episodes([{"id": "ep1", "traces": []}]),
+        lambda run: run.update_summary({"reward": 1.0}),
+    ],
+    ids=["traces", "episodes", "summary"],
+)
+def test_writes_during_finish_fail_without_waiting_for_teardown(operation):
+    class BlockingBackend(FakeBackend):
+        def __init__(self) -> None:
+            super().__init__()
+            self.finalize_started = threading.Event()
+            self.release_finalize = threading.Event()
+
+        def finalize(self, run_id, *, status, summary=None, error=None, config=None) -> None:
+            self.finalize_started.set()
+            assert self.release_finalize.wait(2.0)
+            super().finalize(
+                run_id,
+                status=status,
+                summary=summary,
+                error=error,
+                config=config,
+            )
+
+    backend = BlockingBackend()
+    run = make_run(backend)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        finishing = executor.submit(run.finish)
+        assert backend.finalize_started.wait(2.0)
+        writing = executor.submit(operation, run)
+        try:
+            with pytest.raises(RunFinishedError):
+                writing.result(timeout=0.2)
+        finally:
+            backend.release_finalize.set()
+        finishing.result(timeout=2.0)
 
 
 def test_the_context_manager_completes_a_clean_run():

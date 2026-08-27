@@ -80,6 +80,10 @@ class Run:
         self._deferred_error: Optional[BaseException] = None
 
         self._finish_timeout = DEFAULT_FINISH_TIMEOUT
+        # Guards only the transition from accepting writes to finishing. It is
+        # deliberately separate from _finish_lock, which is held through slow
+        # network teardown so concurrent finish callers wait for completion.
+        self._state_lock = threading.Lock()
         self._finish_lock = threading.Lock()
         self._finishing = False
         self._finished = False
@@ -177,12 +181,14 @@ class Run:
         self._submit("log_episodes", episodes)
 
     def _submit(self, operation: str, records: Iterable[Any]) -> None:
-        # Finish holds the same lock through worker teardown. A log call either
-        # queues its batch first or observes that the run is already closing;
-        # it can never restart the worker between those two states.
-        with self._finish_lock:
+        # Refuse an already-finished run without consuming a lazy iterable.
+        self._require_live(operation)
+        batch = list(records)
+        # Finish holds this short-lived lock only while closing admission. A
+        # log call queues first or observes that teardown has begun, without
+        # waiting behind the slow flush/finalize path.
+        with self._state_lock:
             self._require_live(operation)
-            batch = list(records)
             if batch:
                 self._worker.submit(batch)
 
@@ -192,7 +198,7 @@ class Run:
         Non-finite numbers are dropped here, as they are for
         ``finish(summary=...)``; writing to ``summary`` directly skips that.
         """
-        with self._finish_lock:
+        with self._state_lock:
             self._require_live("update_summary")
             self.summary.update(_clean_metrics(values))
 
@@ -220,12 +226,14 @@ class Run:
             resolved = RunStatus(status) if not isinstance(status, RunStatus) else status
             if not resolved.is_terminal():
                 raise ValueError(f"finish() requires a terminal status, got {resolved.value!r}")
-            self._finishing = True
+            with self._state_lock:
+                self._finishing = True
             try:
                 self._finish_once(summary, resolved, error)
             finally:
-                self._finishing = False
-                self._finished = True
+                with self._state_lock:
+                    self._finishing = False
+                    self._finished = True
 
     def _finish_once(
         self,
@@ -329,6 +337,7 @@ class Run:
         """Make an inherited handle safe in a forked child: fresh lock, and the
         parent keeps ownership of the lifecycle so the child's atexit hook
         cannot finalize a still-running run."""
+        self._state_lock = threading.Lock()
         self._finish_lock = threading.Lock()
         self._finishing = False
         self._owns_lifecycle = False

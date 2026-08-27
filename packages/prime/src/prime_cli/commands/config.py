@@ -15,6 +15,7 @@ from prime_cli.core.config import (
     CONFIG_DIR_NAME,
     CONFIG_FILE_NAME,
     is_global_config_dir,
+    is_owned_by_current_user,
     is_trusted_local_config,
     trust_local_config,
     untrust_local_config,
@@ -133,6 +134,12 @@ def new_local_config() -> Config:
     """
     config_dir = Path.cwd() / CONFIG_DIR_NAME
     config_file = config_dir / CONFIG_FILE_NAME
+    if config_file.exists() and not is_owned_by_current_user(config_file):
+        console.print(
+            f"[red]{config_file} is not owned by you; refusing to write credentials into it. "
+            "Remove it (or fix its ownership) before using --local.[/red]"
+        )
+        raise typer.Exit(1)
     # From the home directory, --local simply means the global config, which is
     # trusted as such and never in the registry.
     if (

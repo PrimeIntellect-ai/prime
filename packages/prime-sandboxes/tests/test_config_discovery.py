@@ -126,6 +126,15 @@ def test_prime_config_dir_env_var_beats_discovery(tmp_path, monkeypatch):
     assert config.api_key == "explicit-key"
 
 
+def test_trust_requires_ownership_even_with_matching_digest(tmp_path, monkeypatch):
+    project = tmp_path / "proj"
+    local = _write(project / ".prime", api_key="local-key")
+    real_uid = os.getuid()
+    monkeypatch.setattr(os, "getuid", lambda: real_uid + 1)
+
+    assert not config_module.is_trusted_local_config(local)
+
+
 def test_ignores_local_config_owned_by_another_user(tmp_path, monkeypatch):
     project = tmp_path / "proj"
     _write(project / ".prime", api_key="planted-key")

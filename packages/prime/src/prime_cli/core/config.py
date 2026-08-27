@@ -55,6 +55,11 @@ def _owned_by_current_user(path: Path) -> bool:
         return False
 
 
+def is_owned_by_current_user(path: Path) -> bool:
+    """Public form of the ownership check used by discovery and the --local guard."""
+    return _owned_by_current_user(path)
+
+
 def _file_digest(path: Path) -> str | None:
     try:
         return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
@@ -91,6 +96,10 @@ def is_trusted_local_config(config_file: Path) -> bool:
     (`prime login --local`, `prime config set-api-key --local`) are trusted
     as part of the write.
     """
+    if not _owned_by_current_user(config_file):
+        # A trusted path swapped for someone else's file (same bytes or not)
+        # is not the file the user approved.
+        return False
     digest = _file_digest(config_file)
     if digest is None:
         return False
@@ -195,8 +204,33 @@ def _warn_untrusted(untrusted: list[Path]) -> None:
         )
 
 
+def _refuse_unless_owned(path: Path) -> None:
+    """Refuse to write into a file (or through a symlink) the current user doesn't own.
+
+    On a shared machine someone with write access to the directory could swap
+    the file for their own, or for a symlink pointing anywhere; O_TRUNC would
+    then hand them the secret or clobber the target. A brand-new path is fine.
+    Windows has no uid model; the check is skipped there.
+    """
+    getuid = getattr(os, "getuid", None)
+    if getuid is None:
+        return
+    try:
+        stats = [path.lstat()]
+    except FileNotFoundError:
+        return
+    if path.is_symlink():
+        try:
+            stats.append(path.stat())
+        except FileNotFoundError:
+            pass  # dangling symlink owned by the user: creating the target is intended
+    if any(st.st_uid != getuid() for st in stats):
+        raise PermissionError(f"Refusing to write {path}: it is not owned by the current user")
+
+
 def _write_private_json(path: Path, data: dict) -> None:
     """Write JSON readable only by the owner; these files hold API keys."""
+    _refuse_unless_owned(path)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
         f.write(json.dumps(data, indent=2))

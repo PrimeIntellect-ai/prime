@@ -12,6 +12,7 @@ from prime_cli.core import config as config_module
 from prime_cli.core.config import (
     Config,
     find_local_config_dir,
+    is_trusted_local_config,
     load_trusted_configs,
     trust_local_config,
 )
@@ -278,6 +279,65 @@ def test_adopt_urls_copies_service_urls_but_not_credentials(home: Path, project:
     assert config.api_key == ""
 
 
+def test_trust_requires_ownership_even_with_matching_digest(
+    home: Path, project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A trusted path replaced by someone else's file with the same bytes is not trusted."""
+    write_config(project / ".prime", api_key="local-key")
+    real_uid = os.getuid()
+    monkeypatch.setattr(os, "getuid", lambda: real_uid + 1)
+
+    assert not is_trusted_local_config(project / ".prime" / "config.json")
+
+
+def test_writes_refuse_files_owned_by_another_user(
+    home: Path, project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    local = write_config(project / ".prime", api_key="local-key")
+    before = local.read_text()
+    config = Config(config_dir=project / ".prime")
+    real_uid = os.getuid()
+    monkeypatch.setattr(os, "getuid", lambda: real_uid + 1)
+
+    with pytest.raises(PermissionError, match="not owned"):
+        config.set_api_key("stolen")
+
+    assert local.read_text() == before
+
+
+def test_writes_refuse_symlinks_owned_by_another_user(
+    home: Path, project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A planted symlink must not turn O_TRUNC into a write to wherever it points."""
+    (project / ".prime").mkdir(parents=True)
+    target = tmp_path / "victim.json"
+    target.write_text(json.dumps({"api_key": "precious"}))
+    (project / ".prime" / "config.json").symlink_to(target)
+    config = Config(config_dir=project / ".prime")
+    real_uid = os.getuid()
+    monkeypatch.setattr(os, "getuid", lambda: real_uid + 1)
+
+    with pytest.raises(PermissionError, match="not owned"):
+        config.set_api_key("x")
+
+    assert json.loads(target.read_text()) == {"api_key": "precious"}
+
+
+def test_writes_follow_symlinks_the_user_owns(home: Path, project: Path, tmp_path: Path) -> None:
+    """Dotfile-style symlinked configs keep working."""
+    (project / ".prime").mkdir(parents=True)
+    target = tmp_path / "dotfiles" / "prime.json"
+    target.parent.mkdir()
+    target.write_text(json.dumps({"api_key": "old"}))
+    link = project / ".prime" / "config.json"
+    link.symlink_to(target)
+
+    Config(config_dir=project / ".prime").set_api_key("new")
+
+    assert link.is_symlink()
+    assert json.loads(target.read_text())["api_key"] == "new"
+
+
 def test_global_config_file_is_created_private(home: Path) -> None:
     config = Config()
 
@@ -418,6 +478,22 @@ class TestCli:
         assert planted.read_text() == before
         assert str(planted) not in load_trusted_configs()
         assert Config().config_source == "global"
+
+    def test_local_refuses_existing_file_owned_by_another_user(
+        self, home: Path, project: Path, no_network: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Even a previously trusted path, if swapped for someone else's file."""
+        planted = write_config(project / ".prime", api_key="theirs")
+        before = planted.read_text()
+        monkeypatch.chdir(project)
+        real_uid = os.getuid()
+        monkeypatch.setattr(os, "getuid", lambda: real_uid + 1)
+
+        result = runner.invoke(app, ["config", "set-api-key", "--local", "k"], env=TEST_ENV)
+
+        assert result.exit_code == 1, result.output
+        assert "not owned by you" in result.output
+        assert planted.read_text() == before
 
     def test_local_updates_existing_trusted_file(
         self, home: Path, project: Path, no_network: None, monkeypatch: pytest.MonkeyPatch

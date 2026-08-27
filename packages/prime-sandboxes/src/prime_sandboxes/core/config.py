@@ -69,6 +69,10 @@ def is_trusted_local_config(config_file: Path) -> bool:
     the approval is tied to a content digest — if the file changes it has to
     be trusted again. The SDK only reads the registry; the CLI maintains it.
     """
+    if not _owned_by_current_user(config_file):
+        # A trusted path swapped for someone else's file (same bytes or not)
+        # is not the file the user approved.
+        return False
     digest = _file_digest(config_file)
     if digest is None:
         return False

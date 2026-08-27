@@ -17,6 +17,7 @@ class Config:
     """
 
     DEFAULT_BASE_URL: str = "https://api.primeintellect.ai"
+    DEFAULT_TRACES_URL: str = "https://prime-traces.pintel.dev"
 
     def __init__(self) -> None:
         self.config_dir = Path.home() / ".prime"
@@ -66,12 +67,11 @@ class Config:
     def traces_url(self) -> str:
         """Base URL of the Prime Traces service.
 
-        Prime Traces is a separately deployed service, so it gets its own
-        override: precedence is PRIME_TRACES_URL > config "traces_url" >
-        the platform base URL. The fallback assumes the service is
-        path-routed under the platform domain; whether production uses that
-        or a dedicated domain is still an open deployment decision, and this
-        property is the single place that absorbs it.
+        Prime Traces is deployed on its own domain, not path-routed under the
+        platform API: ``{base_url}/api/v1/traces`` does not exist, and a client
+        pointed there gets a 404 for every request. So the fallback is the
+        service's own production URL, never ``base_url``. Precedence is
+        PRIME_TRACES_URL > config "traces_url" > DEFAULT_TRACES_URL.
 
         For local development against the service's compose stack:
         PRIME_TRACES_URL=http://localhost:8083
@@ -82,4 +82,4 @@ class Config:
         file_val = self.config.get("traces_url")
         if file_val:
             return self._strip_api_v1(file_val)
-        return self.base_url
+        return self.DEFAULT_TRACES_URL

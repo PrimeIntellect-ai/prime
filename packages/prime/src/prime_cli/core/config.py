@@ -410,12 +410,15 @@ class Config:
     def _environment_file_is_trusted(self, env_file: Path) -> bool:
         """Whether an environment file may be loaded from this config.
 
-        Only a *discovered* local config needs the check: its config.json was
-        vetted by digest, but a repository update can rewrite an environment
-        file while leaving config.json untouched. Explicit config dirs and
-        the global one are trusted as such.
+        Project configs need the check whether discovered or reached via
+        `Config.local()`: config.json is vetted by digest (or refused up
+        front), but a repository update can rewrite an environment file while
+        leaving config.json untouched. Mirrors `_record_trust`. The global
+        config and an explicit PRIME_CONFIG_DIR are trusted as such.
         """
-        return self.config_source != "local" or is_trusted_local_file(env_file)
+        if self.is_global or self.config_source not in ("local", "explicit"):
+            return True
+        return is_trusted_local_file(env_file)
 
     @property
     def api_key(self) -> str:
@@ -575,6 +578,12 @@ class Config:
             sanitized = self._sanitize_environment_name(selected_environment)
             env_file = self.environments_dir / f"{sanitized}.json"
             if env_file.exists():
+                # Read-modify-write would launder a rewritten file into trust.
+                if not self._environment_file_is_trusted(env_file):
+                    raise ValueError(
+                        f"Environment file {env_file} is not trusted; review it and run "
+                        f"'prime config trust {self.config_dir.parent}' first"
+                    )
                 env_config = json.loads(env_file.read_text())
                 if not isinstance(env_config, dict):
                     raise ValueError(f"Invalid configuration in {env_file}")

@@ -414,6 +414,42 @@ class TestLocalEnvironments:
         assert result.exit_code == 1, result.output
         assert "Error: Environment file" in result.output
 
+    def test_login_local_ignores_planted_environment_file(
+        self, home: Path, project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Config.local() is 'explicit', which must gate environment files like 'local'."""
+        self.write_env(project, "dev", base_url="https://evil.example")
+        monkeypatch.chdir(project)
+        monkeypatch.setenv("PRIME_CONTEXT", "dev")
+        posted: list[str] = []
+
+        def record(url: str, *args: object, **kwargs: object) -> None:
+            posted.append(url)
+            raise httpx.ConnectError("offline")
+
+        monkeypatch.setattr("prime_cli.commands.login.httpx.post", record)
+
+        result = runner.invoke(app, ["login", "--local", "--headless"], env=TEST_ENV)
+
+        assert result.exit_code == 1
+        assert posted and all("evil.example" not in url for url in posted), posted
+        assert posted[0].startswith(Config.DEFAULT_BASE_URL)
+
+    def test_set_traces_url_refuses_to_launder_untrusted_environment_file(
+        self, home: Path, project: Path
+    ) -> None:
+        write_config(project / ".prime", api_key="local-key", current_environment="dev")
+        env_file = self.write_env(project, "dev", base_url="https://evil.example")
+        before = env_file.read_text()
+
+        result = runner.invoke(
+            app, ["config", "set-traces-url", "https://traces.example"], env=TEST_ENV
+        )
+
+        assert result.exit_code != 0, result.output
+        assert env_file.read_text() == before
+        assert str(env_file) not in load_trusted_configs()
+
     def test_global_config_environments_need_no_trust(
         self, home: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

@@ -46,6 +46,12 @@ jobs:
             echo "Tag $TAG does not exist"
           fi
 
+      - name: Refuse untagged releases outside main
+        if: github.event_name == 'workflow_dispatch' && steps.check_tag.outputs.exists != 'true' && github.ref != 'refs/heads/main'
+        run: |
+          echo "::error title=Invalid release ref::New prime-runs releases must be dispatched from main, not ${{ github.ref }}."
+          exit 1
+
       # A forced release must build the tagged source, not whatever the
       # dispatch ref currently points at.
       - name: Check out existing tag

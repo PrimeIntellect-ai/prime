@@ -477,7 +477,7 @@ def _resolve_mode(mode: Optional[Mode], *, api_key: str) -> Mode:
 def _sink_context(spec: RunSpec) -> Dict[str, str]:
     """Upload-scoped provenance. Not the join key — that is ``run.id`` inside
     the trace document."""
-    context = {"source": "prime-runs", "run_kind": RUN_KIND}
+    context = {"source": "prime-runs", "run_type": RUN_KIND}
     if spec.framework:
         context["framework"] = spec.framework
     if spec.model:

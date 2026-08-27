@@ -71,6 +71,7 @@ def test_sinks_are_started_with_the_run_id_and_provenance():
     assert run_id == "run-1"
     # Provenance only — the join key is run.id inside the trace document.
     assert context["source"] == "prime-runs"
+    assert context["run_type"] == "eval"
     assert context["framework"] == "verifiers"
     assert "evaluation_id" not in context
     run.finish()

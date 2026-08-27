@@ -26,7 +26,7 @@ class FakeTracesClient:
 
 def make_sink(client=None, **kwargs) -> TracesSink:
     sink = TracesSink(client=client or FakeTracesClient(), **kwargs)
-    sink.start("run-1", {"source": "prime-runs", "run_kind": "eval", "framework": "verifiers"})
+    sink.start("run-1", {"source": "prime-runs", "run_type": "eval", "framework": "verifiers"})
     return sink
 
 
@@ -41,7 +41,7 @@ def test_records_go_out_with_provenance_but_not_the_join_key():
     _, kwargs = client.calls[0]
     assert kwargs["context"] == {
         "source": "prime-runs",
-        "run_kind": "eval",
+        "run_type": "eval",
         "framework": "verifiers",
     }
     assert "run_id" not in kwargs["context"]
@@ -219,6 +219,6 @@ def test_a_missing_traces_client_disables_the_sink_and_reports_the_failure(monke
 
     with caplog.at_level("WARNING"):
         with pytest.raises(RuntimeError, match="no credentials"):
-            sink.start("run-1", {"run_kind": "eval"})
+            sink.start("run-1", {"run_type": "eval"})
 
     assert sink.enabled is False

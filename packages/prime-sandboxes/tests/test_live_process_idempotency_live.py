@@ -162,9 +162,7 @@ async def test_start_retry_attaches_not_respawns(client, vm):
 async def test_input_uuid_duplicate_single_write(client, vm):
     """A byte-identical SendInput resend (same input_uuid) is applied once."""
     out = f"/tmp/live-b-{uuid.uuid4().hex[:8]}"
-    process, session_uuid = await _open_process_recording_session_uuid(
-        client, vm, f"cat >> {out}"
-    )
+    process, session_uuid = await _open_process_recording_session_uuid(client, vm, f"cat >> {out}")
     try:
         request = build_command_session_send_input_request(
             session_uuid=session_uuid,

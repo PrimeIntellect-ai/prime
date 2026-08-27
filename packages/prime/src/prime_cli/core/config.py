@@ -569,27 +569,33 @@ class Config:
             not context_override or root_environment.casefold() == selected_environment.casefold()
         )
 
+        # Validate everything before the first write so a refusal leaves no
+        # half-applied state (root updated, environment file not).
+        env_file: Path | None = None
+        if selected_environment != "production":
+            sanitized = self._sanitize_environment_name(selected_environment)
+            env_file = self.environments_dir / f"{sanitized}.json"
+            if not env_file.exists():
+                env_file = None
+            elif not self._environment_file_is_trusted(env_file):
+                # Read-modify-write would launder a rewritten file into trust.
+                raise ValueError(
+                    f"Environment file {env_file} is not trusted; review it and run "
+                    f"'prime config trust {self.config_dir.parent}' first"
+                )
+
         if update_root:
             root_config["traces_url"] = traces_url
             _write_private_json(self.config_file, root_config)
             self._record_trust()
 
-        if selected_environment != "production":
-            sanitized = self._sanitize_environment_name(selected_environment)
-            env_file = self.environments_dir / f"{sanitized}.json"
-            if env_file.exists():
-                # Read-modify-write would launder a rewritten file into trust.
-                if not self._environment_file_is_trusted(env_file):
-                    raise ValueError(
-                        f"Environment file {env_file} is not trusted; review it and run "
-                        f"'prime config trust {self.config_dir.parent}' first"
-                    )
-                env_config = json.loads(env_file.read_text())
-                if not isinstance(env_config, dict):
-                    raise ValueError(f"Invalid configuration in {env_file}")
-                env_config["traces_url"] = traces_url
-                _write_private_json(env_file, env_config)
-                self._record_trust(env_file)
+        if env_file is not None:
+            env_config = json.loads(env_file.read_text())
+            if not isinstance(env_config, dict):
+                raise ValueError(f"Invalid configuration in {env_file}")
+            env_config["traces_url"] = traces_url
+            _write_private_json(env_file, env_config)
+            self._record_trust(env_file)
 
         self.config["traces_url"] = traces_url
 

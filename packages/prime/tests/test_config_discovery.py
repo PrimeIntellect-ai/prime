@@ -438,16 +438,17 @@ class TestLocalEnvironments:
     def test_set_traces_url_refuses_to_launder_untrusted_environment_file(
         self, home: Path, project: Path
     ) -> None:
-        write_config(project / ".prime", api_key="local-key", current_environment="dev")
+        root = write_config(project / ".prime", api_key="local-key", current_environment="dev")
         env_file = self.write_env(project, "dev", base_url="https://evil.example")
-        before = env_file.read_text()
+        before_env, before_root = env_file.read_text(), root.read_text()
 
         result = runner.invoke(
             app, ["config", "set-traces-url", "https://traces.example"], env=TEST_ENV
         )
 
         assert result.exit_code != 0, result.output
-        assert env_file.read_text() == before
+        assert env_file.read_text() == before_env
+        assert root.read_text() == before_root  # refused before any write, not half-applied
         assert str(env_file) not in load_trusted_configs()
 
     def test_global_config_environments_need_no_trust(

@@ -1,9 +1,11 @@
 """The legacy sample sink that keeps today's viewer working."""
 
+import httpx
 from _fakes import make_episode, make_trace
 from conftest import RecordingHandler
 
 from prime_runs.sinks import EvalSamplesSink
+from prime_runs.worker import UploadWorker
 
 
 def make_sink(make_platform_client, eval_routes):
@@ -81,3 +83,62 @@ def test_an_empty_batch_makes_no_request(make_platform_client, eval_routes):
     sink.write([])
 
     assert handler.requests == []
+
+
+def test_a_rejected_sample_batch_does_not_abort_later_batches(
+    make_platform_client, eval_routes, monkeypatch
+):
+    """One bad request must not hide valid rows later in the same worker batch."""
+    statuses = iter([200, 422, 200, 200])
+
+    def respond(request):
+        status = next(statuses)
+        return httpx.Response(status, json={"detail": "invalid sample"} if status == 422 else {})
+
+    eval_routes["POST /api/v1/evaluations/eval-abc/samples"] = respond
+    monkeypatch.setattr(
+        "prime_runs.sinks.samples.batch_samples",
+        lambda samples: [[sample] for sample in samples],
+    )
+    sink, handler = make_sink(make_platform_client, eval_routes)
+    worker = UploadWorker([sink])
+
+    worker.submit([{"sample_id": sample_id} for sample_id in ("a", "b", "c")])
+    assert worker.flush(timeout=5.0)
+    worker.submit([{"sample_id": "d"}])
+    assert worker.flush(timeout=5.0)
+
+    posted = handler.bodies_for("/api/v1/evaluations/eval-abc/samples")
+    assert [body["samples"][0]["sample_id"] for body in posted] == ["a", "b", "c", "d"]
+    assert sink.samples_written == 3
+    assert sink.enabled is True
+    assert worker.failed_records == {"eval_samples": 1}
+    worker.close()
+
+
+def test_a_sink_wide_failure_counts_only_current_and_unattempted_records(
+    make_platform_client, eval_routes, monkeypatch
+):
+    statuses = iter([200, 401])
+
+    def respond(request):
+        status = next(statuses)
+        return httpx.Response(status, json={"detail": "unauthorized"})
+
+    eval_routes["POST /api/v1/evaluations/eval-abc/samples"] = respond
+    monkeypatch.setattr(
+        "prime_runs.sinks.samples.batch_samples",
+        lambda samples: [[sample] for sample in samples],
+    )
+    sink, handler = make_sink(make_platform_client, eval_routes)
+    worker = UploadWorker([sink])
+
+    worker.submit([{"sample_id": sample_id} for sample_id in ("a", "b", "c")])
+    assert worker.flush(timeout=5.0)
+
+    posted = handler.bodies_for("/api/v1/evaluations/eval-abc/samples")
+    assert [body["samples"][0]["sample_id"] for body in posted] == ["a", "b"]
+    assert sink.samples_written == 1
+    assert sink.enabled is False
+    assert worker.failed_records == {"eval_samples": 2}
+    worker.close()

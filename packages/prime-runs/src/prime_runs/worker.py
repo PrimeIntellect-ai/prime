@@ -20,7 +20,7 @@ from typing import Any, Callable, Optional, Sequence
 
 from . import _fork
 from .exceptions import is_record_rejection, is_transient
-from .sinks.base import Sink
+from .sinks.base import Sink, SinkWriteError
 
 logger = logging.getLogger(__name__)
 
@@ -84,13 +84,18 @@ class UploadWorker:
 
     def start(self) -> None:
         with self._lock:
-            if self._thread is not None and self._thread.is_alive():
-                return
-            self._stopping.clear()
-            self._thread = threading.Thread(
-                target=self._run, name="prime-runs-uploader", daemon=True
-            )
-            self._thread.start()
+            self._start_locked()
+
+    def _start_locked(self) -> None:
+        """Start while ``_lock`` is held; a closed worker is one-shot."""
+        if self._stopping.is_set():
+            return
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(
+            target=self._run, name="prime-runs-uploader", daemon=True
+        )
+        self._thread.start()
 
     def _run(self) -> None:
         while True:
@@ -117,6 +122,8 @@ class UploadWorker:
                 continue
             try:
                 sink.write(records)
+            except SinkWriteError as exc:
+                self._fail_sink(sink, exc.cause, dropped=exc.failed_records)
             except Exception as exc:  # noqa: BLE001 - one sink failing must not stop the others
                 self._fail_sink(sink, exc, dropped=len(records))
             else:
@@ -198,25 +205,26 @@ class UploadWorker:
     def submit(self, records: Sequence[Any]) -> bool:
         """Hand a batch to the uploader. ``False`` means it was dropped: the
         queue stayed full for the whole put timeout."""
-        if self._stopping.is_set():
-            return False
-        thread = self._thread
-        if thread is None or not thread.is_alive():
-            self.start()
-        try:
-            self._queue.put(records, timeout=self.put_timeout)
-            return True
-        except queue.Full:
-            count = len(records)
-            self.dropped += count
-            logger.warning(
-                "Upload queue full after %.1fs; dropped %d item(s) (%d total). "
-                "The producer is outrunning the uploader.",
-                self.put_timeout,
-                count,
-                self.dropped,
-            )
-            return False
+        # Serialize acceptance with close(): an accepted batch is queued before
+        # the stop sentinel, while a submission after close is refused.
+        with self._lock:
+            if self._stopping.is_set():
+                return False
+            self._start_locked()
+            try:
+                self._queue.put(records, timeout=self.put_timeout)
+                return True
+            except queue.Full:
+                count = len(records)
+                self.dropped += count
+                logger.warning(
+                    "Upload queue full after %.1fs; dropped %d item(s) (%d total). "
+                    "The producer is outrunning the uploader.",
+                    self.put_timeout,
+                    count,
+                    self.dropped,
+                )
+                return False
 
     def flush(self, timeout: Optional[float] = None) -> bool:
         """Block until everything queued so far has been written."""
@@ -236,8 +244,9 @@ class UploadWorker:
 
     def close(self, timeout: Optional[float] = 30.0) -> None:
         """Drain, stop the thread, and close every sink."""
-        self._stopping.set()
-        thread = self._thread
+        with self._lock:
+            self._stopping.set()
+            thread = self._thread
         if thread is not None and thread.is_alive():
             deadline = _deadline(timeout)
             try:

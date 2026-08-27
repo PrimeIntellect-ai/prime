@@ -9,11 +9,12 @@ replayed: a lost batch is recoverable, duplicated rows skew every average.
 """
 
 import logging
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from .._http import UPLOAD_TIMEOUT, PlatformClient, encode_json
+from ..exceptions import is_record_rejection, is_transient
 from ..projection import batch_samples, build_samples
-from .base import Sink, is_episode
+from .base import Sink, SinkWriteError, is_episode
 
 logger = logging.getLogger(__name__)
 
@@ -44,33 +45,69 @@ class EvalSamplesSink(Sink):
         if self._run_id is None:
             raise RuntimeError("EvalSamplesSink.write called before start()")
 
-        samples = self._to_samples(records)
+        samples, owners = self._to_samples(records)
         if not samples:
             return
-        for batch in batch_samples(samples):
-            self._client.post(
-                f"/evaluations/{self._run_id}/samples",
-                content=encode_json({"samples": batch}),
-                timeout=UPLOAD_TIMEOUT,
-                idempotent=False,  # appends; a lost response must not duplicate rows
-            )
-            self.samples_written += len(batch)
+        batches = batch_samples(samples)
+        failed_owners: Set[int] = set()
+        reported_error: Optional[Exception] = None
+        offset = 0
+        for batch_index, batch in enumerate(batches):
+            next_offset = offset + len(batch)
+            batch_owners = owners[offset:next_offset]
+            offset = next_offset
+            try:
+                self._client.post(
+                    f"/evaluations/{self._run_id}/samples",
+                    content=encode_json({"samples": batch}),
+                    timeout=UPLOAD_TIMEOUT,
+                    idempotent=False,  # appends; a lost response must not duplicate rows
+                )
+            except Exception as exc:
+                failed_owners.update(batch_owners)
+                recoverable = is_record_rejection(exc) or is_transient(exc)
+                if not recoverable:
+                    # The same sink-wide failure will reject everything after
+                    # this request, so do not send more traffic just to prove it.
+                    for remaining_batch in batches[batch_index + 1 :]:
+                        failed_owners.update(owners[offset : offset + len(remaining_batch)])
+                        offset += len(remaining_batch)
+                    reported_error = exc
+                    break
+                # Prefer a transient error for worker strike accounting when a
+                # write encountered both transient and record-local failures.
+                if reported_error is None or is_transient(exc):
+                    reported_error = exc
+            else:
+                self.samples_written += len(batch)
 
-    def _to_samples(self, records: Sequence[Any]) -> List[Dict[str, Any]]:
+        if reported_error is not None:
+            raise SinkWriteError(
+                reported_error, failed_records=len(failed_owners)
+            ) from reported_error
+
+    def _to_samples(
+        self, records: Sequence[Any]
+    ) -> Tuple[List[Dict[str, Any]], List[int]]:
         """Episode objects are projected; v0 sample dicts (``sample_id``) pass
         through. Anything else — a JSON episode, a bare trace — has no v0
         projection (it is attribute-based, see :mod:`prime_runs.projection`)
         and is skipped: warned once, counted, and left to the traces sink.
         Raising here would retire this sink for the rest of the run over one
-        record shape, which is worse than one missing row."""
+        record shape, which is worse than one missing row. The parallel owner
+        list preserves input-record accounting when HTTP batching splits them."""
         samples: List[Dict[str, Any]] = []
+        owners: List[int] = []
         skipped = 0
         first_skipped_type: Optional[str] = None
-        for record in records:
+        for record_index, record in enumerate(records):
             if isinstance(record, Mapping) and "sample_id" in record:
                 samples.append(dict(record))
+                owners.append(record_index)
             elif not isinstance(record, Mapping) and is_episode(record):
-                samples.extend(build_samples([record], self._rollout_numbers))
+                projected = build_samples([record], self._rollout_numbers)
+                samples.extend(projected)
+                owners.extend([record_index] * len(projected))
             else:
                 skipped += 1
                 if first_skipped_type is None:
@@ -85,7 +122,7 @@ class EvalSamplesSink(Sink):
                     first_skipped_type,
                 )
             self.skipped += skipped
-        return samples
+        return samples, owners
 
     def flush(self) -> None:
         """Writes are synchronous; the uploader thread owns the asynchrony."""

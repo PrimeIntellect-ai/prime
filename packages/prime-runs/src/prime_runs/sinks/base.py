@@ -14,6 +14,22 @@ from typing import Any, Dict, Mapping, Protocol, Sequence
 from ..models import RUN_KIND
 
 
+class SinkWriteError(Exception):
+    """A sink stored only part of a submitted batch.
+
+    ``cause`` drives the worker's retry/retirement policy; ``failed_records``
+    lets it account for only the input records that were not fully stored.
+    """
+
+    def __init__(self, cause: Exception, *, failed_records: int) -> None:
+        self.cause = cause
+        self.failed_records = failed_records
+        super().__init__(
+            f"{failed_records} record(s) were not fully stored: "
+            f"{type(cause).__name__}: {cause}"
+        )
+
+
 class Sink(Protocol):
     """A destination for run records."""
 

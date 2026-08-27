@@ -163,8 +163,7 @@ class Run:
         traces) goes through :meth:`log_episodes`. Call this as rollouts
         complete; nothing is buffered until the end.
         """
-        self._require_live("log_traces")
-        self._submit(traces)
+        self._submit("log_traces", traces)
 
     def log_episodes(self, episodes: Iterable[Any]) -> None:
         """Hand episodes — grouped traces — to the sinks. Returns immediately.
@@ -175,13 +174,17 @@ class Run:
         reads) is projected from episode *objects* only — a JSON episode has
         no row there, which the samples sink warns about once.
         """
-        self._require_live("log_episodes")
-        self._submit(episodes)
+        self._submit("log_episodes", episodes)
 
-    def _submit(self, records: Iterable[Any]) -> None:
-        batch = list(records)
-        if batch:
-            self._worker.submit(batch)
+    def _submit(self, operation: str, records: Iterable[Any]) -> None:
+        # Finish holds the same lock through worker teardown. A log call either
+        # queues its batch first or observes that the run is already closing;
+        # it can never restart the worker between those two states.
+        with self._finish_lock:
+            self._require_live(operation)
+            batch = list(records)
+            if batch:
+                self._worker.submit(batch)
 
     def update_summary(self, values: Mapping[str, Any]) -> None:
         """Merge run-level outputs into :attr:`summary` ahead of :meth:`finish`.
@@ -189,8 +192,9 @@ class Run:
         Non-finite numbers are dropped here, as they are for
         ``finish(summary=...)``; writing to ``summary`` directly skips that.
         """
-        self._require_live("update_summary")
-        self.summary.update(_clean_metrics(values))
+        with self._finish_lock:
+            self._require_live("update_summary")
+            self.summary.update(_clean_metrics(values))
 
     def flush(self, timeout: Optional[float] = 30.0) -> bool:
         """Block until queued records have been written. Under

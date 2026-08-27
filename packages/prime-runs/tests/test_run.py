@@ -237,6 +237,56 @@ def test_logging_after_finish_is_a_producer_bug():
         run.log_traces([{"id": "t1"}])
 
 
+def test_logging_that_started_first_is_queued_before_concurrent_finish():
+    """Finish must not close the worker between the live check and enqueue."""
+
+    class SignalingBackend(FakeBackend):
+        def __init__(self) -> None:
+            super().__init__()
+            self.finalize_started = threading.Event()
+
+        def finalize(self, run_id, *, status, summary=None, error=None, config=None) -> None:
+            self.finalize_started.set()
+            super().finalize(
+                run_id,
+                status=status,
+                summary=summary,
+                error=error,
+                config=config,
+            )
+
+    backend = SignalingBackend()
+    sink = FakeSink()
+    run = make_run(backend, sinks=[sink])
+    iteration_started = threading.Event()
+    release_record = threading.Event()
+    finish_called = threading.Event()
+
+    def records():
+        iteration_started.set()
+        assert release_record.wait(2.0)
+        yield {"id": "t1"}
+
+    def finish_run() -> None:
+        finish_called.set()
+        run.finish()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        logging = executor.submit(run.log_traces, records())
+        assert iteration_started.wait(2.0)
+        finishing = executor.submit(finish_run)
+        assert finish_called.wait(2.0)
+        try:
+            assert not backend.finalize_started.wait(0.1)
+        finally:
+            release_record.set()
+        logging.result(timeout=2.0)
+        finishing.result(timeout=2.0)
+
+    assert sink.batches == [[{"id": "t1"}]]
+    assert sink.closed is True
+
+
 def test_the_context_manager_completes_a_clean_run():
     backend = FakeBackend()
     with make_run(backend) as run:

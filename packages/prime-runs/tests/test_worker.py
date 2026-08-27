@@ -181,10 +181,14 @@ def test_close_drains_then_closes_every_sink():
 
 
 def test_submitting_after_close_is_refused():
-    worker = UploadWorker([FakeSink()])
+    sink = FakeSink()
+    worker = UploadWorker([sink])
     worker.close()
+    worker.start()
 
     assert worker.submit([{"id": 1}]) is False
+    assert worker._thread is None
+    assert sink.batches == []
 
 
 def test_flush_without_a_running_thread_still_flushes_the_sinks():

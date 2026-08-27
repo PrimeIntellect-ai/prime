@@ -20,7 +20,7 @@ authors = [
 # `tenacity`. Nothing is added to what verifiers and prime-rl already carry.
 dependencies = [
     "httpx>=0.25.0",
-    "prime-traces>=0.0.2",
+    "prime-traces>=0.0.3",
 ]
 keywords = ["evals", "evaluations", "training", "runs", "traces", "observability"]
 classifiers = [

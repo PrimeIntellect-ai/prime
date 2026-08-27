@@ -4,9 +4,10 @@ Basic usage example for the prime-traces SDK.
 
 This demonstrates the standalone SDK without any CLI dependencies.
 
-Credentials come from PRIME_API_KEY / ~/.prime/config.json. Point
-PRIME_TRACES_URL at the Prime Traces service — e.g. the service's local
-compose stack: PRIME_TRACES_URL=http://localhost:8083
+Credentials come from PRIME_API_KEY / ~/.prime/config.json. The client talks
+to the production Prime Traces service by default; set PRIME_TRACES_URL to
+point it elsewhere — e.g. the service's local compose stack:
+PRIME_TRACES_URL=http://localhost:8083
 """
 
 import tempfile

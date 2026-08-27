@@ -51,3 +51,22 @@ def test_config_values_read_from_file():
     config = Config()
     assert config.api_key == "file-key"
     assert config.traces_url == "https://traces.example"
+
+
+def test_traces_url_defaults_to_the_traces_service(monkeypatch):
+    """No override anywhere: the traces service's own domain, never the platform
+    API — ``/api/v1/traces`` is not routed there, so that fallback 404s."""
+    assert Config().traces_url == Config.DEFAULT_TRACES_URL
+    assert Config().traces_url != Config().base_url
+    # A platform override says nothing about where traces lives.
+    monkeypatch.setenv("PRIME_API_BASE_URL", "https://api.dev.example/api/v1")
+    config = Config()
+    assert config.base_url == "https://api.dev.example"
+    assert config.traces_url == Config.DEFAULT_TRACES_URL
+
+
+def test_traces_url_env_overrides_file(monkeypatch):
+    _write_config(json.dumps({"traces_url": "https://traces.file.example"}))
+    assert Config().traces_url == "https://traces.file.example"
+    monkeypatch.setenv("PRIME_TRACES_URL", "http://localhost:8083/api/v1/")
+    assert Config().traces_url == "http://localhost:8083"

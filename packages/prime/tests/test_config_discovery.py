@@ -680,6 +680,34 @@ def test_trust_registry_is_replaced_atomically(home: Path, project: Path) -> Non
     assert Config().api_key == "b"
 
 
+def test_concurrent_trust_updates_do_not_lose_entries(home: Path, tmp_path: Path) -> None:
+    """Load-modify-save on the registry is serialized, so parallel writers all land."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    files = []
+    for i in range(12):
+        d = tmp_path / f"proj{i}" / ".prime"
+        d.mkdir(parents=True)
+        f = d / "config.json"
+        f.write_text(json.dumps({"api_key": f"k{i}"}))
+        files.append(f)
+    barrier = threading.Barrier(len(files))
+
+    def trust(path: Path) -> None:
+        barrier.wait()
+        trust_local_config(path)
+
+    with ThreadPoolExecutor(max_workers=len(files)) as pool:
+        list(pool.map(trust, files))
+
+    trusted = load_trusted_configs()
+    assert all(str(f.resolve()) in trusted for f in files)
+    lock = home / ".prime" / "trusted_configs.json.lock"
+    assert lock.exists()
+    assert stat.S_IMODE(lock.stat().st_mode) == 0o600
+
+
 def test_global_config_file_is_created_private(home: Path) -> None:
     config = Config()
 

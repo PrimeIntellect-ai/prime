@@ -5,8 +5,14 @@ import re
 import sys
 import tempfile
 import warnings
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Callable, Iterator, Optional
+
+try:
+    import fcntl
+except ImportError:  # Windows
+    fcntl = None  # type: ignore[assignment]
 
 from pydantic import BaseModel, ConfigDict
 
@@ -108,6 +114,41 @@ def _save_trusted_configs(trusted: dict[str, str]) -> None:
     )
 
 
+@contextmanager
+def _registry_lock() -> Iterator[None]:
+    """Serialize registry transactions across processes (flock; no-op on Windows).
+
+    Writes are atomic on their own, but two CLI processes updating different
+    projects would each load the same registry and the later replace would
+    drop the other's entry. The lock is a sibling file so the registry itself
+    can still be atomically replaced while held.
+    """
+    global_config_dir().mkdir(parents=True, exist_ok=True)
+    lock_path = global_config_dir() / f"{TRUSTED_CONFIGS_FILE_NAME}.lock"
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        if fcntl is not None:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            if fcntl is not None:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
+def _update_trusted_configs(mutate: Callable[[dict[str, str]], bool]) -> None:
+    """Run a load-modify-save transaction on the registry under the lock.
+
+    `mutate` edits the dict in place and returns whether anything changed.
+    """
+    with _registry_lock():
+        trusted = load_trusted_configs()
+        if mutate(trusted):
+            _save_trusted_configs(trusted)
+
+
 def is_trusted_local_file(path: Path) -> bool:
     """Whether the user approved this file *with its current content*.
 
@@ -164,9 +205,12 @@ def trust_local_file(path: Path) -> Path:
         raise ValueError(f"Cannot read {path}")
     if not _owned_by_current_user(path):
         raise ValueError(f"Refusing to trust {path}: not owned by the current user")
-    trusted = load_trusted_configs()
-    trusted[str(path)] = digest
-    _save_trusted_configs(trusted)
+
+    def _set(trusted: dict[str, str]) -> bool:
+        trusted[str(path)] = digest
+        return True
+
+    _update_trusted_configs(_set)
     return path
 
 
@@ -181,9 +225,8 @@ def trust_local_config(config_file: Path) -> Path:
 
 def forget_trusted_file(path: Path) -> None:
     """Drop a single file's registry entry (e.g. after deleting it)."""
-    trusted = load_trusted_configs()
-    if trusted.pop(str(path.resolve()), None) is not None:
-        _save_trusted_configs(trusted)
+    key = str(path.resolve())
+    _update_trusted_configs(lambda trusted: trusted.pop(key, None) is not None)
 
 
 def untrust_local_config(config_file: Path) -> bool:
@@ -192,14 +235,18 @@ def untrust_local_config(config_file: Path) -> bool:
     Returns whether the config file was trusted before.
     """
     resolved = config_file.resolve()
-    trusted = load_trusted_configs()
-    removed = trusted.pop(str(resolved), None) is not None
-    env_prefix = str(resolved.parent / "environments") + os.sep
-    stale = [key for key in trusted if key.startswith(env_prefix)]
-    for key in stale:
-        del trusted[key]
-    if removed or stale:
-        _save_trusted_configs(trusted)
+    env_prefix = str(resolved.parent / ENVIRONMENTS_DIR_NAME) + os.sep
+    removed = False
+
+    def _drop(trusted: dict[str, str]) -> bool:
+        nonlocal removed
+        removed = trusted.pop(str(resolved), None) is not None
+        stale = [key for key in trusted if key.startswith(env_prefix)]
+        for key in stale:
+            del trusted[key]
+        return removed or bool(stale)
+
+    _update_trusted_configs(_drop)
     return removed
 
 

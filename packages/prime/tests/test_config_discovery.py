@@ -338,6 +338,93 @@ def test_writes_follow_symlinks_the_user_owns(home: Path, project: Path, tmp_pat
     assert json.loads(target.read_text())["api_key"] == "new"
 
 
+class TestLocalEnvironments:
+    """Named environment files next to a local config are inside its trust boundary."""
+
+    @staticmethod
+    def write_env(project: Path, name: str, **values: object) -> Path:
+        env_dir = project / ".prime" / "environments"
+        env_dir.mkdir(parents=True, exist_ok=True)
+        env_file = env_dir / f"{name}.json"
+        env_file.write_text(json.dumps(values))
+        return env_file
+
+    def test_prime_context_ignores_untrusted_environment_file(
+        self,
+        home: Path,
+        project: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A repo update can rewrite environments/<name>.json while config.json stays trusted."""
+        write_config(project / ".prime", api_key="local-key", base_url="https://api.dev.example")
+        self.write_env(project, "dev", base_url="https://evil.example")
+        monkeypatch.setenv("PRIME_CONTEXT", "dev")
+
+        config = Config()
+
+        assert config.config_source == "local"
+        assert config.base_url == "https://api.dev.example"
+        assert config.current_environment == "production"
+        assert "Ignoring untrusted environment file" in capsys.readouterr().err
+
+    def test_use_refuses_untrusted_environment_file(self, home: Path, project: Path) -> None:
+        write_config(project / ".prime", api_key="local-key")
+        self.write_env(project, "dev", base_url="https://evil.example")
+
+        result = runner.invoke(app, ["config", "use", "dev"], env=TEST_ENV)
+
+        assert result.exit_code == 1, result.output
+        assert "Error: Environment file" in result.output  # long path gets ellipsized
+        assert Config().base_url == Config.DEFAULT_BASE_URL
+
+    def test_trust_command_covers_environment_files(
+        self, home: Path, project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        write_config(project / ".prime", trusted=False, api_key="local-key")
+        env_file = self.write_env(project, "dev", base_url="https://api.dev.example")
+
+        result = runner.invoke(app, ["config", "trust", str(project)], env=TEST_ENV)
+        assert result.exit_code == 0, result.output
+        assert str(env_file) in load_trusted_configs()
+
+        monkeypatch.setenv("PRIME_CONTEXT", "dev")
+        assert Config().base_url == "https://api.dev.example"
+
+        # Untrust drops the environment entries too.
+        result = runner.invoke(app, ["config", "untrust", str(project)], env=TEST_ENV)
+        assert result.exit_code == 0, result.output
+        assert load_trusted_configs() == {}
+
+    def test_environment_saved_by_the_cli_is_trusted(
+        self, home: Path, project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        write_config(project / ".prime", api_key="local-key")
+        monkeypatch.setenv("PRIME_BASE_URL", "https://api.dev.example")
+        assert runner.invoke(app, ["config", "save", "dev"], env=TEST_ENV).exit_code == 0
+        monkeypatch.delenv("PRIME_BASE_URL")
+
+        assert runner.invoke(app, ["config", "use", "dev"], env=TEST_ENV).exit_code == 0
+        assert Config().base_url == "https://api.dev.example"
+
+        # ...until someone rewrites it behind the CLI's back.
+        env_file = project / ".prime" / "environments" / "dev.json"
+        env_file.write_text(json.dumps({"base_url": "https://evil.example"}))
+        result = runner.invoke(app, ["config", "use", "dev"], env=TEST_ENV)
+        assert result.exit_code == 1, result.output
+        assert "Error: Environment file" in result.output
+
+    def test_global_config_environments_need_no_trust(
+        self, home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        env_dir = home / ".prime" / "environments"
+        env_dir.mkdir(parents=True)
+        (env_dir / "dev.json").write_text(json.dumps({"base_url": "https://api.dev.example"}))
+        monkeypatch.setenv("PRIME_CONTEXT", "dev")
+
+        assert Config().base_url == "https://api.dev.example"
+
+
 def test_global_config_file_is_created_private(home: Path) -> None:
     config = Config()
 

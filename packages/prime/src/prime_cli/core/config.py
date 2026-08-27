@@ -84,7 +84,7 @@ def _save_trusted_configs(trusted: dict[str, str]) -> None:
     _write_private_json(trusted_configs_file(), {"version": 1, "trusted": trusted})
 
 
-def is_trusted_local_config(config_file: Path) -> bool:
+def is_trusted_local_file(path: Path) -> bool:
     """Whether the user approved this file *with its current content*.
 
     Ownership alone is not enough: a `.prime/config.json` committed to a
@@ -95,36 +95,68 @@ def is_trusted_local_config(config_file: Path) -> bool:
     `git pull`) it has to be trusted again. Files the CLI writes itself
     (`prime login --local`, `prime config set-api-key --local`) are trusted
     as part of the write.
+
+    The same rule covers the named environment files next to a local config
+    (`.prime/environments/<name>.json`): `PRIME_CONTEXT` / `prime config use`
+    load URLs from them, so they are part of the same trust boundary.
     """
-    if not _owned_by_current_user(config_file):
+    if not _owned_by_current_user(path):
         # A trusted path swapped for someone else's file (same bytes or not)
         # is not the file the user approved.
         return False
-    digest = _file_digest(config_file)
+    digest = _file_digest(path)
     if digest is None:
         return False
-    return load_trusted_configs().get(str(config_file.resolve())) == digest
+    return load_trusted_configs().get(str(path.resolve())) == digest
+
+
+is_trusted_local_config = is_trusted_local_file
+
+
+def _local_environment_files(config_file: Path) -> list[Path]:
+    """The named environment files that belong to a local config."""
+    environments_dir = config_file.parent / "environments"
+    if not environments_dir.is_dir():
+        return []
+    return sorted(p for p in environments_dir.glob("*.json") if p.is_file())
+
+
+def trust_local_file(path: Path) -> Path:
+    """Approve a single file with its current content; returns its resolved path."""
+    path = path.resolve()
+    digest = _file_digest(path)
+    if digest is None:
+        raise ValueError(f"Cannot read {path}")
+    if not _owned_by_current_user(path):
+        raise ValueError(f"Refusing to trust {path}: not owned by the current user")
+    trusted = load_trusted_configs()
+    trusted[str(path)] = digest
+    _save_trusted_configs(trusted)
+    return path
 
 
 def trust_local_config(config_file: Path) -> Path:
-    """Approve `config_file` for discovery; returns its resolved path."""
-    config_file = config_file.resolve()
-    digest = _file_digest(config_file)
-    if digest is None:
-        raise ValueError(f"Cannot read {config_file}")
-    if not _owned_by_current_user(config_file):
-        raise ValueError(f"Refusing to trust {config_file}: not owned by the current user")
-    trusted = load_trusted_configs()
-    trusted[str(config_file)] = digest
-    _save_trusted_configs(trusted)
-    return config_file
+    """Approve `config_file` and its environment files; returns the resolved config path."""
+    resolved = trust_local_file(config_file)
+    for env_file in _local_environment_files(resolved):
+        if _owned_by_current_user(env_file):
+            trust_local_file(env_file)
+    return resolved
 
 
 def untrust_local_config(config_file: Path) -> bool:
-    """Withdraw approval; returns whether the file was trusted before."""
+    """Withdraw approval for the config and its environment files.
+
+    Returns whether the config file was trusted before.
+    """
+    resolved = config_file.resolve()
     trusted = load_trusted_configs()
-    removed = trusted.pop(str(config_file.resolve()), None) is not None
-    if removed:
+    removed = trusted.pop(str(resolved), None) is not None
+    env_prefix = str(resolved.parent / "environments") + os.sep
+    stale = [key for key in trusted if key.startswith(env_prefix)]
+    for key in stale:
+        del trusted[key]
+    if removed or stale:
         _save_trusted_configs(trusted)
     return removed
 
@@ -157,7 +189,7 @@ def discover_local_config(start: Path | None = None) -> tuple[Path | None, list[
     """
     untrusted: list[Path] = []
     for config_file in _candidate_local_config_files(start):
-        if is_trusted_local_config(config_file):
+        if is_trusted_local_file(config_file):
             return config_file.parent, untrusted
         untrusted.append(config_file)
     return None, untrusted
@@ -192,15 +224,15 @@ _warned_untrusted: set[Path] = set()
 warnings.filterwarnings("ignore", message=UNTRUSTED_CONFIG_WARNING)
 
 
-def _warn_untrusted(untrusted: list[Path]) -> None:
-    """Tell the user (once per file per process) that a local config was ignored."""
-    for config_file in untrusted:
-        if config_file in _warned_untrusted:
+def _warn_untrusted(untrusted: list[Path], kind: str = "project config") -> None:
+    """Tell the user (once per file per process) that a local file was ignored."""
+    for path in untrusted:
+        if path in _warned_untrusted:
             continue
-        _warned_untrusted.add(config_file)
+        _warned_untrusted.add(path)
+        project = path.parent.parent if kind == "project config" else path.parent.parent.parent
         sys.stderr.write(
-            f"{UNTRUSTED_CONFIG_WARNING} {config_file}; "
-            f"run 'prime config trust {config_file.parent.parent}' to use it.\n"
+            f"Ignoring untrusted {kind} {path}; run 'prime config trust {project}' to use it.\n"
         )
 
 
@@ -364,15 +396,26 @@ class Config:
         self.config = config
         self._record_trust()
 
-    def _record_trust(self) -> None:
-        """Re-approve a project-local config after the CLI itself changed it.
+    def _record_trust(self, path: Path | None = None) -> None:
+        """Re-approve a project-local file after the CLI itself changed it.
 
         Trust is bound to the file's content digest, so every write by the CLI
         has to refresh it. Only discovered/explicit project configs need this;
         the global config and an explicit PRIME_CONFIG_DIR are trusted as such.
+        Applies to config.json and to the environment files next to it.
         """
         if self.config_source in ("local", "explicit") and not self.is_global:
-            trust_local_config(self.config_file)
+            trust_local_file(path or self.config_file)
+
+    def _environment_file_is_trusted(self, env_file: Path) -> bool:
+        """Whether an environment file may be loaded from this config.
+
+        Only a *discovered* local config needs the check: its config.json was
+        vetted by digest, but a repository update can rewrite an environment
+        file while leaving config.json untouched. Explicit config dirs and
+        the global one are trusted as such.
+        """
+        return self.config_source != "local" or is_trusted_local_file(env_file)
 
     @property
     def api_key(self) -> str:
@@ -537,6 +580,7 @@ class Config:
                     raise ValueError(f"Invalid configuration in {env_file}")
                 env_config["traces_url"] = traces_url
                 _write_private_json(env_file, env_config)
+                self._record_trust(env_file)
 
         self.config["traces_url"] = traces_url
 
@@ -625,6 +669,7 @@ class Config:
             "traces_url": self._configured_traces_url(),
         }
         _write_private_json(env_file, env_config)
+        self._record_trust(env_file)
 
     def delete_environment(self, name: str) -> None:
         """Delete a saved environment configuration."""
@@ -678,6 +723,15 @@ class Config:
             sanitized_name = self._sanitize_environment_name(name)
             env_file = self.environments_dir / f"{sanitized_name}.json"
             if env_file.exists():
+                if not self._environment_file_is_trusted(env_file):
+                    if persist:
+                        raise ValueError(
+                            f"Environment file {env_file} is not trusted; review it and run "
+                            f"'prime config trust {self.config_dir.parent}' to use it"
+                        )
+                    # PRIME_CONTEXT: don't take the whole command down, just skip it.
+                    _warn_untrusted([env_file], kind="environment file")
+                    return False
                 try:
                     env_config = json.loads(env_file.read_text())
                 except json.JSONDecodeError as e:
@@ -747,6 +801,7 @@ class Config:
                         "traces_url": self._stored_traces_url(),
                     }
                     _write_private_json(env_file, env_config)
+                    self._record_trust(env_file)
             except ValueError:
                 # Skip updating if environment name is invalid
                 pass

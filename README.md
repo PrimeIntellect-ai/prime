@@ -151,7 +151,9 @@ A project-local config is only used once you have trusted it. Files written by
 automatically; one you create by hand needs `prime config trust` (run in the
 project, or pass its path). Trust is tied to the file's content, so if it
 changes — say a `git pull` rewrote it — commands warn and ignore it until you
-trust it again. This is what stops a `.prime/config.json` committed to a
+trust it again. The same applies to the named environments next to it
+(`.prime/environments/*.json`, used by `PRIME_CONTEXT` / `prime config use`):
+`prime config trust` approves them together with `config.json`. This is what stops a `.prime/config.json` committed to a
 repository you clone from pointing your `PRIME_API_KEY` at someone else's
 server. `prime config untrust` withdraws approval.
 

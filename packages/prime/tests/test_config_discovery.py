@@ -611,6 +611,37 @@ class TestLocalEnvironments:
         assert env_file.read_text() == before
         assert str(env_file) not in load_trusted_configs()
 
+    def test_delete_refuses_symlinked_environments_directory(
+        self, home: Path, project: Path, tmp_path: Path
+    ) -> None:
+        """unlink() through `environments -> outside` would delete the external file."""
+        write_config(project / ".prime", api_key="local-key")
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        victim = outside / "dev.json"
+        victim.write_text(json.dumps({"api_key": "someone-elses"}))
+        (project / ".prime" / "environments").symlink_to(outside, target_is_directory=True)
+
+        result = runner.invoke(app, ["config", "delete", "dev"], env=TEST_ENV)
+
+        assert result.exit_code == 1, result.output
+        assert "symlink" in result.output
+        assert victim.exists()
+
+    def test_delete_removes_environment_and_its_trust_entry(
+        self, home: Path, project: Path
+    ) -> None:
+        write_config(project / ".prime", api_key="local-key")
+        assert runner.invoke(app, ["config", "save", "dev"], env=TEST_ENV).exit_code == 0
+        env_file = project / ".prime" / "environments" / "dev.json"
+        assert str(env_file) in load_trusted_configs()
+
+        result = runner.invoke(app, ["config", "delete", "dev"], env=TEST_ENV)
+
+        assert result.exit_code == 0, result.output
+        assert not env_file.exists()
+        assert str(env_file) not in load_trusted_configs()
+
     def test_global_config_environments_need_no_trust(
         self, home: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

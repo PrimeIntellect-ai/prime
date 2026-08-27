@@ -178,6 +178,13 @@ def trust_local_config(config_file: Path) -> Path:
     return resolved
 
 
+def forget_trusted_file(path: Path) -> None:
+    """Drop a single file's registry entry (e.g. after deleting it)."""
+    trusted = load_trusted_configs()
+    if trusted.pop(str(path.resolve()), None) is not None:
+        _save_trusted_configs(trusted)
+
+
 def untrust_local_config(config_file: Path) -> bool:
     """Withdraw approval for the config and its environment files.
 
@@ -766,10 +773,19 @@ class Config:
             )
 
         env_file = self.environments_dir / f"{sanitized_name}.json"
+        if not self.is_global and involves_symlink(env_file):
+            # unlink() through a symlinked environments/ dir would delete
+            # whatever external file the link points at.
+            raise ValueError(
+                f"Refusing to delete {env_file}: it, its directory, or its .prime directory "
+                "is a symlink"
+            )
         if not env_file.exists():
             raise ValueError(f"Unknown environment: {name}")
 
         env_file.unlink()
+        if not self.is_global:
+            forget_trusted_file(env_file)
 
     def load_environment(self, name: str, persist: bool = True) -> bool:
         """Load a named environment configuration.

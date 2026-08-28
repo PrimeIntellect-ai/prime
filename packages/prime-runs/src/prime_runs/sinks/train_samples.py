@@ -10,6 +10,11 @@ Which episodes to upload is read off the records: a verifiers episode carries
 ``run.work`` (``TrainWorkInfo(step=...)``) once its producer has stamped it, and
 prime-rl stamps every dispatched episode. Episodes from eval work, bare traces
 and JSON episodes have no row here and go to Prime Traces only.
+
+One object per step: the platform records a single object key per (run, step),
+so a step's episodes must arrive in one ``log_episodes`` call — prime-rl hands
+over a whole step at a time. Logging a step in pieces would leave the table
+with the last piece only (the traces sink is unaffected).
 """
 
 import logging
@@ -19,6 +24,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 import httpx
 from prime_traces.core.client import retry_delay
 
+from .. import _fork
 from .._http import UPLOAD_TIMEOUT, PlatformClient
 from ..exceptions import (
     APIError,
@@ -79,14 +85,26 @@ class RftSamplesSink(Sink):
         self._step_interval = step_interval
         self._upload_client = upload_client
         self._owns_upload_client = upload_client is None
+        # An inherited socket belongs to the parent; see reset_after_fork.
+        self._forked_with_injected_client = False
         self._run_id: Optional[str] = None
         self.steps_written = 0
         #: Records with no row in this table (eval work, bare traces, JSON).
         self.skipped = 0
         #: Training episodes left out by the step cadence. Not a loss.
         self.sampled_out = 0
+        _fork.register(self)
 
     # ------------------------------------------------------------------ setup
+
+    def reset_after_fork(self) -> None:
+        """Drop (not close) the inherited storage client: its socket is the
+        parent's. An owned client is rebuilt on the next upload; an injected
+        one cannot be, so the child's uploads fail rather than share it."""
+        if self._owns_upload_client:
+            self._upload_client = None
+        else:
+            self._forked_with_injected_client = True
 
     def start(self, run_id: str, context: Mapping[str, str]) -> None:
         self._run_id = run_id
@@ -221,6 +239,8 @@ class RftSamplesSink(Sink):
             time.sleep(retry_delay(error, attempt))
 
     def _upload(self) -> httpx.Client:
+        if self._forked_with_injected_client:
+            raise RuntimeError("an injected upload client cannot be reused after a fork")
         if self._upload_client is None:
             self._upload_client = httpx.Client(follow_redirects=False)
         return self._upload_client

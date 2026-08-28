@@ -141,8 +141,10 @@ did by hand. Where it differs from an eval run:
   table is one Parquet object per training step, uploaded every 10th step
   (prime-rl's cadence) for episodes whose `run.work` says *training* work at
   that step — verifiers' `TrainRunInfo`, which prime-rl stamps on every
-  dispatched episode. Encoding needs pyarrow: `pip install 'prime-runs[train]'`.
-  Without it the table is skipped with a warning and traces still flow.
+  dispatched episode. Log a step's episodes in one `log_episodes` call: the
+  platform keeps one object per step. Encoding needs pyarrow:
+  `pip install 'prime-runs[train]'`. Without it the table is skipped with a
+  warning and traces still flow.
 - **Attach.** `init(kind="train", id=os.environ["RUN_ID"])` joins a run a
   managed launch created: nothing is registered, the platform keeps the run's
   failure marking, and a clean `finish()` still completes it.

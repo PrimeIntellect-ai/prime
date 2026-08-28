@@ -69,9 +69,7 @@ def test_records_this_sink_cannot_project_are_skipped_not_fatal(
     assert sink.skipped == 2
     assert sink.enabled is True
     warnings = [
-        record.getMessage()
-        for record in caplog.records
-        if "no projection" in record.getMessage()
+        record.getMessage() for record in caplog.records if "no projection" in record.getMessage()
     ]
     assert len(warnings) == 1
     assert "(dict)" in warnings[0]

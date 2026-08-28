@@ -311,3 +311,38 @@ def test_the_default_encoder_skips_episodes_without_a_trajectory():
     bare = Episode(id="no-branches", traces=[Trace(id="t", branches=[])])
     assert episodes_to_parquet_bytes([bare], "run-abc", 10) is None
     assert episodes_to_parquet_bytes([], "run-abc", 10) is None
+
+
+def test_a_forked_child_drops_the_inherited_storage_client(make_platform_client, rft_routes):
+    """The socket belongs to the parent: the child must neither reuse it nor
+    close it (a close would send close_notify on the parent's connection)."""
+    handler = RecordingHandler(rft_routes)
+    owned = RftSamplesSink(make_platform_client(handler), encoder=Encoder())
+    owned.start("run-abc", {})
+    inherited = owned._upload()
+
+    owned.reset_after_fork()
+
+    assert owned._upload_client is None
+    assert not inherited.is_closed  # dropped, not closed
+    assert owned._upload() is not inherited
+    owned.close()
+
+    injected = RftSamplesSink(
+        make_platform_client(handler), encoder=Encoder(), upload_client=StorageHandler().client()
+    )
+    injected.start("run-abc", {})
+    injected.reset_after_fork()
+    with pytest.raises(SinkWriteError) as info:
+        injected.write([make_train_episode("e1", step=10)])
+    assert isinstance(info.value.cause, RuntimeError)
+    assert "after a fork" in str(info.value.cause)
+
+
+def test_the_sink_is_registered_for_fork_resets():
+    from prime_runs import _fork
+    from prime_runs.sinks import RftSamplesSink
+
+    sink = RftSamplesSink(object(), encoder=Encoder())  # type: ignore[arg-type]
+
+    assert sink in _fork._registry

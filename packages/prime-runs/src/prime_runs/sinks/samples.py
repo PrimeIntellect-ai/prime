@@ -86,9 +86,7 @@ class EvalSamplesSink(Sink):
                 reported_error, failed_records=len(failed_owners)
             ) from reported_error
 
-    def _to_samples(
-        self, records: Sequence[Any]
-    ) -> Tuple[List[Dict[str, Any]], List[int]]:
+    def _to_samples(self, records: Sequence[Any]) -> Tuple[List[Dict[str, Any]], List[int]]:
         """Episode objects are projected; v0 sample dicts (``sample_id``) pass
         through. Anything else — a JSON episode, a bare trace — has no v0
         projection (it is attribute-based, see :mod:`prime_runs.projection`)

@@ -18,8 +18,14 @@ the same object shape."""
 
 OnError = Literal["warn", "raise"]
 
-RUN_KIND = "eval"
-"""Stamped as ``run.type`` on records and sent as upload provenance."""
+RunKind = Literal["eval", "train"]
+"""What a run is: a standalone evaluation (``/api/v1/evaluations``) or an
+external training run (``/api/v1/rft/external-runs``). Stamped as ``run.type``
+on records and sent as upload provenance — the traces service's vocabulary,
+which is also what verifiers' ``EvalRunInfo`` / ``TrainRunInfo`` carry."""
+
+RUN_KIND: RunKind = "eval"
+"""The default kind."""
 
 
 class RunStatus(str, Enum):
@@ -192,6 +198,26 @@ class ConfigSource:
 
 
 @dataclass
+class TrainingSpec:
+    """What a training run is registered with, beyond what every run has
+    (``model`` is the base model, ``environments`` the training environments,
+    ``config`` the run config). All of it is for display on the dashboard.
+    ``max_steps`` is required by the platform; ``0`` means unknown."""
+
+    max_steps: int = 0
+    batch_size: Optional[int] = None
+    rollouts_per_example: Optional[int] = None
+    seq_len: Optional[int] = None
+    wandb_project: Optional[str] = None
+    wandb_entity: Optional[str] = None
+    wandb_run_name: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if self.max_steps < 0:
+            raise ValueError("max_steps must be non-negative")
+
+
+@dataclass
 class RunSpec:
     """Everything a backend needs to open a run: ``init()``'s arguments after
     normalization. ``config`` is the run's inputs; outputs accumulate on the
@@ -205,6 +231,8 @@ class RunSpec:
     tags: List[str] = field(default_factory=list)
     team_id: Optional[str] = None
     config: Dict[str, Any] = field(default_factory=dict)
+    kind: RunKind = RUN_KIND
+    training: Optional[TrainingSpec] = None
 
 
 @dataclass

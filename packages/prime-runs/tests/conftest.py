@@ -141,3 +141,55 @@ class FakeSink:
 @pytest.fixture
 def fake_sink() -> Callable[..., FakeSink]:
     return FakeSink
+
+
+@pytest.fixture
+def rft_routes() -> Dict[str, Any]:
+    """The happy path for a training run: register, metrics, samples, finalize."""
+
+    def presign(request: httpx.Request) -> httpx.Response:
+        import json
+
+        step = json.loads(request.content)["step"]
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "presignedUrl": f"http://storage.test/run-abc/step-{step}.parquet",
+                    "s3Key": f"runs/run-abc/step-{step}.parquet",
+                    "expiresIn": 900,
+                }
+            },
+        )
+
+    return {
+        "POST /api/v1/rft/external-runs": lambda request: httpx.Response(
+            201,
+            json={"run": {"id": "run-abc", "name": "test-run", "status": "RUNNING"}},
+        ),
+        "POST /api/v1/rft/metrics": {"data": {"status": "success"}},
+        "POST /api/v1/rft/samples/presign": presign,
+        "POST /api/v1/rft/samples/confirm": {"data": {"status": "success"}},
+        "POST /api/v1/rft/finalize": {
+            "data": {"status": "success", "message": "Run finalized successfully"}
+        },
+        "PUT /api/v1/rft/external-runs/run-abc/status": {
+            "run": {"id": "run-abc", "status": "FAILED"}
+        },
+    }
+
+
+class StorageHandler:
+    """Object storage for presigned PUTs: records every upload, answers 200."""
+
+    def __init__(self, status_codes: Sequence[int] = ()) -> None:
+        self.uploads: List[httpx.Request] = []
+        self._status_codes = list(status_codes)
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.uploads.append(request)
+        code = self._status_codes.pop(0) if self._status_codes else 200
+        return httpx.Response(code)
+
+    def client(self) -> httpx.Client:
+        return httpx.Client(transport=httpx.MockTransport(self))

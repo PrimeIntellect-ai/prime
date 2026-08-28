@@ -14,6 +14,7 @@ from prime_traces import ErrorCode, LineFormat, TracesClient
 
 from .. import _fork
 from ..exceptions import ForbiddenError
+from ..models import RUN_KIND
 from .base import Sink, is_episode, stamp_run, to_mapping
 
 logger = logging.getLogger(__name__)
@@ -127,7 +128,7 @@ class TracesSink(Sink):
         but the members are reachable for stamping."""
         if self._run_id is None:
             return record
-        return stamp_run(to_mapping(record), self._run_id)
+        return stamp_run(to_mapping(record), self._run_id, self._context.get("run_type", RUN_KIND))
 
     def flush(self) -> None:
         """Uploads are synchronous; nothing is held back here."""

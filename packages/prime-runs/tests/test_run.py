@@ -639,3 +639,75 @@ def test_a_credential_without_the_traces_scope_reaches_strict_callers_and_loss_a
         run.finish()
 
     assert run.failed_records == {"traces": 1}
+
+
+# ------------------------------------------------------------------ metrics
+
+
+def test_log_metrics_goes_to_the_metrics_sinks_only():
+    records, metrics = FakeSink("records"), FakeSink("metrics")
+    run = make_run(sinks=[records], metrics_sinks=[metrics])
+
+    run.log_metrics({"loss": 0.5, "nan": float("nan")}, step=3)
+    run.log_traces([{"id": "t1"}])
+    run.flush()
+
+    assert records.batches == [[{"id": "t1"}]]
+    (batch,) = metrics.batches
+    (row,) = batch
+    assert row["loss"] == 0.5
+    assert row["step"] == 3
+    assert "nan" not in row
+    assert isinstance(row["_timestamp"], float)
+    run.finish()
+
+
+def test_log_metrics_keeps_a_step_the_producer_already_set():
+    metrics = FakeSink("metrics")
+    run = make_run(metrics_sinks=[metrics])
+
+    run.log_metrics({"step": 7, "loss": 0.5}, step=8)
+    run.flush()
+
+    assert metrics.batches[0][0]["step"] == 7
+    run.finish()
+
+
+def test_log_metrics_without_a_metrics_sink_is_a_no_op():
+    run = make_run()
+
+    run.log_metrics({"loss": 0.5}, step=1)
+
+    assert run._metrics_worker._thread is None
+    assert run.dropped_records == 0
+    run.finish()
+
+
+def test_log_metrics_on_a_finished_run_is_a_producer_bug():
+    run = make_run(metrics_sinks=[FakeSink("metrics")])
+    run.finish()
+
+    with pytest.raises(RunFinishedError):
+        run.log_metrics({"loss": 0.5})
+
+
+def test_finish_drains_and_closes_the_metrics_uploader_too():
+    metrics = FakeSink("metrics")
+    run = make_run(metrics_sinks=[metrics])
+
+    run.log_metrics({"loss": 0.5}, step=1)
+    run.finish()
+
+    assert len(metrics.batches) == 1
+    assert metrics.closed is True
+
+
+def test_losses_are_reported_across_both_uploaders():
+    broken = FakeSink("metrics", fail_on_write=True)
+    run = make_run(metrics_sinks=[broken])
+
+    run.log_metrics({"loss": 0.5}, step=1)
+    run.flush()
+
+    assert run.failed_records == {"metrics": 1}
+    run.finish()

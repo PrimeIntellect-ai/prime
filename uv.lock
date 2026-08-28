@@ -8,7 +8,7 @@ resolution-markers = [
 ]
 
 [options]
-exclude-newer = "2026-08-12T18:00:50.512194Z"
+exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
 exclude-newer-span = "P7D"
 
 [options.exclude-newer-package]
@@ -1461,16 +1461,20 @@ dev = [
     { name = "pytest-asyncio" },
     { name = "ruff" },
 ]
+train = [
+    { name = "pyarrow" },
+]
 
 [package.metadata]
 requires-dist = [
     { name = "httpx", specifier = ">=0.25.0" },
     { name = "prime-traces", editable = "packages/prime-traces" },
+    { name = "pyarrow", marker = "extra == 'train'", specifier = ">=15.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.13.1" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["dev", "train"]
 
 [[package]]
 name = "prime-sandboxes"

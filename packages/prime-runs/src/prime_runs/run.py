@@ -20,7 +20,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Union
 
 from . import _fork
 from ._http import DEFAULT_TIMEOUT, UPLOAD_TIMEOUT, PlatformClient
-from .backend import Backend, DisabledBackend, EvalsBackend, disabled_run_id
+from .backend import Backend, DisabledBackend, EvalsBackend, RftBackend, disabled_run_id
 from .config import Config
 from .exceptions import ConfigurationError, RunFinishedError
 from .models import (
@@ -31,10 +31,12 @@ from .models import (
     Mode,
     OnError,
     RunHandle,
+    RunKind,
     RunSpec,
     RunStatus,
+    TrainingSpec,
 )
-from .sinks import EvalSamplesSink, Sink, TracesSink
+from .sinks import EvalSamplesSink, RftMetricsSink, RftSamplesSink, Sink, TracesSink
 from .worker import UploadWorker
 
 logger = logging.getLogger(__name__)
@@ -64,6 +66,8 @@ class Run:
         mode: Mode = "online",
         on_error: OnError = "warn",
         finish_timeout: Optional[float] = None,
+        metrics_sinks: Optional[List[Sink]] = None,
+        attached: bool = False,
     ) -> None:
         self._backend = backend
         self._handle = handle
@@ -73,6 +77,10 @@ class Run:
         self._status = RunStatus.RUNNING
         # A forked child inherits this handle but must not close the parent's run.
         self._owns_lifecycle = True
+        # A run the platform created and handed to this process (a managed
+        # launch): the platform owns its failure marking, this process only
+        # completes it.
+        self._attached = attached
 
         self.config: Dict[str, Any] = dict(spec.config)
         self.summary: Dict[str, Any] = {}
@@ -95,9 +103,14 @@ class Run:
         _fork.register(self)
 
         sinks = sinks or []
+        metrics_sinks = metrics_sinks or []
+        # Records and metrics drain on separate uploaders: a metrics dict is
+        # not a record (no sink would take both), and a slow sample upload
+        # must not hold a step's metrics behind it.
         self._worker = UploadWorker(sinks, on_error=self._record_sink_error)
+        self._metrics_worker = UploadWorker(metrics_sinks, on_error=self._record_sink_error)
         context = _sink_context(spec)
-        for sink in sinks:
+        for sink in [*sinks, *metrics_sinks]:
             try:
                 sink.start(handle.id, context)
             except Exception as exc:  # noqa: BLE001 - a bad sink is not a bad run
@@ -147,15 +160,25 @@ class Run:
         return self._finished
 
     @property
+    def kind(self) -> RunKind:
+        """``eval`` or ``train``."""
+        return self._spec.kind
+
+    @property
+    def attached(self) -> bool:
+        """Whether this process joined a run the platform had already created."""
+        return self._attached
+
+    @property
     def dropped_records(self) -> int:
-        """Records that reached no sink because the queue was full."""
-        return self._worker.dropped
+        """Records (and metrics) that reached no sink because a queue was full."""
+        return self._worker.dropped + self._metrics_worker.dropped
 
     @property
     def failed_records(self) -> Dict[str, int]:
         """Records each sink could not store, by sink name. Per sink because
         another sink may still hold them."""
-        return dict(self._worker.failed_records)
+        return {**self._worker.failed_records, **self._metrics_worker.failed_records}
 
     def __repr__(self) -> str:
         return f"<Run id={self.id!r} mode={self._mode!r} status={self._status.value}>"
@@ -184,6 +207,24 @@ class Run:
         """
         self._submit("log_episodes", episodes)
 
+    def log_metrics(self, values: Mapping[str, Any], *, step: Optional[int] = None) -> None:
+        """Hand one step's metrics to the run. Returns immediately.
+
+        Training runs only (an eval run has no metrics sink; the call is a
+        no-op there). ``step`` is recorded as ``values["step"]`` unless the
+        mapping already carries one; every row is stamped with ``_timestamp``
+        so step-less rows (inference metrics) keep a time anchor. Non-finite
+        numbers are dropped, as they are for :meth:`update_summary`.
+        """
+        self._require_live("log_metrics")
+        record = _clean_metrics(values)
+        if step is not None:
+            record.setdefault("step", step)
+        record.setdefault("_timestamp", time.time())
+        with self._state_lock:
+            self._require_live("log_metrics")
+            self._metrics_worker.submit([record])
+
     def _submit(self, operation: str, records: Iterable[Any]) -> None:
         # Refuse an already-finished run without consuming a lazy iterable.
         self._require_live(operation)
@@ -209,7 +250,13 @@ class Run:
     def flush(self, timeout: Optional[float] = 30.0) -> bool:
         """Block until queued records have been written. Under
         ``on_error="raise"`` this is the first place an upload failure surfaces."""
-        flushed = self._worker.flush(timeout=timeout)
+        deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
+
+        def remaining() -> Optional[float]:
+            return None if deadline is None else max(0.0, deadline - time.monotonic())
+
+        flushed = self._worker.flush(timeout=remaining())
+        flushed = self._metrics_worker.flush(timeout=remaining()) and flushed
         self._raise_deferred()
         return flushed
 
@@ -266,7 +313,9 @@ class Run:
 
         # Records first, so a dashboard reacting to the terminal status never
         # sees a finished run with samples still landing.
-        if not self._worker.flush(timeout=remaining()):
+        drained = self._worker.flush(timeout=remaining())
+        drained = self._metrics_worker.flush(timeout=remaining()) and drained
+        if not drained:
             logger.warning(
                 "Run %s: uploads did not drain within %ss; finalizing anyway. "
                 "Some records may be missing from this run.",
@@ -274,6 +323,7 @@ class Run:
                 budget,
             )
         self._worker.close(timeout=remaining())
+        self._metrics_worker.close(timeout=remaining())
 
         if self._owns_lifecycle:
             self._teardown_step(
@@ -282,27 +332,37 @@ class Run:
                     self.id, config=self.config or None, summary=self.summary or None
                 ),
             )
-            self._teardown_step(
-                "finalizing the run",
-                lambda: self._backend.finalize(
+            if self._attached and resolved is not RunStatus.COMPLETED:
+                # A managed launch marks its own run failed when this process
+                # goes away; reporting it from here would race that.
+                logger.info(
+                    "Run %s: %s, but the platform owns the status of an attached run; "
+                    "leaving it to the launcher",
                     self.id,
-                    status=resolved,
-                    summary=self.summary or None,
-                    error=error or (self.errors[0] if self.errors else None),
-                    config=self.config or None,
-                ),
-            )
+                    resolved.value,
+                )
+            else:
+                self._teardown_step(
+                    "finalizing the run",
+                    lambda: self._backend.finalize(
+                        self.id,
+                        status=resolved,
+                        summary=self.summary or None,
+                        error=error or (self.errors[0] if self.errors else None),
+                        config=self.config or None,
+                    ),
+                )
         self._teardown_step("closing the backend", self._backend.close)
         atexit.unregister(self._atexit_hook)
 
-        if self._worker.dropped:
+        if self.dropped_records:
             logger.warning(
                 "Run %s finished with %d record(s) that reached no sink; the producer "
                 "outran the uploader.",
                 self.id,
-                self._worker.dropped,
+                self.dropped_records,
             )
-        for sink_name, count in self._worker.failed_records.items():
+        for sink_name, count in self.failed_records.items():
             logger.warning(
                 "Run %s: the %s sink could not store %d record(s)", self.id, sink_name, count
             )
@@ -423,6 +483,9 @@ def init(
     base_url: Optional[str] = None,
     on_error: OnError = "warn",
     finish_timeout: Optional[float] = None,
+    kind: RunKind = "eval",
+    id: Optional[str] = None,
+    training: Optional[TrainingSpec] = None,
 ) -> Run:
     """Start a run and return a handle to it.
 
@@ -436,11 +499,28 @@ def init(
     ``finish_timeout`` is how long :meth:`Run.finish` lets queued uploads drain
     before closing the run out anyway (default: the upload timeout, 300 s);
     ``finish(timeout=...)`` overrides it per call.
+
+    ``kind="train"`` opens an external training run instead of an evaluation:
+    ``model`` is the base model, ``environments`` the training environments
+    (hub ids, passed through), ``training`` the rest of what the dashboard
+    shows, and a team is required. ``id`` attaches to a training run the
+    platform already created (a managed launch that injected ``$RUN_ID``):
+    nothing is registered, the platform keeps ownership of the run's failure
+    marking, and a clean :meth:`Run.finish` still completes it.
     """
     settings = Config()
     api_key = api_key if api_key is not None else settings.api_key
     base_url = base_url or settings.base_url
     team_id = team_id if team_id is not None else settings.team_id
+
+    if kind not in ("eval", "train"):
+        raise ConfigurationError(f"kind={kind!r} is not one of 'eval' or 'train'")
+    if id is not None and kind != "train":
+        raise ConfigurationError(
+            "id= attaches to an existing training run; an eval run is always created here."
+        )
+    if training is not None and kind != "train":
+        raise ConfigurationError("training= only applies to kind='train'")
 
     spec = RunSpec(
         name=name,
@@ -451,14 +531,18 @@ def init(
         tags=list(tags or []),
         team_id=team_id,
         config=_normalize_config(config),
+        kind=kind,
+        training=training,
     )
     resolved_mode = _resolve_mode(mode, api_key=api_key)
 
     backend: Backend
     sinks: List[Sink]
+    metrics_sinks: List[Sink] = []
+    attached = False
     if resolved_mode == "disabled":
         backend = DisabledBackend()
-        handle = RunHandle(id=disabled_run_id(), name=name)
+        handle = RunHandle(id=id or disabled_run_id(), name=name)
         sinks = []
     else:
         if not api_key:
@@ -467,9 +551,17 @@ def init(
                 'or pass mode="disabled".'
             )
         client = PlatformClient(api_key=api_key, base_url=base_url, timeout=DEFAULT_TIMEOUT)
-        backend = EvalsBackend(client, frontend_url=settings.frontend_url, team_id=team_id)
+        if kind == "train":
+            rft = RftBackend(client, frontend_url=settings.frontend_url, team_id=team_id)
+            backend = rft
+        else:
+            backend = EvalsBackend(client, frontend_url=settings.frontend_url, team_id=team_id)
         try:
-            handle = backend.create(spec)
+            if kind == "train" and id is not None:
+                handle = rft.attach(id)
+                attached = True
+            else:
+                handle = backend.create(spec)
         except BaseException:
             # Ownership has not reached a Run yet, so nothing else can release
             # the connection pool when environment resolution or creation fails.
@@ -483,7 +575,12 @@ def init(
             raise
         # Both transports run during the transition: traces is the system of
         # record, the sample table is what today's viewer reads.
-        sinks = [TracesSink(api_key=api_key, team_id=team_id), EvalSamplesSink(client)]
+        traces = TracesSink(api_key=api_key, team_id=team_id)
+        if kind == "train":
+            sinks = [traces, RftSamplesSink(client)]
+            metrics_sinks = [RftMetricsSink(client)]
+        else:
+            sinks = [traces, EvalSamplesSink(client)]
 
     run = Run(
         backend=backend,
@@ -493,6 +590,8 @@ def init(
         mode=resolved_mode,
         on_error=on_error,
         finish_timeout=finish_timeout,
+        metrics_sinks=metrics_sinks,
+        attached=attached,
     )
     if run.url:
         logger.info("Run %s: %s", run.id, run.url)
@@ -521,7 +620,7 @@ def _resolve_mode(mode: Optional[Mode], *, api_key: str) -> Mode:
 def _sink_context(spec: RunSpec) -> Dict[str, str]:
     """Upload-scoped provenance. Not the join key — that is ``run.id`` inside
     the trace document."""
-    context = {"source": "prime-runs", "run_type": RUN_KIND}
+    context = {"source": "prime-runs", "run_type": spec.kind or RUN_KIND}
     if spec.framework:
         context["framework"] = spec.framework
     if spec.model:

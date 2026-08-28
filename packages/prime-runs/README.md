@@ -83,6 +83,8 @@ disables the run with a warning — it never silently writes somewhere else.
 ## What the run handle does for you
 
 - **Streams instead of buffering.** Records go out as they are produced.
+  Whatever queues up while one upload is in flight goes out as the next one,
+  so the request rate tracks upload latency, not rollout throughput.
 - **Contains its own errors.** With the default `on_error="warn"`, nothing the
   platform raises escapes into your loop. Use `on_error="raise"` in tests and
   CI, where a silent upload failure is the bug; failures surface from `flush()`
@@ -93,11 +95,15 @@ disables the run with a warning — it never silently writes somewhere else.
   (`run.dropped_records`) rather than stalled. Per-sink losses are in
   `run.failed_records`.
 - **Waits for its own uploads.** `finish()` gives queued records the same
-  budget a single upload gets (300s) and warns if they do not drain.
+  budget a single upload gets (300s) and warns if they do not drain. Set
+  `init(finish_timeout=...)` for the run, or `finish(timeout=...)` per call — an
+  abort path can pass a few seconds so an interrupted producer is not pinned
+  behind a slow platform.
 - **Reports a terminal status.** The context manager and an `atexit` hook both
   route to the same idempotent `finish()`. A run you said failed is `failed`;
-  one that stopped without saying — Ctrl-C inside a `with` block, an exit that
-  never reached `finish()` — is `crashed`.
+  one somebody stopped on purpose — Ctrl-C or a cancelled task inside a `with`
+  block — is `cancelled`; one that stopped without saying — an exit that never
+  reached `finish()` — is `crashed`.
 
 ## From async code
 
@@ -141,6 +147,10 @@ package is imported — this is a leaf package, because the `prime` CLI depends 
 Eval runs only. Training runs will arrive with a backend over
 `/api/v1/rft/external-runs`, designed against prime-rl's actual needs.
 
-There is currently no producer-facing way to mark an evaluation **failed**. The
-SDK records the terminal state under `metadata.prime_runs` and warns that the
-run will keep showing as running on the dashboard.
+The evaluations API this version targets has no producer-facing way to mark an
+evaluation **failed** or **cancelled**: the SDK records the terminal state under
+`metadata.prime_runs` and warns that the run will keep showing as running on
+the dashboard. The platform is adding `PUT /evaluations/{id}` with a
+`FAILED` / `CANCELLED` status; a follow-up release adopts it (keeping the
+metadata fallback for older backends), which is why `RunStatus.CANCELLED`
+already exists.

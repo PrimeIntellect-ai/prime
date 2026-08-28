@@ -1,5 +1,6 @@
 """The run handle: lifecycle, containment, terminal status."""
 
+import asyncio
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -379,16 +380,55 @@ def test_teardown_does_not_swallow_control_flow_exceptions(teardown_error):
         run.finish()
 
 
-def test_an_interrupt_is_recorded_as_a_decision_not_a_fault():
-    """Ctrl-C must not land in the same bucket as a broken eval."""
+@pytest.mark.parametrize("interrupt", [KeyboardInterrupt, asyncio.CancelledError])
+def test_an_interrupt_is_recorded_as_a_decision_not_a_fault(interrupt):
+    """Ctrl-C must not land in the same bucket as a broken eval, nor in the
+    one for a process that vanished: the platform has a status for it."""
     backend = FakeBackend()
 
-    with pytest.raises(KeyboardInterrupt):
+    with pytest.raises(interrupt):
         with make_run(backend):
-            raise KeyboardInterrupt
+            raise interrupt
 
-    assert backend.finalized[0]["status"] is RunStatus.CRASHED
+    assert backend.finalized[0]["status"] is RunStatus.CANCELLED
     assert backend.finalized[0]["error"] == "interrupted"
+
+
+def test_cancelled_is_terminal_and_finalizes_like_failed():
+    backend = FakeBackend()
+    run = make_run(backend)
+
+    assert RunStatus.CANCELLED.is_terminal()
+    run.finish(status="cancelled", error="operator stopped it")
+
+    assert run.status is RunStatus.CANCELLED
+    assert backend.finalized[0]["status"] is RunStatus.CANCELLED
+    assert backend.finalized[0]["error"] == "operator stopped it"
+
+
+def test_finish_timeout_is_set_per_run_and_overridden_per_call():
+    """An abort path passes a short budget so an interrupted producer is not
+    pinned behind a slow platform for the full drain."""
+    run = make_run(finish_timeout=1.5)
+    observed = {}
+
+    def record_flush(timeout=None):
+        observed["flush"] = timeout
+        return True
+
+    run._worker.flush = record_flush
+    run.finish(timeout=0.25)
+
+    assert run._finish_timeout == 1.5
+    assert 0.0 < observed["flush"] <= 0.25
+
+
+def test_finish_timeout_default_is_the_upload_budget():
+    from prime_runs.run import DEFAULT_FINISH_TIMEOUT
+
+    run = make_run()
+    assert run._finish_timeout == DEFAULT_FINISH_TIMEOUT == 300.0
+    run.finish()
 
 
 def test_finish_hands_the_full_config_to_finalize():

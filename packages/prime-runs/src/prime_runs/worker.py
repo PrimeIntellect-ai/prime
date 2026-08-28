@@ -20,7 +20,7 @@ from typing import Any, Callable, Optional, Sequence
 
 from . import _fork
 from .exceptions import is_record_rejection, is_transient
-from .sinks.base import Sink, SinkWriteError
+from .sinks.base import Sink, SinkWriteError, is_episode
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +35,10 @@ class _Flush:
     """A barrier the caller waits on."""
 
     event: threading.Event = field(default_factory=threading.Event)
+
+
+#: "Nothing pulled ahead" — distinct from ``None``, which is the stop sentinel.
+_NOTHING: Any = object()
 
 
 def _deadline(timeout: Optional[float]) -> Optional[float]:
@@ -92,14 +96,18 @@ class UploadWorker:
             return
         if self._thread is not None and self._thread.is_alive():
             return
-        self._thread = threading.Thread(
-            target=self._run, name="prime-runs-uploader", daemon=True
-        )
+        self._thread = threading.Thread(target=self._run, name="prime-runs-uploader", daemon=True)
         self._thread.start()
 
     def _run(self) -> None:
+        # An item pulled off the queue while coalescing that could not join the
+        # batch (a control item — the stop sentinel is None, hence the marker —
+        # or records of the other kind); it is the next thing to process, ahead
+        # of anything queued after it.
+        pending: Any = _NOTHING
         while True:
-            item = self._queue.get()
+            item = pending if pending is not _NOTHING else self._queue.get()
+            pending = _NOTHING
             try:
                 if item is None:
                     return
@@ -107,11 +115,42 @@ class UploadWorker:
                     self._flush_sinks()
                     item.event.set()
                 else:
-                    self._dispatch(item)
+                    batch, pending = self._coalesce(item)
+                    self._dispatch(batch)
             except Exception as exc:  # noqa: BLE001 - the thread must outlive one bad batch
                 logger.debug("Uploader iteration failed: %s", exc)
             finally:
                 self._queue.task_done()
+
+    def _coalesce(self, first: Sequence[Any]) -> "tuple[list, Any]":
+        """Merge everything already queued behind ``first`` into one batch.
+
+        A producer hands over one episode at a time as rollouts finish, and
+        each batch costs every sink a request: one ``POST /samples`` per
+        episode runs into the platform's per-minute limit on any fast eval,
+        and the retries then back the queue up until records are dropped.
+        Draining what has accumulated while the previous request was in
+        flight makes the request rate track upload latency instead of rollout
+        throughput. Sinks split a large batch by size themselves.
+
+        Stops at a control item (a flush barrier must not be reordered past
+        the records queued before it) and at a batch of the other record kind
+        (the traces sink infers the line format from the first record).
+        Returns the merged batch and the item that stopped it, if any.
+        """
+        batch = list(first)
+        kind = is_episode(batch[0]) if batch else None
+        while True:
+            try:
+                item = self._queue.get_nowait()
+            except queue.Empty:
+                return batch, _NOTHING
+            if item is None or isinstance(item, _Flush):
+                return batch, item
+            if item and (kind is None or is_episode(item[0]) != kind):
+                return batch, item
+            batch.extend(item)
+            self._queue.task_done()
 
     def _dispatch(self, records: Sequence[Any]) -> None:
         for sink in self.sinks:
@@ -205,6 +244,11 @@ class UploadWorker:
     def submit(self, records: Sequence[Any]) -> bool:
         """Hand a batch to the uploader. ``False`` means it was dropped: the
         queue stayed full for the whole put timeout."""
+        # No sinks (a disabled run): there is nowhere for the records to go, so
+        # do not copy them into a queue or start a thread to find that out.
+        # Retired sinks are not the same case — their losses are counted.
+        if not self.sinks:
+            return True
         # Serialize acceptance with close(): an accepted batch is queued before
         # the stop sentinel, while a submission after close is refused.
         with self._lock:

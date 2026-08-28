@@ -44,11 +44,14 @@ def test_a_disabled_run_still_answers_every_call(tmp_path):
     run = pr.init(mode="disabled")
 
     run.log_traces([{"id": "t1"}])
+    # No sinks, so nothing was queued and no uploader thread was started for it.
+    assert run._worker._thread is None
     run.finish(summary={"avg_reward": 1.0})
 
     assert run.id.startswith("disabled-")
     assert run.url is None
     assert run.status is RunStatus.COMPLETED
+    assert run.dropped_records == 0
     assert not list(tmp_path.iterdir())  # tmp_path is $HOME here
 
 
@@ -182,7 +185,15 @@ def test_the_end_to_end_shape_a_producer_writes(online):
         run.log_traces([episode])
     run.finish(summary=metrics.from_episodes(episodes))
 
-    assert handler.paths().count("POST /api/v1/evaluations/eval-abc/samples") == 3
+    # Episodes queued while a request is in flight go out together, so the
+    # request count depends on timing; every row landing exactly once does not.
+    posted = handler.bodies_for("/api/v1/evaluations/eval-abc/samples")
+    assert 1 <= len(posted) <= 3
+    assert sorted(s["sample_id"] for body in posted for s in body["samples"]) == [
+        "ep-0",
+        "ep-1",
+        "ep-2",
+    ]
     finalize = handler.bodies_for("/api/v1/evaluations/eval-abc/finalize")[0]
     assert finalize["metrics"]["avg_reward"] == 1.0
     assert run.status is RunStatus.COMPLETED

@@ -9,6 +9,7 @@ ID everywhere — including inside every trace document the producer writes.
 Nothing is re-stamped afterwards.
 """
 
+import asyncio
 import atexit
 import logging
 import math
@@ -62,6 +63,7 @@ class Run:
         sinks: Optional[List[Sink]] = None,
         mode: Mode = "online",
         on_error: OnError = "warn",
+        finish_timeout: Optional[float] = None,
     ) -> None:
         self._backend = backend
         self._handle = handle
@@ -79,7 +81,9 @@ class Run:
         # and re-raised from flush() or finish(), where the caller is looking.
         self._deferred_error: Optional[BaseException] = None
 
-        self._finish_timeout = DEFAULT_FINISH_TIMEOUT
+        self._finish_timeout = (
+            DEFAULT_FINISH_TIMEOUT if finish_timeout is None else max(0.0, float(finish_timeout))
+        )
         # Guards only the transition from accepting writes to finishing. It is
         # deliberately separate from _finish_lock, which is held through slow
         # network teardown so concurrent finish callers wait for completion.
@@ -217,9 +221,17 @@ class Run:
         *,
         status: Union[RunStatus, str] = RunStatus.COMPLETED,
         error: Optional[str] = None,
+        timeout: Optional[float] = None,
     ) -> None:
         """Flush everything and close the run out. Idempotent: the first caller
-        reports the status, concurrent callers wait for that teardown."""
+        reports the status, concurrent callers wait for that teardown.
+
+        ``timeout`` overrides the run's ``finish_timeout`` for this call: how
+        long queued uploads get to drain before the run is closed out anyway.
+        An abort path can pass a short budget so an interrupted producer is
+        not pinned behind a slow platform. The terminal status is still
+        reported (with its own retries) after the budget runs out.
+        """
         with self._finish_lock:
             if self._finished:
                 return
@@ -229,7 +241,7 @@ class Run:
             with self._state_lock:
                 self._finishing = True
             try:
-                self._finish_once(summary, resolved, error)
+                self._finish_once(summary, resolved, error, timeout)
             finally:
                 with self._state_lock:
                     self._finishing = False
@@ -240,12 +252,14 @@ class Run:
         summary: Optional[Mapping[str, Any]],
         resolved: RunStatus,
         error: Optional[str],
+        timeout: Optional[float] = None,
     ) -> None:
         if summary:
             self.summary.update(_clean_metrics(summary))
         self._status = resolved
 
-        deadline = time.monotonic() + max(0.0, self._finish_timeout)
+        budget = self._finish_timeout if timeout is None else max(0.0, float(timeout))
+        deadline = time.monotonic() + budget
 
         def remaining() -> float:
             return max(0.0, deadline - time.monotonic())
@@ -257,7 +271,7 @@ class Run:
                 "Run %s: uploads did not drain within %ss; finalizing anyway. "
                 "Some records may be missing from this run.",
                 self.id,
-                self._finish_timeout,
+                budget,
             )
         self._worker.close(timeout=remaining())
 
@@ -295,9 +309,9 @@ class Run:
         # Last, so a run whose teardown failed is still closed out first.
         self._raise_deferred()
 
-    def fail(self, error: Union[str, BaseException]) -> None:
+    def fail(self, error: Union[str, BaseException], *, timeout: Optional[float] = None) -> None:
         """Close the run out as failed."""
-        self.finish(status=RunStatus.FAILED, error=_describe(error))
+        self.finish(status=RunStatus.FAILED, error=_describe(error), timeout=timeout)
 
     # -------------------------------------------------------- context manager
 
@@ -309,9 +323,9 @@ class Run:
             self.finish()
             return False
 
-        if isinstance(exc, KeyboardInterrupt):
+        if isinstance(exc, (KeyboardInterrupt, asyncio.CancelledError)):
             # An interrupt is a decision, not a fault.
-            status, error = RunStatus.CRASHED, "interrupted"
+            status, error = RunStatus.CANCELLED, "interrupted"
         else:
             status, error = RunStatus.FAILED, _describe(exc)
 
@@ -408,6 +422,7 @@ def init(
     api_key: Optional[str] = None,
     base_url: Optional[str] = None,
     on_error: OnError = "warn",
+    finish_timeout: Optional[float] = None,
 ) -> Run:
     """Start a run and return a handle to it.
 
@@ -418,6 +433,9 @@ def init(
     key and disabled (with a warning) when there is not. ``config`` is what the
     run was configured with: the path to the file it was launched from (stored
     byte for byte under ``config_source``), or a mapping taken as given.
+    ``finish_timeout`` is how long :meth:`Run.finish` lets queued uploads drain
+    before closing the run out anyway (default: the upload timeout, 300 s);
+    ``finish(timeout=...)`` overrides it per call.
     """
     settings = Config()
     api_key = api_key if api_key is not None else settings.api_key
@@ -474,6 +492,7 @@ def init(
         sinks=sinks,
         mode=resolved_mode,
         on_error=on_error,
+        finish_timeout=finish_timeout,
     )
     if run.url:
         logger.info("Run %s: %s", run.id, run.url)

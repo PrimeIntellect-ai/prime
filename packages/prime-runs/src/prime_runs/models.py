@@ -25,13 +25,16 @@ RUN_KIND = "eval"
 class RunStatus(str, Enum):
     """Terminal state a producer can report.
 
-    ``failed`` means the producer said the run failed; ``crashed`` means the
-    process exited without saying (only the SDK's atexit hook reports it).
+    ``failed`` means the producer said the run failed; ``cancelled`` means
+    somebody stopped it on purpose (Ctrl-C, a cancelled task) — a decision,
+    not a fault; ``crashed`` means the process exited without saying (only the
+    SDK's atexit hook reports it).
     """
 
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
     CRASHED = "crashed"
 
     def is_terminal(self) -> bool:

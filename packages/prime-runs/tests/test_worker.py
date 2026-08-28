@@ -337,7 +337,10 @@ def test_a_record_rejection_drops_only_its_batch(error):
     reported = []
     worker = UploadWorker([sink], on_error=lambda name, exc: reported.append((name, exc)))
 
+    # Drained between the two: queued batches coalesce into one write, and a
+    # rejection is per write.
     worker.submit([{"id": "bad"}])
+    drain(worker)
     worker.submit([{"id": "good"}])
     drain(worker)
 
@@ -361,9 +364,10 @@ def test_a_sustained_outage_eventually_retires_the_sink():
     sink = DeadSink("dead")
     worker = UploadWorker([sink])
 
+    # One write per strike: drained between submits so they do not coalesce.
     for _ in range(TRANSIENT_FAILURE_LIMIT):
         worker.submit([{"id": 1}])
-    drain(worker)
+        drain(worker)
 
     assert sink.enabled is False
     worker.close()
@@ -391,10 +395,11 @@ def test_a_success_forgives_earlier_blips():
     sink = FlakySink()
     worker = UploadWorker([sink])
 
-    # Far more failures than the limit, but never two in a row.
+    # Far more failures than the limit, but never two in a row. Drained one at
+    # a time: queued batches coalesce, and this is about consecutive *writes*.
     for _ in range(TRANSIENT_FAILURE_LIMIT * 4):
         worker.submit([{"id": 1}])
-    drain(worker)
+        drain(worker)
 
     assert sink.calls == TRANSIENT_FAILURE_LIMIT * 4
     assert sink.enabled is True
@@ -439,4 +444,83 @@ def test_a_failed_batch_is_counted_once_per_sink_not_once_per_run():
     assert worker.failed_records == {"broken": 2}
     assert worker.dropped == 0
     assert healthy.batches, "the healthy sink stored them"
+    worker.close()
+
+
+def test_records_queued_during_an_upload_go_out_as_one_batch():
+    """One request per episode runs into the platform's per-minute limit on a
+    fast eval; whatever accumulates while a request is in flight must go out
+    together, so the request rate tracks upload latency instead."""
+    sink = BlockingSink()
+    worker = UploadWorker([sink])
+
+    assert worker.submit([{"id": 0}])
+    assert sink.entered.wait(1.0), "the uploader never reached the sink"
+    for n in (1, 2, 3):
+        assert worker.submit([{"id": n}])
+    sink.released.set()
+    drain(worker)
+
+    assert [[r["id"] for r in batch] for batch in sink.batches] == [[0], [1, 2, 3]]
+    worker.close()
+
+
+def test_coalescing_keeps_traces_and_episodes_apart():
+    """The traces sink infers the line format from a batch's first record, so
+    mixing episodes into a batch of bare traces would misfile every record."""
+    sink = BlockingSink()
+    worker = UploadWorker([sink])
+
+    assert worker.submit([{"id": "t0"}])
+    assert sink.entered.wait(1.0)
+    worker.submit([{"id": "t1"}])
+    worker.submit([{"id": "e1", "traces": []}])
+    worker.submit([{"id": "e2", "traces": []}])
+    worker.submit([{"id": "t2"}])
+    sink.released.set()
+    drain(worker)
+
+    assert [[r["id"] for r in batch] for batch in sink.batches] == [
+        ["t0"],
+        ["t1"],
+        ["e1", "e2"],
+        ["t2"],
+    ]
+    worker.close()
+
+
+def test_a_flush_barrier_is_not_reordered_past_the_records_before_it():
+    """Coalescing must stop at the barrier: flush() promises that everything
+    submitted before it has been written when it returns."""
+    sink = BlockingSink()
+    worker = UploadWorker([sink])
+
+    assert worker.submit([{"id": 0}])
+    assert sink.entered.wait(1.0)
+    worker.submit([{"id": 1}])
+    release = threading.Timer(0.05, sink.released.set)
+    release.start()
+    try:
+        assert worker.flush(timeout=2.0) is True
+    finally:
+        release.join()
+    worker.submit([{"id": 2}])
+
+    assert [[r["id"] for r in batch] for batch in sink.batches] == [[0], [1]]
+    drain(worker)
+    assert [[r["id"] for r in batch] for batch in sink.batches] == [[0], [1], [2]]
+    worker.close()
+
+
+def test_a_worker_with_no_sinks_never_starts_a_thread():
+    """A disabled run submits every batch; copying them into a queue and
+    starting a thread to find there is nowhere to put them is pure cost."""
+    worker = UploadWorker([])
+
+    assert worker.submit([{"id": 1}]) is True
+    assert worker.submit([{"id": 2}]) is True
+
+    assert worker._thread is None
+    assert worker.dropped == 0
+    assert worker.flush(timeout=1.0) is True
     worker.close()

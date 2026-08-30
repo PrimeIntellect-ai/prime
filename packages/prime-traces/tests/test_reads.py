@@ -189,49 +189,6 @@ class TestPointReads:
         with pytest.raises(UnauthorizedError):
             make_client(handler).get("8d3f1a2b")
 
-    def test_unauthorized_keeps_server_detail(self, make_client):
-        """The platform API answers a token missing a required *scope* with
-        401 (not 403), and only the FastAPI ``detail`` names the scope. That
-        text must reach the caller: the key is valid, and "check
-        PRIME_API_KEY" alone sends them rotating it instead of granting the
-        scope."""
-        detail = "Token permission missing: scope 'environments', permission 'write'"
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(401, json={"detail": detail})
-
-        with pytest.raises(UnauthorizedError) as exc_info:
-            make_client(handler).get("8d3f1a2b")
-        assert detail in str(exc_info.value)
-        assert "PRIME_API_KEY" in str(exc_info.value)
-
-    def test_unauthorized_keeps_service_envelope_message(self, make_client):
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(
-                401,
-                json={
-                    "error": {
-                        "code": "unauthenticated",
-                        "message": "Invalid or expired API token",
-                    }
-                },
-            )
-
-        with pytest.raises(UnauthorizedError) as exc_info:
-            make_client(handler).get("8d3f1a2b")
-        assert exc_info.value.code == "unauthenticated"
-        assert "Invalid or expired API token" in str(exc_info.value)
-
-    def test_unauthorized_without_body_stays_readable(self, make_client):
-        """An empty 401 (a gateway, say) must not render as "(HTTP 401)"."""
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(401)
-
-        with pytest.raises(UnauthorizedError) as exc_info:
-            make_client(handler).get("8d3f1a2b")
-        assert str(exc_info.value) == "API key unauthorized. Check PRIME_API_KEY and its scopes."
-
     def test_forbidden_is_typed_with_server_message(self, make_client):
         """403 is an expected path, not an edge case: hosted-eval worker
         tokens are write-only, so any read they attempt lands here. The

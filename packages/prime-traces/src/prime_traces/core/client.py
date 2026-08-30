@@ -193,9 +193,17 @@ def raise_for_response(response: httpx.Response) -> None:
     code, message = _extract_error(response)
 
     if status == 401:
-        raise UnauthorizedError(
-            "API key unauthorized. Check PRIME_API_KEY.", status_code=status, code=code
+        # Carry the server's reason. The platform API answers a token that
+        # lacks a required *scope* with 401, not 403, and only the body names
+        # the scope; a canned line sends the caller to rotate a key that is
+        # valid but under-scoped.
+        detail = message if message != f"HTTP {status}" else None
+        text = (
+            f"API key unauthorized ({detail}). Check PRIME_API_KEY and its scopes."
+            if detail
+            else "API key unauthorized. Check PRIME_API_KEY and its scopes."
         )
+        raise UnauthorizedError(text, status_code=status, code=code)
     if status == 402:
         raise PaymentRequiredError(
             "Payment required. Check billing status.", status_code=status, code=code

@@ -34,6 +34,11 @@ from ..utils import (
     validate_output_format,
 )
 from ..utils.env_metadata import find_environment_metadata
+from ..utils.environment_runtime import (
+    VERIFIERS_V0,
+    VERIFIERS_V1,
+    detect_environment_runtime,
+)
 from ..utils.formatters import format_file_size
 from ..utils.formatters import strip_ansi as _strip_ansi
 from ..utils.prompt import (
@@ -1344,6 +1349,24 @@ def push(
             # Extract Requires-Dist from wheel METADATA (includes URL dependencies)
             requires_dist = extract_requires_dist_from_wheel(wheel_path)
 
+            runtime_hint = detect_environment_runtime(
+                env_path,
+                _collect_archive_files(env_path),
+                requires_dist=requires_dist,
+                dependencies=project_metadata.get("dependencies", []),
+            )
+            if runtime_hint == VERIFIERS_V1:
+                console.print("Detected a verifiers v1 environment (runtime_hint=VERIFIERS_V1)")
+            elif runtime_hint == VERIFIERS_V0:
+                console.print(
+                    "Detected a legacy verifiers v0 environment (runtime_hint=VERIFIERS_V0)"
+                )
+            else:
+                console.print(
+                    "[dim]Could not tell v0 from v1 locally; the Hub will classify "
+                    "the package at unpack time.[/dim]"
+                )
+
             wheel_data = {
                 "content_hash": content_hash,
                 "filename": unique_wheel_name,
@@ -1360,6 +1383,8 @@ def push(
                     "requires_dist": requires_dist,  # Include full dependency specs from wheel
                 },
             }
+            if runtime_hint is not None:
+                wheel_data["runtime_hint"] = runtime_hint
 
             try:
                 response = client.post(f"/environmentshub/{env_id}/wheels", json=wheel_data)
@@ -1463,6 +1488,8 @@ def push(
                             "original_filename": f"{env_name}-{version}.tar.gz",
                         },
                     }
+                    if runtime_hint is not None:
+                        source_data["runtime_hint"] = runtime_hint
 
                     try:
                         response = client.post(

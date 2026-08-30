@@ -193,10 +193,6 @@ def raise_for_response(response: httpx.Response) -> None:
     code, message = _extract_error(response)
 
     if status == 401:
-        # Carry the server's reason. The platform API answers a token that
-        # lacks a required *scope* with 401, not 403, and only the body names
-        # the scope; a canned line sends the caller to rotate a key that is
-        # valid but under-scoped.
         detail = message if message != f"HTTP {status}" else None
         text = (
             f"API key unauthorized ({detail}). Check PRIME_API_KEY and its scopes."

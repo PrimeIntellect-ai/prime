@@ -30,6 +30,7 @@ _SENSITIVE_FIELDS = {
     "api_key",
     "access_token",
     "auth_token",
+    "auth",
     "authorization",
     "client_secret",
     "connection_string",
@@ -48,10 +49,28 @@ _SENSITIVE_FIELDS = {
     "secret_key",
     "session_token",
     "signature",
+    "team_id",
     "token",
 }
 _SCHEMA_VALUES = {"const", "default", "example", "examples"}
-_SCHEMA_TYPES = {"array", "boolean", "integer", "null", "number", "object", "string"}
+_SCHEMA_FIELDS = {
+    "$ref",
+    "allOf",
+    "anyOf",
+    "const",
+    "default",
+    "description",
+    "enum",
+    "examples",
+    "format",
+    "items",
+    "oneOf",
+    "pattern",
+    "properties",
+    "required",
+    "title",
+    "type",
+}
 _SAFE_PATH_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_-]{0,63}")
 _AUTH_VALUE = re.compile(r"^(?:bearer|basic)\s+(.+)$", re.IGNORECASE)
 
@@ -214,10 +233,10 @@ def secret_values(*values: str | None, secrets_file: str | Path | None = None) -
 
 
 def _remember(value: Any, secrets: dict[str, str], category: str) -> None:
-    if isinstance(value, str) and bool(value.strip()) and not _PLACEHOLDER.fullmatch(value.strip()):
+    if _is_secret(value):
         secrets.setdefault(value, category)
-        if match := _AUTH_VALUE.fullmatch(value.strip()):
-            _remember(match.group(1), secrets, category)
+        if (match := _AUTH_VALUE.fullmatch(value.strip())) and _is_secret(token := match.group(1)):
+            secrets.setdefault(token, category)
     elif isinstance(value, Mapping):
         for child in value.values():
             _remember(child, secrets, category)
@@ -234,8 +253,7 @@ def _discover(value: Any, secrets: dict[str, str]) -> None:
                 normalized = _normalize(name)
                 if properties:
                     schema = isinstance(nested, Mapping) and (
-                        nested.get("type") in _SCHEMA_TYPES
-                        or any(field in nested for field in ("$ref", "allOf", "anyOf", "oneOf"))
+                        not nested or any(field in nested for field in _SCHEMA_FIELDS)
                     )
                     if schema:
                         visit(nested, _sensitive(name))
@@ -313,6 +331,9 @@ def _reduce(
     secrets: Mapping[str, str],
     findings: set[Finding],
     path: tuple[str | int, ...] = (),
+    structured_secret: bool = False,
+    schema_secret: bool = False,
+    properties: bool = False,
 ) -> Any:
     if isinstance(value, Mapping):
         reduced = {}
@@ -323,20 +344,57 @@ def _reduce(
             findings.update((_path((*path, "[key]")), category) for category in categories)
             if safe_key in reduced:
                 raise UploadScanError("credential reduction would create duplicate object keys")
+            normalized = _normalize(str(key))
+            schema = (
+                properties
+                and isinstance(child, Mapping)
+                and (not child or any(field in child for field in _SCHEMA_FIELDS))
+            )
+            child_secret = structured_secret or (
+                not schema
+                and (_sensitive(str(key)) or schema_secret and normalized in _SCHEMA_VALUES)
+            )
             reduced[safe_key] = _reduce(
-                child, secrets, findings, (*path, "[key]" if categories else str(key))
+                child,
+                secrets,
+                findings,
+                (*path, "[key]" if categories else str(key)),
+                child_secret,
+                _sensitive(str(key)) if schema else schema_secret,
+                not structured_secret and normalized == "properties",
             )
         return reduced
     if isinstance(value, list):
         return [
-            _reduce(child, secrets, findings, (*path, index)) for index, child in enumerate(value)
+            _reduce(
+                child,
+                secrets,
+                findings,
+                (*path, index),
+                structured_secret,
+                schema_secret,
+                properties,
+            )
+            for index, child in enumerate(value)
         ]
     if isinstance(value, tuple):
         return tuple(
-            _reduce(child, secrets, findings, (*path, index)) for index, child in enumerate(value)
+            _reduce(
+                child,
+                secrets,
+                findings,
+                (*path, index),
+                structured_secret,
+                schema_secret,
+                properties,
+            )
+            for index, child in enumerate(value)
         )
     if not isinstance(value, str):
         return value
+    if structured_secret and value.strip() and not _PLACEHOLDER.fullmatch(value.strip()):
+        findings.add((_path(path), "structured_secret"))
+        return REDACTED
     reduced, categories = _redact_text(value, secrets)
     findings.update((_path(path), category) for category in categories)
     return reduced

@@ -1069,22 +1069,31 @@ def _push_single_eval(
     eval_name = name or eval_data["eval_name"]
     console.print(f"[blue]✓ Loaded eval data:[/blue] {path}")
 
+    detected_env = eval_data.get("env_id") or eval_data.get("env")
+    if not env_slug and detected_env and not run_id and not eval_id:
+        env_slug = detected_env
+
     api_client = APIClient()
     prepared = prepare_upload(
-        {"eval_name": eval_name, "eval_data": eval_data},
+        {
+            "eval_name": eval_name,
+            "eval_data": eval_data,
+            "env_slug": env_slug,
+            "run_id": run_id,
+            "eval_id": eval_id,
+        },
         secret_values(getattr(api_client, "api_key", None), secrets_file=secrets_file),
     )
     eval_name = prepared.data["eval_name"]
     eval_data = prepared.data["eval_data"]
+    env_slug = prepared.data["env_slug"]
+    run_id = prepared.data["run_id"]
+    eval_id = prepared.data["eval_id"]
     if prepared.report:
         console.print(
             f"[yellow]Upload preflight redacted {prepared.report}. "
             "Local files were not changed.[/yellow]"
         )
-
-    detected_env = eval_data.get("env_id") or eval_data.get("env")
-    if not env_slug and detected_env and not run_id and not eval_id:
-        env_slug = detected_env
 
     environments = None
     if env_slug and not run_id and not eval_id:

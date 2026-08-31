@@ -123,7 +123,7 @@ def test_preflight_catches_quoted_json_assignments_and_short_structured_secrets(
     token = "opaque-json-token-0123456789"
     payload = {
         "completion": json.dumps({"Authorization": f"Bearer {token}"}),
-        "answer": "Use token=version-123 for the example.",
+        "answer": "Use abc123 and token=version-123 for the example.",
         "password": "s3cr3t",
         "api_key": "abc123",
     }
@@ -165,10 +165,17 @@ def test_nested_and_properties_credentials_do_not_bypass_discovery():
         "APIKey": secret,
         "apiKeys": [plural_key],
         "awsSecretAccessKey": access_key,
+        "credential": {"value": "pin"},
+        "rubric": "keep the pin label",
         "secret": {"value": secret},
         "token": token,
         "properties": {"password": secret},
-        "schema": {"properties": {"password": {"type": "string", "description": "keep this"}}},
+        "schema": {
+            "properties": {
+                "password": {"type": ["string", "null"], "description": "keep this"},
+                "apiKey": {"description": "typeless schema"},
+            }
+        },
     }
 
     prepared = prepare_upload(payload)
@@ -176,6 +183,8 @@ def test_nested_and_properties_credentials_do_not_bypass_discovery():
     assert prepared.data["APIKey"] == REDACTED
     assert prepared.data["apiKeys"] == [REDACTED]
     assert prepared.data["awsSecretAccessKey"] == REDACTED
+    assert prepared.data["credential"]["value"] == REDACTED
+    assert prepared.data["rubric"] == payload["rubric"]
     assert prepared.data["secret"]["value"] == REDACTED
     assert prepared.data["token"] == REDACTED
     assert prepared.data["properties"]["password"] == REDACTED

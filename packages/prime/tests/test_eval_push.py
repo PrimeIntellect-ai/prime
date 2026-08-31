@@ -398,6 +398,70 @@ class TestPushSingleEval:
         assert opaque_key in (tmp_path / "metadata.json").read_text()
         assert provider_key in (tmp_path / "results.jsonl").read_text()
 
+    def test_preflight_covers_manual_upload_identifiers(self, tmp_path, monkeypatch):
+        secret = "opaque-cli-identifier-0123456789"
+        (tmp_path / "metadata.json").write_text(
+            json.dumps({"env": "owner/gsm8k", "model": "gpt-4"})
+        )
+        (tmp_path / "results.jsonl").write_text("")
+        secrets_file = tmp_path / "secrets.txt"
+        secrets_file.write_text(secret + "\n")
+        captured = {}
+
+        class DummyEvalsClient:
+            def __init__(self, _api_client):
+                pass
+
+            def create_evaluation(self, **kwargs):
+                captured.update(kwargs)
+                return {"evaluation_id": "eval-123"}
+
+            def get_evaluation(self, evaluation_id):
+                captured["checked_evaluation_id"] = evaluation_id
+
+            def update_evaluation(self, **kwargs):
+                captured.update(kwargs)
+
+            def finalize_evaluation(self, evaluation_id, metrics=None):
+                captured["finalized_evaluation_id"] = evaluation_id
+
+        monkeypatch.setattr("prime_cli.commands.evals.APIClient", lambda: object())
+        monkeypatch.setattr("prime_cli.commands.evals.EvalsClient", DummyEvalsClient)
+
+        _push_single_eval(
+            str(tmp_path),
+            f"owner/{secret}",
+            None,
+            None,
+            secrets_file=str(secrets_file),
+        )
+        assert captured["environments"] == [{"slug": "owner/[REDACTED]"}]
+
+        captured.clear()
+        _push_single_eval(
+            str(tmp_path),
+            None,
+            secret,
+            None,
+            secrets_file=str(secrets_file),
+        )
+        assert secret not in json.dumps(captured)
+        assert captured["environments"] is None
+        assert captured["run_id"] == "[REDACTED]"
+
+        captured.clear()
+        _push_single_eval(
+            str(tmp_path),
+            None,
+            None,
+            secret,
+            secrets_file=str(secrets_file),
+        )
+        assert secret not in json.dumps(captured)
+        assert captured["checked_evaluation_id"] == "[REDACTED]"
+        assert captured["evaluation_id"] == "[REDACTED]"
+        assert captured["finalized_evaluation_id"] == "[REDACTED]"
+
     def test_create_evaluation_defaults_to_private(self, tmp_path, monkeypatch):
         metadata = {"env": "owner/gsm8k", "model": "gpt-4"}
         (tmp_path / "metadata.json").write_text(json.dumps(metadata))

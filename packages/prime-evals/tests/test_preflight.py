@@ -166,6 +166,9 @@ def test_preflight_redacts_numeric_structured_secrets():
         "auth": False,
     }
 
+    usage = {"input_tokens": 10, "output_tokens": 20, "total_tokens": 30}
+    assert prepare_upload({"usage": usage}).data["usage"] == usage
+
 
 @pytest.mark.parametrize("label", ["DSA PRIVATE KEY", "ENCRYPTED PRIVATE KEY"])
 def test_preflight_catches_private_key_pem_variants(label):

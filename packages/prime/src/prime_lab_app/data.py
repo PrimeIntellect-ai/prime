@@ -457,9 +457,10 @@ class LabDataSource:
             run_page = client.list_runs(team_id=config.team_id, limit=options.limit)
             runs = run_page.runs
             if run_page.total is None:
-                # Backend predates pagination support and ignored `limit`,
-                # returning the full (already createdAt-desc sorted) history.
-                runs = runs[: options.limit]
+                # Backend predates pagination support and ignored `limit`.
+                # Re-sort defensively (mirrors the CLI's fallback) rather
+                # than trusting response order, then take the newest N.
+                runs = sorted(runs, key=lambda run: run.created_at, reverse=True)[: options.limit]
             items = tuple(_rl_run_item(run, idx) for idx, run in enumerate(runs))
             return LabSection(
                 key="training",

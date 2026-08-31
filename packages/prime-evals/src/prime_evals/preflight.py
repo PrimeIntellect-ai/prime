@@ -64,9 +64,7 @@ _SCHEMA_MARKERS = {
     "$schema",
     "allOf",
     "anyOf",
-    "items",
     "oneOf",
-    "required",
 }
 _SAFE_PATH_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_-]{0,63}")
 _AUTH_VALUE = re.compile(r"^(?:bearer|basic|token)\s+(.+)$", re.IGNORECASE)
@@ -134,7 +132,9 @@ _PATTERNS = (
             r"SECRET(?:_ACCESS_?KEY|_?KEY)?|PASSWORD|PASSWD|CREDENTIAL|PRIVATE_?KEY)\s*=\s*|"
             r"--(?:api-key|api-token|access-token|auth-token|client-secret|password|"
             r"private-key|secret|token)(?:=|\s+))"
-            r"[\"']?(?:(?i:bearer|basic|token)\s+)?(?P<secret>[^\s,;\"']{8,})"
+            r"(?:\"(?P<secret_short_double>(?:\\.|[^\"\\\r\n]){8,})\"|"
+            r"'(?P<secret_short_single>(?:\\.|[^'\\\r\n]){8,})'|"
+            r"(?:(?i:bearer|basic|token)\s+)?(?P<secret>[^\s,;\"']{8,}))"
         ),
     ),
     (
@@ -298,6 +298,8 @@ def _discover(value: Any, secrets: dict[str, str]) -> None:
                     or isinstance(schema_type, (list, tuple))
                     and "object" in schema_type
                 )
+                or schema_type == "array"
+                and "items" in child
             )
             for key, nested in child.items():
                 name = str(key)
@@ -422,6 +424,8 @@ def _reduce(
                 or isinstance(schema_type, (list, tuple))
                 and "object" in schema_type
             )
+            or schema_type == "array"
+            and "items" in value
         )
         for key, child in value.items():
             safe_key, categories = (

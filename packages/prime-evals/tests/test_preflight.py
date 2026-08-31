@@ -105,10 +105,12 @@ def test_preflight_catches_assignments_flags_urls_webhooks_and_private_keys():
         "SECRET_KEY=abcdefgh1234",
         "api_token=abcdefghijklmnop",
         "--token 123456789abc",
+        'password="abcd efgh"',
+        'password="abcd,efgh"',
     ],
 )
 def test_preflight_catches_short_explicit_assignments(assignment):
-    assert prepare_upload({"completion": assignment}).data["completion"].endswith(REDACTED)
+    assert REDACTED in prepare_upload({"completion": assignment}).data["completion"]
 
 
 def test_preflight_catches_azure_storage_account_keys():
@@ -285,6 +287,11 @@ def test_nested_and_properties_credentials_do_not_bypass_discovery():
 
     event = {
         "type": "event",
+        "properties": {"password": {"value": "opaque-password-0123456789"}},
+    }
+    assert prepare_upload(event).data["properties"]["password"]["value"] == REDACTED
+    event = {
+        "items": [],
         "properties": {"password": {"value": "opaque-password-0123456789"}},
     }
     assert prepare_upload(event).data["properties"]["password"]["value"] == REDACTED

@@ -398,13 +398,18 @@ class FakeRun:
         }
 
 
+@dataclass
+class FakeRunPage:
+    runs: list[FakeRun]
+
+
 class FakeRLClient:
     def __init__(self, _api_client: Any) -> None:
         pass
 
-    def list_runs(self, team_id: str | None = None) -> list[FakeRun]:
+    def list_runs(self, team_id: str | None = None, *, limit: int = 20) -> FakeRunPage:
         assert team_id == "team-123"
-        return [FakeRun()]
+        return FakeRunPage(runs=[FakeRun()])
 
     def get_run(self, run_id: str) -> FakeRun:
         assert run_id == "run-1"
@@ -479,7 +484,7 @@ class FailingEvalsClient(FakeEvalsClient):
 
 
 class FailingRLClient(FakeRLClient):
-    def list_runs(self, team_id: str | None = None) -> list[FakeRun]:
+    def list_runs(self, team_id: str | None = None, *, limit: int = 20) -> FakeRunPage:
         raise RuntimeError("training unavailable")
 
 

@@ -454,8 +454,7 @@ class LabDataSource:
         try:
             api_client = self._api_client_factory()
             client = self._rl_client_factory(api_client)
-            runs = client.list_runs(team_id=config.team_id)
-            runs = sorted(runs, key=lambda run: run.created_at, reverse=True)[: options.limit]
+            runs = client.list_runs(team_id=config.team_id, limit=options.limit).runs
             items = tuple(_rl_run_item(run, idx) for idx, run in enumerate(runs))
             return LabSection(
                 key="training",

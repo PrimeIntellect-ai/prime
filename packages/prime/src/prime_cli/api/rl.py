@@ -148,6 +148,18 @@ class EnvServerInfo(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class RLRunPage(BaseModel):
+    """One page of GET /rft/runs, as returned by the backend."""
+
+    runs: List[RLRun] = Field(default_factory=list)
+    total: int = Field(..., description="Total number of matching runs")
+    page: int = Field(..., description="Current page number")
+    limit: int = Field(..., description="Runs per page")
+    total_pages: int = Field(..., alias="total_pages")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class RLClient:
     """Client for the Hosted Training API."""
 
@@ -168,15 +180,26 @@ class RLClient:
                 raise APIError(f"Failed to list Hosted Training models: {e.response.text}")
             raise APIError(f"Failed to list Hosted Training models: {str(e)}")
 
-    def list_runs(self, team_id: Optional[str] = None) -> List[RLRun]:
-        """List Hosted Training runs for the authenticated user."""
+    def list_runs(
+        self,
+        team_id: Optional[str] = None,
+        *,
+        mine: bool = False,
+        page: int = 1,
+        limit: int = 20,
+    ) -> RLRunPage:
+        """List Hosted Training runs for the authenticated user, one page
+        at a time - pagination and the `mine` filter are applied
+        server-side rather than fetched-in-full-then-sliced locally.
+        """
         try:
-            params = {}
+            params: Dict[str, Any] = {"page": page, "limit": limit}
             if team_id:
                 params["team_id"] = team_id
-            response = self.client.get("/rft/runs", params=params if params else None)
-            runs_data = response.get("runs", [])
-            return [RLRun.model_validate(run) for run in runs_data]
+            if mine:
+                params["mine"] = "true"
+            response = self.client.get("/rft/runs", params=params)
+            return RLRunPage.model_validate(response)
         except Exception as e:
             if hasattr(e, "response") and hasattr(e.response, "text"):
                 raise APIError(f"Failed to list Hosted Training runs: {e.response.text}")

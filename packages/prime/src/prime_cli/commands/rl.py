@@ -2150,24 +2150,12 @@ def _list_runs_impl(
 
         team_id = team or config.team_id
 
-        all_runs = rl_client.list_runs(team_id=team_id)
-
-        if mine:
-            current_user_id = config.user_id
-            if not current_user_id:
-                console.print(
-                    "[red]Error:[/red] Cannot filter by user - no user_id configured. "
-                    "Run [bold]prime whoami[/bold] to refresh your config."
-                )
-                raise typer.Exit(1)
-            all_runs = [r for r in all_runs if r.user_id == current_user_id]
-
-        total_count = len(all_runs)
-
-        # Sort by created_at descending and paginate
-        all_runs.sort(key=lambda r: r.created_at, reverse=True)
-        start = (page - 1) * num
-        runs = all_runs[start : start + num]
+        # Pagination and the `mine` filter are applied server-side, so this
+        # fetches exactly the requested page instead of the caller's whole
+        # run history sorted/sliced locally.
+        run_page = rl_client.list_runs(team_id=team_id, mine=mine, page=page, limit=num)
+        runs = run_page.runs
+        total_count = run_page.total
 
         if output == "json":
             output_data_as_json(

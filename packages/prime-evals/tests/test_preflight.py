@@ -102,6 +102,7 @@ def test_preflight_catches_assignments_flags_urls_webhooks_and_private_keys():
     [
         "password=abcdefgh1234",
         "TOKEN=abcdefgh1234",
+        "SECRET_KEY=abcdefgh1234",
         "api_token=abcdefghijklmnop",
         "--token 123456789abc",
     ],
@@ -194,6 +195,18 @@ def test_pattern_discovered_secrets_are_redacted_everywhere():
 
     assert secret not in json.dumps(prepared.data)
     assert prepared.data["prompt"] == f"model repeated {REDACTED}"
+
+
+def test_url_userinfo_is_redacted_without_becoming_a_global_secret():
+    prepared = prepare_upload(
+        {
+            "log": "redis://user:password@example.com/0",
+            "rubric": "mention the password field",
+        }
+    )
+
+    assert "user:password" not in prepared.data["log"]
+    assert prepared.data["rubric"] == "mention the password field"
 
 
 def test_preflight_redacts_numeric_structured_secrets():

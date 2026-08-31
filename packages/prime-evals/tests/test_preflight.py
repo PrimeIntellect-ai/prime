@@ -113,7 +113,8 @@ def test_preflight_catches_additional_provider_credentials(token):
 def test_preflight_redacts_every_value_in_a_raw_cookie_header():
     session = "opaque-cookie-session-0123456789"
     refresh = "opaque-cookie-refresh-0123456789"
-    prepared = prepare_upload({"completion": f"Cookie: session={session}; refresh={refresh}"})
+    header = json.dumps({"Cookie": f"session={session}; refresh={refresh}"})
+    prepared = prepare_upload({"completion": f"request: {header}"})
 
     assert session not in prepared.data["completion"]
     assert refresh not in prepared.data["completion"]
@@ -123,6 +124,7 @@ def test_preflight_catches_quoted_json_assignments_and_short_structured_secrets(
     token = "opaque-json-token-0123456789"
     payload = {
         "completion": json.dumps({"Authorization": f"Bearer {token}"}),
+        "error": "Authorization: Basic dXNlcjpwYXNz",
         "answer": "Use abc123 and token=version-123 for the example.",
         "password": "s3cr3t",
         "api_key": "abc123",
@@ -131,6 +133,7 @@ def test_preflight_catches_quoted_json_assignments_and_short_structured_secrets(
     prepared = prepare_upload(payload)
 
     assert token not in prepared.data["completion"]
+    assert "dXNlcjpwYXNz" not in prepared.data["error"]
     assert prepared.data["answer"] == payload["answer"]
     assert prepared.data["password"] == REDACTED
     assert prepared.data["api_key"] == REDACTED
@@ -161,15 +164,17 @@ def test_nested_and_properties_credentials_do_not_bypass_discovery():
     token = "opaque-generic-token-0123456789"
     access_key = "opaque-aws-secret-access-key-0123456789"
     plural_key = "opaque-plural-key-0123456789"
+    property_key = "opaque-property-key-0123456789"
     payload = {
         "APIKey": secret,
         "apiKeys": [plural_key],
         "awsSecretAccessKey": access_key,
         "credential": {"value": "pin"},
+        "authentication": "opaque-authentication-0123456789",
         "rubric": "keep the pin label",
         "secret": {"value": secret},
         "token": token,
-        "properties": {"password": secret},
+        "properties": {"password": {"type": "string", "value": property_key}},
         "schema": {
             "properties": {
                 "password": {"type": ["string", "null"], "description": "keep this"},
@@ -184,10 +189,11 @@ def test_nested_and_properties_credentials_do_not_bypass_discovery():
     assert prepared.data["apiKeys"] == [REDACTED]
     assert prepared.data["awsSecretAccessKey"] == REDACTED
     assert prepared.data["credential"]["value"] == REDACTED
+    assert prepared.data["authentication"] == REDACTED
     assert prepared.data["rubric"] == payload["rubric"]
     assert prepared.data["secret"]["value"] == REDACTED
     assert prepared.data["token"] == REDACTED
-    assert prepared.data["properties"]["password"] == REDACTED
+    assert prepared.data["properties"]["password"]["value"] == REDACTED
     assert prepared.data["schema"] == payload["schema"]
 
 

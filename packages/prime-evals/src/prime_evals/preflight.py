@@ -31,6 +31,7 @@ _SENSITIVE_FIELDS = {
     "access_token",
     "auth_token",
     "auth",
+    "authentication",
     "authorization",
     "client_secret",
     "connection_string",
@@ -53,8 +54,10 @@ _SENSITIVE_FIELDS = {
     "token",
 }
 _SCHEMA_VALUES = {"const", "default", "example", "examples"}
-_SCHEMA_FIELDS = {
+_SCHEMA_MARKERS = {
+    "$defs",
     "$ref",
+    "$schema",
     "allOf",
     "anyOf",
     "const",
@@ -66,7 +69,6 @@ _SCHEMA_FIELDS = {
     "items",
     "oneOf",
     "pattern",
-    "properties",
     "required",
     "title",
     "type",
@@ -108,14 +110,26 @@ _PATTERNS = (
         ),
     ),
     (
+        "authorization_header",
+        re.compile(
+            r"(?<![A-Za-z0-9_])[\"']?(?:authorization|proxy-authorization)"
+            r"[\"']?\s*[:=]\s*[\"']?(?:(?:bearer|basic)\s+)?"
+            r"(?P<secret>[^\s,;\"']{8,})",
+            re.IGNORECASE,
+        ),
+    ),
+    (
         "cookie_header",
-        re.compile(r"^\s*cookie\s*:\s*(?P<secret>[^\r\n]{8,})", re.IGNORECASE | re.MULTILINE),
+        re.compile(
+            r"(?<![A-Za-z0-9_-])[\"']?cookie[\"']?\s*:\s*[\"']?"
+            r"(?P<secret>[^\r\n\"']{8,})",
+            re.IGNORECASE,
+        ),
     ),
     (
         "credential_assignment",
         re.compile(
-            r"(?:(?<![A-Za-z0-9_])[\"']?(?:authorization|proxy-authorization|"
-            r"x-api-key|api[_ -]?key|"
+            r"(?:(?<![A-Za-z0-9_])[\"']?(?:x-api-key|api[_ -]?key|"
             r"access[_ -]?token|refresh[_ -]?token|auth[_ -]?token|client[_ -]?secret|"
             r"secret|password|passwd|cookie|private[_ -]?key|signature)\b[\"']?\s*[:=]\s*|"
             r"\b(?:[A-Z][A-Z0-9_]*_)?(?:API_?KEY|ACCESS_?TOKEN|REFRESH_?TOKEN|"
@@ -246,17 +260,20 @@ def _remember(value: Any, secrets: dict[str, str], category: str) -> None:
 
 
 def _discover(value: Any, secrets: dict[str, str]) -> None:
-    def visit(child: Any, schema_secret: bool = False, properties: bool = False) -> None:
+    def visit(
+        child: Any,
+        schema_secret: bool = False,
+        schema_context: bool = False,
+        properties: bool = False,
+    ) -> None:
         if isinstance(child, Mapping):
+            object_schema = schema_context or any(field in child for field in _SCHEMA_MARKERS)
             for key, nested in child.items():
                 name = str(key)
                 normalized = _normalize(name)
                 if properties:
-                    schema = isinstance(nested, Mapping) and (
-                        not nested or any(field in nested for field in _SCHEMA_FIELDS)
-                    )
-                    if schema:
-                        visit(nested, _sensitive(name))
+                    if isinstance(nested, (Mapping, bool)):
+                        visit(nested, _sensitive(name), True)
                     else:
                         if _sensitive(name):
                             _remember(nested, secrets, "structured_secret")
@@ -266,10 +283,15 @@ def _discover(value: Any, secrets: dict[str, str]) -> None:
                     _remember(nested, secrets, "structured_secret")
                 if schema_secret and normalized in _SCHEMA_VALUES:
                     _remember(nested, secrets, "structured_secret")
-                visit(nested, schema_secret, normalized == "properties")
+                visit(
+                    nested,
+                    schema_secret,
+                    object_schema or normalized in {"schema", "json_schema"},
+                    object_schema and normalized == "properties",
+                )
         elif isinstance(child, (list, tuple)):
             for nested in child:
-                visit(nested, schema_secret)
+                visit(nested, schema_secret, schema_context, properties)
 
     visit(value)
 
@@ -333,10 +355,12 @@ def _reduce(
     path: tuple[str | int, ...] = (),
     structured_secret: bool = False,
     schema_secret: bool = False,
+    schema_context: bool = False,
     properties: bool = False,
 ) -> Any:
     if isinstance(value, Mapping):
         reduced = {}
+        object_schema = schema_context or any(field in value for field in _SCHEMA_MARKERS)
         for key, child in value.items():
             safe_key, categories = (
                 _redact_text(key, secrets) if isinstance(key, str) else (key, set())
@@ -345,13 +369,9 @@ def _reduce(
             if safe_key in reduced:
                 raise UploadScanError("credential reduction would create duplicate object keys")
             normalized = _normalize(str(key))
-            schema = (
-                properties
-                and isinstance(child, Mapping)
-                and (not child or any(field in child for field in _SCHEMA_FIELDS))
-            )
+            property_schema = properties and isinstance(child, (Mapping, bool))
             child_secret = structured_secret or (
-                not schema
+                not property_schema
                 and (_sensitive(str(key)) or schema_secret and normalized in _SCHEMA_VALUES)
             )
             reduced[safe_key] = _reduce(
@@ -360,8 +380,9 @@ def _reduce(
                 findings,
                 (*path, "[key]" if categories else str(key)),
                 child_secret,
-                _sensitive(str(key)) if schema else schema_secret,
-                not structured_secret and normalized == "properties",
+                _sensitive(str(key)) if property_schema else schema_secret,
+                property_schema or object_schema or normalized in {"schema", "json_schema"},
+                not structured_secret and object_schema and normalized == "properties",
             )
         return reduced
     if isinstance(value, list):
@@ -373,6 +394,7 @@ def _reduce(
                 (*path, index),
                 structured_secret,
                 schema_secret,
+                schema_context,
                 properties,
             )
             for index, child in enumerate(value)
@@ -386,6 +408,7 @@ def _reduce(
                 (*path, index),
                 structured_secret,
                 schema_secret,
+                schema_context,
                 properties,
             )
             for index, child in enumerate(value)

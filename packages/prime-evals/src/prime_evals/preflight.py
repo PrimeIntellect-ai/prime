@@ -29,6 +29,7 @@ _REFERENCE_SUFFIXES = ("_env", "_env_var", "_file", "_name", "_path", "_var", "_
 _SENSITIVE_FIELDS = {
     "access_key",
     "access_key_id",
+    "account_key",
     "api_key",
     "api_token",
     "access_token",
@@ -132,7 +133,7 @@ _PATTERNS = (
         "credential_assignment",
         re.compile(
             r"(?:(?<![A-Za-z0-9_])[\"']?(?:[A-Za-z][A-Za-z0-9]*[_-]+)*"
-            r"(?:x-api-key|api[_ -]?key|"
+            r"(?:x-api-key|api[_ -]?key|account[_ -]?key|"
             r"access[_ -]?token|refresh[_ -]?token|auth[_ -]?token|client[_ -]?secret|"
             r"access[_ -]?key(?:[_ -]?id)?|secret(?:[_ -]?access[_ -]?key)?|"
             r"password|passwd|cookie|private[_ -]?key|signature)\b[\"']?\s*[:=]\s*|"
@@ -344,9 +345,13 @@ def _path(parts: tuple[str | int, ...]) -> str:
     return result
 
 
-def _redact_text(text: str, secrets: Mapping[str, str]) -> tuple[str, set[str]]:
+def _redact_text(
+    text: str,
+    secrets: Mapping[str, str],
+    exact: re.Pattern[str] | None,
+) -> tuple[str, set[str]]:
     categories = set()
-    if exact := _exact_pattern(secrets):
+    if exact:
 
         def replace_exact(match: re.Match[str]) -> str:
             categories.add(secrets[match.group("secret")])
@@ -376,6 +381,7 @@ def _redact_text(text: str, secrets: Mapping[str, str]) -> tuple[str, set[str]]:
 def _reduce(
     value: Any,
     secrets: Mapping[str, str],
+    exact: re.Pattern[str] | None,
     findings: set[Finding],
     path: tuple[str | int, ...] = (),
     structured_secret: bool = False,
@@ -390,7 +396,7 @@ def _reduce(
             safe_key, categories = (
                 (REDACTED, {"structured_secret"})
                 if structured_secret and _is_secret(key)
-                else _redact_text(key, secrets)
+                else _redact_text(key, secrets, exact)
                 if isinstance(key, str)
                 else (key, set())
             )
@@ -411,6 +417,7 @@ def _reduce(
             reduced[safe_key] = _reduce(
                 child,
                 secrets,
+                exact,
                 findings,
                 (*path, "[key]" if categories else str(key)),
                 child_secret,
@@ -424,6 +431,7 @@ def _reduce(
             _reduce(
                 child,
                 secrets,
+                exact,
                 findings,
                 (*path, index),
                 structured_secret,
@@ -438,6 +446,7 @@ def _reduce(
             _reduce(
                 child,
                 secrets,
+                exact,
                 findings,
                 (*path, index),
                 structured_secret,
@@ -461,16 +470,21 @@ def _reduce(
         return REDACTED
     if not isinstance(value, str):
         return value
-    reduced, categories = _redact_text(value, secrets)
+    reduced, categories = _redact_text(value, secrets, exact)
     findings.update((_path(path), category) for category in categories)
     return reduced
 
 
-def _prepare(value: Any, secrets: Mapping[str, str]) -> PreparedUpload:
+def _prepare(
+    value: Any,
+    secrets: Mapping[str, str],
+    exact: re.Pattern[str] | None = None,
+) -> PreparedUpload:
+    exact = exact or _exact_pattern(secrets)
     findings: set[Finding] = set()
-    data = _reduce(value, secrets, findings)
+    data = _reduce(value, secrets, exact, findings)
     residual: set[Finding] = set()
-    _reduce(data, secrets, residual)
+    _reduce(data, secrets, exact, residual)
     if residual:
         paths = ", ".join(path for path, _ in sorted(residual)[:10])
         raise UploadScanError(f"reduced upload still contains credentials at {paths}")
@@ -546,7 +560,8 @@ def prepare_jsonl_upload(
     except UnicodeDecodeError as error:
         raise UploadScanError("trace JSONL must be UTF-8") from error
 
-    context_prepared = _prepare(context, secrets) if context is not None else None
+    exact = _exact_pattern(secrets)
+    context_prepared = _prepare(context, secrets, exact) if context is not None else None
     findings = _prefix(context_prepared.report, "$.context") if context_prepared else set()
     file_findings: set[Finding] = set()
 
@@ -563,7 +578,7 @@ def prepare_jsonl_upload(
                         output_file.write(raw)
                     offset += len(raw)
                     continue
-                value = _prepare(_load_line(raw.decode(), number), secrets)
+                value = _prepare(_load_line(raw.decode(), number), secrets, exact)
                 file_findings.update(_prefix(value.report, f"$.lines[{number}]"))
                 if value.report and output_file is None:
                     output_file = stack.enter_context(redacted.open("wb"))

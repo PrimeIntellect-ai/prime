@@ -97,6 +97,18 @@ def test_preflight_catches_assignments_flags_urls_webhooks_and_private_keys():
     }
 
 
+def test_preflight_catches_azure_storage_account_keys():
+    secret = "QWxhZGRpbjpvcGVuIHNlc2FtZQ=="
+    connection = (
+        "DefaultEndpointsProtocol=https;AccountName=example;"
+        f"AccountKey={secret};EndpointSuffix=core.windows.net"
+    )
+
+    prepared = prepare_upload({"completion": connection})
+
+    assert secret not in prepared.data["completion"]
+
+
 @pytest.mark.parametrize(
     "token",
     [

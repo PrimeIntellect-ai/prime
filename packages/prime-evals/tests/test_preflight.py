@@ -117,6 +117,21 @@ def test_structured_authorization_redacts_the_repeated_bearer_token():
     assert token not in prepared.data["completion"]
 
 
+def test_nested_and_properties_credentials_do_not_bypass_discovery():
+    secret = "opaque-nested-secret-0123456789"
+    payload = {
+        "secret": {"value": secret},
+        "properties": {"password": secret},
+        "schema": {"properties": {"password": {"type": "string", "description": "keep this"}}},
+    }
+
+    prepared = prepare_upload(payload)
+
+    assert prepared.data["secret"]["value"] == REDACTED
+    assert prepared.data["properties"]["password"] == REDACTED
+    assert prepared.data["schema"] == payload["schema"]
+
+
 def test_jsonl_preflight_uses_secrets_discovered_in_later_lines(tmp_path):
     secret = "opaque-later-line-secret-0123456789"
     source = tmp_path / "traces.jsonl"

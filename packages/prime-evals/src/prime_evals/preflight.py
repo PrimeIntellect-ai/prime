@@ -47,6 +47,7 @@ _SENSITIVE_FIELDS = {
     "signature",
 }
 _SCHEMA_VALUES = {"const", "default", "example", "examples"}
+_SCHEMA_TYPES = {"array", "boolean", "integer", "null", "number", "object", "string"}
 _SAFE_PATH_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_-]{0,63}")
 _AUTH_VALUE = re.compile(r"^(?:bearer|basic)\s+(.+)$", re.IGNORECASE)
 
@@ -197,6 +198,9 @@ def _remember(value: Any, secrets: dict[str, str], category: str) -> None:
         if match := _AUTH_VALUE.fullmatch(value.strip()):
             if _is_secret(token := match.group(1)):
                 secrets.setdefault(token, category)
+    elif isinstance(value, Mapping):
+        for child in value.values():
+            _remember(child, secrets, category)
     elif isinstance(value, (list, tuple)):
         for child in value:
             _remember(child, secrets, category)
@@ -209,7 +213,16 @@ def _discover(value: Any, secrets: dict[str, str]) -> None:
                 name = str(key)
                 normalized = _normalize(name)
                 if properties:
-                    visit(nested, _sensitive(name))
+                    schema = isinstance(nested, Mapping) and (
+                        nested.get("type") in _SCHEMA_TYPES
+                        or any(field in nested for field in ("$ref", "allOf", "anyOf", "oneOf"))
+                    )
+                    if schema:
+                        visit(nested, _sensitive(name))
+                    else:
+                        if _sensitive(name):
+                            _remember(nested, secrets, "structured_secret")
+                        visit(nested)
                     continue
                 if _sensitive(name):
                     _remember(nested, secrets, "structured_secret")

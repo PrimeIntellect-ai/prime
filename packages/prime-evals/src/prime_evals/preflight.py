@@ -7,6 +7,7 @@ import os
 import re
 from collections import Counter
 from collections.abc import Iterable, Mapping
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -19,7 +20,8 @@ _PLACEHOLDER = re.compile(
     re.IGNORECASE,
 )
 _SECRET_ENV = re.compile(
-    r"API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTHORIZATION|COOKIE|"
+    r"(?:^|_)AUTH(?:$|_)|API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|"
+    r"AUTHORIZATION|COOKIE|"
     r"PRIVATE_?KEY|CONNECTION_STRING|DATABASE_URL|REDIS_URL",
     re.IGNORECASE,
 )
@@ -50,10 +52,9 @@ _SENSITIVE_FIELDS = {
     "secret_key",
     "session_token",
     "signature",
-    "team_id",
     "token",
 }
-_SCHEMA_VALUES = {"const", "default", "example", "examples"}
+_SCHEMA_VALUES = {"const", "default", "enum", "example", "examples"}
 _SCHEMA_MARKERS = {
     "$defs",
     "$ref",
@@ -74,7 +75,7 @@ _SCHEMA_MARKERS = {
     "type",
 }
 _SAFE_PATH_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_-]{0,63}")
-_AUTH_VALUE = re.compile(r"^(?:bearer|basic)\s+(.+)$", re.IGNORECASE)
+_AUTH_VALUE = re.compile(r"^(?:bearer|basic|token)\s+(.+)$", re.IGNORECASE)
 
 # Every shape names only the credential. The same match drives reporting and redaction.
 _PATTERNS = (
@@ -113,7 +114,7 @@ _PATTERNS = (
         "authorization_header",
         re.compile(
             r"(?<![A-Za-z0-9_])[\"']?(?:authorization|proxy-authorization)"
-            r"[\"']?\s*[:=]\s*[\"']?(?:(?:bearer|basic)\s+)?"
+            r"[\"']?\s*[:=]\s*[\"']?(?:(?:bearer|basic|token)\s+)?"
             r"(?P<secret>[^\s,;\"']{8,})",
             re.IGNORECASE,
         ),
@@ -136,8 +137,10 @@ _PATTERNS = (
             r"AUTH_?TOKEN|SESSION_?TOKEN|TOKEN|CLIENT_?SECRET|SECRET(?:_ACCESS_?KEY)?|"
             r"PASSWORD|PASSWD|CREDENTIAL|PRIVATE_?KEY)\s*=\s*|"
             r"--(?:api-key|access-token|auth-token|client-secret|password|private-key|"
-            r"secret|token)(?:=|\s+))[\"']?(?:(?:bearer|basic)\s+)?[\"']?"
-            r"(?P<secret>[^\s,;\"']{16,})",
+            r"secret|token)(?:=|\s+))"
+            r"(?:\"(?P<secret_double>(?:\\.|[^\"\\\r\n]){16,})\"|"
+            r"'(?P<secret_single>(?:\\.|[^'\\\r\n]){16,})'|"
+            r"(?:(?:bearer|basic|token)\s+)?(?P<secret>[^\s,;\"']{16,}))",
             re.IGNORECASE,
         ),
     ),
@@ -335,7 +338,11 @@ def _redact_text(text: str, secrets: Mapping[str, str]) -> tuple[str, set[str]]:
     for category, pattern in _PATTERNS:
 
         def replace_shape(match: re.Match[str], category: str = category) -> str:
-            group = "secret" if match.groupdict().get("secret") is not None else "secret_query"
+            group = next(
+                name
+                for name, value in match.groupdict().items()
+                if name.startswith("secret") and value is not None
+            )
             secret = match.group(group)
             if not _is_secret(secret):
                 return match.group(0)
@@ -363,7 +370,11 @@ def _reduce(
         object_schema = schema_context or any(field in value for field in _SCHEMA_MARKERS)
         for key, child in value.items():
             safe_key, categories = (
-                _redact_text(key, secrets) if isinstance(key, str) else (key, set())
+                (REDACTED, {"structured_secret"})
+                if structured_secret and _is_secret(key)
+                else _redact_text(key, secrets)
+                if isinstance(key, str)
+                else (key, set())
             )
             findings.update((_path((*path, "[key]")), category) for category in categories)
             if safe_key in reduced:
@@ -516,28 +527,40 @@ def prepare_jsonl_upload(
     findings = _prefix(context_prepared.report, "$.context") if context_prepared else set()
     file_findings: set[Finding] = set()
 
+    redacted.unlink(missing_ok=True)
+    output_file = None
     try:
-        with snapshot.open("rb") as input_file, redacted.open("wb") as output_file:
-            for number, raw in enumerate(input_file, 1):
+        with snapshot.open("rb") as input_file, ExitStack() as stack:
+            offset = 0
+            number = 0
+            while raw := input_file.readline():
+                number += 1
                 if raw.isspace():
-                    output_file.write(raw)
+                    if output_file:
+                        output_file.write(raw)
+                    offset += len(raw)
                     continue
                 value = _prepare(_load_line(raw.decode(), number), secrets)
                 file_findings.update(_prefix(value.report, f"$.lines[{number}]"))
-                output_file.write(
-                    json.dumps(value.data, ensure_ascii=False, separators=(",", ":")).encode()
-                    + b"\n"
-                    if value.report
-                    else raw
-                )
+                if value.report and output_file is None:
+                    output_file = stack.enter_context(redacted.open("wb"))
+                    with snapshot.open("rb") as prefix:
+                        output_file.write(prefix.read(offset))
+                if output_file:
+                    output_file.write(
+                        json.dumps(value.data, ensure_ascii=False, separators=(",", ":")).encode()
+                        + b"\n"
+                        if value.report
+                        else raw
+                    )
+                offset += len(raw)
     except UnicodeDecodeError as error:
         raise UploadScanError("trace JSONL must be UTF-8") from error
 
-    if file_findings:
+    if output_file:
         snapshot.unlink()
         upload_path = redacted
     else:
-        redacted.unlink()
         upload_path = snapshot
     return PreparedJSONLUpload(
         upload_path,

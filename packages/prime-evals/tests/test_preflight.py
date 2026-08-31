@@ -139,6 +139,21 @@ def test_preflight_catches_quoted_json_assignments_and_short_structured_secrets(
     assert prepared.data["api_key"] == REDACTED
 
 
+def test_preflight_catches_quoted_assignments_and_sensitive_mapping_keys():
+    secret = "opaque-map-key-0123456789"
+    prepared = prepare_upload(
+        {
+            "completion": 'password="correct horse battery staple"',
+            "api_keys": {secret: {"owner": "alice"}},
+            "team_id": "team-0123456789",
+        }
+    )
+
+    assert "correct horse battery staple" not in prepared.data["completion"]
+    assert list(prepared.data["api_keys"]) == [REDACTED]
+    assert prepared.data["team_id"] == "team-0123456789"
+
+
 def test_preflight_redacts_numeric_structured_secrets():
     prepared = prepare_upload(
         {"password": 12345678, "token": 987654321, "secret": None, "auth": False}
@@ -159,11 +174,12 @@ def test_preflight_catches_private_key_pem_variants(label):
     assert prepare_upload({"completion": private_key}).data["completion"] == REDACTED
 
 
-def test_structured_authorization_redacts_the_repeated_bearer_token():
+@pytest.mark.parametrize("scheme", ["Bearer", "Token"])
+def test_structured_authorization_redacts_the_repeated_token(scheme):
     token = "opaque-bearer-token-0123456789"
     prepared = prepare_upload(
         {
-            "headers": {"Authorization": f"Bearer {token}"},
+            "headers": {"Authorization": f"{scheme} {token}"},
             "completion": f"the model repeated {token}",
         }
     )
@@ -208,6 +224,18 @@ def test_nested_and_properties_credentials_do_not_bypass_discovery():
     assert prepared.data["token"] == REDACTED
     assert prepared.data["properties"]["password"]["value"] == REDACTED
     assert prepared.data["schema"] == payload["schema"]
+
+
+def test_sensitive_schema_enums_are_redacted():
+    secret = "opaque-schema-secret-0123456789"
+    schema = {
+        "type": "object",
+        "properties": {"api_key": {"type": "string", "enum": [secret]}},
+    }
+
+    prepared = prepare_upload({"schema": schema})
+
+    assert prepared.data["schema"]["properties"]["api_key"]["enum"] == [REDACTED]
 
 
 def test_jsonl_preflight_uses_secrets_discovered_in_later_lines(tmp_path):
@@ -299,3 +327,10 @@ def test_secret_values_file(tmp_path):
     path.write_text("short\n")
     with pytest.raises(ValueError, match="line 1"):
         secret_values(secrets_file=path)
+
+
+def test_secret_values_includes_auth_environment_variables(monkeypatch):
+    secret = "opaque-auth-secret-0123456789"
+    monkeypatch.setenv("AUTH", secret)
+
+    assert secret in secret_values()

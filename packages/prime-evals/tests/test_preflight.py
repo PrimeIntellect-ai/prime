@@ -97,6 +97,21 @@ def test_preflight_catches_assignments_flags_urls_webhooks_and_private_keys():
     }
 
 
+def test_preflight_catches_quoted_json_assignments_and_short_structured_secrets():
+    token = "opaque-json-token-0123456789"
+    payload = {
+        "completion": json.dumps({"Authorization": f"Bearer {token}"}),
+        "password": "s3cr3t",
+        "api_key": "abc123",
+    }
+
+    prepared = prepare_upload(payload)
+
+    assert token not in prepared.data["completion"]
+    assert prepared.data["password"] == REDACTED
+    assert prepared.data["api_key"] == REDACTED
+
+
 @pytest.mark.parametrize("label", ["DSA PRIVATE KEY", "ENCRYPTED PRIVATE KEY"])
 def test_preflight_catches_private_key_pem_variants(label):
     private_key = f"-----BEGIN {label}-----\nopaque-key-material\n-----END {label}-----"

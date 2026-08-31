@@ -87,14 +87,15 @@ _PATTERNS = (
     (
         "credential_assignment",
         re.compile(
-            r"(?:\b(?:authorization|proxy-authorization|x-api-key|api[_ -]?key|"
+            r"(?:(?<![A-Za-z0-9_])[\"']?(?:authorization|proxy-authorization|"
+            r"x-api-key|api[_ -]?key|"
             r"access[_ -]?token|refresh[_ -]?token|auth[_ -]?token|client[_ -]?secret|"
-            r"secret|password|passwd|cookie|private[_ -]?key|signature)\b\s*[:=]\s*|"
+            r"secret|password|passwd|cookie|private[_ -]?key|signature)\b[\"']?\s*[:=]\s*|"
             r"\b(?:[A-Z][A-Z0-9_]*_)?(?:API_?KEY|ACCESS_?TOKEN|REFRESH_?TOKEN|"
             r"AUTH_?TOKEN|SESSION_?TOKEN|TOKEN|CLIENT_?SECRET|SECRET(?:_ACCESS_?KEY)?|"
             r"PASSWORD|PASSWD|CREDENTIAL|PRIVATE_?KEY)\s*=\s*|"
             r"--(?:api-key|access-token|auth-token|client-secret|password|private-key|"
-            r"secret|token)(?:=|\s+))(?:(?:bearer|basic)\s+)?[\"']?"
+            r"secret|token)(?:=|\s+))[\"']?(?:(?:bearer|basic)\s+)?[\"']?"
             r"(?P<secret>[^\s,;\"']{8,})",
             re.IGNORECASE,
         ),
@@ -202,11 +203,10 @@ def secret_values(*values: str | None, secrets_file: str | Path | None = None) -
 
 
 def _remember(value: Any, secrets: dict[str, str], category: str) -> None:
-    if _is_secret(value):
+    if isinstance(value, str) and bool(value.strip()) and not _PLACEHOLDER.fullmatch(value.strip()):
         secrets.setdefault(value, category)
         if match := _AUTH_VALUE.fullmatch(value.strip()):
-            if _is_secret(token := match.group(1)):
-                secrets.setdefault(token, category)
+            _remember(match.group(1), secrets, category)
     elif isinstance(value, Mapping):
         for child in value.values():
             _remember(child, secrets, category)
@@ -246,7 +246,9 @@ def _discover(value: Any, secrets: dict[str, str]) -> None:
 
 
 def _secrets(value: Any, known_secrets: Iterable[str]) -> dict[str, str]:
-    secrets = {secret: "known_secret" for secret in known_secrets if _is_secret(secret)}
+    secrets: dict[str, str] = {}
+    for secret in known_secrets:
+        _remember(secret, secrets, "known_secret")
     _discover(value, secrets)
     return secrets
 

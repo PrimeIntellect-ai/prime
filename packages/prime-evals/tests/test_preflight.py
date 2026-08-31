@@ -97,6 +97,28 @@ def test_preflight_catches_assignments_flags_urls_webhooks_and_private_keys():
     }
 
 
+@pytest.mark.parametrize(
+    "token",
+    [
+        "xwfp-0123456789-abcdefghijklmnop",
+        "xapp-0123456789-abcdefghijklmnop",
+        "rk_" + "live_" + "0" * 24,
+        "sk_" + "test_" + "0" * 24,
+    ],
+)
+def test_preflight_catches_additional_provider_credentials(token):
+    assert prepare_upload({"completion": token}).data["completion"] == REDACTED
+
+
+def test_preflight_redacts_every_value_in_a_raw_cookie_header():
+    session = "opaque-cookie-session-0123456789"
+    refresh = "opaque-cookie-refresh-0123456789"
+    prepared = prepare_upload({"completion": f"Cookie: session={session}; refresh={refresh}"})
+
+    assert session not in prepared.data["completion"]
+    assert refresh not in prepared.data["completion"]
+
+
 def test_preflight_catches_quoted_json_assignments_and_short_structured_secrets():
     token = "opaque-json-token-0123456789"
     payload = {

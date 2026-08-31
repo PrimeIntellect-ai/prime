@@ -75,6 +75,7 @@ _PATTERNS = (
             r"gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|"
             r"hf_[A-Za-z0-9]{20,}|gsk_[A-Za-z0-9]{20,}|"
             r"glpat-[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|"
+            r"x(?:wfp|app)-[A-Za-z0-9-]{10,}|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{20,}|"
             r"npm_[A-Za-z0-9]{20,}|pypi-[A-Za-z0-9_-]{30,}|"
             r"SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,})"
         ),
@@ -86,6 +87,10 @@ _PATTERNS = (
             r"discord(?:app)?\.com/api/webhooks)/[^\s\"']+)",
             re.IGNORECASE,
         ),
+    ),
+    (
+        "cookie_header",
+        re.compile(r"^\s*cookie\s*:\s*(?P<secret>[^\r\n]{8,})", re.IGNORECASE | re.MULTILINE),
     ),
     (
         "credential_assignment",

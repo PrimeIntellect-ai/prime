@@ -55,8 +55,8 @@ _PATTERNS = (
     (
         "private_key",
         re.compile(
-            r"(?P<secret>-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----.*?"
-            r"-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----)",
+            r"(?P<secret>-----BEGIN (?P<label>(?:(?:RSA|EC|OPENSSH|DSA|ENCRYPTED) )?"
+            r"PRIVATE KEY)-----.*?-----END (?P=label)-----)",
             re.DOTALL,
         ),
     ),

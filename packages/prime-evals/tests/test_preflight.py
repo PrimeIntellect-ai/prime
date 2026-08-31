@@ -97,6 +97,13 @@ def test_preflight_catches_assignments_flags_urls_webhooks_and_private_keys():
     }
 
 
+@pytest.mark.parametrize("label", ["DSA PRIVATE KEY", "ENCRYPTED PRIVATE KEY"])
+def test_preflight_catches_private_key_pem_variants(label):
+    private_key = f"-----BEGIN {label}-----\nopaque-key-material\n-----END {label}-----"
+
+    assert prepare_upload({"completion": private_key}).data["completion"] == REDACTED
+
+
 def test_structured_authorization_redacts_the_repeated_bearer_token():
     token = "opaque-bearer-token-0123456789"
     prepared = prepare_upload(

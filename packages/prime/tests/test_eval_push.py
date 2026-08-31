@@ -10,10 +10,59 @@ from prime_cli.commands.evals import (
     _validate_eval_path,
 )
 from prime_cli.main import app
+from prime_cli.utils.eval_push import push_eval_results_to_hub
 from typer.testing import CliRunner
 from typing_extensions import cast
 
 runner = CliRunner()
+
+
+def test_automatic_eval_push_preflights_every_outbound_field(tmp_path, monkeypatch):
+    env_name = "sk-env-0123456789abcdefghijklmnopqrstuv"
+    model = "sk-model-0123456789abcdefghijklmnopqrstuv"
+    task_type = "sk-task-0123456789abcdefghijklmnopqrstuv"
+    output = tmp_path / "outputs" / "evals" / f"{env_name}--{model}" / "run"
+    output.mkdir(parents=True)
+    (output / "metadata.json").write_text(json.dumps({"task_type": task_type}))
+    (output / "results.jsonl").write_text("{}\n")
+    captured = {}
+
+    class DummyAPIClient:
+        api_key = "prime-api-key-0123456789"
+
+        def get(self, _path):
+            return {"data": {"id": "environment-id"}}
+
+    class DummyEvalsClient:
+        def __init__(self, _api_client):
+            pass
+
+        def create_evaluation(self, **kwargs):
+            captured["create"] = kwargs
+            return {"evaluation_id": "eval-id"}
+
+        def push_samples(self, _evaluation_id, samples):
+            captured["samples"] = samples
+
+        def finalize_evaluation(self, _evaluation_id, metrics=None):
+            captured["finalize"] = metrics
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("prime_cli.utils.eval_push.APIClient", DummyAPIClient)
+    monkeypatch.setattr("prime_cli.utils.eval_push.EvalsClient", DummyEvalsClient)
+
+    push_eval_results_to_hub(
+        env_name,
+        model,
+        "job-id",
+        upstream_slug="owner/environment",
+    )
+
+    serialized = json.dumps(captured)
+    assert all(secret not in serialized for secret in (env_name, model, task_type))
+    assert captured["create"]["model_name"] == "[REDACTED]"
+    assert captured["create"]["dataset"] == "[REDACTED]"
+    assert captured["create"]["task_type"] == "[REDACTED]"
 
 
 class TestHasEvalFiles:

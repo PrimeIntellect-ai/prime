@@ -178,6 +178,11 @@ def push_eval_results_to_hub(
     prepared = prepare_upload(
         {
             "eval_name": eval_name,
+            "model": model,
+            "env_name": env_name,
+            "task_type": metadata.get("task_type"),
+            "resolved_env_slug": resolved_env_slug,
+            "resolved_env_id": resolved_env_id,
             "metadata": eval_metadata,
             "metrics": metrics,
             "results": converted_results,
@@ -185,6 +190,11 @@ def push_eval_results_to_hub(
         secret_values(getattr(api_client, "api_key", None)),
     )
     eval_name = prepared.data["eval_name"]
+    model = prepared.data["model"]
+    env_name = prepared.data["env_name"]
+    task_type = prepared.data["task_type"]
+    resolved_env_slug = prepared.data["resolved_env_slug"]
+    resolved_env_id = prepared.data["resolved_env_id"]
     eval_metadata = prepared.data["metadata"]
     metrics = prepared.data["metrics"]
     converted_results = prepared.data["results"]
@@ -218,7 +228,7 @@ def push_eval_results_to_hub(
         model_name=model,
         dataset=env_name,
         framework="verifiers",
-        task_type=metadata.get("task_type"),
+        task_type=task_type,
         metadata=eval_metadata,
         metrics=metrics,
         is_public=False,  # Private by default - only visible to the user who created it

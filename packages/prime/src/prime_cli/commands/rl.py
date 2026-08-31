@@ -2150,24 +2150,33 @@ def _list_runs_impl(
 
         team_id = team or config.team_id
 
-        all_runs = rl_client.list_runs(team_id=team_id)
+        # Pagination and the `mine` filter are applied server-side when the
+        # backend supports it, so this normally fetches exactly the
+        # requested page instead of the caller's whole run history sorted/
+        # sliced locally.
+        run_page = rl_client.list_runs(team_id=team_id, mine=mine, page=page, limit=num)
+        runs = run_page.runs
 
-        if mine:
-            current_user_id = config.user_id
-            if not current_user_id:
-                console.print(
-                    "[red]Error:[/red] Cannot filter by user - no user_id configured. "
-                    "Run [bold]prime whoami[/bold] to refresh your config."
-                )
-                raise typer.Exit(1)
-            all_runs = [r for r in all_runs if r.user_id == current_user_id]
+        if run_page.total is None:
+            # Backend predates pagination support: it silently ignored
+            # page/limit/mine and returned the full history. Fall back to
+            # the old client-side filter/sort/slice behavior.
+            if mine:
+                current_user_id = config.user_id
+                if not current_user_id:
+                    console.print(
+                        "[red]Error:[/red] Cannot filter by user - no user_id configured. "
+                        "Run [bold]prime whoami[/bold] to refresh your config."
+                    )
+                    raise typer.Exit(1)
+                runs = [r for r in runs if r.user_id == current_user_id]
 
-        total_count = len(all_runs)
-
-        # Sort by created_at descending and paginate
-        all_runs.sort(key=lambda r: r.created_at, reverse=True)
-        start = (page - 1) * num
-        runs = all_runs[start : start + num]
+            total_count = len(runs)
+            runs = sorted(runs, key=lambda r: r.created_at, reverse=True)
+            start = (page - 1) * num
+            runs = runs[start : start + num]
+        else:
+            total_count = run_page.total
 
         if output == "json":
             output_data_as_json(

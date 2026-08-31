@@ -135,8 +135,12 @@ def test_structured_authorization_redacts_the_repeated_bearer_token():
 def test_nested_and_properties_credentials_do_not_bypass_discovery():
     secret = "opaque-nested-secret-0123456789"
     token = "opaque-generic-token-0123456789"
+    access_key = "opaque-aws-secret-access-key-0123456789"
+    plural_key = "opaque-plural-key-0123456789"
     payload = {
         "APIKey": secret,
+        "apiKeys": [plural_key],
+        "awsSecretAccessKey": access_key,
         "secret": {"value": secret},
         "token": token,
         "properties": {"password": secret},
@@ -146,6 +150,8 @@ def test_nested_and_properties_credentials_do_not_bypass_discovery():
     prepared = prepare_upload(payload)
 
     assert prepared.data["APIKey"] == REDACTED
+    assert prepared.data["apiKeys"] == [REDACTED]
+    assert prepared.data["awsSecretAccessKey"] == REDACTED
     assert prepared.data["secret"]["value"] == REDACTED
     assert prepared.data["token"] == REDACTED
     assert prepared.data["properties"]["password"] == REDACTED
@@ -190,6 +196,17 @@ def test_jsonl_preflight_uploads_an_exact_snapshot_when_clean(tmp_path):
     assert prepared.path == destination
     assert destination.read_bytes() == source.read_bytes()
     assert prepared.report.findings == ()
+
+
+@pytest.mark.parametrize("source_name", ["safe.jsonl", "redacted-safe.jsonl"])
+def test_jsonl_preflight_rejects_output_paths_that_alias_the_source(tmp_path, source_name):
+    source = tmp_path / source_name
+    source.write_text('{"answer":"keep"}\n')
+
+    with pytest.raises(UploadScanError, match="must not alias"):
+        prepare_jsonl_upload(source, tmp_path / "safe.jsonl")
+
+    assert source.read_text() == '{"answer":"keep"}\n'
 
 
 @pytest.mark.parametrize(

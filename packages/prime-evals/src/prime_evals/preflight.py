@@ -25,6 +25,8 @@ _SECRET_ENV = re.compile(
 )
 _REFERENCE_SUFFIXES = ("_env", "_env_var", "_file", "_name", "_path", "_var", "_variable")
 _SENSITIVE_FIELDS = {
+    "access_key",
+    "access_key_id",
     "api_key",
     "access_token",
     "auth_token",
@@ -42,6 +44,7 @@ _SENSITIVE_FIELDS = {
     "refresh_token",
     "sas_token",
     "secret",
+    "secret_access_key",
     "secret_key",
     "session_token",
     "signature",
@@ -171,8 +174,11 @@ def _normalize(name: str) -> str:
 
 def _sensitive(name: str) -> bool:
     name = _normalize(name)
-    return not name.endswith(_REFERENCE_SUFFIXES) and any(
-        name == field or name.endswith(f"_{field}") for field in _SENSITIVE_FIELDS
+    names = (name, name.removesuffix("s"))
+    return not any(candidate.endswith(_REFERENCE_SUFFIXES) for candidate in names) and any(
+        candidate == field or candidate.endswith(f"_{field}")
+        for candidate in names
+        for field in _SENSITIVE_FIELDS
     )
 
 
@@ -390,7 +396,11 @@ def prepare_jsonl_upload(
     """Return a safe snapshot or redacted JSONL path without changing the source."""
     source, snapshot = Path(source), Path(destination)
     redacted = snapshot.with_name(f"redacted-{snapshot.name}")
-    secrets = {secret: "known_secret" for secret in known_secrets if _is_secret(secret)}
+    if source.resolve() in {snapshot.resolve(), redacted.resolve()}:
+        raise UploadScanError("upload outputs must not alias the source JSONL")
+    secrets: dict[str, str] = {}
+    for secret in known_secrets:
+        _remember(secret, secrets, "known_secret")
     _discover(context, secrets)
 
     try:

@@ -3,7 +3,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from prime_evals import EvalsAPIError, EvalsClient
+from prime_evals import (
+    EvalsAPIError,
+    EvalsClient,
+    prepare_upload,
+    secret_values,
+)
 
 from prime_cli.core import APIClient
 
@@ -157,7 +162,37 @@ def push_eval_results_to_hub(
     env_identifier = resolved_env_slug or resolved_env_id
     console.print(f"\n[blue]Uploading evaluation results, using upstream: {env_identifier}[/blue]")
 
+    metrics = {k: v for k, v in metadata.items() if k.startswith("avg_")}
+    eval_metadata = {"framework": "verifiers", "job_id": job_id, **metadata}
+    converted_results = [
+        {
+            "example_id": sample.get("id", 0),
+            "reward": sample.get("reward", 0.0),
+            **{k: v for k, v in sample.items() if k not in {"id", "reward"}},
+        }
+        for sample in results_samples
+    ]
+    eval_name = f"{env_name}--{model}--{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
     api_client = APIClient()
+    prepared = prepare_upload(
+        {
+            "eval_name": eval_name,
+            "metadata": eval_metadata,
+            "metrics": metrics,
+            "results": converted_results,
+        },
+        secret_values(getattr(api_client, "api_key", None)),
+    )
+    eval_name = prepared.data["eval_name"]
+    eval_metadata = prepared.data["metadata"]
+    metrics = prepared.data["metrics"]
+    converted_results = prepared.data["results"]
+    if prepared.report:
+        console.print(
+            f"[yellow]Upload preflight redacted {prepared.report}. "
+            "Local files were not changed.[/yellow]"
+        )
 
     if resolved_env_id:
         environments = [{"id": resolved_env_id}]
@@ -175,21 +210,6 @@ def push_eval_results_to_hub(
             environments = [{"slug": resolved_env_slug}]
     else:
         raise ValueError("No valid environment identifier found")
-    metrics = {k: v for k, v in metadata.items() if k.startswith("avg_")}
-
-    eval_metadata = {"framework": "verifiers", "job_id": job_id, **metadata}
-
-    converted_results = [
-        {
-            "example_id": sample.get("id", 0),
-            "reward": sample.get("reward", 0.0),
-            **{k: v for k, v in sample.items() if k not in {"id", "reward"}},
-        }
-        for sample in results_samples
-    ]
-
-    eval_name = f"{env_name}--{model}--{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-
     evals_client = EvalsClient(api_client)
 
     create_response = evals_client.create_evaluation(

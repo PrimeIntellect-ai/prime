@@ -33,6 +33,16 @@ from .models import (
     Sample,
     SamplesResponse,
 )
+from .preflight import (
+    PreparedJSONLUpload,
+    PreparedUpload,
+    ScanReport,
+    UploadScanError,
+    prepare_jsonl_upload,
+    prepare_upload,
+    scan_upload,
+    secret_values,
+)
 
 __version__ = "0.2.3"
 
@@ -65,4 +75,13 @@ __all__ = [
     "EvaluationNotFoundError",
     "InvalidEvaluationError",
     "InvalidSampleError",
+    # Upload preflight
+    "PreparedJSONLUpload",
+    "PreparedUpload",
+    "ScanReport",
+    "UploadScanError",
+    "prepare_jsonl_upload",
+    "prepare_upload",
+    "scan_upload",
+    "secret_values",
 ]

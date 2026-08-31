@@ -151,7 +151,9 @@ def test_push_eval_forwards_name_override(monkeypatch, tmp_path):
 
     captured = {}
 
-    def fake_push_single_eval(config_path, env_slug, run_id, eval_id, is_public, name):
+    def fake_push_single_eval(
+        config_path, env_slug, run_id, eval_id, is_public, name, secrets_file
+    ):
         captured.update(
             {
                 "config_path": config_path,
@@ -160,6 +162,7 @@ def test_push_eval_forwards_name_override(monkeypatch, tmp_path):
                 "eval_id": eval_id,
                 "is_public": is_public,
                 "name": name,
+                "secrets_file": secrets_file,
             }
         )
         return "eval-123"
@@ -171,7 +174,17 @@ def test_push_eval_forwards_name_override(monkeypatch, tmp_path):
 
     result = runner.invoke(
         app,
-        ["eval", "push", ".", "--eval-id", "eval-123", "--name", "custom eval"],
+        [
+            "eval",
+            "push",
+            ".",
+            "--eval-id",
+            "eval-123",
+            "--name",
+            "custom eval",
+            "--secrets-file",
+            "secret-values.txt",
+        ],
         env={"PRIME_DISABLE_VERSION_CHECK": "1"},
     )
 
@@ -183,6 +196,7 @@ def test_push_eval_forwards_name_override(monkeypatch, tmp_path):
         "eval_id": "eval-123",
         "is_public": False,
         "name": "custom eval",
+        "secrets_file": "secret-values.txt",
     }
 
 
@@ -284,6 +298,57 @@ def test_push_samples_with_progress_skips_callback_when_signature_is_uninspectab
 
 
 class TestPushSingleEval:
+    def test_preflight_redacts_upload_copy_and_preserves_local_trace(self, tmp_path, monkeypatch):
+        provider_key = "sk-test-0123456789abcdefghijklmnopqrstuv"
+        opaque_key = "opaque-judge-key-0123456789"
+        metadata = {
+            "env": "owner/gsm8k",
+            "model": "gpt-4",
+            "judge_api_key": opaque_key,
+        }
+        result = {
+            "id": 1,
+            "completion": f"leaked twice: {opaque_key} and {provider_key}",
+            "answer": "reference answer",
+            "rubric": "compare with the reference answer",
+        }
+        (tmp_path / "metadata.json").write_text(json.dumps(metadata))
+        (tmp_path / "results.jsonl").write_text(json.dumps(result) + "\n")
+        captured = {}
+
+        class DummyAPIClient:
+            api_key = provider_key
+
+        class DummyEvalsClient:
+            def __init__(self, _api_client):
+                pass
+
+            def create_evaluation(self, **kwargs):
+                captured["create"] = kwargs
+                return {"evaluation_id": "eval-123"}
+
+            def push_samples(self, evaluation_id, samples):
+                captured["samples"] = samples
+
+            def finalize_evaluation(self, evaluation_id, metrics=None):
+                return {}
+
+        monkeypatch.setattr("prime_cli.commands.evals.APIClient", DummyAPIClient)
+        monkeypatch.setattr("prime_cli.commands.evals.EvalsClient", DummyEvalsClient)
+
+        eval_id = _push_single_eval(str(tmp_path), None, None, None)
+
+        assert eval_id == "eval-123"
+        uploaded = json.dumps(captured)
+        assert provider_key not in uploaded
+        assert opaque_key not in uploaded
+        assert captured["create"]["metadata"]["judge_api_key"] == "[REDACTED]"
+        uploaded_result = captured["samples"][0]
+        assert uploaded_result["answer"] == "reference answer"
+        assert uploaded_result["rubric"] == "compare with the reference answer"
+        assert opaque_key in (tmp_path / "metadata.json").read_text()
+        assert provider_key in (tmp_path / "results.jsonl").read_text()
+
     def test_create_evaluation_defaults_to_private(self, tmp_path, monkeypatch):
         metadata = {"env": "owner/gsm8k", "model": "gpt-4"}
         (tmp_path / "metadata.json").write_text(json.dumps(metadata))

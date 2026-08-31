@@ -1,8 +1,14 @@
+import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional
 
 import click
 import typer
+from prime_evals import (
+    UploadScanError,
+    prepare_jsonl_upload,
+    secret_values,
+)
 from prime_traces import (
     APIError,
     Batch,
@@ -93,6 +99,14 @@ def upload_traces(
     no_compress: bool = typer.Option(
         False, "--no-compress", help="Skip gzip transport compression"
     ),
+    secrets_file: Optional[Path] = typer.Option(
+        None,
+        "--secrets-file",
+        exists=True,
+        dir_okay=False,
+        readable=True,
+        help="Local newline-delimited secrets to redact in addition to detected credentials",
+    ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
     """Upload a JSONL file of traces. Safe to rerun after interruption:
@@ -109,14 +123,39 @@ def upload_traces(
             )
 
     try:
-        client = _traces_client()
-        receipts = client.upload_file(
-            file,
-            line_format=line_format,
-            context=_parse_context(context),
-            compress=not no_compress,
-            on_batch=on_batch,
-        )
+        parsed_context = _parse_context(context)
+        known_secrets = secret_values(Config().api_key, secrets_file=secrets_file)
+    except typer.Exit:
+        raise
+    except (UnicodeError, ValueError) as e:
+        error_console.print(f"[red]Preflight failed:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="prime-traces-upload-") as directory:
+            try:
+                prepared = prepare_jsonl_upload(
+                    file,
+                    Path(directory) / "traces.jsonl",
+                    context=parsed_context,
+                    known_secrets=known_secrets,
+                )
+            except UploadScanError as e:
+                error_console.print(f"[red]Preflight failed:[/red] {escape(str(e))}")
+                raise typer.Exit(1)
+            if prepared.report:
+                error_console.print(
+                    f"[yellow]Preflight redacted {prepared.report}; "
+                    "the source file was not changed[/yellow]"
+                )
+            client = _traces_client()
+            receipts = client.upload_file(
+                prepared.path,
+                line_format=line_format,
+                context=prepared.context,
+                compress=not no_compress,
+                on_batch=on_batch,
+            )
     except typer.Exit:
         raise
     except UnauthorizedError as e:

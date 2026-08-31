@@ -15,7 +15,7 @@ from typing import Any
 REDACTED = "[REDACTED]"
 
 _PLACEHOLDER = re.compile(
-    r"^(?:\[?redacted\]?|masked|dummy|example|test|none|null|empty|changeme|"
+    r"^(?:\[?redacted(?:[_ -]?\d+)?\]?|masked|dummy|example|test|none|null|empty|changeme|"
     r"replace[_ -]?me|x{4,}|\*{4,}|<[^>]+>|\$\{?[A-Z][A-Z0-9_]*\}?)$",
     re.IGNORECASE,
 )
@@ -131,9 +131,11 @@ _PATTERNS = (
     (
         "credential_assignment",
         re.compile(
-            r"(?:(?<![A-Za-z0-9_])[\"']?(?:x-api-key|api[_ -]?key|"
+            r"(?:(?<![A-Za-z0-9_])[\"']?(?:[A-Za-z][A-Za-z0-9]*[_-]+)*"
+            r"(?:x-api-key|api[_ -]?key|"
             r"access[_ -]?token|refresh[_ -]?token|auth[_ -]?token|client[_ -]?secret|"
-            r"secret|password|passwd|cookie|private[_ -]?key|signature)\b[\"']?\s*[:=]\s*|"
+            r"access[_ -]?key(?:[_ -]?id)?|secret(?:[_ -]?access[_ -]?key)?|"
+            r"password|passwd|cookie|private[_ -]?key|signature)\b[\"']?\s*[:=]\s*|"
             r"\b(?:[A-Z][A-Z0-9_]*_)?(?:API_?KEY|ACCESS_?TOKEN|REFRESH_?TOKEN|"
             r"AUTH_?TOKEN|SESSION_?TOKEN|TOKEN|CLIENT_?SECRET|SECRET(?:_ACCESS_?KEY)?|"
             r"PASSWORD|PASSWD|CREDENTIAL|PRIVATE_?KEY)\s*=\s*|"
@@ -301,6 +303,16 @@ def _discover(value: Any, secrets: dict[str, str]) -> None:
         elif isinstance(child, (list, tuple)):
             for nested in child:
                 visit(nested, schema_secret, schema_context, properties)
+        elif isinstance(child, str):
+            for category, pattern in _PATTERNS:
+                for match in pattern.finditer(child):
+                    secret = next(
+                        value
+                        for name, value in match.groupdict().items()
+                        if name.startswith("secret") and value is not None
+                    )
+                    if _is_secret(secret):
+                        secrets.setdefault(secret, category)
 
     visit(value)
 
@@ -383,6 +395,11 @@ def _reduce(
                 else (key, set())
             )
             findings.update((_path((*path, "[key]")), category) for category in categories)
+            if structured_secret and safe_key == REDACTED:
+                suffix = 2
+                while safe_key in reduced:
+                    safe_key = f"[REDACTED {suffix}]"
+                    suffix += 1
             if safe_key in reduced:
                 raise UploadScanError("credential reduction would create duplicate object keys")
             normalized = _normalize(str(key))

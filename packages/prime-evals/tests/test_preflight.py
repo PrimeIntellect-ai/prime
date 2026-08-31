@@ -140,18 +140,32 @@ def test_preflight_catches_quoted_json_assignments_and_short_structured_secrets(
 
 
 def test_preflight_catches_quoted_assignments_and_sensitive_mapping_keys():
-    secret = "opaque-map-key-0123456789"
+    secrets = ["opaque-map-key-0123456789", "second-map-key-0123456789"]
+    aws_secret = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
     prepared = prepare_upload(
         {
-            "completion": 'password="correct horse battery staple"',
-            "api_keys": {secret: {"owner": "alice"}},
+            "completion": (
+                'password="correct horse battery staple" '
+                f'{{"aws_secret_access_key":"{aws_secret}"}}'
+            ),
+            "api_keys": {secret: {"owner": "alice"} for secret in secrets},
             "team_id": "team-0123456789",
         }
     )
 
     assert "correct horse battery staple" not in prepared.data["completion"]
-    assert list(prepared.data["api_keys"]) == [REDACTED]
+    assert aws_secret not in prepared.data["completion"]
+    assert list(prepared.data["api_keys"]) == [REDACTED, "[REDACTED 2]"]
     assert prepared.data["team_id"] == "team-0123456789"
+    assert scan_upload(prepared.data).findings == ()
+
+
+def test_pattern_discovered_secrets_are_redacted_everywhere():
+    secret = "opaque-password-value-0123456789"
+    prepared = prepare_upload({"prompt": f"model repeated {secret}", "log": f"password={secret}"})
+
+    assert secret not in json.dumps(prepared.data)
+    assert prepared.data["prompt"] == f"model repeated {REDACTED}"
 
 
 def test_preflight_redacts_numeric_structured_secrets():

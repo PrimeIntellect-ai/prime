@@ -401,6 +401,7 @@ class FakeRun:
 @dataclass
 class FakeRunPage:
     runs: list[FakeRun]
+    total: int | None = None
 
 
 class FakeRLClient:

@@ -454,7 +454,12 @@ class LabDataSource:
         try:
             api_client = self._api_client_factory()
             client = self._rl_client_factory(api_client)
-            runs = client.list_runs(team_id=config.team_id, limit=options.limit).runs
+            run_page = client.list_runs(team_id=config.team_id, limit=options.limit)
+            runs = run_page.runs
+            if run_page.total is None:
+                # Backend predates pagination support and ignored `limit`,
+                # returning the full (already createdAt-desc sorted) history.
+                runs = runs[: options.limit]
             items = tuple(_rl_run_item(run, idx) for idx, run in enumerate(runs))
             return LabSection(
                 key="training",

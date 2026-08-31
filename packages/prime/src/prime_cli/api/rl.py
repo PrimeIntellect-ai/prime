@@ -149,13 +149,21 @@ class EnvServerInfo(BaseModel):
 
 
 class RLRunPage(BaseModel):
-    """One page of GET /rft/runs, as returned by the backend."""
+    """One page of GET /rft/runs, as returned by the backend.
+
+    The pagination metadata fields are Optional: a backend that hasn't
+    deployed pagination support yet silently ignores the page/limit/mine
+    query params (FastAPI drops undeclared query params rather than
+    erroring) and returns the old `{"runs": [...]}` shape - the caller
+    must detect that (via `total is None`) and fall back to client-side
+    filtering/pagination over the full list it got back.
+    """
 
     runs: List[RLRun] = Field(default_factory=list)
-    total: int = Field(..., description="Total number of matching runs")
-    page: int = Field(..., description="Current page number")
-    limit: int = Field(..., description="Runs per page")
-    total_pages: int = Field(..., alias="total_pages")
+    total: Optional[int] = Field(None, description="Total number of matching runs")
+    page: Optional[int] = Field(None, description="Current page number")
+    limit: Optional[int] = Field(None, description="Runs per page")
+    total_pages: Optional[int] = Field(None, alias="total_pages")
 
     model_config = ConfigDict(populate_by_name=True)
 

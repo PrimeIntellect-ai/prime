@@ -11,6 +11,7 @@ from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 REDACTED = "[REDACTED]"
 
@@ -63,18 +64,9 @@ _SCHEMA_MARKERS = {
     "$schema",
     "allOf",
     "anyOf",
-    "const",
-    "default",
-    "description",
-    "enum",
-    "examples",
-    "format",
     "items",
     "oneOf",
-    "pattern",
     "required",
-    "title",
-    "type",
 }
 _SAFE_PATH_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_-]{0,63}")
 _AUTH_VALUE = re.compile(r"^(?:bearer|basic|token)\s+(.+)$", re.IGNORECASE)
@@ -132,8 +124,22 @@ _PATTERNS = (
     (
         "credential_assignment",
         re.compile(
+            r"(?:(?<![A-Za-z0-9_])[\"']?(?i:(?:[A-Za-z][A-Za-z0-9]*[_-]+)*"
+            r"(?:x-api-key|api[_ -]?(?:key|token)|account[_ -]?key|"
+            r"access[_ -]?token|refresh[_ -]?token|auth[_ -]?token|session[_ -]?token|"
+            r"client[_ -]?secret|secret[_ -]?access[_ -]?key|password|passwd|"
+            r"credential|private[_ -]?key|signature))\b[\"']?\s*[:=]\s*|"
+            r"\b(?:[A-Z][A-Z0-9_]*_)?(?:API_?KEY|API_?TOKEN|ACCESS_?TOKEN|"
+            r"REFRESH_?TOKEN|AUTH_?TOKEN|SESSION_?TOKEN|TOKEN|CLIENT_?SECRET|"
+            r"SECRET(?:_ACCESS_?KEY)?|PASSWORD|PASSWD|CREDENTIAL|PRIVATE_?KEY)\s*=\s*)"
+            r"[\"']?(?:(?i:bearer|basic|token)\s+)?(?P<secret>[^\s,;\"']{8,})"
+        ),
+    ),
+    (
+        "credential_assignment",
+        re.compile(
             r"(?:(?<![A-Za-z0-9_])[\"']?(?:[A-Za-z][A-Za-z0-9]*[_-]+)*"
-            r"(?:x-api-key|api[_ -]?key|account[_ -]?key|"
+            r"(?:x-api-key|api[_ -]?(?:key|token)|account[_ -]?key|"
             r"access[_ -]?token|refresh[_ -]?token|auth[_ -]?token|client[_ -]?secret|"
             r"access[_ -]?key(?:[_ -]?id)?|secret(?:[_ -]?access[_ -]?key)?|"
             r"password|passwd|cookie|private[_ -]?key|signature)\b[\"']?\s*[:=]\s*|"
@@ -279,7 +285,17 @@ def _discover(value: Any, secrets: dict[str, str]) -> None:
         properties: bool = False,
     ) -> None:
         if isinstance(child, Mapping):
-            object_schema = schema_context or any(field in child for field in _SCHEMA_MARKERS)
+            schema_type = child.get("type")
+            object_schema = (
+                schema_context
+                or any(field in child for field in _SCHEMA_MARKERS)
+                or "properties" in child
+                and (
+                    schema_type == "object"
+                    or isinstance(schema_type, (list, tuple))
+                    and "object" in schema_type
+                )
+            )
             for key, nested in child.items():
                 name = str(key)
                 normalized = _normalize(name)
@@ -391,7 +407,17 @@ def _reduce(
 ) -> Any:
     if isinstance(value, Mapping):
         reduced = {}
-        object_schema = schema_context or any(field in value for field in _SCHEMA_MARKERS)
+        schema_type = value.get("type")
+        object_schema = (
+            schema_context
+            or any(field in value for field in _SCHEMA_MARKERS)
+            or "properties" in value
+            and (
+                schema_type == "object"
+                or isinstance(schema_type, (list, tuple))
+                and "object" in schema_type
+            )
+        )
         for key, child in value.items():
             safe_key, categories = (
                 (REDACTED, {"structured_secret"})
@@ -538,7 +564,7 @@ def prepare_jsonl_upload(
 ) -> PreparedJSONLUpload:
     """Return a safe snapshot or redacted JSONL path without changing the source."""
     source, snapshot = Path(source), Path(destination)
-    redacted = snapshot.with_name(f"redacted-{snapshot.name}")
+    redacted = snapshot.with_name(f"redacted-{uuid4().hex}-{snapshot.name}")
     outputs = (snapshot, redacted)
     if (
         source.resolve() in {output.resolve() for output in outputs}
@@ -565,7 +591,6 @@ def prepare_jsonl_upload(
     findings = _prefix(context_prepared.report, "$.context") if context_prepared else set()
     file_findings: set[Finding] = set()
 
-    redacted.unlink(missing_ok=True)
     output_file = None
     try:
         with snapshot.open("rb") as input_file, ExitStack() as stack:

@@ -97,6 +97,14 @@ def test_preflight_catches_assignments_flags_urls_webhooks_and_private_keys():
     }
 
 
+@pytest.mark.parametrize(
+    "assignment",
+    ["password=abcdefgh1234", "TOKEN=abcdefgh1234", "api_token=abcdefghijklmnop"],
+)
+def test_preflight_catches_short_explicit_assignments(assignment):
+    assert prepare_upload({"completion": assignment}).data["completion"].endswith(REDACTED)
+
+
 def test_preflight_catches_azure_storage_account_keys():
     secret = "QWxhZGRpbjpvcGVuIHNlc2FtZQ=="
     connection = (
@@ -254,6 +262,12 @@ def test_nested_and_properties_credentials_do_not_bypass_discovery():
     assert prepared.data["properties"]["password"]["value"] == REDACTED
     assert prepared.data["schema"] == payload["schema"]
 
+    event = {
+        "type": "event",
+        "properties": {"password": {"value": "opaque-password-0123456789"}},
+    }
+    assert prepare_upload(event).data["properties"]["password"]["value"] == REDACTED
+
 
 def test_sensitive_schema_enums_are_redacted():
     secret = "opaque-schema-secret-0123456789"
@@ -286,7 +300,8 @@ def test_jsonl_preflight_uses_secrets_discovered_in_later_lines(tmp_path):
     )
 
     assert source.read_text() == original
-    assert prepared.path == tmp_path / "redacted-safe.jsonl"
+    assert prepared.path.name.startswith("redacted-")
+    assert prepared.path.name.endswith("-safe.jsonl")
     assert prepared.context == {"password": REDACTED, "source": "local-eval"}
     assert secret not in prepared.path.read_text()
     records = [json.loads(line) for line in prepared.path.read_text().splitlines()]
@@ -307,15 +322,26 @@ def test_jsonl_preflight_uploads_an_exact_snapshot_when_clean(tmp_path):
     assert prepared.report.findings == ()
 
 
-@pytest.mark.parametrize("source_name", ["safe.jsonl", "redacted-safe.jsonl"])
-def test_jsonl_preflight_rejects_output_paths_that_alias_the_source(tmp_path, source_name):
-    source = tmp_path / source_name
+def test_jsonl_preflight_rejects_output_paths_that_alias_the_source(tmp_path):
+    source = tmp_path / "safe.jsonl"
     source.write_text('{"answer":"keep"}\n')
 
     with pytest.raises(UploadScanError, match="must not alias"):
         prepare_jsonl_upload(source, tmp_path / "safe.jsonl")
 
     assert source.read_text() == '{"answer":"keep"}\n'
+
+
+def test_jsonl_preflight_preserves_unrelated_redacted_siblings(tmp_path):
+    source = tmp_path / "traces.jsonl"
+    destination = tmp_path / "safe.jsonl"
+    sibling = tmp_path / "redacted-safe.jsonl"
+    source.write_text('{"answer":"keep"}\n')
+    sibling.write_text("unrelated\n")
+
+    prepare_jsonl_upload(source, destination)
+
+    assert sibling.read_text() == "unrelated\n"
 
 
 def test_jsonl_preflight_rejects_a_hard_link_to_the_source(tmp_path):

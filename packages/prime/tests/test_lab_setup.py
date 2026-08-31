@@ -616,7 +616,7 @@ def test_lab_setup_uses_existing_verifiers_sources(
 
     assert result.exit_code == 0
     assert _is_pinned_ref(lab_setup.VERIFIERS_REF)
-    assert lab_setup.VERIFIERS_CONFIG_REF == "main"
+    assert lab_setup.VERIFIERS_CONFIG_REF == lab_setup.VERIFIERS_REF
     assert any(
         url.endswith(
             f"/primeintellect-ai/verifiers/{lab_setup.VERIFIERS_REF}/skills/create-environments/SKILL.md"

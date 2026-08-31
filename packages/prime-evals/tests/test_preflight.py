@@ -139,6 +139,19 @@ def test_preflight_catches_quoted_json_assignments_and_short_structured_secrets(
     assert prepared.data["api_key"] == REDACTED
 
 
+def test_preflight_redacts_numeric_structured_secrets():
+    prepared = prepare_upload(
+        {"password": 12345678, "token": 987654321, "secret": None, "auth": False}
+    )
+
+    assert prepared.data == {
+        "password": REDACTED,
+        "token": REDACTED,
+        "secret": None,
+        "auth": False,
+    }
+
+
 @pytest.mark.parametrize("label", ["DSA PRIVATE KEY", "ENCRYPTED PRIVATE KEY"])
 def test_preflight_catches_private_key_pem_variants(label):
     private_key = f"-----BEGIN {label}-----\nopaque-key-material\n-----END {label}-----"
@@ -244,6 +257,18 @@ def test_jsonl_preflight_rejects_output_paths_that_alias_the_source(tmp_path, so
 
     with pytest.raises(UploadScanError, match="must not alias"):
         prepare_jsonl_upload(source, tmp_path / "safe.jsonl")
+
+    assert source.read_text() == '{"answer":"keep"}\n'
+
+
+def test_jsonl_preflight_rejects_a_hard_link_to_the_source(tmp_path):
+    source = tmp_path / "traces.jsonl"
+    destination = tmp_path / "safe.jsonl"
+    source.write_text('{"answer":"keep"}\n')
+    destination.hardlink_to(source)
+
+    with pytest.raises(UploadScanError, match="must not alias"):
+        prepare_jsonl_upload(source, destination)
 
     assert source.read_text() == '{"answer":"keep"}\n'
 

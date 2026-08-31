@@ -413,11 +413,20 @@ def _reduce(
             )
             for index, child in enumerate(value)
         )
-    if not isinstance(value, str):
-        return value
-    if structured_secret and value.strip() and not _PLACEHOLDER.fullmatch(value.strip()):
+    if (
+        structured_secret
+        and value is not None
+        and not isinstance(value, bool)
+        and (
+            not isinstance(value, str)
+            or value.strip()
+            and not _PLACEHOLDER.fullmatch(value.strip())
+        )
+    ):
         findings.add((_path(path), "structured_secret"))
         return REDACTED
+    if not isinstance(value, str):
+        return value
     reduced, categories = _redact_text(value, secrets)
     findings.update((_path(path), category) for category in categories)
     return reduced
@@ -482,7 +491,12 @@ def prepare_jsonl_upload(
     """Return a safe snapshot or redacted JSONL path without changing the source."""
     source, snapshot = Path(source), Path(destination)
     redacted = snapshot.with_name(f"redacted-{snapshot.name}")
-    if source.resolve() in {snapshot.resolve(), redacted.resolve()}:
+    outputs = (snapshot, redacted)
+    if (
+        source.resolve() in {output.resolve() for output in outputs}
+        or source.exists()
+        and any(output.exists() and source.samefile(output) for output in outputs)
+    ):
         raise UploadScanError("upload outputs must not alias the source JSONL")
     secrets: dict[str, str] = {}
     for secret in known_secrets:

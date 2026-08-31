@@ -119,15 +119,20 @@ def test_structured_authorization_redacts_the_repeated_bearer_token():
 
 def test_nested_and_properties_credentials_do_not_bypass_discovery():
     secret = "opaque-nested-secret-0123456789"
+    token = "opaque-generic-token-0123456789"
     payload = {
+        "APIKey": secret,
         "secret": {"value": secret},
+        "token": token,
         "properties": {"password": secret},
         "schema": {"properties": {"password": {"type": "string", "description": "keep this"}}},
     }
 
     prepared = prepare_upload(payload)
 
+    assert prepared.data["APIKey"] == REDACTED
     assert prepared.data["secret"]["value"] == REDACTED
+    assert prepared.data["token"] == REDACTED
     assert prepared.data["properties"]["password"] == REDACTED
     assert prepared.data["schema"] == payload["schema"]
 

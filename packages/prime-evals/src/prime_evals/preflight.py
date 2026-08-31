@@ -45,6 +45,7 @@ _SENSITIVE_FIELDS = {
     "secret_key",
     "session_token",
     "signature",
+    "token",
 }
 _SCHEMA_VALUES = {"const", "default", "example", "examples"}
 _SCHEMA_TYPES = {"array", "boolean", "integer", "null", "number", "object", "string"}
@@ -153,7 +154,15 @@ class UploadScanError(ValueError):
 
 def _normalize(name: str) -> str:
     return (
-        re.sub(r"[^A-Za-z0-9]+", "_", re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", name))
+        re.sub(
+            r"[^A-Za-z0-9]+",
+            "_",
+            re.sub(
+                r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])",
+                "_",
+                name,
+            ),
+        )
         .strip("_")
         .lower()
     )

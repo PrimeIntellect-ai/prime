@@ -99,7 +99,12 @@ def test_preflight_catches_assignments_flags_urls_webhooks_and_private_keys():
 
 @pytest.mark.parametrize(
     "assignment",
-    ["password=abcdefgh1234", "TOKEN=abcdefgh1234", "api_token=abcdefghijklmnop"],
+    [
+        "password=abcdefgh1234",
+        "TOKEN=abcdefgh1234",
+        "api_token=abcdefghijklmnop",
+        "--token 123456789abc",
+    ],
 )
 def test_preflight_catches_short_explicit_assignments(assignment):
     assert prepare_upload({"completion": assignment}).data["completion"].endswith(REDACTED)
@@ -162,11 +167,13 @@ def test_preflight_catches_quoted_json_assignments_and_short_structured_secrets(
 def test_preflight_catches_quoted_assignments_and_sensitive_mapping_keys():
     secrets = ["opaque-map-key-0123456789", "second-map-key-0123456789"]
     aws_secret = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+    session_token = "opaque-aws-session-token-0123456789"
     prepared = prepare_upload(
         {
             "completion": (
                 'password="correct horse battery staple" '
-                f'{{"aws_secret_access_key":"{aws_secret}"}}'
+                f'{{"aws_secret_access_key":"{aws_secret}",'
+                f'"aws_session_token":"{session_token}"}}'
             ),
             "api_keys": {secret: {"owner": "alice"} for secret in secrets},
             "team_id": "team-0123456789",
@@ -175,6 +182,7 @@ def test_preflight_catches_quoted_assignments_and_sensitive_mapping_keys():
 
     assert "correct horse battery staple" not in prepared.data["completion"]
     assert aws_secret not in prepared.data["completion"]
+    assert session_token not in prepared.data["completion"]
     assert list(prepared.data["api_keys"]) == [REDACTED, "[REDACTED 2]"]
     assert prepared.data["team_id"] == "team-0123456789"
     assert scan_upload(prepared.data).findings == ()

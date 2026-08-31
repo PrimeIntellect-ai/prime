@@ -207,6 +207,14 @@ class _SyncVMAuthCache:
         return True
 
 
+class _AsyncVMAuthCache:
+    async def get_or_refresh(self, _sandbox_id: str) -> dict[str, Any]:
+        return {}
+
+    async def is_vm(self, _sandbox_id: str) -> bool:
+        return True
+
+
 def test_concurrent_sync_creation_waits_share_one_platform_batch() -> None:
     client = SandboxClient(APIClient(api_key="test-key"))
     client.client.client.close()
@@ -528,3 +536,50 @@ async def test_async_background_batch_errors_only_fail_the_matching_waiter() -> 
     assert isinstance(results[1], APIError)
     assert "sandbox-b/cafebabe" in str(results[1])
     assert len(platform.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_async_background_job_cancellation_settles_poll_before_teardown() -> None:
+    client = AsyncSandboxClient(api_key="test-key")
+    await client.client.aclose()
+    cast(Any, client).client = _AsyncUnsupportedPlatformClient()
+    cast(Any, client)._auth_cache = _AsyncVMAuthCache()
+
+    poll_started = asyncio.Event()
+    release_poll = asyncio.Event()
+    sandbox_deleted = False
+    polled_after_delete = False
+
+    async def start_background_job(*_args: Any, **_kwargs: Any) -> BackgroundJob:
+        return _job("sandbox-a", "deadbeef")
+
+    async def read_file(*_args: Any, **_kwargs: Any) -> ReadFileResponse:
+        nonlocal polled_after_delete
+        poll_started.set()
+        await release_poll.wait()
+        polled_after_delete = sandbox_deleted
+        return ReadFileResponse(content="", size=0)
+
+    cast(Any, client).start_background_job = start_background_job
+    cast(Any, client).read_file = read_file
+
+    run = asyncio.create_task(client.run_background_job("sandbox-a", "sleep 30"))
+    await poll_started.wait()
+
+    async def cancel_then_delete() -> None:
+        nonlocal sandbox_deleted
+        run.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await run
+        sandbox_deleted = True
+
+    teardown = asyncio.create_task(cancel_then_delete())
+    await asyncio.sleep(0)
+    assert not sandbox_deleted
+
+    release_poll.set()
+    await teardown
+    await client.aclose()
+
+    assert sandbox_deleted
+    assert not polled_after_delete

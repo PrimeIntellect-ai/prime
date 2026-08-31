@@ -307,7 +307,19 @@ class _AsyncRequestBatcher(Generic[_BatchKey, _BatchValue]):
         self._pending.setdefault(key, []).append(future)
         if self._dispatch_task is None:
             self._dispatch_task = asyncio.create_task(self._dispatch())
-        return await future
+        try:
+            return await asyncio.shield(future)
+        except asyncio.CancelledError:
+            # The shared dispatch outlives one caller. Settle this lookup before
+            # its caller can tear down resources that the dispatch still uses.
+            while not future.done():
+                try:
+                    await asyncio.shield(future)
+                except asyncio.CancelledError:
+                    pass
+            if not future.cancelled():
+                future.exception()
+            raise
 
     async def _dispatch(self) -> None:
         """Drain all currently pending lookups in bounded chunks."""

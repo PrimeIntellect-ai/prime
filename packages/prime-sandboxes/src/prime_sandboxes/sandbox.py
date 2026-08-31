@@ -190,8 +190,13 @@ class _SyncPollLeaseRegistry:
             while any(scope in self._draining for scope in scopes):
                 self._condition.wait()
             self._draining.update(scopes)
-            while any(self._active.get(scope, 0) for scope in scopes):
-                self._condition.wait()
+            try:
+                while any(self._active.get(scope, 0) for scope in scopes):
+                    self._condition.wait()
+            except BaseException:
+                self._draining.difference_update(scopes)
+                self._condition.notify_all()
+                raise
         return scopes
 
     def end_drain(self, sandbox_ids: List[str]) -> None:

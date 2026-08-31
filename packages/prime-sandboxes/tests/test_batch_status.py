@@ -783,6 +783,29 @@ def test_sync_delete_waits_for_in_flight_poll() -> None:
     assert platform.delete_called.is_set()
 
 
+def test_sync_interrupted_drain_rolls_back_marker(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = SandboxClient(APIClient(api_key="test-key"))
+    client.client.client.close()
+    registry = cast(Any, client)._poll_leases
+    active_lease = registry.acquire("sandbox-a")
+
+    def interrupt_wait() -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(registry._condition, "wait", interrupt_wait)
+    with pytest.raises(KeyboardInterrupt):
+        registry.begin_drain(["sandbox-a"])
+
+    assert "sandbox-a" not in registry._draining
+    next_lease = registry.acquire("sandbox-a")
+    next_lease.release()
+    active_lease.release()
+
+    scopes = registry.begin_drain(["sandbox-a"])
+    registry.end_drain(scopes)
+    assert "sandbox-a" not in registry._draining
+
+
 @pytest.mark.asyncio
 async def test_async_explicit_bulk_delete_drains_known_sandboxes() -> None:
     client = AsyncSandboxClient(api_key="test-key")

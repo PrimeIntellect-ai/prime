@@ -101,6 +101,7 @@ def test_preflight_catches_quoted_json_assignments_and_short_structured_secrets(
     token = "opaque-json-token-0123456789"
     payload = {
         "completion": json.dumps({"Authorization": f"Bearer {token}"}),
+        "answer": "Use token=version-123 for the example.",
         "password": "s3cr3t",
         "api_key": "abc123",
     }
@@ -108,6 +109,7 @@ def test_preflight_catches_quoted_json_assignments_and_short_structured_secrets(
     prepared = prepare_upload(payload)
 
     assert token not in prepared.data["completion"]
+    assert prepared.data["answer"] == payload["answer"]
     assert prepared.data["password"] == REDACTED
     assert prepared.data["api_key"] == REDACTED
 

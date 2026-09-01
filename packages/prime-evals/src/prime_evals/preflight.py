@@ -69,9 +69,11 @@ SCHEMA_MARKERS = {
     "anyOf",
     "oneOf",
 }
+SCHEMA_CONTAINERS = {"components", "json_schema", "schema"}
+NAMED_DEFINITIONS = {"properties", "security_definitions", "security_schemes"}
 HEADER_CONTAINER = re.compile(r"(?:^|_)headers?$")
 SAFE_PATH_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_-]{0,63}")
-AUTH_VALUE = re.compile(r"^(?:bearer|basic|token)\s+(.+)$", re.IGNORECASE)
+AUTH_VALUE = re.compile(r"^(?:bearer|basic|negotiate|token)\s+(.+)$", re.IGNORECASE)
 
 # Every shape names only the credential. The same match drives reporting and redaction.
 PATTERNS = (
@@ -118,7 +120,8 @@ PATTERNS = (
     (
         "authorization_header",
         re.compile(
-            r"(?<![A-Za-z0-9_])(?:authorization|proxy-authorization)\s*[:=]\s*"
+            r"(?<![A-Za-z0-9_])(?:authorization|proxy-authorization)\s*[:=]"
+            r"(?!\s*(?:bearer|basic|negotiate|token)\s+)\s*"
             r"(?P<secret>[^\r\n]{8,})",
             re.IGNORECASE,
         ),
@@ -290,7 +293,7 @@ class SecretDiscovery:
                 if is_sensitive(name):
                     self.remember(secret, "known_secret")
 
-    def remember(self, value: Any, category: str) -> None:
+    def remember(self, value: Any, category: str, mapping_keys: bool = False) -> None:
         if is_secret(value):
             self.secrets.setdefault(value, category)
             match = AUTH_VALUE.fullmatch(value.strip())
@@ -298,7 +301,8 @@ class SecretDiscovery:
                 self.secrets.setdefault(token, category)
         elif isinstance(value, Mapping):
             for key, child in value.items():
-                self.remember(key, category)
+                if mapping_keys:
+                    self.remember(key, category)
                 self.remember(child, category)
         elif isinstance(value, (list, tuple)):
             for child in value:
@@ -335,11 +339,19 @@ class SecretDiscovery:
                         self.discover(child, is_sensitive(name), True)
                     else:
                         if is_sensitive(name):
-                            self.remember(child, "structured_secret")
+                            self.remember(
+                                child,
+                                "structured_secret",
+                                normalized.endswith(("_keys", "_secrets", "_tokens")),
+                            )
                         self.discover(child)
                     continue
                 if is_sensitive(name):
-                    self.remember(child, "structured_secret")
+                    self.remember(
+                        child,
+                        "structured_secret",
+                        normalized.endswith(("_keys", "_secrets", "_tokens")),
+                    )
                 if named_header and normalized == "value":
                     self.remember(child, "structured_secret")
                 if schema_secret and normalized in SCHEMA_VALUES:
@@ -347,10 +359,8 @@ class SecretDiscovery:
                 self.discover(
                     child,
                     schema_secret,
-                    object_schema or normalized in {"schema", "json_schema"},
-                    normalized == "security_schemes"
-                    or object_schema
-                    and normalized == "properties",
+                    object_schema or normalized in SCHEMA_CONTAINERS,
+                    object_schema and normalized in NAMED_DEFINITIONS,
                     headers or HEADER_CONTAINER.search(normalized) is not None,
                 )
         elif isinstance(value, (list, tuple)):
@@ -472,6 +482,22 @@ class CredentialReducer:
 
     def redact_text(self, text: str) -> tuple[str, set[str]]:
         self.categories = set()
+        stripped = text.strip()
+        if stripped.startswith(("{", "[")):
+            try:
+                parsed = json.loads(stripped)
+            except json.JSONDecodeError:
+                pass
+            else:
+                if isinstance(parsed, (Mapping, list)):
+                    parsed_findings: set[Finding] = set()
+                    parsed = self.reduce(parsed, parsed_findings)
+                    if parsed_findings:
+                        start = len(text) - len(text.lstrip())
+                        end = len(text.rstrip())
+                        serialized = json.dumps(parsed, separators=(",", ":"))
+                        text = f"{text[:start]}{serialized}{text[end:]}"
+                        self.categories.update(finding[1] for finding in parsed_findings)
         if self.exact:
             text = self.exact.sub(self.replace_exact, text)
         fingerprinted = self.find_fingerprinted(text)
@@ -531,8 +557,10 @@ class CredentialReducer:
                     raise UploadScanError("credential reduction would create duplicate object keys")
                 normalized = normalize(str(key))
                 definition_schema = definitions and isinstance(child, (Mapping, bool))
+                telemetry = bool(path) and normalize(str(path[-1])) in {"metrics", "rewards"}
                 child_secret = structured_secret or (
                     not definition_schema
+                    and not (telemetry and isinstance(child, (int, float)))
                     and (
                         is_sensitive(str(key))
                         or named_header
@@ -547,13 +575,8 @@ class CredentialReducer:
                     (*path, "[key]" if categories else str(key)),
                     child_secret,
                     is_sensitive(str(key)) if definition_schema else schema_secret,
-                    definition_schema or object_schema or normalized in {"schema", "json_schema"},
-                    not structured_secret
-                    and (
-                        normalized == "security_schemes"
-                        or object_schema
-                        and normalized == "properties"
-                    ),
+                    definition_schema or object_schema or normalized in SCHEMA_CONTAINERS,
+                    not structured_secret and object_schema and normalized in NAMED_DEFINITIONS,
                     headers or HEADER_CONTAINER.search(normalized) is not None,
                 )
             return reduced
@@ -684,14 +707,22 @@ def prepare_jsonl_upload(
     discovery = SecretDiscovery(known_secrets, secret_sources)
     discovery.discover(context)
 
+    snapshot_started = False
+    validated = False
     try:
-        with source.open("rb") as input_file, snapshot.open("wb") as output_file:
-            for number, raw in enumerate(input_file, 1):
-                output_file.write(raw)
-                if not raw.isspace():
-                    discovery.discover(load_line(raw.decode(), number))
+        with source.open("rb") as input_file:
+            with snapshot.open("wb") as output_file:
+                snapshot_started = True
+                for number, raw in enumerate(input_file, 1):
+                    output_file.write(raw)
+                    if not raw.isspace():
+                        discovery.discover(load_line(raw.decode(), number))
+        validated = True
     except UnicodeDecodeError as error:
         raise UploadScanError("trace JSONL must be UTF-8") from error
+    finally:
+        if snapshot_started and not validated:
+            snapshot.unlink(missing_ok=True)
 
     reducer = CredentialReducer(discovery.secrets, secret_fingerprints=secret_fingerprints)
     context_prepared = reducer.prepare(context) if context is not None else None

@@ -234,7 +234,12 @@ def test_preflight_catches_quoted_assignments_and_sensitive_mapping_keys():
                 f'"aws_session_token":"{session_token}"}}'
             ),
             "api_keys": {secret: {"owner": "alice"} for secret in secrets},
+            "credentials": {
+                "password": "opaque-record-password-0123456789",
+                "username": "review-user",
+            },
             "prompt": f"the model repeated {secrets[0]}",
+            "rubric": "compare the password and username fields",
             "team_id": "team-0123456789",
         }
     )
@@ -244,6 +249,7 @@ def test_preflight_catches_quoted_assignments_and_sensitive_mapping_keys():
     assert session_token not in prepared.data["completion"]
     assert list(prepared.data["api_keys"]) == [REDACTED, "[REDACTED 2]"]
     assert prepared.data["prompt"] == f"the model repeated {REDACTED}"
+    assert prepared.data["rubric"] == "compare the password and username fields"
     assert prepared.data["team_id"] == "team-0123456789"
     assert scan_upload(prepared.data).findings == ()
 
@@ -293,7 +299,7 @@ def test_preflight_catches_private_key_pem_variants(label):
     assert prepare_upload({"completion": private_key}).data["completion"] == REDACTED
 
 
-@pytest.mark.parametrize("scheme", ["Bearer", "Token"])
+@pytest.mark.parametrize("scheme", ["Bearer", "Negotiate", "Token"])
 def test_structured_authorization_redacts_the_repeated_token(scheme):
     token = "opaque-bearer-token-0123456789"
     prepared = prepare_upload(
@@ -305,6 +311,15 @@ def test_structured_authorization_redacts_the_repeated_token(scheme):
 
     assert prepared.data["headers"]["Authorization"] == REDACTED
     assert token not in prepared.data["completion"]
+
+
+def test_authorization_redaction_preserves_trailing_review_text():
+    token = "opaque-bearer-token-0123456789"
+    trailing = "keep this review text"
+    prepared = prepare_upload({"completion": f"Authorization: Bearer {token} {trailing}"})
+
+    assert token not in prepared.data["completion"]
+    assert trailing in prepared.data["completion"]
 
 
 @pytest.mark.parametrize(
@@ -343,6 +358,40 @@ def test_preflight_preserves_openapi_security_scheme_definitions():
     prepared = prepare_upload({"components": {"securitySchemes": security_schemes}})
 
     assert prepared.data["components"]["securitySchemes"] == security_schemes
+
+
+def test_non_schema_security_scheme_mappings_still_redact_credentials():
+    secret = "opaque-security-scheme-secret-0123456789"
+    prepared = prepare_upload({"security_schemes": {"api_key": {"value": secret}}})
+
+    assert secret not in json.dumps(prepared.data)
+
+
+def test_preflight_reduces_short_credentials_inside_serialized_json():
+    serialized = json.dumps({"password": "s3cr3t"})
+    prepared = prepare_upload(
+        {
+            "completion": serialized,
+            "rubric": "the example password is s3cr3t",
+        }
+    )
+
+    assert json.loads(prepared.data["completion"])["password"] == REDACTED
+    assert prepared.data["rubric"] == "the example password is s3cr3t"
+
+
+def test_preflight_preserves_numeric_metric_and_reward_names():
+    prepared = prepare_upload(
+        {
+            "metrics": {"token": 1.0, "secret": 2},
+            "rewards": {"api_key": 0.5},
+            "token": 12345678,
+        }
+    )
+
+    assert prepared.data["metrics"] == {"token": 1.0, "secret": 2}
+    assert prepared.data["rewards"] == {"api_key": 0.5}
+    assert prepared.data["token"] == REDACTED
 
 
 def test_preflight_uses_named_secret_sources_and_fingerprints():
@@ -526,10 +575,13 @@ def test_jsonl_preflight_rejects_a_hard_link_to_the_source(tmp_path):
 )
 def test_jsonl_preflight_fails_closed_on_ambiguous_input(tmp_path, content, message):
     source = tmp_path / "traces.jsonl"
+    destination = tmp_path / "safe.jsonl"
     source.write_text(content)
 
     with pytest.raises(UploadScanError, match=message):
-        prepare_jsonl_upload(source, tmp_path / "safe.jsonl")
+        prepare_jsonl_upload(source, destination)
+
+    assert not destination.exists()
 
 
 def test_secret_values_file(tmp_path):

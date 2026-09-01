@@ -345,6 +345,7 @@ def test_upload_command_table_output(fake_client, tmp_path):
     assert result.exit_code == 0, result.output
     assert "Uploaded 1 batch(es)" in result.output
     call = fake_client.calls["upload_file"]
+    assert call["path"].parent.parent == tmp_path.resolve()
     assert call["context"] == {"source": "hosted_eval", "suite": "s1"}
     assert call["compress"] is True
     assert call["line_format"].value == "trace"

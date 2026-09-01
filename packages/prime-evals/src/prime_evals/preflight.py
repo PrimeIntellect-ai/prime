@@ -354,11 +354,12 @@ class SecretDiscovery:
         definitions: bool = False,
         headers: bool = False,
         components: bool = False,
+        openapi: bool = False,
     ) -> None:
         if isinstance(value, Mapping):
             named_header = headers and is_sensitive(str(value.get("name") or value.get("key", "")))
             schema_type = value.get("type")
-            openapi_document = any(field in value for field in OPENAPI_MARKERS)
+            openapi_document = openapi or any(field in value for field in OPENAPI_MARKERS)
             object_schema = (
                 schema_context
                 or any(field in value for field in SCHEMA_MARKERS)
@@ -376,7 +377,7 @@ class SecretDiscovery:
                 normalized = normalize(name)
                 if definitions:
                     if isinstance(child, (Mapping, list, tuple, bool)):
-                        self.discover(child, is_sensitive(name), True)
+                        self.discover(child, is_sensitive(name), True, openapi=openapi_document)
                     else:
                         if is_sensitive(name):
                             self.remember(
@@ -384,7 +385,7 @@ class SecretDiscovery:
                                 "structured_secret",
                                 normalized.endswith(("_keys", "_secrets", "_tokens")),
                             )
-                        self.discover(child)
+                        self.discover(child, openapi=openapi_document)
                     continue
                 if is_sensitive(name):
                     self.remember(
@@ -409,9 +410,11 @@ class SecretDiscovery:
                     and normalized in OPENAPI_COMPONENT_MAPS
                     or openapi_document
                     and normalized in OPENAPI_ROOT_DEFINITIONS
-                    or normalized == "security",
+                    or openapi_document
+                    and normalized == "security",
                     headers or HEADER_CONTAINER.search(normalized) is not None,
                     openapi_document and normalized == "components",
+                    openapi_document,
                 )
         elif isinstance(value, (list, tuple)):
             for index, child in enumerate(value):
@@ -429,6 +432,7 @@ class SecretDiscovery:
                     definitions,
                     headers,
                     components,
+                    openapi,
                 )
         elif isinstance(value, str):
             text = value.strip()
@@ -446,6 +450,7 @@ class SecretDiscovery:
                             definitions,
                             headers,
                             components,
+                            openapi,
                         )
             for category, pattern in PATTERNS:
                 if category == "credential_url":
@@ -557,6 +562,7 @@ class CredentialReducer:
         definitions: bool = False,
         headers: bool = False,
         components: bool = False,
+        openapi: bool = False,
     ) -> tuple[str, set[str]]:
         self.categories = set()
         stripped = text.strip()
@@ -576,6 +582,7 @@ class CredentialReducer:
                         definitions=definitions,
                         headers=headers,
                         components=components,
+                        openapi=openapi,
                     )
                     if parsed_findings:
                         start = len(text) - len(text.lstrip())
@@ -606,12 +613,13 @@ class CredentialReducer:
         definitions: bool = False,
         headers: bool = False,
         components: bool = False,
+        openapi: bool = False,
     ) -> Any:
         if isinstance(value, Mapping):
             reduced = {}
             named_header = headers and is_sensitive(str(value.get("name") or value.get("key", "")))
             schema_type = value.get("type")
-            openapi_document = any(field in value for field in OPENAPI_MARKERS)
+            openapi_document = openapi or any(field in value for field in OPENAPI_MARKERS)
             object_schema = (
                 schema_context
                 or any(field in value for field in SCHEMA_MARKERS)
@@ -675,10 +683,12 @@ class CredentialReducer:
                         and normalized in OPENAPI_COMPONENT_MAPS
                         or openapi_document
                         and normalized in OPENAPI_ROOT_DEFINITIONS
-                        or normalized == "security"
+                        or openapi_document
+                        and normalized == "security"
                     ),
                     headers or HEADER_CONTAINER.search(normalized) is not None,
                     openapi_document and normalized == "components",
+                    openapi_document,
                 )
             return reduced
         if isinstance(value, (list, tuple)):
@@ -697,6 +707,7 @@ class CredentialReducer:
                     definitions,
                     headers,
                     components,
+                    openapi,
                 )
                 for index, child in enumerate(value)
             ]
@@ -722,6 +733,7 @@ class CredentialReducer:
             definitions,
             headers,
             components,
+            openapi,
         )
         findings.update((finding_path(path), category) for category in categories)
         return reduced

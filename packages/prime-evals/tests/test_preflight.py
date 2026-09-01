@@ -418,6 +418,13 @@ def test_preflight_preserves_openapi_security_requirement_scopes():
     assert prepare_upload(document).data == document
 
 
+def test_preflight_does_not_treat_ordinary_security_data_as_openapi():
+    secret = "opaque-session-value-0123456789"
+    prepared = prepare_upload({"security": {"token": {"primary": secret}}})
+
+    assert prepared.data["security"]["token"]["primary"] == REDACTED
+
+
 @pytest.mark.parametrize("container", ["patternProperties", "dependentSchemas"])
 def test_preflight_preserves_named_json_schema_maps(container):
     schema = {

@@ -193,6 +193,12 @@ def test_preflight_catches_escaped_authorization_headers():
     assert token not in prepared.data["completion"]
 
 
+def test_preflight_catches_escaped_credential_field_names():
+    completion = r"{\"password\":\"opaque-password-0123456789\"}"
+
+    assert "opaque-password" not in prepare_upload({"completion": completion}).data["completion"]
+
+
 @pytest.mark.parametrize("scheme", ["Digest", "AWS4-HMAC-SHA256"])
 def test_preflight_catches_escaped_quoted_authorization_schemes(scheme):
     completion = rf"{{\"Authorization\":\"{scheme} opaque-credential-0123456789\"}}"
@@ -511,6 +517,22 @@ def test_serialized_schema_preserves_credential_field_definitions():
     schema = json.dumps({"properties": {"password": {"type": "string"}}})
 
     assert prepare_upload({"schema": schema}).data["schema"] == schema
+
+
+@pytest.mark.parametrize("container", ["$defs", "definitions"])
+def test_schema_definition_names_are_not_credentials(container):
+    schema = {container: {"Password": {"type": "string"}}}
+
+    assert prepare_upload({"schema": schema}).data["schema"] == schema
+
+
+def test_openapi_schema_definition_names_are_not_credentials():
+    document = {
+        "openapi": "3.1.0",
+        "components": {"schemas": {"AccessToken": {"type": "string"}}},
+    }
+
+    assert prepare_upload(document).data == document
 
 
 def test_jsonl_preflight_uses_secrets_discovered_in_later_lines(tmp_path):

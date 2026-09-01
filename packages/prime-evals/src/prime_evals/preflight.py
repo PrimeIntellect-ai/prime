@@ -71,7 +71,14 @@ SCHEMA_MARKERS = {
 }
 SCHEMA_CONTAINERS = {"json_schema", "schema"}
 OPENAPI_MARKERS = {"openapi", "swagger"}
-NAMED_DEFINITIONS = {"properties", "security_definitions", "security_schemes"}
+NAMED_DEFINITIONS = {
+    "defs",
+    "definitions",
+    "properties",
+    "schemas",
+    "security_definitions",
+    "security_schemes",
+}
 HEADER_CONTAINER = re.compile(r"(?:^|_)headers?$")
 SAFE_PATH_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_-]{0,63}")
 AUTH_VALUE = re.compile(r"^(?:bearer|basic|negotiate|token)\s+(.+)$", re.IGNORECASE)
@@ -147,12 +154,12 @@ PATTERNS = (
     (
         "credential_assignment",
         re.compile(
-            r"(?:(?<![A-Za-z0-9_])[\"']?(?i:(?:[A-Za-z][A-Za-z0-9]*[_-]+)*"
+            r"(?:(?<![A-Za-z0-9_])\\?[\"']?(?i:(?:[A-Za-z][A-Za-z0-9]*[_-]+)*"
             r"(?:x-api-key|api[_ -]?(?:key|token)|account[_ -]?key|"
             r"access[_ -]?token|refresh[_ -]?token|auth[_ -]?token|session[_ -]?token|"
             r"client[_ -]?secret|secret[_ -]?access[_ -]?key|password|passwd|"
             r"cookie|credential|private[_ -]?key|sas[_ -]?token|signature))\b"
-            r"[\"']?\s*[:=]\s*|"
+            r"\\?[\"']?\s*[:=]\s*|"
             r"\b(?:[A-Z][A-Z0-9_]*_)?(?:API_?KEY|API_?TOKEN|ACCESS_?TOKEN|"
             r"REFRESH_?TOKEN|AUTH_?TOKEN|SESSION_?TOKEN|TOKEN|CLIENT_?SECRET|"
             r"SECRET(?:_ACCESS_?KEY|_?KEY)?|PASSWORD|PASSWD|COOKIE|CREDENTIAL|"
@@ -167,13 +174,13 @@ PATTERNS = (
     (
         "credential_assignment",
         re.compile(
-            r"(?:(?<![A-Za-z0-9_])[\"']?(?:[A-Za-z][A-Za-z0-9]*[_-]+)*"
+            r"(?:(?<![A-Za-z0-9_])\\?[\"']?(?:[A-Za-z][A-Za-z0-9]*[_-]+)*"
             r"(?:x-api-key|api[_ -]?(?:key|token)|account[_ -]?key|"
             r"access[_ -]?token|refresh[_ -]?token|auth[_ -]?token|client[_ -]?secret|"
             r"access[_ -]?key(?:[_ -]?id)?|"
             r"secret(?:[_ -]?(?:access[_ -]?)?key)?|"
             r"password|passwd|cookie|private[_ -]?key|sas[_ -]?token|signature)\b"
-            r"[\"']?\s*[:=]\s*|"
+            r"\\?[\"']?\s*[:=]\s*|"
             r"\b(?:[A-Z][A-Z0-9_]*_)?(?:API_?KEY|ACCESS_?TOKEN|REFRESH_?TOKEN|"
             r"AUTH_?TOKEN|SESSION_?TOKEN|TOKEN|CLIENT_?SECRET|SECRET(?:_ACCESS_?KEY)?|"
             r"PASSWORD|PASSWD|COOKIE|CREDENTIAL|PRIVATE_?KEY|SAS_?TOKEN|SECRET_?KEY)"

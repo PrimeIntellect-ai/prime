@@ -307,6 +307,44 @@ def test_structured_authorization_redacts_the_repeated_token(scheme):
     assert token not in prepared.data["completion"]
 
 
+@pytest.mark.parametrize(
+    "headers",
+    [
+        [["authorization", "Bearer opaque-header-token-0123456789"]],
+        [
+            {
+                "key": "Authorization",
+                "value": "Bearer opaque-header-token-0123456789",
+            }
+        ],
+    ],
+)
+def test_preflight_recognizes_suffixed_header_containers(headers):
+    token = "opaque-header-token-0123456789"
+    prepared = prepare_upload(
+        {
+            "request_headers": headers,
+            "completion": f"the model repeated {token}",
+        }
+    )
+
+    assert token not in json.dumps(prepared.data)
+
+
+def test_preflight_preserves_openapi_security_scheme_definitions():
+    security_schemes = {
+        "BearerAuth": {
+            "type": "http",
+            "scheme": "bearer",
+            "bearerFormat": "JWT",
+        }
+    }
+
+    prepared = prepare_upload({"components": {"securitySchemes": security_schemes}})
+
+    assert prepared.data["components"]["securitySchemes"] == security_schemes
+
+
 def test_preflight_uses_named_secret_sources_and_fingerprints():
     runtime_secret = "runtime-secret-0123456789"
     capability = "rollout-capability-0123456789"

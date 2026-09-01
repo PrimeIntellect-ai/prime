@@ -69,6 +69,7 @@ SCHEMA_MARKERS = {
     "anyOf",
     "oneOf",
 }
+HEADER_CONTAINER = re.compile(r"(?:^|_)headers?$")
 SAFE_PATH_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_-]{0,63}")
 AUTH_VALUE = re.compile(r"^(?:bearer|basic|token)\s+(.+)$", re.IGNORECASE)
 
@@ -308,11 +309,11 @@ class SecretDiscovery:
         value: Any,
         schema_secret: bool = False,
         schema_context: bool = False,
-        properties: bool = False,
+        definitions: bool = False,
         headers: bool = False,
     ) -> None:
         if isinstance(value, Mapping):
-            named_header = headers and is_sensitive(str(value.get("name", "")))
+            named_header = headers and is_sensitive(str(value.get("name") or value.get("key", "")))
             schema_type = value.get("type")
             object_schema = (
                 schema_context
@@ -329,7 +330,7 @@ class SecretDiscovery:
             for key, child in value.items():
                 name = str(key)
                 normalized = normalize(name)
-                if properties:
+                if definitions:
                     if isinstance(child, (Mapping, bool)):
                         self.discover(child, is_sensitive(name), True)
                     else:
@@ -347,14 +348,16 @@ class SecretDiscovery:
                     child,
                     schema_secret,
                     object_schema or normalized in {"schema", "json_schema"},
-                    object_schema and normalized == "properties",
-                    headers or normalized in {"header", "headers"},
+                    normalized == "security_schemes"
+                    or object_schema
+                    and normalized == "properties",
+                    headers or HEADER_CONTAINER.search(normalized) is not None,
                 )
         elif isinstance(value, (list, tuple)):
             if headers and len(value) == 2 and isinstance(value[0], str) and is_sensitive(value[0]):
                 self.remember(value[1], "structured_secret")
             for child in value:
-                self.discover(child, schema_secret, schema_context, properties, headers)
+                self.discover(child, schema_secret, schema_context, definitions, headers)
         elif isinstance(value, str):
             text = value.strip()
             if text.startswith(("{", "[")):
@@ -489,12 +492,12 @@ class CredentialReducer:
         structured_secret: bool = False,
         schema_secret: bool = False,
         schema_context: bool = False,
-        properties: bool = False,
+        definitions: bool = False,
         headers: bool = False,
     ) -> Any:
         if isinstance(value, Mapping):
             reduced = {}
-            named_header = headers and is_sensitive(str(value.get("name", "")))
+            named_header = headers and is_sensitive(str(value.get("name") or value.get("key", "")))
             schema_type = value.get("type")
             object_schema = (
                 schema_context
@@ -527,9 +530,9 @@ class CredentialReducer:
                 if safe_key in reduced:
                     raise UploadScanError("credential reduction would create duplicate object keys")
                 normalized = normalize(str(key))
-                property_schema = properties and isinstance(child, (Mapping, bool))
+                definition_schema = definitions and isinstance(child, (Mapping, bool))
                 child_secret = structured_secret or (
-                    not property_schema
+                    not definition_schema
                     and (
                         is_sensitive(str(key))
                         or named_header
@@ -543,10 +546,15 @@ class CredentialReducer:
                     findings,
                     (*path, "[key]" if categories else str(key)),
                     child_secret,
-                    is_sensitive(str(key)) if property_schema else schema_secret,
-                    property_schema or object_schema or normalized in {"schema", "json_schema"},
-                    not structured_secret and object_schema and normalized == "properties",
-                    headers or normalized in {"header", "headers"},
+                    is_sensitive(str(key)) if definition_schema else schema_secret,
+                    definition_schema or object_schema or normalized in {"schema", "json_schema"},
+                    not structured_secret
+                    and (
+                        normalized == "security_schemes"
+                        or object_schema
+                        and normalized == "properties"
+                    ),
+                    headers or HEADER_CONTAINER.search(normalized) is not None,
                 )
             return reduced
         if isinstance(value, (list, tuple)):
@@ -561,7 +569,7 @@ class CredentialReducer:
                     structured_secret or header_pair and index == 1,
                     schema_secret,
                     schema_context,
-                    properties,
+                    definitions,
                     headers,
                 )
                 for index, child in enumerate(value)

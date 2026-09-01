@@ -775,6 +775,8 @@ class BackgroundJobStatus(BaseModel):
     exit_code: Optional[int] = None
     stdout: Optional[str] = None
     stderr: Optional[str] = None
+    stdout_error: Optional[str] = None
+    stderr_error: Optional[str] = None
     stdout_truncated: bool = False
     stderr_truncated: bool = False
 

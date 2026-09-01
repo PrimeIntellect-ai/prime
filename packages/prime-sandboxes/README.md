@@ -240,6 +240,10 @@ print(f"Job started: {job.job_id}")
 # same bounded stdout/stderr tails as get_background_job().
 statuses = sandbox_client.get_background_jobs([job])
 
+# For latency-sensitive polling, status-only methods never download output.
+# Fetch the hydrated result with get_background_job() after completion.
+snapshots = sandbox_client.get_background_job_statuses([job])
+
 # Poll for completion
 import time
 while True:
@@ -256,7 +260,16 @@ sandbox_client.download_file(sandbox.id, "/app/model.pt", "./model.pt")
 ```
 
 `get_background_jobs` is VM-only. Container sandboxes retain the existing
-`get_background_job` polling behavior.
+`get_background_job` polling behavior. Once an exit code is observed, completion
+remains authoritative even if output retrieval exhausts its bounded retry
+deadline: the unavailable stream is `None` and its `stdout_error` or
+`stderr_error` field describes the retrieval failure.
+
+Output downloads are deduplicated, cached within a bounded client-local LRU,
+and scheduled separately from completion polling. Advanced callers can tune the
+client-wide limits with `background_job_output_concurrency`,
+`background_job_output_queue_size`, and `background_job_output_cache_bytes`;
+the defaults are 20 active jobs, 200 queued jobs, and 64 MiB of cached streams.
 
 #### Async version
 

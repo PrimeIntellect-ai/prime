@@ -3,6 +3,7 @@
 import asyncio
 import errno
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from typing import Any, Optional, cast
@@ -11,7 +12,12 @@ import pytest
 
 from prime_sandboxes import BatchStatusUnsupportedError
 from prime_sandboxes.core.client import APIClient, APIError
-from prime_sandboxes.models import BackgroundJob, BackgroundJobStatus, ReadFileResponse
+from prime_sandboxes.models import (
+    BackgroundJob,
+    BackgroundJobStatus,
+    BackgroundJobStatusSnapshot,
+    ReadFileResponse,
+)
 from prime_sandboxes.sandbox import AsyncSandboxClient, SandboxClient
 
 
@@ -467,8 +473,12 @@ def test_sync_background_batch_capability_falls_back_once_per_client() -> None:
     platform = _SyncUnsupportedPlatformClient()
     cast(Any, client).client = platform
     cast(Any, client)._auth_cache = _SyncVMAuthCache()
-    cast(Any, client).get_background_job = lambda _sandbox_id, job, timeout=None: (
-        BackgroundJobStatus(job_id=job.job_id, completed=False)
+    cast(Any, client)._get_background_job_status_unleased = (
+        lambda sandbox_id, job, timeout=None: BackgroundJobStatusSnapshot(
+            sandbox_id=sandbox_id,
+            job_id=job.job_id,
+            completed=False,
+        )
     )
     jobs = [_job("sandbox-a", "deadbeef"), _job("sandbox-b", "cafebabe")]
 
@@ -703,7 +713,7 @@ async def test_async_background_batch_errors_only_fail_the_matching_waiter() -> 
     finally:
         await client.aclose()
 
-    assert isinstance(results[0], BackgroundJobStatus)
+    assert isinstance(results[0], BackgroundJobStatusSnapshot)
     assert not results[0].completed
     assert isinstance(results[1], APIError)
     assert "sandbox-b/cafebabe" in str(results[1])
@@ -999,3 +1009,394 @@ async def test_async_close_joins_fetch_before_transports_even_when_cancelled() -
     assert close_order == ["fetch-close", "gateway-close", "platform-close"]
 
     await client.aclose()
+
+
+def test_sync_completed_output_is_deduplicated_and_cached() -> None:
+    client = SandboxClient(APIClient(api_key="test-key"))
+    job = _job("sandbox-a", "deadbeef")
+    calls: list[str] = []
+    first_read_started = threading.Event()
+    release_reads = threading.Event()
+
+    def read_file(
+        _sandbox_id: str,
+        path: str,
+        timeout: Optional[int] = None,
+        offset: Optional[int] = None,
+        length: Optional[int] = None,
+    ) -> ReadFileResponse:
+        calls.append(path)
+        if len(calls) == 1:
+            first_read_started.set()
+            assert release_reads.wait(timeout=2)
+        return ReadFileResponse(content=path, size=len(path), truncated=False)
+
+    cast(Any, client).read_file = read_file
+    coordinator = cast(Any, client)._background_job_output_coordinator
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(coordinator.get, job, 0, None)
+        assert first_read_started.wait(timeout=2)
+        second = executor.submit(coordinator.get, job, 0, None)
+        release_reads.set()
+        assert first.result(timeout=2).stdout == job.stdout_log_file
+        assert second.result(timeout=2).stderr == job.stderr_log_file
+
+    cached = coordinator.get(job, 0, None)
+    assert cached.stdout == job.stdout_log_file
+    assert calls == [job.stdout_log_file, job.stderr_log_file]
+
+
+def test_sync_bulk_output_hydration_uses_configured_global_limit() -> None:
+    client = SandboxClient(
+        APIClient(api_key="test-key"),
+        background_job_output_concurrency=2,
+    )
+    jobs = [_job(f"sandbox-{index}", f"{index:08x}") for index in range(6)]
+    snapshots = [
+        BackgroundJobStatusSnapshot(
+            sandbox_id=job.sandbox_id,
+            job_id=job.job_id,
+            completed=True,
+            exit_code=0,
+        )
+        for job in jobs
+    ]
+    cast(Any, client).get_background_job_statuses = lambda _jobs, timeout=None: snapshots
+    lock = threading.Lock()
+    active = 0
+    peak = 0
+
+    def read_file(
+        _sandbox_id: str,
+        path: str,
+        timeout: Optional[int] = None,
+        offset: Optional[int] = None,
+        length: Optional[int] = None,
+    ) -> ReadFileResponse:
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        try:
+            time.sleep(0.01)
+            return ReadFileResponse(content=path, size=len(path), truncated=False)
+        finally:
+            with lock:
+                active -= 1
+
+    cast(Any, client).read_file = read_file
+    statuses = client.get_background_jobs(jobs)
+    assert all(status.completed for status in statuses)
+    assert peak == 2
+
+
+@pytest.mark.asyncio
+async def test_async_status_only_batch_never_downloads_output() -> None:
+    client = AsyncSandboxClient(api_key="test-key")
+    await client.client.aclose()
+    cast(Any, client).client = _AsyncBackgroundJobPlatformClient(complete_all=True)
+    reads = 0
+
+    async def read_file(*_args: Any, **_kwargs: Any) -> ReadFileResponse:
+        nonlocal reads
+        reads += 1
+        raise AssertionError("status-only lookup must not download output")
+
+    cast(Any, client).read_file = read_file
+    snapshots = await client.get_background_job_statuses(
+        [_job("sandbox-a", "deadbeef"), _job("sandbox-b", "cafebabe")]
+    )
+    assert all(snapshot.completed and snapshot.exit_code == 0 for snapshot in snapshots)
+    assert reads == 0
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_async_output_hydration_does_not_block_later_status_batches() -> None:
+    client = AsyncSandboxClient(api_key="test-key")
+    await client.client.aclose()
+    cast(Any, client).client = _AsyncBackgroundJobPlatformClient(complete_all=True)
+    output_started = asyncio.Event()
+    release_output = asyncio.Event()
+
+    async def read_file(
+        _sandbox_id: str,
+        path: str,
+        timeout: Optional[int] = None,
+        offset: Optional[int] = None,
+        length: Optional[int] = None,
+    ) -> ReadFileResponse:
+        output_started.set()
+        await release_output.wait()
+        return ReadFileResponse(content=path, size=len(path), truncated=False)
+
+    cast(Any, client).read_file = read_file
+    hydration = asyncio.create_task(client.get_background_jobs([_job("sandbox-a", "deadbeef")]))
+    await output_started.wait()
+
+    snapshot = await asyncio.wait_for(
+        cast(Any, client)._background_job_status_batcher.get(("sandbox-b", "cafebabe")),
+        timeout=0.5,
+    )
+    assert snapshot.completed
+    release_output.set()
+    assert (await hydration)[0].completed
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_async_completed_output_is_deduplicated_and_partially_cached() -> None:
+    client = AsyncSandboxClient(api_key="test-key")
+    await client.client.aclose()
+    cast(Any, client).client = _AsyncBackgroundJobPlatformClient()
+    job = _job("sandbox-a", "deadbeef")
+    calls: list[str] = []
+    stderr_attempts = 0
+
+    async def read_file(
+        _sandbox_id: str,
+        path: str,
+        timeout: Optional[int] = None,
+        offset: Optional[int] = None,
+        length: Optional[int] = None,
+    ) -> ReadFileResponse:
+        nonlocal stderr_attempts
+        calls.append(path)
+        await asyncio.sleep(0.01)
+        if path == job.stderr_log_file:
+            stderr_attempts += 1
+            if stderr_attempts == 1:
+                raise APIError("temporary stderr failure")
+        return ReadFileResponse(content=path, size=len(path), truncated=False)
+
+    cast(Any, client).read_file = read_file
+    coordinator = cast(Any, client)._background_job_output_coordinator
+    first, shared = await asyncio.gather(
+        coordinator.get(job, 0, None),
+        coordinator.get(job, 0, None),
+    )
+    assert first.stdout == job.stdout_log_file
+    assert shared.stderr_error == "APIError: temporary stderr failure"
+
+    retried = await coordinator.get(job, 0, None)
+    assert retried.stdout == job.stdout_log_file
+    assert retried.stderr == job.stderr_log_file
+    assert calls == [job.stdout_log_file, job.stderr_log_file, job.stderr_log_file]
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_async_sole_output_waiter_cancels_and_joins_fetch() -> None:
+    client = AsyncSandboxClient(api_key="test-key")
+    await client.client.aclose()
+    cast(Any, client).client = _AsyncBackgroundJobPlatformClient()
+    fetch_started = asyncio.Event()
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+
+    async def read_file(*_args: Any, **_kwargs: Any) -> ReadFileResponse:
+        fetch_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleanup_started.set()
+            await release_cleanup.wait()
+
+    cast(Any, client).read_file = read_file
+    task = asyncio.create_task(
+        cast(Any, client)._background_job_output_coordinator.get(
+            _job("sandbox-a", "deadbeef"), 0, None
+        )
+    )
+    await fetch_started.wait()
+    task.cancel()
+    await cleanup_started.wait()
+    await asyncio.sleep(0)
+    assert not task.done()
+
+    release_cleanup.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert not cast(Any, client)._operation_leases._active
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_async_shared_output_survives_one_waiter_cancellation() -> None:
+    client = AsyncSandboxClient(api_key="test-key")
+    await client.client.aclose()
+    cast(Any, client).client = _AsyncBackgroundJobPlatformClient()
+    fetch_started = asyncio.Event()
+    release_fetch = asyncio.Event()
+    fetch_cancelled = False
+    job = _job("sandbox-a", "deadbeef")
+
+    async def read_file(
+        _sandbox_id: str,
+        path: str,
+        timeout: Optional[int] = None,
+        offset: Optional[int] = None,
+        length: Optional[int] = None,
+    ) -> ReadFileResponse:
+        nonlocal fetch_cancelled
+        fetch_started.set()
+        try:
+            await release_fetch.wait()
+        except asyncio.CancelledError:
+            fetch_cancelled = True
+            raise
+        return ReadFileResponse(content=path, size=len(path), truncated=False)
+
+    cast(Any, client).read_file = read_file
+    coordinator = cast(Any, client)._background_job_output_coordinator
+    cancelled = asyncio.create_task(coordinator.get(job, 0, None))
+    surviving = asyncio.create_task(coordinator.get(job, 0, None))
+    await fetch_started.wait()
+    while next(iter(coordinator._inflight.values())).waiters != 2:
+        await asyncio.sleep(0)
+
+    cancelled.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled
+    assert not fetch_cancelled
+
+    release_fetch.set()
+    status = await surviving
+    assert status.stdout == job.stdout_log_file
+    assert not fetch_cancelled
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_async_delete_cancels_queued_output_and_waits_active_output() -> None:
+    client = AsyncSandboxClient(
+        api_key="test-key",
+        background_job_output_concurrency=1,
+    )
+    await client.client.aclose()
+    platform = _AsyncDeletePlatformClient()
+    cast(Any, client).client = platform
+    active_started = asyncio.Event()
+    release_active = asyncio.Event()
+    active_job = _job("sandbox-a", "deadbeef")
+    queued_job = _job("sandbox-a", "cafebabe")
+
+    async def read_file(
+        _sandbox_id: str,
+        path: str,
+        timeout: Optional[int] = None,
+        offset: Optional[int] = None,
+        length: Optional[int] = None,
+    ) -> ReadFileResponse:
+        if path == active_job.stdout_log_file:
+            active_started.set()
+            await release_active.wait()
+        return ReadFileResponse(content=path, size=len(path), truncated=False)
+
+    cast(Any, client).read_file = read_file
+    coordinator = cast(Any, client)._background_job_output_coordinator
+    active = asyncio.create_task(coordinator.get(active_job, 0, None))
+    await active_started.wait()
+    queued = asyncio.create_task(coordinator.get(queued_job, 0, None))
+    while coordinator._pending_count != 1:
+        await asyncio.sleep(0)
+
+    deleting = asyncio.create_task(client.delete("sandbox-a"))
+    queued_status = await asyncio.wait_for(queued, timeout=0.5)
+    assert queued_status.completed
+    assert queued_status.stdout_error is not None
+    assert "being deleted" in queued_status.stdout_error
+    assert not platform.delete_called.is_set()
+
+    release_active.set()
+    assert (await active).completed
+    await deleting
+    assert platform.delete_called.is_set()
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_async_output_queue_schedules_sandboxes_round_robin() -> None:
+    client = AsyncSandboxClient(
+        api_key="test-key",
+        background_job_output_concurrency=1,
+    )
+    await client.client.aclose()
+    cast(Any, client).client = _AsyncBackgroundJobPlatformClient()
+    release_first = asyncio.Event()
+    first_started = asyncio.Event()
+    stdout_order: list[str] = []
+
+    async def read_file(
+        _sandbox_id: str,
+        path: str,
+        timeout: Optional[int] = None,
+        offset: Optional[int] = None,
+        length: Optional[int] = None,
+    ) -> ReadFileResponse:
+        if path.endswith("stdout.log"):
+            stdout_order.append(path)
+            if len(stdout_order) == 1:
+                first_started.set()
+                await release_first.wait()
+        return ReadFileResponse(content=path, size=len(path), truncated=False)
+
+    cast(Any, client).read_file = read_file
+    coordinator = cast(Any, client)._background_job_output_coordinator
+    a1 = _job("sandbox-a", "00000001")
+    a2 = _job("sandbox-a", "00000002")
+    b1 = _job("sandbox-b", "00000003")
+    a3 = _job("sandbox-a", "00000004")
+    tasks = [asyncio.create_task(coordinator.get(a1, 0, None))]
+    await first_started.wait()
+    tasks.extend(asyncio.create_task(coordinator.get(job, 0, None)) for job in (a2, b1, a3))
+    while coordinator._pending_count != 3:
+        await asyncio.sleep(0)
+    release_first.set()
+    await asyncio.gather(*tasks)
+
+    assert stdout_order == [
+        a1.stdout_log_file,
+        a2.stdout_log_file,
+        b1.stdout_log_file,
+        a3.stdout_log_file,
+    ]
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_async_close_joins_output_before_transports() -> None:
+    client = AsyncSandboxClient(api_key="test-key")
+    await client.client.aclose()
+    close_order: list[str] = []
+    cast(Any, client).client = _AsyncDeletePlatformClient(close_order)
+    cast(Any, client)._gateway_client = _OrderedAsyncGatewayClient(close_order)
+    fetch_started = asyncio.Event()
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+
+    async def read_file(*_args: Any, **_kwargs: Any) -> ReadFileResponse:
+        fetch_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleanup_started.set()
+            await release_cleanup.wait()
+            close_order.append("output-close")
+
+    cast(Any, client).read_file = read_file
+    lookup = asyncio.create_task(
+        cast(Any, client)._background_job_output_coordinator.get(
+            _job("sandbox-a", "deadbeef"), 0, None
+        )
+    )
+    await fetch_started.wait()
+    closing = asyncio.create_task(client.aclose())
+    await cleanup_started.wait()
+    assert close_order == []
+
+    release_cleanup.set()
+    await closing
+    with pytest.raises(RuntimeError, match="closed"):
+        await lookup
+    assert close_order == ["output-close", "gateway-close", "platform-close"]

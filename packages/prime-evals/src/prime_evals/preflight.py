@@ -196,7 +196,7 @@ PATTERNS = (
         re.compile(
             r"(?:(?<![A-Za-z0-9_])\\?[\"']?(?i:(?:[A-Za-z][A-Za-z0-9]*[_-]+)*"
             r"(?:x-api-key|api[_ -]?(?:key|token)|account[_ -]?key|"
-            r"access[_ -]?token|refresh[_ -]?token|auth[_ -]?token|session[_ -]?token|"
+            r"access[_ -]?token|refresh[_ -]?token|auth[_ -]?token|auth|session[_ -]?token|"
             r"client[_ -]?secret|secret[_ -]?access[_ -]?key|secret[_ -]?key|password|passwd|"
             r"cookie|credentials?|private[_ -]?key|sas[_ -]?token|signature))\b"
             r"\\?[\"']?\s*[:=]\s*|"
@@ -216,7 +216,7 @@ PATTERNS = (
         re.compile(
             r"(?:(?<![A-Za-z0-9_])\\?[\"']?(?:[A-Za-z][A-Za-z0-9]*[_-]+)*"
             r"(?:x-api-key|api[_ -]?(?:key|token)|account[_ -]?key|"
-            r"access[_ -]?token|refresh[_ -]?token|auth[_ -]?token|client[_ -]?secret|"
+            r"access[_ -]?token|refresh[_ -]?token|auth[_ -]?token|auth|client[_ -]?secret|"
             r"access[_ -]?key(?:[_ -]?id)?|"
             r"secret(?:[_ -]?(?:access[_ -]?)?key)?|"
             r"password|passwd|cookie|credentials?|private[_ -]?key|sas[_ -]?token|signature)\b"

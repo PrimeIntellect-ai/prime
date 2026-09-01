@@ -102,6 +102,8 @@ def test_preflight_catches_assignments_flags_urls_webhooks_and_private_keys():
     "assignment",
     [
         "password=abcdefgh1234",
+        "auth=abcdefgh1234",
+        "AUTH=abcdefgh1234",
         "TOKEN=abcdefgh1234",
         "SECRET_KEY=abcdefgh1234",
         "secret_key=abcdefgh1234",

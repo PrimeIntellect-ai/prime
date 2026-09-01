@@ -5,7 +5,7 @@ import typer
 
 from prime_cli.core import Config
 
-from ..utils import PlainTyper, get_console
+from ..utils import PlainTyper, get_console, require_persistent_context
 
 app = PlainTyper(help="Log out of Prime Intellect", no_args_is_help=False)
 console = get_console()
@@ -53,6 +53,7 @@ def logout(
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ) -> None:
     """Clear the stored API key, team selection, and user id."""
+    require_persistent_context()
     config = Config()
 
     raw = config.config

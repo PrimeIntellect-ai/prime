@@ -10,7 +10,7 @@ from rich.text import Text
 from prime_cli.core import Config
 
 from ..client import APIClient, APIError
-from ..utils import PlainTyper, get_console
+from ..utils import PlainTyper, get_console, require_persistent_context
 from .teams import fetch_teams
 
 app = PlainTyper(help="Configure the CLI", no_args_is_help=True)
@@ -124,6 +124,8 @@ def set_api_key(
     ),
 ) -> None:
     """Set your API key (prompts securely if not provided)"""
+    require_persistent_context()
+
     if api_key is None:
         # Interactive mode with secure prompt
         api_key = typer.prompt(
@@ -169,6 +171,7 @@ def set_team_id(
     ),
 ) -> None:
     """Set your team ID."""
+    require_persistent_context()
     config = Config()
 
     # Validate team ID format
@@ -207,6 +210,7 @@ def set_team_id(
 @app.command()
 def remove_team_id() -> None:
     """Remove team ID to use personal account"""
+    require_persistent_context()
     config = Config()
     config.set_team(None)
     console.print("[green]Team ID removed. Using personal account.[/green]")
@@ -220,6 +224,8 @@ def set_base_url(
     ),
 ) -> None:
     """Set the API base URL (prompts if not provided)"""
+    require_persistent_context()
+
     if not url:
         config = Config()
         url = typer.prompt(
@@ -243,6 +249,8 @@ def set_frontend_url(
     ),
 ) -> None:
     """Set the frontend URL (prompts if not provided)"""
+    require_persistent_context()
+
     if not url:
         config = Config()
         url = typer.prompt(
@@ -266,6 +274,8 @@ def set_inference_url(
     ),
 ) -> None:
     """Set the inference URL (prompts if not provided)"""
+    require_persistent_context()
+
     if not url:
         config = Config()
         url = typer.prompt(
@@ -292,6 +302,8 @@ def set_traces_url(
     ),
 ) -> None:
     """Set the Prime Traces service URL (prompts if not provided)"""
+    require_persistent_context()
+
     if url is None:
         config = Config()
         url = typer.prompt(
@@ -319,6 +331,7 @@ def _set_environment(
     env: str,
 ) -> None:
     """Set URLs for a specific environment"""
+    require_persistent_context()
     config = Config()
 
     # Try to load the environment (handles both built-in and custom)
@@ -342,6 +355,7 @@ def _save_environment(
     name: str,
 ) -> None:
     """Save current configuration as a named environment (including API key)"""
+    require_persistent_context()
     try:
         config = Config()
         config.save_environment(name)
@@ -373,6 +387,7 @@ def _delete_environment(
     name: str,
 ) -> None:
     """Delete a named saved environment."""
+    require_persistent_context()
     try:
         config = Config()
         config.delete_environment(name)
@@ -390,6 +405,7 @@ def set_share_resources_with_team(
     ),
 ) -> None:
     """Set whether to automatically share new resources with all team members"""
+    require_persistent_context()
     value = enabled.lower()
     if value not in ("true", "false"):
         console.print("[red]Error: Value must be 'true' or 'false'[/red]")
@@ -408,6 +424,7 @@ def set_ssh_key_path(
     ),
 ) -> None:
     """Set the SSH private key path"""
+    require_persistent_context()
     config = Config()
     config.set_ssh_key_path(path)
     console.print("[green]SSH key path configured successfully![/green]")
@@ -418,6 +435,7 @@ def reset(
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ) -> None:
     """Reset configuration to defaults"""
+    require_persistent_context()
     if yes or typer.confirm("Are you sure you want to reset all settings?"):
         config = Config()
         config.set_api_key("")

@@ -30,7 +30,7 @@ class Config:
     DEFAULT_INFERENCE_URL: str = "https://api.pinference.ai/api/v1"
     DEFAULT_SSH_KEY_PATH: str = str(Path.home() / ".ssh" / "id_rsa")
 
-    def __init__(self) -> None:
+    def __init__(self, use_context: bool = True) -> None:
         self.config_dir = Path.home() / ".prime"
         self.config_file = self.config_dir / "config.json"
         self.environments_dir = self.config_dir / "environments"
@@ -38,9 +38,15 @@ class Config:
         self._load_config()
 
         # Check for PRIME_CONTEXT env var to temporarily override config
-        context = os.getenv("PRIME_CONTEXT")
+        context = os.getenv("PRIME_CONTEXT") if use_context else None
         if context:
             self.load_environment(context, persist=False)
+
+    @property
+    def context_override(self) -> str | None:
+        """Return the temporary context selected for this invocation, if any."""
+        context = os.getenv("PRIME_CONTEXT")
+        return context if context else None
 
     @staticmethod
     def _strip_api_v1(url: str) -> str:
@@ -224,8 +230,7 @@ class Config:
             )
 
         update_root = (
-            not context_override
-            or root_environment.casefold() == selected_environment.casefold()
+            not context_override or root_environment.casefold() == selected_environment.casefold()
         )
 
         if update_root:
@@ -385,6 +390,15 @@ class Config:
                     env_config = json.loads(env_file.read_text())
                 except json.JSONDecodeError as e:
                     raise ValueError(f"Invalid JSON in environment file {sanitized_name}.json: {e}")
+                except (OSError, UnicodeDecodeError) as e:
+                    raise ValueError(
+                        f"Cannot read environment file {sanitized_name}.json: {e}"
+                    ) from e
+
+                if not isinstance(env_config, dict):
+                    raise ValueError(
+                        f"Invalid environment file {sanitized_name}.json: expected a JSON object"
+                    )
 
                 if persist:
                     if "api_key" in env_config:

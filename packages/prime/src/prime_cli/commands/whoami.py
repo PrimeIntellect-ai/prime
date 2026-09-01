@@ -31,7 +31,7 @@ def whoami() -> None:
 
         # Update config
         config = Config()
-        if user_id:
+        if user_id and config.context_override is None:
             config.set_user_id(user_id)
             config.update_current_environment_file()
 

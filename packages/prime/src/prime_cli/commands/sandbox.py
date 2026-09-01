@@ -55,8 +55,6 @@ app = PlainTyper(help="Manage sandboxes", no_args_is_help=True)
 console = get_console()
 
 
-config = Config()
-
 LIST_SANDBOXES_JSON_HELP = json_output_help(
     ".sandboxes[] = {id, name, image, status, resources, labels[], created_at, "
     "timeout_minutes, expires_at?}",
@@ -1027,6 +1025,7 @@ def delete(
             raise typer.Exit(1)
 
         if all or labels:
+            config = Config()
             team_id = config.team_id
 
             if target_user_id and not only_mine:

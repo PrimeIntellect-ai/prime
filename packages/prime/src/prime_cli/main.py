@@ -106,17 +106,36 @@ def callback(
     if context:
         import os
 
-        config = Config()
-        # Check if the context exists
-        if context.lower() != "production" and context not in config.list_environments():
+        # Ignore any inherited PRIME_CONTEXT while validating the explicit
+        # selector, then fully load it before any command can construct a
+        # client. A filename alone is not proof that a context is usable.
+        config = Config(use_context=False)
+        try:
+            context_loaded = config.load_environment(context, persist=False)
+        except (ValueError, TypeError, AttributeError) as e:
+            typer.echo(f"Error: Failed to load context '{context}': {e}", err=True)
+            raise typer.Exit(1)
+
+        if not context_loaded:
             typer.echo(f"Error: Unknown context '{context}'", err=True)
             typer.echo("Available contexts:", err=True)
             for env_name in config.list_environments():
                 typer.echo(f"  - {env_name}", err=True)
             raise typer.Exit(1)
 
-        # Set environment variable so Config instances in subcommands pick it up
+        # Set the environment variable so Config instances in subcommands and
+        # SDK packages pick it up. Restore it when Click closes the context so
+        # embedded/CliRunner invocations in the same process do not leak state.
+        previous_context = os.environ.get("PRIME_CONTEXT")
         os.environ["PRIME_CONTEXT"] = context
+
+        def restore_context() -> None:
+            if previous_context is None:
+                os.environ.pop("PRIME_CONTEXT", None)
+            else:
+                os.environ["PRIME_CONTEXT"] = previous_context
+
+        ctx.call_on_close(restore_context)
 
     # Check for updates (only when a subcommand is being executed)
     if ctx.invoked_subcommand is not None:

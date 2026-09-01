@@ -10,7 +10,7 @@ from rich.table import Table
 from rich.text import Text
 
 from prime_cli.api.availability import AvailabilityClient
-from prime_cli.core import APIClient, APIError, Config
+from prime_cli.core import APIClient, APIError
 from prime_cli.helper.short_id import generate_short_id_disk
 
 from ..api.disks import Disk, DisksClient
@@ -30,7 +30,6 @@ from ..utils.display import DISK_STATUS_COLORS
 
 app = PlainTyper(help="Manage storage", no_args_is_help=True)
 console = get_console()
-config = Config()
 
 LIST_DISKS_JSON_HELP = json_output_help(
     ".disks[] = {id, name, size, status, provider, location, created_at, price_hr}",

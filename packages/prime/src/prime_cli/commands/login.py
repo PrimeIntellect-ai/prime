@@ -13,7 +13,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from prime_cli.core import Config
 
 from ..client import APIClient, APIError
-from ..utils import PlainTyper, get_console
+from ..utils import PlainTyper, get_console, require_persistent_context
 from .teams import fetch_teams
 
 app = PlainTyper(help="Login to Prime Intellect")
@@ -127,6 +127,7 @@ def login(
     headless: bool = typer.Option(False, "--headless", help="Don't attempt to open browser"),
 ) -> None:
     """Login to Prime Intellect"""
+    require_persistent_context()
     config = Config()
     settings = config.view()
 

@@ -51,7 +51,16 @@ from .images_update_helpers import format_image_coordinate
 app = PlainTyper(help="Manage Docker images in Prime Intellect registry", no_args_is_help=True)
 console = get_console()
 
-config = Config()
+
+class _ConfigProxy:
+    """Resolve configuration lazily after the root callback selects a context."""
+
+    @property
+    def team_id(self) -> Optional[str]:
+        return Config().team_id
+
+
+config = _ConfigProxy()
 
 
 LIST_IMAGES_JSON_HELP = json_output_help(
@@ -1054,8 +1063,9 @@ def _update_source_for_parsed_reference(
 
 def _current_scope_owner() -> Any:
     """Owner object for the configured personal/team context."""
-    if config.team_id:
-        return TeamImageOwner(team_id=config.team_id)
+    team_id = config.team_id
+    if team_id:
+        return TeamImageOwner(team_id=team_id)
     return PersonalImageOwner()
 
 

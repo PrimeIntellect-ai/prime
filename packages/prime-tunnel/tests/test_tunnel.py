@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -80,6 +81,62 @@ def test_config_api_key_from_env(monkeypatch):
     monkeypatch.setenv("PRIME_API_KEY", "test-key-123")
     config = Config()
     assert config.api_key == "test-key-123"
+
+
+def test_config_loads_temporary_context(monkeypatch, tmp_path):
+    config_dir = tmp_path / ".prime"
+    environments_dir = config_dir / "environments"
+    environments_dir.mkdir(parents=True)
+    (config_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "api_key": "production-key",
+                "base_url": "https://api.production.example",
+                "team_id": "production-team",
+                "user_id": "production-user",
+            }
+        )
+    )
+    (environments_dir / "dev.json").write_text(
+        json.dumps(
+            {
+                "api_key": "dev-key",
+                "base_url": "https://api.dev.example/api/v1",
+                "team_id": "dev-team",
+                "user_id": "dev-user",
+            }
+        )
+    )
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PRIME_CONTEXT", "dev")
+
+    config = Config()
+
+    assert config.api_key == "dev-key"
+    assert config.base_url == "https://api.dev.example"
+    assert config.team_id == "dev-team"
+    assert config.user_id == "dev-user"
+
+
+@pytest.mark.parametrize("content", ["{", "[]", '"not-an-object"'])
+def test_config_rejects_broken_temporary_context(monkeypatch, tmp_path, content):
+    config_dir = tmp_path / ".prime"
+    environments_dir = config_dir / "environments"
+    environments_dir.mkdir(parents=True)
+    (config_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "api_key": "production-key",
+                "base_url": "https://api.production.example",
+            }
+        )
+    )
+    (environments_dir / "dev.json").write_text(content)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PRIME_CONTEXT", "dev")
+
+    with pytest.raises(ValueError, match="context|JSON object"):
+        Config()
 
 
 def test_config_bin_dir():

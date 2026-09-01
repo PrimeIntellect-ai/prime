@@ -1046,6 +1046,71 @@ def test_sync_completed_output_is_deduplicated_and_cached() -> None:
     assert calls == [job.stdout_log_file, job.stderr_log_file]
 
 
+def test_sync_queue_wakeup_rechecks_inflight_before_inserting() -> None:
+    client = SandboxClient(
+        APIClient(api_key="test-key"),
+        background_job_output_concurrency=1,
+        background_job_output_queue_size=1,
+    )
+    active_job = _job("sandbox-a", "00000001")
+    filler_job = _job("sandbox-b", "00000002")
+    target_job = _job("sandbox-c", "00000003")
+    active_started = threading.Event()
+    filler_started = threading.Event()
+    release_active = threading.Event()
+    release_filler = threading.Event()
+    calls: list[str] = []
+
+    def read_file(
+        _sandbox_id: str,
+        path: str,
+        timeout: Optional[int] = None,
+        offset: Optional[int] = None,
+        length: Optional[int] = None,
+    ) -> ReadFileResponse:
+        calls.append(path)
+        if path == active_job.stdout_log_file:
+            active_started.set()
+            assert release_active.wait(timeout=2)
+        elif path == filler_job.stdout_log_file:
+            filler_started.set()
+            assert release_filler.wait(timeout=2)
+        return ReadFileResponse(content=path, size=len(path), truncated=False)
+
+    cast(Any, client).read_file = read_file
+    coordinator = cast(Any, client)._background_job_output_coordinator
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        active = executor.submit(coordinator.get, active_job, 0, None)
+        assert active_started.wait(timeout=2)
+        filler = executor.submit(coordinator.get, filler_job, 0, None)
+        while coordinator._pending_count != 1:
+            time.sleep(0.001)
+        first_target = executor.submit(coordinator.get, target_job, 0, None)
+        second_target = executor.submit(coordinator.get, target_job, 0, None)
+
+        release_active.set()
+        assert filler_started.wait(timeout=2)
+        target_key = (target_job.sandbox_id, target_job.job_id, 45.0)
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            target_operation = coordinator._inflight.get(target_key)
+            if target_operation is not None and target_operation.waiters == 2:
+                break
+            time.sleep(0.001)
+        else:
+            target_operation = None
+
+        release_filler.set()
+        assert active.result(timeout=2).completed
+        assert filler.result(timeout=2).completed
+        assert first_target.result(timeout=2).completed
+        assert second_target.result(timeout=2).completed
+
+    assert target_operation is not None
+    assert calls.count(target_job.stdout_log_file) == 1
+    assert calls.count(target_job.stderr_log_file) == 1
+
+
 def test_sync_bulk_output_hydration_uses_configured_global_limit() -> None:
     client = SandboxClient(
         APIClient(api_key="test-key"),
@@ -1222,6 +1287,65 @@ async def test_async_sole_output_waiter_cancels_and_joins_fetch() -> None:
 
 
 @pytest.mark.asyncio
+async def test_async_cancelled_fetch_does_not_poison_replacement_waiters() -> None:
+    client = AsyncSandboxClient(api_key="test-key")
+    await client.client.aclose()
+    cast(Any, client).client = _AsyncBackgroundJobPlatformClient()
+    job = _job("sandbox-a", "deadbeef")
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    replacement_started = asyncio.Event()
+    release_replacement = asyncio.Event()
+    calls = 0
+
+    async def read_file(
+        _sandbox_id: str,
+        path: str,
+        timeout: Optional[int] = None,
+        offset: Optional[int] = None,
+        length: Optional[int] = None,
+    ) -> ReadFileResponse:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cleanup_started.set()
+                await release_cleanup.wait()
+        elif calls == 2:
+            replacement_started.set()
+            await release_replacement.wait()
+        return ReadFileResponse(content=path, size=len(path), truncated=False)
+
+    cast(Any, client).read_file = read_file
+    coordinator = cast(Any, client)._background_job_output_coordinator
+    cancelled = asyncio.create_task(coordinator.get(job, 0, None))
+    while calls == 0:
+        await asyncio.sleep(0)
+    cancelled.cancel()
+    await cleanup_started.wait()
+
+    replacement = asyncio.create_task(coordinator.get(job, 0, None))
+    await asyncio.wait_for(replacement_started.wait(), timeout=0.5)
+    release_cleanup.set()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled
+
+    joined = asyncio.create_task(coordinator.get(job, 0, None))
+    key = (job.sandbox_id, job.job_id, 45.0)
+    while coordinator._inflight[key].waiters != 2:
+        await asyncio.sleep(0)
+    release_replacement.set()
+    first_status, second_status = await asyncio.gather(replacement, joined)
+
+    assert first_status.stdout == job.stdout_log_file
+    assert second_status.stderr == job.stderr_log_file
+    assert calls == 3
+    await client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_async_shared_output_survives_one_waiter_cancellation() -> None:
     client = AsyncSandboxClient(api_key="test-key")
     await client.client.aclose()
@@ -1361,6 +1485,71 @@ async def test_async_output_queue_schedules_sandboxes_round_robin() -> None:
         b1.stdout_log_file,
         a3.stdout_log_file,
     ]
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_async_queue_wakeup_rechecks_inflight_before_inserting() -> None:
+    client = AsyncSandboxClient(
+        api_key="test-key",
+        background_job_output_concurrency=1,
+        background_job_output_queue_size=1,
+    )
+    await client.client.aclose()
+    cast(Any, client).client = _AsyncBackgroundJobPlatformClient()
+    active_job = _job("sandbox-a", "00000001")
+    filler_job = _job("sandbox-b", "00000002")
+    target_job = _job("sandbox-c", "00000003")
+    active_started = asyncio.Event()
+    filler_started = asyncio.Event()
+    release_active = asyncio.Event()
+    release_filler = asyncio.Event()
+    calls: list[str] = []
+
+    async def read_file(
+        _sandbox_id: str,
+        path: str,
+        timeout: Optional[int] = None,
+        offset: Optional[int] = None,
+        length: Optional[int] = None,
+    ) -> ReadFileResponse:
+        calls.append(path)
+        if path == active_job.stdout_log_file:
+            active_started.set()
+            await release_active.wait()
+        elif path == filler_job.stdout_log_file:
+            filler_started.set()
+            await release_filler.wait()
+        return ReadFileResponse(content=path, size=len(path), truncated=False)
+
+    cast(Any, client).read_file = read_file
+    coordinator = cast(Any, client)._background_job_output_coordinator
+    active = asyncio.create_task(coordinator.get(active_job, 0, None))
+    await active_started.wait()
+    filler = asyncio.create_task(coordinator.get(filler_job, 0, None))
+    while coordinator._pending_count != 1:
+        await asyncio.sleep(0)
+    first_target = asyncio.create_task(coordinator.get(target_job, 0, None))
+    second_target = asyncio.create_task(coordinator.get(target_job, 0, None))
+
+    release_active.set()
+    await filler_started.wait()
+    target_key = (target_job.sandbox_id, target_job.job_id, 45.0)
+
+    async def wait_for_shared_target() -> None:
+        while True:
+            target_operation = coordinator._inflight.get(target_key)
+            if target_operation is not None and target_operation.waiters == 2:
+                return
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait_for_shared_target(), timeout=0.5)
+    release_filler.set()
+    statuses = await asyncio.gather(active, filler, first_target, second_target)
+
+    assert all(status.completed for status in statuses)
+    assert calls.count(target_job.stdout_log_file) == 1
+    assert calls.count(target_job.stderr_log_file) == 1
     await client.aclose()
 
 

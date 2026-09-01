@@ -987,7 +987,8 @@ class _SyncBackgroundJobOutputCoordinator:
                 operation.result = result
                 operation.error = error
                 operation.done = True
-                self._inflight.pop(operation.key, None)
+                if self._inflight.get(operation.key) is operation:
+                    self._inflight.pop(operation.key)
                 self._active_count -= 1
                 self._promote_locked()
             operation.lease.release()
@@ -1038,20 +1039,41 @@ class _SyncBackgroundJobOutputCoordinator:
                             )
                             return _output_unavailable_status(job, exit_code, message)
                         self._condition.wait(timeout=remaining)
-                    try:
-                        lease = self._leases.acquire(job.sandbox_id)
-                    except APIError as exc:
-                        return _output_unavailable_status(
-                            job, exit_code, _format_exception_diagnostic(exc)
-                        )
-                    operation = _SyncOutputOperation(key, job, exit_code, deadline, lease)
-                    self._inflight[key] = operation
-                    queue = self._pending.setdefault(job.sandbox_id, deque())
-                    if not queue:
-                        self._round_robin.append(job.sandbox_id)
-                    queue.append(operation)
-                    self._pending_count += 1
-                    self._promote_locked()
+                        cached = self._cached_status(job, exit_code)
+                        if cached is not None:
+                            return cached
+                        operation = self._inflight.get(key)
+                        if operation is not None:
+                            break
+                    if operation is not None:
+                        operation.waiters += 1
+                        operation.deadline = max(operation.deadline, deadline)
+                    else:
+                        # Condition waits invalidate all prior observations.
+                        # Recheck immediately before insertion even when the
+                        # wakeup also made queue capacity available.
+                        cached = self._cached_status(job, exit_code)
+                        if cached is not None:
+                            return cached
+                        operation = self._inflight.get(key)
+                        if operation is not None:
+                            operation.waiters += 1
+                            operation.deadline = max(operation.deadline, deadline)
+                        else:
+                            try:
+                                lease = self._leases.acquire(job.sandbox_id)
+                            except APIError as exc:
+                                return _output_unavailable_status(
+                                    job, exit_code, _format_exception_diagnostic(exc)
+                                )
+                            operation = _SyncOutputOperation(key, job, exit_code, deadline, lease)
+                            self._inflight[key] = operation
+                            queue = self._pending.setdefault(job.sandbox_id, deque())
+                            if not queue:
+                                self._round_robin.append(job.sandbox_id)
+                            queue.append(operation)
+                            self._pending_count += 1
+                            self._promote_locked()
 
                 while not operation.done:
                     if operation.active and not operation.runner_claimed:
@@ -1261,7 +1283,8 @@ class _AsyncBackgroundJobOutputCoordinator:
             async with self._condition:
                 operation.result = result
                 operation.error = error
-                self._inflight.pop(operation.key, None)
+                if self._inflight.get(operation.key) is operation:
+                    self._inflight.pop(operation.key)
                 operation.done.set()
                 operation.lease.release()
                 self._condition.notify_all()
@@ -1280,9 +1303,15 @@ class _AsyncBackgroundJobOutputCoordinator:
                 release = operation.lease
                 self._condition.notify_all()
             elif operation.fetch_task is not None:
+                # Retire this operation before cancelling it. New callers must
+                # start or join replacement work, never attach to a fetch that
+                # has already lost its final waiter.
+                if self._inflight.get(operation.key) is operation:
+                    self._inflight.pop(operation.key)
                 if not operation.fetch_task.done():
                     operation.fetch_task.cancel()
                 wait_for_completion = True
+                self._condition.notify_all()
         if release is not None:
             release.release()
         if wait_for_completion:
@@ -1339,21 +1368,44 @@ class _AsyncBackgroundJobOutputCoordinator:
                         return _output_unavailable_status(job, exit_code, message)
                     if self._closed:
                         raise _BatcherClosedError("Background job output coordinator is closed")
-                try:
-                    lease = self._leases.acquire(job.sandbox_id)
-                except APIError as exc:
-                    return _output_unavailable_status(
-                        job, exit_code, _format_exception_diagnostic(exc)
-                    )
-                operation = _AsyncOutputOperation(key, job, exit_code, deadline, lease, timeout)
-                self._inflight[key] = operation
-                queue = self._pending.setdefault(job.sandbox_id, deque())
-                if not queue:
-                    self._round_robin.append(job.sandbox_id)
-                queue.append(operation)
-                self._pending_count += 1
-                self._ensure_workers_locked()
-                self._condition.notify_all()
+                    cached = self._cached_status(job, exit_code)
+                    if cached is not None:
+                        return cached
+                    operation = self._inflight.get(key)
+                    if operation is not None:
+                        break
+                if operation is not None:
+                    operation.waiters += 1
+                    operation.deadline = max(operation.deadline, deadline)
+                else:
+                    # Condition waits invalidate all prior observations.
+                    # Recheck immediately before insertion even when the
+                    # wakeup also made queue capacity available.
+                    cached = self._cached_status(job, exit_code)
+                    if cached is not None:
+                        return cached
+                    operation = self._inflight.get(key)
+                    if operation is not None:
+                        operation.waiters += 1
+                        operation.deadline = max(operation.deadline, deadline)
+                    else:
+                        try:
+                            lease = self._leases.acquire(job.sandbox_id)
+                        except APIError as exc:
+                            return _output_unavailable_status(
+                                job, exit_code, _format_exception_diagnostic(exc)
+                            )
+                        operation = _AsyncOutputOperation(
+                            key, job, exit_code, deadline, lease, timeout
+                        )
+                        self._inflight[key] = operation
+                        queue = self._pending.setdefault(job.sandbox_id, deque())
+                        if not queue:
+                            self._round_robin.append(job.sandbox_id)
+                        queue.append(operation)
+                        self._pending_count += 1
+                        self._ensure_workers_locked()
+                        self._condition.notify_all()
 
         try:
             remaining = max(0.0, deadline - loop.time())

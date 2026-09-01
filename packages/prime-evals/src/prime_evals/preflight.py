@@ -421,7 +421,7 @@ class SecretDiscovery:
                     child,
                     schema_secret,
                     not extension
-                    and normalized not in SCHEMA_VALUES
+                    and (definitions or normalized not in SCHEMA_VALUES)
                     and (
                         object_schema
                         or normalized in SCHEMA_CONTAINERS
@@ -699,7 +699,7 @@ class CredentialReducer:
                     child_secret,
                     is_sensitive(str(key)) if definition_schema else schema_secret,
                     not extension
-                    and normalized not in SCHEMA_VALUES
+                    and (definitions or normalized not in SCHEMA_VALUES)
                     and (
                         definition_schema
                         or object_schema

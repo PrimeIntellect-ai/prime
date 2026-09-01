@@ -498,6 +498,20 @@ def test_preflight_scans_schema_example_values_as_data():
     )
 
 
+@pytest.mark.parametrize("name", ["value", "values", "default", "example"])
+def test_preflight_preserves_value_named_property_schemas(name):
+    schema = {
+        "schema": {
+            "type": "object",
+            "properties": {
+                name: {"properties": {"token": {"type": "string", "description": "review token"}}}
+            },
+        }
+    }
+
+    assert prepare_upload(schema).data == schema
+
+
 def test_preflight_preserves_openapi_auth_endpoint_descriptors():
     document = {
         "openapi": "3.1.0",

@@ -143,9 +143,9 @@ def upload_traces(
             except UploadScanError as e:
                 error_console.print(f"[red]Preflight failed:[/red] {escape(str(e))}")
                 raise typer.Exit(1)
-            if prepared.report:
+            if prepared.report.has_findings:
                 error_console.print(
-                    f"[yellow]Preflight redacted {prepared.report}; "
+                    f"[yellow]Preflight redacted {prepared.report.description}; "
                     "the source file was not changed[/yellow]"
                 )
             client = _traces_client()

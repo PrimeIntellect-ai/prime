@@ -198,9 +198,9 @@ def push_eval_results_to_hub(
     eval_metadata = prepared.data["metadata"]
     metrics = prepared.data["metrics"]
     converted_results = prepared.data["results"]
-    if prepared.report:
+    if prepared.report.has_findings:
         console.print(
-            f"[yellow]Upload preflight redacted {prepared.report}. "
+            f"[yellow]Upload preflight redacted {prepared.report.description}. "
             "Local files were not changed.[/yellow]"
         )
 

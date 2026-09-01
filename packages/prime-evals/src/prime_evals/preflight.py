@@ -8,26 +8,27 @@ import re
 from collections import Counter
 from collections.abc import Iterable, Mapping
 from contextlib import ExitStack
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from pydantic import BaseModel, ConfigDict
+
 REDACTED = "[REDACTED]"
 
-_PLACEHOLDER = re.compile(
+PLACEHOLDER = re.compile(
     r"^(?:\[?redacted(?:[_ -]?\d+)?\]?|masked|dummy|example|test|none|null|empty|changeme|"
     r"replace[_ -]?me|x{4,}|\*{4,}|<[^>]+>|\$\{?[A-Z][A-Z0-9_]*\}?)$",
     re.IGNORECASE,
 )
-_SECRET_ENV = re.compile(
+SECRET_ENV = re.compile(
     r"(?:^|_)AUTH(?:$|_)|API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|"
     r"AUTHORIZATION|COOKIE|"
     r"PRIVATE_?KEY|CONNECTION_STRING|DATABASE_URL|REDIS_URL",
     re.IGNORECASE,
 )
-_REFERENCE_SUFFIXES = ("_env", "_env_var", "_file", "_name", "_path", "_var", "_variable")
-_SENSITIVE_FIELDS = {
+REFERENCE_SUFFIXES = ("_env", "_env_var", "_file", "_name", "_path", "_var", "_variable")
+SENSITIVE_FIELDS = {
     "access_key",
     "access_key_id",
     "account_key",
@@ -57,8 +58,8 @@ _SENSITIVE_FIELDS = {
     "signature",
     "token",
 }
-_SCHEMA_VALUES = {"const", "default", "enum", "example", "examples"}
-_SCHEMA_MARKERS = {
+SCHEMA_VALUES = {"const", "default", "enum", "example", "examples"}
+SCHEMA_MARKERS = {
     "$defs",
     "$ref",
     "$schema",
@@ -66,11 +67,11 @@ _SCHEMA_MARKERS = {
     "anyOf",
     "oneOf",
 }
-_SAFE_PATH_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_-]{0,63}")
-_AUTH_VALUE = re.compile(r"^(?:bearer|basic|token)\s+(.+)$", re.IGNORECASE)
+SAFE_PATH_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_-]{0,63}")
+AUTH_VALUE = re.compile(r"^(?:bearer|basic|token)\s+(.+)$", re.IGNORECASE)
 
 # Every shape names only the credential. The same match drives reporting and redaction.
-_PATTERNS = (
+PATTERNS = (
     (
         "private_key",
         re.compile(
@@ -173,34 +174,39 @@ _PATTERNS = (
 Finding = tuple[str, str]
 
 
-@dataclass(frozen=True)
-class ScanReport:
+class ScanReport(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     findings: tuple[Finding, ...]
 
-    def __bool__(self) -> bool:
+    @property
+    def has_findings(self) -> bool:
         return bool(self.findings)
 
     @property
     def locations(self) -> int:
-        return len({path for path, _ in self.findings})
+        return len({finding[0] for finding in self.findings})
 
     @property
     def categories(self) -> dict[str, int]:
-        return dict(sorted(Counter(category for _, category in self.findings).items()))
+        return dict(sorted(Counter(finding[1] for finding in self.findings).items()))
 
-    def __str__(self) -> str:
+    @property
+    def description(self) -> str:
         categories = ", ".join(f"{name}: {count}" for name, count in self.categories.items())
         return f"{self.locations} credential-bearing location(s) ({categories})"
 
 
-@dataclass(frozen=True)
-class PreparedUpload:
+class PreparedUpload(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     data: Any
     report: ScanReport
 
 
-@dataclass(frozen=True)
-class PreparedJSONLUpload:
+class PreparedJSONLUpload(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     path: Path
     context: dict[str, str] | None
     report: ScanReport
@@ -210,7 +216,7 @@ class UploadScanError(ValueError):
     """The upload could not be safely reduced before network access."""
 
 
-def _normalize(name: str) -> str:
+def normalize(name: str) -> str:
     return (
         re.sub(
             r"[^A-Za-z0-9]+",
@@ -226,33 +232,31 @@ def _normalize(name: str) -> str:
     )
 
 
-def _sensitive(name: str) -> bool:
-    name = _normalize(name)
+def is_sensitive(name: str) -> bool:
+    name = normalize(name)
     singular = name.removesuffix("s")
     plural_secret = singular != name and any(
         singular == field or singular.endswith(f"_{field}")
-        for field in _SENSITIVE_FIELDS - {"token"}
+        for field in SENSITIVE_FIELDS - {"token"}
     )
     names = (name, singular) if plural_secret else (name,)
-    return not any(candidate.endswith(_REFERENCE_SUFFIXES) for candidate in names) and any(
+    return not any(candidate.endswith(REFERENCE_SUFFIXES) for candidate in names) and any(
         candidate == field
         or candidate.endswith(f"_{field}")
         or candidate.replace("_", "").endswith(field.replace("_", ""))
         for candidate in names
-        for field in _SENSITIVE_FIELDS
+        for field in SENSITIVE_FIELDS
     )
 
 
-def _is_secret(value: Any) -> bool:
-    return isinstance(value, str) and len(value) >= 8 and not _PLACEHOLDER.fullmatch(value.strip())
+def is_secret(value: Any) -> bool:
+    return isinstance(value, str) and len(value) >= 8 and not PLACEHOLDER.fullmatch(value.strip())
 
 
 def secret_values(*values: str | None, secrets_file: str | Path | None = None) -> tuple[str, ...]:
     """Combine environment, configured, and optional file secrets."""
     candidates = [
-        value
-        for name, value in os.environ.items()
-        if _SECRET_ENV.search(name) and _is_secret(value)
+        value for name, value in os.environ.items() if SECRET_ENV.search(name) and is_secret(value)
     ]
     candidates.extend(values)
     if secrets_file:
@@ -260,301 +264,295 @@ def secret_values(*values: str | None, secrets_file: str | Path | None = None) -
             value = line.strip()
             if not value or value.startswith("#"):
                 continue
-            if not _is_secret(value):
+            if not is_secret(value):
                 raise ValueError(
                     f"secret file line {line_number} must contain at least 8 "
                     "non-placeholder characters"
                 )
             candidates.append(value)
-    return tuple(dict.fromkeys(value for value in candidates if _is_secret(value)))
+    return tuple(dict.fromkeys(value for value in candidates if is_secret(value)))
 
 
-def _remember(value: Any, secrets: dict[str, str], category: str) -> None:
-    if _is_secret(value):
-        secrets.setdefault(value, category)
-        if (match := _AUTH_VALUE.fullmatch(value.strip())) and _is_secret(token := match.group(1)):
-            secrets.setdefault(token, category)
-    elif isinstance(value, Mapping):
-        for child in value.values():
-            _remember(child, secrets, category)
-    elif isinstance(value, (list, tuple)):
-        for child in value:
-            _remember(child, secrets, category)
+class SecretDiscovery:
+    def __init__(self, known_secrets: Iterable[str] = ()) -> None:
+        self.secrets: dict[str, str] = {}
+        for secret in known_secrets:
+            self.remember(secret, "known_secret")
 
+    def remember(self, value: Any, category: str) -> None:
+        if is_secret(value):
+            self.secrets.setdefault(value, category)
+            match = AUTH_VALUE.fullmatch(value.strip())
+            if match and is_secret(token := match.group(1)):
+                self.secrets.setdefault(token, category)
+        elif isinstance(value, Mapping):
+            for child in value.values():
+                self.remember(child, category)
+        elif isinstance(value, (list, tuple)):
+            for child in value:
+                self.remember(child, category)
 
-def _discover(value: Any, secrets: dict[str, str]) -> None:
-    def visit(
-        child: Any,
+    def discover(
+        self,
+        value: Any,
         schema_secret: bool = False,
         schema_context: bool = False,
         properties: bool = False,
     ) -> None:
-        if isinstance(child, Mapping):
-            schema_type = child.get("type")
+        if isinstance(value, Mapping):
+            schema_type = value.get("type")
             object_schema = (
                 schema_context
-                or any(field in child for field in _SCHEMA_MARKERS)
-                or "properties" in child
+                or any(field in value for field in SCHEMA_MARKERS)
+                or "properties" in value
                 and (
                     schema_type == "object"
                     or isinstance(schema_type, (list, tuple))
                     and "object" in schema_type
                 )
                 or schema_type == "array"
-                and "items" in child
+                and "items" in value
             )
-            for key, nested in child.items():
+            for key, child in value.items():
                 name = str(key)
-                normalized = _normalize(name)
+                normalized = normalize(name)
                 if properties:
-                    if isinstance(nested, (Mapping, bool)):
-                        visit(nested, _sensitive(name), True)
+                    if isinstance(child, (Mapping, bool)):
+                        self.discover(child, is_sensitive(name), True)
                     else:
-                        if _sensitive(name):
-                            _remember(nested, secrets, "structured_secret")
-                        visit(nested)
+                        if is_sensitive(name):
+                            self.remember(child, "structured_secret")
+                        self.discover(child)
                     continue
-                if _sensitive(name):
-                    _remember(nested, secrets, "structured_secret")
-                if schema_secret and normalized in _SCHEMA_VALUES:
-                    _remember(nested, secrets, "structured_secret")
-                visit(
-                    nested,
+                if is_sensitive(name):
+                    self.remember(child, "structured_secret")
+                if schema_secret and normalized in SCHEMA_VALUES:
+                    self.remember(child, "structured_secret")
+                self.discover(
+                    child,
                     schema_secret,
                     object_schema or normalized in {"schema", "json_schema"},
                     object_schema and normalized == "properties",
                 )
-        elif isinstance(child, (list, tuple)):
-            for nested in child:
-                visit(nested, schema_secret, schema_context, properties)
-        elif isinstance(child, str):
-            for category, pattern in _PATTERNS:
+        elif isinstance(value, (list, tuple)):
+            for child in value:
+                self.discover(child, schema_secret, schema_context, properties)
+        elif isinstance(value, str):
+            for category, pattern in PATTERNS:
                 if category == "credential_url":
                     continue
-                for match in pattern.finditer(child):
+                for match in pattern.finditer(value):
                     secret = next(
-                        value
-                        for name, value in match.groupdict().items()
-                        if name.startswith("secret") and value is not None
+                        matched
+                        for name, matched in match.groupdict().items()
+                        if name.startswith("secret") and matched is not None
                     )
-                    if _is_secret(secret):
-                        secrets.setdefault(secret, category)
-
-    visit(value)
+                    if is_secret(secret):
+                        self.secrets.setdefault(secret, category)
 
 
-def _secrets(value: Any, known_secrets: Iterable[str]) -> dict[str, str]:
-    secrets: dict[str, str] = {}
-    for secret in known_secrets:
-        _remember(secret, secrets, "known_secret")
-    _discover(value, secrets)
-    return secrets
-
-
-def _exact_pattern(secrets: Mapping[str, str]) -> re.Pattern[str] | None:
+def exact_pattern(secrets: Mapping[str, str]) -> re.Pattern[str] | None:
     if not secrets:
         return None
     alternatives = "|".join(re.escape(secret) for secret in sorted(secrets, key=len, reverse=True))
     return re.compile(f"(?P<secret>{alternatives})")
 
 
-def _path(parts: tuple[str | int, ...]) -> str:
+def finding_path(parts: tuple[str | int, ...]) -> str:
     result = "$"
     for part in parts:
         if isinstance(part, int):
             result += f"[{part}]"
-        elif part == "[key]" or not _SAFE_PATH_KEY.fullmatch(part):
+        elif part == "[key]" or not SAFE_PATH_KEY.fullmatch(part):
             result += ".[key]"
         else:
             result += f".{part}"
     return result
 
 
-def _redact_text(
-    text: str,
-    secrets: Mapping[str, str],
-    exact: re.Pattern[str] | None,
-) -> tuple[str, set[str]]:
-    categories = set()
-    if exact:
+class CredentialReducer:
+    def __init__(
+        self,
+        secrets: Mapping[str, str],
+        exact: re.Pattern[str] | None = None,
+    ) -> None:
+        self.secrets = secrets
+        self.exact = exact or exact_pattern(secrets)
+        self.categories: set[str] = set()
+        self.pattern_category = ""
 
-        def replace_exact(match: re.Match[str]) -> str:
-            categories.add(secrets[match.group("secret")])
-            return REDACTED
-
-        text = exact.sub(replace_exact, text)
-    for category, pattern in _PATTERNS:
-
-        def replace_shape(match: re.Match[str], category: str = category) -> str:
-            group = next(
-                name
-                for name, value in match.groupdict().items()
-                if name.startswith("secret") and value is not None
-            )
-            secret = match.group(group)
-            if not _is_secret(secret):
-                return match.group(0)
-            categories.add(category)
-            start, end = match.span(group)
-            offset = match.start()
-            return f"{match.group(0)[: start - offset]}{REDACTED}{match.group(0)[end - offset :]}"
-
-        text = pattern.sub(replace_shape, text)
-    return text, categories
-
-
-def _reduce(
-    value: Any,
-    secrets: Mapping[str, str],
-    exact: re.Pattern[str] | None,
-    findings: set[Finding],
-    path: tuple[str | int, ...] = (),
-    structured_secret: bool = False,
-    schema_secret: bool = False,
-    schema_context: bool = False,
-    properties: bool = False,
-) -> Any:
-    if isinstance(value, Mapping):
-        reduced = {}
-        schema_type = value.get("type")
-        object_schema = (
-            schema_context
-            or any(field in value for field in _SCHEMA_MARKERS)
-            or "properties" in value
-            and (
-                schema_type == "object"
-                or isinstance(schema_type, (list, tuple))
-                and "object" in schema_type
-            )
-            or schema_type == "array"
-            and "items" in value
-        )
-        for key, child in value.items():
-            safe_key, categories = (
-                (REDACTED, {"structured_secret"})
-                if structured_secret and _is_secret(key)
-                else _redact_text(key, secrets, exact)
-                if isinstance(key, str)
-                else (key, set())
-            )
-            findings.update((_path((*path, "[key]")), category) for category in categories)
-            if structured_secret and safe_key == REDACTED:
-                suffix = 2
-                while safe_key in reduced:
-                    safe_key = f"[REDACTED {suffix}]"
-                    suffix += 1
-            if safe_key in reduced:
-                raise UploadScanError("credential reduction would create duplicate object keys")
-            normalized = _normalize(str(key))
-            property_schema = properties and isinstance(child, (Mapping, bool))
-            child_secret = structured_secret or (
-                not property_schema
-                and (_sensitive(str(key)) or schema_secret and normalized in _SCHEMA_VALUES)
-            )
-            reduced[safe_key] = _reduce(
-                child,
-                secrets,
-                exact,
-                findings,
-                (*path, "[key]" if categories else str(key)),
-                child_secret,
-                _sensitive(str(key)) if property_schema else schema_secret,
-                property_schema or object_schema or normalized in {"schema", "json_schema"},
-                not structured_secret and object_schema and normalized == "properties",
-            )
-        return reduced
-    if isinstance(value, list):
-        return [
-            _reduce(
-                child,
-                secrets,
-                exact,
-                findings,
-                (*path, index),
-                structured_secret,
-                schema_secret,
-                schema_context,
-                properties,
-            )
-            for index, child in enumerate(value)
-        ]
-    if isinstance(value, tuple):
-        return tuple(
-            _reduce(
-                child,
-                secrets,
-                exact,
-                findings,
-                (*path, index),
-                structured_secret,
-                schema_secret,
-                schema_context,
-                properties,
-            )
-            for index, child in enumerate(value)
-        )
-    if (
-        structured_secret
-        and value is not None
-        and not isinstance(value, bool)
-        and (
-            not isinstance(value, str)
-            or value.strip()
-            and not _PLACEHOLDER.fullmatch(value.strip())
-        )
-    ):
-        findings.add((_path(path), "structured_secret"))
+    def replace_exact(self, match: re.Match[str]) -> str:
+        self.categories.add(self.secrets[match.group("secret")])
         return REDACTED
-    if not isinstance(value, str):
-        return value
-    reduced, categories = _redact_text(value, secrets, exact)
-    findings.update((_path(path), category) for category in categories)
-    return reduced
 
+    def replace_shape(self, match: re.Match[str]) -> str:
+        group = next(
+            name
+            for name, value in match.groupdict().items()
+            if name.startswith("secret") and value is not None
+        )
+        secret = match.group(group)
+        if not is_secret(secret):
+            return match.group(0)
+        self.categories.add(self.pattern_category)
+        start, end = match.span(group)
+        offset = match.start()
+        return f"{match.group(0)[: start - offset]}{REDACTED}{match.group(0)[end - offset :]}"
 
-def _prepare(
-    value: Any,
-    secrets: Mapping[str, str],
-    exact: re.Pattern[str] | None = None,
-) -> PreparedUpload:
-    exact = exact or _exact_pattern(secrets)
-    findings: set[Finding] = set()
-    data = _reduce(value, secrets, exact, findings)
-    residual: set[Finding] = set()
-    _reduce(data, secrets, exact, residual)
-    if residual:
-        paths = ", ".join(path for path, _ in sorted(residual)[:10])
-        raise UploadScanError(f"reduced upload still contains credentials at {paths}")
-    return PreparedUpload(data, ScanReport(tuple(sorted(findings))))
+    def redact_text(self, text: str) -> tuple[str, set[str]]:
+        self.categories = set()
+        if self.exact:
+            text = self.exact.sub(self.replace_exact, text)
+        for category, pattern in PATTERNS:
+            self.pattern_category = category
+            text = pattern.sub(self.replace_shape, text)
+        return text, self.categories
+
+    def reduce(
+        self,
+        value: Any,
+        findings: set[Finding],
+        path: tuple[str | int, ...] = (),
+        structured_secret: bool = False,
+        schema_secret: bool = False,
+        schema_context: bool = False,
+        properties: bool = False,
+    ) -> Any:
+        if isinstance(value, Mapping):
+            reduced = {}
+            schema_type = value.get("type")
+            object_schema = (
+                schema_context
+                or any(field in value for field in SCHEMA_MARKERS)
+                or "properties" in value
+                and (
+                    schema_type == "object"
+                    or isinstance(schema_type, (list, tuple))
+                    and "object" in schema_type
+                )
+                or schema_type == "array"
+                and "items" in value
+            )
+            for key, child in value.items():
+                safe_key, categories = (
+                    (REDACTED, {"structured_secret"})
+                    if structured_secret and is_secret(key)
+                    else self.redact_text(key)
+                    if isinstance(key, str)
+                    else (key, set())
+                )
+                findings.update(
+                    (finding_path((*path, "[key]")), category) for category in categories
+                )
+                if structured_secret and safe_key == REDACTED:
+                    suffix = 2
+                    while safe_key in reduced:
+                        safe_key = f"[REDACTED {suffix}]"
+                        suffix += 1
+                if safe_key in reduced:
+                    raise UploadScanError("credential reduction would create duplicate object keys")
+                normalized = normalize(str(key))
+                property_schema = properties and isinstance(child, (Mapping, bool))
+                child_secret = structured_secret or (
+                    not property_schema
+                    and (is_sensitive(str(key)) or schema_secret and normalized in SCHEMA_VALUES)
+                )
+                reduced[safe_key] = self.reduce(
+                    child,
+                    findings,
+                    (*path, "[key]" if categories else str(key)),
+                    child_secret,
+                    is_sensitive(str(key)) if property_schema else schema_secret,
+                    property_schema or object_schema or normalized in {"schema", "json_schema"},
+                    not structured_secret and object_schema and normalized == "properties",
+                )
+            return reduced
+        if isinstance(value, list):
+            return [
+                self.reduce(
+                    child,
+                    findings,
+                    (*path, index),
+                    structured_secret,
+                    schema_secret,
+                    schema_context,
+                    properties,
+                )
+                for index, child in enumerate(value)
+            ]
+        if isinstance(value, tuple):
+            return tuple(
+                self.reduce(
+                    child,
+                    findings,
+                    (*path, index),
+                    structured_secret,
+                    schema_secret,
+                    schema_context,
+                    properties,
+                )
+                for index, child in enumerate(value)
+            )
+        if (
+            structured_secret
+            and value is not None
+            and not isinstance(value, bool)
+            and (
+                not isinstance(value, str)
+                or value.strip()
+                and not PLACEHOLDER.fullmatch(value.strip())
+            )
+        ):
+            findings.add((finding_path(path), "structured_secret"))
+            return REDACTED
+        if not isinstance(value, str):
+            return value
+        reduced, categories = self.redact_text(value)
+        findings.update((finding_path(path), category) for category in categories)
+        return reduced
+
+    def prepare(self, value: Any) -> PreparedUpload:
+        findings: set[Finding] = set()
+        data = self.reduce(value, findings)
+        residual: set[Finding] = set()
+        self.reduce(data, residual)
+        if residual:
+            paths = ", ".join(path for path, category in sorted(residual)[:10])
+            raise UploadScanError(f"reduced upload still contains credentials at {paths}")
+        return PreparedUpload(data=data, report=ScanReport(findings=tuple(sorted(findings))))
 
 
 def scan_upload(value: Any, known_secrets: Iterable[str] = ()) -> ScanReport:
     """Classify credential locations without returning their values."""
-    return _prepare(value, _secrets(value, known_secrets)).report
+    discovery = SecretDiscovery(known_secrets)
+    discovery.discover(value)
+    return CredentialReducer(discovery.secrets).prepare(value).report
 
 
 def prepare_upload(value: Any, known_secrets: Iterable[str] = ()) -> PreparedUpload:
     """Reduce a copy, then rescan it before any caller starts an upload."""
-    return _prepare(value, _secrets(value, known_secrets))
+    discovery = SecretDiscovery(known_secrets)
+    discovery.discover(value)
+    return CredentialReducer(discovery.secrets).prepare(value)
 
 
-class _DuplicateKeyError(ValueError):
+class DuplicateKeyError(ValueError):
     pass
 
 
-def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     value = {}
     for key, child in pairs:
         if key in value:
-            raise _DuplicateKeyError
+            raise DuplicateKeyError
         value[key] = child
     return value
 
 
-def _load_line(line: str, number: int) -> Any:
+def load_line(line: str, number: int) -> Any:
     try:
-        return json.loads(line, object_pairs_hook=_unique_object)
-    except _DuplicateKeyError as error:
+        return json.loads(line, object_pairs_hook=unique_object)
+    except DuplicateKeyError as error:
         raise UploadScanError(f"duplicate object key on JSONL line {number}") from error
     except json.JSONDecodeError as error:
         raise UploadScanError(
@@ -562,7 +560,7 @@ def _load_line(line: str, number: int) -> Any:
         ) from error
 
 
-def _prefix(report: ScanReport, prefix: str) -> set[Finding]:
+def prefix_findings(report: ScanReport, prefix: str) -> set[Finding]:
     return {(f"{prefix}{path[1:]}", category) for path, category in report.findings}
 
 
@@ -583,23 +581,21 @@ def prepare_jsonl_upload(
         and any(output.exists() and source.samefile(output) for output in outputs)
     ):
         raise UploadScanError("upload outputs must not alias the source JSONL")
-    secrets: dict[str, str] = {}
-    for secret in known_secrets:
-        _remember(secret, secrets, "known_secret")
-    _discover(context, secrets)
+    discovery = SecretDiscovery(known_secrets)
+    discovery.discover(context)
 
     try:
         with source.open("rb") as input_file, snapshot.open("wb") as output_file:
             for number, raw in enumerate(input_file, 1):
                 output_file.write(raw)
                 if not raw.isspace():
-                    _discover(_load_line(raw.decode(), number), secrets)
+                    discovery.discover(load_line(raw.decode(), number))
     except UnicodeDecodeError as error:
         raise UploadScanError("trace JSONL must be UTF-8") from error
 
-    exact = _exact_pattern(secrets)
-    context_prepared = _prepare(context, secrets, exact) if context is not None else None
-    findings = _prefix(context_prepared.report, "$.context") if context_prepared else set()
+    reducer = CredentialReducer(discovery.secrets)
+    context_prepared = reducer.prepare(context) if context is not None else None
+    findings = prefix_findings(context_prepared.report, "$.context") if context_prepared else set()
     file_findings: set[Finding] = set()
 
     output_file = None
@@ -614,9 +610,9 @@ def prepare_jsonl_upload(
                         output_file.write(raw)
                     offset += len(raw)
                     continue
-                value = _prepare(_load_line(raw.decode(), number), secrets, exact)
-                file_findings.update(_prefix(value.report, f"$.lines[{number}]"))
-                if value.report and output_file is None:
+                value = reducer.prepare(load_line(raw.decode(), number))
+                file_findings.update(prefix_findings(value.report, f"$.lines[{number}]"))
+                if value.report.has_findings and output_file is None:
                     output_file = stack.enter_context(redacted.open("wb"))
                     with snapshot.open("rb") as prefix:
                         output_file.write(prefix.read(offset))
@@ -624,7 +620,7 @@ def prepare_jsonl_upload(
                     output_file.write(
                         json.dumps(value.data, ensure_ascii=False, separators=(",", ":")).encode()
                         + b"\n"
-                        if value.report
+                        if value.report.has_findings
                         else raw
                     )
                 offset += len(raw)
@@ -637,7 +633,7 @@ def prepare_jsonl_upload(
     else:
         upload_path = snapshot
     return PreparedJSONLUpload(
-        upload_path,
-        context_prepared.data if context_prepared else None,
-        ScanReport(tuple(sorted(findings | file_findings))),
+        path=upload_path,
+        context=context_prepared.data if context_prepared else None,
+        report=ScanReport(findings=tuple(sorted(findings | file_findings))),
     )

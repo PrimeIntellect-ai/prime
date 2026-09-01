@@ -1089,9 +1089,9 @@ def _push_single_eval(
     env_slug = prepared.data["env_slug"]
     run_id = prepared.data["run_id"]
     eval_id = prepared.data["eval_id"]
-    if prepared.report:
+    if prepared.report.has_findings:
         console.print(
-            f"[yellow]Upload preflight redacted {prepared.report}. "
+            f"[yellow]Upload preflight redacted {prepared.report.description}. "
             "Local files were not changed.[/yellow]"
         )
 

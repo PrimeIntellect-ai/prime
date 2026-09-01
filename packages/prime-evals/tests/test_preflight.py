@@ -362,7 +362,9 @@ def test_preflight_preserves_openapi_security_scheme_definitions():
         }
     }
 
-    prepared = prepare_upload({"components": {"securitySchemes": security_schemes}})
+    prepared = prepare_upload(
+        {"openapi": "3.1.0", "components": {"securitySchemes": security_schemes}}
+    )
 
     assert prepared.data["components"]["securitySchemes"] == security_schemes
 
@@ -370,6 +372,13 @@ def test_preflight_preserves_openapi_security_scheme_definitions():
 def test_non_schema_security_scheme_mappings_still_redact_credentials():
     secret = "opaque-security-scheme-secret-0123456789"
     prepared = prepare_upload({"security_schemes": {"api_key": {"value": secret}}})
+
+    assert secret not in json.dumps(prepared.data)
+
+
+def test_non_schema_components_still_redact_credentials():
+    secret = "opaque-component-secret-0123456789"
+    prepared = prepare_upload({"components": {"properties": {"password": {"value": secret}}}})
 
     assert secret not in json.dumps(prepared.data)
 

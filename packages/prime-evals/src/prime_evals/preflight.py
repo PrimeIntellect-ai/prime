@@ -69,7 +69,8 @@ SCHEMA_MARKERS = {
     "anyOf",
     "oneOf",
 }
-SCHEMA_CONTAINERS = {"components", "json_schema", "schema"}
+SCHEMA_CONTAINERS = {"json_schema", "schema"}
+OPENAPI_MARKERS = {"openapi", "swagger"}
 NAMED_DEFINITIONS = {"properties", "security_definitions", "security_schemes"}
 HEADER_CONTAINER = re.compile(r"(?:^|_)headers?$")
 SAFE_PATH_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_-]{0,63}")
@@ -331,6 +332,7 @@ class SecretDiscovery:
             object_schema = (
                 schema_context
                 or any(field in value for field in SCHEMA_MARKERS)
+                or any(field in value for field in OPENAPI_MARKERS)
                 or "properties" in value
                 and (
                     schema_type == "object"
@@ -557,6 +559,7 @@ class CredentialReducer:
             object_schema = (
                 schema_context
                 or any(field in value for field in SCHEMA_MARKERS)
+                or any(field in value for field in OPENAPI_MARKERS)
                 or "properties" in value
                 and (
                     schema_type == "object"

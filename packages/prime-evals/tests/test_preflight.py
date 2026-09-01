@@ -367,6 +367,27 @@ def test_preflight_recognizes_suffixed_header_containers(headers):
     assert token not in json.dumps(prepared.data)
 
 
+def test_preflight_recognizes_flattened_header_pairs():
+    token = "opaque-header-token-0123456789"
+    prepared = prepare_upload(
+        {
+            "rawHeaders": [
+                "Authorization",
+                f"Bearer {token}",
+                "Content-Type",
+                "application/json",
+            ]
+        }
+    )
+
+    assert prepared.data["rawHeaders"] == [
+        "Authorization",
+        REDACTED,
+        "Content-Type",
+        "application/json",
+    ]
+
+
 def test_preflight_preserves_openapi_security_scheme_definitions():
     security_schemes = {
         "BearerAuth": {
@@ -381,6 +402,32 @@ def test_preflight_preserves_openapi_security_scheme_definitions():
     )
 
     assert prepared.data["components"]["securitySchemes"] == security_schemes
+
+
+def test_preflight_preserves_openapi_security_requirement_scopes():
+    document = {
+        "openapi": "3.1.0",
+        "security": [{"MyAuth": ["read:users"]}],
+        "paths": {
+            "/users": {
+                "get": {"security": [{"MyAuth": ["write:users"]}]},
+            }
+        },
+    }
+
+    assert prepare_upload(document).data == document
+
+
+@pytest.mark.parametrize("container", ["patternProperties", "dependentSchemas"])
+def test_preflight_preserves_named_json_schema_maps(container):
+    schema = {
+        "schema": {
+            "type": "object",
+            container: {"password": {"type": "string"}},
+        }
+    }
+
+    assert prepare_upload(schema).data == schema
 
 
 @pytest.mark.parametrize(

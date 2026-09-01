@@ -73,8 +73,10 @@ SCHEMA_MARKERS = {
 SCHEMA_CONTAINERS = {"json_schema", "schema"}
 OPENAPI_MARKERS = {"openapi", "swagger"}
 NAMED_DEFINITIONS = {
+    "dependent_schemas",
     "defs",
     "definitions",
+    "pattern_properties",
     "properties",
 }
 OPENAPI_COMPONENT_MAPS = {
@@ -373,7 +375,7 @@ class SecretDiscovery:
                 name = str(key)
                 normalized = normalize(name)
                 if definitions:
-                    if isinstance(child, (Mapping, bool)):
+                    if isinstance(child, (Mapping, list, tuple, bool)):
                         self.discover(child, is_sensitive(name), True)
                     else:
                         if is_sensitive(name):
@@ -406,14 +408,20 @@ class SecretDiscovery:
                     or components
                     and normalized in OPENAPI_COMPONENT_MAPS
                     or openapi_document
-                    and normalized in OPENAPI_ROOT_DEFINITIONS,
+                    and normalized in OPENAPI_ROOT_DEFINITIONS
+                    or normalized == "security",
                     headers or HEADER_CONTAINER.search(normalized) is not None,
                     openapi_document and normalized == "components",
                 )
         elif isinstance(value, (list, tuple)):
-            if headers and len(value) == 2 and isinstance(value[0], str) and is_sensitive(value[0]):
-                self.remember(value[1], "structured_secret")
-            for child in value:
+            for index, child in enumerate(value):
+                if (
+                    headers
+                    and index % 2 == 1
+                    and isinstance(value[index - 1], str)
+                    and is_sensitive(value[index - 1])
+                ):
+                    self.remember(child, "structured_secret")
                 self.discover(
                     child,
                     schema_secret,
@@ -635,7 +643,7 @@ class CredentialReducer:
                 if safe_key in reduced:
                     raise UploadScanError("credential reduction would create duplicate object keys")
                 normalized = normalize(str(key))
-                definition_schema = definitions and isinstance(child, (Mapping, bool))
+                definition_schema = definitions and isinstance(child, (Mapping, list, tuple, bool))
                 telemetry = bool(path) and normalize(str(path[-1])) in {"metrics", "rewards"}
                 child_secret = structured_secret or (
                     not definition_schema
@@ -667,21 +675,23 @@ class CredentialReducer:
                         and normalized in OPENAPI_COMPONENT_MAPS
                         or openapi_document
                         and normalized in OPENAPI_ROOT_DEFINITIONS
+                        or normalized == "security"
                     ),
                     headers or HEADER_CONTAINER.search(normalized) is not None,
                     openapi_document and normalized == "components",
                 )
             return reduced
         if isinstance(value, (list, tuple)):
-            header_pair = (
-                headers and len(value) == 2 and isinstance(value[0], str) and is_sensitive(value[0])
-            )
             reduced = [
                 self.reduce(
                     child,
                     findings,
                     (*path, index),
-                    structured_secret or header_pair and index == 1,
+                    structured_secret
+                    or headers
+                    and index % 2 == 1
+                    and isinstance(value[index - 1], str)
+                    and is_sensitive(value[index - 1]),
                     schema_secret,
                     schema_context,
                     definitions,

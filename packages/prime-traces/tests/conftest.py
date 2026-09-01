@@ -17,6 +17,7 @@ _PRIME_ENV_VARS = (
     "PRIME_TRACES_URL",
     "PRIME_API_BASE_URL",
     "PRIME_BASE_URL",
+    "PRIME_CONFIG_DIR",
 )
 
 
@@ -30,6 +31,8 @@ def isolated_prime_config(monkeypatch, tmp_path):
     Mirrors the home-isolation fixture in prime-sandboxes' conftest.
     """
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    # Discovery also walks up from the working directory; start in the tmp dir.
+    monkeypatch.chdir(tmp_path)
     for name in _PRIME_ENV_VARS:
         monkeypatch.delenv(name, raising=False)
     return tmp_path

@@ -14,6 +14,7 @@ from prime_cli.core import Config
 
 from ..client import APIClient, APIError
 from ..utils import PlainTyper, get_console
+from .config import LOCAL_OPTION_HELP, new_local_config, print_local_config_notice
 from .teams import fetch_teams
 
 app = PlainTyper(help="Login to Prime Intellect")
@@ -125,9 +126,13 @@ def decrypt_challenge_response(
 @app.callback(invoke_without_command=True)
 def login(
     headless: bool = typer.Option(False, "--headless", help="Don't attempt to open browser"),
+    local: bool = typer.Option(False, "--local", help=LOCAL_OPTION_HELP),
 ) -> None:
     """Login to Prime Intellect"""
-    config = Config()
+    # A new local config is not written until login succeeds (see new_local_config).
+    config = new_local_config() if local else Config()
+    if local:
+        print_local_config_notice(config)
     settings = config.view()
 
     if not settings["base_url"]:

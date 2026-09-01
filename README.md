@@ -125,6 +125,45 @@ prime config view
 
 **Security Note**: When using non-interactive mode, the API key may be visible in your shell history. For enhanced security, use interactive mode or environment variables.
 
+#### Project-Local Credentials
+
+By default the CLI and SDKs read `~/.prime/config.json`. On a shared machine, or
+when you want different credentials per project, keep them next to the code
+instead:
+
+```bash
+cd ~/code/prime
+prime login --local                 # or: prime config set-api-key --local
+```
+
+This writes `./.prime/config.json` (owner-only permissions) and every `prime`
+command or SDK call run from that directory — or any directory below it — uses
+it. Resolution order:
+
+1. `PRIME_CONFIG_DIR` — explicit config directory
+2. The nearest ancestor of the working directory containing a **trusted**
+   `.prime/config.json` (the search stops at your home directory and ignores
+   files owned by other users)
+3. `~/.prime/config.json`
+
+A project-local config is only used once you have trusted it. Files written by
+`prime login --local` / `prime config set-api-key --local` are trusted
+automatically; one you create by hand needs `prime config trust` (run in the
+project, or pass its path). Trust is tied to the file's content, so if it
+changes — say a `git pull` rewrote it — commands warn and ignore it until you
+trust it again. The same applies to the named environments next to it
+(`.prime/environments/*.json`, used by `PRIME_CONTEXT` / `prime config use`):
+`prime config trust` approves them together with `config.json`. This is what stops a `.prime/config.json` committed to a
+repository you clone from pointing your `PRIME_API_KEY` at someone else's
+server. `prime config untrust` withdraws approval.
+
+A project-local config replaces the global one entirely; it is not merged with
+it. `PRIME_API_KEY` and the other `PRIME_*` environment variables still take
+precedence over either file. `prime config view` shows which file is active and
+lists any untrusted files it skipped. Add `.prime/` to the project's
+`.gitignore` so the key is never committed — the `--local` commands warn if the
+enclosing repository does not ignore it.
+
 ### Environments Hub
 
 Access hundreds of verified environments on our community hub with deep integrations with sandboxes, training, and evaluation stack.

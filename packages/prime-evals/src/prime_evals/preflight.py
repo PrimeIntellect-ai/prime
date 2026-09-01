@@ -396,7 +396,10 @@ class SecretDiscovery:
             for key, child in value.items():
                 name = str(key)
                 normalized = normalize(name)
+                extension = isinstance(key, str) and key.lower().startswith("x-")
                 if definitions:
+                    if named_header and normalized in {"value", "values"}:
+                        self.remember(child, "structured_secret")
                     if isinstance(child, (Mapping, list, tuple, bool)):
                         self.discover(child, is_sensitive(name), True, openapi=openapi_document)
                     else:
@@ -417,23 +420,28 @@ class SecretDiscovery:
                 self.discover(
                     child,
                     schema_secret,
-                    normalized not in SCHEMA_VALUES
+                    not extension
+                    and normalized not in SCHEMA_VALUES
                     and (
                         object_schema
                         or normalized in SCHEMA_CONTAINERS
                         or openapi_document
                         and normalized in OPENAPI_SCHEMA_CONTAINERS
                     ),
-                    object_schema
-                    and normalized in NAMED_DEFINITIONS
-                    or openapi_document
-                    and normalized in OPENAPI_NAMED_MAPS
-                    or openapi_document
-                    and normalized in OPENAPI_ROOT_DEFINITIONS
-                    or openapi_document
-                    and normalized == "security",
+                    not extension
+                    and (
+                        object_schema
+                        and normalized in NAMED_DEFINITIONS
+                        or openapi_document
+                        and normalized in OPENAPI_NAMED_MAPS
+                        or openapi_document
+                        and normalized in OPENAPI_ROOT_DEFINITIONS
+                        or openapi_document
+                        and normalized == "security"
+                    ),
                     headers or HEADER_CONTAINER.search(normalized) is not None,
-                    openapi_document
+                    not extension
+                    and openapi_document
                     and (normalized not in SCHEMA_VALUES or normalized == "examples"),
                 )
         elif isinstance(value, (list, tuple)):
@@ -668,16 +676,18 @@ class CredentialReducer:
                 if safe_key in reduced:
                     raise UploadScanError("credential reduction would create duplicate object keys")
                 normalized = normalize(str(key))
+                extension = isinstance(key, str) and key.lower().startswith("x-")
                 definition_schema = definitions and isinstance(child, (Mapping, list, tuple, bool))
                 telemetry = any(normalize(str(part)) in {"metrics", "rewards"} for part in path)
-                child_secret = structured_secret or (
-                    not definitions
+                child_secret = (
+                    structured_secret
+                    or named_header
+                    and normalized in {"value", "values"}
+                    or not definitions
                     and not (telemetry and isinstance(child, (int, float)))
                     and (
                         is_sensitive(str(key))
                         and not (openapi_document and normalized in OPENAPI_DESCRIPTOR_FIELDS)
-                        or named_header
-                        and normalized in {"value", "values"}
                         or schema_secret
                         and normalized in SCHEMA_VALUES
                     )
@@ -688,7 +698,8 @@ class CredentialReducer:
                     (*path, "[key]" if categories else str(key)),
                     child_secret,
                     is_sensitive(str(key)) if definition_schema else schema_secret,
-                    normalized not in SCHEMA_VALUES
+                    not extension
+                    and normalized not in SCHEMA_VALUES
                     and (
                         definition_schema
                         or object_schema
@@ -696,7 +707,8 @@ class CredentialReducer:
                         or openapi_document
                         and normalized in OPENAPI_SCHEMA_CONTAINERS
                     ),
-                    not structured_secret
+                    not extension
+                    and not structured_secret
                     and (
                         object_schema
                         and normalized in NAMED_DEFINITIONS
@@ -708,7 +720,8 @@ class CredentialReducer:
                         and normalized == "security"
                     ),
                     headers or HEADER_CONTAINER.search(normalized) is not None,
-                    openapi_document
+                    not extension
+                    and openapi_document
                     and (normalized not in SCHEMA_VALUES or normalized == "examples"),
                 )
             return reduced

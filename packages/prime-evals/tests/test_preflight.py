@@ -433,6 +433,26 @@ def test_preflight_preserves_openapi_security_requirement_scopes():
     assert prepare_upload(document).data == document
 
 
+def test_preflight_redacts_live_named_headers_in_openapi_documents():
+    secret = "opaque-header-token-0123456789"
+    document = {
+        "openapi": "3.1.0",
+        "headers": {"name": "Authorization", "value": f"Bearer {secret}"},
+    }
+
+    assert prepare_upload(document).data["headers"]["value"] == REDACTED
+
+
+def test_preflight_scans_openapi_vendor_extensions_as_data():
+    secret = "opaque-extension-secret-0123456789"
+    document = {
+        "openapi": "3.1.0",
+        "x-runtime": {"security": {"token": {"primary": secret}}},
+    }
+
+    assert prepare_upload(document).data["x-runtime"]["security"]["token"]["primary"] == REDACTED
+
+
 def test_preflight_does_not_treat_ordinary_security_data_as_openapi():
     secret = "opaque-session-value-0123456789"
     prepared = prepare_upload({"openapi": False, "security": {"token": {"primary": secret}}})

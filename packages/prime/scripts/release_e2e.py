@@ -22,7 +22,7 @@ from pathlib import Path
 
 from prime_sandboxes import APIClient, CreateSandboxRequest, SandboxClient
 
-DEFAULT_MODEL = "deepseek/deepseek-chat"
+DEFAULT_MODEL = "openai/gpt-5.6-luna"
 DEFAULT_HOSTED_TIMEOUT_MINUTES = "120"
 DEFAULT_SANDBOX_IMAGE = "python:3.11-bookworm"
 

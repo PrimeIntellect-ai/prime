@@ -152,7 +152,7 @@ def test_release_e2e_workflow_uses_standard_name_and_safe_inputs():
     assert '"packages/prime-tunnel/**"' in workflow
     assert '".github/workflows/release-e2e.yml"' in workflow
     assert "HOSTED_MODE: ${{ inputs.hosted_mode || 'submit' }}" in workflow
-    assert "MODEL: ${{ inputs.model || 'deepseek/deepseek-chat' }}" in workflow
+    assert "MODEL: ${{ inputs.model || 'openai/gpt-5.6-luna' }}" in workflow
     assert 'HOSTED_MODE="${{ inputs.hosted_mode' not in workflow
     assert 'MODEL="${{ inputs.model' not in workflow
     assert 'REGION="${{ inputs.sandbox_region' not in workflow

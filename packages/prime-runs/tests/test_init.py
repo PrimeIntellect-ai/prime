@@ -112,6 +112,13 @@ def test_an_online_run_returns_the_platforms_id_and_viewer_url(online):
     run.finish()
 
 
+def test_eval_uploaders_keep_the_permanent_retirement(online):
+    run, _ = online()
+
+    assert run._worker._retire_cooldown is None
+    run.finish()
+
+
 def test_a_failed_create_closes_the_platform_client(monkeypatch):
     class FailingClient:
         def __init__(self):
@@ -275,7 +282,7 @@ def online_train(monkeypatch, make_platform_client, rft_routes):
     storage = StorageHandler()
     encoder_calls = []
 
-    def encoder(episodes, run_id, step):
+    def encoder(episodes, run_id, step, sample_id_offset=0):
         encoder_calls.append((len(episodes), run_id, step))
         return b"parquet"
 
@@ -358,6 +365,18 @@ def test_a_failed_training_run_is_marked_failed_with_the_reason(online_train):
     body = handler.bodies_for("/api/v1/rft/external-runs/run-abc/status")[0]
     assert body == {"status": "failed", "error_message": "ValueError: loss is NaN"}
     assert "POST /api/v1/rft/finalize" not in handler.paths()
+
+
+def test_training_uploaders_pause_rather_than_retire_after_an_outage(online_train):
+    """A training run lasts days; a sink that struck out on a platform blip
+    is tried again after a cooldown instead of losing the rest of the run."""
+    from prime_runs.run import TRAIN_RETIRE_COOLDOWN
+
+    run, _, _, _ = online_train()
+
+    assert run._worker._retire_cooldown == TRAIN_RETIRE_COOLDOWN == 300.0
+    assert run._metrics_worker._retire_cooldown == TRAIN_RETIRE_COOLDOWN
+    run.finish()
 
 
 def test_attaching_to_a_managed_run_registers_nothing(online_train):

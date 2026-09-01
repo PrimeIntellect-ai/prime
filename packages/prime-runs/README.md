@@ -136,21 +136,33 @@ did by hand. Where it differs from an eval run:
 - **Metrics.** `log_metrics(values, step=...)` streams one row per call on its
   own uploader, so a slow sample upload never holds a step's metrics back.
   `_timestamp` is stamped on every row; non-finite values are dropped. The
-  endpoint allows 60 rows a minute per token.
+  endpoint allows 60 rows a minute per token. A row whose response was lost
+  is re-sent: the platform keeps one row per step, so nothing doubles.
 - **Samples.** Every record reaches Prime Traces. The training viewer's sample
-  table is one Parquet object per training step, uploaded every 10th step
-  (prime-rl's cadence) for episodes whose `run.work` says *training* work at
-  that step — verifiers' `TrainRunInfo`, which prime-rl stamps on every
-  dispatched episode. Log a step's episodes in one `log_episodes` call: the
-  platform keeps one object per step. Encoding needs pyarrow:
-  `pip install 'prime-runs[train]'`. Without it the table is skipped with a
-  warning and traces still flow.
+  table is a Parquet object per upload, keyed by the training step an episode
+  was *dispatched* at — `run.work.step` on verifiers' `TrainRunInfo`, which
+  prime-rl stamps on every dispatched episode — and uploaded every 10th step
+  (prime-rl's cadence) for training-work episodes. Objects are additive: a
+  step logged in several `log_episodes` calls (an off-policy episode landing
+  in a later batch) gets one object per call, each numbering its `sample_id`s
+  in its own range, and the viewer shows their union. So "step N" in the
+  sample viewer means dispatched at N, while the metrics logged at N describe
+  the batch trained at N. Encoding needs pyarrow: `pip install
+  'prime-runs[train]'`. Without it the table is skipped with a warning and
+  traces still flow.
 - **Attach.** `init(kind="train", id=os.environ["RUN_ID"])` joins a run a
-  managed launch created: nothing is registered, the platform keeps the run's
-  failure marking, and a clean `finish()` still completes it.
+  launcher created: nothing is registered, the platform keeps the run's
+  failure marking, and a clean `finish()` still completes it. The id must be
+  an external run's (one created through `POST /rft/external-runs`): the
+  platform's monitoring endpoints answer 400 for a hosted run.
 - **Status.** The RFT vocabulary is `completed | failed`. `cancelled` and
   `crashed` are reported as `failed` with the reason in `error_message`; a
   clean `finish()` is an idempotent finalize, safe to replay.
+- **Outages.** A sink that strikes out on transient failures (three in a row,
+  each already retried) is paused for five minutes and then tried again, not
+  retired for the run: a platform deploy costs a multi-day run a window of
+  rows, never the rest of its curves. Records that arrive while a sink is
+  paused are counted in `run.failed_records` for that sink.
 - **No config update.** `config=` is registered once as `run_config` and there
   is no summary document, so `finish(summary=...)` is not sent for training
   runs — log final numbers with `log_metrics`.

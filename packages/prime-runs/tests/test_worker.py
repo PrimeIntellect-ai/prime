@@ -373,6 +373,67 @@ def test_a_sustained_outage_eventually_retires_the_sink():
     worker.close()
 
 
+def test_a_cooldown_gives_a_retired_sink_another_chance():
+    """A training run outlives any platform deploy: after the cooldown the
+    sink is tried again, and records that arrived meanwhile are counted as
+    lost to it, not silently forgotten."""
+    from prime_runs.exceptions import TransportError
+    from prime_runs.worker import TRANSIENT_FAILURE_LIMIT
+
+    class OutageSink(FakeSink):
+        def __init__(self) -> None:
+            super().__init__("outage")
+            self.down = True
+
+        def write(self, records) -> None:
+            if self.down:
+                raise TransportError("connection refused")
+            super().write(records)
+
+    sink = OutageSink()
+    worker = UploadWorker([sink], retire_cooldown=0.05)
+
+    for _ in range(TRANSIENT_FAILURE_LIMIT):
+        worker.submit([{"id": "lost"}])
+        drain(worker)
+    assert sink.enabled is False
+    worker.submit([{"id": "during"}])
+    drain(worker)
+    assert sink.batches == []
+
+    # A real wait: the autouse no_sleep fixture stubs out time.sleep.
+    threading.Event().wait(0.06)
+    sink.down = False
+    worker.submit([{"id": "after"}])
+    drain(worker)
+
+    assert sink.enabled is True
+    assert sink.batches == [[{"id": "after"}]]
+    assert worker.failed_records == {"outage": TRANSIENT_FAILURE_LIMIT + 1}
+    worker.close()
+
+
+def test_a_permanent_failure_is_not_revived_by_the_cooldown():
+    from prime_runs.exceptions import UnauthorizedError
+
+    class DeniedSink(FakeSink):
+        def write(self, records) -> None:
+            raise UnauthorizedError("nope", status_code=401)
+
+    sink = DeniedSink("denied")
+    worker = UploadWorker([sink], retire_cooldown=0.01)
+
+    worker.submit([{"id": 1}])
+    drain(worker)
+    threading.Event().wait(0.02)
+    worker.submit([{"id": 2}])
+    drain(worker)
+
+    assert sink.enabled is False
+    assert worker.failed_records == {"denied": 2}
+    worker.close()
+
+
 def test_a_success_forgives_earlier_blips():
     """Strikes are consecutive: an intermittent gateway must never accumulate
     its way to a retirement across an otherwise healthy run."""

@@ -222,7 +222,9 @@ def train_sample_schema() -> Any:
     )
 
 
-def episodes_to_parquet_bytes(episodes: Sequence[Any], run_id: str, step: int) -> Optional[bytes]:
+def episodes_to_parquet_bytes(
+    episodes: Sequence[Any], run_id: str, step: int, *, sample_id_offset: int = 0
+) -> Optional[bytes]:
     """One training step's episodes as the viewer's Parquet table, one row per
     episode. Moved here from prime-rl's ``monitors/prime.py``.
 
@@ -231,6 +233,11 @@ def episodes_to_parquet_bytes(episodes: Sequence[Any], run_id: str, step: int) -
     one trainable trace), so a training episode and an eval sample land on the
     platform identically; the RFT-only columns (run/step/advantage/problem_id/
     env_name) are layered on here. ``None`` when no episode has a trajectory.
+
+    ``sample_id`` numbers the rows from ``sample_id_offset``: the viewer looks
+    samples up by (step, sample_id), and a step uploaded as more than one
+    object (see :mod:`prime_runs.sinks.train_samples`) needs each object to
+    number its rows in its own range.
     """
     import io
     import json
@@ -251,7 +258,7 @@ def episodes_to_parquet_bytes(episodes: Sequence[Any], run_id: str, step: int) -
 
     now = datetime.now(timezone.utc)
     rows: List[Dict[str, Any]] = []
-    for sample_id, sample in enumerate(build_samples(episodes)):
+    for sample_id, sample in enumerate(build_samples(episodes), start=sample_id_offset):
         trajectory = sample["trajectory"]
         if not trajectory:  # no branches: an episode that errored before any message
             continue

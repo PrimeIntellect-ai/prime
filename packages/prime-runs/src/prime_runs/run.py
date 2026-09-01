@@ -46,6 +46,11 @@ MODE_ENV = "PRIME_RUNS_MODE"
 #: Derived from the upload timeout: a single in-flight sample POST may take
 #: this long, and a shorter budget would abandon an upload about to succeed.
 DEFAULT_FINISH_TIMEOUT = float(UPLOAD_TIMEOUT.read or 300.0)
+#: A training run lasts days and a platform deploy lasts minutes: a training
+#: sink that struck out on transient failures is tried again after this many
+#: seconds instead of being retired for the rest of the run. Eval runs are
+#: minutes long and keep the permanent retirement.
+TRAIN_RETIRE_COOLDOWN = 300.0
 
 
 class Run:
@@ -68,6 +73,7 @@ class Run:
         finish_timeout: Optional[float] = None,
         metrics_sinks: Optional[List[Sink]] = None,
         attached: bool = False,
+        retire_cooldown: Optional[float] = None,
     ) -> None:
         self._backend = backend
         self._handle = handle
@@ -107,8 +113,12 @@ class Run:
         # Records and metrics drain on separate uploaders: a metrics dict is
         # not a record (no sink would take both), and a slow sample upload
         # must not hold a step's metrics behind it.
-        self._worker = UploadWorker(sinks, on_error=self._record_sink_error)
-        self._metrics_worker = UploadWorker(metrics_sinks, on_error=self._record_sink_error)
+        self._worker = UploadWorker(
+            sinks, on_error=self._record_sink_error, retire_cooldown=retire_cooldown
+        )
+        self._metrics_worker = UploadWorker(
+            metrics_sinks, on_error=self._record_sink_error, retire_cooldown=retire_cooldown
+        )
         context = _sink_context(spec)
         for sink in [*sinks, *metrics_sinks]:
             try:
@@ -504,9 +514,13 @@ def init(
     ``model`` is the base model, ``environments`` the training environments
     (hub ids, passed through), ``training`` the rest of what the dashboard
     shows, and a team is required. ``id`` attaches to a training run the
-    platform already created (a managed launch that injected ``$RUN_ID``):
-    nothing is registered, the platform keeps ownership of the run's failure
-    marking, and a clean :meth:`Run.finish` still completes it.
+    platform already created (a launcher that injected ``$RUN_ID``): nothing
+    is registered, the platform keeps ownership of the run's failure marking,
+    and a clean :meth:`Run.finish` still completes it. The run must itself be
+    an external run — one created through ``POST /rft/external-runs`` — since
+    the platform's monitoring endpoints answer 400 for a hosted (managed) run.
+    Training sinks that strike out on transient failures are tried again after
+    ``TRAIN_RETIRE_COOLDOWN`` seconds rather than retired for the run.
     """
     settings = Config()
     api_key = api_key if api_key is not None else settings.api_key
@@ -592,6 +606,7 @@ def init(
         finish_timeout=finish_timeout,
         metrics_sinks=metrics_sinks,
         attached=attached,
+        retire_cooldown=TRAIN_RETIRE_COOLDOWN if kind == "train" else None,
     )
     if run.url:
         logger.info("Run %s: %s", run.id, run.url)

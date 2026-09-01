@@ -11,15 +11,19 @@ Which episodes to upload is read off the records: a verifiers episode carries
 prime-rl stamps every dispatched episode. Episodes from eval work, bare traces
 and JSON episodes have no row here and go to Prime Traces only.
 
-One object per step: the platform records a single object key per (run, step),
-so a step's episodes must arrive in one ``log_episodes`` call — prime-rl hands
-over a whole step at a time. Logging a step in pieces would leave the table
-with the last piece only (the traces sink is unaffected).
+Objects are additive per step: every upload mints its own
+``step_{step}_{uuid}.parquet`` key and the viewer unions every object under a
+step, so a step's episodes may arrive across several ``log_episodes`` calls —
+prime-rl hands over a step's batch at ship time, and an off-policy episode
+dispatched at step N can land in a later batch. Each call becomes one more
+object; ``sample_id`` is numbered from a per-upload offset so (step,
+sample_id), which the viewer looks samples up by, stays unique across them.
+Log a step in one call to keep it to one object.
 """
 
 import logging
 import time
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Protocol, Sequence, Tuple
 
 import httpx
 from prime_traces.core.client import retry_delay
@@ -43,9 +47,20 @@ DEFAULT_STEP_INTERVAL = 10
 #: Attempts for the object-storage PUT, which is idempotent.
 UPLOAD_ATTEMPTS = 3
 
-Encoder = Callable[[Sequence[Any], str, int], Optional[bytes]]
-"""``(episodes, run_id, step) -> parquet bytes``, or ``None`` when there is
-nothing to upload for the step."""
+#: ``sample_id`` ranges are ``upload_index * SAMPLE_ID_STRIDE``: the first
+#: object for a step numbers its rows from 0 (what a single-object step always
+#: did), a straggler object from 2**32, and so on. No object holds that many rows.
+SAMPLE_ID_STRIDE = 1 << 32
+
+
+class Encoder(Protocol):
+    """``(episodes, run_id, step, sample_id_offset=...) -> parquet bytes``, or
+    ``None`` when there is nothing to upload for the step. Rows are numbered
+    from ``sample_id_offset``."""
+
+    def __call__(
+        self, episodes: Sequence[Any], run_id: str, step: int, *, sample_id_offset: int = 0
+    ) -> Optional[bytes]: ...
 
 
 def _field(obj: Any, name: str) -> Any:
@@ -93,6 +108,8 @@ class RftSamplesSink(Sink):
         self.skipped = 0
         #: Training episodes left out by the step cadence. Not a loss.
         self.sampled_out = 0
+        #: Uploads attempted per step; each numbers its rows in its own range.
+        self._uploads_per_step: Dict[int, int] = {}
         _fork.register(self)
 
     # ------------------------------------------------------------------ setup
@@ -182,9 +199,15 @@ class RftSamplesSink(Sink):
         """Encode and upload one step. ``False`` when the step had nothing to
         show (no trajectories) and no request was made."""
         assert self._encoder is not None and self._run_id is not None
-        payload = self._encoder(episodes, self._run_id, step)
+        # Every upload of a step numbers its rows in its own range, counted by
+        # attempt: an upload whose confirm was lost may still have landed.
+        upload_index = self._uploads_per_step.get(step, 0)
+        payload = self._encoder(
+            episodes, self._run_id, step, sample_id_offset=upload_index * SAMPLE_ID_STRIDE
+        )
         if payload is None:
             return False
+        self._uploads_per_step[step] = upload_index + 1
 
         # Replayable: a presign only mints a URL.
         presign = self._client.post(
@@ -202,11 +225,13 @@ class RftSamplesSink(Sink):
 
         self._put_object(url, payload)
 
-        # Records the object under the step. A lost response is not replayed:
-        # the platform may have taken the first confirm.
+        # Records the object under the step. Replayable: confirm checks the
+        # key and the object, then refreshes the run's progress; a second
+        # confirm of the same key changes nothing.
         self._client.post(
             "/rft/samples/confirm",
             json_body={"run_id": self._run_id, "step": step, "s3_key": key},
+            idempotent=True,
         )
         return True
 

@@ -4,6 +4,10 @@ The RFT metrics endpoint takes a single step's metrics per request, so a
 coalesced batch costs one request per record. The platform allows 60 a minute
 per token; a 429 is retried with the server's ``Retry-After`` before it counts
 as a strike.
+
+Requests are replayed after an ambiguous failure (a 502/504, a read timeout):
+the platform keeps one row per step, so a duplicate collapses on its side,
+while a lost row is a hole in the training curves for good.
 """
 
 import logging
@@ -45,10 +49,12 @@ class RftMetricsSink(Sink):
                     reported = TypeError(f"metrics must be a mapping, got {type(record).__name__}")
                 continue
             try:
-                # Appends a row; a lost response is not replayed (the POST default).
+                # Replayable: the platform merges rows by step, so a retry after
+                # a lost response cannot duplicate anything visible.
                 self._client.post(
                     "/rft/metrics",
                     json_body={"run_id": self._run_id, "metrics": dict(record)},
+                    idempotent=True,
                 )
             except Exception as exc:  # noqa: BLE001 - classified below
                 failed += 1

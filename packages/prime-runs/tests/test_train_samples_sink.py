@@ -15,10 +15,12 @@ class Encoder:
 
     def __init__(self, payload=b"parquet-bytes"):
         self.calls = []
+        self.offsets = []
         self.payload = payload
 
-    def __call__(self, episodes, run_id, step):
+    def __call__(self, episodes, run_id, step, sample_id_offset=0):
         self.calls.append((list(episodes), run_id, step))
+        self.offsets.append(sample_id_offset)
         return self.payload
 
 
@@ -194,7 +196,7 @@ def test_a_dropped_connection_to_storage_is_transient(make_platform_client, rft_
 
 
 def test_an_encoder_failure_is_a_record_rejection(make_platform_client, rft_routes):
-    def broken(episodes, run_id, step):
+    def broken(episodes, run_id, step, sample_id_offset=0):
         raise ValueError("cannot serialize")
 
     sink, handler, storage, encoder = make_sink(make_platform_client, rft_routes, encoder=broken)
@@ -216,6 +218,62 @@ def test_a_presign_without_a_url_is_an_api_error(make_platform_client, rft_route
 
     assert isinstance(info.value.cause, APIError)
     assert "presign" in str(info.value.cause)
+
+
+def test_a_step_logged_again_gets_its_own_sample_id_range(make_platform_client, rft_routes):
+    """Objects are additive per step on the platform (each presign mints a new
+    key and the viewer unions them), and the viewer looks samples up by
+    (step, sample_id): a straggler batch must not reuse the first object's ids."""
+    from prime_runs.sinks.train_samples import SAMPLE_ID_STRIDE
+
+    sink, handler, storage, encoder = make_sink(make_platform_client, rft_routes)
+
+    sink.write([make_train_episode("e1", step=10), make_train_episode("e2", step=20)])
+    sink.write([make_train_episode("e3", step=10)])  # dispatched at 10, shipped later
+
+    assert [step for _, _, step in encoder.calls] == [10, 20, 10]
+    assert encoder.offsets == [0, 0, SAMPLE_ID_STRIDE]
+    presigned = [body["step"] for body in handler.bodies_for("/api/v1/rft/samples/presign")]
+    assert presigned == [10, 20, 10]
+    assert sink.steps_written == 3
+
+
+def test_an_upload_that_failed_still_advances_the_sample_id_range(make_platform_client, rft_routes):
+    """An attempt that failed late may still have landed an object; the next
+    one for the step must not overlap it."""
+    from prime_runs.sinks.train_samples import SAMPLE_ID_STRIDE
+
+    storage = StorageHandler(status_codes=[403])
+    sink, handler, storage, encoder = make_sink(make_platform_client, rft_routes, storage=storage)
+
+    with pytest.raises(SinkWriteError):
+        sink.write([make_train_episode("e1", step=10)])
+    sink.write([make_train_episode("e2", step=10)])
+
+    assert encoder.offsets == [0, SAMPLE_ID_STRIDE]
+
+
+def test_a_confirm_whose_response_was_lost_is_replayed(make_platform_client, rft_routes, no_sleep):
+    """Confirm validates the key and refreshes progress; a second confirm of
+    the same key changes nothing, so an ambiguous failure is retried rather
+    than costing the step."""
+    attempts = []
+
+    def flaky(request: httpx.Request) -> httpx.Response:
+        attempts.append(request)
+        if len(attempts) == 1:
+            return httpx.Response(504)
+        return httpx.Response(200, json={"data": {"status": "success"}})
+
+    routes = dict(rft_routes)
+    routes["POST /api/v1/rft/samples/confirm"] = flaky
+    sink, handler, storage, encoder = make_sink(make_platform_client, routes)
+
+    sink.write([make_train_episode("e1", step=10)])
+
+    assert len(attempts) == 2
+    assert len(storage.uploads) == 1
+    assert sink.steps_written == 1
 
 
 def test_without_pyarrow_the_sink_turns_itself_off_quietly(
@@ -300,6 +358,23 @@ def test_the_default_encoder_writes_the_viewer_table():
     info = json.loads(rows[0]["info"])
     assert info["native_wrapper"]["id"] == "e1"
     assert isinstance(pa.Table, type)
+
+
+def test_the_default_encoder_numbers_rows_from_the_offset():
+    pytest.importorskip("pyarrow")
+    import io
+
+    import pyarrow.parquet as pq
+
+    from prime_runs.projection import episodes_to_parquet_bytes
+
+    episodes = [make_train_episode("e1", step=10, idx=3), make_train_episode("e2", step=10, idx=4)]
+
+    payload = episodes_to_parquet_bytes(episodes, "run-abc", 10, sample_id_offset=7)
+
+    rows = pq.read_table(io.BytesIO(payload)).to_pylist()
+    assert [row["sample_id"] for row in rows] == [7, 8]
+    assert [row["problem_id"] for row in rows] == [3, 4]
 
 
 def test_the_default_encoder_skips_episodes_without_a_trajectory():

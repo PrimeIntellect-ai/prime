@@ -8,7 +8,9 @@ The child starts over empty; the queued records belong to the parent.
 
 Containment: record-specific failures drop only their batch. A sink-wide
 failure disables the sink, while transient failures get a few consecutive
-strikes first. The thread never dies on one bad batch.
+strikes first — and, with a ``retire_cooldown``, the sink is tried again once
+the cooldown has passed, so an outage costs a long run a window of records
+rather than the rest of the run. The thread never dies on one bad batch.
 """
 
 import logging
@@ -63,11 +65,15 @@ class UploadWorker:
         max_queue_size: int = DEFAULT_QUEUE_SIZE,
         put_timeout: float = DEFAULT_PUT_TIMEOUT,
         on_error: Optional[Callable[[str, Exception], None]] = None,
+        retire_cooldown: Optional[float] = None,
     ) -> None:
         self.sinks = sinks
         self.max_queue_size = max_queue_size
         self.put_timeout = put_timeout
         self._on_error = on_error
+        #: Seconds after which a sink retired on transient failures is tried
+        #: again; ``None`` retires it for the rest of the run.
+        self._retire_cooldown = retire_cooldown
         self._queue: "queue.Queue[Any]" = queue.Queue(maxsize=max_queue_size)
         self._thread: Optional[threading.Thread] = None
         self._stopping = threading.Event()
@@ -82,6 +88,8 @@ class UploadWorker:
         #: these are lost to it and counted; a sink that switched itself off
         #: without raising (nowhere for the records to go) is not in here.
         self._retired: set = set()
+        #: Sink name -> monotonic time at which a paused sink is tried again.
+        self._cooldowns: dict = {}
         _fork.register(self)
 
     # ----------------------------------------------------------------- thread
@@ -154,6 +162,7 @@ class UploadWorker:
 
     def _dispatch(self, records: Sequence[Any]) -> None:
         for sink in self.sinks:
+            self._maybe_revive(sink)
             if not sink.enabled:
                 if sink.name in self._retired:
                     count = self.failed_records.get(sink.name, 0)
@@ -167,6 +176,17 @@ class UploadWorker:
                 self._fail_sink(sink, exc, dropped=len(records))
             else:
                 self._transient_failures.pop(sink.name, None)
+
+    def _maybe_revive(self, sink: Sink) -> None:
+        """Re-enable a sink whose cooldown has passed. Its strikes start over."""
+        until = self._cooldowns.get(sink.name)
+        if until is None or time.monotonic() < until:
+            return
+        del self._cooldowns[sink.name]
+        self._retired.discard(sink.name)
+        self._transient_failures.pop(sink.name, None)
+        sink.enabled = True
+        logger.info("Sink %s re-enabled after its cooldown", sink.name)
 
     def _flush_sinks(self) -> None:
         for sink in self.sinks:
@@ -182,7 +202,8 @@ class UploadWorker:
 
         Record-specific failures drop only the current batch. Sink-wide
         permanent failures retire immediately; transient failures retire after
-        ``TRANSIENT_FAILURE_LIMIT`` consecutive strikes.
+        ``TRANSIENT_FAILURE_LIMIT`` consecutive strikes — for good, or until
+        the worker's ``retire_cooldown`` has passed.
         """
         name = sink.name
         if dropped:
@@ -218,13 +239,24 @@ class UploadWorker:
                 return
             sink.enabled = False
             self._retired.add(name)
-            logger.warning(
-                "Sink %s disabled after %d consecutive transient failures: %s: %s",
-                name,
-                strikes,
-                type(exc).__name__,
-                exc,
-            )
+            if self._retire_cooldown is None:
+                logger.warning(
+                    "Sink %s disabled after %d consecutive transient failures: %s: %s",
+                    name,
+                    strikes,
+                    type(exc).__name__,
+                    exc,
+                )
+            else:
+                self._cooldowns[name] = time.monotonic() + self._retire_cooldown
+                logger.warning(
+                    "Sink %s paused for %.0fs after %d consecutive transient failures: %s: %s",
+                    name,
+                    self._retire_cooldown,
+                    strikes,
+                    type(exc).__name__,
+                    exc,
+                )
         else:
             sink.enabled = False
             self._retired.add(name)

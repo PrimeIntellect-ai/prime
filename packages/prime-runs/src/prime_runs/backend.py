@@ -352,8 +352,10 @@ class RftBackend:
         )
 
     def attach(self, run_id: str) -> RunHandle:
-        """A handle for a run the platform already created — a managed launch
-        that injected its id. No request: the first write proves access."""
+        """A handle for a run the platform already created — a launcher that
+        injected its id. No request: the first write proves access, and it
+        must be an *external* run (``POST /rft/external-runs``): the v1
+        monitoring endpoints answer 400 for a hosted run's id."""
         return RunHandle(id=run_id, url=self.url_for(run_id))
 
     def url_for(self, run_id: str) -> str:

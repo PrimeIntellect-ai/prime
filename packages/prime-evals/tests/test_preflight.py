@@ -411,6 +411,20 @@ def test_preflight_preserves_named_openapi_component_maps(container):
     assert prepare_upload(document).data == document
 
 
+@pytest.mark.parametrize("container", ["headers", "parameters"])
+def test_preflight_redacts_live_values_in_sensitive_openapi_definitions(container):
+    document = {
+        "openapi": "3.1.0",
+        "components": {
+            container: {"Authorization": {"value": "Bearer opaque-header-token-0123456789"}}
+        },
+    }
+
+    prepared = prepare_upload(document)
+
+    assert prepared.data["components"][container]["Authorization"]["value"] == REDACTED
+
+
 def test_openapi_marker_does_not_turn_event_properties_into_schema_definitions():
     secret = "opaque-event-password-0123456789"
     event = {

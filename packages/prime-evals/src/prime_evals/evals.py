@@ -621,26 +621,32 @@ class AsyncEvalsClient:
                 index, batch = next(pending_batches)
                 task = asyncio.create_task(upload_sample_batch_async(http_client, url, batch))
                 tasks[task] = index
-            while tasks:
-                completed = (await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED))[0]
-                for task in completed:
-                    index = tasks.pop(task)
-                    try:
-                        uploaded_count = task.result()
-                    except Exception as error:
-                        errors.append(f"Batch {index + 1}: {error}")
-                    else:
-                        total_samples_pushed += uploaded_count
-                        if progress_callback is not None:
-                            progress_callback(uploaded_count)
-                    try:
-                        next_index, next_batch = next(pending_batches)
-                    except StopIteration:
-                        continue
-                    next_task = asyncio.create_task(
-                        upload_sample_batch_async(http_client, url, next_batch)
-                    )
-                    tasks[next_task] = next_index
+            try:
+                while tasks:
+                    completed = (await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED))[0]
+                    for task in completed:
+                        index = tasks.pop(task)
+                        try:
+                            uploaded_count = task.result()
+                        except Exception as error:
+                            errors.append(f"Batch {index + 1}: {error}")
+                        else:
+                            total_samples_pushed += uploaded_count
+                            if progress_callback is not None:
+                                progress_callback(uploaded_count)
+                        try:
+                            next_index, next_batch = next(pending_batches)
+                        except StopIteration:
+                            continue
+                        next_task = asyncio.create_task(
+                            upload_sample_batch_async(http_client, url, next_batch)
+                        )
+                        tasks[next_task] = next_index
+            finally:
+                for task in tasks:
+                    task.cancel()
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
         if errors:
             raise EvalsAPIError(f"Failed to push samples: {'; '.join(errors)}")
         return {"samples_pushed": total_samples_pushed, "samples_skipped": 0}

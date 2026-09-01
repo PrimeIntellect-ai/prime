@@ -61,7 +61,7 @@ SENSITIVE_FIELDS = {
     "signature",
     "token",
 }
-SCHEMA_VALUES = {"const", "default", "enum", "example", "examples"}
+SCHEMA_VALUES = {"const", "default", "enum", "example", "examples", "value", "values"}
 SCHEMA_MARKERS = {
     "$defs",
     "$ref",
@@ -812,9 +812,9 @@ def prepare_jsonl_upload(
     try:
         with source.open("rb") as input_file:
             descriptor = os.open(snapshot, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            snapshot_started = True
             with os.fdopen(descriptor, "wb") as output_file:
-                os.fchmod(output_file.fileno(), 0o600)
-                snapshot_started = True
+                os.chmod(snapshot, 0o600)
                 for number, raw in enumerate(input_file, 1):
                     output_file.write(raw)
                     if not raw.isspace():
@@ -849,7 +849,7 @@ def prepare_jsonl_upload(
                 if value.report.has_findings and output_file is None:
                     descriptor = os.open(redacted, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
                     output_file = stack.enter_context(os.fdopen(descriptor, "wb"))
-                    os.fchmod(output_file.fileno(), 0o600)
+                    os.chmod(redacted, 0o600)
                     with snapshot.open("rb") as prefix:
                         output_file.write(prefix.read(offset))
                 if output_file:

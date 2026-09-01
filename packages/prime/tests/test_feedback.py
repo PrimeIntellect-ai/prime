@@ -30,10 +30,11 @@ def capture_feedback_post(monkeypatch: pytest.MonkeyPatch) -> Dict[str, Any]:
 
 
 def test_feedback_submits_general_without_run_id(
-    capture_feedback_post: Dict[str, Any],
+    capture_feedback_post: Dict[str, Any], keys: Any
 ) -> None:
-    # 3 = general, blank run id, message on final prompt
-    result = runner.invoke(app, ["feedback"], input="3\n\nThe CLI is great\n", env=TEST_ENV)
+    # move down to general (bug, feature, general); blank run id; then the message
+    keys.send(keys.DOWN + keys.DOWN + keys.ENTER).send(keys.ENTER).text("The CLI is great")
+    result = runner.invoke(app, ["feedback"], env=TEST_ENV)
 
     assert result.exit_code == 0, result.output
     assert "Feedback submitted" in result.output
@@ -45,15 +46,10 @@ def test_feedback_submits_general_without_run_id(
     assert payload["cli_version"]
 
 
-def test_feedback_submits_bug_with_run_id(
-    capture_feedback_post: Dict[str, Any],
-) -> None:
-    result = runner.invoke(
-        app,
-        ["feedback"],
-        input="1\nrun_abc123\nTraining crashed on step 42\n",
-        env=TEST_ENV,
-    )
+def test_feedback_submits_bug_with_run_id(capture_feedback_post: Dict[str, Any], keys: Any) -> None:
+    # bug is the first choice, then run id, then message
+    keys.send(keys.ENTER).text("run_abc123").text("Training crashed on step 42")
+    result = runner.invoke(app, ["feedback"], env=TEST_ENV)
 
     assert result.exit_code == 0, result.output
     payload = capture_feedback_post["json"]
@@ -62,18 +58,12 @@ def test_feedback_submits_bug_with_run_id(
     assert payload["message"] == "Training crashed on step 42"
 
 
-def test_feedback_rejects_empty_message(
-    capture_feedback_post: Dict[str, Any],
-) -> None:
-    # category general, no run id, empty message once, then real message
-    result = runner.invoke(
-        app,
-        ["feedback"],
-        input="3\n\n\nActually here is my feedback\n",
-        env=TEST_ENV,
+def test_feedback_rejects_empty_message(capture_feedback_post: Dict[str, Any], keys: Any) -> None:
+    # general, no run id, one empty message (re-prompted), then the real one
+    keys.send(keys.DOWN + keys.DOWN + keys.ENTER).send(keys.ENTER).send(keys.ENTER).text(
+        "Actually here is my feedback"
     )
+    result = runner.invoke(app, ["feedback"], env=TEST_ENV)
 
     assert result.exit_code == 0, result.output
-    # Two '> ' prompts prove the first empty attempt was re-prompted.
-    assert result.output.count("> ") >= 2
     assert capture_feedback_post["json"]["message"] == "Actually here is my feedback"

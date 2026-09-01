@@ -205,32 +205,26 @@ def test_lab_setup_prompts_for_agent_when_interactive(monkeypatch: Any) -> None:
         def isatty(self) -> bool:
             return True
 
-    answers = iter(("droid", "y", "amp-code,claude-code"))
     monkeypatch.setattr(lab_setup.sys, "stdin", FakeStdin())
-    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+    monkeypatch.setattr(
+        lab_setup, "select_agents", lambda _menu, _default_index: ("droid", "amp", "claude")
+    )
 
     options = parse_lab_setup_args([])
 
     assert options.agents == ("droid", "amp", "claude")
 
 
-def test_lab_setup_interactive_agent_prompt_retries_invalid_input(
-    monkeypatch: Any,
-    capsys: Any,
-) -> None:
+def test_lab_setup_interactive_agent_selection_can_be_cancelled(monkeypatch: Any) -> None:
     class FakeStdin:
         def isatty(self) -> bool:
             return True
 
-    answers = iter(("codx", "droid", "y", "amp-code,codx", "amp-code,claude-code"))
     monkeypatch.setattr(lab_setup.sys, "stdin", FakeStdin())
-    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+    monkeypatch.setattr(lab_setup, "select_agents", lambda _menu, _default_index: None)
 
-    options = parse_lab_setup_args([])
-
-    assert options.agents == ("droid", "amp", "claude")
-    output = capsys.readouterr().out
-    assert "Unsupported coding agent 'codx'" in output
+    with pytest.raises(ValueError, match="Agent selection was cancelled"):
+        parse_lab_setup_args([])
 
 
 def test_lab_setup_non_interactive_requires_explicit_agent(monkeypatch: Any) -> None:

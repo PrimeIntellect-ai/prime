@@ -183,6 +183,7 @@ class TestPodsCreate:
         mock_pod_availability: None,
         tmp_path: Any,
         monkeypatch: pytest.MonkeyPatch,
+        keys: Any,
     ) -> None:
         config_dir = tmp_path / ".prime"
         config_dir.mkdir()
@@ -205,6 +206,7 @@ class TestPodsCreate:
             )
         )
 
+        monkeypatch.setattr("prime_cli.core.Config.user_id", "user-1")
         monkeypatch.setattr(
             "prime_cli.commands.pods.fetch_team_members",
             lambda _client, _team_id: [
@@ -231,6 +233,7 @@ class TestPodsCreate:
 
         monkeypatch.setattr("prime_cli.commands.pods.PodsClient.create", mock_create)
 
+        keys.check([1])  # index 0 is "Everyone"; check the single other member
         result = runner.invoke(
             app,
             [
@@ -253,7 +256,6 @@ class TestPodsCreate:
                 "--add-members",
                 "--yes",
             ],
-            input="1\n",
             env=TEST_ENV,
         )
 

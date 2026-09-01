@@ -439,6 +439,44 @@ def test_preflight_preserves_named_json_schema_maps(container):
     assert prepare_upload(schema).data == schema
 
 
+def test_preflight_preserves_dependent_required_property_names():
+    schema = {
+        "schema": {
+            "type": "object",
+            "dependentRequired": {"password": ["username"]},
+        }
+    }
+
+    assert prepare_upload(schema).data == schema
+
+
+def test_preflight_preserves_openapi_auth_endpoint_descriptors():
+    document = {
+        "openapi": "3.1.0",
+        "components": {
+            "securitySchemes": {
+                "OAuth2": {
+                    "type": "oauth2",
+                    "flows": {
+                        "authorizationCode": {
+                            "authorizationUrl": "https://example.com/oauth/authorize",
+                            "tokenUrl": "https://example.com/oauth/token",
+                            "refreshUrl": "https://example.com/oauth/refresh",
+                            "scopes": {},
+                        }
+                    },
+                },
+                "OpenID": {
+                    "type": "openIdConnect",
+                    "openIdConnectUrl": "https://example.com/.well-known/openid-configuration",
+                },
+            }
+        },
+    }
+
+    assert prepare_upload(document).data == document
+
+
 @pytest.mark.parametrize(
     "container",
     [

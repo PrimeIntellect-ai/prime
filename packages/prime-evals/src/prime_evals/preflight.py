@@ -76,17 +76,25 @@ API_SPEC_VERSIONS = {
     "swagger": re.compile(r"^2\.0$"),
 }
 NAMED_DEFINITIONS = {
+    "dependent_required",
     "dependent_schemas",
     "defs",
     "definitions",
     "pattern_properties",
     "properties",
 }
+OPENAPI_DESCRIPTOR_FIELDS = {
+    "authorization_url",
+    "open_id_connect_url",
+    "refresh_url",
+    "token_url",
+}
 OPENAPI_NAMED_MAPS = {
     "callbacks",
     "content",
     "encoding",
     "examples",
+    "flows",
     "headers",
     "links",
     "parameters",
@@ -397,7 +405,9 @@ class SecretDiscovery:
                             )
                         self.discover(child, openapi=openapi_document)
                     continue
-                if is_sensitive(name):
+                if is_sensitive(name) and not (
+                    openapi_document and normalized in OPENAPI_DESCRIPTOR_FIELDS
+                ):
                     self.remember(
                         child,
                         "structured_secret",
@@ -667,6 +677,7 @@ class CredentialReducer:
                     and not (telemetry and isinstance(child, (int, float)))
                     and (
                         is_sensitive(str(key))
+                        and not (openapi_document and normalized in OPENAPI_DESCRIPTOR_FIELDS)
                         or named_header
                         and normalized in {"value", "values"}
                         or schema_secret

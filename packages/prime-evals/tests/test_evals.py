@@ -207,8 +207,12 @@ def test_push_samples_reports_progress_and_reuses_http_client(monkeypatch):
 
     result = client.push_samples(
         "eval-1",
-        [{"x": "a"}, {"x": "b"}, {"x": "c"}],
-        max_payload_bytes=30,
+        [
+            {"x": "password=abcdefgh1234"},
+            {"x": "secret_key=abcdefgh1234"},
+            {"x": "credentials=abcdefgh1234"},
+        ],
+        max_payload_bytes=50,
         max_workers=1,
         progress_callback=progress.append,
     )
@@ -216,6 +220,7 @@ def test_push_samples_reports_progress_and_reuses_http_client(monkeypatch):
     assert result == {"samples_pushed": 3, "samples_skipped": 0}
     assert progress == [1, 1, 1]
     assert len(posts) == 3
+    assert all("abcdefgh1234" not in json.dumps(post["json"]) for post in posts)
     assert len(created_clients) == 1
     assert posts[0]["headers"]["Authorization"] == "Bearer secret-token"
 
@@ -294,7 +299,7 @@ def test_api_client_context_manager():
 
 
 def test_push_evaluation_rejects_oversized_samples_before_creating_evaluation():
-    client = EvalsClient(SimpleNamespace())
+    client = EvalsClient(SimpleNamespace(api_key=None))
     request = CreateEvaluationRequest(name="test", environments=[{"name": "env"}])
 
     with pytest.raises(InvalidSampleError, match="sample 0 exceeds maximum payload size"):
@@ -302,21 +307,27 @@ def test_push_evaluation_rejects_oversized_samples_before_creating_evaluation():
 
 
 def test_push_evaluation_creates_uploads_and_finalizes():
-    client = EvalsClient(SimpleNamespace())
+    client = EvalsClient(SimpleNamespace(api_key=None))
     client.create_evaluation = Mock(return_value={"evaluation_id": "eval-1"})
     client.push_samples = Mock()
     client.finalize_evaluation = Mock()
     request = CreateEvaluationRequest(
-        name="test", environments=[{"name": "env"}], metrics={"reward": 1.0}
+        name="test",
+        environments=[{"name": "env"}],
+        metadata={"password": "opaque-password-0123456789"},
+        metrics={"reward": 1.0},
     )
-    samples = [{"value": "ok"}]
+    samples = [{"password": "opaque-sample-password-0123456789"}]
 
     assert client.push_evaluation(request, samples) == "eval-1"
-    client.create_evaluation.assert_called_once_with(**request.model_dump())
+    assert client.create_evaluation.call_args.kwargs["metadata"] == {"password": "[REDACTED]"}
     client.push_samples.assert_called_once_with(
-        "eval-1", samples, max_payload_bytes=25 * 1024 * 1024
+        "eval-1",
+        [{"password": "[REDACTED]"}],
+        max_payload_bytes=25 * 1024 * 1024,
     )
     client.finalize_evaluation.assert_called_once_with("eval-1", metrics={"reward": 1.0})
+    assert request.metadata == {"password": "opaque-password-0123456789"}
 
 
 def test_evaluation_model_minimal():

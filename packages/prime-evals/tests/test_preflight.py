@@ -105,6 +105,7 @@ def test_preflight_catches_assignments_flags_urls_webhooks_and_private_keys():
         "TOKEN=abcdefgh1234",
         "SECRET_KEY=abcdefgh1234",
         "secret_key=abcdefgh1234",
+        "credentials=abcdefgh1234",
         "api_token=abcdefghijklmnop",
         "--token 123456789abc",
         'password="abcd efgh"',
@@ -460,6 +461,17 @@ def test_preflight_preserves_numeric_metric_and_reward_names():
     assert prepared.data["metrics"] == {"token": 1.0, "secret": 2}
     assert prepared.data["rewards"] == {"api_key": 0.5}
     assert prepared.data["token"] == REDACTED
+
+
+def test_preflight_preserves_authentication_descriptors():
+    descriptors = {
+        "auth_type": "oauth2",
+        "token_type": "Bearer",
+        "authentication_method": "client_credentials",
+        "authorization_scheme": "Bearer",
+    }
+
+    assert prepare_upload(descriptors).data == descriptors
 
 
 def test_preflight_uses_named_secret_sources_and_fingerprints():

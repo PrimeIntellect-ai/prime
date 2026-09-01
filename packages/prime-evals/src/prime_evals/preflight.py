@@ -30,6 +30,7 @@ SECRET_ENV = re.compile(
 )
 REFERENCE_SUFFIXES = ("_env", "_env_var", "_file", "_name", "_path", "_var", "_variable")
 TELEMETRY_SUFFIXES = ("_count", "_counts", "_usage")
+DESCRIPTOR_SUFFIXES = ("_method", "_scheme", "_type")
 SENSITIVE_FIELDS = {
     "access_key",
     "access_key_id",
@@ -175,7 +176,7 @@ PATTERNS = (
             r"(?:x-api-key|api[_ -]?(?:key|token)|account[_ -]?key|"
             r"access[_ -]?token|refresh[_ -]?token|auth[_ -]?token|session[_ -]?token|"
             r"client[_ -]?secret|secret[_ -]?access[_ -]?key|secret[_ -]?key|password|passwd|"
-            r"cookie|credential|private[_ -]?key|sas[_ -]?token|signature))\b"
+            r"cookie|credentials?|private[_ -]?key|sas[_ -]?token|signature))\b"
             r"\\?[\"']?\s*[:=]\s*|"
             r"\b(?:[A-Z][A-Z0-9_]*_)?(?:API_?KEY|API_?TOKEN|ACCESS_?TOKEN|"
             r"REFRESH_?TOKEN|AUTH_?TOKEN|SESSION_?TOKEN|TOKEN|CLIENT_?SECRET|"
@@ -196,7 +197,7 @@ PATTERNS = (
             r"access[_ -]?token|refresh[_ -]?token|auth[_ -]?token|client[_ -]?secret|"
             r"access[_ -]?key(?:[_ -]?id)?|"
             r"secret(?:[_ -]?(?:access[_ -]?)?key)?|"
-            r"password|passwd|cookie|private[_ -]?key|sas[_ -]?token|signature)\b"
+            r"password|passwd|cookie|credentials?|private[_ -]?key|sas[_ -]?token|signature)\b"
             r"\\?[\"']?\s*[:=]\s*|"
             r"\b(?:[A-Z][A-Z0-9_]*_)?(?:API_?KEY|ACCESS_?TOKEN|REFRESH_?TOKEN|"
             r"AUTH_?TOKEN|SESSION_?TOKEN|TOKEN|CLIENT_?SECRET|SECRET(?:_ACCESS_?KEY)?|"
@@ -294,7 +295,8 @@ def is_sensitive(name: str) -> bool:
     )
     names = (name, singular) if plural_secret else (name,)
     return not any(
-        candidate.endswith(REFERENCE_SUFFIXES + TELEMETRY_SUFFIXES) for candidate in names
+        candidate.endswith(REFERENCE_SUFFIXES + TELEMETRY_SUFFIXES + DESCRIPTOR_SUFFIXES)
+        for candidate in names
     ) and any(
         f"_{field}_" in f"_{candidate}_" or candidate.replace("_", "") == field.replace("_", "")
         for candidate in names
@@ -460,7 +462,7 @@ def secret_values(
         value
         for name, value in os.environ.items()
         if SECRET_ENV.search(name)
-        and not normalize(name).endswith(REFERENCE_SUFFIXES)
+        and not normalize(name).endswith(REFERENCE_SUFFIXES + DESCRIPTOR_SUFFIXES)
         and is_secret(value)
     ]
     candidates.extend(values)

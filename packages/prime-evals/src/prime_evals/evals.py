@@ -10,6 +10,7 @@ from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponen
 from .core import APIError, AsyncAPIClient
 from .exceptions import EvalsAPIError, InvalidEvaluationError, InvalidSampleError
 from .models import CreateEvaluationRequest
+from .preflight import prepare_upload, secret_values
 
 MAX_SAMPLES_PAYLOAD_BYTES = 25 * 1024 * 1024
 
@@ -298,6 +299,7 @@ class EvalsClient:
         if max_workers < 1:
             raise ValueError("max_workers must be at least 1")
 
+        samples = prepare_upload(samples, secret_values(self.client.api_key)).data
         batches = build_sample_batches(samples, max_payload_bytes)
         total_samples_pushed = 0
         errors = []
@@ -331,6 +333,12 @@ class EvalsClient:
         max_payload_bytes: int = MAX_SAMPLES_PAYLOAD_BYTES,
     ) -> str:
         """Create, populate, and finalize one evaluation."""
+        prepared = prepare_upload(
+            {"request": request.model_dump(mode="json"), "samples": samples},
+            secret_values(self.client.api_key),
+        ).data
+        request = CreateEvaluationRequest.model_validate(prepared["request"])
+        samples = prepared["samples"]
         build_sample_batches(samples, max_payload_bytes)
         response = self.create_evaluation(**request.model_dump())
         evaluation_id = response["evaluation_id"]
@@ -599,6 +607,7 @@ class AsyncEvalsClient:
         if max_concurrent < 1:
             raise ValueError("max_concurrent must be at least 1")
 
+        samples = prepare_upload(samples, secret_values(self.client.api_key)).data
         batches = build_sample_batches(samples, max_payload_bytes)
         headers = samples_upload_headers(self.client.api_key)
         url = f"{self.client.base_url}/api/v1/evaluations/{evaluation_id}/samples"
@@ -643,6 +652,12 @@ class AsyncEvalsClient:
         max_payload_bytes: int = MAX_SAMPLES_PAYLOAD_BYTES,
     ) -> str:
         """Create, populate, and finalize one evaluation."""
+        prepared = prepare_upload(
+            {"request": request.model_dump(mode="json"), "samples": samples},
+            secret_values(self.client.api_key),
+        ).data
+        request = CreateEvaluationRequest.model_validate(prepared["request"])
+        samples = prepared["samples"]
         build_sample_batches(samples, max_payload_bytes)
         response = await self.create_evaluation(**request.model_dump())
         evaluation_id = response["evaluation_id"]

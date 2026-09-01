@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from prime_sandboxes import Config
 
 
@@ -70,3 +72,42 @@ def test_production_context_restores_builtin_scope(monkeypatch, tmp_path) -> Non
     assert config.base_url == Config.DEFAULT_BASE_URL
     assert config.team_id is None
     assert config.user_id == "production-user"
+
+
+@pytest.mark.parametrize("content", ["{", "[]", '"not-an-object"'])
+def test_broken_temporary_context_never_falls_back(monkeypatch, tmp_path, content) -> None:
+    _write_configs(tmp_path)
+    (tmp_path / ".prime" / "environments" / "dev.json").write_text(content)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PRIME_CONTEXT", "dev")
+
+    with pytest.raises(ValueError, match="context|JSON object"):
+        Config()
+
+
+def test_missing_temporary_context_never_falls_back(monkeypatch, tmp_path) -> None:
+    _write_configs(tmp_path)
+    (tmp_path / ".prime" / "environments" / "dev.json").unlink()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PRIME_CONTEXT", "dev")
+
+    with pytest.raises(ValueError, match="Context file not found"):
+        Config()
+
+
+def test_unreadable_temporary_context_never_falls_back(monkeypatch, tmp_path) -> None:
+    _write_configs(tmp_path)
+    environment_file = tmp_path / ".prime" / "environments" / "dev.json"
+    original_read_text = type(environment_file).read_text
+
+    def fail_for_context(path, *args, **kwargs):
+        if path == environment_file:
+            raise PermissionError("permission denied")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(type(environment_file), "read_text", fail_for_context)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PRIME_CONTEXT", "dev")
+
+    with pytest.raises(ValueError, match="Failed to load context 'dev'"):
+        Config()

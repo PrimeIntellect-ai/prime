@@ -118,6 +118,27 @@ def test_config_loads_temporary_context(monkeypatch, tmp_path):
     assert config.user_id == "dev-user"
 
 
+@pytest.mark.parametrize("content", ["{", "[]", '"not-an-object"'])
+def test_config_rejects_broken_temporary_context(monkeypatch, tmp_path, content):
+    config_dir = tmp_path / ".prime"
+    environments_dir = config_dir / "environments"
+    environments_dir.mkdir(parents=True)
+    (config_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "api_key": "production-key",
+                "base_url": "https://api.production.example",
+            }
+        )
+    )
+    (environments_dir / "dev.json").write_text(content)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PRIME_CONTEXT", "dev")
+
+    with pytest.raises(ValueError, match="context|JSON object"):
+        Config()
+
+
 def test_config_bin_dir():
     """Test Config bin_dir property."""
     config = Config()

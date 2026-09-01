@@ -50,17 +50,18 @@ class Config:
             return
 
         if re.fullmatch(r"[a-zA-Z0-9_-]+", context) is None:
-            return
+            raise ValueError(f"Invalid context name: {context!r}")
 
         environment_file = self.environments_dir / f"{context}.json"
         if not environment_file.exists():
-            return
+            raise ValueError(f"Context file not found: {environment_file}")
         try:
             environment_config = json.loads(environment_file.read_text())
-        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
-            return
-        if isinstance(environment_config, dict):
-            self.config.update(environment_config)
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
+            raise ValueError(f"Failed to load context '{context}': {e}") from e
+        if not isinstance(environment_config, dict):
+            raise ValueError(f"Invalid context '{context}': expected a JSON object")
+        self.config.update(environment_config)
 
     @staticmethod
     def _strip_api_v1(url: str) -> str:

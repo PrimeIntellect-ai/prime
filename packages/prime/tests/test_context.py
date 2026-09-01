@@ -87,3 +87,57 @@ def test_whoami_does_not_cache_user_id_in_temporary_context(
     assert "fresh-user" in result.output
     assert json.loads(root_file.read_text()) == root_before
     assert json.loads(dev_file.read_text()) == dev_before
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        ("{", "Invalid JSON"),
+        ("[]", "expected a JSON object"),
+        ('"not-an-object"', "expected a JSON object"),
+    ],
+)
+def test_broken_context_aborts_before_command_execution(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    content: str,
+    expected: str,
+) -> None:
+    _, dev_file = _create_dev_context(monkeypatch, tmp_path)
+    dev_file.write_text(content)
+    monkeypatch.setattr(
+        "prime_cli.commands.sandbox.SandboxClient.list",
+        lambda *args, **kwargs: pytest.fail("sandbox command must not execute"),
+    )
+
+    result = runner.invoke(app, ["-c", "dev", "sandbox", "list"])
+
+    assert result.exit_code == 1, result.output
+    assert "Failed to load context 'dev'" in result.output
+    assert expected in result.output
+    assert os.getenv("PRIME_CONTEXT") is None
+
+
+def test_unreadable_context_aborts_before_command_execution(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _, dev_file = _create_dev_context(monkeypatch, tmp_path)
+    original_read_text = Path.read_text
+
+    def fail_for_context(path: Path, *args: Any, **kwargs: Any) -> str:
+        if path == dev_file:
+            raise PermissionError("permission denied")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fail_for_context)
+    monkeypatch.setattr(
+        "prime_cli.commands.sandbox.SandboxClient.list",
+        lambda *args, **kwargs: pytest.fail("sandbox command must not execute"),
+    )
+
+    result = runner.invoke(app, ["-c", "dev", "sandbox", "list"])
+
+    assert result.exit_code == 1, result.output
+    assert "Failed to load context 'dev'" in result.output
+    assert "Cannot read environment file dev.json" in result.output
+    assert os.getenv("PRIME_CONTEXT") is None

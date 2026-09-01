@@ -481,30 +481,39 @@ class AsyncEvalsClient:
         """
         Resolve a list of environments from various identifier formats to database IDs.
         """
-        resolved_environments = []
+        pending_environments = []
         for env in environments:
             if isinstance(env, str):
                 env = {"slug": env} if "/" in env else {"name": env}
 
             resolved_env = env.copy() if isinstance(env, dict) else {}
-            try:
-                if "slug" in resolved_env:
-                    slug = resolved_env.pop("slug")
-                    if "/" not in slug:
-                        continue
-                    owner_slug, name = slug.split("/", 1)
-                    resolved_env["id"] = await self._lookup_environment_by_slug(owner_slug, name)
-                elif "name" in resolved_env:
-                    resolved_env["id"] = await self._resolve_environment_id(
-                        resolved_env.pop("name")
-                    )
-                elif "id" in resolved_env:
-                    resolved_env["id"] = await self._lookup_environment_id(resolved_env["id"])
-                else:
+            if "slug" in resolved_env:
+                slug = resolved_env.pop("slug")
+                if "/" not in slug:
                     continue
-                resolved_environments.append(resolved_env)
-            except EvalsAPIError:
+                owner_slug, name = slug.split("/", 1)
+                lookup = self._lookup_environment_by_slug(owner_slug, name)
+            elif "name" in resolved_env:
+                lookup = self._resolve_environment_id(resolved_env.pop("name"))
+            elif "id" in resolved_env:
+                lookup = self._lookup_environment_id(resolved_env["id"])
+            else:
                 continue
+            pending_environments.append((resolved_env, lookup))
+
+        results = await asyncio.gather(
+            *(pending[1] for pending in pending_environments),
+            return_exceptions=True,
+        )
+        resolved_environments = []
+        for pending, result in zip(pending_environments, results):
+            if isinstance(result, EvalsAPIError):
+                continue
+            if isinstance(result, BaseException):
+                raise result
+            resolved_env = pending[0]
+            resolved_env["id"] = result
+            resolved_environments.append(resolved_env)
         return resolved_environments
 
     async def create_evaluation(
@@ -594,23 +603,38 @@ class AsyncEvalsClient:
         headers = samples_upload_headers(self.client.api_key)
         url = f"{self.client.base_url}/api/v1/evaluations/{evaluation_id}/samples"
         limits = httpx.Limits(max_connections=max_concurrent)
+        errors = []
+        total_samples_pushed = 0
         async with httpx.AsyncClient(headers=headers, timeout=300.0, limits=limits) as http_client:
-            results = await asyncio.gather(
-                *(upload_sample_batch_async(http_client, url, batch) for batch in batches),
-                return_exceptions=True,
-            )
-        errors = [
-            f"Batch {index + 1}: {result}"
-            for index, result in enumerate(results)
-            if isinstance(result, BaseException)
-        ]
+            pending_batches = iter(enumerate(batches))
+            tasks = {}
+            for slot in range(min(max_concurrent, len(batches))):
+                index, batch = next(pending_batches)
+                task = asyncio.create_task(upload_sample_batch_async(http_client, url, batch))
+                tasks[task] = index
+            while tasks:
+                completed = (await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED))[0]
+                for task in completed:
+                    index = tasks.pop(task)
+                    try:
+                        uploaded_count = task.result()
+                    except Exception as error:
+                        errors.append(f"Batch {index + 1}: {error}")
+                    else:
+                        total_samples_pushed += uploaded_count
+                        if progress_callback is not None:
+                            progress_callback(uploaded_count)
+                    try:
+                        next_index, next_batch = next(pending_batches)
+                    except StopIteration:
+                        continue
+                    next_task = asyncio.create_task(
+                        upload_sample_batch_async(http_client, url, next_batch)
+                    )
+                    tasks[next_task] = next_index
         if errors:
             raise EvalsAPIError(f"Failed to push samples: {'; '.join(errors)}")
-        uploaded = [result for result in results if isinstance(result, int)]
-        if progress_callback is not None:
-            for count in uploaded:
-                progress_callback(count)
-        return {"samples_pushed": sum(uploaded), "samples_skipped": 0}
+        return {"samples_pushed": total_samples_pushed, "samples_skipped": 0}
 
     async def push_evaluation(
         self,

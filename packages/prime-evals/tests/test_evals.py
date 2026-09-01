@@ -223,6 +223,8 @@ def test_push_samples_reports_progress_and_reuses_http_client(monkeypatch):
 def test_async_push_samples_reports_progress_and_reuses_http_client(monkeypatch):
     posts = []
     created_clients = []
+    progress = []
+    activity = {"current": 0, "maximum": 0, "started": 0}
 
     class FakeResponse:
         def raise_for_status(self):
@@ -240,6 +242,12 @@ def test_async_push_samples_reports_progress_and_reuses_http_client(monkeypatch)
             return None
 
         async def post(self, url, content):
+            activity["current"] += 1
+            activity["maximum"] = max(activity["maximum"], activity["current"])
+            activity["started"] += 1
+            if activity["started"] == 2:
+                assert progress == [1]
+            await asyncio.sleep(0)
             posts.append(
                 {
                     "url": url,
@@ -247,6 +255,7 @@ def test_async_push_samples_reports_progress_and_reuses_http_client(monkeypatch)
                     "headers": self.kwargs["headers"],
                 }
             )
+            activity["current"] -= 1
             return FakeResponse()
 
     monkeypatch.setattr("prime_evals.evals.httpx.AsyncClient", FakeAsyncHttpClient)
@@ -255,8 +264,6 @@ def test_async_push_samples_reports_progress_and_reuses_http_client(monkeypatch)
         base_url="https://api.example",
         api_key="secret-token",
     )
-    progress = []
-
     result = asyncio.run(
         client.push_samples(
             "eval-1",
@@ -271,6 +278,7 @@ def test_async_push_samples_reports_progress_and_reuses_http_client(monkeypatch)
     assert progress == [1, 1]
     assert len(posts) == 2
     assert len(created_clients) == 1
+    assert activity["maximum"] == 1
     assert posts[0]["headers"]["Authorization"] == "Bearer secret-token"
 
 

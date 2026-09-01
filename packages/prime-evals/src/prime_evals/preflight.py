@@ -809,7 +809,9 @@ def prepare_jsonl_upload(
     validated = False
     try:
         with source.open("rb") as input_file:
-            with snapshot.open("wb") as output_file:
+            descriptor = os.open(snapshot, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(descriptor, "wb") as output_file:
+                os.fchmod(output_file.fileno(), 0o600)
                 snapshot_started = True
                 for number, raw in enumerate(input_file, 1):
                     output_file.write(raw)
@@ -843,13 +845,14 @@ def prepare_jsonl_upload(
                 value = reducer.prepare(load_line(raw.decode(), number))
                 file_findings.update(prefix_findings(value.report, f"$.lines[{number}]"))
                 if value.report.has_findings and output_file is None:
-                    output_file = stack.enter_context(redacted.open("wb"))
+                    descriptor = os.open(redacted, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                    output_file = stack.enter_context(os.fdopen(descriptor, "wb"))
+                    os.fchmod(output_file.fileno(), 0o600)
                     with snapshot.open("rb") as prefix:
                         output_file.write(prefix.read(offset))
                 if output_file:
                     output_file.write(
-                        json.dumps(value.data, ensure_ascii=False, separators=(",", ":")).encode()
-                        + b"\n"
+                        json.dumps(value.data, separators=(",", ":")).encode() + b"\n"
                         if value.report.has_findings
                         else raw
                     )

@@ -602,6 +602,7 @@ def test_jsonl_preflight_uses_secrets_discovered_in_later_lines(tmp_path):
     assert source.read_text() == original
     assert prepared.path.name.startswith("redacted-")
     assert prepared.path.name.endswith("-safe.jsonl")
+    assert prepared.path.stat().st_mode & 0o777 == 0o600
     assert prepared.context == {"password": REDACTED, "source": "local-eval"}
     assert secret not in prepared.path.read_text()
     records = [json.loads(line) for line in prepared.path.read_text().splitlines()]
@@ -614,12 +615,26 @@ def test_jsonl_preflight_uploads_an_exact_snapshot_when_clean(tmp_path):
     source = tmp_path / "traces.jsonl"
     destination = tmp_path / "safe.jsonl"
     source.write_bytes(b'{ "answer": "reference" }\n\n')
+    destination.write_text("replace me")
+    destination.chmod(0o644)
 
     prepared = prepare_jsonl_upload(source, destination)
 
     assert prepared.path == destination
     assert destination.read_bytes() == source.read_bytes()
+    assert destination.stat().st_mode & 0o777 == 0o600
     assert prepared.report.findings == ()
+
+
+def test_jsonl_preflight_preserves_escaped_surrogates_on_redacted_lines(tmp_path):
+    source = tmp_path / "traces.jsonl"
+    destination = tmp_path / "safe.jsonl"
+    source.write_text('{"completion":"\\ud800","password":"opaque-password-0123456789"}\n')
+
+    prepared = prepare_jsonl_upload(source, destination)
+
+    assert b"\\ud800" in prepared.path.read_bytes()
+    assert json.loads(prepared.path.read_text())["completion"] == "\ud800"
 
 
 def test_jsonl_preflight_rejects_output_paths_that_alias_the_source(tmp_path):

@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 import uuid
+from collections.abc import AsyncIterator
 from concurrent.futures import Future
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -88,13 +89,18 @@ from .models import (
 )
 from .process import AsyncSandboxProcess
 from .rpc_command_session import (
+    COMMAND_SESSION_CONNECT_RPC_METHOD,
+    COMMAND_SESSION_LIST_RPC_METHOD,
     COMMAND_SESSION_SEND_INPUT_RPC_METHOD,
     COMMAND_SESSION_SEND_SIGNAL_RPC_METHOD,
     COMMAND_SESSION_START_RPC_METHOD,
+    build_command_session_connect_request,
+    build_command_session_list_request,
     build_command_session_send_input_request,
     build_command_session_send_signal_request,
     build_command_session_start_request,
     collect_command_session_start_event,
+    find_command_session_pid,
 )
 
 # Connection-level errors: request never reached the server, so retry is safe
@@ -114,6 +120,12 @@ GATEWAY_CONNECTION_RETRYABLE_EXCEPTIONS = (
 _LIVE_PROCESS_TIMEOUT_MS = 24 * 60 * 60 * 1000
 _PROCESS_INPUT_TIMEOUT_MS = 30_000
 _PROCESS_SIGNAL_TIMEOUT_MS = 10_000
+_PROCESS_DISCOVERY_TIMEOUT_MS = 10_000
+_LIVE_PROCESS_TCP_KEEPALIVE_SECONDS = 15.0
+_LIVE_PROCESS_POOL_IDLE_TIMEOUT_SECONDS = 300.0
+_BACKGROUND_JOB_LAUNCH_ATTEMPTS = 3
+_BACKGROUND_JOB_LAUNCH_BACKOFF_SECONDS = 0.5
+_BACKGROUND_JOB_LAUNCH_TIMEOUT_SECONDS = 30
 
 _RequestMessage = TypeVar("_RequestMessage", bound=Message)
 _ResponseMessage = TypeVar("_ResponseMessage", bound=Message)
@@ -128,6 +140,156 @@ class _BatchItemError:
     error: Exception
 
 
+class _BatcherClosedError(RuntimeError):
+    """Raised when a lookup is interrupted by client shutdown."""
+
+
+class _SyncPollLease:
+    def __init__(self, registry: "_SyncPollLeaseRegistry", sandbox_id: str) -> None:
+        self._registry = registry
+        self.sandbox_id = sandbox_id
+        self._released = False
+
+    def release(self) -> None:
+        if not self._released:
+            self._released = True
+            self._registry._release(self.sandbox_id)
+
+
+class _SyncPollLeaseRegistry:
+    """Coordinate sync polls with sandbox deletion across caller threads."""
+
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self._active: Dict[str, int] = {}
+        self._draining: set[str] = set()
+
+    def acquire(self, sandbox_id: str) -> _SyncPollLease:
+        return self.acquire_many([sandbox_id])[0]
+
+    def acquire_many(self, sandbox_ids: List[str]) -> List[_SyncPollLease]:
+        scopes = list(dict.fromkeys(sandbox_ids))
+        with self._condition:
+            blocked = next((scope for scope in scopes if scope in self._draining), None)
+            if blocked is not None:
+                raise APIError(f"Sandbox {blocked} is being deleted")
+            for scope in scopes:
+                self._active[scope] = self._active.get(scope, 0) + 1
+        return [_SyncPollLease(self, scope) for scope in scopes]
+
+    def _release(self, sandbox_id: str) -> None:
+        with self._condition:
+            remaining = self._active[sandbox_id] - 1
+            if remaining:
+                self._active[sandbox_id] = remaining
+            else:
+                del self._active[sandbox_id]
+            self._condition.notify_all()
+
+    def begin_drain(self, sandbox_ids: List[str]) -> List[str]:
+        scopes = list(dict.fromkeys(sandbox_ids))
+        with self._condition:
+            while any(scope in self._draining for scope in scopes):
+                self._condition.wait()
+            self._draining.update(scopes)
+            try:
+                while any(self._active.get(scope, 0) for scope in scopes):
+                    self._condition.wait()
+            except BaseException:
+                self._draining.difference_update(scopes)
+                self._condition.notify_all()
+                raise
+        return scopes
+
+    def end_drain(self, sandbox_ids: List[str]) -> None:
+        with self._condition:
+            self._draining.difference_update(sandbox_ids)
+            self._condition.notify_all()
+
+
+class _AsyncPollLease:
+    def __init__(self, registry: "_AsyncPollLeaseRegistry", sandbox_id: str) -> None:
+        self._registry = registry
+        self.sandbox_id = sandbox_id
+        self._released = False
+
+    def release(self) -> None:
+        if not self._released:
+            self._released = True
+            self._registry._release(self.sandbox_id)
+
+
+class _AsyncPollLeaseRegistry:
+    """Coordinate async polls, deletion, and client shutdown on one event loop."""
+
+    def __init__(self) -> None:
+        self._active: Dict[str, int] = {}
+        self._draining: set[str] = set()
+        self._closing = False
+        self._changed = asyncio.Event()
+
+    def acquire(self, sandbox_id: str) -> _AsyncPollLease:
+        return self.acquire_many([sandbox_id])[0]
+
+    def acquire_many(self, sandbox_ids: List[str]) -> List[_AsyncPollLease]:
+        scopes = list(dict.fromkeys(sandbox_ids))
+        if self._closing:
+            raise _BatcherClosedError("Sandbox client is closing")
+        blocked = next((scope for scope in scopes if scope in self._draining), None)
+        if blocked is not None:
+            raise APIError(f"Sandbox {blocked} is being deleted")
+        for scope in scopes:
+            self._active[scope] = self._active.get(scope, 0) + 1
+        return [_AsyncPollLease(self, scope) for scope in scopes]
+
+    def _notify_changed(self) -> None:
+        changed = self._changed
+        self._changed = asyncio.Event()
+        changed.set()
+
+    def _release(self, sandbox_id: str) -> None:
+        remaining = self._active[sandbox_id] - 1
+        if remaining:
+            self._active[sandbox_id] = remaining
+        else:
+            del self._active[sandbox_id]
+        self._notify_changed()
+
+    async def begin_drain(self, sandbox_ids: List[str]) -> List[str]:
+        scopes = list(dict.fromkeys(sandbox_ids))
+        if self._closing:
+            raise _BatcherClosedError("Sandbox client is closing")
+        while any(scope in self._draining for scope in scopes):
+            changed = self._changed
+            await changed.wait()
+            if self._closing:
+                raise _BatcherClosedError("Sandbox client is closing")
+        self._draining.update(scopes)
+        self._notify_changed()
+        try:
+            while any(self._active.get(scope, 0) for scope in scopes):
+                changed = self._changed
+                await changed.wait()
+        except BaseException:
+            self._draining.difference_update(scopes)
+            self._notify_changed()
+            raise
+        return scopes
+
+    def end_drain(self, sandbox_ids: List[str]) -> None:
+        self._draining.difference_update(sandbox_ids)
+        self._notify_changed()
+
+    def begin_close(self) -> None:
+        self._closing = True
+        self._notify_changed()
+
+    async def wait_for_idle(self) -> None:
+        while self._active:
+            changed = self._changed
+            await changed.wait()
+
+
 @functools.lru_cache(maxsize=1)
 def _ca_bundle() -> bytes:
     with open(certifi.where(), "rb") as ca_file:
@@ -137,7 +299,11 @@ def _ca_bundle() -> bytes:
 def _live_process_transport() -> HTTPTransport:
     # A bare HTTPTransport carries no trust roots on some pyqwest versions
     # (only the default singleton does), so pass certifi's bundle explicitly.
-    return HTTPTransport(tls_ca_cert=_ca_bundle())
+    return HTTPTransport(
+        tls_ca_cert=_ca_bundle(),
+        tcp_keepalive_interval=_LIVE_PROCESS_TCP_KEEPALIVE_SECONDS,
+        pool_idle_timeout=_LIVE_PROCESS_POOL_IDLE_TIMEOUT_SECONDS,
+    )
 
 
 def _network_update_payload(
@@ -219,27 +385,47 @@ CREATION_POLL_JITTER = 0.25
 _LEGACY_FAST_POLLS = 5
 
 
+@dataclass
+class _SyncBatchEntry(Generic[_BatchKey, _BatchValue]):
+    key: _BatchKey
+    lease: _SyncPollLease
+    waiters: List[Future[_BatchValue]]
+
+
 class _SyncRequestBatcher(Generic[_BatchKey, _BatchValue]):
     """Coalesce concurrent sync lookups into bounded calls."""
 
     def __init__(
         self,
         fetch: Callable[[List[_BatchKey]], Dict[_BatchKey, _BatchValue | _BatchItemError]],
+        sandbox_id_for_key: Callable[[_BatchKey], str],
+        leases: _SyncPollLeaseRegistry,
     ) -> None:
         self._fetch = fetch
+        self._sandbox_id_for_key = sandbox_id_for_key
+        self._leases = leases
         self._lock = threading.Lock()
-        self._pending: Dict[_BatchKey, List[Future[_BatchValue]]] = {}
+        self._pending: Dict[_BatchKey, _SyncBatchEntry[_BatchKey, _BatchValue]] = {}
         self._dispatching = False
 
     def get(self, key: _BatchKey) -> _BatchValue:
         """Return one result, sharing a batch with concurrent callers."""
         future: Future[_BatchValue] = Future()
+        lease = self._leases.acquire(self._sandbox_id_for_key(key))
+        redundant_lease: Optional[_SyncPollLease] = None
         with self._lock:
-            self._pending.setdefault(key, []).append(future)
+            entry = self._pending.get(key)
+            if entry is None:
+                self._pending[key] = _SyncBatchEntry(key, lease, [future])
+            else:
+                entry.waiters.append(future)
+                redundant_lease = lease
             leader = not self._dispatching
             if leader:
                 self._dispatching = True
 
+        if redundant_lease is not None:
+            redundant_lease.release()
         if leader:
             time.sleep(STATUS_BATCH_WINDOW_SECONDS)
             self._dispatch()
@@ -254,29 +440,64 @@ class _SyncRequestBatcher(Generic[_BatchKey, _BatchValue]):
                 if not keys:
                     self._dispatching = False
                     return
-                waiters = {key: self._pending.pop(key) for key in keys}
+                entries = {key: self._pending.pop(key) for key in keys}
 
             try:
                 results = self._fetch(keys)
-            except Exception as exc:
-                for key_waiters in waiters.values():
-                    for waiter in key_waiters:
-                        waiter.set_exception(exc)
+            except BaseException as exc:
+                for entry in entries.values():
+                    for waiter in entry.waiters:
+                        if not waiter.done():
+                            waiter.set_exception(exc)
+                    entry.lease.release()
+                if not isinstance(exc, Exception):
+                    raise
                 continue
 
-            for key, key_waiters in waiters.items():
+            for key, entry in entries.items():
                 if key not in results:
                     exc = APIError(f"Batch status response omitted {key!r}")
-                    for waiter in key_waiters:
-                        waiter.set_exception(exc)
+                    for waiter in entry.waiters:
+                        if not waiter.done():
+                            waiter.set_exception(exc)
+                    entry.lease.release()
                     continue
                 result = results[key]
                 if isinstance(result, _BatchItemError):
-                    for waiter in key_waiters:
-                        waiter.set_exception(result.error)
+                    for waiter in entry.waiters:
+                        if not waiter.done():
+                            waiter.set_exception(result.error)
+                    entry.lease.release()
                     continue
-                for waiter in key_waiters:
-                    waiter.set_result(result)
+                for waiter in entry.waiters:
+                    if not waiter.done():
+                        waiter.set_result(result)
+                entry.lease.release()
+
+
+class _AsyncBatchEntry(Generic[_BatchKey, _BatchValue]):
+    def __init__(
+        self,
+        key: _BatchKey,
+        lease: _AsyncPollLease,
+        waiter: asyncio.Future[_BatchValue],
+    ) -> None:
+        self.key = key
+        self.lease = lease
+        self.waiters = [waiter]
+        self.batch: Optional[_AsyncBatch[_BatchKey, _BatchValue]] = None
+
+
+class _AsyncBatch(Generic[_BatchKey, _BatchValue]):
+    def __init__(self, entries: List[_AsyncBatchEntry[_BatchKey, _BatchValue]]) -> None:
+        self.entries = entries
+        self.fetch_task: Optional[asyncio.Task[Dict[_BatchKey, _BatchValue | _BatchItemError]]] = (
+            None
+        )
+        self.done = asyncio.Event()
+
+    def has_waiters(self) -> bool:
+        return any(entry.waiters for entry in self.entries)
 
 
 class _AsyncRequestBatcher(Generic[_BatchKey, _BatchValue]):
@@ -288,55 +509,228 @@ class _AsyncRequestBatcher(Generic[_BatchKey, _BatchValue]):
             [List[_BatchKey]],
             Awaitable[Dict[_BatchKey, _BatchValue | _BatchItemError]],
         ],
+        sandbox_id_for_key: Callable[[_BatchKey], str],
+        leases: _AsyncPollLeaseRegistry,
     ) -> None:
         self._fetch = fetch
-        self._pending: Dict[_BatchKey, List[asyncio.Future[_BatchValue]]] = {}
+        self._sandbox_id_for_key = sandbox_id_for_key
+        self._leases = leases
+        self._pending: Dict[_BatchKey, _AsyncBatchEntry[_BatchKey, _BatchValue]] = {}
         self._dispatch_task: Optional[asyncio.Task[None]] = None
+        self._active_batch: Optional[_AsyncBatch[_BatchKey, _BatchValue]] = None
+        self._closed = False
+        self._close_task: Optional[asyncio.Task[None]] = None
+
+    def _fail_pending(self, error: Exception) -> None:
+        pending = list(self._pending.values())
+        self._pending.clear()
+        for entry in pending:
+            for waiter in entry.waiters:
+                if not waiter.done():
+                    waiter.set_exception(error)
+            entry.waiters.clear()
+            entry.lease.release()
+
+    def _start_dispatch(self) -> None:
+        task = asyncio.create_task(self._dispatch())
+        self._dispatch_task = task
+        task.add_done_callback(self._dispatch_done)
+
+    def _dispatch_done(self, task: asyncio.Task[None]) -> None:
+        # A task cancelled before its coroutine starts never executes its
+        # ``finally`` block, so settle pending work from the completion hook.
+        if self._dispatch_task is not task:
+            return
+        self._dispatch_task = None
+        if task.cancelled():
+            self._fail_pending(
+                _BatcherClosedError("Request batcher is closed")
+                if self._closed
+                else RuntimeError("Request batch dispatch cancelled")
+            )
+            return
+        error = task.exception()
+        if error is not None:
+            self._fail_pending(
+                error if isinstance(error, Exception) else RuntimeError("Request batch aborted")
+            )
+            return
+        if self._pending and not self._closed:
+            self._start_dispatch()
 
     async def get(self, key: _BatchKey) -> _BatchValue:
         """Return one result, sharing a batch with concurrent callers."""
+        if self._closed:
+            raise _BatcherClosedError("Request batcher is closed")
         future = asyncio.get_running_loop().create_future()
-        self._pending.setdefault(key, []).append(future)
+        lease = self._leases.acquire(self._sandbox_id_for_key(key))
+        entry = self._pending.get(key)
+        if entry is None:
+            entry = _AsyncBatchEntry(key, lease, future)
+            self._pending[key] = entry
+        else:
+            entry.waiters.append(future)
+            lease.release()
         if self._dispatch_task is None:
-            self._dispatch_task = asyncio.create_task(self._dispatch())
-        return await future
+            self._start_dispatch()
+        try:
+            return await asyncio.shield(future)
+        except asyncio.CancelledError:
+            await self._cancel_waiter(entry, future)
+            raise
+
+    async def _cancel_waiter(
+        self,
+        entry: _AsyncBatchEntry[_BatchKey, _BatchValue],
+        future: asyncio.Future[_BatchValue],
+    ) -> None:
+        if future in entry.waiters:
+            entry.waiters.remove(future)
+        if not future.done():
+            future.cancel()
+
+        if entry.batch is None:
+            if not entry.waiters and self._pending.get(entry.key) is entry:
+                del self._pending[entry.key]
+                entry.lease.release()
+            return
+
+        batch = entry.batch
+        fetch_task = batch.fetch_task
+        if batch.has_waiters() or fetch_task is None or fetch_task.done():
+            return
+
+        fetch_task.cancel()
+        completion = asyncio.create_task(batch.done.wait())
+        while not completion.done():
+            try:
+                await asyncio.shield(completion)
+            except asyncio.CancelledError:
+                pass
+
+    def _finish_batch(
+        self,
+        batch: _AsyncBatch[_BatchKey, _BatchValue],
+        results: Optional[Dict[_BatchKey, _BatchValue | _BatchItemError]],
+        error: Optional[BaseException],
+    ) -> None:
+        for entry in batch.entries:
+            if error is not None:
+                for waiter in entry.waiters:
+                    if waiter.done():
+                        continue
+                    if isinstance(error, asyncio.CancelledError):
+                        if self._closed:
+                            waiter.set_exception(_BatcherClosedError("Request batcher is closed"))
+                        else:
+                            waiter.cancel()
+                    elif isinstance(error, Exception):
+                        waiter.set_exception(error)
+                    else:
+                        waiter.set_exception(RuntimeError("Request batch dispatch aborted"))
+            elif results is not None and entry.key not in results:
+                exc = APIError(f"Batch status response omitted {entry.key!r}")
+                for waiter in entry.waiters:
+                    if not waiter.done():
+                        waiter.set_exception(exc)
+            elif results is not None:
+                result = results[entry.key]
+                for waiter in entry.waiters:
+                    if waiter.done():
+                        continue
+                    if isinstance(result, _BatchItemError):
+                        waiter.set_exception(result.error)
+                    else:
+                        waiter.set_result(result)
+            entry.waiters.clear()
+            entry.lease.release()
+        batch.done.set()
 
     async def _dispatch(self) -> None:
         """Drain all currently pending lookups in bounded chunks."""
-        await asyncio.sleep(STATUS_BATCH_WINDOW_SECONDS)
         try:
-            while self._pending:
+            await asyncio.sleep(STATUS_BATCH_WINDOW_SECONDS)
+            while self._pending and not self._closed:
                 keys = list(self._pending)[:MAX_STATUS_BATCH_SIZE]
-                waiters = {key: self._pending.pop(key) for key in keys}
+                entries = [self._pending.pop(key) for key in keys]
+                batch = _AsyncBatch(entries)
+                self._active_batch = batch
+                for entry in entries:
+                    entry.batch = batch
+                batch.fetch_task = asyncio.create_task(self._fetch(keys))
+                results: Optional[Dict[_BatchKey, _BatchValue | _BatchItemError]] = None
+                error: Optional[BaseException] = None
+                dispatch_cancelled = False
                 try:
-                    results = await self._fetch(keys)
-                except Exception as exc:
-                    for key_waiters in waiters.values():
-                        for waiter in key_waiters:
-                            if not waiter.done():
-                                waiter.set_exception(exc)
-                    continue
+                    results = await batch.fetch_task
+                except BaseException as exc:
+                    error = exc
+                    task = asyncio.current_task()
+                    dispatch_cancelled = bool(task is not None and task.cancelling())
+                finally:
+                    self._finish_batch(batch, results, error)
+                    self._active_batch = None
 
-                for key, key_waiters in waiters.items():
-                    if key not in results:
-                        exc = APIError(f"Batch status response omitted {key!r}")
-                        for waiter in key_waiters:
-                            if not waiter.done():
-                                waiter.set_exception(exc)
-                        continue
-                    result = results[key]
-                    if isinstance(result, _BatchItemError):
-                        for waiter in key_waiters:
-                            if not waiter.done():
-                                waiter.set_exception(result.error)
-                        continue
-                    for waiter in key_waiters:
-                        if not waiter.done():
-                            waiter.set_result(result)
+                if dispatch_cancelled:
+                    raise asyncio.CancelledError
+                if error is not None and not isinstance(error, (Exception, asyncio.CancelledError)):
+                    raise error
         finally:
+            task = asyncio.current_task()
+            dispatch_cancelled = bool(task is not None and task.cancelling())
+            if dispatch_cancelled:
+                self._fail_pending(
+                    _BatcherClosedError("Request batcher is closed")
+                    if self._closed
+                    else RuntimeError("Request batch dispatch cancelled")
+                )
             self._dispatch_task = None
-            if self._pending:
-                self._dispatch_task = asyncio.create_task(self._dispatch())
+            if self._pending and not self._closed and not dispatch_cancelled:
+                self._start_dispatch()
+
+    async def _close(self) -> None:
+        self._closed = True
+        pending = list(self._pending.values())
+        self._pending.clear()
+        for entry in pending:
+            for waiter in entry.waiters:
+                if not waiter.done():
+                    waiter.set_exception(_BatcherClosedError("Request batcher is closed"))
+            entry.waiters.clear()
+            entry.lease.release()
+
+        batch = self._active_batch
+        if batch is not None:
+            for entry in batch.entries:
+                for waiter in entry.waiters:
+                    if not waiter.done():
+                        waiter.set_exception(_BatcherClosedError("Request batcher is closed"))
+
+        dispatch_task = self._dispatch_task
+        if dispatch_task is not None and not dispatch_task.done():
+            dispatch_task.cancel()
+            try:
+                await dispatch_task
+            except asyncio.CancelledError:
+                pass
+            finally:
+                self._dispatch_done(dispatch_task)
+
+    async def aclose(self) -> None:
+        """Cancel and join all work owned by this batcher."""
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._close())
+        try:
+            await asyncio.shield(self._close_task)
+        except asyncio.CancelledError:
+            while not self._close_task.done():
+                try:
+                    await asyncio.shield(self._close_task)
+                except asyncio.CancelledError:
+                    pass
+            if not self._close_task.cancelled():
+                self._close_task.exception()
+            raise
 
 
 def _creation_poll_delay(poll_index: int) -> float:
@@ -917,9 +1311,16 @@ class SandboxClient:
             self.client.config.config_dir / "sandbox_auth_cache.json",
             self.client,
         )
-        self._sandbox_status_batcher = _SyncRequestBatcher(self._fetch_sandbox_statuses)
+        self._poll_leases = _SyncPollLeaseRegistry()
+        self._sandbox_status_batcher = _SyncRequestBatcher(
+            self._fetch_sandbox_statuses,
+            lambda sandbox_id: sandbox_id,
+            self._poll_leases,
+        )
         self._background_job_status_batcher = _SyncRequestBatcher(
-            self._fetch_background_job_statuses
+            self._fetch_background_job_statuses,
+            lambda key: key[0],
+            self._poll_leases,
         )
         self._background_job_output_semaphore = threading.BoundedSemaphore(
             MAX_CONCURRENT_BACKGROUND_JOB_OUTPUT_READS
@@ -1157,8 +1558,12 @@ class SandboxClient:
 
     def delete(self, sandbox_id: str) -> Dict[str, Any]:
         """Delete a sandbox"""
-        response = self.client.request("DELETE", f"/sandbox/{sandbox_id}")
-        return response
+        scopes = self._poll_leases.begin_drain([sandbox_id])
+        try:
+            response = self.client.request("DELETE", f"/sandbox/{sandbox_id}")
+            return response
+        finally:
+            self._poll_leases.end_drain(scopes)
 
     def get_network(self, sandbox_id: str) -> EgressPolicyStatus:
         """Get the desired and applied network rules of a VM sandbox."""
@@ -1205,12 +1610,16 @@ class SandboxClient:
             all_users=all_users,
         )
         payload = request.model_dump(by_alias=False, exclude_none=True)
-        response = self.client.request(
-            "DELETE",
-            "/sandbox",
-            json=payload,
-        )
-        return BulkDeleteSandboxResponse.model_validate(response)
+        scopes = self._poll_leases.begin_drain(sandbox_ids or [])
+        try:
+            response = self.client.request(
+                "DELETE",
+                "/sandbox",
+                json=payload,
+            )
+            return BulkDeleteSandboxResponse.model_validate(response)
+        finally:
+            self._poll_leases.end_drain(scopes)
 
     def get_logs(self, sandbox_id: str) -> str:
         """Get sandbox logs via backend"""
@@ -1459,6 +1868,7 @@ class SandboxClient:
         stdout_log_file = f"/tmp/job_{job_id}.stdout.log"
         stderr_log_file = f"/tmp/job_{job_id}.stderr.log"
         exit_file = f"/tmp/job_{job_id}.exit"
+        launch_dir = f"/tmp/job_{job_id}.launch"
 
         env_prefix = ""
         if env:
@@ -1483,9 +1893,25 @@ class SandboxClient:
         )
         quoted_sh_command = shlex.quote(sh_command)
 
-        # Outer nohup redirects to /dev/null since output goes to log files inside sh -c
-        bg_cmd = f"nohup sh -c {quoted_sh_command} < /dev/null > /dev/null 2>&1 &"
-        self.execute_command(sandbox_id, bg_cmd, timeout=30, user=user)
+        # mkdir is the launch's idempotency guard: after an ambiguous timeout, only one attempt
+        # can create it and run the user command.
+        bg_cmd = (
+            f"mkdir {shlex.quote(launch_dir)} && "
+            f"nohup sh -c {quoted_sh_command} < /dev/null > /dev/null 2>&1 &"
+        )
+        for attempt in range(_BACKGROUND_JOB_LAUNCH_ATTEMPTS):
+            try:
+                self.execute_command(
+                    sandbox_id,
+                    bg_cmd,
+                    timeout=_BACKGROUND_JOB_LAUNCH_TIMEOUT_SECONDS,
+                    user=user,
+                )
+                break
+            except CommandTimeoutError:
+                if attempt == _BACKGROUND_JOB_LAUNCH_ATTEMPTS - 1:
+                    raise
+                time.sleep(_BACKGROUND_JOB_LAUNCH_BACKOFF_SECONDS * 2**attempt)
 
         return BackgroundJob(
             job_id=job_id,
@@ -1771,7 +2197,11 @@ class SandboxClient:
             if use_batch_status:
                 status = self._background_job_status_batcher.get((sandbox_id, job.job_id))
             else:
-                status = self.get_background_job(sandbox_id, job)
+                lease = self._poll_leases.acquire(sandbox_id)
+                try:
+                    status = self.get_background_job(sandbox_id, job)
+                finally:
+                    lease.release()
             if status.completed:
                 return status
             time.sleep(poll_interval)
@@ -1815,8 +2245,12 @@ class SandboxClient:
                     reachability_phase = True
                     deadline = time.monotonic() + timeout_seconds
                     poll_index = 0
+                lease = self._poll_leases.acquire(sandbox_id)
                 try:
-                    reachable = self._is_sandbox_reachable(sandbox_id)
+                    try:
+                        reachable = self._is_sandbox_reachable(sandbox_id)
+                    finally:
+                        lease.release()
                 except Exception as error:
                     if not _is_retryable_reachability_error(error):
                         raise
@@ -1896,19 +2330,25 @@ class SandboxClient:
         attempt = 0
         while attempt < max_attempts:
             try:
-                response = self.get_sandbox_statuses(sandbox_ids)
-            except BatchStatusUnsupportedError:
-                outcomes = self._fetch_sandbox_statuses(sandbox_ids)
-                snapshots = []
-                for sandbox_id in sandbox_ids:
-                    outcome = outcomes[sandbox_id]
-                    if isinstance(outcome, _BatchItemError):
-                        raise outcome.error
-                    snapshots.append(outcome)
-                response = BatchSandboxStatusResponse(
-                    statuses=snapshots,
-                    errors=[],
-                )
+                leases = self._poll_leases.acquire_many(sandbox_ids)
+                try:
+                    try:
+                        response = self.get_sandbox_statuses(sandbox_ids)
+                    except BatchStatusUnsupportedError:
+                        outcomes = self._fetch_sandbox_statuses(sandbox_ids)
+                        snapshots = []
+                        for sandbox_id in sandbox_ids:
+                            outcome = outcomes[sandbox_id]
+                            if isinstance(outcome, _BatchItemError):
+                                raise outcome.error
+                            snapshots.append(outcome)
+                        response = BatchSandboxStatusResponse(
+                            statuses=snapshots,
+                            errors=[],
+                        )
+                finally:
+                    for lease in leases:
+                        lease.release()
             except Exception as exc:
                 if "429" in str(exc) or "Too Many Requests" in str(exc):
                     time.sleep(min(2**attempt, 60))
@@ -1940,8 +2380,12 @@ class SandboxClient:
                 all_reachable = True
                 for sandbox_id in sandbox_ids:
                     if final_statuses.get(sandbox_id) == "RUNNING":
+                        lease = self._poll_leases.acquire(sandbox_id)
                         try:
-                            reachable = self._is_sandbox_reachable(sandbox_id)
+                            try:
+                                reachable = self._is_sandbox_reachable(sandbox_id)
+                            finally:
+                                lease.release()
                         except Exception as error:
                             if not _is_retryable_reachability_error(error):
                                 raise
@@ -2314,15 +2758,23 @@ class AsyncSandboxClient:
         # Shared httpx client for gateway operations (upload/download/execute)
         # Initialized lazily to allow connection pooling and reuse
         self._gateway_client: Optional[httpx.AsyncClient] = None
-        self._sandbox_status_batcher = _AsyncRequestBatcher(self._fetch_sandbox_statuses)
+        self._poll_leases = _AsyncPollLeaseRegistry()
+        self._sandbox_status_batcher = _AsyncRequestBatcher(
+            self._fetch_sandbox_statuses,
+            lambda sandbox_id: sandbox_id,
+            self._poll_leases,
+        )
         self._background_job_status_batcher = _AsyncRequestBatcher(
-            self._fetch_background_job_statuses
+            self._fetch_background_job_statuses,
+            lambda key: key[0],
+            self._poll_leases,
         )
         self._background_job_output_semaphore = asyncio.Semaphore(
             MAX_CONCURRENT_BACKGROUND_JOB_OUTPUT_READS
         )
         self._sandbox_status_batch_supported: Optional[bool] = None
         self._background_job_status_batch_supported: Optional[bool] = None
+        self._close_task: Optional[asyncio.Task[None]] = None
 
     def _get_gateway_client(self) -> httpx.AsyncClient:
         """Get or create the shared gateway client for connection pooling
@@ -2574,8 +3026,12 @@ class AsyncSandboxClient:
 
     async def delete(self, sandbox_id: str) -> Dict[str, Any]:
         """Delete a sandbox"""
-        response = await self.client.request("DELETE", f"/sandbox/{sandbox_id}")
-        return response
+        scopes = await self._poll_leases.begin_drain([sandbox_id])
+        try:
+            response = await self.client.request("DELETE", f"/sandbox/{sandbox_id}")
+            return response
+        finally:
+            self._poll_leases.end_drain(scopes)
 
     async def get_network(self, sandbox_id: str) -> EgressPolicyStatus:
         """Get the desired and applied network rules of a VM sandbox."""
@@ -2622,12 +3078,16 @@ class AsyncSandboxClient:
             all_users=all_users,
         )
         payload = request.model_dump(by_alias=False, exclude_none=True)
-        response = await self.client.request(
-            "DELETE",
-            "/sandbox",
-            json=payload,
-        )
-        return BulkDeleteSandboxResponse.model_validate(response)
+        scopes = await self._poll_leases.begin_drain(sandbox_ids or [])
+        try:
+            response = await self.client.request(
+                "DELETE",
+                "/sandbox",
+                json=payload,
+            )
+            return BulkDeleteSandboxResponse.model_validate(response)
+        finally:
+            self._poll_leases.end_drain(scopes)
 
     async def get_logs(self, sandbox_id: str) -> str:
         """Get sandbox logs"""
@@ -2682,7 +3142,9 @@ class AsyncSandboxClient:
 
         The returned handle streams stdout and stderr, accepts stdin writes,
         waits for the exit code, and can signal the process. Container sandboxes
-        do not expose this transport and fail fast.
+        do not expose this transport and fail fast. If the initial stream drops
+        before reporting a PID, recovery can find the session only while it is
+        still running because sandboxd does not retain completed sessions.
         """
         await self._auth_cache.get_or_refresh(sandbox_id)
         if not await self._auth_cache.is_vm(sandbox_id):
@@ -2708,11 +3170,15 @@ class AsyncSandboxClient:
             send_compression=None,
             http_client=http_client,
         )
+        # The SDK tag lets reconnect find a Start whose PID response was lost. Remove tag/List
+        # recovery once sandboxd provides idempotent Start/create-or-attach semantics.
+        process_tag = f"prime-sdk-{uuid.uuid4().hex}"
         request = build_command_session_start_request(
             command,
             working_dir,
             env,
             stdin=True,
+            tag=process_tag,
         )
         stream = rpc_client.execute_server_stream(
             request=request,
@@ -2741,12 +3207,54 @@ class AsyncSandboxClient:
                 http_client=http_client,
             )
 
+        async def reconnect(pid: int | None) -> AsyncIterator[Message]:
+            reauthed = False
+            while True:
+                auth = await self._auth_cache.get_or_refresh(sandbox_id)
+                base_url = f"{auth['gateway_url'].rstrip('/')}/{auth['user_ns']}/{auth['job_id']}"
+                client = ConnectClient(
+                    base_url,
+                    codec=GOOGLE_PROTOBUF_BINARY_CODEC,
+                    send_compression=None,
+                    http_client=http_client,
+                )
+                try:
+                    if pid is None:
+                        sessions = await client.execute_unary(
+                            request=build_command_session_list_request(),
+                            method=COMMAND_SESSION_LIST_RPC_METHOD,
+                            headers={"Authorization": f"Bearer {auth['token']}"},
+                            timeout_ms=_PROCESS_DISCOVERY_TIMEOUT_MS,
+                        )
+                        pid = find_command_session_pid(sessions, process_tag)
+                        if pid is None:
+                            raise ConnectError(Code.NOT_FOUND, "live process not found")
+                    stream = client.execute_server_stream(
+                        request=build_command_session_connect_request(pid),
+                        method=COMMAND_SESSION_CONNECT_RPC_METHOD,
+                        headers={"Authorization": f"Bearer {auth['token']}"},
+                        timeout_ms=_LIVE_PROCESS_TIMEOUT_MS,
+                    )
+                    async for response in stream:
+                        yield response
+                    return
+                except ConnectError as error:
+                    if error.code == Code.UNAUTHENTICATED and await self._should_retry_401(
+                        sandbox_id, reauthed
+                    ):
+                        reauthed = True
+                        continue
+                    raise
+                finally:
+                    await client.close()
+
         return await AsyncSandboxProcess._create(
             rpc_client,
             stream,
             write_stdin,
             send_signal,
             transport=transport,
+            reconnect=reconnect,
         )
 
     async def _execute_process_control_rpc(
@@ -2997,6 +3505,7 @@ class AsyncSandboxClient:
         stdout_log_file = f"/tmp/job_{job_id}.stdout.log"
         stderr_log_file = f"/tmp/job_{job_id}.stderr.log"
         exit_file = f"/tmp/job_{job_id}.exit"
+        launch_dir = f"/tmp/job_{job_id}.launch"
 
         env_prefix = ""
         if env:
@@ -3021,9 +3530,25 @@ class AsyncSandboxClient:
         )
         quoted_sh_command = shlex.quote(sh_command)
 
-        # Outer nohup redirects to /dev/null since output goes to log files inside sh -c
-        bg_cmd = f"nohup sh -c {quoted_sh_command} < /dev/null > /dev/null 2>&1 &"
-        await self.execute_command(sandbox_id, bg_cmd, timeout=30, user=user)
+        # mkdir is the launch's idempotency guard: after an ambiguous timeout, only one attempt
+        # can create it and run the user command.
+        bg_cmd = (
+            f"mkdir {shlex.quote(launch_dir)} && "
+            f"nohup sh -c {quoted_sh_command} < /dev/null > /dev/null 2>&1 &"
+        )
+        for attempt in range(_BACKGROUND_JOB_LAUNCH_ATTEMPTS):
+            try:
+                await self.execute_command(
+                    sandbox_id,
+                    bg_cmd,
+                    timeout=_BACKGROUND_JOB_LAUNCH_TIMEOUT_SECONDS,
+                    user=user,
+                )
+                break
+            except CommandTimeoutError:
+                if attempt == _BACKGROUND_JOB_LAUNCH_ATTEMPTS - 1:
+                    raise
+                await asyncio.sleep(_BACKGROUND_JOB_LAUNCH_BACKOFF_SECONDS * 2**attempt)
 
         return BackgroundJob(
             job_id=job_id,
@@ -3321,7 +3846,11 @@ class AsyncSandboxClient:
             if use_batch_status:
                 status = await self._background_job_status_batcher.get((sandbox_id, job.job_id))
             else:
-                status = await self.get_background_job(sandbox_id, job)
+                lease = self._poll_leases.acquire(sandbox_id)
+                try:
+                    status = await self.get_background_job(sandbox_id, job)
+                finally:
+                    lease.release()
             if status.completed:
                 return status
             await asyncio.sleep(poll_interval)
@@ -3365,8 +3894,12 @@ class AsyncSandboxClient:
                     reachability_phase = True
                     deadline = time.monotonic() + timeout_seconds
                     poll_index = 0
+                lease = self._poll_leases.acquire(sandbox_id)
                 try:
-                    reachable = await self._is_sandbox_reachable(sandbox_id)
+                    try:
+                        reachable = await self._is_sandbox_reachable(sandbox_id)
+                    finally:
+                        lease.release()
                 except Exception as error:
                     if not _is_retryable_reachability_error(error):
                         raise
@@ -3447,19 +3980,25 @@ class AsyncSandboxClient:
         attempt = 0
         while attempt < max_attempts:
             try:
-                response = await self.get_sandbox_statuses(sandbox_ids)
-            except BatchStatusUnsupportedError:
-                outcomes = await self._fetch_sandbox_statuses(sandbox_ids)
-                snapshots = []
-                for sandbox_id in sandbox_ids:
-                    outcome = outcomes[sandbox_id]
-                    if isinstance(outcome, _BatchItemError):
-                        raise outcome.error
-                    snapshots.append(outcome)
-                response = BatchSandboxStatusResponse(
-                    statuses=snapshots,
-                    errors=[],
-                )
+                leases = self._poll_leases.acquire_many(sandbox_ids)
+                try:
+                    try:
+                        response = await self.get_sandbox_statuses(sandbox_ids)
+                    except BatchStatusUnsupportedError:
+                        outcomes = await self._fetch_sandbox_statuses(sandbox_ids)
+                        snapshots = []
+                        for sandbox_id in sandbox_ids:
+                            outcome = outcomes[sandbox_id]
+                            if isinstance(outcome, _BatchItemError):
+                                raise outcome.error
+                            snapshots.append(outcome)
+                        response = BatchSandboxStatusResponse(
+                            statuses=snapshots,
+                            errors=[],
+                        )
+                finally:
+                    for lease in leases:
+                        lease.release()
             except Exception as exc:
                 if "429" in str(exc) or "Too Many Requests" in str(exc):
                     await asyncio.sleep(min(2**attempt, 60))
@@ -3491,8 +4030,12 @@ class AsyncSandboxClient:
                 all_reachable = True
                 for sandbox_id in sandbox_ids:
                     if final_statuses.get(sandbox_id) == "RUNNING":
+                        lease = self._poll_leases.acquire(sandbox_id)
                         try:
-                            reachable = await self._is_sandbox_reachable(sandbox_id)
+                            try:
+                                reachable = await self._is_sandbox_reachable(sandbox_id)
+                            finally:
+                                lease.release()
                         except Exception as error:
                             if not _is_retryable_reachability_error(error):
                                 raise
@@ -3802,11 +4345,37 @@ class AsyncSandboxClient:
 
         raise APIError("Read file failed after retries")
 
+    async def _close(self) -> None:
+        self._poll_leases.begin_close()
+        batchers = (
+            self._sandbox_status_batcher,
+            self._background_job_status_batcher,
+        )
+        await asyncio.gather(
+            *(batcher.aclose() for batcher in batchers if isinstance(batcher, _AsyncRequestBatcher))
+        )
+        await self._poll_leases.wait_for_idle()
+        try:
+            if self._gateway_client is not None:
+                await self._gateway_client.aclose()
+        finally:
+            await self.client.aclose()
+
     async def aclose(self) -> None:
-        """Close the async client and gateway client"""
-        if self._gateway_client is not None:
-            await self._gateway_client.aclose()
-        await self.client.aclose()
+        """Cancel owned poll tasks before closing async transports."""
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._close())
+        try:
+            await asyncio.shield(self._close_task)
+        except asyncio.CancelledError:
+            while not self._close_task.done():
+                try:
+                    await asyncio.shield(self._close_task)
+                except asyncio.CancelledError:
+                    pass
+            if not self._close_task.cancelled():
+                self._close_task.exception()
+            raise
 
     async def __aenter__(self) -> "AsyncSandboxClient":
         """Async context manager entry"""

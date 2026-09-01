@@ -43,7 +43,11 @@ from .lab_hygiene import (
 
 VERIFIERS_REPO = "primeintellect-ai/verifiers"
 VERIFIERS_REF = "6c64ce6a3a01e8edde7c3c0e8e5315fb236e9faa"
-VERIFIERS_CONFIG_REF = "main"
+# Lab configs must match the pinned legacy-stack verifiers below; main is
+# moving to a v1-only layout that the pinned stack cannot consume.
+VERIFIERS_CONFIG_REF = VERIFIERS_REF
+# Keep in sync with the verifiers pin in packages/prime/pyproject.toml.
+VERIFIERS_REQUIREMENT = "verifiers==0.2.0"
 DOWNLOAD_ATTEMPTS = 3
 DOWNLOAD_RETRY_DELAY_SECONDS = 1.0
 LAB_CONFIG_FOLDERS = ("rl", "gepa", "eval", "sft", "opd", "fft")
@@ -1387,7 +1391,7 @@ def _ensure_uv_project(workspace: Path, emit: Emit, runner: Runner) -> None:
         emit("Found pyproject.toml\n")
 
     emit("Adding verifiers dependency\n")
-    _check_command(["uv", "add", "verifiers"], workspace, emit, runner)
+    _check_command(["uv", "add", VERIFIERS_REQUIREMENT], workspace, emit, runner)
 
 
 def _post_setup_call_to_action(options: LabSetupOptions) -> Panel:

@@ -15,7 +15,35 @@ on:
         type: string
 
 jobs:
+  await-sandboxes-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The CLI image installs the wheel with its dependencies resolved from PyPI, and
+      # release-sandboxes.yml runs independently of this workflow. Tagging or publishing
+      # before prime-sandboxes is installable would strand the release: the CLI tag
+      # already exists, so a rerun skips it, and every image build fails.
+      - name: Wait for the required prime-sandboxes version on PyPI
+        run: |
+          FLOOR=$(sed -nE 's/.*"prime-sandboxes>=([^"]+)".*/\1/p' packages/prime/pyproject.toml | head -n1)
+          if [ -z "$FLOOR" ]; then
+            echo "::error::Unable to parse the prime-sandboxes floor from packages/prime/pyproject.toml"
+            exit 1
+          fi
+          echo "Waiting for prime-sandboxes==$FLOOR to become installable"
+          for _ in $(seq 1 40); do
+            if python3 -m pip download --quiet --no-deps --no-cache-dir --dest /tmp/floor-check "prime-sandboxes==$FLOOR"; then
+              echo "prime-sandboxes $FLOOR is installable"
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "::error::prime-sandboxes $FLOOR is still not on PyPI after 10 minutes; check the Release prime-sandboxes workflow"
+          exit 1
+
   tag-and-release:
+    needs: await-sandboxes-release
     runs-on: ubuntu-latest
     environment: pypi-prod
     permissions:

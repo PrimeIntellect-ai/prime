@@ -2,10 +2,12 @@
 
 import asyncio
 import contextlib
+import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Literal
 
 from connectrpc.client import ConnectClient
+from connectrpc.code import Code
 from connectrpc.errors import ConnectError
 from google.protobuf.message import Message
 from pyqwest import HTTPTransport
@@ -13,11 +15,16 @@ from pyqwest import HTTPTransport
 from .core import APIError
 from .rpc_command_session import parse_command_session_start_event
 
+logger = logging.getLogger(__name__)
+
 _EOF = object()
 _EXIT_WAIT_SECONDS = 5
+_STREAM_MAX_RECONNECTS = 5
+_STREAM_RECONNECT_BACKOFF_SECONDS = 0.5
 
 _WriteStdin = Callable[[int, bytes], Awaitable[None]]
 _SendSignal = Callable[[int, Literal["terminate", "kill"]], Awaitable[None]]
+_Reconnect = Callable[[int | None], AsyncIterator[Message]]
 
 
 class _AsyncProcessStream(AsyncIterator[bytes]):
@@ -69,6 +76,7 @@ class AsyncSandboxProcess:
         write_stdin: _WriteStdin,
         send_signal: _SendSignal,
         transport: HTTPTransport | None = None,
+        reconnect: _Reconnect | None = None,
     ) -> None:
         self.stdout = _AsyncProcessStream()
         self.stderr = _AsyncProcessStream()
@@ -77,6 +85,7 @@ class AsyncSandboxProcess:
         self._transport = transport
         self._write_stdin = write_stdin
         self._send_process_signal = send_signal
+        self._reconnect = reconnect
         self._remote_exited = False
         self._signals_sent: set[Literal["terminate", "kill"]] = set()
         self._closed = False
@@ -100,8 +109,9 @@ class AsyncSandboxProcess:
         write_stdin: _WriteStdin,
         send_signal: _SendSignal,
         transport: HTTPTransport | None = None,
+        reconnect: _Reconnect | None = None,
     ) -> "AsyncSandboxProcess":
-        process = cls(stream_client, stream, write_stdin, send_signal, transport)
+        process = cls(stream_client, stream, write_stdin, send_signal, transport, reconnect)
         try:
             await asyncio.shield(process._started)
         except asyncio.CancelledError:
@@ -223,31 +233,83 @@ class AsyncSandboxProcess:
             return False
         return self._remote_exited
 
+    def _can_reconnect(self, reconnects: int, error: BaseException | None) -> bool:
+        """Whether the process has enough identity and budget for another attach."""
+        if self._reconnect is None or self._remote_exited or reconnects >= _STREAM_MAX_RECONNECTS:
+            return False
+        if not isinstance(error, ConnectError) or error.code != Code.NOT_FOUND:
+            return True
+        return not self._started.done() and reconnects > 0
+
+    async def _aclose_stream(self) -> None:
+        close = getattr(self._stream, "aclose", None)
+        if close is not None:
+            with contextlib.suppress(BaseException):
+                await close()
+
+    async def _reconnect_stream(self, reconnects: int, error: BaseException | None) -> None:
+        reconnect = self._reconnect
+        assert reconnect is not None
+
+        delay = _STREAM_RECONNECT_BACKOFF_SECONDS * 2 ** (reconnects - 1)
+        logger.warning(
+            "live process stream dropped (%s); re-attaching %d/%d in %.1fs",
+            error or "ended without an exit event",
+            reconnects,
+            _STREAM_MAX_RECONNECTS,
+            delay,
+        )
+        await self._aclose_stream()
+        await asyncio.sleep(delay)
+        # Connect tails the same process from re-attachment time; output emitted while detached
+        # is not replayed.
+        pid = self.pid if self._started.done() else None
+        self._stream = reconnect(pid)
+
     async def _pump(self) -> None:
         ended = False
+        reconnects = 0
         try:
-            async for response in self._stream:
-                event = parse_command_session_start_event(response)
-                if event is None:
-                    continue
-                kind, value = event
-                if kind == "start":
-                    if not self._started.done():
-                        self._started.set_result(value)
-                elif kind == "stdout":
-                    self.stdout.feed(value)
-                elif kind == "stderr":
-                    self.stderr.feed(value)
-                elif kind == "end":
-                    ended = True
-                    self._remote_exited = True
-                    if not self._started.done():
-                        raise APIError("Process exited before reporting its PID")
-                    if not self._exit.done():
-                        self._exit.set_result(value)
+            while not ended:
+                error: BaseException | None = None
+                try:
+                    async for response in self._stream:
+                        event = parse_command_session_start_event(response)
+                        if event is None:
+                            continue
+                        kind, value = event
+                        if kind == "start":
+                            # A reconnected (Connect) stream re-announces the pid; keep the first.
+                            if not self._started.done():
+                                self._started.set_result(value)
+                        elif kind == "stdout":
+                            self.stdout.feed(value)
+                        elif kind == "stderr":
+                            self.stderr.feed(value)
+                        elif kind == "end":
+                            ended = True
+                            self._remote_exited = True
+                            if not self._started.done():
+                                raise APIError("Process ended before reporting its PID")
+                            if not self._exit.done():
+                                self._exit.set_result(value)
+                            break
+                except asyncio.CancelledError:
+                    raise
+                except BaseException as stream_error:
+                    error = stream_error
+
+                if ended:
+                    if error is not None:
+                        raise error
                     break
-            if not ended:
-                raise APIError("Process stream ended without an exit event")
+                if not self._can_reconnect(reconnects, error):
+                    if error is not None:
+                        raise error
+                    raise APIError("Process stream ended without an exit event")
+
+                reconnects += 1
+                await self._reconnect_stream(reconnects, error)
         except asyncio.CancelledError:
             raise
         except BaseException as error:
@@ -262,10 +324,7 @@ class AsyncSandboxProcess:
         finally:
             self.stdout.close()
             self.stderr.close()
-            close_stream = getattr(self._stream, "aclose", None)
-            if close_stream is not None:
-                with contextlib.suppress(BaseException):
-                    await close_stream()
+            await self._aclose_stream()
             await self._stream_client.close()
             # Callers that only consume the streams never reach aclose(), so a
             # process-owned transport is released here too once the stream ends.

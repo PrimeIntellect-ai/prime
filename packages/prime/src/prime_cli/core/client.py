@@ -173,9 +173,14 @@ class APIClient:
             u = getattr(req, "url", "?")
             raise APIError(f"Request failed: {e.__class__.__name__} at {method} {u}: {e}") from e
 
-    def get(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def get(
+        self,
+        endpoint: str,
+        params: Optional[Dict[str, Any]] = None,
+        timeout: Optional[int] = None,
+    ) -> Dict[str, Any]:
         """Make a GET request to the API"""
-        return self.request("GET", endpoint, params=params)
+        return self.request("GET", endpoint, params=params, timeout=timeout)
 
     def post(self, endpoint: str, json: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Make a POST request to the API"""

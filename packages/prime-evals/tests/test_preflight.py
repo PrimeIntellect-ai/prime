@@ -109,6 +109,8 @@ def test_preflight_catches_assignments_flags_urls_webhooks_and_private_keys():
         'password="abcd,efgh"',
         r"password=\"abcdefgh1234\"",
         r"password=\'abcdefgh1234\'",
+        "sas_token=opaque-sas-token-0123456789",
+        "cookie=abcdefgh",
     ],
 )
 def test_preflight_catches_short_explicit_assignments(assignment):
@@ -167,6 +169,35 @@ def test_preflight_catches_quoted_json_assignments_and_short_structured_secrets(
     assert prepared.data["answer"] == payload["answer"]
     assert prepared.data["password"] == REDACTED
     assert prepared.data["api_key"] == REDACTED
+
+
+def test_preflight_catches_escaped_authorization_headers():
+    token = "opaque-token-0123456789"
+    completion = rf"{{\"Authorization\":\"Bearer {token}\"}}"
+
+    prepared = prepare_upload({"completion": completion})
+
+    assert token not in prepared.data["completion"]
+
+
+def test_preflight_distinguishes_oauth_metadata_from_credential_value_fields():
+    payload = {
+        "oauth": "enabled",
+        "hasOauth": True,
+        "secret_value": "opaque-secret-0123456789",
+        "api_key_value": "opaque-api-key-0123456789",
+        "token_value": "opaque-token-0123456789",
+    }
+
+    prepared = prepare_upload(payload)
+
+    assert prepared.data == {
+        "oauth": "enabled",
+        "hasOauth": True,
+        "secret_value": REDACTED,
+        "api_key_value": REDACTED,
+        "token_value": REDACTED,
+    }
 
 
 @pytest.mark.parametrize("field", ["apikey", "accesstoken", "clientsecret", "secretkey"])

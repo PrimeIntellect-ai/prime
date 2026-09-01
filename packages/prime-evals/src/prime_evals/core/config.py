@@ -13,6 +13,7 @@ class Config:
     """
 
     DEFAULT_BASE_URL: str = "https://api.primeintellect.ai"
+    DEFAULT_FRONTEND_URL: str = "https://app.primeintellect.ai"
 
     def __init__(self) -> None:
         self.config_dir = Path.home() / ".prime"
@@ -54,3 +55,10 @@ class Config:
         if env_val:
             return self._strip_api_v1(env_val)
         return self._strip_api_v1(self.config.get("base_url", self.DEFAULT_BASE_URL))
+
+    @property
+    def frontend_url(self) -> str:
+        """Get frontend URL with precedence: env > file > default."""
+        return os.getenv("PRIME_FRONTEND_URL") or self.config.get(
+            "frontend_url", self.DEFAULT_FRONTEND_URL
+        )

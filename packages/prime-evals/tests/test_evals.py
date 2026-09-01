@@ -1,11 +1,15 @@
 """Tests for Prime Evals SDK"""
 
 import asyncio
+import json
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
+from prime_evals.core import APIClient
 from prime_evals.evals import AsyncEvalsClient, EvalsClient
+from prime_evals.exceptions import InvalidSampleError
 from prime_evals.models import (
     CreateEvaluationRequest,
     Evaluation,
@@ -183,8 +187,14 @@ def test_push_samples_reports_progress_and_reuses_http_client(monkeypatch):
         def __exit__(self, *_args):
             return None
 
-        def post(self, url, json):
-            posts.append({"url": url, "json": json, "headers": self.kwargs["headers"]})
+        def post(self, url, content):
+            posts.append(
+                {
+                    "url": url,
+                    "json": json.loads(content),
+                    "headers": self.kwargs["headers"],
+                }
+            )
             return FakeResponse()
 
     monkeypatch.setattr("prime_evals.evals.httpx.Client", FakeHttpClient)
@@ -195,18 +205,17 @@ def test_push_samples_reports_progress_and_reuses_http_client(monkeypatch):
     client = EvalsClient(api_client)
     progress = []
 
-    with pytest.warns(UserWarning, match="exceeds maximum payload size"):
-        result = client.push_samples(
-            "eval-1",
-            [{"x": "a"}, {"x": "b" * 50}, {"x": "c"}],
-            max_payload_bytes=35,
-            max_workers=1,
-            progress_callback=progress.append,
-        )
+    result = client.push_samples(
+        "eval-1",
+        [{"x": "a"}, {"x": "b"}, {"x": "c"}],
+        max_payload_bytes=30,
+        max_workers=1,
+        progress_callback=progress.append,
+    )
 
-    assert result == {"samples_pushed": 2, "samples_skipped": 1}
+    assert result == {"samples_pushed": 3, "samples_skipped": 0}
     assert progress == [1, 1, 1]
-    assert len(posts) == 2
+    assert len(posts) == 3
     assert len(created_clients) == 1
     assert posts[0]["headers"]["Authorization"] == "Bearer secret-token"
 
@@ -230,8 +239,14 @@ def test_async_push_samples_reports_progress_and_reuses_http_client(monkeypatch)
         async def __aexit__(self, *_args):
             return None
 
-        async def post(self, url, json):
-            posts.append({"url": url, "json": json, "headers": self.kwargs["headers"]})
+        async def post(self, url, content):
+            posts.append(
+                {
+                    "url": url,
+                    "json": json.loads(content),
+                    "headers": self.kwargs["headers"],
+                }
+            )
             return FakeResponse()
 
     monkeypatch.setattr("prime_evals.evals.httpx.AsyncClient", FakeAsyncHttpClient)
@@ -246,7 +261,7 @@ def test_async_push_samples_reports_progress_and_reuses_http_client(monkeypatch)
         client.push_samples(
             "eval-1",
             [{"x": "a"}, {"x": "b"}],
-            max_payload_bytes=35,
+            max_payload_bytes=30,
             max_concurrent=1,
             progress_callback=progress.append,
         )
@@ -259,16 +274,23 @@ def test_async_push_samples_reports_progress_and_reuses_http_client(monkeypatch)
     assert posts[0]["headers"]["Authorization"] == "Bearer secret-token"
 
 
-def test_evals_client_context_manager():
-    """Test EvalsClient can be used as context manager"""
-    try:
-        # This will fail without API key, but we're testing the interface
-        client = EvalsClient.__new__(EvalsClient)
-        assert hasattr(client, "__enter__")
-        assert hasattr(client, "__exit__")
-        assert hasattr(client, "close")
-    except Exception:
-        pass  # Expected to fail without proper initialization
+def test_api_client_context_manager():
+    transport = Mock()
+    client = APIClient.__new__(APIClient)
+    client.client = transport
+
+    with client as opened:
+        assert opened is client
+
+    transport.close.assert_called_once_with()
+
+
+def test_push_evaluation_rejects_oversized_samples_before_creating_evaluation():
+    client = EvalsClient(SimpleNamespace())
+    request = CreateEvaluationRequest(name="test", environments=[{"name": "env"}])
+
+    with pytest.raises(InvalidSampleError, match="sample 0 exceeds maximum payload size"):
+        client.push_evaluation(request, [{"value": "x" * 100}], max_payload_bytes=30)
 
 
 def test_evaluation_model_minimal():

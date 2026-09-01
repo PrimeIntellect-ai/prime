@@ -13,7 +13,7 @@ from .core import (
     PaymentRequiredError,
     UnauthorizedError,
 )
-from .evals import AsyncEvalsClient, EvalsClient
+from .evals import MAX_SAMPLES_PAYLOAD_BYTES, AsyncEvalsClient, EvalsClient, serialize_json
 from .exceptions import (
     EnvironmentNotFoundError,
     EvalsAPIError,
@@ -56,6 +56,8 @@ __all__ = [
     # Evals Clients
     "EvalsClient",
     "AsyncEvalsClient",
+    "MAX_SAMPLES_PAYLOAD_BYTES",
+    "serialize_json",
     # Models
     "Evaluation",
     "EvaluationStatus",

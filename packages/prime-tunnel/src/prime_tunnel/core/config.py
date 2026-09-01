@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -16,7 +17,9 @@ class Config:
     def __init__(self) -> None:
         self.config_dir = Path.home() / ".prime"
         self.config_file = self.config_dir / "config.json"
+        self.environments_dir = self.config_dir / "environments"
         self._load_config()
+        self._load_context()
 
     def _load_config(self) -> None:
         """Load configuration from file."""
@@ -28,6 +31,36 @@ class Config:
                 self.config = {}
         else:
             self.config = {}
+
+    def _load_context(self) -> None:
+        """Overlay the profile selected by the Prime CLI for this process."""
+        context = os.getenv("PRIME_CONTEXT")
+        if not context:
+            return
+
+        if context.casefold() == "production":
+            self.config.update(
+                {
+                    "base_url": self.DEFAULT_BASE_URL,
+                    "team_id": None,
+                    "team_name": None,
+                    "team_role": None,
+                }
+            )
+            return
+
+        if re.fullmatch(r"[a-zA-Z0-9_-]+", context) is None:
+            return
+
+        environment_file = self.environments_dir / f"{context}.json"
+        if not environment_file.exists():
+            return
+        try:
+            environment_config = json.loads(environment_file.read_text())
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+            return
+        if isinstance(environment_config, dict):
+            self.config.update(environment_config)
 
     @staticmethod
     def _strip_api_v1(url: str) -> str:

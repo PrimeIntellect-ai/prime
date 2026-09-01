@@ -115,8 +115,19 @@ def callback(
                 typer.echo(f"  - {env_name}", err=True)
             raise typer.Exit(1)
 
-        # Set environment variable so Config instances in subcommands pick it up
+        # Set the environment variable so Config instances in subcommands and
+        # SDK packages pick it up. Restore it when Click closes the context so
+        # embedded/CliRunner invocations in the same process do not leak state.
+        previous_context = os.environ.get("PRIME_CONTEXT")
         os.environ["PRIME_CONTEXT"] = context
+
+        def restore_context() -> None:
+            if previous_context is None:
+                os.environ.pop("PRIME_CONTEXT", None)
+            else:
+                os.environ["PRIME_CONTEXT"] = previous_context
+
+        ctx.call_on_close(restore_context)
 
     # Check for updates (only when a subcommand is being executed)
     if ctx.invoked_subcommand is not None:

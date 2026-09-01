@@ -85,6 +85,68 @@ def _configure_cli(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
 
 
+def test_list_uses_temporary_context_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    config_dir = tmp_path / ".prime"
+    environments_dir = config_dir / "environments"
+    environments_dir.mkdir(parents=True)
+    (config_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "api_key": "production-key",
+                "base_url": "https://api.production.example",
+                "team_id": "production-team",
+                "user_id": "production-user",
+            }
+        )
+    )
+    (environments_dir / "dev.json").write_text(
+        json.dumps(
+            {
+                "api_key": "dev-key",
+                "base_url": "https://api.dev.example",
+                "team_id": "dev-team",
+                "user_id": "dev-user",
+            }
+        )
+    )
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
+    for name in (
+        "PRIME_CONTEXT",
+        "PRIME_API_KEY",
+        "PRIME_API_BASE_URL",
+        "PRIME_BASE_URL",
+        "PRIME_TEAM_ID",
+        "PRIME_USER_ID",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    captured: dict[str, Any] = {}
+
+    def mock_list(self: Any, **kwargs: Any) -> SimpleNamespace:
+        captured.update(
+            {
+                "api_key": self.client.api_key,
+                "base_url": self.client.base_url,
+                "team_id": self.client.config.team_id,
+                "user_id": self.client.config.user_id,
+            }
+        )
+        return SimpleNamespace(sandboxes=[], total=0, page=1, per_page=50, has_next=False)
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.list", mock_list)
+
+    result = runner.invoke(app, ["-c", "dev", "sandbox", "list"])
+
+    assert result.exit_code == 0, result.output
+    assert captured == {
+        "api_key": "dev-key",
+        "base_url": "https://api.dev.example",
+        "team_id": "dev-team",
+        "user_id": "dev-user",
+    }
+
+
 def test_sandbox_network_without_flags_shows_current_rules(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

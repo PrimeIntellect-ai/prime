@@ -4,7 +4,6 @@ import typer
 from prime_sandboxes import (
     APIClient,
     APIError,
-    Config,
     DockerImageCheckResponse,
     RegistryCredentialSummary,
     TemplateClient,
@@ -25,7 +24,6 @@ from ..utils import (
 
 app = PlainTyper(help="Manage registry credentials and private images", no_args_is_help=True)
 console = get_console()
-config = Config()
 
 LIST_REGISTRY_JSON_HELP = json_output_help(
     ".credentials[] = {id, name, server, scope, team_id, user_id, created_at, updated_at, age}",

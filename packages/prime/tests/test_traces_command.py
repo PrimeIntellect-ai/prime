@@ -158,7 +158,7 @@ def test_set_traces_url_does_not_persist_env_override(monkeypatch, tmp_path):
     assert config.traces_url == traces_url
 
 
-def test_set_traces_url_with_context_does_not_replace_default_config(monkeypatch, tmp_path):
+def test_set_traces_url_with_context_is_read_only(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
     # The CLI callback sets this directly; record the pre-test value so the
@@ -181,12 +181,10 @@ def test_set_traces_url_with_context_does_not_replace_default_config(monkeypatch
         ["--context", "staging", "config", "set-traces-url", traces_url],
     )
 
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 1, result.output
+    assert "Temporary context 'staging' is read-only" in result.output
     assert json.loads(config.config_file.read_text()) == root_before
-    assert json.loads(staging_file.read_text()) == {
-        **staging_before,
-        "traces_url": traces_url,
-    }
+    assert json.loads(staging_file.read_text()) == staging_before
 
 
 def test_set_traces_url_does_not_persist_unrelated_env_overrides(monkeypatch, tmp_path):
@@ -236,7 +234,7 @@ def test_set_traces_url_rejects_unstored_production_context(monkeypatch, tmp_pat
     )
 
     assert result.exit_code == 1
-    assert "run 'prime config use production' first" in result.output
+    assert "prime config use production" in result.output
     assert json.loads(config.config_file.read_text()) == root_before
 
 

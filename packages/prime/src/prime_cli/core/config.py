@@ -42,6 +42,12 @@ class Config:
         if context:
             self.load_environment(context, persist=False)
 
+    @property
+    def context_override(self) -> str | None:
+        """Return the temporary context selected for this invocation, if any."""
+        context = os.getenv("PRIME_CONTEXT")
+        return context if context else None
+
     @staticmethod
     def _strip_api_v1(url: str) -> str:
         # make base_url consistent even if user passed a /api/v1 variant
@@ -224,8 +230,7 @@ class Config:
             )
 
         update_root = (
-            not context_override
-            or root_environment.casefold() == selected_environment.casefold()
+            not context_override or root_environment.casefold() == selected_environment.casefold()
         )
 
         if update_root:

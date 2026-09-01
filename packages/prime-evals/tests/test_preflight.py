@@ -305,6 +305,8 @@ def test_preflight_redacts_numeric_structured_secrets():
     assert prepare_upload({"usage": usage}).data["usage"] == usage
     token_usage = {"prompt_tokens": 123, "completion_tokens": 42}
     assert prepare_upload({"token_usage": token_usage}).data["token_usage"] == token_usage
+    metrics = {"by_task": {"token": 1.0, "secret": 2.0}}
+    assert prepare_upload({"metrics": metrics}).data["metrics"] == metrics
 
 
 @pytest.mark.parametrize("label", ["DSA PRIVATE KEY", "ENCRYPTED PRIVATE KEY"])
@@ -704,6 +706,22 @@ def test_jsonl_preflight_uploads_an_exact_snapshot_when_clean(tmp_path):
     assert destination.read_bytes() == source.read_bytes()
     assert destination.stat().st_mode & 0o777 == 0o600
     assert prepared.report.findings == ()
+
+
+def test_jsonl_preflight_replaces_destination_symlink_without_following_it(tmp_path):
+    source = tmp_path / "traces.jsonl"
+    destination = tmp_path / "safe.jsonl"
+    target = tmp_path / "unrelated.jsonl"
+    source.write_text('{"answer":"reference"}\n')
+    target.write_text("keep me\n")
+    destination.symlink_to(target)
+
+    prepared = prepare_jsonl_upload(source, destination)
+
+    assert prepared.path == destination
+    assert not destination.is_symlink()
+    assert destination.read_bytes() == source.read_bytes()
+    assert target.read_text() == "keep me\n"
 
 
 def test_jsonl_preflight_preserves_escaped_surrogates_on_redacted_lines(tmp_path):

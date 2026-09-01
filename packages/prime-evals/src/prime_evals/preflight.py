@@ -652,7 +652,7 @@ class CredentialReducer:
                     raise UploadScanError("credential reduction would create duplicate object keys")
                 normalized = normalize(str(key))
                 definition_schema = definitions and isinstance(child, (Mapping, list, tuple, bool))
-                telemetry = bool(path) and normalize(str(path[-1])) in {"metrics", "rewards"}
+                telemetry = any(normalize(str(part)) in {"metrics", "rewards"} for part in path)
                 child_secret = structured_secret or (
                     not definition_schema
                     and not (telemetry and isinstance(child, (int, float)))
@@ -818,6 +818,7 @@ def prepare_jsonl_upload(
 ) -> PreparedJSONLUpload:
     """Return a safe snapshot or redacted JSONL path without changing the source."""
     source, snapshot = Path(source), Path(destination)
+    staging = snapshot.with_name(f".snapshot-{uuid4().hex}-{snapshot.name}")
     redacted = snapshot.with_name(f"redacted-{uuid4().hex}-{snapshot.name}")
     outputs = (snapshot, redacted)
     if (
@@ -829,24 +830,20 @@ def prepare_jsonl_upload(
     discovery = SecretDiscovery(known_secrets, secret_sources)
     discovery.discover(context)
 
-    snapshot_started = False
-    validated = False
     try:
         with source.open("rb") as input_file:
-            descriptor = os.open(snapshot, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            snapshot_started = True
+            descriptor = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(descriptor, "wb") as output_file:
-                os.chmod(snapshot, 0o600)
+                os.chmod(staging, 0o600)
                 for number, raw in enumerate(input_file, 1):
                     output_file.write(raw)
                     if not raw.isspace():
                         discovery.discover(load_line(raw.decode(), number))
-        validated = True
+        os.replace(staging, snapshot)
     except UnicodeDecodeError as error:
         raise UploadScanError("trace JSONL must be UTF-8") from error
     finally:
-        if snapshot_started and not validated:
-            snapshot.unlink(missing_ok=True)
+        staging.unlink(missing_ok=True)
 
     try:
         reducer = CredentialReducer(discovery.secrets, secret_fingerprints=secret_fingerprints)
@@ -869,7 +866,7 @@ def prepare_jsonl_upload(
                 value = reducer.prepare(load_line(raw.decode(), number))
                 file_findings.update(prefix_findings(value.report, f"$.lines[{number}]"))
                 if value.report.has_findings and output_file is None:
-                    descriptor = os.open(redacted, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                    descriptor = os.open(redacted, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                     output_file = stack.enter_context(os.fdopen(descriptor, "wb"))
                     os.chmod(redacted, 0o600)
                     with snapshot.open("rb") as prefix:

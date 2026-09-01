@@ -29,7 +29,7 @@ on:
       model:
         description: "Prime Inference model for one-example eval smoke tests"
         required: true
-        default: "deepseek/deepseek-chat"
+        default: "openai/gpt-5.6-luna"
         type: string
       sandbox_region:
         description: "Optional Prime sandbox region"
@@ -83,7 +83,7 @@ jobs:
       - name: Run release e2e in a Prime sandbox
         env:
           HOSTED_MODE: ${{ inputs.hosted_mode || 'submit' }}
-          MODEL: ${{ inputs.model || 'deepseek/deepseek-chat' }}
+          MODEL: ${{ inputs.model || 'openai/gpt-5.6-luna' }}
           REGION: ${{ inputs.sandbox_region || '' }}
           KEEP_SANDBOX: ${{ github.event_name == 'workflow_dispatch' && inputs.keep_sandbox || false }}
           CLEANUP_REMOTE_ENV: ${{ github.event_name != 'workflow_dispatch' || inputs.cleanup_remote_env }}

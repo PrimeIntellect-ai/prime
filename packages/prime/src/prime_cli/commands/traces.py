@@ -132,10 +132,16 @@ def upload_traces(
         raise typer.Exit(1)
 
     try:
-        with tempfile.TemporaryDirectory(
-            prefix="prime-traces-upload-",
-            dir=file.resolve().parent,
-        ) as directory:
+        try:
+            staging = tempfile.TemporaryDirectory(
+                prefix="prime-traces-upload-",
+                dir=file.resolve().parent,
+            )
+        except OSError:
+            staging = tempfile.TemporaryDirectory(
+                prefix="prime-traces-upload-",
+            )
+        with staging as directory:
             try:
                 prepared = prepare_jsonl_upload(
                     file,

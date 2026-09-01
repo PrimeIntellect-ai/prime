@@ -112,6 +112,15 @@ PATTERNS = (
         "authorization_header",
         re.compile(
             r"(?<![A-Za-z0-9_])\\?[\"']?(?:authorization|proxy-authorization)"
+            r"\\?[\"']?\s*[:=]\s*(?P<quote>\\?[\"'])"
+            r"(?P<secret>[^\r\n]*?)(?P=quote)",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "authorization_header",
+        re.compile(
+            r"(?<![A-Za-z0-9_])\\?[\"']?(?:authorization|proxy-authorization)"
             r"\\?[\"']?\s*[:=]\s*\\?[\"']?(?:(?:bearer|basic|token|negotiate)\s+)?"
             r"(?P<secret>[^\s,;\\\"']{8,})",
             re.IGNORECASE,
@@ -377,7 +386,13 @@ class SecretDiscovery:
                     pass
                 else:
                     if isinstance(parsed, (Mapping, list)):
-                        self.discover(parsed, headers=headers)
+                        self.discover(
+                            parsed,
+                            schema_secret,
+                            schema_context,
+                            definitions,
+                            headers,
+                        )
             for category, pattern in PATTERNS:
                 if category == "credential_url":
                     continue
@@ -480,7 +495,14 @@ class CredentialReducer:
                     fingerprinted.add(candidate)
         return fingerprinted
 
-    def redact_text(self, text: str) -> tuple[str, set[str]]:
+    def redact_text(
+        self,
+        text: str,
+        schema_secret: bool = False,
+        schema_context: bool = False,
+        definitions: bool = False,
+        headers: bool = False,
+    ) -> tuple[str, set[str]]:
         self.categories = set()
         stripped = text.strip()
         if stripped.startswith(("{", "[")):
@@ -491,7 +513,14 @@ class CredentialReducer:
             else:
                 if isinstance(parsed, (Mapping, list)):
                     parsed_findings: set[Finding] = set()
-                    parsed = self.reduce(parsed, parsed_findings)
+                    parsed = self.reduce(
+                        parsed,
+                        parsed_findings,
+                        schema_secret=schema_secret,
+                        schema_context=schema_context,
+                        definitions=definitions,
+                        headers=headers,
+                    )
                     if parsed_findings:
                         start = len(text) - len(text.lstrip())
                         end = len(text.rstrip())
@@ -612,7 +641,13 @@ class CredentialReducer:
             return REDACTED
         if not isinstance(value, str):
             return value
-        reduced, categories = self.redact_text(value)
+        reduced, categories = self.redact_text(
+            value,
+            schema_secret,
+            schema_context,
+            definitions,
+            headers,
+        )
         findings.update((finding_path(path), category) for category in categories)
         return reduced
 
@@ -724,13 +759,14 @@ def prepare_jsonl_upload(
         if snapshot_started and not validated:
             snapshot.unlink(missing_ok=True)
 
-    reducer = CredentialReducer(discovery.secrets, secret_fingerprints=secret_fingerprints)
-    context_prepared = reducer.prepare(context) if context is not None else None
-    findings = prefix_findings(context_prepared.report, "$.context") if context_prepared else set()
-    file_findings: set[Finding] = set()
-
-    output_file = None
     try:
+        reducer = CredentialReducer(discovery.secrets, secret_fingerprints=secret_fingerprints)
+        context_prepared = reducer.prepare(context) if context is not None else None
+        findings = (
+            prefix_findings(context_prepared.report, "$.context") if context_prepared else set()
+        )
+        file_findings: set[Finding] = set()
+        output_file = None
         with snapshot.open("rb") as input_file, ExitStack() as stack:
             offset = 0
             number = 0
@@ -755,16 +791,17 @@ def prepare_jsonl_upload(
                         else raw
                     )
                 offset += len(raw)
-    except UnicodeDecodeError as error:
-        raise UploadScanError("trace JSONL must be UTF-8") from error
-
-    if output_file:
-        snapshot.unlink()
-        upload_path = redacted
-    else:
-        upload_path = snapshot
-    return PreparedJSONLUpload(
-        path=upload_path,
-        context=context_prepared.data if context_prepared else None,
-        report=ScanReport(findings=tuple(sorted(findings | file_findings))),
-    )
+        if output_file:
+            snapshot.unlink()
+            upload_path = redacted
+        else:
+            upload_path = snapshot
+        return PreparedJSONLUpload(
+            path=upload_path,
+            context=context_prepared.data if context_prepared else None,
+            report=ScanReport(findings=tuple(sorted(findings | file_findings))),
+        )
+    except BaseException:
+        for output in outputs:
+            output.unlink(missing_ok=True)
+        raise

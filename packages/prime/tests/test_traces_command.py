@@ -3,6 +3,7 @@
 of silently falling back to the SDK's static config."""
 
 import json
+from unittest.mock import Mock
 
 import pytest
 from prime_cli.commands import traces as traces_cmd
@@ -417,6 +418,23 @@ def test_upload_command_redacts_a_copy_and_keeps_review_data(fake_client, tmp_pa
     assert uploaded["answer"] == "reference answer"
     assert uploaded["rubric"] == "compare against the reference answer"
     assert traces_file.read_bytes() == original
+
+
+def test_upload_command_falls_back_from_read_only_source_directory(
+    fake_client, tmp_path, monkeypatch
+):
+    traces_file = tmp_path / "traces.jsonl"
+    traces_file.write_text('{"answer":"keep"}\n')
+    real_temporary_directory = traces_cmd.tempfile.TemporaryDirectory
+    fallback = real_temporary_directory(prefix="prime-traces-upload-test-")
+    temporary_directory = Mock(side_effect=[PermissionError(), fallback])
+    monkeypatch.setattr(traces_cmd.tempfile, "TemporaryDirectory", temporary_directory)
+
+    result = runner.invoke(main_app, ["traces", "upload", str(traces_file)])
+
+    assert result.exit_code == 0, result.output
+    assert temporary_directory.call_args_list[0].kwargs["dir"] == traces_file.resolve().parent
+    assert "dir" not in temporary_directory.call_args_list[1].kwargs
 
 
 def test_upload_command_fails_before_client_creation_on_invalid_json(tmp_path, monkeypatch):

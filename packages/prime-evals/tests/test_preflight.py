@@ -193,6 +193,13 @@ def test_preflight_catches_escaped_authorization_headers():
     assert token not in prepared.data["completion"]
 
 
+@pytest.mark.parametrize("scheme", ["Digest", "AWS4-HMAC-SHA256"])
+def test_preflight_catches_escaped_quoted_authorization_schemes(scheme):
+    completion = rf"{{\"Authorization\":\"{scheme} opaque-credential-0123456789\"}}"
+
+    assert "opaque-credential" not in prepare_upload({"completion": completion}).data["completion"]
+
+
 def test_preflight_distinguishes_oauth_metadata_from_credential_value_fields():
     payload = {
         "oauth": "enabled",
@@ -491,6 +498,12 @@ def test_sensitive_schema_enums_are_redacted():
     assert prepared.data["schema"]["properties"]["api_key"]["enum"] == [REDACTED]
 
 
+def test_serialized_schema_preserves_credential_field_definitions():
+    schema = json.dumps({"properties": {"password": {"type": "string"}}})
+
+    assert prepare_upload({"schema": schema}).data["schema"] == schema
+
+
 def test_jsonl_preflight_uses_secrets_discovered_in_later_lines(tmp_path):
     secret = "opaque-later-line-secret-0123456789"
     source = tmp_path / "traces.jsonl"
@@ -579,6 +592,20 @@ def test_jsonl_preflight_fails_closed_on_ambiguous_input(tmp_path, content, mess
     source.write_text(content)
 
     with pytest.raises(UploadScanError, match=message):
+        prepare_jsonl_upload(source, destination)
+
+    assert not destination.exists()
+
+
+def test_jsonl_preflight_removes_snapshot_after_reduction_failure(tmp_path):
+    source = tmp_path / "traces.jsonl"
+    destination = tmp_path / "safe.jsonl"
+    source.write_text(
+        '{"TOKEN=opaque-token-0123456789":"first","TOKEN=[REDACTED]":"second",'
+        '"password":"opaque-password-0123456789"}\n'
+    )
+
+    with pytest.raises(UploadScanError, match="duplicate object keys"):
         prepare_jsonl_upload(source, destination)
 
     assert not destination.exists()

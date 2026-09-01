@@ -1,8 +1,24 @@
 import json
+from pathlib import Path
 
 import pytest
 
 from prime_sandboxes import Config
+
+
+@pytest.fixture(autouse=True)
+def isolated_config_environment(monkeypatch, tmp_path) -> None:
+    """Keep config tests independent from CI credentials and shared SDK fixtures."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    for variable in (
+        "PRIME_CONTEXT",
+        "PRIME_API_KEY",
+        "PRIME_API_BASE_URL",
+        "PRIME_BASE_URL",
+        "PRIME_TEAM_ID",
+        "PRIME_USER_ID",
+    ):
+        monkeypatch.delenv(variable, raising=False)
 
 
 def _write_configs(tmp_path) -> None:
@@ -33,7 +49,6 @@ def _write_configs(tmp_path) -> None:
 
 def test_config_loads_temporary_context(monkeypatch, tmp_path) -> None:
     _write_configs(tmp_path)
-    monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("PRIME_CONTEXT", "dev")
 
     config = Config()
@@ -46,7 +61,6 @@ def test_config_loads_temporary_context(monkeypatch, tmp_path) -> None:
 
 def test_environment_variables_override_temporary_context(monkeypatch, tmp_path) -> None:
     _write_configs(tmp_path)
-    monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("PRIME_CONTEXT", "dev")
     monkeypatch.setenv("PRIME_API_KEY", "environment-key")
     monkeypatch.setenv("PRIME_API_BASE_URL", "https://api.environment.example/api/v1")
@@ -63,7 +77,6 @@ def test_environment_variables_override_temporary_context(monkeypatch, tmp_path)
 
 def test_production_context_restores_builtin_scope(monkeypatch, tmp_path) -> None:
     _write_configs(tmp_path)
-    monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("PRIME_CONTEXT", "production")
 
     config = Config()
@@ -78,7 +91,6 @@ def test_production_context_restores_builtin_scope(monkeypatch, tmp_path) -> Non
 def test_broken_temporary_context_never_falls_back(monkeypatch, tmp_path, content) -> None:
     _write_configs(tmp_path)
     (tmp_path / ".prime" / "environments" / "dev.json").write_text(content)
-    monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("PRIME_CONTEXT", "dev")
 
     with pytest.raises(ValueError, match="context|JSON object"):
@@ -88,7 +100,6 @@ def test_broken_temporary_context_never_falls_back(monkeypatch, tmp_path, conten
 def test_missing_temporary_context_never_falls_back(monkeypatch, tmp_path) -> None:
     _write_configs(tmp_path)
     (tmp_path / ".prime" / "environments" / "dev.json").unlink()
-    monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("PRIME_CONTEXT", "dev")
 
     with pytest.raises(ValueError, match="Context file not found"):
@@ -106,7 +117,6 @@ def test_unreadable_temporary_context_never_falls_back(monkeypatch, tmp_path) ->
         return original_read_text(path, *args, **kwargs)
 
     monkeypatch.setattr(type(environment_file), "read_text", fail_for_context)
-    monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("PRIME_CONTEXT", "dev")
 
     with pytest.raises(ValueError, match="Failed to load context 'dev'"):

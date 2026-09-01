@@ -75,10 +75,27 @@ NAMED_DEFINITIONS = {
     "defs",
     "definitions",
     "properties",
+}
+OPENAPI_COMPONENT_MAPS = {
+    "callbacks",
+    "examples",
+    "headers",
+    "links",
+    "parameters",
+    "path_items",
+    "request_bodies",
+    "responses",
     "schemas",
     "security_definitions",
     "security_schemes",
 }
+OPENAPI_ROOT_DEFINITIONS = {
+    "definitions",
+    "parameters",
+    "responses",
+    "security_definitions",
+}
+OPENAPI_SCHEMA_CONTAINERS = {"components", *OPENAPI_ROOT_DEFINITIONS}
 HEADER_CONTAINER = re.compile(r"(?:^|_)headers?$")
 SAFE_PATH_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_-]{0,63}")
 AUTH_VALUE = re.compile(r"^(?:bearer|basic|negotiate|token)\s+(.+)$", re.IGNORECASE)
@@ -157,7 +174,7 @@ PATTERNS = (
             r"(?:(?<![A-Za-z0-9_])\\?[\"']?(?i:(?:[A-Za-z][A-Za-z0-9]*[_-]+)*"
             r"(?:x-api-key|api[_ -]?(?:key|token)|account[_ -]?key|"
             r"access[_ -]?token|refresh[_ -]?token|auth[_ -]?token|session[_ -]?token|"
-            r"client[_ -]?secret|secret[_ -]?access[_ -]?key|password|passwd|"
+            r"client[_ -]?secret|secret[_ -]?access[_ -]?key|secret[_ -]?key|password|passwd|"
             r"cookie|credential|private[_ -]?key|sas[_ -]?token|signature))\b"
             r"\\?[\"']?\s*[:=]\s*|"
             r"\b(?:[A-Z][A-Z0-9_]*_)?(?:API_?KEY|API_?TOKEN|ACCESS_?TOKEN|"
@@ -332,14 +349,15 @@ class SecretDiscovery:
         schema_context: bool = False,
         definitions: bool = False,
         headers: bool = False,
+        components: bool = False,
     ) -> None:
         if isinstance(value, Mapping):
             named_header = headers and is_sensitive(str(value.get("name") or value.get("key", "")))
             schema_type = value.get("type")
+            openapi_document = any(field in value for field in OPENAPI_MARKERS)
             object_schema = (
                 schema_context
                 or any(field in value for field in SCHEMA_MARKERS)
-                or any(field in value for field in OPENAPI_MARKERS)
                 or "properties" in value
                 and (
                     schema_type == "object"
@@ -370,22 +388,38 @@ class SecretDiscovery:
                         "structured_secret",
                         normalized.endswith(("_keys", "_secrets", "_tokens")),
                     )
-                if named_header and normalized == "value":
+                if named_header and normalized in {"value", "values"}:
                     self.remember(child, "structured_secret")
                 if schema_secret and normalized in SCHEMA_VALUES:
                     self.remember(child, "structured_secret")
                 self.discover(
                     child,
                     schema_secret,
-                    object_schema or normalized in SCHEMA_CONTAINERS,
-                    object_schema and normalized in NAMED_DEFINITIONS,
+                    object_schema
+                    or normalized in SCHEMA_CONTAINERS
+                    or openapi_document
+                    and normalized in OPENAPI_SCHEMA_CONTAINERS,
+                    object_schema
+                    and normalized in NAMED_DEFINITIONS
+                    or components
+                    and normalized in OPENAPI_COMPONENT_MAPS
+                    or openapi_document
+                    and normalized in OPENAPI_ROOT_DEFINITIONS,
                     headers or HEADER_CONTAINER.search(normalized) is not None,
+                    openapi_document and normalized == "components",
                 )
         elif isinstance(value, (list, tuple)):
             if headers and len(value) == 2 and isinstance(value[0], str) and is_sensitive(value[0]):
                 self.remember(value[1], "structured_secret")
             for child in value:
-                self.discover(child, schema_secret, schema_context, definitions, headers)
+                self.discover(
+                    child,
+                    schema_secret,
+                    schema_context,
+                    definitions,
+                    headers,
+                    components,
+                )
         elif isinstance(value, str):
             text = value.strip()
             if text.startswith(("{", "[")):
@@ -401,6 +435,7 @@ class SecretDiscovery:
                             schema_context,
                             definitions,
                             headers,
+                            components,
                         )
             for category, pattern in PATTERNS:
                 if category == "credential_url":
@@ -511,6 +546,7 @@ class CredentialReducer:
         schema_context: bool = False,
         definitions: bool = False,
         headers: bool = False,
+        components: bool = False,
     ) -> tuple[str, set[str]]:
         self.categories = set()
         stripped = text.strip()
@@ -529,6 +565,7 @@ class CredentialReducer:
                         schema_context=schema_context,
                         definitions=definitions,
                         headers=headers,
+                        components=components,
                     )
                     if parsed_findings:
                         start = len(text) - len(text.lstrip())
@@ -558,15 +595,16 @@ class CredentialReducer:
         schema_context: bool = False,
         definitions: bool = False,
         headers: bool = False,
+        components: bool = False,
     ) -> Any:
         if isinstance(value, Mapping):
             reduced = {}
             named_header = headers and is_sensitive(str(value.get("name") or value.get("key", "")))
             schema_type = value.get("type")
+            openapi_document = any(field in value for field in OPENAPI_MARKERS)
             object_schema = (
                 schema_context
                 or any(field in value for field in SCHEMA_MARKERS)
-                or any(field in value for field in OPENAPI_MARKERS)
                 or "properties" in value
                 and (
                     schema_type == "object"
@@ -603,7 +641,7 @@ class CredentialReducer:
                     and (
                         is_sensitive(str(key))
                         or named_header
-                        and normalized == "value"
+                        and normalized in {"value", "values"}
                         or schema_secret
                         and normalized in SCHEMA_VALUES
                     )
@@ -614,9 +652,22 @@ class CredentialReducer:
                     (*path, "[key]" if categories else str(key)),
                     child_secret,
                     is_sensitive(str(key)) if definition_schema else schema_secret,
-                    definition_schema or object_schema or normalized in SCHEMA_CONTAINERS,
-                    not structured_secret and object_schema and normalized in NAMED_DEFINITIONS,
+                    definition_schema
+                    or object_schema
+                    or normalized in SCHEMA_CONTAINERS
+                    or openapi_document
+                    and normalized in OPENAPI_SCHEMA_CONTAINERS,
+                    not structured_secret
+                    and (
+                        object_schema
+                        and normalized in NAMED_DEFINITIONS
+                        or components
+                        and normalized in OPENAPI_COMPONENT_MAPS
+                        or openapi_document
+                        and normalized in OPENAPI_ROOT_DEFINITIONS
+                    ),
                     headers or HEADER_CONTAINER.search(normalized) is not None,
+                    openapi_document and normalized == "components",
                 )
             return reduced
         if isinstance(value, (list, tuple)):
@@ -633,6 +684,7 @@ class CredentialReducer:
                     schema_context,
                     definitions,
                     headers,
+                    components,
                 )
                 for index, child in enumerate(value)
             ]
@@ -657,6 +709,7 @@ class CredentialReducer:
             schema_context,
             definitions,
             headers,
+            components,
         )
         findings.update((finding_path(path), category) for category in categories)
         return reduced

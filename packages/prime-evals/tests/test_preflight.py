@@ -104,6 +104,7 @@ def test_preflight_catches_assignments_flags_urls_webhooks_and_private_keys():
         "password=abcdefgh1234",
         "TOKEN=abcdefgh1234",
         "SECRET_KEY=abcdefgh1234",
+        "secret_key=abcdefgh1234",
         "api_token=abcdefghijklmnop",
         "--token 123456789abc",
         'password="abcd efgh"',
@@ -345,6 +346,12 @@ def test_authorization_redaction_preserves_trailing_review_text():
                 "value": "Bearer opaque-header-token-0123456789",
             }
         ],
+        [
+            {
+                "name": "Authorization",
+                "values": ["Bearer opaque-header-token-0123456789"],
+            }
+        ],
     ],
 )
 def test_preflight_recognizes_suffixed_header_containers(headers):
@@ -373,6 +380,45 @@ def test_preflight_preserves_openapi_security_scheme_definitions():
     )
 
     assert prepared.data["components"]["securitySchemes"] == security_schemes
+
+
+@pytest.mark.parametrize(
+    "container",
+    [
+        "callbacks",
+        "examples",
+        "headers",
+        "links",
+        "parameters",
+        "pathItems",
+        "requestBodies",
+        "responses",
+        "schemas",
+        "securitySchemes",
+    ],
+)
+def test_preflight_preserves_named_openapi_component_maps(container):
+    definitions = {
+        "AccessToken": {
+            "name": "access_token",
+            "in": "query",
+            "schema": {"type": "string"},
+        }
+    }
+    document = {"openapi": "3.1.0", "components": {container: definitions}}
+
+    assert prepare_upload(document).data == document
+
+
+def test_openapi_marker_does_not_turn_event_properties_into_schema_definitions():
+    secret = "opaque-event-password-0123456789"
+    event = {
+        "openapi": "3.1.0",
+        "type": "event",
+        "properties": {"password": {"value": secret}},
+    }
+
+    assert prepare_upload(event).data["properties"]["password"]["value"] == REDACTED
 
 
 def test_non_schema_security_scheme_mappings_still_redact_credentials():

@@ -56,6 +56,32 @@ def _parse_frpc_error(
     return TunnelConnectionError(tunnel_id=tunnel_id, message=message)
 
 
+# Server-side rejection reasons that retrying can never fix.
+_FATAL_LOGIN_ERRORS = (
+    "tunnel is inactive",
+    "tunnel not registered",
+    "invalid binding secret",
+    "invalid authentication token",
+    "token in login doesn't match",
+)
+
+
+def _scan_startup_line(line: str) -> Optional[str]:
+    """Classify an frpc startup log line.
+
+    Returns "connected" once the proxy is registered, "fatal" for login
+    failures that cannot succeed on retry, and None for anything else
+    (including transient login/connect failures frpc will retry).
+    """
+    lowered = line.lower()
+    if "start proxy success" in lowered:
+        return "connected"
+    if "login to the server failed" in lowered or "connect to server error" in lowered:
+        if any(reason in lowered for reason in _FATAL_LOGIN_ERRORS):
+            return "fatal"
+    return None
+
+
 class Tunnel:
     """Tunnel interface for exposing local services."""
 
@@ -378,6 +404,9 @@ user = "{self._tunnel_info.tunnel_id}"
 auth.method = "token"
 auth.token = "{self._tunnel_info.frp_token}"
 
+# Retry the initial login instead of exiting on the first transient failure
+loginFailExit = false
+
 # Per-tunnel binding secret
 metadatas.binding_secret = "{self._tunnel_info.binding_secret}"
 
@@ -459,13 +488,10 @@ subdomain = "{self._tunnel_info.tunnel_id}"
                                 line = line.strip()
                                 if line:
                                     self._output_lines.append(line)
-                                    # Check for success/failure indicators
-                                    if "start proxy success" in line.lower():
+                                    verdict = _scan_startup_line(line)
+                                    if verdict == "connected":
                                         return
-                                    if (
-                                        "login to the server failed" in line.lower()
-                                        or "connect to server error" in line.lower()
-                                    ):
+                                    if verdict == "fatal":
                                         raise _parse_frpc_error(self._output_lines, self.tunnel_id)
                         except (BlockingIOError, IOError):
                             pass  # No more data available on this pipe

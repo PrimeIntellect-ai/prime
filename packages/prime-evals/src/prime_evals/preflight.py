@@ -82,18 +82,22 @@ NAMED_DEFINITIONS = {
     "pattern_properties",
     "properties",
 }
-OPENAPI_COMPONENT_MAPS = {
+OPENAPI_NAMED_MAPS = {
     "callbacks",
+    "content",
+    "encoding",
     "examples",
     "headers",
     "links",
     "parameters",
+    "paths",
     "path_items",
     "request_bodies",
     "responses",
     "schemas",
     "security_definitions",
     "security_schemes",
+    "webhooks",
 }
 OPENAPI_ROOT_DEFINITIONS = {
     "definitions",
@@ -356,7 +360,6 @@ class SecretDiscovery:
         schema_context: bool = False,
         definitions: bool = False,
         headers: bool = False,
-        components: bool = False,
         openapi: bool = False,
     ) -> None:
         if isinstance(value, Mapping):
@@ -413,15 +416,15 @@ class SecretDiscovery:
                     and normalized in OPENAPI_SCHEMA_CONTAINERS,
                     object_schema
                     and normalized in NAMED_DEFINITIONS
-                    or components
-                    and normalized in OPENAPI_COMPONENT_MAPS
+                    or openapi_document
+                    and normalized in OPENAPI_NAMED_MAPS
                     or openapi_document
                     and normalized in OPENAPI_ROOT_DEFINITIONS
                     or openapi_document
                     and normalized == "security",
                     headers or HEADER_CONTAINER.search(normalized) is not None,
-                    openapi_document and normalized == "components",
-                    openapi_document,
+                    openapi_document
+                    and (normalized not in SCHEMA_VALUES or normalized == "examples"),
                 )
         elif isinstance(value, (list, tuple)):
             for index, child in enumerate(value):
@@ -438,7 +441,6 @@ class SecretDiscovery:
                     schema_context,
                     definitions,
                     headers,
-                    components,
                     openapi,
                 )
         elif isinstance(value, str):
@@ -456,7 +458,6 @@ class SecretDiscovery:
                             schema_context,
                             definitions,
                             headers,
-                            components,
                             openapi,
                         )
             for category, pattern in PATTERNS:
@@ -568,7 +569,6 @@ class CredentialReducer:
         schema_context: bool = False,
         definitions: bool = False,
         headers: bool = False,
-        components: bool = False,
         openapi: bool = False,
     ) -> tuple[str, set[str]]:
         self.categories = set()
@@ -588,7 +588,6 @@ class CredentialReducer:
                         schema_context=schema_context,
                         definitions=definitions,
                         headers=headers,
-                        components=components,
                         openapi=openapi,
                     )
                     if parsed_findings:
@@ -619,7 +618,6 @@ class CredentialReducer:
         schema_context: bool = False,
         definitions: bool = False,
         headers: bool = False,
-        components: bool = False,
         openapi: bool = False,
     ) -> Any:
         if isinstance(value, Mapping):
@@ -690,16 +688,16 @@ class CredentialReducer:
                     and (
                         object_schema
                         and normalized in NAMED_DEFINITIONS
-                        or components
-                        and normalized in OPENAPI_COMPONENT_MAPS
+                        or openapi_document
+                        and normalized in OPENAPI_NAMED_MAPS
                         or openapi_document
                         and normalized in OPENAPI_ROOT_DEFINITIONS
                         or openapi_document
                         and normalized == "security"
                     ),
                     headers or HEADER_CONTAINER.search(normalized) is not None,
-                    openapi_document and normalized == "components",
-                    openapi_document,
+                    openapi_document
+                    and (normalized not in SCHEMA_VALUES or normalized == "examples"),
                 )
             return reduced
         if isinstance(value, (list, tuple)):
@@ -717,7 +715,6 @@ class CredentialReducer:
                     schema_context,
                     definitions,
                     headers,
-                    components,
                     openapi,
                 )
                 for index, child in enumerate(value)
@@ -743,7 +740,6 @@ class CredentialReducer:
             schema_context,
             definitions,
             headers,
-            components,
             openapi,
         )
         findings.update((finding_path(path), category) for category in categories)

@@ -467,6 +467,51 @@ def test_preflight_preserves_named_openapi_component_maps(container):
     assert prepare_upload(document).data == document
 
 
+def test_preflight_preserves_named_maps_inside_openapi_operations():
+    response = {
+        "description": "ok",
+        "headers": {"api_key": {"schema": {"type": "string"}}},
+        "links": {"secret": {"operationId": "reviewResult"}},
+    }
+    document = {
+        "openapi": "3.1.0",
+        "paths": {
+            "/review": {
+                "get": {
+                    "callbacks": {
+                        "token": {
+                            "{$request.body#/callbackUrl}": {
+                                "post": {"responses": {"200": response}}
+                            }
+                        }
+                    },
+                    "responses": {"200": response},
+                }
+            }
+        },
+        "webhooks": {"api_key": {"post": {"responses": {"200": response}}}},
+    }
+
+    assert prepare_upload(document).data == document
+
+
+def test_preflight_scans_openapi_example_values_as_data():
+    secret = "opaque-example-secret-0123456789"
+    document = {
+        "openapi": "3.1.0",
+        "components": {
+            "examples": {"review": {"value": {"security": {"token": {"primary": secret}}}}}
+        },
+    }
+
+    prepared = prepare_upload(document)
+
+    assert (
+        prepared.data["components"]["examples"]["review"]["value"]["security"]["token"]["primary"]
+        == REDACTED
+    )
+
+
 @pytest.mark.parametrize("container", ["headers", "parameters"])
 def test_preflight_redacts_live_values_in_sensitive_openapi_definitions(container):
     document = {

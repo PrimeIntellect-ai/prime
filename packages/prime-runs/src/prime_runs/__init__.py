@@ -1,6 +1,6 @@
 """Prime Intellect Runs SDK.
 
-Track eval runs on the Prime platform::
+Track eval and training runs on the Prime platform::
 
     import prime_runs as pr
 
@@ -31,7 +31,14 @@ from .exceptions import (
     TransportError,
     UnauthorizedError,
 )
-from .models import CONFIG_SOURCE_KEY, ConfigSource, EnvironmentRef, RunStatus
+from .models import (
+    CONFIG_SOURCE_KEY,
+    ConfigSource,
+    EnvironmentRef,
+    RunKind,
+    RunStatus,
+    TrainingSpec,
+)
 from .run import MODE_ENV, Run, init
 
 __version__ = "0.1.0"
@@ -40,6 +47,8 @@ __all__ = [
     "init",
     "Run",
     "RunStatus",
+    "RunKind",
+    "TrainingSpec",
     "ConfigSource",
     "CONFIG_SOURCE_KEY",
     "EnvironmentRef",

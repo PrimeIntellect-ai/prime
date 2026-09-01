@@ -43,6 +43,11 @@ Documentation = "https://github.com/PrimeIntellect-ai/prime/tree/main/packages/p
 Repository = "https://github.com/PrimeIntellect-ai/prime.git"
 
 [project.optional-dependencies]
+# The training sample table is Parquet. Optional: an eval producer never needs
+# it, and prime-rl already carries pyarrow.
+train = [
+    "pyarrow>=15.0.0",
+]
 dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.23.0",

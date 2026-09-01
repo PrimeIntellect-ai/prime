@@ -179,3 +179,124 @@ def batch_samples(samples: Sequence[Dict[str, Any]]) -> List[List[Dict[str, Any]
     if batch:
         batches.append(batch)
     return batches
+
+
+# ------------------------------------------------------------ training table
+
+
+def parquet_available() -> bool:
+    """Whether the training sample table can be encoded (``prime-runs[train]``)."""
+    try:
+        import pyarrow  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def train_sample_schema() -> Any:
+    """The training sample table's Parquet schema (prime-rl's ``SAMPLE_SCHEMA``)."""
+    import pyarrow as pa
+
+    return pa.schema(
+        [
+            ("run_id", pa.string()),
+            ("step", pa.int64()),
+            ("tag", pa.string()),
+            ("problem_id", pa.int64()),
+            ("sample_id", pa.int64()),
+            ("prompt", pa.string()),
+            ("completion", pa.string()),
+            ("trajectory", pa.string()),
+            ("answer", pa.string()),
+            ("env_name", pa.string()),
+            ("task", pa.string()),
+            ("info", pa.string()),
+            ("reward", pa.float64()),
+            ("advantage", pa.float64()),
+            ("metrics", pa.string()),
+            ("timing", pa.string()),
+            ("num_input_tokens", pa.int64()),
+            ("num_output_tokens", pa.int64()),
+            ("created_at", pa.timestamp("us", tz="UTC")),
+        ]
+    )
+
+
+def episodes_to_parquet_bytes(
+    episodes: Sequence[Any], run_id: str, step: int, *, sample_id_offset: int = 0
+) -> Optional[bytes]:
+    """One training step's episodes as the viewer's Parquet table, one row per
+    episode. Moved here from prime-rl's ``monitors/prime.py``.
+
+    Sample construction is shared with the eval projection (:func:`build_samples`:
+    the complete native episode in ``info.native_wrapper``, a flat summary from
+    one trainable trace), so a training episode and an eval sample land on the
+    platform identically; the RFT-only columns (run/step/advantage/problem_id/
+    env_name) are layered on here. ``None`` when no episode has a trajectory.
+
+    ``sample_id`` numbers the rows from ``sample_id_offset``: the viewer looks
+    samples up by (step, sample_id), and a step uploaded as more than one
+    object (see :mod:`prime_runs.sinks.train_samples`) needs each object to
+    number its rows in its own range.
+    """
+    import io
+    import json
+    from datetime import datetime, timezone
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    advantages: Dict[Any, Optional[float]] = {}
+    env_names: Dict[Any, str] = {}
+    for episode in episodes:
+        if not episode.traces:
+            continue
+        summary_trace = episode.traces[summary_trace_index(episode)]
+        advantages[episode.id] = (summary_trace.info or {}).get("advantage")
+        env = getattr(episode, "env", None)
+        env_names[episode.id] = str(getattr(env, "id", None) or "")
+
+    now = datetime.now(timezone.utc)
+    rows: List[Dict[str, Any]] = []
+    for sample_id, sample in enumerate(build_samples(episodes), start=sample_id_offset):
+        trajectory = sample["trajectory"]
+        if not trajectory:  # no branches: an episode that errored before any message
+            continue
+        advantage = advantages.get(sample["episode_id"])
+        trajectory = [{**branch, "advantage": advantage} for branch in trajectory]
+        try:
+            problem_id = (
+                int(sample["example_id"]) if sample["example_id"] is not None else sample_id
+            )
+        except (TypeError, ValueError):
+            problem_id = sample_id
+        rows.append(
+            {
+                "run_id": run_id,
+                "step": step,
+                "tag": "",
+                "problem_id": problem_id,
+                "sample_id": sample_id,
+                "prompt": "",
+                "completion": json.dumps(sample["completion"]),
+                "trajectory": json.dumps(trajectory),
+                "answer": "",
+                "env_name": env_names.get(sample["episode_id"], ""),
+                "task": json.dumps(sample["task"]),
+                "info": json.dumps(sample["info"]),
+                "reward": sample["reward"],
+                "advantage": advantage,
+                "metrics": json.dumps(sample["metrics"]),
+                "timing": json.dumps(sample["timing"]),
+                "num_input_tokens": trajectory[-1]["num_input_tokens"],
+                "num_output_tokens": trajectory[-1]["num_output_tokens"],
+                "created_at": now,
+            }
+        )
+    if not rows:
+        return None
+
+    table = pa.Table.from_pylist(rows, schema=train_sample_schema())
+    buffer = io.BytesIO()
+    pq.write_table(table, buffer, compression="snappy", use_dictionary=True, write_statistics=True)
+    return buffer.getvalue()

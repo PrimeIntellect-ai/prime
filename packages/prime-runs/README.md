@@ -1,6 +1,6 @@
 # Prime Runs SDK
 
-Track eval runs on the Prime Intellect platform.
+Track eval and training runs on the Prime Intellect platform.
 
 ```bash
 pip install prime-runs
@@ -105,6 +105,69 @@ disables the run with a warning — it never silently writes somewhere else.
   block — is `cancelled`; one that stopped without saying — an exit that never
   reached `finish()` — is `crashed`.
 
+## Training runs
+
+```python
+import prime_runs as pr
+
+run = pr.init(
+    kind="train",
+    name="qwen3-8b-gsm8k-rl",
+    model="Qwen/Qwen3-8B",                  # the base model
+    environments=["primeintellect/gsm8k"],  # hub ids, passed through as given
+    training=pr.TrainingSpec(max_steps=1000, batch_size=64, rollouts_per_example=8),
+    config=train_config.model_dump(),       # or the path to the launched TOML
+    team_id="team_...",                     # external runs are created for a team
+)
+
+for step, (episodes, metrics) in enumerate(training_loop):
+    run.log_episodes(episodes)              # carry run.work.step (verifiers TrainRunInfo)
+    run.log_metrics(metrics, step=step)
+
+run.finish()
+```
+
+A training run lives on `/api/v1/rft/external-runs` — what prime-rl's monitor
+did by hand. Where it differs from an eval run:
+
+- **A team is required.** The platform enables external runs per team. A team
+  outside the allowlist gets a `ForbiddenError` from `init()` with the
+  platform's reason; the producer decides whether that means "run locally".
+- **Metrics.** `log_metrics(values, step=...)` streams one row per call on its
+  own uploader, so a slow sample upload never holds a step's metrics back.
+  `_timestamp` is stamped on every row; non-finite values are dropped. The
+  endpoint allows 60 rows a minute per token. A row whose response was lost
+  is re-sent: the platform keeps one row per step, so nothing doubles.
+- **Samples.** Every record reaches Prime Traces. The training viewer's sample
+  table is a Parquet object per upload, keyed by the training step an episode
+  was *dispatched* at — `run.work.step` on verifiers' `TrainRunInfo`, which
+  prime-rl stamps on every dispatched episode — and uploaded every 10th step
+  (prime-rl's cadence) for training-work episodes. Objects are additive: a
+  step logged in several `log_episodes` calls (an off-policy episode landing
+  in a later batch) gets one object per call, each numbering its `sample_id`s
+  in its own range (a forked child draws its ranges apart from its parent's),
+  and the viewer shows their union. So "step N" in the
+  sample viewer means dispatched at N, while the metrics logged at N describe
+  the batch trained at N. Encoding needs pyarrow: `pip install
+  'prime-runs[train]'`. Without it the table is skipped with a warning and
+  traces still flow.
+- **Attach.** `init(kind="train", id=os.environ["RUN_ID"])` joins a run a
+  launcher created: nothing is registered, the platform keeps the run's
+  failure marking, and a clean `finish()` still completes it. The id must be
+  an external run's (one created through `POST /rft/external-runs`): the
+  platform's monitoring endpoints answer 400 for a hosted run.
+- **Status.** The RFT vocabulary is `completed | failed`. `cancelled` and
+  `crashed` are reported as `failed` with the reason in `error_message`; a
+  clean `finish()` is an idempotent finalize, safe to replay.
+- **Outages.** A sink that strikes out on transient failures (three in a row,
+  each already retried) is paused for five minutes and then tried again, not
+  retired for the run: a platform deploy costs a multi-day run a window of
+  rows, never the rest of its curves. Records that arrive while a sink is
+  paused are counted in `run.failed_records` for that sink.
+- **No config update.** `config=` is registered once as `run_config` and there
+  is no summary document, so `finish(summary=...)` is not sent for training
+  runs — log final numbers with `log_metrics`.
+
 ## From async code
 
 `log_traces()` / `log_episodes()` are a queue put, not a request, so they are
@@ -144,8 +207,8 @@ package is imported — this is a leaf package, because the `prime` CLI depends 
 
 ## Status
 
-Eval runs only. Training runs will arrive with a backend over
-`/api/v1/rft/external-runs`, designed against prime-rl's actual needs.
+Eval runs over `/api/v1/evaluations`, training runs over
+`/api/v1/rft/external-runs` (see "Training runs").
 
 The evaluations API this version targets has no producer-facing way to mark an
 evaluation **failed** or **cancelled**: the SDK records the terminal state under

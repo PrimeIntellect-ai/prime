@@ -25,8 +25,7 @@ class SinkWriteError(Exception):
         self.cause = cause
         self.failed_records = failed_records
         super().__init__(
-            f"{failed_records} record(s) were not fully stored: "
-            f"{type(cause).__name__}: {cause}"
+            f"{failed_records} record(s) were not fully stored: {type(cause).__name__}: {cause}"
         )
 
 
@@ -74,7 +73,7 @@ def is_episode(record: Any) -> bool:
     return hasattr(record, "traces")
 
 
-def stamp_run(mapping: Mapping[str, Any], run_id: str) -> Dict[str, Any]:
+def stamp_run(mapping: Mapping[str, Any], run_id: str, run_type: str = RUN_KIND) -> Dict[str, Any]:
     """A copy of ``mapping`` carrying ``run`` at the top level, and on every
     member trace of an episode that lacks one.
 
@@ -86,7 +85,7 @@ def stamp_run(mapping: Mapping[str, Any], run_id: str) -> Dict[str, Any]:
     """
     stamped = dict(mapping)
     if not stamped.get("run"):
-        stamped["run"] = {"id": run_id, "type": RUN_KIND}
+        stamped["run"] = {"id": run_id, "type": run_type}
     members = stamped.get("traces")
     if isinstance(members, list):
         run = stamped["run"]

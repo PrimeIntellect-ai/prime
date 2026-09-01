@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional, Protocol
 
 from ._http import PlatformClient
 from .exceptions import APIError, ConfigurationError, EnvironmentResolutionError
-from .models import EnvironmentRef, RunHandle, RunSpec, RunStatus
+from .models import EnvironmentRef, RunHandle, RunSpec, RunStatus, TrainingSpec
 
 logger = logging.getLogger(__name__)
 
@@ -267,3 +267,186 @@ class DisabledBackend:
 
     def close(self) -> None:
         return None
+
+
+# ------------------------------------------------------------------- rft
+
+#: The RFT API's status vocabulary is ``completed | failed``; the SDK's finer
+#: distinctions travel in ``error_message``.
+RFT_TERMINAL_STATUS = {
+    RunStatus.COMPLETED: "completed",
+    RunStatus.FAILED: "failed",
+    RunStatus.CANCELLED: "failed",
+    RunStatus.CRASHED: "failed",
+}
+
+
+class RftBackend:
+    """Lifecycle for external training runs over ``/api/v1/rft/*``.
+
+    What prime-rl's ``TrainRun`` did, in the SDK: register a run (or attach to
+    one a managed launch created), close it out. External runs are created
+    *for a team* and the platform enables them per team, so ``team_id`` is
+    required and a team outside the allowlist gets a 403 from :meth:`create`;
+    the producer decides whether that means "run locally" (the way verifiers
+    treats a missing key) or "stop".
+
+    The API has no config/summary update — ``run_config`` travels with
+    :meth:`create` and :meth:`update` is a no-op — and its status vocabulary
+    is ``completed | failed``: ``cancelled`` and ``crashed`` are reported as
+    ``failed`` with the reason in ``error_message``.
+    """
+
+    def __init__(
+        self,
+        client: PlatformClient,
+        *,
+        frontend_url: str,
+        team_id: Optional[str] = None,
+    ) -> None:
+        self._client = client
+        self._frontend_url = frontend_url.rstrip("/")
+        self._team_id = team_id
+
+    # ------------------------------------------------------------------ create
+
+    def create(self, spec: RunSpec) -> RunHandle:
+        if not spec.model:
+            raise ConfigurationError("A training run needs model= — the base model being trained.")
+        team_id = spec.team_id or self._team_id
+        if not team_id:
+            raise ConfigurationError(
+                "A training run needs a team: pass team_id= or set PRIME_TEAM_ID. "
+                "External training runs are created for a team, and the platform "
+                "enables them per team."
+            )
+        training = spec.training or TrainingSpec()
+        payload: Dict[str, Any] = {
+            "base_model": spec.model,
+            "max_steps": int(training.max_steps),
+            # Environment ids are passed through: training environments are
+            # named by hub id, and the RFT API does its own resolution.
+            "environments": [_training_environment(ref) for ref in spec.environments],
+            "team_id": team_id,
+        }
+        _set_if(payload, "name", spec.name)
+        _set_if(payload, "batch_size", training.batch_size)
+        _set_if(payload, "rollouts_per_example", training.rollouts_per_example)
+        _set_if(payload, "seq_len", training.seq_len)
+        _set_if(payload, "run_config", spec.config or None)
+        _set_if(payload, "wandb_project", training.wandb_project)
+        _set_if(payload, "wandb_entity", training.wandb_entity)
+        _set_if(payload, "wandb_run_name", training.wandb_run_name)
+
+        # Not replayable: a retry after a lost response would register a
+        # second run and only the second would be tracked.
+        response = self._client.post("/rft/external-runs", json_body=payload)
+        run = response.get("run") or {}
+        run_id = run.get("id")
+        if not run_id:
+            raise APIError(f"POST /rft/external-runs returned no run id (keys: {sorted(response)})")
+        return RunHandle(
+            id=str(run_id),
+            name=str(run.get("name") or spec.name or "") or None,
+            url=self.url_for(str(run_id)),
+        )
+
+    def attach(self, run_id: str) -> RunHandle:
+        """A handle for a run the platform already created — a launcher that
+        injected its id. No request: the first write proves access, and it
+        must be an *external* run (``POST /rft/external-runs``): the v1
+        monitoring endpoints answer 400 for a hosted run's id."""
+        return RunHandle(id=run_id, url=self.url_for(run_id))
+
+    def url_for(self, run_id: str) -> str:
+        return f"{self._frontend_url}/dashboard/training/{run_id}"
+
+    # ------------------------------------------------------------------ update
+
+    def update(
+        self,
+        run_id: str,
+        *,
+        config: Optional[Dict[str, Any]] = None,
+        summary: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """No-op: an RFT run takes its config at creation and has no summary
+        document. Run-level outputs go through ``log_metrics``."""
+        if config or summary:
+            logger.debug("Run %s: the RFT API has no config/summary update; nothing sent", run_id)
+
+    # ---------------------------------------------------------------- finalize
+
+    def finalize(
+        self,
+        run_id: str,
+        *,
+        status: RunStatus,
+        summary: Optional[Dict[str, Any]] = None,
+        error: Optional[str] = None,
+        config: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if status is RunStatus.COMPLETED:
+            # Compare-and-set on the server, and "already finalized" is a
+            # success, so a lost response is safe to replay.
+            try:
+                self._client.post(
+                    "/rft/finalize",
+                    json_body={"run_id": run_id, "exit_code": 0},
+                    idempotent=True,
+                )
+            except APIError as exc:
+                # Preserve TrainRun's fallback: finalization may be unavailable
+                # even though the status endpoint can still close the run out.
+                logger.warning(
+                    "Run %s could not be finalized (%s); falling back to a status update",
+                    run_id,
+                    exc,
+                )
+                self._set_terminal_status(run_id, status=status)
+            return
+
+        message = error or status.value
+        if status is not RunStatus.FAILED:
+            message = f"{status.value}: {message}"
+        self._set_terminal_status(run_id, status=status, error_message=message)
+
+    def _set_terminal_status(
+        self,
+        run_id: str,
+        *,
+        status: RunStatus,
+        error_message: Optional[str] = None,
+    ) -> None:
+        payload: Dict[str, Any] = {"status": RFT_TERMINAL_STATUS[status]}
+        _set_if(payload, "error_message", error_message)
+        try:
+            self._client.put(
+                f"/rft/external-runs/{run_id}/status",
+                json_body=payload,
+            )
+        except APIError as exc:
+            if exc.status_code == 409:
+                # Already closed out (a managed launcher, or an earlier attempt
+                # whose response was lost). The outcome is recorded either way.
+                logger.info(
+                    "Run %s is already closed on the platform; not marking it %s",
+                    run_id,
+                    status.value,
+                )
+                return
+            raise
+
+    def log_metrics(self, run_id: str, metrics: Dict[str, Any]) -> None:
+        """One step's metrics, synchronously. The run handle batches these
+        through its uploader; this is the direct call."""
+        self._client.post("/rft/metrics", json_body={"run_id": run_id, "metrics": metrics})
+
+    def close(self) -> None:
+        self._client.close()
+
+
+def _training_environment(ref: EnvironmentRef) -> Dict[str, Any]:
+    entry: Dict[str, Any] = {"id": ref.id or ref.slug or ref.name}
+    _set_if(entry, "version_id", ref.version_id)
+    return entry

@@ -75,10 +75,40 @@ class Trace:
 
 
 @dataclass
+class EnvInfo:
+    id: str = "gsm8k"
+    name: Optional[str] = None
+
+
+@dataclass
+class TrainWorkInfo:
+    step: int
+    type: str = "train"
+
+
+@dataclass
+class EvalWorkInfo:
+    step: int
+    type: str = "eval"
+
+
+@dataclass
+class TrainRunInfo:
+    """verifiers stamps this on every episode a training run dispatches."""
+
+    id: str
+    work: Any
+    type: str = "train"
+    name: Optional[str] = None
+
+
+@dataclass
 class Episode:
     id: str = "episode-1"
     traces: List[Trace] = field(default_factory=list)
     ok: bool = True
+    env: EnvInfo = field(default_factory=EnvInfo)
+    run: Optional[Any] = None
 
     def to_record(self) -> Dict[str, Any]:
         return {"id": self.id, "traces": [trace.to_record() for trace in self.traces]}
@@ -113,3 +143,28 @@ def make_episode(
     episode_id: str = "episode-1", traces: Optional[List[Trace]] = None, ok: bool = True
 ) -> Episode:
     return Episode(id=episode_id, traces=traces if traces is not None else [make_trace()], ok=ok)
+
+
+def make_train_episode(
+    episode_id: str = "episode-1",
+    *,
+    step: int = 10,
+    work: str = "train",
+    idx: int = 0,
+    reward: float = 1.0,
+    advantage: Optional[float] = None,
+    env_id: str = "gsm8k",
+    run_id: str = "run-1",
+) -> Episode:
+    """An episode the way prime-rl hands it over: stamped with the run and the
+    training step it was dispatched at, ``advantage`` in the trace's info."""
+    trace = make_trace(trace_id=f"{episode_id}-t", idx=idx, reward=reward)
+    if advantage is not None:
+        trace.info["advantage"] = advantage
+    work_info = TrainWorkInfo(step=step) if work == "train" else EvalWorkInfo(step=step)
+    return Episode(
+        id=episode_id,
+        traces=[trace],
+        env=EnvInfo(id=env_id),
+        run=TrainRunInfo(id=run_id, work=work_info),
+    )

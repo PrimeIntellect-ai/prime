@@ -8,7 +8,7 @@ from conftest import RecordingHandler
 
 import prime_runs as pr
 from prime_runs.exceptions import ConfigurationError
-from prime_runs.models import RunStatus
+from prime_runs.models import RunSpec, RunStatus
 
 # -------------------------------------------------------------------- modes
 
@@ -109,6 +109,13 @@ def test_an_online_run_returns_the_platforms_id_and_viewer_url(online):
     assert run.id == "eval-abc"
     assert run.url == "https://app.example/dashboard/evaluations/eval-abc"
     assert run.mode == "online"
+    run.finish()
+
+
+def test_eval_uploaders_keep_the_permanent_retirement(online):
+    run, _ = online()
+
+    assert run._worker._retire_cooldown is None
     run.finish()
 
 
@@ -259,3 +266,206 @@ def test_records_reject_nonfinite_json_instead_of_sending_an_opaque_400(online):
     with pytest.raises(ValueError, match="Out of range float values"):
         run.flush()
     run.finish()
+
+
+# ----------------------------------------------------------------- training
+
+
+@pytest.fixture
+def online_train(monkeypatch, make_platform_client, rft_routes):
+    """``init(kind="train", mode="online")`` wired to a MockTransport: traces
+    sink off, sample uploads to an in-memory store, a recording encoder."""
+    from conftest import StorageHandler
+
+    from prime_runs.sinks import RftSamplesSink
+
+    storage = StorageHandler()
+    encoder_calls = []
+
+    def encoder(episodes, run_id, step, sample_id_offset=0):
+        encoder_calls.append((len(episodes), run_id, step))
+        return b"parquet"
+
+    def samples_sink(client, **kwargs):
+        return RftSamplesSink(client, encoder=encoder, upload_client=storage.client(), **kwargs)
+
+    def _init(routes=None, **kwargs):
+        handler = RecordingHandler(routes or rft_routes)
+        monkeypatch.setattr(
+            "prime_runs.run.PlatformClient", lambda **_: make_platform_client(handler)
+        )
+        monkeypatch.setattr("prime_runs.run.TracesSink", lambda **_: _NullSink())
+        monkeypatch.setattr("prime_runs.run.RftSamplesSink", samples_sink)
+        # The RFT create response carries no viewer URL; the SDK builds one.
+        monkeypatch.setenv("PRIME_FRONTEND_URL", "https://app.example")
+        kwargs.setdefault("name", "test-run")
+        kwargs.setdefault("model", "Qwen/Qwen3-8B")
+        kwargs.setdefault("environments", ["primeintellect/vf-math"])
+        kwargs.setdefault("team_id", "team-1")
+        run = pr.init(kind="train", api_key="test-key", **kwargs)
+        return run, handler, storage, encoder_calls
+
+    return _init
+
+
+def test_a_training_run_registers_with_the_rft_api(online_train):
+    run, handler, _, _ = online_train(
+        training=pr.TrainingSpec(max_steps=50, batch_size=32),
+        config={"trainer": {"lr": 1e-6}},
+    )
+
+    assert run.kind == "train"
+    assert run.id == "run-abc"
+    assert run.url == "https://app.example/dashboard/training/run-abc"
+    assert run.attached is False
+    body = handler.bodies_for("/api/v1/rft/external-runs")[0]
+    assert body["base_model"] == "Qwen/Qwen3-8B"
+    assert body["max_steps"] == 50
+    assert body["batch_size"] == 32
+    assert body["environments"] == [{"id": "primeintellect/vf-math"}]
+    assert body["run_config"] == {"trainer": {"lr": 1e-6}}
+    assert body["team_id"] == "team-1"
+    assert [sink.name for sink in run._worker.sinks] == ["traces", "rft_samples"]
+    assert [sink.name for sink in run._metrics_worker.sinks] == ["rft_metrics"]
+    run.finish()
+
+
+def test_a_training_run_streams_metrics_and_step_samples(online_train):
+    from _fakes import make_train_episode
+
+    run, handler, storage, encoder_calls = online_train()
+
+    run.log_metrics({"loss": 0.5}, step=10)
+    run.log_episodes([make_train_episode("e1", step=10), make_train_episode("e2", step=10)])
+    run.finish()
+
+    metrics = handler.bodies_for("/api/v1/rft/metrics")
+    assert len(metrics) == 1
+    assert metrics[0]["run_id"] == "run-abc"
+    assert metrics[0]["metrics"]["loss"] == 0.5
+    assert metrics[0]["metrics"]["step"] == 10
+    assert "_timestamp" in metrics[0]["metrics"]
+    assert encoder_calls == [(2, "run-abc", 10)]
+    assert len(storage.uploads) == 1
+    assert handler.bodies_for("/api/v1/rft/samples/confirm")[0]["step"] == 10
+    # Closed out through the idempotent finalize, not the status PUT.
+    assert handler.bodies_for("/api/v1/rft/finalize") == [{"run_id": "run-abc", "exit_code": 0}]
+    assert "PUT /api/v1/rft/external-runs/run-abc/status" not in handler.paths()
+    assert run.status is RunStatus.COMPLETED
+    assert run.errors == []
+
+
+def test_a_failed_training_run_is_marked_failed_with_the_reason(online_train):
+    run, handler, _, _ = online_train()
+
+    with pytest.raises(ValueError):
+        with run:
+            raise ValueError("loss is NaN")
+
+    body = handler.bodies_for("/api/v1/rft/external-runs/run-abc/status")[0]
+    assert body == {"status": "failed", "error_message": "ValueError: loss is NaN"}
+    assert "POST /api/v1/rft/finalize" not in handler.paths()
+
+
+def test_training_uploaders_pause_rather_than_retire_after_an_outage(online_train):
+    """A training run lasts days; a sink that struck out on a platform blip
+    is tried again after a cooldown instead of losing the rest of the run."""
+    from prime_runs.run import TRAIN_RETIRE_COOLDOWN
+
+    run, _, _, _ = online_train()
+
+    assert run._worker._retire_cooldown == TRAIN_RETIRE_COOLDOWN == 300.0
+    assert run._metrics_worker._retire_cooldown == TRAIN_RETIRE_COOLDOWN
+    run.finish()
+
+
+def test_attaching_to_a_managed_run_registers_nothing(online_train):
+    run, handler, _, _ = online_train(id="run-managed")
+
+    assert run.id == "run-managed"
+    assert run.attached is True
+    assert run.url == "https://app.example/dashboard/training/run-managed"
+    assert "POST /api/v1/rft/external-runs" not in handler.paths()
+    run.finish()
+    # A clean exit still completes it.
+    assert handler.bodies_for("/api/v1/rft/finalize") == [{"run_id": "run-managed", "exit_code": 0}]
+
+
+def test_an_attached_run_leaves_failure_marking_to_the_launcher(online_train, caplog):
+    """A managed launch marks its own run failed when the process goes away;
+    reporting it from here would race that (prime-rl's contract)."""
+    run, handler, _, _ = online_train(id="run-managed")
+
+    with caplog.at_level("INFO"):
+        run.fail("boom")
+
+    assert not any("status" in path for path in handler.paths())
+    assert "POST /api/v1/rft/finalize" not in handler.paths()
+    assert "leaving it to the launcher" in caplog.text
+    assert run.status is RunStatus.FAILED
+
+
+def test_a_training_run_needs_a_team(monkeypatch, make_platform_client, rft_routes):
+    handler = RecordingHandler(rft_routes)
+    monkeypatch.setattr("prime_runs.run.PlatformClient", lambda **_: make_platform_client(handler))
+
+    with pytest.raises(ConfigurationError, match="team"):
+        pr.init(kind="train", model="Qwen/Qwen3-8B", api_key="test-key", mode="online")
+    assert handler.paths() == []
+
+
+def test_a_team_outside_the_allowlist_surfaces_the_platforms_reason(
+    monkeypatch, make_platform_client, rft_routes
+):
+    import httpx
+
+    routes = dict(rft_routes)
+    routes["POST /api/v1/rft/external-runs"] = lambda request: httpx.Response(
+        403, json={"detail": "External training runs are not enabled for this team"}
+    )
+    handler = RecordingHandler(routes)
+    monkeypatch.setattr("prime_runs.run.PlatformClient", lambda **_: make_platform_client(handler))
+
+    with pytest.raises(pr.ForbiddenError, match="not enabled for this team"):
+        pr.init(kind="train", model="m", team_id="team-1", api_key="test-key", mode="online")
+
+
+def test_a_disabled_training_run_keeps_an_attached_id(tmp_path):
+    run = pr.init(kind="train", mode="disabled", id="run-managed", model="m")
+
+    assert run.id == "run-managed"
+    assert run.kind == "train"
+    run.log_metrics({"loss": 0.1}, step=1)
+    assert run._metrics_worker._thread is None
+    run.finish()
+    assert run.status is RunStatus.COMPLETED
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"kind": "eval", "id": "eval-1"},
+        {"kind": "eval", "training": pr.TrainingSpec()},
+        {"kind": "serve"},
+    ],
+    ids=["eval-with-id", "eval-with-training", "unknown-kind"],
+)
+def test_kind_arguments_are_checked_before_anything_else(kwargs):
+    with pytest.raises(ConfigurationError):
+        pr.init(mode="disabled", **kwargs)
+
+
+def test_training_records_are_stamped_with_the_train_run_type():
+    """Bare dicts get ``run.type`` from the run's kind, matching what verifiers'
+    ``TrainRunInfo`` carries, so the traces service files them as training."""
+    from prime_runs.run import _sink_context
+    from prime_runs.sinks.base import stamp_run
+
+    spec = RunSpec(kind="train", model="m")
+    context = _sink_context(spec)
+
+    assert context["run_type"] == "train"
+    assert stamp_run({"id": "t1"}, "run-abc", context["run_type"])["run"] == {
+        "id": "run-abc",
+        "type": "train",
+    }

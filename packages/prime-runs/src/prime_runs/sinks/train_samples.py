@@ -22,6 +22,7 @@ Log a step in one call to keep it to one object.
 """
 
 import logging
+import secrets
 import time
 from typing import Any, Dict, List, Mapping, Optional, Protocol, Sequence, Tuple
 
@@ -47,10 +48,16 @@ DEFAULT_STEP_INTERVAL = 10
 #: Attempts for the object-storage PUT, which is idempotent.
 UPLOAD_ATTEMPTS = 3
 
-#: ``sample_id`` ranges are ``upload_index * SAMPLE_ID_STRIDE``: the first
-#: object for a step numbers its rows from 0 (what a single-object step always
-#: did), a straggler object from 2**32, and so on. No object holds that many rows.
+#: ``sample_id = range * SAMPLE_ID_STRIDE + row``. In the process that opened
+#: the run the range is the step's upload index: the first object numbers its
+#: rows from 0 (what a single-object step always did), a straggler object from
+#: 2**32, and so on; no object holds 2**32 rows. A forked child inherits a copy
+#: of those counters and would hand out the same ranges as its parent, so it
+#: draws its ranges at random from the upper half of the range space instead,
+#: which the parent's counter never reaches. Every id stays below 2**53: the
+#: viewer parses ``sample_id`` as a JSON number.
 SAMPLE_ID_STRIDE = 1 << 32
+SAMPLE_ID_RANGES = 1 << 21
 
 
 class Encoder(Protocol):
@@ -110,6 +117,8 @@ class RftSamplesSink(Sink):
         self.sampled_out = 0
         #: Uploads attempted per step; each numbers its rows in its own range.
         self._uploads_per_step: Dict[int, int] = {}
+        #: A forked child cannot share the parent's counters; see SAMPLE_ID_RANGES.
+        self._forked = False
         _fork.register(self)
 
     # ------------------------------------------------------------------ setup
@@ -117,11 +126,14 @@ class RftSamplesSink(Sink):
     def reset_after_fork(self) -> None:
         """Drop (not close) the inherited storage client: its socket is the
         parent's. An owned client is rebuilt on the next upload; an injected
-        one cannot be, so the child's uploads fail rather than share it."""
+        one cannot be, so the child's uploads fail rather than share it. The
+        inherited upload counters are the parent's too: from here on ranges
+        are drawn at random, apart from anything the parent hands out."""
         if self._owns_upload_client:
             self._upload_client = None
         else:
             self._forked_with_injected_client = True
+        self._forked = True
 
     def start(self, run_id: str, context: Mapping[str, str]) -> None:
         self._run_id = run_id
@@ -201,13 +213,11 @@ class RftSamplesSink(Sink):
         assert self._encoder is not None and self._run_id is not None
         # Every upload of a step numbers its rows in its own range, counted by
         # attempt: an upload whose confirm was lost may still have landed.
-        upload_index = self._uploads_per_step.get(step, 0)
         payload = self._encoder(
-            episodes, self._run_id, step, sample_id_offset=upload_index * SAMPLE_ID_STRIDE
+            episodes, self._run_id, step, sample_id_offset=self._next_range(step) * SAMPLE_ID_STRIDE
         )
         if payload is None:
             return False
-        self._uploads_per_step[step] = upload_index + 1
 
         # Replayable: a presign only mints a URL.
         presign = self._client.post(
@@ -234,6 +244,15 @@ class RftSamplesSink(Sink):
             idempotent=True,
         )
         return True
+
+    def _next_range(self, step: int) -> int:
+        """The ``sample_id`` range for the next upload of ``step``."""
+        if self._forked:
+            half = SAMPLE_ID_RANGES // 2
+            return half + secrets.randbelow(half)
+        upload_index = self._uploads_per_step.get(step, 0)
+        self._uploads_per_step[step] = upload_index + 1
+        return upload_index
 
     def _put_object(self, url: str, payload: bytes) -> None:
         """PUT the object to storage. Bare client: the presigned URL carries its

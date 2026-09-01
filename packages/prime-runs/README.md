@@ -145,7 +145,8 @@ did by hand. Where it differs from an eval run:
   (prime-rl's cadence) for training-work episodes. Objects are additive: a
   step logged in several `log_episodes` calls (an off-policy episode landing
   in a later batch) gets one object per call, each numbering its `sample_id`s
-  in its own range, and the viewer shows their union. So "step N" in the
+  in its own range (a forked child draws its ranges apart from its parent's),
+  and the viewer shows their union. So "step N" in the
   sample viewer means dispatched at N, while the metrics logged at N describe
   the batch trained at N. Encoding needs pyarrow: `pip install
   'prime-runs[train]'`. Without it the table is skipped with a warning and

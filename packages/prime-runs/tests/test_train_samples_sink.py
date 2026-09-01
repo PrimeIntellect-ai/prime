@@ -253,6 +253,31 @@ def test_an_upload_that_failed_still_advances_the_sample_id_range(make_platform_
     assert encoder.offsets == [0, SAMPLE_ID_STRIDE]
 
 
+def test_a_forked_child_numbers_its_rows_apart_from_the_parent(make_platform_client, rft_routes):
+    """The child inherits a copy of the parent's upload counters; continuing
+    them would hand out the parent's next range. The child's ranges come from
+    a band the parent's counter never reaches, and every id stays a JSON-safe
+    integer for the viewer."""
+    from prime_runs.sinks.train_samples import SAMPLE_ID_RANGES, SAMPLE_ID_STRIDE
+
+    assert SAMPLE_ID_RANGES * SAMPLE_ID_STRIDE <= 2**53
+    sink, handler, storage, encoder = make_sink(make_platform_client, rft_routes)
+    sink.write([make_train_episode("e1", step=10)])
+
+    sink.reset_after_fork()  # the child's copy of the sink...
+    # ...with its own storage client, as an owned one is rebuilt on the next upload.
+    sink._upload_client, sink._forked_with_injected_client = storage.client(), False
+    sink.write([make_train_episode("e2", step=10)])
+    sink.write([make_train_episode("e3", step=10)])
+
+    parent, first, second = encoder.offsets
+    assert parent == 0
+    band = range(SAMPLE_ID_RANGES // 2 * SAMPLE_ID_STRIDE, SAMPLE_ID_RANGES * SAMPLE_ID_STRIDE)
+    assert first in band and second in band and first != second
+    assert first % SAMPLE_ID_STRIDE == 0
+    assert sink._uploads_per_step == {10: 1}, "the inherited counters are left to the parent"
+
+
 def test_a_confirm_whose_response_was_lost_is_replayed(make_platform_client, rft_routes, no_sleep):
     """Confirm validates the key and refreshes progress; a second confirm of
     the same key changes nothing, so an ambiguous failure is retried rather

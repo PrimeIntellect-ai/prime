@@ -568,6 +568,25 @@ def test_preflight_preserves_openapi_scalar_definition_maps():
     assert prepare_upload(document).data == document
 
 
+def test_preflight_preserves_sensitive_named_server_variables():
+    document = {
+        "openapi": "3.1.0",
+        "servers": [
+            {
+                "url": "https://{token}.example.com",
+                "variables": {
+                    "token": {
+                        "default": "production",
+                        "enum": ["production", "staging"],
+                    }
+                },
+            }
+        ],
+    }
+
+    assert prepare_upload(document).data == document
+
+
 @pytest.mark.parametrize(
     "container",
     [

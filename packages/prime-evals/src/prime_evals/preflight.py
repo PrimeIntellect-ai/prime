@@ -83,6 +83,8 @@ NAMED_DEFINITIONS = {
     "pattern_properties",
     "properties",
 }
+SCHEMA_DEFINITION_MAPS = NAMED_DEFINITIONS - {"dependent_required"}
+SENSITIVE_DEFINITION_MAPS = {"headers", "parameters"}
 OPENAPI_DESCRIPTOR_FIELDS = {
     "authorization_url",
     "open_id_connect_url",
@@ -369,7 +371,7 @@ class SecretDiscovery:
         value: Any,
         schema_secret: bool = False,
         schema_context: bool = False,
-        definitions: bool = False,
+        definitions: str | None = None,
         headers: bool = False,
         openapi: bool = False,
     ) -> None:
@@ -401,7 +403,12 @@ class SecretDiscovery:
                     if named_header and normalized in {"value", "values"}:
                         self.remember(child, "structured_secret")
                     if isinstance(child, (Mapping, list, tuple, bool)):
-                        self.discover(child, is_sensitive(name), True, openapi=openapi_document)
+                        self.discover(
+                            child,
+                            is_sensitive(name) if definitions in {"schema", "sensitive"} else False,
+                            definitions == "schema",
+                            openapi=openapi_document,
+                        )
                     else:
                         self.discover(child, openapi=openapi_document)
                     continue
@@ -417,19 +424,20 @@ class SecretDiscovery:
                     self.remember(child, "structured_secret")
                 if schema_secret and normalized in SCHEMA_VALUES:
                     self.remember(child, "structured_secret")
-                self.discover(
-                    child,
-                    schema_secret,
-                    not extension
-                    and (definitions or normalized not in SCHEMA_VALUES)
-                    and (
+                child_definitions = (
+                    None
+                    if extension
+                    else "schema"
+                    if (
                         object_schema
-                        or normalized in SCHEMA_CONTAINERS
+                        and normalized in SCHEMA_DEFINITION_MAPS
                         or openapi_document
-                        and normalized in OPENAPI_SCHEMA_CONTAINERS
-                    ),
-                    not extension
-                    and (
+                        and normalized in {"definitions", "schemas"}
+                    )
+                    else "sensitive"
+                    if openapi_document and normalized in SENSITIVE_DEFINITION_MAPS
+                    else "named"
+                    if (
                         object_schema
                         and normalized in NAMED_DEFINITIONS
                         or openapi_document
@@ -438,7 +446,21 @@ class SecretDiscovery:
                         and normalized in OPENAPI_ROOT_DEFINITIONS
                         or openapi_document
                         and normalized == "security"
+                    )
+                    else None
+                )
+                self.discover(
+                    child,
+                    schema_secret,
+                    not extension
+                    and normalized not in SCHEMA_VALUES
+                    and (
+                        object_schema
+                        or normalized in SCHEMA_CONTAINERS
+                        or openapi_document
+                        and normalized in OPENAPI_SCHEMA_CONTAINERS
                     ),
+                    child_definitions,
                     headers or HEADER_CONTAINER.search(normalized) is not None,
                     not extension
                     and openapi_document
@@ -583,7 +605,7 @@ class CredentialReducer:
         text: str,
         schema_secret: bool = False,
         schema_context: bool = False,
-        definitions: bool = False,
+        definitions: str | None = None,
         headers: bool = False,
         openapi: bool = False,
     ) -> tuple[str, set[str]]:
@@ -632,7 +654,7 @@ class CredentialReducer:
         structured_secret: bool = False,
         schema_secret: bool = False,
         schema_context: bool = False,
-        definitions: bool = False,
+        definitions: str | None = None,
         headers: bool = False,
         openapi: bool = False,
     ) -> Any:
@@ -678,6 +700,13 @@ class CredentialReducer:
                 normalized = normalize(str(key))
                 extension = isinstance(key, str) and key.lower().startswith("x-")
                 definition_schema = definitions and isinstance(child, (Mapping, list, tuple, bool))
+                child_schema_secret = (
+                    is_sensitive(str(key))
+                    if definitions in {"schema", "sensitive"} and definition_schema
+                    else False
+                    if definitions
+                    else schema_secret
+                )
                 telemetry = any(normalize(str(part)) in {"metrics", "rewards"} for part in path)
                 child_secret = (
                     structured_secret
@@ -692,24 +721,20 @@ class CredentialReducer:
                         and normalized in SCHEMA_VALUES
                     )
                 )
-                reduced[safe_key] = self.reduce(
-                    child,
-                    findings,
-                    (*path, "[key]" if categories else str(key)),
-                    child_secret,
-                    is_sensitive(str(key)) if definition_schema else schema_secret,
-                    not extension
-                    and (definitions or normalized not in SCHEMA_VALUES)
-                    and (
-                        definition_schema
-                        or object_schema
-                        or normalized in SCHEMA_CONTAINERS
+                child_definitions = (
+                    None
+                    if extension or structured_secret
+                    else "schema"
+                    if (
+                        object_schema
+                        and normalized in SCHEMA_DEFINITION_MAPS
                         or openapi_document
-                        and normalized in OPENAPI_SCHEMA_CONTAINERS
-                    ),
-                    not extension
-                    and not structured_secret
-                    and (
+                        and normalized in {"definitions", "schemas"}
+                    )
+                    else "sensitive"
+                    if openapi_document and normalized in SENSITIVE_DEFINITION_MAPS
+                    else "named"
+                    if (
                         object_schema
                         and normalized in NAMED_DEFINITIONS
                         or openapi_document
@@ -718,7 +743,29 @@ class CredentialReducer:
                         and normalized in OPENAPI_ROOT_DEFINITIONS
                         or openapi_document
                         and normalized == "security"
+                    )
+                    else None
+                )
+                reduced[safe_key] = self.reduce(
+                    child,
+                    findings,
+                    (*path, "[key]" if categories else str(key)),
+                    child_secret,
+                    child_schema_secret,
+                    not extension
+                    and (
+                        definitions == "schema"
+                        and definition_schema
+                        or not definitions
+                        and normalized not in SCHEMA_VALUES
+                        and (
+                            object_schema
+                            or normalized in SCHEMA_CONTAINERS
+                            or openapi_document
+                            and normalized in OPENAPI_SCHEMA_CONTAINERS
+                        )
                     ),
+                    child_definitions,
                     headers or HEADER_CONTAINER.search(normalized) is not None,
                     not extension
                     and openapi_document

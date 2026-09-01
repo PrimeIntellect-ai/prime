@@ -322,6 +322,19 @@ def test_preflight_uses_named_secret_sources_and_fingerprints():
         fingerprint_secret("")
 
 
+def test_preflight_fingerprint_scan_handles_unpaired_surrogates():
+    capability = "opaque-capability-0123456789"
+    payload = {"completion": f"prefix \ud800 {capability} suffix"}
+
+    prepared = prepare_upload(
+        payload,
+        secret_fingerprints=[fingerprint_secret(capability)],
+    )
+
+    assert capability not in prepared.data["completion"]
+    assert "\ud800" in prepared.data["completion"]
+
+
 def test_nested_and_properties_credentials_do_not_bypass_discovery():
     secret = "opaque-nested-secret-0123456789"
     token = "opaque-generic-token-0123456789"
@@ -501,3 +514,20 @@ def test_secret_values_includes_auth_environment_variables(monkeypatch):
 
     assert secret in secret_values()
     assert "REFERENCE_API_KEY" not in secret_values()
+
+
+def test_secret_values_extracts_named_source_credentials():
+    token = "opaque-source-token-0123456789"
+
+    values = secret_values(
+        secret_sources=[
+            {
+                "Authorization": f"Bearer {token}",
+                "X-Custom": "reviewable-setting",
+            }
+        ]
+    )
+
+    assert f"Bearer {token}" in values
+    assert token in values
+    assert "reviewable-setting" not in values

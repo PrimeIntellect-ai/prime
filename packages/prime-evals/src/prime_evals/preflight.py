@@ -272,31 +272,7 @@ def fingerprint_secret(secret: str) -> SecretFingerprint:
     """Return non-plaintext material for finding an echoed secret after resume."""
     if not is_secret(secret):
         raise ValueError("fingerprinted secrets must contain at least 8 non-placeholder characters")
-    return len(secret), sha256(secret.encode()).hexdigest()
-
-
-def secret_values(*values: str | None, secrets_file: str | Path | None = None) -> tuple[str, ...]:
-    """Combine environment, configured, and optional file secrets."""
-    candidates = [
-        value
-        for name, value in os.environ.items()
-        if SECRET_ENV.search(name)
-        and not normalize(name).endswith(REFERENCE_SUFFIXES)
-        and is_secret(value)
-    ]
-    candidates.extend(values)
-    if secrets_file:
-        for line_number, line in enumerate(Path(secrets_file).read_text().splitlines(), 1):
-            value = line.strip()
-            if not value or value.startswith("#"):
-                continue
-            if not is_secret(value):
-                raise ValueError(
-                    f"secret file line {line_number} must contain at least 8 "
-                    "non-placeholder characters"
-                )
-            candidates.append(value)
-    return tuple(dict.fromkeys(value for value in candidates if is_secret(value)))
+    return len(secret), sha256(secret.encode(errors="surrogatepass")).hexdigest()
 
 
 class SecretDiscovery:
@@ -402,6 +378,34 @@ class SecretDiscovery:
                         self.secrets.setdefault(secret, category)
 
 
+def secret_values(
+    *values: str | None,
+    secrets_file: str | Path | None = None,
+    secret_sources: Iterable[Mapping[str, str]] = (),
+) -> tuple[str, ...]:
+    """Combine environment, configured, source-mapping, and optional file secrets."""
+    candidates = [
+        value
+        for name, value in os.environ.items()
+        if SECRET_ENV.search(name)
+        and not normalize(name).endswith(REFERENCE_SUFFIXES)
+        and is_secret(value)
+    ]
+    candidates.extend(values)
+    if secrets_file:
+        for line_number, line in enumerate(Path(secrets_file).read_text().splitlines(), 1):
+            value = line.strip()
+            if not value or value.startswith("#"):
+                continue
+            if not is_secret(value):
+                raise ValueError(
+                    f"secret file line {line_number} must contain at least 8 "
+                    "non-placeholder characters"
+                )
+            candidates.append(value)
+    return tuple(SecretDiscovery(candidates, secret_sources).secrets)
+
+
 def exact_pattern(secrets: Mapping[str, str]) -> re.Pattern[str] | None:
     if not secrets:
         return None
@@ -459,7 +463,7 @@ class CredentialReducer:
         for length, digests in self.fingerprints.items():
             for start in range(len(text) - length + 1):
                 candidate = text[start : start + length]
-                if sha256(candidate.encode()).hexdigest() in digests:
+                if sha256(candidate.encode(errors="surrogatepass")).hexdigest() in digests:
                     fingerprinted.add(candidate)
         return fingerprinted
 

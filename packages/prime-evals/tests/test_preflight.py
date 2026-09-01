@@ -177,6 +177,12 @@ def test_preflight_catches_quoted_json_assignments_and_short_structured_secrets(
     assert prepared.data["password"] == REDACTED
     assert prepared.data["api_key"] == REDACTED
 
+    digest = 'Authorization: Digest username="alice", nonce="opaque-nonce-0123456789"'
+    negotiate = "Authorization: Negotiate opaque-spnego-token-0123456789"
+    prepared = prepare_upload({"digest": digest, "negotiate": negotiate})
+    assert "opaque-nonce" not in prepared.data["digest"]
+    assert "opaque-spnego" not in prepared.data["negotiate"]
+
 
 def test_preflight_catches_escaped_authorization_headers():
     token = "opaque-token-0123456789"
@@ -228,6 +234,7 @@ def test_preflight_catches_quoted_assignments_and_sensitive_mapping_keys():
                 f'"aws_session_token":"{session_token}"}}'
             ),
             "api_keys": {secret: {"owner": "alice"} for secret in secrets},
+            "prompt": f"the model repeated {secrets[0]}",
             "team_id": "team-0123456789",
         }
     )
@@ -236,6 +243,7 @@ def test_preflight_catches_quoted_assignments_and_sensitive_mapping_keys():
     assert aws_secret not in prepared.data["completion"]
     assert session_token not in prepared.data["completion"]
     assert list(prepared.data["api_keys"]) == [REDACTED, "[REDACTED 2]"]
+    assert prepared.data["prompt"] == f"the model repeated {REDACTED}"
     assert prepared.data["team_id"] == "team-0123456789"
     assert scan_upload(prepared.data).findings == ()
 
@@ -274,6 +282,8 @@ def test_preflight_redacts_numeric_structured_secrets():
 
     usage = {"input_tokens": 10, "output_tokens": 20, "total_tokens": 30}
     assert prepare_upload({"usage": usage}).data["usage"] == usage
+    token_usage = {"prompt_tokens": 123, "completion_tokens": 42}
+    assert prepare_upload({"token_usage": token_usage}).data["token_usage"] == token_usage
 
 
 @pytest.mark.parametrize("label", ["DSA PRIVATE KEY", "ENCRYPTED PRIVATE KEY"])
@@ -308,6 +318,8 @@ def test_preflight_uses_named_secret_sources_and_fingerprints():
 
     assert prepared.data["completion"] == f"{REDACTED} {REDACTED} reviewable-setting"
     assert prepared.report.categories == {"known_secret": 1}
+    with pytest.raises(ValueError, match="fingerprinted secrets"):
+        fingerprint_secret("")
 
 
 def test_nested_and_properties_credentials_do_not_bypass_discovery():
@@ -322,6 +334,10 @@ def test_nested_and_properties_credentials_do_not_bypass_discovery():
         "awsSecretAccessKey": access_key,
         "credential": {"value": "pin"},
         "authentication": "opaque-authentication-0123456789",
+        "headers": [
+            ["authorization", "Bearer opaque-pair-token-0123456789"],
+            {"name": "Authorization", "value": "Bearer opaque-named-token-0123456789"},
+        ],
         "rubric": "keep the pin label",
         "secret": {"value": secret},
         "token": token,
@@ -341,6 +357,10 @@ def test_nested_and_properties_credentials_do_not_bypass_discovery():
     assert prepared.data["awsSecretAccessKey"] == REDACTED
     assert prepared.data["credential"]["value"] == REDACTED
     assert prepared.data["authentication"] == REDACTED
+    assert prepared.data["headers"] == [
+        ["authorization", REDACTED],
+        {"name": "Authorization", "value": REDACTED},
+    ]
     assert prepared.data["rubric"] == payload["rubric"]
     assert prepared.data["secret"]["value"] == REDACTED
     assert prepared.data["token"] == REDACTED

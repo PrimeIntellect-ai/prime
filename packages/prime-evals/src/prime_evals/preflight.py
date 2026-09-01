@@ -29,6 +29,7 @@ SECRET_ENV = re.compile(
     re.IGNORECASE,
 )
 REFERENCE_SUFFIXES = ("_env", "_env_var", "_file", "_name", "_path", "_var", "_variable")
+TELEMETRY_SUFFIXES = ("_count", "_counts", "_usage")
 SENSITIVE_FIELDS = {
     "access_key",
     "access_key_id",
@@ -108,8 +109,16 @@ PATTERNS = (
         "authorization_header",
         re.compile(
             r"(?<![A-Za-z0-9_])\\?[\"']?(?:authorization|proxy-authorization)"
-            r"\\?[\"']?\s*[:=]\s*\\?[\"']?(?:(?:bearer|basic|token)\s+)?"
+            r"\\?[\"']?\s*[:=]\s*\\?[\"']?(?:(?:bearer|basic|token|negotiate)\s+)?"
             r"(?P<secret>[^\s,;\\\"']{8,})",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "authorization_header",
+        re.compile(
+            r"(?<![A-Za-z0-9_])(?:authorization|proxy-authorization)\s*[:=]\s*"
+            r"(?P<secret>[^\r\n]{8,})",
             re.IGNORECASE,
         ),
     ),
@@ -246,7 +255,9 @@ def is_sensitive(name: str) -> bool:
         for field in SENSITIVE_FIELDS - {"token"}
     )
     names = (name, singular) if plural_secret else (name,)
-    return not any(candidate.endswith(REFERENCE_SUFFIXES) for candidate in names) and any(
+    return not any(
+        candidate.endswith(REFERENCE_SUFFIXES + TELEMETRY_SUFFIXES) for candidate in names
+    ) and any(
         f"_{field}_" in f"_{candidate}_" or candidate.replace("_", "") == field.replace("_", "")
         for candidate in names
         for field in SENSITIVE_FIELDS
@@ -259,6 +270,8 @@ def is_secret(value: Any) -> bool:
 
 def fingerprint_secret(secret: str) -> SecretFingerprint:
     """Return non-plaintext material for finding an echoed secret after resume."""
+    if not is_secret(secret):
+        raise ValueError("fingerprinted secrets must contain at least 8 non-placeholder characters")
     return len(secret), sha256(secret.encode()).hexdigest()
 
 
@@ -307,7 +320,8 @@ class SecretDiscovery:
             if match and is_secret(token := match.group(1)):
                 self.secrets.setdefault(token, category)
         elif isinstance(value, Mapping):
-            for child in value.values():
+            for key, child in value.items():
+                self.remember(key, category)
                 self.remember(child, category)
         elif isinstance(value, (list, tuple)):
             for child in value:
@@ -319,8 +333,10 @@ class SecretDiscovery:
         schema_secret: bool = False,
         schema_context: bool = False,
         properties: bool = False,
+        headers: bool = False,
     ) -> None:
         if isinstance(value, Mapping):
+            named_header = headers and is_sensitive(str(value.get("name", "")))
             schema_type = value.get("type")
             object_schema = (
                 schema_context
@@ -347,6 +363,8 @@ class SecretDiscovery:
                     continue
                 if is_sensitive(name):
                     self.remember(child, "structured_secret")
+                if named_header and normalized == "value":
+                    self.remember(child, "structured_secret")
                 if schema_secret and normalized in SCHEMA_VALUES:
                     self.remember(child, "structured_secret")
                 self.discover(
@@ -354,11 +372,23 @@ class SecretDiscovery:
                     schema_secret,
                     object_schema or normalized in {"schema", "json_schema"},
                     object_schema and normalized == "properties",
+                    headers or normalized in {"header", "headers"},
                 )
         elif isinstance(value, (list, tuple)):
+            if headers and len(value) == 2 and isinstance(value[0], str) and is_sensitive(value[0]):
+                self.remember(value[1], "structured_secret")
             for child in value:
-                self.discover(child, schema_secret, schema_context, properties)
+                self.discover(child, schema_secret, schema_context, properties, headers)
         elif isinstance(value, str):
+            text = value.strip()
+            if text.startswith(("{", "[")):
+                try:
+                    parsed = json.loads(text)
+                except json.JSONDecodeError:
+                    pass
+                else:
+                    if isinstance(parsed, (Mapping, list)):
+                        self.discover(parsed, headers=headers)
             for category, pattern in PATTERNS:
                 if category == "credential_url":
                     continue
@@ -456,9 +486,11 @@ class CredentialReducer:
         schema_secret: bool = False,
         schema_context: bool = False,
         properties: bool = False,
+        headers: bool = False,
     ) -> Any:
         if isinstance(value, Mapping):
             reduced = {}
+            named_header = headers and is_sensitive(str(value.get("name", "")))
             schema_type = value.get("type")
             object_schema = (
                 schema_context
@@ -494,7 +526,13 @@ class CredentialReducer:
                 property_schema = properties and isinstance(child, (Mapping, bool))
                 child_secret = structured_secret or (
                     not property_schema
-                    and (is_sensitive(str(key)) or schema_secret and normalized in SCHEMA_VALUES)
+                    and (
+                        is_sensitive(str(key))
+                        or named_header
+                        and normalized == "value"
+                        or schema_secret
+                        and normalized in SCHEMA_VALUES
+                    )
                 )
                 reduced[safe_key] = self.reduce(
                     child,
@@ -504,34 +542,27 @@ class CredentialReducer:
                     is_sensitive(str(key)) if property_schema else schema_secret,
                     property_schema or object_schema or normalized in {"schema", "json_schema"},
                     not structured_secret and object_schema and normalized == "properties",
+                    headers or normalized in {"header", "headers"},
                 )
             return reduced
-        if isinstance(value, list):
-            return [
+        if isinstance(value, (list, tuple)):
+            header_pair = (
+                headers and len(value) == 2 and isinstance(value[0], str) and is_sensitive(value[0])
+            )
+            reduced = [
                 self.reduce(
                     child,
                     findings,
                     (*path, index),
-                    structured_secret,
+                    structured_secret or header_pair and index == 1,
                     schema_secret,
                     schema_context,
                     properties,
+                    headers,
                 )
                 for index, child in enumerate(value)
             ]
-        if isinstance(value, tuple):
-            return tuple(
-                self.reduce(
-                    child,
-                    findings,
-                    (*path, index),
-                    structured_secret,
-                    schema_secret,
-                    schema_context,
-                    properties,
-                )
-                for index, child in enumerate(value)
-            )
+            return tuple(reduced) if isinstance(value, tuple) else reduced
         if (
             structured_secret
             and value is not None

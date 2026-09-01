@@ -170,6 +170,25 @@ def test_finalize_is_replayed_after_an_ambiguous_failure(make_platform_client, r
     assert len(attempts) == 2
 
 
+def test_finalize_falls_back_to_a_completed_status_update(make_platform_client, rft_routes):
+    """A finalize-specific failure must not strand an otherwise completed run."""
+    routes = dict(rft_routes)
+    routes["POST /api/v1/rft/finalize"] = lambda request: httpx.Response(
+        400, json={"detail": "finalize unavailable"}
+    )
+    backend, handler = make_backend(make_platform_client, routes)
+
+    backend.finalize("run-abc", status=RunStatus.COMPLETED)
+
+    assert handler.paths() == [
+        "POST /api/v1/rft/finalize",
+        "PUT /api/v1/rft/external-runs/run-abc/status",
+    ]
+    assert handler.bodies_for("/api/v1/rft/external-runs/run-abc/status") == [
+        {"status": "completed"}
+    ]
+
+
 @pytest.mark.parametrize(
     ("status", "error", "expected_message"),
     [

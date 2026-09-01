@@ -387,20 +387,41 @@ class RftBackend:
         if status is RunStatus.COMPLETED:
             # Compare-and-set on the server, and "already finalized" is a
             # success, so a lost response is safe to replay.
-            self._client.post(
-                "/rft/finalize",
-                json_body={"run_id": run_id, "exit_code": 0},
-                idempotent=True,
-            )
+            try:
+                self._client.post(
+                    "/rft/finalize",
+                    json_body={"run_id": run_id, "exit_code": 0},
+                    idempotent=True,
+                )
+            except APIError as exc:
+                # Preserve TrainRun's fallback: finalization may be unavailable
+                # even though the status endpoint can still close the run out.
+                logger.warning(
+                    "Run %s could not be finalized (%s); falling back to a status update",
+                    run_id,
+                    exc,
+                )
+                self._set_terminal_status(run_id, status=status)
             return
 
         message = error or status.value
         if status is not RunStatus.FAILED:
             message = f"{status.value}: {message}"
+        self._set_terminal_status(run_id, status=status, error_message=message)
+
+    def _set_terminal_status(
+        self,
+        run_id: str,
+        *,
+        status: RunStatus,
+        error_message: Optional[str] = None,
+    ) -> None:
+        payload: Dict[str, Any] = {"status": RFT_TERMINAL_STATUS[status]}
+        _set_if(payload, "error_message", error_message)
         try:
             self._client.put(
                 f"/rft/external-runs/{run_id}/status",
-                json_body={"status": RFT_TERMINAL_STATUS[status], "error_message": message},
+                json_body=payload,
             )
         except APIError as exc:
             if exc.status_code == 409:

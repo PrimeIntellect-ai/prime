@@ -662,6 +662,24 @@ def test_log_metrics_goes_to_the_metrics_sinks_only():
     run.finish()
 
 
+def test_log_metrics_drops_non_finite_values_inside_sequences():
+    metrics = FakeSink("metrics")
+    run = make_run(metrics_sinks=[metrics])
+
+    run.log_metrics(
+        {
+            "quantiles": [0.1, float("nan"), 0.9],
+            "nested": [{"loss": float("inf"), "reward": 1.0}, [float("-inf"), 2.0]],
+        }
+    )
+    run.flush()
+
+    row = metrics.batches[0][0]
+    assert row["quantiles"] == [0.1, 0.9]
+    assert row["nested"] == [{"reward": 1.0}, [2.0]]
+    run.finish()
+
+
 def test_log_metrics_keeps_a_step_the_producer_already_set():
     metrics = FakeSink("metrics")
     run = make_run(metrics_sinks=[metrics])

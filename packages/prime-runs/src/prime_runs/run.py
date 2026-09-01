@@ -654,20 +654,41 @@ def _describe(error: Union[str, BaseException]) -> str:
     return str(error)
 
 
-def _clean_metrics(metrics: Mapping[str, Any]) -> Dict[str, Any]:
-    """Drop NaN/infinity: strict JSON rejects them, and the failure would
-    surface as an opaque 400 on the whole request."""
+def _clean_metrics(metrics: Mapping[str, Any], *, _path: str = "") -> Dict[str, Any]:
+    """Recursively drop NaN/infinity: strict JSON rejects them, and the
+    failure would surface as an opaque 400 on the whole request."""
     cleaned: Dict[str, Any] = {}
     for key, value in metrics.items():
+        path = f"{_path}.{key}" if _path else str(key)
         if isinstance(value, float) and not math.isfinite(value):
-            logger.debug("Dropping non-finite metric %s=%r", key, value)
+            logger.debug("Dropping non-finite metric %s=%r", path, value)
             continue
         if isinstance(value, Mapping):
-            nested = _clean_metrics(value)
+            nested = _clean_metrics(value, _path=path)
             if nested:
                 cleaned[key] = nested
             continue
+        if isinstance(value, (list, tuple)):
+            cleaned[key] = _clean_metric_sequence(value, path)
+            continue
         cleaned[key] = value
+    return cleaned
+
+
+def _clean_metric_sequence(values: Sequence[Any], path: str) -> List[Any]:
+    """Clean JSON-array-shaped metric values while preserving their order."""
+    cleaned: List[Any] = []
+    for index, value in enumerate(values):
+        item_path = f"{path}[{index}]"
+        if isinstance(value, float) and not math.isfinite(value):
+            logger.debug("Dropping non-finite metric %s=%r", item_path, value)
+            continue
+        if isinstance(value, Mapping):
+            cleaned.append(_clean_metrics(value, _path=item_path))
+        elif isinstance(value, (list, tuple)):
+            cleaned.append(_clean_metric_sequence(value, item_path))
+        else:
+            cleaned.append(value)
     return cleaned
 
 

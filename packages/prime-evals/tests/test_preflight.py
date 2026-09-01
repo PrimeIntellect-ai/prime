@@ -289,6 +289,19 @@ def test_url_userinfo_is_redacted_without_becoming_a_global_secret():
     assert prepared.data["rubric"] == "mention the password field"
 
 
+def test_long_url_credentials_are_redacted_when_echoed_elsewhere():
+    secret = "opaque-url-secret-0123456789"
+    prepared = prepare_upload(
+        {
+            "log": f"postgres://alice:{secret}@example.com/db",
+            "completion": f"the model echoed {secret}",
+        }
+    )
+
+    assert secret not in json.dumps(prepared.data)
+    assert prepared.data["completion"] == f"the model echoed {REDACTED}"
+
+
 def test_preflight_redacts_numeric_structured_secrets():
     prepared = prepare_upload(
         {"password": 12345678, "token": 987654321, "secret": None, "auth": False}
@@ -450,6 +463,21 @@ def test_preflight_preserves_dependent_required_property_names():
     assert prepare_upload(schema).data == schema
 
 
+def test_preflight_scans_schema_example_values_as_data():
+    secret = "opaque-session-value-0123456789"
+    schema = {
+        "schema": {
+            "type": "object",
+            "example": {"properties": {"token": {"primary": secret}}},
+        }
+    }
+
+    assert (
+        prepare_upload(schema).data["schema"]["example"]["properties"]["token"]["primary"]
+        == REDACTED
+    )
+
+
 def test_preflight_preserves_openapi_auth_endpoint_descriptors():
     document = {
         "openapi": "3.1.0",
@@ -471,6 +499,35 @@ def test_preflight_preserves_openapi_auth_endpoint_descriptors():
                     "openIdConnectUrl": "https://example.com/.well-known/openid-configuration",
                 },
             }
+        },
+    }
+
+    assert prepare_upload(document).data == document
+
+
+def test_preflight_preserves_openapi_scalar_definition_maps():
+    document = {
+        "openapi": "3.1.0",
+        "components": {
+            "securitySchemes": {
+                "OAuth2": {
+                    "type": "oauth2",
+                    "flows": {
+                        "clientCredentials": {
+                            "tokenUrl": "https://example.com/oauth/token",
+                            "scopes": {"token": "read token"},
+                        }
+                    },
+                }
+            },
+            "schemas": {
+                "Pet": {
+                    "discriminator": {
+                        "propertyName": "petType",
+                        "mapping": {"token": "#/components/schemas/Cat"},
+                    }
+                }
+            },
         },
     }
 

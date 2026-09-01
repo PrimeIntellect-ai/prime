@@ -97,14 +97,17 @@ OPENAPI_NAMED_MAPS = {
     "flows",
     "headers",
     "links",
+    "mapping",
     "parameters",
     "paths",
     "path_items",
     "request_bodies",
     "responses",
     "schemas",
+    "scopes",
     "security_definitions",
     "security_schemes",
+    "variables",
     "webhooks",
 }
 OPENAPI_ROOT_DEFINITIONS = {
@@ -397,12 +400,6 @@ class SecretDiscovery:
                     if isinstance(child, (Mapping, list, tuple, bool)):
                         self.discover(child, is_sensitive(name), True, openapi=openapi_document)
                     else:
-                        if is_sensitive(name):
-                            self.remember(
-                                child,
-                                "structured_secret",
-                                normalized.endswith(("_keys", "_secrets", "_tokens")),
-                            )
                         self.discover(child, openapi=openapi_document)
                     continue
                 if is_sensitive(name) and not (
@@ -420,10 +417,13 @@ class SecretDiscovery:
                 self.discover(
                     child,
                     schema_secret,
-                    object_schema
-                    or normalized in SCHEMA_CONTAINERS
-                    or openapi_document
-                    and normalized in OPENAPI_SCHEMA_CONTAINERS,
+                    normalized not in SCHEMA_VALUES
+                    and (
+                        object_schema
+                        or normalized in SCHEMA_CONTAINERS
+                        or openapi_document
+                        and normalized in OPENAPI_SCHEMA_CONTAINERS
+                    ),
                     object_schema
                     and normalized in NAMED_DEFINITIONS
                     or openapi_document
@@ -471,15 +471,13 @@ class SecretDiscovery:
                             openapi,
                         )
             for category, pattern in PATTERNS:
-                if category == "credential_url":
-                    continue
                 for match in pattern.finditer(value):
                     secret = next(
                         matched
                         for name, matched in match.groupdict().items()
                         if name.startswith("secret") and matched is not None
                     )
-                    if is_secret(secret):
+                    if is_secret(secret) and (category != "credential_url" or len(secret) >= 16):
                         self.secrets.setdefault(secret, category)
 
 
@@ -673,7 +671,7 @@ class CredentialReducer:
                 definition_schema = definitions and isinstance(child, (Mapping, list, tuple, bool))
                 telemetry = any(normalize(str(part)) in {"metrics", "rewards"} for part in path)
                 child_secret = structured_secret or (
-                    not definition_schema
+                    not definitions
                     and not (telemetry and isinstance(child, (int, float)))
                     and (
                         is_sensitive(str(key))
@@ -690,11 +688,14 @@ class CredentialReducer:
                     (*path, "[key]" if categories else str(key)),
                     child_secret,
                     is_sensitive(str(key)) if definition_schema else schema_secret,
-                    definition_schema
-                    or object_schema
-                    or normalized in SCHEMA_CONTAINERS
-                    or openapi_document
-                    and normalized in OPENAPI_SCHEMA_CONTAINERS,
+                    normalized not in SCHEMA_VALUES
+                    and (
+                        definition_schema
+                        or object_schema
+                        or normalized in SCHEMA_CONTAINERS
+                        or openapi_document
+                        and normalized in OPENAPI_SCHEMA_CONTAINERS
+                    ),
                     not structured_secret
                     and (
                         object_schema

@@ -422,7 +422,7 @@ def test_preflight_preserves_openapi_security_requirement_scopes():
 
 def test_preflight_does_not_treat_ordinary_security_data_as_openapi():
     secret = "opaque-session-value-0123456789"
-    prepared = prepare_upload({"security": {"token": {"primary": secret}}})
+    prepared = prepare_upload({"openapi": False, "security": {"token": {"primary": secret}}})
 
     assert prepared.data["security"]["token"]["primary"] == REDACTED
 

@@ -8,7 +8,7 @@ from unittest.mock import Mock
 import pytest
 
 from prime_evals.core import APIClient
-from prime_evals.evals import AsyncEvalsClient, EvalsClient
+from prime_evals.evals import AsyncEvalsClient, EvalsClient, serialize_json
 from prime_evals.exceptions import InvalidSampleError
 from prime_evals.models import (
     CreateEvaluationRequest,
@@ -16,6 +16,13 @@ from prime_evals.models import (
     EvaluationStatus,
     Sample,
 )
+
+
+def test_serialize_json_escapes_unpaired_surrogates():
+    payload = serialize_json({"completion": "\ud800"})
+
+    assert payload == b'{"completion":"\\ud800"}'
+    assert json.loads(payload)["completion"] == "\ud800"
 
 
 def test_create_evaluation_request():

@@ -45,7 +45,7 @@ def serialize_json(value: Any) -> bytes:
             ensure_ascii=False,
             separators=(",", ":"),
             allow_nan=False,
-        ).encode()
+        ).encode(errors="backslashreplace")
     except (TypeError, ValueError, UnicodeEncodeError) as error:
         raise InvalidSampleError(f"samples must be valid UTF-8 JSON: {error}") from error
 

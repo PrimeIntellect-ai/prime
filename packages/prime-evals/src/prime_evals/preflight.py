@@ -71,7 +71,10 @@ SCHEMA_MARKERS = {
     "oneOf",
 }
 SCHEMA_CONTAINERS = {"json_schema", "schema"}
-OPENAPI_MARKERS = {"openapi", "swagger"}
+API_SPEC_VERSIONS = {
+    "openapi": re.compile(r"^3\.\d+\.\d+$"),
+    "swagger": re.compile(r"^2\.0$"),
+}
 NAMED_DEFINITIONS = {
     "dependent_schemas",
     "defs",
@@ -359,7 +362,11 @@ class SecretDiscovery:
         if isinstance(value, Mapping):
             named_header = headers and is_sensitive(str(value.get("name") or value.get("key", "")))
             schema_type = value.get("type")
-            openapi_document = openapi or any(field in value for field in OPENAPI_MARKERS)
+            openapi_document = openapi or any(
+                isinstance(version := value.get(marker), str)
+                and pattern.fullmatch(version) is not None
+                for marker, pattern in API_SPEC_VERSIONS.items()
+            )
             object_schema = (
                 schema_context
                 or any(field in value for field in SCHEMA_MARKERS)
@@ -619,7 +626,11 @@ class CredentialReducer:
             reduced = {}
             named_header = headers and is_sensitive(str(value.get("name") or value.get("key", "")))
             schema_type = value.get("type")
-            openapi_document = openapi or any(field in value for field in OPENAPI_MARKERS)
+            openapi_document = openapi or any(
+                isinstance(version := value.get(marker), str)
+                and pattern.fullmatch(version) is not None
+                for marker, pattern in API_SPEC_VERSIONS.items()
+            )
             object_schema = (
                 schema_context
                 or any(field in value for field in SCHEMA_MARKERS)

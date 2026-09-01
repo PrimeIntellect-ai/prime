@@ -132,8 +132,8 @@ _PATTERNS = (
             r"SECRET(?:_ACCESS_?KEY|_?KEY)?|PASSWORD|PASSWD|CREDENTIAL|PRIVATE_?KEY)\s*=\s*|"
             r"--(?:api-key|api-token|access-token|auth-token|client-secret|password|"
             r"private-key|secret|token)(?:=|\s+))"
-            r"(?:\"(?P<secret_short_double>(?:\\.|[^\"\\\r\n]){8,})\"|"
-            r"'(?P<secret_short_single>(?:\\.|[^'\\\r\n]){8,})'|"
+            r"(?:\\?\"(?P<secret_short_double>(?:\\.|[^\"\\\r\n]){8,})\\?\"|"
+            r"\\?'(?P<secret_short_single>(?:\\.|[^'\\\r\n]){8,})\\?'|"
             r"(?:(?i:bearer|basic|token)\s+)?(?P<secret>[^\s,;\"']{8,}))"
         ),
     ),
@@ -151,8 +151,8 @@ _PATTERNS = (
             r"PASSWORD|PASSWD|CREDENTIAL|PRIVATE_?KEY|SECRET_?KEY)\s*=\s*|"
             r"--(?:api-key|access-token|auth-token|client-secret|password|private-key|"
             r"secret|token)(?:=|\s+))"
-            r"(?:\"(?P<secret_double>(?:\\.|[^\"\\\r\n]){16,})\"|"
-            r"'(?P<secret_single>(?:\\.|[^'\\\r\n]){16,})'|"
+            r"(?:\\?\"(?P<secret_double>(?:\\.|[^\"\\\r\n]){16,})\\?\"|"
+            r"\\?'(?P<secret_single>(?:\\.|[^'\\\r\n]){16,})\\?'|"
             r"(?:(?:bearer|basic|token)\s+)?(?P<secret>[^\s,;\"']{16,}))",
             re.IGNORECASE,
         ),
@@ -235,7 +235,9 @@ def _sensitive(name: str) -> bool:
     )
     names = (name, singular) if plural_secret else (name,)
     return not any(candidate.endswith(_REFERENCE_SUFFIXES) for candidate in names) and any(
-        candidate == field or candidate.endswith(f"_{field}")
+        candidate == field
+        or candidate.endswith(f"_{field}")
+        or candidate.replace("_", "").endswith(field.replace("_", ""))
         for candidate in names
         for field in _SENSITIVE_FIELDS
     )

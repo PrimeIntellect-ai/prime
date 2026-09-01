@@ -107,6 +107,8 @@ def test_preflight_catches_assignments_flags_urls_webhooks_and_private_keys():
         "--token 123456789abc",
         'password="abcd efgh"',
         'password="abcd,efgh"',
+        r"password=\"abcdefgh1234\"",
+        r"password=\'abcdefgh1234\'",
     ],
 )
 def test_preflight_catches_short_explicit_assignments(assignment):
@@ -165,6 +167,11 @@ def test_preflight_catches_quoted_json_assignments_and_short_structured_secrets(
     assert prepared.data["answer"] == payload["answer"]
     assert prepared.data["password"] == REDACTED
     assert prepared.data["api_key"] == REDACTED
+
+
+@pytest.mark.parametrize("field", ["apikey", "accesstoken", "clientsecret", "secretkey"])
+def test_preflight_catches_concatenated_credential_fields(field):
+    assert prepare_upload({field: "opaque-value-0123456789"}).data[field] == REDACTED
 
 
 def test_preflight_catches_quoted_assignments_and_sensitive_mapping_keys():

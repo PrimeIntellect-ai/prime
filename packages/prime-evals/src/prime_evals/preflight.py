@@ -8,6 +8,7 @@ import re
 from collections import Counter
 from collections.abc import Iterable, Mapping
 from contextlib import ExitStack
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -176,6 +177,7 @@ PATTERNS = (
 )
 
 Finding = tuple[str, str]
+SecretFingerprint = tuple[int, str]
 
 
 class ScanReport(BaseModel):
@@ -255,10 +257,19 @@ def is_secret(value: Any) -> bool:
     return isinstance(value, str) and len(value) >= 8 and not PLACEHOLDER.fullmatch(value.strip())
 
 
+def fingerprint_secret(secret: str) -> SecretFingerprint:
+    """Return non-plaintext material for finding an echoed secret after resume."""
+    return len(secret), sha256(secret.encode()).hexdigest()
+
+
 def secret_values(*values: str | None, secrets_file: str | Path | None = None) -> tuple[str, ...]:
     """Combine environment, configured, and optional file secrets."""
     candidates = [
-        value for name, value in os.environ.items() if SECRET_ENV.search(name) and is_secret(value)
+        value
+        for name, value in os.environ.items()
+        if SECRET_ENV.search(name)
+        and not normalize(name).endswith(REFERENCE_SUFFIXES)
+        and is_secret(value)
     ]
     candidates.extend(values)
     if secrets_file:
@@ -276,10 +287,18 @@ def secret_values(*values: str | None, secrets_file: str | Path | None = None) -
 
 
 class SecretDiscovery:
-    def __init__(self, known_secrets: Iterable[str] = ()) -> None:
+    def __init__(
+        self,
+        known_secrets: Iterable[str] = (),
+        secret_sources: Iterable[Mapping[str, str]] = (),
+    ) -> None:
         self.secrets: dict[str, str] = {}
         for secret in known_secrets:
             self.remember(secret, "known_secret")
+        for source in secret_sources:
+            for name, secret in source.items():
+                if is_sensitive(name):
+                    self.remember(secret, "known_secret")
 
     def remember(self, value: Any, category: str) -> None:
         if is_secret(value):
@@ -377,9 +396,13 @@ class CredentialReducer:
         self,
         secrets: Mapping[str, str],
         exact: re.Pattern[str] | None = None,
+        secret_fingerprints: Iterable[SecretFingerprint] = (),
     ) -> None:
         self.secrets = secrets
         self.exact = exact or exact_pattern(secrets)
+        self.fingerprints: dict[int, set[str]] = {}
+        for length, digest in secret_fingerprints:
+            self.fingerprints.setdefault(length, set()).add(digest)
         self.categories: set[str] = set()
         self.pattern_category = ""
 
@@ -401,10 +424,24 @@ class CredentialReducer:
         offset = match.start()
         return f"{match.group(0)[: start - offset]}{REDACTED}{match.group(0)[end - offset :]}"
 
+    def find_fingerprinted(self, text: str) -> set[str]:
+        fingerprinted = set()
+        for length, digests in self.fingerprints.items():
+            for start in range(len(text) - length + 1):
+                candidate = text[start : start + length]
+                if sha256(candidate.encode()).hexdigest() in digests:
+                    fingerprinted.add(candidate)
+        return fingerprinted
+
     def redact_text(self, text: str) -> tuple[str, set[str]]:
         self.categories = set()
         if self.exact:
             text = self.exact.sub(self.replace_exact, text)
+        fingerprinted = self.find_fingerprinted(text)
+        if fingerprinted:
+            self.categories.add("known_secret")
+        for secret in sorted(fingerprinted, key=len, reverse=True):
+            text = text.replace(secret, REDACTED)
         for category, pattern in PATTERNS:
             self.pattern_category = category
             text = pattern.sub(self.replace_shape, text)
@@ -524,18 +561,34 @@ class CredentialReducer:
         return PreparedUpload(data=data, report=ScanReport(findings=tuple(sorted(findings))))
 
 
-def scan_upload(value: Any, known_secrets: Iterable[str] = ()) -> ScanReport:
+def scan_upload(
+    value: Any,
+    known_secrets: Iterable[str] = (),
+    secret_sources: Iterable[Mapping[str, str]] = (),
+    secret_fingerprints: Iterable[SecretFingerprint] = (),
+) -> ScanReport:
     """Classify credential locations without returning their values."""
-    discovery = SecretDiscovery(known_secrets)
+    discovery = SecretDiscovery(known_secrets, secret_sources)
     discovery.discover(value)
-    return CredentialReducer(discovery.secrets).prepare(value).report
+    return (
+        CredentialReducer(discovery.secrets, secret_fingerprints=secret_fingerprints)
+        .prepare(value)
+        .report
+    )
 
 
-def prepare_upload(value: Any, known_secrets: Iterable[str] = ()) -> PreparedUpload:
+def prepare_upload(
+    value: Any,
+    known_secrets: Iterable[str] = (),
+    secret_sources: Iterable[Mapping[str, str]] = (),
+    secret_fingerprints: Iterable[SecretFingerprint] = (),
+) -> PreparedUpload:
     """Reduce a copy, then rescan it before any caller starts an upload."""
-    discovery = SecretDiscovery(known_secrets)
+    discovery = SecretDiscovery(known_secrets, secret_sources)
     discovery.discover(value)
-    return CredentialReducer(discovery.secrets).prepare(value)
+    return CredentialReducer(discovery.secrets, secret_fingerprints=secret_fingerprints).prepare(
+        value
+    )
 
 
 class DuplicateKeyError(ValueError):
@@ -572,6 +625,8 @@ def prepare_jsonl_upload(
     *,
     context: Mapping[str, str] | None = None,
     known_secrets: Iterable[str] = (),
+    secret_sources: Iterable[Mapping[str, str]] = (),
+    secret_fingerprints: Iterable[SecretFingerprint] = (),
 ) -> PreparedJSONLUpload:
     """Return a safe snapshot or redacted JSONL path without changing the source."""
     source, snapshot = Path(source), Path(destination)
@@ -583,7 +638,7 @@ def prepare_jsonl_upload(
         and any(output.exists() and source.samefile(output) for output in outputs)
     ):
         raise UploadScanError("upload outputs must not alias the source JSONL")
-    discovery = SecretDiscovery(known_secrets)
+    discovery = SecretDiscovery(known_secrets, secret_sources)
     discovery.discover(context)
 
     try:
@@ -595,7 +650,7 @@ def prepare_jsonl_upload(
     except UnicodeDecodeError as error:
         raise UploadScanError("trace JSONL must be UTF-8") from error
 
-    reducer = CredentialReducer(discovery.secrets)
+    reducer = CredentialReducer(discovery.secrets, secret_fingerprints=secret_fingerprints)
     context_prepared = reducer.prepare(context) if context is not None else None
     findings = prefix_findings(context_prepared.report, "$.context") if context_prepared else set()
     file_findings: set[Finding] = set()

@@ -5,6 +5,7 @@ import pytest
 from prime_evals.preflight import (
     REDACTED,
     UploadScanError,
+    fingerprint_secret,
     prepare_jsonl_upload,
     prepare_upload,
     scan_upload,
@@ -296,6 +297,19 @@ def test_structured_authorization_redacts_the_repeated_token(scheme):
     assert token not in prepared.data["completion"]
 
 
+def test_preflight_uses_named_secret_sources_and_fingerprints():
+    runtime_secret = "runtime-secret-0123456789"
+    capability = "rollout-capability-0123456789"
+    prepared = prepare_upload(
+        {"completion": f"{runtime_secret} {capability} reviewable-setting"},
+        secret_sources=[{"RUNTIME_SECRET": runtime_secret, "X-Custom": "reviewable-setting"}],
+        secret_fingerprints=[fingerprint_secret(capability)],
+    )
+
+    assert prepared.data["completion"] == f"{REDACTED} {REDACTED} reviewable-setting"
+    assert prepared.report.categories == {"known_secret": 1}
+
+
 def test_nested_and_properties_credentials_do_not_bypass_discovery():
     secret = "opaque-nested-secret-0123456789"
     token = "opaque-generic-token-0123456789"
@@ -463,5 +477,7 @@ def test_secret_values_file(tmp_path):
 def test_secret_values_includes_auth_environment_variables(monkeypatch):
     secret = "opaque-auth-secret-0123456789"
     monkeypatch.setenv("AUTH", secret)
+    monkeypatch.setenv("API_KEY_VAR", "REFERENCE_API_KEY")
 
     assert secret in secret_values()
+    assert "REFERENCE_API_KEY" not in secret_values()

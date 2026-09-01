@@ -293,6 +293,24 @@ def test_push_evaluation_rejects_oversized_samples_before_creating_evaluation():
         client.push_evaluation(request, [{"value": "x" * 100}], max_payload_bytes=30)
 
 
+def test_push_evaluation_creates_uploads_and_finalizes():
+    client = EvalsClient(SimpleNamespace())
+    client.create_evaluation = Mock(return_value={"evaluation_id": "eval-1"})
+    client.push_samples = Mock()
+    client.finalize_evaluation = Mock()
+    request = CreateEvaluationRequest(
+        name="test", environments=[{"name": "env"}], metrics={"reward": 1.0}
+    )
+    samples = [{"value": "ok"}]
+
+    assert client.push_evaluation(request, samples) == "eval-1"
+    client.create_evaluation.assert_called_once_with(**request.model_dump())
+    client.push_samples.assert_called_once_with(
+        "eval-1", samples, max_payload_bytes=25 * 1024 * 1024
+    )
+    client.finalize_evaluation.assert_called_once_with("eval-1", metrics={"reward": 1.0})
+
+
 def test_evaluation_model_minimal():
     """Test Evaluation model with minimal data"""
     data = {

@@ -146,10 +146,16 @@ def test_preflight_redacts_every_value_in_a_raw_cookie_header():
     session = "opaque-cookie-session-0123456789"
     refresh = "opaque-cookie-refresh-0123456789"
     header = json.dumps({"Cookie": f"session={session}; refresh={refresh}"})
-    prepared = prepare_upload({"completion": f"request: {header}"})
+    prepared = prepare_upload(
+        {
+            "completion": f"request: {header}",
+            "response": f"Set-Cookie: session={session}",
+        }
+    )
 
     assert session not in prepared.data["completion"]
     assert refresh not in prepared.data["completion"]
+    assert session not in prepared.data["response"]
 
 
 def test_preflight_catches_quoted_json_assignments_and_short_structured_secrets():
@@ -184,6 +190,8 @@ def test_preflight_distinguishes_oauth_metadata_from_credential_value_fields():
     payload = {
         "oauth": "enabled",
         "hasOauth": True,
+        "auth_header": "Bearer opaque-auth-token-0123456789",
+        "authorization_header": "Bearer opaque-authorization-token-0123456789",
         "secret_value": "opaque-secret-0123456789",
         "api_key_value": "opaque-api-key-0123456789",
         "token_value": "opaque-token-0123456789",
@@ -194,6 +202,8 @@ def test_preflight_distinguishes_oauth_metadata_from_credential_value_fields():
     assert prepared.data == {
         "oauth": "enabled",
         "hasOauth": True,
+        "auth_header": REDACTED,
+        "authorization_header": REDACTED,
         "secret_value": REDACTED,
         "api_key_value": REDACTED,
         "token_value": REDACTED,

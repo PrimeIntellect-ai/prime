@@ -78,6 +78,12 @@ def test_known_secrets_sources(monkeypatch, tmp_path):
     monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/ssh-agent/agent.123")  # about auth, not auth
     monkeypatch.setenv("AUTH_TYPE", "oauth2_pkce")
     monkeypatch.setenv("BASIC_AUTH", "basic-auth-0001")  # is the credential
+    monkeypatch.setenv(  # a JSON-valued variable is a mapping too
+        "DOCKER_AUTH_CONFIG",
+        json.dumps(
+            {"auths": {"r.example": {"auth": "dXNlcjpwYXNzd29yZA==", "email": "a@b.example"}}}
+        ),
+    )
     monkeypatch.setenv("DATABASE_URL", "postgres://app:db-pass-000001@db/x")  # URL password
     monkeypatch.setenv("GIT_REMOTE", "https://ghp_token_000000001@github.com/o/r")  # bare token
     monkeypatch.setenv("PG_URL", "postgres://app:p%40ss-000001@db")  # percent-encoded password
@@ -110,6 +116,7 @@ def test_known_secrets_sources(monkeypatch, tmp_path):
         "sas-sig-000001",  # a signed URL's signature is its bearer credential
         "ghp_pat_000000000001",
         "basic-auth-0001",
+        "dXNlcjpwYXNzd29yZA==",  # Docker's registry auth, inside a JSON-valued variable
         "j" * 400,  # longer than a filesystem name: a literal, not a file to probe
     } <= found
     assert (
@@ -127,6 +134,7 @@ def test_known_secrets_sources(monkeypatch, tmp_path):
             "/opt/keep/this/path",
             "/tmp/ssh-agent/agent.123",
             "oauth2_pkce",
+            "a@b.example",
         }
         & found
     )

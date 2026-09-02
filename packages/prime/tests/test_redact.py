@@ -64,6 +64,7 @@ def test_known_secrets_sources(monkeypatch, tmp_path):
     monkeypatch.setenv("NOTE", "see ?token=prose-token-0001")  # prose, not a URL
     monkeypatch.setenv("ODD_URL", "https://h.example/?to%6ben=encoded-name-0001")  # encoded name
     monkeypatch.setenv("FORM_URL", "https://h.example/?token=plus+sep+0001")  # form encoding
+    monkeypatch.setenv("SAS_URL", "https://a.blob.core.windows.net/c?sv=2020&sig=sas-sig-000001")
     monkeypatch.setenv("DATABASE_URL", "postgres://app:db-pass-000001@db/x")  # URL password
     monkeypatch.setenv("GIT_REMOTE", "https://ghp_token_000000001@github.com/o/r")  # bare token
     monkeypatch.setenv("PG_URL", "postgres://app:p%40ss-000001@db")  # percent-encoded password
@@ -93,6 +94,7 @@ def test_known_secrets_sources(monkeypatch, tmp_path):
         "encoded-name-0001",
         "plus+sep+0001",
         "plus sep 0001",  # as a form-decoding client uses it
+        "sas-sig-000001",  # a signed URL's signature is its bearer credential
         "j" * 400,  # longer than a filesystem name: a literal, not a file to probe
     } <= found
     assert (

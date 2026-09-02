@@ -50,6 +50,7 @@ def test_known_secrets_sources(monkeypatch, tmp_path):
     monkeypatch.setenv("DATABASE_URL", "postgres://app:db-pass-000001@db/x")  # URL password
     monkeypatch.setenv("GIT_REMOTE", "https://ghp_token_000000001@github.com/o/r")  # bare token
     monkeypatch.setenv("PG_URL", "postgres://app:p%40ss-000001@db")  # percent-encoded password
+    monkeypatch.setenv("RO_URL", "postgres://readonly_user:@db")  # empty password: a name
     secrets_file = tmp_path / "secrets"
     secrets_file.write_text("from-file-0001\n\n  spaced  \n")
 
@@ -70,4 +71,13 @@ def test_known_secrets_sources(monkeypatch, tmp_path):
         "p@ss-000001",
         "j" * 400,  # longer than a filesystem name: a literal, not a file to probe
     } <= found
-    assert not {"short", "Some Author Name", "", "postgres://app:db-pass-000001@db/x"} & found
+    assert (
+        not {
+            "short",
+            "Some Author Name",
+            "",
+            "postgres://app:db-pass-000001@db/x",
+            "readonly_user",
+        }
+        & found
+    )

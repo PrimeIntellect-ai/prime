@@ -570,8 +570,14 @@ def _finite(value: Any) -> Any:
     if isinstance(value, float) and not math.isfinite(value):
         return _DROP
     if isinstance(value, Mapping):
-        items = ((key, _finite(item)) for key, item in value.items())
-        return {key: item for key, item in items if item is not _DROP and item != {}}
+        cleaned = {}
+        for key, item in value.items():
+            kept = _finite(item)
+            # Identity checks only: an array-like value would make `==` ambiguous.
+            if kept is _DROP or (isinstance(item, Mapping) and not kept):
+                continue
+            cleaned[key] = kept
+        return cleaned
     if isinstance(value, (list, tuple)):
         return [item for item in (_finite(item) for item in value) if item is not _DROP]
     return value

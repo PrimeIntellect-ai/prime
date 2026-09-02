@@ -1,10 +1,12 @@
 """The legacy sample sink that keeps today's viewer working."""
 
 import httpx
+import pytest
 from _fakes import make_episode, make_trace
 from conftest import RecordingHandler
 
 from prime_runs.sinks import EvalSamplesSink
+from prime_runs.sinks.base import SinkWriteError
 from prime_runs.worker import UploadWorker
 
 
@@ -68,6 +70,24 @@ def test_records_this_sink_cannot_project_are_skipped_not_fatal(
     ]
     assert len(warnings) == 1
     assert "(dict)" in warnings[0]
+
+
+def test_a_record_split_across_batches_is_counted_once(
+    make_platform_client, eval_routes, monkeypatch
+):
+    eval_routes["POST /api/v1/evaluations/eval-abc/samples"] = lambda request: httpx.Response(502)
+    # Every episode falls back to one row per trace, and every row is its own batch.
+    monkeypatch.setattr("prime_runs.projection.MAX_SAMPLES_PAYLOAD_BYTES", 1)
+    monkeypatch.setattr(
+        "prime_runs.sinks.samples.batch_samples", lambda samples: [[sample] for sample in samples]
+    )
+    sink, handler = make_sink(make_platform_client, eval_routes)
+
+    with pytest.raises(SinkWriteError) as info:
+        sink.write([make_episode("ep-1", [make_trace(trace_id="a"), make_trace(trace_id="b")])])
+
+    assert len(handler.bodies_for("/api/v1/evaluations/eval-abc/samples")) == 2
+    assert info.value.failed_records == 1
 
 
 def test_an_empty_batch_makes_no_request(make_platform_client, eval_routes):

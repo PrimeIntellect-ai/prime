@@ -5,7 +5,7 @@ a lost batch is recoverable, duplicated rows skew every average.
 """
 
 import logging
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from .._http import UPLOAD_TIMEOUT, PlatformClient, encode_json
 from ..projection import batch_samples, build_samples
@@ -42,8 +42,11 @@ class EvalSamplesSink(Sink):
         samples, owners = self._to_samples(records)
         units: List[Unit] = []
         offset = 0
+        seen: Set[int] = set()
         for batch in batch_samples(samples):
-            batch_owners = set(owners[offset : offset + len(batch)])
+            # A record whose rows straddle two batches is counted once, with the first.
+            batch_owners = set(owners[offset : offset + len(batch)]) - seen
+            seen |= batch_owners
             offset += len(batch)
             units.append((len(batch_owners), self._sender(batch)))
         send_each(units)

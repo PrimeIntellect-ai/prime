@@ -625,6 +625,26 @@ def test_log_metrics_drops_non_finite_values_inside_sequences():
     run.finish()
 
 
+def test_log_metrics_leaves_array_like_values_alone():
+    class Arrayish:  # numpy-style: comparisons are element-wise, truthiness ambiguous
+        def __eq__(self, other):
+            raise ValueError("ambiguous")
+
+        __ne__ = __eq__
+        __bool__ = __eq__
+
+    metrics = FakeSink("metrics")
+    run = make_run(metrics_sinks=[metrics])
+    histogram = Arrayish()
+
+    run.log_metrics({"hist": histogram, "nested": {"hist": histogram, "nan": float("nan")}})
+    run.flush()
+
+    row = metrics.batches[0][0]
+    assert row["hist"] is histogram and row["nested"] == {"hist": histogram}
+    run.finish()
+
+
 def test_log_metrics_keeps_a_step_the_producer_already_set():
     metrics = FakeSink("metrics")
     run = make_run(metrics_sinks=[metrics])

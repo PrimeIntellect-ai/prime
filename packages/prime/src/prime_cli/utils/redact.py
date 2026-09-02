@@ -12,7 +12,7 @@ import os
 import re
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping, Optional
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 REDACTED = "[REDACTED]"
 MIN_SECRET_LENGTH = 8
@@ -27,7 +27,8 @@ JSON_STRING = re.compile(r'"(?:[^"\\]|\\.)*"')
 def env_credentials(mapping: Mapping[str, object]) -> Iterator[str]:
     """The credentials in an environment-like mapping: every value under a credential-like
     name, and the password — or the bare user token — inside a `scheme://user:password@host`
-    value whatever its name (`DATABASE_URL`, `HTTP_PROXY`). A username next to a password
+    value whatever its name (`DATABASE_URL`, `HTTP_PROXY`), as written and percent-decoded
+    the way a client uses it. A username next to a password
     is a name, not a secret (`postgres`), so a token placed there beside a dummy password
     (GitHub's legacy `token:x-oauth-basic`) is not recognised."""
     for name, value in mapping.items():
@@ -40,7 +41,7 @@ def env_credentials(mapping: Mapping[str, object]) -> Iterator[str]:
         except ValueError:
             continue
         if "@" in parts.netloc and (userinfo := parts.password or parts.username):
-            yield userinfo
+            yield from {userinfo, unquote(userinfo)}
 
 
 def known_secrets(*values: Optional[str], secret_args: Iterable[str] = ()) -> set[str]:
@@ -55,8 +56,8 @@ def known_secrets(*values: Optional[str], secret_args: Iterable[str] = ()) -> se
     }
     secrets.update(value for value in values if value)
     for arg in secret_args:
-        path = Path(arg)
-        lines = path.read_text().splitlines() if path.is_file() else [arg]
+        # `os.path.isfile` is False for anything that cannot be a path, a long literal included.
+        lines = Path(arg).read_text().splitlines() if os.path.isfile(arg) else [arg]
         secrets.update(line.strip() for line in lines)
     return {secret for secret in secrets if secret}
 

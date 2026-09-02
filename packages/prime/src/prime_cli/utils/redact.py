@@ -46,8 +46,10 @@ class Redactor:
 
     def __init__(self, secrets: Iterable[str]) -> None:
         # Inside a JSON string a secret is escaped; inside a JSON document quoted within
-        # a string (a tool result) it is escaped twice. Match every spelling.
+        # a string (a tool result) it is escaped twice. Encoders other than Python's
+        # also escape `/`. Match every spelling.
         forms = set(secrets)
+        forms |= {form.replace("/", r"\/") for form in forms}
         for _ in range(2):
             forms |= {
                 json.dumps(form, ensure_ascii=escape)[1:-1]

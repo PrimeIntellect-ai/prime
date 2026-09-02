@@ -7,10 +7,11 @@ from prime_cli.utils.redact import Redactor, known_secrets
 
 
 def test_redactor_replaces_every_spelling_inside_strings_only():
-    redactor = Redactor({'pa"ss\\word-0001', "12345678", "ünïcode-secret"})
+    redactor = Redactor({'pa"ss\\word-0001', "12345678", "ünïcode-secret", "hooks/abc/def"})
     doc = {
         "plain": 'pa"ss\\word-0001 and ünïcode-secret',
         "nested": json.dumps({"k": 'pa"ss\\word-0001', "u": "ünïcode-secret"}),
+        "slashes": '{"url": "hooks\\/abc\\/def"}',  # a JS/PHP-style encoder escapes `/`
         "number": 12345678,  # a JSON number is not a string: untouched
         "text": "12345678",
         "keep": "ordinary text",
@@ -21,11 +22,12 @@ def test_redactor_replaces_every_spelling_inside_strings_only():
         assert out == {
             "plain": "[REDACTED] and [REDACTED]",
             "nested": json.dumps({"k": "[REDACTED]", "u": "[REDACTED]"}),
+            "slashes": '{"url": "[REDACTED]"}',
             "number": 12345678,
             "text": "[REDACTED]",
             "keep": "ordinary text",
         }
-        assert redactor.count == 5
+        assert redactor.count == 6
 
 
 def test_redactor_without_secrets_leaves_text_untouched():

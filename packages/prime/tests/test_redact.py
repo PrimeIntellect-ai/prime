@@ -58,10 +58,10 @@ def test_known_secrets_sources(monkeypatch, tmp_path):
     monkeypatch.setenv("PG_URL", "postgres://app:p%40ss-000001@db")  # percent-encoded password
     monkeypatch.setenv("RO_URL", "postgres://readonly_user:@db")  # empty password: a name
     secrets_file = tmp_path / "secrets"
-    secrets_file.write_text("from-file-0001\n\n  spaced  \n")
+    secrets_file.write_text("from-file-0001\r\n\n  spaced  \n")
 
     found = known_secrets(
-        "api-key-0001", None, secret_args=["literal", str(secrets_file), "j" * 400]
+        "api-key-0001", None, secret_args=["literal", "lit ", str(secrets_file), "j" * 400]
     )
 
     assert {
@@ -69,8 +69,9 @@ def test_known_secrets_sources(monkeypatch, tmp_path):
         "hyphenated-auth-0001",
         "api-key-0001",
         "literal",
-        "from-file-0001",
-        "spaced",
+        "lit ",  # explicit values keep their whitespace
+        "from-file-0001",  # a CRLF file entry loses only its terminator
+        "  spaced  ",
         "db-pass-000001",
         "ghp_token_000000001",
         "p%40ss-000001",

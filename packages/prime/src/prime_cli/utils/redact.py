@@ -66,8 +66,8 @@ def known_secrets(*values: Optional[str], secret_args: Iterable[str] = ()) -> se
     secrets.update(value for value in values if value)
     for arg in secret_args:
         # `os.path.isfile` is False for anything that cannot be a path, a long literal included.
-        lines = Path(arg).read_text().splitlines() if os.path.isfile(arg) else [arg]
-        secrets.update(line.strip() for line in lines)
+        # Taken as given: only a file entry's line terminator goes.
+        secrets.update(Path(arg).read_text().splitlines() if os.path.isfile(arg) else [arg])
     secrets.discard("")
     # No fixed marker can hide a value it contains; refuse rather than upload it.
     if inside_marker := sorted(secret for secret in secrets if secret in REDACTED):

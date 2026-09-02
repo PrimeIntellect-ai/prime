@@ -67,7 +67,7 @@ def view() -> None:
             team_label = f"{team_id} (from env var)"
         else:
             team_name = settings.get("team_name")
-            team_label = f"{team_name} ({team_id})" if team_name else team_id
+            team_label = f"{escape(team_name)} ({team_id})" if team_name else team_id
     else:
         team_label = "Personal Account"
     table.add_row("Team", team_label)
@@ -79,7 +79,7 @@ def view() -> None:
             user_label = f"{user_id} (from env var)"
         else:
             user_name = settings.get("user_name")
-            user_label = f"{user_name} ({user_id})" if user_name else user_id
+            user_label = f"{escape(user_name)} ({user_id})" if user_name else user_id
     else:
         user_label = "Not set"
     table.add_row("User", user_label)
@@ -445,6 +445,7 @@ def reset(
         config = Config()
         config.set_api_key("")
         config.set_team(None)
+        config.set_user_id(None)
         config.set_base_url(Config.DEFAULT_BASE_URL)
         config.set_frontend_url(Config.DEFAULT_FRONTEND_URL)
         config.set_inference_url(Config.DEFAULT_INFERENCE_URL)

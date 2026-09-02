@@ -54,21 +54,6 @@ def url_credentials(value: str) -> Iterator[str]:
             yield from {raw, unquote(raw), unquote_plus(raw)}
 
 
-def overlaps_marker(secret: str) -> bool:
-    """Whether replacing with the marker could leave or form `secret`: one sits inside the
-    other (`REDACTED`, `foo[REDACTED]bar`), or `secret` begins with the marker's tail
-    (`]bar`) or ends with its head (`foo[`). Such a value is a placeholder or a
-    pathological input, never a credential."""
-    return (
-        secret in REDACTED
-        or REDACTED in secret
-        or any(
-            secret.startswith(REDACTED[-n:]) or secret.endswith(REDACTED[:n])
-            for n in range(1, len(REDACTED) + 1)
-        )
-    )
-
-
 def env_credentials(mapping: Mapping[str, object]) -> Iterator[str]:
     """The credentials in an environment-like mapping: every value under a credential-like
     name, and the URL credentials in any value whatever its name (`DATABASE_URL`,
@@ -97,11 +82,13 @@ def known_secrets(*values: Optional[str], secret_args: Iterable[str] = ()) -> se
         # Taken as given: only a file entry's line terminator goes.
         explicit.update(Path(arg).read_text().splitlines() if os.path.isfile(arg) else [arg])
     explicit.discard("")
-    # No fixed marker can hide a value that overlaps it. A discovered one is a sanitized
-    # placeholder (`API_TOKEN=REDACTED`) and is skipped; a requested one is refused.
-    if colliding := sorted(secret for secret in explicit if overlaps_marker(secret)):
-        raise ValueError(f"cannot redact {colliding}: overlaps the {REDACTED} marker")
-    return {secret for secret in discovered if not overlaps_marker(secret)} | explicit
+    # The marker must not contain a secret. A discovered value inside it is a sanitized
+    # placeholder (`API_TOKEN=REDACTED`) and is skipped; a requested one is refused. A
+    # secret that merely contains or borders the marker is kept: leaving it out would
+    # upload it for certain, while a replacement can only form it around another secret.
+    if inside_marker := sorted(secret for secret in explicit if secret in REDACTED):
+        raise ValueError(f"cannot redact {inside_marker}: part of the {REDACTED} marker")
+    return {secret for secret in discovered if secret not in REDACTED} | explicit
 
 
 class Redactor:

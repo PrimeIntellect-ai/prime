@@ -36,10 +36,18 @@ def test_redactor_replaces_every_spelling_inside_strings_only():
         assert redactor.count == 8
 
 
-@pytest.mark.parametrize("value", ["REDACTED", "]bar", "foo[", "ED]tail", "foo[REDACTED]bar"])
-def test_known_secrets_refuses_values_that_overlap_the_marker(value):
+@pytest.mark.parametrize("value", ["REDACTED", "[REDACTED", "ED]"])
+def test_known_secrets_refuses_values_inside_the_marker(value):
     with pytest.raises(ValueError, match="REDACTED"):
         known_secrets(secret_args=[value])
+
+
+def test_known_secrets_keeps_values_that_contain_or_border_the_marker(monkeypatch):
+    """Skipping these would upload a real credential for certain; a replacement can only
+    form one of them around another registered secret."""
+    monkeypatch.setenv("SERVICE_PASSWORD", "live[REDACTED]pass-123")
+    found = known_secrets(secret_args=["]bar", "foo["])
+    assert {"live[REDACTED]pass-123", "]bar", "foo["} <= found
 
 
 def test_redactor_without_secrets_leaves_text_untouched():

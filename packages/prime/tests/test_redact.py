@@ -47,6 +47,8 @@ def test_known_secrets_sources(monkeypatch, tmp_path):
     monkeypatch.setenv("X-Auth", "hyphenated-auth-0001")
     monkeypatch.setenv("MY_SHORT_KEY", "short")  # too short to redact safely
     monkeypatch.setenv("GIT_AUTHOR_NAME", "Some Author Name")  # AUTHOR is not AUTH
+    monkeypatch.setenv("DATABASE_URL", "postgres://app:db-pass-000001@db/x")  # URL password
+    monkeypatch.setenv("GIT_REMOTE", "https://ghp_token_000000001@github.com/o/r")  # bare token
     secrets_file = tmp_path / "secrets"
     secrets_file.write_text("from-file-0001\n\n  spaced  \n")
 
@@ -59,5 +61,7 @@ def test_known_secrets_sources(monkeypatch, tmp_path):
         "literal",
         "from-file-0001",
         "spaced",
+        "db-pass-000001",
+        "ghp_token_000000001",
     } <= found
-    assert not {"short", "Some Author Name", ""} & found
+    assert not {"short", "Some Author Name", "", "postgres://app:db-pass-000001@db/x"} & found

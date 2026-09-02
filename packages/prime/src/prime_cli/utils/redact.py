@@ -3,15 +3,16 @@
 Redaction is exact-match only: a known value is replaced with `[REDACTED]` wherever it
 appears inside a JSON string, and nothing is guessed from the shape of the text, so
 ordinary content is never rewritten. Values come from the process environment
-(variables whose names look like credentials), the Prime API key, and `--secret`
-arguments. Local files are never modified.
+(credential-like variable names, and the password inside connection URLs), the Prime
+API key, and `--secret` arguments. Local files are never modified.
 """
 
 import json
 import os
 import re
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Iterator, Mapping, Optional
+from urllib.parse import urlsplit
 
 REDACTED = "[REDACTED]"
 MIN_SECRET_LENGTH = 8
@@ -23,15 +24,32 @@ SECRET_NAME = re.compile(
 JSON_STRING = re.compile(r'"(?:[^"\\]|\\.)*"')
 
 
+def env_credentials(mapping: Mapping[str, object]) -> Iterator[str]:
+    """The credentials in an environment-like mapping: every value under a credential-like
+    name, and the password — or the bare user token — inside a `scheme://user:password@host`
+    value whatever its name (`DATABASE_URL`, `HTTP_PROXY`)."""
+    for name, value in mapping.items():
+        if not isinstance(value, str):
+            continue
+        if SECRET_NAME.search(name):
+            yield value
+        try:
+            parts = urlsplit(value)
+        except ValueError:
+            continue
+        if "@" in parts.netloc and (userinfo := parts.password or parts.username):
+            yield userinfo
+
+
 def known_secrets(*values: Optional[str], secret_args: Iterable[str] = ()) -> set[str]:
-    """Credential-named environment values, the given values, and `--secret` arguments
-    (a literal, or the path of a file with one secret per line). Environment values
-    shorter than `MIN_SECRET_LENGTH` are dropped — redacting them would rewrite ordinary
-    text; explicit values are taken as given."""
+    """The process environment's credentials (`env_credentials`), the given values, and
+    `--secret` arguments (a literal, or the path of a file with one secret per line).
+    Environment values shorter than `MIN_SECRET_LENGTH` are dropped — redacting them
+    would rewrite ordinary text; explicit values are taken as given."""
     secrets = {
-        value
-        for name, value in os.environ.items()
-        if SECRET_NAME.search(name) and len(value) >= MIN_SECRET_LENGTH
+        credential
+        for credential in env_credentials(os.environ)
+        if len(credential) >= MIN_SECRET_LENGTH
     }
     secrets.update(value for value in values if value)
     for arg in secret_args:

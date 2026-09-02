@@ -1,5 +1,6 @@
 """Exact-match redaction: a known value disappears from JSON strings in every spelling
-(plain, escaped, escaped again inside a quoted JSON document) and nothing else changes."""
+(plain, escaped, escaped again inside quoted JSON documents at any depth, with the `\\/`
+and uppercase-hex escapes other encoders emit) and nothing else changes."""
 
 import json
 
@@ -12,6 +13,8 @@ def test_redactor_replaces_every_spelling_inside_strings_only():
         "plain": 'pa"ss\\word-0001 and ünïcode-secret',
         "nested": json.dumps({"k": 'pa"ss\\word-0001', "u": "ünïcode-secret"}),
         "slashes": '{"url": "hooks\\/abc\\/def"}',  # a JS/PHP-style encoder escapes `/`
+        "upper": '{"u": "\\u00FCn\\u00EFcode-secret"}',  # uppercase hex escapes
+        "deep": json.dumps({"log": json.dumps({"k": 'pa"ss\\word-0001', "n": 1})}),
         "number": 12345678,  # a JSON number is not a string: untouched
         "text": "12345678",
         "keep": "ordinary text",
@@ -23,11 +26,13 @@ def test_redactor_replaces_every_spelling_inside_strings_only():
             "plain": "[REDACTED] and [REDACTED]",
             "nested": json.dumps({"k": "[REDACTED]", "u": "[REDACTED]"}),
             "slashes": '{"url": "[REDACTED]"}',
+            "upper": '{"u": "[REDACTED]"}',
+            "deep": json.dumps({"log": json.dumps({"k": "[REDACTED]", "n": 1})}),
             "number": 12345678,
             "text": "[REDACTED]",
             "keep": "ordinary text",
         }
-        assert redactor.count == 6
+        assert redactor.count == 8
 
 
 def test_redactor_without_secrets_leaves_text_untouched():

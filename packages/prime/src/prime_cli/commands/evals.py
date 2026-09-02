@@ -1062,7 +1062,7 @@ def _push_single_eval(
     path = _validate_eval_path(config_path)
     api_client = APIClient()
     redactor = Redactor(known_secrets(api_client.api_key, secret_args=secrets))
-    eval_data = redactor.value(_load_eval_directory(path))
+    eval_data, name = redactor.value([_load_eval_directory(path), name])
     eval_name = name or eval_data["eval_name"]
     console.print(f"[blue]✓ Loaded eval data:[/blue] {path}")
     if redactor.count:

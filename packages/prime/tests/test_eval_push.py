@@ -368,8 +368,11 @@ class TestPushSingleEval:
         monkeypatch.setattr("prime_cli.commands.evals.APIClient", _StubAPIClient)
         monkeypatch.setattr("prime_cli.commands.evals.EvalsClient", DummyEvalsClient)
 
-        _push_single_eval(str(tmp_path), None, None, None, secrets=["literal-0001"])
+        _push_single_eval(
+            str(tmp_path), None, None, None, name="run literal-0001", secrets=["literal-0001"]
+        )
 
+        assert captured["name"] == "run [REDACTED]"
         assert captured["metadata"]["note"] == "[REDACTED]"
         assert captured["samples"][0]["completion"] == "[REDACTED] [REDACTED] [REDACTED] keep"
         assert json.loads((tmp_path / "results.jsonl").read_text()) == sample

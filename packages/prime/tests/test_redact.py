@@ -84,7 +84,8 @@ def test_known_secrets_sources(monkeypatch, tmp_path):
     monkeypatch.setenv("API_KEY_2", "numbered-key-0002")  # a numbered credential still counts
     monkeypatch.setenv(  # a JSON-valued variable is a mapping too
         "DOCKER_AUTH_CONFIG",
-        json.dumps(
+        " "
+        + json.dumps(  # leading whitespace is valid JSON
             {"auths": {"r.example": {"auth": "dXNlcjpwYXNzd29yZA==", "email": "a@b.example"}}}
         ),
     )

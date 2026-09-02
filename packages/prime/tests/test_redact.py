@@ -36,9 +36,10 @@ def test_redactor_replaces_every_spelling_inside_strings_only():
         assert redactor.count == 8
 
 
-def test_known_secrets_refuses_values_the_marker_would_keep():
+@pytest.mark.parametrize("value", ["REDACTED", "]bar", "foo[", "ED]tail"])
+def test_known_secrets_refuses_values_that_overlap_the_marker(value):
     with pytest.raises(ValueError, match="REDACTED"):
-        known_secrets(secret_args=["REDACTED"])
+        known_secrets(secret_args=[value])
 
 
 def test_redactor_without_secrets_leaves_text_untouched():
@@ -62,6 +63,7 @@ def test_known_secrets_sources(monkeypatch, tmp_path):
     monkeypatch.setenv("BROWSER_URL", "wss://b.example/devtools?token=query-token-0001&v=2")
     monkeypatch.setenv("NOTE", "see ?token=prose-token-0001")  # prose, not a URL
     monkeypatch.setenv("ODD_URL", "https://h.example/?to%6ben=encoded-name-0001")  # encoded name
+    monkeypatch.setenv("FORM_URL", "https://h.example/?token=plus+sep+0001")  # form encoding
     monkeypatch.setenv("DATABASE_URL", "postgres://app:db-pass-000001@db/x")  # URL password
     monkeypatch.setenv("GIT_REMOTE", "https://ghp_token_000000001@github.com/o/r")  # bare token
     monkeypatch.setenv("PG_URL", "postgres://app:p%40ss-000001@db")  # percent-encoded password
@@ -89,6 +91,8 @@ def test_known_secrets_sources(monkeypatch, tmp_path):
         "pg-pass-000001",
         "query-token-0001",
         "encoded-name-0001",
+        "plus+sep+0001",
+        "plus sep 0001",  # as a form-decoding client uses it
         "j" * 400,  # longer than a filesystem name: a literal, not a file to probe
     } <= found
     assert (

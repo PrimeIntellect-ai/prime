@@ -12,7 +12,7 @@ import os
 import re
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping, Optional
-from urllib.parse import unquote, urlsplit
+from urllib.parse import unquote, unquote_plus, urlsplit
 
 REDACTED = "[REDACTED]"
 MIN_SECRET_LENGTH = 8
@@ -50,7 +50,17 @@ def url_credentials(value: str) -> Iterator[str]:
     for pair in parts.query.split("&"):
         name, _, raw = pair.partition("=")
         if raw and SECRET_NAME.search(unquote(name)):
-            yield from {raw, unquote(raw)}
+            yield from {raw, unquote(raw), unquote_plus(raw)}
+
+
+def overlaps_marker(secret: str) -> bool:
+    """Whether replacing with the marker could leave or form `secret`: it sits inside
+    `[REDACTED]`, or begins with the marker's tail (`]bar`) or ends with its head
+    (`foo[`). Such a value is a placeholder or a pathological input, never a credential."""
+    return secret in REDACTED or any(
+        secret.startswith(REDACTED[-n:]) or secret.endswith(REDACTED[:n])
+        for n in range(1, len(REDACTED) + 1)
+    )
 
 
 def env_credentials(mapping: Mapping[str, object]) -> Iterator[str]:
@@ -81,11 +91,11 @@ def known_secrets(*values: Optional[str], secret_args: Iterable[str] = ()) -> se
         # Taken as given: only a file entry's line terminator goes.
         explicit.update(Path(arg).read_text().splitlines() if os.path.isfile(arg) else [arg])
     explicit.discard("")
-    # No fixed marker can hide a value it contains. A discovered one is a sanitized
+    # No fixed marker can hide a value that overlaps it. A discovered one is a sanitized
     # placeholder (`API_TOKEN=REDACTED`) and is skipped; a requested one is refused.
-    if inside_marker := sorted(secret for secret in explicit if secret in REDACTED):
-        raise ValueError(f"cannot redact {inside_marker}: part of the {REDACTED} marker")
-    return {secret for secret in discovered if secret not in REDACTED} | explicit
+    if colliding := sorted(secret for secret in explicit if overlaps_marker(secret)):
+        raise ValueError(f"cannot redact {colliding}: overlaps the {REDACTED} marker")
+    return {secret for secret in discovered if not overlaps_marker(secret)} | explicit
 
 
 class Redactor:

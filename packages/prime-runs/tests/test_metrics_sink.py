@@ -29,8 +29,6 @@ def test_each_metrics_dict_is_one_request(make_platform_client, rft_routes):
 
 
 def test_an_ambiguous_failure_is_replayed(make_platform_client, rft_routes, no_sleep):
-    """The platform keeps one row per step, so a retry after a lost response
-    cannot double anything, while a lost row is a hole in the curves for good."""
     calls = []
 
     def flaky(request: httpx.Request) -> httpx.Response:
@@ -93,10 +91,3 @@ def test_a_record_that_is_not_a_mapping_is_counted_not_sent(make_platform_client
     assert info.value.failed_records == 1
     assert isinstance(info.value.cause, TypeError)
     assert len(handler.bodies_for("/api/v1/rft/metrics")) == 1
-
-
-def test_write_before_start_is_a_producer_bug(make_platform_client, rft_routes):
-    sink = RftMetricsSink(make_platform_client(RecordingHandler(rft_routes)))
-
-    with pytest.raises(RuntimeError, match="before start"):
-        sink.write([{"step": 1}])

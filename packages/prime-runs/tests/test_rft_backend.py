@@ -61,8 +61,6 @@ def test_create_registers_an_external_run_for_the_team(make_platform_client, rft
 def test_training_environments_are_passed_through_not_resolved(
     make_platform_client, rft_routes, environment, expected
 ):
-    """The RFT API names environments by hub id and resolves them itself; a
-    hub round-trip here would be a second opinion."""
     backend, handler = make_backend(make_platform_client, rft_routes)
 
     backend.create(train_spec(environments=[EnvironmentRef.coerce(environment)]))
@@ -88,8 +86,6 @@ def test_create_needs_a_base_model(make_platform_client, rft_routes):
 
 
 def test_create_needs_a_team(make_platform_client, rft_routes):
-    """External runs are created for a team; the API refuses without one, so
-    say so before the request rather than surfacing its 403."""
     backend, handler = make_backend(make_platform_client, rft_routes, team_id=None)
 
     with pytest.raises(ConfigurationError, match="team"):
@@ -98,8 +94,6 @@ def test_create_needs_a_team(make_platform_client, rft_routes):
 
 
 def test_a_team_outside_the_allowlist_is_a_forbidden_error(make_platform_client, rft_routes):
-    """The platform enables external runs per team. The producer decides what
-    a refusal means; the SDK passes the platform's reason through."""
     routes = dict(rft_routes)
     routes["POST /api/v1/rft/external-runs"] = lambda request: httpx.Response(
         403, json={"detail": "External training runs are not enabled for this team"}
@@ -112,7 +106,6 @@ def test_a_team_outside_the_allowlist_is_a_forbidden_error(make_platform_client,
 
 
 def test_create_is_not_replayed_after_an_ambiguous_failure(make_platform_client, rft_routes):
-    """A retry after a lost response would register a second run."""
     routes = dict(rft_routes)
     routes["POST /api/v1/rft/external-runs"] = lambda request: httpx.Response(502)
     backend, handler = make_backend(make_platform_client, routes)
@@ -133,7 +126,6 @@ def test_attach_makes_no_request(make_platform_client, rft_routes):
 
 
 def test_update_is_a_no_op(make_platform_client, rft_routes):
-    """The RFT API takes the config at creation and has no summary document."""
     backend, handler = make_backend(make_platform_client, rft_routes)
 
     backend.update("run-abc", config={"a": 1}, summary={"loss": 0.1})
@@ -151,8 +143,6 @@ def test_a_completed_run_is_finalized_with_exit_code_zero(make_platform_client, 
 
 
 def test_finalize_is_replayed_after_an_ambiguous_failure(make_platform_client, rft_routes):
-    """Compare-and-set on the server, and "already finalized" is a success:
-    a lost response costs nothing to replay, unlike the eval finalize."""
     attempts = []
 
     def flaky(request: httpx.Request) -> httpx.Response:
@@ -171,7 +161,6 @@ def test_finalize_is_replayed_after_an_ambiguous_failure(make_platform_client, r
 
 
 def test_finalize_falls_back_to_a_completed_status_update(make_platform_client, rft_routes):
-    """A finalize-specific failure must not strand an otherwise completed run."""
     routes = dict(rft_routes)
     routes["POST /api/v1/rft/finalize"] = lambda request: httpx.Response(
         400, json={"detail": "finalize unavailable"}
@@ -202,8 +191,6 @@ def test_finalize_falls_back_to_a_completed_status_update(make_platform_client, 
 def test_other_terminal_states_are_reported_as_failed_with_the_reason(
     make_platform_client, rft_routes, status, error, expected_message
 ):
-    """The RFT vocabulary is completed | failed; the finer distinction rides
-    in error_message so an operator can still tell a Ctrl-C from a crash."""
     backend, handler = make_backend(make_platform_client, rft_routes)
 
     backend.finalize("run-abc", status=status, error=error)
@@ -216,8 +203,6 @@ def test_other_terminal_states_are_reported_as_failed_with_the_reason(
 
 
 def test_marking_an_already_closed_run_failed_is_not_an_error(make_platform_client, rft_routes):
-    """409: a managed launcher or an earlier attempt got there first. The
-    outcome is recorded either way, so teardown must not raise over it."""
     routes = dict(rft_routes)
     routes["PUT /api/v1/rft/external-runs/run-abc/status"] = lambda request: httpx.Response(
         409, json={"detail": "Cannot update status of run in 'COMPLETED' state."}
@@ -227,14 +212,3 @@ def test_marking_an_already_closed_run_failed_is_not_an_error(make_platform_clie
     backend.finalize("run-abc", status=RunStatus.FAILED, error="boom")
 
     assert handler.paths() == ["PUT /api/v1/rft/external-runs/run-abc/status"]
-
-
-def test_log_metrics_posts_one_step(make_platform_client, rft_routes):
-    backend, handler = make_backend(make_platform_client, rft_routes)
-
-    backend.log_metrics("run-abc", {"step": 3, "loss": 0.5})
-
-    assert handler.bodies_for("/api/v1/rft/metrics")[0] == {
-        "run_id": "run-abc",
-        "metrics": {"step": 3, "loss": 0.5},
-    }

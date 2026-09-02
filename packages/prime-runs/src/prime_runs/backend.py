@@ -1,16 +1,8 @@
-"""Run backends: the contract, the evaluations backend, and the disabled no-op.
+"""Run lifecycles: create, update, finalize. Sinks, not backends, move records.
 
-A backend owns the *lifecycle* of a run — creating it, updating what is known
-about it, closing it out with a terminal status. It does not move records;
-that is a sink's job (see :mod:`prime_runs.sinks`).
-
-:class:`EvalsBackend` works over ``/api/v1/evaluations/*``, resolving
-environments through the hub's get-or-create so a local run uploads without
-``prime env push``. The eval API has no producer-facing way to mark a run
-failed: ``finalize`` moves a run to COMPLETED and ``UpdateEvaluationRequest``
-carries no status. A failed or crashed run therefore keeps showing as running;
-the terminal state is recorded in ``metadata.prime_runs`` so it is at least
-visible.
+``EvalsBackend`` speaks ``/api/v1/evaluations``; ``RftBackend`` speaks
+``/api/v1/rft/external-runs``; ``DisabledBackend`` is the no-op behind
+``mode="disabled"``.
 """
 
 import logging
@@ -26,9 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 class Backend(Protocol):
-    def create(self, spec: RunSpec) -> RunHandle:
-        """Open a new run and return its identity."""
-        ...
+    def create(self, spec: RunSpec) -> RunHandle: ...
 
     def update(
         self,
@@ -37,11 +27,7 @@ class Backend(Protocol):
         config: Optional[Dict[str, Any]] = None,
         summary: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Persist config (inputs) and/or summary (outputs).
-
-        ``config`` is the run's *whole* config, not a patch: the evaluations API
-        replaces the stored metadata document.
-        """
+        """Persist the run's whole config (not a patch) and/or summary."""
         ...
 
     def finalize(
@@ -53,20 +39,17 @@ class Backend(Protocol):
         error: Optional[str] = None,
         config: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Close the run out. Called exactly once per run. ``config`` is passed
-        so a backend recording terminal state inside metadata can merge it."""
+        """Close the run out, once per run."""
         ...
 
-    def close(self) -> None:
-        """Release transport resources."""
-        ...
-
-
-# ------------------------------------------------------------------- evals
+    def close(self) -> None: ...
 
 
 class EvalsBackend:
-    """Lifecycle for evaluation runs."""
+    """Environments are resolved through the hub's get-or-create, so a local run
+    uploads without ``prime env push``. The API has no producer-facing way to mark
+    a run failed, so a non-completed terminal state is recorded in
+    ``metadata.prime_runs`` and the run keeps showing as running."""
 
     def __init__(
         self,
@@ -79,8 +62,6 @@ class EvalsBackend:
         self._frontend_url = frontend_url.rstrip("/")
         self._team_id = team_id
 
-    # ------------------------------------------------------------------ create
-
     def create(self, spec: RunSpec) -> RunHandle:
         environments = self._resolve_environments(spec.environments)
         if not environments:
@@ -88,7 +69,6 @@ class EvalsBackend:
                 "An eval run needs at least one environment. Pass "
                 'environments=["my-env"] to init().'
             )
-
         run_name: str = spec.name or _default_name(spec)
         payload: Dict[str, Any] = {
             "name": run_name,
@@ -96,15 +76,13 @@ class EvalsBackend:
             "tags": list(spec.tags),
         }
         _set_if(payload, "model_name", spec.model)
-        # The API's `dataset` column is always the environment under another name.
-        _set_if(payload, "dataset", _first_environment_name(spec))
+        _set_if(payload, "dataset", _first_environment_name(spec))  # the env under another name
         _set_if(payload, "framework", spec.framework)
         _set_if(payload, "description", spec.description)
         _set_if(payload, "metadata", spec.config or None)
         _set_if(payload, "team_id", spec.team_id or self._team_id)
 
-        # Not replayable (the POST default): a retry after a lost response would
-        # create a second run and only the second would be tracked.
+        # Not replayable: a retry after a lost response would create a second run.
         response = self._client.post("/evaluations/", json_body=payload)
         run_id = response.get("evaluation_id")
         if not run_id:
@@ -120,8 +98,6 @@ class EvalsBackend:
     def url_for(self, run_id: str) -> str:
         return f"{self._frontend_url}/dashboard/evaluations/{run_id}"
 
-    # ------------------------------------------------------------------ update
-
     def update(
         self,
         run_id: str,
@@ -129,16 +105,11 @@ class EvalsBackend:
         config: Optional[Dict[str, Any]] = None,
         summary: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """``config`` must be the whole config: the service writes metadata with
-        a document-level ``$set``."""
         payload: Dict[str, Any] = {}
         _set_if(payload, "metadata", config or None)
         _set_if(payload, "metrics", summary or None)
-        if not payload:
-            return
-        self._client.put(f"/evaluations/{run_id}", json_body=payload)
-
-    # ---------------------------------------------------------------- finalize
+        if payload:
+            self._client.put(f"/evaluations/{run_id}", json_body=payload)
 
     def finalize(
         self,
@@ -152,20 +123,12 @@ class EvalsBackend:
         if status is RunStatus.COMPLETED:
             body: Dict[str, Any] = {}
             _set_if(body, "metrics", summary or None)
-            # Finalization enqueues the platform's statistics task; replaying an
-            # ambiguous failure could enqueue it twice, so this stays non-idempotent.
-            self._client.post(
-                f"/evaluations/{run_id}/finalize",
-                json_body=body or {"metrics": {}},
-            )
+            # Not replayable: finalization enqueues the platform's statistics task.
+            self._client.post(f"/evaluations/{run_id}/finalize", json_body=body or {"metrics": {}})
             return
 
-        # No status endpoint exists yet. Record the terminal state in metadata,
-        # merged into the full config because this PUT replaces the document.
-        terminal = {
-            "status": status.value,
-            "finished_at": datetime.now(timezone.utc).isoformat(),
-        }
+        # Merged into the whole config: the PUT replaces the metadata document.
+        terminal = {"status": status.value, "finished_at": datetime.now(timezone.utc).isoformat()}
         if error:
             terminal["error"] = error
         self.update(run_id, config={**(config or {}), "prime_runs": terminal}, summary=summary)
@@ -179,13 +142,10 @@ class EvalsBackend:
     def close(self) -> None:
         self._client.close()
 
-    # ----------------------------------------------------------- environments
-
     def _resolve_environments(self, refs: List[EnvironmentRef]) -> List[Dict[str, Any]]:
-        """Hub references as the API's ``EnvironmentReference`` objects, carrying
-        a pinned ``version_id`` through. A reference that cannot be resolved
-        raises rather than being skipped: a run silently attached to the wrong
-        environments looks like a successful upload."""
+        """Hub references as the API's ``EnvironmentReference`` objects. One that
+        cannot be resolved raises rather than being skipped: a run silently
+        attached to the wrong environments looks like a successful upload."""
         resolved: List[Dict[str, Any]] = []
         for ref in refs:
             entry: Dict[str, Any] = {"id": ref.id or self._lookup_environment(ref)}
@@ -202,8 +162,7 @@ class EvalsBackend:
                 raise EnvironmentResolutionError(
                     f"Could not resolve environment {ref.slug!r}: {exc}"
                 ) from exc
-            details = response.get("data") or response
-            environment_id = details.get("id")
+            environment_id = (response.get("data") or response).get("id")
             if not environment_id:
                 raise EnvironmentResolutionError(f"Hub returned no id for environment {ref.slug!r}")
             return str(environment_id)
@@ -240,22 +199,15 @@ def _first_environment_name(spec: RunSpec) -> Optional[str]:
 
 
 def _default_name(spec: RunSpec) -> str:
-    """The API requires a name; lead with the environment so runs sort together."""
     stem = _first_environment_name(spec) or spec.framework or "eval"
     return f"{stem}-{uuid.uuid4().hex[:8]}"
 
 
-# ---------------------------------------------------------------- disabled
-
-
 def disabled_run_id() -> str:
-    """A locally issued ID, visibly distinct from a platform one."""
     return f"disabled-{uuid.uuid4().hex[:16]}"
 
 
 class DisabledBackend:
-    """No-op lifecycle, so ``mode="disabled"`` needs no branching upstream."""
-
     def create(self, spec: RunSpec) -> RunHandle:
         return RunHandle(id=disabled_run_id())
 
@@ -269,10 +221,8 @@ class DisabledBackend:
         return None
 
 
-# ------------------------------------------------------------------- rft
-
-#: The RFT API's status vocabulary is ``completed | failed``; the SDK's finer
-#: distinctions travel in ``error_message``.
+#: The RFT API's vocabulary is ``completed | failed``; the finer distinctions
+#: travel in ``error_message``.
 RFT_TERMINAL_STATUS = {
     RunStatus.COMPLETED: "completed",
     RunStatus.FAILED: "failed",
@@ -282,20 +232,10 @@ RFT_TERMINAL_STATUS = {
 
 
 class RftBackend:
-    """Lifecycle for external training runs over ``/api/v1/rft/*``.
-
-    What prime-rl's ``TrainRun`` did, in the SDK: register a run (or attach to
-    one a managed launch created), close it out. External runs are created
-    *for a team* and the platform enables them per team, so ``team_id`` is
-    required and a team outside the allowlist gets a 403 from :meth:`create`;
-    the producer decides whether that means "run locally" (the way verifiers
-    treats a missing key) or "stop".
-
-    The API has no config/summary update — ``run_config`` travels with
-    :meth:`create` and :meth:`update` is a no-op — and its status vocabulary
-    is ``completed | failed``: ``cancelled`` and ``crashed`` are reported as
-    ``failed`` with the reason in ``error_message``.
-    """
+    """External training runs are created for a team, and the platform enables
+    them per team: ``team_id`` is required and a team outside the allowlist gets
+    a 403 from :meth:`create`. The API takes the config at creation and has no
+    summary document, so :meth:`update` is a no-op."""
 
     def __init__(
         self,
@@ -307,8 +247,6 @@ class RftBackend:
         self._client = client
         self._frontend_url = frontend_url.rstrip("/")
         self._team_id = team_id
-
-    # ------------------------------------------------------------------ create
 
     def create(self, spec: RunSpec) -> RunHandle:
         if not spec.model:
@@ -324,8 +262,7 @@ class RftBackend:
         payload: Dict[str, Any] = {
             "base_model": spec.model,
             "max_steps": int(training.max_steps),
-            # Environment ids are passed through: training environments are
-            # named by hub id, and the RFT API does its own resolution.
+            # Passed through: the RFT API resolves hub ids itself.
             "environments": [_training_environment(ref) for ref in spec.environments],
             "team_id": team_id,
         }
@@ -338,8 +275,7 @@ class RftBackend:
         _set_if(payload, "wandb_entity", training.wandb_entity)
         _set_if(payload, "wandb_run_name", training.wandb_run_name)
 
-        # Not replayable: a retry after a lost response would register a
-        # second run and only the second would be tracked.
+        # Not replayable: a retry after a lost response would register a second run.
         response = self._client.post("/rft/external-runs", json_body=payload)
         run = response.get("run") or {}
         run_id = run.get("id")
@@ -352,16 +288,13 @@ class RftBackend:
         )
 
     def attach(self, run_id: str) -> RunHandle:
-        """A handle for a run the platform already created — a launcher that
-        injected its id. No request: the first write proves access, and it
-        must be an *external* run (``POST /rft/external-runs``): the v1
-        monitoring endpoints answer 400 for a hosted run's id."""
+        """A handle for a run a launcher already created. No request: the first
+        write proves access. The run must be an external one; the monitoring
+        endpoints answer 400 for a hosted run's id."""
         return RunHandle(id=run_id, url=self.url_for(run_id))
 
     def url_for(self, run_id: str) -> str:
         return f"{self._frontend_url}/dashboard/training/{run_id}"
-
-    # ------------------------------------------------------------------ update
 
     def update(
         self,
@@ -370,12 +303,8 @@ class RftBackend:
         config: Optional[Dict[str, Any]] = None,
         summary: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """No-op: an RFT run takes its config at creation and has no summary
-        document. Run-level outputs go through ``log_metrics``."""
         if config or summary:
             logger.debug("Run %s: the RFT API has no config/summary update; nothing sent", run_id)
-
-    # ---------------------------------------------------------------- finalize
 
     def finalize(
         self,
@@ -387,17 +316,13 @@ class RftBackend:
         config: Optional[Dict[str, Any]] = None,
     ) -> None:
         if status is RunStatus.COMPLETED:
-            # Compare-and-set on the server, and "already finalized" is a
-            # success, so a lost response is safe to replay.
+            # Compare-and-set server-side, and "already finalized" is a success.
             try:
                 self._client.post(
-                    "/rft/finalize",
-                    json_body={"run_id": run_id, "exit_code": 0},
-                    idempotent=True,
+                    "/rft/finalize", json_body={"run_id": run_id, "exit_code": 0}, idempotent=True
                 )
             except APIError as exc:
-                # Preserve TrainRun's fallback: finalization may be unavailable
-                # even though the status endpoint can still close the run out.
+                # The status endpoint may still close the run out.
                 logger.warning(
                     "Run %s could not be finalized (%s); falling back to a status update",
                     run_id,
@@ -412,23 +337,14 @@ class RftBackend:
         self._set_terminal_status(run_id, status=status, error_message=message)
 
     def _set_terminal_status(
-        self,
-        run_id: str,
-        *,
-        status: RunStatus,
-        error_message: Optional[str] = None,
+        self, run_id: str, *, status: RunStatus, error_message: Optional[str] = None
     ) -> None:
         payload: Dict[str, Any] = {"status": RFT_TERMINAL_STATUS[status]}
         _set_if(payload, "error_message", error_message)
         try:
-            self._client.put(
-                f"/rft/external-runs/{run_id}/status",
-                json_body=payload,
-            )
+            self._client.put(f"/rft/external-runs/{run_id}/status", json_body=payload)
         except APIError as exc:
-            if exc.status_code == 409:
-                # Already closed out (a managed launcher, or an earlier attempt
-                # whose response was lost). The outcome is recorded either way.
+            if exc.status_code == 409:  # already closed: the outcome is recorded either way
                 logger.info(
                     "Run %s is already closed on the platform; not marking it %s",
                     run_id,
@@ -436,11 +352,6 @@ class RftBackend:
                 )
                 return
             raise
-
-    def log_metrics(self, run_id: str, metrics: Dict[str, Any]) -> None:
-        """One step's metrics, synchronously. The run handle batches these
-        through its uploader; this is the direct call."""
-        self._client.post("/rft/metrics", json_body={"run_id": run_id, "metrics": metrics})
 
     def close(self) -> None:
         self._client.close()

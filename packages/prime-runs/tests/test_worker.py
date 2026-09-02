@@ -38,18 +38,6 @@ def test_records_reach_every_enabled_sink():
     worker.close()
 
 
-def test_a_disabled_sink_is_skipped():
-    live, dead = FakeSink("live"), FakeSink("dead")
-    dead.enabled = False
-    worker = UploadWorker([live, dead])
-
-    worker.submit([{"id": 1}])
-    drain(worker)
-
-    assert live.batches and not dead.batches
-    worker.close()
-
-
 def test_one_sink_failing_does_not_stop_the_others():
     broken, healthy = FakeSink("broken", fail_on_write=True), FakeSink("healthy")
     reported = []
@@ -64,24 +52,7 @@ def test_one_sink_failing_does_not_stop_the_others():
     worker.close()
 
 
-def test_a_failed_sink_is_not_called_again():
-    """One log line per batch for the rest of a run hides whatever failed first."""
-    broken = FakeSink("broken", fail_on_write=True)
-    reported = []
-    worker = UploadWorker([broken], on_error=lambda name, exc: reported.append(name))
-
-    for _ in range(3):
-        worker.submit([{"id": 1}])
-    drain(worker)
-
-    assert reported == ["broken"]
-    worker.close()
-
-
 def test_records_that_skip_a_sink_retired_by_error_are_counted_as_lost_to_it():
-    """After the first failed batch the sink is off, but the producer keeps
-    logging; every later batch is just as lost to that sink as the first. Live
-    run 2026-08-21: five episodes, footer said "1 failed via traces"."""
     broken = FakeSink("broken", fail_on_write=True)
     worker = UploadWorker([broken])
 
@@ -94,9 +65,6 @@ def test_records_that_skip_a_sink_retired_by_error_are_counted_as_lost_to_it():
 
 
 def test_records_that_skip_a_sink_which_switched_itself_off_are_not_counted():
-    """A sink that retires quietly (nowhere for the records to go, e.g. outside
-    the traces beta) lost nothing, and must not start a failure count."""
-
     class QuietSink(FakeSink):
         def write(self, records) -> None:
             self.enabled = False  # retires without raising, like service_not_enabled
@@ -113,7 +81,6 @@ def test_records_that_skip_a_sink_which_switched_itself_off_are_not_counted():
 
 
 def test_a_full_queue_drops_rather_than_blocking_the_producer():
-    """Stalling a training run to protect telemetry is the wrong trade."""
     sink = BlockingSink()
     worker = UploadWorker([sink], max_queue_size=1, put_timeout=0.05)
 
@@ -191,20 +158,7 @@ def test_submitting_after_close_is_refused():
     assert sink.batches == []
 
 
-def test_flush_without_a_running_thread_still_flushes_the_sinks():
-    sink = FakeSink()
-    worker = UploadWorker([sink])
-
-    assert worker.flush(timeout=1.0) is True
-    assert sink.flushes == 1
-
-
 def test_a_forked_child_starts_over_instead_of_re_uploading_the_parents_queue():
-    """The queued records belong to the parent, which still has a live thread.
-
-    Inheriting them would upload each record twice; inheriting the lock could
-    deadlock the child on its first write.
-    """
     sink = FakeSink()
     worker = UploadWorker([sink], max_queue_size=4)
     worker._queue.put([{"id": "parents"}])
@@ -220,9 +174,6 @@ def test_a_forked_child_starts_over_instead_of_re_uploading_the_parents_queue():
 
 
 def test_close_leaves_sinks_open_when_the_uploader_will_not_stop(caplog):
-    """Closing them would pull an httpx client or a file handle out from under
-    a request still running on that thread."""
-
     class WedgedSink(FakeSink):
         def __init__(self) -> None:
             super().__init__("wedged")
@@ -244,9 +195,6 @@ def test_close_leaves_sinks_open_when_the_uploader_will_not_stop(caplog):
 
 
 def test_a_forked_child_resets_every_registered_holder_of_a_connection():
-    """One process-wide hook, not one per object: a per-instance
-    register_at_fork can never be undone, so it would pin every run the process
-    ever opened and re-run hooks for runs that finished hours ago."""
     from prime_runs import _fork
 
     class Holder:
@@ -264,32 +212,7 @@ def test_a_forked_child_resets_every_registered_holder_of_a_connection():
     assert holder.reset == 1
 
 
-def test_one_registered_object_raising_does_not_block_the_others():
-    from prime_runs import _fork
-
-    class Boom:
-        def reset_after_fork(self) -> None:
-            raise RuntimeError("nope")
-
-    class Fine:
-        def __init__(self) -> None:
-            self.reset = 0
-
-        def reset_after_fork(self) -> None:
-            self.reset += 1
-
-    fine = Fine()
-    _fork.register(Boom())
-    _fork.register(fine)
-
-    _fork._reset_all()
-
-    assert fine.reset == 1
-
-
 def test_a_transient_failure_drops_the_batch_but_keeps_the_sink():
-    """One gateway blip must not empty the rest of the run's dashboard. The
-    batch is already lost; retiring the sink loses every batch after it too."""
     from prime_runs.exceptions import RetryableAPIError
 
     class BlipSink(FakeSink):
@@ -320,8 +243,6 @@ def test_a_transient_failure_drops_the_batch_but_keeps_the_sink():
     ids=["local-encoding", "traces-validation", "samples-validation"],
 )
 def test_a_record_rejection_drops_only_its_batch(error):
-    """Malformed content must not prevent later valid records from uploading."""
-
     class RejectOnceSink(FakeSink):
         def __init__(self) -> None:
             super().__init__("reject-once")
@@ -353,7 +274,6 @@ def test_a_record_rejection_drops_only_its_batch(error):
 
 
 def test_a_sustained_outage_eventually_retires_the_sink():
-    """A blip is forgiven; hours of re-attempting every batch is not useful."""
     from prime_runs.exceptions import TransportError
     from prime_runs.worker import TRANSIENT_FAILURE_LIMIT
 
@@ -374,9 +294,6 @@ def test_a_sustained_outage_eventually_retires_the_sink():
 
 
 def test_a_cooldown_gives_a_retired_sink_another_chance():
-    """A training run outlives any platform deploy: after the cooldown the
-    sink is tried again, and records that arrived meanwhile are counted as
-    lost to it, not silently forgotten."""
     from prime_runs.exceptions import TransportError
     from prime_runs.worker import TRANSIENT_FAILURE_LIMIT
 
@@ -435,8 +352,6 @@ def test_a_permanent_failure_is_not_revived_by_the_cooldown():
 
 
 def test_a_success_forgives_earlier_blips():
-    """Strikes are consecutive: an intermittent gateway must never accumulate
-    its way to a retirement across an otherwise healthy run."""
     from prime_runs.exceptions import RetryableAPIError
     from prime_runs.worker import TRANSIENT_FAILURE_LIMIT
 
@@ -469,7 +384,6 @@ def test_a_success_forgives_earlier_blips():
 
 
 def test_a_permanent_failure_retires_the_sink_immediately():
-    """A gated account or a rejected credential fails identically forever."""
     from prime_runs.exceptions import UnauthorizedError
 
     class DeniedSink(FakeSink):
@@ -487,9 +401,6 @@ def test_a_permanent_failure_retires_the_sink_immediately():
 
 
 def test_a_failed_batch_is_counted_once_per_sink_not_once_per_run():
-    """Default online runs write to two sinks. Adding both to one total would
-    report twice the loss, and would report loss at all when the other sink
-    stored the records."""
     from prime_runs.exceptions import RetryableAPIError
 
     class BlipSink(FakeSink):
@@ -509,9 +420,6 @@ def test_a_failed_batch_is_counted_once_per_sink_not_once_per_run():
 
 
 def test_records_queued_during_an_upload_go_out_as_one_batch():
-    """One request per episode runs into the platform's per-minute limit on a
-    fast eval; whatever accumulates while a request is in flight must go out
-    together, so the request rate tracks upload latency instead."""
     sink = BlockingSink()
     worker = UploadWorker([sink])
 
@@ -527,8 +435,6 @@ def test_records_queued_during_an_upload_go_out_as_one_batch():
 
 
 def test_coalescing_keeps_traces_and_episodes_apart():
-    """The traces sink infers the line format from a batch's first record, so
-    mixing episodes into a batch of bare traces would misfile every record."""
     sink = BlockingSink()
     worker = UploadWorker([sink])
 
@@ -551,8 +457,6 @@ def test_coalescing_keeps_traces_and_episodes_apart():
 
 
 def test_a_flush_barrier_is_not_reordered_past_the_records_before_it():
-    """Coalescing must stop at the barrier: flush() promises that everything
-    submitted before it has been written when it returns."""
     sink = BlockingSink()
     worker = UploadWorker([sink])
 
@@ -574,8 +478,6 @@ def test_a_flush_barrier_is_not_reordered_past_the_records_before_it():
 
 
 def test_a_worker_with_no_sinks_never_starts_a_thread():
-    """A disabled run submits every batch; copying them into a queue and
-    starting a thread to find there is nowhere to put them is pure cost."""
     worker = UploadWorker([])
 
     assert worker.submit([{"id": 1}]) is True

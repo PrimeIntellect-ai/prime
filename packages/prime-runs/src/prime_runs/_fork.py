@@ -1,16 +1,8 @@
-"""One process-wide ``os.register_at_fork`` hook, shared by everything stateful.
-
-A forked child inherits copies of every open socket and buffered file handle.
-Anything holding a connection or a file registers here and gets told to start
-over in the child. Two rules for ``reset_after_fork``:
-
-- **Drop, do not close.** Closing an inherited transport can send bytes down a
-  socket the parent is still using.
-- **Do not flush.** An inherited buffer holds records the parent will write.
-
-Registration is weak and the hook is installed once: ``register_at_fork``
-cannot be undone, so per-instance registration would pin every run forever.
-"""
+"""One process-wide ``os.register_at_fork`` hook for everything holding a
+connection. A child must *drop* inherited transports (closing one can write to
+the parent's socket) and never flush inherited buffers (those records are the
+parent's). Registration is weak and the hook is installed once, since
+``register_at_fork`` cannot be undone."""
 
 import logging
 import os
@@ -37,11 +29,8 @@ def register(obj: Any) -> None:
 
 
 def _reset_all() -> None:
-    # A fresh lock: the child inherits the parent's, which may have been held by
-    # a thread that does not exist here. Nothing else runs at this point, so the
-    # swap is safe.
     global _lock
-    _lock = threading.Lock()
+    _lock = threading.Lock()  # the inherited one may be held by a thread that is not here
     for obj in list(_registry):
         try:
             obj.reset_after_fork()

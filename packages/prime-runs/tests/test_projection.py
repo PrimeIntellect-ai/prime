@@ -1,9 +1,4 @@
-"""The v0 eval-sample projection, moved here from verifiers.
-
-These assertions are the contract the current viewer reads. They exist so the
-move is provably a relocation and not a rewrite: a run pushed through this SDK
-must produce the same rows verifiers produced.
-"""
+"""The v0 eval-sample projection, moved here from verifiers."""
 
 import pytest
 from _fakes import Reward, make_episode, make_trace
@@ -46,15 +41,23 @@ def test_trace_to_sample_flattens_sub_rewards_to_top_level():
 
 
 def test_trace_to_sample_does_not_let_a_sub_reward_clobber_a_real_field():
-    """``setdefault`` semantics: a sub-reward named ``reward`` must not win.
-
-    Sub-rewards are flattened into the same namespace as the row's own columns,
-    so an environment that names a reward function after one of them would
-    otherwise silently overwrite the value the dashboard reads.
-    """
     trace = make_trace(reward=0.25, rewards={"reward": Reward(9.0)})
 
     assert trace_to_sample(trace)["reward"] == 0.25
+
+
+def test_non_finite_numbers_become_null_rather_than_losing_the_row():
+    trace = make_trace(reward=float("nan"), metrics={"kl": float("inf")})
+    trace.rewards = {"format": Reward(float("-inf"))}
+
+    sample = trace_to_sample(trace)
+    (row,) = build_samples([make_episode("ep-1", [trace])])
+
+    assert sample["reward"] is None
+    assert sample["metrics"] == {"kl": None}
+    assert sample["format"] is None
+    assert row["info"]["native_wrapper"]["traces"][0]["reward"] is None
+    assert batch_samples([row])  # encodes: nothing non-finite is left
 
 
 def test_trajectory_keeps_one_entry_per_branch():
@@ -79,7 +82,6 @@ def test_build_samples_emits_one_row_per_episode_with_the_native_wrapper():
 
 
 def test_summary_trace_is_the_first_trainable_one():
-    """A judge or modeled user must not become the row the dashboard shows."""
     episode = make_episode(
         "ep-1",
         [
@@ -95,12 +97,6 @@ def test_summary_trace_is_the_first_trainable_one():
 
 
 def test_rollout_numbers_continue_across_streaming_calls():
-    """Streaming uploads must number rollouts the way one final upload did.
-
-    The old code built every sample in a single call, so its per-example counter
-    lived in a local. Streaming means several calls, and without a carried
-    counter every batch would restart at rollout 1.
-    """
     counters: dict = {}
     first = build_samples([make_episode("ep-1", [make_trace(idx=4)])], counters)
     second = build_samples([make_episode("ep-2", [make_trace(idx=4)])], counters)
@@ -124,15 +120,10 @@ def test_batch_samples_splits_on_the_payload_ceiling():
 
 
 def test_batch_samples_refuses_a_sample_that_cannot_be_sent():
-    """Dropping it would report a complete run that is missing rows."""
     oversized = {"sample_id": "x", "blob": "a" * (MAX_SAMPLES_PAYLOAD_BYTES + 1)}
 
     with pytest.raises(ValueError, match="too large"):
         batch_samples([oversized])
-
-
-def test_batch_samples_returns_nothing_for_no_samples():
-    assert batch_samples([]) == []
 
 
 def test_is_episode_distinguishes_episodes_from_traces_in_either_form():

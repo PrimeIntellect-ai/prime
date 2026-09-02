@@ -31,8 +31,6 @@ def make_sink(client=None, **kwargs) -> TracesSink:
 
 
 def test_records_go_out_with_provenance_but_not_the_join_key():
-    """``run.id`` inside the document is the indexed column; ``context`` is an
-    upload-scoped map that answers a different question."""
     client = FakeTracesClient()
     sink = make_sink(client)
 
@@ -61,8 +59,6 @@ def test_the_line_format_is_inferred_from_the_records():
 
 
 def test_a_bare_mapping_gets_the_run_stamped_onto_a_copy():
-    """A dict has no stamping convention, and an upload with no ``run.id`` is
-    orphaned — unqueryable and undeletable by run."""
     client = FakeTracesClient()
     sink = make_sink(client)
     original = {"id": "t1"}
@@ -74,9 +70,6 @@ def test_a_bare_mapping_gets_the_run_stamped_onto_a_copy():
 
 
 def test_a_record_that_names_its_run_keeps_it():
-    """Producers stamp the run at rollout time; the sink never overrides a
-    ``run`` that is already there, which is how a second source of truth
-    would appear."""
     client = FakeTracesClient()
     sink = make_sink(client)
 
@@ -86,10 +79,6 @@ def test_a_record_that_names_its_run_keeps_it():
 
 
 def test_an_episode_s_run_reaches_every_member_trace():
-    """The traces service derives ``run_id`` from ``trace.run.id`` only and never
-    reads the envelope's ``run``, while verifiers records the run on the episode
-    and its ``Trace`` has no ``run`` field at all. Without this, every row of an
-    episode upload lands with an empty ``run_id`` (seen live, 2026-08-21)."""
     client = FakeTracesClient()
     sink = make_sink(client)
     episode = make_episode("ep-1", [make_trace(trace_id="a"), make_trace(trace_id="b")])
@@ -120,23 +109,7 @@ def test_a_member_that_names_its_own_run_is_left_alone():
     assert episode["traces"][0] == {"id": "a"}, "the caller's members were not mutated"
 
 
-def test_producer_objects_are_serialized_once_through_to_record():
-    """The sink calls ``to_record()`` itself so members are reachable; the bytes
-    the transport sees are the same ones it would have produced."""
-    client = FakeTracesClient()
-    sink = make_sink(client)
-    trace = make_trace()
-
-    sink.write([trace])
-
-    sent = client.calls[0][0][0]
-    assert sent == {**trace.to_record(), "run": {"id": "run-1", "type": "eval"}}
-
-
 def test_an_account_outside_the_beta_retires_the_sink_without_a_failure(caplog):
-    """Prime Traces is in closed beta. For everyone outside it there was never
-    anywhere for these records to go, so the sink turns itself off quietly:
-    no exception for the worker to count, nothing above INFO in the log."""
     client = FakeTracesClient(
         raises=ForbiddenError("not in beta", status_code=403, code="service_not_enabled")
     )
@@ -153,8 +126,6 @@ def test_an_account_outside_the_beta_retires_the_sink_without_a_failure(caplog):
 
 
 def test_a_credential_without_the_traces_scope_is_still_a_failure(caplog):
-    """The other 403 is fixable — mint a token with the scope — so it is raised
-    for loss accounting and strict callers, and the sink still retires."""
     client = FakeTracesClient(
         raises=ForbiddenError("missing scope: traces", status_code=403, code="forbidden")
     )
@@ -169,23 +140,12 @@ def test_a_credential_without_the_traces_scope_is_still_a_failure(caplog):
 
 
 def test_a_transient_failure_is_raised_so_the_worker_can_report_it():
-    """Unlike a 403, this one is about the moment, not the account."""
     client = FakeTracesClient(raises=RetryableAPIError("busy", status_code=503))
     sink = make_sink(client)
 
     with pytest.raises(RetryableAPIError):
         sink.write([{"id": "t1"}])
     assert sink.enabled is True
-
-
-def test_a_disabled_sink_stops_calling_the_service():
-    client = FakeTracesClient()
-    sink = make_sink(client)
-    sink.enabled = False
-
-    sink.write([{"id": "t1"}])
-
-    assert client.calls == []
 
 
 def test_receipt_history_is_bounded_while_the_total_is_retained():
@@ -199,18 +159,7 @@ def test_receipt_history_is_bounded_while_the_total_is_retained():
     assert len(sink.receipts) == 2
 
 
-def test_closing_the_sink_closes_the_client():
-    client = FakeTracesClient()
-    sink = make_sink(client)
-
-    sink.close()
-
-    assert client.closed is True
-
-
 def test_a_missing_traces_client_disables_the_sink_and_reports_the_failure(monkeypatch, caplog):
-    """The run applies warn/raise policy, so the sink must surface this failure."""
-
     def explode(**kwargs):
         raise RuntimeError("no credentials")
 

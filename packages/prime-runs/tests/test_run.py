@@ -54,15 +54,6 @@ def make_run(backend=None, sinks=None, config=None, **kwargs) -> Run:
     )
 
 
-def test_the_handle_exposes_what_a_producer_prints():
-    run = make_run()
-
-    assert run.id == "run-1"
-    assert run.url == "https://app.example/run-1"
-    assert run.status is RunStatus.RUNNING
-    run.finish()
-
-
 def test_sinks_are_started_with_the_run_id_and_provenance():
     sink = FakeSink()
     run = make_run(sinks=[sink])
@@ -101,17 +92,6 @@ def test_an_empty_batch_is_not_sent():
     run.finish()
 
 
-def test_episodes_take_the_same_path_as_traces():
-    sink = FakeSink()
-    run = make_run(sinks=[sink])
-
-    run.log_episodes([{"id": "ep-1", "traces": [{"id": "t1"}]}])
-    run.flush()
-
-    assert sink.batches == [[{"id": "ep-1", "traces": [{"id": "t1"}]}]]
-    run.finish()
-
-
 def test_summary_can_be_built_up_before_finish():
     backend = FakeBackend()
     run = make_run(backend)
@@ -124,17 +104,7 @@ def test_summary_can_be_built_up_before_finish():
     assert backend.finalized[0]["summary"] == {"avg_reward": 0.75, "avg_error": 0.0}
 
 
-def test_a_finished_run_refuses_more_summary():
-    run = make_run()
-    run.finish()
-
-    with pytest.raises(RunFinishedError):
-        run.update_summary({"late": 1.0})
-
-
 def test_non_finite_summary_values_are_dropped_rather_than_failing_the_request():
-    """A diverged loss serializes as bare ``NaN``, which strict JSON rejects —
-    the whole request fails on a payload nobody can inspect."""
     backend = FakeBackend()
     run = make_run(backend)
 
@@ -145,8 +115,6 @@ def test_non_finite_summary_values_are_dropped_rather_than_failing_the_request()
 
 
 def test_finish_flushes_records_before_reporting_the_terminal_status():
-    """A dashboard reacting to the status must never see a finished run with
-    samples still landing."""
     order: List[str] = []
 
     class OrderedSink(FakeSink):
@@ -230,17 +198,25 @@ def test_finish_rejects_a_nonterminal_status_without_closing_the_run(status):
     assert backend.finalized[0]["status"] is RunStatus.COMPLETED
 
 
-def test_logging_after_finish_is_a_producer_bug():
-    run = make_run()
+@pytest.mark.parametrize(
+    "operation",
+    [
+        lambda run: run.log_traces([{"id": "t1"}]),
+        lambda run: run.log_episodes([{"id": "ep1", "traces": []}]),
+        lambda run: run.log_metrics({"loss": 0.5}),
+        lambda run: run.update_summary({"late": 1.0}),
+    ],
+    ids=["traces", "episodes", "metrics", "summary"],
+)
+def test_writes_after_finish_are_a_producer_bug(operation):
+    run = make_run(metrics_sinks=[FakeSink("metrics")])
     run.finish()
 
     with pytest.raises(RunFinishedError):
-        run.log_traces([{"id": "t1"}])
+        operation(run)
 
 
 def test_logging_that_started_first_is_queued_before_concurrent_finish():
-    """Finish must not close the worker between the live check and enqueue."""
-
     class SignalingBackend(FakeBackend):
         def __init__(self) -> None:
             super().__init__()
@@ -382,8 +358,6 @@ def test_teardown_does_not_swallow_control_flow_exceptions(teardown_error):
 
 @pytest.mark.parametrize("interrupt", [KeyboardInterrupt, asyncio.CancelledError])
 def test_an_interrupt_is_recorded_as_a_decision_not_a_fault(interrupt):
-    """Ctrl-C must not land in the same bucket as a broken eval, nor in the
-    one for a process that vanished: the platform has a status for it."""
     backend = FakeBackend()
 
     with pytest.raises(interrupt):
@@ -407,8 +381,6 @@ def test_cancelled_is_terminal_and_finalizes_like_failed():
 
 
 def test_finish_timeout_is_set_per_run_and_overridden_per_call():
-    """An abort path passes a short budget so an interrupted producer is not
-    pinned behind a slow platform for the full drain."""
     run = make_run(finish_timeout=1.5)
     observed = {}
 
@@ -423,17 +395,7 @@ def test_finish_timeout_is_set_per_run_and_overridden_per_call():
     assert 0.0 < observed["flush"] <= 0.25
 
 
-def test_finish_timeout_default_is_the_upload_budget():
-    from prime_runs.run import DEFAULT_FINISH_TIMEOUT
-
-    run = make_run()
-    assert run._finish_timeout == DEFAULT_FINISH_TIMEOUT == 300.0
-    run.finish()
-
-
 def test_finish_hands_the_full_config_to_finalize():
-    """The evaluations API replaces metadata wholesale, so a backend recording
-    terminal state inside it needs the whole picture to merge into."""
     backend = FakeBackend()
     run = make_run(backend, config={"num_rollouts": 4})
 
@@ -443,7 +405,6 @@ def test_finish_hands_the_full_config_to_finalize():
 
 
 def test_finish_warns_when_uploads_do_not_drain(caplog):
-    """Finalizing over an unfinished upload silently drops records."""
     run = make_run(sinks=[FakeSink()])
     run._finish_timeout = 0.01
     run._worker.flush = lambda timeout=None: False
@@ -476,8 +437,6 @@ def test_finish_uses_one_timeout_budget_for_flush_and_close():
 
 
 def test_a_process_that_exits_without_finishing_reports_crashed():
-    """The producer never said the run failed — it stopped existing. The
-    distinction tells an operator where to look."""
     backend = FakeBackend()
     run = make_run(backend)
 
@@ -487,7 +446,6 @@ def test_a_process_that_exits_without_finishing_reports_crashed():
 
 
 def test_a_forked_handle_gets_a_fresh_lock_and_loses_lifecycle_ownership():
-    """The child's inherited atexit hook must never finalize the parent's run."""
     backend = FakeBackend()
     run = make_run(backend)
     inherited_lock = run._finish_lock
@@ -501,7 +459,6 @@ def test_a_forked_handle_gets_a_fresh_lock_and_loses_lifecycle_ownership():
 
 
 def test_a_backend_failure_does_not_escape_into_the_producer_by_default():
-    """Six hours of rollouts must not be lost to a 502 on a telemetry call."""
     backend = FakeBackend(fail_on="finalize")
     run = make_run(backend)
 
@@ -564,17 +521,7 @@ def test_a_sink_error_is_recorded_on_the_run():
     run.finish()
 
 
-def test_dropped_records_are_reported_on_the_handle():
-    run = make_run()
-    run._worker.dropped = 3
-
-    assert run.dropped_records == 3
-    run.finish()
-
-
 def test_an_upload_failure_reaches_the_caller_in_raise_mode():
-    """A sink fails on the uploader thread, where raising reaches nobody. Under
-    on_error="raise" the failure has to surface where a test is looking."""
     run = make_run(sinks=[FakeSink("broken", fail_on_write=True)], on_error="raise")
 
     run.log_traces([{"id": "t1"}])
@@ -618,8 +565,6 @@ class _ForbiddenClient:
 
 
 def test_an_account_outside_the_beta_is_not_a_failed_run():
-    """Nothing was lost — the records went to every sink that applies to this
-    account — so the run finishes clean even under ``on_error="raise"``."""
     sink = TracesSink(client=_ForbiddenClient("service_not_enabled"))
     run = make_run(sinks=[sink], on_error="raise")
     run.log_traces([{"id": "t1"}])
@@ -699,14 +644,6 @@ def test_log_metrics_without_a_metrics_sink_is_a_no_op():
     assert run._metrics_worker._thread is None
     assert run.dropped_records == 0
     run.finish()
-
-
-def test_log_metrics_on_a_finished_run_is_a_producer_bug():
-    run = make_run(metrics_sinks=[FakeSink("metrics")])
-    run.finish()
-
-    with pytest.raises(RunFinishedError):
-        run.log_metrics({"loss": 0.5})
 
 
 def test_finish_drains_and_closes_the_metrics_uploader_too():

@@ -1,12 +1,10 @@
-"""HTTP client for the platform run APIs.
+"""Authenticated client for ``{base_url}/api/v1`` with a per-call retry policy.
 
-Error mapping, backoff and the transport-failure classification come from
-``prime_traces.core.client``; what is local is the retry *policy*, because it
-is decided per call. A failure is *ambiguous* when the request may already have
-been processed (a 502/504, a read timeout). Replaying one is fine for a GET or
-PUT and not for ``POST /evaluations/``, which would create a second run.
-Callers declare intent with ``idempotent=``; unambiguous failures (connect
-errors, 429) are replayed for every method.
+A failure is *ambiguous* when the server may already have processed the request
+(a 502/504, a read timeout). Replaying one is safe for a GET or PUT and not for
+``POST /evaluations/``, which would create a second run; callers declare intent
+with ``idempotent=``. Connect errors and 429 are replayed for every method.
+Error mapping and backoff come from ``prime_traces.core.client``.
 """
 
 import json
@@ -15,20 +13,16 @@ import time
 from typing import Any, Dict, Mapping, Optional, Union
 
 import httpx
-from prime_traces.core.client import (
-    AMBIGUOUS_TRANSPORT_ERRORS,
-    raise_for_response,
-    retry_delay,
-)
+from prime_traces.core.client import AMBIGUOUS_TRANSPORT_ERRORS, raise_for_response, retry_delay
 
 from . import _fork
 from .exceptions import APIError, APITimeoutError, RetryableAPIError, TransportError
 
 DEFAULT_TIMEOUT = httpx.Timeout(60.0, connect=10.0)
-# Sample batches are megabytes; uploads get a longer budget.
+#: Sample batches are megabytes.
 UPLOAD_TIMEOUT = httpx.Timeout(300.0, connect=10.0)
-#: Refused before any work was done, so replaying cannot duplicate anything.
-#: 503 is excluded: it may come from an intermediary after forwarding.
+#: Refused before any work was done. 503 is excluded: it may come from an
+#: intermediary after forwarding.
 UNAMBIGUOUS_RETRY_STATUS = frozenset({429})
 DEFAULT_MAX_ATTEMPTS = 5
 
@@ -41,16 +35,13 @@ def _user_agent() -> str:
 
 
 def encode_json(value: Any) -> bytes:
-    """Compact UTF-8 JSON. ``allow_nan=False``: strict parsers server-side
-    reject bare ``NaN`` and the failure is an opaque 400."""
+    """Compact UTF-8 JSON; bare ``NaN`` is refused here rather than as a 400."""
     return json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode(
         "utf-8"
     )
 
 
 class PlatformClient:
-    """Minimal authenticated client for ``{base_url}/api/v1``."""
-
     def __init__(
         self,
         *,
@@ -60,32 +51,23 @@ class PlatformClient:
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
         client: Optional[httpx.Client] = None,
     ) -> None:
-        # Strip a trailing /api/v1 — the same normalization prime_traces applies —
-        # so an explicit base_url written with the suffix does not double it.
         self.base_url = base_url.rstrip("/").removesuffix("/api/v1")
         self.api_prefix = f"{self.base_url}/api/v1"
         self.max_attempts = max(1, max_attempts)
         self._owns_client = client is None
-        self._headers = {
-            "Authorization": f"Bearer {api_key}",
-            "User-Agent": _user_agent(),
-        }
+        self._headers = {"Authorization": f"Bearer {api_key}", "User-Agent": _user_agent()}
         self._timeout = timeout
         self._client = client or self._new_client()
-        if self._owns_client:
-            # Only a pool we opened ourselves is ours to rebuild after a fork.
+        if self._owns_client:  # only a pool we opened is ours to rebuild after a fork
             _fork.register(self)
 
     def _new_client(self) -> httpx.Client:
         return httpx.Client(
-            headers=dict(self._headers),
-            follow_redirects=True,
-            timeout=self._timeout,
+            headers=dict(self._headers), follow_redirects=True, timeout=self._timeout
         )
 
     def reset_after_fork(self) -> None:
-        """Rebuild the pool in a forked child. The old one is dropped, not
-        closed: closing could send ``close_notify`` on the parent's socket."""
+        """Rebuild the pool; the old one is dropped, not closed."""
         self._client = self._new_client()
 
     def request(
@@ -100,11 +82,8 @@ class PlatformClient:
         max_attempts: Optional[int] = None,
         idempotent: Optional[bool] = None,
     ) -> Dict[str, Any]:
-        """Send one request, retrying transient failures. Returns the JSON body.
-
-        ``idempotent`` defaults to ``method != "POST"``; a POST that is safe to
-        replay (get-or-create) passes ``idempotent=True`` explicitly.
-        """
+        """Send one request, retrying transient failures; returns the JSON body.
+        ``idempotent`` defaults to ``method != "POST"``."""
         url = f"{self.api_prefix}{path}"
         body = content if content is not None else (encode_json(json_body) if json_body else None)
         request_kwargs: Dict[str, Any] = {
@@ -112,8 +91,7 @@ class PlatformClient:
             "headers": {"Content-Type": "application/json"} if body is not None else None,
             "params": dict(params) if params else None,
         }
-        # ``None`` would disable httpx timeouts, not restore the default.
-        if timeout is not None:
+        if timeout is not None:  # None would disable httpx timeouts, not restore the default
             request_kwargs["timeout"] = timeout
         attempts = max_attempts or self.max_attempts
         replayable = idempotent if idempotent is not None else method.upper() != "POST"
@@ -137,9 +115,7 @@ class PlatformClient:
                 else:
                     return _decode(response)
 
-            last = attempt == attempts - 1
-            if last or (ambiguous and not replayable):
-                # Possibly processed already; a duplicate cannot be undone.
+            if attempt == attempts - 1 or (ambiguous and not replayable):
                 raise error
             time.sleep(retry_delay(error, attempt))
         raise AssertionError("unreachable")  # pragma: no cover
@@ -156,12 +132,6 @@ class PlatformClient:
     def close(self) -> None:
         if self._owns_client:
             self._client.close()
-
-    def __enter__(self) -> "PlatformClient":
-        return self
-
-    def __exit__(self, *exc_info: Any) -> None:
-        self.close()
 
 
 def _decode(response: httpx.Response) -> Dict[str, Any]:

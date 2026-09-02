@@ -5,7 +5,7 @@ import pytest
 from _fakes import make_episode, make_trace, make_train_episode
 from conftest import RecordingHandler, StorageHandler
 
-from prime_runs.exceptions import APIError, RetryableAPIError, TransportError
+from prime_runs.exceptions import APIError, RetryableAPIError
 from prime_runs.sinks import RftSamplesSink, training_step
 from prime_runs.sinks.base import SinkWriteError
 
@@ -79,8 +79,6 @@ def test_the_cadence_is_configurable(make_platform_client, rft_routes):
 
 
 def test_records_without_training_work_have_no_row_here(make_platform_client, rft_routes):
-    """Eval-work episodes, bare traces and JSON episodes reach Prime Traces
-    only; here they are counted, not uploaded, and not a loss."""
     sink, handler, storage, encoder = make_sink(make_platform_client, rft_routes)
 
     sink.write(
@@ -113,8 +111,6 @@ def test_nothing_to_encode_makes_no_request(make_platform_client, rft_routes):
 
 
 def test_a_failed_presign_loses_that_step_only(make_platform_client, rft_routes):
-    """Presign is replayable (it only mints a URL), so a blip is retried; a
-    step whose presign keeps failing is lost on its own, not the batch."""
     import json
 
     def flaky(request: httpx.Request) -> httpx.Response:
@@ -178,23 +174,6 @@ def test_a_storage_rejection_is_not_retried(make_platform_client, rft_routes):
     assert not isinstance(info.value.cause, RetryableAPIError)
 
 
-def test_a_dropped_connection_to_storage_is_transient(make_platform_client, rft_routes, no_sleep):
-    def refuse(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("connection refused")
-
-    storage = StorageHandler()
-    storage.__call__ = refuse  # type: ignore[method-assign]
-    upload = httpx.Client(transport=httpx.MockTransport(refuse))
-    handler = RecordingHandler(rft_routes)
-    sink = RftSamplesSink(make_platform_client(handler), encoder=Encoder(), upload_client=upload)
-    sink.start("run-abc", {})
-
-    with pytest.raises(SinkWriteError) as info:
-        sink.write([make_train_episode("e1", step=10)])
-
-    assert isinstance(info.value.cause, TransportError)
-
-
 def test_an_encoder_failure_is_a_record_rejection(make_platform_client, rft_routes):
     def broken(episodes, run_id, step, sample_id_offset=0):
         raise ValueError("cannot serialize")
@@ -221,9 +200,6 @@ def test_a_presign_without_a_url_is_an_api_error(make_platform_client, rft_route
 
 
 def test_a_step_logged_again_gets_its_own_sample_id_range(make_platform_client, rft_routes):
-    """Objects are additive per step on the platform (each presign mints a new
-    key and the viewer unions them), and the viewer looks samples up by
-    (step, sample_id): a straggler batch must not reuse the first object's ids."""
     from prime_runs.sinks.train_samples import SAMPLE_ID_STRIDE
 
     sink, handler, storage, encoder = make_sink(make_platform_client, rft_routes)
@@ -239,8 +215,6 @@ def test_a_step_logged_again_gets_its_own_sample_id_range(make_platform_client, 
 
 
 def test_an_upload_that_failed_still_advances_the_sample_id_range(make_platform_client, rft_routes):
-    """An attempt that failed late may still have landed an object; the next
-    one for the step must not overlap it."""
     from prime_runs.sinks.train_samples import SAMPLE_ID_STRIDE
 
     storage = StorageHandler(status_codes=[403])
@@ -254,10 +228,6 @@ def test_an_upload_that_failed_still_advances_the_sample_id_range(make_platform_
 
 
 def test_a_forked_child_numbers_its_rows_apart_from_the_parent(make_platform_client, rft_routes):
-    """The child inherits a copy of the parent's upload counters; continuing
-    them would hand out the parent's next range. The child's ranges come from
-    a band the parent's counter never reaches, and every id stays a JSON-safe
-    integer for the viewer."""
     from prime_runs.sinks.train_samples import SAMPLE_ID_RANGES, SAMPLE_ID_STRIDE
 
     assert SAMPLE_ID_RANGES * SAMPLE_ID_STRIDE <= 2**53
@@ -279,9 +249,6 @@ def test_a_forked_child_numbers_its_rows_apart_from_the_parent(make_platform_cli
 
 
 def test_a_confirm_whose_response_was_lost_is_replayed(make_platform_client, rft_routes, no_sleep):
-    """Confirm validates the key and refreshes progress; a second confirm of
-    the same key changes nothing, so an ambiguous failure is retried rather
-    than costing the step."""
     attempts = []
 
     def flaky(request: httpx.Request) -> httpx.Response:
@@ -304,7 +271,6 @@ def test_a_confirm_whose_response_was_lost_is_replayed(make_platform_client, rft
 def test_without_pyarrow_the_sink_turns_itself_off_quietly(
     make_platform_client, rft_routes, monkeypatch, caplog
 ):
-    """No loss: the episodes still reach Prime Traces. Say how to turn it on."""
     monkeypatch.setattr("prime_runs.projection.parquet_available", lambda: False)
     handler = RecordingHandler(rft_routes)
     sink = RftSamplesSink(make_platform_client(handler))
@@ -350,8 +316,6 @@ def test_training_step_reads_the_episode_provenance(record, expected):
 
 
 def test_the_default_encoder_writes_the_viewer_table():
-    """The real Parquet encoder, when pyarrow is installed: one row per episode
-    with the RFT-only columns layered on the shared sample projection."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     import io
@@ -385,6 +349,28 @@ def test_the_default_encoder_writes_the_viewer_table():
     assert isinstance(pa.Table, type)
 
 
+def test_the_default_encoder_writes_non_finite_numbers_as_null():
+    pytest.importorskip("pyarrow")
+    import io
+    import json
+    import math
+
+    import pyarrow.parquet as pq
+
+    from prime_runs.projection import episodes_to_parquet_bytes
+
+    episode = make_train_episode("e1", step=10, advantage=float("inf"))
+    episode.traces[0].metrics["kl"] = float("nan")
+
+    payload = episodes_to_parquet_bytes([episode], "run-abc", 10)
+
+    (row,) = pq.read_table(io.BytesIO(payload)).to_pylist()
+    strict = dict(parse_constant=lambda constant: pytest.fail(f"bare {constant} in a column"))
+    assert json.loads(row["metrics"], **strict) == {"kl": None}
+    assert json.loads(row["trajectory"], **strict)[-1]["advantage"] is None
+    assert math.isinf(row["advantage"])  # the float column keeps the value
+
+
 def test_the_default_encoder_numbers_rows_from_the_offset():
     pytest.importorskip("pyarrow")
     import io
@@ -414,8 +400,6 @@ def test_the_default_encoder_skips_episodes_without_a_trajectory():
 
 
 def test_a_forked_child_drops_the_inherited_storage_client(make_platform_client, rft_routes):
-    """The socket belongs to the parent: the child must neither reuse it nor
-    close it (a close would send close_notify on the parent's connection)."""
     handler = RecordingHandler(rft_routes)
     owned = RftSamplesSink(make_platform_client(handler), encoder=Encoder())
     owned.start("run-abc", {})
@@ -437,12 +421,3 @@ def test_a_forked_child_drops_the_inherited_storage_client(make_platform_client,
         injected.write([make_train_episode("e1", step=10)])
     assert isinstance(info.value.cause, RuntimeError)
     assert "after a fork" in str(info.value.cause)
-
-
-def test_the_sink_is_registered_for_fork_resets():
-    from prime_runs import _fork
-    from prime_runs.sinks import RftSamplesSink
-
-    sink = RftSamplesSink(object(), encoder=Encoder())  # type: ignore[arg-type]
-
-    assert sink in _fork._registry

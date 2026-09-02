@@ -1,12 +1,7 @@
-"""The run handle, and ``init()`` that produces one.
+"""The run handle, and ``init()`` that opens one.
 
-A run is a long-lived thing with a status, so it is an object rather than three
-stateless calls: records stream instead of buffering, errors are contained, and
-a process that dies still reports a terminal status.
-
-``init()`` is called *before* rollouts start, and the ID it returns is *the* run
-ID everywhere — including inside every trace document the producer writes.
-Nothing is re-stamped afterwards.
+``init()`` is called before the first rollout; the id it returns is the run id
+everywhere, including inside every trace document the producer writes.
 """
 
 import asyncio
@@ -25,7 +20,6 @@ from .config import Config
 from .exceptions import ConfigurationError, RunFinishedError
 from .models import (
     CONFIG_SOURCE_KEY,
-    RUN_KIND,
     ConfigSource,
     EnvironmentRef,
     Mode,
@@ -37,28 +31,25 @@ from .models import (
     TrainingSpec,
 )
 from .sinks import EvalSamplesSink, RftMetricsSink, RftSamplesSink, Sink, TracesSink
-from .worker import UploadWorker
+from .worker import UploadWorker, deadline_after, time_left
 
 logger = logging.getLogger(__name__)
 
 MODE_ENV = "PRIME_RUNS_MODE"
-#: How long ``finish()`` gives queued uploads to drain before finalizing anyway.
-#: Derived from the upload timeout: a single in-flight sample POST may take
-#: this long, and a shorter budget would abandon an upload about to succeed.
+#: How long ``finish()`` lets queued uploads drain: one in-flight sample POST
+#: may take this long, and a shorter budget would abandon it about to succeed.
 DEFAULT_FINISH_TIMEOUT = float(UPLOAD_TIMEOUT.read or 300.0)
-#: A training run lasts days and a platform deploy lasts minutes: a training
-#: sink that struck out on transient failures is tried again after this many
-#: seconds instead of being retired for the rest of the run. Eval runs are
-#: minutes long and keep the permanent retirement.
+#: Training runs last days: a training sink that struck out on transient
+#: failures is tried again after this long instead of retired for the run.
 TRAIN_RETIRE_COOLDOWN = 300.0
 
 
 class Run:
-    """A live run: an ID, a URL, somewhere to put traces, a summary.
+    """A live run: an id, a URL, somewhere to put records, a summary.
 
-    With the default ``on_error="warn"`` nothing raised by the platform escapes
-    into a producer's loop; ``on_error="raise"`` surfaces the first failure
-    from :meth:`flush` or :meth:`finish`, for tests and CI.
+    With ``on_error="warn"`` (the default) nothing the platform raises escapes
+    into the producer's loop; ``on_error="raise"`` surfaces the first failure
+    from :meth:`flush` or :meth:`finish`.
     """
 
     def __init__(
@@ -81,26 +72,24 @@ class Run:
         self._mode: Mode = mode
         self._on_error: OnError = on_error
         self._status = RunStatus.RUNNING
-        # A forked child inherits this handle but must not close the parent's run.
+        # A forked child inherits the handle but must not close the parent's run.
         self._owns_lifecycle = True
-        # A run the platform created and handed to this process (a managed
-        # launch): the platform owns its failure marking, this process only
-        # completes it.
+        # A run a launcher created and handed over: the platform owns its
+        # failure marking, this process only completes it.
         self._attached = attached
 
         self.config: Dict[str, Any] = dict(spec.config)
         self.summary: Dict[str, Any] = {}
         self.errors: List[str] = []
-        # Under on_error="raise", a failure on the uploader thread is held here
-        # and re-raised from flush() or finish(), where the caller is looking.
+        # on_error="raise": the first uploader-thread failure, re-raised from
+        # flush() or finish() where the caller is looking.
         self._deferred_error: Optional[BaseException] = None
 
         self._finish_timeout = (
             DEFAULT_FINISH_TIMEOUT if finish_timeout is None else max(0.0, float(finish_timeout))
         )
-        # Guards only the transition from accepting writes to finishing. It is
-        # deliberately separate from _finish_lock, which is held through slow
-        # network teardown so concurrent finish callers wait for completion.
+        # _state_lock guards admission only; _finish_lock is held through the
+        # slow teardown so concurrent finish() callers wait for it.
         self._state_lock = threading.Lock()
         self._finish_lock = threading.Lock()
         self._finishing = False
@@ -110,9 +99,7 @@ class Run:
 
         sinks = sinks or []
         metrics_sinks = metrics_sinks or []
-        # Records and metrics drain on separate uploaders: a metrics dict is
-        # not a record (no sink would take both), and a slow sample upload
-        # must not hold a step's metrics behind it.
+        # Separate uploaders: a slow sample upload must not hold metrics back.
         self._worker = UploadWorker(
             sinks, on_error=self._record_sink_error, retire_cooldown=retire_cooldown
         )
@@ -127,19 +114,14 @@ class Run:
                 sink.enabled = False
                 self._note(f"starting sink {sink.name}", exc)
                 if self._on_error == "raise":
-                    # The backend may already have created a remote run; close
-                    # it out before the failure reaches the caller. finish()
-                    # re-raises the error noted above.
+                    # Close the remote run before the failure reaches the caller.
                     self.finish(status=RunStatus.FAILED, error=_describe(exc))
                     raise exc
 
         atexit.register(self._atexit_hook)
 
-    # -------------------------------------------------------------- identity
-
     @property
     def id(self) -> str:
-        """The run ID. Stamp this onto every trace the run produces."""
         return self._handle.id
 
     @property
@@ -148,12 +130,10 @@ class Run:
 
     @property
     def url(self) -> Optional[str]:
-        """The dashboard URL; ``None`` when disabled."""
         return self._handle.url
 
     @property
     def config_source(self) -> Optional[ConfigSource]:
-        """The config file this run was launched from, if one was given."""
         raw = self.config.get(CONFIG_SOURCE_KEY)
         return ConfigSource.from_mapping(raw) if isinstance(raw, Mapping) else None
 
@@ -171,61 +151,39 @@ class Run:
 
     @property
     def kind(self) -> RunKind:
-        """``eval`` or ``train``."""
         return self._spec.kind
 
     @property
     def attached(self) -> bool:
-        """Whether this process joined a run the platform had already created."""
         return self._attached
 
     @property
     def dropped_records(self) -> int:
-        """Records (and metrics) that reached no sink because a queue was full."""
+        """Records that reached no sink because a queue was full."""
         return self._worker.dropped + self._metrics_worker.dropped
 
     @property
     def failed_records(self) -> Dict[str, int]:
-        """Records each sink could not store, by sink name. Per sink because
-        another sink may still hold them."""
+        """Records each sink could not store, by sink name."""
         return {**self._worker.failed_records, **self._metrics_worker.failed_records}
 
     def __repr__(self) -> str:
         return f"<Run id={self.id!r} mode={self._mode!r} status={self._status.value}>"
 
-    # ------------------------------------------------------------------- log
-
     def log_traces(self, traces: Iterable[Any]) -> None:
-        """Hand bare traces to the sinks. Returns immediately.
-
-        Accepts verifiers ``Trace`` objects or plain JSON mappings. Both reach
-        Prime Traces; the v0 sample table is projected from *episodes*, so a
-        bare trace has no row there. A rollout that is an episode (a group of
-        traces) goes through :meth:`log_episodes`. Call this as rollouts
-        complete; nothing is buffered until the end.
-        """
+        """Queue bare traces: verifiers ``Trace`` objects or JSON mappings."""
         self._submit("log_traces", traces)
 
     def log_episodes(self, episodes: Iterable[Any]) -> None:
-        """Hand episodes — grouped traces — to the sinks. Returns immediately.
-
-        Accepts verifiers ``Episode`` objects or plain JSON mappings with a
-        ``traces`` list. The episode's ``run`` reaches every member trace.
-        Both reach Prime Traces; the v0 sample table (what today's viewer
-        reads) is projected from episode *objects* only — a JSON episode has
-        no row there, which the samples sink warns about once.
-        """
+        """Queue episodes: verifiers ``Episode`` objects or JSON mappings with a
+        ``traces`` list. The sample tables are projected from episode objects
+        only; a JSON episode reaches Prime Traces alone."""
         self._submit("log_episodes", episodes)
 
     def log_metrics(self, values: Mapping[str, Any], *, step: Optional[int] = None) -> None:
-        """Hand one step's metrics to the run. Returns immediately.
-
-        Training runs only (an eval run has no metrics sink; the call is a
-        no-op there). ``step`` is recorded as ``values["step"]`` unless the
-        mapping already carries one; every row is stamped with ``_timestamp``
-        so step-less rows (inference metrics) keep a time anchor. Non-finite
-        numbers are dropped, as they are for :meth:`update_summary`.
-        """
+        """Queue one step's metrics (training runs; a no-op for evals). ``step``
+        becomes ``values["step"]`` unless already set, every row gets a
+        ``_timestamp``, and non-finite numbers are dropped."""
         self._require_live("log_metrics")
         record = _clean_metrics(values)
         if step is not None:
@@ -236,23 +194,15 @@ class Run:
             self._metrics_worker.submit([record])
 
     def _submit(self, operation: str, records: Iterable[Any]) -> None:
-        # Refuse an already-finished run without consuming a lazy iterable.
-        self._require_live(operation)
+        self._require_live(operation)  # before consuming a lazy iterable
         batch = list(records)
-        # Finish holds this short-lived lock only while closing admission. A
-        # log call queues first or observes that teardown has begun, without
-        # waiting behind the slow flush/finalize path.
         with self._state_lock:
             self._require_live(operation)
             if batch:
                 self._worker.submit(batch)
 
     def update_summary(self, values: Mapping[str, Any]) -> None:
-        """Merge run-level outputs into :attr:`summary` ahead of :meth:`finish`.
-
-        Non-finite numbers are dropped here, as they are for
-        ``finish(summary=...)``; writing to ``summary`` directly skips that.
-        """
+        """Merge run-level outputs into :attr:`summary` ahead of :meth:`finish`."""
         with self._state_lock:
             self._require_live("update_summary")
             self.summary.update(_clean_metrics(values))
@@ -260,17 +210,11 @@ class Run:
     def flush(self, timeout: Optional[float] = 30.0) -> bool:
         """Block until queued records have been written. Under
         ``on_error="raise"`` this is the first place an upload failure surfaces."""
-        deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
-
-        def remaining() -> Optional[float]:
-            return None if deadline is None else max(0.0, deadline - time.monotonic())
-
-        flushed = self._worker.flush(timeout=remaining())
-        flushed = self._metrics_worker.flush(timeout=remaining()) and flushed
+        deadline = deadline_after(timeout)
+        flushed = self._worker.flush(timeout=time_left(deadline))
+        flushed = self._metrics_worker.flush(timeout=time_left(deadline)) and flushed
         self._raise_deferred()
         return flushed
-
-    # ---------------------------------------------------------------- finish
 
     def finish(
         self,
@@ -280,15 +224,9 @@ class Run:
         error: Optional[str] = None,
         timeout: Optional[float] = None,
     ) -> None:
-        """Flush everything and close the run out. Idempotent: the first caller
+        """Drain the uploads and close the run out. Idempotent: the first caller
         reports the status, concurrent callers wait for that teardown.
-
-        ``timeout`` overrides the run's ``finish_timeout`` for this call: how
-        long queued uploads get to drain before the run is closed out anyway.
-        An abort path can pass a short budget so an interrupted producer is
-        not pinned behind a slow platform. The terminal status is still
-        reported (with its own retries) after the budget runs out.
-        """
+        ``timeout`` overrides the run's ``finish_timeout`` for this call."""
         with self._finish_lock:
             if self._finished:
                 return
@@ -309,22 +247,17 @@ class Run:
         summary: Optional[Mapping[str, Any]],
         resolved: RunStatus,
         error: Optional[str],
-        timeout: Optional[float] = None,
+        timeout: Optional[float],
     ) -> None:
         if summary:
             self.summary.update(_clean_metrics(summary))
         self._status = resolved
 
         budget = self._finish_timeout if timeout is None else max(0.0, float(timeout))
-        deadline = time.monotonic() + budget
-
-        def remaining() -> float:
-            return max(0.0, deadline - time.monotonic())
-
-        # Records first, so a dashboard reacting to the terminal status never
-        # sees a finished run with samples still landing.
-        drained = self._worker.flush(timeout=remaining())
-        drained = self._metrics_worker.flush(timeout=remaining()) and drained
+        deadline = deadline_after(budget)
+        # Records first, so the dashboard never sees a finished run with samples landing.
+        drained = self._worker.flush(timeout=time_left(deadline))
+        drained = self._metrics_worker.flush(timeout=time_left(deadline)) and drained
         if not drained:
             logger.warning(
                 "Run %s: uploads did not drain within %ss; finalizing anyway. "
@@ -332,8 +265,8 @@ class Run:
                 self.id,
                 budget,
             )
-        self._worker.close(timeout=remaining())
-        self._metrics_worker.close(timeout=remaining())
+        self._worker.close(timeout=time_left(deadline))
+        self._metrics_worker.close(timeout=time_left(deadline))
 
         if self._owns_lifecycle:
             self._teardown_step(
@@ -343,8 +276,7 @@ class Run:
                 ),
             )
             if self._attached and resolved is not RunStatus.COMPLETED:
-                # A managed launch marks its own run failed when this process
-                # goes away; reporting it from here would race that.
+                # The launcher marks its own run failed; reporting it here would race that.
                 logger.info(
                     "Run %s: %s, but the platform owns the status of an attached run; "
                     "leaving it to the launcher",
@@ -376,14 +308,10 @@ class Run:
             logger.warning(
                 "Run %s: the %s sink could not store %d record(s)", self.id, sink_name, count
             )
-        # Last, so a run whose teardown failed is still closed out first.
-        self._raise_deferred()
+        self._raise_deferred()  # last, so the run is closed out even when this raises
 
     def fail(self, error: Union[str, BaseException], *, timeout: Optional[float] = None) -> None:
-        """Close the run out as failed."""
         self.finish(status=RunStatus.FAILED, error=_describe(error), timeout=timeout)
-
-    # -------------------------------------------------------- context manager
 
     def __enter__(self) -> "Run":
         return self
@@ -392,19 +320,15 @@ class Run:
         if exc_type is None:
             self.finish()
             return False
-
         if isinstance(exc, (KeyboardInterrupt, asyncio.CancelledError)):
-            # An interrupt is a decision, not a fault.
-            status, error = RunStatus.CANCELLED, "interrupted"
+            status, error = RunStatus.CANCELLED, "interrupted"  # a decision, not a fault
         else:
             status, error = RunStatus.FAILED, _describe(exc)
-
         try:
             self.finish(status=status, error=error)
         except Exception as finish_error:
-            # The producer's exception is why this block is unwinding; a
-            # telemetry teardown error must not replace it. Control-flow
-            # exceptions (KeyboardInterrupt, SystemExit) deliberately pass.
+            # The producer's exception is why this block is unwinding; a teardown
+            # error must not replace it. Control-flow exceptions pass through.
             logger.warning(
                 "Run %s: finishing after %s also failed: %s: %s",
                 self.id,
@@ -415,12 +339,9 @@ class Run:
             )
         return False
 
-    # ------------------------------------------------------------- internals
-
     def reset_after_fork(self) -> None:
-        """Make an inherited handle safe in a forked child: fresh lock, and the
-        parent keeps ownership of the lifecycle so the child's atexit hook
-        cannot finalize a still-running run."""
+        """Fresh locks, and the parent keeps the lifecycle: the child's atexit
+        hook must not finalize a still-running run."""
         self._state_lock = threading.Lock()
         self._finish_lock = threading.Lock()
         self._finishing = False
@@ -428,8 +349,7 @@ class Run:
         self._deferred_error = None
 
     def _on_process_exit(self) -> None:
-        """The process is exiting and nobody called ``finish()``: report CRASHED
-        rather than FAILED, since the producer never said the run failed."""
+        """atexit: nobody called ``finish()``, so report CRASHED rather than FAILED."""
         if self._finished:
             return
         logger.warning("Run %s was never finished; reporting it as crashed", self.id)
@@ -446,11 +366,9 @@ class Run:
             )
 
     def _record_sink_error(self, sink_name: str, exc: Exception) -> None:
-        """Called on the uploader thread when a sink gives up on a batch."""
         self._note(f"writing to the {sink_name} sink", exc)
 
     def _teardown_step(self, what: str, call: Any) -> None:
-        """Run one teardown step without letting it skip the steps after it."""
         try:
             call()
         except Exception as exc:  # noqa: BLE001 - teardown must continue
@@ -467,15 +385,11 @@ class Run:
             logger.warning("Run %s: %s", self.id, message)
 
     def _raise_deferred(self) -> None:
-        """Re-raise the first held failure, once."""
         exc = self._deferred_error
         if exc is None:
             return
         self._deferred_error = None
         raise exc
-
-
-# --------------------------------------------------------------------- init
 
 
 def init(
@@ -497,30 +411,19 @@ def init(
     id: Optional[str] = None,
     training: Optional[TrainingSpec] = None,
 ) -> Run:
-    """Start a run and return a handle to it.
-
-    Call this *before* the first rollout: the ID it returns is what every trace
-    in the run should carry, and the URL is what a producer prints.
+    """Open a run and return its handle. Call it before the first rollout.
 
     ``mode`` defaults to ``$PRIME_RUNS_MODE``, else online when there is an API
-    key and disabled (with a warning) when there is not. ``config`` is what the
-    run was configured with: the path to the file it was launched from (stored
-    byte for byte under ``config_source``), or a mapping taken as given.
-    ``finish_timeout`` is how long :meth:`Run.finish` lets queued uploads drain
-    before closing the run out anyway (default: the upload timeout, 300 s);
-    ``finish(timeout=...)`` overrides it per call.
+    key and disabled (with a warning) when there is not. ``config`` is the path
+    to the file the run was launched from (stored byte for byte under
+    ``config_source``) or a mapping taken as given. ``finish_timeout`` bounds
+    the drain in :meth:`Run.finish`.
 
-    ``kind="train"`` opens an external training run instead of an evaluation:
-    ``model`` is the base model, ``environments`` the training environments
-    (hub ids, passed through), ``training`` the rest of what the dashboard
-    shows, and a team is required. ``id`` attaches to a training run the
-    platform already created (a launcher that injected ``$RUN_ID``): nothing
-    is registered, the platform keeps ownership of the run's failure marking,
-    and a clean :meth:`Run.finish` still completes it. The run must itself be
-    an external run — one created through ``POST /rft/external-runs`` — since
-    the platform's monitoring endpoints answer 400 for a hosted (managed) run.
-    Training sinks that strike out on transient failures are tried again after
-    ``TRAIN_RETIRE_COOLDOWN`` seconds rather than retired for the run.
+    ``kind="train"`` opens an external training run: ``model`` is the base
+    model, ``environments`` the hub ids, ``training`` the display fields, and a
+    team is required. ``id`` attaches to an external run a launcher already
+    created (``$RUN_ID``): nothing is registered, the platform keeps the run's
+    failure marking, and a clean finish still completes it.
     """
     settings = Config()
     api_key = api_key if api_key is not None else settings.api_key
@@ -577,15 +480,11 @@ def init(
             else:
                 handle = backend.create(spec)
         except BaseException:
-            # Ownership has not reached a Run yet, so nothing else can release
-            # the connection pool when environment resolution or creation fails.
+            # Nothing else can release the connection pool yet.
             try:
                 backend.close()
             except Exception as close_error:  # noqa: BLE001 - preserve the create failure
-                logger.debug(
-                    "Error closing the platform client after run creation failed: %s",
-                    close_error,
-                )
+                logger.debug("Error closing the platform client: %s", close_error)
             raise
         # Both transports run during the transition: traces is the system of
         # record, the sample table is what today's viewer reads.
@@ -633,9 +532,8 @@ def _resolve_mode(mode: Optional[Mode], *, api_key: str) -> Mode:
 
 
 def _sink_context(spec: RunSpec) -> Dict[str, str]:
-    """Upload-scoped provenance. Not the join key — that is ``run.id`` inside
-    the trace document."""
-    context = {"source": "prime-runs", "run_type": spec.kind or RUN_KIND}
+    """Upload-scoped provenance; the join key is ``run.id`` inside the document."""
+    context = {"source": "prime-runs", "run_type": spec.kind}
     if spec.framework:
         context["framework"] = spec.framework
     if spec.model:
@@ -644,12 +542,6 @@ def _sink_context(spec: RunSpec) -> Dict[str, str]:
 
 
 def _normalize_config(value: Any) -> Dict[str, Any]:
-    """A producer's config as a plain dict.
-
-    A path is the file the run was launched from, kept byte for byte under
-    ``config_source`` (stored, not parsed — the platform can read TOML). A
-    mapping is taken exactly as given.
-    """
     if value is None:
         return {}
     if isinstance(value, Mapping):
@@ -669,42 +561,21 @@ def _describe(error: Union[str, BaseException]) -> str:
     return str(error)
 
 
-def _clean_metrics(metrics: Mapping[str, Any], *, _path: str = "") -> Dict[str, Any]:
-    """Recursively drop NaN/infinity: strict JSON rejects them, and the
-    failure would surface as an opaque 400 on the whole request."""
-    cleaned: Dict[str, Any] = {}
-    for key, value in metrics.items():
-        path = f"{_path}.{key}" if _path else str(key)
-        if isinstance(value, float) and not math.isfinite(value):
-            logger.debug("Dropping non-finite metric %s=%r", path, value)
-            continue
-        if isinstance(value, Mapping):
-            nested = _clean_metrics(value, _path=path)
-            if nested:
-                cleaned[key] = nested
-            continue
-        if isinstance(value, (list, tuple)):
-            cleaned[key] = _clean_metric_sequence(value, path)
-            continue
-        cleaned[key] = value
-    return cleaned
+_DROP: Any = object()
 
 
-def _clean_metric_sequence(values: Sequence[Any], path: str) -> List[Any]:
-    """Clean JSON-array-shaped metric values while preserving their order."""
-    cleaned: List[Any] = []
-    for index, value in enumerate(values):
-        item_path = f"{path}[{index}]"
-        if isinstance(value, float) and not math.isfinite(value):
-            logger.debug("Dropping non-finite metric %s=%r", item_path, value)
-            continue
-        if isinstance(value, Mapping):
-            cleaned.append(_clean_metrics(value, _path=item_path))
-        elif isinstance(value, (list, tuple)):
-            cleaned.append(_clean_metric_sequence(value, item_path))
-        else:
-            cleaned.append(value)
-    return cleaned
+def _finite(value: Any) -> Any:
+    """``value`` without NaN/infinity anywhere inside it (strict JSON rejects
+    them as an opaque 400), or ``_DROP``. Empty nested mappings are dropped."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return _DROP
+    if isinstance(value, Mapping):
+        items = ((key, _finite(item)) for key, item in value.items())
+        return {key: item for key, item in items if item is not _DROP and item != {}}
+    if isinstance(value, (list, tuple)):
+        return [item for item in (_finite(item) for item in value) if item is not _DROP]
+    return value
 
 
-__all__ = ["Run", "init", "MODE_ENV"]
+def _clean_metrics(metrics: Mapping[str, Any]) -> Dict[str, Any]:
+    return _finite(dict(metrics))

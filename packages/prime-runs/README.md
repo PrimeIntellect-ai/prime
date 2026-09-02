@@ -1,219 +1,123 @@
 # Prime Runs SDK
 
-Track eval and training runs on the Prime Intellect platform.
+Track evaluation and training runs on the Prime Intellect platform: `init()`
+opens the run, records stream out while it proceeds, and `finish()` closes it
+out with a terminal status.
+
+## Install
 
 ```bash
-pip install prime-runs
+uv add prime-runs            # or: pip install prime-runs
+uv add 'prime-runs[train]'   # training runs: adds pyarrow for the sample table
 ```
 
-## Quick start
+## Eval runs
 
 ```python
 import prime_runs as pr
+from verifiers.v1 import EvalRunInfo
 
 run = pr.init(
     name="gsm8k-qwen3-8b",
-    environments=["gsm8k"],
+    environments=["gsm8k"],      # hub names (get-or-create) or owner/name slugs
     model="Qwen/Qwen3-8B",
     framework="verifiers",
-    config="eval.toml",          # the file the run was launched from
+    config="eval.toml",          # the launched file, stored byte for byte
 )
-print(run.url)   # https://app.primeintellect.ai/dashboard/evaluations/eval-...
+print(run.url)                   # https://app.primeintellect.ai/dashboard/evaluations/...
 
-for episode in rollouts:          # episodes carry run.id — see "Identity" below
-    run.log_episodes([episode])   # bare traces go through log_traces()
+for episode in rollouts:
+    episode.record_run(EvalRunInfo(id=run.id))   # every trace carries the run id
+    run.log_episodes([episode])                  # a queue put; bare traces: log_traces()
 
 run.finish(summary=pr.metrics.from_episodes(episodes))
 ```
 
-`init()` opens the run and returns a handle carrying its ID and dashboard URL.
-Records stream out on a background thread while the run proceeds, so the
-dashboard fills in as rollouts land. `finish()` closes the run out; a `with`
-block does that for you, including when the body raises. Run-level outputs go
-in `finish(summary=...)`, or incrementally through `update_summary()`;
-`metrics.from_episodes()` returns them in the shape the dashboard reads
-(`metrics.RunSummary`).
+`init()` is called before the first rollout, and the id it returns is the run
+id everywhere, including inside every trace document. A `with run:` block
+finishes for you: an exception marks the run `failed`, Ctrl-C `cancelled`, and
+a process that exits without finishing is reported `crashed` by an atexit hook.
 
-## Identity
-
-`init()` is called **before** the first rollout, and the ID it returns is *the*
-run ID everywhere — including inside every trace document you write:
-
-```python
-run = pr.init(...)
-trace.record_run(EvalRunInfo(id=run.id))     # verifiers
-```
-
-The ingestion service indexes `run.id` from the trace body, so "every trace for
-this run" is a fast query. Bare dicts without a `run` key are stamped for you;
-producer objects are passed through untouched.
-
-## Config
-
-`config=` takes the path to the file the run was launched from, or a mapping.
-
-| you pass | what is stored |
-| --- | --- |
-| a path | the file, byte for byte, under `config_source` |
-| a mapping | exactly as given |
-
-The file is the run's real configuration — comments, key order and section
-grouping included — so it is stored verbatim, not parsed. A `str` or `Path` is
-always a path; use `pr.ConfigSource(text=...)` for contents already in memory.
-To send structured values *and* the file, put the file under
-`pr.CONFIG_SOURCE_KEY` in the mapping:
-
-```python
-config = {**cfg.model_dump(exclude_unset=True),
-          pr.CONFIG_SOURCE_KEY: pr.ConfigSource.from_file("eval.toml").to_dict()}
-```
-
-Nothing is redacted — keep credentials in the environment, not in the file.
-
-## Modes
-
-| mode | what happens |
-| --- | --- |
-| `online` | the run lives on the platform (default when an API key is present) |
-| `disabled` | every call is a no-op, with the same object shape |
-
-Set the mode explicitly, or through `$PRIME_RUNS_MODE`. A missing API key
-disables the run with a warning — it never silently writes somewhere else.
-
-## What the run handle does for you
-
-- **Streams instead of buffering.** Records go out as they are produced.
-  Whatever queues up while one upload is in flight goes out as the next one,
-  so the request rate tracks upload latency, not rollout throughput.
-- **Contains its own errors.** With the default `on_error="warn"`, nothing the
-  platform raises escapes into your loop. Use `on_error="raise"` in tests and
-  CI, where a silent upload failure is the bug; failures surface from `flush()`
-  and `finish()`. Platform errors are the `prime_traces` exception family
-  (`pr.APIError` and friends), so one set of `except` clauses covers both SDKs.
-- **Applies backpressure.** The upload queue is bounded; a producer that
-  durably outruns the uploader has records dropped and counted
-  (`run.dropped_records`) rather than stalled. Per-sink losses are in
-  `run.failed_records`.
-- **Waits for its own uploads.** `finish()` gives queued records the same
-  budget a single upload gets (300s) and warns if they do not drain. Set
-  `init(finish_timeout=...)` for the run, or `finish(timeout=...)` per call — an
-  abort path can pass a few seconds so an interrupted producer is not pinned
-  behind a slow platform.
-- **Reports a terminal status.** The context manager and an `atexit` hook both
-  route to the same idempotent `finish()`. A run you said failed is `failed`;
-  one somebody stopped on purpose — Ctrl-C or a cancelled task inside a `with`
-  block — is `cancelled`; one that stopped without saying — an exit that never
-  reached `finish()` — is `crashed`.
+`config=` takes the path to the launched file (kept verbatim under
+`config_source`, comments and all) or a mapping stored as given; put a file
+under `pr.CONFIG_SOURCE_KEY` in the mapping to send both. Nothing is redacted.
 
 ## Training runs
 
 ```python
-import prime_runs as pr
-
 run = pr.init(
     kind="train",
     name="qwen3-8b-gsm8k-rl",
-    model="Qwen/Qwen3-8B",                  # the base model
-    environments=["primeintellect/gsm8k"],  # hub ids, passed through as given
+    model="Qwen/Qwen3-8B",                    # the base model
+    environments=["primeintellect/gsm8k"],    # hub ids, passed through
     training=pr.TrainingSpec(max_steps=1000, batch_size=64, rollouts_per_example=8),
-    config=train_config.model_dump(),       # or the path to the launched TOML
-    team_id="team_...",                     # external runs are created for a team
+    config=train_config.model_dump(),
+    team_id="team_...",                       # external runs belong to a team
 )
 
 for step, (episodes, metrics) in enumerate(training_loop):
-    run.log_episodes(episodes)              # carry run.work.step (verifiers TrainRunInfo)
+    run.log_episodes(episodes)          # episodes carry run.work.step (TrainRunInfo)
     run.log_metrics(metrics, step=step)
 
 run.finish()
 ```
 
-A training run lives on `/api/v1/rft/external-runs` — what prime-rl's monitor
-did by hand. Where it differs from an eval run:
+- The platform enables external runs per team; a team outside the allowlist
+  gets a `ForbiddenError` from `init()`.
+- `init(kind="train", id=os.environ["RUN_ID"])` attaches to an external run a
+  launcher already created: nothing is registered, the platform keeps the run's
+  failure marking, and a clean `finish()` still completes it.
+- Metrics are one row per `log_metrics` call, on their own uploader. The sample
+  table gets one Parquet object per upload, every 10th step, keyed by the step
+  an episode was dispatched at; a step logged in several calls gets several
+  objects, and the viewer shows their union.
+- The status vocabulary is `completed | failed`; `cancelled` and `crashed`
+  arrive as `failed` with the reason in `error_message`.
 
-- **A team is required.** The platform enables external runs per team. A team
-  outside the allowlist gets a `ForbiddenError` from `init()` with the
-  platform's reason; the producer decides whether that means "run locally".
-- **Metrics.** `log_metrics(values, step=...)` streams one row per call on its
-  own uploader, so a slow sample upload never holds a step's metrics back.
-  `_timestamp` is stamped on every row; non-finite values are dropped. The
-  endpoint allows 60 rows a minute per token. A row whose response was lost
-  is re-sent: the platform keeps one row per step, so nothing doubles.
-- **Samples.** Every record reaches Prime Traces. The training viewer's sample
-  table is a Parquet object per upload, keyed by the training step an episode
-  was *dispatched* at — `run.work.step` on verifiers' `TrainRunInfo`, which
-  prime-rl stamps on every dispatched episode — and uploaded every 10th step
-  (prime-rl's cadence) for training-work episodes. Objects are additive: a
-  step logged in several `log_episodes` calls (an off-policy episode landing
-  in a later batch) gets one object per call, each numbering its `sample_id`s
-  in its own range (a forked child draws its ranges apart from its parent's),
-  and the viewer shows their union. So "step N" in the
-  sample viewer means dispatched at N, while the metrics logged at N describe
-  the batch trained at N. Encoding needs pyarrow: `pip install
-  'prime-runs[train]'`. Without it the table is skipped with a warning and
-  traces still flow.
-- **Attach.** `init(kind="train", id=os.environ["RUN_ID"])` joins a run a
-  launcher created: nothing is registered, the platform keeps the run's
-  failure marking, and a clean `finish()` still completes it. The id must be
-  an external run's (one created through `POST /rft/external-runs`): the
-  platform's monitoring endpoints answer 400 for a hosted run.
-- **Status.** The RFT vocabulary is `completed | failed`. `cancelled` and
-  `crashed` are reported as `failed` with the reason in `error_message`; a
-  clean `finish()` is an idempotent finalize, safe to replay.
-- **Outages.** A sink that strikes out on transient failures (three in a row,
-  each already retried) is paused for five minutes and then tried again, not
-  retired for the run: a platform deploy costs a multi-day run a window of
-  rows, never the rest of its curves. Records that arrive while a sink is
-  paused are counted in `run.failed_records` for that sink.
-- **No config update.** `config=` is registered once as `run_config` and there
-  is no summary document, so `finish(summary=...)` is not sent for training
-  runs — log final numbers with `log_metrics`.
+## How it behaves
 
-## From async code
+- **Streams.** Records go out on a background thread as they are logged;
+  whatever queues up during one request goes out as the next.
+- **Contains its errors.** With the default `on_error="warn"` nothing the
+  platform raises escapes into your loop; `on_error="raise"` surfaces the first
+  failure from `flush()` or `finish()`, for tests and CI. Platform errors are
+  the `prime_traces` exception family.
+- **Degrades.** A transient failure costs its batch, three in a row retire the
+  sink (a training run pauses it for five minutes instead), and a full queue
+  drops records rather than stalling the run. Losses are counted in
+  `run.dropped_records` and `run.failed_records`.
+- **Drains on exit.** `finish()` gives queued uploads up to `finish_timeout`
+  (300 s) before closing the run out; an abort path can pass
+  `finish(timeout=...)`.
 
-`log_traces()` / `log_episodes()` are a queue put, not a request, so they are
-safe to call from a coroutine; it blocks only if the queue is full (up to 5s), which is the
-backpressure. `init()` and `finish()` do network I/O — wrap them in
-`asyncio.to_thread` if a stall there would matter.
+An online run writes to Prime Traces (the system of record, gated to an
+allowlist; outside it that sink turns itself off quietly) and to the sample
+table today's viewer reads. `log_*()` are queue puts, safe inside a coroutine;
+`init()` and `finish()` do network I/O.
 
 ## Configuration
 
-Resolved from environment variables first, then `~/.prime/config.json`:
+| Source                 | Meaning                                                                |
+| ---------------------- | ---------------------------------------------------------------------- |
+| `PRIME_API_KEY`        | Platform API token                                                     |
+| `PRIME_TEAM_ID`        | Team context; required for training runs                               |
+| `PRIME_API_BASE_URL`   | Platform API; defaults to `https://api.primeintellect.ai`              |
+| `PRIME_FRONTEND_URL`   | Dashboard; defaults to `https://app.primeintellect.ai`                 |
+| `PRIME_TRACES_URL`     | Prime Traces service, resolved by `prime-traces`                       |
+| `PRIME_RUNS_MODE`      | `online` or `disabled`; unset means online when there is an API key    |
+| `~/.prime/config.json` | Shared prime CLI config (`api_key`, `team_id`, `base_url`)             |
 
-| setting | env var | default |
-| --- | --- | --- |
-| API key | `PRIME_API_KEY` | — |
-| team | `PRIME_TEAM_ID` | — |
-| platform API | `PRIME_API_BASE_URL` | `https://api.primeintellect.ai` |
-| dashboard | `PRIME_FRONTEND_URL` | `https://app.primeintellect.ai` |
-| traces service | `PRIME_TRACES_URL` | resolved by `prime-traces` |
+Precedence is `init()` argument → environment variable → config file. A missing
+API key disables the run with a warning.
 
-Or pass `api_key=`, `base_url=`, `team_id=` to `init()`.
+## Not yet available
 
-## Transports
+- **Failed or cancelled evaluations on the dashboard.** The evaluations API has
+  no producer-facing status endpoint yet, so the terminal state is recorded
+  under `metadata.prime_runs` and the run keeps showing as running.
 
-An online run writes every record to two sinks: Prime Traces (the system of
-record — streaming, episode-aware, content-addressed and therefore idempotent
-on retry) and the flat v0 sample table today's viewer reads. Both run because
-Prime Traces is gated to an allowlist; an account outside it has the traces sink
-turn itself off at the first upload — not counted as a failure, since nothing was
-lost. When the viewer reads traces natively the default sink list drops one entry
-and no producer changes.
+## Related packages
 
-`prime_runs.projection` holds `trace_to_sample` / `build_samples`, the v0
-projection moved here from verifiers. `prime_runs.metrics.from_episodes` is the
-run-level aggregation the eval dashboard reads. Both are duck-typed; no producer
-package is imported — this is a leaf package, because the `prime` CLI depends on
-`verifiers` and verifiers depends on this.
-
-## Status
-
-Eval runs over `/api/v1/evaluations`, training runs over
-`/api/v1/rft/external-runs` (see "Training runs").
-
-The evaluations API this version targets has no producer-facing way to mark an
-evaluation **failed** or **cancelled**: the SDK records the terminal state under
-`metadata.prime_runs` and warns that the run will keep showing as running on
-the dashboard. The platform is adding `PUT /evaluations/{id}` with a
-`FAILED` / `CANCELLED` status; a follow-up release adopts it (keeping the
-metadata fallback for older backends), which is why `RunStatus.CANCELLED`
-already exists.
+- [prime-traces](https://github.com/PrimeIntellect-ai/prime/tree/main/packages/prime-traces) — Prime Traces SDK
+- [prime](https://github.com/PrimeIntellect-ai/prime/tree/main/packages/prime) — Prime CLI
+- [prime-evals](https://github.com/PrimeIntellect-ai/prime/tree/main/packages/prime-evals) — Evals SDK

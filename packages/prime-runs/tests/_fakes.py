@@ -1,11 +1,4 @@
-"""Stand-ins for verifiers ``Trace``/``Episode``.
-
-The SDK never imports a producer package — records are duck-typed — so the
-tests must not either, or they would be testing an import rather than the
-protocol. These objects implement exactly the surface
-:mod:`prime_runs.projection` and :mod:`prime_runs.metrics` touch, which makes
-that surface explicit and makes an accidental widening of it fail here.
-"""
+"""Stand-ins for verifiers ``Trace``/``Episode``."""
 
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional

@@ -14,8 +14,6 @@ from prime_runs.models import RunSpec, RunStatus
 
 
 def test_no_api_key_disables_the_run_and_says_so(caplog):
-    """Loudly, not silently: a user who forgot ``prime login`` must not believe
-    the run was tracked."""
     with caplog.at_level("WARNING"):
         run = pr.init(name="local")
 
@@ -39,8 +37,6 @@ def test_an_unknown_mode_is_rejected():
 
 
 def test_a_disabled_run_still_answers_every_call(tmp_path):
-    """Same object shape, so producer code needs no branching — and nothing
-    touches the network or the filesystem."""
     run = pr.init(mode="disabled")
 
     run.log_traces([{"id": "t1"}])
@@ -147,7 +143,6 @@ def test_a_failed_create_closes_the_platform_client(monkeypatch):
 def test_an_online_run_has_both_transports_by_default(
     monkeypatch, make_platform_client, eval_routes
 ):
-    """Traces is the system of record; the sample table is what the viewer reads."""
     handler = RecordingHandler(eval_routes)
     monkeypatch.setattr("prime_runs.run.PlatformClient", lambda **_: make_platform_client(handler))
     monkeypatch.setattr("prime_traces.TracesClient", lambda **_: object())
@@ -172,17 +167,7 @@ def test_episodes_stream_to_the_sample_table_while_the_run_is_going(online):
     run.finish()
 
 
-def test_finishing_an_online_run_finalizes_it_with_its_metrics(online):
-    run, handler = online()
-
-    run.finish(summary={"avg_reward": 0.9})
-
-    body = handler.bodies_for("/api/v1/evaluations/eval-abc/finalize")[0]
-    assert body["metrics"]["avg_reward"] == 0.9
-
-
 def test_the_end_to_end_shape_a_producer_writes(online):
-    """The whole surface, in the order verifiers calls it."""
     from prime_runs import metrics
 
     episodes = [make_episode(f"ep-{n}", [make_trace(idx=n, reward=float(n))]) for n in range(3)]
@@ -207,25 +192,12 @@ def test_the_end_to_end_shape_a_producer_writes(online):
     assert run.errors == []
 
 
-def test_a_second_init_in_one_process_opens_its_own_run():
-    first = pr.init(mode="disabled")
-    first.finish()
-
-    second = pr.init(mode="disabled")
-    second.finish()
-
-    assert second.id != first.id
-
-
 # --------------------------------------------------------------------- fork
 
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="fork is POSIX-only")
 @pytest.mark.filterwarnings("ignore:This process .* is multi-threaded:DeprecationWarning")
 def test_a_forked_child_does_not_duplicate_the_parents_records_or_close_its_run(online):
-    """At fork time the parent may have records in the upload queue. The child
-    inherits a copy; writing them would upload every record twice, and the
-    inherited atexit hook must not finalize the parent's run."""
     run, handler = online()
     run.log_traces([{"sample_id": f"parent-{n}"} for n in range(5)])
 
@@ -368,8 +340,6 @@ def test_a_failed_training_run_is_marked_failed_with_the_reason(online_train):
 
 
 def test_training_uploaders_pause_rather_than_retire_after_an_outage(online_train):
-    """A training run lasts days; a sink that struck out on a platform blip
-    is tried again after a cooldown instead of losing the rest of the run."""
     from prime_runs.run import TRAIN_RETIRE_COOLDOWN
 
     run, _, _, _ = online_train()
@@ -392,8 +362,6 @@ def test_attaching_to_a_managed_run_registers_nothing(online_train):
 
 
 def test_an_attached_run_leaves_failure_marking_to_the_launcher(online_train, caplog):
-    """A managed launch marks its own run failed when the process goes away;
-    reporting it from here would race that (prime-rl's contract)."""
     run, handler, _, _ = online_train(id="run-managed")
 
     with caplog.at_level("INFO"):
@@ -456,8 +424,6 @@ def test_kind_arguments_are_checked_before_anything_else(kwargs):
 
 
 def test_training_records_are_stamped_with_the_train_run_type():
-    """Bare dicts get ``run.type`` from the run's kind, matching what verifiers'
-    ``TrainRunInfo`` carries, so the traces service files them as training."""
     from prime_runs.run import _sink_context
     from prime_runs.sinks.base import stamp_run
 

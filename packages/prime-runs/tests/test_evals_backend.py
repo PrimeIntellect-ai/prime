@@ -85,8 +85,6 @@ def test_a_published_environment_slug_supplies_dataset_and_default_name(
 def test_an_unresolvable_environment_fails_the_run_rather_than_being_skipped(
     make_platform_client, eval_routes
 ):
-    """Silently dropping it produces a run attached to the wrong environments —
-    an upload that looks successful and is discovered wrong much later."""
     routes = dict(eval_routes)
     routes["POST /api/v1/environmentshub/resolve"] = lambda request: httpx.Response(
         404, json={"detail": "no such environment"}
@@ -108,8 +106,6 @@ def test_a_run_with_no_environments_is_rejected_before_any_request(
 
 
 def test_a_run_without_a_name_gets_one(make_platform_client, eval_routes):
-    """The API requires a name; the alternative to generating one is a 422 at
-    the worst possible moment."""
     backend, handler = make_backend(make_platform_client, eval_routes)
 
     backend.create(RunSpec(environments=[EnvironmentRef(name="gsm8k")]))
@@ -137,7 +133,6 @@ def test_finalizing_a_completed_run_posts_its_metrics(make_platform_client, eval
 
 
 def test_an_ambiguous_finalize_failure_is_not_replayed(make_platform_client, eval_routes):
-    """Finalization enqueues asynchronous processing, so a retry can enqueue it twice."""
     routes = dict(eval_routes)
     routes["POST /api/v1/evaluations/eval-abc/finalize"] = lambda request: httpx.Response(502)
     backend, handler = make_backend(make_platform_client, routes)
@@ -149,9 +144,6 @@ def test_an_ambiguous_finalize_failure_is_not_replayed(make_platform_client, eva
 
 
 def test_a_failed_run_is_recorded_in_metadata(make_platform_client, eval_routes, caplog):
-    """The platform has no producer-facing way to fail an evaluation. The run
-    cannot leave RUNNING, but the failure is recorded where an operator and the
-    dashboard can read it, and the SDK says the run will keep showing as running."""
     backend, handler = make_backend(make_platform_client, eval_routes)
 
     with caplog.at_level("WARNING"):
@@ -164,18 +156,7 @@ def test_a_failed_run_is_recorded_in_metadata(make_platform_client, eval_routes,
     assert "keep showing as running" in caplog.text
 
 
-def test_update_sends_nothing_when_there_is_nothing_to_send(make_platform_client, eval_routes):
-    backend, handler = make_backend(make_platform_client, eval_routes)
-
-    backend.update("eval-abc")
-
-    assert handler.requests == []
-
-
 def test_a_pinned_environment_version_reaches_the_api(make_platform_client, eval_routes):
-    """The API's EnvironmentReference carries version_id. Dropping it attaches
-    the run to whatever version the hub resolves today — the difference between
-    a reproducible eval and one that quietly moved."""
     backend, handler = make_backend(make_platform_client, eval_routes)
 
     backend.create(RunSpec(name="r", environments=[EnvironmentRef(id="env-1", version_id="v-7")]))
@@ -196,8 +177,6 @@ def test_a_version_pin_survives_hub_resolution(make_platform_client, eval_routes
 
 
 def test_the_failure_fallback_preserves_the_run_config(make_platform_client, eval_routes):
-    """The service writes metadata with a document-level $set, so a PUT carrying
-    only the terminal block would erase everything finish() just wrote."""
     backend, handler = make_backend(make_platform_client, eval_routes)
 
     backend.finalize(

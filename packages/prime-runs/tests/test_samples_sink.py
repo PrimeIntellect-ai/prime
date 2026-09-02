@@ -26,7 +26,6 @@ def test_episodes_are_projected_and_posted(make_platform_client, eval_routes):
 
 
 def test_rollout_numbering_is_continuous_across_streamed_batches(make_platform_client, eval_routes):
-    """Streaming must produce the numbering the old one-shot upload produced."""
     sink, handler = make_sink(make_platform_client, eval_routes)
 
     sink.write([make_episode("ep-1", [make_trace(idx=0)])])
@@ -48,10 +47,6 @@ def test_a_producer_that_already_speaks_v0_is_passed_through(make_platform_clien
 def test_records_this_sink_cannot_project_are_skipped_not_fatal(
     make_platform_client, eval_routes, caplog
 ):
-    """A JSON episode or a bare trace has no v0 projection. Raising would have
-    the worker retire the sink for the run — outside the traces beta that is
-    an empty viewer — so the record is skipped, warned once, and counted,
-    while the episode object in the same batch is still stored."""
     sink, handler = make_sink(make_platform_client, eval_routes)
 
     with caplog.at_level("WARNING"):
@@ -86,7 +81,6 @@ def test_an_empty_batch_makes_no_request(make_platform_client, eval_routes):
 def test_a_rejected_sample_batch_does_not_abort_later_batches(
     make_platform_client, eval_routes, monkeypatch
 ):
-    """One bad request must not hide valid rows later in the same worker batch."""
     statuses = iter([200, 422, 200, 200])
 
     def respond(request):

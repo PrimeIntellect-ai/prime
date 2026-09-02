@@ -1,5 +1,5 @@
-"""Configuration: ``prime_traces.core.Config`` (``~/.prime/config.json`` plus
-environment variables, env taking precedence) with the dashboard URL added."""
+"""``prime_traces.core.Config`` (env vars, then ``~/.prime/config.json``) plus the
+dashboard URL."""
 
 import os
 
@@ -11,7 +11,6 @@ class Config(_TracesConfig):
 
     @property
     def frontend_url(self) -> str:
-        """Dashboard base URL; fallback when a create response omits ``viewer_url``."""
         env_val = os.getenv("PRIME_FRONTEND_URL")
         if env_val:
             return env_val.rstrip("/")

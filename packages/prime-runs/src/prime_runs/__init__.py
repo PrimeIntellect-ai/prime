@@ -1,20 +1,7 @@
-"""Prime Intellect Runs SDK.
+"""Prime Intellect Runs SDK: track eval and training runs on the Prime platform.
 
-Track eval and training runs on the Prime platform::
-
-    import prime_runs as pr
-
-    run = pr.init(name="gsm8k-qwen3-8b", environments=["gsm8k"], model=model)
-    print(run.url)
-
-    for episode in rollouts:              # stamp run.id onto the traces
-        run.log_traces([episode])
-
-    run.finish(summary=pr.metrics.from_episodes(episodes))
-
-This is a leaf package: the ``prime`` CLI depends on ``verifiers``, so verifiers
-can never depend on ``prime``. Nothing here imports a producer package; records
-are duck-typed through ``to_record()``.
+A leaf package: the ``prime`` CLI depends on ``verifiers`` and verifiers depends
+on this, so nothing here imports a producer package; records are duck-typed.
 """
 
 from . import metrics, projection

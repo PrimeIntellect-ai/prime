@@ -1,16 +1,11 @@
 """Background uploader: one daemon thread draining a bounded queue into sinks.
 
-Backpressure: the queue is bounded, so a producer that outruns the uploader
-blocks briefly and then drops (counted) rather than stalling the run.
-
-Fork safety: a forked child inherits the queue's memory but not the thread.
-The child starts over empty; the queued records belong to the parent.
-
-Containment: record-specific failures drop only their batch. A sink-wide
-failure disables the sink, while transient failures get a few consecutive
-strikes first — and, with a ``retire_cooldown``, the sink is tried again once
-the cooldown has passed, so an outage costs a long run a window of records
-rather than the rest of the run. The thread never dies on one bad batch.
+Backpressure: a producer that outruns the uploader blocks briefly, then drops
+(counted). Fork safety: a child starts over with an empty queue; the queued
+records belong to the parent. Containment: record-specific failures drop only
+their batch, transient failures get a few consecutive strikes before the sink
+is retired (for good, or until ``retire_cooldown`` has passed), and any other
+failure retires the sink at once. The thread never dies on one bad batch.
 """
 
 import logging
@@ -39,20 +34,16 @@ class _Flush:
     event: threading.Event = field(default_factory=threading.Event)
 
 
-#: "Nothing pulled ahead" — distinct from ``None``, which is the stop sentinel.
+#: "Nothing pulled ahead"; ``None`` is the stop sentinel.
 _NOTHING: Any = object()
 
 
-def _deadline(timeout: Optional[float]) -> Optional[float]:
-    if timeout is None:
-        return None
-    return time.monotonic() + max(0.0, timeout)
+def deadline_after(timeout: Optional[float]) -> Optional[float]:
+    return None if timeout is None else time.monotonic() + max(0.0, timeout)
 
 
-def _remaining(deadline: Optional[float]) -> Optional[float]:
-    if deadline is None:
-        return None
-    return max(0.0, deadline - time.monotonic())
+def time_left(deadline: Optional[float]) -> Optional[float]:
+    return None if deadline is None else max(0.0, deadline - time.monotonic())
 
 
 class UploadWorker:
@@ -80,27 +71,23 @@ class UploadWorker:
         self._lock = threading.Lock()
         #: Records never handed to any sink because the queue was full.
         self.dropped = 0
-        #: Records a particular sink could not store, by sink name. Kept apart
-        #: from ``dropped``: another sink may well have stored them.
+        #: Records a sink could not store, by sink name. Kept apart from
+        #: ``dropped``: another sink may well have stored them.
         self.failed_records: dict = {}
         self._transient_failures: dict = {}
-        #: Sinks this worker retired after a failure. Records that skip one of
-        #: these are lost to it and counted; a sink that switched itself off
-        #: without raising (nowhere for the records to go) is not in here.
+        #: Sinks retired by this worker. Records that skip one are counted as
+        #: lost to it; a sink that switched itself off quietly is not in here.
         self._retired: set = set()
         #: Sink name -> monotonic time at which a paused sink is tried again.
         self._cooldowns: dict = {}
         _fork.register(self)
-
-    # ----------------------------------------------------------------- thread
 
     def start(self) -> None:
         with self._lock:
             self._start_locked()
 
     def _start_locked(self) -> None:
-        """Start while ``_lock`` is held; a closed worker is one-shot."""
-        if self._stopping.is_set():
+        if self._stopping.is_set():  # a closed worker is one-shot
             return
         if self._thread is not None and self._thread.is_alive():
             return
@@ -109,9 +96,7 @@ class UploadWorker:
 
     def _run(self) -> None:
         # An item pulled off the queue while coalescing that could not join the
-        # batch (a control item — the stop sentinel is None, hence the marker —
-        # or records of the other kind); it is the next thing to process, ahead
-        # of anything queued after it.
+        # batch; it is processed next, ahead of anything queued after it.
         pending: Any = _NOTHING
         while True:
             item = pending if pending is not _NOTHING else self._queue.get()
@@ -131,21 +116,11 @@ class UploadWorker:
                 self._queue.task_done()
 
     def _coalesce(self, first: Sequence[Any]) -> "tuple[list, Any]":
-        """Merge everything already queued behind ``first`` into one batch.
-
-        A producer hands over one episode at a time as rollouts finish, and
-        each batch costs every sink a request: one ``POST /samples`` per
-        episode runs into the platform's per-minute limit on any fast eval,
-        and the retries then back the queue up until records are dropped.
-        Draining what has accumulated while the previous request was in
-        flight makes the request rate track upload latency instead of rollout
-        throughput. Sinks split a large batch by size themselves.
-
-        Stops at a control item (a flush barrier must not be reordered past
-        the records queued before it) and at a batch of the other record kind
-        (the traces sink infers the line format from the first record).
-        Returns the merged batch and the item that stopped it, if any.
-        """
+        """Merge everything already queued behind ``first`` into one batch, so
+        the request rate tracks upload latency rather than rollout throughput.
+        Stops at a control item (a flush barrier must not be reordered past the
+        records before it) and at a batch of the other record kind (the traces
+        sink infers the line format from the first record)."""
         batch = list(first)
         kind = is_episode(batch[0]) if batch else None
         while True:
@@ -178,7 +153,6 @@ class UploadWorker:
                 self._transient_failures.pop(sink.name, None)
 
     def _maybe_revive(self, sink: Sink) -> None:
-        """Re-enable a sink whose cooldown has passed. Its strikes start over."""
         until = self._cooldowns.get(sink.name)
         if until is None or time.monotonic() < until:
             return
@@ -198,13 +172,6 @@ class UploadWorker:
                 self._fail_sink(sink, exc)
 
     def _fail_sink(self, sink: Sink, exc: Exception, *, dropped: int = 0) -> None:
-        """Account for a failed operation and decide whether to retire its sink.
-
-        Record-specific failures drop only the current batch. Sink-wide
-        permanent failures retire immediately; transient failures retire after
-        ``TRANSIENT_FAILURE_LIMIT`` consecutive strikes — for good, or until
-        the worker's ``retire_cooldown`` has passed.
-        """
         name = sink.name
         if dropped:
             self.failed_records[name] = self.failed_records.get(name, 0) + dropped
@@ -271,18 +238,12 @@ class UploadWorker:
         except Exception:  # noqa: BLE001 - the handler is the caller's problem
             logger.debug("Error handler raised while reporting a sink failure", exc_info=True)
 
-    # ------------------------------------------------------------------ queue
-
     def submit(self, records: Sequence[Any]) -> bool:
-        """Hand a batch to the uploader. ``False`` means it was dropped: the
-        queue stayed full for the whole put timeout."""
-        # No sinks (a disabled run): there is nowhere for the records to go, so
-        # do not copy them into a queue or start a thread to find that out.
-        # Retired sinks are not the same case — their losses are counted.
-        if not self.sinks:
+        """Queue a batch. ``False`` means it was dropped: the queue stayed full
+        for the whole put timeout."""
+        if not self.sinks:  # a disabled run: nowhere for the records to go
             return True
-        # Serialize acceptance with close(): an accepted batch is queued before
-        # the stop sentinel, while a submission after close is refused.
+        # Serialize with close(): an accepted batch is queued before the stop sentinel.
         with self._lock:
             if self._stopping.is_set():
                 return False
@@ -307,16 +268,15 @@ class UploadWorker:
         if self._thread is None or not self._thread.is_alive():
             self._flush_sinks()
             return True
-        deadline = _deadline(timeout)
+        deadline = deadline_after(timeout)
         barrier = _Flush()
         try:
-            # The barrier gets the caller's drain budget, not the short
-            # producer put timeout: a full queue is when finish() most needs it.
-            self._queue.put(barrier, timeout=_remaining(deadline))
+            # The barrier gets the caller's drain budget, not the producer put timeout.
+            self._queue.put(barrier, timeout=time_left(deadline))
         except queue.Full:
             logger.warning("Could not enqueue a flush barrier before the drain timeout")
             return False
-        return barrier.event.wait(_remaining(deadline))
+        return barrier.event.wait(time_left(deadline))
 
     def close(self, timeout: Optional[float] = 30.0) -> None:
         """Drain, stop the thread, and close every sink."""
@@ -324,15 +284,14 @@ class UploadWorker:
             self._stopping.set()
             thread = self._thread
         if thread is not None and thread.is_alive():
-            deadline = _deadline(timeout)
+            deadline = deadline_after(timeout)
             try:
-                self._queue.put(None, timeout=_remaining(deadline))
+                self._queue.put(None, timeout=time_left(deadline))
             except queue.Full:
                 logger.warning("Upload queue remained saturated through the close timeout")
-            thread.join(_remaining(deadline))
+            thread.join(time_left(deadline))
             if thread.is_alive():
-                # Closing the sinks now would pull a client or file handle out
-                # from under a request still running on that thread.
+                # Closing the sinks now would pull a client out from under a request.
                 logger.warning(
                     "Uploader still running after %ss; leaving it and its sinks open. "
                     "Records still in flight may not finish before the process exits.",
@@ -346,10 +305,7 @@ class UploadWorker:
             except Exception as exc:  # noqa: BLE001 - teardown must not raise
                 logger.debug("Error closing sink %s: %s", sink.name, exc)
 
-    # ------------------------------------------------------------------- fork
-
     def reset_after_fork(self) -> None:
-        """Give the child a clean uploader; what was queued belongs to the parent."""
         self._queue = queue.Queue(maxsize=self.max_queue_size)
         self._thread = None
         self._stopping = threading.Event()

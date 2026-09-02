@@ -1,30 +1,21 @@
-"""Run-level aggregates over native episodes — the aggregation verifiers used,
-so migrated runs keep identical dashboard numbers. Opt-in: pass the result to
-``run.finish(summary=...)``. Duck-typed; no producer package is imported."""
+"""Run-level aggregates over native episodes, in the shape the eval dashboard
+reads; the aggregation verifiers used, so migrated runs keep their numbers.
+Pass the result to ``run.finish(summary=...)``."""
 
 from typing import Any, Dict, Optional, Sequence, TypedDict
 
 
 class RunSummary(TypedDict):
-    """The run-level aggregates the eval dashboard reads. A summary may carry
-    more than this — ``finish(summary=...)`` stores whatever it is given — but
-    these three are what the dashboard renders."""
-
     avg_reward: float
     avg_metrics: Dict[str, float]
     avg_error: float
 
 
 def from_episodes(episodes: Sequence[Any], traces: Optional[Sequence[Any]] = None) -> RunSummary:
-    """Run-level aggregates in the shape the eval dashboard reads.
-
-    Rewards and metrics aggregate over the trainable traces only — fixed agents
-    (a judge, a modeled user) often carry no rewards and would dilute every mean
-    with structural zeros — falling back to all traces when none are trainable,
-    the same rule the dashboard applies. ``avg_error`` is the share of EPISODES
-    that aren't ok: a hook failure counts even when its traces are clean or it
-    left none behind.
-    """
+    """Rewards and metrics aggregate over the trainable traces only (a judge or
+    a modeled user would dilute every mean with structural zeros), falling back
+    to all traces when none are trainable, as the dashboard does. ``avg_error``
+    is the share of episodes that are not ok."""
     if traces is None:
         traces = [trace for episode in episodes for trace in episode.traces]
     scored = [trace for trace in traces if trace.agent.trainable] or list(traces)

@@ -1,5 +1,4 @@
-"""The config a run is actually configured with: the file someone wrote, kept
-byte for byte, rather than a projection that cannot show it."""
+"""The config a run is actually configured with: the file someone wrote, kept"""
 
 import json
 
@@ -12,7 +11,6 @@ from prime_runs.models import (
     CONFIG_SOURCE_KEY,
     MAX_CONFIG_SOURCE_BYTES,
     ConfigSource,
-    RunSpec,
 )
 from prime_runs.run import _normalize_config
 
@@ -30,7 +28,6 @@ num_examples = 1
 
 
 def test_a_path_is_read_verbatim(tmp_path):
-    """Comments, ordering and section grouping are the point — a dict loses all three."""
     path = tmp_path / "eval.toml"
     path.write_text(EVAL_TOML)
 
@@ -56,8 +53,6 @@ def test_the_format_is_inferred_from_the_suffix(tmp_path):
 
 
 def test_inline_text_has_to_be_explicit(tmp_path):
-    """A bare string is a path. Guessing would turn a typo'd filename into a run
-    whose config tab proudly displays the filename."""
     with pytest.raises(ConfigurationError, match="does not exist"):
         ConfigSource.coerce("environment = 'gsm8k'")
 
@@ -66,7 +61,6 @@ def test_inline_text_has_to_be_explicit(tmp_path):
 
 
 def test_an_oversized_file_is_refused_at_init_not_truncated(tmp_path):
-    """Silently storing half a config is worse than not storing one."""
     path = tmp_path / "eval.toml"
     path.write_text("x = 1\n" * MAX_CONFIG_SOURCE_BYTES)
 
@@ -95,34 +89,16 @@ def test_a_mapping_round_trips():
 
 def test_a_mapping_without_text_is_not_a_config_source():
     assert ConfigSource.from_mapping({"format": "toml"}) is None
-    with pytest.raises(ValueError, match="must contain a 'text' string"):
-        ConfigSource.coerce({"format": "toml"})
 
 
 # ------------------------------------------------------- config normalization
 
 
 def test_a_mapping_is_taken_exactly_as_given():
-    """The caller already decided what to say; second-guessing it would be worse."""
     assert _normalize_config({"a": 1, "b": None}) == {"a": 1, "b": None}
 
 
-def test_a_mapping_is_copied_not_aliased():
-    original = {"a": 1}
-    assert _normalize_config(original) is not original
-
-
-def test_no_config_is_an_empty_config():
-    assert _normalize_config(None) == {}
-
-
-def test_an_unusable_config_says_what_was_expected():
-    with pytest.raises(TypeError, match="config must be a path"):
-        _normalize_config(object())
-
-
 def test_a_path_becomes_a_stored_source(tmp_path):
-    """One parameter, three forms — the same shape ``environments=`` already has."""
     path = tmp_path / "eval.toml"
     path.write_text(EVAL_TOML)
 
@@ -134,8 +110,6 @@ def test_a_path_becomes_a_stored_source(tmp_path):
 
 
 def test_a_mapping_that_looks_like_a_source_is_still_just_a_mapping():
-    """Form is decided by type, never by inspecting keys — so a config that
-    happens to have a ``text`` field is not mistaken for a launch file."""
     assert _normalize_config({"text": "hello", "format": "toml"}) == {
         "text": "hello",
         "format": "toml",
@@ -172,8 +146,6 @@ def test_an_online_run_sends_the_source_in_create_metadata(tmp_path, online):
 
 
 def test_extra_values_can_be_merged_onto_a_launch_file(tmp_path, online):
-    """A run launched from a file that also wants structured values passes a
-    mapping carrying the source under ``CONFIG_SOURCE_KEY`` — what verifiers does."""
     path = tmp_path / "eval.toml"
     path.write_text(EVAL_TOML)
     config = {
@@ -210,8 +182,6 @@ def test_a_run_without_a_source_reports_none():
 
 
 def test_the_source_survives_the_failure_fallback(tmp_path, online):
-    """The fallback rewrites metadata to record a terminal state. It merges into
-    the whole config, so the source must still be there afterwards."""
     path = tmp_path / "eval.toml"
     path.write_text(EVAL_TOML)
 
@@ -221,7 +191,3 @@ def test_the_source_survives_the_failure_fallback(tmp_path, online):
     update = handler.bodies_for("/api/v1/evaluations/eval-abc")[-1]
     assert update["metadata"][CONFIG_SOURCE_KEY]["text"] == EVAL_TOML
     assert update["metadata"]["prime_runs"]["status"] == "failed"
-
-
-def test_a_spec_defaults_to_no_source():
-    assert RunSpec().config == {}

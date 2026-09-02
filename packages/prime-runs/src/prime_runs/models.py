@@ -1,8 +1,5 @@
-"""Types shared across backends, sinks and the ``Run`` handle.
-
-Response bodies are deliberately not modeled: backends pull the two or three
-fields they need and hand back a ``RunHandle``.
-"""
+"""Types shared across backends, sinks and the ``Run`` handle. Response bodies
+are not modeled: backends pull the fields they need into a ``RunHandle``."""
 
 import os
 from dataclasses import dataclass, field
@@ -13,29 +10,19 @@ from typing import Any, Dict, List, Literal, Mapping, Optional, Union
 from .exceptions import ConfigurationError
 
 Mode = Literal["online", "disabled"]
-"""``online`` talks to the platform; ``disabled`` makes every call a no-op with
-the same object shape."""
-
 OnError = Literal["warn", "raise"]
 
 RunKind = Literal["eval", "train"]
-"""What a run is: a standalone evaluation (``/api/v1/evaluations``) or an
-external training run (``/api/v1/rft/external-runs``). Stamped as ``run.type``
-on records and sent as upload provenance — the traces service's vocabulary,
-which is also what verifiers' ``EvalRunInfo`` / ``TrainRunInfo`` carry."""
+"""Stamped as ``run.type`` on records and sent as upload provenance; the traces
+service's vocabulary, matching verifiers' ``EvalRunInfo`` / ``TrainRunInfo``."""
 
 RUN_KIND: RunKind = "eval"
-"""The default kind."""
 
 
 class RunStatus(str, Enum):
-    """Terminal state a producer can report.
-
-    ``failed`` means the producer said the run failed; ``cancelled`` means
-    somebody stopped it on purpose (Ctrl-C, a cancelled task) — a decision,
-    not a fault; ``crashed`` means the process exited without saying (only the
-    SDK's atexit hook reports it).
-    """
+    """``failed``: the producer said so. ``cancelled``: stopped on purpose (an
+    interrupt). ``crashed``: the process exited without saying (only the
+    atexit hook reports it)."""
 
     RUNNING = "running"
     COMPLETED = "completed"
@@ -49,11 +36,8 @@ class RunStatus(str, Enum):
 
 @dataclass
 class EnvironmentRef:
-    """An environment as a producer names it, before hub resolution.
-
-    ``id`` short-circuits resolution; ``name`` goes through the hub's
-    get-or-create; ``slug`` looks up a published ``owner/name`` environment.
-    """
+    """``id`` short-circuits resolution; ``name`` goes through the hub's
+    get-or-create; ``slug`` looks up a published ``owner/name`` environment."""
 
     name: Optional[str] = None
     id: Optional[str] = None
@@ -88,29 +72,17 @@ class EnvironmentRef:
 
 
 CONFIG_SOURCE_KEY = "config_source"
-"""Where a config file lands inside a run's config, as a :class:`ConfigSource`
-dict. Present means "render this verbatim"; absent means "render the structure"."""
+"""Where a config file lands inside a run's config, as a ``ConfigSource`` dict."""
 
 MAX_CONFIG_SOURCE_BYTES = 256 * 1024
-"""A hand-written run config is kilobytes; anything past this is refused at
-``init()`` rather than truncated."""
 
-_CONFIG_SOURCE_FORMATS = {
-    ".toml": "toml",
-    ".json": "json",
-    ".yaml": "yaml",
-    ".yml": "yaml",
-}
+_CONFIG_SOURCE_FORMATS = {".toml": "toml", ".json": "json", ".yaml": "yaml", ".yml": "yaml"}
 
 
 @dataclass
 class ConfigSource:
-    """The config file a run was started from, kept byte-for-byte.
-
-    That file *is* the run's configuration — comments, key order and section
-    grouping included — where a resolved model dump is a different artifact.
-    Nothing here is redacted: keep credentials in the environment, not the file.
-    """
+    """The config file a run was started from, kept byte for byte. Nothing is
+    redacted: keep credentials in the environment, not the file."""
 
     text: str
     format: str = "toml"
@@ -124,7 +96,7 @@ class ConfigSource:
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> Optional["ConfigSource"]:
-        """Rebuild from stored metadata. ``None`` if the mapping is not one of ours."""
+        """Rebuild from stored metadata; ``None`` if the mapping is not one of ours."""
         text = value.get("text")
         if not isinstance(text, str):
             return None
@@ -138,7 +110,6 @@ class ConfigSource:
 
     @classmethod
     def from_file(cls, path: Union[str, "os.PathLike[str]"]) -> "ConfigSource":
-        """Read a config file, inferring its format from the suffix."""
         resolved = Path(path)
         try:
             raw = resolved.read_bytes()
@@ -168,23 +139,13 @@ class ConfigSource:
 
     @classmethod
     def coerce(cls, value: Any) -> Optional["ConfigSource"]:
-        """Normalize the config-file form of ``init(config=...)``.
-
-        A ``str`` or ``PathLike`` is a *path*, never inline text; inline text
-        goes through ``ConfigSource(text=...)`` explicitly.
-        """
+        """A ``str`` or ``PathLike`` is a *path*, never inline text."""
         if value is None or isinstance(value, cls):
             return value
-        if isinstance(value, Mapping):
-            source = cls.from_mapping(value)
-            if source is None:
-                raise ValueError("a config-source mapping must contain a 'text' string")
-            return source
         if isinstance(value, (str, os.PathLike)):
             return cls.from_file(value)
         raise TypeError(
-            "a config source must be a path, a ConfigSource or a mapping, "
-            f"got {type(value).__name__}"
+            f"a config source must be a path or a ConfigSource, got {type(value).__name__}"
         )
 
     def __post_init__(self) -> None:
@@ -199,10 +160,8 @@ class ConfigSource:
 
 @dataclass
 class TrainingSpec:
-    """What a training run is registered with, beyond what every run has
-    (``model`` is the base model, ``environments`` the training environments,
-    ``config`` the run config). All of it is for display on the dashboard.
-    ``max_steps`` is required by the platform; ``0`` means unknown."""
+    """Display fields a training run is registered with. ``max_steps`` is
+    required by the platform; ``0`` means unknown."""
 
     max_steps: int = 0
     batch_size: Optional[int] = None
@@ -219,9 +178,7 @@ class TrainingSpec:
 
 @dataclass
 class RunSpec:
-    """Everything a backend needs to open a run: ``init()``'s arguments after
-    normalization. ``config`` is the run's inputs; outputs accumulate on the
-    handle as ``summary``."""
+    """``init()``'s arguments after normalization."""
 
     name: Optional[str] = None
     environments: List[EnvironmentRef] = field(default_factory=list)
@@ -237,8 +194,6 @@ class RunSpec:
 
 @dataclass
 class RunHandle:
-    """What a backend returns once the run exists on the other side."""
-
     id: str
     name: Optional[str] = None
     url: Optional[str] = None

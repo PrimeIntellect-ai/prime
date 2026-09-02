@@ -78,6 +78,10 @@ def test_known_secrets_sources(monkeypatch, tmp_path):
     monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/ssh-agent/agent.123")  # about auth, not auth
     monkeypatch.setenv("AUTH_TYPE", "oauth2_pkce")
     monkeypatch.setenv("BASIC_AUTH", "basic-auth-0001")  # is the credential
+    monkeypatch.setenv("AUTHORIZATION_URL", "https://idp.example/authorize")  # metadata
+    monkeypatch.setenv("COOKIE_DOMAIN", "cookies.example.com")
+    monkeypatch.setenv("TLS_KEY_FILE", "/etc/tls/server.key")
+    monkeypatch.setenv("API_KEY_2", "numbered-key-0002")  # a numbered credential still counts
     monkeypatch.setenv(  # a JSON-valued variable is a mapping too
         "DOCKER_AUTH_CONFIG",
         json.dumps(
@@ -116,6 +120,7 @@ def test_known_secrets_sources(monkeypatch, tmp_path):
         "sas-sig-000001",  # a signed URL's signature is its bearer credential
         "ghp_pat_000000000001",
         "basic-auth-0001",
+        "numbered-key-0002",
         "dXNlcjpwYXNzd29yZA==",  # Docker's registry auth, inside a JSON-valued variable
         "j" * 400,  # longer than a filesystem name: a literal, not a file to probe
     } <= found
@@ -135,6 +140,9 @@ def test_known_secrets_sources(monkeypatch, tmp_path):
             "/tmp/ssh-agent/agent.123",
             "oauth2_pkce",
             "a@b.example",
+            "https://idp.example/authorize",
+            "cookies.example.com",
+            "/etc/tls/server.key",
         }
         & found
     )

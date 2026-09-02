@@ -36,7 +36,7 @@ def test_redactor_replaces_every_spelling_inside_strings_only():
         assert redactor.count == 8
 
 
-@pytest.mark.parametrize("value", ["REDACTED", "]bar", "foo[", "ED]tail"])
+@pytest.mark.parametrize("value", ["REDACTED", "]bar", "foo[", "ED]tail", "foo[REDACTED]bar"])
 def test_known_secrets_refuses_values_that_overlap_the_marker(value):
     with pytest.raises(ValueError, match="REDACTED"):
         known_secrets(secret_args=[value])

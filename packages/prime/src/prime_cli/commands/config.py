@@ -67,10 +67,10 @@ def view() -> None:
             team_label = f"{team_id} (from env var)"
         else:
             team_name = settings.get("team_name")
-            team_label = f"{escape(team_name)} ({team_id})" if team_name else team_id
+            team_label = f"{team_name} ({team_id})" if team_name else team_id
     else:
         team_label = "Personal Account"
-    table.add_row("Team", team_label)
+    table.add_row("Team", Text(team_label))
 
     # Show User
     user_id = settings.get("user_id")
@@ -79,10 +79,10 @@ def view() -> None:
             user_label = f"{user_id} (from env var)"
         else:
             user_name = settings.get("user_name")
-            user_label = f"{escape(user_name)} ({user_id})" if user_name else user_id
+            user_label = f"{user_name} ({user_id})" if user_name else user_id
     else:
         user_label = "Not set"
-    table.add_row("User", user_label)
+    table.add_row("User", Text(user_label))
 
     # Show base URL
     base_label = settings["base_url"]

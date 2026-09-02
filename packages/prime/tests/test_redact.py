@@ -56,6 +56,8 @@ def test_known_secrets_sources(monkeypatch, tmp_path):
     monkeypatch.setenv("KEYCLOAK_REALM", "production-realm")  # KEYCLOAK is not KEY
     monkeypatch.setenv("COOKIECUTTER_CONFIG", "/home/user/config")  # nor COOKIE
     monkeypatch.setenv("OPENAI_APIKEY", "apikey-nosep-0001")  # but APIKEY is a key
+    monkeypatch.setenv("PGPASSWORD", "pg-pass-000001")  # and PGPASSWORD a password
+    monkeypatch.setenv("PGPASSFILE", "/home/user/.pgpass")  # a path, not a password
     monkeypatch.setenv("DATABASE_URL", "postgres://app:db-pass-000001@db/x")  # URL password
     monkeypatch.setenv("GIT_REMOTE", "https://ghp_token_000000001@github.com/o/r")  # bare token
     monkeypatch.setenv("PG_URL", "postgres://app:p%40ss-000001@db")  # percent-encoded password
@@ -80,6 +82,7 @@ def test_known_secrets_sources(monkeypatch, tmp_path):
         "p%40ss-000001",
         "p@ss-000001",
         "apikey-nosep-0001",
+        "pg-pass-000001",
         "j" * 400,  # longer than a filesystem name: a literal, not a file to probe
     } <= found
     assert (
@@ -91,6 +94,7 @@ def test_known_secrets_sources(monkeypatch, tmp_path):
             "readonly_user",
             "production-realm",
             "/home/user/config",
+            "/home/user/.pgpass",
         }
         & found
     )

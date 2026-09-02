@@ -15,7 +15,6 @@ uv add 'prime-runs[train]'   # training runs: adds pyarrow for the sample table
 
 ```python
 import prime_runs as pr
-from verifiers.v1 import EvalRunInfo
 
 run = pr.init(
     name="gsm8k-qwen3-8b",
@@ -27,16 +26,18 @@ run = pr.init(
 print(run.url)                   # https://app.primeintellect.ai/dashboard/evaluations/...
 
 for episode in rollouts:
-    episode.record_run(EvalRunInfo(id=run.id))   # every trace carries the run id
-    run.log_episodes([episode])                  # a queue put; bare traces: log_traces()
+    run.log_episodes([episode])  # a queue put; bare traces: log_traces()
 
 run.finish(summary=pr.metrics.from_episodes(episodes))
 ```
 
-`init()` is called before the first rollout, and the id it returns is the run
-id everywhere, including inside every trace document. A `with run:` block
-finishes for you: an exception marks the run `failed`, Ctrl-C `cancelled`, and
-a process that exits without finishing is reported `crashed` by an atexit hook.
+`init()` is called before the first rollout. Every record the run uploads is
+keyed to it: the SDK sets `run.id` and `run.type` on the uploaded copy of each
+trace and episode, over whatever run id the producer recorded locally, and
+keeps the rest of that block (`name`, `work`). A producer never needs to know
+the platform's id; `run.url` is the handle. A `with run:` block finishes for
+you: an exception marks the run `failed`, Ctrl-C `cancelled`, and a process
+that exits without finishing is reported `crashed` by an atexit hook.
 
 `config=` takes the path to the launched file (kept verbatim under
 `config_source`, comments and all) or a mapping stored as given; put a file

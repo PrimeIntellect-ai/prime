@@ -69,13 +69,30 @@ def test_a_bare_mapping_gets_the_run_stamped_onto_a_copy():
     assert original == {"id": "t1"}, "the caller's dict was not mutated"
 
 
-def test_a_record_that_names_its_run_keeps_it():
+def test_a_record_that_names_its_own_run_is_rekeyed_to_this_one():
     client = FakeTracesClient()
     sink = make_sink(client)
+    original = {"id": "t1", "run": {"id": "theirs", "type": "train", "name": "local"}}
 
-    sink.write([{"id": "t1", "run": {"id": "theirs", "type": "eval"}}])
+    sink.write([original])
 
-    assert client.calls[0][0][0]["run"] == {"id": "theirs", "type": "eval"}
+    assert client.calls[0][0][0]["run"] == {"id": "run-1", "type": "eval", "name": "local"}
+    assert original["run"] == {"id": "theirs", "type": "train", "name": "local"}, "not mutated"
+
+
+def test_a_training_episode_keeps_its_dispatch_step_while_being_rekeyed():
+    """prime-rl stamps ``TrainRunInfo(id=$PRL_RUN_ID, work=...)`` on every
+    dispatched episode; the platform's id replaces the launcher's, the work
+    (the dispatch step) stays."""
+    client = FakeTracesClient()
+    sink = TracesSink(client=client)
+    sink.start("run-1", {"run_type": "train"})
+    work = {"type": "train", "step": 10}
+    episode = {"id": "ep-1", "run": {"id": "prl-run", "type": "train", "work": work}, "traces": []}
+
+    sink.write([episode])
+
+    assert client.calls[0][0][0]["run"] == {"id": "run-1", "type": "train", "work": work}
 
 
 def test_an_episode_s_run_reaches_every_member_trace():
@@ -91,22 +108,24 @@ def test_an_episode_s_run_reaches_every_member_trace():
     assert [member["id"] for member in sent["traces"]] == ["a", "b"]
 
 
-def test_a_member_that_names_its_own_run_is_left_alone():
+def test_every_member_trace_is_rekeyed_too():
     client = FakeTracesClient()
     sink = make_sink(client)
-    theirs = {"id": "other-run", "type": "eval"}
+    theirs = {"id": "other-run", "type": "eval", "name": "other"}
     episode = {
         "id": "ep-1",
-        "run": {"id": "env-run", "type": "eval"},
+        "run": {"id": "env-run", "type": "eval", "name": "local"},
         "traces": [{"id": "a"}, {"id": "b", "run": theirs}],
     }
 
     sink.write([episode])
 
-    members = client.calls[0][0][0]["traces"]
-    assert members[0]["run"] == {"id": "env-run", "type": "eval"}
-    assert members[1]["run"] == theirs
+    sent = client.calls[0][0][0]
+    assert sent["run"] == {"id": "run-1", "type": "eval", "name": "local"}
+    assert sent["traces"][0]["run"] == sent["run"]
+    assert sent["traces"][1]["run"] == {"id": "run-1", "type": "eval", "name": "other"}
     assert episode["traces"][0] == {"id": "a"}, "the caller's members were not mutated"
+    assert theirs == {"id": "other-run", "type": "eval", "name": "other"}
 
 
 def test_an_account_outside_the_beta_retires_the_sink_without_a_failure(caplog):

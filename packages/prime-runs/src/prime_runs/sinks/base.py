@@ -81,20 +81,27 @@ def is_episode(record: Any) -> bool:
 
 
 def stamp_run(mapping: Mapping[str, Any], run_id: str, run_type: str = RUN_KIND) -> Dict[str, Any]:
-    """A copy of ``mapping`` with ``run`` on the envelope and on every member
-    trace that lacks one. A record that already names a run keeps it. Members
-    matter because the traces service reads ``run_id`` from ``trace.run.id``
-    only, while verifiers records the run on the episode."""
+    """A copy of ``mapping`` keyed to this run: ``run.id`` and ``run.type`` are
+    set on the envelope and on every member trace, over whatever run the
+    producer recorded there (its own local id), and the rest of that block
+    (``name``, ``work``) is kept. Members matter because the traces service
+    reads ``run_id`` from ``trace.run.id`` only, while verifiers records the
+    run on the episode."""
     stamped = dict(mapping)
-    if not stamped.get("run"):
-        stamped["run"] = {"id": run_id, "type": run_type}
+    stamped["run"] = _rekey(stamped.get("run"), run_id, run_type)
     members = stamped.get("traces")
     if isinstance(members, list):
-        run = stamped["run"]
         stamped["traces"] = [
-            {**member, "run": run}
-            if isinstance(member, Mapping) and not member.get("run")
+            {**member, "run": _rekey(member.get("run") or stamped["run"], run_id, run_type)}
+            if isinstance(member, Mapping)
             else member
             for member in members
         ]
     return stamped
+
+
+def _rekey(run: Any, run_id: str, run_type: str) -> Dict[str, Any]:
+    keyed = dict(run) if isinstance(run, Mapping) else {}
+    keyed["id"] = run_id
+    keyed["type"] = run_type
+    return keyed

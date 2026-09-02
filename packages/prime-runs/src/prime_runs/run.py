@@ -1,7 +1,7 @@
 """The run handle, and ``init()`` that opens one.
 
-``init()`` is called before the first rollout; the id it returns is the run id
-everywhere, including inside every trace document the producer writes.
+``init()`` is called before the first rollout; the id it returns keys every
+record the run uploads, whatever run id the producer recorded locally.
 """
 
 import asyncio

@@ -126,7 +126,7 @@ def upload_traces(
         receipts = client.upload_lines(
             (redactor.json(line.decode()).encode() for line in read_jsonl_lines(file)),
             line_format=line_format,
-            context=_parse_context(context),
+            context=redactor.value(_parse_context(context)),
             compress=not no_compress,
             on_batch=on_batch,
         )

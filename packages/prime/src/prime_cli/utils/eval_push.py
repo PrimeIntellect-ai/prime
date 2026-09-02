@@ -189,7 +189,9 @@ def push_eval_results_to_hub(
         }
         for sample in results_samples
     ]
-    eval_metadata, converted_results = redactor.value([eval_metadata, converted_results])
+    eval_metadata, metrics, converted_results = redactor.value(
+        [eval_metadata, metrics, converted_results]
+    )
     if redactor.count:
         console.print(
             f"[yellow]Redacted {redactor.count} occurrence(s) of known secrets; "
@@ -206,7 +208,7 @@ def push_eval_results_to_hub(
         model_name=model,
         dataset=env_name,
         framework="verifiers",
-        task_type=metadata.get("task_type"),
+        task_type=eval_metadata.get("task_type"),
         metadata=eval_metadata,
         metrics=metrics,
         is_public=False,  # Private by default - only visible to the user who created it

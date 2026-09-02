@@ -397,13 +397,16 @@ def test_upload_command_redacts_known_secrets(fake_client, tmp_path, monkeypatch
             str(secrets_file),
             "--secret",
             "12345678",
+            "-c",
+            "note=literal-secret-0001",
             "-o",
             "json",
         ],
     )
 
     assert result.exit_code == 0, result.output
-    assert json.loads(result.output)["redacted"] == 5
+    assert json.loads(result.output)["redacted"] == 6
+    assert fake_client.calls["upload_lines"]["context"] == {"note": "[REDACTED]"}
     assert fake_client.calls["upload_lines"]["lines"] == (
         b'{"id":"a","messages":[{"content":"[REDACTED] [REDACTED] [REDACTED] [REDACTED] '
         b'{\\"k\\": \\"[REDACTED]\\"} plain"}],"n":12345678}\n'

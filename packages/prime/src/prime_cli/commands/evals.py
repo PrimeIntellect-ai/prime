@@ -1062,7 +1062,11 @@ def _push_single_eval(
     path = _validate_eval_path(config_path)
     api_client = APIClient()
     redactor = Redactor(known_secrets(api_client.api_key, secret_args=secrets))
-    eval_data, name = redactor.value([_load_eval_directory(path), name])
+    # Everything from here on is what the platform receives: redact it all up front. A
+    # secret inside an identifier makes the request fail rather than leak it.
+    eval_data, env_slug, run_id, eval_id, name = redactor.value(
+        [_load_eval_directory(path), env_slug, run_id, eval_id, name]
+    )
     eval_name = name or eval_data["eval_name"]
     console.print(f"[blue]✓ Loaded eval data:[/blue] {path}")
     if redactor.count:

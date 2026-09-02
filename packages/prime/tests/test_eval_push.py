@@ -369,9 +369,15 @@ class TestPushSingleEval:
         monkeypatch.setattr("prime_cli.commands.evals.EvalsClient", DummyEvalsClient)
 
         _push_single_eval(
-            str(tmp_path), None, None, None, name="run literal-0001", secrets=["literal-0001"]
+            str(tmp_path),
+            None,
+            "run-literal-0001",
+            None,
+            name="run literal-0001",
+            secrets=["literal-0001"],
         )
 
+        assert captured["run_id"] == "run-[REDACTED]"
         assert captured["name"] == "run [REDACTED]"
         assert captured["metadata"]["note"] == "[REDACTED]"
         assert captured["samples"][0]["completion"] == "[REDACTED] [REDACTED] [REDACTED] keep"

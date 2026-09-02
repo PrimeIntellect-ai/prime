@@ -160,6 +160,18 @@ def push_eval_results_to_hub(
 
     api_client = APIClient()
     redactor = Redactor(known_secrets(api_client.api_key))
+    # Everything from here on is what the platform receives: redact it all up front. A
+    # secret inside an identifier makes the request fail rather than leak it.
+    env_name, model, job_id, resolved_env_slug, resolved_env_id, metadata, results_samples = (
+        redactor.value(
+            [env_name, model, job_id, resolved_env_slug, resolved_env_id, metadata, results_samples]
+        )
+    )
+    if redactor.count:
+        console.print(
+            f"[yellow]Redacted {redactor.count} occurrence(s) of known secrets; "
+            "local files are unchanged[/yellow]"
+        )
 
     if resolved_env_id:
         environments = [{"id": resolved_env_id}]
@@ -189,14 +201,6 @@ def push_eval_results_to_hub(
         }
         for sample in results_samples
     ]
-    eval_metadata, metrics, converted_results = redactor.value(
-        [eval_metadata, metrics, converted_results]
-    )
-    if redactor.count:
-        console.print(
-            f"[yellow]Redacted {redactor.count} occurrence(s) of known secrets; "
-            "local files are unchanged[/yellow]"
-        )
 
     eval_name = f"{env_name}--{model}--{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
@@ -208,7 +212,7 @@ def push_eval_results_to_hub(
         model_name=model,
         dataset=env_name,
         framework="verifiers",
-        task_type=eval_metadata.get("task_type"),
+        task_type=metadata.get("task_type"),
         metadata=eval_metadata,
         metrics=metrics,
         is_public=False,  # Private by default - only visible to the user who created it

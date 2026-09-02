@@ -4,6 +4,7 @@ and uppercase-hex escapes other encoders emit) and nothing else changes."""
 
 import json
 
+import pytest
 from prime_cli.utils.redact import Redactor, known_secrets
 
 
@@ -33,6 +34,11 @@ def test_redactor_replaces_every_spelling_inside_strings_only():
             "keep": "ordinary text",
         }
         assert redactor.count == 8
+
+
+def test_known_secrets_refuses_values_the_marker_would_keep():
+    with pytest.raises(ValueError, match="REDACTED"):
+        known_secrets(secret_args=["REDACTED"])
 
 
 def test_redactor_without_secrets_leaves_text_untouched():

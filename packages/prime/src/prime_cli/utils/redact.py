@@ -63,21 +63,22 @@ def known_secrets(*values: Optional[str], secret_args: Iterable[str] = ()) -> se
     `--secret` arguments (a literal, or the path of a file with one secret per line).
     Environment values shorter than `MIN_SECRET_LENGTH` are dropped — redacting them
     would rewrite ordinary text; explicit values are taken as given."""
-    secrets = {
+    discovered = {
         credential
         for credential in env_credentials(os.environ)
         if len(credential) >= MIN_SECRET_LENGTH
     }
-    secrets.update(value for value in values if value)
+    discovered.update(value for value in values if value)
+    explicit: set[str] = set()
     for arg in secret_args:
-        # `os.path.isfile` is False for anything that cannot be a path, a long literal included.
         # Taken as given: only a file entry's line terminator goes.
-        secrets.update(Path(arg).read_text().splitlines() if os.path.isfile(arg) else [arg])
-    secrets.discard("")
-    # No fixed marker can hide a value it contains; refuse rather than upload it.
-    if inside_marker := sorted(secret for secret in secrets if secret in REDACTED):
+        explicit.update(Path(arg).read_text().splitlines() if os.path.isfile(arg) else [arg])
+    explicit.discard("")
+    # No fixed marker can hide a value it contains. A discovered one is a sanitized
+    # placeholder (`API_TOKEN=REDACTED`) and is skipped; a requested one is refused.
+    if inside_marker := sorted(secret for secret in explicit if secret in REDACTED):
         raise ValueError(f"cannot redact {inside_marker}: part of the {REDACTED} marker")
-    return secrets
+    return {secret for secret in discovered if secret not in REDACTED} | explicit
 
 
 class Redactor:

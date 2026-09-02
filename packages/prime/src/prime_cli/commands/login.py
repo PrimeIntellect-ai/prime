@@ -219,7 +219,7 @@ def login(
                             if isinstance(data, dict):
                                 user_id = data.get("id")
                                 if user_id:
-                                    config.set_user_id(user_id)
+                                    config.set_user_id(user_id, user_name=data.get("name"))
                                     config.update_current_environment_file()
                         except (APIError, Exception):
                             console.print("[yellow]Logged in, but failed to fetch user id[/yellow]")

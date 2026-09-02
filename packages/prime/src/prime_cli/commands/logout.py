@@ -38,6 +38,7 @@ def _clear_env_file(config: Config) -> None:
                 "team_name": raw.get("team_name"),
                 "team_role": raw.get("team_role"),
                 "user_id": raw.get("user_id"),
+                "user_name": raw.get("user_name"),
                 "base_url": raw.get("base_url", Config.DEFAULT_BASE_URL),
                 "frontend_url": raw.get("frontend_url", Config.DEFAULT_FRONTEND_URL),
                 "inference_url": raw.get("inference_url", Config.DEFAULT_INFERENCE_URL),

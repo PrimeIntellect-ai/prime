@@ -72,12 +72,17 @@ def view() -> None:
         team_label = "Personal Account"
     table.add_row("Team", team_label)
 
-    # Show User ID
+    # Show User
     user_id = settings.get("user_id")
-    user_label = user_id or "Not set"
-    if user_id and _env_set("PRIME_USER_ID"):
-        user_label += " (from env var)"
-    table.add_row("User ID", user_label)
+    if user_id:
+        if _env_set("PRIME_USER_ID"):
+            user_label = f"{user_id} (from env var)"
+        else:
+            user_name = settings.get("user_name")
+            user_label = f"{user_name} ({user_id})" if user_name else user_id
+    else:
+        user_label = "Not set"
+    table.add_row("User", user_label)
 
     # Show base URL
     base_label = settings["base_url"]
@@ -149,7 +154,7 @@ def set_api_key(
             if isinstance(data, dict):
                 user_id = data.get("id")
                 if user_id:
-                    config.set_user_id(user_id)
+                    config.set_user_id(user_id, user_name=data.get("name"))
                     config.update_current_environment_file()
         except (APIError, Exception):
             pass

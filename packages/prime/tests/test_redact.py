@@ -75,6 +75,9 @@ def test_known_secrets_sources(monkeypatch, tmp_path):
     monkeypatch.setenv("SAS_URL", "https://a.blob.core.windows.net/c?sv=2020&sig=sas-sig-000001")
     monkeypatch.setenv("GITHUB_PAT", "ghp_pat_000000000001")  # PAT is a credential word
     monkeypatch.setenv("PYTHONPATH", "/opt/keep/this/path")  # PATH is not
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/ssh-agent/agent.123")  # about auth, not auth
+    monkeypatch.setenv("AUTH_TYPE", "oauth2_pkce")
+    monkeypatch.setenv("BASIC_AUTH", "basic-auth-0001")  # is the credential
     monkeypatch.setenv("DATABASE_URL", "postgres://app:db-pass-000001@db/x")  # URL password
     monkeypatch.setenv("GIT_REMOTE", "https://ghp_token_000000001@github.com/o/r")  # bare token
     monkeypatch.setenv("PG_URL", "postgres://app:p%40ss-000001@db")  # percent-encoded password
@@ -106,6 +109,7 @@ def test_known_secrets_sources(monkeypatch, tmp_path):
         "plus sep 0001",  # as a form-decoding client uses it
         "sas-sig-000001",  # a signed URL's signature is its bearer credential
         "ghp_pat_000000000001",
+        "basic-auth-0001",
         "j" * 400,  # longer than a filesystem name: a literal, not a file to probe
     } <= found
     assert (
@@ -121,6 +125,8 @@ def test_known_secrets_sources(monkeypatch, tmp_path):
             "[REDACTED]",
             "prose-token-0001",
             "/opt/keep/this/path",
+            "/tmp/ssh-agent/agent.123",
+            "oauth2_pkce",
         }
         & found
     )

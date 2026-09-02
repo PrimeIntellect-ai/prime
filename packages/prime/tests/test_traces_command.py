@@ -3,6 +3,7 @@
 of silently falling back to the SDK's static config."""
 
 import json
+from types import SimpleNamespace
 
 import pytest
 from prime_cli.commands import traces as traces_cmd
@@ -290,10 +291,11 @@ def _summary(**overrides):
 class FakeTracesClient:
     def __init__(self):
         self.calls: dict = {}
+        self.client = SimpleNamespace(api_key="fake-api-key-0001")
         self.receipt = UploadReceipt(upload_id="a" * 64, status="committed")
 
-    def upload_file(self, path, **kwargs):
-        self.calls["upload_file"] = {"path": path, **kwargs}
+    def upload_lines(self, lines, **kwargs):
+        self.calls["upload_lines"] = {"lines": b"".join(lines), **kwargs}
         on_batch = kwargs.get("on_batch")
         batch = Batch(data=b"{}\n", digest="a" * 64, num_lines=1, first_line_number=1)
         if on_batch is not None:
@@ -342,7 +344,8 @@ def test_upload_command_table_output(fake_client, tmp_path):
 
     assert result.exit_code == 0, result.output
     assert "Uploaded 1 batch(es)" in result.output
-    call = fake_client.calls["upload_file"]
+    call = fake_client.calls["upload_lines"]
+    assert call["lines"] == b'{"id":"a"}\n'  # nothing to redact: bytes are untouched
     assert call["context"] == {"source": "hosted_eval", "suite": "s1"}
     assert call["compress"] is True
     assert call["line_format"].value == "trace"
@@ -361,9 +364,51 @@ def test_upload_command_episodes_json_output(fake_client, tmp_path):
     payload = json.loads(result.output)
     assert payload["num_batches"] == 1
     assert payload["receipts"][0]["status"] == "committed"
-    call = fake_client.calls["upload_file"]
+    assert payload["redacted"] == 0
+    call = fake_client.calls["upload_lines"]
     assert call["line_format"].value == "episode"
     assert call["compress"] is False
+
+
+def test_upload_command_redacts_known_secrets(fake_client, tmp_path, monkeypatch):
+    """Secrets from the environment, the API key, and --secret (a literal or a file) are
+    replaced inside JSON strings before the bytes leave the machine — including a copy
+    quoted inside a JSON tool result. Numbers, ordinary text, and the file itself stay."""
+    monkeypatch.setenv("HOST_HF_TOKEN", "hf_host_token_00000001")
+    secrets_file = tmp_path / "secrets.txt"
+    secrets_file.write_text("from-file-secret-0001\n\n")
+    traces_file = tmp_path / "traces.jsonl"
+    original = (
+        b'{"id":"a","messages":[{"content":"hf_host_token_00000001 fake-api-key-0001 '
+        b'literal-secret-0001 from-file-secret-0001 {\\"k\\": \\"literal-secret-0001\\"} '
+        b'plain"}],"n":12345678}\n'
+    )
+    traces_file.write_bytes(original)
+
+    result = runner.invoke(
+        main_app,
+        [
+            "traces",
+            "upload",
+            str(traces_file),
+            "--secret",
+            "literal-secret-0001",
+            "--secret",
+            str(secrets_file),
+            "--secret",
+            "12345678",
+            "-o",
+            "json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["redacted"] == 5
+    assert fake_client.calls["upload_lines"]["lines"] == (
+        b'{"id":"a","messages":[{"content":"[REDACTED] [REDACTED] [REDACTED] [REDACTED] '
+        b'{\\"k\\": \\"[REDACTED]\\"} plain"}],"n":12345678}\n'
+    )
+    assert traces_file.read_bytes() == original
 
 
 def test_upload_command_rejects_malformed_context(fake_client, tmp_path):
@@ -373,7 +418,7 @@ def test_upload_command_rejects_malformed_context(fake_client, tmp_path):
     result = runner.invoke(main_app, ["traces", "upload", str(traces_file), "-c", "no-equals"])
 
     assert result.exit_code == 1
-    assert "upload_file" not in fake_client.calls
+    assert "upload_lines" not in fake_client.calls
 
 
 def test_unexpected_error_does_not_dump_sdk_locals(fake_client, tmp_path):
@@ -385,7 +430,7 @@ def test_unexpected_error_does_not_dump_sdk_locals(fake_client, tmp_path):
         assert secret_trace
         raise RuntimeError("malformed receipt")
 
-    fake_client.upload_file = fail_upload
+    fake_client.upload_lines = fail_upload
     result = runner.invoke(main_app, ["traces", "upload", str(traces_file)])
 
     assert result.exit_code == 1

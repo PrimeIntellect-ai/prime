@@ -10,6 +10,7 @@ from prime_cli.core import APIClient
 from .display import get_eval_viewer_url
 from .env_metadata import find_environment_metadata
 from .plain import get_console
+from .redact import Redactor, known_secrets
 
 console = get_console()
 
@@ -158,6 +159,7 @@ def push_eval_results_to_hub(
     console.print(f"\n[blue]Uploading evaluation results, using upstream: {env_identifier}[/blue]")
 
     api_client = APIClient()
+    redactor = Redactor(known_secrets(api_client.api_key))
 
     if resolved_env_id:
         environments = [{"id": resolved_env_id}]
@@ -187,6 +189,12 @@ def push_eval_results_to_hub(
         }
         for sample in results_samples
     ]
+    eval_metadata, converted_results = redactor.value([eval_metadata, converted_results])
+    if redactor.count:
+        console.print(
+            f"[yellow]Redacted {redactor.count} occurrence(s) of known secrets; "
+            "local files are unchanged[/yellow]"
+        )
 
     eval_name = f"{env_name}--{model}--{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 

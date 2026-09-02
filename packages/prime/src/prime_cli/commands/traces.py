@@ -13,6 +13,7 @@ from prime_traces import (
     TracesClient,
     UnauthorizedError,
     UploadReceipt,
+    read_jsonl_lines,
 )
 from rich.markup import escape
 from rich.table import Table
@@ -25,6 +26,7 @@ from ..utils import (
     output_data_as_json,
     validate_output_format,
 )
+from ..utils.redact import Redactor, known_secrets
 
 app = PlainTyper(help="Upload and query traces (Prime Traces)", no_args_is_help=True)
 console = get_console()
@@ -44,6 +46,7 @@ def _traces_client() -> TracesClient:
 UPLOAD_JSON_HELP = json_output_help(
     ".receipts[] = {upload_id, status}",
     ".num_batches = number",
+    ".redacted = number of secret occurrences replaced before upload",
 )
 
 LIST_TRACES_JSON_HELP = json_output_help(
@@ -90,13 +93,22 @@ def upload_traces(
         "-c",
         help="Batch context as key=value, repeatable (e.g. -c source=hosted_eval)",
     ),
+    secret: List[str] = typer.Option(
+        [],
+        "--secret",
+        help=(
+            "Value to redact before upload, or a file with one per line; repeatable. "
+            "Credential-named environment variables and the API key are always redacted."
+        ),
+    ),
     no_compress: bool = typer.Option(
         False, "--no-compress", help="Skip gzip transport compression"
     ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
     """Upload a JSONL file of traces. Safe to rerun after interruption:
-    identical bytes replay their committed receipts without re-storing."""
+    identical bytes replay their committed receipts without re-storing.
+    Known secrets are replaced with [REDACTED] on the way out; the file is unchanged."""
     validate_output_format(output, error_console)
     line_format = LineFormat.EPISODE if episodes else LineFormat.TRACE
 
@@ -110,8 +122,9 @@ def upload_traces(
 
     try:
         client = _traces_client()
-        receipts = client.upload_file(
-            file,
+        redactor = Redactor(known_secrets(client.client.api_key, secret_args=secret))
+        receipts = client.upload_lines(
+            (redactor.json(line.decode()).encode() for line in read_jsonl_lines(file)),
             line_format=line_format,
             context=_parse_context(context),
             compress=not no_compress,
@@ -138,11 +151,17 @@ def upload_traces(
             {
                 "receipts": [r.model_dump() for r in receipts],
                 "num_batches": len(receipts),
+                "redacted": redactor.count,
             },
             console,
         )
-    else:
-        console.print(f"[green]Uploaded {len(receipts)} batch(es) from {escape(str(file))}[/green]")
+        return
+    if redactor.count:
+        console.print(
+            f"[yellow]Redacted {redactor.count} occurrence(s) of known secrets; "
+            f"{escape(str(file))} is unchanged[/yellow]"
+        )
+    console.print(f"[green]Uploaded {len(receipts)} batch(es) from {escape(str(file))}[/green]")
 
 
 @app.command("list", epilog=LIST_TRACES_JSON_HELP)

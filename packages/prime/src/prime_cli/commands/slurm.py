@@ -235,11 +235,9 @@ def connect(
             str(cluster.ssh_port),
             f"{username}@{cluster.ssh_host}",
         ]
-        try:
-            subprocess.run(ssh_command)
-        except subprocess.CalledProcessError as e:
-            console.print(f"[red]SSH connection failed: {str(e)}[/red]")
-            raise typer.Exit(1)
+        result = subprocess.run(ssh_command)
+        if result.returncode != 0:
+            raise typer.Exit(result.returncode)
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
@@ -461,6 +459,24 @@ def accounting(
 
         console.print(f"[bold]Accounting for the last {rollup.days} day(s)[/bold]")
         console.print(f"Total jobs: {rollup.total_jobs}")
+
+        if rollup.throughput:
+            table = Table(title="Throughput")
+            table.add_column("Day", style="cyan")
+            table.add_column("Completed", style="green")
+            table.add_column("Failed", style="red")
+            table.add_column("Cancelled", style="yellow")
+            for row in rollup.throughput:
+                table.add_row(row.day, str(row.completed), str(row.failed), str(row.cancelled))
+            console.print(table)
+
+        if rollup.queue_wait:
+            table = Table(title="Queue Wait")
+            table.add_column("Day", style="cyan")
+            table.add_column("Median Wait", style="green")
+            for row in rollup.queue_wait:
+                table.add_row(row.day, f"{row.median_seconds:.0f}s")
+            console.print(table)
 
         if rollup.gpu_hours_by_user:
             table = Table(title="GPU-Hours by User")

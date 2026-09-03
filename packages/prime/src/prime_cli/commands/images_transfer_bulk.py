@@ -19,6 +19,7 @@ from prime_sandboxes import (
     ImageVisibility,
     UnauthorizedError,
 )
+from prime_sandboxes.image_references import is_docker_hub_reference
 from rich.table import Table
 
 from ..utils import get_console
@@ -29,7 +30,6 @@ from .images_bulk import (
     DEFAULT_MAX_IN_FLIGHT,
     FAILURE_TABLE_MAX_ROWS,
     POLL_INTERVAL_SECONDS,
-    SUPPORTED_PLATFORMS,
     BulkPushValidationError,
     BulkRunInterrupted,
     QuotaExceededError,
@@ -54,9 +54,10 @@ from .images_hf import (
 
 console = get_console()
 
-# How long to pause new submissions after the server's transfer rate limiter
+# How long to pause new submissions after the server's source-build rate limiter
 # rejects one.
 TRANSFER_RATE_LIMIT_PAUSE_SECONDS = 15.0
+SOURCE_IMAGE_PLATFORMS = ("linux/amd64",)
 
 _TRANSFER_MANIFEST_KEYS = {"source", "image", "platform"}
 
@@ -65,9 +66,9 @@ _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 @dataclass
 class TransferSpec:
-    """One resolved transfer: a source registry image and its Prime destination.
+    """One resolved source build: a registry image and its Prime destination.
 
-    ``dest_name``/``dest_tag`` are what the transfer will be called. When
+    ``dest_name``/``dest_tag`` name the resulting VM image. When
     ``override`` is False they are derived from the source the same way the
     server derives them and are only used for display and duplicate detection;
     when True the user chose them and they are sent with the request.
@@ -84,6 +85,10 @@ class TransferSpec:
     def image_ref(self) -> str:
         return f"{self.dest_name}:{self.dest_tag}"
 
+    @property
+    def is_docker_hub(self) -> bool:
+        return is_docker_hub_reference(self.source_image)
+
     def to_manifest_line(self) -> dict[str, str]:
         line = {"source": self.source_image, "platform": self.platform}
         if self.override:
@@ -94,14 +99,13 @@ class TransferSpec:
 def derive_transfer_destination(
     source_ref: str, *, keep_namespace: bool = False
 ) -> tuple[str, str]:
-    """Derive the (name, tag) a transfer gets when no destination is given.
+    """Derive a source build's destination when none is given.
 
-    With ``keep_namespace`` (platform-image transfers) the name is the full
-    source path minus the registry host: org-less platform images carry the
-    Docker Hub namespace inside their name (docker.io/ns/app:v1 -> ns/app:v1),
-    which is how the backend stores them and how sandbox-create resolution and
-    auto-import match raw references. Otherwise only the last path segment is
-    kept, matching how the server derives personal/team destinations.
+    Docker Hub sources always keep their namespace because they become org-less
+    platform images automatically. The implicit ``library/`` namespace is
+    removed. ``keep_namespace`` applies the same platform naming rule to an
+    explicit non-Docker-Hub registry source. Otherwise only the last path segment
+    is kept for a personal or team destination.
     """
     ref = (source_ref or "").strip()
     if not ref:
@@ -136,7 +140,10 @@ def derive_transfer_destination(
     if not repository:
         raise ValueError("missing repository")
 
-    name = repository.lower() if keep_namespace else repository.split("/")[-1].lower()
+    docker_hub = is_docker_hub_reference(source_ref)
+    if docker_hub and repository.lower().startswith("library/"):
+        repository = repository.split("/", 1)[1]
+    name = repository.lower() if keep_namespace or docker_hub else repository.split("/")[-1].lower()
     if tag is None:
         assert digest is not None
         tag = "sha256-" + digest.split(":", 1)[1][:16]
@@ -144,19 +151,19 @@ def derive_transfer_destination(
 
 
 _DUPLICATE_DEST_HINT = (
-    ' — transfer them via a JSONL manifest with distinct "image" destination overrides'
+    ' — build them via a JSONL manifest with distinct "image" destination overrides'
 )
 
 
 # ---------------------------------------------------------------------------
-# Transfer-list resolution: JSONL manifest
+# Source-build list resolution: JSONL manifest
 # ---------------------------------------------------------------------------
 
 
 def load_transfer_manifest(
     manifest_path: Path, default_platform: str, *, platform_image: bool = False
 ) -> list[TransferSpec]:
-    """Parse and fully validate a JSONL transfer manifest.
+    """Parse and fully validate a JSONL source-build manifest.
 
     With ``platform_image``, destinations keep the source's registry namespace
     and "image" overrides may be namespaced ('ns/name:tag').
@@ -192,13 +199,14 @@ def load_transfer_manifest(
         source = source.strip()
 
         platform = entry.get("platform") or default_platform
-        if platform not in SUPPORTED_PLATFORMS:
+        if platform not in SOURCE_IMAGE_PLATFORMS:
             problems.append(
                 f"{where}: unsupported platform '{platform}' "
-                f"(supported: {', '.join(SUPPORTED_PLATFORMS)})"
+                f"(supported: {', '.join(SOURCE_IMAGE_PLATFORMS)})"
             )
             continue
 
+        docker_hub = is_docker_hub_reference(source)
         try:
             derived_name, derived_tag = derive_transfer_destination(
                 source, keep_namespace=platform_image
@@ -212,12 +220,17 @@ def load_transfer_manifest(
             problems.append(f"{where}: 'image' must be a string")
             continue
         if image:
+            if docker_hub:
+                problems.append(
+                    f"{where}: Docker Hub source builds do not accept a custom destination"
+                )
+                continue
             if ":" in image:
                 dest_name, dest_tag = image.rsplit(":", 1)
             else:
                 dest_name, dest_tag = image, "latest"
             # '/' separates owner from name in personal/team image paths, so
-            # only platform images (org-less, stored under their Docker Hub
+            # only platform images (org-less, stored under their source repository
             # namespace) may use a single-level namespace in the destination.
             segments = dest_name.split("/")
             if len(segments) > (2 if platform_image else 1) or not all(segments):
@@ -249,26 +262,26 @@ def load_transfer_manifest(
 
     problems.extend(_duplicate_ref_problems(specs, hint=_DUPLICATE_DEST_HINT))
     if not specs and not problems:
-        problems.append(f"{manifest_path.name}: manifest contains no transfers")
+        problems.append(f"{manifest_path.name}: manifest contains no source builds")
     if problems:
         raise BulkPushValidationError(problems)
     return specs
 
 
 # ---------------------------------------------------------------------------
-# Transfer-list resolution: Harbor task directories
+# Source-build list resolution: Harbor task directories
 # ---------------------------------------------------------------------------
 
 
 def load_harbor_transfer_specs(
     root: Path, *, platform: str, platform_image: bool = False
 ) -> tuple[list[TransferSpec], list[tuple[str, str]]]:
-    """Resolve transfer specs from a Harbor tasks directory.
+    """Resolve source-build specs from a Harbor tasks directory.
 
     The complement of push-bulk's Harbor mode: it collects the prebuilt
     ``[environment] docker_image`` references that push-bulk skips. Returns
-    (specs, skipped) where skipped lists tasks with nothing to transfer.
-    Tasks sharing the same prebuilt image collapse into one transfer.
+    (specs, skipped) where skipped lists tasks with no prebuilt source image.
+    Tasks sharing the same prebuilt image collapse into one source build.
     """
     tasks = discover_harbor_tasks(root)
     if not tasks:
@@ -337,7 +350,7 @@ def load_harbor_transfer_specs(
 
 
 # ---------------------------------------------------------------------------
-# Transfer-list resolution: Hugging Face datasets
+# Source-build list resolution: Hugging Face datasets
 # ---------------------------------------------------------------------------
 
 
@@ -350,7 +363,7 @@ def load_hf_specs(
     platform: str,
     platform_image: bool = False,
 ) -> tuple[list[TransferSpec], list[str]]:
-    """Resolve transfer specs from a Hugging Face dataset column.
+    """Resolve source-build specs from a Hugging Face dataset column.
 
     Pages the dataset through the datasets-server rows API (no local
     `datasets` dependency), dedupes identical references preserving order,
@@ -430,9 +443,9 @@ def _submit_transfer(
     visibility: Optional[ImageVisibility],
     owner_scope: Optional[str] = None,
 ) -> tuple[str, str]:
-    """Queue one transfer. Returns (build_id, full_image_path).
+    """Queue one source-image VM build. Returns (build_id, full_image_path).
 
-    Transfers are counted per image by the server's transfer rate limiter
+    Source builds are counted per image by the server's rate limiter
     (a rolling window), so a plain 429 means "later", not "failed": it is
     surfaced as SubmitRateLimited so the engine requeues the spec. Wallet
     quota 429s become QuotaExceededError and stop the run.
@@ -462,21 +475,19 @@ def _submit_transfer(
             raise SubmitRateLimited(str(e), retry_after=TRANSFER_RATE_LIMIT_PAUSE_SECONDS) from e
         raise
 
-    # Single-source transfers return a top-level build_id today; the endpoint
-    # also has a per-source results shape (used for comma-separated sources),
-    # so unwrap it like `prime images push --source-image` does in case the
-    # contract shifts.
+    # Single-source builds return a top-level build_id today. Also accept the
+    # bulk shape without silently dropping results if the server contract shifts.
     results = response.get("results")
     if isinstance(results, list):
-        # Specs are validated to hold exactly one image reference, so anything
-        # other than one entry means we would silently drop transfers.
+        # Each spec holds one source, so any count other than one is invalid.
         if len(results) != 1 or not isinstance(results[0], dict):
             raise APIError(
-                f"invalid response from server (expected one transfer result, got {len(results)})"
+                "invalid response from server "
+                f"(expected one source-build result, got {len(results)})"
             )
         entry = results[0]
         if not entry.get("success") or not entry.get("buildId"):
-            error = entry.get("error") or "invalid response from server (transfer not queued)"
+            error = entry.get("error") or "invalid response from server (source build not queued)"
             if any(marker in error.lower() for marker in _QUOTA_DETAIL_MARKERS):
                 raise QuotaExceededError(error)
             raise APIError(error)
@@ -499,7 +510,7 @@ def transfer_bulk(
         "--manifest",
         "-m",
         help=(
-            "JSONL manifest of transfers; each line is "
+            "JSONL manifest of source-image VM builds; each line is "
             '{"source": "registry/repo:tag", "image"?: "name:tag", "platform"?: "..."}'
         ),
     ),
@@ -507,7 +518,7 @@ def transfer_bulk(
         None,
         "--harbor",
         help=(
-            "Harbor task directory (or directory of tasks); transfers each task's "
+            "Harbor task directory (or directory of tasks); builds a VM image from each task's "
             "prebuilt [environment] docker_image"
         ),
     ),
@@ -516,7 +527,7 @@ def transfer_bulk(
         "--hf",
         help=(
             "Hugging Face dataset id or URL (e.g. 'org/dataset'); "
-            "transfers every image referenced in the dataset"
+            "builds a VM image from every registry image referenced in the dataset"
         ),
     ),
     hf_split: str = typer.Option("train", "--hf-split", help="Dataset split for --hf mode"),
@@ -536,57 +547,63 @@ def transfer_bulk(
     platform: str = typer.Option(
         "linux/amd64",
         "--platform",
-        click_type=click.Choice(list(SUPPORTED_PLATFORMS)),
-        help="Required platform for the transferred images (manifest lines may override)",
+        click_type=click.Choice(list(SOURCE_IMAGE_PLATFORMS)),
+        help="Target VM platform (linux/amd64 only; manifest lines may override)",
     ),
     public: bool = typer.Option(
-        False, "--public", help="Make the images public when the transfers complete"
+        False, "--public", help="Make the images public when the VM builds complete"
     ),
     private: bool = typer.Option(
-        False, "--private", help="Make the images private when the transfers complete"
+        False,
+        "--private",
+        help="Make non-Docker Hub images private when the VM builds complete",
     ),
     platform_image: bool = typer.Option(
         False,
         "--platform-image",
         help=(
-            "Transfer org-less platform images (admins only; implies --public; "
-            "destinations keep the source's registry namespace)"
+            "Build explicit non-Docker-Hub registry sources as org-less platform VM images "
+            "(admins only; implies --public)"
         ),
     ),
     concurrency: int = typer.Option(
-        DEFAULT_MAX_IN_FLIGHT, "--concurrency", help="Maximum transfers in flight at once"
+        DEFAULT_MAX_IN_FLIGHT, "--concurrency", help="Maximum VM builds in flight at once"
     ),
     build_timeout: int = typer.Option(
         DEFAULT_BUILD_TIMEOUT_SECONDS,
         "--build-timeout",
-        help="Seconds to wait for a single transfer before giving up on it",
+        help="Seconds to wait for a single VM build before giving up on it",
     ),
     dry_run: bool = typer.Option(
-        False, "--dry-run", help="Resolve and print the transfer list without transferring"
+        False, "--dry-run", help="Resolve and print the build list without building"
     ),
     failures_out: Path = typer.Option(
         Path("transfer-bulk-failures.jsonl"),
         "--failures-out",
-        help="Where to write a re-runnable manifest of failed transfers",
+        help="Where to write a re-runnable manifest of failed VM builds",
     ),
 ):
     """
-    Copy many existing registry images into Prime in one command.
+    Build many Prime VM images directly from allowed public registry images.
 
     Reads image references from a JSONL manifest (--manifest), a Harbor tasks
     directory (--harbor), or a Hugging Face dataset (--hf), validates
-    everything up front, then queues transfers server-side, pacing submissions
-    to the server's transfer rate limit and polling until every transfer
-    finishes. Failed transfers are written to a manifest you can re-run.
+    everything up front, then queues VM builds server-side, pacing submissions
+    to the server's source-image build rate limit and polling until every build
+    finishes. Failed builds are written to a manifest you can re-run. Docker
+    Hub sources always become public, org-less platform images. Their
+    namespace-preserving destination is derived automatically, with the
+    implicit library/ namespace removed. They do not accept "image" overrides
+    or --private, and configured team context is ignored for those items.
 
     \b
-    Manifest format (one JSON object per line; "image" overrides the
-    destination, which otherwise derives from the source reference):
-        {"source": "ghcr.io/org/app:v1"}
-        {"source": "docker.io/other/app:v1", "image": "other-app:v1"}
+    Manifest format (one JSON object per line; "image" overrides an explicit
+    non-Docker-Hub source destination, which otherwise derives from the source):
+        {"source": "docker.io/org/app:v1"}
+        {"source": "ghcr.io/other/app:v1", "image": "other-app:v1"}
 
     \b
-    Harbor mode transfers the prebuilt docker_image of each task — exactly the
+    Harbor mode builds from the prebuilt docker_image of each task — exactly the
     tasks push-bulk skips, so the two commands together cover a task set.
 
     \b
@@ -595,12 +612,10 @@ def transfer_bulk(
     local dataset download. Set HF_TOKEN for private or gated datasets.
 
     \b
-    Admins can pass --platform-image to transfer org-less public platform
-    images, exactly like 'prime images push --source-image --platform-image'.
-    Platform destinations keep the source's registry namespace — the backend
-    stores platform images under their Docker Hub path, so
-    docker.io/ns/app:v1 lands as ns/app:v1 — and manifest "image" overrides
-    may be namespaced ('ns/name:tag').
+    Docker Hub sources become platform images without --platform-image.
+    Admins can pass --platform-image to apply org-less public platform ownership
+    to explicit non-Docker-Hub registry sources too. Those explicit sources may use
+    namespaced manifest "image" overrides ('ns/name:tag').
 
     \b
     Examples:
@@ -608,7 +623,7 @@ def transfer_bulk(
         prime images transfer-bulk --harbor ./tasks
         prime images transfer-bulk --hf org/dataset --column docker_image --dry-run
         prime images transfer-bulk --hf org/dataset --hf-split test --column image_name
-        prime images transfer-bulk --hf org/dataset --column docker_image --platform-image
+        prime images transfer-bulk --manifest non-docker-sources.jsonl --platform-image
         prime images transfer-bulk --manifest transfer-bulk-failures.jsonl
     """
     try:
@@ -669,10 +684,16 @@ def transfer_bulk(
                 )
         except BulkPushValidationError as e:
             console.print(
-                f"[red]Error: cannot start bulk transfer ({len(e.problems)} problem(s)):[/red]"
+                "[red]Error: cannot start bulk VM image build "
+                f"({len(e.problems)} problem(s)):[/red]"
             )
             for problem in e.problems:
                 console.print(f"[red]  - {problem}[/red]")
+            raise typer.Exit(1)
+
+        docker_hub_specs = [spec for spec in specs if spec.is_docker_hub]
+        if docker_hub_specs and private:
+            console.print("[red]Error: Docker Hub source builds must be public[/red]")
             raise typer.Exit(1)
 
         for note in notes:
@@ -681,7 +702,7 @@ def transfer_bulk(
             console.print(f"[yellow]Skipping {task_name}: {reason}[/yellow]")
 
         if dry_run:
-            table = Table(title=f"Resolved {len(specs)} transfer(s)")
+            table = Table(title=f"Resolved {len(specs)} VM image build(s)")
             table.add_column("Source", style="cyan", overflow="fold")
             table.add_column("Destination", overflow="fold")
             table.add_column("Platform", no_wrap=True)
@@ -689,7 +710,7 @@ def transfer_bulk(
             for spec in specs:
                 table.add_row(spec.source_image, spec.image_ref, spec.platform, spec.source)
             console.print(table)
-            console.print("[dim]Dry run only — re-run without --dry-run to transfer.[/dim]")
+            console.print("[dim]Dry run only — re-run without --dry-run to build.[/dim]")
             return
 
         config = Config()
@@ -702,33 +723,43 @@ def transfer_bulk(
             visibility = ImageVisibility.PUBLIC
 
         console.print(
-            f"[bold blue]Bulk transferring {len(specs)} image(s)[/bold blue] "
-            f"[dim]({source_desc})[/dim]"
+            f"[bold blue]Building {len(specs)} VM image(s)[/bold blue] [dim]({source_desc})[/dim]"
         )
+        non_docker_hub_specs = [spec for spec in specs if not spec.is_docker_hub]
         if platform_image:
             console.print("[dim]Owner: Platform[/dim]")
             if config.team_id:
                 console.print("[dim]Team context ignored: platform images are org-less[/dim]")
-        elif config.team_id:
-            console.print(f"[dim]Team: {config.team_id}[/dim]")
-        if visibility is not None:
-            console.print(f"[dim]Visibility: {visibility.value}[/dim]")
-        else:
+        elif docker_hub_specs:
+            console.print("[dim]Docker Hub sources: Platform owner, PUBLIC visibility[/dim]")
+            if config.team_id and not non_docker_hub_specs:
+                console.print("[dim]Team context ignored for Docker Hub sources[/dim]")
+        if not platform_image and non_docker_hub_specs and config.team_id:
+            console.print(f"[dim]Other sources team: {config.team_id}[/dim]")
+        if platform_image:
+            console.print(f"[dim]Visibility: {ImageVisibility.PUBLIC.value}[/dim]")
+        elif non_docker_hub_specs and visibility is not None:
+            console.print(f"[dim]Other sources visibility: {visibility.value}[/dim]")
+        elif non_docker_hub_specs:
             console.print(
-                "[dim]Visibility: PRIVATE for new images "
+                "[dim]Other sources visibility: PRIVATE for new images "
                 "(existing tags keep their current visibility)[/dim]"
             )
-        # Platform transfers skip the server's per-account transfer rate limiter.
-        pacing_note = (
-            ""
-            if platform_image
-            else (
-                " Transfers are rate-limited per account server-side, "
+        # Only explicit admin non-Docker-Hub platform builds skip the source-build rate limit.
+        if platform_image and docker_hub_specs:
+            pacing_note = (
+                " Docker Hub auto-platform builds remain rate-limited per account "
+                "server-side, so large batches take a while to submit."
+            )
+        elif not platform_image:
+            pacing_note = (
+                " Source-image builds are rate-limited per account server-side, "
                 "so large batches take a while to submit."
             )
-        )
+        else:
+            pacing_note = ""
         console.print(
-            f"[dim]Up to {concurrency} transfers in flight; "
+            f"[dim]Up to {concurrency} VM builds in flight; "
             f"polling every {int(POLL_INTERVAL_SECONDS)}s.{pacing_note}[/dim]"
         )
         console.print()
@@ -740,26 +771,30 @@ def transfer_bulk(
             submit=lambda spec: _submit_transfer(
                 client,
                 spec,
-                team_id=None if platform_image else (config.team_id or None),
-                visibility=visibility,
-                owner_scope="platform" if platform_image else None,
+                team_id=(
+                    None if platform_image or spec.is_docker_hub else (config.team_id or None)
+                ),
+                visibility=(
+                    ImageVisibility.PUBLIC if platform_image or spec.is_docker_hub else visibility
+                ),
+                owner_scope=("platform" if platform_image or spec.is_docker_hub else None),
             ),
             concurrency=concurrency,
             build_timeout=build_timeout,
-            progress_description="Transferring images",
+            progress_description="Building VM images",
         )
 
         failures = [o for o in outcomes if o.status != "COMPLETED"]
         completed_count = len(outcomes) - len(failures)
         console.print()
-        console.print(f"[bold]{completed_count}/{len(outcomes)} transfers completed[/bold]")
+        console.print(f"[bold]{completed_count}/{len(outcomes)} VM builds completed[/bold]")
         if not failures:
-            console.print("[bold green]All images transferred successfully![/bold green]")
+            console.print("[bold green]All VM images built successfully![/bold green]")
             console.print()
             console.print("[dim]Use them with: prime sandbox create <image reference>[/dim]")
             return
 
-        failure_table = Table(title=f"{len(failures)} transfer(s) did not complete")
+        failure_table = Table(title=f"{len(failures)} VM build(s) did not complete")
         failure_table.add_column("Source", style="cyan", overflow="fold")
         failure_table.add_column("Destination", overflow="fold")
         failure_table.add_column("Status", no_wrap=True)
@@ -798,7 +833,7 @@ def transfer_bulk(
 
         _write_failures_manifest(failures_out, failures)
         console.print()
-        console.print(f"Wrote {len(failures)} failed transfer(s) to [bold]{failures_out}[/bold]")
+        console.print(f"Wrote {len(failures)} failed VM build(s) to [bold]{failures_out}[/bold]")
         console.print(
             f"[dim]Retry with: prime images transfer-bulk --manifest {failures_out}[/dim]"
         )
@@ -809,14 +844,14 @@ def transfer_bulk(
         raise typer.Exit(1)
     except BulkRunInterrupted as e:
         console.print(
-            "\n[yellow]Cancelled. Transfers already queued keep running server-side; "
+            "\n[yellow]Cancelled. VM builds already queued keep running server-side; "
             "check them with 'prime images list'.[/yellow]"
         )
         unfinished = [o for o in e.outcomes if o.status != "COMPLETED"]
         if unfinished:
             _write_failures_manifest(failures_out, unfinished)
             console.print(
-                f"Wrote {len(unfinished)} unfinished transfer(s) to [bold]{failures_out}[/bold]"
+                f"Wrote {len(unfinished)} unfinished VM build(s) to [bold]{failures_out}[/bold]"
             )
             console.print(
                 f"[dim]Resume with: prime images transfer-bulk --manifest {failures_out}[/dim]"
@@ -824,7 +859,7 @@ def transfer_bulk(
         raise typer.Exit(1)
     except KeyboardInterrupt:
         console.print(
-            "\n[yellow]Cancelled. Transfers already queued keep running server-side; "
+            "\n[yellow]Cancelled. VM builds already queued keep running server-side; "
             "check them with 'prime images list'.[/yellow]"
         )
         raise typer.Exit(1)

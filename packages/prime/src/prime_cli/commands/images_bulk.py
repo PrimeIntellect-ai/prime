@@ -36,7 +36,7 @@ console = get_console()
 # Use a synthetic archive path to avoid collisions with Dockerfiles already in the context.
 PACKAGED_DOCKERFILE_PATH = ".__prime_dockerfile__"
 
-SUPPORTED_PLATFORMS = ("linux/amd64", "linux/arm64")
+SUPPORTED_PLATFORMS = ("linux/amd64",)
 
 DEFAULT_MAX_IN_FLIGHT = 64
 DEFAULT_BUILD_TIMEOUT_SECONDS = 1800
@@ -120,7 +120,7 @@ class BuildOutcome:
     """Terminal result for one spec.
 
     ``spec`` is any object with ``image_ref``, ``source`` and
-    ``to_manifest_line()`` (BuildSpec here, TransferSpec for bulk transfers).
+    ``to_manifest_line()`` (BuildSpec here, TransferSpec for source-image builds).
     ``status`` is a backend terminal status (COMPLETED/FAILED/CANCELLED) or a
     client-side one: SUBMIT_FAILED (initiate/upload/start failed), TIMEOUT
     (no terminal status within --build-timeout), SKIPPED (never submitted
@@ -474,8 +474,11 @@ def _submit_build(
         )
         build_id = response.get("build_id")
         upload_url = response.get("upload_url")
-        if not build_id or not upload_url:
-            raise APIError("invalid response from server (missing build_id or upload_url)")
+        expires_in = response.get("expires_in")
+        if not build_id or not upload_url or expires_in is None:
+            raise APIError(
+                "invalid response from server (missing build_id, upload_url, or expires_in)"
+            )
         full_image_path = response.get("fullImagePath") or spec.image_ref
 
         with open(tar_path, "rb") as f:
@@ -516,7 +519,7 @@ def run_bulk_jobs(
 ) -> list[BuildOutcome]:
     """Submit jobs with a sliding window and poll them to terminal status.
 
-    ``submit(spec)`` starts one server-side build/transfer and returns
+    ``submit(spec)`` starts one server-side build job and returns
     (build_id, full_image_path). A finished job immediately frees a slot for
     the next queued spec, so one slow job never blocks the rest of a "batch".
     Once the wallet quota is hit (QuotaExceededError), submission stops
@@ -809,7 +812,7 @@ def push_bulk(
     ),
 ):
     """
-    Build and push many Docker images in one command.
+    Build and push many image artifacts in one command.
 
     Reads builds from a JSONL manifest (--manifest), a Harbor tasks directory
     (--harbor), or a Hugging Face dataset of Dockerfiles (--hf), validates
@@ -834,7 +837,7 @@ def push_bulk(
     viewer API — no local dataset download. --dockerfile-column holds each
     row's Dockerfile contents and --name-column names the image (sanitized,
     tagged with --tag). Set HF_TOKEN for private or gated datasets. Datasets
-    whose rows reference prebuilt registry images are transfer-bulk's job:
+    whose rows reference prebuilt registry images use the source-image build command:
     prime images transfer-bulk --hf.
 
     \b

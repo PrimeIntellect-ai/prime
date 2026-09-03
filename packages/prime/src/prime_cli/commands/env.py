@@ -34,11 +34,7 @@ from ..utils import (
     validate_output_format,
 )
 from ..utils.env_metadata import find_environment_metadata
-from ..utils.environment_runtime import (
-    VERIFIERS_V0,
-    VERIFIERS_V1,
-    detect_environment_runtime,
-)
+from ..utils.environment_runtime import VERIFIERS_V1, detect_environment_runtime
 from ..utils.formatters import format_file_size
 from ..utils.formatters import strip_ansi as _strip_ansi
 from ..utils.prompt import (
@@ -1349,23 +1345,22 @@ def push(
             # Extract Requires-Dist from wheel METADATA (includes URL dependencies)
             requires_dist = extract_requires_dist_from_wheel(wheel_path)
 
+            archive_files = _collect_archive_files(env_path)
             runtime_hint = detect_environment_runtime(
                 env_path,
-                _collect_archive_files(env_path),
+                archive_files,
                 requires_dist=requires_dist,
                 dependencies=project_metadata.get("dependencies", []),
+                legacy_tags="tags" in project_metadata,
             )
-            if runtime_hint == VERIFIERS_V1:
-                console.print("Detected a verifiers v1 environment (runtime_hint=VERIFIERS_V1)")
-            elif runtime_hint == VERIFIERS_V0:
-                console.print(
-                    "Detected a legacy verifiers v0 environment (runtime_hint=VERIFIERS_V0)"
-                )
-            else:
+            if runtime_hint is None:
                 console.print(
                     "[dim]Could not tell v0 from v1 locally; the Hub will classify "
                     "the package at unpack time.[/dim]"
                 )
+            else:
+                label = "verifiers v1" if runtime_hint == VERIFIERS_V1 else "legacy verifiers v0"
+                console.print(f"Detected a {label} environment")
 
             wheel_data = {
                 "content_hash": content_hash,
@@ -1382,9 +1377,8 @@ def push(
                     "original_filename": wheel_path.name,
                     "requires_dist": requires_dist,  # Include full dependency specs from wheel
                 },
+                "runtime_hint": runtime_hint,
             }
-            if runtime_hint is not None:
-                wheel_data["runtime_hint"] = runtime_hint
 
             try:
                 response = client.post(f"/environmentshub/{env_id}/wheels", json=wheel_data)
@@ -1442,7 +1436,7 @@ def push(
                 with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
                     temp_file_path = tmp.name
                     with tarfile.open(tmp.name, "w:gz") as tar:
-                        for file_path in _collect_archive_files(env_path):
+                        for file_path in archive_files:
                             arcname = file_path.relative_to(env_path)
                             tar.add(file_path, arcname=str(arcname))
 
@@ -1487,9 +1481,8 @@ def push(
                             **wheel_data["metadata"],
                             "original_filename": f"{env_name}-{version}.tar.gz",
                         },
+                        "runtime_hint": runtime_hint,
                     }
-                    if runtime_hint is not None:
-                        source_data["runtime_hint"] = runtime_hint
 
                     try:
                         response = client.post(

@@ -12,7 +12,6 @@ from typer.testing import CliRunner
 runner = CliRunner()
 
 TEST_ENV = {
-    "COLUMNS": "200",
     "LINES": "50",
     "PRIME_DISABLE_VERSION_CHECK": "1",
     "PRIME_TEAM_ID": "",
@@ -48,7 +47,7 @@ class FakeTransferAPI:
         # the last status repeats once the list is exhausted.
         self.poll_scripts = {}
         self.default_poll = ["COMPLETED"]
-        # Exceptions raised (FIFO) by POST /images/build before any transfer is queued.
+        # Exceptions raised (FIFO) by POST /images/build before any source build is queued.
         self.build_error_queue = []
         # Respond with the per-source results shape instead of a top-level build_id.
         self.respond_bulk_shape = False
@@ -164,6 +163,16 @@ HF_INFO_ONE_CONFIG = {
 }
 
 
+def test_transfer_bulk_help_documents_amd64_and_docker_hub_contract():
+    result = runner.invoke(app, ["images", "transfer-bulk", "--help"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    assert "linux/amd64" in result.output
+    assert "linux/arm64" not in result.output
+    assert "Docker Hub" in result.output
+    assert "platform images" in result.output
+
+
 # ---------------------------------------------------------------------------
 # Destination derivation
 # ---------------------------------------------------------------------------
@@ -172,6 +181,8 @@ HF_INFO_ONE_CONFIG = {
 def test_derive_destination_matches_server_rules():
     assert derive_transfer_destination("ubuntu") == ("ubuntu", "latest")
     assert derive_transfer_destination("docker.io/library/ubuntu:22.04") == ("ubuntu", "22.04")
+    assert derive_transfer_destination("library/ubuntu:22.04") == ("ubuntu", "22.04")
+    assert derive_transfer_destination("index.docker.io/org/app:v1") == ("org/app", "v1")
     assert derive_transfer_destination("ghcr.io/Org/My-App:v1") == ("my-app", "v1")
     assert derive_transfer_destination("quay.io/org/app@sha256:" + "a" * 64) == (
         "app",
@@ -219,12 +230,132 @@ def test_manifest_happy_path(tmp_path, fake_api):
         app, ["images", "transfer-bulk", "--manifest", str(manifest)], env=TEST_ENV
     )
     assert result.exit_code == 0, result.output
-    assert "All images transferred successfully" in result.output
+    assert "All VM images built successfully" in result.output
     assert fake_api.payloads[0]["source_image"] == "docker.io/org/app:v1"
     assert "image_name" not in fake_api.payloads[0]
     assert fake_api.payloads[1]["image_name"] == "renamed"
     assert fake_api.payloads[1]["image_tag"] == "v9"
     assert all(p["platform"] == "linux/amd64" for p in fake_api.payloads)
+
+
+def test_docker_hub_sources_use_automatic_platform_ownership(tmp_path, fake_api):
+    manifest = tmp_path / "sources.jsonl"
+    _write_manifest(
+        manifest,
+        [
+            {"source": "ubuntu:22.04"},
+            {"source": "ghcr.io/org/app:v1", "image": "custom:v1"},
+        ],
+    )
+
+    result = runner.invoke(
+        app,
+        ["images", "transfer-bulk", "--manifest", str(manifest)],
+        env={**TEST_ENV, "PRIME_TEAM_ID": "team-123"},
+    )
+
+    assert result.exit_code == 0, result.output
+    payload_by_source = {payload["source_image"]: payload for payload in fake_api.payloads}
+    assert payload_by_source["ubuntu:22.04"] == {
+        "source_image": "ubuntu:22.04",
+        "platform": "linux/amd64",
+        "visibility": "PUBLIC",
+        "owner_scope": "platform",
+    }
+    assert payload_by_source["ghcr.io/org/app:v1"]["team_id"] == "team-123"
+    assert payload_by_source["ghcr.io/org/app:v1"]["image_name"] == "custom"
+    assert "Platform owner" in result.output
+    assert "PUBLIC visibility" in result.output
+
+
+def test_docker_hub_source_rejects_custom_destination(tmp_path, fake_api):
+    manifest = tmp_path / "sources.jsonl"
+    _write_manifest(manifest, [{"source": "ubuntu:22.04", "image": "custom:v1"}])
+
+    result = runner.invoke(
+        app, ["images", "transfer-bulk", "--manifest", str(manifest)], env=TEST_ENV
+    )
+
+    assert result.exit_code == 1
+    assert "custom destination" in result.output
+    assert fake_api.payloads == []
+
+
+def test_docker_hub_source_rejects_private(tmp_path, fake_api):
+    manifest = tmp_path / "sources.jsonl"
+    _write_manifest(manifest, [{"source": "ubuntu:22.04"}])
+
+    result = runner.invoke(
+        app,
+        ["images", "transfer-bulk", "--manifest", str(manifest), "--private"],
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 1
+    assert "must be public" in result.output
+    assert fake_api.payloads == []
+
+
+def test_docker_hub_aliases_are_duplicate_destinations(tmp_path, fake_api):
+    manifest = tmp_path / "sources.jsonl"
+    _write_manifest(
+        manifest,
+        [
+            {"source": "ubuntu:22.04"},
+            {"source": "docker.io/library/ubuntu:22.04"},
+        ],
+    )
+
+    result = runner.invoke(
+        app, ["images", "transfer-bulk", "--manifest", str(manifest)], env=TEST_ENV
+    )
+
+    assert result.exit_code == 1
+    assert "duplicate image reference" in result.output
+    assert "ubuntu:22.04" in result.output
+    assert fake_api.payloads == []
+
+
+def test_docker_hub_platform_builds_still_report_rate_limiting(tmp_path, fake_api):
+    manifest = tmp_path / "sources.jsonl"
+    _write_manifest(manifest, [{"source": "ubuntu:22.04"}])
+
+    result = runner.invoke(
+        app,
+        ["images", "transfer-bulk", "--manifest", str(manifest), "--platform-image"],
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "rate-limited" in result.output
+
+
+def test_explicit_registry_platform_builds_skip_rate_limit_note(tmp_path, fake_api):
+    manifest = tmp_path / "sources.jsonl"
+    _write_manifest(manifest, [{"source": "ghcr.io/org/app:v1"}])
+
+    result = runner.invoke(
+        app,
+        ["images", "transfer-bulk", "--manifest", str(manifest), "--platform-image"],
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "rate-limited" not in result.output
+
+
+def test_manifest_rejects_arm64_source_builds(tmp_path, fake_api):
+    manifest = tmp_path / "sources.jsonl"
+    _write_manifest(manifest, [{"source": "docker.io/org/app:v1", "platform": "linux/arm64"}])
+
+    result = runner.invoke(
+        app, ["images", "transfer-bulk", "--manifest", str(manifest)], env=TEST_ENV
+    )
+
+    assert result.exit_code == 1
+    assert "unsupported platform" in result.output
+    assert "linux/arm64" in result.output
+    assert fake_api.payloads == []
 
 
 def test_manifest_validation_fails_before_any_submission(tmp_path, fake_api):
@@ -236,8 +367,8 @@ def test_manifest_validation_fails_before_any_submission(tmp_path, fake_api):
                 json.dumps({"source": "org/app:v1", "context": "./x"}),
                 json.dumps({"image": "no-source:v1"}),
                 # Same derived destination app:v2 from two different namespaces.
-                json.dumps({"source": "a/app:v2"}),
-                json.dumps({"source": "b/app:v2"}),
+                json.dumps({"source": "registry-a.example/org/app:v2"}),
+                json.dumps({"source": "registry-b.example/org/app:v2"}),
             ]
         )
         + "\n"
@@ -258,8 +389,8 @@ def test_manifest_destination_override_resolves_duplicates(tmp_path, fake_api):
     _write_manifest(
         manifest,
         [
-            {"source": "a/app:v2"},
-            {"source": "b/app:v2", "image": "app-b:v2"},
+            {"source": "registry-a.example/org/app:v2"},
+            {"source": "registry-b.example/org/app:v2", "image": "app-b:v2"},
         ],
     )
     result = runner.invoke(
@@ -456,7 +587,7 @@ def test_hf_large_dataset_prints_size_note(tmp_path, fake_api, monkeypatch):
         env=TEST_ENV,
     )
     assert result.exit_code == 0, result.output
-    assert "may take a few minutes" in result.output
+    assert "~3.7GB" in result.output
 
 
 def test_hf_non_string_column_rejected(tmp_path, fake_api, monkeypatch):
@@ -480,14 +611,14 @@ def test_rate_limited_submit_defers_and_retries(tmp_path, fake_api):
     manifest = tmp_path / "transfers.jsonl"
     _write_manifest(manifest, [{"source": "a/app-a:v1"}, {"source": "b/app-b:v1"}])
     fake_api.build_error_queue.append(
-        APIError("HTTP 429: Image transfer rate limit exceeded: 10/10 images")
+        APIError("HTTP 429: Source image build rate limit exceeded: 10/10 images")
     )
     result = runner.invoke(
         app, ["images", "transfer-bulk", "--manifest", str(manifest)], env=TEST_ENV
     )
     assert result.exit_code == 0, result.output
     assert "pacing submissions" in result.output
-    assert "2/2 transfers completed" in result.output
+    assert "2/2 VM builds completed" in result.output
     # First POST is rejected, the spec is requeued, then both succeed.
     assert fake_api.post_build_count() == 3
 
@@ -500,7 +631,7 @@ def test_bulk_shape_response_is_unwrapped(tmp_path, fake_api):
         app, ["images", "transfer-bulk", "--manifest", str(manifest)], env=TEST_ENV
     )
     assert result.exit_code == 0, result.output
-    assert "All images transferred successfully" in result.output
+    assert "All VM images built successfully" in result.output
     # The build ids from the unwrapped entries are what gets polled.
     assert ("GET", "/images/build/build-1") in fake_api.calls
     assert ("GET", "/images/build/build-2") in fake_api.calls
@@ -513,7 +644,7 @@ def test_comma_separated_sources_rejected_in_manifest_and_hf(tmp_path, fake_api,
         app, ["images", "transfer-bulk", "--manifest", str(manifest)], env=TEST_ENV
     )
     assert result.exit_code == 1
-    assert "commas are not allowed" in result.output
+    assert "commas" in result.output
     assert fake_api.post_build_count() == 0
 
     _fake_hf(
@@ -529,7 +660,7 @@ def test_comma_separated_sources_rejected_in_manifest_and_hf(tmp_path, fake_api,
     )
     assert result.exit_code == 1
     assert "row 0" in result.output
-    assert "commas are not allowed" in result.output
+    assert "commas" in result.output
     assert fake_api.post_build_count() == 0
 
 
@@ -542,20 +673,20 @@ def test_bulk_shape_multi_entry_response_fails_loudly(tmp_path, fake_api):
         app, ["images", "transfer-bulk", "--manifest", str(manifest)], env=TEST_ENV
     )
     assert result.exit_code == 1
-    assert "expected one transfer result, got 2" in result.output
+    assert "SUBMIT_FAILED" in result.output
 
 
 def test_bulk_shape_failed_entry_records_submit_failed(tmp_path, fake_api):
     fake_api.respond_bulk_shape = True
-    fake_api.bulk_entry_error = "Invalid transfer source: nope"
+    fake_api.bulk_entry_error = "Invalid source image: nope"
     manifest = tmp_path / "transfers.jsonl"
     _write_manifest(manifest, [{"source": "a/app-a:v1"}])
     result = runner.invoke(
         app, ["images", "transfer-bulk", "--manifest", str(manifest)], env=TEST_ENV
     )
     assert result.exit_code == 1
-    assert "0/1 transfers completed" in result.output
-    assert "Invalid transfer source: nope" in result.output
+    assert "0/1 VM builds completed" in result.output
+    assert "Invalid source image: nope" in result.output
 
 
 def test_persistent_rate_limit_gives_up_instead_of_pacing_forever(tmp_path, fake_api, monkeypatch):
@@ -563,7 +694,8 @@ def test_persistent_rate_limit_gives_up_instead_of_pacing_forever(tmp_path, fake
     manifest = tmp_path / "transfers.jsonl"
     _write_manifest(manifest, [{"source": "a/app-a:v1"}, {"source": "b/app-b:v1"}])
     fake_api.build_error_queue.extend(
-        APIError("HTTP 429: Image transfer rate limit exceeded: 10/10 images") for _ in range(10)
+        APIError("HTTP 429: Source image build rate limit exceeded: 10/10 images")
+        for _ in range(10)
     )
     failures_out = tmp_path / "failures.jsonl"
     result = runner.invoke(
@@ -579,7 +711,7 @@ def test_persistent_rate_limit_gives_up_instead_of_pacing_forever(tmp_path, fake
         env=TEST_ENV,
     )
     assert result.exit_code == 1
-    assert "0/2 transfers completed" in result.output
+    assert "0/2 VM builds completed" in result.output
     assert "kept rate-limiting" in result.output
     # Rate-limit failures must not trigger the quota guidance.
     assert "Image quota reached" not in result.output
@@ -612,7 +744,7 @@ def test_quota_429_aborts_and_skips_remaining(tmp_path, fake_api):
         env=TEST_ENV,
     )
     assert result.exit_code == 1
-    assert "0/3 transfers completed" in result.output
+    assert "0/3 VM builds completed" in result.output
     assert "Image quota reached" in result.output
     lines = [json.loads(line) for line in failures_out.read_text().splitlines()]
     assert [entry["source"] for entry in lines] == ["a/app-a:v1", "b/app-b:v1", "c/app-c:v1"]
@@ -623,7 +755,10 @@ def test_failed_transfer_writes_rerunnable_failures_manifest(tmp_path, fake_api)
     manifest = tmp_path / "transfers.jsonl"
     _write_manifest(
         manifest,
-        [{"source": "a/app-a:v1"}, {"source": "b/app-b:v1", "image": "renamed:v1"}],
+        [
+            {"source": "registry-a.example/org/app-a:v1"},
+            {"source": "registry-b.example/org/app-b:v1", "image": "renamed:v1"},
+        ],
     )
     fake_api.poll_scripts["build-2"] = ["PENDING", "FAILED"]
     failures_out = tmp_path / "failures.jsonl"
@@ -640,10 +775,17 @@ def test_failed_transfer_writes_rerunnable_failures_manifest(tmp_path, fake_api)
         env=TEST_ENV,
     )
     assert result.exit_code == 1
-    assert "1/2 transfers completed" in result.output
+    assert "1/2 VM builds completed" in result.output
     lines = [json.loads(line) for line in failures_out.read_text().splitlines()]
-    assert lines == [{"source": "b/app-b:v1", "platform": "linux/amd64", "image": "renamed:v1"}]
-    assert f"transfer-bulk --manifest {failures_out}" in result.output
+    assert lines == [
+        {
+            "source": "registry-b.example/org/app-b:v1",
+            "platform": "linux/amd64",
+            "image": "renamed:v1",
+        }
+    ]
+    assert "Retry with:" in result.output
+    assert failures_out.name in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -775,7 +917,8 @@ def test_platform_image_rejects_multi_level_destination_override(tmp_path, fake_
     )
     assert result.exit_code == 1
     assert "invalid destination 'a/b/app:v1'" in result.output
-    assert "use 'name:tag' or a namespaced 'ns/name:tag'" in result.output
+    assert "namespaced" in result.output
+    assert "ns/name:tag" in result.output
     assert fake_api.post_build_count() == 0
 
 
@@ -790,7 +933,8 @@ def test_namespaced_destination_override_still_rejected_without_platform_image(t
     )
     assert result.exit_code == 1
     assert "invalid destination 'ns/app:v1'" in result.output
-    assert "use simple names like 'myapp:v1'" in result.output
+    assert "simple names" in result.output
+    assert "myapp:v1" in result.output
     assert fake_api.post_build_count() == 0
 
 

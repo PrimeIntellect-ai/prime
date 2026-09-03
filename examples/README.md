@@ -235,11 +235,11 @@ prime sandbox ssh SANDBOX_ID
 ### Image Command Reference
 
 ```bash
-# Build and push an image from a Dockerfile (linux/amd64 by default)
+# Build VM and container artifacts from a Dockerfile (linux/amd64 only)
 prime images push myapp:v1.0.0 --context ./app --dockerfile ./app/Dockerfile
 
-# Copy an existing public image into Prime instead of building
-prime images push myubuntu:22.04 --source-image ubuntu:22.04
+# Docker Hub sources become public, org-less platform images automatically
+prime images push --source-image ubuntu:22.04
 
 # Pre-build the VM artifact for an existing image (otherwise the first VM
 # sandbox using that image triggers a one-time conversion)

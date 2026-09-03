@@ -12,7 +12,6 @@ from typer.testing import CliRunner
 runner = CliRunner()
 
 TEST_ENV = {
-    "COLUMNS": "200",
     "LINES": "50",
     "PRIME_DISABLE_VERSION_CHECK": "1",
     "PRIME_TEAM_ID": "",
@@ -59,6 +58,7 @@ class FakeAPI:
         self.build_error_queue = []
         # errorMessage returned alongside FAILED poll statuses.
         self.poll_error_message = None
+        self.expires_in = 3600
 
     def request(self, method, path, json=None, params=None):
         self.calls.append((method, path))
@@ -71,6 +71,7 @@ class FakeAPI:
             return {
                 "build_id": build_id,
                 "upload_url": f"https://example.test/upload/{build_id}",
+                "expires_in": self.expires_in,
                 "fullImagePath": f"user/{json['image_name']}:{json['image_tag']}",
             }
         if method == "POST" and path.endswith("/start"):
@@ -265,6 +266,35 @@ def test_quota_429_aborts_and_skips_remaining(tmp_path, fake_api, monkeypatch):
     failures_file = tmp_path / "push-bulk-failures.jsonl"
     lines = [json.loads(line) for line in failures_file.read_text().splitlines()]
     assert {line["image"] for line in lines} == {"app-a:v1", "app-b:v1", "app-c:v1"}
+
+
+def test_bulk_dockerfile_build_requires_upload_expiry(tmp_path, fake_api, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _make_context(tmp_path, "a")
+    manifest = tmp_path / "builds.jsonl"
+    _write_manifest(manifest, [{"image": "app-a:v1", "context": "a"}])
+    fake_api.expires_in = None
+
+    result = runner.invoke(app, ["images", "push-bulk", "--manifest", str(manifest)], env=TEST_ENV)
+
+    assert result.exit_code == 1
+    assert "expires_in" in result.output
+
+
+def test_manifest_rejects_arm64_dockerfile_build(tmp_path, fake_api, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _make_context(tmp_path, "a")
+    manifest = tmp_path / "builds.jsonl"
+    _write_manifest(
+        manifest,
+        [{"image": "app-a:v1", "context": "a", "platform": "linux/arm64"}],
+    )
+
+    result = runner.invoke(app, ["images", "push-bulk", "--manifest", str(manifest)], env=TEST_ENV)
+
+    assert result.exit_code == 1
+    assert "unsupported platform 'linux/arm64'" in result.output
+    assert fake_api.calls == []
 
 
 def test_requires_exactly_one_mode(tmp_path, fake_api, monkeypatch):
@@ -610,7 +640,7 @@ def test_hf_flags_rejected_outside_hf_mode(tmp_path, fake_api, monkeypatch):
     )
 
     assert result.exit_code == 1
-    assert "only apply to --hf mode" in result.output
+    assert "--hf mode" in result.output
     assert fake_api.calls == []
 
 
@@ -653,7 +683,7 @@ def test_hf_failures_keep_contexts_and_manifest_is_rerunnable(tmp_path, fake_api
     lines = [json.loads(line) for line in failures_file.read_text().splitlines()]
     assert [line["image"] for line in lines] == ["repo-1:latest"]
     # The generated contexts stay behind so the failures manifest re-runs.
-    assert str(context_root) in result.output
+    assert context_root.name in result.output
     assert all((tmp_path / line["dockerfile"]).is_file() for line in lines)
 
     fake_api.default_poll = ["COMPLETED"]

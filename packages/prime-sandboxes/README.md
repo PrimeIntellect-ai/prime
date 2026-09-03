@@ -116,6 +116,33 @@ vm_images = [
 ]
 ```
 
+## Image Builds
+
+Dockerfile builds create both container and VM artifacts on `linux/amd64`. The
+initial response includes `upload_url` and `expires_in`; upload the build context
+before calling `start_build`.
+
+Source-image requests build VM artifacts directly from allowed public registry
+images. They do not return upload metadata. A single source returns `build_id`
+and `build_ids`. Comma-separated sources return per-source `results` and
+`failed` entries. The `transfer_image` method name remains available for API
+compatibility:
+
+```python
+from prime_sandboxes import ImageClient
+
+images = ImageClient()
+response = images.transfer_image("ubuntu:22.04", platform="linux/amd64")
+print(response.build_ids)
+```
+
+All image builds support only `linux/amd64`. Docker Hub sources become public,
+org-less platform images automatically. Docker Hub source builds do not accept a
+custom destination, team, or private visibility. One comma-separated request
+cannot mix Docker Hub with other registries. Explicit non-Docker-Hub public
+registries can still use personal or team ownership, custom destinations, and
+public or private visibility.
+
 ## Authentication
 
 The SDK looks for credentials in this order:

@@ -196,7 +196,7 @@ def test_image_client_transfer_image_payload_and_response():
         )
     )
     response = client.transfer_image(
-        "ubuntu:22.04",
+        "ghcr.io/research/ubuntu:22.04",
         image_name="ubuntu",
         image_tag="22.04",
         team_id="team1",
@@ -209,7 +209,7 @@ def test_image_client_transfer_image_payload_and_response():
         "image_name": "ubuntu",
         "image_tag": "22.04",
         "dockerfile_path": "Dockerfile",
-        "source_image": "ubuntu:22.04",
+        "source_image": "ghcr.io/research/ubuntu:22.04",
         "platform": "linux/amd64",
         "team_id": "team1",
         "visibility": ImageVisibility.PUBLIC,
@@ -219,6 +219,60 @@ def test_image_client_transfer_image_payload_and_response():
     assert response.build_ids == ["build-123"]
     assert response.upload_url is None
     assert response.full_image_path == "prime/research/ubuntu:22.04"
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"build_id": "build-123", "expires_in": 3600, "fullImagePath": "app:v1"},
+        {
+            "build_id": "build-123",
+            "upload_url": "https://example.test/upload",
+            "fullImagePath": "app:v1",
+        },
+    ],
+)
+def test_image_client_dockerfile_build_requires_upload_metadata(response: dict[str, Any]):
+    client = ImageClient(DummyAPIClient(response))
+
+    with pytest.raises(ValueError, match="requires upload_url and expires_in"):
+        client.initiate_build(BuildImageRequest(image_name="app", image_tag="v1"))
+
+
+@pytest.mark.parametrize("source_image", [None, "ubuntu:22.04", "ghcr.io/org/app:v1"])
+def test_build_image_request_requires_amd64(source_image: str | None):
+    with pytest.raises(ValueError, match="platform must be linux/amd64"):
+        BuildImageRequest(
+            image_name="app" if source_image is None else None,
+            source_image=source_image,
+            platform="linux/arm64",
+        )
+
+
+@pytest.mark.parametrize(
+    "source_image",
+    ["ubuntu:22.04", "library/ubuntu:22.04", "docker.io/library/ubuntu:22.04"],
+)
+def test_build_image_request_normalizes_docker_hub_ownership(source_image: str):
+    request = BuildImageRequest(source_image=source_image)
+
+    assert request.team_id is None
+    assert request.visibility == ImageVisibility.PUBLIC
+    assert request.owner_scope == "platform"
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"image_name": "custom"}, "custom destination"),
+        ({"image_tag": "v1"}, "custom destination"),
+        ({"team_id": "team-1"}, "team_id"),
+        ({"visibility": ImageVisibility.PRIVATE}, "must be public"),
+    ],
+)
+def test_build_image_request_rejects_docker_hub_customization(kwargs: dict[str, Any], message: str):
+    with pytest.raises(ValueError, match=message):
+        BuildImageRequest(source_image="ubuntu:22.04", **kwargs)
 
 
 def test_build_image_response_allows_multi_transfer_without_full_image_path():
@@ -245,6 +299,7 @@ def test_image_client_initiate_build_accepts_platform_owner_scope():
                 "build_id": "build-123",
                 "buildIds": ["build-123"],
                 "upload_url": "https://example.test/upload",
+                "expires_in": 3600,
                 "fullImagePath": "ubuntu:22.04",
                 "visibility": "PUBLIC",
             },

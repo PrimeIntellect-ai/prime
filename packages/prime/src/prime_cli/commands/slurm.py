@@ -239,6 +239,14 @@ def connect(
         if result.returncode != 0:
             raise typer.Exit(result.returncode)
 
+    except typer.Exit:
+        # typer.Exit subclasses Exception, so without this it falls into
+        # the generic handler below: the exit code from a failed ssh
+        # (or the "not connectable" / "key not found" cases above, each
+        # already printed its own message before raising) gets stomped
+        # to 1 and a bogus "Unexpected error: <code>" line gets printed
+        # on top of it.
+        raise
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
         raise typer.Exit(1)

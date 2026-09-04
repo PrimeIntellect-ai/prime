@@ -79,7 +79,7 @@ def list_clusters(
         for c in clusters:
             table.add_row(
                 c.id,
-                escape(c.display_name),
+                Text(c.display_name),
                 Text(c.status, style=status_color(c.status, SLURM_CLUSTER_STATUS_COLORS)),
                 c.gpu_type or "N/A",
                 str(c.gpu_count),
@@ -123,10 +123,11 @@ def list_members(
             table.add_row(
                 m.username,
                 str(m.uid),
-                "\n".join(escape(_truncate_ssh_key(k)) for k in m.ssh_authorized_keys) or "N/A",
+                Text("\n").join(Text(_truncate_ssh_key(k)) for k in m.ssh_authorized_keys)
+                or Text("N/A"),
                 "yes" if m.sudo else "no",
                 m.status,
-                escape(m.linked_user_email or m.linked_user_name or "N/A"),
+                Text(m.linked_user_email or m.linked_user_name or "N/A"),
             )
         console.print(table)
 

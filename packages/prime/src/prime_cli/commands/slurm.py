@@ -1,6 +1,7 @@
 from typing import List, Optional
 
 import typer
+from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
 
@@ -78,7 +79,7 @@ def list_clusters(
         for c in clusters:
             table.add_row(
                 c.id,
-                c.display_name,
+                escape(c.display_name),
                 Text(c.status, style=status_color(c.status, SLURM_CLUSTER_STATUS_COLORS)),
                 c.gpu_type or "N/A",
                 str(c.gpu_count),
@@ -122,10 +123,10 @@ def list_members(
             table.add_row(
                 m.username,
                 str(m.uid),
-                "\n".join(_truncate_ssh_key(k) for k in m.ssh_authorized_keys) or "N/A",
+                "\n".join(escape(_truncate_ssh_key(k)) for k in m.ssh_authorized_keys) or "N/A",
                 "yes" if m.sudo else "no",
                 m.status,
-                m.linked_user_email or m.linked_user_name or "N/A",
+                escape(m.linked_user_email or m.linked_user_name or "N/A"),
             )
         console.print(table)
 
@@ -149,7 +150,7 @@ def _print_member(m: SlurmClusterMember) -> None:
     console.print(f"Sudo: {'yes' if m.sudo else 'no'}")
     console.print(f"Status: {m.status}")
     for key in m.ssh_authorized_keys:
-        console.print(f"SSH Key: {key}")
+        console.print(f"SSH Key: {escape(key)}")
 
 
 @app.command(name="add-member", no_args_is_help=True)

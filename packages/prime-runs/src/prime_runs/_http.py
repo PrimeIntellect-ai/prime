@@ -19,6 +19,7 @@ import json
 import sys
 import time
 from typing import Any, Dict, Mapping, Optional, Tuple, Union
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 from prime_traces.core.client import AMBIGUOUS_TRANSPORT_ERRORS, raise_for_response, retry_delay
@@ -38,14 +39,29 @@ PUBLIC_API_PATH = "/api/v1"
 INTERNAL_API_PATH = "/api/internal"
 
 
+#: API roots a base URL may end in, longest first; ``/rft`` is only recognised
+#: after an API path, so a host that happens to be named ``rft`` or ``api`` stays.
+_API_ROOTS = (
+    ("/api/internal/rft", INTERNAL_API_PATH),
+    ("/api/internal", INTERNAL_API_PATH),
+    ("/api/v1/rft", PUBLIC_API_PATH),
+    ("/api/v1", PUBLIC_API_PATH),
+)
+
+
 def split_api_root(base_url: str) -> Tuple[str, str]:
     """``(origin, api_path)`` for a base URL that is a platform origin or one of
-    its API roots, with or without the ``/rft`` the RFT client historically got."""
-    root = base_url.rstrip("/").removesuffix("/rft")
-    for api_path in (INTERNAL_API_PATH, PUBLIC_API_PATH):
-        if root.endswith(api_path):
-            return root[: -len(api_path)], api_path
-    return root, PUBLIC_API_PATH
+    its API roots, with or without the ``/rft`` the RFT client historically got.
+    Only the URL's path is inspected, never its host."""
+    parts = urlsplit(base_url)
+    path = parts.path.rstrip("/")
+    api_path = PUBLIC_API_PATH
+    for suffix, candidate in _API_ROOTS:
+        if path.endswith(suffix):
+            path, api_path = path[: -len(suffix)], candidate
+            break
+    origin = urlunsplit((parts.scheme, parts.netloc, path, "", ""))
+    return origin.rstrip("/"), api_path
 
 
 def _user_agent() -> str:

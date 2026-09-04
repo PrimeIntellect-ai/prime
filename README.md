@@ -279,7 +279,7 @@ Tagging and publishing to PyPI is handled automatically by CI.
 
 #### Version sync considerations:
 
-When releasing `prime`, consider whether `prime-sandboxes` should also be bumped, as `prime` depends on `prime-sandboxes`. The packages can be released independently or together depending on what changed.
+When releasing `prime`, consider whether `prime-sandboxes` or `prime-tunnel` should also be bumped, as `prime` depends on both. The packages can be released independently or together depending on what changed.
 
 ## License
 

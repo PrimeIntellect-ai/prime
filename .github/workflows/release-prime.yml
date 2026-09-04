@@ -15,35 +15,41 @@ on:
         type: string
 
 jobs:
-  await-sandboxes-release:
+  await-sdk-releases:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       # The CLI image installs the wheel with its dependencies resolved from PyPI, and
-      # release-sandboxes.yml runs independently of this workflow. Tagging or publishing
-      # before prime-sandboxes is installable would strand the release: the CLI tag
-      # already exists, so a rerun skips it, and every image build fails.
-      - name: Wait for the required prime-sandboxes version on PyPI
+      # SDK release workflows run independently. Publishing before a required SDK is
+      # installable would strand the release: reruns skip the existing CLI tag while
+      # every image build continues to fail dependency resolution.
+      - name: Wait for required SDK versions on PyPI
         run: |
-          FLOOR=$(sed -nE 's/.*"prime-sandboxes>=([^"]+)".*/\1/p' packages/prime/pyproject.toml | head -n1)
-          if [ -z "$FLOOR" ]; then
-            echo "::error::Unable to parse the prime-sandboxes floor from packages/prime/pyproject.toml"
-            exit 1
-          fi
-          echo "Waiting for prime-sandboxes==$FLOOR to become installable"
-          for _ in $(seq 1 40); do
-            if python3 -m pip download --quiet --no-deps --no-cache-dir --dest /tmp/floor-check "prime-sandboxes==$FLOOR"; then
-              echo "prime-sandboxes $FLOOR is installable"
-              exit 0
+          for PACKAGE in prime-sandboxes prime-tunnel; do
+            FLOOR=$(sed -nE "s/.*\"${PACKAGE}>=([^\"]+)\".*/\1/p" packages/prime/pyproject.toml | head -n1)
+            if [ -z "$FLOOR" ]; then
+              echo "::error::Unable to parse the $PACKAGE floor from packages/prime/pyproject.toml"
+              exit 1
             fi
-            sleep 15
+            echo "Waiting for $PACKAGE==$FLOOR to become installable"
+            AVAILABLE=false
+            for _ in $(seq 1 40); do
+              if python3 -m pip download --quiet --no-deps --no-cache-dir --dest /tmp/floor-check "$PACKAGE==$FLOOR"; then
+                echo "$PACKAGE $FLOOR is installable"
+                AVAILABLE=true
+                break
+              fi
+              sleep 15
+            done
+            if [ "$AVAILABLE" != true ]; then
+              echo "::error::$PACKAGE $FLOOR is still not on PyPI after 10 minutes; check its release workflow"
+              exit 1
+            fi
           done
-          echo "::error::prime-sandboxes $FLOOR is still not on PyPI after 10 minutes; check the Release prime-sandboxes workflow"
-          exit 1
 
   tag-and-release:
-    needs: await-sandboxes-release
+    needs: await-sdk-releases
     runs-on: ubuntu-latest
     environment: pypi-prod
     permissions:

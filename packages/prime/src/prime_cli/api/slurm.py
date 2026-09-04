@@ -69,6 +69,8 @@ class SlurmClusterDetail(BaseModel):
 
 class SlurmClusterMember(BaseModel):
     username: str
+    uid: int
+    ssh_authorized_keys: List[str] = Field(alias="sshAuthorizedKeys")
     sudo: bool
     status: str
     linked_user_id: Optional[str] = Field(None, alias="linkedUserId")

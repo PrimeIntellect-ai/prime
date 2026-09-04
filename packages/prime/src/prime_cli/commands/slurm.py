@@ -36,7 +36,8 @@ CLUSTER_DETAIL_JSON_HELP = json_output_help(
 )
 
 MEMBERS_JSON_HELP = json_output_help(
-    ".data[] = {username, sudo, status, linked_user_id?, linked_user_name?, linked_user_email?}",
+    ".data[] = {username, uid, ssh_authorized_keys[], sudo, status, "
+    "linked_user_id?, linked_user_name?, linked_user_email?}",
 )
 
 ACCOUNTING_JSON_HELP = json_output_help(
@@ -274,12 +275,16 @@ def list_members(
 
         table = Table(title=f"Members (Total: {len(members)})", show_lines=True)
         table.add_column("Username", style="cyan")
+        table.add_column("UID", style="magenta")
+        table.add_column("SSH Keys", style="green")
         table.add_column("Sudo", style="white")
         table.add_column("Status", style="yellow")
         table.add_column("Linked User", style="blue")
         for m in members:
             table.add_row(
                 m.username,
+                str(m.uid),
+                "\n".join(_truncate_ssh_key(k) for k in m.ssh_authorized_keys) or "N/A",
                 "yes" if m.sudo else "no",
                 m.status,
                 m.linked_user_email or m.linked_user_name or "N/A",
@@ -294,10 +299,19 @@ def list_members(
         raise typer.Exit(1)
 
 
+def _truncate_ssh_key(key: str, max_len: int = 60) -> str:
+    """Shorten a full authorized_keys line for table display. Full value
+    is always available via --output json."""
+    return key if len(key) <= max_len else f"{key[:max_len]}..."
+
+
 def _print_member(m: SlurmClusterMember) -> None:
     console.print(f"Username: {m.username}")
+    console.print(f"UID: {m.uid}")
     console.print(f"Sudo: {'yes' if m.sudo else 'no'}")
     console.print(f"Status: {m.status}")
+    for key in m.ssh_authorized_keys:
+        console.print(f"SSH Key: {key}")
 
 
 @app.command(name="add-member", no_args_is_help=True)

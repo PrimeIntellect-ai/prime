@@ -65,9 +65,14 @@ run.finish()
 
 - The platform enables external runs per team; a team outside the allowlist
   gets a `ForbiddenError` from `init()`.
-- `init(kind="train", id=os.environ["RUN_ID"])` attaches to an external run a
-  launcher already created: nothing is registered, the platform keeps the run's
-  failure marking, and a clean `finish()` still completes it.
+- `init(kind="train", id=os.environ["RUN_ID"])` attaches to a run a launcher
+  already created: nothing is registered, the platform keeps the run's failure
+  marking, and a clean `finish()` still completes it. A *hosted* run (one the
+  platform launched) is reachable only through the platform's internal RFT
+  root: pass the `PRIME_API_BASE` its launcher injects (`…/api/internal/rft`) as
+  `base_url=` and the SDK addresses that router, sending the run's token as
+  `x-api-key` too. Registering a run or setting its status is not available
+  there; the public API answers 400 for a hosted run's id.
 - Metrics are one row per `log_metrics` call, on their own uploader. The sample
   table gets one Parquet object per upload, every 10th step, keyed by the step
   an episode was dispatched at; a step logged in several calls gets several
@@ -109,7 +114,10 @@ table today's viewer reads. `log_*()` are queue puts, safe inside a coroutine;
 | `~/.prime/config.json` | Shared prime CLI config (`api_key`, `team_id`, `base_url`)             |
 
 Precedence is `init()` argument → environment variable → config file. A missing
-API key disables the run with a warning.
+API key disables the run with a warning. `base_url` is normally the platform
+origin; the internal RFT root a hosted training run is given
+(`…/api/internal`, with or without `/rft`) is accepted too and switches the
+client to that router (attached runs only).
 
 ## Not yet available
 

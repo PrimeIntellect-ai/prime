@@ -206,3 +206,68 @@ def test_idempotent_methods_still_replay_ambiguous_failures(no_sleep):
     client = client_for(lambda request: responses.pop(0))
 
     assert client.put("/evaluations/x", json_body={"metrics": {}}) == {"ok": True}
+
+
+def _recording(seen):
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200, json={"data": {"status": "success"}})
+
+    return handler
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "http://testserver/api/internal/rft",
+        "http://testserver/api/internal/rft/",
+        "http://testserver/api/internal",
+    ],
+)
+def test_the_internal_rft_root_addresses_that_router_with_the_run_token(base_url):
+    """A hosted run's ``$PRIME_API_BASE``: paths go under ``/api/internal`` and the
+    token travels in ``x-api-key`` as well, which is what that router checks."""
+    seen = []
+    client = client_for(_recording(seen), base_url=base_url)
+
+    client.post("/rft/metrics", json_body={"run_id": "run-1", "metrics": {"loss": 1.0}})
+
+    assert client.internal
+    assert client.api_prefix == "http://testserver/api/internal"
+    assert str(seen[0].url) == "http://testserver/api/internal/rft/metrics"
+    assert seen[0].headers["x-api-key"] == "test-key"
+    assert seen[0].headers["Authorization"] == "Bearer test-key"
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "http://testserver",
+        "http://testserver/",
+        "http://testserver/api/v1",
+        "http://testserver/api/v1/rft",
+    ],
+)
+def test_the_public_root_stays_under_api_v1_without_the_run_token_header(base_url):
+    seen = []
+    client = client_for(_recording(seen), base_url=base_url)
+
+    client.post("/rft/metrics", json_body={"run_id": "run-1", "metrics": {"loss": 1.0}})
+
+    assert not client.internal
+    assert client.api_prefix == "http://testserver/api/v1"
+    assert str(seen[0].url) == "http://testserver/api/v1/rft/metrics"
+    assert "x-api-key" not in seen[0].headers
+    assert seen[0].headers["Authorization"] == "Bearer test-key"
+
+
+def test_an_injected_client_is_authenticated_per_request():
+    """The pool's default headers are also sent per call, so a caller-supplied
+    ``httpx.Client`` without them still authenticates."""
+    seen = []
+    client = client_for(_recording(seen))
+
+    client.get("/evaluations/x")
+
+    assert seen[0].headers["Authorization"] == "Bearer test-key"
+    assert seen[0].headers["User-Agent"].startswith("prime-runs/")

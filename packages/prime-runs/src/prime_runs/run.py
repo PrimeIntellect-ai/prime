@@ -423,7 +423,10 @@ def init(
     model, ``environments`` the hub ids, ``training`` the display fields, and a
     team is required. ``id`` attaches to an external run a launcher already
     created (``$RUN_ID``): nothing is registered, the platform keeps the run's
-    failure marking, and a clean finish still completes it.
+    failure marking, and a clean finish still completes it. ``base_url`` is the
+    platform origin; a hosted run passes the internal RFT root its launcher
+    injects (``$PRIME_API_BASE``, ``…/api/internal/rft``), which serves attached
+    runs only.
     """
     settings = Config()
     api_key = api_key if api_key is not None else settings.api_key

@@ -271,3 +271,25 @@ def test_an_injected_client_is_authenticated_per_request():
 
     assert seen[0].headers["Authorization"] == "Bearer test-key"
     assert seen[0].headers["User-Agent"].startswith("prime-runs/")
+
+
+@pytest.mark.parametrize(
+    "base_url,expected_prefix",
+    [
+        ("http://rft", "http://rft/api/v1"),
+        ("http://rft/", "http://rft/api/v1"),
+        ("https://rft.internal:8080", "https://rft.internal:8080/api/v1"),
+        ("http://api", "http://api/api/v1"),
+        ("http://api/v1", "http://api/v1/api/v1"),
+        (
+            "https://platform.test/proxy/api/internal/rft",
+            "https://platform.test/proxy/api/internal",
+        ),
+    ],
+)
+def test_only_the_path_is_normalised_never_a_host_named_like_a_suffix(base_url, expected_prefix):
+    """A service host called ``rft`` or ``api`` (Docker, Kubernetes) is not a path
+    suffix; the API path is recognised on the URL's path only."""
+    client = client_for(lambda request: httpx.Response(200, json={}), base_url=base_url)
+
+    assert client.api_prefix == expected_prefix

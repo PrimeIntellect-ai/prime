@@ -1,6 +1,5 @@
 import os
 import subprocess
-from datetime import datetime, timezone
 from typing import List, Optional
 
 import typer
@@ -26,13 +25,12 @@ console = get_console()
 
 LIST_CLUSTERS_JSON_HELP = json_output_help(
     ".data[] = {id, prime_cluster_id, display_name, status, gpu_type, gpu_count, "
-    "total_gpus, free_gpus, total_nodes, healthy_nodes, cordoned_node_count, "
     "created_at, started_at?}",
 )
 
 CLUSTER_DETAIL_JSON_HELP = json_output_help(
     ". = {id, prime_cluster_id, display_name, status, gpu_type, gpu_count, "
-    "connectable, ssh_host?, ssh_port?, node_health, nodes[]}",
+    "connectable, ssh_host?, ssh_port?}",
 )
 
 MEMBERS_JSON_HELP = json_output_help(
@@ -87,22 +85,15 @@ def list_clusters(
         table.add_column("Name", style="blue")
         table.add_column("Status", style="yellow")
         table.add_column("GPU Type", style="magenta")
-        table.add_column("Free/Total GPUs", style="green")
-        table.add_column("Nodes (healthy/total)", style="blue")
+        table.add_column("GPU Count", style="green")
 
         for c in clusters:
-            gpu_col = (
-                f"{c.free_gpus}/{c.total_gpus}"
-                if c.free_gpus is not None and c.total_gpus is not None
-                else "N/A"
-            )
             table.add_row(
                 c.id,
                 c.display_name,
                 Text(c.status, style=status_color(c.status, SLURM_CLUSTER_STATUS_COLORS)),
                 c.gpu_type or "N/A",
-                gpu_col,
-                f"{c.healthy_nodes}/{c.total_nodes}",
+                str(c.gpu_count),
             )
         console.print(table)
         console.print(
@@ -124,7 +115,7 @@ def get_cluster(
     team_id: Optional[str] = _TEAM_ID_OPTION,
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """Get connection info, health, and node details for a Slurm cluster."""
+    """Get connection info for a Slurm cluster."""
     validate_output_format(output, console)
     resolved_team_id = _resolve_team_id(team_id)
 
@@ -152,36 +143,7 @@ def get_cluster(
             )
         else:
             table.add_row("SSH", "Not connectable (cluster is not RUNNING)")
-        table.add_row(
-            "Node health",
-            f"{cluster.node_health.healthy_nodes}/{cluster.node_health.total_nodes} healthy",
-        )
         console.print(table)
-
-        if cluster.node_health.cordoned_nodes:
-            cordoned_table = Table(title="Cordoned Nodes")
-            cordoned_table.add_column("Name", style="cyan")
-            cordoned_table.add_column("Reason", style="yellow")
-            for n in cluster.node_health.cordoned_nodes:
-                cordoned_table.add_row(n.name, n.reason)
-            console.print("\n")
-            console.print(cordoned_table)
-
-        if cluster.nodes:
-            nodes_table = Table(title="Nodes")
-            nodes_table.add_column("Name", style="cyan")
-            nodes_table.add_column("Ready", style="white")
-            nodes_table.add_column("Free/Allocatable GPUs", style="green")
-            nodes_table.add_column("Slurm State", style="blue")
-            for n in cluster.nodes:
-                nodes_table.add_row(
-                    n.name,
-                    "yes" if n.ready else "no",
-                    f"{n.free_gpus}/{n.allocatable_gpus}",
-                    ",".join(n.slurm_states) if n.slurm_states else "N/A",
-                )
-            console.print("\n")
-            console.print(nodes_table)
 
         console.print(
             f"\n[blue]Use 'prime slurm members {cluster_id}' to see who has access[/blue]"
@@ -515,50 +477,6 @@ def accounting(
             for row in rollup.outcomes:
                 table.add_row(row.outcome, str(row.count))
             console.print(table)
-
-    except APIError as e:
-        console.print(f"[red]Error:[/red] {str(e)}")
-        raise typer.Exit(1)
-    except Exception as e:
-        console.print(f"[red]Unexpected error:[/red] {str(e)}")
-        raise typer.Exit(1)
-
-
-@app.command(name="utilization", no_args_is_help=True)
-def utilization(
-    cluster_id: str,
-    range_seconds: int = typer.Option(
-        21_600, "--range-seconds", help="Time range to query, in seconds"
-    ),
-    team_id: Optional[str] = _TEAM_ID_OPTION,
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
-) -> None:
-    """Show GPU utilization over time for a Slurm cluster."""
-    validate_output_format(output, console)
-    resolved_team_id = _resolve_team_id(team_id)
-
-    try:
-        points = _slurm_client().utilization(
-            resolved_team_id, cluster_id, range_seconds=range_seconds
-        )
-
-        if output == "json":
-            output_data_as_json({"gpu_util": [p.model_dump() for p in points]}, console)
-            return
-
-        if not points:
-            console.print("[yellow]No utilization data available for this range.[/yellow]")
-            return
-
-        table = Table(title=f"GPU Utilization (last {range_seconds}s)")
-        table.add_column("Time", style="cyan")
-        table.add_column("Utilization %", style="green")
-        for p in points:
-            timestamp = datetime.fromtimestamp(p.timestamp, tz=timezone.utc).strftime(
-                "%Y-%m-%d %H:%M:%S UTC"
-            )
-            table.add_row(timestamp, f"{p.value:.1f}")
-        console.print(table)
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")

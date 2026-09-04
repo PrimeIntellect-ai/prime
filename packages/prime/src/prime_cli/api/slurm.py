@@ -5,33 +5,6 @@ from pydantic import BaseModel, ConfigDict, Field
 from prime_cli.core import APIClient, APIError
 
 
-class CordonedNode(BaseModel):
-    name: str
-    reason: str
-    automated: bool
-
-
-class NodeHealth(BaseModel):
-    total_nodes: int = Field(alias="totalNodes")
-    healthy_nodes: int = Field(alias="healthyNodes")
-    cordoned_nodes: List[CordonedNode] = Field(alias="cordonedNodes")
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class GpuNode(BaseModel):
-    name: str
-    ready: bool
-    is_cordoned: bool = Field(alias="isCordoned")
-    cordon_reason: Optional[str] = Field(None, alias="cordonReason")
-    allocatable_gpus: int = Field(alias="allocatableGpus")
-    used_gpus: int = Field(alias="usedGpus")
-    free_gpus: int = Field(alias="freeGpus")
-    slurm_states: Optional[List[str]] = Field(None, alias="slurmStates")
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
 class SlurmClusterSummary(BaseModel):
     id: str
     prime_cluster_id: str = Field(alias="primeClusterId")
@@ -39,11 +12,6 @@ class SlurmClusterSummary(BaseModel):
     status: str
     gpu_type: Optional[str] = Field(None, alias="gpuType")
     gpu_count: int = Field(alias="gpuCount")
-    total_gpus: Optional[int] = Field(None, alias="totalGpus")
-    free_gpus: Optional[int] = Field(None, alias="freeGpus")
-    total_nodes: int = Field(alias="totalNodes")
-    healthy_nodes: int = Field(alias="healthyNodes")
-    cordoned_node_count: int = Field(alias="cordonedNodeCount")
     created_at: str = Field(alias="createdAt")
     started_at: Optional[str] = Field(None, alias="startedAt")
 
@@ -60,8 +28,6 @@ class SlurmClusterDetail(BaseModel):
     connectable: bool
     ssh_host: Optional[str] = Field(None, alias="sshHost")
     ssh_port: Optional[int] = Field(None, alias="sshPort")
-    node_health: NodeHealth = Field(alias="nodeHealth")
-    nodes: List[GpuNode]
     created_at: str = Field(alias="createdAt")
 
     model_config = ConfigDict(populate_by_name=True)
@@ -112,11 +78,6 @@ class SlurmAccounting(BaseModel):
     queue_wait: List[QueueWaitPoint] = Field(default_factory=list)
     gpu_hours_by_user: List[GpuHoursRow] = Field(default_factory=list)
     outcomes: List[OutcomeRow] = Field(default_factory=list)
-
-
-class UtilizationPoint(BaseModel):
-    timestamp: float
-    value: float
 
 
 class SlurmClustersClient:
@@ -177,25 +138,12 @@ class SlurmClustersClient:
         )
         return SlurmAccounting.model_validate(response)
 
-    def utilization(
-        self, team_id: str, cluster_id: str, range_seconds: int = 21_600
-    ) -> List[UtilizationPoint]:
-        response = self.client.get(
-            f"/slurm-clusters/{team_id}/{cluster_id}/utilization",
-            params={"range_seconds": range_seconds},
-        )
-        return [UtilizationPoint.model_validate(p) for p in response.get("gpuUtil", [])]
-
 
 __all__ = [
     "SlurmClustersClient",
     "SlurmClusterSummary",
     "SlurmClusterDetail",
     "SlurmClusterMember",
-    "NodeHealth",
-    "GpuNode",
-    "CordonedNode",
     "SlurmAccounting",
-    "UtilizationPoint",
     "APIError",
 ]

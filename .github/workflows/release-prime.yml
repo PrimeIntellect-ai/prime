@@ -220,6 +220,8 @@ jobs:
       contents: read
       packages: write
     strategy:
+      # One matrix leg hitting a transient PyPI error must not cancel the others.
+      fail-fast: false
       matrix:
         python-version: ['3.11', '3.12', '3.13']
     steps:
@@ -248,11 +250,26 @@ jobs:
           IMAGE_PATH=$(echo "$REPOSITORY" | tr '[:upper:]' '[:lower:]')
           IMAGE="ghcr.io/$IMAGE_PATH"
           PY_TAG="py${PYTHON_VERSION}"
-          docker build --build-arg PRIME_VERSION="$VERSION" \
-            --build-arg PYTHON_VERSION="$PYTHON_VERSION" \
-            -t "$IMAGE:$VERSION-$PY_TAG" \
-            -t "$IMAGE:v$VERSION-$PY_TAG" \
-            -t "$IMAGE:$PY_TAG" .
+          # pip resolves the wheel's dependencies from PyPI inside the build. Even after
+          # await-sdk-releases has seen a freshly published SDK, a later request can still be
+          # served a stale index by the PyPI CDN, so retry the build before giving up. Layers
+          # before the pip install stay cached, so each retry only repeats the install step.
+          MAX_ATTEMPTS=6
+          for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
+            if docker build --build-arg PRIME_VERSION="$VERSION" \
+              --build-arg PYTHON_VERSION="$PYTHON_VERSION" \
+              -t "$IMAGE:$VERSION-$PY_TAG" \
+              -t "$IMAGE:v$VERSION-$PY_TAG" \
+              -t "$IMAGE:$PY_TAG" .; then
+              break
+            fi
+            if [ "$attempt" -eq "$MAX_ATTEMPTS" ]; then
+              echo "::error::docker build failed after $MAX_ATTEMPTS attempts"
+              exit 1
+            fi
+            echo "docker build failed (attempt $attempt/$MAX_ATTEMPTS); retrying in 30s"
+            sleep 30
+          done
           docker push "$IMAGE:$VERSION-$PY_TAG"
           docker push "$IMAGE:v$VERSION-$PY_TAG"
           docker push "$IMAGE:$PY_TAG"

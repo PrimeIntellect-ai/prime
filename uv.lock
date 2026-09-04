@@ -8,13 +8,14 @@ resolution-markers = [
 ]
 
 [options]
-exclude-newer = "2026-08-12T18:00:50.512194Z"
+exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
 exclude-newer-span = "P7D"
 
 [options.exclude-newer-package]
 verifiers = false
 tasksets = false
 prime-traces = false
+prime-runs = false
 prime-tunnel = false
 prime-sandboxes = false
 harnesses = false
@@ -25,6 +26,7 @@ prime = false
 members = [
     "prime",
     "prime-evals",
+    "prime-runs",
     "prime-sandboxes",
     "prime-traces",
     "prime-tunnel",
@@ -1444,6 +1446,35 @@ wheels = [
 toml = [
     { name = "tomli" },
 ]
+
+[[package]]
+name = "prime-runs"
+source = { editable = "packages/prime-runs" }
+dependencies = [
+    { name = "httpx" },
+    { name = "prime-traces" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "ruff" },
+]
+train = [
+    { name = "pyarrow" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.25.0" },
+    { name = "prime-traces", editable = "packages/prime-traces" },
+    { name = "pyarrow", marker = "extra == 'train'", specifier = ">=15.0.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
+    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23.0" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.13.1" },
+]
+provides-extras = ["dev", "train"]
 
 [[package]]
 name = "prime-sandboxes"

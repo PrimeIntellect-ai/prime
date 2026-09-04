@@ -1,10 +1,12 @@
 import pytest
+from prime_cli.commands.env import app
 from prime_cli.utils.environment_runtime import (
     VERIFIERS_V0,
     VERIFIERS_V1,
     classify_runtime_from_metadata,
     parse_runtime_option,
 )
+from typer.testing import CliRunner
 
 
 @pytest.mark.parametrize(
@@ -46,3 +48,11 @@ def test_parse_runtime_option(value, expected):
 def test_parse_runtime_option_rejects_unknown_values(value):
     with pytest.raises(ValueError, match="--runtime must be 'v0' or 'v1'"):
         parse_runtime_option(value)
+
+
+def test_push_rejects_invalid_runtime_without_unexpected_error():
+    result = CliRunner().invoke(app, ["push", "--runtime", "v2"])
+
+    assert result.exit_code == 1
+    assert "--runtime must be 'v0' or 'v1'" in result.output
+    assert "Unexpected error" not in result.output

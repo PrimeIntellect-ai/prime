@@ -1095,12 +1095,12 @@ def push(
     """Push environment to registry"""
 
     try:
-        try:
-            declared_runtime = parse_runtime_option(runtime)
-        except ValueError as e:
-            console.print(f"[red]Error: {e}[/red]")
-            raise typer.Exit(1)
+        declared_runtime = parse_runtime_option(runtime)
+    except ValueError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
 
+    try:
         env_path = _resolve_push_environment_path(path, env_id)
         _run_env_push_lab_hygiene_preflight(env_path)
 

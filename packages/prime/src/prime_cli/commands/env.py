@@ -2107,6 +2107,7 @@ def get_install_command(
             # Use -P to only upgrade this package, not its dependencies
             cmd.extend(["-P", package_name])
         cmd.append(wheel_url)
+        cmd.append("--system")
         return cmd
     elif tool == "pip":
         cmd = ["pip", "install"]
@@ -2567,6 +2568,7 @@ def install(
                             # Use -P to only upgrade this package, not its dependencies
                             cmd_parts.extend(["-P", normalized_name])
                         cmd_parts.append(str(wheel_path))
+                        cmd_parts.append("--system")
                         if prerelease:
                             cmd_parts.append("--prerelease=allow")
                     else:
@@ -3273,6 +3275,7 @@ def _build_install_command(
             # Add URL dependencies as direct requirements (uv requires this)
             if url_dependencies:
                 cmd.extend(url_dependencies)
+            cmd.append("--system")
             cmd.extend(["--extra-index-url", simple_index_url])
             # Hub simple index doesn't emit PEP 700 upload-time metadata, so any
             # exclude-newer cutoff on the consumer side filters hub wheels
@@ -3350,6 +3353,7 @@ def _install_single_environment(env_slug: str, tool: str = "uv", prerelease: boo
                 cmd_parts = _uv_pip_command("install", "-P", normalized_name, str(wheel_path))
                 if prerelease:
                     cmd_parts.append("--prerelease=allow")
+                cmd_parts.append("--system")
             else:
                 cmd_parts = ["pip", "install", "--upgrade", str(wheel_path)]
                 if prerelease:

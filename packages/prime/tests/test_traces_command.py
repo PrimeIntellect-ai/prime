@@ -3,6 +3,7 @@
 of silently falling back to the SDK's static config."""
 
 import json
+from unittest.mock import Mock
 
 import pytest
 from prime_cli.commands import traces as traces_cmd
@@ -293,7 +294,7 @@ class FakeTracesClient:
         self.receipt = UploadReceipt(upload_id="a" * 64, status="committed")
 
     def upload_file(self, path, **kwargs):
-        self.calls["upload_file"] = {"path": path, **kwargs}
+        self.calls["upload_file"] = {"path": path, "data": path.read_bytes(), **kwargs}
         on_batch = kwargs.get("on_batch")
         batch = Batch(data=b"{}\n", digest="a" * 64, num_lines=1, first_line_number=1)
         if on_batch is not None:
@@ -343,6 +344,7 @@ def test_upload_command_table_output(fake_client, tmp_path):
     assert result.exit_code == 0, result.output
     assert "Uploaded 1 batch(es)" in result.output
     call = fake_client.calls["upload_file"]
+    assert call["path"].parent.parent == tmp_path.resolve()
     assert call["context"] == {"source": "hosted_eval", "suite": "s1"}
     assert call["compress"] is True
     assert call["line_format"].value == "trace"
@@ -374,6 +376,78 @@ def test_upload_command_rejects_malformed_context(fake_client, tmp_path):
 
     assert result.exit_code == 1
     assert "upload_file" not in fake_client.calls
+
+
+def test_upload_command_redacts_a_copy_and_keeps_review_data(fake_client, tmp_path):
+    secret = "opaque-user-key-0123456789"
+    traces_file = tmp_path / "traces.jsonl"
+    original = (
+        json.dumps(
+            {
+                "prompt": f"accidentally repeated {secret}",
+                "answer": "reference answer",
+                "rubric": "compare against the reference answer",
+            }
+        ).encode()
+        + b"\n"
+    )
+    traces_file.write_bytes(original)
+    secrets_file = tmp_path / "secrets.txt"
+    secrets_file.write_text(secret + "\n")
+
+    result = runner.invoke(
+        main_app,
+        [
+            "traces",
+            "upload",
+            str(traces_file),
+            "-c",
+            f"authorization={secret}",
+            "--secrets-file",
+            str(secrets_file),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Preflight redacted 2 credential-bearing location(s)" in result.output
+    assert secret not in fake_client.calls["upload_file"]["data"].decode()
+    assert fake_client.calls["upload_file"]["context"] == {"authorization": "[REDACTED]"}
+    uploaded = json.loads(fake_client.calls["upload_file"]["data"])
+    assert uploaded["answer"] == "reference answer"
+    assert uploaded["rubric"] == "compare against the reference answer"
+    assert traces_file.read_bytes() == original
+
+
+def test_upload_command_falls_back_from_read_only_source_directory(
+    fake_client, tmp_path, monkeypatch
+):
+    traces_file = tmp_path / "traces.jsonl"
+    traces_file.write_text('{"answer":"keep"}\n')
+    real_temporary_directory = traces_cmd.tempfile.TemporaryDirectory
+    fallback = real_temporary_directory(prefix="prime-traces-upload-test-")
+    temporary_directory = Mock(side_effect=[PermissionError(), fallback])
+    monkeypatch.setattr(traces_cmd.tempfile, "TemporaryDirectory", temporary_directory)
+
+    result = runner.invoke(main_app, ["traces", "upload", str(traces_file)])
+
+    assert result.exit_code == 0, result.output
+    assert temporary_directory.call_args_list[0].kwargs["dir"] == traces_file.resolve().parent
+    assert "dir" not in temporary_directory.call_args_list[1].kwargs
+
+
+def test_upload_command_fails_before_client_creation_on_invalid_json(tmp_path, monkeypatch):
+    traces_file = tmp_path / "traces.jsonl"
+    traces_file.write_text('{"password":}\n')
+
+    def fail_if_called():
+        raise AssertionError("client must not be created before preflight succeeds")
+
+    monkeypatch.setattr(traces_cmd, "_traces_client", fail_if_called)
+    result = runner.invoke(main_app, ["traces", "upload", str(traces_file)])
+
+    assert result.exit_code == 1
+    assert "Preflight failed: invalid JSON on JSONL line 1" in result.output
+    assert not isinstance(result.exception, AssertionError)
 
 
 def test_unexpected_error_does_not_dump_sdk_locals(fake_client, tmp_path):

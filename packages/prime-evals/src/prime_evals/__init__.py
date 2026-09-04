@@ -13,7 +13,7 @@ from .core import (
     PaymentRequiredError,
     UnauthorizedError,
 )
-from .evals import AsyncEvalsClient, EvalsClient
+from .evals import MAX_SAMPLES_PAYLOAD_BYTES, AsyncEvalsClient, EvalsClient, serialize_json
 from .exceptions import (
     EnvironmentNotFoundError,
     EvalsAPIError,
@@ -33,8 +33,20 @@ from .models import (
     Sample,
     SamplesResponse,
 )
+from .preflight import (
+    PreparedJSONLUpload,
+    PreparedUpload,
+    ScanReport,
+    SecretFingerprint,
+    UploadScanError,
+    fingerprint_secret,
+    prepare_jsonl_upload,
+    prepare_upload,
+    scan_upload,
+    secret_values,
+)
 
-__version__ = "0.2.3"
+__version__ = "0.2.4"
 
 __all__ = [
     # Core HTTP Client & Config
@@ -44,6 +56,8 @@ __all__ = [
     # Evals Clients
     "EvalsClient",
     "AsyncEvalsClient",
+    "MAX_SAMPLES_PAYLOAD_BYTES",
+    "serialize_json",
     # Models
     "Evaluation",
     "EvaluationStatus",
@@ -65,4 +79,15 @@ __all__ = [
     "EvaluationNotFoundError",
     "InvalidEvaluationError",
     "InvalidSampleError",
+    # Upload preflight
+    "PreparedJSONLUpload",
+    "PreparedUpload",
+    "ScanReport",
+    "SecretFingerprint",
+    "UploadScanError",
+    "fingerprint_secret",
+    "prepare_jsonl_upload",
+    "prepare_upload",
+    "scan_upload",
+    "secret_values",
 ]

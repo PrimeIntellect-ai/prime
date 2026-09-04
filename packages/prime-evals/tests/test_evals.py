@@ -1,17 +1,28 @@
 """Tests for Prime Evals SDK"""
 
 import asyncio
+import json
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
-from prime_evals.evals import AsyncEvalsClient, EvalsClient
+from prime_evals.core import APIClient
+from prime_evals.evals import AsyncEvalsClient, EvalsClient, serialize_json
+from prime_evals.exceptions import InvalidSampleError
 from prime_evals.models import (
     CreateEvaluationRequest,
     Evaluation,
     EvaluationStatus,
     Sample,
 )
+
+
+def test_serialize_json_escapes_unpaired_surrogates():
+    payload = serialize_json({"completion": "\ud800"})
+
+    assert payload == b'{"completion":"\\ud800"}'
+    assert json.loads(payload)["completion"] == "\ud800"
 
 
 def test_create_evaluation_request():
@@ -183,8 +194,14 @@ def test_push_samples_reports_progress_and_reuses_http_client(monkeypatch):
         def __exit__(self, *_args):
             return None
 
-        def post(self, url, json):
-            posts.append({"url": url, "json": json, "headers": self.kwargs["headers"]})
+        def post(self, url, content):
+            posts.append(
+                {
+                    "url": url,
+                    "json": json.loads(content),
+                    "headers": self.kwargs["headers"],
+                }
+            )
             return FakeResponse()
 
     monkeypatch.setattr("prime_evals.evals.httpx.Client", FakeHttpClient)
@@ -195,18 +212,22 @@ def test_push_samples_reports_progress_and_reuses_http_client(monkeypatch):
     client = EvalsClient(api_client)
     progress = []
 
-    with pytest.warns(UserWarning, match="exceeds maximum payload size"):
-        result = client.push_samples(
-            "eval-1",
-            [{"x": "a"}, {"x": "b" * 50}, {"x": "c"}],
-            max_payload_bytes=35,
-            max_workers=1,
-            progress_callback=progress.append,
-        )
+    result = client.push_samples(
+        "eval-1",
+        [
+            {"x": "password=abcdefgh1234"},
+            {"x": "secret_key=abcdefgh1234"},
+            {"x": "credentials=abcdefgh1234"},
+        ],
+        max_payload_bytes=50,
+        max_workers=1,
+        progress_callback=progress.append,
+    )
 
-    assert result == {"samples_pushed": 2, "samples_skipped": 1}
+    assert result == {"samples_pushed": 3, "samples_skipped": 0}
     assert progress == [1, 1, 1]
-    assert len(posts) == 2
+    assert len(posts) == 3
+    assert all("abcdefgh1234" not in json.dumps(post["json"]) for post in posts)
     assert len(created_clients) == 1
     assert posts[0]["headers"]["Authorization"] == "Bearer secret-token"
 
@@ -214,6 +235,8 @@ def test_push_samples_reports_progress_and_reuses_http_client(monkeypatch):
 def test_async_push_samples_reports_progress_and_reuses_http_client(monkeypatch):
     posts = []
     created_clients = []
+    progress = []
+    activity = {"current": 0, "maximum": 0, "started": 0}
 
     class FakeResponse:
         def raise_for_status(self):
@@ -230,8 +253,21 @@ def test_async_push_samples_reports_progress_and_reuses_http_client(monkeypatch)
         async def __aexit__(self, *_args):
             return None
 
-        async def post(self, url, json):
-            posts.append({"url": url, "json": json, "headers": self.kwargs["headers"]})
+        async def post(self, url, content):
+            activity["current"] += 1
+            activity["maximum"] = max(activity["maximum"], activity["current"])
+            activity["started"] += 1
+            if activity["started"] == 2:
+                assert progress == [1]
+            await asyncio.sleep(0)
+            posts.append(
+                {
+                    "url": url,
+                    "json": json.loads(content),
+                    "headers": self.kwargs["headers"],
+                }
+            )
+            activity["current"] -= 1
             return FakeResponse()
 
     monkeypatch.setattr("prime_evals.evals.httpx.AsyncClient", FakeAsyncHttpClient)
@@ -240,13 +276,11 @@ def test_async_push_samples_reports_progress_and_reuses_http_client(monkeypatch)
         base_url="https://api.example",
         api_key="secret-token",
     )
-    progress = []
-
     result = asyncio.run(
         client.push_samples(
             "eval-1",
             [{"x": "a"}, {"x": "b"}],
-            max_payload_bytes=35,
+            max_payload_bytes=30,
             max_concurrent=1,
             progress_callback=progress.append,
         )
@@ -256,19 +290,51 @@ def test_async_push_samples_reports_progress_and_reuses_http_client(monkeypatch)
     assert progress == [1, 1]
     assert len(posts) == 2
     assert len(created_clients) == 1
+    assert activity["maximum"] == 1
     assert posts[0]["headers"]["Authorization"] == "Bearer secret-token"
 
 
-def test_evals_client_context_manager():
-    """Test EvalsClient can be used as context manager"""
-    try:
-        # This will fail without API key, but we're testing the interface
-        client = EvalsClient.__new__(EvalsClient)
-        assert hasattr(client, "__enter__")
-        assert hasattr(client, "__exit__")
-        assert hasattr(client, "close")
-    except Exception:
-        pass  # Expected to fail without proper initialization
+def test_api_client_context_manager():
+    transport = Mock()
+    client = APIClient.__new__(APIClient)
+    client.client = transport
+
+    with client as opened:
+        assert opened is client
+
+    transport.close.assert_called_once_with()
+
+
+def test_push_evaluation_rejects_oversized_samples_before_creating_evaluation():
+    client = EvalsClient(SimpleNamespace(api_key=None))
+    request = CreateEvaluationRequest(name="test", environments=[{"name": "env"}])
+
+    with pytest.raises(InvalidSampleError, match="sample 0 exceeds maximum payload size"):
+        client.push_evaluation(request, [{"value": "x" * 100}], max_payload_bytes=30)
+
+
+def test_push_evaluation_creates_uploads_and_finalizes():
+    client = EvalsClient(SimpleNamespace(api_key=None))
+    client.create_evaluation = Mock(return_value={"evaluation_id": "eval-1"})
+    client.push_samples = Mock()
+    client.finalize_evaluation = Mock()
+    request = CreateEvaluationRequest(
+        name="test",
+        environments=[{"name": "env"}],
+        metadata={"password": "opaque-password-0123456789"},
+        metrics={"reward": 1.0},
+    )
+    samples = [{"password": "opaque-sample-password-0123456789"}]
+
+    assert client.push_evaluation(request, samples) == "eval-1"
+    assert client.create_evaluation.call_args.kwargs["metadata"] == {"password": "[REDACTED]"}
+    client.push_samples.assert_called_once_with(
+        "eval-1",
+        [{"password": "[REDACTED]"}],
+        max_payload_bytes=25 * 1024 * 1024,
+    )
+    client.finalize_evaluation.assert_called_once_with("eval-1", metrics={"reward": 1.0})
+    assert request.metadata == {"password": "opaque-password-0123456789"}
 
 
 def test_evaluation_model_minimal():

@@ -9,7 +9,13 @@ from typing import Any, Optional
 
 import typer
 from click.core import ParameterSource
-from prime_evals import EvalsAPIError, EvalsClient, InvalidEvaluationError
+from prime_evals import (
+    EvalsAPIError,
+    EvalsClient,
+    InvalidEvaluationError,
+    prepare_upload,
+    secret_values,
+)
 from rich.progress import Progress
 from rich.syntax import Syntax
 from rich.table import Table
@@ -1056,6 +1062,7 @@ def _push_single_eval(
     eval_id: Optional[str],
     is_public: bool = False,
     name: Optional[str] = None,
+    secrets_file: Optional[str] = None,
 ) -> str:
     path = _validate_eval_path(config_path)
     eval_data = _load_eval_directory(path)
@@ -1066,6 +1073,28 @@ def _push_single_eval(
     if not env_slug and detected_env and not run_id and not eval_id:
         env_slug = detected_env
 
+    api_client = APIClient()
+    prepared = prepare_upload(
+        {
+            "eval_name": eval_name,
+            "eval_data": eval_data,
+            "env_slug": env_slug,
+            "run_id": run_id,
+            "eval_id": eval_id,
+        },
+        secret_values(getattr(api_client, "api_key", None), secrets_file=secrets_file),
+    )
+    eval_name = prepared.data["eval_name"]
+    eval_data = prepared.data["eval_data"]
+    env_slug = prepared.data["env_slug"]
+    run_id = prepared.data["run_id"]
+    eval_id = prepared.data["eval_id"]
+    if prepared.report.has_findings:
+        console.print(
+            f"[yellow]Upload preflight redacted {prepared.report.description}. "
+            "Local files were not changed.[/yellow]"
+        )
+
     environments = None
     if env_slug and not run_id and not eval_id:
         if "/" not in env_slug:
@@ -1074,7 +1103,6 @@ def _push_single_eval(
 
     console.print()
 
-    api_client = APIClient()
     client = EvalsClient(api_client)
 
     if eval_id:
@@ -1222,6 +1250,11 @@ def push_eval(
         "--public",
         help="Make the pushed evaluation public. Evaluations are private by default.",
     ),
+    secrets_file: Optional[str] = typer.Option(
+        None,
+        "--secrets-file",
+        help="Local newline-delimited secrets to remove from the upload copy.",
+    ),
 ) -> None:
     """Push evaluation data to Prime Evals.
 
@@ -1255,7 +1288,9 @@ def push_eval(
         if config_path is None:
             current_dir = Path(".")
             if _has_eval_files(current_dir):
-                result_eval_id = _push_single_eval(".", env_id, run_id, eval_id, is_public, name)
+                result_eval_id = _push_single_eval(
+                    ".", env_id, run_id, eval_id, is_public, name, secrets_file
+                )
                 if output == "json":
                     console.print()
                     output_data_as_json({"evaluation_id": result_eval_id}, console)
@@ -1279,7 +1314,13 @@ def push_eval(
             for eval_dir in eval_dirs:
                 try:
                     result_eval_id = _push_single_eval(
-                        str(eval_dir), env_id, run_id, eval_id, is_public, name
+                        str(eval_dir),
+                        env_id,
+                        run_id,
+                        eval_id,
+                        is_public,
+                        name,
+                        secrets_file,
                     )
                     results.append(
                         {"path": str(eval_dir), "eval_id": result_eval_id, "status": "success"}
@@ -1303,7 +1344,9 @@ def push_eval(
 
             return
 
-        result_eval_id = _push_single_eval(config_path, env_id, run_id, eval_id, is_public, name)
+        result_eval_id = _push_single_eval(
+            config_path, env_id, run_id, eval_id, is_public, name, secrets_file
+        )
 
         if output == "json":
             console.print()

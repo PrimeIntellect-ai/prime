@@ -46,8 +46,9 @@ class APIClient:
         api_key: Optional[str] = None,
         require_auth: bool = True,
         user_agent: Optional[str] = None,
+        config: Config | None = None,
     ):
-        self.config = Config()
+        self.config = config or Config()
         self.api_key = api_key or self.config.api_key
         self.require_auth = require_auth
         self.base_url = self.config.base_url
@@ -62,6 +63,15 @@ class APIClient:
             follow_redirects=True,
             timeout=httpx.Timeout(30.0, connect=10.0),
         )
+
+    def close(self) -> None:
+        self.client.close()
+
+    def __enter__(self) -> "APIClient":
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self.close()
 
     def _check_auth_required(self) -> None:
         if self.require_auth and not self.api_key:
@@ -138,8 +148,9 @@ class AsyncAPIClient:
         api_key: Optional[str] = None,
         require_auth: bool = True,
         user_agent: Optional[str] = None,
+        config: Config | None = None,
     ):
-        self.config = Config()
+        self.config = config or Config()
         self.api_key = api_key or self.config.api_key
         self.require_auth = require_auth
         self.base_url = self.config.base_url

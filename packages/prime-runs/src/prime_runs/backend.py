@@ -289,8 +289,11 @@ class RftBackend:
 
     def attach(self, run_id: str) -> RunHandle:
         """A handle for a run a launcher already created. No request: the first
-        write proves access. The run must be an external one; the monitoring
-        endpoints answer 400 for a hosted run's id."""
+        write proves access. An external run is reached through the public API,
+        whose monitoring endpoints answer 400 for a hosted run's id; a hosted run
+        is reached through the platform's internal RFT root — pass the
+        ``$PRIME_API_BASE`` its launcher injects as ``base_url`` and the client
+        authenticates with the run's token (see :mod:`prime_runs._http`)."""
         return RunHandle(id=run_id, url=self.url_for(run_id))
 
     def url_for(self, run_id: str) -> str:

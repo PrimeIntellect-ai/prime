@@ -1,4 +1,12 @@
-"""Authenticated client for ``{base_url}/api/v1`` with a per-call retry policy.
+"""Authenticated client for the platform API with a per-call retry policy.
+
+Requests are addressed under ``{base_url}/api/v1``. When ``base_url`` is the
+platform's *internal* RFT root instead (``…/api/internal/rft``, what a hosted
+run's launcher injects as ``$PRIME_API_BASE``), they go under
+``{base_url}/api/internal`` and the token is repeated in ``x-api-key``, the
+header that router authenticates a run's own token on. A trailing ``/rft`` is
+accepted on either root; only attached runs are reachable through the internal
+one (it registers nothing and has no status endpoint).
 
 A failure is *ambiguous* when the server may already have processed the request
 (a 502/504, a read timeout). Replaying one is safe for a GET or PUT and not for
@@ -10,7 +18,8 @@ Error mapping and backoff come from ``prime_traces.core.client``.
 import json
 import sys
 import time
-from typing import Any, Dict, Mapping, Optional, Union
+from typing import Any, Dict, Mapping, Optional, Tuple, Union
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 from prime_traces.core.client import AMBIGUOUS_TRANSPORT_ERRORS, raise_for_response, retry_delay
@@ -25,6 +34,34 @@ UPLOAD_TIMEOUT = httpx.Timeout(300.0, connect=10.0)
 #: intermediary after forwarding.
 UNAMBIGUOUS_RETRY_STATUS = frozenset({429})
 DEFAULT_MAX_ATTEMPTS = 5
+PUBLIC_API_PATH = "/api/v1"
+#: The platform's internal RFT root, served to hosted runs; see the module docstring.
+INTERNAL_API_PATH = "/api/internal"
+
+
+#: API roots a base URL may end in, longest first; ``/rft`` is only recognised
+#: after an API path, so a host that happens to be named ``rft`` or ``api`` stays.
+_API_ROOTS = (
+    ("/api/internal/rft", INTERNAL_API_PATH),
+    ("/api/internal", INTERNAL_API_PATH),
+    ("/api/v1/rft", PUBLIC_API_PATH),
+    ("/api/v1", PUBLIC_API_PATH),
+)
+
+
+def split_api_root(base_url: str) -> Tuple[str, str]:
+    """``(origin, api_path)`` for a base URL that is a platform origin or one of
+    its API roots, with or without the ``/rft`` the RFT client historically got.
+    Only the URL's path is inspected, never its host."""
+    parts = urlsplit(base_url)
+    path = parts.path.rstrip("/")
+    api_path = PUBLIC_API_PATH
+    for suffix, candidate in _API_ROOTS:
+        if path.endswith(suffix):
+            path, api_path = path[: -len(suffix)], candidate
+            break
+    origin = urlunsplit((parts.scheme, parts.netloc, path, "", ""))
+    return origin.rstrip("/"), api_path
 
 
 def _user_agent() -> str:
@@ -51,11 +88,16 @@ class PlatformClient:
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
         client: Optional[httpx.Client] = None,
     ) -> None:
-        self.base_url = base_url.rstrip("/").removesuffix("/api/v1")
-        self.api_prefix = f"{self.base_url}/api/v1"
+        self.base_url, api_path = split_api_root(base_url)
+        self.api_prefix = f"{self.base_url}{api_path}"
+        #: Addressing the internal RFT router rather than the public API.
+        self.internal = api_path == INTERNAL_API_PATH
         self.max_attempts = max(1, max_attempts)
         self._owns_client = client is None
         self._headers = {"Authorization": f"Bearer {api_key}", "User-Agent": _user_agent()}
+        if self.internal:
+            # The internal router reads a hosted run's own token from this header.
+            self._headers["x-api-key"] = api_key
         self._timeout = timeout
         self._client = client or self._new_client()
         if self._owns_client:  # only a pool we opened is ours to rebuild after a fork
@@ -86,9 +128,14 @@ class PlatformClient:
         ``idempotent`` defaults to ``method != "POST"``."""
         url = f"{self.api_prefix}{path}"
         body = content if content is not None else (encode_json(json_body) if json_body else None)
+        # Sent per request as well as set on the pool, so an injected client is
+        # authenticated the same way as one we opened.
+        headers = dict(self._headers)
+        if body is not None:
+            headers["Content-Type"] = "application/json"
         request_kwargs: Dict[str, Any] = {
             "content": body,
-            "headers": {"Content-Type": "application/json"} if body is not None else None,
+            "headers": headers,
             "params": dict(params) if params else None,
         }
         if timeout is not None:  # None would disable httpx timeouts, not restore the default

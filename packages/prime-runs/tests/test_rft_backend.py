@@ -4,6 +4,7 @@ import httpx
 import pytest
 from conftest import RecordingHandler
 
+from prime_runs._http import PlatformClient
 from prime_runs.backend import RftBackend
 from prime_runs.exceptions import ConfigurationError, ForbiddenError, RetryableAPIError
 from prime_runs.models import EnvironmentRef, RunSpec, RunStatus, TrainingSpec
@@ -212,3 +213,27 @@ def test_marking_an_already_closed_run_failed_is_not_an_error(make_platform_clie
     backend.finalize("run-abc", status=RunStatus.FAILED, error="boom")
 
     assert handler.paths() == ["PUT /api/v1/rft/external-runs/run-abc/status"]
+
+
+def test_a_hosted_run_is_finalized_through_the_internal_router():
+    """Attached with the launcher's ``$PRIME_API_BASE``: the same call reaches
+    ``/api/internal/rft/finalize`` carrying the run's token in ``x-api-key``."""
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"data": {"status": "success"}})
+
+    client = PlatformClient(
+        api_key="run-token",
+        base_url="http://testserver/api/internal/rft",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    backend = RftBackend(client, frontend_url="https://app.example")
+
+    handle = backend.attach("run-managed")
+    backend.finalize(handle.id, status=RunStatus.COMPLETED)
+
+    assert [str(r.url) for r in seen] == ["http://testserver/api/internal/rft/finalize"]
+    assert seen[0].headers["x-api-key"] == "run-token"
+    assert seen[0].headers["Authorization"] == "Bearer run-token"

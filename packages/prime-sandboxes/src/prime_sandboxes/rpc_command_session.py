@@ -2,9 +2,12 @@
 
 from typing import Dict, List, Literal, Optional, Protocol, Sequence, cast
 
+from connectrpc.code import Code
+from connectrpc.errors import ConnectError
 from connectrpc.method import IdempotencyLevel, MethodInfo
 from google.protobuf.message import Message
 
+from ._connectrpc import PYQWEST_BODY_READ_ERROR_MARKERS
 from ._proto.command_session import command_session_pb2
 
 
@@ -18,12 +21,12 @@ class _CommandSpecFactory(Protocol):
 
 class _CommandSessionStartRequestFactory(Protocol):
     def __call__(
-        self, *, command: _CommandSpecLike, stdin: bool, tag: str | None = None
+        self, *, command: _CommandSpecLike, stdin: bool, session_uuid: str | None = None
     ) -> Message: ...
 
 
 class _CommandSessionSelectorFactory(Protocol):
-    def __call__(self, *, pid: int) -> Message: ...
+    def __call__(self, *, session_uuid: str) -> Message: ...
 
 
 class _CommandInputFactory(Protocol):
@@ -31,11 +34,11 @@ class _CommandInputFactory(Protocol):
 
 
 class _CommandSessionSendInputRequestFactory(Protocol):
-    def __call__(self, *, session: Message, input: Message) -> Message: ...
+    def __call__(self, *, session: Message, input: Message, input_uuid: str) -> Message: ...
 
 
 class _CommandSessionSendSignalRequestFactory(Protocol):
-    def __call__(self, *, session: Message, signal: int) -> Message: ...
+    def __call__(self, *, session: Message, signal: int, signal_uuid: str) -> Message: ...
 
 
 class _CommandSessionConnectRequestFactory(Protocol):
@@ -44,7 +47,8 @@ class _CommandSessionConnectRequestFactory(Protocol):
 
 class _CommandSessionInfoLike(Protocol):
     pid: int
-    tag: str
+    session_uuid: str
+    command: _CommandSpecLike
 
 
 class _CommandSessionListResponseLike(Protocol):
@@ -164,6 +168,8 @@ COMMAND_SESSION_CONNECT_RPC_METHOD = MethodInfo(
     idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
 )
 
+# Live-process introspection: pid, session_uuid, and command for each running
+# process. Permanent public API; exited sessions are not listed.
 COMMAND_SESSION_LIST_RPC_METHOD = MethodInfo(
     name="List",
     service_name="command_session.CommandSession",
@@ -173,13 +179,48 @@ COMMAND_SESSION_LIST_RPC_METHOD = MethodInfo(
 )
 
 
+# The two fault predicates below classify command-session RPC failures for
+# retry, with deliberately opposite polarity. Stream re-attach (Connect, or a
+# create-or-attach Start resending the identical request) is idempotent, so
+# is_recoverable_stream_fault is a deny-list: retry everything except the codes
+# command_session.proto promises as definitive answers. A unary control RPC's
+# unknown fault may itself be a definitive answer, so is_transient_control_fault
+# is an allow-list: fail fast on everything except known link faults.
+
+# Stream faults recovery cannot fix, per command_session.proto's code promises:
+# NOT_FOUND (the session is gone or its retention expired) and
+# FAILED_PRECONDITION (a Start reusing the session_uuid with a different spec —
+# a guard for a future non-identical retry; today's reconnect resends the
+# identical request, so the server cannot answer it with a spec conflict).
+_STREAM_FATAL_CODES = frozenset({Code.NOT_FOUND, Code.FAILED_PRECONDITION})
+
+# Link faults a unary control RPC may retry; pyqwest body-read faults surface
+# as ConnectError INTERNAL and are matched by message marker instead.
+_TRANSIENT_CONTROL_CODES = frozenset({Code.DEADLINE_EXCEEDED, Code.UNAVAILABLE})
+
+
+def is_recoverable_stream_fault(error: BaseException | None) -> bool:
+    """Whether a dropped command-session stream may be re-attached (None: clean EOF)."""
+    return not (isinstance(error, ConnectError) and error.code in _STREAM_FATAL_CODES)
+
+
+def is_transient_control_fault(error: ConnectError) -> bool:
+    """Whether a unary control-RPC fault is a link hiccup rather than a definitive answer."""
+    if error.code in _TRANSIENT_CONTROL_CODES:
+        return True
+    message = (error.message or "").lower()
+    return error.code == Code.INTERNAL and any(
+        marker in message for marker in PYQWEST_BODY_READ_ERROR_MARKERS
+    )
+
+
 def build_command_session_start_request(
+    *,
     command: str,
     working_dir: Optional[str],
     env: Optional[Dict[str, str]],
-    *,
     stdin: bool = False,
-    tag: str | None = None,
+    session_uuid: str | None = None,
 ) -> Message:
     command_spec = _COMMAND_SPEC_FACTORY(
         cmd="/bin/bash",
@@ -192,13 +233,7 @@ def build_command_session_start_request(
     return _COMMAND_SESSION_START_REQUEST_FACTORY(
         command=command_spec,
         stdin=stdin,
-        tag=tag,
-    )
-
-
-def build_command_session_connect_request(pid: int) -> Message:
-    return _COMMAND_SESSION_CONNECT_REQUEST_FACTORY(
-        session=_COMMAND_SESSION_SELECTOR_FACTORY(pid=pid)
+        session_uuid=session_uuid,
     )
 
 
@@ -206,28 +241,33 @@ def build_command_session_list_request() -> Message:
     return _COMMAND_SESSION_LIST_REQUEST_TYPE()
 
 
-def find_command_session_pid(response: Message, tag: str) -> int | None:
-    sessions = cast(_CommandSessionListResponseLike, response).sessions
-    return next((int(session.pid) for session in sessions if session.tag == tag), None)
+def build_command_session_connect_request(*, session_uuid: str) -> Message:
+    return _COMMAND_SESSION_CONNECT_REQUEST_FACTORY(
+        session=_COMMAND_SESSION_SELECTOR_FACTORY(session_uuid=session_uuid)
+    )
 
 
-def build_command_session_send_input_request(pid: int, data: bytes) -> Message:
+def build_command_session_send_input_request(
+    *, session_uuid: str, data: bytes, input_uuid: str
+) -> Message:
     return _COMMAND_SESSION_SEND_INPUT_REQUEST_FACTORY(
-        session=_COMMAND_SESSION_SELECTOR_FACTORY(pid=pid),
+        session=_COMMAND_SESSION_SELECTOR_FACTORY(session_uuid=session_uuid),
         input=_COMMAND_INPUT_FACTORY(stdin=data),
+        input_uuid=input_uuid,
     )
 
 
 def build_command_session_send_signal_request(
-    pid: int, signal: Literal["terminate", "kill"]
+    *, session_uuid: str, signal: Literal["terminate", "kill"], signal_uuid: str
 ) -> Message:
     signal_value = getattr(
         command_session_pb2,
         "SIGNAL_SIGTERM" if signal == "terminate" else "SIGNAL_SIGKILL",
     )
     return _COMMAND_SESSION_SEND_SIGNAL_REQUEST_FACTORY(
-        session=_COMMAND_SESSION_SELECTOR_FACTORY(pid=pid),
+        session=_COMMAND_SESSION_SELECTOR_FACTORY(session_uuid=session_uuid),
         signal=signal_value,
+        signal_uuid=signal_uuid,
     )
 
 

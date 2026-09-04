@@ -10,7 +10,7 @@ from prime_sandboxes.rpc_command_session import build_command_session_start_requ
 
 
 def test_google_protobuf_command_request_round_trips() -> None:
-    request = build_command_session_start_request("echo ready", None, None)
+    request = build_command_session_start_request(command="echo ready", working_dir=None, env=None)
 
     payload = GOOGLE_PROTOBUF_BINARY_CODEC.encode(request)
     decoded = GOOGLE_PROTOBUF_BINARY_CODEC.decode(payload, type(request))

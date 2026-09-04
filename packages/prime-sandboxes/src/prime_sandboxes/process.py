@@ -7,13 +7,12 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Literal
 
 from connectrpc.client import ConnectClient
-from connectrpc.code import Code
 from connectrpc.errors import ConnectError
 from google.protobuf.message import Message
 from pyqwest import HTTPTransport
 
 from .core import APIError
-from .rpc_command_session import parse_command_session_start_event
+from .rpc_command_session import is_recoverable_stream_fault, parse_command_session_start_event
 
 logger = logging.getLogger(__name__)
 
@@ -22,9 +21,11 @@ _EXIT_WAIT_SECONDS = 5
 _STREAM_MAX_RECONNECTS = 5
 _STREAM_RECONNECT_BACKOFF_SECONDS = 0.5
 
-_WriteStdin = Callable[[int, bytes], Awaitable[None]]
-_SendSignal = Callable[[int, Literal["terminate", "kill"]], Awaitable[None]]
-_Reconnect = Callable[[int | None], AsyncIterator[Message]]
+_WriteStdin = Callable[[bytes], Awaitable[None]]
+_SendSignal = Callable[[Literal["terminate", "kill"]], Awaitable[None]]
+# The argument is whether a StartEvent has been observed yet; the callee picks
+# between retrying Start (create-or-attach) and Connect-ing to the session.
+_Reconnect = Callable[[bool], AsyncIterator[Message]]
 
 
 class _AsyncProcessStream(AsyncIterator[bytes]):
@@ -148,7 +149,7 @@ class AsyncSandboxProcess:
             return
         if self._closed or self._remote_exited:
             raise BrokenPipeError("process has exited")
-        await self._write_stdin(self.pid, data)
+        await self._write_stdin(data)
 
     async def wait(self) -> int:
         """Wait for the process to exit and return its exit code."""
@@ -165,7 +166,7 @@ class AsyncSandboxProcess:
     async def _send_signal(self, signal: Literal["terminate", "kill"]) -> None:
         if self._closed or self._remote_exited:
             return
-        await self._send_process_signal(self.pid, signal)
+        await self._send_process_signal(signal)
         self._signals_sent.add(signal)
 
     async def aclose(self) -> None:
@@ -234,12 +235,10 @@ class AsyncSandboxProcess:
         return self._remote_exited
 
     def _can_reconnect(self, reconnects: int, error: BaseException | None) -> bool:
-        """Whether the process has enough identity and budget for another attach."""
+        """Whether the stream fault is recoverable and reconnect budget remains."""
         if self._reconnect is None or self._remote_exited or reconnects >= _STREAM_MAX_RECONNECTS:
             return False
-        if not isinstance(error, ConnectError) or error.code != Code.NOT_FOUND:
-            return True
-        return not self._started.done() and reconnects > 0
+        return is_recoverable_stream_fault(error)
 
     async def _aclose_stream(self) -> None:
         close = getattr(self._stream, "aclose", None)
@@ -261,10 +260,11 @@ class AsyncSandboxProcess:
         )
         await self._aclose_stream()
         await asyncio.sleep(delay)
-        # Connect tails the same process from re-attachment time; output emitted while detached
-        # is not replayed.
-        pid = self.pid if self._started.done() else None
-        self._stream = reconnect(pid)
+        # Re-attachment — a retried Start before the pid was seen, Connect after —
+        # never replays output emitted while detached. Both arms re-announce the
+        # StartEvent and replay the retained EndEvent of a session that exited
+        # within sandboxd's retention window, so a missed exit is still observed.
+        self._stream = reconnect(self._started.done())
 
     async def _pump(self) -> None:
         ended = False
@@ -279,7 +279,7 @@ class AsyncSandboxProcess:
                             continue
                         kind, value = event
                         if kind == "start":
-                            # A reconnected (Connect) stream re-announces the pid; keep the first.
+                            # A re-attached stream re-announces the pid; keep the first.
                             if not self._started.done():
                                 self._started.set_result(value)
                         elif kind == "stdout":

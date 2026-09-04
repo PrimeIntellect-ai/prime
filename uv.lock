@@ -29,7 +29,6 @@ members = [
     "prime-traces",
     "prime-tunnel",
 ]
-overrides = [{ name = "prime-tunnel", editable = "packages/prime-tunnel" }]
 
 [manifest.dependency-groups]
 dev = [

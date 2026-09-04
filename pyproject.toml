@@ -20,7 +20,6 @@ dev-dependencies = [
     "ty>=0.0.1a21",
     "pre-commit>=3.5.0"
 ]
-override-dependencies = ["prime-tunnel>=0.1.6"]
 
 [tool.uv.exclude-newer-package]
 # Fast-track trusted first-party / partner-published packages past the

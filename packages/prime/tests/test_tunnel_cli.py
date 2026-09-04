@@ -22,9 +22,10 @@ def test_prime_requires_runtime_sdks_with_cli_feature_support() -> None:
     pyproject_path = Path(__file__).resolve().parents[1] / "pyproject.toml"
     pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
 
+    assert "prime-sandboxes>=0.2.41" in pyproject["project"]["dependencies"]
     assert "prime-evals>=0.2.3" in pyproject["project"]["dependencies"]
     assert "prime-traces>=0.0.1" in pyproject["project"]["dependencies"]
-    assert "prime-tunnel>=0.1.9" in pyproject["project"]["dependencies"]
+    assert "prime-tunnel>=0.1.11" in pyproject["project"]["dependencies"]
 
 
 def test_tunnel_start_cli_passes_labels_to_sdk(monkeypatch: pytest.MonkeyPatch) -> None:

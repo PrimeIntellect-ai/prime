@@ -1,5 +1,3 @@
-import os
-import subprocess
 from typing import List, Optional
 
 import typer
@@ -20,7 +18,7 @@ from ..utils import (
 )
 from ..utils.display import SLURM_CLUSTER_STATUS_COLORS
 
-app = PlainTyper(help="Manage Slurm clusters", no_args_is_help=True)
+app = PlainTyper(help="Manage Slurm cluster member access", no_args_is_help=True)
 console = get_console()
 
 LIST_CLUSTERS_JSON_HELP = json_output_help(
@@ -28,19 +26,9 @@ LIST_CLUSTERS_JSON_HELP = json_output_help(
     "created_at, started_at?}",
 )
 
-CLUSTER_DETAIL_JSON_HELP = json_output_help(
-    ". = {id, prime_cluster_id, display_name, status, gpu_type, gpu_count, "
-    "connectable, ssh_host?, ssh_port?}",
-)
-
 MEMBERS_JSON_HELP = json_output_help(
     ".data[] = {username, uid, ssh_authorized_keys[], sudo, status, "
     "linked_user_id?, linked_user_name?, linked_user_email?}",
-)
-
-ACCOUNTING_JSON_HELP = json_output_help(
-    ". = {available, days, total_jobs, throughput[], queue_wait[], "
-    "gpu_hours_by_user[], outcomes[]}",
 )
 
 
@@ -96,120 +84,8 @@ def list_clusters(
                 str(c.gpu_count),
             )
         console.print(table)
-        console.print(
-            "\n[blue]Use 'prime slurm connect <cluster-id> <username>' to SSH in, "
-            "or 'prime slurm get <cluster-id>' for details[/blue]"
-        )
+        console.print("\n[blue]Use 'prime slurm members <cluster-id>' to see who has access[/blue]")
 
-    except APIError as e:
-        console.print(f"[red]Error:[/red] {str(e)}")
-        raise typer.Exit(1)
-    except Exception as e:
-        console.print(f"[red]Unexpected error:[/red] {str(e)}")
-        raise typer.Exit(1)
-
-
-@app.command(name="get", no_args_is_help=True, epilog=CLUSTER_DETAIL_JSON_HELP)
-def get_cluster(
-    cluster_id: str,
-    team_id: Optional[str] = _TEAM_ID_OPTION,
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
-) -> None:
-    """Get connection info for a Slurm cluster."""
-    validate_output_format(output, console)
-    resolved_team_id = _resolve_team_id(team_id)
-
-    try:
-        cluster = _slurm_client().get(resolved_team_id, cluster_id)
-
-        if output == "json":
-            output_data_as_json(cluster.model_dump(), console)
-            return
-
-        table = Table(title=f"Cluster: {cluster.display_name}")
-        table.add_column("Property", style="cyan")
-        table.add_column("Value", style="white")
-        table.add_row(
-            "Status",
-            Text(cluster.status, style=status_color(cluster.status, SLURM_CLUSTER_STATUS_COLORS)),
-        )
-        table.add_row("GPU Type", cluster.gpu_type or "N/A")
-        table.add_row("GPU Count", str(cluster.gpu_count))
-        if cluster.connectable and cluster.ssh_host and cluster.ssh_port:
-            table.add_row(
-                "SSH",
-                f"ssh -p {cluster.ssh_port} <username>@{cluster.ssh_host}  "
-                f"(or: prime slurm connect {cluster_id} <username>)",
-            )
-        else:
-            table.add_row("SSH", "Not connectable (cluster is not RUNNING)")
-        console.print(table)
-
-        console.print(
-            f"\n[blue]Use 'prime slurm members {cluster_id}' to see who has access[/blue]"
-        )
-
-    except APIError as e:
-        console.print(f"[red]Error:[/red] {str(e)}")
-        raise typer.Exit(1)
-    except Exception as e:
-        console.print(f"[red]Unexpected error:[/red] {str(e)}")
-        raise typer.Exit(1)
-
-
-@app.command(name="connect", no_args_is_help=True)
-@app.command(name="ssh", no_args_is_help=True)
-def connect(
-    cluster_id: str,
-    username: str,
-    team_id: Optional[str] = _TEAM_ID_OPTION,
-    identity_file: Optional[str] = typer.Option(
-        None,
-        "--identity",
-        "-i",
-        help="Path to SSH private key (uses configured ssh_key_path if not specified)",
-    ),
-) -> None:
-    """SSH into a Slurm cluster's login node as the given member."""
-    resolved_team_id = _resolve_team_id(team_id)
-
-    try:
-        cluster = _slurm_client().get(resolved_team_id, cluster_id)
-
-        if not cluster.connectable or not cluster.ssh_host or not cluster.ssh_port:
-            console.print(
-                f"[red]Cluster {cluster_id} is not connectable (status: {cluster.status}).[/red]"
-            )
-            raise typer.Exit(1)
-
-        ssh_key_path = identity_file or Config().ssh_key_path
-        if not os.path.exists(ssh_key_path):
-            console.print(f"[red]SSH key not found at {ssh_key_path}[/red]")
-            raise typer.Exit(1)
-
-        console.print(f"[blue]Connecting to {cluster.display_name} as {username}...[/blue]")
-        ssh_command = [
-            "ssh",
-            "-i",
-            ssh_key_path,
-            "-o",
-            "StrictHostKeyChecking=no",
-            "-p",
-            str(cluster.ssh_port),
-            f"{username}@{cluster.ssh_host}",
-        ]
-        result = subprocess.run(ssh_command)
-        if result.returncode != 0:
-            raise typer.Exit(result.returncode)
-
-    except typer.Exit:
-        # typer.Exit subclasses Exception, so without this it falls into
-        # the generic handler below: the exit code from a failed ssh
-        # (or the "not connectable" / "key not found" cases above, each
-        # already printed its own message before raising) gets stomped
-        # to 1 and a bogus "Unexpected error: <code>" line gets printed
-        # on top of it.
-        raise
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
         raise typer.Exit(1)
@@ -327,156 +203,6 @@ def remove_member(
         with console.status("[bold blue]Removing member...", spinner="dots"):
             _slurm_client().remove_member(resolved_team_id, cluster_id, username)
         console.print(f"[green]Successfully removed {username} from cluster {cluster_id}[/green]")
-
-    except APIError as e:
-        console.print(f"[red]Error:[/red] {str(e)}")
-        raise typer.Exit(1)
-    except Exception as e:
-        console.print(f"[red]Unexpected error:[/red] {str(e)}")
-        raise typer.Exit(1)
-
-
-@app.command(name="sudo", no_args_is_help=True)
-def set_sudo(
-    cluster_id: str,
-    username: str,
-    on: bool = typer.Option(..., "--on/--off", help="Grant or revoke sudo"),
-    team_id: Optional[str] = _TEAM_ID_OPTION,
-) -> None:
-    """Grant or revoke sudo for a cluster member. Requires team admin."""
-    resolved_team_id = _resolve_team_id(team_id)
-
-    try:
-        with console.status("[bold blue]Updating sudo...", spinner="dots"):
-            member = _slurm_client().set_sudo(resolved_team_id, cluster_id, username, on)
-        verb = "Granted" if on else "Revoked"
-        console.print(f"[green]{verb} sudo for {member.username} on cluster {cluster_id}[/green]")
-
-    except APIError as e:
-        console.print(f"[red]Error:[/red] {str(e)}")
-        raise typer.Exit(1)
-    except Exception as e:
-        console.print(f"[red]Unexpected error:[/red] {str(e)}")
-        raise typer.Exit(1)
-
-
-@app.command(name="rename", no_args_is_help=True)
-def rename(
-    cluster_id: str,
-    name: str,
-    team_id: Optional[str] = _TEAM_ID_OPTION,
-) -> None:
-    """Rename a Slurm cluster. Requires team admin."""
-    resolved_team_id = _resolve_team_id(team_id)
-
-    try:
-        with console.status("[bold blue]Renaming cluster...", spinner="dots"):
-            display_name = _slurm_client().rename(resolved_team_id, cluster_id, name)
-        console.print(f"[green]Cluster {cluster_id} renamed to '{display_name}'[/green]")
-
-    except APIError as e:
-        console.print(f"[red]Error:[/red] {str(e)}")
-        raise typer.Exit(1)
-    except Exception as e:
-        console.print(f"[red]Unexpected error:[/red] {str(e)}")
-        raise typer.Exit(1)
-
-
-@app.command(name="delete", no_args_is_help=True)
-def delete(
-    cluster_id: str,
-    team_id: Optional[str] = _TEAM_ID_OPTION,
-    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
-    force: bool = typer.Option(
-        False,
-        "--force",
-        help="Delete even if the cluster has active Slurm jobs (or accounting can't verify)",
-    ),
-) -> None:
-    """Delete a Slurm cluster. Destructive — requires team admin."""
-    resolved_team_id = _resolve_team_id(team_id)
-
-    if not confirm_or_skip(
-        f"Delete Slurm cluster {cluster_id}? This is destructive and permanently "
-        "removes all data and any running jobs on it.",
-        yes,
-    ):
-        console.print("Cancelled")
-        raise typer.Exit(0)
-
-    try:
-        with console.status("[bold blue]Deleting cluster...", spinner="dots"):
-            _slurm_client().delete(resolved_team_id, cluster_id, force=force)
-        console.print(f"[green]Delete started for cluster {cluster_id}[/green]")
-
-    except APIError as e:
-        console.print(f"[red]Error:[/red] {str(e)}")
-        if "active" in str(e).lower() or "force" in str(e).lower():
-            console.print("[yellow]Retry with --force to delete anyway.[/yellow]")
-        raise typer.Exit(1)
-    except Exception as e:
-        console.print(f"[red]Unexpected error:[/red] {str(e)}")
-        raise typer.Exit(1)
-
-
-@app.command(name="accounting", no_args_is_help=True, epilog=ACCOUNTING_JSON_HELP)
-def accounting(
-    cluster_id: str,
-    days: int = typer.Option(30, "--days", help="Number of days to include (1-90)"),
-    team_id: Optional[str] = _TEAM_ID_OPTION,
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
-) -> None:
-    """Show accounting rollups (throughput, queue wait, GPU-hours) for a Slurm cluster."""
-    validate_output_format(output, console)
-    resolved_team_id = _resolve_team_id(team_id)
-
-    try:
-        rollup = _slurm_client().accounting(resolved_team_id, cluster_id, days=days)
-
-        if output == "json":
-            output_data_as_json(rollup.model_dump(), console)
-            return
-
-        if not rollup.available:
-            console.print("[yellow]Accounting is currently unavailable for this cluster.[/yellow]")
-            return
-
-        console.print(f"[bold]Accounting for the last {rollup.days} day(s)[/bold]")
-        console.print(f"Total jobs: {rollup.total_jobs}")
-
-        if rollup.throughput:
-            table = Table(title="Throughput")
-            table.add_column("Day", style="cyan")
-            table.add_column("Completed", style="green")
-            table.add_column("Failed", style="red")
-            table.add_column("Cancelled", style="yellow")
-            for row in rollup.throughput:
-                table.add_row(row.day, str(row.completed), str(row.failed), str(row.cancelled))
-            console.print(table)
-
-        if rollup.queue_wait:
-            table = Table(title="Queue Wait")
-            table.add_column("Day", style="cyan")
-            table.add_column("Median Wait", style="green")
-            for row in rollup.queue_wait:
-                table.add_row(row.day, f"{row.median_seconds:.0f}s")
-            console.print(table)
-
-        if rollup.gpu_hours_by_user:
-            table = Table(title="GPU-Hours by User")
-            table.add_column("User", style="cyan")
-            table.add_column("GPU-Hours", style="green")
-            for row in rollup.gpu_hours_by_user:
-                table.add_row(row.user, f"{row.gpu_hours:.2f}")
-            console.print(table)
-
-        if rollup.outcomes:
-            table = Table(title="Outcomes")
-            table.add_column("Outcome", style="cyan")
-            table.add_column("Count", style="white")
-            for row in rollup.outcomes:
-                table.add_row(row.outcome, str(row.count))
-            console.print(table)
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")

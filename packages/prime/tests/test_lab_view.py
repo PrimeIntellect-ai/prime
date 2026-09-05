@@ -147,7 +147,7 @@ from prime_lab_app.environment_screen import (
     WorkspaceScreen,
 )
 from prime_lab_app.eval_markdown import MathMarkdown, make_math_parser
-from prime_lab_app.eval_records import LazyRunResults, LocalEvalRun
+from prime_lab_app.eval_records import HistorySectionData, LazyRunResults, LocalEvalRun
 from prime_lab_app.eval_render import compute_run_overview_stats, history_groups
 from prime_lab_app.eval_screen import (
     HostedEvalSamplesScreen,
@@ -1614,6 +1614,17 @@ def test_rollout_viewer_escapes_xml_in_markdown_body() -> None:
     assert [(child.type, child.content) for child in inline.children or []] == [
         ("text", "<answer>hello endpoint</answer>")
     ]
+
+
+def test_rollout_viewer_treats_section_titles_as_literal_text() -> None:
+    title = "tool 2  bash  ... [SUPABASE_URL=http://kong:8000 SUPABASE_ANO..."
+    viewer = RolloutViewer([])
+
+    section = viewer._make_section(
+        HistorySectionData(title=title, body="output", column="completion")
+    )
+
+    assert str(section.title) == title
 
 
 def test_rollout_tool_calls_use_non_error_palette() -> None:

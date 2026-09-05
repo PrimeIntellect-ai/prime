@@ -36,7 +36,7 @@ class TestSyncLaunchRetry:
         job = client.start_background_job("sb", "rm -rf x")
         assert len(commands) == 2
         assert commands[0] == commands[1]
-        assert commands[0].startswith(f"mkdir /tmp/job_{job.job_id}.launch && nohup")
+        assert commands[0].startswith(f"{{ mkdir /tmp/job_{job.job_id}.launch && nohup")
         assert job.job_id
 
     def test_gives_up_after_max_attempts(self, monkeypatch):
@@ -71,7 +71,7 @@ class TestAsyncLaunchRetry:
         job = await client.start_background_job("sb", "rm -rf x")
         assert len(commands) == 2
         assert commands[0] == commands[1]
-        assert commands[0].startswith(f"mkdir /tmp/job_{job.job_id}.launch && nohup")
+        assert commands[0].startswith(f"{{ mkdir /tmp/job_{job.job_id}.launch && nohup")
         assert job.job_id
 
     @pytest.mark.asyncio

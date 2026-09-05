@@ -5,7 +5,7 @@ import re
 import time
 from functools import wraps
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 import typer
 from click.core import ParameterSource
@@ -32,6 +32,7 @@ from ..utils.hosted_eval import (
     clean_logs,
     get_new_log_lines,
 )
+from ..utils.redact import Redactor, known_secrets
 from ..verifiers_bridge import (
     DEFAULT_ENV_DIR_PATH,
     DEFAULT_MODEL,
@@ -1056,11 +1057,23 @@ def _push_single_eval(
     eval_id: Optional[str],
     is_public: bool = False,
     name: Optional[str] = None,
+    secrets: Iterable[str] = (),
 ) -> str:
     path = _validate_eval_path(config_path)
-    eval_data = _load_eval_directory(path)
+    api_client = APIClient()
+    redactor = Redactor(known_secrets(api_client.api_key, secret_args=secrets))
+    # Everything from here on is what the platform receives: redact it all up front. A
+    # secret inside an identifier makes the request fail rather than leak it.
+    eval_data, env_slug, run_id, eval_id, name = redactor.value(
+        [_load_eval_directory(path), env_slug, run_id, eval_id, name]
+    )
     eval_name = name or eval_data["eval_name"]
     console.print(f"[blue]✓ Loaded eval data:[/blue] {path}")
+    if redactor.count:
+        console.print(
+            f"[yellow]Redacted {redactor.count} occurrence(s) of known secrets; "
+            "local files are unchanged[/yellow]"
+        )
 
     detected_env = eval_data.get("env_id") or eval_data.get("env")
     if not env_slug and detected_env and not run_id and not eval_id:
@@ -1074,7 +1087,6 @@ def _push_single_eval(
 
     console.print()
 
-    api_client = APIClient()
     client = EvalsClient(api_client)
 
     if eval_id:
@@ -1222,6 +1234,14 @@ def push_eval(
         "--public",
         help="Make the pushed evaluation public. Evaluations are private by default.",
     ),
+    secret: list[str] = typer.Option(
+        [],
+        "--secret",
+        help=(
+            "Value to redact before upload, or a file with one per line; repeatable. "
+            "Credential-named environment variables and the API key are always redacted."
+        ),
+    ),
 ) -> None:
     """Push evaluation data to Prime Evals.
 
@@ -1255,7 +1275,9 @@ def push_eval(
         if config_path is None:
             current_dir = Path(".")
             if _has_eval_files(current_dir):
-                result_eval_id = _push_single_eval(".", env_id, run_id, eval_id, is_public, name)
+                result_eval_id = _push_single_eval(
+                    ".", env_id, run_id, eval_id, is_public, name, secret
+                )
                 if output == "json":
                     console.print()
                     output_data_as_json({"evaluation_id": result_eval_id}, console)
@@ -1279,7 +1301,7 @@ def push_eval(
             for eval_dir in eval_dirs:
                 try:
                     result_eval_id = _push_single_eval(
-                        str(eval_dir), env_id, run_id, eval_id, is_public, name
+                        str(eval_dir), env_id, run_id, eval_id, is_public, name, secret
                     )
                     results.append(
                         {"path": str(eval_dir), "eval_id": result_eval_id, "status": "success"}
@@ -1303,7 +1325,9 @@ def push_eval(
 
             return
 
-        result_eval_id = _push_single_eval(config_path, env_id, run_id, eval_id, is_public, name)
+        result_eval_id = _push_single_eval(
+            config_path, env_id, run_id, eval_id, is_public, name, secret
+        )
 
         if output == "json":
             console.print()

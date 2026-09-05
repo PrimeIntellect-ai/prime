@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
 import sys
+import tempfile
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import httpx
 import toml
@@ -69,6 +71,96 @@ def is_help_request(primary_arg: str, passthrough_args: list[str]) -> bool:
     if primary_arg in ("-h", "--help"):
         return True
     return any(arg in ("-h", "--help") for arg in passthrough_args)
+
+
+def _normalize_eval_sampling_args_dict(sampling_args: dict[str, Any]) -> bool:
+    if "enable_thinking" not in sampling_args:
+        return False
+
+    extra_body = sampling_args.get("extra_body")
+    if extra_body is not None and not isinstance(extra_body, dict):
+        return False
+
+    chat_template_kwargs = None
+    if isinstance(extra_body, dict):
+        chat_template_kwargs = extra_body.get("chat_template_kwargs")
+        if chat_template_kwargs is not None and not isinstance(chat_template_kwargs, dict):
+            return False
+
+    enable_thinking = sampling_args.pop("enable_thinking")
+    extra_body_dict = dict(extra_body) if isinstance(extra_body, dict) else {}
+    chat_template_kwargs_dict = (
+        dict(chat_template_kwargs) if isinstance(chat_template_kwargs, dict) else {}
+    )
+    chat_template_kwargs_dict.setdefault("enable_thinking", enable_thinking)
+    extra_body_dict["chat_template_kwargs"] = chat_template_kwargs_dict
+    sampling_args["extra_body"] = extra_body_dict
+    return True
+
+
+def _normalize_eval_sampling_args(passthrough_args: list[str]) -> list[str]:
+    normalized = list(passthrough_args)
+
+    for i, arg in enumerate(normalized[:-1]):
+        if arg != "--sampling-args":
+            continue
+
+        try:
+            sampling_args = json.loads(normalized[i + 1])
+        except json.JSONDecodeError:
+            continue
+
+        if not isinstance(sampling_args, dict):
+            continue
+
+        if not _normalize_eval_sampling_args_dict(sampling_args):
+            continue
+
+        normalized[i + 1] = json.dumps(sampling_args, separators=(",", ":"))
+
+    return normalized
+
+
+def _normalize_eval_config_target(environment: str) -> tuple[str, Optional[Path]]:
+    if not _is_config_target(environment):
+        return environment, None
+
+    config_path = Path(environment)
+    try:
+        raw = toml.load(config_path)
+    except Exception:
+        return environment, None
+
+    if not isinstance(raw, dict):
+        return environment, None
+
+    eval_entries = raw.get("eval")
+    if not isinstance(eval_entries, list):
+        return environment, None
+
+    mutated = False
+    for entry in eval_entries:
+        if not isinstance(entry, dict):
+            continue
+        sampling_args = entry.get("sampling_args")
+        if not isinstance(sampling_args, dict):
+            continue
+        if _normalize_eval_sampling_args_dict(sampling_args):
+            mutated = True
+
+    if not mutated:
+        return environment, None
+
+    temp_file = tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        suffix=config_path.suffix or ".toml",
+        delete=False,
+    )
+    with temp_file:
+        toml.dump(raw, temp_file)
+
+    return temp_file.name, Path(temp_file.name)
 
 
 def _sanitize_help_text(help_text: str, module_name: str, prime_command: str) -> str:
@@ -950,6 +1042,7 @@ def run_eval_passthrough(
 ) -> None:
     plugin = load_verifiers_prime_plugin(console=console)
     config = Config()
+    temp_config_path: Optional[Path] = None
 
     if not config.api_key:
         console.print(
@@ -958,6 +1051,7 @@ def run_eval_passthrough(
         )
         raise typer.Exit(1)
 
+    passthrough_args = _normalize_eval_sampling_args(passthrough_args)
     args, env, model, base_url = _add_default_inference_and_key_args(passthrough_args, config)
     configured_base_url = (config.inference_url or "").strip().rstrip("/")
     _validate_model(model, base_url, configured_base_url)
@@ -969,58 +1063,63 @@ def run_eval_passthrough(
     env_name_for_upload: Optional[str] = None
     resolved_env: Optional[ResolvedEnvironment] = None
     config_envs: list[tuple[str, str]] = []
+    run_target, temp_config_path = _normalize_eval_config_target(environment)
 
-    if _is_config_target(environment):
-        config_envs = _collect_eval_config_envs(Path(environment), env_dir_path)
-        for env_ref, ref_env_dir in config_envs:
-            _prepare_single_environment(plugin, env_ref, ref_env_dir)
-    else:
-        resolved_env = _prepare_single_environment(plugin, environment, env_dir_path)
-        run_target = resolved_env.env_name
-        upstream_slug = resolved_env.upstream_slug
-        env_name_for_upload = resolved_env.env_name
-        if resolved_env.env_display_id:
-            args.extend(
-                ["--header", f"{INTERNAL_ENV_DISPLAY_HEADER}: {resolved_env.env_display_id}"]
+    try:
+        if _is_config_target(environment):
+            config_envs = _collect_eval_config_envs(Path(environment), env_dir_path)
+            for env_ref, ref_env_dir in config_envs:
+                _prepare_single_environment(plugin, env_ref, ref_env_dir)
+        else:
+            resolved_env = _prepare_single_environment(plugin, environment, env_dir_path)
+            run_target = resolved_env.env_name
+            upstream_slug = resolved_env.upstream_slug
+            env_name_for_upload = resolved_env.env_name
+            if resolved_env.env_display_id:
+                args.extend(
+                    ["--header", f"{INTERNAL_ENV_DISPLAY_HEADER}: {resolved_env.env_display_id}"]
+                )
+
+        if not skip_upload and not _has_flag(args, "--save-results", "-s"):
+            args.append("-s")
+
+        job_target = env_name_for_upload
+        if job_target is None and config_envs:
+            job_target = _env_name_from_reference(config_envs[0][0])
+        if job_target is None:
+            job_target = Path(environment).stem
+        job_id = _build_job_id(job_target, model)
+        args.extend(["--header", f"X-PI-Job-Id: {job_id}"])
+
+        if config.team_id:
+            args.extend(["--header", f"X-Prime-Team-ID: {config.team_id}"])
+
+        console.print(f"[dim]Eval job_id: {job_id}[/dim]")
+        command = plugin.build_module_command(plugin.eval_module, [run_target, *args])
+        _run_command(command, env=env)
+
+        if skip_upload:
+            _print_environment_source_footer(resolved_env)
+            console.print("[dim]Skipped uploading evaluation results[/dim]")
+            return
+
+        if _is_config_target(environment):
+            console.print(
+                "[yellow]Evaluation completed. Automatic upload is skipped for "
+                "config-driven runs.[/yellow]"
             )
+            return
 
-    if not skip_upload and not _has_flag(args, "--save-results", "-s"):
-        args.append("-s")
-
-    job_target = env_name_for_upload
-    if job_target is None and config_envs:
-        job_target = _env_name_from_reference(config_envs[0][0])
-    if job_target is None:
-        job_target = Path(environment).stem
-    job_id = _build_job_id(job_target, model)
-    args.extend(["--header", f"X-PI-Job-Id: {job_id}"])
-
-    if config.team_id:
-        args.extend(["--header", f"X-Prime-Team-ID: {config.team_id}"])
-
-    console.print(f"[dim]Eval job_id: {job_id}[/dim]")
-    command = plugin.build_module_command(plugin.eval_module, [run_target, *args])
-    _run_command(command, env=env)
-
-    if skip_upload:
-        _print_environment_source_footer(resolved_env)
-        console.print("[dim]Skipped uploading evaluation results[/dim]")
-        return
-
-    if _is_config_target(environment):
-        console.print(
-            "[yellow]Evaluation completed. Automatic upload is skipped for "
-            "config-driven runs.[/yellow]"
-        )
-        return
-
-    if resolved_env is not None and resolved_env.recommend_push:
-        _print_environment_source_footer(resolved_env)
-        console.print(
-            "[yellow]Evaluation completed. Automatic upload is skipped until the local "
-            "environment is published.[/yellow]"
-        )
-        return
+        if resolved_env is not None and resolved_env.recommend_push:
+            _print_environment_source_footer(resolved_env)
+            console.print(
+                "[yellow]Evaluation completed. Automatic upload is skipped until the local "
+                "environment is published.[/yellow]"
+            )
+            return
+    finally:
+        if temp_config_path is not None:
+            temp_config_path.unlink(missing_ok=True)
 
     upload_env_name = env_name_for_upload or environment
     if upstream_slug is None:

@@ -34,6 +34,11 @@ from ..utils import (
     validate_output_format,
 )
 from ..utils.env_metadata import find_environment_metadata
+from ..utils.environment_runtime import (
+    VERIFIERS_V1,
+    classify_runtime_from_metadata,
+    parse_runtime_option,
+)
 from ..utils.formatters import format_file_size
 from ..utils.formatters import strip_ansi as _strip_ansi
 from ..utils.prompt import (
@@ -1069,6 +1074,14 @@ def push(
     visibility: Optional[str] = typer.Option(
         None, "--visibility", "-v", help="Environment visibility (PUBLIC/PRIVATE)"
     ),
+    runtime: Optional[str] = typer.Option(
+        None,
+        "--runtime",
+        help=(
+            "Verifiers API the package targets: v0 or v1. Defaults to the package's "
+            "verifiers requirement (a lower bound of 0.2.0 or newer means v1)."
+        ),
+    ),
     auto_bump: bool = typer.Option(
         False, "--auto-bump", help="Automatically bump patch version before push"
     ),
@@ -1080,6 +1093,12 @@ def push(
     ),
 ) -> None:
     """Push environment to registry"""
+
+    try:
+        declared_runtime = parse_runtime_option(runtime)
+    except ValueError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
 
     try:
         env_path = _resolve_push_environment_path(path, env_id)
@@ -1344,6 +1363,19 @@ def push(
             # Extract Requires-Dist from wheel METADATA (includes URL dependencies)
             requires_dist = extract_requires_dist_from_wheel(wheel_path)
 
+            runtime_hint = declared_runtime or classify_runtime_from_metadata(
+                requires_dist or project_metadata.get("dependencies", [])
+            )
+            if runtime_hint is None:
+                console.print(
+                    "[yellow]No verifiers requirement found, so the Hub will list this "
+                    "package as Unclassified; pass --runtime v0|v1 to declare it.[/yellow]"
+                )
+            else:
+                label = "verifiers v1" if runtime_hint == VERIFIERS_V1 else "legacy verifiers v0"
+                source = "--runtime" if declared_runtime else "the verifiers requirement"
+                console.print(f"Publishing as {label} (from {source})")
+
             wheel_data = {
                 "content_hash": content_hash,
                 "filename": unique_wheel_name,
@@ -1360,6 +1392,8 @@ def push(
                     "requires_dist": requires_dist,  # Include full dependency specs from wheel
                 },
             }
+            if runtime_hint is not None:
+                wheel_data["runtime_hint"] = runtime_hint
 
             try:
                 response = client.post(f"/environmentshub/{env_id}/wheels", json=wheel_data)
@@ -1463,6 +1497,8 @@ def push(
                             "original_filename": f"{env_name}-{version}.tar.gz",
                         },
                     }
+                    if runtime_hint is not None:
+                        source_data["runtime_hint"] = runtime_hint
 
                     try:
                         response = client.post(

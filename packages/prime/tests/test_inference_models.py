@@ -261,6 +261,14 @@ def _catalog_fixture() -> Dict[str, Any]:
                     "cache_write_usd_per_mtok": 0.11,
                 },
             },
+            {
+                "id": "partial/cache-read-only",
+                "pricing": {
+                    "input_usd_per_mtok": 0.3,
+                    "output_usd_per_mtok": 0.6,
+                    "cache_read_usd_per_mtok": 0.03,
+                },
+            },
         ],
     }
 
@@ -286,8 +294,22 @@ def test_models_table_shows_catalog_columns(monkeypatch: pytest.MonkeyPatch) -> 
     # Second model has no specs -> em-dash cells, but cache pricing still shown.
     assert "prime/hosted-model" in out
     assert "$0.099 / $0.11" in out
+    # Partial cache pricing marks the missing side explicitly.
+    assert "$0.03 / —" in out
     # Legend explains the reasoning column.
     assert "reasoning ✓" in out
+
+
+def test_models_table_folds_ids_in_narrow_terminals(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_models(monkeypatch, _catalog_fixture())
+
+    result = CliRunner().invoke(app, ["inference", "models"], env={**TEST_ENV, "COLUMNS": "80"})
+
+    assert result.exit_code == 0, result.output
+    # The id column folds (wraps) instead of truncating, so the identifier's
+    # tail stays visible and copyable even when catalog columns squeeze the
+    # table (truncation would render 'anthrop…' and drop the tail).
+    assert "u-4.5" in result.output
 
 
 def test_models_table_omits_catalog_columns_for_legacy_payload(

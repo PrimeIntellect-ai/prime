@@ -32,6 +32,12 @@ _SORT_KEYS = ("id", "input", "output")
 _ORDER_KEYS = ("asc", "desc")
 
 
+def _format_cache_price(value: Any) -> str:
+    """Render one side of the cache read/write pair. None means "no data"
+    (renders as an em-dash); 0 is a real price (free) and renders normally."""
+    return format_price_per_mtok(value) if value is not None else "—"
+
+
 def _format_token_count(value: Any) -> str:
     """Compact token counts for table cells: 200000 -> '200k', 1048576 -> '1.05M'."""
     try:
@@ -142,7 +148,7 @@ def list_models(
         )
         show_specs = any(m.get("specs") for m in models)
 
-        table.add_column("id", style="cyan")
+        table.add_column("id", style="cyan", overflow="fold")
         if show_name:
             table.add_column("name")
         table.add_column("input $/1M tok", style="green", justify="right")
@@ -171,8 +177,7 @@ def list_models(
                     row.append("—")
                 else:
                     cache_cell = (
-                        f"{format_price_per_mtok(cache_read)} /"
-                        f" {format_price_per_mtok(cache_write)}"
+                        f"{_format_cache_price(cache_read)} / {_format_cache_price(cache_write)}"
                     )
                     row.append(cache_cell)
             if show_specs:

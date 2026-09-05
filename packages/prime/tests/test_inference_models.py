@@ -276,15 +276,18 @@ def test_models_table_shows_catalog_columns(monkeypatch: pytest.MonkeyPatch) -> 
     assert "context" in out
     assert "200k" in out
     assert "64k" in out
-    assert "t+i+f→t" in out
     assert "✓" in out
+    # Modalities are upstream model data, not a productized gateway feature —
+    # never rendered even when the endpoint serves them.
+    assert "modalities" not in out
+    assert "t+i+f" not in out
     # Cache read/write cell for the first model.
     assert "$0.1 / $1.25" in out
     # Second model has no specs -> em-dash cells, but cache pricing still shown.
     assert "prime/hosted-model" in out
     assert "$0.099 / $0.11" in out
-    # Legend explains the compact modality codes.
-    assert "t=text" in out
+    # Legend explains the reasoning column.
+    assert "reasoning ✓" in out
 
 
 def test_models_table_omits_catalog_columns_for_legacy_payload(
@@ -299,7 +302,6 @@ def test_models_table_omits_catalog_columns_for_legacy_payload(
     # No model carries catalog data -> slim table, unchanged from before.
     assert "name" not in out
     assert "context" not in out
-    assert "modalities" not in out
     assert "reasoning" not in out
     assert "cache" not in out
 

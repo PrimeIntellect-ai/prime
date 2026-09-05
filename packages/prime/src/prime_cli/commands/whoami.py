@@ -32,7 +32,7 @@ def whoami() -> None:
         # Update config
         config = Config()
         if user_id and config.context_override is None:
-            config.set_user_id(user_id)
+            config.set_user_id(user_id, user_name=name)
             config.update_current_environment_file()
 
         # Display account info table

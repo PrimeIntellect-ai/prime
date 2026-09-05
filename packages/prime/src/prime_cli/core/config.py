@@ -13,6 +13,7 @@ class ConfigModel(BaseModel):
     team_name: str | None = None
     team_role: str | None = None
     user_id: str | None = None
+    user_name: str | None = None
     base_url: str = "https://api.primeintellect.ai"
     frontend_url: str = "https://app.primeintellect.ai"
     inference_url: str = "https://api.pinference.ai/api/v1"
@@ -135,9 +136,20 @@ class Config:
             return user_id
         return self.config.get("user_id") or None
 
-    def set_user_id(self, value: str | None) -> None:
-        """Set user ID in config file"""
+    @property
+    def user_id_from_env(self) -> bool:
+        """Check if user ID is set via environment variable."""
+        return os.getenv("PRIME_USER_ID") is not None
+
+    @property
+    def user_name(self) -> Optional[str]:
+        """Get user name from config file (only valid if user_id not from env)."""
+        return self.config.get("user_name") or None
+
+    def set_user_id(self, value: str | None, user_name: str | None = None) -> None:
+        """Set user ID and display name in config file."""
         self.config["user_id"] = value if value else None
+        self.config["user_name"] = user_name if value else None
         self._save_config(self.config)
 
     @property
@@ -305,6 +317,7 @@ class Config:
             "team_name": self.team_name,
             "team_role": self.team_role,
             "user_id": self.user_id,
+            "user_name": self.user_name,
             "base_url": self.base_url,
             "frontend_url": self.frontend_url,
             "inference_url": self.inference_url,
@@ -327,6 +340,7 @@ class Config:
             "team_name": None if self.team_id_from_env else self.team_name,
             "team_role": None if self.team_id_from_env else self.team_role,
             "user_id": self.user_id,
+            "user_name": None if self.user_id_from_env else self.user_name,
             "base_url": self.base_url,
             "frontend_url": self.frontend_url,
             "inference_url": self.inference_url,
@@ -409,8 +423,11 @@ class Config:
                         team_name=env_config.get("team_name", None),
                         team_role=env_config.get("team_role", None),
                     )
-                    # Set user_id from environment
-                    self.set_user_id(env_config.get("user_id", None))
+                    # Set user_id and user_name from environment
+                    self.set_user_id(
+                        env_config.get("user_id", None),
+                        user_name=env_config.get("user_name", None),
+                    )
                     self.set_base_url(env_config.get("base_url", self.DEFAULT_BASE_URL))
                     self.set_frontend_url(env_config.get("frontend_url", self.DEFAULT_FRONTEND_URL))
                     self.set_inference_url(
@@ -426,6 +443,7 @@ class Config:
                     self.config["team_name"] = env_config.get("team_name", None)
                     self.config["team_role"] = env_config.get("team_role", None)
                     self.config["user_id"] = env_config.get("user_id", None)
+                    self.config["user_name"] = env_config.get("user_name", None)
                     # Normalize URLs the same way set_* methods do
                     base_url = env_config.get("base_url", self.DEFAULT_BASE_URL)
                     self.config["base_url"] = self._strip_api_v1(base_url)
@@ -458,6 +476,7 @@ class Config:
                         "team_name": None if self.team_id_from_env else self.team_name,
                         "team_role": None if self.team_id_from_env else self.team_role,
                         "user_id": self.user_id,
+                        "user_name": None if self.user_id_from_env else self.user_name,
                         "base_url": self.base_url,
                         "frontend_url": self.frontend_url,
                         "inference_url": self.inference_url,

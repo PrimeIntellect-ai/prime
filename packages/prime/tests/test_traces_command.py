@@ -401,11 +401,137 @@ def test_list_command_forwards_filters_and_renders_table(fake_client):
 
     assert result.exit_code == 0, result.output
     assert "8d3f1a2b" in result.output
-    assert "cursor-1" in result.output  # next-page hint
+    assert "Use --page 2 to see more." in result.output
+    # The exact-boundary resume stays on offer next to the page hint.
+    assert "--cursor cursor-1" in result.output
     call = fake_client.calls["list"]
     assert call["run_id"] == "run_9f3k2m"
     assert call["reward_min"] == 0.5
     assert call["limit"] == 10
+    assert call["cursor"] is None
+
+
+def test_list_command_first_page_without_more_has_no_footer(fake_client):
+    fake_client.list = lambda **kwargs: TraceListPage(items=[_summary()], next_cursor=None)
+
+    result = runner.invoke(main_app, ["traces", "list"])
+
+    assert result.exit_code == 0, result.output
+    assert "Page 1" not in result.output
+    assert "--page" not in result.output
+
+
+def test_list_command_cursor_resume_keeps_cursor_hint(fake_client):
+    result = runner.invoke(main_app, ["traces", "list", "--cursor", "cursor-0"])
+
+    assert result.exit_code == 0, result.output
+    assert fake_client.calls["list"]["cursor"] == "cursor-0"
+    assert "More results: --cursor cursor-1" in result.output
+    assert "--page" not in result.output
+
+
+def _paged_client(fake_client, pages):
+    """Serve ``pages`` keyed by the cursor that reaches them; records each call."""
+    calls = []
+
+    def list_(**kwargs):
+        calls.append(kwargs)
+        items, next_cursor = pages[kwargs.get("cursor")]
+        return TraceListPage(items=items, next_cursor=next_cursor)
+
+    fake_client.list = list_
+    return calls
+
+
+def test_list_command_page_walks_cursors_to_the_requested_page(fake_client):
+    calls = _paged_client(
+        fake_client,
+        {
+            None: ([_summary(trace_id="p1a"), _summary(trace_id="p1b")], "c1"),
+            "c1": ([_summary(trace_id="p2a"), _summary(trace_id="p2b")], "c2"),
+            "c2": ([_summary(trace_id="p3a")], None),
+        },
+    )
+
+    result = runner.invoke(main_app, ["traces", "list", "--page", "3", "--limit", "2"])
+
+    assert result.exit_code == 0, result.output
+    assert [call["cursor"] for call in calls] == [None, "c1", "c2"]
+    assert all(call["limit"] == 2 for call in calls)
+    assert "p3a" in result.output
+    assert "p1a" not in result.output
+    assert "p2a" not in result.output
+    assert "Page 3 • showing 5-5" in result.output
+    assert "--page 4" not in result.output
+
+
+def test_list_command_page_with_more_pages_hints_the_next_page(fake_client):
+    _paged_client(
+        fake_client,
+        {
+            None: ([_summary(trace_id="p1a"), _summary(trace_id="p1b")], "c1"),
+            "c1": ([_summary(trace_id="p2a"), _summary(trace_id="p2b")], "c2"),
+        },
+    )
+
+    result = runner.invoke(main_app, ["traces", "list", "-p", "2", "--limit", "2"])
+
+    assert result.exit_code == 0, result.output
+    assert "Page 2 • showing 3-4" in result.output
+    assert "Use --page 3 to see more." in result.output
+    assert "--cursor c2" in result.output
+
+
+def test_list_command_page_past_the_end_stops_walking(fake_client):
+    calls = _paged_client(
+        fake_client,
+        {
+            None: ([_summary(trace_id="p1a")], "c1"),
+            "c1": ([_summary(trace_id="p2a")], None),
+        },
+    )
+
+    result = runner.invoke(main_app, ["traces", "list", "--page", "5"])
+
+    assert result.exit_code == 0, result.output
+    assert len(calls) == 2  # stops at the last real page instead of requesting five
+    assert "No traces on page 5." in result.output
+    assert "--page 1" in result.output
+    assert "p2a" not in result.output
+    assert "showing" not in result.output
+
+
+def test_list_command_page_json_output_is_the_requested_page(fake_client):
+    _paged_client(
+        fake_client,
+        {
+            None: ([_summary(trace_id="p1a")], "c1"),
+            "c1": ([_summary(trace_id="p2a")], "c2"),
+        },
+    )
+
+    result = runner.invoke(main_app, ["traces", "list", "--page", "2", "-o", "json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert [item["trace_id"] for item in payload["items"]] == ["p2a"]
+    assert payload["next_cursor"] == "c2"
+
+
+def test_list_command_rejects_page_with_cursor(fake_client):
+    result = runner.invoke(main_app, ["traces", "list", "--page", "2", "--cursor", "c1"])
+
+    assert result.exit_code == 1
+    assert "--page cannot be combined with --cursor" in result.output
+    assert "list" not in fake_client.calls
+
+
+def test_list_command_rejects_page_below_one(fake_client):
+    result = runner.invoke(main_app, ["traces", "list", "--page", "0"])
+
+    assert result.exit_code == 1
+    assert "--page must be at least 1" in result.output
+    assert "list" not in fake_client.calls
 
 
 def test_list_command_renders_full_trace_id(fake_client):

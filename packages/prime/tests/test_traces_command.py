@@ -402,7 +402,8 @@ def test_list_command_forwards_filters_and_renders_table(fake_client):
     assert result.exit_code == 0, result.output
     assert "8d3f1a2b" in result.output
     assert "Use --page 2 to see more." in result.output
-    assert "cursor-1" not in result.output  # page mode hides the raw cursor
+    # The exact-boundary resume stays on offer next to the page hint.
+    assert "--cursor cursor-1" in result.output
     call = fake_client.calls["list"]
     assert call["run_id"] == "run_9f3k2m"
     assert call["reward_min"] == 0.5
@@ -478,7 +479,7 @@ def test_list_command_page_with_more_pages_hints_the_next_page(fake_client):
     assert result.exit_code == 0, result.output
     assert "Page 2 • showing 3-4" in result.output
     assert "Use --page 3 to see more." in result.output
-    assert "c2" not in result.output
+    assert "--cursor c2" in result.output
 
 
 def test_list_command_page_past_the_end_stops_walking(fake_client):

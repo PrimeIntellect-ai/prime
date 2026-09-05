@@ -189,7 +189,10 @@ def list_traces(
         1,
         "--page",
         "-p",
-        help="Page number; later pages are reached by walking the pages before them",
+        help=(
+            "Page number; each run walks the pages before it from the current top, so"
+            " boundaries shift as traces arrive (use --cursor for a fixed boundary)"
+        ),
     ),
     limit: int = typer.Option(20, "--limit", help="Max results per page (up to 100)"),
     cursor: Optional[str] = typer.Option(
@@ -271,7 +274,7 @@ def list_traces(
     console.print(table)
 
     # A cursor resume has no page number to report, so it keeps the raw
-    # cursor hint; page mode mirrors the other list commands' footer.
+    # cursor hint alone; page mode mirrors the other list commands' footer.
     if cursor is not None:
         if result.next_cursor:
             console.print(f"[dim]More results: --cursor {escape(result.next_cursor)}[/dim]")
@@ -281,7 +284,14 @@ def list_traces(
         end = (page - 1) * limit + len(result.items)
         console.print(f"[dim]Page {page} • showing {start}-{end}[/dim]")
     if result.next_cursor:
+        # `--page N+1` re-walks from the current top in a fresh process, so a
+        # trace that arrives in between shifts every boundary and the row
+        # that fell off this page shows up again on the next. The cursor
+        # pins the boundary to this exact row, so it stays on offer.
         console.print(f"[dim]Use --page {page + 1} to see more.[/dim]")
+        console.print(
+            f"[dim]Or resume from this exact boundary: --cursor {escape(result.next_cursor)}[/dim]"
+        )
 
 
 @app.command("get", epilog=GET_TRACE_JSON_HELP)

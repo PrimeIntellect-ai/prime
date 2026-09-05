@@ -2703,9 +2703,11 @@ class SandboxClient:
 
         # mkdir is the launch's idempotency guard: after an ambiguous timeout, only one attempt
         # can create it and run the user command.
+        # Redirect the entire group so its shell cannot keep the launch output streams open.
         bg_cmd = (
-            f"mkdir {shlex.quote(launch_dir)} && "
-            f"nohup sh -c {quoted_sh_command} < /dev/null > /dev/null 2>&1 &"
+            f"{{ mkdir {shlex.quote(launch_dir)} && "
+            f"nohup sh -c {quoted_sh_command}; "
+            "} < /dev/null > /dev/null 2>&1 &"
         )
         for attempt in range(_BACKGROUND_JOB_LAUNCH_ATTEMPTS):
             try:
@@ -4422,9 +4424,11 @@ class AsyncSandboxClient:
 
         # mkdir is the launch's idempotency guard: after an ambiguous timeout, only one attempt
         # can create it and run the user command.
+        # Redirect the entire group so its shell cannot keep the launch output streams open.
         bg_cmd = (
-            f"mkdir {shlex.quote(launch_dir)} && "
-            f"nohup sh -c {quoted_sh_command} < /dev/null > /dev/null 2>&1 &"
+            f"{{ mkdir {shlex.quote(launch_dir)} && "
+            f"nohup sh -c {quoted_sh_command}; "
+            "} < /dev/null > /dev/null 2>&1 &"
         )
         for attempt in range(_BACKGROUND_JOB_LAUNCH_ATTEMPTS):
             try:

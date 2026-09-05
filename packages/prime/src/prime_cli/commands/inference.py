@@ -24,12 +24,43 @@ app = PlainTyper(
 console = get_console()
 
 MODELS_JSON_HELP = json_output_help(
-    "Typical OpenAI schema: .object?, .data[] = {id, created, pricing?}",
+    "Typical OpenAI schema: .object?, .data[] = {id, display_name?, created, pricing?, specs?}",
     "Compatibility fallback: .models[] may be present instead of .data[]",
 )
 
 _SORT_KEYS = ("id", "input", "output")
 _ORDER_KEYS = ("asc", "desc")
+
+_MODALITY_CODES = {"text": "t", "image": "i", "audio": "a", "video": "v", "file": "f"}
+
+
+def _format_token_count(value: Any) -> str:
+    """Compact token counts for table cells: 200000 -> '200k', 1048576 -> '1.05M'."""
+    try:
+        v = int(value)
+    except (TypeError, ValueError):
+        return "—"
+    if v <= 0:
+        return "—"
+    if v >= 1_000_000:
+        return f"{v / 1_000_000:.2f}".rstrip("0").rstrip(".") + "M"
+    if v >= 1_000:
+        return f"{v / 1_000:.1f}".rstrip("0").rstrip(".") + "k"
+    return str(v)
+
+
+def _format_modalities(specs: Dict[str, Any]) -> str:
+    """Compact modality codes: {'input': ['text','image'], 'output': ['text']} -> 't+i→t'."""
+    modalities = (specs or {}).get("modalities") or {}
+    inputs = [str(x) for x in (modalities.get("input") or [])]
+    outputs = [str(x) for x in (modalities.get("output") or [])]
+    if not inputs and not outputs:
+        return "—"
+
+    def codes(values: List[str]) -> str:
+        return "+".join(_MODALITY_CODES.get(x, x[:1].lower()) for x in values) or "?"
+
+    return f"{codes(inputs)}→{codes(outputs)}"
 
 
 def _price(m: Dict[str, Any], key: str) -> Optional[float]:
@@ -117,23 +148,63 @@ def list_models(
             return
 
         table = Table(title="Prime Inference — Models")
+        # Catalog columns appear only when the endpoint serves the data, so
+        # the table stays slim against older /models responses.
+        show_name = any(m.get("display_name") for m in models)
+        show_cache = any(
+            (m.get("pricing") or {}).get("cache_read_usd_per_mtok") is not None
+            or (m.get("pricing") or {}).get("cache_write_usd_per_mtok") is not None
+            for m in models
+        )
+        show_specs = any(m.get("specs") for m in models)
+
         table.add_column("id", style="cyan")
+        if show_name:
+            table.add_column("name")
         table.add_column("input $/1M tok", style="green", justify="right")
         table.add_column("output $/1M tok", style="green", justify="right")
+        if show_cache:
+            table.add_column("cache r/w $/1M tok", style="green", justify="right")
+        if show_specs:
+            table.add_column("context", justify="right")
+            table.add_column("max out", justify="right")
+            table.add_column("modalities")
+            table.add_column("reasoning")
 
         for m in models:
             mid = str(m.get("id", ""))
             pricing = m.get("pricing") or {}
-            pin = pricing.get("input_usd_per_mtok")
-            pout = pricing.get("output_usd_per_mtok")
+            specs = m.get("specs") or {}
 
-            table.add_row(
-                mid,
-                format_price_per_mtok(pin),
-                format_price_per_mtok(pout),
-            )
+            row: List[str] = [mid]
+            if show_name:
+                row.append(str(m.get("display_name") or "—"))
+            row.append(format_price_per_mtok(pricing.get("input_usd_per_mtok")))
+            row.append(format_price_per_mtok(pricing.get("output_usd_per_mtok")))
+            if show_cache:
+                cache_read = pricing.get("cache_read_usd_per_mtok")
+                cache_write = pricing.get("cache_write_usd_per_mtok")
+                if cache_read is None and cache_write is None:
+                    row.append("—")
+                else:
+                    cache_cell = (
+                        f"{format_price_per_mtok(cache_read)} /"
+                        f" {format_price_per_mtok(cache_write)}"
+                    )
+                    row.append(cache_cell)
+            if show_specs:
+                row.append(_format_token_count(specs.get("context_window")))
+                row.append(_format_token_count(specs.get("max_output_tokens")))
+                row.append(_format_modalities(specs))
+                row.append("✓" if specs.get("supports_reasoning") else "—")
+            table.add_row(*row)
 
         console.print(table)
+        if show_specs:
+            console.print(
+                "[dim]modalities: t=text i=image a=audio v=video f=file (in→out) · "
+                "reasoning ✓ = supports reasoning effort[/dim]"
+            )
 
     except InferenceAPIError as e:
         console.print(f"[red]Error:[/red] {e}")

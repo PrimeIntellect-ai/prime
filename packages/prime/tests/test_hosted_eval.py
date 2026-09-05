@@ -348,9 +348,11 @@ def test_create_hosted_evaluation_adds_team_id_to_payload(monkeypatch):
 
     monkeypatch.setattr("prime_cli.commands.evals.APIClient", DummyAPIClient)
 
+    environment = {"taskset": {"id": "gsm8k-v1"}, "harness": {"id": "default"}}
     result = _create_hosted_evaluations(
         HostedEvalConfig(
-            environment_id="env-123",
+            environment_id=None,
+            environments=[environment],
             inference_model="openai/gpt-4.1-mini",
             num_examples=5,
             rollouts_per_example=3,
@@ -360,6 +362,8 @@ def test_create_hosted_evaluation_adds_team_id_to_payload(monkeypatch):
     assert result["evaluation_id"] == "eval-123"
     assert captured["endpoint"] == "/hosted-evaluations"
     assert captured["json"]["team_id"] == "team-123"
+    assert "environment_ids" not in captured["json"]
+    assert captured["json"]["environments"] == [environment]
     assert captured["json"]["eval_config"]["allow_sandbox_access"] is True
     assert captured["json"]["eval_config"]["allow_instances_access"] is False
     assert captured["json"]["eval_config"]["allow_tunnel_access"] is True
@@ -730,6 +734,116 @@ eval_name = "math500 smoke test"
         },
         "name": "math500 smoke test",
     }
+
+
+def test_hosted_eval_config_accepts_v1_taskset_and_harness(tmp_path):
+    config_path = tmp_path / "eval.toml"
+    config_path.write_text(
+        """
+model = "openai/gpt-4.1-mini"
+num_examples = 7
+rollouts_per_example = 2
+
+[[eval]]
+taskset = { id = "gsm8k-v1", split = "test" }
+harness = { id = "default" }
+""".strip()
+    )
+
+    loaded = _load_hosted_eval_configs(str(config_path))[0]
+
+    assert "env_id" not in loaded
+    assert loaded["environment"] == {
+        "taskset": {"id": "gsm8k-v1", "split": "test"},
+        "harness": {"id": "default"},
+    }
+    assert loaded["num_examples"] == 7
+    assert loaded["rollouts_per_example"] == 2
+
+
+def test_hosted_eval_config_accepts_top_level_v1_taskset_and_harness(tmp_path):
+    config_path = tmp_path / "eval.toml"
+    config_path.write_text(
+        """
+model = "openai/gpt-4.1-mini"
+taskset = { id = "gsm8k-v1", split = "test" }
+harness = { id = "default" }
+
+[[eval]]
+num_examples = 7
+rollouts_per_example = 2
+""".strip()
+    )
+
+    loaded = _load_hosted_eval_configs(str(config_path))[0]
+
+    assert "env_id" not in loaded
+    assert loaded["environment"] == {
+        "taskset": {"id": "gsm8k-v1", "split": "test"},
+        "harness": {"id": "default"},
+    }
+    assert loaded["num_examples"] == 7
+    assert loaded["rollouts_per_example"] == 2
+
+
+def test_eval_run_hosted_supports_v1_eval_toml(monkeypatch, tmp_path):
+    captured = {}
+    config_path = tmp_path / "eval.toml"
+    config_path.write_text(
+        """
+model = "openai/gpt-4.1-mini"
+num_examples = 1
+rollouts_per_example = 1
+
+[[eval]]
+taskset = { id = "gsm8k-v1" }
+harness = { id = "default" }
+""".strip()
+    )
+
+    monkeypatch.setattr(
+        "prime_cli.commands.evals._resolve_hosted_environment",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("v1 hosted evals should not resolve published environments")
+        ),
+    )
+
+    def fake_run_hosted_evaluation(config, environment_ids=None):
+        captured["environment_id"] = config.environment_id
+        captured["environment_ids"] = environment_ids
+        captured["environments"] = config.environments
+        captured["inference_model"] = config.inference_model
+        captured["num_examples"] = config.num_examples
+        captured["rollouts_per_example"] = config.rollouts_per_example
+        return {"evaluation_id": "eval-123"}
+
+    monkeypatch.setattr(
+        "prime_cli.commands.evals._create_hosted_evaluations",
+        fake_run_hosted_evaluation,
+    )
+
+    result = runner.invoke(
+        app,
+        ["eval", "run", str(config_path), "--hosted"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured == {
+        "environment_id": None,
+        "environment_ids": None,
+        "environments": [
+            {
+                "taskset": {"id": "gsm8k-v1"},
+                "harness": {"id": "default"},
+            }
+        ],
+        "inference_model": "openai/gpt-4.1-mini",
+        "num_examples": 1,
+        "rollouts_per_example": 1,
+    }
+    assert "Environment:" in result.output
+    assert "gsm8k-v1" in result.output
 
 
 def test_eval_run_hosted_cli_overrides_supported_toml_fields(monkeypatch, tmp_path):
@@ -1133,6 +1247,72 @@ env_id = "gsm8k"
     assert f"`{expected_field}`" in result.output
 
 
+def test_eval_run_hosted_rejects_toml_without_selector(tmp_path):
+    config_path = tmp_path / "eval.toml"
+    config_path.write_text(
+        """
+model = "openai/gpt-4.1-mini"
+
+[[eval]]
+env_args = { split = "test" }
+""".strip()
+    )
+
+    result = runner.invoke(
+        app,
+        ["eval", "run", str(config_path), "--hosted"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 1
+    assert "requires either `env_id` or `taskset.id`" in result.output
+
+
+def test_eval_run_hosted_rejects_mixed_env_id_and_taskset(tmp_path):
+    config_path = tmp_path / "eval.toml"
+    config_path.write_text(
+        """
+model = "openai/gpt-4.1-mini"
+
+[[eval]]
+env_id = "primeintellect/gsm8k"
+taskset = { id = "gsm8k-v1" }
+""".strip()
+    )
+
+    result = runner.invoke(
+        app,
+        ["eval", "run", str(config_path), "--hosted"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 1
+    assert "cannot combine `env_id` with `taskset` or `harness`" in result.output
+    assert "Error: 1" not in result.output
+
+
+def test_eval_run_hosted_rejects_v1_selector_without_taskset_id(tmp_path):
+    config_path = tmp_path / "eval.toml"
+    config_path.write_text(
+        """
+model = "openai/gpt-4.1-mini"
+
+[[eval]]
+harness = { id = "default" }
+""".strip()
+    )
+
+    result = runner.invoke(
+        app,
+        ["eval", "run", str(config_path), "--hosted"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 1
+    assert "Environment config requires either legacy id" in result.output
+    assert "taskset.id" in result.output
+
+
 def test_eval_run_hosted_toml_preserves_cli_env_dir_path(monkeypatch, tmp_path):
     captured = {}
     config_path = tmp_path / "eval.toml"
@@ -1179,20 +1359,22 @@ env_id = "gsm8k"
     }
 
 
-def test_hosted_eval_config_accepts_id_alias(tmp_path):
+def test_hosted_eval_config_accepts_top_level_id_alias(tmp_path):
     config_path = tmp_path / "eval.toml"
     config_path.write_text(
         """
 model = "openai/gpt-4.1-mini"
+id = "gsm8k"
 
 [[eval]]
-id = "gsm8k"
+num_examples = 3
 """.strip()
     )
 
     loaded = _load_hosted_eval_configs(str(config_path))[0]
 
     assert loaded["env_id"] == "gsm8k"
+    assert loaded["num_examples"] == 3
 
 
 def test_eval_run_hosted_endpoint_id_uses_default_endpoints_path_from_cwd(monkeypatch, tmp_path):

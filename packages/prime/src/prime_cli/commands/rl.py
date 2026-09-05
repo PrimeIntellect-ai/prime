@@ -1012,27 +1012,15 @@ def _dispatch_full_finetune_run(
         raise typer.Exit(1)
     secrets = secrets or {}
 
-    # The full-FT backend schema only knows about WANDB_API_KEY and
-    # HF_TOKEN (see platform CreateDedicatedRunRequestBase). Silently
-    # dropping anything else here would launch the run without the
-    # credentials the orchestrator's env needs — the LoRA path forwards
-    # the whole map via env-server pods, but full-FT runs the env inline
-    # in the orchestrator and has no comparable surface today. Reject
-    # loudly instead so the user knows up-front rather than discovering
-    # via a runtime auth error inside a $$$ hosted pod.
-    supported_secret_keys = {"WANDB_API_KEY", "HF_TOKEN"}
-    unsupported = sorted(k for k in secrets if k not in supported_secret_keys)
-    if unsupported:
-        console.print(
-            "[red]Error:[/red] full-FT runs only forward "
-            f"{', '.join(sorted(supported_secret_keys))} today; got "
-            f"unsupported secret(s): {', '.join(unsupported)}."
-        )
-        console.print(
-            "[dim]Drop these from --env-var/--env-file, or wait for "
-            "generic secret forwarding on the dedicated training endpoint.[/dim]"
-        )
-        raise typer.Exit(1)
+    # WANDB_API_KEY and HF_TOKEN keep their dedicated request fields, so
+    # strip them from the freeform map — the backend 422s on reserved
+    # keys rather than letting the same credential arrive by two routes.
+    # Everything else goes over as `secrets` and the chart projects it
+    # onto trainer / inference / orchestrator / env pods. Platform-owned
+    # names (PRIME_API_KEY and friends) are deliberately *not* filtered
+    # here: the backend rejects them by name, which tells the user their
+    # secret was refused instead of silently dropping it.
+    extra_secrets = {k: v for k, v in secrets.items() if k not in ("WANDB_API_KEY", "HF_TOKEN")}
 
     # `image_tag` is chart-level — it picks which prime-rl container build
     # the run pulls. Two ways to set it: `--image-tag` (CLI flag, useful
@@ -1099,6 +1087,7 @@ def _dispatch_full_finetune_run(
         wandb_api_key=secrets.get("WANDB_API_KEY"),
         hf_token=secrets.get("HF_TOKEN"),
         gpu_type=resolved_gpu_type,
+        secrets=extra_secrets,
     )
 
     # `--output json` is a formatting switch: still dispatch the run,

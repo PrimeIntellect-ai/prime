@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 import click
 import typer
@@ -10,6 +10,7 @@ from prime_traces import (
     NotFoundError,
     PaymentRequiredError,
     PrimeTracesError,
+    TraceListPage,
     TracesClient,
     UnauthorizedError,
     UploadReceipt,
@@ -145,6 +146,27 @@ def upload_traces(
         console.print(f"[green]Uploaded {len(receipts)} batch(es) from {escape(str(file))}[/green]")
 
 
+def _list_page(
+    fetch: Callable[[Optional[str]], TraceListPage],
+    *,
+    page: int,
+    cursor: Optional[str],
+) -> TraceListPage:
+    """Fetch one page, walking the pages before it when it is not the first.
+
+    The service paginates by cursor only, so page N costs N requests. Every
+    hop asks for the same page size, which keeps the page boundaries lined
+    up; a walk that runs out of pages early yields an empty page rather than
+    the last real one.
+    """
+    for _ in range(page - 1):
+        hop = fetch(cursor)
+        if not hop.next_cursor:
+            return TraceListPage(items=[], next_cursor=None)
+        cursor = hop.next_cursor
+    return fetch(cursor)
+
+
 @app.command("list", epilog=LIST_TRACES_JSON_HELP)
 def list_traces(
     run_id: Optional[str] = typer.Option(None, "--run-id", help="Filter by run ID"),
@@ -163,28 +185,48 @@ def list_traces(
     sort: Optional[str] = typer.Option(
         None, "--sort", help="Sort key: created_at (default, newest first), reward, duration_ms"
     ),
+    page: int = typer.Option(
+        1,
+        "--page",
+        "-p",
+        help="Page number; later pages are reached by walking the pages before them",
+    ),
     limit: int = typer.Option(20, "--limit", help="Max results per page (up to 100)"),
-    cursor: Optional[str] = typer.Option(None, "--cursor", help="Cursor from a previous page"),
+    cursor: Optional[str] = typer.Option(
+        None,
+        "--cursor",
+        help="Resume from a cursor returned by a previous page (cannot be combined with --page)",
+    ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
     """List trace summaries, newest first."""
     validate_output_format(output, error_console)
+    if page < 1:
+        error_console.print("[red]Error:[/red] --page must be at least 1")
+        raise typer.Exit(1)
+    if cursor is not None and page > 1:
+        error_console.print("[red]Error:[/red] --page cannot be combined with --cursor")
+        raise typer.Exit(1)
     try:
         client = _traces_client()
-        page = client.list(
-            run_id=run_id,
-            task_id=task_id,
-            model_id=model_id,
-            outcome=outcome,
-            has_error=has_error,
-            reward_min=reward_min,
-            reward_max=reward_max,
-            created_after=created_after,
-            created_before=created_before,
-            sort=sort,
-            limit=limit,
-            cursor=cursor,
-        )
+
+        def fetch(page_cursor: Optional[str]) -> TraceListPage:
+            return client.list(
+                run_id=run_id,
+                task_id=task_id,
+                model_id=model_id,
+                outcome=outcome,
+                has_error=has_error,
+                reward_min=reward_min,
+                reward_max=reward_max,
+                created_after=created_after,
+                created_before=created_before,
+                sort=sort,
+                limit=limit,
+                cursor=page_cursor,
+            )
+
+        result = _list_page(fetch, page=page, cursor=cursor)
     except typer.Exit:
         raise
     except UnauthorizedError as e:
@@ -202,7 +244,7 @@ def list_traces(
         raise typer.Exit(1)
 
     if output == "json":
-        output_data_as_json(page.model_dump(mode="json"), console)
+        output_data_as_json(result.model_dump(mode="json"), console)
         return
 
     table = Table(title="Traces")
@@ -213,7 +255,7 @@ def list_traces(
     table.add_column("Outcome")
     table.add_column("Created")
 
-    for summary in page.items:
+    for summary in result.items:
         reward = summary.score.reward
         table.add_row(
             escape(summary.trace_id),
@@ -223,9 +265,23 @@ def list_traces(
             escape(summary.score.outcome or "-"),
             escape(summary.created_at.isoformat()),
         )
+    if not result.items and page > 1:
+        console.print(f"[yellow]No traces on page {page}.[/yellow]")
+        console.print("Try [bold]--page 1[/bold] to start from the beginning.")
     console.print(table)
-    if page.next_cursor:
-        console.print(f"[dim]More results: --cursor {escape(page.next_cursor)}[/dim]")
+
+    # A cursor resume has no page number to report, so it keeps the raw
+    # cursor hint; page mode mirrors the other list commands' footer.
+    if cursor is not None:
+        if result.next_cursor:
+            console.print(f"[dim]More results: --cursor {escape(result.next_cursor)}[/dim]")
+        return
+    if result.items and (result.next_cursor or page > 1):
+        start = (page - 1) * limit + 1
+        end = (page - 1) * limit + len(result.items)
+        console.print(f"[dim]Page {page} • showing {start}-{end}[/dim]")
+    if result.next_cursor:
+        console.print(f"[dim]Use --page {page + 1} to see more.[/dim]")
 
 
 @app.command("get", epilog=GET_TRACE_JSON_HELP)

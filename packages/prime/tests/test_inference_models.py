@@ -300,6 +300,29 @@ def test_models_table_shows_catalog_columns(monkeypatch: pytest.MonkeyPatch) -> 
     assert "reasoning ✓" in out
 
 
+def test_models_table_renders_markup_in_catalog_names_literally(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = {
+        "object": "list",
+        "data": [
+            {
+                "id": "vendor/model",
+                "display_name": "Weird [/red] Name",
+                "pricing": {"input_usd_per_mtok": 1.0, "output_usd_per_mtok": 2.0},
+            }
+        ],
+    }
+    _patch_models(monkeypatch, payload)
+
+    result = CliRunner().invoke(app, ["inference", "models"], env=TEST_ENV)
+
+    # An unmatched closing tag must not raise MarkupError (exit 1) nor
+    # restyle the table — catalog names render verbatim.
+    assert result.exit_code == 0, result.output
+    assert "Weird [/red] Name" in result.output
+
+
 def test_models_table_folds_ids_in_narrow_terminals(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_models(monkeypatch, _catalog_fixture())
 

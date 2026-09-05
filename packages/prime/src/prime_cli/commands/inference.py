@@ -5,6 +5,7 @@ from typing import Any, Dict, Iterable, List, Optional, cast
 
 import typer
 from rich.table import Table
+from rich.text import Text
 
 from ..api.inference import InferenceAPIError, InferenceClient
 from ..utils import (
@@ -165,9 +166,13 @@ def list_models(
             pricing = m.get("pricing") or {}
             specs = m.get("specs") or {}
 
-            row: List[str] = [mid]
+            # Catalog values (id, display_name) are untrusted upstream data —
+            # Text cells render them verbatim, so Rich markup in a name can
+            # neither restyle the table nor raise MarkupError.
+            row: List[Any] = [Text(mid)]
             if show_name:
-                row.append(str(m.get("display_name") or "—"))
+                name = m.get("display_name")
+                row.append(Text(str(name)) if name else "—")
             row.append(format_price_per_mtok(pricing.get("input_usd_per_mtok")))
             row.append(format_price_per_mtok(pricing.get("output_usd_per_mtok")))
             if show_cache:

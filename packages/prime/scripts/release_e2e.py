@@ -513,6 +513,31 @@ def remote_script(config: RemoteConfig) -> str:
                     )
 
 
+        def best_effort_delete_remote_environment(slug: str, attempts: int = 3) -> None:
+            # A fast-failing run deletes the environment seconds after pushing it,
+            # while the hub may still be post-processing the version. A transient
+            # failure here must not leave the temporary environment behind.
+            for attempt in range(1, attempts + 1):
+                try:
+                    run(["prime", "env", "delete", slug, "--force"], timeout=180)
+                    return
+                except Exception as exc:
+                    if attempt == attempts:
+                        print(
+                            f"Warning: failed to delete temporary environment "
+                            f"{slug} after {attempts} attempts: {exc}",
+                            file=sys.stderr,
+                        )
+                        return
+                    delay = 10 * attempt
+                    print(
+                        f"Retrying delete of {slug} in {delay}s "
+                        f"(attempt {attempt}/{attempts} failed: {exc})",
+                        flush=True,
+                    )
+                    time.sleep(delay)
+
+
         def hosted_eval_checks() -> None:
             if CONFIG["hosted_mode"] == "skip":
                 print("Skipping hosted eval checks by request.", flush=True)
@@ -691,18 +716,7 @@ def remote_script(config: RemoteConfig) -> str:
                 if HOSTED_EVAL_IDS:
                     best_effort_cancel_hosted_evals()
                 if REMOTE_ENV_SLUG and CONFIG["cleanup_remote_env"]:
-                    try:
-                        run(
-                            ["prime", "env", "delete", REMOTE_ENV_SLUG, "--force"],
-                            check=False,
-                            timeout=180,
-                        )
-                    except Exception as exc:
-                        print(
-                            f"Warning: failed to delete temporary environment "
-                            f"{REMOTE_ENV_SLUG}: {exc}",
-                            file=sys.stderr,
-                        )
+                    best_effort_delete_remote_environment(REMOTE_ENV_SLUG)
 
 
         if __name__ == "__main__":

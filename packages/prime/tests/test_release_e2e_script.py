@@ -89,6 +89,10 @@ def test_remote_script_compiles_and_keeps_cleanup_best_effort(tmp_path):
     assert "prime_tunnel.Tunnel must accept labels" in script
     assert "old prime-evals push_samples compatibility failed" in script
     assert "Warning: failed to delete temporary environment" in script
+    # The cleanup delete is retried instead of being a single check=False call.
+    assert "def best_effort_delete_remote_environment(slug: str, attempts: int = 3)" in script
+    assert 'run(["prime", "env", "delete", slug, "--force"], timeout=180)' in script
+    assert "best_effort_delete_remote_environment(REMOTE_ENV_SLUG)" in script
     assert 'line.rsplit(":", 1)[-1]' in script
     assert (
         "install_candidate_cli()\n"

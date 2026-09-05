@@ -4,7 +4,9 @@ from datetime import datetime
 from enum import Enum
 from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationInfo, model_validator
+
+from .image_references import is_docker_hub_reference
 
 
 class SandboxStatus(str, Enum):
@@ -505,6 +507,12 @@ class ImageListResponse(BaseModel):
 
 
 class BuildImageRequest(BaseModel):
+    """Request a linux/amd64 Dockerfile or public-registry source build.
+
+    Docker Hub sources become public, org-less platform images automatically.
+    They cannot use a custom destination, team, or private visibility.
+    """
+
     image_name: Optional[str] = None
     image_tag: Optional[str] = None
     dockerfile_path: str = "Dockerfile"
@@ -515,6 +523,31 @@ class BuildImageRequest(BaseModel):
     owner_scope: Optional[Literal["platform"]] = Field(default=None, alias="ownerScope")
 
     model_config = ConfigDict(populate_by_name=True)
+
+    @model_validator(mode="after")
+    def validate_build(self) -> "BuildImageRequest":
+        if self.platform != "linux/amd64":
+            raise ValueError("platform must be linux/amd64")
+
+        sources = [source.strip() for source in (self.source_image or "").split(",")]
+        docker_hub_sources = [
+            source for source in sources if source and is_docker_hub_reference(source)
+        ]
+        if not docker_hub_sources:
+            return self
+
+        if self.image_name is not None or self.image_tag is not None:
+            raise ValueError("Docker Hub source builds do not accept a custom destination")
+        if self.team_id is not None:
+            raise ValueError("Docker Hub source builds do not accept team_id")
+        if self.visibility == ImageVisibility.PRIVATE:
+            raise ValueError("Docker Hub source builds must be public")
+        if len(docker_hub_sources) != len([source for source in sources if source]):
+            raise ValueError("Docker Hub and non-Docker Hub sources cannot share one request")
+
+        self.visibility = ImageVisibility.PUBLIC
+        self.owner_scope = "platform"
+        return self
 
 
 class BuildImageResponse(BaseModel):
@@ -531,9 +564,17 @@ class BuildImageResponse(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
+    @model_validator(mode="after")
+    def require_dockerfile_upload(self, info: ValidationInfo) -> "BuildImageResponse":
+        """Require upload metadata when the caller identifies a Dockerfile build."""
+        if info.context and info.context.get("requires_upload"):
+            if not self.upload_url or self.expires_in is None:
+                raise ValueError("Dockerfile build response requires upload_url and expires_in")
+        return self
+
 
 class TransferImageResult(BaseModel):
-    """Per-source result returned by bulk image transfer requests."""
+    """Per-source result returned by bulk source-image build requests."""
 
     source_image: str = Field(..., alias="sourceImage")
     success: bool
@@ -547,7 +588,7 @@ class TransferImageResult(BaseModel):
 
 
 class BulkImageTransferResponse(BaseModel):
-    """Response returned for comma-separated image transfer requests."""
+    """Response returned for comma-separated source-image build requests."""
 
     results: List[TransferImageResult] = Field(default_factory=list)
     failed: List[TransferImageResult] = Field(default_factory=list)

@@ -1,6 +1,7 @@
 import io
 import tarfile
 
+import pytest
 from prime_cli.commands.images import PACKAGED_DOCKERFILE_PATH
 from prime_cli.main import app
 from typer.testing import CliRunner
@@ -8,11 +9,22 @@ from typer.testing import CliRunner
 runner = CliRunner()
 
 TEST_ENV = {
-    "COLUMNS": "200",
     "LINES": "50",
     "PRIME_DISABLE_VERSION_CHECK": "1",
     "PRIME_TEAM_ID": "",
 }
+
+
+def test_push_help_documents_amd64_and_docker_hub_contract(monkeypatch):
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+
+    result = runner.invoke(app, ["images", "push", "--help"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    assert "linux/amd64" in result.output
+    assert "linux/arm64" not in result.output
+    assert "Docker Hub" in result.output
+    assert "platform images" in result.output
 
 
 def test_push_image_defaults_dockerfile_to_context(tmp_path, monkeypatch):
@@ -33,6 +45,7 @@ def test_push_image_defaults_dockerfile_to_context(tmp_path, monkeypatch):
                 return {
                     "build_id": "build-123",
                     "upload_url": "https://example.test/upload",
+                    "expires_in": 3600,
                     "fullImagePath": "rehl:latest",
                 }
 
@@ -90,6 +103,7 @@ def test_push_image_public_sends_visibility(tmp_path, monkeypatch):
                 return {
                     "build_id": "build-123",
                     "upload_url": "https://example.test/upload",
+                    "expires_in": 3600,
                     "fullImagePath": "rehl:latest",
                 }
 
@@ -137,6 +151,7 @@ def test_push_platform_image_forces_public_owner_scope(tmp_path, monkeypatch):
                 return {
                     "build_id": "build-123",
                     "upload_url": "https://example.test/upload",
+                    "expires_in": 3600,
                     "fullImagePath": "ubuntu:22.04",
                 }
 
@@ -170,7 +185,7 @@ def test_push_platform_image_forces_public_owner_scope(tmp_path, monkeypatch):
         "owner_scope": "platform",
         "visibility": "PUBLIC",
     }
-    assert "Building and pushing platform image" in result.output
+    assert "Building platform VM and container artifacts" in result.output
     assert "Owner:" in result.output
     assert "Platform" in result.output
 
@@ -193,6 +208,7 @@ def test_push_platform_image_allows_namespaced_image_reference(tmp_path, monkeyp
                 return {
                     "build_id": "build-123",
                     "upload_url": "https://example.test/upload",
+                    "expires_in": 3600,
                     "fullImagePath": "namanjain12/orange3_final:tag",
                 }
 
@@ -235,6 +251,42 @@ def test_push_platform_image_allows_namespaced_image_reference(tmp_path, monkeyp
     }
 
 
+def test_push_image_dockerfile_build_requires_upload_expiry(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+    (tmp_path / "Dockerfile").write_text("FROM busybox\n")
+
+    class DummyAPIClient:
+        def request(self, method, path, json=None, params=None):
+            assert (method, path) == ("POST", "/images/build")
+            return {
+                "build_id": "build-123",
+                "upload_url": "https://example.test/upload",
+                "fullImagePath": "app:v1",
+            }
+
+    monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
+
+    result = runner.invoke(app, ["images", "push", "app:v1"], env=TEST_ENV)
+
+    assert result.exit_code == 1
+    assert "expires_in" in result.output
+
+
+def test_push_image_rejects_arm64_for_dockerfile_build(monkeypatch):
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+
+    result = runner.invoke(
+        app,
+        ["images", "push", "app:v1", "--platform", "linux/arm64"],
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 2
+    assert "linux/arm64" in result.output
+    assert "linux/amd64" in result.output
+
+
 def test_push_platform_image_source_image_queues_platform_transfer(monkeypatch):
     monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
     monkeypatch.delenv("PRIME_TEAM_ID", raising=False)
@@ -254,7 +306,7 @@ def test_push_platform_image_source_image_queues_platform_transfer(monkeypatch):
             }
 
     def fake_put(*args, **kwargs):
-        raise AssertionError("transfer should not upload a build context")
+        raise AssertionError("source build should not upload a build context")
 
     monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
     monkeypatch.setattr("prime_cli.commands.images.httpx.put", fake_put)
@@ -275,7 +327,7 @@ def test_push_platform_image_source_image_queues_platform_transfer(monkeypatch):
         "visibility": "PUBLIC",
         "owner_scope": "platform",
     }
-    assert "Transferring platform image" in result.output
+    assert "Building platform VM image" in result.output
     assert "Owner:" in result.output
     assert "Platform" in result.output
     assert "Visibility:" in result.output
@@ -301,7 +353,7 @@ def test_push_platform_image_rejects_private(monkeypatch):
     assert "Platform images must be public" in result.output
 
 
-def test_push_platform_image_ignores_team_context(monkeypatch):
+def test_push_docker_hub_source_ignores_team_context(monkeypatch):
     monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
     captured = {}
 
@@ -320,14 +372,39 @@ def test_push_platform_image_ignores_team_context(monkeypatch):
 
     result = runner.invoke(
         app,
-        ["images", "push", "--source-image", "ubuntu:22.04", "--platform-image"],
+        ["images", "push", "--source-image", "ubuntu:22.04"],
         env={**TEST_ENV, "PRIME_TEAM_ID": "team-123"},
     )
 
     assert result.exit_code == 0, result.output
     assert "Team context ignored" in result.output
+    assert "Destination: ubuntu:22.04" in result.output
+    assert "PUBLIC" in result.output
     assert captured["json"]["owner_scope"] == "platform"
     assert "team_id" not in captured["json"]
+
+
+@pytest.mark.parametrize(
+    "extra_args",
+    [["custom:v1"], ["--private"]],
+)
+def test_push_docker_hub_source_rejects_customization(monkeypatch, extra_args):
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+
+    class DummyAPIClient:
+        def request(self, method, path, json=None, params=None):
+            raise AssertionError(f"Unexpected request: {method} {path}")
+
+    monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
+
+    result = runner.invoke(
+        app,
+        ["images", "push", *extra_args, "--source-image", "ubuntu:22.04"],
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 1
+    assert "Docker Hub" in result.output
 
 
 def test_push_image_source_image_queues_transfer_without_upload(monkeypatch):
@@ -344,12 +421,12 @@ def test_push_image_source_image_queues_transfer_without_upload(monkeypatch):
                 "build_id": "build-123",
                 "buildIds": ["build-123"],
                 "upload_url": None,
-                "fullImagePath": "prime/cmk123/ubuntu:22.04",
-                "visibility": "PRIVATE",
+                "fullImagePath": "ubuntu:22.04",
+                "visibility": "PUBLIC",
             }
 
     def fake_put(*args, **kwargs):
-        raise AssertionError("transfer should not upload a build context")
+        raise AssertionError("source build should not upload a build context")
 
     monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
     monkeypatch.setattr("prime_cli.commands.images.httpx.put", fake_put)
@@ -367,8 +444,14 @@ def test_push_image_source_image_queues_transfer_without_upload(monkeypatch):
         "dockerfile_path": "Dockerfile",
         "source_image": "ubuntu:22.04",
         "platform": "linux/amd64",
+        "visibility": "PUBLIC",
+        "owner_scope": "platform",
     }
-    assert "Transfer queued" in result.output
+    assert "ubuntu:22.04" in result.output
+    assert "Owner:" in result.output
+    assert "Platform" in result.output
+    assert "PUBLIC" in result.output
+    assert "VM image build queued" in result.output
     assert "build-123" in result.output
 
 
@@ -391,7 +474,14 @@ def test_push_image_source_image_with_destination_override(monkeypatch):
 
     result = runner.invoke(
         app,
-        ["images", "push", "myubuntu:22.04", "--source-image", "ubuntu:22.04", "--public"],
+        [
+            "images",
+            "push",
+            "myubuntu:22.04",
+            "--source-image",
+            "ghcr.io/org/ubuntu:22.04",
+            "--public",
+        ],
         env={**TEST_ENV, "PRIME_USER_ID": "cmk123"},
     )
 
@@ -400,7 +490,7 @@ def test_push_image_source_image_with_destination_override(monkeypatch):
         "image_name": "myubuntu",
         "image_tag": "22.04",
         "dockerfile_path": "Dockerfile",
-        "source_image": "ubuntu:22.04",
+        "source_image": "ghcr.io/org/ubuntu:22.04",
         "platform": "linux/amd64",
         "visibility": "PUBLIC",
     }
@@ -422,13 +512,13 @@ def test_push_image_source_image_multi_rejects_destination(monkeypatch):
             "push",
             "myubuntu:22.04",
             "--source-image",
-            "ubuntu:22.04,ghcr.io/org/app:v1",
+            "ghcr.io/org/ubuntu:22.04,quay.io/org/app:v1",
         ],
         env=TEST_ENV,
     )
 
     assert result.exit_code == 1
-    assert "single-image transfers" in result.output
+    assert "single-source" in result.output
 
 
 def test_publish_image_passes_prime_team_ref_to_backend(monkeypatch):
@@ -911,6 +1001,7 @@ def test_push_image_accepts_dockerfile_outside_context(tmp_path, monkeypatch):
                 return {
                     "build_id": "build-123",
                     "upload_url": "https://example.test/upload",
+                    "expires_in": 3600,
                     "fullImagePath": "rehl:latest",
                 }
 
@@ -1026,9 +1117,9 @@ def test_push_image_source_image_result_shape_reports_all_failures(monkeypatch):
     )
 
     assert result.exit_code == 1
-    assert "Failed to initiate image transfer" in result.output
+    assert "Failed to initiate VM image build" in result.output
     assert "missing:notfound: source image not found" in result.output
-    assert "Your image transfer is running" not in result.output
+    assert "Your VM image build is running" not in result.output
 
 
 def test_push_image_source_image_result_shape_reports_partial_failures(monkeypatch):
@@ -1067,6 +1158,6 @@ def test_push_image_source_image_result_shape_reports_partial_failures(monkeypat
 
     assert result.exit_code == 1
     assert "buildabc" in result.output
-    assert "image transfer" in result.output
+    assert "VM image build" in result.output
     assert "failed" in result.output
     assert "missing:notfound: source image not found" in result.output

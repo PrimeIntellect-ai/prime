@@ -1,4 +1,4 @@
-"""Image build and transfer SDK client."""
+"""Image build SDK client."""
 
 from typing import Literal, Optional
 
@@ -43,7 +43,7 @@ def _list_params(
 
 
 class ImageClient:
-    """Client for Prime image build and transfer APIs."""
+    """Client for Prime image build APIs."""
 
     def __init__(self, api_client: Optional[APIClient] = None):
         self.client = api_client or APIClient()
@@ -72,11 +72,19 @@ class ImageClient:
     def initiate_build(
         self, request: BuildImageRequest
     ) -> BuildImageResponse | BulkImageTransferResponse:
+        """Queue a linux/amd64 Dockerfile build or public-registry VM build.
+
+        Docker Hub source requests are public, org-less platform builds. They
+        cannot set a custom destination, team, or private visibility.
+        """
         payload = request.model_dump(by_alias=False, exclude_none=True)
         response = self.client.request("POST", "/images/build", json=payload)
         if "results" in response:
             return BulkImageTransferResponse.model_validate(response)
-        return BuildImageResponse.model_validate(response)
+        return BuildImageResponse.model_validate(
+            response,
+            context={"requires_upload": request.source_image is None},
+        )
 
     def transfer_image(
         self,
@@ -89,6 +97,12 @@ class ImageClient:
         visibility: Optional[ImageVisibility] = None,
         owner_scope: Optional[Literal["platform"]] = None,
     ) -> BuildImageResponse | BulkImageTransferResponse:
+        """Build VM images directly from allowed public registry references.
+
+        Only ``linux/amd64`` is supported. Docker Hub sources always build as
+        public, org-less platform images. They do not accept a custom
+        destination, team, or private visibility.
+        """
         request = BuildImageRequest(
             image_name=image_name,
             image_tag=image_tag,
@@ -141,7 +155,7 @@ class ImageClient:
 
 
 class AsyncImageClient:
-    """Async client for Prime image build and transfer APIs."""
+    """Async client for Prime image build APIs."""
 
     def __init__(self, api_client: Optional[AsyncAPIClient] = None):
         self.client = api_client or AsyncAPIClient()
@@ -170,11 +184,19 @@ class AsyncImageClient:
     async def initiate_build(
         self, request: BuildImageRequest
     ) -> BuildImageResponse | BulkImageTransferResponse:
+        """Queue a linux/amd64 Dockerfile build or public-registry VM build.
+
+        Docker Hub source requests are public, org-less platform builds. They
+        cannot set a custom destination, team, or private visibility.
+        """
         payload = request.model_dump(by_alias=False, exclude_none=True)
         response = await self.client.request("POST", "/images/build", json=payload)
         if "results" in response:
             return BulkImageTransferResponse.model_validate(response)
-        return BuildImageResponse.model_validate(response)
+        return BuildImageResponse.model_validate(
+            response,
+            context={"requires_upload": request.source_image is None},
+        )
 
     async def transfer_image(
         self,
@@ -187,6 +209,12 @@ class AsyncImageClient:
         visibility: Optional[ImageVisibility] = None,
         owner_scope: Optional[Literal["platform"]] = None,
     ) -> BuildImageResponse | BulkImageTransferResponse:
+        """Build VM images directly from allowed public registry references.
+
+        Only ``linux/amd64`` is supported. Docker Hub sources always build as
+        public, org-less platform images. They do not accept a custom
+        destination, team, or private visibility.
+        """
         request = BuildImageRequest(
             image_name=image_name,
             image_tag=image_tag,

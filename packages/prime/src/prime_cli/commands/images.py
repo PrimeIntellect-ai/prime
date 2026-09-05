@@ -1,4 +1,4 @@
-"""Commands for managing Docker images in Prime Intellect registry."""
+"""Commands for managing image artifacts in the Prime Intellect registry."""
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -29,6 +29,7 @@ from prime_sandboxes import (
     UnauthorizedError,
     UpdateImagesRequest,
 )
+from prime_sandboxes.image_references import is_docker_hub_reference
 from rich.table import Table
 
 from ..utils import (
@@ -44,11 +45,16 @@ from .images_bulk import (
     package_build_context,
     push_bulk,
 )
-from .images_transfer_bulk import transfer_bulk
+from .images_transfer_bulk import (
+    derive_transfer_destination,
+    transfer_bulk,
+)
 from .images_update_bulk import update_bulk
 from .images_update_helpers import format_image_coordinate
 
-app = PlainTyper(help="Manage Docker images in Prime Intellect registry", no_args_is_help=True)
+app = PlainTyper(
+    help="Manage image artifacts in the Prime Intellect registry", no_args_is_help=True
+)
 console = get_console()
 
 
@@ -312,8 +318,8 @@ def push_image(
     platform: str = typer.Option(
         "linux/amd64",
         "--platform",
-        click_type=click.Choice(["linux/amd64", "linux/arm64"]),
-        help="Target platform (defaults to linux/amd64 for Kubernetes compatibility)",
+        click_type=click.Choice(["linux/amd64"]),
+        help="Target platform (linux/amd64 only)",
     ),
     public: bool = typer.Option(
         False,
@@ -328,28 +334,32 @@ def push_image(
     source_image: Optional[str] = typer.Option(
         None,
         "--source-image",
-        help="Copy an existing public image into Prime instead of uploading a build context",
+        help=(
+            "Build a linux/amd64 VM image from an allowed public registry source; "
+            "Docker Hub sources become public platform images automatically"
+        ),
     ),
     platform_image: bool = typer.Option(
         False,
         "--platform-image",
-        help="Build an org-less platform image (admins only)",
+        help="Build explicit non-Docker-Hub sources as platform image artifacts (admins only)",
     ),
 ):
     """
-    Build and push a Docker image to Prime Intellect registry.
+    Build VM and container image artifacts in the Prime Intellect registry.
 
     New image tags are private by default. Re-pushing an existing tag keeps
-    its current visibility unless --public or --private is provided.
+    its current visibility unless --public or --private is provided. Docker Hub
+    sources always become public, org-less platform images. They do not accept
+    a destination override or --private. Configured team context is ignored.
 
     \b
     Examples:
         prime images push myapp:v1.0.0
         prime images push myapp:latest --context ./app --dockerfile ../docker/Dockerfile.prod
-        prime images push myapp:v1 --platform linux/arm64
         prime images push myapp:v1 --public
         prime images push --source-image ubuntu:22.04
-        prime images push myubuntu:22.04 --source-image ubuntu:22.04
+        prime images push myapp:v1 --source-image ghcr.io/org/app:v1
     """
     try:
         if public and private:
@@ -374,10 +384,26 @@ def push_image(
                 "[red]Error: --source-image must include at least one image reference[/red]"
             )
             raise typer.Exit(1)
+        docker_hub_sources = [
+            source for source in transfer_sources if is_docker_hub_reference(source)
+        ]
+        if is_transfer and docker_hub_sources and image_reference is not None:
+            console.print(
+                "[red]Error: Docker Hub source builds do not accept a custom destination[/red]"
+            )
+            raise typer.Exit(1)
+        if is_transfer and docker_hub_sources and private:
+            console.print("[red]Error: Docker Hub source builds must be public[/red]")
+            raise typer.Exit(1)
+        if is_transfer and docker_hub_sources and len(docker_hub_sources) != len(transfer_sources):
+            console.print(
+                "[red]Error: Docker Hub and non-Docker Hub sources cannot share one request[/red]"
+            )
+            raise typer.Exit(1)
         if is_transfer and image_reference is not None and len(transfer_sources) > 1:
             console.print(
                 "[red]Error: Destination image reference can only be provided for "
-                "single-image transfers[/red]"
+                "single-source VM image builds[/red]"
             )
             raise typer.Exit(1)
 
@@ -400,32 +426,41 @@ def push_image(
             raise typer.Exit(1)
 
         if is_transfer:
+            automatic_docker_hub_build = bool(docker_hub_sources)
+            platform_source_build = platform_image or automatic_docker_hub_build
             source_display = ", ".join(transfer_sources)
-            destination_display = (
-                f"{image_name}:{image_tag}" if image_name and image_tag else "derived"
-            )
-            if platform_image:
-                console.print("[bold blue]Transferring platform image into Prime:[/bold blue]")
+            if image_name and image_tag:
+                destination_display = f"{image_name}:{image_tag}"
             else:
-                console.print("[bold blue]Transferring image into Prime:[/bold blue]")
+                destination_display = ", ".join(
+                    ":".join(
+                        derive_transfer_destination(source, keep_namespace=platform_source_build)
+                    )
+                    for source in transfer_sources
+                )
+            if platform_source_build:
+                console.print("[bold blue]Building platform VM image in Prime:[/bold blue]")
+            else:
+                console.print("[bold blue]Building VM image in Prime:[/bold blue]")
             console.print(f"[bold]Source:[/bold] {source_display}")
             console.print(f"[bold]Destination:[/bold] {destination_display}")
-            if platform_image:
+            if platform_source_build:
                 console.print("[bold]Owner:[/bold] Platform")
                 if config.team_id:
                     console.print("[dim]Team context ignored: platform images are org-less[/dim]")
             elif config.team_id:
                 console.print(f"[dim]Team: {config.team_id}[/dim]")
-            console.print()
 
-            client = ImageClient(APIClient())
             visibility = None
             if public:
                 visibility = ImageVisibility.PUBLIC
             elif private:
                 visibility = ImageVisibility.PRIVATE
-            if platform_image:
+            if platform_source_build:
                 visibility = ImageVisibility.PUBLIC
+            console.print()
+
+            client = ImageClient(APIClient())
 
             try:
                 response = client.transfer_image(
@@ -433,9 +468,9 @@ def push_image(
                     image_name=image_name,
                     image_tag=image_tag,
                     platform=platform,
-                    team_id=None if platform_image else (config.team_id or None),
+                    team_id=None if platform_source_build else (config.team_id or None),
                     visibility=visibility,
-                    owner_scope="platform" if platform_image else None,
+                    owner_scope="platform" if platform_source_build else None,
                 )
             except UnauthorizedError:
                 console.print(
@@ -443,7 +478,7 @@ def push_image(
                 )
                 raise typer.Exit(1)
             except APIError as e:
-                console.print(f"[red]Error: Failed to initiate transfer: {e}[/red]")
+                console.print(f"[red]Error: Failed to initiate VM image build: {e}[/red]")
                 raise typer.Exit(1)
 
             if isinstance(response, BulkImageTransferResponse):
@@ -459,31 +494,31 @@ def push_image(
                 image_path = response.full_image_path
 
             if not build_ids:
-                console.print("[red]Error: Failed to initiate image transfer[/red]")
+                console.print("[red]Error: Failed to initiate VM image build[/red]")
                 for result in failed_results:
                     console.print(f"[red]- {result.source_image}: {result.error}[/red]")
                 raise typer.Exit(1)
 
-            console.print("[green]✓[/green] Transfer queued")
+            console.print("[green]✓[/green] VM image build queued")
             console.print()
             if len(build_ids) == 1:
-                console.print("[bold green]Image transfer queued successfully![/bold green]")
+                console.print("[bold green]VM image build queued successfully![/bold green]")
                 console.print()
                 console.print(f"[bold]Build ID:[/bold] {build_ids[0]}")
                 console.print(f"[bold]Image:[/bold] {image_path}")
             else:
-                console.print("[bold green]Image transfers queued successfully![/bold green]")
+                console.print("[bold green]VM image builds queued successfully![/bold green]")
                 console.print()
                 console.print(f"[bold]Builds:[/bold] {len(build_ids)}")
                 console.print(f"[bold]Build IDs:[/bold] {', '.join(build_ids)}")
             if failed_results:
                 console.print()
                 console.print(
-                    f"[yellow]Warning: {len(failed_results)} image transfer(s) failed:[/yellow]"
+                    f"[yellow]Warning: {len(failed_results)} VM image build(s) failed:[/yellow]"
                 )
                 for result in failed_results:
                     console.print(f"[yellow]- {result.source_image}: {result.error}[/yellow]")
-            if platform_image:
+            if platform_source_build:
                 console.print(f"[bold]Visibility:[/bold] {ImageVisibility.PUBLIC.value}")
             elif public or private:
                 requested_visibility = ImageVisibility.PUBLIC if public else ImageVisibility.PRIVATE
@@ -494,9 +529,9 @@ def push_image(
                     "(existing tags keep their current visibility)"
                 )
             console.print()
-            console.print("[cyan]Your image transfer is running.[/cyan]")
+            console.print("[cyan]Your VM image build is running.[/cyan]")
             console.print()
-            console.print("[bold]Check transfer status:[/bold]")
+            console.print("[bold]Check build status:[/bold]")
             console.print("  prime images list")
             console.print()
             if failed_results:
@@ -505,12 +540,13 @@ def push_image(
 
         if platform_image:
             console.print(
-                f"[bold blue]Building and pushing platform image:[/bold blue] "
+                f"[bold blue]Building platform VM and container artifacts:[/bold blue] "
                 f"{image_name}:{image_tag}"
             )
         else:
             console.print(
-                f"[bold blue]Building and pushing image:[/bold blue] {image_name}:{image_tag}"
+                f"[bold blue]Building VM and container artifacts:[/bold blue] "
+                f"{image_name}:{image_tag}"
             )
         if platform_image:
             if config.team_id:
@@ -585,10 +621,11 @@ def push_image(
 
             build_id = build_response.get("build_id")
             upload_url = build_response.get("upload_url")
-            if not build_id or not upload_url:
+            expires_in = build_response.get("expires_in")
+            if not build_id or not upload_url or expires_in is None:
                 console.print(
                     "[red]Error: Invalid response from server "
-                    "(missing build_id or upload_url)[/red]"
+                    "(missing build_id, upload_url, or expires_in)[/red]"
                 )
                 raise typer.Exit(1)
             full_image_path = build_response.get("fullImagePath") or f"{image_name}:{image_tag}"
@@ -674,7 +711,7 @@ def push_image(
 # Bulk push (JSONL manifest / Harbor task dirs) lives in images_bulk.py.
 app.command("push-bulk")(push_bulk)
 
-# Bulk transfer (JSONL manifest / Harbor task dirs / Hugging Face datasets)
+# Bulk source-image builds (JSONL manifest / Harbor task dirs / Hugging Face datasets)
 # lives in images_transfer_bulk.py.
 app.command("transfer-bulk")(transfer_bulk)
 
@@ -865,11 +902,11 @@ def list_images(
         is_team_listing: bool = bool(config.team_id) and not platform_image
         title: str
         if platform_image:
-            title = "Platform Docker Images"
+            title = "Platform Images"
         elif is_team_listing:
-            title = f"Team Docker Images (team: {config.team_id})"
+            title = f"Team Images (team: {config.team_id})"
         else:
-            title = "Personal Docker Images"
+            title = "Personal Images"
 
         grouped: dict[str, list[ImageRow]] = {}
         for image in images:

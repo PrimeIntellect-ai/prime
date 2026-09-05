@@ -152,8 +152,10 @@ prime env push my-environment
 Prime Lab connects verifiers environments to evaluations, GEPA prompt optimization, and Hosted Training. Start with `prime lab setup` to create a local workspace with starter configs, then use `prime train models` to choose a Hosted Training model with current capacity and pricing.
 
 ```bash
-# Set up a Lab workspace
+# Set up a Lab workspace.
+# If authenticated, setup creates an active project named after this folder.
 prime lab setup
+prime project current
 
 # List trainable models, capacity, and token pricing
 prime train models
@@ -161,14 +163,41 @@ prime train models
 # Generate a Hosted Training config
 prime train init
 
-# Launch the run from the generated config
+# Launch the run from the generated config.
+# Runs attach to the active project by default.
 prime train rl.toml
+prime train rl.toml --project <project-id>
+prime train rl.toml --no-project
 
 # Inspect and manage Hosted Training runs
 prime train list
 prime train logs <run-id> -f
 prime train metrics <run-id>
 prime train checkpoints <run-id>
+```
+
+Lab projects group related training runs, evaluations, and adapters. By default,
+`prime lab setup` creates an active project named after the workspace folder.
+Use `prime lab setup --project <project-id>` to bind an existing project,
+`prime lab setup --project-name "Alphabet Sort Baselines"` to choose the default
+project name, or `prime lab setup --no-project` to keep setup local-only. Later,
+use `prime project use <project-id>` to switch the active workspace project, or
+`prime project clear` to stop using one by default. Existing runs and adapters
+support project add/remove/clear; evaluations support assign/clear.
+
+```bash
+# Manage projects
+prime project list
+prime project show <project-id>
+prime project update <project-id> --description "Baseline alphabet sort runs"
+
+# Attach existing artifacts
+prime project assign run <run-id> <project-id>
+prime project remove run <run-id> <project-id>
+prime project assign adapter <adapter-id> <project-id>
+prime project remove adapter <adapter-id>  # clear all adapter project memberships
+prime project assign eval <eval-id> <project-id>
+prime project remove eval <eval-id>        # clear the evaluation project
 ```
 
 ### GPU Resources
@@ -211,6 +240,8 @@ prime eval push
 
 # Push specific eval directory (verifiers format)
 prime eval push outputs/evals/gsm8k--gpt-4/abc123
+prime eval push outputs/evals/gsm8k--gpt-4/abc123 --project <project-id>
+prime eval push outputs/evals/gsm8k--gpt-4/abc123 --no-project
 
 # Push a public evaluation (default is private)
 prime eval push --public

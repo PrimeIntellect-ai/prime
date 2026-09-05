@@ -141,6 +141,8 @@ def _append_eval_options(help_text: str) -> str:
         "Allow tunnel creation and management for hosted evaluations.",
         "  --custom-secrets JSON       Custom sandbox secrets for hosted evaluations.",
         "  --eval-name TEXT            Custom name for the hosted evaluation.",
+        "  --project TEXT              Project ID or slug. Defaults to the active project.",
+        "  --no-project                Do not attach this evaluation to the active project.",
     ]
     lines = help_text.rstrip("\n").splitlines()
     for extra_line in extra_lines:
@@ -947,6 +949,8 @@ def run_eval_passthrough(
     *,
     skip_upload: bool,
     env_path: Optional[str],
+    project_id: Optional[str] = None,
+    use_active_project: bool = True,
 ) -> None:
     plugin = load_verifiers_prime_plugin(console=console)
     config = Config()
@@ -1054,6 +1058,8 @@ def run_eval_passthrough(
             job_id=job_id,
             env_path=Path(env_path) if env_path else None,
             upstream_slug=upstream_slug,
+            project_id=project_id,
+            use_active_project=use_active_project,
         )
     except Exception as exc:
         console.print(f"[red]Failed to push results to hub:[/red] {exc}")

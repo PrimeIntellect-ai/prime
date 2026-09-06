@@ -5,6 +5,7 @@ from typing import Any, Dict, Iterable, List, Optional, cast
 
 import typer
 from rich.table import Table
+from rich.text import Text
 
 from ..api.inference import InferenceAPIError, InferenceClient
 from ..utils import (
@@ -24,12 +25,33 @@ app = PlainTyper(
 console = get_console()
 
 MODELS_JSON_HELP = json_output_help(
-    "Typical OpenAI schema: .object?, .data[] = {id, created, pricing?}",
+    "Typical OpenAI schema: .object?, .data[] = {id, display_name?, created, pricing?, specs?}",
     "Compatibility fallback: .models[] may be present instead of .data[]",
 )
 
 _SORT_KEYS = ("id", "input", "output")
 _ORDER_KEYS = ("asc", "desc")
+
+
+def _format_cache_price(value: Any) -> str:
+    """Render one side of the cache read/write pair. None means "no data"
+    (renders as an em-dash); 0 is a real price (free) and renders normally."""
+    return format_price_per_mtok(value) if value is not None else "—"
+
+
+def _format_token_count(value: Any) -> str:
+    """Compact token counts for table cells: 200000 -> '200k', 1048576 -> '1.05M'."""
+    try:
+        v = int(value)
+    except (TypeError, ValueError):
+        return "—"
+    if v <= 0:
+        return "—"
+    if v >= 1_000_000:
+        return f"{v / 1_000_000:.2f}".rstrip("0").rstrip(".") + "M"
+    if v >= 1_000:
+        return f"{v / 1_000:.1f}".rstrip("0").rstrip(".") + "k"
+    return str(v)
 
 
 def _price(m: Dict[str, Any], key: str) -> Optional[float]:
@@ -117,23 +139,61 @@ def list_models(
             return
 
         table = Table(title="Prime Inference — Models")
-        table.add_column("id", style="cyan")
+        # Catalog columns appear only when the endpoint serves the data, so
+        # the table stays slim against older /models responses.
+        show_name = any(m.get("display_name") for m in models)
+        show_cache = any(
+            (m.get("pricing") or {}).get("cache_read_usd_per_mtok") is not None
+            or (m.get("pricing") or {}).get("cache_write_usd_per_mtok") is not None
+            for m in models
+        )
+        show_specs = any(m.get("specs") for m in models)
+
+        table.add_column("id", style="cyan", overflow="fold")
+        if show_name:
+            table.add_column("name")
         table.add_column("input $/1M tok", style="green", justify="right")
         table.add_column("output $/1M tok", style="green", justify="right")
+        if show_cache:
+            table.add_column("cache r/w $/1M tok", style="green", justify="right")
+        if show_specs:
+            table.add_column("context", justify="right")
+            table.add_column("max out", justify="right")
+            table.add_column("reasoning")
 
         for m in models:
             mid = str(m.get("id", ""))
             pricing = m.get("pricing") or {}
-            pin = pricing.get("input_usd_per_mtok")
-            pout = pricing.get("output_usd_per_mtok")
+            specs = m.get("specs") or {}
 
-            table.add_row(
-                mid,
-                format_price_per_mtok(pin),
-                format_price_per_mtok(pout),
-            )
+            # Catalog values (id, display_name) are untrusted upstream data —
+            # Text cells render them verbatim, so Rich markup in a name can
+            # neither restyle the table nor raise MarkupError.
+            row: List[Any] = [Text(mid)]
+            if show_name:
+                name = m.get("display_name")
+                row.append(Text(str(name)) if name else "—")
+            row.append(format_price_per_mtok(pricing.get("input_usd_per_mtok")))
+            row.append(format_price_per_mtok(pricing.get("output_usd_per_mtok")))
+            if show_cache:
+                cache_read = pricing.get("cache_read_usd_per_mtok")
+                cache_write = pricing.get("cache_write_usd_per_mtok")
+                if cache_read is None and cache_write is None:
+                    row.append("—")
+                else:
+                    cache_cell = (
+                        f"{_format_cache_price(cache_read)} / {_format_cache_price(cache_write)}"
+                    )
+                    row.append(cache_cell)
+            if show_specs:
+                row.append(_format_token_count(specs.get("context_window")))
+                row.append(_format_token_count(specs.get("max_output_tokens")))
+                row.append("✓" if specs.get("supports_reasoning") else "—")
+            table.add_row(*row)
 
         console.print(table)
+        if show_specs:
+            console.print("[dim]reasoning ✓ = supports reasoning effort[/dim]")
 
     except InferenceAPIError as e:
         console.print(f"[red]Error:[/red] {e}")

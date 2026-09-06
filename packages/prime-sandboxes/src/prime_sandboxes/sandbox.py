@@ -51,7 +51,7 @@ from tenacity import (
 )
 
 from ._connectrpc import GOOGLE_PROTOBUF_BINARY_CODEC
-from .core import APIClient, APIError, AsyncAPIClient
+from .core import APIClient, APIError, APITimeoutError, AsyncAPIClient
 from .exceptions import (
     BatchStatusUnsupportedError,
     CommandTimeoutError,
@@ -144,6 +144,15 @@ class _BatchItemError:
     """An error for one key in an otherwise successful transport batch."""
 
     error: Exception
+
+
+class _BackgroundJobStatusLookupError(APIError):
+    """A typed per-job status error returned by the VM runtime backend."""
+
+    def __init__(self, sandbox_id: str, job_id: str, code: str, message: str) -> None:
+        super().__init__(f"Background job batch status failed: {sandbox_id}/{job_id}: {message}")
+        self.code = code
+        self.message = message
 
 
 class _BatcherClosedError(RuntimeError):
@@ -410,6 +419,29 @@ BACKGROUND_JOB_OUTPUT_CACHE_BYTES = 64 * 1024 * 1024
 # adding a persistent worker to the client lifecycle.
 MAX_STATUS_BATCH_SIZE = 100
 STATUS_BATCH_WINDOW_SECONDS = 0.025
+
+# The command is already running when its status lookup fails, so retrying this
+# idempotent read is safe and avoids duplicating command side effects.
+_BACKGROUND_JOB_STATUS_MAX_ATTEMPTS = 4
+_BACKGROUND_JOB_STATUS_RETRY_INITIAL_DELAY_SECONDS = 1.0
+_BACKGROUND_JOB_STATUS_RETRY_MAX_DELAY_SECONDS = 4.0
+_VM_RUNTIME_STATUS_TIMEOUT_MESSAGE = "Timed out reading background job status from the VM runtime"
+
+
+def _background_job_status_retry_delay(failures: int) -> float:
+    return min(
+        _BACKGROUND_JOB_STATUS_RETRY_INITIAL_DELAY_SECONDS * (2 ** (failures - 1)),
+        _BACKGROUND_JOB_STATUS_RETRY_MAX_DELAY_SECONDS,
+    )
+
+
+def _is_retryable_background_job_status_error(error: Exception) -> bool:
+    return isinstance(error, APITimeoutError) or (
+        isinstance(error, _BackgroundJobStatusLookupError)
+        and error.code == "RUNTIME_ERROR"
+        and _VM_RUNTIME_STATUS_TIMEOUT_MESSAGE in error.message
+    )
+
 
 # Creation status-poll pacing. Sandbox creation is polled with exponential
 # backoff plus jitter rather than at a fixed interval
@@ -2976,7 +3008,12 @@ class SandboxClient:
             exc = (
                 BatchStatusUnsupportedError(details)
                 if error.code == "NOT_VM"
-                else APIError(f"Background job batch status failed: {details}")
+                else _BackgroundJobStatusLookupError(
+                    error.sandbox_id,
+                    error.job_id,
+                    error.code,
+                    error.message,
+                )
             )
             results[key] = _BatchItemError(exc)
 
@@ -3028,11 +3065,26 @@ class SandboxClient:
         job = self.start_background_job(sandbox_id, command, working_dir=working_dir, env=env)
         use_batch_status = self._auth_cache.is_vm(sandbox_id)
         deadline = time.monotonic() + timeout
+        status_failures = 0
         while time.monotonic() < deadline:
-            if use_batch_status:
-                snapshot = self._background_job_status_batcher.get((sandbox_id, job.job_id))
-            else:
-                snapshot = self.get_background_job_status(sandbox_id, job)
+            try:
+                if use_batch_status:
+                    snapshot = self._background_job_status_batcher.get((sandbox_id, job.job_id))
+                else:
+                    snapshot = self.get_background_job_status(sandbox_id, job)
+            except Exception as error:  # noqa: BLE001 - classify SDK status errors below
+                status_failures += 1
+                if (
+                    not _is_retryable_background_job_status_error(error)
+                    or status_failures >= _BACKGROUND_JOB_STATUS_MAX_ATTEMPTS
+                ):
+                    raise
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(_background_job_status_retry_delay(status_failures), remaining))
+                continue
+            status_failures = 0
             if snapshot.completed:
                 assert snapshot.exit_code is not None
                 return self._background_job_output_coordinator.get(job, snapshot.exit_code, None)
@@ -4696,7 +4748,12 @@ class AsyncSandboxClient:
             exc = (
                 BatchStatusUnsupportedError(details)
                 if error.code == "NOT_VM"
-                else APIError(f"Background job batch status failed: {details}")
+                else _BackgroundJobStatusLookupError(
+                    error.sandbox_id,
+                    error.job_id,
+                    error.code,
+                    error.message,
+                )
             )
             results[key] = _BatchItemError(exc)
 
@@ -4755,11 +4812,30 @@ class AsyncSandboxClient:
         job = await self.start_background_job(sandbox_id, command, working_dir=working_dir, env=env)
         use_batch_status = await self._auth_cache.is_vm(sandbox_id)
         deadline = time.monotonic() + timeout
+        status_failures = 0
         while time.monotonic() < deadline:
-            if use_batch_status:
-                snapshot = await self._background_job_status_batcher.get((sandbox_id, job.job_id))
-            else:
-                snapshot = await self.get_background_job_status(sandbox_id, job)
+            try:
+                if use_batch_status:
+                    snapshot = await self._background_job_status_batcher.get(
+                        (sandbox_id, job.job_id)
+                    )
+                else:
+                    snapshot = await self.get_background_job_status(sandbox_id, job)
+            except Exception as error:  # noqa: BLE001 - classify SDK status errors below
+                status_failures += 1
+                if (
+                    not _is_retryable_background_job_status_error(error)
+                    or status_failures >= _BACKGROUND_JOB_STATUS_MAX_ATTEMPTS
+                ):
+                    raise
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                await asyncio.sleep(
+                    min(_background_job_status_retry_delay(status_failures), remaining)
+                )
+                continue
+            status_failures = 0
             if snapshot.completed:
                 assert snapshot.exit_code is not None
                 return await self._background_job_output_coordinator.get(

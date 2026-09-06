@@ -11,6 +11,7 @@ from typing import Any, Optional, cast
 import pytest
 
 from prime_sandboxes import BatchStatusUnsupportedError
+from prime_sandboxes import sandbox as sandbox_module
 from prime_sandboxes.core.client import APIClient, APIError
 from prime_sandboxes.models import (
     BackgroundJob,
@@ -107,14 +108,27 @@ class _SyncBackgroundJobPlatformClient:
         self,
         reject_as_container: bool = False,
         error_job_id: Optional[str] = None,
+        transient_failures: int = 0,
     ) -> None:
         self.calls: list[tuple[str, str, dict[str, Any]]] = []
         self.reject_as_container = reject_as_container
         self.error_job_id = error_job_id
+        self.transient_failures = transient_failures
 
     def request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
         self.calls.append((method, path, kwargs))
         jobs = kwargs["json"]["jobs"]
+        if len(self.calls) <= self.transient_failures:
+            return {
+                "statuses": [],
+                "errors": [
+                    {
+                        **jobs[0],
+                        "code": "RUNTIME_ERROR",
+                        "message": "Timed out reading background job status from the VM runtime",
+                    }
+                ],
+            }
         if self.reject_as_container:
             return {
                 "statuses": [],
@@ -157,13 +171,26 @@ class _AsyncBackgroundJobPlatformClient:
         self,
         error_job_id: Optional[str] = None,
         complete_all: bool = False,
+        transient_failures: int = 0,
     ) -> None:
         self.calls: list[tuple[str, str, dict[str, Any]]] = []
         self.error_job_id = error_job_id
         self.complete_all = complete_all
+        self.transient_failures = transient_failures
 
     async def request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
         self.calls.append((method, path, kwargs))
+        if len(self.calls) <= self.transient_failures:
+            return {
+                "statuses": [],
+                "errors": [
+                    {
+                        **kwargs["json"]["jobs"][0],
+                        "code": "RUNTIME_ERROR",
+                        "message": "Timed out reading background job status from the VM runtime",
+                    }
+                ],
+            }
         return {
             "statuses": [
                 {
@@ -718,6 +745,136 @@ async def test_async_background_batch_errors_only_fail_the_matching_waiter() -> 
     assert isinstance(results[1], APIError)
     assert "sandbox-b/cafebabe" in str(results[1])
     assert len(platform.calls) == 1
+
+
+def test_sync_run_background_job_retries_transient_vm_status_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = SandboxClient(APIClient(api_key="test-key"))
+    client.client.client.close()
+    platform = _SyncBackgroundJobPlatformClient(transient_failures=1)
+    cast(Any, client).client = platform
+    cast(Any, client)._auth_cache = _SyncVMAuthCache()
+    job = _job("sandbox-a", "feedface")
+    launches = 0
+
+    def start_background_job(*_args: Any, **_kwargs: Any) -> BackgroundJob:
+        nonlocal launches
+        launches += 1
+        return job
+
+    def read_file(
+        _sandbox_id: str,
+        path: str,
+        **_kwargs: Any,
+    ) -> ReadFileResponse:
+        content = "stdout" if path.endswith("stdout.log") else "stderr"
+        return ReadFileResponse(content=content, size=len(content), truncated=False)
+
+    cast(Any, client).start_background_job = start_background_job
+    cast(Any, client).read_file = read_file
+    monkeypatch.setattr(sandbox_module, "_BACKGROUND_JOB_STATUS_RETRY_INITIAL_DELAY_SECONDS", 0)
+    status = client.run_background_job("sandbox-a", "echo ok")
+
+    assert status.completed
+    assert status.exit_code == 7
+    assert status.stdout == "stdout"
+    assert len(platform.calls) == 2
+    assert launches == 1
+
+
+def test_sync_run_background_job_does_not_retry_other_runtime_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = SandboxClient(APIClient(api_key="test-key"))
+    client.client.client.close()
+    platform = _SyncBackgroundJobPlatformClient(error_job_id="deadbeef")
+    cast(Any, client).client = platform
+    cast(Any, client)._auth_cache = _SyncVMAuthCache()
+    launches = 0
+
+    def start_background_job(*_args: Any, **_kwargs: Any) -> BackgroundJob:
+        nonlocal launches
+        launches += 1
+        return _job("sandbox-a", "deadbeef")
+
+    cast(Any, client).start_background_job = start_background_job
+    monkeypatch.setattr(sandbox_module, "_BACKGROUND_JOB_STATUS_RETRY_INITIAL_DELAY_SECONDS", 0)
+
+    with pytest.raises(APIError, match="Runtime lookup failed"):
+        client.run_background_job("sandbox-a", "echo ok")
+
+    assert len(platform.calls) == 1
+    assert launches == 1
+
+
+@pytest.mark.asyncio
+async def test_async_run_background_job_retries_transient_vm_status_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = AsyncSandboxClient(api_key="test-key")
+    await client.client.aclose()
+    platform = _AsyncBackgroundJobPlatformClient(complete_all=True, transient_failures=1)
+    cast(Any, client).client = platform
+    cast(Any, client)._auth_cache = _AsyncVMAuthCache()
+    job = _job("sandbox-a", "deadbeef")
+    launches = 0
+
+    async def start_background_job(*_args: Any, **_kwargs: Any) -> BackgroundJob:
+        nonlocal launches
+        launches += 1
+        return job
+
+    async def read_file(
+        _sandbox_id: str,
+        path: str,
+        **_kwargs: Any,
+    ) -> ReadFileResponse:
+        content = "stdout" if path.endswith("stdout.log") else "stderr"
+        return ReadFileResponse(content=content, size=len(content), truncated=False)
+
+    cast(Any, client).start_background_job = start_background_job
+    cast(Any, client).read_file = read_file
+    monkeypatch.setattr(sandbox_module, "_BACKGROUND_JOB_STATUS_RETRY_INITIAL_DELAY_SECONDS", 0)
+    try:
+        status = await client.run_background_job("sandbox-a", "echo ok")
+    finally:
+        await client.aclose()
+
+    assert status.completed
+    assert status.exit_code == 0
+    assert status.stdout == "stdout"
+    assert len(platform.calls) == 2
+    assert launches == 1
+
+
+@pytest.mark.asyncio
+async def test_async_run_background_job_bounds_transient_vm_status_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = AsyncSandboxClient(api_key="test-key")
+    await client.client.aclose()
+    platform = _AsyncBackgroundJobPlatformClient(complete_all=True, transient_failures=10)
+    cast(Any, client).client = platform
+    cast(Any, client)._auth_cache = _AsyncVMAuthCache()
+    launches = 0
+
+    async def start_background_job(*_args: Any, **_kwargs: Any) -> BackgroundJob:
+        nonlocal launches
+        launches += 1
+        return _job("sandbox-a", "deadbeef")
+
+    cast(Any, client).start_background_job = start_background_job
+    monkeypatch.setattr(sandbox_module, "_BACKGROUND_JOB_STATUS_RETRY_INITIAL_DELAY_SECONDS", 0)
+    monkeypatch.setattr(sandbox_module, "_BACKGROUND_JOB_STATUS_MAX_ATTEMPTS", 3)
+    try:
+        with pytest.raises(APIError, match="Timed out reading background job status"):
+            await client.run_background_job("sandbox-a", "echo ok")
+    finally:
+        await client.aclose()
+
+    assert len(platform.calls) == 3
+    assert launches == 1
 
 
 @pytest.mark.asyncio

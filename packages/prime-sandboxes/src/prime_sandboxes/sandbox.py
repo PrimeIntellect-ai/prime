@@ -2204,13 +2204,16 @@ class SandboxClient:
         # Sandbox is not running
         _raise_not_running_error(sandbox_id, ctx, command=command, cause=error)
 
-    def _should_retry_upload_error(self, error: httpx.HTTPStatusError, attempt: int) -> bool:
-        """Check if a transient error (408/5xx) on an idempotent upload should be retried."""
-        status = error.response.status_code
-        if status != 408 and status not in RETRYABLE_5XX_STATUSES:
-            return False
-        if _is_gateway_sandbox_not_found(error.response):
-            return False
+    def _should_retry_upload_error(
+        self, error: httpx.HTTPStatusError | httpx.ReadError, attempt: int
+    ) -> bool:
+        """Retry transient HTTP or read errors on an idempotent upload."""
+        if isinstance(error, httpx.HTTPStatusError):
+            status = error.response.status_code
+            if status != 408 and status not in RETRYABLE_5XX_STATUSES:
+                return False
+            if _is_gateway_sandbox_not_found(error.response):
+                return False
         if attempt < MAX_409_RETRIES - 1:
             time.sleep(RETRY_409_BASE_DELAY * (2**attempt))
             return True
@@ -3309,6 +3312,9 @@ class SandboxClient:
                 )
                 raise APIError(f"Upload failed: {error_details}") from e
             except httpx.RequestError as e:
+                if isinstance(e, httpx.ReadError) and self._should_retry_upload_error(e, attempt):
+                    attempt += 1
+                    continue
                 req = getattr(e, "request", None)
                 method = getattr(req, "method", "?")
                 u = getattr(req, "url", "?")
@@ -3338,7 +3344,7 @@ class SandboxClient:
         effective_timeout = timeout if timeout is not None else 300
 
         reauthed = False
-        # `attempt` counts only transient (409/5xx/408) retries, capped by the
+        # `attempt` counts only transient (409/5xx/408/ReadError) retries, capped by the
         # helpers at MAX_409_RETRIES; the single 401 re-auth is bounded by
         # `reauthed`. The loop bound is a backstop sized for both budgets.
         attempt = 0
@@ -3370,7 +3376,10 @@ class SandboxClient:
                 error_details = f"HTTP {e.response.status_code}: {e.response.text}"
                 raise APIError(f"Upload failed: {error_details}")
             except Exception as e:
-                raise APIError(f"Upload failed: {str(e)}")
+                if isinstance(e, httpx.ReadError) and self._should_retry_upload_error(e, attempt):
+                    attempt += 1
+                    continue
+                raise APIError(f"Upload failed: {e.__class__.__name__}: {e}") from e
 
         raise APIError("Upload failed after retries")
 
@@ -3727,13 +3736,16 @@ class AsyncSandboxClient:
         # Sandbox is not running
         _raise_not_running_error(sandbox_id, ctx, command=command, cause=error)
 
-    async def _should_retry_upload_error(self, error: httpx.HTTPStatusError, attempt: int) -> bool:
-        """Check if a transient 408/5xx on an idempotent upload should be retried (async)."""
-        status = error.response.status_code
-        if status != 408 and status not in RETRYABLE_5XX_STATUSES:
-            return False
-        if _is_gateway_sandbox_not_found(error.response):
-            return False
+    async def _should_retry_upload_error(
+        self, error: httpx.HTTPStatusError | httpx.ReadError, attempt: int
+    ) -> bool:
+        """Retry transient HTTP or read errors on an idempotent upload (async)."""
+        if isinstance(error, httpx.HTTPStatusError):
+            status = error.response.status_code
+            if status != 408 and status not in RETRYABLE_5XX_STATUSES:
+                return False
+            if _is_gateway_sandbox_not_found(error.response):
+                return False
         if attempt < MAX_409_RETRIES - 1:
             await asyncio.sleep(RETRY_409_BASE_DELAY * (2**attempt))
             return True
@@ -5054,6 +5066,11 @@ class AsyncSandboxClient:
                 )
                 raise APIError(f"Upload failed: {error_details}") from e
             except httpx.RequestError as e:
+                if isinstance(e, httpx.ReadError) and await self._should_retry_upload_error(
+                    e, attempt
+                ):
+                    attempt += 1
+                    continue
                 req = getattr(e, "request", None)
                 method = getattr(req, "method", "?")
                 u = getattr(req, "url", "?")
@@ -5116,7 +5133,12 @@ class AsyncSandboxClient:
                 error_details = f"HTTP {e.response.status_code}: {e.response.text}"
                 raise APIError(f"Upload failed: {error_details}")
             except Exception as e:
-                raise APIError(f"Upload failed: {str(e)}")
+                if isinstance(e, httpx.ReadError) and await self._should_retry_upload_error(
+                    e, attempt
+                ):
+                    attempt += 1
+                    continue
+                raise APIError(f"Upload failed: {e.__class__.__name__}: {e}") from e
 
         raise APIError("Upload failed after retries")
 

@@ -411,6 +411,11 @@ BACKGROUND_JOB_OUTPUT_CACHE_BYTES = 64 * 1024 * 1024
 MAX_STATUS_BATCH_SIZE = 100
 STATUS_BATCH_WINDOW_SECONDS = 0.025
 
+# Background-job completion polling starts with the caller-selected interval,
+# then backs off after each non-terminal status to reduce load from older jobs.
+BACKGROUND_JOB_POLL_MAX_DELAY = 20.0
+BACKGROUND_JOB_POLL_BACKOFF_FACTOR = 1.5
+
 # Creation status-poll pacing. Sandbox creation is polled with exponential
 # backoff plus jitter rather than at a fixed interval
 CREATION_POLL_INITIAL_DELAY = 1.0
@@ -2074,6 +2079,14 @@ def _is_waiting_for_image_build(sandbox: Sandbox | SandboxStatusSnapshot) -> boo
     return sandbox.status == "PENDING" and bool(getattr(sandbox, "pending_image_build_id", None))
 
 
+def _next_background_job_poll_delay(current_interval: float) -> float:
+    """Increase a background-job poll delay without exponentiating its age."""
+    return min(
+        current_interval * BACKGROUND_JOB_POLL_BACKOFF_FACTOR,
+        BACKGROUND_JOB_POLL_MAX_DELAY,
+    )
+
+
 class SandboxClient:
     """Client for sandbox API operations"""
 
@@ -3017,7 +3030,8 @@ class SandboxClient:
             timeout: Maximum seconds to wait for completion
             working_dir: Working directory for command execution
             env: Environment variables
-            poll_interval: Seconds between status polls
+            poll_interval: Initial seconds between status polls. The interval
+                backs off to a maximum of 20 seconds as the job ages.
 
         Returns:
             BackgroundJobStatus with exit_code, stdout, stderr
@@ -3028,7 +3042,8 @@ class SandboxClient:
         job = self.start_background_job(sandbox_id, command, working_dir=working_dir, env=env)
         use_batch_status = self._auth_cache.is_vm(sandbox_id)
         deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
+        poll_delay = min(float(poll_interval), BACKGROUND_JOB_POLL_MAX_DELAY)
+        while True:
             if use_batch_status:
                 snapshot = self._background_job_status_batcher.get((sandbox_id, job.job_id))
             else:
@@ -3036,7 +3051,11 @@ class SandboxClient:
             if snapshot.completed:
                 assert snapshot.exit_code is not None
                 return self._background_job_output_coordinator.get(job, snapshot.exit_code, None)
-            time.sleep(poll_interval)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(poll_delay, remaining))
+            poll_delay = _next_background_job_poll_delay(poll_delay)
         raise CommandTimeoutError(sandbox_id, command, timeout)
 
     def wait_for_creation(
@@ -4744,7 +4763,8 @@ class AsyncSandboxClient:
             timeout: Maximum seconds to wait for completion
             working_dir: Working directory for command execution
             env: Environment variables
-            poll_interval: Seconds between status polls
+            poll_interval: Initial seconds between status polls. The interval
+                backs off to a maximum of 20 seconds as the job ages.
 
         Returns:
             BackgroundJobStatus with exit_code, stdout, stderr
@@ -4755,7 +4775,8 @@ class AsyncSandboxClient:
         job = await self.start_background_job(sandbox_id, command, working_dir=working_dir, env=env)
         use_batch_status = await self._auth_cache.is_vm(sandbox_id)
         deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
+        poll_delay = min(float(poll_interval), BACKGROUND_JOB_POLL_MAX_DELAY)
+        while True:
             if use_batch_status:
                 snapshot = await self._background_job_status_batcher.get((sandbox_id, job.job_id))
             else:
@@ -4765,7 +4786,11 @@ class AsyncSandboxClient:
                 return await self._background_job_output_coordinator.get(
                     job, snapshot.exit_code, None
                 )
-            await asyncio.sleep(poll_interval)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(poll_delay, remaining))
+            poll_delay = _next_background_job_poll_delay(poll_delay)
         raise CommandTimeoutError(sandbox_id, command, timeout)
 
     async def wait_for_creation(

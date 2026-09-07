@@ -3043,7 +3043,7 @@ class SandboxClient:
         use_batch_status = self._auth_cache.is_vm(sandbox_id)
         deadline = time.monotonic() + timeout
         poll_delay = min(float(poll_interval), BACKGROUND_JOB_POLL_MAX_DELAY)
-        while time.monotonic() < deadline:
+        while True:
             if use_batch_status:
                 snapshot = self._background_job_status_batcher.get((sandbox_id, job.job_id))
             else:
@@ -3051,7 +3051,10 @@ class SandboxClient:
             if snapshot.completed:
                 assert snapshot.exit_code is not None
                 return self._background_job_output_coordinator.get(job, snapshot.exit_code, None)
-            time.sleep(poll_delay)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(poll_delay, remaining))
             poll_delay = _next_background_job_poll_delay(poll_delay)
         raise CommandTimeoutError(sandbox_id, command, timeout)
 
@@ -4773,7 +4776,7 @@ class AsyncSandboxClient:
         use_batch_status = await self._auth_cache.is_vm(sandbox_id)
         deadline = time.monotonic() + timeout
         poll_delay = min(float(poll_interval), BACKGROUND_JOB_POLL_MAX_DELAY)
-        while time.monotonic() < deadline:
+        while True:
             if use_batch_status:
                 snapshot = await self._background_job_status_batcher.get((sandbox_id, job.job_id))
             else:
@@ -4783,7 +4786,10 @@ class AsyncSandboxClient:
                 return await self._background_job_output_coordinator.get(
                     job, snapshot.exit_code, None
                 )
-            await asyncio.sleep(poll_delay)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(poll_delay, remaining))
             poll_delay = _next_background_job_poll_delay(poll_delay)
         raise CommandTimeoutError(sandbox_id, command, timeout)
 

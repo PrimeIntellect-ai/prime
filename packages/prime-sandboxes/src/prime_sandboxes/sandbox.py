@@ -2079,10 +2079,10 @@ def _is_waiting_for_image_build(sandbox: Sandbox | SandboxStatusSnapshot) -> boo
     return sandbox.status == "PENDING" and bool(getattr(sandbox, "pending_image_build_id", None))
 
 
-def _background_job_poll_delay(initial_interval: float, poll_index: int) -> float:
-    """Return the adaptive delay after the Nth non-terminal status poll."""
+def _next_background_job_poll_delay(current_interval: float) -> float:
+    """Increase a background-job poll delay without exponentiating its age."""
     return min(
-        initial_interval * (BACKGROUND_JOB_POLL_BACKOFF_FACTOR**poll_index),
+        current_interval * BACKGROUND_JOB_POLL_BACKOFF_FACTOR,
         BACKGROUND_JOB_POLL_MAX_DELAY,
     )
 
@@ -3042,7 +3042,7 @@ class SandboxClient:
         job = self.start_background_job(sandbox_id, command, working_dir=working_dir, env=env)
         use_batch_status = self._auth_cache.is_vm(sandbox_id)
         deadline = time.monotonic() + timeout
-        poll_index = 0
+        poll_delay = min(float(poll_interval), BACKGROUND_JOB_POLL_MAX_DELAY)
         while time.monotonic() < deadline:
             if use_batch_status:
                 snapshot = self._background_job_status_batcher.get((sandbox_id, job.job_id))
@@ -3051,8 +3051,8 @@ class SandboxClient:
             if snapshot.completed:
                 assert snapshot.exit_code is not None
                 return self._background_job_output_coordinator.get(job, snapshot.exit_code, None)
-            time.sleep(_background_job_poll_delay(poll_interval, poll_index))
-            poll_index += 1
+            time.sleep(poll_delay)
+            poll_delay = _next_background_job_poll_delay(poll_delay)
         raise CommandTimeoutError(sandbox_id, command, timeout)
 
     def wait_for_creation(
@@ -4772,7 +4772,7 @@ class AsyncSandboxClient:
         job = await self.start_background_job(sandbox_id, command, working_dir=working_dir, env=env)
         use_batch_status = await self._auth_cache.is_vm(sandbox_id)
         deadline = time.monotonic() + timeout
-        poll_index = 0
+        poll_delay = min(float(poll_interval), BACKGROUND_JOB_POLL_MAX_DELAY)
         while time.monotonic() < deadline:
             if use_batch_status:
                 snapshot = await self._background_job_status_batcher.get((sandbox_id, job.job_id))
@@ -4783,8 +4783,8 @@ class AsyncSandboxClient:
                 return await self._background_job_output_coordinator.get(
                     job, snapshot.exit_code, None
                 )
-            await asyncio.sleep(_background_job_poll_delay(poll_interval, poll_index))
-            poll_index += 1
+            await asyncio.sleep(poll_delay)
+            poll_delay = _next_background_job_poll_delay(poll_delay)
         raise CommandTimeoutError(sandbox_id, command, timeout)
 
     async def wait_for_creation(

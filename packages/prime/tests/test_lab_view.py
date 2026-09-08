@@ -310,8 +310,6 @@ class FakeAPIClient:
                     ]
                 }
             }
-        if endpoint == "/environmentshub/primeintellect/gsm8k/actions":
-            return {"data": {"actions": [{"name": "ci", "status": "SUCCESS"}]}}
         raise AssertionError(f"unexpected endpoint: {endpoint}")
 
 
@@ -1695,7 +1693,7 @@ def test_lab_view_renders_environment_details_without_raw_json() -> None:
     assert "content_hash" not in rendered
 
 
-def test_lab_view_loads_environment_versions_and_actions() -> None:
+def test_lab_view_loads_environment_versions() -> None:
     source = make_source()
     snapshot = source.load(LabLoadOptions(limit=10))
     environments = snapshot.section("environments")
@@ -1716,7 +1714,6 @@ def test_lab_view_loads_environment_versions_and_actions() -> None:
     )
 
     assert [version["version"] for version in item.raw["versions"]] == ["1.0.0", "0.9.0"]
-    assert item.raw["actions"] == [{"name": "ci", "status": "SUCCESS"}]
     assert versioned.raw["semantic_version"] == "0.9.0"
     assert versioned.raw["content_hash"] == "fedcba654321"
 

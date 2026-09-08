@@ -662,27 +662,6 @@ class LabDataSource:
                 versions = [version for version in raw_versions if isinstance(version, dict)]
         except Exception:
             versions = []
-        actions: list[dict[str, Any]] = []
-        try:
-            auth_client = self._api_client_factory()
-            actions_response = auth_client.get(
-                f"/environmentshub/{owner}/{name}/actions",
-                params={"limit": 20, "offset": 0},
-            )
-            actions_data = actions_response.get("data", actions_response)
-            if isinstance(actions_data, dict):
-                raw_actions = (
-                    actions_data.get("actions")
-                    or actions_data.get("jobs")
-                    or actions_data.get("items")
-                    or []
-                )
-            else:
-                raw_actions = actions_data
-            if isinstance(raw_actions, list):
-                actions = [action for action in raw_actions if isinstance(action, dict)]
-        except Exception:
-            actions = []
 
         data = details.get("data", details)
         if not isinstance(data, dict):
@@ -698,7 +677,6 @@ class LabDataSource:
             "platform_detail": data,
             "selected_version": selected_version,
             "versions": versions,
-            "actions": actions,
             "status": status,
         }
         metadata = list(item.metadata)

@@ -216,13 +216,10 @@ def _environment_status_summary_table(status: dict[str, Any]) -> Table:
     latest = status.get("latest_version") or status.get("latestVersion")
     if isinstance(latest, dict):
         version = latest.get("semantic_version") or latest.get("version")
-        action = latest.get("latest_ci_status") or latest.get("status")
         if version not in (None, "", "-"):
             table.add_row("Latest version", str(version))
-        if action not in (None, "", "-"):
-            table.add_row("Action", str(action))
     else:
-        for key in ("latest_ci_status", "status", "action"):
+        for key in ("status",):
             value = status.get(key)
             if value not in (None, "", "-"):
                 table.add_row(_humanize_key(key), str(value))

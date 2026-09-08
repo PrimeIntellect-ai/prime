@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 from typing import Optional
 
+from prime_traces.core.config import Config as _TracesSdkConfig
 from pydantic import BaseModel, ConfigDict
 
 
@@ -29,6 +30,7 @@ class Config:
     DEFAULT_BASE_URL: str = "https://api.primeintellect.ai"
     DEFAULT_FRONTEND_URL: str = "https://app.primeintellect.ai"
     DEFAULT_INFERENCE_URL: str = "https://api.pinference.ai/api/v1"
+    DEFAULT_TRACES_URL: str = _TracesSdkConfig.DEFAULT_TRACES_URL
     DEFAULT_SSH_KEY_PATH: str = str(Path.home() / ".ssh" / "id_rsa")
 
     def __init__(self, use_context: bool = True) -> None:
@@ -212,8 +214,12 @@ class Config:
 
     @property
     def traces_url(self) -> str:
-        """Get Prime Traces service URL with precedence: env > file > base_url."""
-        return self._configured_traces_url() or self.base_url
+        """Get Prime Traces service URL with precedence: env > file > DEFAULT_TRACES_URL.
+
+        base_url is never consulted: a platform override says nothing about
+        where the traces service lives, and the platform API 404s /api/v1/traces.
+        """
+        return self._configured_traces_url() or self.DEFAULT_TRACES_URL
 
     def set_traces_url(self, value: str) -> None:
         """Set Prime Traces service URL in config file; empty clears the override."""

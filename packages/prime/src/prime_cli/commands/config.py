@@ -102,7 +102,7 @@ def view() -> None:
         inf_label += " (from env var)"
     table.add_row("Inference URL", inf_label)
 
-    # Show traces URL (effective value: falls back to the base URL)
+    # Show traces URL (effective value: falls back to the traces service default)
     traces_label = settings["traces_url"]
     if _env_set("PRIME_TRACES_URL"):
         traces_label += " (from env var)"

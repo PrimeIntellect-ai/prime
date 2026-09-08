@@ -24,7 +24,7 @@ def test_prime_requires_runtime_sdks_with_cli_feature_support() -> None:
 
     assert "prime-sandboxes>=0.2.41" in pyproject["project"]["dependencies"]
     assert "prime-evals>=0.2.3" in pyproject["project"]["dependencies"]
-    assert "prime-traces>=0.0.1" in pyproject["project"]["dependencies"]
+    assert "prime-traces>=0.0.3" in pyproject["project"]["dependencies"]
     assert "prime-tunnel>=0.1.11" in pyproject["project"]["dependencies"]
 
 

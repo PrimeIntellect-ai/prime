@@ -79,8 +79,10 @@ def test_cli_config_traces_url_precedence(monkeypatch):
     config = Config.__new__(Config)
     config.config = {"base_url": "https://api.staging.primeintellect.ai"}
 
-    # No traces_url anywhere: fall back to the context's platform base URL.
-    assert config.traces_url == "https://api.staging.primeintellect.ai"
+    # No traces_url anywhere: the traces service default, never the platform
+    # base URL (which does not serve /api/v1/traces), even with a base_url override.
+    assert config.traces_url == "https://prime-traces.pintel.dev"
+    assert config.traces_url == Config.DEFAULT_TRACES_URL
 
     # Context file value wins over the fallback; /api/v1 is normalized away
     # like base_url does (the client appends the prefix itself).

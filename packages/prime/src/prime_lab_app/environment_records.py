@@ -295,7 +295,7 @@ def _environment_badges(record: EnvironmentRecord, visibility: str) -> list[dict
     elif visibility.upper() == "PRIVATE":
         badges.append({"label": "PRIVATE", "style": STATUS_WARNING})
     elif record.platform:
-        status = str(record.platform.get("latest_ci_status") or visibility or "PLATFORM")
+        status = visibility or "PLATFORM"
         badges.append({"label": status, "style": _status_style(status)})
     return badges
 

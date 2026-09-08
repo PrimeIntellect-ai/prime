@@ -7,7 +7,6 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-import time
 import zipfile
 from datetime import datetime
 
@@ -35,7 +34,6 @@ from ..utils import (
 )
 from ..utils.env_metadata import find_environment_metadata
 from ..utils.formatters import format_file_size
-from ..utils.formatters import strip_ansi as _strip_ansi
 from ..utils.prompt import (
     any_provided,
     prompt_for_value,
@@ -57,8 +55,17 @@ DEFAULT_LIST_LIMIT = 20
 MAX_TARBALL_SIZE_LIMIT = 250 * 1024 * 1024  # 250MB
 
 # Action subcommand app
-action_app = PlainTyper(help="Manage environment actions (CI jobs)", no_args_is_help=True)
-app.add_typer(action_app, name="action", rich_help_panel="Manage")
+action_app = PlainTyper(
+    help="Removed: the Environments Hub no longer runs Environment Actions.",
+    no_args_is_help=True,
+)
+app.add_typer(action_app, name="action", rich_help_panel="Manage", hidden=True, deprecated=True)
+
+_ACTIONS_REMOVED_NOTE = (
+    "[yellow]Environment Actions were removed from the Environments Hub.[/yellow] "
+    "Pushed environments no longer run CI, so there is no action status to show. "
+    "See https://docs.primeintellect.ai/tutorials-environments/environments"
+)
 
 # Secret subcommand app
 secret_app = PlainTyper(help="Manage environment secrets", no_args_is_help=True)
@@ -68,27 +75,16 @@ app.add_typer(secret_app, name="secret", rich_help_panel="Manage")
 var_app = PlainTyper(help="Manage environment variables", no_args_is_help=True)
 app.add_typer(var_app, name="var", rich_help_panel="Manage")
 
-ACTION_LIST_JSON_HELP = json_output_help(
-    ".actions[] = {id, name|job_type, status, version, trigger, created_at}",
-    ".total = number",
-)
-
-ACTION_RETRY_JSON_HELP = json_output_help(
-    ". = {success, job_id?, version_id?, message?}",
-)
-
 ENV_LIST_JSON_HELP = json_output_help(
-    ".environments[] = {environment, description, visibility, version, stars, "
-    "updated_at, action_status?, tags[]?}",
+    ".environments[] = {environment, description, visibility, version, stars, updated_at, tags[]?}",
     ".total = number",
     ".page = number",
     ".per_page = number",
 )
 
 ENV_STATUS_JSON_HELP = json_output_help(
-    ". = {name, description?, visibility, latest_version?, action?}",
+    ". = {name, description?, visibility, latest_version?}",
     ".latest_version? = {semantic_version?, content_hash?, created_at?}",
-    ".action? = {status, job_id?}",
 )
 
 ENV_INSPECT_JSON_HELP = json_output_help(
@@ -168,257 +164,47 @@ def _resolve_environment(environment: Optional[str]) -> Tuple[str, str]:
     raise typer.Exit(1)
 
 
-@action_app.command("list", epilog=ACTION_LIST_JSON_HELP)
+def _environment_actions_removed() -> None:
+    console.print(_ACTIONS_REMOVED_NOTE)
+    raise typer.Exit(1)
+
+
+_IGNORE_LEGACY_FLAGS = {"allow_extra_args": True, "ignore_unknown_options": True}
+
+
+@action_app.command("list", hidden=True, deprecated=True, context_settings=_IGNORE_LEGACY_FLAGS)
 def actions_list(
     environment: str = typer.Argument(
         ...,
         help="Environment slug (e.g., 'owner/environment-name')",
     ),
-    version_id: Optional[str] = typer.Option(
-        None,
-        "--version-id",
-        "-v",
-        help="Filter by version ID",
-    ),
-    num: int = typer.Option(
-        20,
-        "--num",
-        "-n",
-        help="Items per page",
-    ),
-    page: int = typer.Option(
-        1,
-        "--page",
-        "-p",
-        help="Page number",
-    ),
-    output: str = typer.Option(
-        "table",
-        "--output",
-        "-o",
-        help="Output format: table or json",
-    ),
 ) -> None:
-    """List actions (CI jobs) for an environment."""
-    validate_output_format(output, console)
-
-    if num < 1 or page < 1:
-        console.print("[red]Error:[/red] --num and --page must be at least 1")
-        raise typer.Exit(1)
-
-    owner, env_name = _parse_environment_slug(environment)
-
-    try:
-        client = APIClient()
-        offset = (page - 1) * num
-        params: dict[str, int | str] = {
-            "limit": num,
-            "offset": offset,
-        }
-        if version_id:
-            params["version_id"] = version_id
-
-        response = client.get(f"/environmentshub/{owner}/{env_name}/actions", params=params)
-        data = response.get("data", {})
-
-        if output == "json":
-            output_data_as_json(data, console)
-            return
-
-        actions = data.get("actions", [])
-        total = data.get("total", 0)
-
-        if not actions:
-            if page > 1:
-                console.print("[yellow]No more results.[/yellow]")
-            else:
-                console.print("[yellow]No actions found for this environment.[/yellow]")
-            return
-
-        table = Table(title=f"Actions for {owner}/{env_name}")
-        table.add_column("ID", style="cyan", no_wrap=True)
-        table.add_column("Name", style="blue")
-        table.add_column("Status", style="yellow")
-        table.add_column("Version", style="dim")
-        table.add_column("Trigger", style="dim")
-        table.add_column("Created", style="dim")
-
-        for action in actions:
-            action_id = action.get("id", "")
-            name = action.get("name") or action.get("job_type", "")
-            status = action.get("status", "")
-
-            # Color the status
-            status_color = {
-                "SUCCESS": "[green]SUCCESS[/green]",
-                "FAILED": "[red]FAILED[/red]",
-                "RUNNING": "[yellow]RUNNING[/yellow]",
-                "PENDING": "[dim]PENDING[/dim]",
-                "CANCELLED": "[dim]CANCELLED[/dim]",
-            }.get(status, status)
-
-            version = action.get("version") or {}
-            version_str = version.get("semantic_version") or (version.get("content_hash") or "")[:8]
-            trigger = action.get("trigger", "")
-            created = action.get("created_at", "")
-            if created:
-                created = format_time_ago(created)
-
-            table.add_row(action_id, name, status_color, version_str, trigger, created)
-
-        console.print(table)
-        if total > page * num:
-            console.print(
-                f"\n[yellow]Showing page {page} of results. "
-                f"Use --page {page + 1} to see more.[/yellow]"
-            )
-        else:
-            console.print(f"\n[dim]Total: {total} action(s)[/dim]")
-
-    except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+    """Removed: the Hub no longer runs Environment Actions."""
+    _environment_actions_removed()
 
 
-@action_app.command("logs")
+@action_app.command("logs", hidden=True, deprecated=True, context_settings=_IGNORE_LEGACY_FLAGS)
 def actions_logs(
     environment: str = typer.Argument(
         ...,
         help="Environment slug (e.g., 'owner/environment-name')",
     ),
-    action_id: str = typer.Argument(
-        ...,
-        help="Action/job ID to get logs for",
-    ),
-    tail: int = typer.Option(1000, "--tail", "-n", help="Number of lines to show"),
-    follow: bool = typer.Option(False, "--follow", "-f", help="Follow log output"),
+    action_id: Optional[str] = typer.Argument(None, help="Action/job ID"),
 ) -> None:
-    """Get logs for a specific action."""
-    owner, env_name = _parse_environment_slug(environment)
-
-    try:
-        client = APIClient()
-
-        if follow:
-            console.print(f"[dim]Watching logs for action {action_id}... (Ctrl+C to stop)[/dim]\n")
-            last_logs = ""
-            consecutive_errors = 0
-
-            while True:
-                try:
-                    response = client.get(
-                        f"/environmentshub/{owner}/{env_name}/actions/{action_id}/logs",
-                        params={"tail_lines": tail},
-                    )
-                    data = response.get("data", {})
-                    logs = _strip_ansi(data.get("logs") or "")
-                    consecutive_errors = 0
-
-                    if logs != last_logs:
-                        old_lines = last_logs.splitlines() if last_logs else []
-                        new_lines = logs.splitlines()
-
-                        if not last_logs:
-                            for line in new_lines:
-                                console.print(line)
-                        else:
-                            overlap = 0
-                            max_overlap = min(len(old_lines), len(new_lines))
-                            for i in range(1, max_overlap + 1):
-                                if old_lines[-i:] == new_lines[:i]:
-                                    overlap = i
-                            for line in new_lines[overlap:]:
-                                console.print(line)
-
-                        last_logs = logs
-                except APIError as e:
-                    consecutive_errors += 1
-                    if "429" in str(e):
-                        if consecutive_errors >= 3:
-                            console.print("[yellow]Rate limited. Waiting 30s...[/yellow]")
-                            time.sleep(30)
-                        else:
-                            time.sleep(10)
-                        continue
-                    raise
-
-                time.sleep(5)
-        else:
-            response = client.get(
-                f"/environmentshub/{owner}/{env_name}/actions/{action_id}/logs",
-                params={"tail_lines": tail},
-            )
-            data = response.get("data", {})
-            logs = _strip_ansi(data.get("logs") or "")
-
-            if logs:
-                console.print(logs)
-            else:
-                console.print("[yellow]No logs available yet.[/yellow]")
-
-    except KeyboardInterrupt:
-        console.print("\n[dim]Stopped watching logs.[/dim]")
-    except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+    """Removed: the Hub no longer runs Environment Actions."""
+    _environment_actions_removed()
 
 
-@action_app.command("retry", epilog=ACTION_RETRY_JSON_HELP)
+@action_app.command("retry", hidden=True, deprecated=True, context_settings=_IGNORE_LEGACY_FLAGS)
 def actions_retry(
     environment: str = typer.Argument(
         ...,
         help="Environment slug (e.g., 'owner/environment-name')",
     ),
-    action_id: Optional[str] = typer.Argument(
-        None,
-        help="Action ID to retry (retries latest action if not provided)",
-    ),
-    output: str = typer.Option(
-        "table",
-        "--output",
-        "-o",
-        help="Output format: table or json",
-    ),
+    action_id: Optional[str] = typer.Argument(None, help="Action ID"),
 ) -> None:
-    """Retry an action (integration test) for an environment.
-
-    If no action ID is provided, retries the latest action.
-    """
-    validate_output_format(output, console)
-
-    owner, env_name = _parse_environment_slug(environment)
-
-    try:
-        client = APIClient()
-        payload = {}
-        if action_id:
-            payload["action_id"] = action_id
-
-        response = client.post(
-            f"/environmentshub/{owner}/{env_name}/actions/retry",
-            json=payload,
-        )
-        data = response.get("data", {})
-
-        if output == "json":
-            output_data_as_json(data, console)
-            return
-
-        if data.get("success"):
-            console.print("[green]Successfully triggered retry[/green]")
-            console.print(f"[dim]Job ID: {data.get('job_id')}[/dim]")
-            console.print(f"[dim]Version: {data.get('version_id')}[/dim]")
-            job_id = data.get("job_id")
-            console.print(
-                f"\n[dim]Use 'prime env action logs {environment} {job_id}' to view logs[/dim]"
-            )
-        else:
-            console.print(f"[red]Retry failed:[/red] {data.get('message', 'Unknown error')}")
-            raise typer.Exit(1)
-
-    except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+    """Removed: the Hub no longer runs Environment Actions."""
+    _environment_actions_removed()
 
 
 def display_upstream_environment_info(
@@ -689,21 +475,6 @@ def compute_content_hash(env_path: Path) -> str:
     return content_hasher.hexdigest()
 
 
-def _format_action_status(status: Optional[str]) -> Text:
-    """Format action status with color coding."""
-    if not status:
-        return Text("-", style="dim")
-    status_colors = {
-        "SUCCESS": "green",
-        "FAILED": "red",
-        "RUNNING": "yellow",
-        "PENDING": "yellow",
-        "CANCELLED": "dim",
-    }
-    color = status_colors.get(status.upper(), "white")
-    return Text(status, style=color)
-
-
 def _print_env_inspect_examples(owner: str, name: str, version: str) -> None:
     """Print inspect commands for an environment version."""
     console.print("[bold yellow]Inspect[/bold yellow]")
@@ -725,13 +496,21 @@ def list_cmd(
     ),
     tag: Optional[List[str]] = typer.Option(None, "--tag", "-t", help="Filter by tag (repeatable)"),
     action_status: Optional[str] = typer.Option(
-        None, "--action-status", help="Filter by action status (SUCCESS/FAILED/RUNNING/PENDING)"
+        None,
+        "--action-status",
+        hidden=True,
+        help="Deprecated: Environment Actions were removed; this filter is ignored.",
     ),
     sort: str = typer.Option(
         "created_at", "--sort", help="Sort by: name, created_at, updated_at, stars"
     ),
     order: str = typer.Option("desc", "--order", help="Sort order: asc, desc"),
-    show_actions: bool = typer.Option(False, "--show-actions", help="Show action status column"),
+    show_actions: bool = typer.Option(
+        False,
+        "--show-actions",
+        hidden=True,
+        help="Deprecated: Environment Actions were removed; this flag is ignored.",
+    ),
     starred: bool = typer.Option(
         False, "--starred", help="Filter to only environments you have starred"
     ),
@@ -789,10 +568,8 @@ def list_cmd(
             params["search"] = search
         if tag:
             params["tags"] = tag
-        if action_status:
-            params["ci_status"] = action_status
-        if show_actions or action_status:
-            params["include_ci_status"] = True
+        if (show_actions or action_status) and output != "json":
+            console.print(_ACTIONS_REMOVED_NOTE)
         if starred:
             params["starred_only"] = True
         if mine:
@@ -828,8 +605,6 @@ def list_cmd(
                     "stars": env.get("stars", 0),
                     "updated_at": env.get("updated_at"),
                 }
-                if show_actions or action_status:
-                    env_entry["action_status"] = env.get("latest_ci_status")
                 if env.get("tags"):
                     env_entry["tags"] = env.get("tags")
                 env_data.append(env_entry)
@@ -849,8 +624,6 @@ def list_cmd(
             table.add_column("Version", style="blue")
             table.add_column("Stars", style="yellow", justify="right")
             table.add_column("Updated", style="dim")
-            if show_actions or action_status:
-                table.add_column("Action Status")
 
             for env in environments:
                 owner_name = env["owner"]["name"]
@@ -868,11 +641,7 @@ def list_cmd(
                     except (ValueError, AttributeError):
                         pass
 
-                if show_actions or action_status:
-                    action_text = _format_action_status(env.get("latest_ci_status"))
-                    table.add_row(env_id, description, version, stars, updated_at, action_text)
-                else:
-                    table.add_row(env_id, description, version, stars, updated_at)
+                table.add_row(env_id, description, version, stars, updated_at)
 
             console.print(table)
 
@@ -897,7 +666,7 @@ def status_cmd(
     env_id: str = typer.Argument(..., help="Environment ID (owner/name)"),
     output: str = typer.Option("table", "--output", help="Output format: table or json"),
 ) -> None:
-    """Show action status for an environment.
+    """Show an environment's visibility and latest version.
 
     \b
     Examples:
@@ -940,17 +709,6 @@ def status_cmd(
                 console.print(f"  Created: {format_time_ago(created_at)}")
             else:
                 console.print("  [dim]No versions found[/dim]")
-
-            # Action status section
-            action_data = data.get("action")
-            if action_data:
-                console.print("\n[bold]Action Status:[/bold]")
-                action_status_value = action_data.get("status")
-                action_text = _format_action_status(action_status_value)
-                console.print("  Status: ", end="")
-                console.print(action_text)
-                if action_data.get("job_id"):
-                    console.print(f"  Job ID: [dim]{action_data.get('job_id')}[/dim]")
 
             console.print()
 

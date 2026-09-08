@@ -498,7 +498,6 @@ class LabDataSource:
         progress: dict[str, Any] = {}
         metrics: list[dict[str, Any]] = []
         metrics_loaded = False
-        environment_statuses: list[dict[str, Any]] = []
         reward_distribution: dict[str, Any] = {}
         reward_distribution_loaded = False
         rollout_samples: dict[str, Any] = {}
@@ -549,16 +548,6 @@ class LabDataSource:
                 logs = f"Failed to load logs: {exc}"
                 logs_loaded = True
 
-        for env in run_data.get("environments") or []:
-            slug = _environment_slug(env)
-            if slug is None:
-                continue
-            owner, name = slug.split("/", 1)
-            try:
-                environment_statuses.append(client.get_environment_status(owner, name))
-            except Exception as exc:
-                environment_statuses.append({"environment": slug, "error": str(exc)})
-
         detail_item = _rl_run_item(run, 0)
         raw = {
             **detail_item.raw,
@@ -570,7 +559,6 @@ class LabDataSource:
             "metrics_page_limit": metrics_limit,
             "metrics_page_count": len(metrics),
             "metrics_min_step": metrics_min_step,
-            "environment_statuses": environment_statuses,
             "reward_distribution": reward_distribution,
             "reward_distribution_loaded": reward_distribution_loaded,
             "rollout_samples": rollout_samples,
@@ -662,27 +650,6 @@ class LabDataSource:
                 versions = [version for version in raw_versions if isinstance(version, dict)]
         except Exception:
             versions = []
-        actions: list[dict[str, Any]] = []
-        try:
-            auth_client = self._api_client_factory()
-            actions_response = auth_client.get(
-                f"/environmentshub/{owner}/{name}/actions",
-                params={"limit": 20, "offset": 0},
-            )
-            actions_data = actions_response.get("data", actions_response)
-            if isinstance(actions_data, dict):
-                raw_actions = (
-                    actions_data.get("actions")
-                    or actions_data.get("jobs")
-                    or actions_data.get("items")
-                    or []
-                )
-            else:
-                raw_actions = actions_data
-            if isinstance(raw_actions, list):
-                actions = [action for action in raw_actions if isinstance(action, dict)]
-        except Exception:
-            actions = []
 
         data = details.get("data", details)
         if not isinstance(data, dict):
@@ -698,7 +665,6 @@ class LabDataSource:
             "platform_detail": data,
             "selected_version": selected_version,
             "versions": versions,
-            "actions": actions,
             "status": status,
         }
         metadata = list(item.metadata)
@@ -1112,7 +1078,7 @@ def _environment_item(env: dict[str, Any], idx: int, *, section: str, scope: str
     version = env.get("latest_version") or "-"
     stars = str(env.get("stars", 0))
     visibility = str(env.get("visibility") or "-")
-    status = str(env.get("latest_ci_status") or visibility)
+    status = visibility
 
     return LabItem(
         key=f"environment:{env.get('id', idx)}",
@@ -1818,19 +1784,6 @@ def _environment_name(env: Any) -> str:
     if not isinstance(env, dict):
         return str(env)
     return str(env.get("slug") or env.get("name") or env.get("id") or "?")
-
-
-def _environment_slug(env: Any) -> str | None:
-    if not isinstance(env, dict):
-        return None
-    slug = env.get("slug") or env.get("id")
-    if isinstance(slug, str) and "/" in slug:
-        return slug
-    owner = env.get("owner")
-    name = env.get("name")
-    if isinstance(owner, str) and isinstance(name, str) and owner and name:
-        return f"{owner}/{name}"
-    return None
 
 
 def _first_text(value: Any) -> str | None:

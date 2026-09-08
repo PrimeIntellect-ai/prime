@@ -353,10 +353,6 @@ def _is_hub_env_id(value: Any) -> bool:
     return isinstance(value, str) and "/" in value
 
 
-def _split_hub_env_id(env_id: str) -> str:
-    return env_id.rsplit("@", 1)[0]
-
-
 def _env_display_name(env: Dict[str, Any], index: int | None = None) -> str:
     taskset_id = _dict_id(env.get("taskset") if isinstance(env.get("taskset"), dict) else None)
     value = env.get("slug") or env.get("name") or env.get("id") or taskset_id
@@ -1314,7 +1310,8 @@ def create_run(
     skip_action_check: bool = typer.Option(
         False,
         "--skip-action-check",
-        help="Skip action status check and run even if environment action failed.",
+        hidden=True,
+        help="Deprecated: Environment Actions were removed and no check runs.",
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
     image_tag: Optional[str] = typer.Option(
@@ -1578,58 +1575,11 @@ def create_run(
 
         console.print()
 
-        # Check action status for Hub-backed environment refs. Bare v1 ids
-        # like taskset.id="alphabet-sort-v1" are runtime-importable names and
-        # intentionally do not resolve through the Hub.
-        hub_env_ids: list[str] = []
-        for env_config in cfg.env:
-            for env_id in env_config.hub_env_ids():
-                if env_id not in hub_env_ids:
-                    hub_env_ids.append(env_id)
-
-        if hub_env_ids and not skip_action_check:
-            console.print("[dim]Checking Environment Actions...[/dim]")
-            failed_envs = []
-
-            for env_id in hub_env_ids:
-                env_id_base = _split_hub_env_id(env_id)
-                owner, name = env_id_base.split("/", 1)
-                try:
-                    status_resp = rl_client.get_environment_status(owner, name)
-                    action = status_resp.get("action") or {}
-                    action_status = action.get("status")
-
-                    if action_status == "FAILED":
-                        console.print(f"  [red]✗[/red] {env_id} [dim](failed)[/dim]")
-                        failed_envs.append(env_id)
-                    elif action_status == "SUCCESS":
-                        console.print(f"  [green]✓[/green] {env_id} [dim](success)[/dim]")
-                    elif action_status in ("RUNNING", "PENDING"):
-                        console.print(f"  [yellow]○[/yellow] {env_id} [dim](in progress)[/dim]")
-                    else:
-                        console.print(f"  [dim]-[/dim] {env_id} [dim](no action)[/dim]")
-                except APIError:
-                    console.print(f"  [dim]-[/dim] {env_id} [dim](could not check)[/dim]")
-
-            if failed_envs:
-                console.print("\n[red]Error: Action failed for environments:[/red]\n")
-                for env_id in failed_envs:
-                    env_id_base = _split_hub_env_id(env_id)
-                    owner, name = env_id_base.split("/", 1)
-                    url = f"{app_config.frontend_url}/dashboard/environments/{owner}/{name}/actions"
-                    console.print(f"  [red]✗[/red] {env_id}")
-                    console.print(f"    [dim]Details: prime env action list {env_id_base}[/dim]")
-                    console.print(f"    [dim]View at: [link={url}]{url}[/link][/dim]\n")
-
-                console.print(
-                    "[yellow]This usually means the environment doesn't compile or run, "
-                    "or is using an unsupported version of verifiers, so the Hosted Training run "
-                    "will fail.[/yellow]"
-                )
-                console.print("[dim]To proceed anyway, use --skip-action-check[/dim]")
-                raise typer.Exit(1)
-
-            console.print()
+        if skip_action_check:
+            console.print(
+                "[dim]--skip-action-check is deprecated: Environment Actions were removed "
+                "and no check runs.[/dim]"
+            )
 
         if not confirm_or_skip("Launch this Hosted Training run?", yes, default=True):
             console.print("\nRun cancelled")

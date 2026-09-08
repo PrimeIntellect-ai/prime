@@ -75,7 +75,6 @@ def training_run_widgets(
     progress = dict_value(raw.get("progress"))
     metrics = list_value(raw.get("recent_metrics"))
     environments = list_value(raw.get("environments"))
-    environment_statuses = list_value(raw.get("environment_statuses"))
     reward_distribution = dict_value(raw.get("reward_distribution"))
 
     summary = training_progress_summary(raw, progress, metrics)
@@ -115,7 +114,6 @@ def training_run_widgets(
         metrics,
         reward_distribution,
         environments,
-        environment_statuses,
         chart_mode=chart_mode,
         metric_index=metric_index,
         distribution_index=distribution_index,
@@ -302,7 +300,6 @@ def _training_overview_widgets(
     metrics: list[Any],
     reward_distribution: dict[str, Any],
     environments: list[Any],
-    environment_statuses: list[Any],
     *,
     chart_mode: ChartMode,
     metric_index: int,
@@ -340,7 +337,6 @@ def _training_overview_widgets(
                 raw,
                 summary,
                 environments,
-                environment_statuses,
             )
         )
     ]
@@ -489,13 +485,12 @@ def _training_side_panel(
     raw: dict[str, Any],
     summary: dict[str, int | float | bool],
     environments: list[Any],
-    environment_statuses: list[Any],
 ) -> Group:
     chunks: list[Any] = [
         Text("Run", style="bold"),
         _training_overview_table(item, raw, summary),
     ]
-    env_table = _training_environment_table(environments, environment_statuses)
+    env_table = _training_environment_table(environments)
     if env_table.row_count:
         chunks.extend([Text(""), Text("Environments", style="bold"), env_table])
     return Group(*chunks)
@@ -519,28 +514,18 @@ def _progress_block(summary: dict[str, int | float | bool]) -> Text:
     return text
 
 
-def _training_environment_table(environments: list[Any], environment_statuses: list[Any]) -> Table:
+def _training_environment_table(environments: list[Any]) -> Table:
     table = Table(show_header=True, header_style="bold dim")
     table.add_column("Environment")
-    table.add_column("Action")
-    status_by_slug: dict[str, dict[str, Any]] = {}
-    for status in environment_statuses:
-        if not isinstance(status, dict):
-            continue
-        slug = str(status.get("environment") or status.get("slug") or status.get("id") or "")
-        if slug:
-            status_by_slug[slug] = status
     if not environments:
-        table.add_row("-", "-")
+        table.add_row("-")
         return table
     for env in environments:
         if not isinstance(env, dict):
-            table.add_row(str(env), "-")
+            table.add_row(str(env))
             continue
         slug = str(env.get("slug") or env.get("id") or env.get("name") or "-")
-        status = status_by_slug.get(slug, {})
-        action = status.get("latest_ci_status") or status.get("status") or "-"
-        table.add_row(_environment_version_label(slug, env), str(action))
+        table.add_row(_environment_version_label(slug, env))
     return table
 
 

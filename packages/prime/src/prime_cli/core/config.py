@@ -30,8 +30,6 @@ class Config:
     DEFAULT_BASE_URL: str = "https://api.primeintellect.ai"
     DEFAULT_FRONTEND_URL: str = "https://app.primeintellect.ai"
     DEFAULT_INFERENCE_URL: str = "https://api.pinference.ai/api/v1"
-    # Prime Traces is its own service; the platform API does not serve /api/v1/traces.
-    # Shared with the SDK so `prime traces` and prime-runs agree on the default.
     DEFAULT_TRACES_URL: str = _TracesSdkConfig.DEFAULT_TRACES_URL
     DEFAULT_SSH_KEY_PATH: str = str(Path.home() / ".ssh" / "id_rsa")
 

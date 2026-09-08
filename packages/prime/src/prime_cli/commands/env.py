@@ -666,7 +666,7 @@ def status_cmd(
     env_id: str = typer.Argument(..., help="Environment ID (owner/name)"),
     output: str = typer.Option("table", "--output", help="Output format: table or json"),
 ) -> None:
-    """Show action status for an environment.
+    """Show an environment's visibility and latest version.
 
     \b
     Examples:

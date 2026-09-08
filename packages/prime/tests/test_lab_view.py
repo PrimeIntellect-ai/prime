@@ -468,9 +468,6 @@ class FakeRLClient:
             "limit": limit,
         }
 
-    def get_environment_status(self, owner: str, name: str) -> dict[str, Any]:
-        return {"environment": f"{owner}/{name}", "status": "SUCCESS"}
-
 
 class FailingAPIClient(FakeAPIClient):
     def get(self, endpoint: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1357,7 +1354,7 @@ def test_agent_surface_validation_passes_when_binary_and_surface_exist(
     assert results[0].ok is True
 
 
-def test_lab_view_loads_training_logs_and_environment_status() -> None:
+def test_lab_view_loads_training_logs_without_environment_status() -> None:
     source = make_source()
     snapshot = source.load(LabLoadOptions(limit=10))
     training = snapshot.section("training")
@@ -1375,9 +1372,8 @@ def test_lab_view_loads_training_logs_and_environment_status() -> None:
     }
     assert item.raw["rollout_samples_step"] == 12
     assert item.raw["rollout_samples"]["samples"][0]["reward"] == 0.8
-    assert item.raw["environment_statuses"] == [
-        {"environment": "primeintellect/gsm8k", "status": "SUCCESS"}
-    ]
+    # Environment Actions are gone: the loader no longer fetches a per-environment status.
+    assert "environment_statuses" not in item.raw
 
 
 def test_training_data_tab_uses_rollout_viewer() -> None:

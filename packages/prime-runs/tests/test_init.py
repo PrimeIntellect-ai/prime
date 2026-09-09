@@ -69,14 +69,15 @@ def online(monkeypatch, make_platform_client, eval_routes):
             "prime_runs.run.PlatformClient", lambda **_: make_platform_client(handler)
         )
         monkeypatch.setattr("prime_runs.run.TracesSink", lambda **_: _NullSink())
-        run = pr.init(
-            name="test-run",
-            environments=["gsm8k"],
-            model="Qwen3-8B",
-            framework="verifiers",
-            api_key="test-key",
+        params = {
+            "name": "test-run",
+            "environments": ["gsm8k"],
+            "model": "Qwen3-8B",
+            "framework": "verifiers",
+            "api_key": "test-key",
             **kwargs,
-        )
+        }
+        run = pr.init(**params)
         return run, handler
 
     return _init
@@ -190,6 +191,85 @@ def test_the_end_to_end_shape_a_producer_writes(online):
     assert finalize["metrics"]["avg_reward"] == 1.0
     assert run.status is RunStatus.COMPLETED
     assert run.errors == []
+
+
+# ------------------------------------------------------------------ attach
+
+
+@pytest.fixture
+def hosted_eval_routes(eval_routes):
+    """A launcher created ``eval-hosted``; the sandbox may write to it but never creates."""
+
+    def refuse_create(request):
+        import httpx
+
+        return httpx.Response(500, json={"detail": "an attached run must not create"})
+
+    return {
+        "POST /api/v1/evaluations/": refuse_create,
+        "POST /api/v1/evaluations/eval-hosted/samples": {"samples_pushed": 1},
+        "POST /api/v1/evaluations/eval-hosted/finalize": {"status": "PROCESSING"},
+        "PUT /api/v1/evaluations/eval-hosted": {"status": "RUNNING"},
+    }
+
+
+def test_an_eval_run_attaches_to_a_launcher_created_evaluation(online, hosted_eval_routes):
+    run, handler = online(routes=hosted_eval_routes, id="eval-hosted")
+
+    assert run.id == "eval-hosted"
+    assert run.attached is True
+    # No create response to take a viewer URL from: built from the dashboard origin.
+    assert run.url is not None and run.url.endswith("/dashboard/evaluations/eval-hosted")
+    # Neither the hub nor the evaluations API was asked to create anything.
+    assert handler.paths() == []
+
+    run.log_traces([make_episode("ep-1", [make_trace()])])
+    run.finish(summary={"avg_reward": 1.0})
+
+    posted = handler.bodies_for("/api/v1/evaluations/eval-hosted/samples")
+    assert [s["sample_id"] for body in posted for s in body["samples"]] == ["ep-1"]
+    # The launcher's config document is left alone: only the summary goes up.
+    assert handler.bodies_for("/api/v1/evaluations/eval-hosted") == [
+        {"metrics": {"avg_reward": 1.0}}
+    ]
+    # A clean finish still completes the launcher's run.
+    assert handler.bodies_for("/api/v1/evaluations/eval-hosted/finalize") == [
+        {"metrics": {"avg_reward": 1.0}}
+    ]
+    assert run.status is RunStatus.COMPLETED
+    assert run.errors == []
+
+
+def test_an_attached_eval_run_leaves_failure_marking_to_the_launcher(
+    online, hosted_eval_routes, caplog
+):
+    run, handler = online(routes=hosted_eval_routes, id="eval-hosted")
+
+    with caplog.at_level("INFO"):
+        run.fail("boom")
+
+    assert "POST /api/v1/evaluations/eval-hosted/finalize" not in handler.paths()
+    # No metadata.prime_runs failure marker either: the launcher reads the exit code.
+    assert handler.bodies_for("/api/v1/evaluations/eval-hosted") == []
+    assert "leaving it to the launcher" in caplog.text
+    assert run.status is RunStatus.FAILED
+
+
+def test_an_attached_eval_run_needs_no_environments(online, hosted_eval_routes):
+    run, handler = online(routes=hosted_eval_routes, id="eval-hosted", environments=None)
+
+    assert run.id == "eval-hosted"
+    assert handler.paths() == []
+    run.finish()
+
+
+def test_a_disabled_eval_run_keeps_an_attached_id():
+    run = pr.init(mode="disabled", id="eval-hosted")
+
+    assert run.id == "eval-hosted"
+    assert run.attached is False  # nothing to hand back to
+    run.finish()
+    assert run.status is RunStatus.COMPLETED
 
 
 # --------------------------------------------------------------------- fork
@@ -412,11 +492,10 @@ def test_a_disabled_training_run_keeps_an_attached_id(tmp_path):
 @pytest.mark.parametrize(
     "kwargs",
     [
-        {"kind": "eval", "id": "eval-1"},
         {"kind": "eval", "training": pr.TrainingSpec()},
         {"kind": "serve"},
     ],
-    ids=["eval-with-id", "eval-with-training", "unknown-kind"],
+    ids=["eval-with-training", "unknown-kind"],
 )
 def test_kind_arguments_are_checked_before_anything_else(kwargs):
     with pytest.raises(ConfigurationError):

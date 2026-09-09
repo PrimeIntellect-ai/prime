@@ -42,6 +42,16 @@ def test_create_resolves_environment_names_through_the_hub(make_platform_client,
     assert handle.url == "https://app.example/dashboard/evaluations/eval-abc"
 
 
+def test_attach_makes_no_request(make_platform_client, eval_routes):
+    backend, handler = make_backend(make_platform_client, eval_routes)
+
+    handle = backend.attach("eval-hosted")
+
+    assert handle.id == "eval-hosted"
+    assert handle.url == "https://app.example/dashboard/evaluations/eval-hosted"
+    assert handler.paths() == []
+
+
 def test_an_explicit_environment_id_skips_the_hub(make_platform_client, eval_routes):
     backend, handler = make_backend(make_platform_client, eval_routes)
 

@@ -20,6 +20,10 @@ logger = logging.getLogger(__name__)
 class Backend(Protocol):
     def create(self, spec: RunSpec) -> RunHandle: ...
 
+    def attach(self, run_id: str) -> RunHandle:
+        """A handle for a run a launcher already created; no request."""
+        ...
+
     def update(
         self,
         run_id: str,
@@ -49,7 +53,9 @@ class EvalsBackend:
     """Environments are resolved through the hub's get-or-create, so a local run
     uploads without ``prime env push``. The API has no producer-facing way to mark
     a run failed, so a non-completed terminal state is recorded in
-    ``metadata.prime_runs`` and the run keeps showing as running."""
+    ``metadata.prime_runs`` and the run keeps showing as running. A run a launcher
+    already created (a hosted evaluation) is attached to instead (:meth:`attach`):
+    the launcher owns its status, this process streams into it and completes it."""
 
     def __init__(
         self,
@@ -94,6 +100,15 @@ class EvalsBackend:
             name=str(response.get("name") or run_name),
             url=response.get("viewer_url") or self.url_for(run_id),
         )
+
+    def attach(self, run_id: str) -> RunHandle:
+        """A handle for an evaluation a launcher already created — a hosted eval's
+        sandbox is handed its id as ``$EVALUATION_ID``. No request: the first write
+        proves access. The launcher created the run with its environments and
+        config, so nothing is resolved or registered here; on a clean finish the
+        run is finalized like one this process created, while a failure is left
+        for the launcher to mark from the process exit."""
+        return RunHandle(id=run_id, url=self.url_for(run_id))
 
     def url_for(self, run_id: str) -> str:
         return f"{self._frontend_url}/dashboard/evaluations/{run_id}"
@@ -210,6 +225,9 @@ def disabled_run_id() -> str:
 class DisabledBackend:
     def create(self, spec: RunSpec) -> RunHandle:
         return RunHandle(id=disabled_run_id())
+
+    def attach(self, run_id: str) -> RunHandle:
+        return RunHandle(id=run_id)
 
     def update(self, run_id: str, **kwargs: Any) -> None:
         return None

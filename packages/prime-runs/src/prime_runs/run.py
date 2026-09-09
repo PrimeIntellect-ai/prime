@@ -269,11 +269,12 @@ class Run:
         self._metrics_worker.close(timeout=time_left(deadline))
 
         if self._owns_lifecycle:
+            # An attached run's config document is the launcher's: it created the
+            # run from its own config and reads it back, so only the summary goes up.
+            config = None if self._attached else (self.config or None)
             self._teardown_step(
                 "updating the run",
-                lambda: self._backend.update(
-                    self.id, config=self.config or None, summary=self.summary or None
-                ),
+                lambda: self._backend.update(self.id, config=config, summary=self.summary or None),
             )
             if self._attached and resolved is not RunStatus.COMPLETED:
                 # The launcher marks its own run failed; reporting it here would race that.
@@ -421,12 +422,16 @@ def init(
 
     ``kind="train"`` opens an external training run: ``model`` is the base
     model, ``environments`` the hub ids, ``training`` the display fields, and a
-    team is required. ``id`` attaches to an external run a launcher already
-    created (``$RUN_ID``): nothing is registered, the platform keeps the run's
-    failure marking, and a clean finish still completes it. ``base_url`` is the
-    platform origin; a hosted run passes the internal RFT root its launcher
-    injects (``$PRIME_API_BASE``, ``…/api/internal/rft``), which serves attached
-    runs only.
+    team is required.
+
+    ``id`` attaches to a run a launcher already created instead of creating one:
+    a hosted training run's ``$RUN_ID``, or a hosted evaluation's
+    ``$EVALUATION_ID``. Nothing is registered, ``environments`` and ``config``
+    are the launcher's to record, the platform keeps the run's failure marking,
+    and a clean finish still completes it. ``base_url`` is the platform origin;
+    a hosted training run passes the internal RFT root its launcher injects
+    (``$PRIME_API_BASE``, ``…/api/internal/rft``), which serves attached runs
+    only; a hosted evaluation uses the public API with its sandbox key.
     """
     settings = Config()
     api_key = api_key if api_key is not None else settings.api_key
@@ -435,10 +440,6 @@ def init(
 
     if kind not in ("eval", "train"):
         raise ConfigurationError(f"kind={kind!r} is not one of 'eval' or 'train'")
-    if id is not None and kind != "train":
-        raise ConfigurationError(
-            "id= attaches to an existing training run; an eval run is always created here."
-        )
     if training is not None and kind != "train":
         raise ConfigurationError("training= only applies to kind='train'")
 
@@ -472,13 +473,12 @@ def init(
             )
         client = PlatformClient(api_key=api_key, base_url=base_url, timeout=DEFAULT_TIMEOUT)
         if kind == "train":
-            rft = RftBackend(client, frontend_url=settings.frontend_url, team_id=team_id)
-            backend = rft
+            backend = RftBackend(client, frontend_url=settings.frontend_url, team_id=team_id)
         else:
             backend = EvalsBackend(client, frontend_url=settings.frontend_url, team_id=team_id)
         try:
-            if kind == "train" and id is not None:
-                handle = rft.attach(id)
+            if id is not None:
+                handle = backend.attach(id)
                 attached = True
             else:
                 handle = backend.create(spec)

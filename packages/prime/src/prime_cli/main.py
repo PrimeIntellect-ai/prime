@@ -24,6 +24,7 @@ from .commands.registry import app as registry_app
 from .commands.rl import app as train_app
 from .commands.sandbox import app as sandbox_app
 from .commands.secrets import app as secret_app
+from .commands.slurm import app as slurm_app
 from .commands.switch import app as switch_app
 from .commands.teams import app as teams_app
 from .commands.traces import app as traces_app
@@ -68,6 +69,7 @@ app.add_typer(availability_app, name="availability", rich_help_panel="Compute")
 app.add_typer(disks_app, name="disks", rich_help_panel="Compute")
 app.add_typer(pods_app, name="pods", rich_help_panel="Compute")
 app.add_typer(sandbox_app, name="sandbox", rich_help_panel="Compute")
+app.add_typer(slurm_app, name="slurm", rich_help_panel="Compute")
 app.add_typer(images_app, name="images", rich_help_panel="Compute")
 app.add_typer(registry_app, name="registry", rich_help_panel="Compute")
 app.add_typer(tunnel_app, name="tunnel", rich_help_panel="Compute")

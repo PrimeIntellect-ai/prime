@@ -261,3 +261,109 @@ class TestPodsCreate:
         assert captured["pod_config"]["team"] == {"teamId": "team-123"}
         assert captured["pod_config"]["teamMemberIds"] == ["user-2"]
         assert "sharedWithTeam" not in captured["pod_config"]
+
+    def test_create_preserves_equals_in_env_values(
+        self,
+        temp_home: None,
+        disable_update_check: None,
+        mock_pod_availability: None,
+        tmp_path: Any,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        config_dir = tmp_path / ".prime"
+        config_dir.mkdir()
+        (config_dir / "config.json").write_text(
+            json.dumps(
+                {
+                    "api_key": "",
+                    "team_id": None,
+                    "team_name": None,
+                    "team_role": None,
+                    "user_id": "user-1",
+                    "base_url": "https://api.primeintellect.ai",
+                    "frontend_url": "https://app.primeintellect.ai",
+                    "inference_url": "https://api.pinference.ai/api/v1",
+                    "ssh_key_path": str(tmp_path / ".ssh" / "id_rsa"),
+                    "current_environment": "production",
+                    "share_resources_with_team": False,
+                }
+            )
+        )
+
+        captured: dict[str, Any] = {}
+
+        def mock_create(self: Any, pod_config: dict) -> Any:
+            captured["pod_config"] = pod_config
+            return type("PodResult", (), {"id": "pod-env"})()
+
+        monkeypatch.setattr("prime_cli.commands.pods.PodsClient.create", mock_create)
+
+        result = runner.invoke(
+            app,
+            [
+                "pods",
+                "create",
+                "--cloud-id",
+                "cloud-ctx",
+                "--name",
+                "env-pod",
+                "--disk-size",
+                "20",
+                "--vcpus",
+                "8",
+                "--memory",
+                "16",
+                "--image",
+                "ubuntu",
+                "--env",
+                "DATABASE_URL=postgres://u:p@h/db?ssl=true",
+                "--env",
+                "FLAGS=a=b=c",
+                "--yes",
+            ],
+            env=TEST_ENV,
+        )
+
+        assert result.exit_code == 0, result.output
+        assert captured["pod_config"]["pod"]["envVars"] == [
+            {"key": "DATABASE_URL", "value": "postgres://u:p@h/db?ssl=true"},
+            {"key": "FLAGS", "value": "a=b=c"},
+        ]
+
+    def test_create_rejects_env_without_equals(
+        self,
+        temp_home: None,
+        disable_update_check: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            "prime_cli.commands.pods.AvailabilityClient.get",
+            lambda self: pytest.fail("availability should not be fetched for invalid env"),
+        )
+
+        result = runner.invoke(
+            app,
+            [
+                "pods",
+                "create",
+                "--cloud-id",
+                "cloud-ctx",
+                "--name",
+                "bad-env-pod",
+                "--disk-size",
+                "20",
+                "--vcpus",
+                "8",
+                "--memory",
+                "16",
+                "--image",
+                "ubuntu",
+                "--env",
+                "NOT_A_PAIR",
+                "--yes",
+            ],
+            env=TEST_ENV,
+        )
+
+        assert result.exit_code == 1, result.output
+        assert "KEY=VALUE" in result.output

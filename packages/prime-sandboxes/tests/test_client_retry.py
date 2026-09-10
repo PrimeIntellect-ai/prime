@@ -1,7 +1,9 @@
 """Tests for retry logic on transient connection errors."""
 
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, call
 
 import httpx
 import pytest
@@ -9,11 +11,73 @@ import pytest
 from prime_sandboxes.core.client import APIClient, APIError, AsyncAPIClient
 from prime_sandboxes.models import CreateSandboxRequest
 from prime_sandboxes.sandbox import (
+    MAX_409_RETRIES,
+    RETRY_409_BASE_DELAY,
     AsyncSandboxAuthCache,
     AsyncSandboxClient,
     SandboxAuthCache,
     SandboxClient,
 )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("client_type", [SandboxClient, AsyncSandboxClient])
+@pytest.mark.parametrize("upload_method", ["upload_file", "upload_bytes"])
+@pytest.mark.parametrize(
+    "failures, first_status", [(1, None), (MAX_409_RETRIES, None), (MAX_409_RETRIES, 503)]
+)
+async def test_upload_retries_read_error(
+    monkeypatch, tmp_path, client_type, upload_method, failures, first_status
+):
+    payload = bytes(range(256)) * 256
+    local_path = tmp_path / "upload.pdf"
+    local_path.write_bytes(payload)
+    destination = "/workspace/upload.pdf"
+    request = httpx.Request("POST", "https://gateway.example/upload")
+    errors = [httpx.ReadError("", request=request) for _ in range(failures)]
+    if first_status:
+        errors[0] = httpx.HTTPStatusError(
+            "temporary error",
+            request=request,
+            response=httpx.Response(first_status, request=request),
+        )
+    response = httpx.Response(
+        200,
+        request=request,
+        json={
+            "success": True,
+            "path": destination,
+            "size": len(payload),
+            "timestamp": "2026-01-01T00:00:00Z",
+        },
+    )
+    is_async = client_type is AsyncSandboxClient
+    mock_type = AsyncMock if is_async else Mock
+    sleep = mock_type()
+    monkeypatch.setattr(
+        "prime_sandboxes.sandbox.asyncio.sleep"
+        if is_async
+        else "prime_sandboxes.sandbox.time.sleep",
+        sleep,
+    )
+    client = client_type.__new__(client_type)
+    client._auth_cache = SimpleNamespace(get_or_refresh=mock_type(return_value=_auth_response()))
+    client._gateway_post = mock_type(side_effect=[*errors, response])
+    args = (str(local_path),) if upload_method == "upload_file" else (payload, local_path.name)
+    exhausted = failures == MAX_409_RETRIES
+    with pytest.raises(APIError, match="ReadError") if exhausted else nullcontext() as error:
+        result = getattr(client, upload_method)("sandbox-1", destination, *args)
+        if is_async:
+            result = await result
+        assert result.success
+    if exhausted:
+        assert error.value.__cause__ is errors[-1]
+    attempts = min(failures + 1, MAX_409_RETRIES)
+    assert client._gateway_post.call_count == attempts
+    assert sleep.call_args_list == [call(RETRY_409_BASE_DELAY * 2**i) for i in range(attempts - 1)]
+    for attempt in client._gateway_post.call_args_list:
+        assert attempt.kwargs["files"]["file"] == (local_path.name, payload)
+        assert attempt.kwargs["params"] == {"path": destination, "sandbox_id": "sandbox-1"}
 
 
 class FailThenSucceedTransport(httpx.BaseTransport):

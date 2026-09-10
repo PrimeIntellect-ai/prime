@@ -14,8 +14,9 @@ Mirrors the server's fallback (platform ``backend/app/utils/environment_runtime.
 from __future__ import annotations
 
 import re
-from typing import Iterable, List, Optional
+from typing import Any, Iterable, List, Optional
 
+from packaging.markers import Marker, Variable
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.version import InvalidVersion, Version
 
@@ -27,8 +28,8 @@ VERIFIERS_V1_MIN_VERSION = Version("0.2.0")
 
 _RUNTIME_OPTIONS = {"v0": VERIFIERS_V0, "v1": VERIFIERS_V1}
 
-# packaging serializes markers canonically (bare variables, quoted values), so
-# quoted literals are blanked before looking for the `extra` variable.
+# Fallback only, when packaging exposes no parsed marker tree: the serialized
+# form is lossy (embedded double quotes are not re-escaped), so the tree wins.
 _EXTRA_MARKER = re.compile(r"\bextra\b")
 _QUOTED_LITERAL = re.compile(r"\"[^\"]*\"|'[^']*'")
 
@@ -46,11 +47,29 @@ def parse_runtime_option(value: Optional[str]) -> Optional[str]:
     return runtime
 
 
+def _marker_mentions_extra(marker: Marker) -> bool:
+    """True when the marker compares the ``extra`` *variable* anywhere. Walks the
+    parsed tree (nested ``(Variable, Op, Value)`` triples joined by and/or), so a
+    value containing the word never counts, however it is quoted."""
+    tree = getattr(marker, "_markers", None)
+    if tree is None:
+        return bool(_EXTRA_MARKER.search(_QUOTED_LITERAL.sub('""', str(marker))))
+
+    def walk(node: Any) -> bool:
+        if isinstance(node, list):
+            return any(walk(child) for child in node)
+        if isinstance(node, tuple):
+            return any(isinstance(o, Variable) and o.value == "extra" for o in node)
+        return False
+
+    return walk(tree)
+
+
 def _is_extra_guarded(requirement: Requirement) -> bool:
     """True when only an ``extra`` pulls the requirement in (its marker is
     false with no extra selected). Markers without ``extra`` are not judged."""
     marker = requirement.marker
-    if marker is None or not _EXTRA_MARKER.search(_QUOTED_LITERAL.sub('""', str(marker))):
+    if marker is None or not _marker_mentions_extra(marker):
         return False
     try:
         return not marker.evaluate({"extra": ""})

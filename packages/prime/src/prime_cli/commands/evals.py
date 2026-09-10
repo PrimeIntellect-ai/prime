@@ -1,5 +1,4 @@
 import argparse
-import inspect
 import json
 import re
 import time
@@ -32,6 +31,7 @@ from ..utils.hosted_eval import (
     clean_logs,
     get_new_log_lines,
 )
+from ..utils.projects import resolve_project_id
 from ..verifiers_bridge import (
     DEFAULT_ENV_DIR_PATH,
     DEFAULT_MODEL,
@@ -563,7 +563,9 @@ def _build_hosted_evaluation_payload(config: HostedEvalConfig) -> dict[str, Any]
 
 
 def _create_hosted_evaluations(
-    config: HostedEvalConfig, environment_ids: Optional[list[str]] = None
+    config: HostedEvalConfig,
+    environment_ids: Optional[list[str]] = None,
+    project_id: Optional[str] = None,
 ) -> dict[str, Any]:
     client = APIClient()
     payload = _build_hosted_evaluation_payload(config)
@@ -573,6 +575,8 @@ def _create_hosted_evaluations(
 
     if client.config.team_id:
         payload["team_id"] = client.config.team_id
+    if project_id is not None:
+        payload["project_id"] = project_id
 
     created = client.post("/hosted-evaluations", json=payload)
     evaluation_id = created.get("evaluation_id")
@@ -1013,7 +1017,7 @@ def _resolve_eval_viewer_url(evaluation_id: str, response: Optional[dict[str, An
 def _push_samples_with_progress(
     client: EvalsClient, evaluation_id: str, samples: list[dict[str, Any]]
 ) -> None:
-    if not console.is_terminal or not _push_samples_accepts_progress_callback(client):
+    if not console.is_terminal:
         client.push_samples(evaluation_id, samples)
         return
 
@@ -1024,17 +1028,6 @@ def _push_samples_with_progress(
             samples,
             progress_callback=lambda uploaded: progress.update(task_id, advance=uploaded),
         )
-
-
-def _push_samples_accepts_progress_callback(client: EvalsClient) -> bool:
-    try:
-        parameters = inspect.signature(client.push_samples).parameters.values()
-    except (TypeError, ValueError):
-        return False
-    return any(
-        parameter.name == "progress_callback" or parameter.kind is inspect.Parameter.VAR_KEYWORD
-        for parameter in parameters
-    )
 
 
 def _require_published_environment_for_eval_push(env_name: str, eval_path: Path) -> None:
@@ -1056,6 +1049,8 @@ def _push_single_eval(
     eval_id: Optional[str],
     is_public: bool = False,
     name: Optional[str] = None,
+    project_id: Optional[str] = None,
+    clear_project: bool = False,
 ) -> str:
     path = _validate_eval_path(config_path)
     eval_data = _load_eval_directory(path)
@@ -1093,6 +1088,8 @@ def _push_single_eval(
                 metadata=eval_data.get("metadata"),
                 metrics=eval_data.get("metrics"),
                 tags=eval_data.get("tags", []),
+                project_id=project_id,
+                clear_project=clear_project,
             )
             console.print(f"[green]✓ Updated evaluation:[/green] {eval_id}")
         except Exception as e:
@@ -1111,6 +1108,7 @@ def _push_single_eval(
             metadata=eval_data.get("metadata"),
             metrics=eval_data.get("metrics"),
             tags=eval_data.get("tags", []),
+            project_id=project_id,
             is_public=is_public,
         )
 
@@ -1222,6 +1220,16 @@ def push_eval(
         "--public",
         help="Make the pushed evaluation public. Evaluations are private by default.",
     ),
+    project: Optional[str] = typer.Option(
+        None,
+        "--project",
+        help="Project ID or slug. Defaults to the active project for this workspace.",
+    ),
+    no_project: bool = typer.Option(
+        False,
+        "--no-project",
+        help="Do not attach this evaluation to the active project.",
+    ),
 ) -> None:
     """Push evaluation data to Prime Evals.
 
@@ -1252,10 +1260,26 @@ def push_eval(
             console.print("  prime eval push outputs/evals/env--model/run-id --eval-id <eval-id>")
             raise typer.Exit(1)
 
+        project_id = resolve_project_id(
+            project,
+            no_project=no_project,
+            use_active_project=eval_id is None,
+        )
+        clear_project = bool(eval_id and no_project)
+
         if config_path is None:
             current_dir = Path(".")
             if _has_eval_files(current_dir):
-                result_eval_id = _push_single_eval(".", env_id, run_id, eval_id, is_public, name)
+                result_eval_id = _push_single_eval(
+                    ".",
+                    env_id,
+                    run_id,
+                    eval_id,
+                    is_public,
+                    name,
+                    project_id,
+                    clear_project,
+                )
                 if output == "json":
                     console.print()
                     output_data_as_json({"evaluation_id": result_eval_id}, console)
@@ -1279,7 +1303,14 @@ def push_eval(
             for eval_dir in eval_dirs:
                 try:
                     result_eval_id = _push_single_eval(
-                        str(eval_dir), env_id, run_id, eval_id, is_public, name
+                        str(eval_dir),
+                        env_id,
+                        run_id,
+                        eval_id,
+                        is_public,
+                        name,
+                        project_id,
+                        clear_project,
                     )
                     results.append(
                         {"path": str(eval_dir), "eval_id": result_eval_id, "status": "success"}
@@ -1303,7 +1334,16 @@ def push_eval(
 
             return
 
-        result_eval_id = _push_single_eval(config_path, env_id, run_id, eval_id, is_public, name)
+        result_eval_id = _push_single_eval(
+            config_path,
+            env_id,
+            run_id,
+            eval_id,
+            is_public,
+            name,
+            project_id,
+            clear_project,
+        )
 
         if output == "json":
             console.print()
@@ -1471,6 +1511,16 @@ def run_eval_cmd(
         "--eval-name",
         help="Custom name for the hosted evaluation",
     ),
+    project: Optional[str] = typer.Option(
+        None,
+        "--project",
+        help="Project ID or slug. Defaults to the active project for this workspace.",
+    ),
+    no_project: bool = typer.Option(
+        False,
+        "--no-project",
+        help="Do not attach this evaluation to the active project.",
+    ),
 ) -> None:
     """Run an evaluation with local-first environment resolution."""
     passthrough_args = list(ctx.args)
@@ -1490,6 +1540,15 @@ def run_eval_cmd(
         raise typer.Exit(2)
 
     env_dir_path: Optional[str] = None
+    try:
+        project_id = resolve_project_id(
+            project,
+            no_project=no_project,
+            use_active_project=hosted or not skip_upload,
+        )
+    except APIError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(1) from exc
     poll_interval_was_provided = (
         ctx.get_parameter_source("poll_interval") == ParameterSource.COMMANDLINE
     )
@@ -1809,10 +1868,12 @@ def run_eval_cmd(
                     api_base_url=target.get("api_base_url"),
                     api_key_var=target.get("api_key_var"),
                 )
-                result = _create_hosted_evaluations(
-                    hosted_config,
-                    environment_ids=group["environment_ids"],
-                )
+                hosted_kwargs: dict[str, Any] = {
+                    "environment_ids": group["environment_ids"],
+                }
+                if project_id is not None:
+                    hosted_kwargs["project_id"] = project_id
+                result = _create_hosted_evaluations(hosted_config, **hosted_kwargs)
                 all_platform_slugs.extend(group["platform_slugs"])
                 all_evaluation_ids.extend(result.get("evaluation_ids") or [result["evaluation_id"]])
         except APIError as exc:
@@ -1852,4 +1913,6 @@ def run_eval_cmd(
         passthrough_args=local_passthrough_args,
         skip_upload=skip_upload,
         env_path=env_path,
+        project_id=project_id,
+        use_active_project=False,
     )

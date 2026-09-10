@@ -125,45 +125,6 @@ def test_sample_model_with_metadata():
     assert sample.info == {"batch": 1}
 
 
-def test_lookup_environment_by_slug_uses_owner_aware_detail_endpoint():
-    calls = []
-
-    class FakeAPIClient:
-        def get(self, endpoint):
-            calls.append(("get", endpoint))
-            return {"data": {"id": "env-123"}}
-
-        def post(self, *_args, **_kwargs):
-            raise AssertionError("owner/name lookup must not use team_slug lookup")
-
-    client = EvalsClient(FakeAPIClient())
-
-    env_id = client._lookup_environment_by_slug("d42me", "opencode-cp")
-
-    assert env_id == "env-123"
-    assert calls == [("get", "/environmentshub/d42me/opencode-cp/@latest")]
-
-
-def test_async_lookup_environment_by_slug_uses_owner_aware_detail_endpoint():
-    calls = []
-
-    class FakeAsyncAPIClient:
-        async def get(self, endpoint):
-            calls.append(("get", endpoint))
-            return {"data": {"id": "env-123"}}
-
-        async def post(self, *_args, **_kwargs):
-            raise AssertionError("owner/name lookup must not use team_slug lookup")
-
-    client = AsyncEvalsClient.__new__(AsyncEvalsClient)
-    client.client = FakeAsyncAPIClient()
-
-    env_id = asyncio.run(client._lookup_environment_by_slug("d42me", "opencode-cp"))
-
-    assert env_id == "env-123"
-    assert calls == [("get", "/environmentshub/d42me/opencode-cp/@latest")]
-
-
 def test_push_samples_reports_progress_and_reuses_http_client(monkeypatch):
     posts = []
     created_clients = []
@@ -269,6 +230,101 @@ def test_evals_client_context_manager():
         assert hasattr(client, "close")
     except Exception:
         pass  # Expected to fail without proper initialization
+
+
+def test_lookup_environment_by_slug_uses_owner_slug_payload():
+    captured = {}
+
+    class DummyHTTPClient:
+        def post(self, endpoint, json=None):
+            captured["endpoint"] = endpoint
+            captured["json"] = json
+            return {"data": {"id": "env-123"}}
+
+    client = EvalsClient.__new__(EvalsClient)
+    client.client = DummyHTTPClient()
+
+    assert client._lookup_environment_by_slug("alice", "gsm8k") == "env-123"
+    assert captured == {
+        "endpoint": "/environmentshub/lookup",
+        "json": {"name": "gsm8k", "owner_slug": "alice"},
+    }
+
+
+def test_async_lookup_environment_by_slug_uses_owner_slug_payload():
+    captured = {}
+
+    class DummyHTTPClient:
+        async def post(self, endpoint, json=None):
+            captured["endpoint"] = endpoint
+            captured["json"] = json
+            return {"data": {"id": "env-123"}}
+
+    client = AsyncEvalsClient.__new__(AsyncEvalsClient)
+    client.client = DummyHTTPClient()
+
+    result = asyncio.run(client._lookup_environment_by_slug("alice", "gsm8k"))
+
+    assert result == "env-123"
+    assert captured == {
+        "endpoint": "/environmentshub/lookup",
+        "json": {"name": "gsm8k", "owner_slug": "alice"},
+    }
+
+
+def test_create_evaluation_sends_project_id_payload():
+    captured = {}
+
+    class DummyConfig:
+        team_id = None
+
+    class DummyHTTPClient:
+        config = DummyConfig()
+
+        def request(self, method, endpoint, json=None, params=None):
+            captured["method"] = method
+            captured["endpoint"] = endpoint
+            captured["json"] = json
+            captured["params"] = params
+            return {"evaluation_id": "eval-123"}
+
+    client = EvalsClient.__new__(EvalsClient)
+    client.client = DummyHTTPClient()
+
+    response = client.create_evaluation(
+        name="gsm8k",
+        run_id="run-123",
+        model_name="gpt-4o-mini",
+        project_id="project-123",
+    )
+
+    assert response == {"evaluation_id": "eval-123"}
+    assert captured["method"] == "POST"
+    assert captured["endpoint"] == "/evaluations/"
+    assert captured["json"]["project_id"] == "project-123"
+    assert "projectId" not in captured["json"]
+
+
+def test_update_evaluation_clear_project_sends_null_project_id():
+    captured = {}
+
+    class DummyHTTPClient:
+        def request(self, method, endpoint, json=None, params=None):
+            captured["method"] = method
+            captured["endpoint"] = endpoint
+            captured["json"] = json
+            captured["params"] = params
+            return {"evaluation_id": "eval-123"}
+
+    client = EvalsClient.__new__(EvalsClient)
+    client.client = DummyHTTPClient()
+
+    response = client.update_evaluation("eval-123", clear_project=True)
+
+    assert response == {"evaluation_id": "eval-123"}
+    assert captured["method"] == "PUT"
+    assert captured["endpoint"] == "/evaluations/eval-123"
+    assert captured["json"] == {"project_id": None}
 
 
 def test_evaluation_model_minimal():

@@ -35,7 +35,6 @@ USER_ID = "cmkrcib4x00004kjyxq48nltd"
 TEAM_ID = "team-abc123"
 
 TEST_ENV: dict[str, str] = {
-    "COLUMNS": "200",
     "LINES": "50",
     "NO_COLOR": "1",
     "PRIME_DISABLE_VERSION_CHECK": "1",
@@ -494,7 +493,10 @@ def run_images_list(monkeypatch) -> Callable[..., Any]:
         monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
         monkeypatch.setattr(images_cmd, "config", _StubConfig(team_id=team_id))
         monkeypatch.setattr(images_cmd, "ImageClient", DummyImageClient)
-        return runner.invoke(app, ["images", "list"], env=env or TEST_ENV)
+        command_env = env or TEST_ENV
+        monkeypatch.setattr(images_cmd.console, "_width", int(command_env.get("COLUMNS", "200")))
+        monkeypatch.setattr(images_cmd.console, "_height", int(command_env.get("LINES", "50")))
+        return runner.invoke(app, ["images", "list"], env=command_env)
 
     return _run
 
@@ -806,7 +808,7 @@ def test_list_platform_image_forwards_owner_scope(monkeypatch):
     assert result.exit_code == 0, result.output
     assert captured["params"].get("platform") is True
     assert captured["params"].get("team_id") is None
-    assert "Platform Docker Images" in result.output
+    assert "Platform Images" in result.output
 
 
 def test_list_platform_image_ignores_team_context(monkeypatch):
@@ -820,7 +822,7 @@ def test_list_platform_image_ignores_team_context(monkeypatch):
     assert captured["params"].get("platform") is True
     assert captured["params"].get("team_id") is None
     assert "Team context ignored" in result.output
-    assert "Platform Docker Images" in result.output
+    assert "Platform Images" in result.output
     # Platform listings never render the team-scoped Owner column.
     assert "Owner" not in result.output
 

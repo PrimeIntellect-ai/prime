@@ -5,9 +5,8 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
-from rich.markup import escape
 from rich.text import Text
 from textual import events, on, work
 from textual.app import ComposeResult
@@ -1291,7 +1290,8 @@ class RolloutViewer(Container):
         )
         return Collapsible(
             *children,
-            title=escape(section.title),
+            # Textual accepts Rich Text titles, but annotates this parameter as str.
+            title=cast(str, Text(section.title)),
             collapsed=collapsed,
             classes=section.classes,
         )

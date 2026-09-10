@@ -27,7 +27,10 @@ VERIFIERS_V1_MIN_VERSION = Version("0.2.0")
 
 _RUNTIME_OPTIONS = {"v0": VERIFIERS_V0, "v1": VERIFIERS_V1}
 
+# packaging serializes markers canonically (bare variables, quoted values), so
+# quoted literals are blanked before looking for the `extra` variable.
 _EXTRA_MARKER = re.compile(r"\bextra\b")
+_QUOTED_LITERAL = re.compile(r"\"[^\"]*\"|'[^']*'")
 
 
 def parse_runtime_option(value: Optional[str]) -> Optional[str]:
@@ -47,7 +50,7 @@ def _is_extra_guarded(requirement: Requirement) -> bool:
     """True when only an ``extra`` pulls the requirement in (its marker is
     false with no extra selected). Markers without ``extra`` are not judged."""
     marker = requirement.marker
-    if marker is None or not _EXTRA_MARKER.search(str(marker)):
+    if marker is None or not _EXTRA_MARKER.search(_QUOTED_LITERAL.sub('""', str(marker))):
         return False
     try:
         return not marker.evaluate({"extra": ""})

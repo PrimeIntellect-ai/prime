@@ -25,6 +25,18 @@ from typer.testing import CliRunner
         (["verifiers>=0.1", "verifiers>=0.2"], VERIFIERS_V1),
         (["verifiers==0.2.*"], VERIFIERS_V1),
         (["not a requirement", "verifiers~=0.3.0"], VERIFIERS_V1),
+        # Extra-only entries declare nothing.
+        (['verifiers<0.4,>=0.3; extra == "rl"'], None),
+        (['verifiers>=0.3; python_version >= "3.11" and extra == "rl"'], None),
+        (["verifiers>=0.1.5,<0.2", 'verifiers>=0.3; extra == "rl"'], VERIFIERS_V0),
+        # "extra" inside a quoted value is not the extra variable.
+        (['verifiers>=0.3; platform_release == "6.8.0-extra"'], VERIFIERS_V1),
+        # str(marker) is lossy for embedded double quotes; the parsed tree is not.
+        (["verifiers>=0.3; platform_release == '6.8.0-\"extra\"'"], VERIFIERS_V1),
+        (['verifiers>=0.2; extra == "extra"'], None),
+        # Markers that hold without an extra count.
+        (['verifiers>=0.2; extra != "rl"'], VERIFIERS_V1),
+        (['verifiers>=0.2; extra == "rl" or python_version >= "3"'], VERIFIERS_V1),
     ],
 )
 def test_classify_from_metadata(requirements, expected):

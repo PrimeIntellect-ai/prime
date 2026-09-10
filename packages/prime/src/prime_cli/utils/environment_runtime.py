@@ -3,17 +3,20 @@
 The Hub stores whatever the CLI declares (``--runtime v0|v1``) as the package's
 runtime. Without the flag, the package's own ``verifiers`` requirement decides:
 v1 shipped as verifiers 0.2.0, so a lower bound at or above 0.2.0 declares v1
-and any other pin declares v0. No verifiers requirement (or a URL pin, which
-says nothing about the API) means no hint is sent and the Hub lists the
-package as Unclassified until its owner sets the runtime.
+and any other pin declares v0. Entries only an ``extra`` pulls in are ignored.
+No verifiers requirement (or a URL pin, which says nothing about the API) means
+no hint is sent and the Hub lists the package as Unclassified until its owner
+sets the runtime.
 
 Mirrors the server's fallback (platform ``backend/app/utils/environment_runtime.py``).
 """
 
 from __future__ import annotations
 
-from typing import Iterable, List, Optional
+import re
+from typing import Any, Iterable, List, Optional
 
+from packaging.markers import Marker, Variable
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.version import InvalidVersion, Version
 
@@ -24,6 +27,11 @@ VERIFIERS_V1 = "VERIFIERS_V1"
 VERIFIERS_V1_MIN_VERSION = Version("0.2.0")
 
 _RUNTIME_OPTIONS = {"v0": VERIFIERS_V0, "v1": VERIFIERS_V1}
+
+# Fallback only, when packaging exposes no parsed marker tree: the serialized
+# form is lossy (embedded double quotes are not re-escaped), so the tree wins.
+_EXTRA_MARKER = re.compile(r"\bextra\b")
+_QUOTED_LITERAL = re.compile(r"\"[^\"]*\"|'[^']*'")
 
 
 def parse_runtime_option(value: Optional[str]) -> Optional[str]:
@@ -39,16 +47,47 @@ def parse_runtime_option(value: Optional[str]) -> Optional[str]:
     return runtime
 
 
+def _marker_mentions_extra(marker: Marker) -> bool:
+    """True when the marker compares the ``extra`` *variable* anywhere. Walks the
+    parsed tree (nested ``(Variable, Op, Value)`` triples joined by and/or), so a
+    value containing the word never counts, however it is quoted."""
+    tree = getattr(marker, "_markers", None)
+    if tree is None:
+        return bool(_EXTRA_MARKER.search(_QUOTED_LITERAL.sub('""', str(marker))))
+
+    def walk(node: Any) -> bool:
+        if isinstance(node, list):
+            return any(walk(child) for child in node)
+        if isinstance(node, tuple):
+            return any(isinstance(o, Variable) and o.value == "extra" for o in node)
+        return False
+
+    return walk(tree)
+
+
+def _is_extra_guarded(requirement: Requirement) -> bool:
+    """True when only an ``extra`` pulls the requirement in (its marker is
+    false with no extra selected). Markers without ``extra`` are not judged."""
+    marker = requirement.marker
+    if marker is None or not _marker_mentions_extra(marker):
+        return False
+    try:
+        return not marker.evaluate({"extra": ""})
+    except Exception:  # pragma: no cover
+        return True
+
+
 def find_verifiers_requirement(requirement_strings: Iterable[str]) -> Optional[Requirement]:
-    """Effective ``verifiers`` requirement: unconditional entries beat marker-guarded
-    ones, and among those the highest floor wins (repeated entries intersect)."""
+    """Effective ``verifiers`` requirement: extra-only entries are ignored,
+    unconditional entries beat marker-guarded ones, and among those the highest
+    floor wins (repeated entries intersect)."""
     requirements: List[Requirement] = []
     for text in requirement_strings:
         try:
             requirement = Requirement(text.strip())
         except InvalidRequirement:
             continue
-        if requirement.name.lower() == "verifiers":
+        if requirement.name.lower() == "verifiers" and not _is_extra_guarded(requirement):
             requirements.append(requirement)
     if not requirements:
         return None

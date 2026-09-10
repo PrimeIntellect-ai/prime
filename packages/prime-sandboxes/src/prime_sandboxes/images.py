@@ -6,7 +6,7 @@ from .core import APIClient, AsyncAPIClient
 from .models import (
     BuildImageRequest,
     BuildImageResponse,
-    BulkImageTransferResponse,
+    BulkBuildImageResponse,
     ImageListResponse,
     ImageVisibility,
     UpdateImagesRequest,
@@ -71,7 +71,7 @@ class ImageClient:
 
     def initiate_build(
         self, request: BuildImageRequest
-    ) -> BuildImageResponse | BulkImageTransferResponse:
+    ) -> BuildImageResponse | BulkBuildImageResponse:
         """Queue a linux/amd64 Dockerfile build or public-registry VM build.
 
         Docker Hub source requests are public, org-less platform builds. They
@@ -80,7 +80,7 @@ class ImageClient:
         payload = request.model_dump(by_alias=False, exclude_none=True)
         response = self.client.request("POST", "/images/build", json=payload)
         if "results" in response:
-            return BulkImageTransferResponse.model_validate(response)
+            return BulkBuildImageResponse.model_validate(response)
         return BuildImageResponse.model_validate(
             response,
             context={"requires_upload": request.source_image is None},
@@ -96,7 +96,7 @@ class ImageClient:
         team_id: Optional[str] = None,
         visibility: Optional[ImageVisibility] = None,
         owner_scope: Optional[Literal["platform"]] = None,
-    ) -> BuildImageResponse | BulkImageTransferResponse:
+    ) -> BuildImageResponse | BulkBuildImageResponse:
         """Build VM images directly from allowed public registry references.
 
         Only ``linux/amd64`` is supported. Docker Hub sources always build as
@@ -119,24 +119,6 @@ class ImageClient:
             "POST",
             f"/images/build/{build_id}/start",
             json={"context_uploaded": True},
-        )
-
-    def build_vm_image(
-        self,
-        image_name: str,
-        image_tag: str,
-        *,
-        team_id: Optional[str] = None,
-        owner_scope: Optional[Literal["platform"]] = None,
-    ) -> dict:
-        """Build a VM image from an existing container image."""
-        payload = {"teamId": team_id} if team_id else {}
-        if owner_scope:
-            payload["ownerScope"] = owner_scope
-        return self.client.request(
-            "POST",
-            f"/images/{image_name}/{image_tag}/vm-build",
-            json=payload,
         )
 
     def get_build_status(self, build_id: str) -> dict:
@@ -183,7 +165,7 @@ class AsyncImageClient:
 
     async def initiate_build(
         self, request: BuildImageRequest
-    ) -> BuildImageResponse | BulkImageTransferResponse:
+    ) -> BuildImageResponse | BulkBuildImageResponse:
         """Queue a linux/amd64 Dockerfile build or public-registry VM build.
 
         Docker Hub source requests are public, org-less platform builds. They
@@ -192,7 +174,7 @@ class AsyncImageClient:
         payload = request.model_dump(by_alias=False, exclude_none=True)
         response = await self.client.request("POST", "/images/build", json=payload)
         if "results" in response:
-            return BulkImageTransferResponse.model_validate(response)
+            return BulkBuildImageResponse.model_validate(response)
         return BuildImageResponse.model_validate(
             response,
             context={"requires_upload": request.source_image is None},
@@ -208,7 +190,7 @@ class AsyncImageClient:
         team_id: Optional[str] = None,
         visibility: Optional[ImageVisibility] = None,
         owner_scope: Optional[Literal["platform"]] = None,
-    ) -> BuildImageResponse | BulkImageTransferResponse:
+    ) -> BuildImageResponse | BulkBuildImageResponse:
         """Build VM images directly from allowed public registry references.
 
         Only ``linux/amd64`` is supported. Docker Hub sources always build as
@@ -231,24 +213,6 @@ class AsyncImageClient:
             "POST",
             f"/images/build/{build_id}/start",
             json={"context_uploaded": True},
-        )
-
-    async def build_vm_image(
-        self,
-        image_name: str,
-        image_tag: str,
-        *,
-        team_id: Optional[str] = None,
-        owner_scope: Optional[Literal["platform"]] = None,
-    ) -> dict:
-        """Build a VM image from an existing container image."""
-        payload = {"teamId": team_id} if team_id else {}
-        if owner_scope:
-            payload["ownerScope"] = owner_scope
-        return await self.client.request(
-            "POST",
-            f"/images/{image_name}/{image_tag}/vm-build",
-            json=payload,
         )
 
     async def get_build_status(self, build_id: str) -> dict:

@@ -11,7 +11,7 @@ import typer
 from prime_sandboxes import (
     APIClient,
     APIError,
-    BulkImageTransferResponse,
+    BulkBuildImageResponse,
     Config,
     ImageArtifactType,
     ImageBuildStatus,
@@ -342,16 +342,19 @@ def push_image(
     platform_image: bool = typer.Option(
         False,
         "--platform-image",
-        help="Build explicit non-Docker-Hub sources as platform image artifacts (admins only)",
+        help="Build Dockerfiles or non-Docker-Hub sources as platform VM images (admins only)",
     ),
 ):
     """
-    Build VM and container image artifacts in the Prime Intellect registry.
+    Build VM image artifacts on Prime Intellect.
 
     New image tags are private by default. Re-pushing an existing tag keeps
     its current visibility unless --public or --private is provided. Docker Hub
     sources always become public, org-less platform images. They do not accept
     a destination override or --private. Configured team context is ignored.
+
+    Allowed registries: Docker Hub, ghcr.io, quay.io, public.ecr.aws,
+    registry.k8s.io, and mcr.microsoft.com. Google-hosted registries are rejected.
 
     \b
     Examples:
@@ -481,13 +484,15 @@ def push_image(
                 console.print(f"[red]Error: Failed to initiate VM image build: {e}[/red]")
                 raise typer.Exit(1)
 
-            if isinstance(response, BulkImageTransferResponse):
-                successful_results = [result for result in response.results if result.build_id]
-                build_ids = [result.build_id for result in successful_results if result.build_id]
-                failed_results = response.failed
-                image_path = (
-                    successful_results[0].full_image_path if len(successful_results) == 1 else None
-                )
+            if isinstance(response, BulkBuildImageResponse):
+                builds = [result.build for result in response.results if result.build is not None]
+                build_ids = [
+                    build_id
+                    for build in builds
+                    for build_id in (build.build_ids or [build.build_id])
+                ]
+                failed_results = [result for result in response.results if result.build is None]
+                image_path = builds[0].full_image_path if len(builds) == 1 else None
             else:
                 build_ids = response.build_ids or [response.build_id]
                 failed_results = []
@@ -540,13 +545,12 @@ def push_image(
 
         if platform_image:
             console.print(
-                f"[bold blue]Building platform VM and container artifacts:[/bold blue] "
+                f"[bold blue]Building platform VM image artifacts:[/bold blue] "
                 f"{image_name}:{image_tag}"
             )
         else:
             console.print(
-                f"[bold blue]Building VM and container artifacts:[/bold blue] "
-                f"{image_name}:{image_tag}"
+                f"[bold blue]Building VM image artifacts:[/bold blue] {image_name}:{image_tag}"
             )
         if platform_image:
             if config.team_id:
@@ -718,76 +722,6 @@ app.command("transfer-bulk")(transfer_bulk)
 # Bulk logical-image updates (rename / owner move / visibility) from a JSONL
 # manifest live in images_update_bulk.py.
 app.command("update-bulk")(update_bulk)
-
-
-@app.command("build-vm")
-def build_vm_image(
-    image_reference: str = typer.Argument(
-        ...,
-        help=(
-            "Existing image to build a VM image for "
-            "(e.g., 'myapp:v1.0.0', 'prime/<ownerSlug>/myapp:v1.0.0', or "
-            "'prime/team-{teamId}/myapp:v1.0.0')"
-        ),
-    ),
-    platform_image: bool = typer.Option(
-        False,
-        "--platform-image",
-        help="Build the VM artifact for an org-less platform image (admins only)",
-    ),
-):
-    """
-    Build a VM image from an existing container image.
-
-    Requires a linux/amd64 image. Personal and team builds require VM
-    sandboxes to be enabled for the owning account. For team images, only
-    the image creator or team admins can trigger this. Platform images
-    require a platform admin with sandboxes:update permission.
-
-    \b
-    Examples:
-        prime images build-vm myapp:v1.0.0
-        prime images build-vm prime/alice/myapp:v1.0.0
-        prime images build-vm prime/team-abc123/myapp:v1.0.0
-        prime images build-vm ubuntu:22.04 --platform-image
-    """
-    try:
-        if platform_image:
-            image_name, image_tag = _parse_platform_image_reference(image_reference)
-            team_id = None
-        else:
-            image_name, image_tag, team_id = _parse_mutable_image_reference(image_reference)
-        payload: dict[str, str] = {"teamId": team_id} if team_id else {}
-        if platform_image:
-            payload["ownerScope"] = "platform"
-
-        client = APIClient()
-        response = client.request(
-            "POST",
-            f"/images/{image_name}/{image_tag}/vm-build",
-            json=payload,
-        )
-
-        if platform_image:
-            context = " (platform)"
-        else:
-            context = f" (team: {team_id})" if team_id else ""
-        console.print(
-            f"[green]✓[/green] VM image build queued for {image_name}:{image_tag}{context}"
-        )
-        build_id = response.get("buildId") if isinstance(response, dict) else None
-        if build_id:
-            console.print(f"[bold]Build ID:[/bold] {build_id}")
-        list_command = (
-            "prime images list --platform-image" if platform_image else "prime images list"
-        )
-        console.print(f"Track progress with: {list_command}")
-    except UnauthorizedError:
-        console.print("[red]Error: Not authenticated. Please run 'prime login' first.[/red]")
-        raise typer.Exit(1)
-    except APIError as e:
-        console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1)
 
 
 @app.command("list", epilog=LIST_IMAGES_JSON_HELP)
@@ -1009,19 +943,6 @@ def list_images(
 def _looks_like_registry_host(value: str) -> bool:
     # Docker treats localhost as a registry host even without a dot or port.
     return "." in value or ":" in value or value == "localhost"
-
-
-def _parse_platform_image_reference(image_reference: str) -> tuple[str, str]:
-    """Parse an org-less platform image reference, preserving name namespaces."""
-    if ":" not in image_reference:
-        console.print("[red]Error: Image reference must include a tag (e.g., ubuntu:22.04)[/red]")
-        raise typer.Exit(1)
-
-    image_name, image_tag = image_reference.rsplit(":", 1)
-    if not image_name or not image_tag:
-        console.print("[red]Error: Platform image reference must use image:tag[/red]")
-        raise typer.Exit(1)
-    return image_name, image_tag
 
 
 def _parse_mutable_image_reference(image_reference: str) -> tuple[str, str, Optional[str]]:

@@ -185,7 +185,7 @@ def test_push_platform_image_forces_public_owner_scope(tmp_path, monkeypatch):
         "owner_scope": "platform",
         "visibility": "PUBLIC",
     }
-    assert "Building platform VM and container artifacts" in result.output
+    assert "Building platform VM image artifacts" in result.output
     assert "Owner:" in result.output
     assert "Platform" in result.output
 
@@ -1161,3 +1161,46 @@ def test_push_image_source_image_result_shape_reports_partial_failures(monkeypat
     assert "VM image build" in result.output
     assert "failed" in result.output
     assert "missing:notfound: source image not found" in result.output
+
+
+@pytest.mark.parametrize("failed_count", [0, 1, 2])
+def test_push_source_build_nested_results(monkeypatch, failed_count):
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+    sources = ["ubuntu:22.04", "alpine:3"]
+
+    class DummyAPIClient:
+        def request(self, method, path, json=None, params=None):
+            assert (method, path) == ("POST", "/images/build")
+            assert json["source_image"] == ",".join(sources)
+            assert json["owner_scope"] == "platform"
+            assert json["visibility"] == "PUBLIC"
+            assert "team_id" not in json
+            return {
+                "results": [
+                    {
+                        "sourceImage": source,
+                        "build": {
+                            "build_id": f"build-{i}",
+                            "buildIds": [f"build-{i}"],
+                            "fullImagePath": source,
+                        }
+                        if i >= failed_count
+                        else None,
+                        "error": "source unavailable" if i < failed_count else None,
+                        "retryable": i < failed_count,
+                    }
+                    for i, source in enumerate(sources)
+                ]
+            }
+
+    monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
+    result = runner.invoke(
+        app, ["images", "push", "--source-image", ",".join(sources)], env=TEST_ENV
+    )
+    assert result.exit_code == (1 if failed_count else 0), result.output
+    for i in range(failed_count, 2):
+        assert f"build-{i}" in result.output
+    if failed_count:
+        assert "source unavailable" in result.output
+    if failed_count == 2:
+        assert "Your VM image build is running" not in result.output

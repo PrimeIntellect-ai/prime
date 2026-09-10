@@ -17,6 +17,7 @@ from prime_sandboxes import (
     APIError,
     Config,
     ImageVisibility,
+    SourceImageBuildResult,
     UnauthorizedError,
 )
 from prime_sandboxes.image_references import is_docker_hub_reference
@@ -485,13 +486,13 @@ def _submit_transfer(
                 "invalid response from server "
                 f"(expected one source-build result, got {len(results)})"
             )
-        entry = results[0]
-        if not entry.get("success") or not entry.get("buildId"):
-            error = entry.get("error") or "invalid response from server (source build not queued)"
+        entry = SourceImageBuildResult.model_validate(results[0])
+        if entry.build is None:
+            error = entry.error or "invalid response from server (source build not queued)"
             if any(marker in error.lower() for marker in _QUOTA_DETAIL_MARKERS):
                 raise QuotaExceededError(error)
             raise APIError(error)
-        return entry["buildId"], entry.get("fullImagePath") or spec.image_ref
+        return entry.build.build_id, entry.build.full_image_path
 
     build_id = response.get("build_id") or response.get("buildId")
     if not build_id:
@@ -585,6 +586,9 @@ def transfer_bulk(
 ):
     """
     Build many Prime VM images directly from allowed public registry images.
+
+    Allowed registries: Docker Hub, ghcr.io, quay.io, public.ecr.aws,
+    registry.k8s.io, and mcr.microsoft.com. Google-hosted registries are rejected.
 
     Reads image references from a JSONL manifest (--manifest), a Harbor tasks
     directory (--harbor), or a Hugging Face dataset (--hf), validates

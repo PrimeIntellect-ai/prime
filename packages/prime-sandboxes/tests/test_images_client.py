@@ -9,7 +9,7 @@ from prime_sandboxes import (
     AsyncImageClient,
     BuildImageRequest,
     BuildImageResponse,
-    BulkImageTransferResponse,
+    BulkBuildImageResponse,
     ImageArtifactType,
     ImageBuildStatus,
     ImageClient,
@@ -395,30 +395,13 @@ def test_image_client_transfer_image_accepts_bulk_transfer_response():
         )
     ).transfer_image("ubuntu:22.04,missing:notfound")
 
-    assert isinstance(response, BulkImageTransferResponse)
+    assert isinstance(response, BulkBuildImageResponse)
     assert response.results[0].source_image == "ubuntu:22.04"
-    assert response.results[0].build_id == "build-123"
-    assert response.results[0].full_image_path == "prime/research/ubuntu:22.04"
-    assert response.failed[0].source_image == "missing:notfound"
-    assert response.failed[0].error == "source image not found"
-
-
-def test_image_client_build_vm_image_accepts_platform_owner_scope():
-    captured: dict[str, Any] = {}
-    client = ImageClient(DummyAPIClient({"buildId": "build-123"}, captured))
-
-    response = client.build_vm_image(
-        "org/ubuntu",
-        "22.04",
-        owner_scope="platform",
-    )
-
-    assert captured == {
-        "method": "POST",
-        "path": "/images/org/ubuntu/22.04/vm-build",
-        "json": {"ownerScope": "platform"},
-    }
-    assert response == {"buildId": "build-123"}
+    assert response.results[0].build.build_id == "build-123"
+    assert response.results[0].build.full_image_path == "prime/research/ubuntu:22.04"
+    assert response.results[1].build is None
+    assert response.results[1].source_image == "missing:notfound"
+    assert response.results[1].error == "source image not found"
 
 
 class DummyAsyncAPIClient:
@@ -527,28 +510,6 @@ def test_async_image_client_list_validates_query(kwargs: dict[str, Any]):
         asyncio.run(client.list(**kwargs))
 
     assert captured == {}
-
-
-def test_async_image_client_build_vm_image_accepts_platform_owner_scope():
-    import asyncio
-
-    captured: dict[str, Any] = {}
-    client = AsyncImageClient(DummyAsyncAPIClient({"buildId": "build-123"}, captured))  # type: ignore[arg-type]
-
-    response = asyncio.run(
-        client.build_vm_image(
-            "org/ubuntu",
-            "22.04",
-            owner_scope="platform",
-        )
-    )
-
-    assert captured == {
-        "method": "POST",
-        "path": "/images/org/ubuntu/22.04/vm-build",
-        "json": {"ownerScope": "platform"},
-    }
-    assert response == {"buildId": "build-123"}
 
 
 def _update_images_response(reference: str) -> dict[str, Any]:
@@ -701,3 +662,73 @@ def test_async_image_client_update_images():
     ]
     assert isinstance(response, UpdateImagesResponse)
     assert response.results[0].success
+
+
+@pytest.mark.parametrize("async_client", [False, True])
+@pytest.mark.parametrize("legacy", [False, True])
+def test_source_build_wire_contract(async_client, legacy):
+    build = {
+        "build_id": "build-123",
+        "buildIds": ["build-123"],
+        "upload_url": None,
+        "expires_in": None,
+        "fullImagePath": "ubuntu:22.04",
+        "visibility": "PUBLIC",
+    }
+    success = {"sourceImage": "ubuntu:22.04", "build": build}
+    failure = {
+        "sourceImage": "missing:v1",
+        "build": None,
+        "error": "source unavailable",
+        "retryable": True,
+    }
+    if legacy:
+        success = {
+            "sourceImage": "ubuntu:22.04",
+            "success": True,
+            "buildId": "build-123",
+            "fullImagePath": "ubuntu:22.04",
+            "visibility": "PUBLIC",
+        }
+        failure = {key: value for key, value in failure.items() if key != "build"}
+        failure["success"] = False
+    wire = {"results": [success, failure]}
+    if legacy:
+        wire["failed"] = [failure]
+    captured = {}
+    if async_client:
+        response = asyncio.run(
+            AsyncImageClient(DummyAsyncAPIClient(wire, captured)).transfer_image(
+                "ubuntu:22.04,missing:v1"
+            )
+        )
+    else:
+        response = ImageClient(DummyAPIClient(wire, captured)).transfer_image(
+            "ubuntu:22.04,missing:v1"
+        )
+    assert captured["path"] == "/images/build"
+    assert [item.source_image for item in response.results] == ["ubuntu:22.04", "missing:v1"]
+    assert response.results[0].build.build_id == "build-123"
+    assert response.results[1].build is None
+    assert response.results[1].error == "source unavailable"
+    assert response.results[1].retryable
+    serialized = response.model_dump(by_alias=True)
+    assert set(serialized) == {"results"}
+    assert set(serialized["results"][0]) == {"sourceImage", "build", "error", "retryable"}
+    assert set(serialized["results"][0]["build"]) == set(build)
+    assert serialized["results"][0]["build"]["build_id"] == "build-123"
+
+
+@pytest.mark.parametrize("async_client", [False, True])
+def test_single_source_build_wire_contract(async_client):
+    wire = {"build_id": "build-1", "buildIds": ["build-1"], "fullImagePath": "ubuntu:v1"}
+    if async_client:
+        response = asyncio.run(
+            AsyncImageClient(DummyAsyncAPIClient(wire)).transfer_image("ubuntu:v1")
+        )
+    else:
+        response = ImageClient(DummyAPIClient(wire)).transfer_image("ubuntu:v1")
+    assert isinstance(response, BuildImageResponse)
+    assert response.build_id == "build-1"
+    assert response.upload_url is None
+    assert response.expires_in is None

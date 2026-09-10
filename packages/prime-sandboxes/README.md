@@ -118,15 +118,20 @@ vm_images = [
 
 ## Image Builds
 
-Dockerfile builds create both container and VM artifacts on `linux/amd64`. The
+Dockerfile builds create VM artifacts on `linux/amd64`. The
 initial response includes `upload_url` and `expires_in`; upload the build context
 before calling `start_build`.
 
 Source-image requests build VM artifacts directly from allowed public registry
 images. They do not return upload metadata. A single source returns `build_id`
-and `build_ids`. Comma-separated sources return per-source `results` and
-`failed` entries. The `transfer_image` method name remains available for API
-compatibility:
+and `build_ids`. Comma-separated sources return `BulkBuildImageResponse` with
+ordered `results`: each entry has `source_image`, `build` (a `BuildImageResponse`
+or `None`), `error`, and `retryable`. There are no `success` or `failed` fields.
+The SDK also accepts the old flat bulk response during rollout.
+
+The server uses mixed wire casing: `build_id`, `upload_url`, and `expires_in`,
+but `buildIds`, `fullImagePath`, and `sourceImage`. SDK attributes use snake_case.
+The `transfer_image` method remains a compatibility name for `POST /images/build`:
 
 ```python
 from prime_sandboxes import ImageClient
@@ -141,7 +146,15 @@ org-less platform images automatically. Docker Hub source builds do not accept a
 custom destination, team, or private visibility. One comma-separated request
 cannot mix Docker Hub with other registries. Explicit non-Docker-Hub public
 registries can still use personal or team ownership, custom destinations, and
-public or private visibility.
+public or private visibility. Allowed registries are Docker Hub, `ghcr.io`,
+`quay.io`, `public.ecr.aws`, `registry.k8s.io`, and `mcr.microsoft.com`.
+Google-hosted registries are rejected. Docker-Hub-only multi-source requests
+preserve source names and tags and force PUBLIC platform scope.
+
+Use `prime images push --source-image <reference>` for one or comma-separated
+sources, or `prime images transfer-bulk` for manifests. Dockerfile platform
+publishing uses `prime images push <name>:<tag> --platform-image`; the primary
+build creates its VM artifact without a second publishing step.
 
 ## Authentication
 

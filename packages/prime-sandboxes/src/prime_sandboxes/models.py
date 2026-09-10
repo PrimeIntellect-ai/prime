@@ -551,6 +551,8 @@ class BuildImageRequest(BaseModel):
 
 
 class BuildImageResponse(BaseModel):
+    # Server quirk: build_id/upload_url/expires_in stay snake_case on the wire;
+    # buildIds/fullImagePath use camelCase. buildId is accepted for older backends.
     build_id: str = Field(
         ...,
         alias="build_id",
@@ -573,27 +575,32 @@ class BuildImageResponse(BaseModel):
         return self
 
 
-class TransferImageResult(BaseModel):
-    """Per-source result returned by bulk source-image build requests."""
+class SourceImageBuildResult(BaseModel):
+    """Build result or error for one requested source image."""
 
     source_image: str = Field(..., alias="sourceImage")
-    success: bool
-    build_id: Optional[str] = Field(default=None, alias="buildId")
-    full_image_path: Optional[str] = Field(default=None, alias="fullImagePath")
-    visibility: Optional[ImageVisibility] = None
+    build: Optional[BuildImageResponse] = None
     error: Optional[str] = None
     retryable: bool = False
 
     model_config = ConfigDict(populate_by_name=True)
 
+    @model_validator(mode="before")
+    @classmethod
+    def accept_legacy_result(cls, value: Any) -> Any:
+        # Accept old backends during the CLI-first rollout; emit only the new shape.
+        if isinstance(value, dict) and "build" not in value and "success" in value:
+            value = {
+                **value,
+                "build": value if value["success"] else None,
+            }
+        return value
 
-class BulkImageTransferResponse(BaseModel):
-    """Response returned for comma-separated source-image build requests."""
 
-    results: List[TransferImageResult] = Field(default_factory=list)
-    failed: List[TransferImageResult] = Field(default_factory=list)
+class BulkBuildImageResponse(BaseModel):
+    """Ordered, best-effort results for comma-separated source images."""
 
-    model_config = ConfigDict(populate_by_name=True)
+    results: List[SourceImageBuildResult]
 
 
 MAX_IMAGE_UPDATES = 100

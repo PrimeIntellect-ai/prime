@@ -63,22 +63,23 @@ class FakeTransferAPI:
             if self.respond_bulk_shape and self.bulk_entry_error is not None:
                 entry = {
                     "sourceImage": json["source_image"],
-                    "success": False,
+                    "build": None,
                     "error": self.bulk_entry_error,
                     "retryable": False,
                 }
-                return {"results": [entry], "failed": [entry]}
+                return {"results": [entry]}
             self.payloads.append(json)
             self.build_counter += 1
             build_id = f"build-{self.build_counter}"
             if self.respond_bulk_shape:
                 entry = {
                     "sourceImage": json["source_image"],
-                    "success": True,
-                    "buildId": build_id,
-                    "fullImagePath": f"user/{json.get('image_name') or 'derived'}",
+                    "build": {
+                        "build_id": build_id,
+                        "fullImagePath": f"user/{json.get('image_name') or 'derived'}",
+                    },
                 }
-                return {"results": [entry] * self.bulk_results_count, "failed": []}
+                return {"results": [entry] * self.bulk_results_count}
             return {
                 "build_id": build_id,
                 "fullImagePath": f"user/{json.get('image_name') or 'derived'}",

@@ -1,0 +1,132 @@
+{
+  "input": {
+    "num_examples": 12,
+    "num_rollouts": 4,
+    "shuffle": false,
+    "max_concurrent": 8,
+    "model": "PRIVATE_MODEL_PATH",
+    "env": {
+      "agent": {
+        "harness": {
+          "env": {
+            "OPENAI_API_KEY": "SECRET_HARNESS"
+          }
+        },
+        "client": {
+          "headers": {
+            "Authorization": "Bearer SECRET_NESTED"
+          }
+        }
+      },
+      "taskset": {
+        "args": {
+          "email": "PRIVATE_EMAIL"
+        }
+      }
+    },
+    "config_source": {
+      "format": "toml",
+      "text": "# SECRET_COMMENT\n[client]\nbase_url=\"https://user:SECRET_URL@example.invalid\"\nCookie=\"SECRET_COOKIE\"",
+      "filename": "PRIVATE_FILENAME.toml"
+    },
+    "api_key": "SECRET_TOP",
+    "output_dir": "PRIVATE_PATH",
+    "env_args": {
+      "password": "SECRET_ENV_ARG"
+    },
+    "extra_env_kwargs": {
+      "key": "SECRET_EXTRA"
+    },
+    "start_command": "echo SECRET_COMMAND",
+    "sampling": {
+      "temperature": 0.6,
+      "max_tokens": 2048,
+      "reasoning_effort": "high",
+      "extra_body": {
+        "credential": "SECRET_SAMPLING"
+      }
+    },
+    "client": {
+      "type": "eval",
+      "base_url": "https://user:SECRET_URL@example.invalid",
+      "headers": {
+        "Cookie": "SECRET_COOKIE"
+      },
+      "api_key_var": "PRIVATE_VAR"
+    },
+    "serve": {
+      "max_concurrent": 32,
+      "address": "PRIVATE_ADDRESS",
+      "pool": {
+        "type": "elastic",
+        "max_workers": 4,
+        "multiplex": 128,
+        "password": "SECRET_POOL"
+      }
+    },
+    "prime_runs": {
+      "status": "failed",
+      "finished_at": "2026-09-11T00:00:00+00:00",
+      "error": "SECRET_ERROR"
+    },
+    "state_columns": [
+      "info",
+      "answer"
+    ],
+    "avg_reward": 0.75,
+    "custom_notes": "PRIVATE_NOTES"
+  },
+  "config": {
+    "num_examples": 12,
+    "num_rollouts": 4,
+    "max_concurrent": 8,
+    "shuffle": false,
+    "sampling": {
+      "temperature": 0.6,
+      "max_tokens": 2048,
+      "reasoning_effort": "high"
+    },
+    "client": {
+      "type": "eval"
+    },
+    "serve": {
+      "max_concurrent": 32,
+      "pool": {
+        "type": "elastic",
+        "max_workers": 4,
+        "multiplex": 128
+      }
+    }
+  },
+  "metadata": {
+    "num_examples": 12,
+    "num_rollouts": 4,
+    "max_concurrent": 8,
+    "shuffle": false,
+    "sampling": {
+      "temperature": 0.6,
+      "max_tokens": 2048,
+      "reasoning_effort": "high"
+    },
+    "client": {
+      "type": "eval"
+    },
+    "serve": {
+      "max_concurrent": 32,
+      "pool": {
+        "type": "elastic",
+        "max_workers": 4,
+        "multiplex": 128
+      }
+    },
+    "prime_runs": {
+      "status": "failed",
+      "finished_at": "2026-09-11T00:00:00+00:00"
+    },
+    "state_columns": [
+      "info",
+      "answer"
+    ],
+    "avg_reward": 0.75
+  }
+}

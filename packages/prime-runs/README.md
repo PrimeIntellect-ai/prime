@@ -21,7 +21,7 @@ run = pr.init(
     environments=["gsm8k"],      # hub names (get-or-create) or owner/name slugs
     model="Qwen/Qwen3-8B",
     framework="verifiers",
-    config="eval.toml",          # the launched file, stored byte for byte
+    config={"num_tasks": 100, "sampling": {"temperature": 0.6}},
 )
 print(run.url)                   # https://app.primeintellect.ai/dashboard/evaluations/...
 
@@ -39,9 +39,21 @@ the platform's id; `run.url` is the handle. A `with run:` block finishes for
 you: an exception marks the run `failed`, Ctrl-C `cancelled`, and a process
 that exits without finishing is reported `crashed` by an atexit hook.
 
-`config=` takes the path to the launched file (kept verbatim under
-`config_source`, comments and all) or a mapping stored as given; put a file
-under `pr.CONFIG_SOURCE_KEY` in the mapping to send both. Nothing is redacted.
+`config=` accepts a mapping or a local file path. The run retains the original
+in memory (`run.config` / `run.config_source`); it uploads only a summary of
+supported numeric/boolean controls, sampling settings, client type, and serving
+pool controls. Source text and filenames are never uploaded. To record controls
+alongside a local source, include them in a mapping with `pr.CONFIG_SOURCE_KEY`.
+
+Unknown fields, task data, harness environment values, headers, URLs, paths and
+commands are omitted instead of attempting to mask arbitrary secrets. This also
+applies on updates and failure finalization. A file alone supplies no remote
+config controls; pass a mapping for a dashboard summary. External training
+config additionally supports numeric training controls, including `trainer.lr`.
+
+This policy covers config metadata, not run identity, metrics, samples or traces.
+Choose publishable `name`, `model`, `environments`, tags and descriptions, and keep
+credentials out of the data passed to `log_*()`.
 
 ## Training runs
 

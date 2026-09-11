@@ -416,9 +416,11 @@ def init(
 
     ``mode`` defaults to ``$PRIME_RUNS_MODE``, else online when there is an API
     key and disabled (with a warning) when there is not. ``config`` is the path
-    to the file the run was launched from (stored byte for byte under
-    ``config_source``) or a mapping taken as given. ``finish_timeout`` bounds
-    the drain in :meth:`Run.finish`.
+    to the file the run was launched from (kept locally under ``config_source``)
+    or a mapping. Only supported, typed summary fields are uploaded; source
+    files, unknown fields, URLs, paths, commands, headers and environment values
+    stay local. The name/model/environment arguments remain published run identity.
+    ``finish_timeout`` bounds the drain in :meth:`Run.finish`.
 
     ``kind="train"`` opens an external training run: ``model`` is the base
     model, ``environments`` the hub ids, ``training`` the display fields, and a

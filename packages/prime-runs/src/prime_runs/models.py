@@ -72,7 +72,7 @@ class EnvironmentRef:
 
 
 CONFIG_SOURCE_KEY = "config_source"
-"""Where a config file lands inside a run's config, as a ``ConfigSource`` dict."""
+"""The local config source key; excluded from uploaded config summaries."""
 
 MAX_CONFIG_SOURCE_BYTES = 256 * 1024
 
@@ -81,8 +81,8 @@ _CONFIG_SOURCE_FORMATS = {".toml": "toml", ".json": "json", ".yaml": "yaml", ".y
 
 @dataclass
 class ConfigSource:
-    """The config file a run was started from, kept byte for byte. Nothing is
-    redacted: keep credentials in the environment, not the file."""
+    """The local launch file, kept byte for byte on the Run. Source text and
+    filenames are never included in uploaded config summaries."""
 
     text: str
     format: str = "toml"

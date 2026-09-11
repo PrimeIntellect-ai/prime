@@ -131,7 +131,7 @@ def online(monkeypatch, make_platform_client, eval_routes):
     return _init
 
 
-def test_an_online_run_sends_the_source_in_create_metadata(tmp_path, online):
+def test_an_online_run_keeps_the_source_local(tmp_path, online):
     path = tmp_path / "eval.toml"
     path.write_text(EVAL_TOML)
 
@@ -139,17 +139,16 @@ def test_an_online_run_sends_the_source_in_create_metadata(tmp_path, online):
     run.finish()
 
     create = next(r for r in handler.requests if r.url.path == "/api/v1/evaluations/")
-    metadata = json.loads(create.content)["metadata"]
-    assert metadata[CONFIG_SOURCE_KEY]["text"] == EVAL_TOML
-    assert metadata[CONFIG_SOURCE_KEY]["format"] == "toml"
-    assert metadata[CONFIG_SOURCE_KEY]["filename"] == "eval.toml"
+    assert "metadata" not in json.loads(create.content)
+    assert run.config_source.text == EVAL_TOML
+    assert path.read_text() == EVAL_TOML
 
 
 def test_extra_values_can_be_merged_onto_a_launch_file(tmp_path, online):
     path = tmp_path / "eval.toml"
     path.write_text(EVAL_TOML)
     config = {
-        "model": "deepseek/deepseek-v4-flash",
+        "num_rollouts": 4,
         CONFIG_SOURCE_KEY: ConfigSource.from_file(path).to_dict(),
     }
 
@@ -158,8 +157,8 @@ def test_extra_values_can_be_merged_onto_a_launch_file(tmp_path, online):
 
     create = next(r for r in handler.requests if r.url.path == "/api/v1/evaluations/")
     metadata = json.loads(create.content)["metadata"]
-    assert metadata["model"] == "deepseek/deepseek-v4-flash"
-    assert metadata[CONFIG_SOURCE_KEY]["text"] == EVAL_TOML
+    assert metadata == {"num_rollouts": 4}
+    assert run.config_source.text == EVAL_TOML
     assert run.config_source.filename == "eval.toml"
 
 
@@ -189,5 +188,6 @@ def test_the_source_survives_the_failure_fallback(tmp_path, online):
     run.fail("something broke")
 
     update = handler.bodies_for("/api/v1/evaluations/eval-abc")[-1]
-    assert update["metadata"][CONFIG_SOURCE_KEY]["text"] == EVAL_TOML
+    assert CONFIG_SOURCE_KEY not in update["metadata"]
+    assert run.config_source.text == EVAL_TOML
     assert update["metadata"]["prime_runs"]["status"] == "failed"

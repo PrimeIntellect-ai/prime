@@ -71,3 +71,14 @@ def test_training_config_does_not_bypass_source_protection(make_platform_client,
 )
 def test_numeric_controls_reject_opaque_values(value):
     assert config_summary({"max_tokens": value, "sampling": {"temperature": value}}) == {}
+
+
+def test_state_columns_preserve_exact_keys_with_bounded_names_and_count():
+    columns = ["tool-output", "grader.score", "ground truth", "答案", "😀" * 128]
+    assert metadata_summary(
+        {"state_columns": [*columns, "", "x" * 129, "😀" * 129, None, {"key": "SECRET"}]}
+    ) == {"state_columns": columns}
+    many_columns = [f"column {index}" for index in range(129)]
+    assert metadata_summary({"state_columns": many_columns}) == {
+        "state_columns": many_columns[:128]
+    }

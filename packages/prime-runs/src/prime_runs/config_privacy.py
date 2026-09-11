@@ -8,7 +8,6 @@ dashboard's evaluationConfig projection; none trusts another to sanitize input.
 """
 
 import math
-import re
 from datetime import datetime
 from typing import Any
 
@@ -116,10 +115,9 @@ def metadata_summary(value: Any) -> dict[str, Any]:
     result.update(_numbers(value, ("avg_reward", "avg_score")))
     columns = value.get("state_columns")
     if isinstance(columns, list):
+        # These are exact published sample keys, not Python identifiers.
         result["state_columns"] = [
-            column
-            for column in columns[:128]
-            if isinstance(column, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,127}", column)
+            column for column in columns[:128] if isinstance(column, str) and 0 < len(column) <= 128
         ]
     terminal = value.get("prime_runs")
     if isinstance(terminal, dict):
@@ -133,6 +131,7 @@ def metadata_summary(value: Any) -> dict[str, Any]:
                         finished_at.replace("Z", "+00:00")
                     ).isoformat()
                 except ValueError:
+                    # Untrusted, invalid timestamps are omitted from the summary.
                     pass
     return result
 

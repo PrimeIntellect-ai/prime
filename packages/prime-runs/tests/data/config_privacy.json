@@ -71,7 +71,11 @@
     },
     "state_columns": [
       "info",
-      "answer"
+      "answer",
+      "tool-output",
+      "grader.score",
+      "ground truth",
+      "答案"
     ],
     "avg_reward": 0.75,
     "custom_notes": "PRIVATE_NOTES"
@@ -125,7 +129,11 @@
     },
     "state_columns": [
       "info",
-      "answer"
+      "answer",
+      "tool-output",
+      "grader.score",
+      "ground truth",
+      "答案"
     ],
     "avg_reward": 0.75
   }

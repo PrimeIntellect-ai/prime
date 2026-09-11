@@ -51,6 +51,10 @@ applies on updates and failure finalization. A file alone supplies no remote
 config controls; pass a mapping for a dashboard summary. External training
 config additionally supports numeric training controls, including `trainer.lr`.
 
+`state_columns` identifies published sample fields by their exact names, including
+spaces, punctuation and Unicode. Summaries retain non-empty names of at most 128
+characters from the first 128 entries; they do not copy the sample values.
+
 This policy covers config metadata, not run identity, metrics, samples or traces.
 Choose publishable `name`, `model`, `environments`, tags and descriptions, and keep
 credentials out of the data passed to `log_*()`.

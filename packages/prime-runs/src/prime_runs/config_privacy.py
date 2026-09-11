@@ -8,7 +8,7 @@ dashboard's evaluationConfig projection; none trusts another to sanitize input.
 """
 
 import math
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 NUMBER_FIELDS = (
@@ -127,11 +127,13 @@ def metadata_summary(value: Any) -> dict[str, Any]:
             finished_at = terminal.get("finished_at")
             if isinstance(finished_at, str):
                 try:
-                    result["prime_runs"]["finished_at"] = datetime.fromisoformat(
-                        finished_at.replace("Z", "+00:00")
-                    ).isoformat()
-                except ValueError:
-                    # Untrusted, invalid timestamps are omitted from the summary.
+                    parsed = datetime.fromisoformat(finished_at.replace("Z", "+00:00"))
+                    if parsed.utcoffset() is not None:
+                        result["prime_runs"]["finished_at"] = parsed.astimezone(
+                            timezone.utc
+                        ).isoformat()
+                except (ValueError, OverflowError):
+                    # Invalid or out-of-range timestamps are omitted from the summary.
                     pass
     return result
 

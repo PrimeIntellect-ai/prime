@@ -82,3 +82,25 @@ def test_state_columns_preserve_exact_keys_with_bounded_names_and_count():
     assert metadata_summary({"state_columns": many_columns}) == {
         "state_columns": many_columns[:128]
     }
+
+
+@pytest.mark.parametrize(
+    ("finished_at", "expected"),
+    [
+        ("2026-09-11", None),
+        ("2026-09-11T12:34:56", None),
+        ("2026-09-11T07:04:56Z", "2026-09-11T07:04:56+00:00"),
+        ("2026-09-11T12:34:56+05:30", "2026-09-11T07:04:56+00:00"),
+        ("2026-09-11T12:34:56+05:30:15", "2026-09-11T07:04:41+00:00"),
+        ("0001-01-01T00:00:00+01:00", None),
+    ],
+)
+def test_terminal_timestamps_require_a_timezone_and_normalize_to_utc(finished_at, expected):
+    terminal = metadata_summary(
+        {"prime_runs": {"status": "completed", "finished_at": finished_at}}
+    )["prime_runs"]
+    assert terminal == (
+        {"status": "completed", "finished_at": expected}
+        if expected is not None
+        else {"status": "completed"}
+    )

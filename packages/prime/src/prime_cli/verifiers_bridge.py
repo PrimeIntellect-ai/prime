@@ -127,6 +127,8 @@ def _write_help(text: str) -> None:
 
 def _append_eval_options(help_text: str) -> str:
     extra_lines = [
+        "  --env-var TEXT              Load env vars before Prime auth/model resolution.",
+        "  --env-file PATH             Load a .env file before Prime auth/model resolution.",
         "  --skip-upload               Skip uploading evaluation results to the platform.",
         "  --env-path PATH             Explicit path for upstream environment metadata.",
         "  --hosted                    Run the evaluation on the platform instead of locally.",

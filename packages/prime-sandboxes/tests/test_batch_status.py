@@ -735,7 +735,7 @@ def test_sync_run_background_job_maps_status_error_after_termination() -> None:
     }
 
     with pytest.raises(SandboxNotRunningError, match="maximum runtime") as exc_info:
-        client.run_background_job("sandbox-a", "python worker.py")
+        client.run_background_job("sandbox-a", "python worker.py", timeout=0)
 
     assert isinstance(exc_info.value.__cause__, APIError)
     assert "Runtime lookup failed" in str(exc_info.value.__cause__)
@@ -763,8 +763,7 @@ def test_sync_run_background_job_preserves_status_error_while_running() -> None:
     with pytest.raises(APIError, match="Runtime lookup failed"):
         client.run_background_job("sandbox-a", "python worker.py", timeout=0.1)
 
-    assert len(context_timeouts) == 1
-    assert 0 < context_timeouts[0] <= 0.1
+    assert context_timeouts == [10.0]
 
 
 @pytest.mark.asyncio
@@ -793,7 +792,7 @@ async def test_async_run_background_job_maps_status_error_after_termination() ->
         with pytest.raises(
             SandboxNotRunningError, match="Cancelled by the owning workload"
         ) as exc_info:
-            await client.run_background_job("sandbox-a", "python worker.py")
+            await client.run_background_job("sandbox-a", "python worker.py", timeout=0)
     finally:
         await client.aclose()
 
@@ -802,7 +801,13 @@ async def test_async_run_background_job_maps_status_error_after_termination() ->
 
 
 @pytest.mark.asyncio
-async def test_async_run_background_job_bounds_stalled_error_context_lookup() -> None:
+async def test_async_run_background_job_bounds_stalled_error_context_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "prime_sandboxes.sandbox._SANDBOX_ERROR_CONTEXT_TIMEOUT_SECONDS",
+        0.05,
+    )
     client = AsyncSandboxClient(api_key="test-key")
     await client.client.aclose()
     platform = _AsyncBackgroundJobPlatformClient(error_job_id="deadbeef")
@@ -821,7 +826,7 @@ async def test_async_run_background_job_bounds_stalled_error_context_lookup() ->
     try:
         with pytest.raises(APIError, match="Runtime lookup failed"):
             await asyncio.wait_for(
-                client.run_background_job("sandbox-a", "python worker.py", timeout=0.05),
+                client.run_background_job("sandbox-a", "python worker.py", timeout=0),
                 timeout=0.5,
             )
     finally:

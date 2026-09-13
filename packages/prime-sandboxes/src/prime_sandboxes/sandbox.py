@@ -3060,12 +3060,12 @@ class SandboxClient:
                 else:
                     snapshot = self.get_background_job_status(sandbox_id, job)
             except APIError as error:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise
+                # Error classification gets a separate bounded grace period so a
+                # status poll that overruns the job deadline can still report that
+                # the sandbox terminated.
                 ctx = self._get_sandbox_error_context(
                     sandbox_id,
-                    timeout=min(_SANDBOX_ERROR_CONTEXT_TIMEOUT_SECONDS, remaining),
+                    timeout=_SANDBOX_ERROR_CONTEXT_TIMEOUT_SECONDS,
                 )
                 if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
                     _raise_not_running_error(sandbox_id, ctx, command=command, cause=error)
@@ -4816,10 +4816,10 @@ class AsyncSandboxClient:
                 else:
                     snapshot = await self.get_background_job_status(sandbox_id, job)
             except APIError as error:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise
-                context_timeout = min(_SANDBOX_ERROR_CONTEXT_TIMEOUT_SECONDS, remaining)
+                # Error classification gets a separate bounded grace period so a
+                # status poll that overruns the job deadline can still report that
+                # the sandbox terminated.
+                context_timeout = _SANDBOX_ERROR_CONTEXT_TIMEOUT_SECONDS
                 try:
                     ctx = await asyncio.wait_for(
                         self._get_sandbox_error_context(

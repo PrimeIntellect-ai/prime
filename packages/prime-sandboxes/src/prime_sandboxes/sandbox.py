@@ -132,6 +132,7 @@ _PROCESS_CONTROL_RETRY_INITIAL_DELAY = 0.5
 _BACKGROUND_JOB_LAUNCH_ATTEMPTS = 3
 _BACKGROUND_JOB_LAUNCH_BACKOFF_SECONDS = 0.5
 _BACKGROUND_JOB_LAUNCH_TIMEOUT_SECONDS = 30
+_SANDBOX_ERROR_CONTEXT_TIMEOUT_SECONDS = 10.0
 
 _RequestMessage = TypeVar("_RequestMessage", bound=Message)
 _ResponseMessage = TypeVar("_ResponseMessage", bound=Message)
@@ -2182,10 +2183,18 @@ class SandboxClient:
         self.execute_command(sandbox_id, "echo 'sandbox ready'", timeout=timeout)
         return True
 
-    def _get_sandbox_error_context(self, sandbox_id: str) -> dict:
+    def _get_sandbox_error_context(
+        self,
+        sandbox_id: str,
+        timeout: float = _SANDBOX_ERROR_CONTEXT_TIMEOUT_SECONDS,
+    ) -> dict:
         """Fetch sandbox error context from the lightweight server endpoint."""
         try:
-            response = self.client.request("GET", f"/sandbox/{sandbox_id}/error-context")
+            response = self.client.request(
+                "GET",
+                f"/sandbox/{sandbox_id}/error-context",
+                timeout=timeout,
+            )
             return {
                 "status": response.get("status"),
                 "error_type": response.get("errorType") or response.get("error_type"),
@@ -3051,7 +3060,13 @@ class SandboxClient:
                 else:
                     snapshot = self.get_background_job_status(sandbox_id, job)
             except APIError as error:
-                ctx = self._get_sandbox_error_context(sandbox_id)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise
+                ctx = self._get_sandbox_error_context(
+                    sandbox_id,
+                    timeout=min(_SANDBOX_ERROR_CONTEXT_TIMEOUT_SECONDS, remaining),
+                )
                 if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
                     _raise_not_running_error(sandbox_id, ctx, command=command, cause=error)
                 raise
@@ -3718,10 +3733,18 @@ class AsyncSandboxClient:
         await self.execute_command(sandbox_id, "echo 'sandbox ready'", timeout=timeout)
         return True
 
-    async def _get_sandbox_error_context(self, sandbox_id: str) -> dict:
+    async def _get_sandbox_error_context(
+        self,
+        sandbox_id: str,
+        timeout: float = _SANDBOX_ERROR_CONTEXT_TIMEOUT_SECONDS,
+    ) -> dict:
         """Fetch sandbox error context from the lightweight server endpoint."""
         try:
-            response = await self.client.request("GET", f"/sandbox/{sandbox_id}/error-context")
+            response = await self.client.request(
+                "GET",
+                f"/sandbox/{sandbox_id}/error-context",
+                timeout=timeout,
+            )
             return {
                 "status": response.get("status"),
                 "error_type": response.get("errorType") or response.get("error_type"),
@@ -4793,7 +4816,20 @@ class AsyncSandboxClient:
                 else:
                     snapshot = await self.get_background_job_status(sandbox_id, job)
             except APIError as error:
-                ctx = await self._get_sandbox_error_context(sandbox_id)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise
+                context_timeout = min(_SANDBOX_ERROR_CONTEXT_TIMEOUT_SECONDS, remaining)
+                try:
+                    ctx = await asyncio.wait_for(
+                        self._get_sandbox_error_context(
+                            sandbox_id,
+                            timeout=context_timeout,
+                        ),
+                        timeout=context_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    raise error from None
                 if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
                     _raise_not_running_error(sandbox_id, ctx, command=command, cause=error)
                 raise

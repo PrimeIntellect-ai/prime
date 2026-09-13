@@ -728,7 +728,7 @@ def test_sync_run_background_job_maps_status_error_after_termination() -> None:
     cast(Any, client).client = platform
     cast(Any, client)._auth_cache = _SyncVMAuthCache()
     cast(Any, client).start_background_job = lambda *_args, **_kwargs: _job("sandbox-a", "deadbeef")
-    cast(Any, client)._get_sandbox_error_context = lambda _sandbox_id: {
+    cast(Any, client)._get_sandbox_error_context = lambda _sandbox_id, **_kwargs: {
         "status": "TERMINATED",
         "error_type": "TIMEOUT",
         "error_message": "Maximum runtime exceeded",
@@ -748,14 +748,23 @@ def test_sync_run_background_job_preserves_status_error_while_running() -> None:
     cast(Any, client).client = platform
     cast(Any, client)._auth_cache = _SyncVMAuthCache()
     cast(Any, client).start_background_job = lambda *_args, **_kwargs: _job("sandbox-a", "deadbeef")
-    cast(Any, client)._get_sandbox_error_context = lambda _sandbox_id: {
-        "status": "RUNNING",
-        "error_type": None,
-        "error_message": None,
-    }
+    context_timeouts: list[float] = []
+
+    def get_sandbox_error_context(_sandbox_id: str, *, timeout: float) -> dict[str, Optional[str]]:
+        context_timeouts.append(timeout)
+        return {
+            "status": "RUNNING",
+            "error_type": None,
+            "error_message": None,
+        }
+
+    cast(Any, client)._get_sandbox_error_context = get_sandbox_error_context
 
     with pytest.raises(APIError, match="Runtime lookup failed"):
-        client.run_background_job("sandbox-a", "python worker.py")
+        client.run_background_job("sandbox-a", "python worker.py", timeout=0.1)
+
+    assert len(context_timeouts) == 1
+    assert 0 < context_timeouts[0] <= 0.1
 
 
 @pytest.mark.asyncio
@@ -769,7 +778,9 @@ async def test_async_run_background_job_maps_status_error_after_termination() ->
     async def start_background_job(*_args: Any, **_kwargs: Any) -> BackgroundJob:
         return _job("sandbox-a", "deadbeef")
 
-    async def get_sandbox_error_context(_sandbox_id: str) -> dict[str, Optional[str]]:
+    async def get_sandbox_error_context(
+        _sandbox_id: str, **_kwargs: Any
+    ) -> dict[str, Optional[str]]:
         return {
             "status": "TERMINATED",
             "error_type": None,
@@ -788,6 +799,33 @@ async def test_async_run_background_job_maps_status_error_after_termination() ->
 
     assert isinstance(exc_info.value.__cause__, APIError)
     assert "Runtime lookup failed" in str(exc_info.value.__cause__)
+
+
+@pytest.mark.asyncio
+async def test_async_run_background_job_bounds_stalled_error_context_lookup() -> None:
+    client = AsyncSandboxClient(api_key="test-key")
+    await client.client.aclose()
+    platform = _AsyncBackgroundJobPlatformClient(error_job_id="deadbeef")
+    cast(Any, client).client = platform
+    cast(Any, client)._auth_cache = _AsyncVMAuthCache()
+
+    async def start_background_job(*_args: Any, **_kwargs: Any) -> BackgroundJob:
+        return _job("sandbox-a", "deadbeef")
+
+    async def get_sandbox_error_context(_sandbox_id: str, **_kwargs: Any) -> dict[str, Any]:
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    cast(Any, client).start_background_job = start_background_job
+    cast(Any, client)._get_sandbox_error_context = get_sandbox_error_context
+    try:
+        with pytest.raises(APIError, match="Runtime lookup failed"):
+            await asyncio.wait_for(
+                client.run_background_job("sandbox-a", "python worker.py", timeout=0.05),
+                timeout=0.5,
+            )
+    finally:
+        await client.aclose()
 
 
 @pytest.mark.asyncio

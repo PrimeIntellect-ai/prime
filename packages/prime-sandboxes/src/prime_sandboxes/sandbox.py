@@ -3038,16 +3038,23 @@ class SandboxClient:
 
         Raises:
             CommandTimeoutError: If command doesn't complete within timeout
+            SandboxNotRunningError: If the sandbox terminates while the command is running
         """
         job = self.start_background_job(sandbox_id, command, working_dir=working_dir, env=env)
         use_batch_status = self._auth_cache.is_vm(sandbox_id)
         deadline = time.monotonic() + timeout
         poll_delay = min(float(poll_interval), BACKGROUND_JOB_POLL_MAX_DELAY)
         while True:
-            if use_batch_status:
-                snapshot = self._background_job_status_batcher.get((sandbox_id, job.job_id))
-            else:
-                snapshot = self.get_background_job_status(sandbox_id, job)
+            try:
+                if use_batch_status:
+                    snapshot = self._background_job_status_batcher.get((sandbox_id, job.job_id))
+                else:
+                    snapshot = self.get_background_job_status(sandbox_id, job)
+            except APIError as error:
+                ctx = self._get_sandbox_error_context(sandbox_id)
+                if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
+                    _raise_not_running_error(sandbox_id, ctx, command=command, cause=error)
+                raise
             if snapshot.completed:
                 assert snapshot.exit_code is not None
                 return self._background_job_output_coordinator.get(job, snapshot.exit_code, None)
@@ -4771,16 +4778,25 @@ class AsyncSandboxClient:
 
         Raises:
             CommandTimeoutError: If command doesn't complete within timeout
+            SandboxNotRunningError: If the sandbox terminates while the command is running
         """
         job = await self.start_background_job(sandbox_id, command, working_dir=working_dir, env=env)
         use_batch_status = await self._auth_cache.is_vm(sandbox_id)
         deadline = time.monotonic() + timeout
         poll_delay = min(float(poll_interval), BACKGROUND_JOB_POLL_MAX_DELAY)
         while True:
-            if use_batch_status:
-                snapshot = await self._background_job_status_batcher.get((sandbox_id, job.job_id))
-            else:
-                snapshot = await self.get_background_job_status(sandbox_id, job)
+            try:
+                if use_batch_status:
+                    snapshot = await self._background_job_status_batcher.get(
+                        (sandbox_id, job.job_id)
+                    )
+                else:
+                    snapshot = await self.get_background_job_status(sandbox_id, job)
+            except APIError as error:
+                ctx = await self._get_sandbox_error_context(sandbox_id)
+                if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
+                    _raise_not_running_error(sandbox_id, ctx, command=command, cause=error)
+                raise
             if snapshot.completed:
                 assert snapshot.exit_code is not None
                 return await self._background_job_output_coordinator.get(

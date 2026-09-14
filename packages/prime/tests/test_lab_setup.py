@@ -9,6 +9,7 @@ from urllib.error import URLError
 
 import pytest
 from prime_cli import lab_setup
+from prime_cli.api.projects import Project
 from prime_cli.commands.lab import app as lab_cli_app
 from prime_cli.lab_agents import AgentCapability, known_agent_names
 from prime_cli.lab_setup import (
@@ -21,6 +22,10 @@ from prime_cli.lab_setup import (
     run_lab_doctor_service,
     run_lab_setup_service,
     run_lab_sync_service,
+)
+from prime_cli.utils.projects import (
+    PROJECT_CONTEXT_CLEARED_KEY,
+    PROJECT_CONTEXT_ENV_OVERRIDE_KEY,
 )
 from rich.console import Console
 from typer.testing import CliRunner
@@ -35,6 +40,10 @@ def _git_init(path: Path) -> None:
 
 @pytest.fixture(autouse=True)
 def fake_lab_asset_downloads(monkeypatch: Any) -> list[str]:
+    monkeypatch.delenv("PRIME_API_KEY", raising=False)
+    monkeypatch.delenv("PRIME_PROJECT_ID", raising=False)
+    monkeypatch.delenv("PRIME_TEAM_ID", raising=False)
+
     urls: list[str] = []
     skill_names = (
         "create-environments",
@@ -148,13 +157,32 @@ def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_lab_setup_parses_selected_agents_and_all() -> None:
-    selected = parse_lab_setup_args(
-        ["--agent", "factory-droid,amp-code,claude-code,letta-code,grok"]
+def _project(
+    *,
+    id: str = "project-123",
+    name: str = "Alphabet Sort",
+    slug: str = "alphabet-sort",
+    team_id: str | None = None,
+) -> Project:
+    return Project.model_validate(
+        {
+            "id": id,
+            "name": name,
+            "slug": slug,
+            "status": "ACTIVE",
+            "userId": "user-123",
+            "teamId": team_id,
+            "createdAt": "2026-05-20T12:00:00Z",
+            "updatedAt": "2026-05-20T12:00:00Z",
+        }
     )
+
+
+def test_lab_setup_parses_selected_agents_and_all() -> None:
+    selected = parse_lab_setup_args(["--agent", "factory-droid,amp-code,claude-code,letta-code"])
     all_agents = parse_lab_sync_args(["--agents", "all"])
 
-    assert selected.agents == ("droid", "amp", "claude", "letta", "grok")
+    assert selected.agents == ("droid", "amp", "claude", "letta")
     assert all_agents.agents == known_agent_names()
 
 
@@ -162,6 +190,31 @@ def test_lab_setup_no_interactive_uses_codex_default() -> None:
     options = parse_lab_setup_args(["--no-interactive"])
 
     assert options.agents == ("codex",)
+
+
+def test_lab_setup_parses_project_options() -> None:
+    existing = parse_lab_setup_args(["--agent", "codex", "--project", "project-123"])
+    named = parse_lab_setup_args(["--agent", "codex", "--project-name", "Alphabet Sort Baselines"])
+    skipped = parse_lab_setup_args(["--agent", "codex", "--no-project"])
+
+    assert existing.project_ref == "project-123"
+    assert existing.project_name is None
+    assert named.project_name == "Alphabet Sort Baselines"
+    assert named.project_ref is None
+    assert skipped.no_project is True
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--agent", "codex", "--project", "project-123", "--no-project"],
+        ["--agent", "codex", "--project-name", "Alphabet Sort", "--no-project"],
+        ["--agent", "codex", "--project", "project-123", "--project-name", "Alphabet Sort"],
+    ],
+)
+def test_lab_setup_rejects_conflicting_project_options(args: list[str]) -> None:
+    with pytest.raises(ValueError):
+        parse_lab_setup_args(args)
 
 
 def test_lab_setup_help_lists_supported_agents(capsys: Any) -> None:
@@ -294,6 +347,7 @@ def test_lab_setup_service_downloads_upstream_assets_without_agent_installs(
     assert "/CLAUDE.md" in gitignore.splitlines()
     assert "/CLAUDE.local.md" in gitignore.splitlines()
     assert "/.prime/" in gitignore.splitlines()
+    assert "/.agents/skills/" in gitignore.splitlines()
     assert (tmp_path / ".pi" / "extensions" / "prime-lab" / "index.ts").is_file()
     output = _render_emitted(emitted)
     assert "pi-acp" not in output
@@ -324,6 +378,527 @@ def test_lab_setup_hygiene_preflight_nudges_tracked_guidance(
     assert result.exit_code == 0
     assert "untracked generated Lab files: AGENTS.md" in output
     assert _git(tmp_path, "ls-files", "--", "AGENTS.md").stdout == ""
+
+
+def test_lab_setup_creates_default_project_from_workspace_name(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "alphabet-sort"
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("PRIME_API_KEY", "test-key")
+    monkeypatch.setattr(AGENT_WHICH, lambda _command: "/bin/tool")
+    monkeypatch.setattr("prime_cli.lab_setup.APIClient", lambda: object())
+    captured: dict[str, Any] = {}
+
+    class DummyProjectsClient:
+        def __init__(self, _api_client: object) -> None:
+            pass
+
+        def get(self, project_ref: str, team_id: str | None = None) -> Project:
+            raise lab_setup.APIError("not found")
+
+        def create(
+            self,
+            name: str,
+            slug: str | None = None,
+            description: str | None = None,
+            team_id: str | None = None,
+        ) -> Project:
+            captured.update(
+                {
+                    "name": name,
+                    "slug": slug,
+                    "description": description,
+                    "team_id": team_id,
+                }
+            )
+            return _project(name=name, slug="alphabet-sort", team_id=team_id)
+
+    monkeypatch.setattr("prime_cli.lab_setup.ProjectsClient", DummyProjectsClient)
+    monkeypatch.setattr("prime_cli.utils.projects.ProjectsClient", DummyProjectsClient)
+
+    emitted: list[Any] = []
+    result = run_lab_setup_service(
+        LabSetupOptions(skip_install=True, skip_agents_md=True, agents=("codex",)),
+        workspace=workspace,
+        emit=emitted.append,
+    )
+
+    context = json.loads((workspace / ".prime" / "lab" / "context.json").read_text())
+    assert result.exit_code == 0
+    assert captured == {
+        "name": "Alphabet Sort",
+        "slug": "alphabet-sort",
+        "description": None,
+        "team_id": None,
+    }
+    assert context["project_id"] == "project-123"
+    assert context["project_slug"] == "alphabet-sort"
+    assert "Created Lab project Alphabet Sort (alphabet-sort)" in _render_emitted(emitted)
+
+
+def test_lab_setup_reuses_existing_default_project_by_workspace_slug(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "alphabet-sort"
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("PRIME_API_KEY", "test-key")
+    monkeypatch.setattr(AGENT_WHICH, lambda _command: "/bin/tool")
+    monkeypatch.setattr("prime_cli.lab_setup.APIClient", lambda: object())
+    captured: dict[str, Any] = {}
+
+    class DummyProjectsClient:
+        def __init__(self, _api_client: object) -> None:
+            pass
+
+        def get(self, project_ref: str, team_id: str | None = None) -> Project:
+            captured["project_ref"] = project_ref
+            captured["team_id"] = team_id
+            return _project(name="Alphabet Sort", slug="alphabet-sort", team_id=team_id)
+
+        def create(
+            self,
+            name: str,
+            slug: str | None = None,
+            description: str | None = None,
+            team_id: str | None = None,
+        ) -> Project:
+            raise AssertionError("should not create a duplicate default project")
+
+    monkeypatch.setattr("prime_cli.lab_setup.ProjectsClient", DummyProjectsClient)
+    monkeypatch.setattr("prime_cli.utils.projects.ProjectsClient", DummyProjectsClient)
+
+    emitted: list[Any] = []
+    result = run_lab_setup_service(
+        LabSetupOptions(skip_install=True, skip_agents_md=True, agents=("codex",)),
+        workspace=workspace,
+        emit=emitted.append,
+    )
+
+    context = json.loads((workspace / ".prime" / "lab" / "context.json").read_text())
+    assert result.exit_code == 0
+    assert captured == {"project_ref": "alphabet-sort", "team_id": None}
+    assert context["project_id"] == "project-123"
+    assert context["project_slug"] == "alphabet-sort"
+    assert "Using Lab project Alphabet Sort (alphabet-sort)" in _render_emitted(emitted)
+
+
+def test_lab_setup_ignores_invalid_env_project_and_reuses_default_slug(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "alphabet-sort"
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("PRIME_API_KEY", "test-key")
+    monkeypatch.setenv("PRIME_PROJECT_ID", "team-project")
+    monkeypatch.setenv("PRIME_TEAM_ID", "team-123")
+    monkeypatch.setattr(AGENT_WHICH, lambda _command: "/bin/tool")
+    monkeypatch.setattr("prime_cli.lab_setup.APIClient", lambda: object())
+    calls: list[tuple[str, str | None]] = []
+
+    class DummyProjectsClient:
+        def __init__(self, _api_client: object) -> None:
+            pass
+
+        def get(self, project_ref: str, team_id: str | None = None) -> Project:
+            calls.append((project_ref, team_id))
+            if project_ref == "team-project":
+                return _project(
+                    id="project-other-team",
+                    name="Other Team",
+                    slug="other-team",
+                    team_id="other-team",
+                )
+            if project_ref == "alphabet-sort":
+                return _project(name="Alphabet Sort", slug="alphabet-sort", team_id=team_id)
+            raise AssertionError(f"unexpected project ref {project_ref}")
+
+        def create(
+            self,
+            name: str,
+            slug: str | None = None,
+            description: str | None = None,
+            team_id: str | None = None,
+        ) -> Project:
+            raise AssertionError("should reuse the default project instead of creating")
+
+    monkeypatch.setattr("prime_cli.lab_setup.ProjectsClient", DummyProjectsClient)
+    monkeypatch.setattr("prime_cli.utils.projects.ProjectsClient", DummyProjectsClient)
+
+    emitted: list[Any] = []
+    result = run_lab_setup_service(
+        LabSetupOptions(skip_install=True, skip_agents_md=True, agents=("codex",)),
+        workspace=workspace,
+        emit=emitted.append,
+    )
+
+    context = json.loads((workspace / ".prime" / "lab" / "context.json").read_text())
+    output = _render_emitted(emitted)
+    assert result.exit_code == 0
+    assert calls == [("team-project", "team-123"), ("alphabet-sort", "team-123")]
+    assert context["project_id"] == "project-123"
+    assert context["team_id"] == "team-123"
+    assert "Ignored PRIME_PROJECT_ID because it is not valid for this CLI context" in output
+    assert "Using Lab project Alphabet Sort (alphabet-sort)" in output
+
+
+def test_lab_setup_persists_env_active_project(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("PRIME_API_KEY", "test-key")
+    monkeypatch.setenv("PRIME_PROJECT_ID", "env-project")
+    monkeypatch.setattr(AGENT_WHICH, lambda _command: "/bin/tool")
+    monkeypatch.setattr("prime_cli.lab_setup.APIClient", lambda: object())
+    calls: list[tuple[str, str | None]] = []
+
+    class DummyProjectsClient:
+        def __init__(self, _api_client: object) -> None:
+            pass
+
+        def get(self, project_ref: str, team_id: str | None = None) -> Project:
+            calls.append((project_ref, team_id))
+            assert project_ref == "env-project"
+            assert team_id is None
+            return _project(
+                id="env-project",
+                name="Env Project",
+                slug="env-project",
+            )
+
+        def create(
+            self,
+            name: str,
+            slug: str | None = None,
+            description: str | None = None,
+            team_id: str | None = None,
+        ) -> Project:
+            raise AssertionError("should use the active project instead of creating")
+
+    monkeypatch.setattr("prime_cli.lab_setup.ProjectsClient", DummyProjectsClient)
+    monkeypatch.setattr("prime_cli.utils.projects.ProjectsClient", DummyProjectsClient)
+    emitted: list[Any] = []
+
+    result = run_lab_setup_service(
+        LabSetupOptions(skip_install=True, skip_agents_md=True, agents=("codex",)),
+        workspace=tmp_path,
+        emit=emitted.append,
+    )
+
+    context = json.loads((tmp_path / ".prime" / "lab" / "context.json").read_text())
+    assert result.exit_code == 0
+    assert calls
+    assert all(call == ("env-project", None) for call in calls)
+    assert context["project_id"] == "env-project"
+    assert context["project_slug"] == "env-project"
+    assert context[PROJECT_CONTEXT_ENV_OVERRIDE_KEY] is True
+    assert "Using active Lab project env-project" in _render_emitted(emitted)
+
+
+def test_lab_setup_uses_existing_project_option(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("PRIME_API_KEY", "test-key")
+    monkeypatch.setattr(AGENT_WHICH, lambda _command: "/bin/tool")
+    monkeypatch.setattr("prime_cli.lab_setup.APIClient", lambda: object())
+    captured: dict[str, Any] = {}
+
+    class DummyProjectsClient:
+        def __init__(self, _api_client: object) -> None:
+            pass
+
+        def get(self, project_ref: str, team_id: str | None = None) -> Project:
+            captured["project_ref"] = project_ref
+            captured["team_id"] = team_id
+            return _project(name="Existing Project", slug="existing-project")
+
+    monkeypatch.setattr("prime_cli.lab_setup.ProjectsClient", DummyProjectsClient)
+
+    result = run_lab_setup_service(
+        LabSetupOptions(
+            skip_install=True,
+            skip_agents_md=True,
+            agents=("codex",),
+            project_ref="existing-project",
+        ),
+        workspace=tmp_path,
+        emit=lambda _item: None,
+    )
+
+    context = json.loads((tmp_path / ".prime" / "lab" / "context.json").read_text())
+    assert result.exit_code == 0
+    assert captured == {"project_ref": "existing-project", "team_id": None}
+    assert context["project_name"] == "Existing Project"
+
+
+def test_lab_setup_project_option_overrides_active_project(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("PRIME_API_KEY", "test-key")
+    monkeypatch.setattr(AGENT_WHICH, lambda _command: "/bin/tool")
+    monkeypatch.setattr("prime_cli.lab_setup.APIClient", lambda: object())
+    context_dir = tmp_path / ".prime" / "lab"
+    context_dir.mkdir(parents=True)
+    (context_dir / "context.json").write_text(
+        json.dumps(
+            {
+                "project_id": "old-project",
+                "project_slug": "old-project",
+                "project_name": "Old Project",
+                "team_id": None,
+                "base_url": "https://api.primeintellect.ai",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class DummyProjectsClient:
+        def __init__(self, _api_client: object) -> None:
+            pass
+
+        def get(self, project_ref: str, team_id: str | None = None) -> Project:
+            assert project_ref == "new-project"
+            assert team_id is None
+            return _project(
+                id="new-project",
+                name="New Project",
+                slug="new-project",
+            )
+
+    monkeypatch.setattr("prime_cli.lab_setup.ProjectsClient", DummyProjectsClient)
+
+    result = run_lab_setup_service(
+        LabSetupOptions(
+            skip_install=True,
+            skip_agents_md=True,
+            agents=("codex",),
+            project_ref="new-project",
+        ),
+        workspace=tmp_path,
+        emit=lambda _item: None,
+    )
+
+    context = json.loads((context_dir / "context.json").read_text())
+    assert result.exit_code == 0
+    assert context["project_id"] == "new-project"
+    assert context["project_name"] == "New Project"
+
+
+def test_lab_setup_project_name_overrides_active_project(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("PRIME_API_KEY", "test-key")
+    monkeypatch.setattr(AGENT_WHICH, lambda _command: "/bin/tool")
+    monkeypatch.setattr("prime_cli.lab_setup.APIClient", lambda: object())
+    context_dir = tmp_path / ".prime" / "lab"
+    context_dir.mkdir(parents=True)
+    (context_dir / "context.json").write_text(
+        json.dumps(
+            {
+                "project_id": "old-project",
+                "project_slug": "old-project",
+                "project_name": "Old Project",
+                "team_id": None,
+                "base_url": "https://api.primeintellect.ai",
+            }
+        ),
+        encoding="utf-8",
+    )
+    captured: dict[str, Any] = {}
+
+    class DummyProjectsClient:
+        def __init__(self, _api_client: object) -> None:
+            pass
+
+        def create(
+            self,
+            name: str,
+            slug: str | None = None,
+            description: str | None = None,
+            team_id: str | None = None,
+        ) -> Project:
+            captured.update(
+                {
+                    "name": name,
+                    "slug": slug,
+                    "description": description,
+                    "team_id": team_id,
+                }
+            )
+            return _project(
+                id="new-project",
+                name=name,
+                slug="new-project",
+            )
+
+    monkeypatch.setattr("prime_cli.lab_setup.ProjectsClient", DummyProjectsClient)
+
+    result = run_lab_setup_service(
+        LabSetupOptions(
+            skip_install=True,
+            skip_agents_md=True,
+            agents=("codex",),
+            project_name="New Project",
+        ),
+        workspace=tmp_path,
+        emit=lambda _item: None,
+    )
+
+    context = json.loads((context_dir / "context.json").read_text())
+    assert result.exit_code == 0
+    assert captured == {
+        "name": "New Project",
+        "slug": None,
+        "description": None,
+        "team_id": None,
+    }
+    assert context["project_id"] == "new-project"
+    assert context["project_name"] == "New Project"
+
+
+def test_lab_setup_does_not_activate_mismatched_team_project(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("PRIME_API_KEY", "test-key")
+    monkeypatch.setattr(AGENT_WHICH, lambda _command: "/bin/tool")
+    monkeypatch.setattr("prime_cli.lab_setup.APIClient", lambda: object())
+
+    class DummyProjectsClient:
+        def __init__(self, _api_client: object) -> None:
+            pass
+
+        def get(self, project_ref: str, team_id: str | None = None) -> Project:
+            assert project_ref == "team-project"
+            assert team_id is None
+            return _project(
+                name="Team Project",
+                slug="team-project",
+                team_id="team-123",
+            )
+
+    monkeypatch.setattr("prime_cli.lab_setup.ProjectsClient", DummyProjectsClient)
+    emitted: list[Any] = []
+
+    result = run_lab_setup_service(
+        LabSetupOptions(
+            skip_install=True,
+            skip_agents_md=True,
+            agents=("codex",),
+            project_ref="team-project",
+        ),
+        workspace=tmp_path,
+        emit=emitted.append,
+    )
+
+    output = _render_emitted(emitted)
+    assert result.exit_code == 0
+    assert not (tmp_path / ".prime" / "lab" / "context.json").exists()
+    assert "project scope is not active" in output
+    assert "Cannot set an active project for team team-123" in output
+    assert "Projects API request failed" not in output
+
+
+def test_lab_setup_no_project_skips_project_api(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("PRIME_API_KEY", "test-key")
+    monkeypatch.setattr(AGENT_WHICH, lambda _command: "/bin/tool")
+    monkeypatch.setattr(
+        "prime_cli.lab_setup.ProjectsClient",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("should not construct ProjectsClient")
+        ),
+    )
+    emitted: list[Any] = []
+
+    result = run_lab_setup_service(
+        LabSetupOptions(
+            skip_install=True,
+            skip_agents_md=True,
+            agents=("codex",),
+            no_project=True,
+        ),
+        workspace=tmp_path,
+        emit=emitted.append,
+    )
+
+    assert result.exit_code == 0
+    assert not (tmp_path / ".prime" / "lab" / "context.json").exists()
+    assert "Skipped Lab project setup (--no-project)" in _render_emitted(emitted)
+
+
+def test_lab_setup_respects_cleared_project_context(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("PRIME_API_KEY", "test-key")
+    monkeypatch.setattr(AGENT_WHICH, lambda _command: "/bin/tool")
+    monkeypatch.setattr(
+        "prime_cli.lab_setup.ProjectsClient",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("should not construct ProjectsClient")
+        ),
+    )
+    context_dir = tmp_path / ".prime" / "lab"
+    context_dir.mkdir(parents=True)
+    context_path = context_dir / "context.json"
+    context_path.write_text(
+        json.dumps(
+            {
+                "project_id": None,
+                PROJECT_CONTEXT_CLEARED_KEY: True,
+                "team_id": None,
+                "base_url": "https://api.primeintellect.ai",
+            }
+        ),
+        encoding="utf-8",
+    )
+    emitted: list[Any] = []
+
+    result = run_lab_setup_service(
+        LabSetupOptions(skip_install=True, skip_agents_md=True, agents=("codex",)),
+        workspace=tmp_path,
+        emit=emitted.append,
+    )
+
+    context = json.loads(context_path.read_text())
+    assert result.exit_code == 0
+    assert context["project_id"] is None
+    assert context[PROJECT_CONTEXT_CLEARED_KEY] is True
+    assert "cleared its active project" in _render_emitted(emitted)
+
+
+def test_lab_setup_without_api_key_continues_without_project(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(AGENT_WHICH, lambda _command: "/bin/tool")
+    emitted: list[Any] = []
+
+    result = run_lab_setup_service(
+        LabSetupOptions(skip_install=True, skip_agents_md=True, agents=("codex",)),
+        workspace=tmp_path,
+        emit=emitted.append,
+    )
+
+    assert result.exit_code == 0
+    assert not (tmp_path / ".prime" / "lab" / "context.json").exists()
+    assert "Skipped Lab project setup because no API key is configured" in _render_emitted(emitted)
 
 
 def test_lab_setup_service_emits_post_setup_call_to_action(

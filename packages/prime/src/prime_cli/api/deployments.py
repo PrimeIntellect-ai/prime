@@ -15,6 +15,7 @@ class Adapter(BaseModel):
     display_name: Optional[str] = Field(None, alias="displayName")
     user_id: str = Field(..., alias="userId")
     team_id: Optional[str] = Field(None, alias="teamId")
+    project_id: Optional[str] = Field(None, alias="projectId")
     rft_run_id: str = Field(..., alias="rftRunId")
     base_model: str = Field(..., alias="baseModel")
     step: Optional[int] = Field(None, description="Training step number")
@@ -101,6 +102,26 @@ class DeploymentsClient:
             if hasattr(e, "response") and hasattr(e.response, "text"):
                 raise APIError(f"Failed to unload adapter: {e.response.text}")
             raise APIError(f"Failed to unload adapter: {str(e)}")
+
+    def update_adapter_project(
+        self,
+        adapter_id: str,
+        project_id: Optional[str],
+        *,
+        operation: str = "set",
+    ) -> Adapter:
+        """Update adapter project memberships."""
+        try:
+            response = self.client.request(
+                "PATCH",
+                f"/rft/adapters/{adapter_id}/project",
+                json={"projectId": project_id, "operation": operation},
+            )
+            return Adapter.model_validate(response.get("adapter"))
+        except Exception as e:
+            if hasattr(e, "response") and hasattr(e.response, "text"):
+                raise APIError(f"Failed to update adapter project: {e.response.text}")
+            raise APIError(f"Failed to update adapter project: {str(e)}")
 
     def get_deployable_models(self) -> List[str]:
         """Get list of base models that support LoRA deployment."""

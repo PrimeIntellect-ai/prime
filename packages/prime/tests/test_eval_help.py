@@ -46,6 +46,8 @@ def test_append_eval_options_mentions_tunnel_access():
     help_text = _append_eval_options("Usage: prime eval run [-h] environment\n")
 
     assert "--allow-tunnel-access" in help_text
+    assert "--project TEXT" in help_text
+    assert "--no-project" in help_text
 
 
 def test_eval_view_uses_prime_viewer(monkeypatch):

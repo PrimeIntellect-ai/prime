@@ -37,6 +37,7 @@ eval_response = client.create_evaluation(
     model_name="gpt-4o-mini",
     dataset="gsm8k",
     framework="verifiers",
+    project_id="project-id",
     metadata={
         "version": "1.0",
         "num_examples": 10,
@@ -220,6 +221,29 @@ client.finalize_evaluation(eval_id, metrics=eval_data.get("metrics"))
 print(f"Successfully pushed evaluation: {eval_id}")
 ```
 
+## Project Attachment
+
+Evaluations can be created inside a Lab project, moved to another project, or
+cleared from their project. Evaluation assignment is set/clear; targeted removal
+from one project is not supported for evaluations.
+
+```python
+eval_response = client.create_evaluation(
+    name="gsm8k-project-baseline",
+    environments=[{"id": "gsm8k"}],
+    model_name="gpt-4o-mini",
+    project_id="project-id",
+)
+
+eval_id = eval_response["evaluation_id"]
+
+# Move the evaluation to another project
+client.update_evaluation(eval_id, project_id="another-project-id")
+
+# Clear the evaluation project
+client.update_evaluation(eval_id, clear_project=True)
+```
+
 ## API Reference
 
 ### EvalsClient
@@ -232,6 +256,7 @@ Main client for interacting with the Prime Evals API.
 - `push_samples()` - Push evaluation samples
 - `finalize_evaluation()` - Finalize an evaluation with final metrics
 - `get_evaluation()` - Get evaluation details by ID
+- `update_evaluation()` - Update evaluation details or assign/clear a project
 - `list_evaluations()` - List evaluations with optional filters
 - `get_samples()` - Get samples for an evaluation
 
@@ -276,4 +301,3 @@ except EvalsAPIError as e:
 ## License
 
 MIT License - see LICENSE file for details
-

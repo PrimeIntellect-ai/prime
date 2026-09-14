@@ -132,6 +132,7 @@ _PROCESS_CONTROL_RETRY_INITIAL_DELAY = 0.5
 _BACKGROUND_JOB_LAUNCH_ATTEMPTS = 3
 _BACKGROUND_JOB_LAUNCH_BACKOFF_SECONDS = 0.5
 _BACKGROUND_JOB_LAUNCH_TIMEOUT_SECONDS = 30
+_SANDBOX_ERROR_CONTEXT_TIMEOUT_SECONDS = 10.0
 
 _RequestMessage = TypeVar("_RequestMessage", bound=Message)
 _ResponseMessage = TypeVar("_ResponseMessage", bound=Message)
@@ -2182,10 +2183,18 @@ class SandboxClient:
         self.execute_command(sandbox_id, "echo 'sandbox ready'", timeout=timeout)
         return True
 
-    def _get_sandbox_error_context(self, sandbox_id: str) -> dict:
+    def _get_sandbox_error_context(
+        self,
+        sandbox_id: str,
+        timeout: float = _SANDBOX_ERROR_CONTEXT_TIMEOUT_SECONDS,
+    ) -> dict:
         """Fetch sandbox error context from the lightweight server endpoint."""
         try:
-            response = self.client.request("GET", f"/sandbox/{sandbox_id}/error-context")
+            response = self.client.request(
+                "GET",
+                f"/sandbox/{sandbox_id}/error-context",
+                timeout=timeout,
+            )
             return {
                 "status": response.get("status"),
                 "error_type": response.get("errorType") or response.get("error_type"),
@@ -3038,16 +3047,29 @@ class SandboxClient:
 
         Raises:
             CommandTimeoutError: If command doesn't complete within timeout
+            SandboxNotRunningError: If the sandbox terminates while the command is running
         """
         job = self.start_background_job(sandbox_id, command, working_dir=working_dir, env=env)
         use_batch_status = self._auth_cache.is_vm(sandbox_id)
         deadline = time.monotonic() + timeout
         poll_delay = min(float(poll_interval), BACKGROUND_JOB_POLL_MAX_DELAY)
         while True:
-            if use_batch_status:
-                snapshot = self._background_job_status_batcher.get((sandbox_id, job.job_id))
-            else:
-                snapshot = self.get_background_job_status(sandbox_id, job)
+            try:
+                if use_batch_status:
+                    snapshot = self._background_job_status_batcher.get((sandbox_id, job.job_id))
+                else:
+                    snapshot = self.get_background_job_status(sandbox_id, job)
+            except APIError as error:
+                # Error classification gets a separate bounded grace period so a
+                # status poll that overruns the job deadline can still report that
+                # the sandbox terminated.
+                ctx = self._get_sandbox_error_context(
+                    sandbox_id,
+                    timeout=_SANDBOX_ERROR_CONTEXT_TIMEOUT_SECONDS,
+                )
+                if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
+                    _raise_not_running_error(sandbox_id, ctx, command=command, cause=error)
+                raise
             if snapshot.completed:
                 assert snapshot.exit_code is not None
                 return self._background_job_output_coordinator.get(job, snapshot.exit_code, None)
@@ -3711,10 +3733,18 @@ class AsyncSandboxClient:
         await self.execute_command(sandbox_id, "echo 'sandbox ready'", timeout=timeout)
         return True
 
-    async def _get_sandbox_error_context(self, sandbox_id: str) -> dict:
+    async def _get_sandbox_error_context(
+        self,
+        sandbox_id: str,
+        timeout: float = _SANDBOX_ERROR_CONTEXT_TIMEOUT_SECONDS,
+    ) -> dict:
         """Fetch sandbox error context from the lightweight server endpoint."""
         try:
-            response = await self.client.request("GET", f"/sandbox/{sandbox_id}/error-context")
+            response = await self.client.request(
+                "GET",
+                f"/sandbox/{sandbox_id}/error-context",
+                timeout=timeout,
+            )
             return {
                 "status": response.get("status"),
                 "error_type": response.get("errorType") or response.get("error_type"),
@@ -4771,16 +4801,38 @@ class AsyncSandboxClient:
 
         Raises:
             CommandTimeoutError: If command doesn't complete within timeout
+            SandboxNotRunningError: If the sandbox terminates while the command is running
         """
         job = await self.start_background_job(sandbox_id, command, working_dir=working_dir, env=env)
         use_batch_status = await self._auth_cache.is_vm(sandbox_id)
         deadline = time.monotonic() + timeout
         poll_delay = min(float(poll_interval), BACKGROUND_JOB_POLL_MAX_DELAY)
         while True:
-            if use_batch_status:
-                snapshot = await self._background_job_status_batcher.get((sandbox_id, job.job_id))
-            else:
-                snapshot = await self.get_background_job_status(sandbox_id, job)
+            try:
+                if use_batch_status:
+                    snapshot = await self._background_job_status_batcher.get(
+                        (sandbox_id, job.job_id)
+                    )
+                else:
+                    snapshot = await self.get_background_job_status(sandbox_id, job)
+            except APIError as error:
+                # Error classification gets a separate bounded grace period so a
+                # status poll that overruns the job deadline can still report that
+                # the sandbox terminated.
+                context_timeout = _SANDBOX_ERROR_CONTEXT_TIMEOUT_SECONDS
+                try:
+                    ctx = await asyncio.wait_for(
+                        self._get_sandbox_error_context(
+                            sandbox_id,
+                            timeout=context_timeout,
+                        ),
+                        timeout=context_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    raise error from None
+                if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
+                    _raise_not_running_error(sandbox_id, ctx, command=command, cause=error)
+                raise
             if snapshot.completed:
                 assert snapshot.exit_code is not None
                 return await self._background_job_output_coordinator.get(

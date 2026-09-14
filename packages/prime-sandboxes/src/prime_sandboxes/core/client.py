@@ -114,7 +114,7 @@ class APIClient:
         url: str,
         params: Optional[Dict[str, Any]] = None,
         json: Optional[Dict[str, Any]] = None,
-        timeout: Optional[int] = None,
+        timeout: Optional[float] = None,
     ) -> httpx.Response:
         """Make idempotent HTTP request with retry on transient failures."""
         response = self.client.request(method, url, params=params, json=json, timeout=timeout)
@@ -133,7 +133,7 @@ class APIClient:
         url: str,
         params: Optional[Dict[str, Any]] = None,
         json: Optional[Dict[str, Any]] = None,
-        timeout: Optional[int] = None,
+        timeout: Optional[float] = None,
     ) -> httpx.Response:
         """Make non-idempotent request with only pre-processing safe retries."""
         return self.client.request(method, url, params=params, json=json, timeout=timeout)
@@ -150,7 +150,7 @@ class APIClient:
         url: str,
         params: Optional[Dict[str, Any]] = None,
         json: Optional[Dict[str, Any]] = None,
-        timeout: Optional[int] = None,
+        timeout: Optional[float] = None,
     ) -> httpx.Response:
         """Make idempotent POST with retries for ambiguous transient failures."""
         response = self.client.request(method, url, params=params, json=json, timeout=timeout)
@@ -163,7 +163,7 @@ class APIClient:
         endpoint: str,
         params: Optional[Dict[str, Any]] = None,
         json: Optional[Dict[str, Any]] = None,
-        timeout: Optional[int] = None,
+        timeout: Optional[float] = None,
         idempotent_post: bool = False,
     ) -> Dict[str, Any]:
         """Make a request to the API"""
@@ -275,7 +275,7 @@ class AsyncAPIClient:
         url: str,
         params: Optional[Dict[str, Any]] = None,
         json: Optional[Dict[str, Any]] = None,
-        timeout: Optional[int] = None,
+        timeout: Optional[float] = None,
     ) -> httpx.Response:
         """Make async idempotent HTTP request with retry on transient failures."""
         response = await self.client.request(method, url, params=params, json=json, timeout=timeout)
@@ -294,7 +294,7 @@ class AsyncAPIClient:
         url: str,
         params: Optional[Dict[str, Any]] = None,
         json: Optional[Dict[str, Any]] = None,
-        timeout: Optional[int] = None,
+        timeout: Optional[float] = None,
     ) -> httpx.Response:
         """Make async non-idempotent request with only pre-processing safe retries."""
         return await self.client.request(method, url, params=params, json=json, timeout=timeout)
@@ -311,7 +311,7 @@ class AsyncAPIClient:
         url: str,
         params: Optional[Dict[str, Any]] = None,
         json: Optional[Dict[str, Any]] = None,
-        timeout: Optional[int] = None,
+        timeout: Optional[float] = None,
     ) -> httpx.Response:
         """Make async idempotent POST with retries for ambiguous transient failures."""
         response = await self.client.request(method, url, params=params, json=json, timeout=timeout)
@@ -324,7 +324,7 @@ class AsyncAPIClient:
         endpoint: str,
         params: Optional[Dict[str, Any]] = None,
         json: Optional[Dict[str, Any]] = None,
-        timeout: Optional[int] = None,
+        timeout: Optional[float] = None,
         idempotent_post: bool = False,
     ) -> Dict[str, Any]:
         """Make an async request to the API"""

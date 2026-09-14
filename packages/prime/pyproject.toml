@@ -11,6 +11,9 @@ authors = [
 ]
 dependencies = [
     "prime-sandboxes>=0.2.41",
+    # TODO(release): the CLI calls EvalsClient.create/cancel_hosted_evaluation;
+    # before publishing the CLI, raise this floor to the first prime-evals
+    # release that ships those methods.
     "prime-evals>=0.2.3",
     "prime-traces>=0.0.4",
     "prime-tunnel>=0.1.11",

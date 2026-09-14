@@ -87,11 +87,21 @@ class APIClient:
 
         url = f"{self.base_url}{endpoint}"
 
+        # Forward an explicit per-request timeout, but keep the client's
+        # configured default when none is given: httpx treats timeout=None
+        # as "no timeout", which would disable the constructor's 30s bound.
+        request_kwargs: Dict[str, Any] = {}
+        if timeout is not None:
+            request_kwargs["timeout"] = timeout
+
         try:
-            response = self.client.request(method, url, params=params, json=json, timeout=timeout)
+            response = self.client.request(method, url, params=params, json=json, **request_kwargs)
             response.raise_for_status()
 
-            result = response.json()
+            try:
+                result = response.json()
+            except ValueError as e:
+                raise APIError(f"Invalid JSON in API response: {e}") from e
             if not isinstance(result, dict):
                 raise APIError("API response was not a dictionary")
             return result
@@ -179,13 +189,23 @@ class AsyncAPIClient:
 
         url = f"{self.base_url}{endpoint}"
 
+        # Forward an explicit per-request timeout, but keep the client's
+        # configured default when none is given: httpx treats timeout=None
+        # as "no timeout", which would disable the constructor's 30s bound.
+        request_kwargs: Dict[str, Any] = {}
+        if timeout is not None:
+            request_kwargs["timeout"] = timeout
+
         try:
             response = await self.client.request(
-                method, url, params=params, json=json, timeout=timeout
+                method, url, params=params, json=json, **request_kwargs
             )
             response.raise_for_status()
 
-            result = response.json()
+            try:
+                result = response.json()
+            except ValueError as e:
+                raise APIError(f"Invalid JSON in API response: {e}") from e
             if not isinstance(result, dict):
                 raise APIError("API response was not a dictionary")
             return result

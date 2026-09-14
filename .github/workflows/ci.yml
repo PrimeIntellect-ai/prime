@@ -169,6 +169,33 @@ jobs:
       working-directory: packages/prime-traces
       run: uv run pytest tests/ -v
 
+  test-evals:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v6
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@v4
+      with:
+        version: "latest"
+
+    - name: Install dependencies
+      working-directory: packages/prime-evals
+      run: uv sync --all-extras
+
+    # No secrets: the evals tests are hermetic (fakes and monkeypatch).
+    - name: Run tests
+      working-directory: packages/prime-evals
+      run: uv run pytest tests/ -v
+
   test-runs:
     runs-on: ubuntu-latest
     strategy:

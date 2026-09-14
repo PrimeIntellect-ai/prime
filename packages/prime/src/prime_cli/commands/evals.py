@@ -513,7 +513,7 @@ def _fetch_logs(client: APIClient, eval_id: str) -> str:
     return response.get("logs") or ""
 
 
-def _build_hosted_evaluation_payload(config: HostedEvalConfig) -> dict[str, Any]:
+def _build_hosted_eval_config(config: HostedEvalConfig) -> dict[str, Any]:
     eval_config: dict[str, Any] = {
         "num_examples": config.num_examples,
         "rollouts_per_example": config.rollouts_per_example,
@@ -551,30 +551,24 @@ def _build_hosted_evaluation_payload(config: HostedEvalConfig) -> dict[str, Any]
     if config.api_key_var:
         eval_config["api_key_var"] = config.api_key_var
 
-    payload: dict[str, Any] = {
-        "environment_ids": [config.environment_id],
-        "inference_model": config.inference_model,
-        "eval_config": eval_config,
-    }
-    if config.name:
-        payload["name"] = config.name
-
-    return payload
+    return eval_config
 
 
 def _create_hosted_evaluations(
     config: HostedEvalConfig, environment_ids: Optional[list[str]] = None
 ) -> dict[str, Any]:
-    client = APIClient()
-    payload = _build_hosted_evaluation_payload(config)
+    api_client = APIClient()
 
-    if environment_ids is not None:
-        payload["environment_ids"] = environment_ids
-
-    if client.config.team_id:
-        payload["team_id"] = client.config.team_id
-
-    created = client.post("/hosted-evaluations", json=payload)
+    # team_id is not passed explicitly: the SDK falls back to the injected
+    # client's config.team_id, same source as before the refactor.
+    created = EvalsClient(api_client).create_hosted_evaluation(
+        # Explicit empty list stays empty; only None falls back to the config's
+        # single environment.
+        environment_ids if environment_ids is not None else [config.environment_id],
+        config.inference_model,
+        _build_hosted_eval_config(config),
+        name=config.name or None,
+    )
     evaluation_id = created.get("evaluation_id")
     evaluation_ids = created.get("evaluation_ids")
 
@@ -1379,8 +1373,7 @@ def stop_cmd(
 ) -> None:
     """Stop a running hosted evaluation."""
     try:
-        client = APIClient()
-        result = client.patch(f"/hosted-evaluations/{eval_id}/cancel")
+        result = EvalsClient(APIClient()).cancel_hosted_evaluation(eval_id)
         message = result.get("message") or f"Evaluation {eval_id} cancelled."
         console.print(f"[green]✓ {message}[/green]")
         console.print(f"[dim]View results:[/dim] {get_eval_viewer_url(eval_id)}")

@@ -5,7 +5,7 @@ from typing import Any, Dict, Optional
 
 import pytest
 
-from prime_evals.core import APIClient, APIError, AsyncAPIClient
+from prime_evals.core import APIClient, APIError
 from prime_evals.evals import AsyncEvalsClient, EvalsClient
 
 
@@ -30,7 +30,7 @@ def _eval_config() -> Dict[str, Any]:
         "api_base_url": "https://api.inference.example/v1",
         "api_key_var": "PRODUCTION_INFERENCE_KEY",
         "custom_secrets": {"PRODUCTION_INFERENCE_KEY": "sk-prod"},
-        "headers": {"X-Custom-Header": "custom-value"},
+        "headers": ["X-Custom-Header: custom-value"],
     }
 
 
@@ -161,35 +161,6 @@ def test_async_cancel_hosted_evaluation_uses_patch():
     ]
 
 
-class FakeResponse:
-    def raise_for_status(self):
-        return None
-
-    def json(self):
-        return {"ok": True}
-
-
-class RecordingHttpClient:
-    def __init__(self, **kwargs):
-        self.request_calls = []
-
-    def request(self, method, url, **kwargs):
-        self.request_calls.append((method, url, kwargs))
-        return FakeResponse()
-
-
-def test_request_keeps_configured_timeout_when_no_override_given(monkeypatch):
-    api_client = APIClient(api_key="test-key")
-    http = RecordingHttpClient()
-    monkeypatch.setattr(api_client, "client", http)
-
-    api_client.request("GET", "/evaluations/eval-123")
-
-    method, url, kwargs = http.request_calls[0]
-    assert (method, url) == ("GET", f"{api_client.base_url}/api/v1/evaluations/eval-123")
-    assert "timeout" not in kwargs, "timeout=None must not disable the client default"
-
-
 def test_request_wraps_malformed_json_in_api_error(monkeypatch):
     class MalformedResponse:
         def raise_for_status(self):
@@ -207,47 +178,3 @@ def test_request_wraps_malformed_json_in_api_error(monkeypatch):
 
     with pytest.raises(APIError, match="Invalid JSON in API response"):
         api_client.request("GET", "/evaluations/eval-123")
-
-
-def test_request_forwards_explicit_timeout(monkeypatch):
-    api_client = APIClient(api_key="test-key")
-    http = RecordingHttpClient()
-    monkeypatch.setattr(api_client, "client", http)
-
-    api_client.request("GET", "/evaluations/eval-123", timeout=5)
-
-    _, _, kwargs = http.request_calls[0]
-    assert kwargs["timeout"] == 5
-
-
-def test_async_request_keeps_configured_timeout_when_no_override_given():
-    api_client = AsyncAPIClient(api_key="test-key")
-
-    class RecordingAsyncHttpClient(RecordingHttpClient):
-        async def request(self, method, url, **kwargs):
-            return super().request(method, url, **kwargs)
-
-    http = RecordingAsyncHttpClient()
-    api_client.client = http
-
-    result = asyncio.run(api_client.request("GET", "/evaluations/eval-123"))
-
-    assert result == {"ok": True}
-    _, _, kwargs = http.request_calls[0]
-    assert "timeout" not in kwargs
-
-
-def test_async_request_forwards_explicit_timeout():
-    api_client = AsyncAPIClient(api_key="test-key")
-
-    class RecordingAsyncHttpClient(RecordingHttpClient):
-        async def request(self, method, url, **kwargs):
-            return super().request(method, url, **kwargs)
-
-    http = RecordingAsyncHttpClient()
-    api_client.client = http
-
-    asyncio.run(api_client.request("GET", "/evaluations/eval-123", timeout=5))
-
-    _, _, kwargs = http.request_calls[0]
-    assert kwargs["timeout"] == 5

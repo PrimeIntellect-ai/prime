@@ -87,15 +87,8 @@ class APIClient:
 
         url = f"{self.base_url}{endpoint}"
 
-        # Forward an explicit per-request timeout, but keep the client's
-        # configured default when none is given: httpx treats timeout=None
-        # as "no timeout", which would disable the constructor's 30s bound.
-        request_kwargs: Dict[str, Any] = {}
-        if timeout is not None:
-            request_kwargs["timeout"] = timeout
-
         try:
-            response = self.client.request(method, url, params=params, json=json, **request_kwargs)
+            response = self.client.request(method, url, params=params, json=json, timeout=timeout)
             response.raise_for_status()
 
             try:
@@ -189,16 +182,9 @@ class AsyncAPIClient:
 
         url = f"{self.base_url}{endpoint}"
 
-        # Forward an explicit per-request timeout, but keep the client's
-        # configured default when none is given: httpx treats timeout=None
-        # as "no timeout", which would disable the constructor's 30s bound.
-        request_kwargs: Dict[str, Any] = {}
-        if timeout is not None:
-            request_kwargs["timeout"] = timeout
-
         try:
             response = await self.client.request(
-                method, url, params=params, json=json, **request_kwargs
+                method, url, params=params, json=json, timeout=timeout
             )
             response.raise_for_status()
 

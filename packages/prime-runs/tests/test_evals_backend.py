@@ -196,6 +196,26 @@ def test_the_error_message_is_capped_at_the_api_limit(make_platform_client, eval
     assert len(sent) == 4096
 
 
+def test_a_rejected_summary_does_not_stop_the_run_from_closing(
+    make_platform_client, eval_routes, caplog
+):
+    def put(request):
+        if b"metrics" in request.content:
+            return httpx.Response(422, json={"detail": "metrics value not allowed"})
+        return httpx.Response(200, json={"evaluation_id": "eval-abc", "status": "FAILED"})
+
+    routes = dict(eval_routes)
+    routes["PUT /api/v1/evaluations/eval-abc"] = put
+    backend, handler = make_backend(make_platform_client, routes)
+
+    with caplog.at_level("WARNING"):
+        backend.finalize("eval-abc", status=RunStatus.FAILED, error="boom", summary={"n": 1})
+
+    bodies = handler.bodies_for("/api/v1/evaluations/eval-abc")
+    assert bodies[-1] == {"status": "FAILED", "error_message": "boom"}
+    assert "still marking it failed" in caplog.text
+
+
 def test_a_run_the_platform_already_closed_is_left_alone(make_platform_client, eval_routes, caplog):
     routes = dict(eval_routes)
     routes["PUT /api/v1/evaluations/eval-abc"] = lambda request: httpx.Response(

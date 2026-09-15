@@ -10,7 +10,12 @@ import uuid
 from typing import Any, Dict, List, Optional, Protocol
 
 from ._http import PlatformClient
-from .exceptions import APIError, ConfigurationError, EnvironmentResolutionError
+from .exceptions import (
+    APIError,
+    ConfigurationError,
+    EnvironmentResolutionError,
+    TransportError,
+)
 from .models import EnvironmentRef, RunHandle, RunSpec, RunStatus, TrainingSpec
 
 logger = logging.getLogger(__name__)
@@ -156,8 +161,17 @@ class EvalsBackend:
             return
 
         # Two requests: the status guard rejects the whole update when the run is
-        # already closed, and the config/summary should land either way.
-        self.update(run_id, config=config, summary=summary)
+        # already closed, and the config/summary should land either way. The
+        # status is what closes the run out, so a rejected update must not stop it.
+        try:
+            self.update(run_id, config=config, summary=summary)
+        except (APIError, TransportError) as exc:
+            logger.warning(
+                "Run %s: config/summary update failed (%s); still marking it %s",
+                run_id,
+                exc,
+                status.value,
+            )
         message = error
         if status is RunStatus.CRASHED:
             message = f"crashed: {error}" if error else "crashed"

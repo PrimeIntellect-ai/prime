@@ -87,6 +87,7 @@ LIST_SANDBOX_PORTS_JSON_HELP = json_output_help(
 
 # Statuses where a sandbox is finished and has no remaining lifetime.
 _TERMINAL_SANDBOX_STATUSES = {"TERMINATED", "TIMEOUT", "ERROR"}
+_DEFAULT_SANDBOX_IMAGE = "python:3.11-slim"
 
 
 def _short_duration(seconds: int) -> str:
@@ -501,11 +502,14 @@ def get(
         raise typer.Exit(1)
 
 
-@app.command(no_args_is_help=True)
+@app.command()
 def create(
     docker_image: Optional[str] = typer.Argument(
         None,
-        help="Image to run. For VM sandboxes (the default), provide the VM image reference.",
+        help=(
+            "Image to run. Defaults to python:3.11-slim. For VM sandboxes "
+            "(the default), provide the VM image reference."
+        ),
     ),
     command: Optional[List[str]] = typer.Argument(
         None,
@@ -691,11 +695,7 @@ def create(
                 )
                 raise typer.Exit(1)
 
-        if not docker_image:
-            console.print(
-                "[red]Docker image is required.[/red] Provide a DOCKER_IMAGE positional argument."
-            )
-            raise typer.Exit(1)
+        docker_image = docker_image or _DEFAULT_SANDBOX_IMAGE
 
         # Auto-generate name if not provided
         if not name:

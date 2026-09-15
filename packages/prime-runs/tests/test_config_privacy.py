@@ -27,13 +27,16 @@ def test_eval_create_update_and_failure_only_send_summaries(make_platform_client
     )
     handle = backend.create(spec)
     backend.update(handle.id, config=source)
-    backend.finalize(handle.id, status=RunStatus.FAILED, error="SECRET_ERROR", config=source)
+    backend.finalize(handle.id, status=RunStatus.FAILED, error="boom", config=source)
     for request in handler.requests:
         assert b"SECRET" not in request.content
         assert b"PRIVATE" not in request.content
     created = handler.bodies_for("/api/v1/evaluations/")[0]
     assert created["metadata"] == FIXTURE["metadata"]
-    assert handler.bodies_for("/api/v1/evaluations/eval-abc")[0]["metadata"] == FIXTURE["metadata"]
+    updates = handler.bodies_for("/api/v1/evaluations/eval-abc")
+    assert [u["metadata"] for u in updates if "metadata" in u] == [FIXTURE["metadata"]] * 2
+    # The producer's own error text closes the run (status API); it is not config.
+    assert updates[-1] == {"status": "FAILED", "error_message": "boom"}
     assert source["env"]["agent"]["harness"]["env"]["OPENAI_API_KEY"] == "SECRET_HARNESS"
 
 
@@ -104,3 +107,4 @@ def test_terminal_timestamps_require_a_timezone_and_normalize_to_utc(finished_at
         if expected is not None
         else {"status": "completed"}
     )
+

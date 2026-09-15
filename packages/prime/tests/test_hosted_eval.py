@@ -341,7 +341,8 @@ def test_create_hosted_evaluation_adds_team_id_to_payload(monkeypatch):
         def __init__(self):
             self.config = DummyConfig()
 
-        def post(self, endpoint, json=None):
+        def request(self, method, endpoint, params=None, json=None, timeout=None):
+            captured["method"] = method
             captured["endpoint"] = endpoint
             captured["json"] = json
             return {"evaluation_id": "eval-123"}
@@ -375,7 +376,8 @@ def test_create_hosted_evaluation_includes_sampling_args_in_payload(monkeypatch)
         def __init__(self):
             self.config = DummyConfig()
 
-        def post(self, endpoint, json=None):
+        def request(self, method, endpoint, params=None, json=None, timeout=None):
+            captured["method"] = method
             captured["endpoint"] = endpoint
             captured["json"] = json
             return {"evaluation_id": "eval-123"}
@@ -424,7 +426,8 @@ def test_create_hosted_evaluation_includes_extra_env_kwargs_in_payload(monkeypat
         def __init__(self):
             self.config = DummyConfig()
 
-        def post(self, endpoint, json=None):
+        def request(self, method, endpoint, params=None, json=None, timeout=None):
+            captured["method"] = method
             captured["endpoint"] = endpoint
             captured["json"] = json
             return {"evaluation_id": "eval-123"}
@@ -461,7 +464,8 @@ def test_create_hosted_evaluation_includes_hosted_runtime_args_in_payload(monkey
         def __init__(self):
             self.config = DummyConfig()
 
-        def post(self, endpoint, json=None):
+        def request(self, method, endpoint, params=None, json=None, timeout=None):
+            captured["method"] = method
             captured["endpoint"] = endpoint
             captured["json"] = json
             return {"evaluation_id": "eval-123"}
@@ -505,7 +509,8 @@ def test_create_hosted_evaluation_includes_api_base_url_and_key_var_in_payload(m
         def __init__(self):
             self.config = DummyConfig()
 
-        def post(self, endpoint, json=None):
+        def request(self, method, endpoint, params=None, json=None, timeout=None):
+            captured["method"] = method
             captured["endpoint"] = endpoint
             captured["json"] = json
             return {"evaluation_id": "eval-123"}
@@ -538,7 +543,8 @@ def test_create_hosted_evaluation_includes_tunnel_access_in_payload(monkeypatch)
         def __init__(self):
             self.config = DummyConfig()
 
-        def post(self, endpoint, json=None):
+        def request(self, method, endpoint, params=None, json=None, timeout=None):
+            captured["method"] = method
             captured["endpoint"] = endpoint
             captured["json"] = json
             return {"evaluation_id": "eval-123"}
@@ -567,7 +573,7 @@ def test_create_hosted_evaluation_accepts_plural_ids_response(monkeypatch):
         def __init__(self):
             self.config = DummyConfig()
 
-        def post(self, endpoint, json=None):
+        def request(self, method, endpoint, params=None, json=None, timeout=None):
             return {"evaluation_ids": ["eval-123", "eval-456"]}
 
     monkeypatch.setattr("prime_cli.commands.evals.APIClient", DummyAPIClient)
@@ -1631,11 +1637,12 @@ def test_eval_run_hosted_reports_resolve_api_errors(monkeypatch):
 def test_eval_stop_command_calls_cancel_endpoint(monkeypatch):
     captured = {}
 
-    def fake_patch(self, endpoint, json=None, params=None):
+    def fake_request(self, method, endpoint, params=None, json=None, timeout=None):
+        captured["method"] = method
         captured["endpoint"] = endpoint
         return {"message": "Evaluation cancelled", "evaluation_id": "eval-123"}
 
-    monkeypatch.setattr("prime_cli.commands.evals.APIClient.patch", fake_patch)
+    monkeypatch.setattr("prime_cli.commands.evals.APIClient.request", fake_request)
 
     result = runner.invoke(
         app,
@@ -1644,9 +1651,87 @@ def test_eval_stop_command_calls_cancel_endpoint(monkeypatch):
     )
 
     assert result.exit_code == 0, result.output
-    assert captured == {"endpoint": "/hosted-evaluations/eval-123/cancel"}
+    assert captured == {
+        "method": "PATCH",
+        "endpoint": "/hosted-evaluations/eval-123/cancel",
+    }
     assert "Evaluation cancelled" in result.output
     assert "dashboard/evaluations/eval-123" in result.output
+
+
+def test_create_hosted_evaluations_uses_public_sdk_method(monkeypatch):
+    calls = {}
+
+    class DummyConfig:
+        team_id = "team-123"
+
+    class DummyAPIClient:
+        def __init__(self):
+            self.config = DummyConfig()
+
+    class FakeEvalsClient:
+        def __init__(self, api_client):
+            calls["init_client_type"] = type(api_client).__name__
+
+        def create_hosted_evaluation(
+            self, environment_ids, inference_model, eval_config, *, name=None, team_id=None
+        ):
+            calls["environment_ids"] = environment_ids
+            calls["inference_model"] = inference_model
+            calls["eval_config"] = eval_config
+            calls["name"] = name
+            calls["team_id"] = team_id
+            return {"evaluation_id": "eval-123"}
+
+    monkeypatch.setattr("prime_cli.commands.evals.APIClient", DummyAPIClient)
+    monkeypatch.setattr("prime_cli.commands.evals.EvalsClient", FakeEvalsClient)
+
+    result = _create_hosted_evaluations(
+        HostedEvalConfig(
+            environment_id="env-123",
+            inference_model="openai/gpt-4.1-mini",
+            num_examples=5,
+            rollouts_per_example=3,
+        ),
+        environment_ids=["env-123", "env-456"],
+    )
+
+    assert result == {"evaluation_id": "eval-123"}
+    assert calls["init_client_type"] == "DummyAPIClient"
+    assert calls["environment_ids"] == ["env-123", "env-456"]
+    assert calls["inference_model"] == "openai/gpt-4.1-mini"
+    assert calls["eval_config"]["num_examples"] == 5
+    assert calls["name"] is None
+    # team_id is omitted so the SDK falls back to the injected client's config.
+    assert calls["team_id"] is None
+
+
+def test_eval_stop_command_uses_public_sdk_method(monkeypatch):
+    calls = {}
+
+    class DummyAPIClient:
+        pass
+
+    class FakeEvalsClient:
+        def __init__(self, api_client):
+            calls["init_client_type"] = type(api_client).__name__
+
+        def cancel_hosted_evaluation(self, evaluation_id):
+            calls["evaluation_id"] = evaluation_id
+            return {"message": "Evaluation cancelled"}
+
+    monkeypatch.setattr("prime_cli.commands.evals.APIClient", DummyAPIClient)
+    monkeypatch.setattr("prime_cli.commands.evals.EvalsClient", FakeEvalsClient)
+
+    result = runner.invoke(
+        app,
+        ["eval", "stop", "eval-123"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls == {"init_client_type": "DummyAPIClient", "evaluation_id": "eval-123"}
+    assert "Evaluation cancelled" in result.output
 
 
 def test_print_eval_status_prefers_returned_viewer_url(monkeypatch, capsys):

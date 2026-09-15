@@ -7,12 +7,16 @@
 
 import logging
 import uuid
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Protocol
 
 from ._http import PlatformClient
 from .config_privacy import metadata_summary, training_config_summary
-from .exceptions import APIError, ConfigurationError, EnvironmentResolutionError
+from .exceptions import (
+    APIError,
+    ConfigurationError,
+    EnvironmentResolutionError,
+    TransportError,
+)
 from .models import EnvironmentRef, RunHandle, RunSpec, RunStatus, TrainingSpec
 
 logger = logging.getLogger(__name__)
@@ -50,13 +54,27 @@ class Backend(Protocol):
     def close(self) -> None: ...
 
 
+#: The evaluations API closes a run a producer stopped as ``FAILED`` or
+#: ``CANCELLED`` (``PUT /evaluations/{id}``); ``COMPLETED`` only comes from
+#: ``/finalize``. A crash is a failure the process never got to explain, so it
+#: arrives as ``FAILED`` with the reason in ``error_message``.
+EVAL_TERMINAL_STATUS = {
+    RunStatus.FAILED: "FAILED",
+    RunStatus.CANCELLED: "CANCELLED",
+    RunStatus.CRASHED: "FAILED",
+}
+
+#: ``UpdateEvaluationRequest.error_message`` is capped server-side.
+EVAL_ERROR_MESSAGE_MAX_LENGTH = 4096
+
+
 class EvalsBackend:
     """Environments are resolved through the hub's get-or-create, so a local run
-    uploads without ``prime env push``. The API has no producer-facing way to mark
-    a run failed, so a non-completed terminal state is recorded in
-    ``metadata.prime_runs`` and the run keeps showing as running. A run a launcher
-    already created (a hosted evaluation) is attached to instead (:meth:`attach`):
-    the launcher owns its status, this process streams into it and completes it."""
+    uploads without ``prime env push``. A run that stops without completing is
+    closed out through the API's producer status update, so the dashboard shows
+    it failed or cancelled rather than running forever. A run a launcher already
+    created (a hosted evaluation) is attached to instead (:meth:`attach`): the
+    launcher owns its status, this process streams into it and completes it."""
 
     def __init__(
         self,
@@ -144,17 +162,40 @@ class EvalsBackend:
             self._client.post(f"/evaluations/{run_id}/finalize", json_body=body or {"metrics": {}})
             return
 
-        # Merged into the whole config: the PUT replaces the metadata document.
-        terminal = {"status": status.value, "finished_at": datetime.now(timezone.utc).isoformat()}
-        if error:
-            terminal["error"] = error
-        self.update(run_id, config={**(config or {}), "prime_runs": terminal}, summary=summary)
-        logger.warning(
-            "Run %s %s, but the evaluations API cannot record that; it will keep "
-            "showing as running. Recorded the failure in metadata.prime_runs.",
-            run_id,
-            status.value,
-        )
+        # Two requests: the status guard rejects the whole update when the run is
+        # already closed, and the config/summary should land either way. The
+        # status is what closes the run out, so a rejected update must not stop it.
+        try:
+            self.update(run_id, config=config, summary=summary)
+        except (APIError, TransportError) as exc:
+            logger.warning(
+                "Run %s: config/summary update failed (%s); still marking it %s",
+                run_id,
+                exc,
+                status.value,
+            )
+        message = error
+        if status is RunStatus.CRASHED:
+            message = f"crashed: {error}" if error else "crashed"
+        self._set_terminal_status(run_id, status=status, error_message=message)
+
+    def _set_terminal_status(
+        self, run_id: str, *, status: RunStatus, error_message: Optional[str] = None
+    ) -> None:
+        payload: Dict[str, Any] = {"status": EVAL_TERMINAL_STATUS[status]}
+        if error_message:
+            payload["error_message"] = error_message[:EVAL_ERROR_MESSAGE_MAX_LENGTH]
+        try:
+            self._client.put(f"/evaluations/{run_id}", json_body=payload)
+        except APIError as exc:
+            if exc.status_code == 409:  # already closed: the outcome is recorded either way
+                logger.info(
+                    "Run %s is already closed on the platform; not marking it %s",
+                    run_id,
+                    status.value,
+                )
+                return
+            raise
 
     def close(self) -> None:
         self._client.close()

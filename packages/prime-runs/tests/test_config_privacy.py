@@ -108,3 +108,15 @@ def test_terminal_timestamps_require_a_timezone_and_normalize_to_utc(finished_at
         else {"status": "completed"}
     )
 
+
+@pytest.mark.parametrize("key", ["sampling", "sampling_args"])
+@pytest.mark.parametrize("enabled", [True, False])
+def test_the_boolean_thinking_switch_is_kept(key, enabled):
+    assert config_summary({key: {"enable_thinking": enabled, "temperature": 0.6}}) == {
+        key: {"enable_thinking": enabled, "temperature": 0.6}
+    }
+
+
+@pytest.mark.parametrize("value", ["true", "False", 1, 0, None, [True], {"on": True}])
+def test_a_non_boolean_thinking_value_is_dropped(value):
+    assert config_summary({"sampling": {"enable_thinking": value}}) == {}

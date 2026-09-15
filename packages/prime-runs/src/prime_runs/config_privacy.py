@@ -72,6 +72,9 @@ def config_summary(value: Any) -> dict[str, Any]:
         sampling = value.get(key)
         if isinstance(sampling, dict):
             projected = _numbers(sampling, SAMPLING_FIELDS)
+            # The boolean peer of reasoning_effort (Qwen3.5 / Nemotron thinking switch).
+            if type(sampling.get("enable_thinking")) is bool:
+                projected["enable_thinking"] = sampling["enable_thinking"]
             effort = sampling.get("reasoning_effort")
             if isinstance(effort, str) and effort in (
                 "none",

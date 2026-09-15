@@ -181,13 +181,13 @@ def test_a_run_without_a_source_reports_none():
     run.finish()
 
 
-def test_the_source_survives_the_failure_fallback(tmp_path, online):
+def test_the_source_survives_a_failure(tmp_path, online):
     path = tmp_path / "eval.toml"
     path.write_text(EVAL_TOML)
 
     run, handler = online(config=path)
     run.fail("something broke")
 
-    update = handler.bodies_for("/api/v1/evaluations/eval-abc")[-1]
-    assert update["metadata"][CONFIG_SOURCE_KEY]["text"] == EVAL_TOML
-    assert update["metadata"]["prime_runs"]["status"] == "failed"
+    updates = handler.bodies_for("/api/v1/evaluations/eval-abc")
+    assert updates[-1] == {"status": "FAILED", "error_message": "something broke"}
+    assert all(u["metadata"][CONFIG_SOURCE_KEY]["text"] == EVAL_TOML for u in updates[:-1])

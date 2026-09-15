@@ -37,7 +37,11 @@ trace and episode, over whatever run id the producer recorded locally, and
 keeps the rest of that block (`name`, `work`). A producer never needs to know
 the platform's id; `run.url` is the handle. A `with run:` block finishes for
 you: an exception marks the run `failed`, Ctrl-C `cancelled`, and a process
-that exits without finishing is reported `crashed` by an atexit hook.
+that exits without finishing is reported `crashed` by an atexit hook. An
+evaluation that stops without completing is closed out on the platform as
+`FAILED` or `CANCELLED` (a crash arrives as `FAILED` with the reason in
+`error_message`), so it never shows as running forever; a run the platform
+already closed is left as it is.
 
 `config=` takes the path to the launched file (kept verbatim under
 `config_source`, comments and all) or a mapping stored as given; put a file
@@ -118,12 +122,6 @@ API key disables the run with a warning. `base_url` is normally the platform
 origin; the internal RFT root a hosted training run is given
 (`…/api/internal`, with or without `/rft`) is accepted too and switches the
 client to that router (attached runs only).
-
-## Not yet available
-
-- **Failed or cancelled evaluations on the dashboard.** The evaluations API has
-  no producer-facing status endpoint yet, so the terminal state is recorded
-  under `metadata.prime_runs` and the run keeps showing as running.
 
 ## Related packages
 

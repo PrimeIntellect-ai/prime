@@ -476,6 +476,41 @@ def test_sandbox_create_vm_start_command_preserves_argv(
     )
 
 
+def test_sandbox_create_omitted_image_preserves_command_argv(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_cli(monkeypatch)
+    captured: dict[str, Any] = {}
+
+    def mock_create(self: Any, request: Any) -> Any:
+        captured["request"] = request
+        return SimpleNamespace(id="sbx-default-image-command")
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.create", mock_create)
+
+    result = runner.invoke(
+        app,
+        [
+            "sandbox",
+            "create",
+            "--cpu-cores",
+            "2",
+            "--yes",
+            "--",
+            "python",
+            "script.py",
+            "--verbose",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    request = captured["request"]
+    assert request.docker_image == "python:3.11-slim"
+    assert request.cpu_cores == 2
+    assert request.start_command.executable == "python"
+    assert request.start_command.args == ["script.py", "--verbose"]
+
+
 def test_sandbox_create_container_keeps_legacy_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

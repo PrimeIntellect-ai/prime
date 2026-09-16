@@ -278,7 +278,9 @@ class Run:
             if self.kind == "eval" and traces_counts:
                 # Hosted sandbox keys are upload-only. Persist receipt-backed
                 # counts for their completion check without granting trace reads.
+                prime_runs_summary = self.summary.get("prime_runs")
                 self.summary["prime_runs"] = {
+                    **(prime_runs_summary if isinstance(prime_runs_summary, Mapping) else {}),
                     "traces_episodes_written": sum(traces_counts),
                 }
             # An attached run's config document is the launcher's: it created the

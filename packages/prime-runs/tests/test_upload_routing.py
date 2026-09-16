@@ -139,14 +139,45 @@ def test_access_revoked_after_a_commit_does_not_split_the_run(open_run, uploads)
     assert not any("/samples" in path for path in platform.paths())
 
 
-def test_counts_exclude_bare_traces_and_empty_episodes_and_override_user_summary(open_run):
-    run, _, _ = open_run()
+@pytest.mark.parametrize("summary_source", ["update", "finish"])
+def test_counts_preserve_sibling_metrics_and_override_only_the_owned_field(
+    open_run, summary_source
+):
+    run, platform, _ = open_run()
+    summary = {
+        "prime_runs": {
+            "custom_metric": 1,
+            "nested": {"reward": 0.5},
+            "traces_episodes_written": 999,
+        }
+    }
     with run:
         run.log_traces([make_trace()])
         run.log_episodes([{"id": "empty", "traces": []}, make_episode("e1")])
-        run.update_summary({"prime_runs": {"traces_episodes_written": 999}})
+        if summary_source == "update":
+            run.update_summary(summary)
+        else:
+            run.finish(summary=summary)
 
-    assert run.summary["prime_runs"]["traces_episodes_written"] == 1
+    expected = {
+        "custom_metric": 1,
+        "nested": {"reward": 0.5},
+        "traces_episodes_written": 1,
+    }
+    assert run.summary["prime_runs"] == expected
+    assert summary["prime_runs"]["traces_episodes_written"] == 999
+    for path in ["/api/v1/evaluations/eval-abc", "/api/v1/evaluations/eval-abc/finalize"]:
+        assert platform.bodies_for(path)[0]["metrics"]["prime_runs"] == expected
+
+
+@pytest.mark.parametrize("value", [None, 1, "custom", [1]])
+def test_non_mapping_prime_runs_summary_is_replaced_with_receipt_count(open_run, value):
+    run, _, _ = open_run()
+    with run:
+        run.log_episodes([make_episode()])
+        run.update_summary({"prime_runs": value})
+
+    assert run.summary["prime_runs"] == {"traces_episodes_written": 1}
 
 
 def test_strict_error_policy_surfaces_failure_without_falling_back(open_run, uploads):

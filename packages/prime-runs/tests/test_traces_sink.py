@@ -1,5 +1,7 @@
 """The primary sample transport, and how it degrades."""
 
+from types import SimpleNamespace
+
 import pytest
 from _fakes import make_episode, make_trace
 from prime_traces import LineFormat
@@ -18,6 +20,7 @@ class FakeTracesClient:
         self.calls.append((list(records), kwargs))
         if self.raises is not None:
             raise self.raises
+        kwargs["on_batch"](SimpleNamespace(num_lines=len(records)), "receipt")
         return ["receipt"]
 
     def close(self) -> None:
@@ -139,6 +142,7 @@ def test_an_account_outside_the_beta_retires_the_sink_without_a_failure(caplog):
         sink.write([{"id": "t2"}])
 
     assert sink.enabled is False
+    assert sink.service_not_enabled is True
     assert len(client.calls) == 1
     assert "not enabled" in caplog.text
     assert not [r for r in caplog.records if r.levelname == "WARNING"]
@@ -155,6 +159,7 @@ def test_a_credential_without_the_traces_scope_is_still_a_failure(caplog):
             sink.write([{"id": "t1"}])
 
     assert sink.enabled is False
+    assert sink.service_not_enabled is False
     assert "cannot write traces" in caplog.text
 
 

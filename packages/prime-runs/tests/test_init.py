@@ -86,6 +86,7 @@ def online(monkeypatch, make_platform_client, eval_routes):
 class _NullSink:
     name = "traces"
     enabled = True
+    service_not_enabled = True
 
     def start(self, run_id, context):
         pass
@@ -141,7 +142,7 @@ def test_a_failed_create_closes_the_platform_client(monkeypatch):
     assert client.closed is True
 
 
-def test_an_online_run_has_both_transports_by_default(
+def test_an_online_run_has_traces_with_a_legacy_fallback(
     monkeypatch, make_platform_client, eval_routes
 ):
     handler = RecordingHandler(eval_routes)
@@ -151,6 +152,9 @@ def test_an_online_run_has_both_transports_by_default(
     run = pr.init(name="test-run", environments=["gsm8k"], api_key="test-key")
 
     assert [sink.name for sink in run._worker.sinks] == ["traces", "eval_samples"]
+    from prime_runs.sinks.fallback import LegacySamplesFallback
+
+    assert isinstance(run._worker.sinks[1], LegacySamplesFallback)
     run.finish()
 
 

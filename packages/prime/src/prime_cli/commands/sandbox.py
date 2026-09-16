@@ -49,6 +49,7 @@ from ..utils import (
     validate_output_format,
 )
 from ..utils.display import SANDBOX_STATUS_COLORS
+from ..utils.plain import _PlainTyperCommand
 from ..utils.time_utils import now_utc, to_utc
 
 app = PlainTyper(help="Manage sandboxes", no_args_is_help=True)
@@ -87,6 +88,30 @@ LIST_SANDBOX_PORTS_JSON_HELP = json_output_help(
 
 # Statuses where a sandbox is finished and has no remaining lifetime.
 _TERMINAL_SANDBOX_STATUSES = {"TERMINATED", "TIMEOUT", "ERROR"}
+_DEFAULT_SANDBOX_IMAGE = "python:3.11-slim"
+
+
+class _SandboxCreateCommand(_PlainTyperCommand):
+    """Treat a leading positional separator as an omitted image.
+
+    Click normally removes ``--`` and assigns the first token after it to the
+    optional ``docker_image`` positional. Preserve the more useful CLI meaning
+    for ``create -- COMMAND...`` while leaving ``create IMAGE -- COMMAND...``
+    unchanged.
+    """
+
+    def parse_args(self, ctx: typer.Context, args: List[str]) -> List[str]:
+        if "--" in args:
+            separator_index = args.index("--")
+            parser = self.make_parser(ctx)
+            prefix_values, _, _ = parser.parse_args(args=args[:separator_index])
+            if prefix_values.get("docker_image") is None:
+                args = [
+                    *args[:separator_index],
+                    _DEFAULT_SANDBOX_IMAGE,
+                    *args[separator_index:],
+                ]
+        return super().parse_args(ctx, args)
 
 
 def _short_duration(seconds: int) -> str:
@@ -501,11 +526,15 @@ def get(
         raise typer.Exit(1)
 
 
-@app.command(no_args_is_help=True)
+@app.command(cls=_SandboxCreateCommand)
 def create(
     docker_image: Optional[str] = typer.Argument(
         None,
-        help="Image to run. For VM sandboxes (the default), provide the VM image reference.",
+        help=(
+            "Image to run. Defaults to python:3.11-slim. For VM sandboxes "
+            "(the default), provide the VM image reference. To omit the image "
+            "when supplying a command, use '-- COMMAND...'."
+        ),
     ),
     command: Optional[List[str]] = typer.Argument(
         None,
@@ -691,11 +720,7 @@ def create(
                 )
                 raise typer.Exit(1)
 
-        if not docker_image:
-            console.print(
-                "[red]Docker image is required.[/red] Provide a DOCKER_IMAGE positional argument."
-            )
-            raise typer.Exit(1)
+        docker_image = docker_image or _DEFAULT_SANDBOX_IMAGE
 
         # Auto-generate name if not provided
         if not name:

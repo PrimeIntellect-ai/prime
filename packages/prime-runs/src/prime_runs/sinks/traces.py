@@ -35,6 +35,8 @@ class TracesSink(Sink):
         if receipt_history_size < 0:
             raise ValueError("receipt_history_size must be non-negative")
         self.enabled = True
+        # Only an explicit account-level denial permits the legacy fallback.
+        self.service_not_enabled = False
         self._client = client
         self._injected_client = client is not None
         # The traces service URL (PRIME_TRACES_URL) is resolved by prime-traces.
@@ -48,6 +50,7 @@ class TracesSink(Sink):
         self._context: Dict[str, str] = {}
         self.receipts: list = []
         self.receipts_received = 0
+        self.episodes_written = 0
         self._receipt_history_size = receipt_history_size
         _fork.register(self)
 
@@ -81,32 +84,46 @@ class TracesSink(Sink):
         # The line format is inferred from the first record; batches are homogeneous.
         line_format = LineFormat.EPISODE if is_episode(records[0]) else LineFormat.TRACE
         payload = [self._prepare(record) for record in records]
+        offset = 0
+
+        def committed(batch: Any, receipt: Any) -> None:
+            nonlocal offset
+            if line_format is LineFormat.EPISODE:
+                # Match hosted eval confirmation: empty episodes produce no samples.
+                self.episodes_written += sum(
+                    bool(record.get("traces"))
+                    for record in payload[offset : offset + batch.num_lines]
+                )
+            offset += batch.num_lines
+            self.receipts_received += 1
+            if self._receipt_history_size:
+                self.receipts.append(receipt)
+                del self.receipts[: -self._receipt_history_size]
+
         try:
-            receipts = list(
+            list(
                 self._client.upload_records(
                     payload,
                     line_format=line_format,
                     context=dict(self._context) or None,
                     compress=self._compress,
+                    on_batch=committed,
                 )
             )
         except ForbiddenError as exc:
             # Nothing at runtime fixes a 403, so the sink retires either way;
             # what differs is whether the batch counts as lost.
-            if exc.code == ErrorCode.SERVICE_NOT_ENABLED.value:
+            if exc.code == ErrorCode.SERVICE_NOT_ENABLED.value and self.receipts_received == 0:
                 # Outside the beta: there was never anywhere for these records to go.
+                self.service_not_enabled = True
                 self._retire_quietly(
                     f"Prime Traces is not enabled for this account ({exc}); "
-                    "continuing with the remaining sinks"
+                    "continuing with legacy samples"
                 )
                 return
             # A credential without the traces scope: raised for loss accounting.
             self._disable(f"this credential cannot write traces ({exc})")
             raise
-        self.receipts_received += len(receipts)
-        if self._receipt_history_size:
-            self.receipts.extend(receipts)
-            del self.receipts[: -self._receipt_history_size]
 
     def _prepare(self, record: Any) -> Any:
         """The wire mapping, with the run on the envelope and every member trace."""

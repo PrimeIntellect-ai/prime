@@ -31,6 +31,7 @@ from .models import (
     TrainingSpec,
 )
 from .sinks import EvalSamplesSink, RftMetricsSink, RftSamplesSink, Sink, TracesSink
+from .sinks.fallback import LegacySamplesFallback
 from .worker import UploadWorker, deadline_after, time_left
 
 logger = logging.getLogger(__name__)
@@ -269,6 +270,19 @@ class Run:
         self._metrics_worker.close(timeout=time_left(deadline))
 
         if self._owns_lifecycle:
+            traces_counts = [
+                sink.episodes_written
+                for sink in self._worker.sinks
+                if hasattr(sink, "episodes_written")
+            ]
+            if self.kind == "eval" and traces_counts:
+                # Hosted sandbox keys are upload-only. Persist receipt-backed
+                # counts for their completion check without granting trace reads.
+                prime_runs_summary = self.summary.get("prime_runs")
+                self.summary["prime_runs"] = {
+                    **(prime_runs_summary if isinstance(prime_runs_summary, Mapping) else {}),
+                    "traces_episodes_written": sum(traces_counts),
+                }
             # An attached run's config document is the launcher's: it created the
             # run from its own config and reads it back, so only the summary goes up.
             config = None if self._attached else (self.config or None)
@@ -489,14 +503,14 @@ def init(
             except Exception as close_error:  # noqa: BLE001 - preserve the create failure
                 logger.debug("Error closing the platform client: %s", close_error)
             raise
-        # Both transports run during the transition: traces is the system of
-        # record, the sample table is what today's viewer reads.
+        # The worker visits traces first; an explicit no-access response sends
+        # that same batch, and subsequent batches, to the legacy sample table.
         traces = TracesSink(api_key=api_key, team_id=team_id)
         if kind == "train":
-            sinks = [traces, RftSamplesSink(client)]
+            sinks = [traces, LegacySamplesFallback(traces, RftSamplesSink(client))]
             metrics_sinks = [RftMetricsSink(client)]
         else:
-            sinks = [traces, EvalSamplesSink(client)]
+            sinks = [traces, LegacySamplesFallback(traces, EvalSamplesSink(client))]
 
     run = Run(
         backend=backend,

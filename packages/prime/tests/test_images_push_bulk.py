@@ -281,19 +281,19 @@ def test_bulk_dockerfile_build_requires_upload_expiry(tmp_path, fake_api, monkey
     assert "expires_in" in result.output
 
 
-def test_manifest_rejects_arm64_dockerfile_build(tmp_path, fake_api, monkeypatch):
+def test_manifest_rejects_unknown_platform_key(tmp_path, fake_api, monkeypatch):
     monkeypatch.chdir(tmp_path)
     _make_context(tmp_path, "a")
     manifest = tmp_path / "builds.jsonl"
     _write_manifest(
         manifest,
-        [{"image": "app-a:v1", "context": "a", "platform": "linux/arm64"}],
+        [{"image": "app-a:v1", "context": "a", "platform": "linux/amd64"}],
     )
 
     result = runner.invoke(app, ["images", "push-bulk", "--manifest", str(manifest)], env=TEST_ENV)
 
     assert result.exit_code == 1
-    assert "unsupported platform 'linux/arm64'" in result.output
+    assert "unknown key(s) platform" in result.output
     assert fake_api.calls == []
 
 
@@ -355,7 +355,9 @@ def test_harbor_dry_run_discovery_and_skips(tmp_path, fake_api, monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert "hello_world:v1" in result.output
-    assert "Skipping prebuilt-task" in result.output
+    # The prebuilt task resolves to a source build instead of being skipped.
+    assert "Skipping prebuilt-task" not in result.output
+    assert "python:3.11" in result.output
     assert "Skipping compose-only" in result.output
     assert "not-a-task" not in result.output
     assert fake_api.calls == []
@@ -588,9 +590,7 @@ def test_hf_column_flags_are_required(tmp_path, fake_api, monkeypatch):
 
     result = runner.invoke(app, ["images", "push-bulk", "--hf", "org/ds"], env=TEST_ENV)
     assert result.exit_code == 1
-    assert "--dockerfile-column is required" in result.output
-    # The error lists the dataset's columns so the user can pick one.
-    assert "instance_id" in result.output
+    assert "exactly one of --dockerfile-column" in result.output
 
     result = runner.invoke(
         app,

@@ -5,7 +5,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, List, Optional
 
-import click
 import httpx
 import typer
 from prime_sandboxes import (
@@ -42,12 +41,9 @@ from ..utils import (
 )
 from .images_bulk import (
     PACKAGED_DOCKERFILE_PATH,
+    derive_source_destination,
     package_build_context,
     push_bulk,
-)
-from .images_transfer_bulk import (
-    derive_transfer_destination,
-    transfer_bulk,
 )
 from .images_update_bulk import update_bulk
 from .images_update_helpers import format_image_coordinate
@@ -315,12 +311,6 @@ def push_image(
         help="Path to Dockerfile",
         show_default="<context>/Dockerfile",
     ),
-    platform: str = typer.Option(
-        "linux/amd64",
-        "--platform",
-        click_type=click.Choice(["linux/amd64"]),
-        help="Target platform (linux/amd64 only)",
-    ),
     public: bool = typer.Option(
         False,
         "--public",
@@ -369,41 +359,39 @@ def push_image(
             console.print("[red]Error: --public and --private cannot be used together[/red]")
             raise typer.Exit(1)
 
-        is_transfer = source_image is not None
+        is_source_build = source_image is not None
         if platform_image and private:
             console.print("[red]Error: Platform images must be public[/red]")
             raise typer.Exit(1)
-        if not is_transfer and image_reference is None:
+        if not is_source_build and image_reference is None:
             console.print(
                 "[red]Error: Image reference is required unless --source-image is used[/red]"
             )
             raise typer.Exit(1)
 
-        transfer_sources = [
+        source_refs = [
             source.strip() for source in (source_image or "").split(",") if source.strip()
         ]
-        if is_transfer and not transfer_sources:
+        if is_source_build and not source_refs:
             console.print(
                 "[red]Error: --source-image must include at least one image reference[/red]"
             )
             raise typer.Exit(1)
-        docker_hub_sources = [
-            source for source in transfer_sources if is_docker_hub_reference(source)
-        ]
-        if is_transfer and docker_hub_sources and image_reference is not None:
+        docker_hub_sources = [source for source in source_refs if is_docker_hub_reference(source)]
+        if is_source_build and docker_hub_sources and image_reference is not None:
             console.print(
                 "[red]Error: Docker Hub source builds do not accept a custom destination[/red]"
             )
             raise typer.Exit(1)
-        if is_transfer and docker_hub_sources and private:
+        if is_source_build and docker_hub_sources and private:
             console.print("[red]Error: Docker Hub source builds must be public[/red]")
             raise typer.Exit(1)
-        if is_transfer and docker_hub_sources and len(docker_hub_sources) != len(transfer_sources):
+        if is_source_build and docker_hub_sources and len(docker_hub_sources) != len(source_refs):
             console.print(
                 "[red]Error: Docker Hub and non-Docker Hub sources cannot share one request[/red]"
             )
             raise typer.Exit(1)
-        if is_transfer and image_reference is not None and len(transfer_sources) > 1:
+        if is_source_build and image_reference is not None and len(source_refs) > 1:
             console.print(
                 "[red]Error: Destination image reference can only be provided for "
                 "single-source VM image builds[/red]"
@@ -428,18 +416,18 @@ def push_image(
             )
             raise typer.Exit(1)
 
-        if is_transfer:
+        if is_source_build:
             automatic_docker_hub_build = bool(docker_hub_sources)
             platform_source_build = platform_image or automatic_docker_hub_build
-            source_display = ", ".join(transfer_sources)
+            source_display = ", ".join(source_refs)
             if image_name and image_tag:
                 destination_display = f"{image_name}:{image_tag}"
             else:
                 destination_display = ", ".join(
                     ":".join(
-                        derive_transfer_destination(source, keep_namespace=platform_source_build)
+                        derive_source_destination(source, keep_namespace=platform_source_build)
                     )
-                    for source in transfer_sources
+                    for source in source_refs
                 )
             if platform_source_build:
                 console.print("[bold blue]Building platform VM image in Prime:[/bold blue]")
@@ -467,10 +455,9 @@ def push_image(
 
             try:
                 response = client.transfer_image(
-                    ",".join(transfer_sources),
+                    ",".join(source_refs),
                     image_name=image_name,
                     image_tag=image_tag,
-                    platform=platform,
                     team_id=None if platform_source_build else (config.team_id or None),
                     visibility=visibility,
                     owner_scope="platform" if platform_source_build else None,
@@ -597,7 +584,7 @@ def push_image(
                     "image_name": image_name,
                     "image_tag": image_tag,
                     "dockerfile_path": PACKAGED_DOCKERFILE_PATH,
-                    "platform": platform,
+                    "platform": "linux/amd64",
                 }
                 if config.team_id and not platform_image:
                     build_payload["team_id"] = config.team_id
@@ -714,10 +701,6 @@ def push_image(
 
 # Bulk push (JSONL manifest / Harbor task dirs) lives in images_bulk.py.
 app.command("push-bulk")(push_bulk)
-
-# Bulk source-image builds (JSONL manifest / Harbor task dirs / Hugging Face datasets)
-# lives in images_transfer_bulk.py.
-app.command("transfer-bulk")(transfer_bulk)
 
 # Bulk logical-image updates (rename / owner move / visibility) from a JSONL
 # manifest live in images_update_bulk.py.

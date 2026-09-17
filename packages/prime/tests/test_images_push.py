@@ -273,20 +273,6 @@ def test_push_image_dockerfile_build_requires_upload_expiry(tmp_path, monkeypatc
     assert "expires_in" in result.output
 
 
-def test_push_image_rejects_arm64_for_dockerfile_build(monkeypatch):
-    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
-
-    result = runner.invoke(
-        app,
-        ["images", "push", "app:v1", "--platform", "linux/arm64"],
-        env=TEST_ENV,
-    )
-
-    assert result.exit_code == 2
-    assert "linux/arm64" in result.output
-    assert "linux/amd64" in result.output
-
-
 def test_push_platform_image_source_image_queues_platform_transfer(monkeypatch):
     monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
     monkeypatch.delenv("PRIME_TEAM_ID", raising=False)

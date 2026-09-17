@@ -15,7 +15,6 @@ if sys.version_info >= (3, 11):
 else:
     import tomli as tomllib
 
-import click
 import httpx
 import typer
 from gitignore_parser import parse_gitignore
@@ -24,8 +23,10 @@ from prime_sandboxes import (
     APIError,
     Config,
     ImageVisibility,
+    SourceImageBuildResult,
     UnauthorizedError,
 )
+from prime_sandboxes.image_references import is_docker_hub_reference
 from rich.progress import BarColumn, Progress, TextColumn, TimeElapsedColumn
 from rich.table import Table
 
@@ -35,8 +36,6 @@ console = get_console()
 
 # Use a synthetic archive path to avoid collisions with Dockerfiles already in the context.
 PACKAGED_DOCKERFILE_PATH = ".__prime_dockerfile__"
-
-SUPPORTED_PLATFORMS = ("linux/amd64",)
 
 DEFAULT_MAX_IN_FLIGHT = 64
 DEFAULT_BUILD_TIMEOUT_SECONDS = 1800
@@ -54,7 +53,8 @@ MAX_CONSECUTIVE_SUBMIT_DEFERRALS = 20
 FAILURE_TABLE_MAX_ROWS = 20
 
 _TAG_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$")
-_MANIFEST_KEYS = {"image", "context", "dockerfile", "platform"}
+_BUILD_MANIFEST_KEYS = {"image", "context", "dockerfile"}
+_SOURCE_MANIFEST_KEY = "source"
 
 
 class BulkPushValidationError(Exception):
@@ -98,7 +98,6 @@ class BuildSpec:
     image_tag: str
     context: Path
     dockerfile: Path
-    platform: str
     source: str
 
     @property
@@ -111,7 +110,6 @@ class BuildSpec:
             "image": self.image_ref,
             "context": str(self.context),
             "dockerfile": str(self.dockerfile),
-            "platform": self.platform,
         }
 
 
@@ -182,6 +180,336 @@ def package_build_context(context_path: Path, dockerfile_path: Path) -> str:
     return tar_path
 
 
+# How long to pause new submissions after the server's source-build rate limiter
+# rejects one.
+SOURCE_RATE_LIMIT_PAUSE_SECONDS = 15.0
+
+_SOURCE_MANIFEST_KEYS = {"source", "image"}
+
+_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+@dataclass
+class SourceBuildSpec:
+    """One resolved source build: a registry image and its Prime destination.
+
+    ``dest_name``/``dest_tag`` name the resulting VM image. When ``override``
+    is False they are derived from the source the same way the server derives
+    them and are only used for display and duplicate detection; when True the
+    user chose them and they are sent with the request.
+    """
+
+    source_image: str
+    dest_name: str
+    dest_tag: str
+    source: str
+    override: bool = False
+
+    @property
+    def image_ref(self) -> str:
+        return f"{self.dest_name}:{self.dest_tag}"
+
+    @property
+    def is_docker_hub(self) -> bool:
+        return is_docker_hub_reference(self.source_image)
+
+    def to_manifest_line(self) -> dict[str, str]:
+        line = {"source": self.source_image}
+        if self.override:
+            line["image"] = self.image_ref
+        return line
+
+
+def derive_source_destination(source_ref: str, *, keep_namespace: bool = False) -> tuple[str, str]:
+    """Derive a source build's destination when none is given.
+
+    Docker Hub sources always keep their namespace because they become org-less
+    platform images automatically. The implicit ``library/`` namespace is
+    removed. ``keep_namespace`` applies the same platform naming rule to an
+    explicit non-Docker-Hub registry source. Otherwise only the last path segment
+    is kept for a personal or team destination.
+    """
+    ref = (source_ref or "").strip()
+    if not ref:
+        raise ValueError("empty image reference")
+    # A comma is never valid inside an image reference.
+    if "," in ref:
+        raise ValueError("commas are not allowed; use one entry per image reference")
+
+    digest: Optional[str] = None
+    if "@" in ref:
+        ref, _, digest = ref.rpartition("@")
+        if not _DIGEST_RE.match(digest):
+            raise ValueError("unsupported digest (only sha256 is supported)")
+
+    first_segment = ref.split("/", 1)[0]
+    has_registry = "/" in ref and (
+        "." in first_segment or ":" in first_segment or first_segment == "localhost"
+    )
+    path_part = ref[len(first_segment) + 1 :] if has_registry else ref
+    if not path_part:
+        raise ValueError("missing repository")
+
+    tag: Optional[str] = None
+    if ":" in path_part:
+        path_part, _, tag = path_part.rpartition(":")
+        if not tag:
+            raise ValueError("empty tag")
+    elif digest is None:
+        tag = "latest"
+
+    repository = path_part.strip("/")
+    if not repository:
+        raise ValueError("missing repository")
+
+    docker_hub = is_docker_hub_reference(source_ref)
+    if docker_hub and repository.lower().startswith("library/"):
+        repository = repository.split("/", 1)[1]
+    name = repository.lower() if keep_namespace or docker_hub else repository.split("/")[-1].lower()
+    if tag is None:
+        assert digest is not None
+        tag = "sha256-" + digest.split(":", 1)[1][:16]
+    return name, tag
+
+
+_DUPLICATE_DEST_HINT = (
+    ' — build them via a JSONL manifest with distinct "image" destination overrides'
+)
+
+
+def parse_source_manifest_row(
+    entry: dict[str, Any], where: str, *, platform_image: bool = False
+) -> list[str] | SourceBuildSpec:
+    """Validate one ``{"source": ..., "image"?: ...}`` manifest row.
+
+    Returns the resolved spec, or a list of problems for the caller to append.
+    """
+    unknown = sorted(set(entry) - _SOURCE_MANIFEST_KEYS)
+    if unknown:
+        return [
+            f"{where}: unknown key(s) {', '.join(unknown)} "
+            f"(expected: {', '.join(sorted(_SOURCE_MANIFEST_KEYS))})"
+        ]
+
+    source = entry.get("source")
+    if not source or not isinstance(source, str):
+        return [f"{where}: 'source' is required"]
+    source = source.strip()
+
+    docker_hub = is_docker_hub_reference(source)
+    try:
+        derived_name, derived_tag = derive_source_destination(source, keep_namespace=platform_image)
+    except ValueError as e:
+        return [f"{where}: invalid source '{source}' ({e})"]
+
+    image = entry.get("image")
+    if image is not None and not isinstance(image, str):
+        return [f"{where}: 'image' must be a string"]
+    if image:
+        if docker_hub:
+            return [f"{where}: Docker Hub source builds do not accept a custom destination"]
+        if ":" in image:
+            dest_name, dest_tag = image.rsplit(":", 1)
+        else:
+            dest_name, dest_tag = image, "latest"
+        # '/' separates owner from name in personal/team image paths, so
+        # only platform images (org-less, stored under their source repository
+        # namespace) may use a single-level namespace in the destination.
+        segments = dest_name.split("/")
+        if len(segments) > (2 if platform_image else 1) or not all(segments):
+            hint = (
+                "use 'name:tag' or a namespaced 'ns/name:tag'"
+                if platform_image
+                else "use simple names like 'myapp:v1'"
+            )
+            return [f"{where}: invalid destination '{image}'; {hint}"]
+        if not _TAG_RE.match(dest_tag):
+            return [f"{where}: invalid destination tag '{dest_tag}'"]
+        override = True
+    else:
+        dest_name, dest_tag = derived_name, derived_tag
+        override = False
+
+    return SourceBuildSpec(
+        source_image=source,
+        dest_name=dest_name,
+        dest_tag=dest_tag,
+        source=where,
+        override=override,
+    )
+
+
+def load_source_specs_from_manifest_entries(
+    entries: list[tuple[int, dict[str, Any]]], manifest_name: str, *, platform_image: bool = False
+) -> list[SourceBuildSpec]:
+    """Resolve and fully validate source rows from a parsed JSONL manifest.
+
+    ``entries`` pairs each row with its 1-based line number. Rows with problems
+    raise BulkPushValidationError with every problem at once.
+    """
+    problems: list[str] = []
+    specs: list[SourceBuildSpec] = []
+    for lineno, entry in entries:
+        result = parse_source_manifest_row(
+            entry, f"{manifest_name}:{lineno}", platform_image=platform_image
+        )
+        if isinstance(result, list):
+            problems.extend(result)
+        else:
+            specs.append(result)
+
+    problems.extend(_duplicate_ref_problems(specs, hint=_DUPLICATE_DEST_HINT))
+    if problems:
+        raise BulkPushValidationError(problems)
+    return specs
+
+
+def load_hf_source_specs(
+    dataset: str,
+    *,
+    config: Optional[str],
+    split: str,
+    column: Optional[str],
+    platform_image: bool = False,
+) -> tuple[list[SourceBuildSpec], list[str]]:
+    """Resolve source-build specs from a Hugging Face dataset column.
+
+    Pages the dataset through the datasets-server rows API (no local
+    `datasets` dependency), dedupes identical references preserving order,
+    and returns (specs, notes) where notes are informational messages.
+    """
+    # Imported here: images_hf imports BuildSpec helpers from this module.
+    from .images_hf import (
+        PARTIAL_DATASET_NOTE,
+        check_split,
+        iter_hf_rows,
+        require_string_column,
+        select_hf_config,
+        warn_if_large,
+    )
+
+    ds = select_hf_config(dataset, config)
+    dataset_id = ds.dataset_id
+    notes: list[str] = []
+
+    require_string_column(ds, column, reason="it cannot hold image references")
+    check_split(ds, split)
+    if ds.partial:
+        notes.append(PARTIAL_DATASET_NOTE)
+    warn_if_large(ds)
+
+    sources: list[tuple[str, int]] = []  # (image ref, first row index), order-preserving
+    seen: set[str] = set()
+    scanned = 0
+    empty_rows = 0
+    for row_idx, row in iter_hf_rows(ds, split):
+        value = row.get(column)
+        if not isinstance(value, str) or not value.strip():
+            empty_rows += 1
+            continue
+        scanned += 1
+        value = value.strip()
+        if value in seen:
+            continue
+        seen.add(value)
+        sources.append((value, row_idx))
+
+    if empty_rows:
+        notes.append(f"Skipped {empty_rows} row(s) with an empty '{column}' value")
+    duplicates = scanned - len(sources)
+    if duplicates:
+        notes.append(f"Collapsed {duplicates} duplicate image reference(s)")
+
+    problems: list[str] = []
+    specs: list[SourceBuildSpec] = []
+    for ref, row_idx in sources:
+        try:
+            dest_name, dest_tag = derive_source_destination(ref, keep_namespace=platform_image)
+        except ValueError as e:
+            problems.append(f"{dataset_id} row {row_idx}: invalid image reference '{ref}' ({e})")
+            continue
+        specs.append(
+            SourceBuildSpec(
+                source_image=ref,
+                dest_name=dest_name,
+                dest_tag=dest_tag,
+                source=f"row {row_idx}",
+                override=False,
+            )
+        )
+
+    problems.extend(_duplicate_ref_problems(specs, hint=_DUPLICATE_DEST_HINT))
+    if not specs and not problems:
+        problems.append(f"no image references found in '{dataset_id}' column '{column}'")
+    if problems:
+        raise BulkPushValidationError(problems)
+    return specs, notes
+
+
+def submit_source_build(
+    client: APIClient,
+    spec: SourceBuildSpec,
+    *,
+    team_id: Optional[str],
+    visibility: Optional[ImageVisibility],
+    owner_scope: Optional[str] = None,
+) -> tuple[str, str]:
+    """Queue one source-image VM build. Returns (build_id, full_image_path).
+
+    Source builds are counted per image by the server's rate limiter
+    (a rolling window), so a plain 429 means "later", not "failed": it is
+    surfaced as SubmitRateLimited so the engine requeues the spec. Wallet
+    quota 429s become QuotaExceededError and stop the run.
+    """
+    payload: dict[str, Any] = {
+        "source_image": spec.source_image,
+        "platform": "linux/amd64",
+    }
+    if spec.override:
+        payload["image_name"] = spec.dest_name
+        payload["image_tag"] = spec.dest_tag
+    if team_id:
+        payload["team_id"] = team_id
+    if visibility is not None:
+        payload["visibility"] = visibility.value
+    if owner_scope is not None:
+        payload["owner_scope"] = owner_scope
+
+    try:
+        response = client.request("POST", "/images/build", json=payload)
+    except UnauthorizedError:
+        raise
+    except APIError as e:
+        if _is_quota_429(e):
+            raise QuotaExceededError(str(e)) from e
+        if _is_http_429(e):
+            raise SubmitRateLimited(str(e), retry_after=SOURCE_RATE_LIMIT_PAUSE_SECONDS) from e
+        raise
+
+    # Single-source builds return a top-level build_id today. Also accept the
+    # bulk shape without silently dropping results if the server contract shifts.
+    results = response.get("results")
+    if isinstance(results, list):
+        # Each spec holds one source, so any count other than one is invalid.
+        if len(results) != 1 or not isinstance(results[0], dict):
+            raise APIError(
+                "invalid response from server "
+                f"(expected one source-build result, got {len(results)})"
+            )
+        entry = SourceImageBuildResult.model_validate(results[0])
+        if entry.build is None:
+            error = entry.error or "invalid response from server (source build not queued)"
+            if any(marker in error.lower() for marker in _QUOTA_DETAIL_MARKERS):
+                raise QuotaExceededError(error)
+            raise APIError(error)
+        return entry.build.build_id, entry.build.full_image_path
+
+    build_id = response.get("build_id") or response.get("buildId")
+    if not build_id:
+        raise APIError("invalid response from server (missing build_id)")
+    return build_id, response.get("fullImagePath") or spec.image_ref
+
+
 # ---------------------------------------------------------------------------
 # Build-list resolution: JSONL manifest
 # ---------------------------------------------------------------------------
@@ -199,11 +527,20 @@ def _duplicate_ref_problems(specs: list[Any], hint: str = "") -> list[str]:
     ]
 
 
-def load_manifest(manifest_path: Path, default_platform: str) -> list[BuildSpec]:
-    """Parse and fully validate a JSONL manifest."""
+def load_manifest(
+    manifest_path: Path, *, platform_image: bool = False
+) -> tuple[list[BuildSpec], list[SourceBuildSpec]]:
+    """Parse and fully validate a JSONL manifest.
+
+    Each row is either a Dockerfile build (``{"image", "context",
+    "dockerfile"?}`` with paths relative to the manifest file) or a
+    public-registry source build (``{"source", "image"?}``, where "image"
+    optionally overrides the derived destination).
+    """
     base = manifest_path.parent
     problems: list[str] = []
     specs: list[BuildSpec] = []
+    source_entries: list[tuple[int, dict[str, Any]]] = []
 
     for lineno, raw_line in enumerate(manifest_path.read_text().splitlines(), start=1):
         line = raw_line.strip()
@@ -218,11 +555,16 @@ def load_manifest(manifest_path: Path, default_platform: str) -> list[BuildSpec]
         if not isinstance(entry, dict):
             problems.append(f"{where}: expected a JSON object")
             continue
-        unknown = sorted(set(entry) - _MANIFEST_KEYS)
+
+        if _SOURCE_MANIFEST_KEY in entry:
+            source_entries.append((lineno, entry))
+            continue
+
+        unknown = sorted(set(entry) - _BUILD_MANIFEST_KEYS)
         if unknown:
             problems.append(
                 f"{where}: unknown key(s) {', '.join(unknown)} "
-                f"(expected: {', '.join(sorted(_MANIFEST_KEYS))})"
+                f"(expected: {', '.join(sorted(_BUILD_MANIFEST_KEYS))})"
             )
             continue
 
@@ -251,14 +593,6 @@ def load_manifest(manifest_path: Path, default_platform: str) -> list[BuildSpec]
             problems.append(f"{where}: invalid image tag '{image_tag}'")
             continue
 
-        platform = entry.get("platform") or default_platform
-        if platform not in SUPPORTED_PLATFORMS:
-            problems.append(
-                f"{where}: unsupported platform '{platform}' "
-                f"(supported: {', '.join(SUPPORTED_PLATFORMS)})"
-            )
-            continue
-
         dockerfile = entry.get("dockerfile")
         if dockerfile is not None and not isinstance(dockerfile, str):
             problems.append(f"{where}: 'dockerfile' must be a string")
@@ -281,17 +615,24 @@ def load_manifest(manifest_path: Path, default_platform: str) -> list[BuildSpec]
                 image_tag=image_tag,
                 context=context_path,
                 dockerfile=dockerfile_path,
-                platform=platform,
                 source=where,
             )
         )
 
-    problems.extend(_duplicate_ref_problems(specs))
-    if not specs and not problems:
+    try:
+        source_specs = load_source_specs_from_manifest_entries(
+            source_entries, manifest_path.name, platform_image=platform_image
+        )
+    except BulkPushValidationError as e:
+        problems.extend(e.problems)
+        source_specs = []
+
+    problems.extend(_duplicate_ref_problems(specs + source_specs))
+    if not specs and not source_specs and not problems:
         problems.append(f"{manifest_path.name}: manifest contains no builds")
     if problems:
         raise BulkPushValidationError(problems)
-    return specs
+    return specs, source_specs
 
 
 # ---------------------------------------------------------------------------
@@ -337,13 +678,15 @@ def _render_name_template(template: str, *, task_dir_name: str, toml_name: Optio
 
 
 def load_harbor_specs(
-    root: Path, *, tag: str, name_template: str, platform: str
-) -> tuple[list[BuildSpec], list[tuple[str, str]]]:
-    """Resolve build specs from a Harbor tasks directory.
+    root: Path, *, tag: str, name_template: str, platform_image: bool = False
+) -> tuple[list[BuildSpec], list[SourceBuildSpec], list[tuple[str, str]]]:
+    """Resolve build and source specs from a Harbor tasks directory.
 
-    Returns (specs, skipped) where skipped is a list of (task name, reason)
-    for tasks that have nothing to build: prebuilt ``docker_image`` tasks and
-    tasks whose environment/ has no Dockerfile (e.g. compose-only).
+    Tasks with a prebuilt ``[environment] docker_image`` become public-registry
+    source builds; tasks with an ``environment/Dockerfile`` become Dockerfile
+    builds. Returns (build_specs, source_specs, skipped) where skipped lists
+    (task name, reason) for tasks with nothing to build (e.g. compose-only).
+    Tasks sharing the same prebuilt image collapse into one source build.
     """
     tasks = discover_harbor_tasks(root)
     if not tasks:
@@ -356,7 +699,9 @@ def load_harbor_specs(
 
     problems: list[str] = []
     specs: list[BuildSpec] = []
+    source_specs: list[SourceBuildSpec] = []
     skipped: list[tuple[str, str]] = []
+    first_task_by_source: dict[str, str] = {}
     for task_dir in tasks:
         try:
             with open(task_dir / "task.toml", "rb") as f:
@@ -366,9 +711,32 @@ def load_harbor_specs(
             continue
 
         environment = config.get("environment") or {}
-        if isinstance(environment, dict) and environment.get("docker_image"):
-            skipped.append((task_dir.name, f"uses prebuilt image {environment['docker_image']}"))
+        docker_image = environment.get("docker_image") if isinstance(environment, dict) else None
+        if docker_image and isinstance(docker_image, str):
+            docker_image = docker_image.strip()
+            first_task = first_task_by_source.get(docker_image)
+            if first_task is not None:
+                skipped.append((task_dir.name, f"same image as {first_task} ({docker_image})"))
+                continue
+            first_task_by_source[docker_image] = task_dir.name
+            try:
+                dest_name, dest_tag = derive_source_destination(
+                    docker_image, keep_namespace=platform_image
+                )
+            except ValueError as e:
+                problems.append(f"{task_dir.name}: invalid docker_image '{docker_image}' ({e})")
+                continue
+            source_specs.append(
+                SourceBuildSpec(
+                    source_image=docker_image,
+                    dest_name=dest_name,
+                    dest_tag=dest_tag,
+                    source=task_dir.name,
+                    override=False,
+                )
+            )
             continue
+
         dockerfile = task_dir / "environment" / "Dockerfile"
         if not dockerfile.is_file():
             skipped.append((task_dir.name, "no environment/Dockerfile"))
@@ -389,20 +757,19 @@ def load_harbor_specs(
                 image_tag=tag,
                 context=task_dir / "environment",
                 dockerfile=dockerfile,
-                platform=platform,
                 source=task_dir.name,
             )
         )
 
     problems.extend(_duplicate_ref_problems(specs, hint=" — use --name-template to disambiguate"))
-    if not specs and not problems:
+    if not specs and not source_specs and not problems:
         problems.append(
             f"no buildable tasks under {root} "
             f"({len(skipped)} skipped: {', '.join(name for name, _ in skipped)})"
         )
     if problems:
         raise BulkPushValidationError(problems)
-    return specs, skipped
+    return specs, source_specs, skipped
 
 
 # ---------------------------------------------------------------------------
@@ -462,7 +829,7 @@ def _submit_build(
             "image_name": spec.image_name,
             "image_tag": spec.image_tag,
             "dockerfile_path": PACKAGED_DOCKERFILE_PATH,
-            "platform": spec.platform,
+            "platform": "linux/amd64",
         }
         if team_id:
             payload["team_id"] = team_id
@@ -696,18 +1063,41 @@ def run_bulk_jobs(
 
 def run_bulk_push(
     client: APIClient,
-    specs: list[BuildSpec],
+    build_specs: list[BuildSpec],
+    source_specs: list[SourceBuildSpec],
     *,
     team_id: Optional[str],
     visibility: Optional[ImageVisibility],
+    platform_image: bool,
     concurrency: int,
     build_timeout: int,
 ) -> list[BuildOutcome]:
-    """Bulk build-and-push: submit build contexts through the shared engine."""
+    """Run Dockerfile and source builds through the shared engine.
+
+    Dockerfile builds submit their packaged context; source builds queue a
+    server-side public-registry VM build. Docker Hub sources (and explicit
+    --platform-image sources) become public, org-less platform images: no
+    team, forced PUBLIC visibility, platform owner scope.
+    """
+    specs: list[Any] = [*build_specs, *source_specs]
+
+    def submit(spec: Any) -> tuple[str, str]:
+        if isinstance(spec, BuildSpec):
+            return _submit_build(client, spec, team_id=team_id, visibility=visibility)
+        docker_hub = spec.is_docker_hub
+        platform = platform_image or docker_hub
+        return submit_source_build(
+            client,
+            spec,
+            team_id=None if platform else team_id,
+            visibility=ImageVisibility.PUBLIC if platform else visibility,
+            owner_scope="platform" if platform else None,
+        )
+
     return run_bulk_jobs(
         client,
         specs,
-        submit=lambda spec: _submit_build(client, spec, team_id=team_id, visibility=visibility),
+        submit=submit,
         concurrency=concurrency,
         build_timeout=build_timeout,
     )
@@ -729,9 +1119,10 @@ def push_bulk(
         "--manifest",
         "-m",
         help=(
-            "JSONL manifest of builds; each line is "
-            '{"image": "name:tag", "context": "./dir", "dockerfile"?: "...", "platform"?: "..."} '
-            "with paths relative to the manifest file"
+            "JSONL manifest; each line is a Dockerfile build "
+            '{"image": "name:tag", "context": "./dir", "dockerfile"?: "..."} '
+            "with paths relative to the manifest file, or a public-registry source build "
+            '{"source": "registry/repo:tag", "image"?: "name:tag"}'
         ),
     ),
     harbor: Optional[Path] = typer.Option(
@@ -739,15 +1130,17 @@ def push_bulk(
         "--harbor",
         help=(
             "Harbor task directory (or directory of tasks); each task's "
-            "environment/ folder is the build context"
+            "environment/ folder is the build context, and tasks with a prebuilt "
+            "[environment] docker_image build from that registry image instead"
         ),
     ),
     hf_dataset: Optional[str] = typer.Option(
         None,
         "--hf",
         help=(
-            "Hugging Face dataset id or URL (e.g. 'org/dataset'); "
-            "builds every Dockerfile stored in the dataset"
+            "Hugging Face dataset id or URL (e.g. 'org/dataset'); builds every "
+            "Dockerfile stored in the dataset, or every registry image referenced "
+            "in a column (--column)"
         ),
     ),
     hf_split: str = typer.Option("train", "--hf-split", help="Dataset split for --hf mode"),
@@ -761,38 +1154,52 @@ def push_bulk(
         None,
         "--dockerfile-column",
         help=(
-            "Dataset column holding Dockerfile contents (required for --hf mode; e.g. 'dockerfile')"
+            "Dataset column holding Dockerfile contents (required for --hf mode "
+            "without --column; e.g. 'dockerfile')"
         ),
     ),
     name_column: Optional[str] = typer.Option(
         None,
         "--name-column",
         help=(
-            "Dataset column naming each image (required for --hf mode; "
-            "e.g. 'instance_id'; values are sanitized to valid image names)"
+            "Dataset column naming each image (required for --hf mode without "
+            "--column; e.g. 'instance_id'; values are sanitized to valid image names)"
         ),
     ),
-    tag: str = typer.Option("latest", "--tag", help="Image tag for Harbor and --hf modes"),
+    source_column: Optional[str] = typer.Option(
+        None,
+        "--column",
+        help=(
+            "Dataset column holding registry image references (required for --hf "
+            "mode without --dockerfile-column; e.g. 'docker_image')"
+        ),
+    ),
+    tag: str = typer.Option(
+        "latest", "--tag", help="Image tag for Harbor and --hf Dockerfile modes"
+    ),
     name_template: str = typer.Option(
         "{dir}",
         "--name-template",
         help=(
-            "Image name template for Harbor and --hf modes; placeholders: {dir} (task "
-            "directory name) and {name} (task.toml [task].name; in --hf mode both are "
-            "the --name-column value). The result is sanitized to a valid image name"
+            "Image name template for Harbor and --hf Dockerfile modes; placeholders: "
+            "{dir} (task directory name) and {name} (task.toml [task].name; in --hf "
+            "mode both are the --name-column value). The result is sanitized to a "
+            "valid image name"
         ),
     ),
-    platform: str = typer.Option(
-        "linux/amd64",
-        "--platform",
-        click_type=click.Choice(list(SUPPORTED_PLATFORMS)),
-        help="Default target platform (manifest lines may override per build)",
+    platform_image: bool = typer.Option(
+        False,
+        "--platform-image",
+        help=(
+            "Build explicit non-Docker-Hub registry sources as org-less platform VM "
+            "images (admins only; implies --public)"
+        ),
     ),
     public: bool = typer.Option(
         False, "--public", help="Make the images public when the builds complete"
     ),
     private: bool = typer.Option(
-        False, "--private", help="Make the images private when the builds complete"
+        False, "--private", help="Make non-Docker Hub images private when the builds complete"
     ),
     concurrency: int = typer.Option(
         DEFAULT_MAX_IN_FLIGHT, "--concurrency", help="Maximum builds in flight at once"
@@ -815,38 +1222,37 @@ def push_bulk(
     Build and push many image artifacts in one command.
 
     Reads builds from a JSONL manifest (--manifest), a Harbor tasks directory
-    (--harbor), or a Hugging Face dataset of Dockerfiles (--hf), validates
-    everything up front, then keeps up to --concurrency builds running
-    server-side, starting the next build as soon as one finishes. Failed
-    builds are written to a manifest you can re-run.
+    (--harbor), or a Hugging Face dataset (--hf), validates everything up
+    front, then keeps up to --concurrency builds running server-side, starting
+    the next build as soon as one finishes. Failed builds are written to a
+    manifest you can re-run.
 
-    \b
-    Manifest format (one JSON object per line; paths relative to the manifest):
-        {"image": "myapp:v1", "context": "./apps/myapp"}
-        {"image": "other:v2", "context": "./other", "dockerfile": "./docker/Dockerfile.prod"}
+    Dockerfile builds read a context directory (manifest rows and Harbor
+    environment/ folders) or a dataset column of Dockerfile contents
+    (--dockerfile-column with --name-column). Public-registry source builds
+    read manifest {"source": ...} rows, Harbor tasks with a prebuilt
+    [environment] docker_image, or a dataset column of image references
+    (--column). Allowed source registries: Docker Hub, ghcr.io, quay.io,
+    public.ecr.aws, registry.k8s.io, and mcr.microsoft.com. Google-hosted
+    registries are rejected.
 
-    \b
-    Harbor mode finds tasks (directories containing task.toml and environment/)
-    and uses each task's environment/ folder as the build context. Images are
-    named after the task directory (override with --name-template) and tagged
-    with --tag. Tasks with a prebuilt docker_image or no environment/Dockerfile
-    are skipped.
-
-    \b
-    Hugging Face mode builds one image per dataset row using the dataset
-    viewer API — no local dataset download. --dockerfile-column holds each
-    row's Dockerfile contents and --name-column names the image (sanitized,
-    tagged with --tag). Set HF_TOKEN for private or gated datasets. Datasets
-    whose rows reference prebuilt registry images use the source-image build command:
-    prime images transfer-bulk --hf.
+    Docker Hub sources always become public, org-less platform images. Their
+    namespace-preserving destination is derived automatically, with the
+    implicit library/ namespace removed. They do not accept "image" overrides
+    or --private, and configured team context is ignored for those items.
+    Admins can pass --platform-image to apply org-less public platform
+    ownership to explicit non-Docker-Hub registry sources too. Those explicit
+    sources may use namespaced manifest "image" overrides ('ns/name:tag').
 
     \b
     Examples:
         prime images push-bulk --manifest builds.jsonl
         prime images push-bulk --harbor ./tasks --tag v1
         prime images push-bulk --harbor ./tasks --name-template "swe-{dir}" --dry-run
-        prime images push-bulk --hf org/dataset --dockerfile-column dockerfile \\
+        prime images push-bulk --hf org/dataset --dockerfile-column dockerfile \
             --name-column instance_id
+        prime images push-bulk --hf org/dataset --column docker_image
+        prime images push-bulk --manifest sources.jsonl --platform-image
         prime images push-bulk --manifest push-bulk-failures.jsonl
     """
     hf_context_root: Optional[Path] = None
@@ -857,15 +1263,24 @@ def push_bulk(
             console.print("[red]Error: Provide exactly one of --manifest, --harbor or --hf[/red]")
             raise typer.Exit(1)
         if hf_dataset is None and (
-            hf_split != "train" or hf_config or dockerfile_column or name_column
+            hf_split != "train" or hf_config or dockerfile_column or name_column or source_column
         ):
             console.print(
-                "[red]Error: --hf-split, --hf-config, --dockerfile-column and "
-                "--name-column only apply to --hf mode[/red]"
+                "[red]Error: --hf-split, --hf-config, --dockerfile-column, --name-column "
+                "and --column only apply to --hf mode[/red]"
+            )
+            raise typer.Exit(1)
+        if hf_dataset is not None and bool(dockerfile_column or name_column) == bool(source_column):
+            console.print(
+                "[red]Error: --hf mode needs exactly one of --dockerfile-column "
+                "(with --name-column) or --column[/red]"
             )
             raise typer.Exit(1)
         if public and private:
             console.print("[red]Error: --public and --private cannot be used together[/red]")
+            raise typer.Exit(1)
+        if platform_image and private:
+            console.print("[red]Error: Platform images must be public[/red]")
             raise typer.Exit(1)
         if concurrency < 1:
             console.print("[red]Error: --concurrency must be at least 1[/red]")
@@ -875,19 +1290,30 @@ def push_bulk(
             raise typer.Exit(1)
         if manifest is not None and (tag != "latest" or name_template != "{dir}"):
             console.print(
-                "[red]Error: --tag and --name-template only apply to --harbor and --hf modes[/red]"
+                "[red]Error: --tag and --name-template only apply to --harbor and "
+                "--hf Dockerfile modes[/red]"
+            )
+            raise typer.Exit(1)
+        if source_column is not None and (tag != "latest" or name_template != "{dir}"):
+            console.print(
+                "[red]Error: --tag and --name-template only apply to Dockerfile builds[/red]"
             )
             raise typer.Exit(1)
 
         skipped: list[tuple[str, str]] = []
         notes: list[str] = []
+        build_specs: list[BuildSpec] = []
+        source_specs: list[SourceBuildSpec] = []
+        source_desc = ""
         try:
             if manifest is not None:
                 manifest_path = manifest.resolve()
                 if not manifest_path.is_file():
                     raise BulkPushValidationError([f"manifest not found: {manifest_path}"])
                 source_desc = f"manifest {manifest_path}"
-                specs = load_manifest(manifest_path, default_platform=platform)
+                build_specs, source_specs = load_manifest(
+                    manifest_path, platform_image=platform_image
+                )
             elif harbor is not None:
                 harbor_root = harbor.resolve()
                 if not harbor_root.is_dir():
@@ -897,30 +1323,45 @@ def push_bulk(
                 if not _TAG_RE.match(tag):
                     raise BulkPushValidationError([f"invalid image tag '{tag}'"])
                 source_desc = f"Harbor tasks in {harbor_root}"
-                specs, skipped = load_harbor_specs(
-                    harbor_root, tag=tag, name_template=name_template, platform=platform
+                build_specs, source_specs, skipped = load_harbor_specs(
+                    harbor_root,
+                    tag=tag,
+                    name_template=name_template,
+                    platform_image=platform_image,
                 )
             else:
                 assert hf_dataset is not None
-                if not _TAG_RE.match(tag):
-                    raise BulkPushValidationError([f"invalid image tag '{tag}'"])
                 # Imported here: images_hf imports BuildSpec helpers from this module.
-                from .images_hf import load_hf_build_specs, normalize_hf_dataset_id
+                from .images_hf import normalize_hf_dataset_id
 
                 source_desc = f"Hugging Face dataset {normalize_hf_dataset_id(hf_dataset)}"
-                console.print(f"[cyan]Reading Dockerfiles from {source_desc}...[/cyan]")
-                hf_context_root = Path(tempfile.mkdtemp(prefix="prime-push-bulk-hf-"))
-                specs, notes = load_hf_build_specs(
-                    hf_dataset,
-                    config=hf_config,
-                    split=hf_split,
-                    dockerfile_column=dockerfile_column,
-                    name_column=name_column,
-                    tag=tag,
-                    name_template=name_template,
-                    platform=platform,
-                    context_root=hf_context_root,
-                )
+                if source_column is not None:
+                    console.print(f"[cyan]Reading image references from {source_desc}...[/cyan]")
+                    source_specs, notes = load_hf_source_specs(
+                        hf_dataset,
+                        config=hf_config,
+                        split=hf_split,
+                        column=source_column,
+                        platform_image=platform_image,
+                    )
+                else:
+                    if not _TAG_RE.match(tag):
+                        raise BulkPushValidationError([f"invalid image tag '{tag}'"])
+                    # Imported here: images_hf imports BuildSpec helpers from this module.
+                    from .images_hf import load_hf_build_specs
+
+                    console.print(f"[cyan]Reading Dockerfiles from {source_desc}...[/cyan]")
+                    hf_context_root = Path(tempfile.mkdtemp(prefix="prime-push-bulk-hf-"))
+                    build_specs, notes = load_hf_build_specs(
+                        hf_dataset,
+                        config=hf_config,
+                        split=hf_split,
+                        dockerfile_column=dockerfile_column,
+                        name_column=name_column,
+                        tag=tag,
+                        name_template=name_template,
+                        context_root=hf_context_root,
+                    )
         except BulkPushValidationError as e:
             console.print(
                 f"[red]Error: cannot start bulk push ({len(e.problems)} problem(s)):[/red]"
@@ -929,24 +1370,40 @@ def push_bulk(
                 console.print(f"[red]  - {problem}[/red]")
             raise typer.Exit(1)
 
+        if platform_image and not source_specs:
+            console.print(
+                "[red]Error: --platform-image only applies to public-registry source builds[/red]"
+            )
+            raise typer.Exit(1)
+
+        docker_hub_specs = [spec for spec in source_specs if spec.is_docker_hub]
+        if docker_hub_specs and private:
+            console.print("[red]Error: Docker Hub source builds must be public[/red]")
+            raise typer.Exit(1)
+
         for note in notes:
             console.print(f"[dim]{note}[/dim]")
         for task_name, reason in skipped:
             console.print(f"[yellow]Skipping {task_name}: {reason}[/yellow]")
 
         if dry_run:
-            table = Table(title=f"Resolved {len(specs)} build(s)")
+            table = Table(title=f"Resolved {len(build_specs) + len(source_specs)} build(s)")
             table.add_column("Image", style="cyan", no_wrap=True)
-            table.add_column("Context")
-            table.add_column("Dockerfile")
-            table.add_column("Platform", no_wrap=True)
+            table.add_column("Kind", no_wrap=True)
+            table.add_column("Source", overflow="fold")
             table.add_column("From", style="dim")
-            for spec in specs:
+            for spec in build_specs:
                 table.add_row(
                     spec.image_ref,
+                    "dockerfile",
                     str(spec.context),
-                    str(spec.dockerfile),
-                    spec.platform,
+                    spec.source,
+                )
+            for spec in source_specs:
+                table.add_row(
+                    spec.image_ref,
+                    "source",
+                    spec.source_image,
                     spec.source,
                 )
             console.print(table)
@@ -961,29 +1418,67 @@ def push_bulk(
             visibility = ImageVisibility.PRIVATE
 
         console.print(
-            f"[bold blue]Bulk pushing {len(specs)} image(s)[/bold blue] [dim]({source_desc})[/dim]"
+            f"[bold blue]Bulk pushing {len(build_specs) + len(source_specs)} image(s)[/bold blue] "
+            f"[dim]({source_desc})[/dim]"
         )
-        if config.team_id:
-            console.print(f"[dim]Team: {config.team_id}[/dim]")
-        if visibility is not None:
-            console.print(f"[dim]Visibility: {visibility.value}[/dim]")
-        else:
+        non_docker_hub_specs = [spec for spec in source_specs if not spec.is_docker_hub]
+        if platform_image:
+            console.print("[dim]Source builds owner: Platform[/dim]")
+            if config.team_id:
+                console.print("[dim]Team context ignored: platform images are org-less[/dim]")
+        elif docker_hub_specs:
+            console.print("[dim]Docker Hub sources: Platform owner, PUBLIC visibility[/dim]")
+            if config.team_id and not non_docker_hub_specs:
+                console.print("[dim]Team context ignored for Docker Hub sources[/dim]")
+        if not platform_image and non_docker_hub_specs and config.team_id:
+            console.print(f"[dim]Other sources team: {config.team_id}[/dim]")
+        if platform_image:
+            console.print(f"[dim]Source builds visibility: {ImageVisibility.PUBLIC.value}[/dim]")
+        elif non_docker_hub_specs and visibility is not None:
+            console.print(f"[dim]Other sources visibility: {visibility.value}[/dim]")
+        elif non_docker_hub_specs:
             console.print(
-                "[dim]Visibility: PRIVATE for new images "
+                "[dim]Other sources visibility: PRIVATE for new images "
                 "(existing tags keep their current visibility)[/dim]"
             )
+        if build_specs:
+            if config.team_id:
+                console.print(f"[dim]Dockerfile builds team: {config.team_id}[/dim]")
+            if visibility is not None:
+                console.print(f"[dim]Dockerfile builds visibility: {visibility.value}[/dim]")
+            else:
+                console.print(
+                    "[dim]Dockerfile builds visibility: PRIVATE for new images "
+                    "(existing tags keep their current visibility)[/dim]"
+                )
+        # Only explicit admin non-Docker-Hub platform builds skip the
+        # source-build rate limit.
+        if platform_image and docker_hub_specs:
+            pacing_note = (
+                " Docker Hub auto-platform builds remain rate-limited per account "
+                "server-side, so large batches take a while to submit."
+            )
+        elif not platform_image and source_specs:
+            pacing_note = (
+                " Source-image builds are rate-limited per account server-side, "
+                "so large batches take a while to submit."
+            )
+        else:
+            pacing_note = ""
         console.print(
             f"[dim]Up to {concurrency} builds in flight; "
-            f"polling every {int(POLL_INTERVAL_SECONDS)}s[/dim]"
+            f"polling every {int(POLL_INTERVAL_SECONDS)}s.{pacing_note}[/dim]"
         )
         console.print()
 
         client = APIClient()
         outcomes = run_bulk_push(
             client,
-            specs,
+            build_specs,
+            source_specs,
             team_id=config.team_id or None,
             visibility=visibility,
+            platform_image=platform_image,
             concurrency=concurrency,
             build_timeout=build_timeout,
         )
@@ -1013,10 +1508,21 @@ def push_bulk(
                 f"[dim]... and {len(failures) - FAILURE_TABLE_MAX_ROWS} more, "
                 f"all included in {failures_out}[/dim]"
             )
-        if any("limit exceeded" in (o.error or "").lower() for o in failures):
+        failure_errors = [(o.error or "").lower() for o in failures]
+        if any(marker in error for error in failure_errors for marker in _QUOTA_DETAIL_MARKERS):
             console.print(
                 "[red]Image quota reached — delete unused images (prime images delete) "
                 "or request a higher limit, then retry.[/red]"
+            )
+        if any(
+            # Matches the engine's skip reason and its give-up SUBMIT_FAILED error.
+            "kept rate-limiting submissions" in (o.error or "")
+            or "rate-limit deferrals" in (o.error or "")
+            for o in failures
+        ):
+            console.print(
+                "[yellow]The server kept rate-limiting submissions — wait a few minutes, "
+                "then retry with the failures manifest.[/yellow]"
             )
 
         _write_failures_manifest(failures_out, failures)

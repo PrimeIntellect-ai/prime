@@ -1,10 +1,20 @@
-"""Tests for sandbox CRUD operations, listing, and bulk operations"""
+"""Live sandbox CRUD, listing, and bulk operations against a real backend.
 
+Opt-in via PRIME_LIVE_VM_SMOKE=1, matching test_live_process_idempotency_live.py;
+plain pytest runs never create real sandboxes.
+"""
+
+import os
 import time
 
 import pytest
 
 from prime_sandboxes import APIError, CreateSandboxRequest
+
+pytestmark = pytest.mark.skipif(
+    os.environ.get("PRIME_LIVE_VM_SMOKE") != "1",
+    reason="Live VM smoke tests are opt-in.",
+)
 
 
 def test_create_sandbox_with_custom_config(sandbox_client):

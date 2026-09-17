@@ -1,5 +1,7 @@
 """Tests for sandbox CRUD operations, listing, and bulk operations"""
 
+import time
+
 from prime_sandboxes import CreateSandboxRequest
 
 
@@ -266,7 +268,12 @@ def test_bulk_delete_by_labels(sandbox_client, unique_id):
 
 
 def test_get_logs(sandbox_client):
-    """Test getting sandbox logs"""
+    """Test getting sandbox logs.
+
+    Logs are served for container sandboxes; VM sandboxes do not expose a
+    logs endpoint yet. Readiness is polled via get() because the container
+    exec path (wait_for_creation) is retired.
+    """
     sandbox = None
     try:
         print("\nCreating sandbox...")
@@ -280,10 +287,10 @@ def test_get_logs(sandbox_client):
         print(f"✓ Created sandbox: {sandbox.id}")
 
         print("Waiting for sandbox to be ready...")
-        sandbox_client.wait_for_creation(sandbox.id, max_attempts=120)
-
-        # Execute a command to generate some output
-        sandbox_client.execute_command(sandbox.id, "echo 'test log message'")
+        for _ in range(120):
+            if sandbox_client.get(sandbox.id).status == "RUNNING":
+                break
+            time.sleep(1)
 
         # Get logs
         print("Fetching sandbox logs...")
@@ -311,7 +318,7 @@ def test_wait_for_creation(sandbox_client):
             CreateSandboxRequest(
                 name="test-wait",
                 docker_image="python:3.11-slim",
-                vm=False,
+                vm=True,
             )
         )
         print(f"✓ Created sandbox: {sandbox.id}")
@@ -350,7 +357,7 @@ def test_sandbox_lifecycle(sandbox_client):
             CreateSandboxRequest(
                 name="test-lifecycle",
                 docker_image="python:3.11-slim",
-                vm=False,
+                vm=True,
                 labels=["lifecycle-test"],
             )
         )

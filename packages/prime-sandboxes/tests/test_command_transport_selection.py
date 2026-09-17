@@ -1,4 +1,4 @@
-"""Tests for container/VM command transport selection."""
+"""Tests for command transport selection: every exec goes over Connect RPC."""
 
 import asyncio
 from datetime import datetime, timedelta, timezone
@@ -47,7 +47,7 @@ class _AsyncFakeCache:
         return self._is_vm
 
 
-def test_sync_execute_command_uses_connect_for_vm():
+def test_sync_execute_command_uses_connect():
     client = SandboxClient(APIClient(api_key="test-key"))
     cast(Any, client)._auth_cache = _FakeCache(is_vm=True)
 
@@ -57,12 +57,8 @@ def test_sync_execute_command_uses_connect_for_vm():
         called["connect"] = True
         return CommandResponse(stdout="ok", stderr="", exit_code=0)
 
-    def _rest(*_args, **_kwargs):
-        raise AssertionError("REST path should not be used for VM sandboxes")
-
     client_any = cast(Any, client)
     client_any._execute_command_connect_rpc = _connect
-    client_any._execute_command_rest = _rest
 
     result = client.execute_command("sbx-gpu", "echo hi")
 
@@ -70,31 +66,8 @@ def test_sync_execute_command_uses_connect_for_vm():
     assert result.exit_code == 0
 
 
-def test_sync_execute_command_uses_rest_for_cpu():
-    client = SandboxClient(APIClient(api_key="test-key"))
-    cast(Any, client)._auth_cache = _FakeCache(is_vm=False)
-
-    called = {"rest": False}
-
-    def _connect(*_args, **_kwargs):
-        raise AssertionError("Connect path should not be used for CPU sandboxes")
-
-    def _rest(*_args, **_kwargs):
-        called["rest"] = True
-        return CommandResponse(stdout="ok", stderr="", exit_code=0)
-
-    client_any = cast(Any, client)
-    client_any._execute_command_connect_rpc = _connect
-    client_any._execute_command_rest = _rest
-
-    result = client.execute_command("sbx-cpu", "echo hi")
-
-    assert called["rest"]
-    assert result.exit_code == 0
-
-
 @pytest.mark.asyncio
-async def test_async_execute_command_uses_connect_for_vm():
+async def test_async_execute_command_uses_connect():
     client = AsyncSandboxClient(api_key="test-key")
     cast(Any, client)._auth_cache = _AsyncFakeCache(is_vm=True)
 
@@ -104,44 +77,13 @@ async def test_async_execute_command_uses_connect_for_vm():
         called["connect"] = True
         return CommandResponse(stdout="ok", stderr="", exit_code=0)
 
-    async def _rest(*_args, **_kwargs):
-        raise AssertionError("REST path should not be used for VM sandboxes")
-
     client_any = cast(Any, client)
     client_any._execute_command_connect_rpc = _connect
-    client_any._execute_command_rest = _rest
 
     try:
         result = await client.execute_command("sbx-gpu", "echo hi")
 
         assert called["connect"]
-        assert result.exit_code == 0
-    finally:
-        await client.aclose()
-
-
-@pytest.mark.asyncio
-async def test_async_execute_command_uses_rest_for_cpu():
-    client = AsyncSandboxClient(api_key="test-key")
-    cast(Any, client)._auth_cache = _AsyncFakeCache(is_vm=False)
-
-    called = {"rest": False}
-
-    async def _connect(*_args, **_kwargs):
-        raise AssertionError("Connect path should not be used for CPU sandboxes")
-
-    async def _rest(*_args, **_kwargs):
-        called["rest"] = True
-        return CommandResponse(stdout="ok", stderr="", exit_code=0)
-
-    client_any = cast(Any, client)
-    client_any._execute_command_connect_rpc = _connect
-    client_any._execute_command_rest = _rest
-
-    try:
-        result = await client.execute_command("sbx-cpu", "echo hi")
-
-        assert called["rest"]
         assert result.exit_code == 0
     finally:
         await client.aclose()
@@ -366,7 +308,6 @@ def test_auth_cache_stores_vm_flag_for_reuse(tmp_path):
                     "errorMessage": None,
                     "userId": "user",
                     "teamId": "team",
-                    "kubernetesJobId": None,
                     "registryCredentialsId": None,
                 }
             raise AssertionError(f"Unexpected request: {method} {path}")

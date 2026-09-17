@@ -40,7 +40,6 @@ from .models import (
     CommandRequest,
     CommandResponse,
     CreateSandboxRequest,
-    DockerImageCheckResponse,
     EgressPolicyStatus,
     ExposedPort,
     ExposePortRequest,
@@ -62,7 +61,6 @@ from .models import (
     PersonalImageOwner,
     PlatformImageOwner,
     ReadFileResponse,
-    RegistryCredentialSummary,
     Sandbox,
     SandboxEgressPolicy,
     SandboxListResponse,
@@ -75,10 +73,9 @@ from .models import (
     TeamImageOwner,
     UpdateImagesRequest,
     UpdateImagesResponse,
-    UpdateSandboxRequest,
 )
 from .process import AsyncSandboxProcess
-from .sandbox import AsyncSandboxClient, AsyncTemplateClient, SandboxClient, TemplateClient
+from .sandbox import AsyncSandboxClient, SandboxClient
 
 __version__ = "0.2.42"
 
@@ -94,8 +91,6 @@ __all__ = [
     "SandboxClient",
     "AsyncSandboxClient",
     "AsyncSandboxProcess",
-    "TemplateClient",
-    "AsyncTemplateClient",
     "ImageClient",
     "AsyncImageClient",
     # Models
@@ -105,15 +100,12 @@ __all__ = [
     "SandboxListResponse",
     "CreateSandboxRequest",
     "StartCommand",
-    "UpdateSandboxRequest",
     "CommandRequest",
     "CommandResponse",
     "FileUploadResponse",
     "ReadFileResponse",
     "BulkDeleteSandboxRequest",
     "BulkDeleteSandboxResponse",
-    "RegistryCredentialSummary",
-    "DockerImageCheckResponse",
     "EgressPolicyStatus",
     "AdvancedConfigs",
     "BackgroundJob",

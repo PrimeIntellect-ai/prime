@@ -10,7 +10,6 @@ from prime_sandboxes.models import (
     CreateSandboxRequest,
     EgressPolicyStatus,
     Sandbox,
-    UpdateSandboxRequest,
     validate_egress_lists,
 )
 from prime_sandboxes.sandbox import AsyncSandboxClient, SandboxClient
@@ -108,11 +107,6 @@ class TestCreateSandboxRequestNetworkLists:
         entries = [f"h{i}.example.com" for i in range(257)]
         with pytest.raises(ValidationError, match="at most"):
             CreateSandboxRequest(name="t", docker_image="img", vm=True, network_allowlist=entries)
-
-
-class TestUpdateSandboxRequest:
-    def test_network_access_removed(self):
-        assert "network_access" not in UpdateSandboxRequest.model_fields
 
 
 class TestSandboxModel:

@@ -173,7 +173,6 @@ class Sandbox(BaseModel):
     error_message: Optional[str] = Field(None, alias="errorMessage")
     user_id: Optional[str] = Field(None, alias="userId")
     team_id: Optional[str] = Field(None, alias="teamId")
-    kubernetes_job_id: Optional[str] = Field(None, alias="kubernetesJobId")
     region: Optional[str] = None
     registry_credentials_id: Optional[str] = Field(default=None, alias="registryCredentialsId")
     pending_image_build_id: Optional[str] = Field(default=None, alias="pendingImageBuildId")
@@ -223,7 +222,7 @@ class CreateSandboxRequest(BaseModel):
 
     name: str
     docker_image: str
-    start_command: Optional[Union[StartCommand, str]] = "tail -f /dev/null"
+    start_command: Optional[StartCommand] = None
     cpu_cores: float = 1.0
     memory_gb: float = 1.0
     disk_size_gb: float = 5.0
@@ -240,8 +239,6 @@ class CreateSandboxRequest(BaseModel):
     team_id: Optional[str] = None
     region: Optional[str] = None
     advanced_configs: Optional[AdvancedConfigs] = None
-    registry_credentials_id: Optional[str] = None
-    guaranteed: bool = False
     idempotency_key: Optional[str] = None
 
     @model_validator(mode="after")
@@ -252,44 +249,6 @@ class CreateSandboxRequest(BaseModel):
             raise ValueError("gpu_count is not supported with vm=False")
         if self.gpu_count == 0 and self.gpu_type is not None:
             raise ValueError("gpu_type requires gpu_count greater than 0")
-        return self
-
-    @model_validator(mode="after")
-    def validate_guaranteed(self) -> "CreateSandboxRequest":
-        if self.guaranteed and self.vm is not False:
-            raise ValueError(
-                "guaranteed is not supported for VM sandboxes; pass vm=False "
-                "to create a container sandbox"
-            )
-        return self
-
-    @model_validator(mode="after")
-    def validate_registry_credentials(self) -> "CreateSandboxRequest":
-        if self.registry_credentials_id and self.vm is not False:
-            raise ValueError(
-                "registry_credentials_id is only supported for container "
-                "sandboxes; pass vm=False to create a container sandbox"
-            )
-        return self
-
-    @model_validator(mode="after")
-    def validate_vm_start_command(self) -> "CreateSandboxRequest":
-        if self.vm is False:
-            return self
-        if "start_command" not in self.model_fields_set:
-            if self.vm is True:
-                self.start_command = None
-            return self
-        if isinstance(self.start_command, str):
-            if self.vm is True:
-                raise ValueError(
-                    "VM sandboxes require start_command as StartCommand(executable=..., args=[...])"
-                )
-            raise ValueError(
-                "String start_command values are container-only. Pass vm=False "
-                "to create a container sandbox, or use "
-                "StartCommand(executable=..., args=[...]) for VM sandboxes."
-            )
         return self
 
     @model_validator(mode="after")
@@ -318,48 +277,12 @@ class CreateSandboxRequest(BaseModel):
         return self
 
 
-class UpdateSandboxRequest(BaseModel):
-    """Update sandbox request model"""
-
-    name: Optional[str] = None
-    docker_image: Optional[str] = None
-    start_command: Optional[str] = None
-    cpu_cores: Optional[float] = None
-    memory_gb: Optional[float] = None
-    disk_size_gb: Optional[float] = None
-    gpu_count: Optional[int] = None
-    gpu_type: Optional[str] = None
-    timeout_minutes: Optional[int] = None
-    idle_timeout_minutes: Optional[int] = None
-    environment_vars: Optional[Dict[str, str]] = None
-    registry_credentials_id: Optional[str] = None
-    secrets: Optional[Dict[str, str]] = None
-
-    @model_validator(mode="after")
-    def validate_idle_timeout(self) -> "UpdateSandboxRequest":
-        if self.idle_timeout_minutes is None:
-            return self
-        if self.idle_timeout_minutes < 1:
-            raise ValueError("idle_timeout_minutes must be >= 1")
-        if (
-            self.timeout_minutes is not None
-            and self.timeout_minutes > 0
-            and self.idle_timeout_minutes > self.timeout_minutes
-        ):
-            raise ValueError(
-                "idle_timeout_minutes must be <= timeout_minutes "
-                f"(got idle={self.idle_timeout_minutes}, lifetime={self.timeout_minutes})"
-            )
-        return self
-
-
 class CommandRequest(BaseModel):
     """Execute command request model"""
 
     command: str
     working_dir: Optional[str] = None
     env: Optional[Dict[str, str]] = None
-    user: Optional[str] = None
 
 
 class CommandResponse(BaseModel):
@@ -412,25 +335,6 @@ class BulkDeleteSandboxResponse(BaseModel):
     succeeded: List[str]
     failed: List[Dict[str, str]]
     message: str
-
-
-class RegistryCredentialSummary(BaseModel):
-    """Summary of registry credential data (no secrets)."""
-
-    id: str
-    name: str
-    server: str
-    created_at: datetime = Field(..., alias="createdAt")
-    updated_at: datetime = Field(..., alias="updatedAt")
-    user_id: Optional[str] = Field(default=None, alias="userId")
-    team_id: Optional[str] = Field(default=None, alias="teamId")
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class DockerImageCheckResponse(BaseModel):
-    accessible: bool
-    details: str
 
 
 class ImageVisibility(str, Enum):
@@ -589,6 +493,7 @@ class SourceImageBuildResult(BaseModel):
     @classmethod
     def accept_legacy_result(cls, value: Any) -> Any:
         # Accept old backends during the CLI-first rollout; emit only the new shape.
+        # TODO: remove after the platform backend deploy lands.
         if isinstance(value, dict) and "build" not in value and "success" in value:
             value = {
                 **value,

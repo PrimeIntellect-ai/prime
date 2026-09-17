@@ -30,7 +30,7 @@ def test_create_sandbox_request_defaults():
     assert request.timeout_minutes == 60
     assert request.region is None
     assert request.labels == []
-    assert request.start_command == "tail -f /dev/null"
+    assert request.start_command is None
 
 
 def test_unset_vm_is_omitted_from_payload():
@@ -43,24 +43,15 @@ def test_unset_vm_is_omitted_from_payload():
     assert "vm" not in request.model_dump(exclude_none=True)
 
 
-def test_unset_vm_still_serializes_default_start_command():
-    """With vm unset, the container keep-alive default stays on the wire.
-
-    This is deliberate, not a leak: the server is contractually committed to
-    dropping legacy string start commands on the VM path (ingress #3817
-    compat), so a VM-resolved sandbox behaves as if no start command was set.
-    Meanwhile a container-resolved sandbox (SANDBOX_DEFAULT_VM=false rollback,
-    or an older ingress where omitted vm still means container) needs this
-    default — without it the container runs the bare image ENTRYPOINT and
-    typically exits immediately. Do not clear this default for unset vm.
-    """
+def test_unset_vm_omits_start_command_from_payload():
+    """With no boot command set, start_command stays off the wire entirely."""
     request = CreateSandboxRequest(
         name="test-sandbox",
         docker_image="python:3.11-slim",
     )
 
     payload = request.model_dump(exclude_none=True)
-    assert payload["start_command"] == "tail -f /dev/null"
+    assert "start_command" not in payload
     assert "vm" not in payload
 
 
@@ -75,25 +66,14 @@ def test_explicit_vm_false_is_serialized():
     assert request.model_dump(exclude_none=True)["vm"] is False
 
 
-def test_unset_vm_rejects_explicit_string_start_command():
-    """Explicit string start commands are container-only; require vm=False."""
-    with pytest.raises(ValidationError, match="container-only"):
+def test_string_start_command_is_rejected():
+    """Only the structured StartCommand form exists; strings are a type error."""
+    with pytest.raises(ValidationError):
         CreateSandboxRequest(
             name="test-sandbox",
             docker_image="python:3.11-slim",
             start_command="sleep infinity",
         )
-
-
-def test_container_opt_out_keeps_explicit_string_start_command():
-    request = CreateSandboxRequest(
-        name="test-sandbox",
-        docker_image="python:3.11-slim",
-        vm=False,
-        start_command="sleep infinity",
-    )
-
-    assert request.start_command == "sleep infinity"
 
 
 def test_vm_start_command_preserves_argv():
@@ -220,50 +200,6 @@ def test_create_sandbox_request_gpu_type_none_matches_default():
 
     assert request_default.gpu_type is None
     assert request_none.gpu_type is None
-
-
-def test_guaranteed_requires_container_opt_out():
-    """guaranteed is container-only; unset vm resolves to VM on the server"""
-    with pytest.raises(ValidationError, match="vm=False"):
-        CreateSandboxRequest(
-            name="guaranteed-sandbox",
-            docker_image="python:3.11-slim",
-            guaranteed=True,
-        )
-
-    request = CreateSandboxRequest(
-        name="guaranteed-sandbox",
-        docker_image="python:3.11-slim",
-        guaranteed=True,
-        vm=False,
-    )
-    assert request.guaranteed is True
-
-
-def test_registry_credentials_require_container_opt_out():
-    """registry_credentials_id is container-only; unset vm resolves to VM on the server"""
-    with pytest.raises(ValidationError, match="vm=False"):
-        CreateSandboxRequest(
-            name="private-image-sandbox",
-            docker_image="registry.example.com/private:latest",
-            registry_credentials_id="cred-123",
-        )
-
-    with pytest.raises(ValidationError, match="vm=False"):
-        CreateSandboxRequest(
-            name="private-image-sandbox",
-            docker_image="registry.example.com/private:latest",
-            registry_credentials_id="cred-123",
-            vm=True,
-        )
-
-    request = CreateSandboxRequest(
-        name="private-image-sandbox",
-        docker_image="registry.example.com/private:latest",
-        registry_credentials_id="cred-123",
-        vm=False,
-    )
-    assert request.registry_credentials_id == "cred-123"
 
 
 def test_idle_timeout_supports_vm_and_container():

@@ -32,8 +32,7 @@ from prime_sandboxes import APIClient, SandboxClient, CreateSandboxRequest, Star
 client = APIClient(api_key="your-api-key")
 sandbox_client = SandboxClient(client)
 
-# Create a sandbox. Leaving `vm` unset uses the platform default runtime:
-# VM-backed sandboxes (public beta).
+# Create a VM-backed sandbox.
 request = CreateSandboxRequest(
     name="my-sandbox",
     docker_image="python:3.11-slim",
@@ -44,27 +43,17 @@ request = CreateSandboxRequest(
 sandbox = sandbox_client.create(request)
 print(f"Created: {sandbox.id}")
 
-# VM workloads use a structured argv contract; no shell is implied.
+# Boot commands use a structured argv contract; no shell is implied.
 vm = sandbox_client.create(CreateSandboxRequest(
     name="vm-workload",
     docker_image="user-1/vm-image:latest",
-    vm=True,
     start_command=StartCommand(
         executable="/worker",
         args=["--platform", "linux/amd64"],
     ),
 ))
 
-# Opt out to a container sandbox explicitly with `vm=False` (containers
-# support string start commands, SSH, and port exposure).
-container = sandbox_client.create(CreateSandboxRequest(
-    name="container-workload",
-    docker_image="python:3.11-slim",
-    vm=False,
-    start_command="python -m http.server 8080",
-))
 
-# Wait for it to be ready
 sandbox_client.wait_for_creation(sandbox.id)
 
 # Execute commands
@@ -137,7 +126,7 @@ The `transfer_image` method remains a compatibility name for `POST /images/build
 from prime_sandboxes import ImageClient
 
 images = ImageClient()
-response = images.transfer_image("ubuntu:22.04", platform="linux/amd64")
+response = images.transfer_image("ubuntu:22.04")
 print(response.build_ids)
 ```
 
@@ -152,7 +141,7 @@ Google-hosted registries are rejected. Docker-Hub-only multi-source requests
 preserve source names and tags and force PUBLIC platform scope.
 
 Use `prime images push --source-image <reference>` for one or comma-separated
-sources, or `prime images transfer-bulk` for manifests. Dockerfile platform
+sources, or `prime images push-bulk` for manifests. Dockerfile platform
 publishing uses `prime images push <name>:<tag> --platform-image`; the primary
 build creates its VM artifact without a second publishing step.
 

@@ -1,6 +1,7 @@
 """Tests for retry logic on transient connection errors."""
 
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -422,6 +423,53 @@ class TestAsyncAPIClientRetry:
             await client.request("GET", "test", idempotent_post=True)
 
         assert transport.call_count == 1
+
+
+class RecordingAPIClient(APIClient):
+    """Real-config APIClient that records requests instead of hitting the wire."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.calls = []
+
+    def request(self, method: str, path: str, **kwargs):
+        self.calls.append((method, path, kwargs))
+        return _sandbox_response(f"sandbox-{len(self.calls)}")
+
+
+class TestCreateSandboxTeamContextFromConfig:
+    def test_sync_create_omits_team_id_when_prime_team_id_env_is_empty(self, monkeypatch, tmp_path):
+        # PRIME_TEAM_ID="" means personal scope: the create payload must not
+        # carry team_id: "", which the backend rejects as an unknown wallet.
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        for variable in ("PRIME_CONTEXT", "PRIME_TEAM_ID", "PRIME_USER_ID"):
+            monkeypatch.delenv(variable, raising=False)
+        monkeypatch.setenv("PRIME_TEAM_ID", "")
+
+        recording = RecordingAPIClient(api_key="test-key")
+        assert recording.config.team_id is None
+
+        SandboxClient(recording).create(
+            CreateSandboxRequest(name="sandbox", docker_image="python:3.11-slim")
+        )
+
+        payload = recording.calls[0][2]["json"]
+        assert "team_id" not in payload
+
+    def test_sync_create_keeps_team_id_from_env_when_set(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        for variable in ("PRIME_CONTEXT", "PRIME_TEAM_ID", "PRIME_USER_ID"):
+            monkeypatch.delenv(variable, raising=False)
+        monkeypatch.setenv("PRIME_TEAM_ID", "team-77")
+
+        recording = RecordingAPIClient(api_key="test-key")
+
+        SandboxClient(recording).create(
+            CreateSandboxRequest(name="sandbox", docker_image="python:3.11-slim")
+        )
+
+        payload = recording.calls[0][2]["json"]
+        assert payload["team_id"] == "team-77"
 
 
 class TestCreateSandboxIdempotencyPayload:

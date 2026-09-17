@@ -59,6 +59,29 @@ def test_config_loads_temporary_context(monkeypatch, tmp_path) -> None:
     assert config.user_id == "dev-user"
 
 
+def test_empty_team_id_env_forces_personal_scope(monkeypatch, tmp_path) -> None:
+    """PRIME_TEAM_ID="" means personal scope, never a team id of ""."""
+    _write_configs(tmp_path)
+    monkeypatch.setenv("PRIME_TEAM_ID", "")
+
+    config = Config()
+
+    # Empty env forces personal scope even when the config file has a team.
+    assert config.team_id is None
+
+
+def test_empty_team_id_env_without_file_team_is_none(monkeypatch, tmp_path) -> None:
+    """PRIME_TEAM_ID="" with no team in the config yields None, not ""."""
+    config_dir = tmp_path / ".prime"
+    config_dir.mkdir(parents=True)
+    (config_dir / "config.json").write_text(json.dumps({"api_key": "k"}))
+    monkeypatch.setenv("PRIME_TEAM_ID", "")
+
+    config = Config()
+
+    assert config.team_id is None
+
+
 def test_environment_variables_override_temporary_context(monkeypatch, tmp_path) -> None:
     _write_configs(tmp_path)
     monkeypatch.setenv("PRIME_CONTEXT", "dev")

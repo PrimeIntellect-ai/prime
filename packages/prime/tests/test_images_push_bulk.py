@@ -136,6 +136,24 @@ def test_manifest_happy_path(tmp_path, fake_api, monkeypatch):
     assert not (tmp_path / "push-bulk-failures.jsonl").exists()
 
 
+def test_plain_output_has_no_rich_reprs(tmp_path, fake_api, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _make_context(tmp_path, "a")
+    manifest = tmp_path / "builds.jsonl"
+    _write_manifest(manifest, [{"image": "app-a:v1", "context": "a"}])
+
+    result = runner.invoke(
+        app, ["images", "push-bulk", "--manifest", str(manifest), "--plain"], env=TEST_ENV
+    )
+
+    assert result.exit_code == 0, result.output
+    # Progress/Live internals print rich renderables (e.g. NewLine) that must
+    # not surface as "<rich.console.NewLine object at ...>" in --plain mode.
+    assert "NewLine" not in result.output
+    assert "rich.console" not in result.output
+    assert "[dim]" not in result.output
+
+
 def test_manifest_relative_paths_resolve_from_manifest_dir(tmp_path, fake_api, monkeypatch):
     # cwd differs from the manifest's directory; ../a only exists relative to
     # the manifest, so cwd-relative resolution would fail validation.

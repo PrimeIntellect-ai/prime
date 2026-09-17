@@ -30,6 +30,7 @@ from prime_sandboxes import (
 )
 from prime_sandboxes.image_references import is_docker_hub_reference
 from rich.table import Table
+from rich.text import Text
 
 from ..utils import (
     PlainTyper,
@@ -135,53 +136,63 @@ def _partition_group(artifacts: list[ImageRow]) -> PartitionMap:
     return result
 
 
-_TYPE_LABELS: tuple[tuple[ImageArtifactType, str], ...] = (
-    (ImageArtifactType.CONTAINER_IMAGE, "[cyan]Container[/cyan]"),
-    (ImageArtifactType.VM_SANDBOX, "[magenta]VM[/magenta]"),
+# Cell values are rich Text objects, not markup strings, so --plain table
+# rendering never leaks raw "[cyan]..." tags into the output.
+_TYPE_LABELS: tuple[tuple[ImageArtifactType, str, str], ...] = (
+    (ImageArtifactType.CONTAINER_IMAGE, "Container", "cyan"),
+    (ImageArtifactType.VM_SANDBOX, "VM", "magenta"),
 )
+
+_STATUS_LABELS: dict[ImageBuildStatus, tuple[str, str]] = {
+    ImageBuildStatus.COMPLETED: ("Ready", "green"),
+    ImageBuildStatus.BUILDING: ("Building", "yellow"),
+    ImageBuildStatus.UPLOADING: ("Uploading", "yellow"),
+    ImageBuildStatus.PENDING: ("Pending", "blue"),
+    ImageBuildStatus.FAILED: ("Failed", "red"),
+    ImageBuildStatus.CANCELLED: ("Cancelled", "dim"),
+}
+
+
+def _empty_dash() -> Text:
+    return Text("—", style="dim")
 
 
 def _ordered_present_types(
     partition: PartitionMap,
-) -> list[tuple[ImageArtifactType, str]]:
+) -> list[tuple[ImageArtifactType, str, str]]:
     """Return present artifact types in display order."""
     return [
-        (artifact_type, label)
-        for artifact_type, label in _TYPE_LABELS
+        (artifact_type, label, style)
+        for artifact_type, label, style in _TYPE_LABELS
         if not partition.get(artifact_type, ArtifactPartition()).is_empty()
     ]
 
 
-def _render_type_column(partition: PartitionMap) -> str:
+def _render_type_column(partition: PartitionMap) -> Text:
     """Build the Type cell: ``Container / VM`` with color, only for types present."""
-    parts = [label for _artifact_type, label in _ordered_present_types(partition)]
-    return " / ".join(parts) if parts else "[dim]—[/dim]"
+    text = Text()
+    for _artifact_type, label, style in _ordered_present_types(partition):
+        if text.plain:
+            text.append(" / ")
+        text.append(label, style=style)
+    return text if text.plain else _empty_dash()
 
 
-_STATUS_LABELS: dict[ImageBuildStatus, str] = {
-    ImageBuildStatus.COMPLETED: "[green]Ready[/green]",
-    ImageBuildStatus.BUILDING: "[yellow]Building[/yellow]",
-    ImageBuildStatus.UPLOADING: "[yellow]Uploading[/yellow]",
-    ImageBuildStatus.PENDING: "[blue]Pending[/blue]",
-    ImageBuildStatus.FAILED: "[red]Failed[/red]",
-    ImageBuildStatus.CANCELLED: "[dim]Cancelled[/dim]",
-}
-
-
-def _render_visibility(visibility: ImageVisibility) -> str:
+def _render_visibility(visibility: ImageVisibility) -> Text:
     if visibility == ImageVisibility.PUBLIC:
-        return "[green]Public[/green]"
-    return "[dim]Private[/dim]"
+        return Text("Public", style="green")
+    return Text("Private", style="dim")
 
 
-def _render_status_slot(part: Optional[ArtifactPartition]) -> str:
+def _render_status_slot(part: Optional[ArtifactPartition]) -> Text:
     """Render the status of the latest row for one artifact type."""
     if part is None or part.latest is None:
-        return "[dim]—[/dim]"
-    return _STATUS_LABELS[part.latest.status]
+        return _empty_dash()
+    label, style = _STATUS_LABELS[part.latest.status]
+    return Text(label, style=style)
 
 
-def _render_status_column(partition: PartitionMap) -> str:
+def _render_status_column(partition: PartitionMap) -> Text:
     """Build the Status cell as positional slots aligned with the Type column.
 
     Example: if Type is ``Container / VM``, Status for ``rehl:latest`` with a
@@ -191,8 +202,13 @@ def _render_status_column(partition: PartitionMap) -> str:
     """
     ordered = _ordered_present_types(partition)
     if not ordered:
-        return "[dim]—[/dim]"
-    return " / ".join(_render_status_slot(partition.get(art_type)) for art_type, _ in ordered)
+        return _empty_dash()
+    text = Text()
+    for index, (art_type, _label, _style) in enumerate(ordered):
+        if index:
+            text.append(" / ")
+        text.append(_render_status_slot(partition.get(art_type)))
+    return text
 
 
 def _render_image_reference(img: ImageRow, *, is_team_listing: bool) -> str:
@@ -255,7 +271,7 @@ def _image_ref_column_width(console_width: int, is_team_listing: bool) -> int:
     return max(30, min(80, budget))
 
 
-def _completed_size_mb(partition: PartitionMap) -> str:
+def _completed_size_mb(partition: PartitionMap) -> str | Text:
     """Sum sizes of the latest COMPLETED rows per artifact type.
 
     Only completed artifacts carry a meaningful ``sizeBytes``; in-flight and
@@ -269,7 +285,7 @@ def _completed_size_mb(partition: PartitionMap) -> str:
             continue
         total += row.size_bytes or 0
     if total <= 0:
-        return "[dim]—[/dim]"
+        return _empty_dash()
     return f"{total / 1024 / 1024:.1f} MB"
 
 
@@ -873,18 +889,18 @@ def list_images(
                 _render_image_reference(preferred, is_team_listing=is_team_listing),
                 ref_max_width,
             )
-            type_display: str = _render_type_column(partition)
-            status_display: str = _render_status_column(partition)
-            visibility_display: str = _render_visibility(preferred.visibility)
-            size_mb: str = _completed_size_mb(partition)
+            type_display: Text = _render_type_column(partition)
+            status_display: Text = _render_status_column(partition)
+            visibility_display: Text = _render_visibility(preferred.visibility)
+            size_mb: str | Text = _completed_size_mb(partition)
             date_str: str = _display_created(partition)
 
-            row: list[str] = [image_ref, type_display]
+            row: list[str | Text] = [image_ref, type_display]
             if is_team_listing:
                 owner_display = (
-                    "[blue]Team[/blue]"
+                    Text("Team", style="blue")
                     if preferred.owner_type == ImageOwnerType.TEAM
-                    else "[dim]Personal[/dim]"
+                    else Text("Personal", style="dim")
                 )
                 row.append(owner_display)
             row.extend([status_display, visibility_display, size_mb, date_str])

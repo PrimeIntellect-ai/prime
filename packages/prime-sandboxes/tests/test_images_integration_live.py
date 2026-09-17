@@ -18,8 +18,11 @@ wire, complementing the hermetic shape tests in test_images_client.py.
 import io
 import os
 import tarfile
+import tempfile
 import time
 import uuid
+from pathlib import Path
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -42,9 +45,6 @@ pytestmark = pytest.mark.skipif(
 # Tiny public images: the registry pull/push cost stays CPU-minutes scale.
 SOURCE_IMAGE_OK = os.environ.get("PRIME_LIVE_SOURCE_IMAGE", "registry.k8s.io/pause:3.9")
 SOURCE_IMAGE_OK_ALT = "registry.k8s.io/pause:3.10"
-# A source on a disallowed (Google-hosted) registry: rejected per source,
-# in order, without failing the rest of a bulk transfer.
-SOURCE_IMAGE_BAD = "us.gcr.io/prime-intellect-it/does-not-exist:v1"
 
 BUILD_TERMINAL_STATUSES = {"COMPLETED", "FAILED", "CANCELLED"}
 BUILD_POLL_SECONDS = 900
@@ -53,11 +53,20 @@ POLL_INTERVAL_SECONDS = 10
 
 @pytest.fixture(scope="module")
 def image_client():
-    return ImageClient()
+    # Home-dir isolation, matching the platform VM E2E conftest: these tests
+    # are driven by PRIME_API_KEY / PRIME_API_BASE_URL / PRIME_TEAM_ID, and an
+    # unpatched config file would otherwise leak an unrelated team scope into
+    # the image list/build requests.
+    with patch("pathlib.Path.home", return_value=Path(tempfile.mkdtemp())):
+        yield ImageClient()
 
 
-def _team_id(image_client):
-    return image_client.client.config.team_id
+def _team_id():
+    """Team context for image operations: only an explicit PRIME_TEAM_ID.
+
+    An empty PRIME_TEAM_ID means personal, not a team id of "".
+    """
+    return os.environ.get("PRIME_TEAM_ID") or None
 
 
 def _poll_build_terminal(image_client, build_id):
@@ -94,7 +103,7 @@ def _listed_rows(image_client, image_name, image_tag, team_id):
 
 def test_single_source_transfer_live(image_client):
     """A single-source transfer returns one build shaped like a dockerfile build."""
-    team_id = _team_id(image_client)
+    team_id = _team_id()
     response = image_client.transfer_image(SOURCE_IMAGE_OK, team_id=team_id)
     assert isinstance(response, BuildImageResponse)
     # The legacy single-source wire uses the buildId key; the SDK accepts both.
@@ -115,14 +124,20 @@ def test_single_source_transfer_live(image_client):
 
 
 def test_bulk_source_transfer_partial_failure_live(image_client):
-    """Comma-separated sources: ordered best-effort results, legacy shape normalized."""
-    team_id = _team_id(image_client)
-    sources = f"{SOURCE_IMAGE_OK_ALT},{SOURCE_IMAGE_BAD}"
+    """Comma-separated sources: ordered best-effort results, legacy shape normalized.
+
+    The partial failure is a duplicate destination: a repeated source
+    resolves to the same name:tag and the backend rejects the second copy
+    per-source, without failing the first. (An unsupported registry source
+    would be rejected for the whole request before any source is processed.)
+    """
+    team_id = _team_id()
+    sources = f"{SOURCE_IMAGE_OK_ALT},{SOURCE_IMAGE_OK_ALT}"
     response = image_client.transfer_image(sources, team_id=team_id)
     assert isinstance(response, BulkBuildImageResponse)
     assert [result.source_image for result in response.results] == [
         SOURCE_IMAGE_OK_ALT,
-        SOURCE_IMAGE_BAD,
+        SOURCE_IMAGE_OK_ALT,
     ]
     ok, bad = response.results
     # Legacy rows carry flat success/buildId fields; normalization nests them
@@ -131,7 +146,7 @@ def test_bulk_source_transfer_partial_failure_live(image_client):
     assert ok.build.build_id
     assert ok.error is None
     assert bad.build is None
-    assert bad.error
+    assert "duplicate" in bad.error.lower()
     serialized = response.model_dump(by_alias=True)
     assert set(serialized) == {"results"}
     assert set(serialized["results"][0]) == {
@@ -151,10 +166,10 @@ def test_bulk_source_transfer_partial_failure_live(image_client):
 
 def test_dockerfile_build_full_flow_live(image_client):
     """Dockerfile build: initiate -> upload context -> start -> poll -> list."""
-    team_id = _team_id(image_client)
+    team_id = _team_id()
     image_name = f"it-live-df-{uuid.uuid4().hex[:8]}"
     image_tag = "smoke"
-    request = BuildImageRequest(image_name=image_name, image_tag=image_tag)
+    request = BuildImageRequest(image_name=image_name, image_tag=image_tag, team_id=team_id)
     response = image_client.initiate_build(request)
     assert isinstance(response, BuildImageResponse)
     assert response.build_id
@@ -243,11 +258,13 @@ def test_egress_policy_live(sandbox_client, egress_vm):
     status = sandbox_client.get_network(egress_vm.id)
     assert status.policy.allowlist == ["api.primeintellect.ai"]
     assert status.policy.denylist is None
-    assert status.generation >= 1
+    # The create-time policy counts as generation 0 and is applied at boot.
+    assert status.applied
 
+    # Deny-all is represented as an empty allowlist with no denylist.
     replaced = sandbox_client.set_network(egress_vm.id, deny=["*"])
-    assert replaced.policy.denylist == []
-    assert replaced.policy.allowlist is None
+    assert replaced.policy.allowlist == []
+    assert replaced.policy.denylist is None
     assert replaced.generation > status.generation
 
     deadline = time.monotonic() + 120
@@ -257,5 +274,6 @@ def test_egress_policy_live(sandbox_client, egress_vm):
             break
         time.sleep(2)
     assert current.applied, current
-    assert current.policy.denylist == []
+    assert current.policy.allowlist == []
+    assert current.policy.denylist is None
     assert current.applied_generation == replaced.generation

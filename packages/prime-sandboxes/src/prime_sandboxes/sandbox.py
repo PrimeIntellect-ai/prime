@@ -2737,6 +2737,7 @@ class SandboxClient:
                     sandbox_id,
                     bg_cmd,
                     timeout=_BACKGROUND_JOB_LAUNCH_TIMEOUT_SECONDS,
+                    working_dir=working_dir,
                     user=user,
                 )
                 break
@@ -4485,6 +4486,7 @@ class AsyncSandboxClient:
                     sandbox_id,
                     bg_cmd,
                     timeout=_BACKGROUND_JOB_LAUNCH_TIMEOUT_SECONDS,
+                    working_dir=working_dir,
                     user=user,
                 )
                 break

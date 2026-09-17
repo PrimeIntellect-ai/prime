@@ -233,9 +233,17 @@ def test_structured_start_command_live(sandbox_client, egress_vm):
     assert isinstance(start_command, StartCommand)
     assert start_command.executable == "/bin/sh"
     assert start_command.args[0] == "-c"
-    marker = sandbox_client.execute_command(egress_vm.id, "cat /tmp/it-live-started")
-    assert marker.exit_code == 0
-    assert marker.stdout.strip() == "start-ok"
+    # The start process may still be a moment behind the sandbox reaching
+    # RUNNING, so poll for the marker instead of racing the boot.
+    deadline = time.monotonic() + 30
+    stdout = ""
+    while time.monotonic() < deadline:
+        marker = sandbox_client.execute_command(egress_vm.id, "cat /tmp/it-live-started")
+        stdout = marker.stdout.strip()
+        if marker.exit_code == 0 and stdout == "start-ok":
+            break
+        time.sleep(2)
+    assert stdout == "start-ok"
 
 
 def test_background_job_live(sandbox_client, egress_vm):

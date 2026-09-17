@@ -20,7 +20,6 @@ from .commands.lab import app as lab_app
 from .commands.login import app as login_app
 from .commands.logout import app as logout_app
 from .commands.pods import app as pods_app
-from .commands.registry import app as registry_app
 from .commands.rl import app as train_app
 from .commands.sandbox import app as sandbox_app
 from .commands.secrets import app as secret_app
@@ -69,7 +68,6 @@ app.add_typer(disks_app, name="disks", rich_help_panel="Compute")
 app.add_typer(pods_app, name="pods", rich_help_panel="Compute")
 app.add_typer(sandbox_app, name="sandbox", rich_help_panel="Compute")
 app.add_typer(images_app, name="images", rich_help_panel="Compute")
-app.add_typer(registry_app, name="registry", rich_help_panel="Compute")
 app.add_typer(tunnel_app, name="tunnel", rich_help_panel="Compute")
 app.add_typer(inference_app, name="inference", rich_help_panel="Compute")
 

@@ -10,7 +10,6 @@ from prime_sandboxes import (
     SandboxClient,
     SandboxNotRunningError,
     SandboxStatus,
-    UpdateSandboxRequest,
 )
 
 from prime_cli.core import (
@@ -38,5 +37,4 @@ __all__ = [
     "SandboxClient",
     "SandboxNotRunningError",
     "SandboxStatus",
-    "UpdateSandboxRequest",
 ]

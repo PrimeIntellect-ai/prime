@@ -353,10 +353,10 @@ def load_source_specs_from_manifest_entries(
         result = parse_source_manifest_row(
             entry, f"{manifest_name}:{lineno}", platform_image=platform_image
         )
-        if isinstance(result, list):
-            problems.extend(result)
-        else:
+        if isinstance(result, SourceBuildSpec):
             specs.append(result)
+        else:
+            problems.extend(result)
 
     problems.extend(_duplicate_ref_problems(specs, hint=_DUPLICATE_DEST_HINT))
     if problems:
@@ -369,7 +369,7 @@ def load_hf_source_specs(
     *,
     config: Optional[str],
     split: str,
-    column: Optional[str],
+    column: str,
     platform_image: bool = False,
 ) -> tuple[list[SourceBuildSpec], list[str]]:
     """Resolve source-build specs from a Hugging Face dataset column.

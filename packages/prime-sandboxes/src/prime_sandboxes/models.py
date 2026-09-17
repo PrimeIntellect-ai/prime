@@ -228,7 +228,6 @@ class CreateSandboxRequest(BaseModel):
     disk_size_gb: float = 5.0
     gpu_count: int = 0
     gpu_type: Optional[str] = None
-    vm: Optional[bool] = None
     network_allowlist: Optional[List[str]] = None
     network_denylist: Optional[List[str]] = None
     timeout_minutes: int = 60
@@ -245,21 +244,12 @@ class CreateSandboxRequest(BaseModel):
     def validate_gpu_fields(self) -> "CreateSandboxRequest":
         if self.gpu_count > 0 and not self.gpu_type:
             raise ValueError("gpu_type is required when gpu_count is greater than 0")
-        if self.gpu_count > 0 and self.vm is False:
-            raise ValueError("gpu_count is not supported with vm=False")
         if self.gpu_count == 0 and self.gpu_type is not None:
             raise ValueError("gpu_type requires gpu_count greater than 0")
         return self
 
     @model_validator(mode="after")
     def validate_network_lists(self) -> "CreateSandboxRequest":
-        if self.vm is False and (
-            self.network_allowlist is not None or self.network_denylist is not None
-        ):
-            raise ValueError(
-                "network_allowlist and network_denylist are only supported for "
-                "VM sandboxes (vm=True)"
-            )
         validate_egress_lists(self.network_allowlist, self.network_denylist)
         return self
 
@@ -275,14 +265,6 @@ class CreateSandboxRequest(BaseModel):
                 f"(got idle={self.idle_timeout_minutes}, lifetime={self.timeout_minutes})"
             )
         return self
-
-
-class CommandRequest(BaseModel):
-    """Execute command request model"""
-
-    command: str
-    working_dir: Optional[str] = None
-    env: Optional[Dict[str, str]] = None
 
 
 class CommandResponse(BaseModel):
@@ -662,52 +644,6 @@ class UpdateImagesResponse(BaseModel):
     results: List[ImageUpdateResult] = Field(default_factory=list)
 
     model_config = ConfigDict(populate_by_name=True)
-
-
-class ExposePortRequest(BaseModel):
-    """Request to expose a port"""
-
-    port: int
-    name: Optional[str] = None
-    protocol: str = "HTTP"  # HTTP or TCP
-
-
-class ExposedPort(BaseModel):
-    """Information about an exposed port"""
-
-    exposure_id: str
-    sandbox_id: str
-    port: int
-    name: Optional[str]
-    url: str
-    tls_socket: str
-    protocol: Optional[str] = None
-    external_port: Optional[int] = None  # For TCP exposures
-    external_endpoint: Optional[str] = None  # For TCP: host:port endpoint
-    created_at: Optional[str] = None
-
-
-class ListExposedPortsResponse(BaseModel):
-    """Response for listing exposed ports"""
-
-    exposures: List[ExposedPort]
-
-
-class SSHSession(BaseModel):
-    """SSH session details"""
-
-    session_id: str
-    exposure_id: str
-    sandbox_id: str
-    host: str
-    port: int
-    external_endpoint: str
-    expires_at: datetime
-    ttl_seconds: int
-    gateway_url: str
-    user_ns: str
-    job_id: str
-    token: str
 
 
 class BackgroundJob(BaseModel):

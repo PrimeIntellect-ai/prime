@@ -21,7 +21,6 @@ def main() -> None:
         CreateSandboxRequest(
             name="sandbox-ssh",
             docker_image="ubuntu:22.04",
-            vm=True,
             cpu_cores=1,
             memory_gb=2,
             timeout_minutes=120,

@@ -418,7 +418,6 @@ async def main(mode: str = "both") -> None:
         request = CreateSandboxRequest(
             name="file-upload-stress-test",
             docker_image="python:3.11-slim",
-            vm=True,
             cpu_cores=1,
             memory_gb=2,
             disk_size_gb=20,  # Ensure enough disk space for tests

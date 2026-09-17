@@ -137,8 +137,7 @@ from prime_sandboxes import APIClient, SandboxClient, CreateSandboxRequest, Star
 client = APIClient()
 sandbox_client = SandboxClient(client)
 
-# Create sandbox. Leaving `vm` unset uses the platform default runtime:
-# VM-backed sandboxes (public beta).
+# Create a VM-backed sandbox.
 request = CreateSandboxRequest(
     name="my-sandbox",
     docker_image="python:3.11-slim",

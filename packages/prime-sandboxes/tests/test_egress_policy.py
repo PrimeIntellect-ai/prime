@@ -43,18 +43,7 @@ class TestCreateSandboxRequestNetworkLists:
         assert "network_access" not in type(request).model_fields
         assert "network_access" not in request.model_dump()
 
-    def test_lists_rejected_with_container_opt_out(self):
-        with pytest.raises(ValidationError, match="only supported for"):
-            CreateSandboxRequest(
-                name="t",
-                docker_image="img",
-                vm=False,
-                network_allowlist=["api.example.com"],
-            )
-
     def test_lists_accepted_with_unset_vm(self):
-        # Unset vm defers to the platform default runtime (VM), so egress
-        # lists are accepted without an explicit vm=True.
         request = CreateSandboxRequest(
             name="t", docker_image="img", network_allowlist=["api.example.com"]
         )
@@ -64,7 +53,6 @@ class TestCreateSandboxRequestNetworkLists:
         request = CreateSandboxRequest(
             name="t",
             docker_image="img",
-            vm=True,
             network_allowlist=["api.example.com", "1.2.3.4", "10.0.0.0/8"],
         )
         assert request.network_allowlist == ["api.example.com", "1.2.3.4", "10.0.0.0/8"]
@@ -74,13 +62,12 @@ class TestCreateSandboxRequestNetworkLists:
             CreateSandboxRequest(
                 name="t",
                 docker_image="img",
-                vm=True,
                 network_allowlist=["a.com"],
                 network_denylist=["b.com"],
             )
 
     def test_serializes_snake_case_and_keeps_empty_list(self):
-        request = CreateSandboxRequest(name="t", docker_image="img", vm=True, network_allowlist=[])
+        request = CreateSandboxRequest(name="t", docker_image="img", network_allowlist=[])
         payload = request.model_dump(by_alias=False, exclude_none=True)
         assert payload["network_allowlist"] == []
         assert "network_denylist" not in payload
@@ -101,12 +88,12 @@ class TestCreateSandboxRequestNetworkLists:
     )
     def test_invalid_entries_rejected(self, entry):
         with pytest.raises(ValidationError):
-            CreateSandboxRequest(name="t", docker_image="img", vm=True, network_denylist=[entry])
+            CreateSandboxRequest(name="t", docker_image="img", network_denylist=[entry])
 
     def test_rule_count_cap(self):
         entries = [f"h{i}.example.com" for i in range(257)]
         with pytest.raises(ValidationError, match="at most"):
-            CreateSandboxRequest(name="t", docker_image="img", vm=True, network_allowlist=entries)
+            CreateSandboxRequest(name="t", docker_image="img", network_allowlist=entries)
 
 
 class TestSandboxModel:

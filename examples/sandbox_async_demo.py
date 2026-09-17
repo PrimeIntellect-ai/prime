@@ -21,7 +21,6 @@ async def main() -> None:
                 CreateSandboxRequest(
                     name="async-demo-python-1",
                     docker_image="python:3.11-slim",
-                    vm=True,
                     cpu_cores=1,
                     memory_gb=1,
                     timeout_minutes=120,
@@ -29,7 +28,6 @@ async def main() -> None:
                 CreateSandboxRequest(
                     name="async-demo-node-2",
                     docker_image="node:20-slim",
-                    vm=True,
                     cpu_cores=1,
                     memory_gb=1,
                     timeout_minutes=120,

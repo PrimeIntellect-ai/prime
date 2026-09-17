@@ -2255,6 +2255,9 @@ class SandboxClient:
     def create(self, request: CreateSandboxRequest) -> Sandbox:
         """Create a new sandbox"""
         payload = request.model_dump(by_alias=False, exclude_none=True)
+        # VM is the only runtime; send it explicitly so the created runtime
+        # never depends on server-side defaults changing underneath the SDK.
+        payload["vm"] = True
         # Auto-populate team_id from config if not specified
         if request.team_id is None and self.client.config.team_id is not None:
             payload["team_id"] = self.client.config.team_id
@@ -3629,6 +3632,9 @@ class AsyncSandboxClient:
     async def create(self, request: CreateSandboxRequest) -> Sandbox:
         """Create a new sandbox"""
         payload = request.model_dump(by_alias=False, exclude_none=True)
+        # VM is the only runtime; send it explicitly so the created runtime
+        # never depends on server-side defaults changing underneath the SDK.
+        payload["vm"] = True
         if request.team_id is None and self.client.config.team_id is not None:
             payload["team_id"] = self.client.config.team_id
         payload["idempotency_key"] = request.idempotency_key or uuid.uuid4().hex

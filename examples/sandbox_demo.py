@@ -27,7 +27,6 @@ def main() -> None:
         request = CreateSandboxRequest(
             name="demo-sandbox",
             docker_image="python:3.11-slim",
-            vm=True,
             cpu_cores=1,
             memory_gb=2,
             timeout_minutes=120,  # 2 hours to avoid timeout during demo

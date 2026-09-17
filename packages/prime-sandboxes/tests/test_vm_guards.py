@@ -1,14 +1,17 @@
-"""Tests for the public VM-flag helpers on SandboxClient / AsyncSandboxClient.
+"""Tests for the VM-only create wire contract and the public is_vm helpers.
 
 The container-era VM-guarded operations (port exposure, SSH sessions) are gone;
-what remains pinned here is the is_vm lookup contract.
+what remains pinned here is the is_vm lookup contract and the create() runtime
+injection.
 """
 
 from datetime import datetime, timedelta, timezone
 from typing import Any, cast
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from prime_sandboxes import CreateSandboxRequest, Sandbox
 from prime_sandboxes.core.client import APIClient
 from prime_sandboxes.sandbox import AsyncSandboxClient, SandboxAuthCache, SandboxClient
 
@@ -129,3 +132,56 @@ async def test_async_is_vm_public_helper():
         assert (await client.is_vm("sbx-vm")) is True
     finally:
         await client.aclose()
+
+
+def _sandbox_response() -> dict:
+    return {
+        "id": "sbx-1",
+        "name": "vm-box",
+        "dockerImage": "img",
+        "startCommand": None,
+        "cpuCores": 1.0,
+        "memoryGB": 2.0,
+        "diskSizeGB": 10.0,
+        "diskMountPath": "/sandbox-workspace",
+        "gpuCount": 0,
+        "gpuType": None,
+        "vm": True,
+        "status": "RUNNING",
+        "timeoutMinutes": 60,
+        "labels": [],
+        "createdAt": "2026-01-01T00:00:00+00:00",
+        "updatedAt": "2026-01-01T00:00:00+00:00",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Create always sends vm=true
+# ---------------------------------------------------------------------------
+
+
+def test_sync_create_injects_vm_true_on_the_wire():
+    client = _make_sync_client(is_vm=True)
+    client.client = MagicMock()
+    client.client.config.team_id = None
+    client.client.request.return_value = _sandbox_response()
+
+    sandbox = client.create(CreateSandboxRequest(name="t", docker_image="img"))
+
+    payload = client.client.request.call_args.kwargs["json"]
+    assert payload["vm"] is True
+    assert isinstance(sandbox, Sandbox)
+
+
+@pytest.mark.asyncio
+async def test_async_create_injects_vm_true_on_the_wire():
+    client = _make_async_client(is_vm=True)
+    client.client = MagicMock()
+    client.client.config.team_id = None
+    client.client.request = AsyncMock(return_value=_sandbox_response())
+
+    sandbox = await client.create(CreateSandboxRequest(name="t", docker_image="img"))
+
+    payload = client.client.request.call_args.kwargs["json"]
+    assert payload["vm"] is True
+    assert isinstance(sandbox, Sandbox)

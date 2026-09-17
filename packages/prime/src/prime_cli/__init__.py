@@ -2,7 +2,6 @@
 
 from prime_sandboxes import (
     AsyncSandboxClient,
-    CommandRequest,
     CommandResponse,
     CommandTimeoutError,
     CreateSandboxRequest,
@@ -28,7 +27,6 @@ __all__ = [
     "APITimeoutError",
     "AsyncAPIClient",
     "AsyncSandboxClient",
-    "CommandRequest",
     "CommandResponse",
     "CommandTimeoutError",
     "Config",

@@ -93,7 +93,6 @@ async def main() -> None:
                     CreateSandboxRequest(
                         name=f"sandbox-{i}",
                         docker_image="python:3.11-slim",
-                        vm=True,
                         cpu_cores=1,
                         memory_gb=1,
                         timeout_minutes=10,

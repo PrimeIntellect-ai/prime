@@ -406,7 +406,6 @@ def test_sandbox_create_with_gpu_options(monkeypatch: pytest.MonkeyPatch) -> Non
     assert captured["request"].docker_image == "team-1/gpu-runtime:v1"
     assert captured["request"].gpu_count == 1
     assert captured["request"].gpu_type == "H100_80GB"
-    assert captured["request"].vm is True
 
 
 def test_sandbox_create_vm_accepts_fractional_disk_size_gb(
@@ -532,7 +531,6 @@ def test_sandbox_create_defaults_to_vm_runtime(
     output = strip_ansi(result.output)
     assert result.exit_code == 0, result.output
     assert "Runtime: VM (default)" in output
-    assert captured["request"].vm is True
     assert captured["request"].start_command is None
 
 
@@ -602,7 +600,6 @@ def test_sandbox_create_accepts_docker_image_for_gpu(monkeypatch: pytest.MonkeyP
     assert captured["request"].docker_image == "python:3.11-slim"
     assert captured["request"].gpu_count == 1
     assert captured["request"].gpu_type == "H100_80GB"
-    assert captured["request"].vm is True
 
 
 def test_sandbox_create_accepts_region(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -692,7 +689,6 @@ def test_sandbox_create_gpu_with_defaulted_vm_runtime(
     output = strip_ansi(result.output)
     assert result.exit_code == 0, f"Failed: {result.output}"
     assert "Successfully created sandbox sbx-gpu-default-vm" in output
-    assert captured["request"].vm is True
     assert captured["request"].gpu_count == 1
 
 
@@ -741,7 +737,6 @@ def test_sandbox_create_without_arguments_uses_default_image(
     assert "Docker Image: python:3.11-slim" in output
     assert "Successfully created sandbox sbx-default-image" in output
     assert captured["request"].docker_image == "python:3.11-slim"
-    assert captured["request"].vm is True
 
 
 def test_sandbox_create_vm_without_gpu(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -764,7 +759,6 @@ def test_sandbox_create_vm_without_gpu(monkeypatch: pytest.MonkeyPatch) -> None:
     output = strip_ansi(result.output)
     assert result.exit_code == 0, f"Failed: {result.output}"
     assert "Successfully created sandbox sbx-vm-123" in output
-    assert captured["request"].vm is True
     assert captured["request"].gpu_count == 0
     assert captured["request"].cpu_cores == 1.0
     assert captured["request"].memory_gb == 1.0
@@ -800,7 +794,6 @@ def test_sandbox_create_vm_supports_idle_timeout_with_unlimited_lifetime(
     output = strip_ansi(result.output)
     assert result.exit_code == 0, result.output
     assert "Idle Timeout: 10 minutes" in output
-    assert captured["request"].vm is True
     assert captured["request"].timeout_minutes == -1
     assert captured["request"].idle_timeout_minutes == 10
 

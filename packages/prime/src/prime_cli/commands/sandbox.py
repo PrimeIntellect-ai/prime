@@ -496,9 +496,8 @@ def create(
         "--gpu-type",
         help="GPU type/model (e.g. RTX_PRO_6000, H200_141GB). Required when --gpu-count > 0",
     ),
-    # Hidden for compatibility: VM is the only runtime now, but the resolved
-    # value is still sent so the created runtime never depends on server-side
-    # defaults changing underneath a deployed CLI.
+    # Hidden for compatibility: VM is the only runtime. The SDK's create()
+    # always sends vm=true on the wire.
     vm: Optional[bool] = typer.Option(None, "--vm", hidden=True),
     network_allow: Optional[List[str]] = typer.Option(
         None,
@@ -659,7 +658,6 @@ def create(
             disk_size_gb=disk_size_gb,
             gpu_count=gpu_count,
             gpu_type=gpu_type,
-            vm=True,
             network_allowlist=network_allow,
             network_denylist=network_deny,
             timeout_minutes=timeout_minutes,

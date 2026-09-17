@@ -155,14 +155,13 @@ sandbox = sandbox_client.create(request)
 print(f"Created sandbox: {sandbox.id}")
 ```
 
-VM sandboxes take a structured argv start command (`StartCommand`) instead of a command
-string, and support GPUs and network rules:
+VM sandboxes take a structured argv start command (`StartCommand`), and support
+GPUs, idle timeout, and network rules:
 
 ```python
 vm_request = CreateSandboxRequest(
     name="my-vm-sandbox",
     docker_image="user-1/vm-image:latest",
-    vm=True,  # redundant with the default, but explicit for VM-only features
     start_command=StartCommand(executable="python", args=["serve.py", "--port", "8000"]),
     gpu_count=1,
     gpu_type="RTX_PRO_6000",  # required when gpu_count > 0
@@ -172,25 +171,19 @@ vm_request = CreateSandboxRequest(
 vm = sandbox_client.create(vm_request)
 ```
 
-Pass `vm=False` for a container sandbox, which is currently the only runtime that supports
-SSH, port exposure, string start commands, idle timeout, and private-registry credentials.
-
 ### CLI Command Reference
 
 ```bash
 # List sandboxes
 prime sandbox list [--team-id TEAM] [--status STATUS] [--label LABEL] [--page N] [--num N] [--all]
 
-# Create sandbox
+# Create sandbox (VM-backed)
 prime sandbox create IMAGE [OPTIONS]
 
-# Opt out to a container sandbox (SSH, port exposure, string start commands, idle timeout)
-prime sandbox create python:3.11-slim --container
+# Create a sandbox with GPUs (--gpu-type is required when --gpu-count > 0)
+prime sandbox create user-1/vm-image:latest --gpu-count 1 --gpu-type RTX_PRO_6000
 
-# Create VM sandbox with GPUs (--gpu-type is required when --gpu-count > 0)
-prime sandbox create user-1/vm-image:latest --vm --gpu-count 1 --gpu-type RTX_PRO_6000
-
-# VM start command: each argv token is separate after --, no shell is involved
+# Start command: each argv token is separate after --, no shell is involved
 prime sandbox create user-1/vm-image:latest -- python serve.py --port 8000
 
 # Restrict egress (--network-allow/--network-deny are repeatable and mutually exclusive)
@@ -209,7 +202,7 @@ prime sandbox run SANDBOX_ID -- python script.py
 # Get sandbox details
 prime sandbox get SANDBOX_ID [--output json]
 
-# Show or replace network rules (not available on container sandboxes)
+# Show or replace network rules
 prime sandbox network SANDBOX_ID
 prime sandbox network SANDBOX_ID --allow api.openai.com,10.0.0.0/8
 
@@ -224,12 +217,6 @@ prime sandbox logs SANDBOX_ID
 # Upload/download files
 prime sandbox upload SANDBOX_ID local_file.py /remote/path/file.py
 prime sandbox download SANDBOX_ID /remote/file.txt ./local/file.txt
-
-# Expose ports and SSH (container sandboxes)
-prime sandbox expose SANDBOX_ID 8000 [--protocol HTTP|TCP]
-prime sandbox list-ports [SANDBOX_ID]
-prime sandbox unexpose SANDBOX_ID EXPOSURE_ID
-prime sandbox ssh SANDBOX_ID
 ```
 
 ### Image Command Reference
@@ -242,8 +229,13 @@ prime images push myapp:v1.0.0 --context ./app --dockerfile ./app/Dockerfile
 prime images push --source-image ubuntu:22.04
 prime images push --source-image ubuntu:22.04,alpine:3
 
-# Build source images from a JSONL manifest
-prime images transfer-bulk --manifest sources.jsonl
+# Build and push many images in one command: Dockerfile manifests, Harbor task
+# directories, or Hugging Face datasets; manifest rows may also be
+# public-registry source builds ({"source": "ghcr.io/org/app:v1"})
+prime images push-bulk --manifest builds.jsonl
+prime images push-bulk --harbor ./tasks --tag v1
+prime images push-bulk --hf org/dataset --dockerfile-column dockerfile --name-column instance_id
+prime images push-bulk --hf org/dataset --column docker_image
 
 # List images
 prime images list [--search TERM] [--page N] [--num N] [--output json]

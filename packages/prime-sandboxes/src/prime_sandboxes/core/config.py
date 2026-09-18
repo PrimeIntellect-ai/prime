@@ -76,10 +76,15 @@ class Config:
 
     @property
     def team_id(self) -> Optional[str]:
-        """Get team ID with precedence: env > file > None."""
+        """Get team ID with precedence: env > file > None.
+
+        An explicitly empty PRIME_TEAM_ID means personal scope: it must not
+        fall back to the file's team, and must never leak onto the wire as
+        ``teamId: ""``.
+        """
         team_id = os.getenv("PRIME_TEAM_ID")
         if team_id is not None:
-            return team_id
+            return team_id or None
         return self.config.get("team_id") or None
 
     @property

@@ -1,16 +1,11 @@
 import json
-import os
 import random
 import shlex
-import shutil
 import string
-import subprocess
-import tempfile
 import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
-import httpx
 import typer
 from prime_sandboxes import (
     APIClient,
@@ -43,7 +38,6 @@ from ..utils import (
     obfuscate_env_vars,
     obfuscate_secrets,
     output_data_as_json,
-    require_selection,
     sort_by_created,
     status_color,
     validate_output_format,
@@ -73,16 +67,6 @@ SANDBOX_DETAIL_JSON_HELP = json_output_help(
     ".environment_vars? = object",
     ".secrets? = object",
     ".advanced_configs? = object",
-)
-
-SANDBOX_EXPOSURE_JSON_HELP = json_output_help(
-    ". = {sandbox_id?, exposure_id, port, protocol, name?, url, "
-    "external_port?, external_endpoint?, tls_socket?}",
-)
-
-LIST_SANDBOX_PORTS_JSON_HELP = json_output_help(
-    ".exposures[] = {sandbox_id?, exposure_id, port, protocol, name?, url, "
-    "external_port?, external_endpoint?, tls_socket?}",
 )
 
 
@@ -246,49 +230,6 @@ def _format_sandbox_for_details(sandbox: Sandbox) -> Dict[str, Any]:
             data["advanced_configs"] = advanced_configs
 
     return data
-
-
-def _guard_vm_unsupported(sandbox: Sandbox, feature_name: str) -> None:
-    if sandbox.vm:
-        console.print(f"[red]Error:[/red] {feature_name} is not yet supported for VM sandboxes.")
-        raise typer.Exit(1)
-
-
-def _ssh_sandbox_display(item: Dict[str, Any]) -> str:
-    """Format a sandbox row for the interactive SSH picker."""
-    return f"{item['id']}  {item['name']}  [dim]({item['image']})[/dim]"
-
-
-def _select_sandbox_for_ssh(sandbox_client: SandboxClient) -> str:
-    """Let the user pick a running sandbox to SSH into when no ID is given."""
-    # Page through every running sandbox before filtering, so SSH-able containers
-    # on later pages aren't dropped when a user has many running sandboxes.
-    sandboxes: List[Sandbox] = []
-    with console.status("[bold blue]Loading sandboxes...", spinner="dots"):
-        page = 1
-        while True:
-            sandbox_list = sandbox_client.list(status="RUNNING", per_page=100, page=page)
-            sandboxes.extend(sandbox_list.sandboxes)
-            if not sandbox_list.has_next:
-                break
-            page += 1
-
-    # SSH is only supported for non-VM sandboxes (see _guard_vm_unsupported).
-    items = [
-        {"id": sb.id, "name": sb.name, "image": sb.docker_image}
-        for sb in sort_by_created(sandboxes)
-        if not sb.vm
-    ]
-
-    selected = require_selection(
-        items,
-        "SSH into",
-        "No running sandboxes available to SSH into.",
-        item_type="sandbox",
-        display_fn=_ssh_sandbox_display,
-        page_size=50,
-    )
-    return str(selected.get("id"))
 
 
 @app.command("list", epilog=LIST_SANDBOXES_JSON_HELP)
@@ -531,9 +472,8 @@ def create(
     docker_image: Optional[str] = typer.Argument(
         None,
         help=(
-            "Image to run. Defaults to python:3.11-slim. For VM sandboxes "
-            "(the default), provide the VM image reference. To omit the image "
-            "when supplying a command, use '-- COMMAND...'."
+            "VM image reference to run. Defaults to python:3.11-slim. "
+            "To omit the image when supplying a command, use '-- COMMAND...'."
         ),
     ),
     command: Optional[List[str]] = typer.Argument(
@@ -547,11 +487,6 @@ def create(
     name: Optional[str] = typer.Option(
         None, help="Name for the sandbox (auto-generated if not provided)"
     ),
-    start_command: Optional[str] = typer.Option(
-        None,
-        "--start-command",
-        help="Legacy container-only command string (requires --container)",
-    ),
     cpu_cores: float = typer.Option(1.0, help="Number of CPU cores"),
     memory_gb: float = typer.Option(1.0, help="Memory in GB"),
     disk_size_gb: float = typer.Option(10.0, help="Disk size in GB"),
@@ -561,20 +496,14 @@ def create(
         "--gpu-type",
         help="GPU type/model (e.g. RTX_PRO_6000, H200_141GB). Required when --gpu-count > 0",
     ),
-    vm: Optional[bool] = typer.Option(
-        None,
-        "--vm/--container",
-        help=(
-            "Sandbox runtime. VM-backed sandboxes are the default (public beta); "
-            "pass --container to opt out to a container sandbox. VMs are "
-            "required when requesting GPUs."
-        ),
-    ),
+    # Hidden for compatibility: VM is the only runtime. The SDK's create()
+    # always sends vm=true on the wire.
+    vm: Optional[bool] = typer.Option(None, "--vm", hidden=True),
     network_allow: Optional[List[str]] = typer.Option(
         None,
         "--network-allow",
         help=(
-            "VM only, repeatable. Allow egress only to these domains/IPv4 CIDRs "
+            "Repeatable. Allow egress only to these domains/IPv4 CIDRs "
             "(hostname-aware). Mutually exclusive with --network-deny."
         ),
     ),
@@ -582,7 +511,7 @@ def create(
         None,
         "--network-deny",
         help=(
-            "VM only, repeatable. Deny egress to these domains/IPv4 CIDRs and "
+            "Repeatable. Deny egress to these domains/IPv4 CIDRs and "
             "allow everything else. Mutually exclusive with --network-allow."
         ),
     ),
@@ -603,11 +532,6 @@ def create(
         "--region",
         help="Sandbox cluster region (for example: us, eu-west). Uses backend default if omitted.",
     ),
-    registry_credentials_id: Optional[str] = typer.Option(
-        None,
-        "--registry-credentials-id",
-        help="Registry credentials ID for pulling private images",
-    ),
     env: Optional[List[str]] = typer.Option(
         None,
         help="Environment variables in KEY=VALUE format. Can be specified multiple times.",
@@ -621,15 +545,6 @@ def create(
         "--label",
         "-l",
         help="Labels/tags for the sandbox. Can be specified multiple times.",
-    ),
-    guaranteed: bool = typer.Option(
-        False,
-        "--guaranteed",
-        help=(
-            "Admin/manager only. Schedule with CPU/memory requests equal to limits "
-            "(Guaranteed QoS), bypassing the default oversubscription. Container "
-            "sandboxes only (requires --container)."
-        ),
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ) -> None:
@@ -656,12 +571,11 @@ def create(
                 key, value = secret_var.split("=", 1)
                 secrets_vars[key] = value
 
-        # Resolve the sandbox runtime. VM is the platform default (public
-        # beta); explicit --vm/--container flags always win. The resolved
-        # value is sent to the API so the created runtime never depends on
-        # server-side defaults changing underneath a deployed CLI.
+        # VM is the only runtime. The hidden --vm flag stays accepted for
+        # compatibility, and the resolved value is always sent so the created
+        # runtime never depends on server-side defaults changing underneath a
+        # deployed CLI.
         runtime_defaulted = vm is None
-        use_vm = True if runtime_defaulted else vm
 
         if gpu_count > 0 and not gpu_type:
             console.print(
@@ -670,43 +584,11 @@ def create(
             )
             raise typer.Exit(1)
 
-        if gpu_count > 0 and not use_vm:
-            console.print(
-                "[red]GPUs require VM sandboxes.[/red] Drop --container when using --gpu-count."
-            )
-            raise typer.Exit(1)
-
         if gpu_count == 0 and gpu_type:
             console.print(
                 "[red]GPU type provided without GPUs.[/red] "
                 "Set --gpu-count > 0 when using --gpu-type."
             )
-            raise typer.Exit(1)
-
-        if guaranteed and use_vm:
-            if runtime_defaulted:
-                console.print(
-                    "[red]--guaranteed is only supported for container sandboxes.[/red] "
-                    "Add --container to opt out of the default VM runtime."
-                )
-            else:
-                console.print(
-                    "[red]--guaranteed is not supported for VM sandboxes.[/red] "
-                    "Drop --vm or drop --guaranteed."
-                )
-            raise typer.Exit(1)
-
-        if registry_credentials_id and use_vm:
-            if runtime_defaulted:
-                console.print(
-                    "[red]--registry-credentials-id is only supported for container "
-                    "sandboxes.[/red] Add --container to opt out of the default VM runtime."
-                )
-            else:
-                console.print(
-                    "[red]--registry-credentials-id is not supported for VM sandboxes.[/red] "
-                    "Drop --vm or drop --registry-credentials-id."
-                )
             raise typer.Exit(1)
 
         if idle_timeout_minutes is not None:
@@ -727,18 +609,12 @@ def create(
             if gpu_count > 0 and gpu_type:
                 gpu_slug = "".join(c if c.isalnum() or c == "-" else "-" for c in gpu_type.lower())
                 base_name = f"gpu-{'-'.join(filter(None, gpu_slug.split('-')))}"
-            elif use_vm:
+            else:
                 image_parts = docker_image.split("/")[-1].split(":")[0]
                 image_slug = "".join(
                     c if c.isalnum() or c == "-" else "-" for c in image_parts.lower()
                 )
                 base_name = f"vm-{'-'.join(filter(None, image_slug.split('-')))}"
-            else:
-                image_parts = docker_image.split("/")[-1].split(":")[0]
-                base_name = "".join(
-                    c if c.isalnum() or c == "-" else "-" for c in image_parts.lower()
-                )
-                base_name = "-".join(filter(None, base_name.split("-")))
 
             suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=4))
             name = f"{base_name}-{suffix}"
@@ -763,46 +639,15 @@ def create(
                 "[red]Error:[/red] --network-allow and --network-deny are mutually exclusive"
             )
             raise typer.Exit(1)
-        if (network_allow is not None or network_deny is not None) and not use_vm:
-            console.print(
-                "[red]Error:[/red] --network-allow/--network-deny require a VM "
-                "sandbox; drop --container"
-            )
-            raise typer.Exit(1)
 
-        if command and start_command is not None:
-            console.print(
-                "[red]Error:[/red] provide either trailing COMMAND arguments "
-                "or --start-command, not both"
-            )
-            raise typer.Exit(1)
-        if use_vm and start_command is not None:
-            if runtime_defaulted:
-                console.print(
-                    "[red]Error:[/red] --start-command is legacy container-only syntax. "
-                    "Pass an executable after '--' for VM sandboxes (the default), "
-                    "or add --container to create a container sandbox."
-                )
-            else:
-                console.print(
-                    "[red]Error:[/red] --start-command is legacy container-only syntax. "
-                    "For VMs, pass an executable after '--'."
-                )
-            raise typer.Exit(1)
-
-        resolved_start_command: StartCommand | str | None
+        resolved_start_command: StartCommand | None
         if command:
             resolved_start_command = StartCommand(
                 executable=command[0],
                 args=command[1:],
             )
-        elif start_command is not None:
-            resolved_start_command = start_command
-        elif use_vm:
-            resolved_start_command = None
         else:
-            # Preserve the existing long-running default for container callers.
-            resolved_start_command = "tail -f /dev/null"
+            resolved_start_command = None
 
         request = CreateSandboxRequest(
             name=name,
@@ -813,7 +658,6 @@ def create(
             disk_size_gb=disk_size_gb,
             gpu_count=gpu_count,
             gpu_type=gpu_type,
-            vm=use_vm,
             network_allowlist=network_allow,
             network_denylist=network_deny,
             timeout_minutes=timeout_minutes,
@@ -822,9 +666,7 @@ def create(
             labels=labels if labels else [],
             team_id=team_id,
             region=region,
-            registry_credentials_id=registry_credentials_id,
             **request_kwargs,
-            guaranteed=guaranteed,
         )
 
         # Show configuration summary
@@ -833,9 +675,7 @@ def create(
         console.print(f"Docker Image: {docker_image}")
         console.print(f"Start Command: {_format_start_command(resolved_start_command)}")
         console.print(f"Resources: {cpu_cores} CPU, {memory_gb}GB RAM, {disk_size_gb}GB disk")
-        if guaranteed:
-            console.print("Scheduling: [green]Guaranteed QoS[/green]")
-        runtime_label = "VM (default)" if runtime_defaulted else ("VM" if use_vm else "Container")
+        runtime_label = "VM (default)" if runtime_defaulted else "VM"
         console.print(f"Runtime: {runtime_label}")
         if gpu_count > 0:
             console.print(f"GPUs: {gpu_type} x{gpu_count}")
@@ -854,8 +694,6 @@ def create(
             console.print(f"Idle Timeout: {idle_timeout_minutes} minutes")
         console.print(f"Team: {team_id or 'Personal'}")
         console.print(f"Region: {region or 'Backend default'}")
-        if registry_credentials_id:
-            console.print(f"Registry Credentials: {registry_credentials_id}")
         if labels:
             console.print(f"Labels: {', '.join(labels)}")
         if env_vars:
@@ -1359,13 +1197,6 @@ def run(
         "--timeout",
         help="Timeout for the command in seconds",
     ),
-    user: Optional[str] = typer.Option(
-        None,
-        "-u",
-        "--user",
-        help="Run the command as this user (username or UID, optionally USER:GROUP), "
-        "like 'docker exec -u'. Container sandboxes only.",
-    ),
 ) -> None:
     """Execute a command in a sandbox.
 
@@ -1406,8 +1237,6 @@ def run(
             console.print(f"[bold blue]Environment:[/bold blue] {obfuscated_env}")
         if timeout is not None:
             console.print(f"[bold blue]Timeout:[/bold blue] {timeout}s")
-        if user:
-            console.print(f"[bold blue]User:[/bold blue] {user}")
 
         start_time = time.perf_counter()
 
@@ -1418,7 +1247,6 @@ def run(
                 working_dir,
                 env_vars if env_vars else None,
                 timeout=timeout,
-                user=user,
             )
 
         # End timing
@@ -1599,385 +1427,3 @@ def reset_cache(
         except Exception as e:
             console.print(f"[red]Error clearing cache: {e}[/red]")
             raise typer.Exit(1)
-
-
-@app.command("expose", no_args_is_help=True, epilog=SANDBOX_EXPOSURE_JSON_HELP)
-def expose_port(
-    sandbox_id: str = typer.Argument(..., help="Sandbox ID to expose port from"),
-    port: int = typer.Argument(..., help="Port number to expose"),
-    name: Optional[str] = typer.Option(None, help="Optional name for the exposed port"),
-    protocol: str = typer.Option(
-        "HTTP",
-        "--protocol",
-        "-p",
-        help="Protocol: HTTP or TCP",
-    ),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
-) -> None:
-    """Expose a port from a sandbox."""
-    validate_output_format(output, console)
-
-    # Validate protocol
-    protocol = protocol.upper()
-    if protocol not in ("HTTP", "TCP"):
-        console.print(f"[red]Error:[/red] Invalid protocol '{protocol}'. Use HTTP or TCP.")
-        raise typer.Exit(1)
-
-    try:
-        base_client = APIClient()
-        sandbox_client = SandboxClient(base_client)
-
-        with console.status("[bold blue]Checking sandbox status...", spinner="dots"):
-            sandbox = sandbox_client.get(sandbox_id)
-        _guard_vm_unsupported(sandbox, "Port exposure")
-
-        with console.status("[bold blue]Exposing port...", spinner="dots"):
-            exposed = sandbox_client.expose(sandbox_id, port, name, protocol)
-
-        if output == "json":
-            output_data_as_json(exposed.model_dump(), console)
-        else:
-            console.print("[green]✓[/green] Port exposed successfully!")
-            console.print(f"[bold green]Exposure ID:[/bold green] {exposed.exposure_id}")
-            console.print(f"[bold green]Port:[/bold green] {exposed.port}")
-            console.print(f"[bold green]Protocol:[/bold green] {exposed.protocol or protocol}")
-            if exposed.name:
-                console.print(f"[bold green]Name:[/bold green] {exposed.name}")
-            console.print(f"[bold green]URL:[/bold green] {exposed.url}")
-            if protocol == "TCP":
-                if exposed.external_port:
-                    console.print(
-                        f"[bold green]External Port:[/bold green] {exposed.external_port}"
-                    )
-                if exposed.external_endpoint:
-                    console.print(
-                        f"[bold green]External Endpoint:[/bold green] {exposed.external_endpoint}"
-                    )
-            else:
-                console.print(f"[bold green]TLS Socket:[/bold green] {exposed.tls_socket}")
-
-    except typer.Exit:
-        raise
-    except APIError as e:
-        console.print(f"[red]Error:[/red] {str(e)}")
-        raise typer.Exit(1)
-    except Exception as e:
-        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
-        console.print_exception(show_locals=True)
-        raise typer.Exit(1)
-
-
-@app.command("unexpose", no_args_is_help=True)
-def unexpose_port(
-    sandbox_id: str = typer.Argument(..., help="Sandbox ID"),
-    exposure_id: str = typer.Argument(..., help="Exposure ID to remove"),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
-) -> None:
-    """Unexpose a port from a sandbox"""
-    try:
-        if not confirm_or_skip(
-            f"Are you sure you want to unexpose {exposure_id}?", yes, default=True
-        ):
-            console.print("Unexpose cancelled")
-            raise typer.Exit(0)
-
-        base_client = APIClient()
-        sandbox_client = SandboxClient(base_client)
-
-        with console.status("[bold blue]Checking sandbox status...", spinner="dots"):
-            sandbox = sandbox_client.get(sandbox_id)
-        _guard_vm_unsupported(sandbox, "Port unexpose")
-
-        with console.status("[bold blue]Unexposing port...", spinner="dots"):
-            sandbox_client.unexpose(sandbox_id, exposure_id)
-
-        console.print(f"[green]✓ Successfully unexposed {exposure_id}[/green]")
-
-    except typer.Exit:
-        raise
-    except APIError as e:
-        console.print(f"[red]Error:[/red] {str(e)}")
-        raise typer.Exit(1)
-    except Exception as e:
-        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
-        console.print_exception(show_locals=True)
-        raise typer.Exit(1)
-
-
-@app.command("list-ports", epilog=LIST_SANDBOX_PORTS_JSON_HELP)
-def list_ports(
-    sandbox_id: Optional[str] = typer.Argument(
-        None, help="Sandbox ID (omit to list all exposed ports across all sandboxes)"
-    ),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
-) -> None:
-    """List exposed ports for a sandbox, or all sandboxes if no ID is provided"""
-    validate_output_format(output, console)
-
-    try:
-        base_client = APIClient()
-        sandbox_client = SandboxClient(base_client)
-
-        if sandbox_id:
-            # List ports for a specific sandbox
-            with console.status("[bold blue]Checking sandbox status...", spinner="dots"):
-                sandbox = sandbox_client.get(sandbox_id)
-            _guard_vm_unsupported(sandbox, "Port listing")
-
-            with console.status("[bold blue]Fetching exposed ports...", spinner="dots"):
-                response = sandbox_client.list_exposed_ports(sandbox_id)
-
-            if output == "json":
-                output_data_as_json(
-                    {"exposures": [exp.model_dump() for exp in response.exposures]}, console
-                )
-            else:
-                if not response.exposures:
-                    console.print(f"[yellow]No exposed ports for sandbox {sandbox_id}[/yellow]")
-                else:
-                    table = build_table(
-                        f"Exposed Ports for Sandbox {sandbox_id}",
-                        [
-                            ("Exposure ID", "cyan"),
-                            ("Protocol", "white"),
-                            ("Port", "blue"),
-                            ("External", "blue"),
-                            ("Name", "green"),
-                            ("URL", "magenta"),
-                        ],
-                    )
-
-                    for exp in response.exposures:
-                        external_port = str(exp.external_port) if exp.external_port else "-"
-                        table.add_row(
-                            exp.exposure_id,
-                            exp.protocol or "HTTP",
-                            str(exp.port),
-                            external_port,
-                            exp.name or "-",
-                            exp.url,
-                        )
-
-                    console.print(table)
-        else:
-            # List all exposed ports across all sandboxes
-            with console.status("[bold blue]Fetching all exposed ports...", spinner="dots"):
-                response = sandbox_client.list_all_exposed_ports()
-
-            if output == "json":
-                output_data_as_json(
-                    {"exposures": [exp.model_dump() for exp in response.exposures]}, console
-                )
-            else:
-                if not response.exposures:
-                    console.print("[yellow]No exposed ports found[/yellow]")
-                else:
-                    table = build_table(
-                        "All Exposed Ports",
-                        [
-                            ("Sandbox ID", "yellow"),
-                            ("Exposure ID", "cyan"),
-                            ("Protocol", "white"),
-                            ("Port", "blue"),
-                            ("External", "blue"),
-                            ("Name", "green"),
-                            ("URL", "magenta"),
-                        ],
-                    )
-
-                    for exp in response.exposures:
-                        external_port = str(exp.external_port) if exp.external_port else "-"
-                        table.add_row(
-                            exp.sandbox_id,
-                            exp.exposure_id,
-                            exp.protocol or "HTTP",
-                            str(exp.port),
-                            external_port,
-                            exp.name or "-",
-                            exp.url,
-                        )
-
-                    console.print(table)
-
-    except typer.Exit:
-        raise
-    except APIError as e:
-        console.print(f"[red]Error:[/red] {str(e)}")
-        raise typer.Exit(1)
-    except Exception as e:
-        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
-        console.print_exception(show_locals=True)
-        raise typer.Exit(1)
-
-
-@app.command("ssh")
-def ssh_connect(
-    sandbox_id: Optional[str] = typer.Argument(
-        None, help="Sandbox ID to SSH into (interactive selection if not provided)"
-    ),
-    ssh_args: Optional[List[str]] = typer.Argument(
-        None, help="Additional SSH arguments (e.g., -- -v for verbose)"
-    ),
-    shell: Optional[str] = typer.Option(
-        None,
-        "--shell",
-        "-s",
-        help="Shell to use (e.g., bash, zsh, sh). Auto-detected if not specified.",
-    ),
-) -> None:
-    """Connect to a sandbox via SSH.
-
-    This command creates a SSH session with an ephemeral key and cleans up on disconnect.
-    Run without a sandbox ID to pick from your running sandboxes interactively.
-
-    \b
-    Examples:
-        prime sandbox ssh
-        prime sandbox ssh sb_abc123
-        prime sandbox ssh sb_abc123 --shell bash
-        prime sandbox ssh sb_abc123 -- -L 3000:localhost:3000
-    """
-    session_id: Optional[str] = None
-    sandbox_client: Optional[SandboxClient] = None
-    temp_dir: Optional[str] = None
-    key_path: Optional[str] = None
-
-    def cleanup() -> None:
-        """Clean up the SSH session and temporary keys."""
-        if session_id and sandbox_client and sandbox_id:
-            try:
-                console.print("\n[bold blue]Cleaning up SSH session...[/bold blue]")
-                sandbox_client.close_ssh_session(sandbox_id, session_id)
-                console.print("[green]✓[/green] SSH session closed")
-            except Exception:
-                pass
-        if temp_dir and os.path.isdir(temp_dir):
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
-    try:
-        # Check if ssh and ssh-keygen commands are available
-        if not shutil.which("ssh"):
-            console.print("[red]Error:[/red] SSH client not found. Please install OpenSSH.")
-            raise typer.Exit(1)
-        if not shutil.which("ssh-keygen"):
-            console.print("[red]Error:[/red] ssh-keygen not found. Please install OpenSSH.")
-            raise typer.Exit(1)
-
-        base_client = APIClient()
-        sandbox_client = SandboxClient(base_client)
-
-        # Pick a sandbox interactively when no ID was provided
-        if sandbox_id is None:
-            sandbox_id = _select_sandbox_for_ssh(sandbox_client)
-
-        # Check if sandbox is running
-        with console.status("[bold blue]Checking sandbox status...", spinner="dots"):
-            sandbox = sandbox_client.get(sandbox_id)
-
-        _guard_vm_unsupported(sandbox, "SSH")
-
-        if sandbox.status != "RUNNING":
-            console.print(f"[red]Error:[/red] Sandbox is not running (status: {sandbox.status})")
-            console.print(
-                f"[yellow]Tip:[/yellow] Check sandbox status with: prime sandbox get {sandbox_id}"
-            )
-            raise typer.Exit(1)
-
-        # Generate ephemeral SSH key
-        temp_dir = tempfile.mkdtemp(prefix="prime-ssh-")
-        key_path = os.path.join(temp_dir, "id_ed25519")
-        subprocess.run(
-            ["ssh-keygen", "-t", "ed25519", "-N", "", "-f", key_path],
-            check=True,
-            capture_output=True,
-        )
-        with open(f"{key_path}.pub", "r") as f:
-            public_key = f.read().strip()
-
-        # Create SSH session
-        console.print("[bold blue]Creating SSH session...[/bold blue]")
-        with console.status("[bold blue]Setting up SSH session...", spinner="dots"):
-            session = sandbox_client.create_ssh_session(sandbox_id)
-        session_id = session.session_id
-
-        # Authorize the key
-        authorize_url = (
-            f"{session.gateway_url.rstrip('/')}/{session.user_ns}/{session.job_id}/authorize"
-        )
-        headers = {"Authorization": f"Bearer {session.token}"}
-        payload = {
-            "session_id": session.session_id,
-            "public_key": public_key,
-            "ttl_seconds": session.ttl_seconds,
-        }
-        try:
-            with httpx.Client(timeout=30) as client:
-                client.post(authorize_url, json=payload, headers=headers).raise_for_status()
-        except Exception as e:
-            console.print(f"[red]Error:[/red] Failed to authorize SSH key: {e}")
-            cleanup()
-            raise typer.Exit(1)
-
-        ssh_host = session.host
-        ssh_port = session.port
-
-        console.print("[green]✓[/green] SSH session ready!")
-        console.print(f"[bold green]Connecting to:[/bold green] {session.session_id}@{ssh_host}")
-        console.print(f"[bold green]Port:[/bold green] {ssh_port}")
-        console.print()
-
-        # Wait for TCP exposure to propagate through the load balancer
-        with console.status("[bold blue]Waiting for connection to be ready...", spinner="dots"):
-            time.sleep(5)
-
-        console.print("[dim]Press Ctrl+D or type 'exit' to disconnect[/dim]")
-        console.print()
-
-        # Build SSH command
-        ssh_cmd = ["ssh", f"{session.session_id}@{ssh_host}", "-p", str(ssh_port)]
-
-        # Disable strict host key checking for dynamic hosts
-        ssh_cmd.extend(["-o", "StrictHostKeyChecking=no"])
-        ssh_cmd.extend(["-o", "UserKnownHostsFile=/dev/null"])
-        ssh_cmd.extend(["-o", "LogLevel=ERROR"])
-
-        # Add identity file if specified
-        if key_path:
-            ssh_cmd.extend(["-i", key_path])
-
-        # Force PTY allocation when a remote command is specified
-        if shell:
-            ssh_cmd.append("-t")
-
-        # Add any additional SSH arguments
-        if ssh_args:
-            ssh_cmd.extend(ssh_args)
-
-        # Add shell if specified
-        if shell:
-            ssh_cmd.append(shell)
-
-        # Connect via SSH (this will be interactive)
-        result = subprocess.run(ssh_cmd)
-
-        # Check if SSH connection failed
-        if result.returncode != 0 and result.returncode != 255:
-            console.print(f"\n[yellow]SSH connection exited with code {result.returncode}[/yellow]")
-
-        cleanup()
-
-    except KeyboardInterrupt:
-        console.print("\n[yellow]SSH connection interrupted[/yellow]")
-        cleanup()
-        raise typer.Exit(130)
-    except APIError as e:
-        console.print(f"[red]Error:[/red] {str(e)}")
-        cleanup()
-        raise typer.Exit(1)
-    except typer.Exit:
-        raise
-    except Exception as e:
-        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
-        console.print_exception(show_locals=True)
-        cleanup()
-        raise typer.Exit(1)

@@ -2,6 +2,7 @@ from typing import Any, Dict
 
 import typer
 from rich.table import Table
+from rich.text import Text
 
 from prime_cli.core import Config
 
@@ -45,7 +46,7 @@ def whoami() -> None:
             table.add_row("Type", "Team")
             table.add_section()
             table.add_row("Team ID", config.team_id)
-            table.add_row("Team Name", config.team_name or "[dim]Unknown[/dim]")
+            table.add_row("Team Name", config.team_name or Text("Unknown", style="dim"))
             if config.team_role:
                 table.add_row("Role", config.team_role)
         else:
@@ -56,7 +57,7 @@ def whoami() -> None:
 
         # User details
         table.add_row("User ID", user_id or "Unknown")
-        table.add_row("Username", slug or "[dim]Not set[/dim]")
+        table.add_row("Username", slug or Text("Not set", style="dim"))
         table.add_row("Name", name or "Unknown")
         table.add_row("Email", email or "Unknown")
 

@@ -4,7 +4,9 @@ from datetime import datetime
 from enum import Enum
 from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationInfo, model_validator
+
+from .image_references import is_docker_hub_reference
 
 
 class SandboxStatus(str, Enum):
@@ -171,7 +173,6 @@ class Sandbox(BaseModel):
     error_message: Optional[str] = Field(None, alias="errorMessage")
     user_id: Optional[str] = Field(None, alias="userId")
     team_id: Optional[str] = Field(None, alias="teamId")
-    kubernetes_job_id: Optional[str] = Field(None, alias="kubernetesJobId")
     region: Optional[str] = None
     registry_credentials_id: Optional[str] = Field(default=None, alias="registryCredentialsId")
     pending_image_build_id: Optional[str] = Field(default=None, alias="pendingImageBuildId")
@@ -221,13 +222,12 @@ class CreateSandboxRequest(BaseModel):
 
     name: str
     docker_image: str
-    start_command: Optional[Union[StartCommand, str]] = "tail -f /dev/null"
+    start_command: Optional[StartCommand] = None
     cpu_cores: float = 1.0
     memory_gb: float = 1.0
     disk_size_gb: float = 5.0
     gpu_count: int = 0
     gpu_type: Optional[str] = None
-    vm: Optional[bool] = None
     network_allowlist: Optional[List[str]] = None
     network_denylist: Optional[List[str]] = None
     timeout_minutes: int = 60
@@ -238,67 +238,18 @@ class CreateSandboxRequest(BaseModel):
     team_id: Optional[str] = None
     region: Optional[str] = None
     advanced_configs: Optional[AdvancedConfigs] = None
-    registry_credentials_id: Optional[str] = None
-    guaranteed: bool = False
     idempotency_key: Optional[str] = None
 
     @model_validator(mode="after")
     def validate_gpu_fields(self) -> "CreateSandboxRequest":
         if self.gpu_count > 0 and not self.gpu_type:
             raise ValueError("gpu_type is required when gpu_count is greater than 0")
-        if self.gpu_count > 0 and self.vm is False:
-            raise ValueError("gpu_count is not supported with vm=False")
         if self.gpu_count == 0 and self.gpu_type is not None:
             raise ValueError("gpu_type requires gpu_count greater than 0")
         return self
 
     @model_validator(mode="after")
-    def validate_guaranteed(self) -> "CreateSandboxRequest":
-        if self.guaranteed and self.vm is not False:
-            raise ValueError(
-                "guaranteed is not supported for VM sandboxes; pass vm=False "
-                "to create a container sandbox"
-            )
-        return self
-
-    @model_validator(mode="after")
-    def validate_registry_credentials(self) -> "CreateSandboxRequest":
-        if self.registry_credentials_id and self.vm is not False:
-            raise ValueError(
-                "registry_credentials_id is only supported for container "
-                "sandboxes; pass vm=False to create a container sandbox"
-            )
-        return self
-
-    @model_validator(mode="after")
-    def validate_vm_start_command(self) -> "CreateSandboxRequest":
-        if self.vm is False:
-            return self
-        if "start_command" not in self.model_fields_set:
-            if self.vm is True:
-                self.start_command = None
-            return self
-        if isinstance(self.start_command, str):
-            if self.vm is True:
-                raise ValueError(
-                    "VM sandboxes require start_command as StartCommand(executable=..., args=[...])"
-                )
-            raise ValueError(
-                "String start_command values are container-only. Pass vm=False "
-                "to create a container sandbox, or use "
-                "StartCommand(executable=..., args=[...]) for VM sandboxes."
-            )
-        return self
-
-    @model_validator(mode="after")
     def validate_network_lists(self) -> "CreateSandboxRequest":
-        if self.vm is False and (
-            self.network_allowlist is not None or self.network_denylist is not None
-        ):
-            raise ValueError(
-                "network_allowlist and network_denylist are only supported for "
-                "VM sandboxes (vm=True)"
-            )
         validate_egress_lists(self.network_allowlist, self.network_denylist)
         return self
 
@@ -314,50 +265,6 @@ class CreateSandboxRequest(BaseModel):
                 f"(got idle={self.idle_timeout_minutes}, lifetime={self.timeout_minutes})"
             )
         return self
-
-
-class UpdateSandboxRequest(BaseModel):
-    """Update sandbox request model"""
-
-    name: Optional[str] = None
-    docker_image: Optional[str] = None
-    start_command: Optional[str] = None
-    cpu_cores: Optional[float] = None
-    memory_gb: Optional[float] = None
-    disk_size_gb: Optional[float] = None
-    gpu_count: Optional[int] = None
-    gpu_type: Optional[str] = None
-    timeout_minutes: Optional[int] = None
-    idle_timeout_minutes: Optional[int] = None
-    environment_vars: Optional[Dict[str, str]] = None
-    registry_credentials_id: Optional[str] = None
-    secrets: Optional[Dict[str, str]] = None
-
-    @model_validator(mode="after")
-    def validate_idle_timeout(self) -> "UpdateSandboxRequest":
-        if self.idle_timeout_minutes is None:
-            return self
-        if self.idle_timeout_minutes < 1:
-            raise ValueError("idle_timeout_minutes must be >= 1")
-        if (
-            self.timeout_minutes is not None
-            and self.timeout_minutes > 0
-            and self.idle_timeout_minutes > self.timeout_minutes
-        ):
-            raise ValueError(
-                "idle_timeout_minutes must be <= timeout_minutes "
-                f"(got idle={self.idle_timeout_minutes}, lifetime={self.timeout_minutes})"
-            )
-        return self
-
-
-class CommandRequest(BaseModel):
-    """Execute command request model"""
-
-    command: str
-    working_dir: Optional[str] = None
-    env: Optional[Dict[str, str]] = None
-    user: Optional[str] = None
 
 
 class CommandResponse(BaseModel):
@@ -410,25 +317,6 @@ class BulkDeleteSandboxResponse(BaseModel):
     succeeded: List[str]
     failed: List[Dict[str, str]]
     message: str
-
-
-class RegistryCredentialSummary(BaseModel):
-    """Summary of registry credential data (no secrets)."""
-
-    id: str
-    name: str
-    server: str
-    created_at: datetime = Field(..., alias="createdAt")
-    updated_at: datetime = Field(..., alias="updatedAt")
-    user_id: Optional[str] = Field(default=None, alias="userId")
-    team_id: Optional[str] = Field(default=None, alias="teamId")
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class DockerImageCheckResponse(BaseModel):
-    accessible: bool
-    details: str
 
 
 class ImageVisibility(str, Enum):
@@ -505,6 +393,12 @@ class ImageListResponse(BaseModel):
 
 
 class BuildImageRequest(BaseModel):
+    """Request a linux/amd64 Dockerfile or public-registry source build.
+
+    Docker Hub sources become public, org-less platform images automatically.
+    They cannot use a custom destination, team, or private visibility.
+    """
+
     image_name: Optional[str] = None
     image_tag: Optional[str] = None
     dockerfile_path: str = "Dockerfile"
@@ -516,8 +410,35 @@ class BuildImageRequest(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
+    @model_validator(mode="after")
+    def validate_build(self) -> "BuildImageRequest":
+        if self.platform != "linux/amd64":
+            raise ValueError("platform must be linux/amd64")
+
+        sources = [source.strip() for source in (self.source_image or "").split(",")]
+        docker_hub_sources = [
+            source for source in sources if source and is_docker_hub_reference(source)
+        ]
+        if not docker_hub_sources:
+            return self
+
+        if self.image_name is not None or self.image_tag is not None:
+            raise ValueError("Docker Hub source builds do not accept a custom destination")
+        if self.team_id is not None:
+            raise ValueError("Docker Hub source builds do not accept team_id")
+        if self.visibility == ImageVisibility.PRIVATE:
+            raise ValueError("Docker Hub source builds must be public")
+        if len(docker_hub_sources) != len([source for source in sources if source]):
+            raise ValueError("Docker Hub and non-Docker Hub sources cannot share one request")
+
+        self.visibility = ImageVisibility.PUBLIC
+        self.owner_scope = "platform"
+        return self
+
 
 class BuildImageResponse(BaseModel):
+    # Server quirk: build_id/upload_url/expires_in stay snake_case on the wire;
+    # buildIds/fullImagePath use camelCase. buildId is accepted for older backends.
     build_id: str = Field(
         ...,
         alias="build_id",
@@ -531,28 +452,42 @@ class BuildImageResponse(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
+    @model_validator(mode="after")
+    def require_dockerfile_upload(self, info: ValidationInfo) -> "BuildImageResponse":
+        """Require upload metadata when the caller identifies a Dockerfile build."""
+        if info.context and info.context.get("requires_upload"):
+            if not self.upload_url or self.expires_in is None:
+                raise ValueError("Dockerfile build response requires upload_url and expires_in")
+        return self
 
-class TransferImageResult(BaseModel):
-    """Per-source result returned by bulk image transfer requests."""
+
+class SourceImageBuildResult(BaseModel):
+    """Build result or error for one requested source image."""
 
     source_image: str = Field(..., alias="sourceImage")
-    success: bool
-    build_id: Optional[str] = Field(default=None, alias="buildId")
-    full_image_path: Optional[str] = Field(default=None, alias="fullImagePath")
-    visibility: Optional[ImageVisibility] = None
+    build: Optional[BuildImageResponse] = None
     error: Optional[str] = None
     retryable: bool = False
 
     model_config = ConfigDict(populate_by_name=True)
 
+    @model_validator(mode="before")
+    @classmethod
+    def accept_legacy_result(cls, value: Any) -> Any:
+        # Accept old backends during the CLI-first rollout; emit only the new shape.
+        # TODO: remove after the platform backend deploy lands.
+        if isinstance(value, dict) and "build" not in value and "success" in value:
+            value = {
+                **value,
+                "build": value if value["success"] else None,
+            }
+        return value
 
-class BulkImageTransferResponse(BaseModel):
-    """Response returned for comma-separated image transfer requests."""
 
-    results: List[TransferImageResult] = Field(default_factory=list)
-    failed: List[TransferImageResult] = Field(default_factory=list)
+class BulkBuildImageResponse(BaseModel):
+    """Ordered, best-effort results for comma-separated source images."""
 
-    model_config = ConfigDict(populate_by_name=True)
+    results: List[SourceImageBuildResult]
 
 
 MAX_IMAGE_UPDATES = 100
@@ -709,52 +644,6 @@ class UpdateImagesResponse(BaseModel):
     results: List[ImageUpdateResult] = Field(default_factory=list)
 
     model_config = ConfigDict(populate_by_name=True)
-
-
-class ExposePortRequest(BaseModel):
-    """Request to expose a port"""
-
-    port: int
-    name: Optional[str] = None
-    protocol: str = "HTTP"  # HTTP or TCP
-
-
-class ExposedPort(BaseModel):
-    """Information about an exposed port"""
-
-    exposure_id: str
-    sandbox_id: str
-    port: int
-    name: Optional[str]
-    url: str
-    tls_socket: str
-    protocol: Optional[str] = None
-    external_port: Optional[int] = None  # For TCP exposures
-    external_endpoint: Optional[str] = None  # For TCP: host:port endpoint
-    created_at: Optional[str] = None
-
-
-class ListExposedPortsResponse(BaseModel):
-    """Response for listing exposed ports"""
-
-    exposures: List[ExposedPort]
-
-
-class SSHSession(BaseModel):
-    """SSH session details"""
-
-    session_id: str
-    exposure_id: str
-    sandbox_id: str
-    host: str
-    port: int
-    external_endpoint: str
-    expires_at: datetime
-    ttl_seconds: int
-    gateway_url: str
-    user_ns: str
-    job_id: str
-    token: str
 
 
 class BackgroundJob(BaseModel):

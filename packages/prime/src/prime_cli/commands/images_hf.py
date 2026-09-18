@@ -271,13 +271,12 @@ def load_hf_build_specs(
     name_column: Optional[str],
     tag: str,
     name_template: str,
-    platform: str,
     context_root: Path,
 ) -> tuple[list[BuildSpec], list[str]]:
     """Resolve build specs from a Hugging Face dataset of Dockerfiles.
 
-    The push-bulk complement of transfer-bulk's --hf mode: instead of image
-    references, each row carries Dockerfile *contents* (--dockerfile-column)
+    The push-bulk Dockerfile mode: each row carries Dockerfile *contents*
+    (--dockerfile-column)
     plus a name for the resulting image (--name-column). Each usable row's
     Dockerfile is written under ``context_root`` as a one-file build context.
     Rows with identical (name, Dockerfile) values collapse into one build.
@@ -350,7 +349,6 @@ def load_hf_build_specs(
                 image_tag=tag,
                 context=context_dir,
                 dockerfile=dockerfile_path,
-                platform=platform,
                 source=f"row {row_idx}",
             )
         )

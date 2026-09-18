@@ -1,7 +1,22 @@
+"""Live long-command timeout test against a real backend sandbox.
+
+Opt-in via PRIME_LIVE_VM_SMOKE=1, matching test_live_process_idempotency_live.py;
+plain pytest runs never create real sandboxes.
+"""
+
+import os
+
+import pytest
+
 from prime_sandboxes import (
     APIClient,
     CreateSandboxRequest,
     SandboxClient,
+)
+
+pytestmark = pytest.mark.skipif(
+    os.environ.get("PRIME_LIVE_VM_SMOKE") != "1",
+    reason="Live VM smoke tests are opt-in.",
 )
 
 
@@ -17,7 +32,7 @@ def test_command_timeout():
             CreateSandboxRequest(
                 name="test-sandbox",
                 docker_image="python:3.11-slim",
-                vm=False,
+                vm=True,
                 cpu_cores=1,
                 memory_gb=2,
                 timeout_minutes=60,

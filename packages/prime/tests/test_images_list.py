@@ -29,13 +29,13 @@ from prime_sandboxes import (
     ImageListResponse,
     ImageOwnerType,
 )
+from rich.text import Text
 from typer.testing import CliRunner
 
 USER_ID = "cmkrcib4x00004kjyxq48nltd"
 TEAM_ID = "team-abc123"
 
 TEST_ENV: dict[str, str] = {
-    "COLUMNS": "200",
     "LINES": "50",
     "NO_COLOR": "1",
     "PRIME_DISABLE_VERSION_CHECK": "1",
@@ -164,23 +164,25 @@ def test_partition_surfaces_failure_when_only_failed_rows_exist():
 
 
 @pytest.mark.parametrize(
-    "status,expected",
+    "status,expected_plain,expected_style",
     [
-        (ImageBuildStatus.COMPLETED, "[green]Ready[/green]"),
-        (ImageBuildStatus.BUILDING, "[yellow]Building[/yellow]"),
-        (ImageBuildStatus.UPLOADING, "[yellow]Uploading[/yellow]"),
-        (ImageBuildStatus.PENDING, "[blue]Pending[/blue]"),
-        (ImageBuildStatus.FAILED, "[red]Failed[/red]"),
-        (ImageBuildStatus.CANCELLED, "[dim]Cancelled[/dim]"),
+        (ImageBuildStatus.COMPLETED, "Ready", "green"),
+        (ImageBuildStatus.BUILDING, "Building", "yellow"),
+        (ImageBuildStatus.UPLOADING, "Uploading", "yellow"),
+        (ImageBuildStatus.PENDING, "Pending", "blue"),
+        (ImageBuildStatus.FAILED, "Failed", "red"),
+        (ImageBuildStatus.CANCELLED, "Cancelled", "dim"),
     ],
 )
-def test_render_status_slot_known(status, expected):
-    assert _render_status_slot(ArtifactPartition(latest=_container(status=status))) == expected
+def test_render_status_slot_known(status, expected_plain, expected_style):
+    assert _render_status_slot(ArtifactPartition(latest=_container(status=status))) == Text(
+        expected_plain, style=expected_style
+    )
 
 
 @pytest.mark.parametrize("empty", [None, ArtifactPartition()])
 def test_render_status_slot_empty_returns_dash(empty):
-    assert _render_status_slot(empty) == "[dim]—[/dim]"
+    assert _render_status_slot(empty) == Text("—", style="dim")
 
 
 # ---------------------------------------------------------------------------
@@ -194,8 +196,8 @@ def test_render_type_column_container_and_vm():
             [_container(pushed_at="2026-04-16T22:24:07"), _vm(pushed_at="2026-04-16T22:24:07")]
         )
     )
-    assert "Container" in text and "VM" in text
-    assert text.index("Container") < text.index("VM")
+    assert text.plain == "Container / VM"
+    assert [span.style for span in text.spans] == ["cyan", "magenta"]
 
 
 def test_render_type_column_container_only():
@@ -216,7 +218,8 @@ def test_render_status_column_healthy_slots():
             [_container(pushed_at="2026-04-16T22:24:07"), _vm(pushed_at="2026-04-16T22:24:07")]
         )
     )
-    assert text == "[green]Ready[/green] / [green]Ready[/green]"
+    assert text.plain == "Ready / Ready"
+    assert [span.style for span in text.spans] == ["green", "green"]
 
 
 def test_render_status_column_partial_failure_aligned():
@@ -228,12 +231,14 @@ def test_render_status_column_partial_failure_aligned():
             ]
         )
     )
-    assert text == "[green]Ready[/green] / [red]Failed[/red]"
+    assert text.plain == "Ready / Failed"
+    assert [span.style for span in text.spans] == ["green", "red"]
 
 
 def test_render_status_column_container_only():
     text = _render_status_column(_partition_group([_container(pushed_at="2026-04-16T22:24:07")]))
-    assert text == "[green]Ready[/green]"
+    assert text.plain == "Ready"
+    assert [span.style for span in text.spans] == ["green"]
     assert " / " not in text
 
 
@@ -256,7 +261,8 @@ def test_render_status_column_stale_zombie_hidden_by_fresh_completed():
             ]
         )
     )
-    assert text == "[green]Ready[/green] / [green]Ready[/green]"
+    assert text.plain == "Ready / Ready"
+    assert [span.style for span in text.spans] == ["green", "green"]
 
 
 def test_render_status_column_active_build_on_top_of_older_completed():
@@ -278,7 +284,8 @@ def test_render_status_column_active_build_on_top_of_older_completed():
             ]
         )
     )
-    assert text == "[yellow]Building[/yellow] / [yellow]Building[/yellow]"
+    assert text.plain == "Building / Building"
+    assert [span.style for span in text.spans] == ["yellow", "yellow"]
 
 
 # ---------------------------------------------------------------------------
@@ -381,7 +388,7 @@ def test_completed_size_ignores_older_completed_if_newer_is_not_completed():
             ),
         ]
     )
-    assert _completed_size_mb(part) == "[dim]—[/dim]"
+    assert _completed_size_mb(part) == Text("—", style="dim")
 
 
 def test_completed_size_returns_dash_when_no_completed():
@@ -391,7 +398,7 @@ def test_completed_size_returns_dash_when_no_completed():
             _vm(status=ImageBuildStatus.PENDING, created_at="2026-04-17T08:00:00"),
         ]
     )
-    assert _completed_size_mb(part) == "[dim]—[/dim]"
+    assert _completed_size_mb(part) == Text("—", style="dim")
 
 
 # ---------------------------------------------------------------------------
@@ -475,6 +482,7 @@ def run_images_list(monkeypatch) -> Callable[..., Any]:
         *,
         team_id: str | None = None,
         env: dict[str, str] | None = None,
+        plain: bool = False,
     ):
         class DummyImageClient:
             def __init__(self, _api_client) -> None:
@@ -494,7 +502,11 @@ def run_images_list(monkeypatch) -> Callable[..., Any]:
         monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
         monkeypatch.setattr(images_cmd, "config", _StubConfig(team_id=team_id))
         monkeypatch.setattr(images_cmd, "ImageClient", DummyImageClient)
-        return runner.invoke(app, ["images", "list"], env=env or TEST_ENV)
+        command_env = env or TEST_ENV
+        monkeypatch.setattr(images_cmd.console, "_width", int(command_env.get("COLUMNS", "200")))
+        monkeypatch.setattr(images_cmd.console, "_height", int(command_env.get("LINES", "50")))
+        args = ["images", "list"] + (["--plain"] if plain else [])
+        return runner.invoke(app, args, env=command_env)
 
     return _run
 
@@ -554,6 +566,29 @@ def test_list_cli_shows_building_when_build_is_newer_than_last_completed(run_ima
     assert result.exit_code == 0, result.output
     assert "Building / Building" in result.output
     assert "2026-04-17 10:00" in result.output
+
+
+def test_list_cli_plain_output_has_no_markup_leaks(run_images_list):
+    result = run_images_list(
+        [
+            _container(
+                image="plainapp:latest",
+                team_id=TEAM_ID,
+                pushed_at="2026-04-16T22:24:07",
+                size_bytes=10 * 1024 * 1024,
+            ),
+        ],
+        team_id=TEAM_ID,
+        plain=True,
+        env=dict(TEST_ENV, COLUMNS="200"),
+    )
+    assert result.exit_code == 0, result.output
+    assert "Container" in result.output
+    assert "Ready" in result.output
+    assert "Private" in result.output
+    assert "Team" in result.output
+    for tag in ("[cyan]", "[green]", "[dim]", "[blue]"):
+        assert tag not in result.output
 
 
 def test_list_cli_team_listing_keeps_owner_column_and_prefix(run_images_list):
@@ -806,7 +841,7 @@ def test_list_platform_image_forwards_owner_scope(monkeypatch):
     assert result.exit_code == 0, result.output
     assert captured["params"].get("platform") is True
     assert captured["params"].get("team_id") is None
-    assert "Platform Docker Images" in result.output
+    assert "Platform Images" in result.output
 
 
 def test_list_platform_image_ignores_team_context(monkeypatch):
@@ -820,7 +855,7 @@ def test_list_platform_image_ignores_team_context(monkeypatch):
     assert captured["params"].get("platform") is True
     assert captured["params"].get("team_id") is None
     assert "Team context ignored" in result.output
-    assert "Platform Docker Images" in result.output
+    assert "Platform Images" in result.output
     # Platform listings never render the team-scoped Owner column.
     assert "Owner" not in result.output
 

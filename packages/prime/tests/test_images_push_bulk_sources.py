@@ -2,9 +2,8 @@ import json
 
 import prime_cli.commands.images_bulk as images_bulk
 import prime_cli.commands.images_hf as images_hf
-import prime_cli.commands.images_transfer_bulk as images_transfer_bulk
 import pytest
-from prime_cli.commands.images_transfer_bulk import derive_transfer_destination
+from prime_cli.commands.images_bulk import derive_source_destination
 from prime_cli.main import app
 from prime_sandboxes import APIError
 from typer.testing import CliRunner
@@ -12,7 +11,6 @@ from typer.testing import CliRunner
 runner = CliRunner()
 
 TEST_ENV = {
-    "COLUMNS": "200",
     "LINES": "50",
     "PRIME_DISABLE_VERSION_CHECK": "1",
     "PRIME_TEAM_ID": "",
@@ -48,7 +46,7 @@ class FakeTransferAPI:
         # the last status repeats once the list is exhausted.
         self.poll_scripts = {}
         self.default_poll = ["COMPLETED"]
-        # Exceptions raised (FIFO) by POST /images/build before any transfer is queued.
+        # Exceptions raised (FIFO) by POST /images/build before any source build is queued.
         self.build_error_queue = []
         # Respond with the per-source results shape instead of a top-level build_id.
         self.respond_bulk_shape = False
@@ -57,29 +55,43 @@ class FakeTransferAPI:
 
     def request(self, method, path, json=None, params=None):
         self.calls.append((method, path))
+        if method == "POST" and path.startswith("/images/build/") and path.endswith("/start"):
+            return {"status": "ok"}
         if method == "POST" and path == "/images/build":
             if self.build_error_queue:
                 raise self.build_error_queue.pop(0)
-            assert "source_image" in json
+            if "source_image" not in json:
+                # Dockerfile build initiate: the upload goes to upload_url
+                # (stubbed in the fixture), then /start is posted.
+                self.payloads.append(json)
+                self.build_counter += 1
+                build_id = f"build-{self.build_counter}"
+                return {
+                    "build_id": build_id,
+                    "upload_url": f"https://upload.example/{build_id}",
+                    "expires_in": 3600,
+                    "fullImagePath": f"user/{json['image_name']}",
+                }
             if self.respond_bulk_shape and self.bulk_entry_error is not None:
                 entry = {
                     "sourceImage": json["source_image"],
-                    "success": False,
+                    "build": None,
                     "error": self.bulk_entry_error,
                     "retryable": False,
                 }
-                return {"results": [entry], "failed": [entry]}
+                return {"results": [entry]}
             self.payloads.append(json)
             self.build_counter += 1
             build_id = f"build-{self.build_counter}"
             if self.respond_bulk_shape:
                 entry = {
                     "sourceImage": json["source_image"],
-                    "success": True,
-                    "buildId": build_id,
-                    "fullImagePath": f"user/{json.get('image_name') or 'derived'}",
+                    "build": {
+                        "build_id": build_id,
+                        "fullImagePath": f"user/{json.get('image_name') or 'derived'}",
+                    },
                 }
-                return {"results": [entry] * self.bulk_results_count, "failed": []}
+                return {"results": [entry] * self.bulk_results_count}
             return {
                 "build_id": build_id,
                 "fullImagePath": f"user/{json.get('image_name') or 'derived'}",
@@ -95,12 +107,20 @@ class FakeTransferAPI:
 
 
 @pytest.fixture
-def fake_api(monkeypatch):
+def fake_api(monkeypatch, tmp_path):
+    # Run from tmp_path so default --failures-out paths never dirty the repo.
+    monkeypatch.chdir(tmp_path)
     api = FakeTransferAPI()
     monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
-    monkeypatch.setattr(images_transfer_bulk, "APIClient", lambda: api)
+    monkeypatch.setattr(images_bulk, "APIClient", lambda: api)
     monkeypatch.setattr(images_bulk, "POLL_INTERVAL_SECONDS", 0.0)
-    monkeypatch.setattr(images_transfer_bulk, "TRANSFER_RATE_LIMIT_PAUSE_SECONDS", 0.0)
+    monkeypatch.setattr(images_bulk, "SOURCE_RATE_LIMIT_PAUSE_SECONDS", 0.0)
+
+    class _FakeUploadResponse:
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(images_bulk.httpx, "put", lambda *a, **k: _FakeUploadResponse())
     return api
 
 
@@ -164,38 +184,57 @@ HF_INFO_ONE_CONFIG = {
 }
 
 
+def test_push_bulk_help_documents_source_contract():
+    result = runner.invoke(app, ["images", "push-bulk", "--help"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    assert "transfer" not in result.output.lower()
+    assert "--platform " not in result.output
+    assert "Docker Hub" in result.output
+    assert "platform images" in result.output
+
+
+def test_transfer_bulk_command_is_gone():
+    result = runner.invoke(app, ["images", "transfer-bulk", "--help"], env=TEST_ENV)
+
+    assert result.exit_code == 2
+    assert "No such command" in result.output
+
+
 # ---------------------------------------------------------------------------
 # Destination derivation
 # ---------------------------------------------------------------------------
 
 
 def test_derive_destination_matches_server_rules():
-    assert derive_transfer_destination("ubuntu") == ("ubuntu", "latest")
-    assert derive_transfer_destination("docker.io/library/ubuntu:22.04") == ("ubuntu", "22.04")
-    assert derive_transfer_destination("ghcr.io/Org/My-App:v1") == ("my-app", "v1")
-    assert derive_transfer_destination("quay.io/org/app@sha256:" + "a" * 64) == (
+    assert derive_source_destination("ubuntu") == ("ubuntu", "latest")
+    assert derive_source_destination("docker.io/library/ubuntu:22.04") == ("ubuntu", "22.04")
+    assert derive_source_destination("library/ubuntu:22.04") == ("ubuntu", "22.04")
+    assert derive_source_destination("index.docker.io/org/app:v1") == ("org/app", "v1")
+    assert derive_source_destination("ghcr.io/Org/My-App:v1") == ("my-app", "v1")
+    assert derive_source_destination("quay.io/org/app@sha256:" + "a" * 64) == (
         "app",
         "sha256-" + "a" * 16,
     )
     with pytest.raises(ValueError):
-        derive_transfer_destination("")
+        derive_source_destination("")
     with pytest.raises(ValueError):
-        derive_transfer_destination("app@sha512:abc")
+        derive_source_destination("app@sha512:abc")
     # Comma-separated refs (the push --source-image ad-hoc form) are one-per-entry here.
     with pytest.raises(ValueError, match="commas"):
-        derive_transfer_destination("a/app:v1,b/app:v2")
+        derive_source_destination("a/app:v1,b/app:v2")
 
 
 def test_derive_destination_keeps_namespace_for_platform_images():
     # Platform images are stored under their Docker Hub path: only the
     # registry host is stripped, the namespace stays in the name.
-    assert derive_transfer_destination("docker.io/ns/app:v1", keep_namespace=True) == (
+    assert derive_source_destination("docker.io/ns/app:v1", keep_namespace=True) == (
         "ns/app",
         "v1",
     )
-    assert derive_transfer_destination("ns/app", keep_namespace=True) == ("ns/app", "latest")
-    assert derive_transfer_destination("ubuntu", keep_namespace=True) == ("ubuntu", "latest")
-    assert derive_transfer_destination("ghcr.io/Org/My-App:v1", keep_namespace=True) == (
+    assert derive_source_destination("ns/app", keep_namespace=True) == ("ns/app", "latest")
+    assert derive_source_destination("ubuntu", keep_namespace=True) == ("ubuntu", "latest")
+    assert derive_source_destination("ghcr.io/Org/My-App:v1", keep_namespace=True) == (
         "org/my-app",
         "v1",
     )
@@ -215,16 +254,127 @@ def test_manifest_happy_path(tmp_path, fake_api):
             {"source": "ghcr.io/org/other:v2", "image": "renamed:v9"},
         ],
     )
-    result = runner.invoke(
-        app, ["images", "transfer-bulk", "--manifest", str(manifest)], env=TEST_ENV
-    )
+    result = runner.invoke(app, ["images", "push-bulk", "--manifest", str(manifest)], env=TEST_ENV)
     assert result.exit_code == 0, result.output
-    assert "All images transferred successfully" in result.output
+    assert "All images pushed successfully" in result.output
     assert fake_api.payloads[0]["source_image"] == "docker.io/org/app:v1"
     assert "image_name" not in fake_api.payloads[0]
     assert fake_api.payloads[1]["image_name"] == "renamed"
     assert fake_api.payloads[1]["image_tag"] == "v9"
     assert all(p["platform"] == "linux/amd64" for p in fake_api.payloads)
+
+
+def test_docker_hub_sources_use_automatic_platform_ownership(tmp_path, fake_api):
+    manifest = tmp_path / "sources.jsonl"
+    _write_manifest(
+        manifest,
+        [
+            {"source": "ubuntu:22.04"},
+            {"source": "ghcr.io/org/app:v1", "image": "custom:v1"},
+        ],
+    )
+
+    result = runner.invoke(
+        app,
+        ["images", "push-bulk", "--manifest", str(manifest)],
+        env={**TEST_ENV, "PRIME_TEAM_ID": "team-123"},
+    )
+
+    assert result.exit_code == 0, result.output
+    payload_by_source = {payload["source_image"]: payload for payload in fake_api.payloads}
+    assert payload_by_source["ubuntu:22.04"] == {
+        "source_image": "ubuntu:22.04",
+        "platform": "linux/amd64",
+        "visibility": "PUBLIC",
+        "owner_scope": "platform",
+    }
+    assert payload_by_source["ghcr.io/org/app:v1"]["team_id"] == "team-123"
+    assert payload_by_source["ghcr.io/org/app:v1"]["image_name"] == "custom"
+    assert "Platform owner" in result.output
+    assert "PUBLIC visibility" in result.output
+
+
+def test_docker_hub_source_rejects_custom_destination(tmp_path, fake_api):
+    manifest = tmp_path / "sources.jsonl"
+    _write_manifest(manifest, [{"source": "ubuntu:22.04", "image": "custom:v1"}])
+
+    result = runner.invoke(app, ["images", "push-bulk", "--manifest", str(manifest)], env=TEST_ENV)
+
+    assert result.exit_code == 1
+    assert "custom destination" in result.output
+    assert fake_api.payloads == []
+
+
+def test_docker_hub_source_rejects_private(tmp_path, fake_api):
+    manifest = tmp_path / "sources.jsonl"
+    _write_manifest(manifest, [{"source": "ubuntu:22.04"}])
+
+    result = runner.invoke(
+        app,
+        ["images", "push-bulk", "--manifest", str(manifest), "--private"],
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 1
+    assert "must be public" in result.output
+    assert fake_api.payloads == []
+
+
+def test_docker_hub_aliases_are_duplicate_destinations(tmp_path, fake_api):
+    manifest = tmp_path / "sources.jsonl"
+    _write_manifest(
+        manifest,
+        [
+            {"source": "ubuntu:22.04"},
+            {"source": "docker.io/library/ubuntu:22.04"},
+        ],
+    )
+
+    result = runner.invoke(app, ["images", "push-bulk", "--manifest", str(manifest)], env=TEST_ENV)
+
+    assert result.exit_code == 1
+    assert "duplicate image reference" in result.output
+    assert "ubuntu:22.04" in result.output
+    assert fake_api.payloads == []
+
+
+def test_docker_hub_platform_builds_still_report_rate_limiting(tmp_path, fake_api):
+    manifest = tmp_path / "sources.jsonl"
+    _write_manifest(manifest, [{"source": "ubuntu:22.04"}])
+
+    result = runner.invoke(
+        app,
+        ["images", "push-bulk", "--manifest", str(manifest), "--platform-image"],
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "rate-limited" in result.output
+
+
+def test_explicit_registry_platform_builds_skip_rate_limit_note(tmp_path, fake_api):
+    manifest = tmp_path / "sources.jsonl"
+    _write_manifest(manifest, [{"source": "ghcr.io/org/app:v1"}])
+
+    result = runner.invoke(
+        app,
+        ["images", "push-bulk", "--manifest", str(manifest), "--platform-image"],
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "rate-limited" not in result.output
+
+
+def test_manifest_rejects_unknown_platform_key(tmp_path, fake_api):
+    manifest = tmp_path / "sources.jsonl"
+    _write_manifest(manifest, [{"source": "docker.io/org/app:v1", "platform": "linux/arm64"}])
+
+    result = runner.invoke(app, ["images", "push-bulk", "--manifest", str(manifest)], env=TEST_ENV)
+
+    assert result.exit_code == 1
+    assert "unknown key(s) platform" in result.output
+    assert fake_api.payloads == []
 
 
 def test_manifest_validation_fails_before_any_submission(tmp_path, fake_api):
@@ -236,19 +386,17 @@ def test_manifest_validation_fails_before_any_submission(tmp_path, fake_api):
                 json.dumps({"source": "org/app:v1", "context": "./x"}),
                 json.dumps({"image": "no-source:v1"}),
                 # Same derived destination app:v2 from two different namespaces.
-                json.dumps({"source": "a/app:v2"}),
-                json.dumps({"source": "b/app:v2"}),
+                json.dumps({"source": "registry-a.example/org/app:v2"}),
+                json.dumps({"source": "registry-b.example/org/app:v2"}),
             ]
         )
         + "\n"
     )
-    result = runner.invoke(
-        app, ["images", "transfer-bulk", "--manifest", str(manifest)], env=TEST_ENV
-    )
+    result = runner.invoke(app, ["images", "push-bulk", "--manifest", str(manifest)], env=TEST_ENV)
     assert result.exit_code == 1
     assert "invalid JSON" in result.output
     assert "unknown key(s) context" in result.output
-    assert "'source' is required" in result.output
+    assert "'context' is required" in result.output
     assert "duplicate image reference 'app:v2'" in result.output
     assert fake_api.post_build_count() == 0
 
@@ -258,13 +406,11 @@ def test_manifest_destination_override_resolves_duplicates(tmp_path, fake_api):
     _write_manifest(
         manifest,
         [
-            {"source": "a/app:v2"},
-            {"source": "b/app:v2", "image": "app-b:v2"},
+            {"source": "registry-a.example/org/app:v2"},
+            {"source": "registry-b.example/org/app:v2", "image": "app-b:v2"},
         ],
     )
-    result = runner.invoke(
-        app, ["images", "transfer-bulk", "--manifest", str(manifest)], env=TEST_ENV
-    )
+    result = runner.invoke(app, ["images", "push-bulk", "--manifest", str(manifest)], env=TEST_ENV)
     assert result.exit_code == 0, result.output
     assert fake_api.post_build_count() == 2
 
@@ -274,7 +420,7 @@ def test_dry_run_prints_derived_destinations_without_api_calls(tmp_path, fake_ap
     _write_manifest(manifest, [{"source": "ghcr.io/org/My-App:v1"}])
     result = runner.invoke(
         app,
-        ["images", "transfer-bulk", "--manifest", str(manifest), "--dry-run"],
+        ["images", "push-bulk", "--manifest", str(manifest), "--dry-run"],
         env=TEST_ENV,
     )
     assert result.exit_code == 0, result.output
@@ -288,25 +434,31 @@ def test_dry_run_prints_derived_destinations_without_api_calls(tmp_path, fake_ap
 # ---------------------------------------------------------------------------
 
 
-def test_harbor_transfers_prebuilt_images_and_skips_buildable_tasks(tmp_path, fake_api):
+def test_harbor_builds_prebuilt_images_and_dockerfile_tasks(tmp_path, fake_api):
     root = tmp_path / "tasks"
     _make_harbor_task(root, "task-a", docker_image="ghcr.io/org/img-a:v1")
     _make_harbor_task(root, "task-b", with_dockerfile=True)
     _make_harbor_task(root, "task-c", docker_image="ghcr.io/org/img-a:v1")
-    result = runner.invoke(app, ["images", "transfer-bulk", "--harbor", str(root)], env=TEST_ENV)
+    _make_harbor_task(root, "task-d")
+    result = runner.invoke(app, ["images", "push-bulk", "--harbor", str(root)], env=TEST_ENV)
     assert result.exit_code == 0, result.output
-    assert "Skipping task-b" in result.output
+    # The Dockerfile task is built, not skipped; the duplicate prebuilt image
+    # and the compose-only task are skipped.
+    assert "Skipping task-b" not in result.output
     assert "Skipping task-c: same image as task-a" in result.output
-    assert fake_api.post_build_count() == 1
-    assert fake_api.payloads[0]["source_image"] == "ghcr.io/org/img-a:v1"
+    assert "Skipping task-d" in result.output
+    assert fake_api.post_build_count() == 2
+    payload_by_kind = {("source_image" in p): p for p in fake_api.payloads}
+    assert payload_by_kind[True]["source_image"] == "ghcr.io/org/img-a:v1"
+    assert payload_by_kind[False]["image_name"] == "task-b"
 
 
-def test_harbor_with_no_transferable_tasks_fails(tmp_path, fake_api):
+def test_harbor_with_no_buildable_tasks_fails(tmp_path, fake_api):
     root = tmp_path / "tasks"
-    _make_harbor_task(root, "task-a", with_dockerfile=True)
-    result = runner.invoke(app, ["images", "transfer-bulk", "--harbor", str(root)], env=TEST_ENV)
+    _make_harbor_task(root, "task-a")
+    result = runner.invoke(app, ["images", "push-bulk", "--harbor", str(root)], env=TEST_ENV)
     assert result.exit_code == 1
-    assert "no tasks with a prebuilt docker_image" in result.output
+    assert "no buildable tasks" in result.output
     assert fake_api.post_build_count() == 0
 
 
@@ -327,7 +479,7 @@ def test_hf_pages_rows_and_dedupes(tmp_path, fake_api, monkeypatch):
     )
     result = runner.invoke(
         app,
-        ["images", "transfer-bulk", "--hf", "Org/DataSet", "--column", "docker_image"],
+        ["images", "push-bulk", "--hf", "Org/DataSet", "--column", "docker_image"],
         env=TEST_ENV,
     )
     assert result.exit_code == 0, result.output
@@ -352,7 +504,7 @@ def test_hf_rate_limited_request_retries(tmp_path, fake_api, monkeypatch):
     )
     result = runner.invoke(
         app,
-        ["images", "transfer-bulk", "--hf", "org/ds", "--column", "docker_image"],
+        ["images", "push-bulk", "--hf", "org/ds", "--column", "docker_image"],
         env=TEST_ENV,
     )
     assert result.exit_code == 0, result.output
@@ -367,7 +519,7 @@ def test_hf_accepts_dataset_url(tmp_path, fake_api, monkeypatch):
         app,
         [
             "images",
-            "transfer-bulk",
+            "push-bulk",
             "--hf",
             "https://huggingface.co/datasets/R2E-Gym/R2E-Gym-Subset/viewer/default/train",
             "--column",
@@ -387,7 +539,11 @@ def test_hf_multiple_configs_requires_flag(tmp_path, fake_api, monkeypatch):
         }
     }
     _fake_hf(monkeypatch, info=info, pages={0: ["org/img-a:v1"]}, total=1)
-    result = runner.invoke(app, ["images", "transfer-bulk", "--hf", "org/ds"], env=TEST_ENV)
+    result = runner.invoke(
+        app,
+        ["images", "push-bulk", "--hf", "org/ds", "--column", "docker_image"],
+        env=TEST_ENV,
+    )
     assert result.exit_code == 1
     assert "multiple configs" in result.output
 
@@ -395,7 +551,7 @@ def test_hf_multiple_configs_requires_flag(tmp_path, fake_api, monkeypatch):
         app,
         [
             "images",
-            "transfer-bulk",
+            "push-bulk",
             "--hf",
             "org/ds",
             "--hf-config",
@@ -412,7 +568,7 @@ def test_hf_unknown_column_and_split_fail(tmp_path, fake_api, monkeypatch):
     _fake_hf(monkeypatch, info=HF_INFO_ONE_CONFIG, pages={0: []}, total=0)
     result = runner.invoke(
         app,
-        ["images", "transfer-bulk", "--hf", "org/ds", "--column", "nope"],
+        ["images", "push-bulk", "--hf", "org/ds", "--column", "nope"],
         env=TEST_ENV,
     )
     assert result.exit_code == 1
@@ -422,7 +578,7 @@ def test_hf_unknown_column_and_split_fail(tmp_path, fake_api, monkeypatch):
         app,
         [
             "images",
-            "transfer-bulk",
+            "push-bulk",
             "--hf",
             "org/ds",
             "--column",
@@ -436,13 +592,28 @@ def test_hf_unknown_column_and_split_fail(tmp_path, fake_api, monkeypatch):
     assert "split 'test' not found" in result.output
 
 
-def test_hf_column_is_required(tmp_path, fake_api, monkeypatch):
-    _fake_hf(monkeypatch, info=HF_INFO_ONE_CONFIG, pages={0: []}, total=0)
-    result = runner.invoke(app, ["images", "transfer-bulk", "--hf", "org/ds"], env=TEST_ENV)
+def test_hf_requires_exactly_one_column_mode(tmp_path, fake_api, monkeypatch):
+    result = runner.invoke(app, ["images", "push-bulk", "--hf", "org/ds"], env=TEST_ENV)
     assert result.exit_code == 1
-    assert "--column is required" in result.output
-    # The error lists the dataset's columns so the user can pick one.
-    assert "docker_image" in result.output
+    assert "exactly one of --dockerfile-column" in result.output
+
+    _fake_hf(monkeypatch, info=HF_INFO_ONE_CONFIG, pages={0: []}, total=0)
+    result = runner.invoke(
+        app,
+        [
+            "images",
+            "push-bulk",
+            "--hf",
+            "org/ds",
+            "--dockerfile-column",
+            "dockerfile",
+            "--column",
+            "docker_image",
+        ],
+        env=TEST_ENV,
+    )
+    assert result.exit_code == 1
+    assert "exactly one of --dockerfile-column" in result.output
     assert fake_api.post_build_count() == 0
 
 
@@ -452,18 +623,18 @@ def test_hf_large_dataset_prints_size_note(tmp_path, fake_api, monkeypatch):
     _fake_hf(monkeypatch, info=info, pages={0: ["org/img-a:v1"]}, total=1)
     result = runner.invoke(
         app,
-        ["images", "transfer-bulk", "--hf", "org/ds", "--column", "docker_image"],
+        ["images", "push-bulk", "--hf", "org/ds", "--column", "docker_image"],
         env=TEST_ENV,
     )
     assert result.exit_code == 0, result.output
-    assert "may take a few minutes" in result.output
+    assert "~3.7GB" in result.output
 
 
 def test_hf_non_string_column_rejected(tmp_path, fake_api, monkeypatch):
     _fake_hf(monkeypatch, info=HF_INFO_ONE_CONFIG, pages={0: []}, total=0)
     result = runner.invoke(
         app,
-        ["images", "transfer-bulk", "--hf", "org/ds", "--column", "picture"],
+        ["images", "push-bulk", "--hf", "org/ds", "--column", "picture"],
         env=TEST_ENV,
     )
     assert result.exit_code == 1
@@ -480,14 +651,12 @@ def test_rate_limited_submit_defers_and_retries(tmp_path, fake_api):
     manifest = tmp_path / "transfers.jsonl"
     _write_manifest(manifest, [{"source": "a/app-a:v1"}, {"source": "b/app-b:v1"}])
     fake_api.build_error_queue.append(
-        APIError("HTTP 429: Image transfer rate limit exceeded: 10/10 images")
+        APIError("HTTP 429: Source image build rate limit exceeded: 10/10 images")
     )
-    result = runner.invoke(
-        app, ["images", "transfer-bulk", "--manifest", str(manifest)], env=TEST_ENV
-    )
+    result = runner.invoke(app, ["images", "push-bulk", "--manifest", str(manifest)], env=TEST_ENV)
     assert result.exit_code == 0, result.output
     assert "pacing submissions" in result.output
-    assert "2/2 transfers completed" in result.output
+    assert "2/2 builds completed" in result.output
     # First POST is rejected, the spec is requeued, then both succeed.
     assert fake_api.post_build_count() == 3
 
@@ -496,11 +665,9 @@ def test_bulk_shape_response_is_unwrapped(tmp_path, fake_api):
     fake_api.respond_bulk_shape = True
     manifest = tmp_path / "transfers.jsonl"
     _write_manifest(manifest, [{"source": "a/app-a:v1"}, {"source": "b/app-b:v1"}])
-    result = runner.invoke(
-        app, ["images", "transfer-bulk", "--manifest", str(manifest)], env=TEST_ENV
-    )
+    result = runner.invoke(app, ["images", "push-bulk", "--manifest", str(manifest)], env=TEST_ENV)
     assert result.exit_code == 0, result.output
-    assert "All images transferred successfully" in result.output
+    assert "All images pushed successfully" in result.output
     # The build ids from the unwrapped entries are what gets polled.
     assert ("GET", "/images/build/build-1") in fake_api.calls
     assert ("GET", "/images/build/build-2") in fake_api.calls
@@ -509,11 +676,9 @@ def test_bulk_shape_response_is_unwrapped(tmp_path, fake_api):
 def test_comma_separated_sources_rejected_in_manifest_and_hf(tmp_path, fake_api, monkeypatch):
     manifest = tmp_path / "transfers.jsonl"
     _write_manifest(manifest, [{"source": "a/app:v1,b/app:v2"}])
-    result = runner.invoke(
-        app, ["images", "transfer-bulk", "--manifest", str(manifest)], env=TEST_ENV
-    )
+    result = runner.invoke(app, ["images", "push-bulk", "--manifest", str(manifest)], env=TEST_ENV)
     assert result.exit_code == 1
-    assert "commas are not allowed" in result.output
+    assert "commas" in result.output
     assert fake_api.post_build_count() == 0
 
     _fake_hf(
@@ -524,12 +689,12 @@ def test_comma_separated_sources_rejected_in_manifest_and_hf(tmp_path, fake_api,
     )
     result = runner.invoke(
         app,
-        ["images", "transfer-bulk", "--hf", "org/ds", "--column", "docker_image"],
+        ["images", "push-bulk", "--hf", "org/ds", "--column", "docker_image"],
         env=TEST_ENV,
     )
     assert result.exit_code == 1
     assert "row 0" in result.output
-    assert "commas are not allowed" in result.output
+    assert "commas" in result.output
     assert fake_api.post_build_count() == 0
 
 
@@ -538,24 +703,20 @@ def test_bulk_shape_multi_entry_response_fails_loudly(tmp_path, fake_api):
     fake_api.bulk_results_count = 2
     manifest = tmp_path / "transfers.jsonl"
     _write_manifest(manifest, [{"source": "a/app-a:v1"}])
-    result = runner.invoke(
-        app, ["images", "transfer-bulk", "--manifest", str(manifest)], env=TEST_ENV
-    )
+    result = runner.invoke(app, ["images", "push-bulk", "--manifest", str(manifest)], env=TEST_ENV)
     assert result.exit_code == 1
-    assert "expected one transfer result, got 2" in result.output
+    assert "SUBMIT_FAILED" in result.output
 
 
 def test_bulk_shape_failed_entry_records_submit_failed(tmp_path, fake_api):
     fake_api.respond_bulk_shape = True
-    fake_api.bulk_entry_error = "Invalid transfer source: nope"
+    fake_api.bulk_entry_error = "Invalid source image: nope"
     manifest = tmp_path / "transfers.jsonl"
     _write_manifest(manifest, [{"source": "a/app-a:v1"}])
-    result = runner.invoke(
-        app, ["images", "transfer-bulk", "--manifest", str(manifest)], env=TEST_ENV
-    )
+    result = runner.invoke(app, ["images", "push-bulk", "--manifest", str(manifest)], env=TEST_ENV)
     assert result.exit_code == 1
-    assert "0/1 transfers completed" in result.output
-    assert "Invalid transfer source: nope" in result.output
+    assert "0/1 builds completed" in result.output
+    assert "Invalid source image: nope" in result.output
 
 
 def test_persistent_rate_limit_gives_up_instead_of_pacing_forever(tmp_path, fake_api, monkeypatch):
@@ -563,14 +724,15 @@ def test_persistent_rate_limit_gives_up_instead_of_pacing_forever(tmp_path, fake
     manifest = tmp_path / "transfers.jsonl"
     _write_manifest(manifest, [{"source": "a/app-a:v1"}, {"source": "b/app-b:v1"}])
     fake_api.build_error_queue.extend(
-        APIError("HTTP 429: Image transfer rate limit exceeded: 10/10 images") for _ in range(10)
+        APIError("HTTP 429: Source image build rate limit exceeded: 10/10 images")
+        for _ in range(10)
     )
     failures_out = tmp_path / "failures.jsonl"
     result = runner.invoke(
         app,
         [
             "images",
-            "transfer-bulk",
+            "push-bulk",
             "--manifest",
             str(manifest),
             "--failures-out",
@@ -579,7 +741,7 @@ def test_persistent_rate_limit_gives_up_instead_of_pacing_forever(tmp_path, fake
         env=TEST_ENV,
     )
     assert result.exit_code == 1
-    assert "0/2 transfers completed" in result.output
+    assert "0/2 builds completed" in result.output
     assert "kept rate-limiting" in result.output
     # Rate-limit failures must not trigger the quota guidance.
     assert "Image quota reached" not in result.output
@@ -603,7 +765,7 @@ def test_quota_429_aborts_and_skips_remaining(tmp_path, fake_api):
         app,
         [
             "images",
-            "transfer-bulk",
+            "push-bulk",
             "--manifest",
             str(manifest),
             "--failures-out",
@@ -612,7 +774,7 @@ def test_quota_429_aborts_and_skips_remaining(tmp_path, fake_api):
         env=TEST_ENV,
     )
     assert result.exit_code == 1
-    assert "0/3 transfers completed" in result.output
+    assert "0/3 builds completed" in result.output
     assert "Image quota reached" in result.output
     lines = [json.loads(line) for line in failures_out.read_text().splitlines()]
     assert [entry["source"] for entry in lines] == ["a/app-a:v1", "b/app-b:v1", "c/app-c:v1"]
@@ -623,7 +785,10 @@ def test_failed_transfer_writes_rerunnable_failures_manifest(tmp_path, fake_api)
     manifest = tmp_path / "transfers.jsonl"
     _write_manifest(
         manifest,
-        [{"source": "a/app-a:v1"}, {"source": "b/app-b:v1", "image": "renamed:v1"}],
+        [
+            {"source": "registry-a.example/org/app-a:v1"},
+            {"source": "registry-b.example/org/app-b:v1", "image": "renamed:v1"},
+        ],
     )
     fake_api.poll_scripts["build-2"] = ["PENDING", "FAILED"]
     failures_out = tmp_path / "failures.jsonl"
@@ -631,7 +796,7 @@ def test_failed_transfer_writes_rerunnable_failures_manifest(tmp_path, fake_api)
         app,
         [
             "images",
-            "transfer-bulk",
+            "push-bulk",
             "--manifest",
             str(manifest),
             "--failures-out",
@@ -640,10 +805,16 @@ def test_failed_transfer_writes_rerunnable_failures_manifest(tmp_path, fake_api)
         env=TEST_ENV,
     )
     assert result.exit_code == 1
-    assert "1/2 transfers completed" in result.output
+    assert "1/2 builds completed" in result.output
     lines = [json.loads(line) for line in failures_out.read_text().splitlines()]
-    assert lines == [{"source": "b/app-b:v1", "platform": "linux/amd64", "image": "renamed:v1"}]
-    assert f"transfer-bulk --manifest {failures_out}" in result.output
+    assert lines == [
+        {
+            "source": "registry-b.example/org/app-b:v1",
+            "image": "renamed:v1",
+        }
+    ]
+    assert "Retry with: prime images push-bulk --manifest" in result.output
+    assert failures_out.name in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -652,7 +823,7 @@ def test_failed_transfer_writes_rerunnable_failures_manifest(tmp_path, fake_api)
 
 
 def test_requires_exactly_one_mode(tmp_path, fake_api):
-    result = runner.invoke(app, ["images", "transfer-bulk"], env=TEST_ENV)
+    result = runner.invoke(app, ["images", "push-bulk"], env=TEST_ENV)
     assert result.exit_code == 1
     assert "exactly one of --manifest, --harbor or --hf" in result.output
 
@@ -660,7 +831,7 @@ def test_requires_exactly_one_mode(tmp_path, fake_api):
     _write_manifest(manifest, [{"source": "a/app:v1"}])
     result = runner.invoke(
         app,
-        ["images", "transfer-bulk", "--manifest", str(manifest), "--hf", "org/ds"],
+        ["images", "push-bulk", "--manifest", str(manifest), "--hf", "org/ds"],
         env=TEST_ENV,
     )
     assert result.exit_code == 1
@@ -672,7 +843,7 @@ def test_hf_flags_rejected_outside_hf_mode(tmp_path, fake_api):
     _write_manifest(manifest, [{"source": "a/app:v1"}])
     result = runner.invoke(
         app,
-        ["images", "transfer-bulk", "--manifest", str(manifest), "--column", "docker_image"],
+        ["images", "push-bulk", "--manifest", str(manifest), "--column", "docker_image"],
         env=TEST_ENV,
     )
     assert result.exit_code == 1
@@ -692,12 +863,12 @@ def test_platform_image_sends_owner_scope_and_public_visibility(tmp_path, fake_a
     )
     result = runner.invoke(
         app,
-        ["images", "transfer-bulk", "--manifest", str(manifest), "--platform-image"],
+        ["images", "push-bulk", "--manifest", str(manifest), "--platform-image"],
         env=TEST_ENV,
     )
     assert result.exit_code == 0, result.output
-    assert "Owner: Platform" in result.output
-    assert "Visibility: PUBLIC" in result.output
+    assert "Source builds owner: Platform" in result.output
+    assert "Source builds visibility: PUBLIC" in result.output
     for payload in fake_api.payloads:
         assert payload["owner_scope"] == "platform"
         assert payload["visibility"] == "PUBLIC"
@@ -709,7 +880,7 @@ def test_platform_image_rejects_private(tmp_path, fake_api):
     _write_manifest(manifest, [{"source": "a/app:v1"}])
     result = runner.invoke(
         app,
-        ["images", "transfer-bulk", "--manifest", str(manifest), "--platform-image", "--private"],
+        ["images", "push-bulk", "--manifest", str(manifest), "--platform-image", "--private"],
         env=TEST_ENV,
     )
     assert result.exit_code == 1
@@ -727,7 +898,7 @@ def test_platform_image_derives_namespaced_destinations(tmp_path, fake_api):
     )
     result = runner.invoke(
         app,
-        ["images", "transfer-bulk", "--manifest", str(manifest), "--platform-image", "--dry-run"],
+        ["images", "push-bulk", "--manifest", str(manifest), "--platform-image", "--dry-run"],
         env=TEST_ENV,
     )
     assert result.exit_code == 0, result.output
@@ -736,7 +907,7 @@ def test_platform_image_derives_namespaced_destinations(tmp_path, fake_api):
 
     result = runner.invoke(
         app,
-        ["images", "transfer-bulk", "--manifest", str(manifest), "--platform-image"],
+        ["images", "push-bulk", "--manifest", str(manifest), "--platform-image"],
         env=TEST_ENV,
     )
     assert result.exit_code == 0, result.output
@@ -753,7 +924,7 @@ def test_platform_image_accepts_namespaced_destination_override(tmp_path, fake_a
     )
     result = runner.invoke(
         app,
-        ["images", "transfer-bulk", "--manifest", str(manifest), "--platform-image"],
+        ["images", "push-bulk", "--manifest", str(manifest), "--platform-image"],
         env=TEST_ENV,
     )
     assert result.exit_code == 0, result.output
@@ -770,12 +941,13 @@ def test_platform_image_rejects_multi_level_destination_override(tmp_path, fake_
     )
     result = runner.invoke(
         app,
-        ["images", "transfer-bulk", "--manifest", str(manifest), "--platform-image"],
+        ["images", "push-bulk", "--manifest", str(manifest), "--platform-image"],
         env=TEST_ENV,
     )
     assert result.exit_code == 1
     assert "invalid destination 'a/b/app:v1'" in result.output
-    assert "use 'name:tag' or a namespaced 'ns/name:tag'" in result.output
+    assert "namespaced" in result.output
+    assert "ns/name:tag" in result.output
     assert fake_api.post_build_count() == 0
 
 
@@ -785,12 +957,11 @@ def test_namespaced_destination_override_still_rejected_without_platform_image(t
         manifest,
         [{"source": "ghcr.io/org/app:v1", "image": "ns/app:v1"}],
     )
-    result = runner.invoke(
-        app, ["images", "transfer-bulk", "--manifest", str(manifest)], env=TEST_ENV
-    )
+    result = runner.invoke(app, ["images", "push-bulk", "--manifest", str(manifest)], env=TEST_ENV)
     assert result.exit_code == 1
     assert "invalid destination 'ns/app:v1'" in result.output
-    assert "use simple names like 'myapp:v1'" in result.output
+    assert "simple names" in result.output
+    assert "myapp:v1" in result.output
     assert fake_api.post_build_count() == 0
 
 
@@ -799,7 +970,7 @@ def test_platform_image_keeps_namespace_in_harbor_and_hf_modes(tmp_path, fake_ap
     _make_harbor_task(root, "task-a", docker_image="ghcr.io/org/img-a:v1")
     result = runner.invoke(
         app,
-        ["images", "transfer-bulk", "--harbor", str(root), "--platform-image", "--dry-run"],
+        ["images", "push-bulk", "--harbor", str(root), "--platform-image", "--dry-run"],
         env=TEST_ENV,
     )
     assert result.exit_code == 0, result.output
@@ -815,7 +986,7 @@ def test_platform_image_keeps_namespace_in_harbor_and_hf_modes(tmp_path, fake_ap
         app,
         [
             "images",
-            "transfer-bulk",
+            "push-bulk",
             "--hf",
             "org/ds",
             "--column",
@@ -834,7 +1005,7 @@ def test_platform_image_ignores_team_context(tmp_path, fake_api):
     _write_manifest(manifest, [{"source": "a/app:v1"}])
     result = runner.invoke(
         app,
-        ["images", "transfer-bulk", "--manifest", str(manifest), "--platform-image"],
+        ["images", "push-bulk", "--manifest", str(manifest), "--platform-image"],
         env={**TEST_ENV, "PRIME_TEAM_ID": "team-123"},
     )
     assert result.exit_code == 0, result.output

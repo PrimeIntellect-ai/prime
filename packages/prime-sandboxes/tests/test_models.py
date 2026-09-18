@@ -25,16 +25,15 @@ def test_create_sandbox_request_defaults():
     assert request.disk_size_gb == 5
     assert request.gpu_count == 0
     assert request.gpu_type is None
-    # Unset vm defers the runtime choice to the server (platform default: VM).
-    assert request.vm is None
     assert request.timeout_minutes == 60
     assert request.region is None
     assert request.labels == []
-    assert request.start_command == "tail -f /dev/null"
+    assert request.start_command is None
 
 
-def test_unset_vm_is_omitted_from_payload():
-    """Unset vm must be excluded from the API payload so the server default applies."""
+def test_vm_is_not_a_model_field():
+    """The runtime is VM-only; SandboxClient.create() sends vm=true itself."""
+    assert "vm" not in CreateSandboxRequest.model_fields
     request = CreateSandboxRequest(
         name="test-sandbox",
         docker_image="python:3.11-slim",
@@ -43,41 +42,32 @@ def test_unset_vm_is_omitted_from_payload():
     assert "vm" not in request.model_dump(exclude_none=True)
 
 
-def test_unset_vm_still_serializes_default_start_command():
-    """With vm unset, the container keep-alive default stays on the wire.
-
-    This is deliberate, not a leak: the server is contractually committed to
-    dropping legacy string start commands on the VM path (ingress #3817
-    compat), so a VM-resolved sandbox behaves as if no start command was set.
-    Meanwhile a container-resolved sandbox (SANDBOX_DEFAULT_VM=false rollback,
-    or an older ingress where omitted vm still means container) needs this
-    default — without it the container runs the bare image ENTRYPOINT and
-    typically exits immediately. Do not clear this default for unset vm.
-    """
+def test_unset_vm_omits_start_command_from_payload():
+    """With no boot command set, start_command stays off the wire entirely."""
     request = CreateSandboxRequest(
         name="test-sandbox",
         docker_image="python:3.11-slim",
     )
 
     payload = request.model_dump(exclude_none=True)
-    assert payload["start_command"] == "tail -f /dev/null"
+    assert "start_command" not in payload
     assert "vm" not in payload
 
 
-def test_explicit_vm_false_is_serialized():
-    """The explicit container opt-out must survive exclude_none serialization."""
+def test_legacy_vm_kwarg_is_ignored():
+    """Deployed callers still pass vm=; extra kwargs are ignored, not errors."""
     request = CreateSandboxRequest(
         name="test-sandbox",
         docker_image="python:3.11-slim",
         vm=False,
     )
 
-    assert request.model_dump(exclude_none=True)["vm"] is False
+    assert "vm" not in request.model_dump(exclude_none=True)
 
 
-def test_unset_vm_rejects_explicit_string_start_command():
-    """Explicit string start commands are container-only; require vm=False."""
-    with pytest.raises(ValidationError, match="container-only"):
+def test_string_start_command_is_rejected():
+    """Only the structured StartCommand form exists; strings are a type error."""
+    with pytest.raises(ValidationError):
         CreateSandboxRequest(
             name="test-sandbox",
             docker_image="python:3.11-slim",
@@ -85,22 +75,10 @@ def test_unset_vm_rejects_explicit_string_start_command():
         )
 
 
-def test_container_opt_out_keeps_explicit_string_start_command():
-    request = CreateSandboxRequest(
-        name="test-sandbox",
-        docker_image="python:3.11-slim",
-        vm=False,
-        start_command="sleep infinity",
-    )
-
-    assert request.start_command == "sleep infinity"
-
-
 def test_vm_start_command_preserves_argv():
     request = CreateSandboxRequest(
         name="vm-workload",
         docker_image="team/image:v1",
-        vm=True,
         start_command=StartCommand(
             executable="/worker",
             args=["--platform", "linux/amd64", "value with spaces"],
@@ -117,7 +95,6 @@ def test_vm_without_start_command_does_not_inherit_container_default():
     request = CreateSandboxRequest(
         name="interactive-vm",
         docker_image="team/image:v1",
-        vm=True,
     )
 
     assert request.start_command is None
@@ -128,7 +105,6 @@ def test_vm_rejects_legacy_string_start_command():
         CreateSandboxRequest(
             name="vm-workload",
             docker_image="team/image:v1",
-            vm=True,
             start_command="/worker --platform linux/amd64",
         )
 
@@ -162,37 +138,10 @@ def test_create_sandbox_request_accepts_gpu_type_for_gpu_count():
         docker_image="python:3.11-slim",
         gpu_count=1,
         gpu_type="H100_80GB",
-        vm=True,
     )
 
     assert request.gpu_count == 1
     assert request.gpu_type == "H100_80GB"
-    assert request.vm is True
-
-
-def test_create_sandbox_request_rejects_gpu_with_container_opt_out():
-    """GPUs conflict with an explicit container opt-out (vm=False)"""
-    with pytest.raises(ValidationError):
-        CreateSandboxRequest(
-            name="gpu-sandbox",
-            docker_image="python:3.11-slim",
-            gpu_count=1,
-            gpu_type="H100_80GB",
-            vm=False,
-        )
-
-
-def test_create_sandbox_request_allows_gpu_with_unset_vm():
-    """Unset vm defers to the platform default (VM), which supports GPUs"""
-    request = CreateSandboxRequest(
-        name="gpu-sandbox",
-        docker_image="python:3.11-slim",
-        gpu_count=1,
-        gpu_type="H100_80GB",
-    )
-
-    assert request.vm is None
-    assert request.gpu_count == 1
 
 
 def test_create_sandbox_request_rejects_gpu_type_without_gpu_count():
@@ -202,7 +151,6 @@ def test_create_sandbox_request_rejects_gpu_type_without_gpu_count():
             name="cpu-sandbox",
             docker_image="python:3.11-slim",
             gpu_type="H100_80GB",
-            vm=True,
         )
 
 
@@ -222,72 +170,14 @@ def test_create_sandbox_request_gpu_type_none_matches_default():
     assert request_none.gpu_type is None
 
 
-def test_guaranteed_requires_container_opt_out():
-    """guaranteed is container-only; unset vm resolves to VM on the server"""
-    with pytest.raises(ValidationError, match="vm=False"):
-        CreateSandboxRequest(
-            name="guaranteed-sandbox",
-            docker_image="python:3.11-slim",
-            guaranteed=True,
-        )
-
+def test_idle_timeout_is_supported():
+    """idle_timeout_minutes is accepted for the VM runtime."""
     request = CreateSandboxRequest(
-        name="guaranteed-sandbox",
-        docker_image="python:3.11-slim",
-        guaranteed=True,
-        vm=False,
-    )
-    assert request.guaranteed is True
-
-
-def test_registry_credentials_require_container_opt_out():
-    """registry_credentials_id is container-only; unset vm resolves to VM on the server"""
-    with pytest.raises(ValidationError, match="vm=False"):
-        CreateSandboxRequest(
-            name="private-image-sandbox",
-            docker_image="registry.example.com/private:latest",
-            registry_credentials_id="cred-123",
-        )
-
-    with pytest.raises(ValidationError, match="vm=False"):
-        CreateSandboxRequest(
-            name="private-image-sandbox",
-            docker_image="registry.example.com/private:latest",
-            registry_credentials_id="cred-123",
-            vm=True,
-        )
-
-    request = CreateSandboxRequest(
-        name="private-image-sandbox",
-        docker_image="registry.example.com/private:latest",
-        registry_credentials_id="cred-123",
-        vm=False,
-    )
-    assert request.registry_credentials_id == "cred-123"
-
-
-def test_idle_timeout_supports_vm_and_container():
-    """idle_timeout_minutes is supported by either sandbox runtime."""
-    default_vm = CreateSandboxRequest(
         name="idle-sandbox",
         docker_image="python:3.11-slim",
         idle_timeout_minutes=10,
     )
-    vm = CreateSandboxRequest(
-        name="idle-sandbox",
-        docker_image="python:3.11-slim",
-        idle_timeout_minutes=10,
-        vm=True,
-    )
-    container = CreateSandboxRequest(
-        name="idle-sandbox",
-        docker_image="python:3.11-slim",
-        idle_timeout_minutes=10,
-        vm=False,
-    )
-    assert default_vm.idle_timeout_minutes == 10
-    assert vm.idle_timeout_minutes == 10
-    assert container.idle_timeout_minutes == 10
+    assert request.idle_timeout_minutes == 10
 
 
 def test_sandbox_status_enum():

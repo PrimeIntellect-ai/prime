@@ -27,8 +27,6 @@ def main() -> None:
         request = CreateSandboxRequest(
             name="demo-sandbox",
             docker_image="python:3.11-slim",
-            start_command="tail -f /dev/null",  # Keep container running indefinitely
-            vm=False,  # string start commands are container-only
             cpu_cores=1,
             memory_gb=2,
             timeout_minutes=120,  # 2 hours to avoid timeout during demo

@@ -12,7 +12,6 @@ from typer.testing import CliRunner
 runner = CliRunner()
 
 TEST_ENV = {
-    "COLUMNS": "200",
     "LINES": "50",
     "PRIME_DISABLE_VERSION_CHECK": "1",
     "PRIME_TEAM_ID": "",
@@ -59,6 +58,7 @@ class FakeAPI:
         self.build_error_queue = []
         # errorMessage returned alongside FAILED poll statuses.
         self.poll_error_message = None
+        self.expires_in = 3600
 
     def request(self, method, path, json=None, params=None):
         self.calls.append((method, path))
@@ -71,6 +71,7 @@ class FakeAPI:
             return {
                 "build_id": build_id,
                 "upload_url": f"https://example.test/upload/{build_id}",
+                "expires_in": self.expires_in,
                 "fullImagePath": f"user/{json['image_name']}:{json['image_tag']}",
             }
         if method == "POST" and path.endswith("/start"):
@@ -133,6 +134,24 @@ def test_manifest_happy_path(tmp_path, fake_api, monkeypatch):
     assert len(starts) == 2
     assert "2/2 builds completed" in result.output
     assert not (tmp_path / "push-bulk-failures.jsonl").exists()
+
+
+def test_plain_output_has_no_rich_reprs(tmp_path, fake_api, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _make_context(tmp_path, "a")
+    manifest = tmp_path / "builds.jsonl"
+    _write_manifest(manifest, [{"image": "app-a:v1", "context": "a"}])
+
+    result = runner.invoke(
+        app, ["images", "push-bulk", "--manifest", str(manifest), "--plain"], env=TEST_ENV
+    )
+
+    assert result.exit_code == 0, result.output
+    # Progress/Live internals print rich renderables (e.g. NewLine) that must
+    # not surface as "<rich.console.NewLine object at ...>" in --plain mode.
+    assert "NewLine" not in result.output
+    assert "rich.console" not in result.output
+    assert "[dim]" not in result.output
 
 
 def test_manifest_relative_paths_resolve_from_manifest_dir(tmp_path, fake_api, monkeypatch):
@@ -267,6 +286,35 @@ def test_quota_429_aborts_and_skips_remaining(tmp_path, fake_api, monkeypatch):
     assert {line["image"] for line in lines} == {"app-a:v1", "app-b:v1", "app-c:v1"}
 
 
+def test_bulk_dockerfile_build_requires_upload_expiry(tmp_path, fake_api, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _make_context(tmp_path, "a")
+    manifest = tmp_path / "builds.jsonl"
+    _write_manifest(manifest, [{"image": "app-a:v1", "context": "a"}])
+    fake_api.expires_in = None
+
+    result = runner.invoke(app, ["images", "push-bulk", "--manifest", str(manifest)], env=TEST_ENV)
+
+    assert result.exit_code == 1
+    assert "expires_in" in result.output
+
+
+def test_manifest_rejects_unknown_platform_key(tmp_path, fake_api, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _make_context(tmp_path, "a")
+    manifest = tmp_path / "builds.jsonl"
+    _write_manifest(
+        manifest,
+        [{"image": "app-a:v1", "context": "a", "platform": "linux/amd64"}],
+    )
+
+    result = runner.invoke(app, ["images", "push-bulk", "--manifest", str(manifest)], env=TEST_ENV)
+
+    assert result.exit_code == 1
+    assert "unknown key(s) platform" in result.output
+    assert fake_api.calls == []
+
+
 def test_requires_exactly_one_mode(tmp_path, fake_api, monkeypatch):
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["images", "push-bulk"], env=TEST_ENV)
@@ -325,7 +373,9 @@ def test_harbor_dry_run_discovery_and_skips(tmp_path, fake_api, monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert "hello_world:v1" in result.output
-    assert "Skipping prebuilt-task" in result.output
+    # The prebuilt task resolves to a source build instead of being skipped.
+    assert "Skipping prebuilt-task" not in result.output
+    assert "python:3.11" in result.output
     assert "Skipping compose-only" in result.output
     assert "not-a-task" not in result.output
     assert fake_api.calls == []
@@ -558,9 +608,7 @@ def test_hf_column_flags_are_required(tmp_path, fake_api, monkeypatch):
 
     result = runner.invoke(app, ["images", "push-bulk", "--hf", "org/ds"], env=TEST_ENV)
     assert result.exit_code == 1
-    assert "--dockerfile-column is required" in result.output
-    # The error lists the dataset's columns so the user can pick one.
-    assert "instance_id" in result.output
+    assert "exactly one of --dockerfile-column" in result.output
 
     result = runner.invoke(
         app,
@@ -610,7 +658,7 @@ def test_hf_flags_rejected_outside_hf_mode(tmp_path, fake_api, monkeypatch):
     )
 
     assert result.exit_code == 1
-    assert "only apply to --hf mode" in result.output
+    assert "--hf mode" in result.output
     assert fake_api.calls == []
 
 
@@ -653,7 +701,7 @@ def test_hf_failures_keep_contexts_and_manifest_is_rerunnable(tmp_path, fake_api
     lines = [json.loads(line) for line in failures_file.read_text().splitlines()]
     assert [line["image"] for line in lines] == ["repo-1:latest"]
     # The generated contexts stay behind so the failures manifest re-runs.
-    assert str(context_root) in result.output
+    assert context_root.name in result.output
     assert all((tmp_path / line["dockerfile"]).is_file() for line in lines)
 
     fake_api.default_poll = ["COMPLETED"]

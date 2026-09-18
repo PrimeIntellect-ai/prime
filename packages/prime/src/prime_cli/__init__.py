@@ -2,7 +2,6 @@
 
 from prime_sandboxes import (
     AsyncSandboxClient,
-    CommandRequest,
     CommandResponse,
     CommandTimeoutError,
     CreateSandboxRequest,
@@ -10,7 +9,6 @@ from prime_sandboxes import (
     SandboxClient,
     SandboxNotRunningError,
     SandboxStatus,
-    UpdateSandboxRequest,
 )
 
 from prime_cli.core import (
@@ -29,7 +27,6 @@ __all__ = [
     "APITimeoutError",
     "AsyncAPIClient",
     "AsyncSandboxClient",
-    "CommandRequest",
     "CommandResponse",
     "CommandTimeoutError",
     "Config",
@@ -38,5 +35,4 @@ __all__ = [
     "SandboxClient",
     "SandboxNotRunningError",
     "SandboxStatus",
-    "UpdateSandboxRequest",
 ]

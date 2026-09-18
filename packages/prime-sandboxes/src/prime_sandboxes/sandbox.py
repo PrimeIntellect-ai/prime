@@ -74,19 +74,13 @@ from .models import (
     BulkDeleteSandboxResponse,
     CommandResponse,
     CreateSandboxRequest,
-    DockerImageCheckResponse,
     EgressPolicyStatus,
-    ExposedPort,
-    ExposePortRequest,
     FileUploadResponse,
-    ListExposedPortsResponse,
     ReadFileResponse,
-    RegistryCredentialSummary,
     Sandbox,
     SandboxListResponse,
     SandboxLogsResponse,
     SandboxStatusSnapshot,
-    SSHSession,
     validate_egress_lists,
 )
 from .process import AsyncSandboxProcess
@@ -2258,19 +2252,12 @@ class SandboxClient:
         """
         return self._auth_cache.is_vm(sandbox_id)
 
-    def _guard_vm_unsupported(self, sandbox_id: str, feature_name: str) -> None:
-        """Raise APIError if the operation is not supported on VM sandboxes.
-
-        Mirrors the CLI behavior of short-circuiting operations the backend
-        does not currently support for VM-backed sandboxes, so callers fail
-        fast with a clear message instead of an opaque gateway error.
-        """
-        if self._auth_cache.is_vm(sandbox_id):
-            raise APIError(f"{feature_name} is not yet supported for VM sandboxes.")
-
     def create(self, request: CreateSandboxRequest) -> Sandbox:
         """Create a new sandbox"""
         payload = request.model_dump(by_alias=False, exclude_none=True)
+        # VM is the only runtime; send it explicitly so the created runtime
+        # never depends on server-side defaults changing underneath the SDK.
+        payload["vm"] = True
         # Auto-populate team_id from config if not specified
         if request.team_id is None and self.client.config.team_id is not None:
             payload["team_id"] = self.client.config.team_id
@@ -2462,32 +2449,15 @@ class SandboxClient:
         working_dir: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
         timeout: Optional[int] = None,
-        user: Optional[str] = None,
     ) -> CommandResponse:
         """Execute command directly via gateway."""
         self._auth_cache.get_or_refresh(sandbox_id)
-
-        if self._auth_cache.is_vm(sandbox_id):
-            if user is not None:
-                raise ValueError(
-                    "The 'user' parameter is only supported for container sandboxes, "
-                    "not VM sandboxes."
-                )
-            return self._execute_command_connect_rpc(
-                sandbox_id=sandbox_id,
-                command=command,
-                working_dir=working_dir,
-                env=env,
-                timeout=timeout,
-            )
-
-        return self._execute_command_rest(
+        return self._execute_command_connect_rpc(
             sandbox_id=sandbox_id,
             command=command,
             working_dir=working_dir,
             env=env,
             timeout=timeout,
-            user=user,
         )
 
     def _execute_command_connect_rpc(
@@ -2580,103 +2550,12 @@ class SandboxClient:
             finally:
                 rpc_client.close()
 
-    def _execute_command_rest(
-        self,
-        sandbox_id: str,
-        command: str,
-        working_dir: Optional[str] = None,
-        env: Optional[Dict[str, str]] = None,
-        timeout: Optional[int] = None,
-        user: Optional[str] = None,
-    ) -> CommandResponse:
-        effective_timeout = timeout if timeout is not None else 300
-
-        payload = {
-            "command": command,
-            "working_dir": working_dir,
-            "env": env or {},
-            "sandbox_id": sandbox_id,
-            "timeout": effective_timeout,
-        }
-        if user is not None:
-            payload["user"] = user
-
-        reauthed = False
-        attempt = 0
-        for _ in range(MAX_GATEWAY_ATTEMPTS):
-            auth = self._auth_cache.get_or_refresh(sandbox_id)
-            gateway_url = auth["gateway_url"].rstrip("/")
-            url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/exec"
-            headers = {"Authorization": f"Bearer {auth['token']}"}
-            try:
-                # The + 5 accounts for connection creation and closing. Prevents any command
-                # running close to its `effective_timeout` from being killed prematurely
-                client_timeout = effective_timeout + 5
-                response = self._gateway_post(
-                    url, headers=headers, timeout=client_timeout, json=payload
-                )
-                response.raise_for_status()
-                return CommandResponse.model_validate(response.json())
-            except httpx.TimeoutException as e:
-                ctx = self._get_sandbox_error_context(sandbox_id)
-                if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
-                    _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
-                raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
-            except httpx.HTTPStatusError as e:
-                resp = getattr(e, "response", None)
-                status = getattr(resp, "status_code", "?")
-
-                if status == 401 and self._should_retry_401(sandbox_id, reauthed):
-                    reauthed = True
-                    continue
-
-                if status == 502 and _is_gateway_sandbox_not_found(resp):
-                    ctx = self._get_sandbox_error_context(sandbox_id)
-                    ctx["status"] = "TERMINATED"
-                    if not ctx.get("error_type"):
-                        ctx["error_type"] = "SANDBOX_NOT_FOUND"
-                    if not ctx.get("error_message"):
-                        ctx["error_message"] = (
-                            "Sandbox is no longer present on the runtime node. "
-                            "Please create a new sandbox."
-                        )
-                    _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
-
-                if status == 409:
-                    if self._should_retry_409(sandbox_id, e, attempt, command=command):
-                        attempt += 1
-                        continue
-
-                if status == 408:
-                    ctx = self._get_sandbox_error_context(sandbox_id)
-                    if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
-                        _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
-                    raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
-
-                req = getattr(e, "request", None)
-                method = getattr(req, "method", "?")
-                u = getattr(req, "url", "?")
-                text = getattr(resp, "text", "")
-                raise APIError(f"HTTP {status} {method} {u}: {text}") from e
-            except httpx.RequestError as e:
-                req = getattr(e, "request", None)
-                method = getattr(req, "method", "?")
-                u = getattr(req, "url", "?")
-                raise APIError(
-                    f"Request failed: {e.__class__.__name__} at {method} {u}: {e}"
-                ) from e
-            except Exception as e:
-                raise APIError(f"Request failed: {e.__class__.__name__}: {e}") from e
-
-        raise APIError("Command execution failed after retries")
-
     def start_background_job(
         self,
         sandbox_id: str,
         command: str,
         working_dir: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
-        user: Optional[str] = None,
     ) -> BackgroundJob:
         """Start a long-running command in the background.
 
@@ -2688,8 +2567,6 @@ class SandboxClient:
             command: Command to execute
             working_dir: Working directory for command execution
             env: Environment variables
-            user: Run the job as this user, like ``docker exec -u`` (username or
-                numeric UID, optionally USER:GROUP). Container sandboxes only.
 
         Returns:
             BackgroundJob with job_id and file paths for polling
@@ -2737,7 +2614,6 @@ class SandboxClient:
                     sandbox_id,
                     bg_cmd,
                     timeout=_BACKGROUND_JOB_LAUNCH_TIMEOUT_SECONDS,
-                    user=user,
                 )
                 break
             except CommandTimeoutError:
@@ -3548,61 +3424,6 @@ class SandboxClient:
 
         raise APIError("Read file failed after retries")
 
-    def expose(
-        self,
-        sandbox_id: str,
-        port: int,
-        name: Optional[str] = None,
-        protocol: str = "HTTP",
-    ) -> ExposedPort:
-        """Expose a port from a sandbox."""
-        self._guard_vm_unsupported(sandbox_id, "Port exposure")
-        request = ExposePortRequest(port=port, name=name, protocol=protocol)
-        response = self.client.request(
-            "POST",
-            f"/sandbox/{sandbox_id}/expose",
-            json=request.model_dump(by_alias=False, exclude_none=True),
-        )
-        return ExposedPort.model_validate(response)
-
-    def unexpose(self, sandbox_id: str, exposure_id: str) -> None:
-        """Unexpose a port from a sandbox."""
-        self._guard_vm_unsupported(sandbox_id, "Port unexpose")
-        self.client.request("DELETE", f"/sandbox/{sandbox_id}/expose/{exposure_id}")
-
-    def list_exposed_ports(self, sandbox_id: str) -> ListExposedPortsResponse:
-        """List all exposed ports for a sandbox"""
-        self._guard_vm_unsupported(sandbox_id, "Port listing")
-        response = self.client.request("GET", f"/sandbox/{sandbox_id}/expose")
-        return ListExposedPortsResponse.model_validate(response)
-
-    def list_all_exposed_ports(self) -> ListExposedPortsResponse:
-        """List all exposed ports across all sandboxes for the current user"""
-        response = self.client.request("GET", "/sandbox/expose/all")
-        return ListExposedPortsResponse.model_validate(response)
-
-    def create_ssh_session(
-        self,
-        sandbox_id: str,
-        ttl_seconds: Optional[int] = None,
-    ) -> SSHSession:
-        """Create an SSH session"""
-        self._guard_vm_unsupported(sandbox_id, "SSH")
-        payload: Dict[str, Any] = {}
-        if ttl_seconds is not None:
-            payload["ttl_seconds"] = ttl_seconds
-        response = self.client.request(
-            "POST",
-            f"/sandbox/{sandbox_id}/ssh-session",
-            json=payload,
-        )
-        return SSHSession.model_validate(response)
-
-    def close_ssh_session(self, sandbox_id: str, session_id: str) -> None:
-        """Close an SSH session and remove its exposure"""
-        self._guard_vm_unsupported(sandbox_id, "SSH")
-        self.client.request("DELETE", f"/sandbox/{sandbox_id}/ssh-session/{session_id}")
-
 
 class AsyncSandboxClient:
     """Async client for sandbox API operations"""
@@ -3808,19 +3629,12 @@ class AsyncSandboxClient:
         """
         return await self._auth_cache.is_vm(sandbox_id)
 
-    async def _guard_vm_unsupported(self, sandbox_id: str, feature_name: str) -> None:
-        """Raise APIError if the operation is not supported on VM sandboxes.
-
-        Mirrors the CLI behavior of short-circuiting operations the backend
-        does not currently support for VM-backed sandboxes, so callers fail
-        fast with a clear message instead of an opaque gateway error.
-        """
-        if await self._auth_cache.is_vm(sandbox_id):
-            raise APIError(f"{feature_name} is not yet supported for VM sandboxes.")
-
     async def create(self, request: CreateSandboxRequest) -> Sandbox:
         """Create a new sandbox"""
         payload = request.model_dump(by_alias=False, exclude_none=True)
+        # VM is the only runtime; send it explicitly so the created runtime
+        # never depends on server-side defaults changing underneath the SDK.
+        payload["vm"] = True
         if request.team_id is None and self.client.config.team_id is not None:
             payload["team_id"] = self.client.config.team_id
         payload["idempotency_key"] = request.idempotency_key or uuid.uuid4().hex
@@ -4014,32 +3828,15 @@ class AsyncSandboxClient:
         working_dir: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
         timeout: Optional[int] = None,
-        user: Optional[str] = None,
     ) -> CommandResponse:
         """Execute command directly via gateway (async)."""
         await self._auth_cache.get_or_refresh(sandbox_id)
-
-        if await self._auth_cache.is_vm(sandbox_id):
-            if user is not None:
-                raise ValueError(
-                    "The 'user' parameter is only supported for container sandboxes, "
-                    "not VM sandboxes."
-                )
-            return await self._execute_command_connect_rpc(
-                sandbox_id=sandbox_id,
-                command=command,
-                working_dir=working_dir,
-                env=env,
-                timeout=timeout,
-            )
-
-        return await self._execute_command_rest(
+        return await self._execute_command_connect_rpc(
             sandbox_id=sandbox_id,
             command=command,
             working_dir=working_dir,
             env=env,
             timeout=timeout,
-            user=user,
         )
 
     async def open_process(
@@ -4328,103 +4125,12 @@ class AsyncSandboxClient:
             finally:
                 await rpc_client.close()
 
-    async def _execute_command_rest(
-        self,
-        sandbox_id: str,
-        command: str,
-        working_dir: Optional[str] = None,
-        env: Optional[Dict[str, str]] = None,
-        timeout: Optional[int] = None,
-        user: Optional[str] = None,
-    ) -> CommandResponse:
-        effective_timeout = timeout if timeout is not None else 300
-
-        payload = {
-            "command": command,
-            "working_dir": working_dir,
-            "env": env or {},
-            "sandbox_id": sandbox_id,
-            "timeout": effective_timeout,
-        }
-        if user is not None:
-            payload["user"] = user
-
-        reauthed = False
-        attempt = 0
-        for _ in range(MAX_GATEWAY_ATTEMPTS):
-            auth = await self._auth_cache.get_or_refresh(sandbox_id)
-            gateway_url = auth["gateway_url"].rstrip("/")
-            url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/exec"
-            headers = {"Authorization": f"Bearer {auth['token']}"}
-            try:
-                # The + 5 accounts for connection creation and closing. Prevents any command
-                # running close to its `effective_timeout` from being killed prematurely
-                client_timeout = effective_timeout + 5
-                response = await self._gateway_post(
-                    url, headers=headers, timeout=client_timeout, json=payload
-                )
-                response.raise_for_status()
-                return CommandResponse.model_validate(response.json())
-            except httpx.TimeoutException as e:
-                ctx = await self._get_sandbox_error_context(sandbox_id)
-                if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
-                    _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
-                raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
-            except httpx.HTTPStatusError as e:
-                resp = getattr(e, "response", None)
-                status = getattr(resp, "status_code", "?")
-
-                if status == 401 and await self._should_retry_401(sandbox_id, reauthed):
-                    reauthed = True
-                    continue
-
-                if status == 502 and _is_gateway_sandbox_not_found(resp):
-                    ctx = await self._get_sandbox_error_context(sandbox_id)
-                    ctx["status"] = "TERMINATED"
-                    if not ctx.get("error_type"):
-                        ctx["error_type"] = "SANDBOX_NOT_FOUND"
-                    if not ctx.get("error_message"):
-                        ctx["error_message"] = (
-                            "Sandbox is no longer present on the runtime node. "
-                            "Please create a new sandbox."
-                        )
-                    _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
-
-                if status == 409:
-                    if await self._should_retry_409(sandbox_id, e, attempt, command=command):
-                        attempt += 1
-                        continue
-
-                if status == 408:
-                    ctx = await self._get_sandbox_error_context(sandbox_id)
-                    if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
-                        _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
-                    raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
-
-                req = getattr(e, "request", None)
-                method = getattr(req, "method", "?")
-                u = getattr(req, "url", "?")
-                text = getattr(resp, "text", "")
-                raise APIError(f"HTTP {status} {method} {u}: {text}") from e
-            except httpx.RequestError as e:
-                req = getattr(e, "request", None)
-                method = getattr(req, "method", "?")
-                u = getattr(req, "url", "?")
-                raise APIError(
-                    f"Request failed: {e.__class__.__name__} at {method} {u}: {e}"
-                ) from e
-            except Exception as e:
-                raise APIError(f"Request failed: {e.__class__.__name__}: {e}") from e
-
-        raise APIError("Command execution failed after retries")
-
     async def start_background_job(
         self,
         sandbox_id: str,
         command: str,
         working_dir: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
-        user: Optional[str] = None,
     ) -> BackgroundJob:
         """Start a long-running command in the background (async).
 
@@ -4436,8 +4142,6 @@ class AsyncSandboxClient:
             command: Command to execute
             working_dir: Working directory for command execution
             env: Environment variables
-            user: Run the job as this user, like ``docker exec -u`` (username or
-                numeric UID, optionally USER:GROUP). Container sandboxes only.
 
         Returns:
             BackgroundJob with job_id and file paths for polling
@@ -4485,7 +4189,6 @@ class AsyncSandboxClient:
                     sandbox_id,
                     bg_cmd,
                     timeout=_BACKGROUND_JOB_LAUNCH_TIMEOUT_SECONDS,
-                    user=user,
                 )
                 break
             except CommandTimeoutError:
@@ -5372,123 +5075,6 @@ class AsyncSandboxClient:
             raise
 
     async def __aenter__(self) -> "AsyncSandboxClient":
-        """Async context manager entry"""
-        return self
-
-    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        """Async context manager exit"""
-        await self.aclose()
-
-    async def expose(
-        self,
-        sandbox_id: str,
-        port: int,
-        name: Optional[str] = None,
-        protocol: str = "HTTP",
-    ) -> ExposedPort:
-        """Expose a port from a sandbox."""
-        await self._guard_vm_unsupported(sandbox_id, "Port exposure")
-        request = ExposePortRequest(port=port, name=name, protocol=protocol)
-        response = await self.client.request(
-            "POST",
-            f"/sandbox/{sandbox_id}/expose",
-            json=request.model_dump(by_alias=False, exclude_none=True),
-        )
-        return ExposedPort.model_validate(response)
-
-    async def unexpose(self, sandbox_id: str, exposure_id: str) -> None:
-        """Unexpose a port from a sandbox."""
-        await self._guard_vm_unsupported(sandbox_id, "Port unexpose")
-        await self.client.request("DELETE", f"/sandbox/{sandbox_id}/expose/{exposure_id}")
-
-    async def list_exposed_ports(self, sandbox_id: str) -> ListExposedPortsResponse:
-        """List all exposed ports for a sandbox"""
-        await self._guard_vm_unsupported(sandbox_id, "Port listing")
-        response = await self.client.request("GET", f"/sandbox/{sandbox_id}/expose")
-        return ListExposedPortsResponse.model_validate(response)
-
-    async def list_all_exposed_ports(self) -> ListExposedPortsResponse:
-        """List all exposed ports across all sandboxes for the current user"""
-        response = await self.client.request("GET", "/sandbox/expose/all")
-        return ListExposedPortsResponse.model_validate(response)
-
-    async def create_ssh_session(
-        self,
-        sandbox_id: str,
-        ttl_seconds: Optional[int] = None,
-    ) -> SSHSession:
-        """Create an SSH session"""
-        await self._guard_vm_unsupported(sandbox_id, "SSH")
-        payload: Dict[str, Any] = {}
-        if ttl_seconds is not None:
-            payload["ttl_seconds"] = ttl_seconds
-        response = await self.client.request(
-            "POST",
-            f"/sandbox/{sandbox_id}/ssh-session",
-            json=payload,
-        )
-        return SSHSession.model_validate(response)
-
-    async def close_ssh_session(self, sandbox_id: str, session_id: str) -> None:
-        """Close an SSH session and remove its exposure"""
-        await self._guard_vm_unsupported(sandbox_id, "SSH")
-        await self.client.request("DELETE", f"/sandbox/{sandbox_id}/ssh-session/{session_id}")
-
-
-class TemplateClient:
-    """Client for template/registry helper APIs."""
-
-    def __init__(self, api_client: Optional[APIClient] = None):
-        self.client = api_client or APIClient()
-
-    def list_registry_credentials(self) -> List[RegistryCredentialSummary]:
-        response = self.client.request("GET", "/template/registry-credentials")
-        credentials = response.get("credentials", [])
-        return [RegistryCredentialSummary.model_validate(item) for item in credentials]
-
-    def check_docker_image(
-        self, image: str, registry_credentials_id: Optional[str] = None
-    ) -> DockerImageCheckResponse:
-        payload: Dict[str, Any] = {"image": image}
-        if registry_credentials_id:
-            payload["registry_credentials_id"] = registry_credentials_id
-        response = self.client.request(
-            "POST",
-            "/template/check-docker-image",
-            json=payload,
-        )
-        return DockerImageCheckResponse.model_validate(response)
-
-
-class AsyncTemplateClient:
-    """Async client for template/registry helper APIs."""
-
-    def __init__(self, api_client: Optional[AsyncAPIClient] = None):
-        self.client = api_client or AsyncAPIClient()
-
-    async def list_registry_credentials(self) -> List[RegistryCredentialSummary]:
-        response = await self.client.request("GET", "/template/registry-credentials")
-        credentials = response.get("credentials", [])
-        return [RegistryCredentialSummary.model_validate(item) for item in credentials]
-
-    async def check_docker_image(
-        self, image: str, registry_credentials_id: Optional[str] = None
-    ) -> DockerImageCheckResponse:
-        payload: Dict[str, Any] = {"image": image}
-        if registry_credentials_id:
-            payload["registry_credentials_id"] = registry_credentials_id
-        response = await self.client.request(
-            "POST",
-            "/template/check-docker-image",
-            json=payload,
-        )
-        return DockerImageCheckResponse.model_validate(response)
-
-    async def aclose(self) -> None:
-        """Close the async client"""
-        await self.client.aclose()
-
-    async def __aenter__(self) -> "AsyncTemplateClient":
         """Async context manager entry"""
         return self
 

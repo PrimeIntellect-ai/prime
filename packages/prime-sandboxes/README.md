@@ -32,8 +32,7 @@ from prime_sandboxes import APIClient, SandboxClient, CreateSandboxRequest, Star
 client = APIClient(api_key="your-api-key")
 sandbox_client = SandboxClient(client)
 
-# Create a sandbox. Leaving `vm` unset uses the platform default runtime:
-# VM-backed sandboxes (public beta).
+# Create a VM-backed sandbox.
 request = CreateSandboxRequest(
     name="my-sandbox",
     docker_image="python:3.11-slim",
@@ -44,27 +43,17 @@ request = CreateSandboxRequest(
 sandbox = sandbox_client.create(request)
 print(f"Created: {sandbox.id}")
 
-# VM workloads use a structured argv contract; no shell is implied.
+# Boot commands use a structured argv contract; no shell is implied.
 vm = sandbox_client.create(CreateSandboxRequest(
     name="vm-workload",
     docker_image="user-1/vm-image:latest",
-    vm=True,
     start_command=StartCommand(
         executable="/worker",
         args=["--platform", "linux/amd64"],
     ),
 ))
 
-# Opt out to a container sandbox explicitly with `vm=False` (containers
-# support string start commands, SSH, and port exposure).
-container = sandbox_client.create(CreateSandboxRequest(
-    name="container-workload",
-    docker_image="python:3.11-slim",
-    vm=False,
-    start_command="python -m http.server 8080",
-))
 
-# Wait for it to be ready
 sandbox_client.wait_for_creation(sandbox.id)
 
 # Execute commands
@@ -115,6 +104,46 @@ vm_images = [
     and image.status == ImageBuildStatus.COMPLETED
 ]
 ```
+
+## Image Builds
+
+Dockerfile builds create VM artifacts on `linux/amd64`. The
+initial response includes `upload_url` and `expires_in`; upload the build context
+before calling `start_build`.
+
+Source-image requests build VM artifacts directly from allowed public registry
+images. They do not return upload metadata. A single source returns `build_id`
+and `build_ids`. Comma-separated sources return `BulkBuildImageResponse` with
+ordered `results`: each entry has `source_image`, `build` (a `BuildImageResponse`
+or `None`), `error`, and `retryable`. There are no `success` or `failed` fields.
+The SDK also accepts the old flat bulk response during rollout.
+
+The server uses mixed wire casing: `build_id`, `upload_url`, and `expires_in`,
+but `buildIds`, `fullImagePath`, and `sourceImage`. SDK attributes use snake_case.
+The `transfer_image` method remains a compatibility name for `POST /images/build`:
+
+```python
+from prime_sandboxes import ImageClient
+
+images = ImageClient()
+response = images.transfer_image("ubuntu:22.04")
+print(response.build_ids)
+```
+
+All image builds support only `linux/amd64`. Docker Hub sources become public,
+org-less platform images automatically. Docker Hub source builds do not accept a
+custom destination, team, or private visibility. One comma-separated request
+cannot mix Docker Hub with other registries. Explicit non-Docker-Hub public
+registries can still use personal or team ownership, custom destinations, and
+public or private visibility. Allowed registries are Docker Hub, `ghcr.io`,
+`quay.io`, `public.ecr.aws`, `registry.k8s.io`, and `mcr.microsoft.com`.
+Google-hosted registries are rejected. Docker-Hub-only multi-source requests
+preserve source names and tags and force PUBLIC platform scope.
+
+Use `prime images push --source-image <reference>` for one or comma-separated
+sources, or `prime images push-bulk` for manifests. Dockerfile platform
+publishing uses `prime images push <name>:<tag> --platform-image`; the primary
+build creates its VM artifact without a second publishing step.
 
 ## Authentication
 

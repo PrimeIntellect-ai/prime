@@ -16,6 +16,10 @@ from typing_extensions import cast
 runner = CliRunner()
 
 
+class _StubAPIClient:
+    api_key = "stub-api-key-0001"
+
+
 class TestHasEvalFiles:
     """Tests for _has_eval_files function"""
 
@@ -151,7 +155,7 @@ def test_push_eval_forwards_name_override(monkeypatch, tmp_path):
 
     captured = {}
 
-    def fake_push_single_eval(config_path, env_slug, run_id, eval_id, is_public, name):
+    def fake_push_single_eval(config_path, env_slug, run_id, eval_id, is_public, name, secrets):
         captured.update(
             {
                 "config_path": config_path,
@@ -236,7 +240,7 @@ def test_push_eval_cli_supports_old_prime_evals_client(monkeypatch, tmp_path):
             return {}
 
     monkeypatch.setattr("prime_cli.commands.evals.console", TerminalConsole())
-    monkeypatch.setattr("prime_cli.commands.evals.APIClient", lambda: object())
+    monkeypatch.setattr("prime_cli.commands.evals.APIClient", _StubAPIClient)
     monkeypatch.setattr("prime_cli.commands.evals.EvalsClient", OldEvalsClient)
 
     (tmp_path / "metadata.json").write_text(
@@ -303,7 +307,7 @@ class TestPushSingleEval:
                 captured["finalized_evaluation_id"] = evaluation_id
                 captured["finalized_metrics"] = metrics
 
-        monkeypatch.setattr("prime_cli.commands.evals.APIClient", lambda: object())
+        monkeypatch.setattr("prime_cli.commands.evals.APIClient", _StubAPIClient)
         monkeypatch.setattr("prime_cli.commands.evals.EvalsClient", DummyEvalsClient)
 
         eval_id = _push_single_eval(str(tmp_path), None, None, None)
@@ -312,10 +316,11 @@ class TestPushSingleEval:
         assert captured["is_public"] is False
         assert captured["environments"] == [{"slug": "owner/gsm8k"}]
 
-    def test_create_evaluation_requires_pushed_environment(self, tmp_path, capsys):
+    def test_create_evaluation_requires_pushed_environment(self, tmp_path, capsys, monkeypatch):
         metadata = {"env": "gsm8k", "model": "gpt-4"}
         (tmp_path / "metadata.json").write_text(json.dumps(metadata))
         (tmp_path / "results.jsonl").write_text("")
+        monkeypatch.setattr("prime_cli.commands.evals.APIClient", _StubAPIClient)
 
         with pytest.raises(typer.Exit) as exc_info:
             _push_single_eval(str(tmp_path), None, None, None)
@@ -325,6 +330,58 @@ class TestPushSingleEval:
         assert "Evaluation uploads require a pushed environment" in output
         assert "prime env push gsm8k" in output
         assert "--env <owner>/gsm8k" in output
+
+    def test_push_redacts_known_secrets_before_upload(self, tmp_path, monkeypatch):
+        """Values from --secret, credential-named environment variables, and the API key
+        are replaced in every outgoing field; the local files keep them."""
+        monkeypatch.setenv("JUDGE_API_KEY", "judge-key-0001-abcd")
+        metadata = {
+            "env": "owner/gsm8k",
+            "model": "gpt-4",
+            "avg_reward": 0.5,
+            "note": "judge-key-0001-abcd",
+        }
+        sample = {
+            "id": 1,
+            "reward": 1.0,
+            "completion": "stub-api-key-0001 judge-key-0001-abcd literal-0001 keep",
+        }
+        (tmp_path / "metadata.json").write_text(json.dumps(metadata))
+        (tmp_path / "results.jsonl").write_text(json.dumps(sample) + "\n")
+
+        captured = {}
+
+        class DummyEvalsClient:
+            def __init__(self, _api_client):
+                pass
+
+            def create_evaluation(self, **kwargs):
+                captured.update(kwargs)
+                return {"evaluation_id": "eval-123"}
+
+            def push_samples(self, evaluation_id, samples):
+                captured["samples"] = samples
+
+            def finalize_evaluation(self, evaluation_id, metrics=None):
+                pass
+
+        monkeypatch.setattr("prime_cli.commands.evals.APIClient", _StubAPIClient)
+        monkeypatch.setattr("prime_cli.commands.evals.EvalsClient", DummyEvalsClient)
+
+        _push_single_eval(
+            str(tmp_path),
+            None,
+            "run-literal-0001",
+            None,
+            name="run literal-0001",
+            secrets=["literal-0001"],
+        )
+
+        assert captured["run_id"] == "run-[REDACTED]"
+        assert captured["name"] == "run [REDACTED]"
+        assert captured["metadata"]["note"] == "[REDACTED]"
+        assert captured["samples"][0]["completion"] == "[REDACTED] [REDACTED] [REDACTED] keep"
+        assert json.loads((tmp_path / "results.jsonl").read_text()) == sample
 
     def test_create_evaluation_passes_public_flag(self, tmp_path, monkeypatch):
         metadata = {"env": "owner/gsm8k", "model": "gpt-4"}
@@ -345,7 +402,7 @@ class TestPushSingleEval:
                 captured["finalized_evaluation_id"] = evaluation_id
                 captured["finalized_metrics"] = metrics
 
-        monkeypatch.setattr("prime_cli.commands.evals.APIClient", lambda: object())
+        monkeypatch.setattr("prime_cli.commands.evals.APIClient", _StubAPIClient)
         monkeypatch.setattr("prime_cli.commands.evals.EvalsClient", DummyEvalsClient)
 
         eval_id = _push_single_eval(str(tmp_path), None, None, None, is_public=True)
@@ -372,7 +429,7 @@ class TestPushSingleEval:
                 captured["finalized_evaluation_id"] = evaluation_id
                 captured["finalized_metrics"] = metrics
 
-        monkeypatch.setattr("prime_cli.commands.evals.APIClient", lambda: object())
+        monkeypatch.setattr("prime_cli.commands.evals.APIClient", _StubAPIClient)
         monkeypatch.setattr("prime_cli.commands.evals.EvalsClient", DummyEvalsClient)
 
         eval_id = _push_single_eval(str(tmp_path), None, None, None, name="explicit override")
@@ -402,7 +459,7 @@ class TestPushSingleEval:
                 captured["finalized_evaluation_id"] = evaluation_id
                 captured["finalized_metrics"] = metrics
 
-        monkeypatch.setattr("prime_cli.commands.evals.APIClient", lambda: object())
+        monkeypatch.setattr("prime_cli.commands.evals.APIClient", _StubAPIClient)
         monkeypatch.setattr("prime_cli.commands.evals.EvalsClient", DummyEvalsClient)
 
         eval_id = _push_single_eval(str(tmp_path), None, None, "eval-123", name="explicit override")
@@ -430,7 +487,7 @@ class TestPushSingleEval:
                     "viewer_url": "https://app.primeintellect.ai/dashboard/evaluations/eval-123"
                 }
 
-        monkeypatch.setattr("prime_cli.commands.evals.APIClient", lambda: object())
+        monkeypatch.setattr("prime_cli.commands.evals.APIClient", _StubAPIClient)
         monkeypatch.setattr("prime_cli.commands.evals.EvalsClient", DummyEvalsClient)
         monkeypatch.setattr(
             "prime_cli.commands.evals.get_eval_viewer_url",
@@ -462,7 +519,7 @@ class TestPushSingleEval:
                 assert metrics == {}
                 return {}
 
-        monkeypatch.setattr("prime_cli.commands.evals.APIClient", lambda: object())
+        monkeypatch.setattr("prime_cli.commands.evals.APIClient", _StubAPIClient)
         monkeypatch.setattr("prime_cli.commands.evals.EvalsClient", DummyEvalsClient)
         monkeypatch.setattr(
             "prime_cli.commands.evals.get_eval_viewer_url",

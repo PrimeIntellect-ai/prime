@@ -3054,6 +3054,22 @@ def _build_install_command(
     """
     normalized_name = normalize_package_name(name)
 
+    # Scope the Hub to the resolved artifact so its packages cannot shadow
+    # unrelated dependencies (for example, the harbor package on PyPI).
+    if wheel_url:
+        try:
+            cmd = get_install_command(tool, wheel_url, normalized_name, no_upgrade)
+            if url_dependencies:
+                cmd.extend(url_dependencies)
+            if prerelease:
+                if tool == "uv":
+                    cmd.append("--prerelease=allow")
+                else:
+                    cmd.append("--pre")
+            return cmd
+        except ValueError:
+            return None
+
     if simple_index_url:
         if tool == "uv":
             cmd = _uv_pip_command("install")
@@ -3090,21 +3106,6 @@ def _build_install_command(
                 cmd.extend(url_dependencies)
             cmd.extend(["--extra-index-url", simple_index_url])
             return cmd
-    elif wheel_url:
-        try:
-            cmd = get_install_command(tool, wheel_url, normalized_name, no_upgrade)
-            # Add URL dependencies for wheel-only installs too
-            if url_dependencies:
-                cmd.extend(url_dependencies)
-            if prerelease:
-                if tool == "uv":
-                    cmd.append("--prerelease=allow")
-                else:
-                    cmd.append("--pre")
-            return cmd
-        except ValueError:
-            return None
-
     return None
 
 

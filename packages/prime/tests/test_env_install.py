@@ -5,6 +5,7 @@ from prime_cli.commands import env
 from typer.testing import CliRunner
 
 INDEX_URL = "https://hub.primeintellect.ai/primeintellect/simple/"
+SCOPED_INDEX_URL = "https://hub.primeintellect.ai/primeintellect/deep-swe/install/simple/"
 WHEEL_URL = (
     "https://hub.primeintellect.ai/primeintellect/deep-swe/"
     "@f4017d3d/deep_swe-0.1.0-py3-none-any.whl"
@@ -18,15 +19,17 @@ def workspace_python(monkeypatch):
 
 
 @pytest.mark.parametrize("installer", ["command", "automatic"])
-@pytest.mark.parametrize("version", ["latest", "0.1.0", "f4017d3d"])
-def test_install_uses_resolved_wheel_without_exposing_hub_dependency_index(
-    monkeypatch, installer, version
+@pytest.mark.parametrize("version", ["latest", "0.1.0"])
+@pytest.mark.parametrize("scoped_index", [SCOPED_INDEX_URL, None])
+def test_install_prefers_scoped_index_with_legacy_server_fallback(
+    monkeypatch, installer, version, scoped_index
 ):
     client = Mock()
     client.get.return_value = {
         "data": {
             "wheel_url": WHEEL_URL,
             "simple_index_url": INDEX_URL,
+            "install_index_url": scoped_index,
             "url_dependencies": [URL_DEPENDENCY],
             "visibility": "PUBLIC",
         }
@@ -47,21 +50,21 @@ def test_install_uses_resolved_wheel_without_exposing_hub_dependency_index(
     client.get.assert_called_once_with(f"/environmentshub/primeintellect/deep-swe/@{version}")
     execute.assert_called_once()
     command = execute.call_args.args[0]
-    assert WHEEL_URL in command
+    assert WHEEL_URL not in command
     assert URL_DEPENDENCY in command
-    assert "--extra-index-url" not in command
-    assert INDEX_URL not in command
+    assert command[command.index("--extra-index-url") + 1] == (scoped_index or INDEX_URL)
+    assert ("deep_swe" if version == "latest" else f"deep_swe=={version}") in command
     assert "--index-strategy" not in command
 
 
 @pytest.mark.parametrize("tool", ["uv", "pip"])
 @pytest.mark.parametrize("no_upgrade", [False, True])
 @pytest.mark.parametrize("prerelease", [False, True])
-def test_wheel_install_preserves_options(tool, no_upgrade, prerelease):
+def test_scoped_index_install_preserves_options(tool, no_upgrade, prerelease):
     command = env._build_install_command(
         "deep-swe",
         "latest",
-        INDEX_URL,
+        SCOPED_INDEX_URL,
         WHEEL_URL,
         tool=tool,
         no_upgrade=no_upgrade,
@@ -70,7 +73,8 @@ def test_wheel_install_preserves_options(tool, no_upgrade, prerelease):
     )
 
     assert command is not None
-    assert WHEEL_URL in command
+    assert SCOPED_INDEX_URL in command
+    assert WHEEL_URL not in command
     assert URL_DEPENDENCY in command
     assert INDEX_URL not in command
     upgrade_flag = "-P" if tool == "uv" else "--upgrade"
@@ -87,7 +91,7 @@ def test_wheel_install_preserves_options(tool, no_upgrade, prerelease):
 
 @pytest.mark.parametrize("tool", ["uv", "pip"])
 @pytest.mark.parametrize("version", ["latest", "0.1.0"])
-def test_install_falls_back_to_index_when_no_wheel_is_available(tool, version):
+def test_legacy_index_without_wheel_still_works(tool, version):
     command = env._build_install_command(
         "deep-swe", version, INDEX_URL, None, tool=tool, url_dependencies=[URL_DEPENDENCY]
     )
@@ -112,3 +116,25 @@ def test_install_supports_wheel_without_index(tool):
 
 def test_install_requires_wheel_or_index():
     assert env._build_install_command("deep-swe", "latest", None, None) is None
+
+
+def test_info_displays_scoped_install_index(monkeypatch):
+    client = Mock()
+    client.get.return_value = {
+        "data": {
+            "id": "env-1",
+            "name": "deep-swe",
+            "owner": {"name": "primeintellect"},
+            "visibility": "PUBLIC",
+            "wheel_url": WHEEL_URL,
+            "simple_index_url": INDEX_URL,
+            "install_index_url": SCOPED_INDEX_URL,
+        }
+    }
+    monkeypatch.setattr(env, "APIClient", lambda **kwargs: client)
+    result = CliRunner().invoke(env.app, ["info", "primeintellect/deep-swe"])
+    assert result.exit_code == 0, result.output
+    # Rich may wrap URLs, so inspect rendered output with whitespace removed.
+    output = "".join(result.output.split())
+    assert SCOPED_INDEX_URL in output
+    assert INDEX_URL not in output

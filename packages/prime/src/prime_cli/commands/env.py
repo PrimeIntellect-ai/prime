@@ -1960,7 +1960,7 @@ def info(
         console.print()
 
         # Display key installation commands based on availability
-        simple_index_url = details.get("simple_index_url")
+        simple_index_url = details.get("install_index_url") or details.get("simple_index_url")
         _print_env_inspect_examples(owner, name, target_version)
         console.print()
 
@@ -2342,7 +2342,7 @@ def install(
                 continue
 
             # Get both simple index URL and wheel URL
-            simple_index_url = details.get("simple_index_url")
+            simple_index_url = details.get("install_index_url") or details.get("simple_index_url")
             wheel_url = process_wheel_url(details.get("wheel_url"))
             url_dependencies = details.get("url_dependencies", [])
 
@@ -3054,22 +3054,6 @@ def _build_install_command(
     """
     normalized_name = normalize_package_name(name)
 
-    # Scope the Hub to the resolved artifact so its packages cannot shadow
-    # unrelated dependencies (for example, the harbor package on PyPI).
-    if wheel_url:
-        try:
-            cmd = get_install_command(tool, wheel_url, normalized_name, no_upgrade)
-            if url_dependencies:
-                cmd.extend(url_dependencies)
-            if prerelease:
-                if tool == "uv":
-                    cmd.append("--prerelease=allow")
-                else:
-                    cmd.append("--pre")
-            return cmd
-        except ValueError:
-            return None
-
     if simple_index_url:
         if tool == "uv":
             cmd = _uv_pip_command("install")
@@ -3106,6 +3090,21 @@ def _build_install_command(
                 cmd.extend(url_dependencies)
             cmd.extend(["--extra-index-url", simple_index_url])
             return cmd
+    elif wheel_url:
+        try:
+            cmd = get_install_command(tool, wheel_url, normalized_name, no_upgrade)
+            # Add URL dependencies for wheel-only installs too
+            if url_dependencies:
+                cmd.extend(url_dependencies)
+            if prerelease:
+                if tool == "uv":
+                    cmd.append("--prerelease=allow")
+                else:
+                    cmd.append("--pre")
+            return cmd
+        except ValueError:
+            return None
+
     return None
 
 
@@ -3126,7 +3125,7 @@ def _install_single_environment(env_slug: str, tool: str = "uv", prerelease: boo
         console.print(f"[red]Failed to find environment {env_slug}: {e}[/red]")
         return False
 
-    simple_index_url = details.get("simple_index_url")
+    simple_index_url = details.get("install_index_url") or details.get("simple_index_url")
     wheel_url = process_wheel_url(details.get("wheel_url"))
     url_dependencies = details.get("url_dependencies", [])
 

@@ -1960,7 +1960,7 @@ def info(
         console.print()
 
         # Display key installation commands based on availability
-        simple_index_url = details.get("simple_index_url")
+        simple_index_url = details.get("install_index_url") or details.get("simple_index_url")
         _print_env_inspect_examples(owner, name, target_version)
         console.print()
 
@@ -2342,7 +2342,7 @@ def install(
                 continue
 
             # Get both simple index URL and wheel URL
-            simple_index_url = details.get("simple_index_url")
+            simple_index_url = details.get("install_index_url") or details.get("simple_index_url")
             wheel_url = process_wheel_url(details.get("wheel_url"))
             url_dependencies = details.get("url_dependencies", [])
 
@@ -3125,7 +3125,7 @@ def _install_single_environment(env_slug: str, tool: str = "uv", prerelease: boo
         console.print(f"[red]Failed to find environment {env_slug}: {e}[/red]")
         return False
 
-    simple_index_url = details.get("simple_index_url")
+    simple_index_url = details.get("install_index_url") or details.get("simple_index_url")
     wheel_url = process_wheel_url(details.get("wheel_url"))
     url_dependencies = details.get("url_dependencies", [])
 

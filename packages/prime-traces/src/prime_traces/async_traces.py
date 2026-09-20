@@ -350,7 +350,7 @@ class AsyncTracesClient:
             )
         )
         return TraceSearchPage.model_validate(
-            await self.client.get_json("/trace-search", params=params)
+            await self.client.get_json("/traces/search", params=params)
         )
 
     async def list(

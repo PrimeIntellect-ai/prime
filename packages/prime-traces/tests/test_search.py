@@ -35,7 +35,7 @@ async def test_search_contract_and_empty_continuations(
     calls = []
 
     def handler(request):
-        assert request.url.path == "/api/v1/trace-search"
+        assert request.url.path == "/api/v1/traces/search"
         params = dict(request.url.params)
         assert params["query"] == "🙂 hello %_"
         assert params["run_id"] == "run #1"

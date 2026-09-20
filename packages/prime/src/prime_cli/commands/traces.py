@@ -115,7 +115,8 @@ def search_traces(
                 cursor=cursor,
             )
     except NotFoundError as exc:
-        if exc.code is None:
+        # Older servers treat search as a trace ID.
+        if exc.code in (None, "trace_not_found"):
             error_console.print(
                 "[red]Search is unavailable on this server. "
                 "It requires the Prime Traces search API.[/red]"

@@ -782,7 +782,7 @@ def test_search_error_keeps_json_stdout_clean(monkeypatch, code):
     result = runner.invoke(traces_cmd.app, ["search", "hello", "--run-id", "run", "-o", "json"])
     assert result.exit_code == 1
     assert result.stdout_bytes == b""
-    if code is None:
+    if code in (None, "trace_not_found"):
         assert "requires the Prime Traces search API" in result.stderr
     else:
         assert "Search failed: Run [red]missing[/] not found" in result.stderr

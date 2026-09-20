@@ -20,6 +20,8 @@ already do, so producers can hand over their own objects. Records are
 serialized lazily into bounded batches, so nothing buffers the whole run or
 round-trips through disk.
 
+Trace IDs `search`, `export`, and `exports` are reserved by the API.
+
 ```python
 from prime_traces import LineFormat, TracesClient
 
@@ -68,7 +70,7 @@ members = client.list_episode_traces(episode_id, has_error=True)
 ## Search indexed content
 
 Case-sensitive literal search within one run. Requires SDK 0.0.5+ and a server
-supporting `GET /api/v1/trace-search`.
+supporting `GET /api/v1/traces/search`.
 
 ```python
 page = client.search("connection refused", run_id="run_9f3k2m", role="tool")

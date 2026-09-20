@@ -1733,10 +1733,6 @@ def info(
                         f"  [green]$[/green] uv add {normalized_name}=={target_version} "
                         f"--index {simple_index_url}"
                     )
-                    console.print(
-                        f"  [green]$[/green] pip install {normalized_name}=={target_version} "
-                        f"--extra-index-url {simple_index_url}"
-                    )
                 else:
                     console.print(
                         f"  [green]$[/green] uv pip install {normalized_name} "
@@ -1745,14 +1741,9 @@ def info(
                     console.print(
                         f"  [green]$[/green] uv add {normalized_name} --index {simple_index_url}"
                     )
-                    console.print(
-                        f"  [green]$[/green] pip install {normalized_name} "
-                        f"--extra-index-url {simple_index_url}"
-                    )
             elif wheel_url:
                 console.print(f"  [green]$[/green] uv pip install {wheel_url}")
                 console.print(f"  [green]$[/green] uv add {normalized_name}@{wheel_url}")
-                console.print(f"  [green]$[/green] pip install {wheel_url}")
 
         elif details.get("visibility") == "PRIVATE":
             console.print("[bold yellow]Install (private environment)[/bold yellow]")

@@ -11,9 +11,47 @@ new summary columns must not break an older SDK.
 
 from datetime import datetime
 from enum import Enum
-from typing import Dict, List, Optional
+from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict
+
+SearchField = Literal["content", "reasoning_content", "tool_calls"]
+
+
+class TraceSearchMatch(BaseModel):
+    """First literal match in one node; offsets are Unicode code points."""
+
+    model_config = ConfigDict(extra="allow")
+
+    trace_id: str
+    upload_id: str
+    generation: int
+    episode_id: Optional[str]
+    node_idx: int
+    role: str
+    field: SearchField
+    representation: Literal["text", "json"]
+    match_start: int
+    match_end: int
+    excerpt: str
+    excerpt_start: int
+
+
+class TraceSearchPage(BaseModel):
+    """One bounded scan. An empty page with next_cursor is not a completed search.
+
+    Index warnings apply to this page; collect them across continuations.
+    Restart after indexing to include unindexed traces. No snapshot guarantee.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    items: List[TraceSearchMatch]
+    next_cursor: Optional[str]
+    scanned_nodes: int
+    examined_traces: int
+    unindexed_trace_ids: List[str]
+    partial_index: bool
 
 
 class LineFormat(str, Enum):

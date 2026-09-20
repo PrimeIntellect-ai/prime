@@ -65,6 +65,59 @@ detail = client.get_episode(episode_id)      # + member aggregate under .traces
 members = client.list_episode_traces(episode_id, has_error=True)
 ```
 
+## Search indexed content
+
+Requires SDK 0.0.5 or later and a deployment with `GET /api/v1/traces/search`.
+Search is a case-sensitive literal substring, scoped to one run:
+
+```python
+page = client.search("connection refused", run_id="run_9f3k2m", role="tool", limit=50)
+for match in page.items:
+    print(match.trace_id, match.node_idx, match.excerpt)
+
+# One call searches one bounded page. An empty page can still have a cursor.
+if page.next_cursor:
+    next_page = client.search(
+        "connection refused", run_id="run_9f3k2m", role="tool", limit=50,
+        cursor=page.next_cursor,
+    )
+```
+
+`AsyncTracesClient.search()` has the same parameters and response. Optional
+filters are `field`, `role`, `run_step`, `has_error`, `reward_min`, and `reward_max`.
+Choose `field="content"` (default), `"reasoning_content"`, or `"tool_calls"`.
+Queries contain 1–256 characters of nonblank text; `limit` is 1–100.
+
+The CLI exposes the same single-page contract:
+
+```bash
+prime traces search 'connection refused' --run-id run_9f3k2m --role tool
+prime traces search 'connection refused' --run-id run_9f3k2m --role tool -o json
+prime traces search 'connection refused' --run-id run_9f3k2m --role tool --cursor '<next_cursor>'
+```
+
+Each call examines a bounded window of the existing node index and returns
+small excerpts without downloading raw traces. Stop only when `next_cursor`
+is null; the SDK and CLI never automatically scan an entire run. Keep all
+filters unchanged when resuming. Pages expose `scanned_nodes` and
+`examined_traces` for progress. `unindexed_trace_ids` and `partial_index` indicate
+incomplete coverage for that page, even if its cursor is null: restart after
+pending uploads finish indexing. Nodes beyond the service's indexing cap are
+not searchable. Cursors are not snapshots; changes during a scan can affect
+results, and replacing the resumed trace requires restarting.
+
+There is one result per matching node, at its first occurrence, ordered by
+trace ID and node index. String content is JSON-decoded; structured content and
+tool calls are searched in their recorded JSON representation. `representation`
+is `text` or `json`. `match_start`, `match_end` (exclusive), and `excerpt_start`
+are zero-based Unicode code-point offsets in that representation. The match's
+coordinates within its excerpt are `match_start - excerpt_start` through
+`match_end - excerpt_start`. Results identify their `upload_id` and `generation`.
+
+This is literal content search, without regex, relevance ranking, arbitrary
+JSON-path predicates, or cross-run search. An older server returns
+`NotFoundError`; the CLI explains that the search API is required.
+
 ## Async
 
 `AsyncTracesClient` mirrors `TracesClient` method for method.
@@ -103,7 +156,7 @@ Precedence is constructor argument → environment variable → config file.
 
 - **Exports** — the service route exists but is unimplemented, so wrapping it
   would ship a method that cannot succeed.
-- **Search and free-text queries.**
+- **Cross-run search, regex and arbitrary JSON-path queries.**
 
 ## Examples
 

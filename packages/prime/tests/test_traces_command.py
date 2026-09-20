@@ -819,3 +819,30 @@ def test_search_preserves_opaque_cursor(monkeypatch, cursor, output):
         assert json.loads(result.stdout)["next_cursor"] == cursor
     else:
         assert f"--cursor {cursor}" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "args,warns",
+    [
+        ([], True),  # first page without coverage: completeness is unknown
+        (["--cursor", "resume"], False),  # resumed pages omit coverage by design
+    ],
+)
+def test_search_warns_when_first_page_coverage_is_unknown(monkeypatch, args, warns):
+    from prime_traces import TraceSearchPage
+
+    class Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def search(self, *args, **kwargs):
+            return TraceSearchPage(items=[], next_cursor=None, coverage=None)
+
+    monkeypatch.setattr(traces_cmd, "_traces_client", Client)
+    result = runner.invoke(traces_cmd.app, ["search", "hello", "--run-id", "run", *args])
+    assert result.exit_code == 0, result.output
+    assert ("Index coverage is unknown" in result.stderr) is warns
+    assert "Search exhausted" in result.stdout

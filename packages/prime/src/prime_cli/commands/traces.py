@@ -154,6 +154,13 @@ def search_traces(
                 "[yellow]Incomplete index coverage: some traces are unindexed or capped. "
                 "Restart after indexing to include pending traces.[/yellow]"
             )
+    elif cursor is None:
+        # Only resumed pages omit coverage by design; on a first page it means the
+        # server could not compute it, which is unknown rather than complete.
+        error_console.print(
+            "[yellow]Index coverage is unknown: the server could not check whether every "
+            "trace in the run was searchable. Matches may be incomplete.[/yellow]"
+        )
     if result.next_cursor:
         console.print("Search has more pages. Continue with the same filters and:")
         console.print(f"--cursor {escape(result.next_cursor)}", soft_wrap=True)

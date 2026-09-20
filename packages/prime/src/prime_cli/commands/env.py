@@ -687,7 +687,7 @@ def push(
         help="Bump or create a .post release (post0 -> post1)",
     ),
 ) -> None:
-    """Push environment to registry"""
+    """Push an environment to the Environments Hub"""
 
     try:
         declared_runtime = parse_runtime_option(runtime)
@@ -1294,7 +1294,7 @@ def pull(
     target: Optional[str] = typer.Option(None, "--target", "-t", help="Target directory"),
     version: str = typer.Option("latest", "--version", "-v", help="Version to pull"),
 ) -> None:
-    """Pull environment for local inspection"""
+    """Pull an environment from the Environments Hub"""
     try:
         client = APIClient(require_auth=False)
 

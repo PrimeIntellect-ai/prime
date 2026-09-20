@@ -135,8 +135,8 @@ prime env list
 # View environment details
 prime env info <environment-name>
 
-# Install an environment locally
-prime env install <environment-name>
+# Show install commands (uv pip install / uv add) for an environment
+prime env info <owner>/<environment-name>
 
 # Push your own environment (scaffold one with `vf-init` from verifiers)
 prime env push my-environment

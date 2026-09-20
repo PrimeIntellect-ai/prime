@@ -11,7 +11,7 @@ from prime_sandboxes import CreateSandboxRequest, SandboxClient
 from rich.syntax import Syntax
 from rich.table import Table
 
-from ..client import APIClient
+from ..client import APIClient, APIError
 from ..core import Config
 from ..utils import (
     DefaultCommandGroup,
@@ -20,11 +20,13 @@ from ..utils import (
     json_output_help,
     output_data_as_json,
 )
+from .teams import fetch_team_members
 
 console = get_console()
 
 LIST_EVALS_JSON_HELP = json_output_help(
-    ".evaluations[] = {evaluation_id|id, environment_names[], model_name, status, metadata}",
+    ".evaluations[] = {evaluation_id|id, environment_names[], model_name, status, user_id, "
+    "metadata}",
     ".total = number",
 )
 
@@ -85,6 +87,22 @@ def handle_errors(func):
     return wrapper
 
 
+def _team_user_names(client: APIClient, config: Config) -> dict[str, str]:
+    """Map user ids to display names: team members in a team context, else just you."""
+    if config.team_id:
+        try:
+            members = fetch_team_members(client, config.team_id)
+        except APIError:
+            return {}
+        return {
+            str(m.get("userId")): m.get("userName") or m.get("userEmail") or str(m.get("userId"))
+            for m in members
+        }
+    if config.user_id:
+        return {config.user_id: config.user_name or "you"}
+    return {}
+
+
 @subcommands_app.command("list", epilog=LIST_EVALS_JSON_HELP)
 @handle_errors
 def list_evals(
@@ -97,6 +115,7 @@ def list_evals(
         "-e",
         help="Filter by environment (e.g., 'gsm8k' or 'owner/gsm8k')",
     ),
+    mine: bool = typer.Option(False, "--mine", help="Only evaluations started by you"),
     as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ) -> None:
     """List hosted evaluations"""
@@ -118,6 +137,16 @@ def list_evals(
             limit=num,
         )
 
+        if mine:
+            if not config.user_id:
+                console.print(
+                    "[red]Error:[/red] --mine needs your user id; run `prime whoami` first"
+                )
+                raise typer.Exit(1)
+            data["evaluations"] = [
+                e for e in data.get("evaluations", []) if str(e.get("user_id")) == config.user_id
+            ]
+
         if as_json:
             output_data_as_json(data, console)
             return
@@ -131,20 +160,20 @@ def list_evals(
                 console.print("[yellow]No evaluations found.[/yellow]")
             return
 
-        table = Table()
-        table.add_column("ID", style="cyan")
-        table.add_column("Environment", style="blue")
-        table.add_column("Model", style="magenta")
-        table.add_column("Status", style="yellow")
-        table.add_column("Type", style="green", justify="center")
-        table.add_column("Examples", style="dim", justify="right")
-        table.add_column("Rollouts", style="dim", justify="right")
+        user_names = _team_user_names(api_client, config)
+
+        table = Table(expand=True)
+        table.add_column("ID", style="cyan", no_wrap=True)
+        table.add_column("Environment", style="blue", no_wrap=True, overflow="ellipsis", ratio=1)
+        table.add_column("Model", style="magenta", no_wrap=True, overflow="ellipsis", ratio=1)
+        table.add_column("Status", style="yellow", no_wrap=True)
+        table.add_column("Type", style="green", justify="center", no_wrap=True)
+        table.add_column("User", style="dim", no_wrap=True, overflow="ellipsis")
 
         for e in evals:
             eval_id = str(e.get("evaluation_id", e.get("id", "")))
-            metadata = e.get("metadata", {})
-            num_examples = metadata.get("num_examples", "-")
-            rollouts_per_example = metadata.get("rollouts_per_example", "-")
+            user_id = str(e.get("user_id") or "")
+            user = user_names.get(user_id, user_id or "-")
 
             env_name = "-"
             environment_names = e.get("environment_names", [])
@@ -156,12 +185,11 @@ def list_evals(
 
             table.add_row(
                 eval_id if eval_id else "",
-                str(env_name)[:EVAL_TABLE_MAX_TEXT_WIDTH],
-                str(e.get("model_name", ""))[:EVAL_TABLE_MAX_TEXT_WIDTH],
+                str(env_name),
+                str(e.get("model_name", "")),
                 str(e.get("status", "")),
                 execution_mode,
-                str(num_examples),
-                str(rollouts_per_example),
+                user,
             )
 
         console.print(table)

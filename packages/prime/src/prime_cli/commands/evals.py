@@ -2,6 +2,7 @@ import json
 import shlex
 import tarfile
 import tempfile
+import time
 import uuid
 from functools import wraps
 from pathlib import Path
@@ -40,8 +41,6 @@ EVAL_INFO_JSON_HELP = json_output_help(
 )
 
 EVAL_TABLE_MAX_TEXT_WIDTH = 30
-EVAL_HOSTED_LABEL = "HOSTED"
-EVAL_LOCAL_LABEL = "LOCAL"
 
 PRIME_RL_REPO = "https://github.com/PrimeIntellect-ai/prime-rl.git"
 EVAL_SANDBOX_IMAGE = "python:3.12-slim"
@@ -166,7 +165,6 @@ def list_evals(
         table.add_column("Environment", style="blue", no_wrap=True, overflow="ellipsis", ratio=1)
         table.add_column("Model", style="magenta", no_wrap=True, overflow="ellipsis", ratio=1)
         table.add_column("Status", style="yellow", no_wrap=True)
-        table.add_column("Type", style="green", justify="center", no_wrap=True)
         table.add_column("User", style="dim", no_wrap=True, overflow="ellipsis")
 
         for e in evals:
@@ -179,15 +177,11 @@ def list_evals(
             if environment_names and len(environment_names) > 0:
                 env_name = environment_names[0]
 
-            is_hosted = bool(e.get("is_hosted"))
-            execution_mode = EVAL_HOSTED_LABEL if is_hosted else EVAL_LOCAL_LABEL
-
             table.add_row(
                 eval_id if eval_id else "",
                 str(env_name),
                 str(e.get("model_name", "")),
                 str(e.get("status", "")),
-                execution_mode,
                 user,
             )
 
@@ -375,9 +369,12 @@ def run_eval_cmd(
     )
     console.print(f"[dim]Sandbox {sandbox.id} ({image})[/dim]")
     try:
+        started = time.monotonic()
         with console.status("[bold blue]Waiting for sandbox...", spinner="dots"):
             sandboxes.wait_for_creation(sandbox.id)
+        console.print(f"[dim]Sandbox ready in {time.monotonic() - started:.0f}s[/dim]")
 
+        started = time.monotonic()
         with console.status(f"[bold blue]Installing prime-rl@{ref}...", spinner="dots"):
             setup_script = EVAL_SETUP_SCRIPT.format(
                 workdir=EVAL_SANDBOX_WORKDIR, repo=PRIME_RL_REPO, ref=shlex.quote(ref)
@@ -393,6 +390,7 @@ def run_eval_cmd(
             console.print(f"[red]Installing prime-rl failed (exit {setup.exit_code}):[/red]")
             console.print(setup.stderr)
             raise typer.Exit(setup.exit_code or 1)
+        console.print(f"[dim]prime-rl@{ref} installed in {time.monotonic() - started:.0f}s[/dim]")
 
         if env_path is not None:
             _upload_local_env(sandboxes, sandbox.id, env_path)

@@ -545,12 +545,18 @@ def list_cmd(
             output_data_as_json(output_data, console)
         else:
             # Table output
-            table = Table(title=f"Environments (Total: {total})")
-            table.add_column("Environment", style="cyan")
-            table.add_column("Description", style="green")
-            table.add_column("Version", style="blue")
-            table.add_column("Stars", style="yellow", justify="right")
-            table.add_column("Updated", style="dim")
+            # One line per environment: the description absorbs the width and is cut
+            # with an ellipsis so the table always fits the terminal.
+            table = Table(title=f"Environments (Total: {total})", expand=True)
+            table.add_column(
+                "Environment", style="cyan", no_wrap=True, overflow="ellipsis", max_width=40
+            )
+            table.add_column(
+                "Description", style="green", no_wrap=True, overflow="ellipsis", ratio=1
+            )
+            table.add_column("Version", style="blue", no_wrap=True)
+            table.add_column("Stars", style="yellow", justify="right", no_wrap=True)
+            table.add_column("Updated", style="dim", no_wrap=True)
 
             for env in environments:
                 owner_name = env["owner"]["name"]

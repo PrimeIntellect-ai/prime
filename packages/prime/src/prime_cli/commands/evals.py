@@ -3,11 +3,12 @@ import shlex
 import tarfile
 import tempfile
 import time
+import tomllib
 import uuid
 from contextlib import contextmanager
 from functools import wraps
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import typer
 from prime_evals import EvalsAPIError, EvalsClient
@@ -53,6 +54,20 @@ EVAL_SETUP_TIMEOUT_SECONDS = 45 * 60
 # The sandbox has no lifetime; the eval decides when it ends.
 EVAL_NO_DEADLINE_SECONDS = 10**9
 EVAL_LOCAL_ENV_ARCHIVE_SKIP = {".git", ".venv", "__pycache__", "outputs", "dist", ".prime"}
+EVAL_LINK_TIMEOUT_SECONDS = 180
+EVAL_POLL_SECONDS = 3
+# The monitor logs one such line per source once its platform evaluation exists.
+EVAL_LINK_GREP = (
+    "grep -ho 'evaluation - https://[^ ]*' outputs/*/logs/latest/eval.log 2>/dev/null"
+    " | cut -d' ' -f3 | sort -u"
+)
+# Runs inside the sandbox after the eval so nothing is left behind when the launcher
+# has already exited; the API key is in the job's environment.
+EVAL_SELF_DELETE = (
+    "python3 -c 'import os, urllib.request as u; "
+    'u.urlopen(u.Request("{base}/api/v1/sandbox/{sandbox_id}", method="DELETE", '
+    'headers={{"Authorization": "Bearer " + os.environ["PRIME_API_KEY"]}}))\''
+)
 # Sandboxes only run Docker Hub images, so start from python:3.12-slim and add git
 # and uv. Submodules are pinned to SSH URLs; the sandbox has no GitHub key, so route
 # them over HTTPS. Exported (not `git config`) so `git submodule--helper clone` sees it.
@@ -164,6 +179,7 @@ def list_evals(
             return
 
         user_names = _team_user_names(api_client, config)
+        env_slugs = _environment_slugs(api_client, evals)
 
         table = Table(expand=True)
         table.add_column("ID", style="cyan", no_wrap=True)
@@ -181,6 +197,9 @@ def list_evals(
             environment_names = e.get("environment_names", [])
             if environment_names and len(environment_names) > 0:
                 env_name = environment_names[0]
+                env_ids = e.get("environment_ids") or []
+                if env_ids:
+                    env_name = env_slugs.get(env_ids[0], env_name)
 
             table.add_row(
                 eval_id if eval_id else "",
@@ -297,6 +316,8 @@ def _step(label: str):
 def _check(job, what: str) -> None:
     if job.exit_code == 0:
         return
+    if not hasattr(job, "stdout"):
+        raise _StepFailed(f"{what} failed (exit {job.exit_code})")
     output = "\n".join(part.strip() for part in (job.stdout, job.stderr) if part and part.strip())
     tail = "\n".join(output.splitlines()[-15:])
     raise _StepFailed(f"{what} failed (exit {job.exit_code})\n{tail}")
@@ -350,6 +371,65 @@ def _upload_local_env(sandboxes: SandboxClient, sandbox_id: str, env_path: Path)
         raise typer.Exit(1)
 
 
+def _wait_for_links(sandboxes: SandboxClient, sandbox_id: str, job, workdir: str) -> list[str]:
+    """Poll the eval log until the monitor has logged every source's platform link."""
+    deadline = time.monotonic() + EVAL_LINK_TIMEOUT_SECONDS
+    links: list[str] = []
+    while time.monotonic() < deadline:
+        status = sandboxes.get_background_job_status(sandbox_id, job)
+        if status.completed:
+            _check(sandboxes.get_background_job(sandbox_id, job), "Eval")
+            break
+        found = sandboxes.execute_command(sandbox_id, EVAL_LINK_GREP, working_dir=workdir)
+        links = [line.strip() for line in (found.stdout or "").splitlines() if line.strip()]
+        if links:
+            break
+        time.sleep(EVAL_POLL_SECONDS)
+    return links
+
+
+def _validate_eval_config(config_file: Path, installed_names: set[str]) -> None:
+    """Parse the TOML and make sure every source's taskset will be installed."""
+    try:
+        with open(config_file, "rb") as handle:
+            data = tomllib.load(handle)
+    except tomllib.TOMLDecodeError as exc:
+        console.print(f"[red]Error:[/red] {config_file} is not valid TOML: {exc}")
+        raise typer.Exit(1) from exc
+    tasksets: list[str] = []
+    for block in [data, *data.get("source", [])]:
+        taskset = ((block.get("env") or {}).get("taskset") or {}).get("id")
+        if taskset:
+            tasksets.append(taskset)
+    if not tasksets:
+        console.print(f"[red]Error:[/red] {config_file} names no env.taskset.id")
+        raise typer.Exit(1)
+    missing = sorted(t for t in tasksets if t.replace("_", "-") not in installed_names)
+    if missing:
+        console.print(
+            "[red]Error:[/red] no environment installed for "
+            + ", ".join(f"`{t}`" for t in missing)
+            + " - pass --install owner/<name> for each (or --env-path for a local package)"
+        )
+        raise typer.Exit(1)
+
+
+def _environment_slugs(client: APIClient, evals: list[dict[str, Any]]) -> dict[str, str]:
+    """Map environment ids to `owner/name`. Evaluations carry ids and bare names; the
+    Hub has no lookup by id, so search by name and match the id."""
+    slugs: dict[str, str] = {}
+    for e in evals:
+        for env_id, name in zip(e.get("environment_ids") or [], e.get("environment_names") or []):
+            if env_id in slugs:
+                continue
+            response = client.get("/environmentshub/", params={"search": name, "limit": 50})
+            for entry in response.get("data", []):
+                owner = (entry.get("owner") or {}).get("name")
+                if entry.get("id") == env_id and owner:
+                    slugs[env_id] = f"{owner}/{entry.get('name', name)}"
+    return slugs
+
+
 @app.command(
     "run",
     help="Run a hosted evaluation",
@@ -379,11 +459,14 @@ def run_eval_cmd(
     env_var: Optional[list[str]] = typer.Option(
         None, "--env-var", help="Extra KEY=VALUE for the eval process (repeatable)"
     ),
+    wait: bool = typer.Option(False, "--wait", help="Stay attached until the eval exits"),
     keep: bool = typer.Option(False, "--keep", help="Keep the sandbox after the eval exits"),
 ) -> None:
     """Every argument `prime eval run` does not own is proxied verbatim to `uv run eval`
     (see `uv run eval -h` in prime-rl). `--monitors.prime` is added unless given, so each
-    finished source lands as an evaluation on the platform."""
+    finished source lands as an evaluation on the platform. The command is a launcher:
+    it returns once the platform links exist, and the sandbox deletes itself when the
+    eval ends (unless --wait keeps the CLI attached, or --keep)."""
     eval_args = [environment, *ctx.args]
     install_commands = [_hub_env_install_command(slug)[0] for slug in install or []]
     if env_path is not None:
@@ -409,6 +492,10 @@ def run_eval_cmd(
         if not config_file.is_file():
             console.print(f"[red]Error:[/red] config not found: {config_file}")
             raise typer.Exit(1)
+        installed_names = {slug.split("/", 1)[1] for slug in install or []}
+        if env_path is not None:
+            installed_names.add(env_path.resolve().name.replace("_", "-"))
+        _validate_eval_config(config_file, installed_names)
         eval_args[1] = config_file.name
     if not any(arg.startswith("--monitors.prime") for arg in eval_args):
         eval_args.append("--monitors.prime")
@@ -471,22 +558,51 @@ def run_eval_cmd(
                 )
 
         command = shlex.join(["uv", "run", "eval", *eval_args])
-        console.print(
-            f"[dim]Follow along: prime sandbox run {sandbox.id} -w {EVAL_SANDBOX_WORKDIR}/prime-rl "
-            "-- bash -c 'tail -n 50 outputs/*/logs/latest/eval.log'[/dim]"
-        )
-        with _step(f"Run {command}"):
-            result = sandboxes.run_background_job(
+        workdir = f"{EVAL_SANDBOX_WORKDIR}/prime-rl"
+        with _step("Validate config"):
+            dry_run = sandboxes.run_background_job(
                 sandbox.id,
-                command,
-                timeout=EVAL_NO_DEADLINE_SECONDS,
-                working_dir=f"{EVAL_SANDBOX_WORKDIR}/prime-rl",
+                f"{command} --dry-run",
+                timeout=EVAL_SETUP_TIMEOUT_SECONDS,
+                working_dir=workdir,
                 env=env_vars,
             )
-            _check(result, "Eval")
-        console.print("Results are under `prime eval list`")
-    finally:
-        if keep:
-            console.print(f"[dim]Sandbox kept: prime sandbox get {sandbox.id}[/dim]")
+            _check(dry_run, "Config validation")
+        if wait or keep:
+            job_script = command
         else:
+            cleanup = EVAL_SELF_DELETE.format(
+                base=config.base_url.rstrip("/"), sandbox_id=sandbox.id
+            )
+            job_script = f"{command}; code=$?; {cleanup}; exit $code"
+        with _step(f"Launch {command}"):
+            job = sandboxes.start_background_job(
+                sandbox.id, job_script, working_dir=workdir, env=env_vars
+            )
+            links = _wait_for_links(sandboxes, sandbox.id, job, workdir)
+        for link in links:
+            console.print(f"Evaluation: [link={link}]{link}[/link]")
+        console.print(
+            f"[dim]Follow along: prime sandbox run {sandbox.id} -w {workdir} "
+            "-- bash -c 'tail -n 50 outputs/*/logs/latest/eval.log'[/dim]"
+        )
+        if not wait:
+            if keep:
+                console.print(f"[dim]Sandbox {sandbox.id} keeps running after the eval[/dim]")
+            else:
+                console.print(f"[dim]Sandbox {sandbox.id} deletes itself when the eval ends[/dim]")
+            return
+        with _step("Run eval"):
+            while True:
+                status = sandboxes.get_background_job_status(sandbox.id, job)
+                if status.completed:
+                    _check(sandboxes.get_background_job(sandbox.id, job), "Eval")
+                    break
+                time.sleep(EVAL_POLL_SECONDS)
+    except BaseException:
+        # Setup failed or we were interrupted before handing the sandbox to the eval.
+        if not keep:
             sandboxes.delete(sandbox.id)
+        raise
+    if wait and not keep:
+        sandboxes.delete(sandbox.id)

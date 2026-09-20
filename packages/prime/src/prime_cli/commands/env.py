@@ -587,7 +587,7 @@ def list_cmd(
         raise typer.Exit(1)
 
 
-@app.command("status", epilog=ENV_STATUS_JSON_HELP)
+@app.command("status", no_args_is_help=True, epilog=ENV_STATUS_JSON_HELP)
 def status_cmd(
     env_id: str = typer.Argument(..., help="Environment ID (owner/name)"),
     output: str = typer.Option("table", "--output", help="Output format: table or json"),

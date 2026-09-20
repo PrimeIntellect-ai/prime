@@ -314,7 +314,7 @@ class TracesClient:
                 ("cursor", cursor),
             )
         )
-        return TraceSearchPage.model_validate(self.client.get_json("/traces/search", params=params))
+        return TraceSearchPage.model_validate(self.client.get_json("/trace-search", params=params))
 
     def list(
         self,

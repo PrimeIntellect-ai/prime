@@ -35,7 +35,7 @@ async def test_search_contract_and_empty_continuations(
     calls = []
 
     def handler(request):
-        assert request.url.path == "/api/v1/traces/search"
+        assert request.url.path == "/api/v1/trace-search"
         params = dict(request.url.params)
         assert params["query"] == "🙂 hello %_"
         assert params["run_id"] == "run #1"
@@ -76,11 +76,16 @@ async def test_search_contract_and_empty_continuations(
     assert page.items[0].match_start == 2 and page.next_cursor is None
 
 
-def test_search_preserves_unsupported_server_error(make_client):
+@pytest.mark.parametrize("code", [None, "trace_not_found", "run_not_found"])
+def test_search_preserves_not_found_error(make_client, code):
     def handler(request):
         return httpx.Response(
-            404, json={"error": {"code": "trace_not_found", "message": "not found"}}
+            404,
+            json={"detail": "Not Found"}
+            if code is None
+            else {"error": {"code": code, "message": "not found"}},
         )
 
-    with pytest.raises(NotFoundError):
+    with pytest.raises(NotFoundError) as exc:
         make_client(handler).search("hello", run_id="run")
+    assert exc.value.code == code

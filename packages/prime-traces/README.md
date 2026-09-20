@@ -68,7 +68,7 @@ members = client.list_episode_traces(episode_id, has_error=True)
 ## Search indexed content
 
 Case-sensitive literal search within one run. Requires SDK 0.0.5+ and a server
-supporting `GET /api/v1/traces/search`.
+supporting `GET /api/v1/trace-search`.
 
 ```python
 page = client.search("connection refused", run_id="run_9f3k2m", role="tool")

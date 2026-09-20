@@ -55,6 +55,8 @@ EVAL_SETUP_TIMEOUT_SECONDS = 45 * 60
 EVAL_NO_DEADLINE_SECONDS = 10**9
 EVAL_LOCAL_ENV_ARCHIVE_SKIP = {".git", ".venv", "__pycache__", "outputs", "dist", ".prime"}
 EVAL_LINK_TIMEOUT_SECONDS = 180
+# Where uploaded `@ file.toml` configs land inside the prime-rl checkout.
+EVAL_CONFIG_DIR = "launch"
 EVAL_POLL_SECONDS = 3
 # The monitor logs one such line per source once its platform evaluation exists.
 EVAL_LINK_GREP = (
@@ -85,6 +87,7 @@ cd prime-rl
 git checkout --quiet {ref}
 git submodule update --init --recursive --depth 1 --quiet
 uv sync --quiet
+mkdir -p {config_dir}
 """
 
 
@@ -288,7 +291,7 @@ class _StepView:
         return f"{time.monotonic() - self.started:.0f}s"
 
     def __rich_console__(self, console, options):
-        self._spinner.update(text=Text(f" {self.label} ({self.elapsed()})", style="bold blue"))
+        self._spinner.update(text=Text(f"{self.label} ({self.elapsed()})", style="bold blue"))
         yield self._spinner
 
 
@@ -388,21 +391,41 @@ def _wait_for_links(sandboxes: SandboxClient, sandbox_id: str, job, workdir: str
     return links
 
 
-def _validate_eval_config(config_file: Path, installed_names: set[str]) -> None:
-    """Parse the TOML and make sure every source's taskset will be installed."""
-    try:
-        with open(config_file, "rb") as handle:
-            data = tomllib.load(handle)
-    except tomllib.TOMLDecodeError as exc:
-        console.print(f"[red]Error:[/red] {config_file} is not valid TOML: {exc}")
-        raise typer.Exit(1) from exc
+def _extract_config_files(eval_args: list[str]) -> list[Path]:
+    """Every `@ path.toml` in the command (leading or after a `--section` flag) is a local
+    file: collect it and point the argument at its sandbox copy."""
+    files: list[Path] = []
+    for i, arg in enumerate(eval_args[:-1]):
+        if arg != "@":
+            continue
+        path = Path(eval_args[i + 1])
+        if not path.is_file():
+            console.print(f"[red]Error:[/red] config not found: {path}")
+            raise typer.Exit(1)
+        if any(f.name == path.name and f.resolve() != path.resolve() for f in files):
+            console.print(f"[red]Error:[/red] two configs share the name {path.name}")
+            raise typer.Exit(1)
+        files.append(path)
+        eval_args[i + 1] = f"{EVAL_CONFIG_DIR}/{path.name}"
+    return files
+
+
+def _validate_eval_config(config_files: list[Path], installed_names: set[str]) -> None:
+    """Parse the TOMLs and make sure every source's taskset will be installed."""
     tasksets: list[str] = []
-    for block in [data, *data.get("source", [])]:
-        taskset = ((block.get("env") or {}).get("taskset") or {}).get("id")
-        if taskset:
-            tasksets.append(taskset)
+    for config_file in config_files:
+        try:
+            with open(config_file, "rb") as handle:
+                data = tomllib.load(handle)
+        except tomllib.TOMLDecodeError as exc:
+            console.print(f"[red]Error:[/red] {config_file} is not valid TOML: {exc}")
+            raise typer.Exit(1) from exc
+        for block in [data, *data.get("source", [])]:
+            taskset = ((block.get("env") or {}).get("taskset") or {}).get("id")
+            if taskset:
+                tasksets.append(taskset)
     if not tasksets:
-        console.print(f"[red]Error:[/red] {config_file} names no env.taskset.id")
+        console.print("[red]Error:[/red] the config names no env.taskset.id")
         raise typer.Exit(1)
     missing = sorted(t for t in tasksets if t.replace("_", "-") not in installed_names)
     if missing:
@@ -486,17 +509,12 @@ def run_eval_cmd(
             "(owner/name), --env-path for a local package, or `@ eval.toml` with --install"
         )
         raise typer.Exit(1)
-    config_file = None
-    if environment == "@" and eval_args[1:]:
-        config_file = Path(eval_args[1])
-        if not config_file.is_file():
-            console.print(f"[red]Error:[/red] config not found: {config_file}")
-            raise typer.Exit(1)
+    config_files = _extract_config_files(eval_args)
+    if environment == "@":
         installed_names = {slug.split("/", 1)[1] for slug in install or []}
         if env_path is not None:
             installed_names.add(env_path.resolve().name.replace("_", "-"))
-        _validate_eval_config(config_file, installed_names)
-        eval_args[1] = config_file.name
+        _validate_eval_config(config_files, installed_names)
     if not any(arg.startswith("--monitors.prime") for arg in eval_args):
         eval_args.append("--monitors.prime")
 
@@ -530,7 +548,10 @@ def run_eval_cmd(
     try:
         with _step(f"Installing prime-rl@{ref}"):
             setup_script = EVAL_SETUP_SCRIPT.format(
-                workdir=EVAL_SANDBOX_WORKDIR, repo=PRIME_RL_REPO, ref=shlex.quote(ref)
+                workdir=EVAL_SANDBOX_WORKDIR,
+                repo=PRIME_RL_REPO,
+                ref=shlex.quote(ref),
+                config_dir=EVAL_CONFIG_DIR,
             )
             # Background jobs run under `sh`; the script needs bash for `pipefail`.
             setup = sandboxes.run_background_job(
@@ -550,10 +571,10 @@ def run_eval_cmd(
                 working_dir=f"{EVAL_SANDBOX_WORKDIR}/prime-rl",
             )
             _check(installed, "Installing environments")
-            if config_file is not None:
+            for config_file in config_files:
                 sandboxes.upload_file(
                     sandbox.id,
-                    f"{EVAL_SANDBOX_WORKDIR}/prime-rl/{config_file.name}",
+                    f"{EVAL_SANDBOX_WORKDIR}/prime-rl/{EVAL_CONFIG_DIR}/{config_file.name}",
                     str(config_file),
                 )
 

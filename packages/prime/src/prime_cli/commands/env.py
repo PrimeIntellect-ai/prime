@@ -50,8 +50,8 @@ from .config import TEAM_ID_PATTERN
 
 app = PlainTyper(
     help=(
-        "Manage environments (list, status, info, push, pull, install, uninstall, delete, "
-        "version, secret, var)"
+        "Manage environments (list, info, push, pull, install, uninstall, delete, version, "
+        "secret, var)"
     ),
     no_args_is_help=True,
 )
@@ -78,8 +78,8 @@ ENV_LIST_JSON_HELP = json_output_help(
     ".per_page = number",
 )
 
-ENV_STATUS_JSON_HELP = json_output_help(
-    ". = {name, description?, visibility, latest_version?}",
+ENV_INFO_JSON_HELP = json_output_help(
+    ". = environment version object from the Hub",
     ".latest_version? = {semantic_version?, content_hash?, created_at?}",
 )
 
@@ -578,65 +578,6 @@ def list_cmd(
                 )
             else:
                 console.print(f"\n[dim]Total: {total} environment(s)[/dim]")
-
-    except APIError as e:
-        console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1)
-    except Exception as e:
-        console.print(f"[red]Unexpected error: {e}[/red]")
-        raise typer.Exit(1)
-
-
-@app.command("status", no_args_is_help=True, epilog=ENV_STATUS_JSON_HELP)
-def status_cmd(
-    env_id: str = typer.Argument(..., help="Environment ID (owner/name)"),
-    output: str = typer.Option("table", "--output", help="Output format: table or json"),
-) -> None:
-    """Show an environment's visibility and latest version.
-
-    \b
-    Examples:
-        prime env status owner/my-env
-        prime env status owner/my-env --output json
-    """
-    validate_output_format(output, console)
-
-    # Parse env_id
-    owner_name, env_name = _parse_environment_slug(env_id)
-
-    try:
-        client = APIClient(require_auth=False)
-
-        result = client.get(
-            f"/environmentshub/{owner_name}/{env_name}/status",
-        )
-
-        data = result.get("data", result)
-
-        if output == "json":
-            output_data_as_json(data, console)
-        else:
-            # Header
-            env_display_name = data.get("name", env_name)
-            console.print(f"\n[bold cyan]Environment:[/bold cyan] {owner_name}/{env_display_name}")
-            if data.get("description"):
-                console.print(f"[dim]Description:[/dim] {data['description']}")
-            console.print(f"[dim]Visibility:[/dim] {data.get('visibility', 'UNKNOWN')}")
-
-            # Latest Version section
-            console.print("\n[bold]Latest Version:[/bold]")
-            latest_version = data.get("latest_version")
-            if latest_version:
-                content_hash = latest_version.get("content_hash") or ""
-                version_str = latest_version.get("semantic_version") or content_hash[:8]
-                console.print(f"  Version: {version_str}")
-                console.print(f"  Hash: {(latest_version.get('content_hash') or '-')[:12]}")
-                created_at = latest_version.get("created_at")
-                console.print(f"  Created: {format_time_ago(created_at)}")
-            else:
-                console.print("  [dim]No versions found[/dim]")
-
-            console.print()
 
     except APIError as e:
         console.print(f"[red]Error: {e}[/red]")
@@ -1727,12 +1668,14 @@ def get_install_command(
         raise ValueError(f"Unsupported package manager: {tool}. Use 'uv' or 'pip'.")
 
 
-@app.command(no_args_is_help=True)
+@app.command(no_args_is_help=True, epilog=ENV_INFO_JSON_HELP)
 def info(
     env_id: str = typer.Argument(..., help="Environment ID (owner/name)"),
     version: str = typer.Option("latest", "--version", "-v", help="Version to show"),
+    output: str = typer.Option("table", "--output", help="Output format: table or json"),
 ) -> None:
-    """Show environment details and installation commands"""
+    """Show environment details, visibility, latest version and installation commands"""
+    validate_output_format(output, console)
     try:
         client = APIClient(require_auth=False)
 
@@ -1750,27 +1693,39 @@ def info(
 
         owner, name = env_id.split("/")
 
-        console.print(f"Fetching {env_id}@{target_version}...")
-
-        # Fetch environment details
         try:
             response = client.get(f"/environmentshub/{owner}/{name}/@{target_version}")
             details = response.get("data", response)
+            status_response = client.get(f"/environmentshub/{owner}/{name}/status")
+            status = status_response.get("data", status_response)
         except APIError as e:
             console.print(f"[red]Failed to get environment details: {e}[/red]")
             raise typer.Exit(1)
 
-        # Process wheel URL
+        if output == "json":
+            details["latest_version"] = status.get("latest_version")
+            output_data_as_json(details, console)
+            return
+
         wheel_url = process_wheel_url(details.get("wheel_url"))
 
-        # Display basic info with nice formatting
         console.print()
         console.print(f"[bold cyan]{owner}/{name}[/bold cyan][dim]@{target_version}[/dim]")
+        description = (details.get("metadata") or {}).get("description") or status.get(
+            "description"
+        )
+        if description:
+            console.print(f"[dim]{description}[/dim]")
+        console.print(f"[dim]Visibility:[/dim] {status.get('visibility', 'UNKNOWN')}")
 
-        # Display metadata if available
-        if metadata := details.get("metadata"):
-            if desc := metadata.get("description"):
-                console.print(f"[dim]{desc}[/dim]")
+        latest_version = status.get("latest_version")
+        if latest_version:
+            content_hash = latest_version.get("content_hash") or ""
+            version_str = latest_version.get("semantic_version") or content_hash[:8]
+            created = format_time_ago(latest_version.get("created_at"))
+            console.print(
+                f"[dim]Latest:[/dim] {version_str} ({content_hash[:12] or '-'}, created {created})"
+            )
 
         console.print()
 

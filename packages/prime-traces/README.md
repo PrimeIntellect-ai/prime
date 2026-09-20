@@ -84,12 +84,13 @@ Async uses the same API. Optional filters: `role`, `run_step`, `has_error`,
 `reward_min`, `reward_max`, and `field` (`content`, `reasoning_content`, `tool_calls`).
 String content is decoded; structured content and tool calls use recorded JSON.
 
-Each call scans one bounded page without downloading raw traces. Continue with
+Search uses server text indexes; one- and two-character terms use bounded scans.
+Each call returns one page without downloading raw traces. Continue with
 `cursor=page.next_cursor` (CLI: `--cursor`) and unchanged filters until null,
 **even on empty pages**. Cursors are not snapshots; replacing the resumed trace
 requires restarting.
 
-`unindexed_trace_ids` and `partial_index` flag incomplete coverage. Restart after
+`unindexed_trace_ids` (a bounded sample) and `partial_index` flag incomplete coverage. Restart after
 pending uploads finish indexing; nodes beyond the indexing cap remain excluded.
 
 ## Async

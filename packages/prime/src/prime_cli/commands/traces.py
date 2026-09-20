@@ -86,10 +86,10 @@ def search_traces(
     reward_min: Optional[float] = typer.Option(None, "--reward-min"),
     reward_max: Optional[float] = typer.Option(None, "--reward-max"),
     limit: int = typer.Option(50, "--limit", min=1, max=100, help="Maximum matches returned"),
-    cursor: Optional[str] = typer.Option(None, "--cursor", help="Continue an unfinished scan"),
+    cursor: Optional[str] = typer.Option(None, "--cursor", help="Continue an unfinished search"),
     output: str = typer.Option("table", "--output", "-o", help="table or json"),
 ) -> None:
-    """Search one bounded page of indexed trace content.
+    """Return one page of matches in indexed trace content.
 
     Follow next_cursor with unchanged filters, even on empty pages.
     """
@@ -144,7 +144,7 @@ def search_traces(
         )
     console.print(table)
     console.print(
-        f"Examined {result.examined_traces} trace candidates; scanned {result.scanned_nodes} nodes."
+        f"Examined {result.examined_traces} traces and {result.scanned_nodes} node candidates."
     )
     if result.unindexed_trace_ids or result.partial_index:
         error_console.print(
@@ -152,10 +152,10 @@ def search_traces(
             "Restart after indexing to include pending traces.[/yellow]"
         )
     if result.next_cursor:
-        console.print("Search has more to scan. Continue with the same filters and:")
+        console.print("Search has more pages. Continue with the same filters and:")
         console.print(f"--cursor {escape(result.next_cursor)}", soft_wrap=True)
     else:
-        console.print("Scan exhausted for the currently available index.")
+        console.print("Search exhausted for the currently available index.")
 
 
 @app.command("upload", epilog=UPLOAD_JSON_HELP)

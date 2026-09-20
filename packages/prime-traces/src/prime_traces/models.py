@@ -38,7 +38,7 @@ class TraceSearchMatch(BaseModel):
 
 
 class TraceSearchPage(BaseModel):
-    """Bounded scan; follow next_cursor and collect index warnings across pages."""
+    """Search page; follow next_cursor and collect index warnings across pages."""
 
     model_config = ConfigDict(extra="allow")
 

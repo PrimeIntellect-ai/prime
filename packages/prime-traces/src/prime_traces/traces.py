@@ -295,7 +295,7 @@ class TracesClient:
         limit: int = 50,
         cursor: Optional[str] = None,
     ) -> TraceSearchPage:
-        """Search one bounded page of indexed nodes using case-sensitive literal text.
+        """Return one page of case-sensitive literal matches in indexed nodes.
 
         Follow next_cursor with unchanged filters, even on empty pages.
         unindexed_trace_ids / partial_index indicate incomplete coverage.

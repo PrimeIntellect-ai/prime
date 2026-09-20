@@ -1261,9 +1261,8 @@ def push(
                 console.print("\n[cyan]View on Environments Hub:[/cyan]")
                 console.print(f"  [link={hub_url}]{hub_url}[/link]")
 
-                # Show install command
-                console.print("\n[cyan]Install with:[/cyan]")
-                console.print(f"  prime env install {owner_name}/{env_name}")
+                console.print("\n[cyan]Install commands:[/cyan]")
+                console.print(f"  prime env info {owner_name}/{env_name}")
             else:
                 console.print(f"[red]Error finalizing: {finalize_response.get('message')}[/red]")
                 raise typer.Exit(1)

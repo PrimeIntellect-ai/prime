@@ -1,20 +1,20 @@
-import argparse
 import inspect
 import json
 import re
-import time
+import shlex
+import uuid
 from functools import wraps
 from pathlib import Path
 from typing import Any, Optional
 
 import typer
-from click.core import ParameterSource
 from prime_evals import EvalsAPIError, EvalsClient, InvalidEvaluationError
+from prime_sandboxes import CreateSandboxRequest, SandboxClient
 from rich.progress import Progress
 from rich.syntax import Syntax
 from rich.table import Table
 
-from ..client import APIClient, APIError
+from ..client import APIClient
 from ..core import Config
 from ..utils import (
     DefaultCommandGroup,
@@ -24,31 +24,9 @@ from ..utils import (
     output_data_as_json,
 )
 from ..utils.display import get_eval_viewer_url
-from ..utils.env_metadata import find_environment_metadata
 from ..utils.eval_push import load_results_jsonl
-from ..utils.hosted_eval import (
-    EvalStatus,
-    HostedEvalConfig,
-    clean_logs,
-    get_new_log_lines,
-)
-from ..verifiers_bridge import (
-    DEFAULT_ENV_DIR_PATH,
-    DEFAULT_MODEL,
-    _is_config_target,
-    _resolve_environment_reference,
-    _split_owner_and_name,
-    is_help_request,
-    print_eval_run_help,
-    run_eval_passthrough,
-    run_eval_view,
-)
 
 console = get_console()
-
-# verifiers.* must be imported inside functions (not at module top): top-level
-# imports drag in huggingface_hub/datasets/pyarrow/pandas/numpy and triple
-# `prime --version` startup time. Same convention as the rest of prime_cli.
 
 LIST_EVALS_JSON_HELP = json_output_help(
     ".evaluations[] = {evaluation_id|id, environment_names[], model_name, status, metadata}",
@@ -74,97 +52,27 @@ PUSH_EVAL_JSON_HELP = json_output_help(
     "Auto-discovery batch push: .results[] = {path, status, eval_id?, error?}",
 )
 
-HOSTED_LOGS_DEFAULT_TAIL_LINES = 1000
-HOSTED_LOGS_DEFAULT_POLL_INTERVAL_SECONDS = 5.0
-HOSTED_RUN_DEFAULT_POLL_INTERVAL_SECONDS = 10.0
-HOSTED_RUN_DEFAULT_NUM_EXAMPLES = 5
-HOSTED_RUN_DEFAULT_ROLLOUTS_PER_EXAMPLE = 3
-HOSTED_LOGS_RATE_LIMIT_THRESHOLD = 3
-HOSTED_LOGS_RATE_LIMIT_WAIT_SECONDS = 30
-HOSTED_LOGS_RETRY_WAIT_SECONDS = 10
-HOSTED_LOGS_STATUS_UPDATE_EVERY_POLLS = 6
 EVAL_TABLE_MAX_TEXT_WIDTH = 30
-EVAL_RUN_EXAMPLE_COMMAND = "prime eval run gsm8k -n 10"
 EVAL_HOSTED_LABEL = "HOSTED"
 EVAL_LOCAL_LABEL = "LOCAL"
-# Legacy verifiers config fields/flags are accepted through the parser only so
-# Prime can reject them with the hosted-specific unsupported-option message.
-HOSTED_EVAL_CONFIG_EXTRA_FIELDS = {
-    "debug",
-    "timeout_minutes",
-    "allow_sandbox_access",
-    "allow_instances_access",
-    "allow_tunnel_access",
-    "eval_name",
-}
-HOSTED_LEGACY_UNSUPPORTED_FLAGS = {"--debug", "--tui", "-u"}
-HOSTED_EVAL_CONFIG_FIELD_TYPES: dict[str, tuple[type[Any], str]] = {
-    "env_dir_path": (str, "a non-empty string"),
-    "num_examples": (int, "an integer"),
-    "rollouts_per_example": (int, "an integer"),
-    "timeout_minutes": (int, "an integer"),
-    "allow_sandbox_access": (bool, "a boolean"),
-    "allow_instances_access": (bool, "a boolean"),
-    "allow_tunnel_access": (bool, "a boolean"),
-    "max_tokens": (int, "an integer"),
-    "max_concurrent": (int, "an integer"),
-    "max_retries": (int, "an integer"),
-    "independent_scoring": (bool, "a boolean"),
-    "verbose": (bool, "a boolean"),
-    "api_client_type": (str, "a non-empty string"),
-    "api_base_url": (str, "a non-empty string"),
-    "api_key_var": (str, "a non-empty string"),
-    "eval_name": (str, "a non-empty string"),
-}
-HOSTED_SUPPORTED_VERIFIERS_FIELDS = {
-    "api_base_url",
-    "api_client_type",
-    "api_key_var",
-    "env_args",
-    "env_dir_path",
-    "extra_env_kwargs",
-    "header",
-    "independent_scoring",
-    "max_concurrent",
-    "verbose",
-    "max_retries",
-    "max_tokens",
-    "model",
-    "num_examples",
-    "rollouts_per_example",
-    "sampling_args",
-    "state_columns",
-    "temperature",
-}
-HOSTED_SUPPORTED_TOML_FIELDS = {
-    "allow_instances_access",
-    "allow_sandbox_access",
-    "allow_tunnel_access",
-    "api_base_url",
-    "api_client_type",
-    "api_key_var",
-    "endpoint_id",
-    "endpoints_path",
-    "env_id",
-    "env_args",
-    "env_dir_path",
-    "eval_name",
-    "extra_env_kwargs",
-    "header",
-    "headers",
-    "independent_scoring",
-    "max_concurrent",
-    "verbose",
-    "max_retries",
-    "max_tokens",
-    "model",
-    "num_examples",
-    "rollouts_per_example",
-    "sampling_args",
-    "state_columns",
-    "temperature",
-    "timeout_minutes",
-}
+
+PRIME_RL_REPO = "https://github.com/PrimeIntellect-ai/prime-rl.git"
+EVAL_SANDBOX_IMAGE = "ghcr.io/astral-sh/uv:python3.12-bookworm"
+EVAL_SANDBOX_WORKDIR = "/workspace"
+EVAL_SETUP_TIMEOUT_SECONDS = 45 * 60
+# Submodules are pinned to SSH URLs; the sandbox has no GitHub key, so route them
+# over HTTPS. Exported (not `git config`) so `git submodule--helper clone` sees it.
+EVAL_SETUP_SCRIPT = """
+set -euo pipefail
+export GIT_CONFIG_COUNT=1
+export GIT_CONFIG_KEY_0="url.https://github.com/.insteadOf"
+export GIT_CONFIG_VALUE_0="git@github.com:"
+git clone --quiet {repo} prime-rl
+cd prime-rl
+git checkout --quiet {ref}
+git submodule update --init --recursive --depth 1 --quiet
+uv sync --all-packages --quiet
+"""
 
 
 class DefaultGroup(DefaultCommandGroup):
@@ -207,573 +115,6 @@ def format_output(data: dict, output: str) -> None:
     else:
         syntax = Syntax(json.dumps(data, indent=2), "json", theme="monokai")
         console.print(syntax)
-
-
-def _parse_json_object_option(raw: Optional[str], option_name: str) -> Optional[dict[str, Any]]:
-    if raw is None:
-        return None
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        console.print(f"[red]Error:[/red] invalid {option_name}: {exc}")
-        raise typer.Exit(1) from exc
-
-    if type(parsed) is not dict:
-        console.print(f"[red]Error:[/red] {option_name} must be a JSON object")
-        raise typer.Exit(1)
-
-    return parsed
-
-
-def _parse_string_map_option(raw: Optional[str], option_name: str) -> Optional[dict[str, str]]:
-    parsed = _parse_json_object_option(raw, option_name)
-    if parsed is None:
-        return None
-
-    for key, value in parsed.items():
-        if type(key) is not str or type(value) is not str:
-            console.print(
-                f"[red]Error:[/red] {option_name} must contain only string keys and values"
-            )
-            raise typer.Exit(1)
-
-    return parsed
-
-
-def _validate_json_object_field(merged: dict[str, Any], field_name: str) -> None:
-    field_value = merged.get(field_name)
-    if field_value is None:
-        return
-    if not isinstance(field_value, dict):
-        console.print(f"[red]Error:[/red] hosted eval config `{field_name}` must be a TOML table")
-        raise typer.Exit(1)
-
-    try:
-        json.dumps(field_value)
-    except (TypeError, ValueError) as exc:
-        console.print(
-            "[red]Error:[/red] hosted eval config "
-            f"`{field_name}` must contain only JSON-serializable values"
-        )
-        raise typer.Exit(1) from exc
-
-
-def _coerce_hosted_headers(raw: dict[str, Any]) -> list[str] | None:
-    from verifiers.cli.commands.eval import build_extra_headers
-
-    try:
-        normalized = build_extra_headers(raw)
-    except ValueError as exc:
-        console.print(f"[red]Error:[/red] {exc}")
-        raise typer.Exit(1) from exc
-
-    if not normalized:
-        return None
-    return [f"{name}: {value}" for name, value in normalized.items()]
-
-
-def _parse_verifiers_eval_namespace(
-    environment: str, passthrough_args: list[str], sampling_args: Optional[str]
-) -> tuple[argparse.Namespace, set[str], dict[str, str]]:
-    from verifiers.cli.commands.eval import build_parser
-
-    argv = [environment, *passthrough_args]
-    if sampling_args is not None:
-        argv.extend(["--sampling-args", sampling_args])
-
-    explicit_parser = build_parser()
-    option_names_by_dest = {}
-    for action in explicit_parser._actions:
-        if action.option_strings:
-            action.default = argparse.SUPPRESS
-            option_names_by_dest[action.dest] = next(
-                (option for option in action.option_strings if option.startswith("--")),
-                action.option_strings[0],
-            )
-
-    try:
-        parsed = build_parser().parse_args(argv)
-        explicit = explicit_parser.parse_args(argv)
-    except SystemExit as exc:
-        raise typer.Exit(exc.code) from exc
-
-    provided_dests = {dest for dest, value in vars(explicit).items() if dest != "env_id_or_config"}
-    return parsed, provided_dests, option_names_by_dest
-
-
-def _reject_unsupported_hosted_verifiers_args(
-    provided_dests: set[str], option_names_by_dest: dict[str, str]
-) -> None:
-    unsupported_flags = [
-        option_name
-        for dest, option_name in option_names_by_dest.items()
-        if dest in provided_dests and dest not in HOSTED_SUPPORTED_VERIFIERS_FIELDS
-    ]
-    if not unsupported_flags:
-        return
-
-    console.print(
-        "[red]Error:[/red] hosted eval CLI does not support: "
-        + ", ".join(f"`{flag}`" for flag in unsupported_flags)
-    )
-    raise typer.Exit(1)
-
-
-def _reject_legacy_unsupported_hosted_flags(passthrough_args: list[str]) -> None:
-    unsupported_flags = []
-    for arg in passthrough_args:
-        flag = arg.split("=", 1)[0]
-        if flag in HOSTED_LEGACY_UNSUPPORTED_FLAGS and flag not in unsupported_flags:
-            unsupported_flags.append(flag)
-
-    if not unsupported_flags:
-        return
-
-    console.print(
-        "[red]Error:[/red] hosted eval CLI does not support: "
-        + ", ".join(f"`{flag}`" for flag in unsupported_flags)
-    )
-    raise typer.Exit(1)
-
-
-def _freeze_json_value(value: Any) -> Any:
-    if isinstance(value, dict):
-        return tuple(sorted((key, _freeze_json_value(nested)) for key, nested in value.items()))
-    if isinstance(value, list):
-        return tuple(_freeze_json_value(item) for item in value)
-    return value
-
-
-def _validate_hosted_config_field(
-    merged: dict[str, Any], field_name: str, expected_type: type[Any], description: str
-) -> None:
-    field_value = merged.get(field_name)
-    if field_value is None:
-        return
-    if type(field_value) is not expected_type:
-        console.print(f"[red]Error:[/red] `{field_name}` must be {description}")
-        raise typer.Exit(1)
-    if expected_type is str and not field_value:
-        console.print(f"[red]Error:[/red] `{field_name}` must be {description}")
-        raise typer.Exit(1)
-
-
-def _resolve_hosted_config_model(raw_config: dict[str, Any], config_path: Path) -> str:
-    raw_endpoint_id = raw_config.get("endpoint_id")
-    raw_model = raw_config.get("model")
-
-    if raw_endpoint_id is not None and raw_model is not None:
-        console.print(
-            "[red]Error:[/red] hosted eval config cannot set both `endpoint_id` and `model`"
-        )
-        raise typer.Exit(1)
-
-    if raw_endpoint_id is None:
-        if raw_model is None:
-            return DEFAULT_MODEL
-        if type(raw_model) is not str or not raw_model:
-            console.print("[red]Error:[/red] `model` must be a non-empty string")
-            raise typer.Exit(1)
-        return raw_model
-
-    if type(raw_endpoint_id) is not str or not raw_endpoint_id:
-        console.print("[red]Error:[/red] `endpoint_id` must be a non-empty string")
-        raise typer.Exit(1)
-
-    endpoints_path = raw_config.get("endpoints_path", "./configs/endpoints.toml")
-    if type(endpoints_path) is not str or not endpoints_path:
-        console.print("[red]Error:[/red] `endpoints_path` must be a non-empty string")
-        raise typer.Exit(1)
-
-    endpoints_path_obj = Path(endpoints_path)
-    if "endpoints_path" in raw_config and not endpoints_path_obj.is_absolute():
-        endpoints_path = str((config_path.parent / endpoints_path_obj).resolve())
-
-    try:
-        from verifiers.utils.eval_utils import load_endpoints, resolve_endpoints_file
-    except ImportError as exc:
-        console.print(
-            "[red]Error:[/red] verifiers is required to resolve `endpoint_id`. "
-            "Install the `verifiers` package or use `model` instead."
-        )
-        raise typer.Exit(1) from exc
-
-    resolved_endpoints_file = resolve_endpoints_file(endpoints_path)
-    if resolved_endpoints_file is None or resolved_endpoints_file.suffix != ".toml":
-        console.print(
-            "[red]Error:[/red] `endpoint_id` requires an endpoints.toml registry "
-            "via `endpoints_path`"
-        )
-        raise typer.Exit(1)
-
-    endpoints = load_endpoints(endpoints_path)
-    if raw_endpoint_id not in endpoints:
-        console.print(
-            f"[red]Error:[/red] endpoint_id '{raw_endpoint_id}' not found in {endpoints_path}"
-        )
-        raise typer.Exit(1)
-
-    endpoint_group = endpoints[raw_endpoint_id]
-    endpoint_models = {entry.model for entry in endpoint_group}
-    if len(endpoint_models) != 1:
-        console.print(
-            f"[red]Error:[/red] endpoint_id '{raw_endpoint_id}' resolves to multiple models: "
-            f"{sorted(endpoint_models)}"
-        )
-        raise typer.Exit(1)
-
-    return endpoint_group[0].model
-
-
-def _validate_single_hosted_eval_config(
-    merged: dict[str, Any], config_path: Path
-) -> dict[str, Any]:
-    from verifiers.cli.commands.eval import merge_sampling_args
-
-    unsupported_fields = sorted(
-        field_name for field_name in merged if field_name not in HOSTED_SUPPORTED_TOML_FIELDS
-    )
-    if unsupported_fields:
-        console.print(
-            "[red]Error:[/red] hosted eval config does not support: "
-            + ", ".join(f"`{field}`" for field in unsupported_fields)
-        )
-        raise typer.Exit(1)
-
-    env_id = merged.get("env_id")
-    if type(env_id) is not str or not env_id:
-        console.print("[red]Error:[/red] hosted eval config requires a non-empty `env_id`")
-        raise typer.Exit(1)
-
-    _validate_json_object_field(merged, "env_args")
-    _validate_json_object_field(merged, "sampling_args")
-    _validate_json_object_field(merged, "extra_env_kwargs")
-    state_columns = merged.get("state_columns")
-    if state_columns is not None and (
-        not isinstance(state_columns, list)
-        or any(type(item) is not str or not item for item in state_columns)
-    ):
-        console.print("[red]Error:[/red] `state_columns` must be a list of non-empty strings")
-        raise typer.Exit(1)
-
-    headers = _coerce_hosted_headers(merged)
-    merged.pop("header", None)
-    merged.pop("headers", None)
-    if headers is not None:
-        merged["headers"] = headers
-
-    for field_name, (expected_type, description) in HOSTED_EVAL_CONFIG_FIELD_TYPES.items():
-        _validate_hosted_config_field(merged, field_name, expected_type, description)
-
-    temperature = merged.get("temperature")
-    if temperature is not None and type(temperature) not in {int, float}:
-        console.print("[red]Error:[/red] `temperature` must be a number")
-        raise typer.Exit(1)
-    if type(temperature) is int:
-        merged["temperature"] = float(temperature)
-
-    merged["sampling_args"] = (
-        merge_sampling_args(
-            merged.get("sampling_args"),
-            max_tokens=merged.pop("max_tokens", None),
-            temperature=merged.pop("temperature", None),
-            prefer_existing_keys=True,
-        )
-        or None
-    )
-
-    merged["model"] = _resolve_hosted_config_model(merged, config_path)
-    return merged
-
-
-def _load_hosted_eval_configs(config_path_str: str) -> list[dict[str, Any]]:
-    from verifiers.utils.eval_utils import load_toml_config
-
-    config_path = Path(config_path_str)
-    try:
-        loaded_configs = load_toml_config(
-            config_path,
-            extra_valid_fields=HOSTED_EVAL_CONFIG_EXTRA_FIELDS,
-        )
-    except Exception as exc:
-        console.print(f"[red]Error:[/red] {exc}")
-        raise typer.Exit(1) from exc
-
-    return [
-        _validate_single_hosted_eval_config(dict(config), config_path) for config in loaded_configs
-    ]
-
-
-def _fetch_eval_status(client: APIClient, eval_id: str) -> dict[str, Any]:
-    return client.get(f"/evaluations/{eval_id}")
-
-
-def _fetch_logs(client: APIClient, eval_id: str) -> str:
-    response = client.get(f"/hosted-evaluations/{eval_id}/logs")
-    return response.get("logs") or ""
-
-
-def _build_hosted_eval_config(config: HostedEvalConfig) -> dict[str, Any]:
-    eval_config: dict[str, Any] = {
-        "num_examples": config.num_examples,
-        "rollouts_per_example": config.rollouts_per_example,
-        "allow_sandbox_access": config.allow_sandbox_access,
-        "allow_instances_access": config.allow_instances_access,
-        "allow_tunnel_access": config.allow_tunnel_access,
-    }
-
-    if config.env_args:
-        eval_config["env_args"] = config.env_args
-    if config.timeout_minutes is not None:
-        eval_config["timeout_minutes"] = config.timeout_minutes
-    if config.custom_secrets:
-        eval_config["custom_secrets"] = config.custom_secrets
-    if config.sampling_args:
-        eval_config["sampling_args"] = config.sampling_args
-    if config.max_concurrent is not None:
-        eval_config["max_concurrent"] = config.max_concurrent
-    if config.max_retries is not None:
-        eval_config["max_retries"] = config.max_retries
-    if config.state_columns:
-        eval_config["state_columns"] = config.state_columns
-    if config.independent_scoring:
-        eval_config["independent_scoring"] = True
-    if config.verbose:
-        eval_config["verbose"] = True
-    if config.headers:
-        eval_config["headers"] = config.headers
-    if config.extra_env_kwargs:
-        eval_config["extra_env_kwargs"] = config.extra_env_kwargs
-    if config.api_client_type:
-        eval_config["api_client_type"] = config.api_client_type
-    if config.api_base_url:
-        eval_config["api_base_url"] = config.api_base_url
-    if config.api_key_var:
-        eval_config["api_key_var"] = config.api_key_var
-
-    return eval_config
-
-
-def _create_hosted_evaluations(
-    config: HostedEvalConfig, environment_ids: Optional[list[str]] = None
-) -> dict[str, Any]:
-    api_client = APIClient()
-
-    # team_id is not passed explicitly: the SDK falls back to the injected
-    # client's config.team_id, same source as before the refactor.
-    created = EvalsClient(api_client).create_hosted_evaluation(
-        # Explicit empty list stays empty; only None falls back to the config's
-        # single environment.
-        environment_ids if environment_ids is not None else [config.environment_id],
-        config.inference_model,
-        _build_hosted_eval_config(config),
-        name=config.name or None,
-    )
-    evaluation_id = created.get("evaluation_id")
-    evaluation_ids = created.get("evaluation_ids")
-
-    if not evaluation_id and not evaluation_ids:
-        raise APIError(f"Failed to get evaluation ID from response: {created}")
-
-    return created
-
-
-def _print_eval_status(eval_data: dict[str, Any]) -> None:
-    status_str, status = _parse_eval_status(eval_data)
-    color = status.color if status else "white"
-
-    console.print(f"[{color}]Status: {status_str}[/{color}]")
-
-    error_message = eval_data.get("error_message")
-    if error_message:
-        console.print(f"[red]Error:[/red] {error_message}")
-
-    viewer_url = eval_data.get("viewer_url")
-    if viewer_url:
-        console.print(f"[dim]View: {viewer_url}[/dim]")
-        return
-
-    eval_id = eval_data.get("evaluation_id")
-    if eval_id:
-        console.print(f"[dim]View: {get_eval_viewer_url(eval_id)}[/dim]")
-
-
-def _parse_eval_status(eval_data: dict[str, Any]) -> tuple[str, EvalStatus | None]:
-    raw_status = eval_data.get("status")
-    status_str = raw_status if type(raw_status) is str else "UNKNOWN"
-
-    try:
-        return status_str, EvalStatus(status_str)
-    except ValueError:
-        return status_str, None
-
-
-def _handle_log_poll_error(eval_id: str, exc: APIError, consecutive_errors: int) -> None:
-    if "404" in str(exc):
-        console.print(f"\n[red]Evaluation {eval_id} not found.[/red]")
-        raise typer.Exit(1) from exc
-
-    if "429" not in str(exc):
-        raise exc
-
-    if consecutive_errors >= HOSTED_LOGS_RATE_LIMIT_THRESHOLD:
-        console.print(
-            f"[yellow]Rate limited. Waiting {HOSTED_LOGS_RATE_LIMIT_WAIT_SECONDS:.0f}s...[/yellow]"
-        )
-        time.sleep(HOSTED_LOGS_RATE_LIMIT_WAIT_SECONDS)
-    else:
-        time.sleep(HOSTED_LOGS_RETRY_WAIT_SECONDS)
-
-
-def _display_logs_follow(eval_id: str, poll_interval: float) -> None:
-    console.print(f"[dim]Watching logs for evaluation {eval_id}... (Ctrl+C to stop)[/dim]\n")
-
-    client = APIClient()
-    last_logs = ""
-    consecutive_errors = 0
-    no_logs_polls = 0
-
-    while True:
-        try:
-            eval_data = _fetch_eval_status(client, eval_id)
-            status_str, status = _parse_eval_status(eval_data)
-
-            if status and status in EvalStatus.terminal_statuses():
-                final_logs = clean_logs(_fetch_logs(client, eval_id))
-                if final_logs and final_logs != last_logs:
-                    for line in get_new_log_lines(last_logs, final_logs):
-                        console.print(line)
-                    last_logs = final_logs
-                console.print()
-                _print_eval_status(eval_data)
-                if status != EvalStatus.COMPLETED:
-                    raise typer.Exit(1)
-                return
-
-            raw_logs = _fetch_logs(client, eval_id)
-            logs = clean_logs(raw_logs) if raw_logs else ""
-            consecutive_errors = 0
-
-            if logs and logs != last_logs:
-                for line in get_new_log_lines(last_logs, logs):
-                    console.print(line)
-                last_logs = logs
-                no_logs_polls = 0
-            else:
-                no_logs_polls += 1
-
-            if no_logs_polls > 0 and no_logs_polls % HOSTED_LOGS_STATUS_UPDATE_EVERY_POLLS == 0:
-                console.print(f"[dim]Evaluation status: {status_str} (waiting for logs...)[/dim]")
-        except APIError as exc:
-            consecutive_errors += 1
-            _handle_log_poll_error(eval_id, exc, consecutive_errors)
-            continue
-
-        time.sleep(poll_interval)
-
-
-def _display_logs_once(eval_id: str, tail: int) -> None:
-    client = APIClient()
-    eval_data = _fetch_eval_status(client, eval_id)
-    raw_logs = _fetch_logs(client, eval_id)
-    logs = clean_logs(raw_logs) if raw_logs else ""
-
-    if logs:
-        for line in logs.splitlines()[-tail:]:
-            console.print(line)
-    else:
-        console.print("[yellow]No logs available.[/yellow]")
-
-    console.print()
-    _print_eval_status(eval_data)
-
-
-def _display_logs(
-    eval_id: str,
-    tail: int,
-    follow: bool,
-    poll_interval: float = HOSTED_LOGS_DEFAULT_POLL_INTERVAL_SECONDS,
-) -> None:
-    try:
-        if follow:
-            _display_logs_follow(eval_id, poll_interval)
-        else:
-            _display_logs_once(eval_id, tail)
-    except KeyboardInterrupt:
-        console.print("\n[dim]Stopped watching logs. Evaluation continues running.[/dim]")
-    except typer.Exit:
-        raise
-    except APIError as exc:
-        console.print(f"[red]Error:[/red] {exc}")
-        raise typer.Exit(1) from exc
-
-
-def _resolve_hosted_environment(
-    environment: str,
-    *,
-    env_dir_path: Optional[str],
-    env_path: Optional[str],
-) -> tuple[str, str]:
-    resolved = _resolve_environment_reference(environment, env_dir_path or DEFAULT_ENV_DIR_PATH)
-
-    platform_slug = resolved.platform_slug or resolved.upstream_slug
-    if platform_slug is None and env_path:
-        metadata = find_environment_metadata(
-            env_name=resolved.env_name,
-            env_path=Path(env_path),
-            module_name=resolved.env_name.replace("-", "_"),
-        )
-        owner = metadata.get("owner") if metadata else None
-        name = metadata.get("name") if metadata else None
-        if owner and name:
-            platform_slug = f"{owner}/{name}"
-
-    if platform_slug is None:
-        console.print(
-            "[red]Error:[/red] hosted evaluations require an upstream environment on the platform"
-        )
-        console.print(
-            "[yellow]Use an environment slug or publish the local environment "
-            "with `prime env push`.[/yellow]"
-        )
-        raise typer.Exit(1)
-
-    parts = _split_owner_and_name(platform_slug)
-    if parts is None:
-        console.print(f"[red]Error:[/red] invalid environment slug: {platform_slug}")
-        raise typer.Exit(1)
-
-    owner, env_name = parts
-    api_client = APIClient()
-    try:
-        response = api_client.get(f"/environmentshub/{owner}/{env_name}/@latest")
-    except APIError as exc:
-        message = str(exc).lower()
-        if "404" in message or "not found" in message:
-            console.print(
-                "[red]Error:[/red] hosted evaluations require an environment "
-                "that is published to the platform"
-            )
-            console.print(f"[yellow]Publish {platform_slug} with `prime env push` first.[/yellow]")
-            raise typer.Exit(1) from exc
-        raise
-
-    details = response.get("data", response)
-    environment_id = details.get("id")
-    if not environment_id:
-        console.print(f"[red]Error:[/red] could not resolve environment id for {platform_slug}")
-        raise typer.Exit(1)
-
-    if resolved.install_mode == "local" and resolved.recommend_push:
-        console.print(
-            "[yellow]Local environment code differs from the latest published version of "
-            f"{platform_slug}.[/yellow]"
-        )
-    console.print(
-        f"[dim]Hosted evaluations always use the latest published version of {platform_slug}.[/dim]"
-    )
-    console.print(f"[dim]Using hosted environment {platform_slug}@latest[/dim]")
-    return platform_slug, str(environment_id)
 
 
 @subcommands_app.command("list", epilog=LIST_EVALS_JSON_HELP)
@@ -1139,40 +480,6 @@ def _push_single_eval(
     return eval_id
 
 
-@subcommands_app.command("view")
-def view_cmd(
-    limit: int = typer.Option(50, "--limit", "-n", help="Max evaluation rows to load"),
-    env_dir: Optional[str] = typer.Option(
-        None, "--env-dir", "-e", help="Path to environments directory"
-    ),
-    outputs_dir: Optional[str] = typer.Option(
-        None, "--outputs-dir", "-o", help="Path to outputs directory"
-    ),
-) -> None:
-    """Launch the interactive evaluation viewer."""
-    if limit < 1:
-        console.print("[red]Error:[/red] --limit must be at least 1")
-        raise typer.Exit(1)
-    run_eval_view(env_dir=env_dir, outputs_dir=outputs_dir, limit=limit)
-
-
-@subcommands_app.command("tui")
-def tui_cmd(
-    _limit: int = typer.Option(
-        50, "--limit", "-n", help="Deprecated; use `prime eval view --limit`."
-    ),
-    _env_dir: Optional[str] = typer.Option(
-        None, "--env-dir", "-e", help="Deprecated; use `prime eval view --env-dir`."
-    ),
-    _outputs_dir: Optional[str] = typer.Option(
-        None, "--outputs-dir", "-o", help="Deprecated; use `prime eval view --outputs-dir`."
-    ),
-) -> None:
-    """Deprecated alias for the evaluation viewer."""
-    console.print("[yellow]Deprecated:[/yellow] `prime eval tui` has moved. Use `prime eval view`.")
-    raise typer.Exit(1)
-
-
 @subcommands_app.command("push", epilog=PUSH_EVAL_JSON_HELP)
 @handle_errors
 def push_eval(
@@ -1347,502 +654,125 @@ app = PlainTyper(
 app.add_typer(subcommands_app, name="")
 
 
-@app.command("logs", no_args_is_help=True)
-def logs_cmd(
-    eval_id: str = typer.Argument(..., help="Evaluation id to get logs for"),
-    tail: int = typer.Option(
-        HOSTED_LOGS_DEFAULT_TAIL_LINES,
-        "--tail",
-        "-n",
-        help="Number of lines to show",
+app = PlainTyper(
+    cls=DefaultGroup,
+    help=(
+        "Run evaluations or manage results (list, get, push, samples).\n\n"
+        "By default, 'prime eval <environment>' runs 'prime eval run <environment>'."
     ),
-    follow: bool = typer.Option(False, "--follow", "-f", help="Follow log output"),
-    poll_interval: float = typer.Option(
-        HOSTED_LOGS_DEFAULT_POLL_INTERVAL_SECONDS,
-        "--poll-interval",
-        help="Polling interval in seconds when following logs",
-    ),
-) -> None:
-    """Get logs for a hosted evaluation."""
-    _display_logs(eval_id, tail, follow, poll_interval=poll_interval)
+    no_args_is_help=True,
+)
 
-
-@app.command("stop", no_args_is_help=True)
-def stop_cmd(
-    eval_id: str = typer.Argument(..., help="Evaluation id to stop"),
-) -> None:
-    """Stop a running hosted evaluation."""
-    try:
-        result = EvalsClient(APIClient()).cancel_hosted_evaluation(eval_id)
-        message = result.get("message") or f"Evaluation {eval_id} cancelled."
-        console.print(f"[green]✓ {message}[/green]")
-        console.print(f"[dim]View results:[/dim] {get_eval_viewer_url(eval_id)}")
-    except APIError as exc:
-        console.print(f"[red]Error:[/red] {exc}")
-        raise typer.Exit(1) from exc
+app.add_typer(subcommands_app, name="")
 
 
 @app.command(
     "run",
-    help="Run an evaluation with API models (default provider = Prime Inference)",
+    help="Run `uv run eval` from prime-rl in a sandbox and stream results to the platform",
     no_args_is_help=True,
-    context_settings={
-        "allow_extra_args": True,
-        "ignore_unknown_options": True,
-        "help_option_names": [],
-    },
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
 )
 def run_eval_cmd(
     ctx: typer.Context,
-    environment: Optional[str] = typer.Argument(
-        None,
-        help="Environment name/slug or TOML config path",
+    environment: str = typer.Argument(
+        ..., help="Taskset id (e.g. gsm8k) or `@ eval.toml`; the rest is passed to `uv run eval`"
     ),
-    skip_upload: bool = typer.Option(
-        False,
-        "--skip-upload",
-        help="Skip uploading results to Prime Evals Hub (results are uploaded by default)",
+    ref: str = typer.Option("main", "--ref", help="prime-rl git ref to check out"),
+    image: str = typer.Option(EVAL_SANDBOX_IMAGE, "--image", help="Sandbox docker image"),
+    cpu_cores: float = typer.Option(4.0, "--cpu", help="Sandbox CPU cores"),
+    memory_gb: float = typer.Option(8.0, "--memory", help="Sandbox memory in GB"),
+    disk_size_gb: float = typer.Option(30.0, "--disk", help="Sandbox disk in GB"),
+    timeout_minutes: int = typer.Option(
+        180, "--timeout-minutes", help="Sandbox lifetime; the eval is killed with it"
     ),
-    env_path: Optional[str] = typer.Option(
-        None,
-        "--env-path",
-        help=(
-            "Path to the environment directory "
-            "(used to locate .prime/.env-metadata.json for upstream resolution)"
-        ),
+    env_var: Optional[list[str]] = typer.Option(
+        None, "--env-var", help="Extra KEY=VALUE for the eval process (repeatable)"
     ),
-    hosted: bool = typer.Option(
-        False,
-        "--hosted",
-        help="Run the evaluation on the platform instead of locally",
-    ),
-    poll_interval: float = typer.Option(
-        HOSTED_RUN_DEFAULT_POLL_INTERVAL_SECONDS,
-        "--poll-interval",
-        help="Polling interval in seconds for hosted evaluation status",
-    ),
-    follow: bool = typer.Option(
-        False,
-        "--follow",
-        help="Follow hosted evaluation status and stream logs until completion",
-    ),
-    timeout_minutes: Optional[int] = typer.Option(
-        None,
-        "--timeout-minutes",
-        help="Timeout in minutes for hosted evaluation",
-    ),
-    allow_sandbox_access: bool = typer.Option(
-        False,
-        "--allow-sandbox-access",
-        help="Allow sandbox read/write access for hosted evaluations",
-    ),
-    allow_instances_access: bool = typer.Option(
-        False,
-        "--allow-instances-access",
-        help="Allow instance creation and management for hosted evaluations",
-    ),
-    allow_tunnel_access: bool = typer.Option(
-        False,
-        "--allow-tunnel-access",
-        help="Allow tunnel creation and management for hosted evaluations",
-    ),
-    custom_secrets: Optional[str] = typer.Option(
-        None,
-        "--custom-secrets",
-        help='Custom secrets for hosted eval as JSON (e.g. \'{"API_KEY":"xxx"}\')',
-    ),
-    sampling_args: Optional[str] = typer.Option(
-        None,
-        "--sampling-args",
-        help=(
-            "Sampling args as JSON for local or hosted evals. "
-            'Example: {"temperature": 0.7, "extra_body": {"provider": {"order": ["azure"]}}}'
-        ),
-    ),
-    eval_name: Optional[str] = typer.Option(
-        None,
-        "--eval-name",
-        help="Custom name for the hosted evaluation",
-    ),
+    keep: bool = typer.Option(False, "--keep", help="Keep the sandbox after the eval exits"),
 ) -> None:
-    """Run an evaluation with local-first environment resolution."""
-    passthrough_args = list(ctx.args)
-
-    if is_help_request(environment or "", passthrough_args):
-        print_eval_run_help()
-        raise typer.Exit(0)
-
-    if environment is None:
-        console.print("[red]Error:[/red] Missing argument 'ENVIRONMENT'.")
-        console.print(f"[dim]Example: {EVAL_RUN_EXAMPLE_COMMAND}[/dim]")
-        raise typer.Exit(2)
-
-    if environment.startswith("-"):
-        console.print("[red]Error:[/red] Environment/config must be the first argument.")
-        console.print(f"[dim]Example: {EVAL_RUN_EXAMPLE_COMMAND}[/dim]")
-        raise typer.Exit(2)
-
-    env_dir_path: Optional[str] = None
-    poll_interval_was_provided = (
-        ctx.get_parameter_source("poll_interval") == ParameterSource.COMMANDLINE
-    )
-    local_passthrough_args = list(passthrough_args)
-    if sampling_args is not None:
-        local_passthrough_args.extend(["--sampling-args", sampling_args])
-
-    if not hosted:
-        hosted_only_args = {
-            "--follow": follow,
-            "--poll-interval": poll_interval_was_provided,
-            "--timeout-minutes": timeout_minutes is not None,
-            "--allow-sandbox-access": allow_sandbox_access,
-            "--allow-instances-access": allow_instances_access,
-            "--allow-tunnel-access": allow_tunnel_access,
-            "--custom-secrets": custom_secrets is not None,
-            "--eval-name": eval_name is not None,
-        }
-        used_hosted_only_args = [flag for flag, used in hosted_only_args.items() if used]
-        if used_hosted_only_args:
-            console.print(
-                "[red]Error:[/red] hosted-only options require `--hosted`: "
-                + ", ".join(used_hosted_only_args)
-            )
+    """Every argument `prime eval run` does not own is proxied verbatim to `uv run eval`
+    (see `uv run eval -h` in prime-rl). `--monitors.prime` is added unless given, so each
+    finished source lands as an evaluation on the platform."""
+    eval_args = [environment, *ctx.args]
+    config_file = None
+    if environment == "@" and eval_args[1:]:
+        config_file = Path(eval_args[1])
+        if not config_file.is_file():
+            console.print(f"[red]Error:[/red] config not found: {config_file}")
             raise typer.Exit(1)
+        eval_args[1] = config_file.name
+    if not any(arg.startswith("--monitors.prime") for arg in eval_args):
+        eval_args.append("--monitors.prime")
 
-    if hosted:
-        _reject_legacy_unsupported_hosted_flags(passthrough_args)
-        parsed_verifiers_args, cli_overrides, option_names_by_dest = (
-            _parse_verifiers_eval_namespace(
-                environment,
-                passthrough_args,
-                sampling_args,
+    config = Config()
+    env_vars = {"PRIME_API_KEY": config.api_key}
+    if config.team_id:
+        env_vars["PRIME_TEAM_ID"] = config.team_id
+    for pair in env_var or []:
+        if "=" not in pair:
+            console.print(f"[red]Error:[/red] --env-var expects KEY=VALUE, got {pair!r}")
+            raise typer.Exit(1)
+        key, value = pair.split("=", 1)
+        env_vars[key] = value
+
+    sandboxes = SandboxClient(APIClient())
+    sandbox = sandboxes.create(
+        CreateSandboxRequest(
+            name=f"prime-eval-{uuid.uuid4().hex[:8]}",
+            docker_image=image,
+            cpu_cores=cpu_cores,
+            memory_gb=memory_gb,
+            disk_size_gb=disk_size_gb,
+            timeout_minutes=timeout_minutes,
+            labels=["prime-eval"],
+        )
+    )
+    console.print(f"[dim]Sandbox {sandbox.id} ({image})[/dim]")
+    try:
+        with console.status("[bold blue]Waiting for sandbox...", spinner="dots"):
+            sandboxes.wait_for_creation(sandbox.id)
+
+        with console.status(f"[bold blue]Installing prime-rl@{ref}...", spinner="dots"):
+            setup = sandboxes.run_background_job(
+                sandbox.id,
+                EVAL_SETUP_SCRIPT.format(repo=PRIME_RL_REPO, ref=shlex.quote(ref)),
+                timeout=EVAL_SETUP_TIMEOUT_SECONDS,
+                working_dir=EVAL_SANDBOX_WORKDIR,
             )
-        )
-        _reject_unsupported_hosted_verifiers_args(cli_overrides, option_names_by_dest)
-        env_dir_path = (
-            parsed_verifiers_args.env_dir_path if "env_dir_path" in cli_overrides else None
-        )
+        if setup.exit_code != 0:
+            console.print(setup.stdout)
+            console.print(f"[red]Installing prime-rl failed (exit {setup.exit_code}):[/red]")
+            console.print(setup.stderr)
+            raise typer.Exit(setup.exit_code or 1)
 
-        cli_headers = None
-        if "header" in cli_overrides:
-            cli_headers = _coerce_hosted_headers({"header": parsed_verifiers_args.header})
+        if config_file is not None:
+            sandboxes.upload_file(
+                sandbox.id, f"{EVAL_SANDBOX_WORKDIR}/prime-rl/{config_file.name}", str(config_file)
+            )
 
-        hosted_target_configs: list[dict[str, Any]] = []
-        if _is_config_target(environment):
-            hosted_target_configs = _load_hosted_eval_configs(environment)
+        command = shlex.join(["uv", "run", "eval", *eval_args])
+        console.print(f"[bold blue]Running:[/bold blue] {command}")
+        console.print(
+            f"[dim]Follow along: prime sandbox run {sandbox.id} -w {EVAL_SANDBOX_WORKDIR}/prime-rl "
+            "-- bash -c 'tail -n 50 outputs/*/logs/latest/eval.log'[/dim]"
+        )
+        result = sandboxes.run_background_job(
+            sandbox.id,
+            command,
+            timeout=timeout_minutes * 60,
+            working_dir=f"{EVAL_SANDBOX_WORKDIR}/prime-rl",
+            env=env_vars,
+        )
+        if result.stdout:
+            console.print(result.stdout)
+        if result.stderr:
+            console.print(result.stderr)
+        if result.exit_code != 0:
+            console.print(f"[red]Eval exited with code {result.exit_code}[/red]")
+            raise typer.Exit(result.exit_code or 1)
+        console.print("[green]✓ Eval finished[/green] - results are under `prime eval list`")
+    finally:
+        if keep:
+            console.print(f"[dim]Sandbox kept: prime sandbox get {sandbox.id}[/dim]")
         else:
-            hosted_target_configs = [
-                {
-                    "env_id": environment,
-                    "env_dir_path": env_dir_path,
-                    "model": DEFAULT_MODEL,
-                    "num_examples": HOSTED_RUN_DEFAULT_NUM_EXAMPLES,
-                    "rollouts_per_example": HOSTED_RUN_DEFAULT_ROLLOUTS_PER_EXAMPLE,
-                    "env_args": None,
-                    "timeout_minutes": None,
-                    "allow_sandbox_access": True,
-                    "allow_instances_access": False,
-                    "allow_tunnel_access": True,
-                    "sampling_args": None,
-                    "max_concurrent": None,
-                    "max_retries": None,
-                    "state_columns": None,
-                    "independent_scoring": False,
-                    "verbose": False,
-                    "headers": None,
-                    "extra_env_kwargs": None,
-                    "api_client_type": None,
-                    "api_base_url": None,
-                    "api_key_var": None,
-                    "eval_name": None,
-                }
-            ]
-
-        parsed_custom_secrets = _parse_string_map_option(custom_secrets, "--custom-secrets")
-
-        effective_targets: list[dict[str, Any]] = []
-        for target_config in hosted_target_configs:
-            try:
-                default_num_examples = int(
-                    target_config.get("num_examples", HOSTED_RUN_DEFAULT_NUM_EXAMPLES)
-                )
-                default_rollouts_per_example = int(
-                    target_config.get(
-                        "rollouts_per_example",
-                        HOSTED_RUN_DEFAULT_ROLLOUTS_PER_EXAMPLE,
-                    )
-                )
-                num_examples = (
-                    parsed_verifiers_args.num_examples
-                    if "num_examples" in cli_overrides
-                    else default_num_examples
-                )
-                rollouts_per_example = (
-                    parsed_verifiers_args.rollouts_per_example
-                    if "rollouts_per_example" in cli_overrides
-                    else default_rollouts_per_example
-                )
-            except ValueError as exc:
-                console.print(
-                    "[red]Error:[/red] --num-examples and --rollouts-per-example must be integers"
-                )
-                raise typer.Exit(1) from exc
-
-            if num_examples < -1 or rollouts_per_example < 1:
-                console.print(
-                    "[red]Error:[/red] --num-examples must be >= -1 and "
-                    "--rollouts-per-example must be >= 1"
-                )
-                raise typer.Exit(1)
-
-            explicit_sampling_args = "sampling_args" in cli_overrides
-            base_sampling_args_raw = (
-                parsed_verifiers_args.sampling_args
-                if explicit_sampling_args
-                else target_config.get("sampling_args")
-            )
-            if base_sampling_args_raw is None:
-                base_sampling_args = None
-            elif isinstance(base_sampling_args_raw, dict):
-                base_sampling_args = base_sampling_args_raw
-            else:
-                console.print("[red]Error:[/red] `sampling_args` must be a JSON object")
-                raise typer.Exit(1)
-            from verifiers.cli.commands.eval import merge_sampling_args
-
-            effective_sampling_args = (
-                merge_sampling_args(
-                    base_sampling_args,
-                    max_tokens=(
-                        parsed_verifiers_args.max_tokens if "max_tokens" in cli_overrides else None
-                    ),
-                    temperature=(
-                        parsed_verifiers_args.temperature
-                        if "temperature" in cli_overrides
-                        else None
-                    ),
-                    prefer_existing_keys=explicit_sampling_args,
-                )
-                or None
-            )
-
-            effective_targets.append(
-                {
-                    "env_id": target_config["env_id"],
-                    "env_dir_path": target_config.get("env_dir_path") or env_dir_path,
-                    "model": (
-                        parsed_verifiers_args.model
-                        if "model" in cli_overrides
-                        else target_config["model"]
-                    ),
-                    "num_examples": num_examples,
-                    "rollouts_per_example": rollouts_per_example,
-                    "env_args": (
-                        parsed_verifiers_args.env_args
-                        if "env_args" in cli_overrides
-                        else target_config.get("env_args")
-                    ),
-                    "timeout_minutes": (
-                        timeout_minutes
-                        if timeout_minutes is not None
-                        else target_config.get("timeout_minutes")
-                    ),
-                    "allow_sandbox_access": (
-                        allow_sandbox_access
-                        if allow_sandbox_access
-                        else target_config.get("allow_sandbox_access", True)
-                    ),
-                    "allow_instances_access": (
-                        allow_instances_access
-                        if allow_instances_access
-                        else target_config.get("allow_instances_access", False)
-                    ),
-                    "allow_tunnel_access": (
-                        allow_tunnel_access
-                        if allow_tunnel_access
-                        else target_config.get("allow_tunnel_access", True)
-                    ),
-                    "custom_secrets": parsed_custom_secrets,
-                    "sampling_args": effective_sampling_args,
-                    "max_concurrent": (
-                        parsed_verifiers_args.max_concurrent
-                        if "max_concurrent" in cli_overrides
-                        else target_config.get("max_concurrent")
-                    ),
-                    "max_retries": (
-                        parsed_verifiers_args.max_retries
-                        if "max_retries" in cli_overrides
-                        else target_config.get("max_retries")
-                    ),
-                    "state_columns": (
-                        parsed_verifiers_args.state_columns
-                        if "state_columns" in cli_overrides
-                        else target_config.get("state_columns")
-                    ),
-                    "independent_scoring": (
-                        parsed_verifiers_args.independent_scoring
-                        if "independent_scoring" in cli_overrides
-                        else target_config.get("independent_scoring", False)
-                    ),
-                    "verbose": (
-                        parsed_verifiers_args.verbose
-                        if "verbose" in cli_overrides
-                        else target_config.get("verbose", False)
-                    ),
-                    "headers": (
-                        cli_headers if "header" in cli_overrides else target_config.get("headers")
-                    ),
-                    "extra_env_kwargs": (
-                        parsed_verifiers_args.extra_env_kwargs
-                        if "extra_env_kwargs" in cli_overrides
-                        else target_config.get("extra_env_kwargs")
-                    ),
-                    "api_client_type": (
-                        parsed_verifiers_args.api_client_type
-                        if "api_client_type" in cli_overrides
-                        else target_config.get("api_client_type")
-                    ),
-                    "api_base_url": (
-                        parsed_verifiers_args.api_base_url
-                        if "api_base_url" in cli_overrides
-                        else target_config.get("api_base_url")
-                    ),
-                    "api_key_var": (
-                        parsed_verifiers_args.api_key_var
-                        if "api_key_var" in cli_overrides
-                        else target_config.get("api_key_var")
-                    ),
-                    "eval_name": eval_name or target_config.get("eval_name"),
-                }
-            )
-
-        if follow and len(effective_targets) > 1:
-            console.print(
-                "[red]Error:[/red] `--follow` is only supported for a single hosted evaluation"
-            )
-            raise typer.Exit(1)
-
-        grouped_targets: dict[tuple[Any, ...], dict[str, Any]] = {}
-        target_order: list[tuple[Any, ...]] = []
-        for target in effective_targets:
-            group_key = (
-                target["model"],
-                target["num_examples"],
-                target["rollouts_per_example"],
-                _freeze_json_value(target.get("env_args")),
-                target.get("timeout_minutes"),
-                target.get("allow_sandbox_access", True),
-                target.get("allow_instances_access", False),
-                target.get("allow_tunnel_access", True),
-                _freeze_json_value(target.get("sampling_args")),
-                target.get("max_concurrent"),
-                target.get("max_retries"),
-                _freeze_json_value(target.get("state_columns")),
-                target.get("independent_scoring", False),
-                target.get("verbose", False),
-                _freeze_json_value(target.get("headers")),
-                _freeze_json_value(target.get("extra_env_kwargs")),
-                target.get("api_client_type"),
-                target.get("api_base_url"),
-                target.get("api_key_var"),
-                target.get("eval_name"),
-            )
-            if group_key not in grouped_targets:
-                grouped_targets[group_key] = {
-                    "target": target,
-                    "targets": [],
-                    "platform_slugs": [],
-                    "environment_ids": [],
-                }
-                target_order.append(group_key)
-            grouped_targets[group_key]["targets"].append(target)
-
-        try:
-            for group_key in target_order:
-                group = grouped_targets[group_key]
-                for grouped_target in group["targets"]:
-                    platform_slug, environment_id = _resolve_hosted_environment(
-                        grouped_target["env_id"],
-                        env_dir_path=grouped_target["env_dir_path"],
-                        env_path=env_path,
-                    )
-                    group["platform_slugs"].append(platform_slug)
-                    group["environment_ids"].append(environment_id)
-        except APIError as exc:
-            console.print(f"[red]Error:[/red] {exc}")
-            raise typer.Exit(1) from exc
-
-        all_platform_slugs: list[str] = []
-        all_evaluation_ids: list[str] = []
-        try:
-            for group_key in target_order:
-                group = grouped_targets[group_key]
-                target = group["target"]
-                hosted_config = HostedEvalConfig(
-                    environment_id=group["environment_ids"][0],
-                    inference_model=target["model"],
-                    num_examples=target["num_examples"],
-                    rollouts_per_example=target["rollouts_per_example"],
-                    env_args=target.get("env_args"),
-                    name=target.get("eval_name"),
-                    timeout_minutes=target.get("timeout_minutes"),
-                    allow_sandbox_access=target.get("allow_sandbox_access", True),
-                    allow_instances_access=target.get("allow_instances_access", False),
-                    allow_tunnel_access=target.get("allow_tunnel_access", True),
-                    custom_secrets=target.get("custom_secrets"),
-                    sampling_args=target.get("sampling_args"),
-                    max_concurrent=target.get("max_concurrent"),
-                    max_retries=target.get("max_retries"),
-                    state_columns=target.get("state_columns"),
-                    independent_scoring=target.get("independent_scoring", False),
-                    verbose=target.get("verbose", False),
-                    headers=target.get("headers"),
-                    extra_env_kwargs=target.get("extra_env_kwargs"),
-                    api_client_type=target.get("api_client_type"),
-                    api_base_url=target.get("api_base_url"),
-                    api_key_var=target.get("api_key_var"),
-                )
-                result = _create_hosted_evaluations(
-                    hosted_config,
-                    environment_ids=group["environment_ids"],
-                )
-                all_platform_slugs.extend(group["platform_slugs"])
-                all_evaluation_ids.extend(result.get("evaluation_ids") or [result["evaluation_id"]])
-        except APIError as exc:
-            console.print(f"[red]Hosted evaluation failed:[/red] {exc}")
-            raise typer.Exit(1) from exc
-
-        if follow:
-            console.print("[green]✓ Hosted evaluation started[/green]")
-            console.print(f"[cyan]Environment:[/cyan] {all_platform_slugs[0]}")
-            console.print(f"[cyan]Evaluation ID:[/cyan] {all_evaluation_ids[0]}")
-            console.print()
-            _display_logs(
-                all_evaluation_ids[0],
-                tail=HOSTED_LOGS_DEFAULT_TAIL_LINES,
-                follow=True,
-                poll_interval=poll_interval,
-            )
-            return
-
-        console.print("[green]✓ Hosted evaluation started[/green]")
-        if len(all_platform_slugs) == 1:
-            console.print(f"[cyan]Environment:[/cyan] {all_platform_slugs[0]}")
-            console.print(f"[cyan]Evaluation ID:[/cyan] {all_evaluation_ids[0]}")
-            console.print(
-                f"[green]View results:[/green] {get_eval_viewer_url(all_evaluation_ids[0])}"
-            )
-            console.print("[dim]View logs:[/dim] prime eval logs " + all_evaluation_ids[0] + " -f")
-            return
-
-        console.print(f"[cyan]Environments:[/cyan] {', '.join(all_platform_slugs)}")
-        console.print(f"[cyan]Evaluation IDs:[/cyan] {', '.join(all_evaluation_ids)}")
-        console.print("[dim]View logs:[/dim] prime eval logs <evaluation-id> -f")
-        return
-
-    run_eval_passthrough(
-        environment=environment,
-        passthrough_args=local_passthrough_args,
-        skip_upload=skip_upload,
-        env_path=env_path,
-    )
+            sandboxes.delete(sandbox.id)

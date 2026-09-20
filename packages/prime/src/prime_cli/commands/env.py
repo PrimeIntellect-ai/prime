@@ -1831,10 +1831,6 @@ def info(
                 console.print(f"  [green]$[/green] uv add {normalized_name}@{wheel_url}")
                 console.print(f"  [green]$[/green] pip install {wheel_url}")
 
-            console.print()
-            console.print("[bold yellow]Usage[/bold yellow]")
-            console.print("  [blue]>>>[/blue] from verifiers import load_environment")
-            console.print(f"  [blue]>>>[/blue] env = load_environment('{name}')")
         elif details.get("visibility") == "PRIVATE":
             console.print("[bold yellow]Install (private environment)[/bold yellow]")
             console.print(f"  [green]$[/green] prime env pull {owner}/{name}@{target_version}")
@@ -2248,11 +2244,6 @@ def install(
             try:
                 execute_install_command(cmd_parts, env_id, target_version, with_tool)
                 installed_envs.append((env_id, target_version))
-
-                # Display usage instructions
-                console.print("\n[dim]Use in Python:[/dim]")
-                console.print("  from verifiers import load_environment")
-                console.print(f"  env = load_environment('{name}')")
             except FileNotFoundError:
                 error_msg = f"{cmd_parts[0]} command not found"
                 install_failed_envs.append((f"{env_id}@{target_version}", error_msg))

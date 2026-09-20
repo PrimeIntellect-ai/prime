@@ -98,6 +98,9 @@ def search_traces(
         raise typer.BadParameter(
             "Choose content, reasoning_content, or tool_calls", param_hint="--field"
         )
+    if "/" in run_id:
+        # The run ID is one URL path segment; the SDK refuses what it cannot address.
+        raise typer.BadParameter("Run IDs containing '/' cannot be searched", param_hint="--run-id")
     if not query.strip() or not 3 <= len(query) <= 256:
         raise typer.BadParameter("Provide 3–256 characters of nonblank text", param_hint="query")
     try:

@@ -58,6 +58,7 @@ def test_search_json_preserves_continuation_coverage_and_scope(monkeypatch):
         ["search", "hello"],
         ["search", " ", "--run-id", "run"],
         ["search", "he", "--run-id", "run"],
+        ["search", "hello", "--run-id", "team/run"],
         ["search", "hello", "--run-id", "run", "--field", "sql"],
     ],
 )

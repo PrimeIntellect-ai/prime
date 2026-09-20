@@ -44,16 +44,19 @@ EVAL_HOSTED_LABEL = "HOSTED"
 EVAL_LOCAL_LABEL = "LOCAL"
 
 PRIME_RL_REPO = "https://github.com/PrimeIntellect-ai/prime-rl.git"
-EVAL_SANDBOX_IMAGE = "ghcr.io/astral-sh/uv:python3.12-bookworm"
+EVAL_SANDBOX_IMAGE = "python:3.12-slim"
 EVAL_SANDBOX_WORKDIR = "/workspace"
 EVAL_SETUP_TIMEOUT_SECONDS = 45 * 60
 # The sandbox has no lifetime; the eval decides when it ends.
 EVAL_NO_DEADLINE_SECONDS = 10**9
 EVAL_LOCAL_ENV_ARCHIVE_SKIP = {".git", ".venv", "__pycache__", "outputs", "dist", ".prime"}
-# Submodules are pinned to SSH URLs; the sandbox has no GitHub key, so route them
-# over HTTPS. Exported (not `git config`) so `git submodule--helper clone` sees it.
+# Sandboxes only run Docker Hub images, so start from python:3.12-slim and add git
+# and uv. Submodules are pinned to SSH URLs; the sandbox has no GitHub key, so route
+# them over HTTPS. Exported (not `git config`) so `git submodule--helper clone` sees it.
 EVAL_SETUP_SCRIPT = """
 set -euo pipefail
+apt-get update -qq && apt-get install -y -qq --no-install-recommends git > /dev/null
+pip install --quiet uv
 export GIT_CONFIG_COUNT=1
 export GIT_CONFIG_KEY_0="url.https://github.com/.insteadOf"
 export GIT_CONFIG_VALUE_0="git@github.com:"

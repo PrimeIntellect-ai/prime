@@ -645,7 +645,7 @@ def push_eval(
 app = PlainTyper(
     cls=DefaultGroup,
     help=(
-        "Run evaluations or manage results (list, get, push, samples).\n\n"
+        "Manage hosted evaluations (run, list, get, samples, push)\n\n"
         "By default, 'prime eval <environment>' runs 'prime eval run <environment>'."
     ),
     no_args_is_help=True,
@@ -657,7 +657,7 @@ app.add_typer(subcommands_app, name="")
 app = PlainTyper(
     cls=DefaultGroup,
     help=(
-        "Run evaluations or manage results (list, get, push, samples).\n\n"
+        "Manage hosted evaluations (run, list, get, samples, push)\n\n"
         "By default, 'prime eval <environment>' runs 'prime eval run <environment>'."
     ),
     no_args_is_help=True,

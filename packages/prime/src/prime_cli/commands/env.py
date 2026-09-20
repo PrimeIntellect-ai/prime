@@ -48,7 +48,13 @@ from ..utils.time_utils import format_time_ago, iso_timestamp
 from ..utils.workspace import resolve_workspace_python
 from .config import TEAM_ID_PATTERN
 
-app = PlainTyper(help="Manage environments on the Environments Hub", no_args_is_help=True)
+app = PlainTyper(
+    help=(
+        "Manage environments (list, status, info, inspect, push, pull, install, uninstall, "
+        "delete, version, secret, var)"
+    ),
+    no_args_is_help=True,
+)
 console = get_console()
 
 # Constants

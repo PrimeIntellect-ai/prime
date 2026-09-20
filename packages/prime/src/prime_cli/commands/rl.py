@@ -1279,7 +1279,10 @@ class DefaultGroup(DefaultCommandGroup):
 app = PlainTyper(
     cls=DefaultGroup,
     help=(
-        "Launch and manage Hosted Training runs. Pass a config path directly to start a new run."
+        "Manage hosted training (models, gpus, request, configs, list, get, stop, delete, "
+        "restart, init, logs, components, metrics, rollouts, progress, distributions, "
+        "checkpoints, usage)\n\n"
+        "By default, 'prime train <config.toml>' starts a new run."
     ),
     no_args_is_help=True,
 )

@@ -48,9 +48,7 @@ from ..utils.time_utils import format_time_ago, iso_timestamp
 from .config import TEAM_ID_PATTERN
 
 app = PlainTyper(
-    help=(
-        "Manage environments (list, info, push, pull, delete, version, secret, var)"
-    ),
+    help=("Manage environments (list, info, push, pull, delete, version, secret, var)"),
     no_args_is_help=True,
 )
 console = get_console()
@@ -1778,6 +1776,10 @@ def process_wheel_url(wheel_url: Optional[str]) -> Optional[str]:
         raise ValueError(f"Invalid wheel URL: {wheel_url}")
 
     return wheel_url
+
+
+version_app = PlainTyper(help="Manage environment versions", no_args_is_help=True)
+app.add_typer(version_app, name="version")
 
 
 @version_app.command("list", no_args_is_help=True)

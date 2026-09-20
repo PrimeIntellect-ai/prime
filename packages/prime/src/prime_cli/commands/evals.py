@@ -55,6 +55,7 @@ EVAL_LOCAL_ENV_ARCHIVE_SKIP = {".git", ".venv", "__pycache__", "outputs", "dist"
 # them over HTTPS. Exported (not `git config`) so `git submodule--helper clone` sees it.
 EVAL_SETUP_SCRIPT = """
 set -euo pipefail
+mkdir -p {workdir} && cd {workdir}
 apt-get update -qq && apt-get install -y -qq --no-install-recommends git > /dev/null
 pip install --quiet uv
 export GIT_CONFIG_COUNT=1
@@ -378,11 +379,14 @@ def run_eval_cmd(
             sandboxes.wait_for_creation(sandbox.id)
 
         with console.status(f"[bold blue]Installing prime-rl@{ref}...", spinner="dots"):
+            setup_script = EVAL_SETUP_SCRIPT.format(
+                workdir=EVAL_SANDBOX_WORKDIR, repo=PRIME_RL_REPO, ref=shlex.quote(ref)
+            )
+            # Background jobs run under `sh`; the script needs bash for `pipefail`.
             setup = sandboxes.run_background_job(
                 sandbox.id,
-                EVAL_SETUP_SCRIPT.format(repo=PRIME_RL_REPO, ref=shlex.quote(ref)),
+                f"bash -c {shlex.quote(setup_script)}",
                 timeout=EVAL_SETUP_TIMEOUT_SECONDS,
-                working_dir=EVAL_SANDBOX_WORKDIR,
             )
         if setup.exit_code != 0:
             console.print(setup.stdout)

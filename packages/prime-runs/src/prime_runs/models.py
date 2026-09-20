@@ -190,6 +190,7 @@ class RunSpec:
     config: Dict[str, Any] = field(default_factory=dict)
     kind: RunKind = RUN_KIND
     training: Optional[TrainingSpec] = None
+    hosted: bool = False
 
 
 @dataclass

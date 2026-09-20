@@ -360,7 +360,8 @@ def run_eval_cmd(
         eval_args.append("--monitors.prime")
 
     config = Config()
-    env_vars = {"PRIME_API_KEY": config.api_key}
+    # PRIME_RUNS_HOSTED marks the evaluations prime-rl's monitor creates as hosted.
+    env_vars = {"PRIME_API_KEY": config.api_key, "PRIME_RUNS_HOSTED": "1"}
     if config.team_id:
         env_vars["PRIME_TEAM_ID"] = config.team_id
     for pair in env_var or []:

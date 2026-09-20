@@ -105,6 +105,7 @@ class EvalsBackend:
         _set_if(payload, "description", spec.description)
         _set_if(payload, "metadata", spec.config or None)
         _set_if(payload, "team_id", spec.team_id or self._team_id)
+        _set_if(payload, "is_hosted", True if spec.hosted else None)
 
         # Not replayable: a retry after a lost response would create a second run.
         response = self._client.post("/evaluations/", json_body=payload)

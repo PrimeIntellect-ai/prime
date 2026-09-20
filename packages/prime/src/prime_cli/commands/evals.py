@@ -189,6 +189,7 @@ def list_evals(
         table.add_column("Environment", style="blue", no_wrap=True, overflow="ellipsis", ratio=1)
         table.add_column("Model", style="magenta", no_wrap=True, overflow="ellipsis", ratio=1)
         table.add_column("Status", style="yellow", no_wrap=True)
+        table.add_column("Type", style="green", justify="center", no_wrap=True)
         table.add_column("User", style="dim", no_wrap=True, overflow="ellipsis")
 
         for e in evals:
@@ -209,6 +210,7 @@ def list_evals(
                 str(env_name),
                 str(e.get("model_name", "")),
                 str(e.get("status", "")),
+                "HOSTED" if e.get("is_hosted") else "LOCAL",
                 user,
             )
 

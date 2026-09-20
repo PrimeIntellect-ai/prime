@@ -115,7 +115,6 @@ def list_evals(
         "-e",
         help="Filter by environment (e.g., 'gsm8k' or 'owner/gsm8k')",
     ),
-    mine: bool = typer.Option(False, "--mine", help="Only evaluations started by you"),
     as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ) -> None:
     """List hosted evaluations"""
@@ -136,16 +135,6 @@ def list_evals(
             skip=skip,
             limit=num,
         )
-
-        if mine:
-            if not config.user_id:
-                console.print(
-                    "[red]Error:[/red] --mine needs your user id; run `prime whoami` first"
-                )
-                raise typer.Exit(1)
-            data["evaluations"] = [
-                e for e in data.get("evaluations", []) if str(e.get("user_id")) == config.user_id
-            ]
 
         if as_json:
             output_data_as_json(data, console)

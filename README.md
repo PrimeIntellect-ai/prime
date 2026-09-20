@@ -195,7 +195,7 @@ prime pods ssh <pod-id>
 
 ### Evaluations
 
-`prime eval run` creates a sandbox, installs [prime-rl](https://github.com/PrimeIntellect-ai/prime-rl), and runs `uv run eval` with every other argument passed through. Results stream to the platform via the prime monitor.
+`prime eval run` creates a sandbox, installs [prime-rl](https://github.com/PrimeIntellect-ai/prime-rl), and runs `uv run eval` with every other argument passed through. Results stream to the platform via the prime monitor and show up in `prime eval list`.
 
 ```bash
 # Evaluate a model (flags after the environment go to `uv run eval`)
@@ -204,23 +204,9 @@ prime eval run gsm8k -n 32 -r 4 -m openai/gpt-4.1-mini
 # Multi-source eval from a local TOML, pinned to a prime-rl ref
 prime eval run @ eval.toml --ref v0.3.0
 
-# Auto-discover and push evaluations from current directory
-prime eval push
-
-# Push specific eval directory (verifiers format)
-prime eval push outputs/evals/gsm8k--gpt-4/abc123
-
-# Push a public evaluation (default is private)
-prime eval push --public
-
-# List all evaluations
+# List hosted evaluations and inspect one with its samples
 prime eval list
-
-# Get evaluation details
-prime eval get <eval-id>
-
-# View evaluation samples
-prime eval samples <eval-id>
+prime eval info <eval-id>
 ```
 
 ### Team Management

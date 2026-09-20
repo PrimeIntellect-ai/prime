@@ -1,16 +1,13 @@
-import inspect
 import json
-import re
 import shlex
 import uuid
 from functools import wraps
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 import typer
-from prime_evals import EvalsAPIError, EvalsClient, InvalidEvaluationError
+from prime_evals import EvalsAPIError, EvalsClient
 from prime_sandboxes import CreateSandboxRequest, SandboxClient
-from rich.progress import Progress
 from rich.syntax import Syntax
 from rich.table import Table
 
@@ -23,8 +20,6 @@ from ..utils import (
     json_output_help,
     output_data_as_json,
 )
-from ..utils.display import get_eval_viewer_url
-from ..utils.eval_push import load_results_jsonl
 
 console = get_console()
 
@@ -33,23 +28,10 @@ LIST_EVALS_JSON_HELP = json_output_help(
     ".total = number",
 )
 
-EVAL_DETAIL_JSON_HELP = json_output_help(
+EVAL_INFO_JSON_HELP = json_output_help(
     ". = evaluation object from Prime Evals",
-    "Common keys: .evaluation_id? | .id, .environment_names[]?, .model_name?, "
-    ".status?, .metadata?, .metrics?",
-)
-
-EVAL_SAMPLES_JSON_HELP = json_output_help(
-    ".samples[] = sample object",
-    "Common keys: .samples[].example_id?, .samples[].input?, .samples[].output?, .samples[].score?",
-    ".total? = number",
-    ".page? = number",
-    ".limit? = number",
-)
-
-PUSH_EVAL_JSON_HELP = json_output_help(
-    "Single push: .evaluation_id = string",
-    "Auto-discovery batch push: .results[] = {path, status, eval_id?, error?}",
+    "Common keys: .evaluation_id? | .id, .environment_names[]?, .model_name?, .status?, .metrics?",
+    ".samples = the requested page of samples (.samples[]?, .total?, .page?, .limit?)",
 )
 
 EVAL_TABLE_MAX_TEXT_WIDTH = 30
@@ -101,14 +83,6 @@ def handle_errors(func):
             raise typer.Exit(1)
 
     return wrapper
-
-
-def format_output(data: dict, as_json: bool) -> None:
-    if as_json:
-        output_data_as_json(data, console)
-    else:
-        syntax = Syntax(json.dumps(data, indent=2), "json", theme="monokai")
-        console.print(syntax)
 
 
 @subcommands_app.command("list", epilog=LIST_EVALS_JSON_HELP)
@@ -208,431 +182,31 @@ def list_evals(
         raise typer.Exit(1)
 
 
-@subcommands_app.command("get", epilog=EVAL_DETAIL_JSON_HELP)
+@subcommands_app.command("info", epilog=EVAL_INFO_JSON_HELP)
 @handle_errors
-def get_eval(
-    eval_id: str = typer.Argument(..., help="The ID of the evaluation to retrieve"),
+def info_eval(
+    eval_id: str = typer.Argument(..., help="Evaluation ID (from `prime eval list`)"),
+    page: int = typer.Option(1, "--page", "-p", help="Samples page number"),
+    num: int = typer.Option(20, "--num", "-n", help="Samples per page"),
     as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ) -> None:
-    """Show a hosted evaluation"""
-    api_client = APIClient()
-    client = EvalsClient(api_client)
-    data = client.get_evaluation(eval_id)
-    format_output(data, as_json)
-
-
-@subcommands_app.command("samples", epilog=EVAL_SAMPLES_JSON_HELP)
-@handle_errors
-def get_samples(
-    eval_id: str = typer.Argument(..., help="The ID of the evaluation"),
-    page: int = typer.Option(1, "--page", "-p", help="Page number"),
-    num: int = typer.Option(100, "--num", "-n", help="Items per page"),
-    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
-) -> None:
-    """Show the samples of a hosted evaluation"""
-    api_client = APIClient()
-    client = EvalsClient(api_client)
-    data = client.get_samples(eval_id, page=page, limit=num)
-    format_output(data, as_json)
-
-
-def _load_eval_directory(directory: Path) -> dict:
-    with open(directory / "metadata.json") as f:
-        metadata = json.load(f)
-
-    env_field = metadata.get("env_id") or metadata.get("env")
-    if not env_field or "model" not in metadata:
-        raise ValueError(
-            f"Missing required 'env_id' or 'model' field in {directory / 'metadata.json'}"
-        )
-
-    results = load_results_jsonl(directory / "results.jsonl")
-
-    for sample in results:
-        if "id" in sample and "example_id" not in sample:
-            sample["example_id"] = sample["id"]
-
-    avg_pattern = re.compile(r"^avg_(.+)$")
-    metrics = {}
-    metadata_copy = {}
-    for key, value in metadata.items():
-        if match := avg_pattern.match(key):
-            metrics[match.group(1)] = value
-        else:
-            metadata_copy[key] = value
-
-    return {
-        "eval_name": f"{env_field}-{metadata['model']}",
-        "model_name": metadata["model"],
-        "env": env_field,
-        "metrics": metrics,
-        "metadata": metadata_copy,
-        "results": results,
-    }
-
-
-def _has_eval_files(directory: Path) -> bool:
-    return (directory / "metadata.json").exists() and (directory / "results.jsonl").exists()
-
-
-def _validate_eval_path(path_str: str) -> Path:
-    """Validate and return the evaluation directory path."""
-    path = Path(path_str)
-
-    if path.is_file():
-        # Auto-correct: if user passed metadata.json or results.jsonl, use parent directory
-        if path.name in ("metadata.json", "results.jsonl"):
-            parent = path.parent
-            if _has_eval_files(parent):
-                return parent
-            raise ValueError(
-                f"Directory '{parent}' must contain both metadata.json and results.jsonl"
-            )
-        raise ValueError(
-            f"Expected a directory path, but got file: {path}\n"
-            f"Pass a directory containing metadata.json and results.jsonl"
-        )
-
-    if path.is_dir():
-        if _has_eval_files(path):
-            return path
-
-        has_metadata = (path / "metadata.json").exists()
-        has_results = (path / "results.jsonl").exists()
-        if has_metadata and not has_results:
-            raise ValueError(f"Directory '{path}' is missing results.jsonl")
-        elif has_results and not has_metadata:
-            raise ValueError(f"Directory '{path}' is missing metadata.json")
-        else:
-            raise ValueError(f"Directory '{path}' is missing both metadata.json and results.jsonl")
-
-    raise FileNotFoundError(f"Path not found: {path}")
-
-
-def _discover_eval_outputs() -> list[Path]:
-    outputs_dir = Path("outputs/evals")
-    if not outputs_dir.exists():
-        return []
-
-    eval_dirs = []
-    for env_dir in outputs_dir.iterdir():
-        if not env_dir.is_dir():
-            continue
-        for run_dir in env_dir.iterdir():
-            if run_dir.is_dir() and _has_eval_files(run_dir):
-                eval_dirs.append(run_dir)
-
-    return sorted(eval_dirs)
-
-
-def _resolve_eval_viewer_url(evaluation_id: str, response: Optional[dict[str, Any]] = None) -> str:
-    viewer_url = response.get("viewer_url") if response else None
-    if viewer_url:
-        return str(viewer_url)
-    return get_eval_viewer_url(evaluation_id)
-
-
-def _push_samples_with_progress(
-    client: EvalsClient, evaluation_id: str, samples: list[dict[str, Any]]
-) -> None:
-    if not console.is_terminal or not _push_samples_accepts_progress_callback(client):
-        client.push_samples(evaluation_id, samples)
+    """Show a hosted evaluation and its samples"""
+    client = EvalsClient(APIClient())
+    evaluation = client.get_evaluation(eval_id)
+    samples = client.get_samples(eval_id, page=page, limit=num)
+    if as_json:
+        output_data_as_json({**evaluation, "samples": samples}, console)
         return
-
-    with Progress(console=console, transient=True) as progress:
-        task_id = progress.add_task("Uploading samples", total=len(samples))
-        client.push_samples(
-            evaluation_id,
-            samples,
-            progress_callback=lambda uploaded: progress.update(task_id, advance=uploaded),
-        )
-
-
-def _push_samples_accepts_progress_callback(client: EvalsClient) -> bool:
-    try:
-        parameters = inspect.signature(client.push_samples).parameters.values()
-    except (TypeError, ValueError):
-        return False
-    return any(
-        parameter.name == "progress_callback" or parameter.kind is inspect.Parameter.VAR_KEYWORD
-        for parameter in parameters
-    )
-
-
-def _require_published_environment_for_eval_push(env_name: str, eval_path: Path) -> None:
-    console.print("[red]Error:[/red] Evaluation uploads require a pushed environment.")
-    console.print(
-        f"[yellow]Push '{env_name}' before uploading this evaluation:[/yellow] "
-        f"prime env push {env_name}"
-    )
-    console.print("[dim]Then retry with an owner-qualified environment:[/dim]")
-    console.print(f"[dim]  --env <owner>/{env_name}[/dim]")
-    console.print(f"[dim]Example: prime eval push {eval_path} --env <owner>/{env_name}[/dim]")
-    raise typer.Exit(1)
-
-
-def _push_single_eval(
-    config_path: str,
-    env_slug: Optional[str],
-    run_id: Optional[str],
-    eval_id: Optional[str],
-    is_public: bool = False,
-    name: Optional[str] = None,
-) -> str:
-    path = _validate_eval_path(config_path)
-    eval_data = _load_eval_directory(path)
-    eval_name = name or eval_data["eval_name"]
-    console.print(f"[blue]✓ Loaded eval data:[/blue] {path}")
-
-    detected_env = eval_data.get("env_id") or eval_data.get("env")
-    if not env_slug and detected_env and not run_id and not eval_id:
-        env_slug = detected_env
-
-    environments = None
-    if env_slug and not run_id and not eval_id:
-        if "/" not in env_slug:
-            _require_published_environment_for_eval_push(env_slug, path)
-        environments = [{"slug": env_slug}]
-
-    console.print()
-
-    api_client = APIClient()
-    client = EvalsClient(api_client)
-
-    if eval_id:
-        console.print(f"[blue]Checking evaluation:[/blue] {eval_id}")
-        try:
-            client.get_evaluation(eval_id)
-            console.print("[green]✓ Found existing evaluation[/green]")
-
-            console.print("[blue]Updating evaluation...[/blue]")
-            client.update_evaluation(
-                evaluation_id=eval_id,
-                name=eval_name,
-                model_name=eval_data.get("model_name"),
-                framework=eval_data.get("metadata", {}).get("framework", "verifiers"),
-                task_type=eval_data.get("metadata", {}).get("task_type"),
-                metadata=eval_data.get("metadata"),
-                metrics=eval_data.get("metrics"),
-                tags=eval_data.get("tags", []),
-            )
-            console.print(f"[green]✓ Updated evaluation:[/green] {eval_id}")
-        except Exception as e:
-            console.print(f"[red]Error:[/red] Could not update evaluation {eval_id}: {e}")
-            raise
-        console.print()
-    else:
-        console.print("[blue]Creating evaluation...[/blue]")
-        create_response = client.create_evaluation(
-            name=eval_name,
-            environments=environments,
-            run_id=run_id,
-            model_name=eval_data.get("model_name"),
-            framework=eval_data.get("metadata", {}).get("framework", "verifiers"),
-            task_type=eval_data.get("metadata", {}).get("task_type"),
-            metadata=eval_data.get("metadata"),
-            metrics=eval_data.get("metrics"),
-            tags=eval_data.get("tags", []),
-            is_public=is_public,
-        )
-
-        eval_id = create_response.get("evaluation_id")
-        if not eval_id:
-            raise ValueError("Failed to get evaluation ID from response")
-
-        console.print(f"[green]✓ Created evaluation:[/green] {eval_id}")
-        console.print()
-
-    results = eval_data.get("results", [])
-    if results:
-        console.print(f"[blue]Pushing {len(results)} samples...[/blue]")
-        _push_samples_with_progress(client, eval_id, results)
-        console.print("[green]✓ Samples pushed successfully[/green]")
-        console.print()
-
-    console.print("[blue]Finalizing evaluation...[/blue]")
-    finalize_response = client.finalize_evaluation(eval_id, metrics=eval_data.get("metrics"))
-    viewer_url = _resolve_eval_viewer_url(eval_id, finalize_response)
-    console.print("[green]✓ Evaluation finalized[/green]")
-    console.print()
-
-    console.print("[green]✓ Success[/green]")
-    console.print(f"[blue]Evaluation ID:[/blue] {eval_id}")
-    console.print(f"[dim]View results:[/dim] {viewer_url}")
-    console.print()
-    console.print("[dim]Inspect evaluation data:[/dim]")
-    console.print(f"  prime eval get {eval_id}")
-    console.print(f"  prime eval samples {eval_id}")
-
-    return eval_id
-
-
-@subcommands_app.command("push", epilog=PUSH_EVAL_JSON_HELP)
-@handle_errors
-def push_eval(
-    config_path: Optional[str] = typer.Argument(
-        None,
-        help=(
-            "Path to eval directory containing metadata.json and results.jsonl. "
-            "If not provided, auto-discovers from outputs/evals/"
-        ),
-    ),
-    env_id: Optional[str] = typer.Option(
-        None,
-        "--env",
-        "--env-id",
-        "-e",
-        help=(
-            "Published environment slug (owner/name). "
-            "Push local environments with `prime env push` first."
-        ),
-    ),
-    run_id: Optional[str] = typer.Option(
-        None,
-        "--run-id",
-        "-r",
-        help="Link to existing training run id",
-    ),
-    eval_id: Optional[str] = typer.Option(
-        None,
-        "--eval",
-        "--eval-id",
-        help="Push to existing evaluation id",
-    ),
-    name: Optional[str] = typer.Option(
-        None,
-        "--name",
-        help="Explicit evaluation name override",
-    ),
-    is_public: bool = typer.Option(
-        False,
-        "--public",
-        help="Make the pushed evaluation public. Evaluations are private by default.",
-    ),
-    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
-) -> None:
-    """Push a local evaluation to the platform.
-
-    The directory must contain metadata.json and results.jsonl files.
-
-    \b
-    Examples:
-        prime eval push                                    # Push current dir or auto-discover
-        prime eval push outputs/evals/gsm8k--gpt-4/abc123  # Push specific directory
-        prime eval push --env owner/gsm8k                  # Push with environment override
-        prime eval push --name "gsm8k smoke test"         # Override evaluation display name
-        prime eval push --public                           # Create a public evaluation
-        prime eval push --eval xyz789 --name "rerun"      # Update an existing evaluation name
-    """
-    try:
-        if eval_id and is_public:
-            console.print(
-                "[red]Error:[/red] The --public flag cannot be used with --eval-id. "
-                "Visibility can only be set when creating a new evaluation."
-            )
-            raise typer.Exit(1)
-
-        if config_path is None and eval_id:
-            console.print("[red]Error:[/red] Cannot use --eval-id with auto-discovery")
-            console.print()
-            console.print("[yellow]Tip:[/yellow] Specify an explicit path when using --eval-id:")
-            console.print("  prime eval push /path/to/eval/data --eval-id <eval-id>")
-            console.print("  prime eval push outputs/evals/env--model/run-id --eval-id <eval-id>")
-            raise typer.Exit(1)
-
-        if config_path is None:
-            current_dir = Path(".")
-            if _has_eval_files(current_dir):
-                result_eval_id = _push_single_eval(".", env_id, run_id, eval_id, is_public, name)
-                if as_json:
-                    console.print()
-                    output_data_as_json({"evaluation_id": result_eval_id}, console)
-                return
-
-            eval_dirs = _discover_eval_outputs()
-            if not eval_dirs:
-                console.print("[red]Error:[/red] No evaluation outputs found")
-                console.print(
-                    "[yellow]Hint:[/yellow] Run from a directory with "
-                    "metadata.json and results.jsonl, or from a directory containing outputs/evals/"
-                )
-                raise typer.Exit(1)
-
-            console.print(f"[blue]Found {len(eval_dirs)} evaluation(s) to push:[/blue]")
-            for eval_dir in eval_dirs:
-                console.print(f"  - {eval_dir}")
-            console.print()
-
-            results = []
-            for eval_dir in eval_dirs:
-                try:
-                    result_eval_id = _push_single_eval(
-                        str(eval_dir), env_id, run_id, eval_id, is_public, name
-                    )
-                    results.append(
-                        {"path": str(eval_dir), "eval_id": result_eval_id, "status": "success"}
-                    )
-                except Exception as e:
-                    console.print(f"[red]Failed to push {eval_dir}:[/red] {e}")
-                    results.append({"path": str(eval_dir), "error": str(e), "status": "failed"})
-                console.print()
-
-            success_count = sum(1 for r in results if r["status"] == "success")
-            console.print(
-                f"[blue]Summary:[/blue] {success_count}/{len(eval_dirs)} "
-                f"evaluations pushed successfully"
-            )
-
-            if as_json:
-                output_data_as_json({"results": results}, console)
-
-            if success_count < len(eval_dirs):
-                raise typer.Exit(1)
-
-            return
-
-        result_eval_id = _push_single_eval(config_path, env_id, run_id, eval_id, is_public, name)
-
-        if as_json:
-            console.print()
-            output_data_as_json({"evaluation_id": result_eval_id}, console)
-
-    except FileNotFoundError as e:
-        console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
-    except json.JSONDecodeError as e:
-        console.print(f"[red]Error:[/red] Invalid JSON in metadata.json: {e}")
-        raise typer.Exit(1)
-    except ValueError as e:
-        console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
-    except InvalidEvaluationError as e:
-        console.print(f"[red]Error:[/red] {e}")
-        console.print()
-        console.print("[yellow]Tip:[/yellow] You must provide one of:")
-        console.print("  --eval <eval_id>     (to update an existing evaluation)")
-        console.print("  --run-id <run_id>    (to link to an existing training run)")
-        console.print("  --env <env>          (published environment slug, e.g., 'owner/gsm8k')")
-        console.print("  [or ensure owner/name 'env' or 'env_id' is set in metadata.json]")
-        raise typer.Exit(1)
-    except KeyError as e:
-        console.print(f"[red]Error:[/red] Missing required field: {e}")
-        console.print(
-            "[yellow]Hint:[/yellow] metadata.json must contain 'env' (or 'env_id') and 'model'"
-        )
-        raise typer.Exit(1)
-    except EvalsAPIError as e:
-        console.print(f"[red]API Error:[/red] {e}")
-        raise typer.Exit(1)
-    except Exception as e:
-        console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+    console.print("[bold cyan]Evaluation[/bold cyan]")
+    console.print(Syntax(json.dumps(evaluation, indent=2), "json", theme="monokai"))
+    console.print(f"\n[bold cyan]Samples[/bold cyan] [dim](page {page}, {num} per page)[/dim]")
+    console.print(Syntax(json.dumps(samples, indent=2), "json", theme="monokai"))
 
 
 app = PlainTyper(
     cls=DefaultGroup,
     help=(
-        "Manage hosted evaluations (run, list, get, samples, push)\n\n"
+        "Manage hosted evaluations (run, list, info)\n\n"
         "By default, 'prime eval <environment>' runs 'prime eval run <environment>'."
     ),
     no_args_is_help=True,
@@ -644,7 +218,7 @@ app.add_typer(subcommands_app, name="")
 app = PlainTyper(
     cls=DefaultGroup,
     help=(
-        "Manage hosted evaluations (run, list, get, samples, push)\n\n"
+        "Manage hosted evaluations (run, list, info)\n\n"
         "By default, 'prime eval <environment>' runs 'prime eval run <environment>'."
     ),
     no_args_is_help=True,

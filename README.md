@@ -35,8 +35,8 @@ uv tool install prime
 # Authenticate
 prime login
 
-# Evaluate a model on an environment (runs prime-rl in a sandbox)
-prime eval run gsm8k -n 32 -r 4
+# Evaluate a model on a Hub environment (runs prime-rl in a sandbox)
+prime eval run primeintellect/gsm8k -n 32 -r 4
 
 # See available Hosted Training models, capacity, and pricing
 prime train models
@@ -195,18 +195,17 @@ prime pods ssh <pod-id>
 
 ### Evaluations
 
-`prime eval run` creates a sandbox, installs [prime-rl](https://github.com/PrimeIntellect-ai/prime-rl), and runs `uv run eval` with every other argument passed through. Results stream to the platform via the prime monitor and show up in `prime eval list`.
+`prime eval run` creates a sandbox, installs [prime-rl](https://github.com/PrimeIntellect-ai/prime-rl) plus the environment from the Environments Hub, and runs `uv run eval` with every other argument passed through. Results stream to the platform via the prime monitor and show up in `prime eval list`.
 
 ```bash
-# Evaluate a model (flags after the environment go to `uv run eval`)
-prime eval run gsm8k -n 32 -r 4 -m openai/gpt-4.1-mini
+# Evaluate a model on a Hub environment (flags after it go to `uv run eval`)
+prime eval run primeintellect/gsm8k -n 32 -r 4 -m openai/gpt-4.1-mini
 
-# A Hub environment by slug, or a local environment package
-prime eval run primeintellect/gsm8k -n 32
+# A local environment package instead of a Hub one
 prime eval run gsm8k --env-path ./environments/gsm8k -n 32
 
-# Multi-source eval from a local TOML, pinned to a prime-rl ref
-prime eval run @ eval.toml --ref v0.3.0
+# Multi-source eval from a local TOML, installing its environments from the Hub
+prime eval run @ eval.toml --install primeintellect/gsm8k --install primeintellect/aime25
 
 # List hosted evaluations and inspect one with its samples
 prime eval list

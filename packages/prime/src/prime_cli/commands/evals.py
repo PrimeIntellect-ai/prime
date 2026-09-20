@@ -64,7 +64,7 @@ git clone --quiet {repo} prime-rl
 cd prime-rl
 git checkout --quiet {ref}
 git submodule update --init --recursive --depth 1 --quiet
-uv sync --all-packages --quiet
+uv sync --quiet
 """
 
 
@@ -249,7 +249,10 @@ app.add_typer(subcommands_app, name="")
 
 
 def _hub_env_install_command(slug: str) -> tuple[str, str]:
-    """Resolve an `owner/name` Hub slug to its install command and taskset id."""
+    """Resolve an `owner/name` Hub slug to its install command and taskset id.
+
+    `--no-config` keeps prime-rl's `[tool.uv]` settings (an `exclude-newer` cooldown
+    that rejects Hub wheels, which carry no upload date) out of the install."""
     owner, name = slug.split("/", 1)
     try:
         response = APIClient(require_auth=False).get(f"/environmentshub/{owner}/{name}/@latest")
@@ -263,7 +266,7 @@ def _hub_env_install_command(slug: str) -> tuple[str, str]:
         console.print(f"[yellow]Pull it with `prime env pull {slug}` and pass --env-path.[/yellow]")
         raise typer.Exit(1)
     package = name.replace("-", "_").lower()
-    return f"uv pip install {package} --extra-index-url {index_url}", name
+    return f"uv pip install --no-config {package} --extra-index-url {index_url}", name
 
 
 def _upload_local_env(sandboxes: SandboxClient, sandbox_id: str, env_path: Path) -> None:
@@ -304,12 +307,15 @@ def run_eval_cmd(
     environment: str = typer.Argument(
         ...,
         help=(
-            "Taskset id bundled with prime-rl (gsm8k), a Hub slug (owner/name), "
+            "Environments Hub slug (owner/name), a taskset id with --env-path, "
             "or `@ eval.toml`; the rest is passed to `uv run eval`"
         ),
     ),
     env_path: Optional[Path] = typer.Option(
         None, "--env-path", help="Local environment package to upload and install first"
+    ),
+    install: Optional[list[str]] = typer.Option(
+        None, "--install", help="Extra Hub environments (owner/name) to install (repeatable)"
     ),
     ref: str = typer.Option("main", "--ref", help="prime-rl git ref to check out"),
     image: str = typer.Option(EVAL_SANDBOX_IMAGE, "--image", help="Sandbox docker image"),
@@ -325,15 +331,24 @@ def run_eval_cmd(
     (see `uv run eval -h` in prime-rl). `--monitors.prime` is added unless given, so each
     finished source lands as an evaluation on the platform."""
     eval_args = [environment, *ctx.args]
-    install_command = None
+    install_commands = [_hub_env_install_command(slug)[0] for slug in install or []]
     if env_path is not None:
         if not (env_path / "pyproject.toml").is_file():
             console.print(f"[red]Error:[/red] {env_path} has no pyproject.toml")
             raise typer.Exit(1)
-        install_command = f"uv pip install -e {EVAL_SANDBOX_WORKDIR}/envs/{env_path.resolve().name}"
-    elif "/" in environment and environment != "@":
+        install_commands.append(
+            f"uv pip install --no-config -e {EVAL_SANDBOX_WORKDIR}/envs/{env_path.resolve().name}"
+        )
+    elif "/" in environment:
         install_command, environment = _hub_env_install_command(environment)
+        install_commands.append(install_command)
         eval_args[0] = environment
+    elif environment != "@" or not install_commands:
+        console.print(
+            "[red]Error:[/red] prime-rl ships no environments; pass an Environments Hub slug "
+            "(owner/name), --env-path for a local package, or `@ eval.toml` with --install"
+        )
+        raise typer.Exit(1)
     config_file = None
     if environment == "@" and eval_args[1:]:
         config_file = Path(eval_args[1])
@@ -394,21 +409,20 @@ def run_eval_cmd(
 
         if env_path is not None:
             _upload_local_env(sandboxes, sandbox.id, env_path)
-        if install_command is not None:
-            with console.status("[bold blue]Installing the environment...", spinner="dots"):
-                install = sandboxes.run_background_job(
-                    sandbox.id,
-                    install_command,
-                    timeout=EVAL_SETUP_TIMEOUT_SECONDS,
-                    working_dir=f"{EVAL_SANDBOX_WORKDIR}/prime-rl",
-                )
-            if install.exit_code != 0:
-                console.print(install.stdout)
-                console.print(
-                    f"[red]Installing the environment failed (exit {install.exit_code}):[/red]"
-                )
-                console.print(install.stderr)
-                raise typer.Exit(install.exit_code or 1)
+        started = time.monotonic()
+        with console.status("[bold blue]Installing environments...", spinner="dots"):
+            installed = sandboxes.run_background_job(
+                sandbox.id,
+                " && ".join(install_commands),
+                timeout=EVAL_SETUP_TIMEOUT_SECONDS,
+                working_dir=f"{EVAL_SANDBOX_WORKDIR}/prime-rl",
+            )
+        if installed.exit_code != 0:
+            console.print(installed.stdout)
+            console.print(f"[red]Installing environments failed (exit {installed.exit_code})[/red]")
+            console.print(installed.stderr)
+            raise typer.Exit(installed.exit_code or 1)
+        console.print(f"[dim]Environments installed in {time.monotonic() - started:.0f}s[/dim]")
 
         if config_file is not None:
             sandboxes.upload_file(

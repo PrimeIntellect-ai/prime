@@ -125,7 +125,7 @@ def list_evals(
     ),
     as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ) -> None:
-    """List evaluations."""
+    """List hosted evaluations"""
 
     if num < 1 or page < 1:
         console.print("[red]Error:[/red] --num and --page must be at least 1")
@@ -214,6 +214,7 @@ def get_eval(
     eval_id: str = typer.Argument(..., help="The ID of the evaluation to retrieve"),
     as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ) -> None:
+    """Show a hosted evaluation"""
     api_client = APIClient()
     client = EvalsClient(api_client)
     data = client.get_evaluation(eval_id)
@@ -228,6 +229,7 @@ def get_samples(
     num: int = typer.Option(100, "--num", "-n", help="Items per page"),
     as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ) -> None:
+    """Show the samples of a hosted evaluation"""
     api_client = APIClient()
     client = EvalsClient(api_client)
     data = client.get_samples(eval_id, page=page, limit=num)
@@ -509,7 +511,7 @@ def push_eval(
     ),
     as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ) -> None:
-    """Push evaluation data to Prime Evals.
+    """Push a local evaluation to the platform.
 
     The directory must contain metadata.json and results.jsonl files.
 
@@ -653,7 +655,7 @@ app.add_typer(subcommands_app, name="")
 
 @app.command(
     "run",
-    help="Run `uv run eval` from prime-rl in a sandbox and stream results to the platform",
+    help="Run a hosted evaluation",
     no_args_is_help=True,
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
 )

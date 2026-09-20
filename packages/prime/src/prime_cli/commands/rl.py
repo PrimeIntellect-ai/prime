@@ -1237,34 +1237,11 @@ def _format_run_for_display(run: RLRun) -> Dict[str, Any]:
 class DefaultGroup(DefaultCommandGroup):
     """Makes 'run' the default command when a config file is passed."""
 
-    def __init__(self, *args, default_cmd_name: str = "run", **kwargs):
-        super().__init__(*args, default_cmd_name=default_cmd_name, **kwargs)
-        self._show_default_command_params = False
-
     def format_usage(self, ctx, formatter):
         formatter.write_usage(
             ctx.command_path,
             "[OPTIONS] CONFIG_PATH [ARGS]... | COMMAND [ARGS]...",
         )
-
-    def get_params(self, ctx):
-        params = super().get_params(ctx)
-        if not self._show_default_command_params:
-            return params
-
-        default_command = self.commands.get(self.default_cmd_name)
-        if default_command is None:
-            return params
-
-        seen = {p.name for p in default_command.params}
-        return [*default_command.params, *(p for p in params if p.name not in seen)]
-
-    def format_help(self, ctx, formatter):
-        self._show_default_command_params = True
-        try:
-            return super().format_help(ctx, formatter)
-        finally:
-            self._show_default_command_params = False
 
     def invoke(self, ctx):
         if ctx.info_name == "rl":
@@ -1287,7 +1264,7 @@ app = PlainTyper(
 )
 
 
-@app.command("run", rich_help_panel="Commands", hidden=True, epilog=RL_RUN_JSON_HELP)
+@app.command("run", rich_help_panel="Commands", epilog=RL_RUN_JSON_HELP)
 def create_run(
     config_path: str = typer.Argument(
         ...,

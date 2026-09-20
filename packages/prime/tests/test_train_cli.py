@@ -16,8 +16,8 @@ def test_train_help_promotes_config_run_path() -> None:
     assert result.exit_code == 0, result.output
     assert "prime train [OPTIONS] CONFIG_PATH [ARGS]... | COMMAND [ARGS]..." in result.output
     assert "Manage hosted training" in result.output
-    assert "Path to a TOML config file to launch as a" in result.output
-    assert "Hosted Training run." in result.output
+    assert "run" in result.output
+    assert "--env-var" not in result.output
     assert "logs" in result.output
     assert "request" in result.output
 

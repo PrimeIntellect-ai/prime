@@ -1690,13 +1690,13 @@ def info(
         wheel_url = process_wheel_url(details.get("wheel_url"))
 
         console.print()
-        console.print(f"[bold cyan]{owner}/{name}[/bold cyan][dim]@{target_version}[/dim]")
+        visibility = (status.get("visibility") or "unknown").lower()
+        console.print(f"[bold cyan]{owner}/{name}@{target_version}[/bold cyan] ({visibility})")
         description = (details.get("metadata") or {}).get("description") or status.get(
             "description"
         )
         if description:
             console.print(f"[dim]{description}[/dim]")
-        console.print(f"[dim]Visibility:[/dim] {status.get('visibility', 'UNKNOWN')}")
 
         if versions:
             table = Table()

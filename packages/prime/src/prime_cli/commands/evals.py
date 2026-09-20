@@ -1,5 +1,7 @@
 import json
 import shlex
+import tarfile
+import tempfile
 import uuid
 from functools import wraps
 from pathlib import Path
@@ -7,6 +9,7 @@ from typing import Optional
 
 import typer
 from prime_evals import EvalsAPIError, EvalsClient
+from prime_sandboxes import APIClient as SandboxAPIClient
 from prime_sandboxes import CreateSandboxRequest, SandboxClient
 from rich.syntax import Syntax
 from rich.table import Table
@@ -44,6 +47,9 @@ PRIME_RL_REPO = "https://github.com/PrimeIntellect-ai/prime-rl.git"
 EVAL_SANDBOX_IMAGE = "ghcr.io/astral-sh/uv:python3.12-bookworm"
 EVAL_SANDBOX_WORKDIR = "/workspace"
 EVAL_SETUP_TIMEOUT_SECONDS = 45 * 60
+# The sandbox has no lifetime; the eval decides when it ends.
+EVAL_NO_DEADLINE_SECONDS = 10**9
+EVAL_LOCAL_ENV_ARCHIVE_SKIP = {".git", ".venv", "__pycache__", "outputs", "dist", ".prime"}
 # Submodules are pinned to SSH URLs; the sandbox has no GitHub key, so route them
 # over HTTPS. Exported (not `git config`) so `git submodule--helper clone` sees it.
 EVAL_SETUP_SCRIPT = """
@@ -244,6 +250,51 @@ app = PlainTyper(
 app.add_typer(subcommands_app, name="")
 
 
+def _hub_env_install_command(slug: str) -> tuple[str, str]:
+    """Resolve an `owner/name` Hub slug to its install command and taskset id."""
+    owner, name = slug.split("/", 1)
+    try:
+        response = APIClient(require_auth=False).get(f"/environmentshub/{owner}/{name}/@latest")
+    except APIError as exc:
+        console.print(f"[red]Error:[/red] could not resolve {slug} on the Environments Hub: {exc}")
+        raise typer.Exit(1) from exc
+    details = response.get("data", response)
+    index_url = details.get("install_index_url") or details.get("simple_index_url")
+    if not index_url:
+        console.print(f"[red]Error:[/red] {slug} has no install index (private environment?)")
+        console.print(f"[yellow]Pull it with `prime env pull {slug}` and pass --env-path.[/yellow]")
+        raise typer.Exit(1)
+    package = name.replace("-", "_").lower()
+    return f"uv pip install {package} --extra-index-url {index_url}", name
+
+
+def _upload_local_env(sandboxes: SandboxClient, sandbox_id: str, env_path: Path) -> None:
+    """Ship a local environment package into the sandbox at /workspace/envs/<name>."""
+    env_path = env_path.resolve()
+
+    def skip(info: tarfile.TarInfo) -> tarfile.TarInfo | None:
+        parts = Path(info.name).parts
+        return None if any(part in EVAL_LOCAL_ENV_ARCHIVE_SKIP for part in parts) else info
+
+    with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as handle:
+        archive = Path(handle.name)
+    try:
+        with tarfile.open(archive, "w:gz") as tar:
+            tar.add(env_path, arcname=env_path.name, filter=skip)
+        remote_archive = f"{EVAL_SANDBOX_WORKDIR}/{env_path.name}.tar.gz"
+        sandboxes.upload_file(sandbox_id, remote_archive, str(archive))
+    finally:
+        archive.unlink()
+    result = sandboxes.execute_command(
+        sandbox_id,
+        f"mkdir -p envs && tar -xzf {shlex.quote(remote_archive)} -C envs",
+        working_dir=EVAL_SANDBOX_WORKDIR,
+    )
+    if result.exit_code != 0:
+        console.print(f"[red]Error:[/red] unpacking {env_path.name} failed: {result.stderr}")
+        raise typer.Exit(1)
+
+
 @app.command(
     "run",
     help="Run a hosted evaluation",
@@ -253,16 +304,20 @@ app.add_typer(subcommands_app, name="")
 def run_eval_cmd(
     ctx: typer.Context,
     environment: str = typer.Argument(
-        ..., help="Taskset id (e.g. gsm8k) or `@ eval.toml`; the rest is passed to `uv run eval`"
+        ...,
+        help=(
+            "Taskset id bundled with prime-rl (gsm8k), a Hub slug (owner/name), "
+            "or `@ eval.toml`; the rest is passed to `uv run eval`"
+        ),
+    ),
+    env_path: Optional[Path] = typer.Option(
+        None, "--env-path", help="Local environment package to upload and install first"
     ),
     ref: str = typer.Option("main", "--ref", help="prime-rl git ref to check out"),
     image: str = typer.Option(EVAL_SANDBOX_IMAGE, "--image", help="Sandbox docker image"),
     cpu_cores: float = typer.Option(4.0, "--cpu", help="Sandbox CPU cores"),
     memory_gb: float = typer.Option(8.0, "--memory", help="Sandbox memory in GB"),
-    disk_size_gb: float = typer.Option(30.0, "--disk", help="Sandbox disk in GB"),
-    timeout_minutes: int = typer.Option(
-        180, "--timeout-minutes", help="Sandbox lifetime; the eval is killed with it"
-    ),
+    disk_size_gb: float = typer.Option(20.0, "--disk", help="Sandbox disk in GB"),
     env_var: Optional[list[str]] = typer.Option(
         None, "--env-var", help="Extra KEY=VALUE for the eval process (repeatable)"
     ),
@@ -272,6 +327,15 @@ def run_eval_cmd(
     (see `uv run eval -h` in prime-rl). `--monitors.prime` is added unless given, so each
     finished source lands as an evaluation on the platform."""
     eval_args = [environment, *ctx.args]
+    install_command = None
+    if env_path is not None:
+        if not (env_path / "pyproject.toml").is_file():
+            console.print(f"[red]Error:[/red] {env_path} has no pyproject.toml")
+            raise typer.Exit(1)
+        install_command = f"uv pip install -e {EVAL_SANDBOX_WORKDIR}/envs/{env_path.resolve().name}"
+    elif "/" in environment and environment != "@":
+        install_command, environment = _hub_env_install_command(environment)
+        eval_args[0] = environment
     config_file = None
     if environment == "@" and eval_args[1:]:
         config_file = Path(eval_args[1])
@@ -293,7 +357,7 @@ def run_eval_cmd(
         key, value = pair.split("=", 1)
         env_vars[key] = value
 
-    sandboxes = SandboxClient(APIClient())
+    sandboxes = SandboxClient(SandboxAPIClient())
     sandbox = sandboxes.create(
         CreateSandboxRequest(
             name=f"prime-eval-{uuid.uuid4().hex[:8]}",
@@ -301,7 +365,7 @@ def run_eval_cmd(
             cpu_cores=cpu_cores,
             memory_gb=memory_gb,
             disk_size_gb=disk_size_gb,
-            timeout_minutes=timeout_minutes,
+            timeout_minutes=-1,
             labels=["prime-eval"],
         )
     )
@@ -323,6 +387,24 @@ def run_eval_cmd(
             console.print(setup.stderr)
             raise typer.Exit(setup.exit_code or 1)
 
+        if env_path is not None:
+            _upload_local_env(sandboxes, sandbox.id, env_path)
+        if install_command is not None:
+            with console.status("[bold blue]Installing the environment...", spinner="dots"):
+                install = sandboxes.run_background_job(
+                    sandbox.id,
+                    install_command,
+                    timeout=EVAL_SETUP_TIMEOUT_SECONDS,
+                    working_dir=f"{EVAL_SANDBOX_WORKDIR}/prime-rl",
+                )
+            if install.exit_code != 0:
+                console.print(install.stdout)
+                console.print(
+                    f"[red]Installing the environment failed (exit {install.exit_code}):[/red]"
+                )
+                console.print(install.stderr)
+                raise typer.Exit(install.exit_code or 1)
+
         if config_file is not None:
             sandboxes.upload_file(
                 sandbox.id, f"{EVAL_SANDBOX_WORKDIR}/prime-rl/{config_file.name}", str(config_file)
@@ -337,7 +419,7 @@ def run_eval_cmd(
         result = sandboxes.run_background_job(
             sandbox.id,
             command,
-            timeout=timeout_minutes * 60,
+            timeout=EVAL_NO_DEADLINE_SECONDS,
             working_dir=f"{EVAL_SANDBOX_WORKDIR}/prime-rl",
             env=env_vars,
         )

@@ -201,6 +201,10 @@ prime pods ssh <pod-id>
 # Evaluate a model (flags after the environment go to `uv run eval`)
 prime eval run gsm8k -n 32 -r 4 -m openai/gpt-4.1-mini
 
+# A Hub environment by slug, or a local environment package
+prime eval run primeintellect/gsm8k -n 32
+prime eval run gsm8k --env-path ./environments/gsm8k -n 32
+
 # Multi-source eval from a local TOML, pinned to a prime-rl ref
 prime eval run @ eval.toml --ref v0.3.0
 

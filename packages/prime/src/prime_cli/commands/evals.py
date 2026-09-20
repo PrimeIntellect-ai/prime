@@ -4,6 +4,7 @@ import tarfile
 import tempfile
 import time
 import uuid
+from contextlib import contextmanager
 from functools import wraps
 from pathlib import Path
 from typing import Optional
@@ -12,8 +13,11 @@ import typer
 from prime_evals import EvalsAPIError, EvalsClient
 from prime_sandboxes import APIClient as SandboxAPIClient
 from prime_sandboxes import CreateSandboxRequest, SandboxClient
+from rich.live import Live
+from rich.spinner import Spinner
 from rich.syntax import Syntax
 from rich.table import Table
+from rich.text import Text
 
 from ..client import APIClient, APIError
 from ..core import Config
@@ -54,6 +58,7 @@ EVAL_LOCAL_ENV_ARCHIVE_SKIP = {".git", ".venv", "__pycache__", "outputs", "dist"
 # them over HTTPS. Exported (not `git config`) so `git submodule--helper clone` sees it.
 EVAL_SETUP_SCRIPT = """
 set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
 mkdir -p {workdir} && cd {workdir}
 apt-get update -qq && apt-get install -y -qq --no-install-recommends git > /dev/null
 pip install --quiet uv
@@ -248,6 +253,55 @@ app = PlainTyper(
 app.add_typer(subcommands_app, name="")
 
 
+class _StepFailed(Exception):
+    """A step's command exited non-zero; the message is what to show the user."""
+
+
+class _StepView:
+    """Spinner + label + running timer, redrawn by `Live`."""
+
+    def __init__(self, label: str) -> None:
+        self.label = label
+        self.started = time.monotonic()
+        self._spinner = Spinner("dots", style="blue")
+
+    def elapsed(self) -> str:
+        return f"{time.monotonic() - self.started:.0f}s"
+
+    def __rich_console__(self, console, options):
+        self._spinner.update(text=Text(f" {self.label} ({self.elapsed()})", style="bold blue"))
+        yield self._spinner
+
+
+@contextmanager
+def _step(label: str):
+    """Show `label` with a spinner and timer, then replace it with ✓ or ✗ and the time."""
+    view = _StepView(label)
+    live = Live(view, console=console, transient=True, refresh_per_second=8)
+    live.start()
+    try:
+        yield view
+    except _StepFailed as exc:
+        live.stop()
+        console.print(f"[red]✗[/red] {view.label} [dim]({view.elapsed()})[/dim]")
+        console.print(str(exc), markup=False)
+        raise typer.Exit(1) from exc
+    except BaseException:
+        live.stop()
+        console.print(f"[red]✗[/red] {view.label} [dim]({view.elapsed()})[/dim]")
+        raise
+    live.stop()
+    console.print(f"[green]✓[/green] {view.label} [dim]({view.elapsed()})[/dim]")
+
+
+def _check(job, what: str) -> None:
+    if job.exit_code == 0:
+        return
+    output = "\n".join(part.strip() for part in (job.stdout, job.stderr) if part and part.strip())
+    tail = "\n".join(output.splitlines()[-15:])
+    raise _StepFailed(f"{what} failed (exit {job.exit_code})\n{tail}")
+
+
 def _hub_env_install_command(slug: str) -> tuple[str, str]:
     """Resolve an `owner/name` Hub slug to its install command and taskset id.
 
@@ -372,26 +426,22 @@ def run_eval_cmd(
         env_vars[key] = value
 
     sandboxes = SandboxClient(SandboxAPIClient())
-    sandbox = sandboxes.create(
-        CreateSandboxRequest(
-            name=f"prime-eval-{uuid.uuid4().hex[:8]}",
-            docker_image=image,
-            cpu_cores=cpu_cores,
-            memory_gb=memory_gb,
-            disk_size_gb=disk_size_gb,
-            timeout_minutes=-1,
-            labels=["prime-eval"],
+    with _step("Start sandbox") as step:
+        sandbox = sandboxes.create(
+            CreateSandboxRequest(
+                name=f"prime-eval-{uuid.uuid4().hex[:8]}",
+                docker_image=image,
+                cpu_cores=cpu_cores,
+                memory_gb=memory_gb,
+                disk_size_gb=disk_size_gb,
+                timeout_minutes=-1,
+                labels=["prime-eval"],
+            )
         )
-    )
-    console.print(f"[dim]Sandbox {sandbox.id} ({image})[/dim]")
+        step.label = f"Start sandbox {sandbox.id} ({image})"
+        sandboxes.wait_for_creation(sandbox.id)
     try:
-        started = time.monotonic()
-        with console.status("[bold blue]Waiting for sandbox...", spinner="dots"):
-            sandboxes.wait_for_creation(sandbox.id)
-        console.print(f"[dim]Sandbox ready in {time.monotonic() - started:.0f}s[/dim]")
-
-        started = time.monotonic()
-        with console.status(f"[bold blue]Installing prime-rl@{ref}...", spinner="dots"):
+        with _step(f"Install prime-rl@{ref}"):
             setup_script = EVAL_SETUP_SCRIPT.format(
                 workdir=EVAL_SANDBOX_WORKDIR, repo=PRIME_RL_REPO, ref=shlex.quote(ref)
             )
@@ -401,56 +451,40 @@ def run_eval_cmd(
                 f"bash -c {shlex.quote(setup_script)}",
                 timeout=EVAL_SETUP_TIMEOUT_SECONDS,
             )
-        if setup.exit_code != 0:
-            console.print(setup.stdout)
-            console.print(f"[red]Installing prime-rl failed (exit {setup.exit_code}):[/red]")
-            console.print(setup.stderr)
-            raise typer.Exit(setup.exit_code or 1)
-        console.print(f"[dim]prime-rl@{ref} installed in {time.monotonic() - started:.0f}s[/dim]")
+            _check(setup, "Installing prime-rl")
 
-        if env_path is not None:
-            _upload_local_env(sandboxes, sandbox.id, env_path)
-        started = time.monotonic()
-        with console.status("[bold blue]Installing environments...", spinner="dots"):
+        with _step("Install environments"):
+            if env_path is not None:
+                _upload_local_env(sandboxes, sandbox.id, env_path)
             installed = sandboxes.run_background_job(
                 sandbox.id,
                 " && ".join(install_commands),
                 timeout=EVAL_SETUP_TIMEOUT_SECONDS,
                 working_dir=f"{EVAL_SANDBOX_WORKDIR}/prime-rl",
             )
-        if installed.exit_code != 0:
-            console.print(installed.stdout)
-            console.print(f"[red]Installing environments failed (exit {installed.exit_code})[/red]")
-            console.print(installed.stderr)
-            raise typer.Exit(installed.exit_code or 1)
-        console.print(f"[dim]Environments installed in {time.monotonic() - started:.0f}s[/dim]")
-
-        if config_file is not None:
-            sandboxes.upload_file(
-                sandbox.id, f"{EVAL_SANDBOX_WORKDIR}/prime-rl/{config_file.name}", str(config_file)
-            )
+            _check(installed, "Installing environments")
+            if config_file is not None:
+                sandboxes.upload_file(
+                    sandbox.id,
+                    f"{EVAL_SANDBOX_WORKDIR}/prime-rl/{config_file.name}",
+                    str(config_file),
+                )
 
         command = shlex.join(["uv", "run", "eval", *eval_args])
-        console.print(f"[bold blue]Running:[/bold blue] {command}")
         console.print(
             f"[dim]Follow along: prime sandbox run {sandbox.id} -w {EVAL_SANDBOX_WORKDIR}/prime-rl "
             "-- bash -c 'tail -n 50 outputs/*/logs/latest/eval.log'[/dim]"
         )
-        result = sandboxes.run_background_job(
-            sandbox.id,
-            command,
-            timeout=EVAL_NO_DEADLINE_SECONDS,
-            working_dir=f"{EVAL_SANDBOX_WORKDIR}/prime-rl",
-            env=env_vars,
-        )
-        if result.stdout:
-            console.print(result.stdout)
-        if result.stderr:
-            console.print(result.stderr)
-        if result.exit_code != 0:
-            console.print(f"[red]Eval exited with code {result.exit_code}[/red]")
-            raise typer.Exit(result.exit_code or 1)
-        console.print("[green]✓ Eval finished[/green] - results are under `prime eval list`")
+        with _step(f"Run {command}"):
+            result = sandboxes.run_background_job(
+                sandbox.id,
+                command,
+                timeout=EVAL_NO_DEADLINE_SECONDS,
+                working_dir=f"{EVAL_SANDBOX_WORKDIR}/prime-rl",
+                env=env_vars,
+            )
+            _check(result, "Eval")
+        console.print("Results are under `prime eval list`")
     finally:
         if keep:
             console.print(f"[dim]Sandbox kept: prime sandbox get {sandbox.id}[/dim]")

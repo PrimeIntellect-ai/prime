@@ -65,11 +65,11 @@ MAX_TARBALL_SIZE_LIMIT = 250 * 1024 * 1024  # 250MB
 
 # Secret subcommand app
 secret_app = PlainTyper(help="Manage environment secrets", no_args_is_help=True)
-app.add_typer(secret_app, name="secret", rich_help_panel="Manage")
+app.add_typer(secret_app, name="secret")
 
 # Variable subcommand app
 var_app = PlainTyper(help="Manage environment variables", no_args_is_help=True)
-app.add_typer(var_app, name="var", rich_help_panel="Manage")
+app.add_typer(var_app, name="var")
 
 ENV_LIST_JSON_HELP = json_output_help(
     ".environments[] = {environment, description, visibility, version, stars, updated_at, tags[]?}",
@@ -422,7 +422,7 @@ def compute_content_hash(env_path: Path) -> str:
     return content_hasher.hexdigest()
 
 
-@app.command("list", rich_help_panel="Explore", epilog=ENV_LIST_JSON_HELP)
+@app.command("list", epilog=ENV_LIST_JSON_HELP)
 def list_cmd(
     num: int = typer.Option(DEFAULT_LIST_LIMIT, "--num", "-n", help="Items per page"),
     page: int = typer.Option(1, "--page", "-p", help="Page number"),
@@ -587,7 +587,7 @@ def list_cmd(
         raise typer.Exit(1)
 
 
-@app.command("status", rich_help_panel="Explore", epilog=ENV_STATUS_JSON_HELP)
+@app.command("status", epilog=ENV_STATUS_JSON_HELP)
 def status_cmd(
     env_id: str = typer.Argument(..., help="Environment ID (owner/name)"),
     output: str = typer.Option("table", "--output", help="Output format: table or json"),
@@ -692,7 +692,7 @@ def _resolve_pull_environment_path(target: Optional[str], env_name: str) -> Path
     return parent / env_folder
 
 
-@app.command(rich_help_panel="Manage")
+@app.command()
 def push(
     env_id: Optional[str] = typer.Argument(
         None,
@@ -1344,7 +1344,7 @@ def push(
         raise typer.Exit(1)
 
 
-@app.command(no_args_is_help=True, rich_help_panel="Manage")
+@app.command(no_args_is_help=True)
 def pull(
     env_id: str = typer.Argument(..., help="Environment ID (owner/name or owner/name@version)"),
     target: Optional[str] = typer.Option(None, "--target", "-t", help="Target directory"),
@@ -1727,7 +1727,7 @@ def get_install_command(
         raise ValueError(f"Unsupported package manager: {tool}. Use 'uv' or 'pip'.")
 
 
-@app.command(no_args_is_help=True, rich_help_panel="Explore")
+@app.command(no_args_is_help=True)
 def info(
     env_id: str = typer.Argument(..., help="Environment ID (owner/name)"),
     version: str = typer.Option("latest", "--version", "-v", help="Version to show"),
@@ -1919,7 +1919,7 @@ def execute_install_command(cmd: List[str], env_id: str, version: str, tool: str
     console.print(f"\n[green]✓ Successfully installed {env_id}@{version}[/green]")
 
 
-@app.command(no_args_is_help=True, rich_help_panel="Manage")
+@app.command(no_args_is_help=True)
 def install(
     env_ids: List[str] = typer.Argument(
         ..., help="Environment ID(s) to install (owner/name or local name)"
@@ -1946,7 +1946,7 @@ def install(
         help="Allow pre-release versions (e.g., verifiers>=0.1.12.dev3).",
     ),
 ) -> None:
-    """Install a verifiers environment.
+    """Install an environment from the Hub or a local path.
 
     \b
     Examples:
@@ -2207,7 +2207,7 @@ def execute_uninstall_command(cmd: List[str], env_name: str, tool: str) -> None:
         raise typer.Exit(1)
 
 
-@app.command(no_args_is_help=True, rich_help_panel="Manage")
+@app.command(no_args_is_help=True)
 def uninstall(
     env_name: str = typer.Argument(..., help="Environment name to uninstall"),
     with_tool: str = typer.Option(
@@ -2216,7 +2216,7 @@ def uninstall(
         help="Package manager to use (uv or pip)",
     ),
 ) -> None:
-    """Uninstall a verifiers environment.
+    """Uninstall an environment.
 
     \b
     Examples:
@@ -2269,7 +2269,7 @@ def uninstall(
 
 
 version_app = PlainTyper(help="Manage environment versions", no_args_is_help=True)
-app.add_typer(version_app, name="version", rich_help_panel="Manage")
+app.add_typer(version_app, name="version")
 
 
 @version_app.command("list", no_args_is_help=True)
@@ -2424,7 +2424,7 @@ def delete_version(
         raise typer.Exit(1)
 
 
-@app.command(no_args_is_help=True, rich_help_panel="Manage")
+@app.command(no_args_is_help=True)
 def delete(
     env_id: str = typer.Argument(..., help="Environment ID to delete"),
     force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation"),

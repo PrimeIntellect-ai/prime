@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 
 MODE_ENV = "PRIME_RUNS_MODE"
 #: Set (to 1/true) by launchers such as `prime eval run`; marks the run as hosted.
-HOSTED_ENV = "PRIME_RUNS_HOSTED"
+HOSTED_ENV = "PRIME_RUNS_IS_HOSTED"
 #: How long ``finish()`` lets queued uploads drain: one in-flight sample POST
 #: may take this long, and a shorter budget would abandon it about to succeed.
 DEFAULT_FINISH_TIMEOUT = float(UPLOAD_TIMEOUT.read or 300.0)

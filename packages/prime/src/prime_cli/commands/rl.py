@@ -330,7 +330,7 @@ id = "{env_value}"
 def _validate_env_id_value(v: str, *, field_name: str) -> str:
     """Validate a legacy env id or v1 plugin id.
 
-    Bare ids are importable runtime ids. Slash-shaped ids are Hub refs and
+    Bare ids are importable runtime ids. Slash-shaped ids are Environments Hub refs and
     must include both owner and name.
     """
     v = v.strip()

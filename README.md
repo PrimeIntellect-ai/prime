@@ -54,7 +54,7 @@ prime availability list
 
 ## Features
 
-- **Environments** - Access hundreds of verified environments on our community hub
+- **Environments** - Access hundreds of verified environments on the Environments Hub
 - **Evaluations** - Run prime-rl evals in a sandbox and manage results on the platform
 - **Hosted Training** - Train models against environments and inspect runs, logs, metrics, and checkpoints
 - **GPU Resource Management** - Query and filter available GPU resources
@@ -126,7 +126,7 @@ prime config view
 
 ### Environments Hub
 
-Access hundreds of verified environments on our community hub with deep integrations with sandboxes, training, and evaluation stack.
+Access hundreds of verified environments on the Environments Hub with deep integrations with sandboxes, training, and evaluation stack.
 
 ```bash
 # Browse available environments

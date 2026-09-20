@@ -75,7 +75,7 @@ ENV_LIST_JSON_HELP = json_output_help(
 )
 
 ENV_INFO_JSON_HELP = json_output_help(
-    ". = environment version object from the Hub",
+    ". = environment version object from the Environments Hub",
     ".latest_version? = {semantic_version?, content_hash?, created_at?}",
 )
 
@@ -437,7 +437,7 @@ def list_cmd(
         False, "--mine", help="Filter to only your own environments (personal + team)"
     ),
 ) -> None:
-    """List environments from the hub.
+    """List environments from the Environments Hub.
 
     By default, shows all public environments. If authenticated, also includes
     private environments you have access to. Use --starred or --mine to filter.
@@ -809,7 +809,7 @@ def push(
         wheel_size = wheel_path.stat().st_size
         console.print(f"[green]✓ Built {wheel_path.name} ({wheel_size:,} bytes)[/green]")
 
-        console.print("\nUploading to Prime Intellect Hub...")
+        console.print("\nUploading to the Environments Hub...")
 
         try:
             client = APIClient()
@@ -950,8 +950,8 @@ def push(
             )
             if runtime_hint is None:
                 console.print(
-                    "[yellow]No verifiers requirement found, so the Hub will list this "
-                    "package as Unclassified; pass --runtime v0|v1 to declare it.[/yellow]"
+                    "[yellow]No verifiers requirement found, so the Environments Hub will list "
+                    "this package as Unclassified; pass --runtime v0|v1 to declare it.[/yellow]"
                 )
             else:
                 label = "verifiers v1" if runtime_hint == VERIFIERS_V1 else "legacy verifiers v0"
@@ -1153,7 +1153,7 @@ def push(
                 console.print(f"Wheel: {wheel_path.name}")
                 console.print(f"SHA256: {wheel_sha256}")
 
-                # Save or update environment hub metadata for future reference
+                # Save or update Environments Hub metadata for future reference
                 try:
                     prime_dir = env_path / ".prime"
                     prime_dir.mkdir(exist_ok=True)
@@ -1242,7 +1242,7 @@ def push(
                         f"[yellow]Warning: Could not save environment metadata: {e}[/yellow]"
                     )
 
-                # Show Hub page link for the environment
+                # Show Environments Hub page link for the environment
                 frontend_url = client.config.frontend_url.rstrip("/")
                 hub_url = f"{frontend_url}/dashboard/environments/{owner_name}/{env_name}"
                 console.print("\n[cyan]View on Environments Hub:[/cyan]")
@@ -1874,7 +1874,7 @@ def delete_version(
     content_hash: str = typer.Argument(..., help="Content hash of the version to delete"),
     force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation"),
 ) -> None:
-    """Delete a specific environment version from the environments hub using its content hash"""
+    """Delete a specific environment version from the Environments Hub using its content hash"""
     try:
         # Validate that we have a proper content hash (basic validation)
         if len(content_hash) < 8:
@@ -1890,7 +1890,7 @@ def delete_version(
             try:
                 confirm_msg = (
                     f"Are you sure you want to permanently delete version with content "
-                    f"hash '{content_hash}' from '{env_id}' on the environments hub?"
+                    f"hash '{content_hash}' from '{env_id}' on the Environments Hub?"
                 )
                 confirm = typer.confirm(confirm_msg)
                 if not confirm:
@@ -1939,13 +1939,13 @@ def delete(
     env_id: str = typer.Argument(..., help="Environment ID to delete"),
     force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation"),
 ) -> None:
-    """Delete an entire environment from the environments hub"""
+    """Delete an entire environment from the Environments Hub"""
     try:
         if not force:
             try:
                 delete_msg = (
                     f"Are you sure you want to permanently delete entire environment "
-                    f"'{env_id}' and ALL its versions from the environments hub?"
+                    f"'{env_id}' and ALL its versions from the Environments Hub?"
                 )
                 confirm = typer.confirm(delete_msg)
                 if not confirm:
@@ -1956,7 +1956,7 @@ def delete(
                 raise typer.Exit()
 
         client = APIClient()
-        console.print(f"Deleting {env_id} from remote hub...")
+        console.print(f"Deleting {env_id} from the Environments Hub...")
 
         try:
             client.delete(f"/environmentshub/{env_id}")

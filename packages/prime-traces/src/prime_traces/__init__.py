@@ -43,13 +43,16 @@ from .models import (
     LineFormat,
     ModelInfo,
     Score,
+    SearchField,
     TraceListPage,
+    TraceSearchMatch,
+    TraceSearchPage,
     TraceSummary,
     UploadReceipt,
 )
 from .traces import SupportsToRecord, TraceRecord, TracesClient
 
-__version__ = "0.0.4"
+__version__ = "0.0.5"
 
 __all__ = [
     # Clients & config
@@ -81,6 +84,9 @@ __all__ = [
     "ModelInfo",
     "Score",
     "TraceListPage",
+    "SearchField",
+    "TraceSearchMatch",
+    "TraceSearchPage",
     "TraceSummary",
     "UploadReceipt",
     # Exceptions

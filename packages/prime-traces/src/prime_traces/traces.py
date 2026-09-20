@@ -12,7 +12,7 @@ Deliberately not implemented (open v0 contract decisions — do not freeze
 them here): exports in any form — the service publishes ``GET /traces/export``
 and the job routes, but all three handlers raise ``NotImplementedError``,
 which FastAPI answers as 500, and the streaming route declares no query
-parameters, so there is no filter vocabulary to bind to; ``/search``; episode
+parameters, so there is no filter vocabulary to bind to; episode
 writes (episodes are read-only, written only as a side effect of
 episode-grouped uploads); and the dot-path query compiler (needs the server-side
 field registry).
@@ -37,7 +37,9 @@ from .models import (
     EpisodeDetail,
     EpisodeListPage,
     LineFormat,
+    SearchField,
     TraceListPage,
+    TraceSearchPage,
     TraceSummary,
     UploadReceipt,
 )
@@ -278,6 +280,41 @@ class TracesClient:
         raise last_error
 
     # -- traces: read -------------------------------------------------------
+
+    def search(
+        self,
+        query: str,
+        *,
+        run_id: str,
+        field: SearchField = "content",
+        role: Optional[str] = None,
+        run_step: Optional[int] = None,
+        has_error: Optional[bool] = None,
+        reward_min: Optional[float] = None,
+        reward_max: Optional[float] = None,
+        limit: int = 50,
+        cursor: Optional[str] = None,
+    ) -> TraceSearchPage:
+        """Search one bounded page of indexed nodes using case-sensitive literal text.
+
+        Follow next_cursor with unchanged filters, even on empty pages.
+        unindexed_trace_ids / partial_index indicate incomplete coverage.
+        """
+        params = _build_params(
+            (
+                ("query", query),
+                ("run_id", run_id),
+                ("field", field),
+                ("role", role),
+                ("run_step", run_step),
+                ("has_error", has_error),
+                ("reward_min", reward_min),
+                ("reward_max", reward_max),
+                ("limit", limit),
+                ("cursor", cursor),
+            )
+        )
+        return TraceSearchPage.model_validate(self.client.get_json("/traces/search", params=params))
 
     def list(
         self,

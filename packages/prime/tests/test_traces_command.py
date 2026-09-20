@@ -15,6 +15,57 @@ from typer.testing import CliRunner
 runner = CliRunner()
 
 
+def test_search_json_preserves_empty_continuation_and_scope(monkeypatch):
+    from prime_traces import TraceSearchPage
+
+    calls = []
+
+    class Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def search(self, query, **kwargs):
+            calls.append((query, kwargs))
+            return TraceSearchPage(
+                items=[],
+                next_cursor="cursor",
+                scanned_nodes=8192,
+                examined_traces=256,
+                unindexed_trace_ids=["pending"],
+                partial_index=False,
+            )
+
+    monkeypatch.setattr(traces_cmd, "_traces_client", Client)
+    result = runner.invoke(
+        traces_cmd.app,
+        ["search", "connection refused", "--run-id", "run", "--run-step", "0", "-o", "json"],
+    )
+    assert result.exit_code == 0, result.output
+    body = json.loads(result.stdout)
+    assert body["next_cursor"] == "cursor" and body["unindexed_trace_ids"] == ["pending"]
+    assert len(calls) == 1 and calls[0][0] == "connection refused"
+    assert calls[0][1]["run_id"] == "run" and calls[0][1]["run_step"] == 0
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["search", "hello"],
+        ["search", " ", "--run-id", "run"],
+        ["search", "hello", "--run-id", "run", "--field", "sql"],
+    ],
+)
+def test_search_rejects_invalid_arguments_before_network(monkeypatch, args):
+    def fail():
+        pytest.fail("invalid input must not make a network request")
+
+    monkeypatch.setattr(traces_cmd, "_traces_client", fail)
+    assert runner.invoke(traces_cmd.app, args).exit_code != 0
+
+
 class _StubConfig:
     api_key = "ctx-key"
     traces_url = "https://traces.staging.primeintellect.ai"
@@ -711,3 +762,59 @@ def test_delete_success_treats_target_as_literal_text(fake_client):
     assert result.exit_code == 0, result.output
     assert fake_client.calls["delete"] == ("[red]", None)
     assert "Deletion of trace [red] accepted" in result.output
+
+
+@pytest.mark.parametrize("code", [None, "trace_not_found", "run_not_found"])
+def test_search_error_keeps_json_stdout_clean(monkeypatch, code):
+    from prime_traces import NotFoundError
+
+    class Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def search(self, *args, **kwargs):
+            raise NotFoundError("Run [red]missing[/] not found", code=code)
+
+    monkeypatch.setattr(traces_cmd, "_traces_client", Client)
+    result = runner.invoke(traces_cmd.app, ["search", "hello", "--run-id", "run", "-o", "json"])
+    assert result.exit_code == 1
+    assert result.stdout_bytes == b""
+    if code in (None, "trace_not_found"):
+        assert "requires the Prime Traces search API" in result.stderr
+    else:
+        assert "Search failed: Run [red]missing[/] not found" in result.stderr
+        assert "requires the Prime Traces search API" not in result.stderr
+
+
+@pytest.mark.parametrize("cursor", ["cursor[red]opaque[/red]", "cursor[/]"])
+@pytest.mark.parametrize("output", ["table", "json"])
+def test_search_preserves_opaque_cursor(monkeypatch, cursor, output):
+    from prime_traces import TraceSearchPage
+
+    class Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def search(self, *args, **kwargs):
+            return TraceSearchPage(
+                items=[],
+                next_cursor=cursor,
+                scanned_nodes=8192,
+                examined_traces=256,
+                unindexed_trace_ids=[],
+                partial_index=False,
+            )
+
+    monkeypatch.setattr(traces_cmd, "_traces_client", Client)
+    result = runner.invoke(traces_cmd.app, ["search", "hello", "--run-id", "run", "-o", output])
+    assert result.exit_code == 0, result.output
+    if output == "json":
+        assert json.loads(result.stdout)["next_cursor"] == cursor
+    else:
+        assert f"--cursor {cursor}" in result.stdout

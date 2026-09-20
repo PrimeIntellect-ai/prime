@@ -26,7 +26,7 @@ jobs:
       # every image build continues to fail dependency resolution.
       - name: Wait for required SDK versions on PyPI
         run: |
-          for PACKAGE in prime-sandboxes prime-tunnel; do
+          for PACKAGE in prime-sandboxes prime-tunnel prime-traces; do
             FLOOR=$(sed -nE "s/.*\"${PACKAGE}>=([^\"]+)\".*/\1/p" packages/prime/pyproject.toml | head -n1)
             if [ -z "$FLOOR" ]; then
               echo "::error::Unable to parse the $PACKAGE floor from packages/prime/pyproject.toml"

@@ -73,6 +73,91 @@ def _parse_context(values: List[str]) -> Optional[Dict[str, str]]:
     return context
 
 
+@app.command("search")
+def search_traces(
+    query: str = typer.Argument(..., help="Case-sensitive literal text (quote phrases)"),
+    run_id: str = typer.Option(..., "--run-id", help="Required run scope"),
+    field: str = typer.Option(
+        "content", "--field", help="content, reasoning_content, or tool_calls"
+    ),
+    role: Optional[str] = typer.Option(None, "--role", help="Message role"),
+    run_step: Optional[int] = typer.Option(None, "--run-step", min=0),
+    has_error: Optional[bool] = typer.Option(None, "--has-error/--no-has-error"),
+    reward_min: Optional[float] = typer.Option(None, "--reward-min"),
+    reward_max: Optional[float] = typer.Option(None, "--reward-max"),
+    limit: int = typer.Option(50, "--limit", min=1, max=100, help="Maximum matches returned"),
+    cursor: Optional[str] = typer.Option(None, "--cursor", help="Continue an unfinished scan"),
+    output: str = typer.Option("table", "--output", "-o", help="table or json"),
+) -> None:
+    """Search one bounded page of indexed trace content.
+
+    Follow next_cursor with unchanged filters, even on empty pages.
+    """
+    validate_output_format(output, error_console)
+    if field not in ("content", "reasoning_content", "tool_calls"):
+        raise typer.BadParameter(
+            "Choose content, reasoning_content, or tool_calls", param_hint="--field"
+        )
+    if not query.strip() or len(query) > 256:
+        raise typer.BadParameter("Provide 1–256 characters of nonblank text", param_hint="query")
+    try:
+        with _traces_client() as client:
+            result = client.search(
+                query,
+                run_id=run_id,
+                field=field,
+                role=role,
+                run_step=run_step,
+                has_error=has_error,
+                reward_min=reward_min,
+                reward_max=reward_max,
+                limit=limit,
+                cursor=cursor,
+            )
+    except NotFoundError as exc:
+        # Older servers route /traces/search to /traces/{trace_id}.
+        if exc.code in (None, "trace_not_found"):
+            error_console.print(
+                "[red]Search is unavailable on this server. "
+                "It requires the Prime Traces search API.[/red]"
+            )
+        else:
+            error_console.print(f"[red]Search failed:[/red] {escape(str(exc))}")
+        raise typer.Exit(1)
+    except PrimeTracesError as exc:
+        error_console.print(f"[red]Search failed:[/red] {escape(str(exc))}")
+        raise typer.Exit(1)
+
+    if output == "json":
+        output_data_as_json(result.model_dump(mode="json"), console)
+        return
+    table = Table(title="Trace search")
+    for heading in ("Trace ID", "Node", "Role", "Field", "Match"):
+        table.add_column(heading)
+    for match in result.items:
+        table.add_row(
+            escape(match.trace_id),
+            str(match.node_idx),
+            escape(match.role),
+            match.field,
+            escape(match.excerpt),
+        )
+    console.print(table)
+    console.print(
+        f"Examined {result.examined_traces} trace candidates; scanned {result.scanned_nodes} nodes."
+    )
+    if result.unindexed_trace_ids or result.partial_index:
+        error_console.print(
+            "[yellow]Incomplete index coverage: some traces are unindexed or capped. "
+            "Restart after indexing to include pending traces.[/yellow]"
+        )
+    if result.next_cursor:
+        console.print("Search has more to scan. Continue with the same filters and:")
+        console.print(f"--cursor {escape(result.next_cursor)}", soft_wrap=True)
+    else:
+        console.print("Scan exhausted for the currently available index.")
+
+
 @app.command("upload", epilog=UPLOAD_JSON_HELP)
 def upload_traces(
     file: Path = typer.Argument(

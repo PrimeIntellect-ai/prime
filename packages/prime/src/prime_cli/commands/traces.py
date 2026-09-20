@@ -115,11 +115,15 @@ def search_traces(
                 limit=limit,
                 cursor=cursor,
             )
-    except NotFoundError:
-        error_console.print(
-            "[red]Search is unavailable on this server. "
-            "It requires the Prime Traces search API.[/red]"
-        )
+    except NotFoundError as exc:
+        # Older servers route /traces/search to /traces/{trace_id}.
+        if exc.code in (None, "trace_not_found"):
+            error_console.print(
+                "[red]Search is unavailable on this server. "
+                "It requires the Prime Traces search API.[/red]"
+            )
+        else:
+            error_console.print(f"[red]Search failed:[/red] {escape(str(exc))}")
         raise typer.Exit(1)
     except PrimeTracesError as exc:
         error_console.print(f"[red]Search failed:[/red] {escape(str(exc))}")
@@ -150,7 +154,7 @@ def search_traces(
         )
     if result.next_cursor:
         console.print("Search has more to scan. Continue with the same filters and:")
-        console.print(f"--cursor {result.next_cursor}", soft_wrap=True)
+        console.print(f"--cursor {escape(result.next_cursor)}", soft_wrap=True)
     else:
         console.print("Scan exhausted for the currently available index.")
 

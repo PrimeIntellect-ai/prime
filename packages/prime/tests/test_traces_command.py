@@ -764,7 +764,8 @@ def test_delete_success_treats_target_as_literal_text(fake_client):
     assert "Deletion of trace [red] accepted" in result.output
 
 
-def test_search_error_keeps_json_stdout_clean(monkeypatch):
+@pytest.mark.parametrize("code", [None, "trace_not_found", "run_not_found"])
+def test_search_error_keeps_json_stdout_clean(monkeypatch, code):
     from prime_traces import NotFoundError
 
     class Client:
@@ -775,10 +776,45 @@ def test_search_error_keeps_json_stdout_clean(monkeypatch):
             pass
 
         def search(self, *args, **kwargs):
-            raise NotFoundError("not found")
+            raise NotFoundError("Run [red]missing[/] not found", code=code)
 
     monkeypatch.setattr(traces_cmd, "_traces_client", Client)
     result = runner.invoke(traces_cmd.app, ["search", "hello", "--run-id", "run", "-o", "json"])
     assert result.exit_code == 1
     assert result.stdout_bytes == b""
-    assert "requires the Prime Traces search API" in result.stderr
+    if code in (None, "trace_not_found"):
+        assert "requires the Prime Traces search API" in result.stderr
+    else:
+        assert "Search failed: Run [red]missing[/] not found" in result.stderr
+        assert "requires the Prime Traces search API" not in result.stderr
+
+
+@pytest.mark.parametrize("cursor", ["cursor[red]opaque[/red]", "cursor[/]"])
+@pytest.mark.parametrize("output", ["table", "json"])
+def test_search_preserves_opaque_cursor(monkeypatch, cursor, output):
+    from prime_traces import TraceSearchPage
+
+    class Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def search(self, *args, **kwargs):
+            return TraceSearchPage(
+                items=[],
+                next_cursor=cursor,
+                scanned_nodes=8192,
+                examined_traces=256,
+                unindexed_trace_ids=[],
+                partial_index=False,
+            )
+
+    monkeypatch.setattr(traces_cmd, "_traces_client", Client)
+    result = runner.invoke(traces_cmd.app, ["search", "hello", "--run-id", "run", "-o", output])
+    assert result.exit_code == 0, result.output
+    if output == "json":
+        assert json.loads(result.stdout)["next_cursor"] == cursor
+    else:
+        assert f"--cursor {cursor}" in result.stdout

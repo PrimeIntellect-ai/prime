@@ -50,7 +50,10 @@ class TraceSearchCoverage(BaseModel):
 
 
 class TraceSearchPage(BaseModel):
-    """Search page; coverage is reported on the first page only."""
+    """Search page; coverage is reported on the first page only.
+
+    A first page with ``coverage=None`` means coverage is unknown, not complete.
+    """
 
     model_config = ConfigDict(extra="allow")
 

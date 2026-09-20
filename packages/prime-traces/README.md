@@ -91,7 +91,8 @@ Cursors are node positions, not snapshots: a trace replaced mid-search resumes
 at the same position in its new copy.
 
 The first page's `coverage` reports what was not searchable: `unindexed_trace_ids`
-(a bounded sample) and `partial_index`. It is null on later pages. Restart after
+(a bounded sample) and `partial_index`. It is null on later pages, and on a first
+page when the server could not compute it within budget (unknown, not complete). Restart after
 pending uploads finish indexing; nodes beyond the indexing cap remain excluded.
 
 A search that overruns the server's read budget fails with `search_limit_exceeded`

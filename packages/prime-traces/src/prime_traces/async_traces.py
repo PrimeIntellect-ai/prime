@@ -45,6 +45,7 @@ from .traces import (
     _encode_record,
     _episode_endpoint,
     _record_lines,
+    _run_search_endpoint,
     _trace_endpoint,
 )
 
@@ -332,13 +333,13 @@ class AsyncTracesClient:
     ) -> TraceSearchPage:
         """Return one page of case-sensitive literal matches in indexed nodes.
 
-        Follow next_cursor with unchanged filters, even on empty pages.
-        unindexed_trace_ids / partial_index indicate incomplete coverage.
+        ``query`` needs at least three characters. Follow next_cursor with
+        unchanged filters. The first page's ``coverage`` reports traces that
+        were not searchable yet.
         """
         params = _build_params(
             (
                 ("query", query),
-                ("run_id", run_id),
                 ("field", field),
                 ("role", role),
                 ("run_step", run_step),
@@ -350,7 +351,7 @@ class AsyncTracesClient:
             )
         )
         return TraceSearchPage.model_validate(
-            await self.client.get_json("/traces/search", params=params)
+            await self.client.get_json(_run_search_endpoint(run_id), params=params)
         )
 
     async def list(

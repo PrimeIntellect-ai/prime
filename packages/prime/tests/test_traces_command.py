@@ -15,8 +15,8 @@ from typer.testing import CliRunner
 runner = CliRunner()
 
 
-def test_search_json_preserves_empty_continuation_and_scope(monkeypatch):
-    from prime_traces import TraceSearchPage
+def test_search_json_preserves_continuation_coverage_and_scope(monkeypatch):
+    from prime_traces import TraceSearchCoverage, TraceSearchPage
 
     calls = []
 
@@ -32,10 +32,11 @@ def test_search_json_preserves_empty_continuation_and_scope(monkeypatch):
             return TraceSearchPage(
                 items=[],
                 next_cursor="cursor",
-                scanned_nodes=8192,
-                examined_traces=256,
-                unindexed_trace_ids=["pending"],
-                partial_index=False,
+                coverage=TraceSearchCoverage(
+                    examined_traces=256,
+                    unindexed_trace_ids=["pending"],
+                    partial_index=False,
+                ),
             )
 
     monkeypatch.setattr(traces_cmd, "_traces_client", Client)
@@ -45,7 +46,8 @@ def test_search_json_preserves_empty_continuation_and_scope(monkeypatch):
     )
     assert result.exit_code == 0, result.output
     body = json.loads(result.stdout)
-    assert body["next_cursor"] == "cursor" and body["unindexed_trace_ids"] == ["pending"]
+    assert body["next_cursor"] == "cursor"
+    assert body["coverage"]["unindexed_trace_ids"] == ["pending"]
     assert len(calls) == 1 and calls[0][0] == "connection refused"
     assert calls[0][1]["run_id"] == "run" and calls[0][1]["run_step"] == 0
 
@@ -55,6 +57,7 @@ def test_search_json_preserves_empty_continuation_and_scope(monkeypatch):
     [
         ["search", "hello"],
         ["search", " ", "--run-id", "run"],
+        ["search", "he", "--run-id", "run"],
         ["search", "hello", "--run-id", "run", "--field", "sql"],
     ],
 )
@@ -764,7 +767,7 @@ def test_delete_success_treats_target_as_literal_text(fake_client):
     assert "Deletion of trace [red] accepted" in result.output
 
 
-@pytest.mark.parametrize("code", [None, "trace_not_found", "run_not_found"])
+@pytest.mark.parametrize("code", [None, "run_not_found", "search_limit_exceeded"])
 def test_search_error_keeps_json_stdout_clean(monkeypatch, code):
     from prime_traces import NotFoundError
 
@@ -782,7 +785,7 @@ def test_search_error_keeps_json_stdout_clean(monkeypatch, code):
     result = runner.invoke(traces_cmd.app, ["search", "hello", "--run-id", "run", "-o", "json"])
     assert result.exit_code == 1
     assert result.stdout_bytes == b""
-    if code in (None, "trace_not_found"):
+    if code is None:
         assert "requires the Prime Traces search API" in result.stderr
     else:
         assert "Search failed: Run [red]missing[/] not found" in result.stderr
@@ -805,10 +808,7 @@ def test_search_preserves_opaque_cursor(monkeypatch, cursor, output):
             return TraceSearchPage(
                 items=[],
                 next_cursor=cursor,
-                scanned_nodes=8192,
-                examined_traces=256,
-                unindexed_trace_ids=[],
-                partial_index=False,
+                coverage=None,
             )
 
     monkeypatch.setattr(traces_cmd, "_traces_client", Client)

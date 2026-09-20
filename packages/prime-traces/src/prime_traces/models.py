@@ -37,17 +37,26 @@ class TraceSearchMatch(BaseModel):
     excerpt_start: int
 
 
+class TraceSearchCoverage(BaseModel):
+    """What the search could not see when it started."""
+
+    model_config = ConfigDict(extra="allow")
+
+    examined_traces: int
+    # A sample of at most 256 traces whose current copy is not indexed yet.
+    unindexed_trace_ids: List[str]
+    # A searched trace reached the node indexing cap; its later nodes are excluded.
+    partial_index: bool
+
+
 class TraceSearchPage(BaseModel):
-    """Search page; follow next_cursor and collect index warnings across pages."""
+    """Search page; coverage is reported on the first page only."""
 
     model_config = ConfigDict(extra="allow")
 
     items: List[TraceSearchMatch]
     next_cursor: Optional[str]
-    scanned_nodes: int
-    examined_traces: int
-    unindexed_trace_ids: List[str]
-    partial_index: bool
+    coverage: Optional[TraceSearchCoverage] = None
 
 
 class LineFormat(str, Enum):

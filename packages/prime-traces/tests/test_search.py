@@ -17,28 +17,27 @@ MATCH = {
     "excerpt": "🙂 hello world",
     "excerpt_start": 0,
 }
-EMPTY_PAGE = {
+FIRST_PAGE = {
     "items": [],
-    "next_cursor": "keep-scanning",
-    "scanned_nodes": 8192,
-    "examined_traces": 256,
-    "unindexed_trace_ids": ["pending"],
-    "partial_index": True,
+    "next_cursor": "continue",
+    "coverage": {
+        "examined_traces": 256,
+        "unindexed_trace_ids": ["pending"],
+        "partial_index": True,
+    },
 }
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
 @pytest.mark.asyncio
-async def test_search_contract_and_empty_continuations(
-    make_client, make_async_client, asynchronous
-):
+async def test_search_contract_and_continuation(make_client, make_async_client, asynchronous):
     calls = []
 
     def handler(request):
-        assert request.url.path == "/api/v1/traces/search"
+        assert request.url.raw_path.split(b"?")[0] == b"/api/v1/runs/run%20%231/search"
         params = dict(request.url.params)
         assert params["query"] == "🙂 hello %_"
-        assert params["run_id"] == "run #1"
+        assert "run_id" not in params
         assert params["field"] == "content"
         assert params["role"] == "tool"
         assert params["run_step"] == "0"
@@ -47,13 +46,9 @@ async def test_search_contract_and_empty_continuations(
         calls.append(params)
         return httpx.Response(
             200,
-            json=EMPTY_PAGE
+            json=FIRST_PAGE
             if len(calls) == 1
-            else {
-                **EMPTY_PAGE,
-                "items": [MATCH],
-                "next_cursor": None,
-            },
+            else {"items": [MATCH], "next_cursor": None, "coverage": None},
         )
 
     client = (make_async_client if asynchronous else make_client)(handler)
@@ -63,17 +58,18 @@ async def test_search_contract_and_empty_continuations(
         if asynchronous
         else client.search("🙂 hello %_", **kwargs)
     )
-    assert len(calls) == 1  # Never hide an unbounded scan behind one SDK call.
-    assert page.items == [] and page.next_cursor == "keep-scanning"
-    assert page.partial_index and page.unindexed_trace_ids == ["pending"]
+    assert len(calls) == 1  # One page per call; the SDK never paginates implicitly.
+    assert page.items == [] and page.next_cursor == "continue"
+    assert page.coverage.partial_index and page.coverage.unindexed_trace_ids == ["pending"]
     kwargs["cursor"] = page.next_cursor
     page = (
         await client.search("🙂 hello %_", **kwargs)
         if asynchronous
         else client.search("🙂 hello %_", **kwargs)
     )
-    assert calls[1]["cursor"] == "keep-scanning"
+    assert calls[1]["cursor"] == "continue"
     assert page.items[0].match_start == 2 and page.next_cursor is None
+    assert page.coverage is None
 
 
 @pytest.mark.parametrize("code", [None, "trace_not_found", "run_not_found"])
@@ -89,3 +85,11 @@ def test_search_preserves_not_found_error(make_client, code):
     with pytest.raises(NotFoundError) as exc:
         make_client(handler).search("hello", run_id="run")
     assert exc.value.code == code
+
+
+def test_search_refuses_a_run_id_that_cannot_be_one_path_segment(make_client):
+    def handler(request):
+        pytest.fail("an unaddressable run must not make a network request")
+
+    with pytest.raises(ValueError, match="run_id"):
+        make_client(handler).search("hello", run_id="team/run")

@@ -20,8 +20,6 @@ already do, so producers can hand over their own objects. Records are
 serialized lazily into bounded batches, so nothing buffers the whole run or
 round-trips through disk.
 
-Trace IDs `search`, `export`, and `exports` are reserved by the API.
-
 ```python
 from prime_traces import LineFormat, TracesClient
 
@@ -70,7 +68,7 @@ members = client.list_episode_traces(episode_id, has_error=True)
 ## Search indexed content
 
 Case-sensitive literal search within one run. Requires SDK 0.0.5+ and a server
-supporting `GET /api/v1/traces/search`.
+supporting `GET /api/v1/runs/{run_id}/search`.
 
 ```python
 page = client.search("connection refused", run_id="run_9f3k2m", role="tool")
@@ -86,14 +84,18 @@ Async uses the same API. Optional filters: `role`, `run_step`, `has_error`,
 `reward_min`, `reward_max`, and `field` (`content`, `reasoning_content`, `tool_calls`).
 String content is decoded; structured content and tool calls use recorded JSON.
 
-Search uses server text indexes; one- and two-character terms use bounded scans.
+Search uses server text indexes, so the query needs at least three characters.
 Each call returns one page without downloading raw traces. Continue with
-`cursor=page.next_cursor` (CLI: `--cursor`) and unchanged filters until null,
-**even on empty pages**. Cursors are not snapshots; replacing the resumed trace
-requires restarting.
+`cursor=page.next_cursor` (CLI: `--cursor`) and unchanged filters until null.
+Cursors are node positions, not snapshots: a trace replaced mid-search resumes
+at the same position in its new copy.
 
-`unindexed_trace_ids` (a bounded sample) and `partial_index` flag incomplete coverage. Restart after
+The first page's `coverage` reports what was not searchable: `unindexed_trace_ids`
+(a bounded sample) and `partial_index`. It is null on later pages. Restart after
 pending uploads finish indexing; nodes beyond the indexing cap remain excluded.
+
+A search that overruns the server's read budget fails with `search_limit_exceeded`
+(HTTP 400). Retrying unchanged will not help; use a more specific query or add filters.
 
 ## Async
 

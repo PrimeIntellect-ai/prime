@@ -91,15 +91,15 @@ def search_traces(
 ) -> None:
     """Return one page of matches in indexed trace content.
 
-    Follow next_cursor with unchanged filters, even on empty pages.
+    Follow next_cursor with unchanged filters until the search is exhausted.
     """
     validate_output_format(output, error_console)
     if field not in ("content", "reasoning_content", "tool_calls"):
         raise typer.BadParameter(
             "Choose content, reasoning_content, or tool_calls", param_hint="--field"
         )
-    if not query.strip() or len(query) > 256:
-        raise typer.BadParameter("Provide 1–256 characters of nonblank text", param_hint="query")
+    if not query.strip() or not 3 <= len(query) <= 256:
+        raise typer.BadParameter("Provide 3–256 characters of nonblank text", param_hint="query")
     try:
         with _traces_client() as client:
             result = client.search(
@@ -115,8 +115,8 @@ def search_traces(
                 cursor=cursor,
             )
     except NotFoundError as exc:
-        # Older servers treat search as a trace ID.
-        if exc.code in (None, "trace_not_found"):
+        # A server without the route answers with a bare 404 and no error code.
+        if exc.code is None:
             error_console.print(
                 "[red]Search is unavailable on this server. "
                 "It requires the Prime Traces search API.[/red]"
@@ -143,14 +143,14 @@ def search_traces(
             escape(match.excerpt),
         )
     console.print(table)
-    console.print(
-        f"Examined {result.examined_traces} traces and {result.scanned_nodes} node candidates."
-    )
-    if result.unindexed_trace_ids or result.partial_index:
-        error_console.print(
-            "[yellow]Incomplete index coverage: some traces are unindexed or capped. "
-            "Restart after indexing to include pending traces.[/yellow]"
-        )
+    coverage = result.coverage
+    if coverage is not None:
+        console.print(f"Searched {coverage.examined_traces} traces.")
+        if coverage.unindexed_trace_ids or coverage.partial_index:
+            error_console.print(
+                "[yellow]Incomplete index coverage: some traces are unindexed or capped. "
+                "Restart after indexing to include pending traces.[/yellow]"
+            )
     if result.next_cursor:
         console.print("Search has more pages. Continue with the same filters and:")
         console.print(f"--cursor {escape(result.next_cursor)}", soft_wrap=True)

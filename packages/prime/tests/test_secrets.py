@@ -121,7 +121,7 @@ class TestSecretsList:
 
     def test_list_secrets_json_output(self, mock_secrets_api: None) -> None:
         """Test listing secrets with JSON output."""
-        result = runner.invoke(app, ["secret", "list", "-o", "json"])
+        result = runner.invoke(app, ["secret", "list", "--json"])
 
         assert result.exit_code == 0, f"Failed: {result.output}"
         output = json.loads(result.output)
@@ -184,7 +184,7 @@ class TestSecretsCreate:
         """Test creating a secret with JSON output."""
         result = runner.invoke(
             app,
-            ["secret", "create", "-n", "NEW_SECRET", "-v", "value", "-o", "json"],
+            ["secret", "create", "-n", "NEW_SECRET", "-v", "value", "--json"],
         )
 
         assert result.exit_code == 0, f"Failed: {result.output}"
@@ -333,7 +333,7 @@ class TestSecretsUpdate:
         """Test updating a secret with JSON output."""
         result = runner.invoke(
             app,
-            ["secret", "update", "secret-id-1234567890", "-n", "NEW_NAME", "-o", "json"],
+            ["secret", "update", "secret-id-1234567890", "-n", "NEW_NAME", "--json"],
         )
 
         assert result.exit_code == 0, f"Failed: {result.output}"
@@ -384,7 +384,7 @@ class TestSecretsGet:
         """Test getting a secret with JSON output."""
         result = runner.invoke(
             app,
-            ["secret", "get", "secret-id-1234567890", "-o", "json"],
+            ["secret", "get", "secret-id-1234567890", "--json"],
         )
 
         assert result.exit_code == 0, f"Failed: {result.output}"
@@ -414,7 +414,7 @@ class TestSecretsHelp:
 
         assert result.exit_code == 0
         output = strip_ansi(result.output)
-        assert "--output" in output
+        assert "--json" in output
 
     def test_secrets_create_help(self) -> None:
         """Test that secrets create help works."""
@@ -504,7 +504,7 @@ class TestSecretsTeamContext:
 
         monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
 
-        result = runner.invoke(app, ["secret", "list", "-o", "json"])
+        result = runner.invoke(app, ["secret", "list", "--json"])
         assert result.exit_code == 0, f"Failed: {result.output}"
         output = json.loads(result.output)
         assert len(output["secrets"]) == 1
@@ -584,8 +584,7 @@ class TestSecretsUpdateEdgeCases:
                 "RENAMED",
                 "-v",
                 "new-val",
-                "-o",
-                "json",
+                "--json",
             ],
         )
         assert result.exit_code == 0, f"Failed: {result.output}"

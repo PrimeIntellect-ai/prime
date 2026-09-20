@@ -30,7 +30,6 @@ from ..utils import (
     get_console,
     json_output_help,
     output_data_as_json,
-    validate_output_format,
 )
 from ..utils.env_metadata import find_environment_metadata
 from ..utils.environment_runtime import (
@@ -427,13 +426,12 @@ def compute_content_hash(env_path: Path) -> str:
 def list_cmd(
     num: int = typer.Option(DEFAULT_LIST_LIMIT, "--num", "-n", help="Items per page"),
     page: int = typer.Option(1, "--page", "-p", help="Page number"),
-    owner: Optional[str] = typer.Option(None, "--owner", help="Filter by owner name"),
+    owner: Optional[str] = typer.Option(None, "--owner", "-o", help="Filter by owner name"),
     visibility: Optional[str] = typer.Option(
-        None, "--visibility", help="Filter by visibility (PUBLIC/PRIVATE)"
+        None, "--visibility", "-v", help="Filter by visibility (PUBLIC/PRIVATE)"
     ),
-    output: str = typer.Option("table", "--output", help="Output format: table or json"),
     search: Optional[str] = typer.Option(
-        None, "--search", "-s", help="Search by name or description"
+        None, "--search", "-s", help="Filter by name or description"
     ),
     tag: Optional[List[str]] = typer.Option(None, "--tag", "-t", help="Filter by tag (repeatable)"),
     sort: str = typer.Option(
@@ -446,6 +444,7 @@ def list_cmd(
     mine: bool = typer.Option(
         False, "--mine", help="Filter to only your own environments (personal + team)"
     ),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ) -> None:
     """List environments from the Environments Hub.
 
@@ -460,7 +459,6 @@ def list_cmd(
         prime env list --search "math"       # Search by name/description
         prime env list --sort stars          # Sort by most starred
     """
-    validate_output_format(output, console)
 
     if num < 1 or page < 1:
         console.print("[red]Error:[/red] --num and --page must be at least 1")
@@ -508,7 +506,7 @@ def list_cmd(
         total = result.get("total_count", result.get("total", 0))
 
         if not environments:
-            if output == "json":
+            if as_json:
                 output_data_as_json(
                     {"environments": [], "total": 0, "page": page, "per_page": num}, console
                 )
@@ -518,7 +516,7 @@ def list_cmd(
                 console.print("No environments found.", style="yellow")
             return
 
-        if output == "json":
+        if as_json:
             # Format environments for JSON output
             env_data = []
             for env in environments:
@@ -547,7 +545,7 @@ def list_cmd(
             # Table output
             # One line per environment: the description absorbs the width and is cut
             # with an ellipsis so the table always fits the terminal.
-            table = Table(title=f"Environments (Total: {total})", expand=True)
+            table = Table(expand=True)
             table.add_column(
                 "Environment", style="cyan", no_wrap=True, overflow="ellipsis", max_width=40
             )
@@ -578,13 +576,11 @@ def list_cmd(
 
             console.print(table)
 
-            if total > page * num:
-                console.print(
-                    f"\n[yellow]Showing page {page} of results. "
-                    f"Use --page {page + 1} to see more.[/yellow]"
-                )
-            else:
-                console.print(f"\n[dim]Total: {total} environment(s)[/dim]")
+            pages = max(1, -(-total // num))
+            footer = f"Page {page}/{pages} - {total} environment(s)"
+            if page < pages:
+                footer += f" - use --page {page + 1} for the next"
+            console.print(f"\n[dim]{footer}[/dim]")
 
     except APIError as e:
         console.print(f"[red]Error: {e}[/red]")
@@ -1651,10 +1647,9 @@ def update_pyproject_version(pyproject_path: Path, new_version: str) -> None:
 def info(
     env_id: str = typer.Argument(..., help="Environment ID (owner/name)"),
     version: str = typer.Option("latest", "--version", "-v", help="Version to show"),
-    output: str = typer.Option("table", "--output", help="Output format: table or json"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ) -> None:
     """Show environment details, visibility, latest version and installation commands"""
-    validate_output_format(output, console)
     try:
         client = APIClient(require_auth=False)
 
@@ -1681,7 +1676,7 @@ def info(
             console.print(f"[red]Failed to get environment details: {e}[/red]")
             raise typer.Exit(1)
 
-        if output == "json":
+        if as_json:
             details["latest_version"] = status.get("latest_version")
             output_data_as_json(details, console)
             return
@@ -1834,7 +1829,7 @@ def list_versions(
             console.print("No versions found.")
             return
 
-        table = Table(title=f"Versions for {env_id}")
+        table = Table()
         table.add_column("Version", style="cyan")
         table.add_column("Created", style="green")
         table.add_column("Content Hash", style="yellow")
@@ -2052,15 +2047,9 @@ def env_secret_list(
         None,
         help="Environment slug (e.g., 'owner/environment-name'). Auto-detected if not provided.",
     ),
-    output: str = typer.Option(
-        "table",
-        "--output",
-        "-o",
-        help="Output format: table or json",
-    ),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ) -> None:
     """List all secrets for an environment."""
-    validate_output_format(output, console)
     owner, env_name = _resolve_environment(environment)
 
     try:
@@ -2068,7 +2057,7 @@ def env_secret_list(
         env_id = _get_environment_id(client, owner, env_name)
         secrets = _fetch_env_secrets(client, env_id)
 
-        if output == "json":
+        if as_json:
             output_data_as_json({"secrets": secrets}, console)
             return
 
@@ -2076,7 +2065,7 @@ def env_secret_list(
             console.print("[yellow]No secrets found for this environment.[/yellow]")
             return
 
-        table = Table(title=f"Secrets for {owner}/{env_name}")
+        table = Table()
         table.add_column("ID", style="dim", no_wrap=True)
         table.add_column("Name", style="cyan")
         table.add_column("Source", style="blue")
@@ -2124,15 +2113,9 @@ def env_secret_create(
         "-d",
         help="Secret description",
     ),
-    output: str = typer.Option(
-        "table",
-        "--output",
-        "-o",
-        help="Output format: table or json",
-    ),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ) -> None:
     """Create an environment-specific secret."""
-    validate_output_format(output, console)
     owner, env_name = _resolve_environment(environment)
 
     try:
@@ -2162,7 +2145,7 @@ def env_secret_create(
             response = client.post(f"/environmentshub/{env_id}/secrets", json=payload)
             secret = response.get("data", {})
 
-        if output == "json":
+        if as_json:
             output_data_as_json(secret, console)
             return
 
@@ -2206,15 +2189,9 @@ def env_secret_update(
         "-d",
         help="New secret description",
     ),
-    output: str = typer.Option(
-        "table",
-        "--output",
-        "-o",
-        help="Output format: table or json",
-    ),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ) -> None:
     """Update an environment-specific secret."""
-    validate_output_format(output, console)
     owner, env_name = _resolve_environment(environment)
 
     try:
@@ -2252,7 +2229,7 @@ def env_secret_update(
         response = client.patch(f"/environmentshub/{env_id}/secrets/{secret_id}", json=payload)
         secret = response.get("data", {})
 
-        if output == "json":
+        if as_json:
             output_data_as_json(secret, console)
             return
 
@@ -2332,15 +2309,9 @@ def env_secret_link(
         None,
         help="Environment slug (e.g., 'owner/environment-name'). Auto-detected if not provided.",
     ),
-    output: str = typer.Option(
-        "table",
-        "--output",
-        "-o",
-        help="Output format: table or json",
-    ),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ) -> None:
     """Link a global secret to an environment."""
-    validate_output_format(output, console)
     owner, env_name = _resolve_environment(environment)
 
     try:
@@ -2353,7 +2324,7 @@ def env_secret_link(
         )
         linked = response.get("data", {})
 
-        if output == "json":
+        if as_json:
             output_data_as_json(linked, console)
             return
 
@@ -2415,15 +2386,9 @@ def var_list(
         None,
         help="Environment slug (e.g., 'owner/environment-name'). Auto-detected if not provided.",
     ),
-    output: str = typer.Option(
-        "table",
-        "--output",
-        "-o",
-        help="Output format: table or json",
-    ),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ) -> None:
     """List all variables for an environment."""
-    validate_output_format(output, console)
     owner, env_name = _resolve_environment(environment)
 
     try:
@@ -2432,7 +2397,7 @@ def var_list(
         response = client.get(f"/environmentshub/{env_id}/variables")
         variables = response.get("data", [])
 
-        if output == "json":
+        if as_json:
             output_data_as_json({"variables": variables}, console)
             return
 
@@ -2440,7 +2405,7 @@ def var_list(
             console.print("[yellow]No variables found for this environment.[/yellow]")
             return
 
-        table = Table(title=f"Variables for {owner}/{env_name}")
+        table = Table()
         table.add_column("ID", style="dim", no_wrap=True)
         table.add_column("Name", style="cyan")
         table.add_column("Value", style="green")
@@ -2490,15 +2455,9 @@ def var_create(
         "-d",
         help="Variable description",
     ),
-    output: str = typer.Option(
-        "table",
-        "--output",
-        "-o",
-        help="Output format: table or json",
-    ),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ) -> None:
     """Create an environment variable."""
-    validate_output_format(output, console)
     owner, env_name = _resolve_environment(environment)
 
     try:
@@ -2528,7 +2487,7 @@ def var_create(
             response = client.post(f"/environmentshub/{env_id}/variables", json=payload)
             var = response.get("data", {})
 
-        if output == "json":
+        if as_json:
             output_data_as_json(var, console)
             return
 
@@ -2571,15 +2530,9 @@ def var_update(
         "-d",
         help="New variable description",
     ),
-    output: str = typer.Option(
-        "table",
-        "--output",
-        "-o",
-        help="Output format: table or json",
-    ),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ) -> None:
     """Update an environment variable."""
-    validate_output_format(output, console)
 
     if not any_provided(name, value, description):
         console.print(
@@ -2610,7 +2563,7 @@ def var_update(
         )
         var = response.get("data", {})
 
-        if output == "json":
+        if as_json:
             output_data_as_json(var, console)
             return
 

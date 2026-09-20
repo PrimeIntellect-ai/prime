@@ -44,7 +44,7 @@ def test_rl_alias_still_works_with_deprecation_warning(tmp_path: Path) -> None:
 
 
 def test_rl_alias_warning_uses_stderr_for_json_output() -> None:
-    result = runner.invoke(app, ["rl", "configs", "--output", "json"], env=TEST_ENV)
+    result = runner.invoke(app, ["rl", "configs", "--json"], env=TEST_ENV)
 
     assert result.exit_code == 0, result.output
     assert (

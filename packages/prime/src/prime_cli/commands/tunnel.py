@@ -11,7 +11,6 @@ from prime_cli.utils import (
     human_age,
     iso_timestamp,
     output_data_as_json,
-    validate_output_format,
 )
 from prime_cli.utils.prompt import confirm_or_skip
 
@@ -194,10 +193,9 @@ def list_tunnels(
     ),
     page: int = typer.Option(1, "--page", "-p", help="Page number"),
     num: int = typer.Option(50, "--num", "-n", help="Items per page"),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ) -> None:
     """List active tunnels."""
-    validate_output_format(output, console)
 
     async def fetch_tunnels():
         client = _create_tunnel_client()
@@ -225,7 +223,7 @@ def list_tunnels(
     has_next = page_result.has_next
 
     tunnels_data = [_format_tunnel_for_output(tunnel) for tunnel in tunnels]
-    if output == "json":
+    if as_json:
         output_data_as_json(
             {
                 "tunnels": tunnels_data,

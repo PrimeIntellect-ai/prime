@@ -28,7 +28,6 @@ from ..utils import (
     json_output_help,
     output_data_as_json,
     status_color,
-    validate_output_format,
 )
 from ..utils.display import POD_STATUS_COLORS
 
@@ -150,13 +149,12 @@ def list(
     limit: int = typer.Option(100, help="Maximum number of pods to list"),
     offset: int = typer.Option(0, help="Number of pods to skip"),
     watch: bool = typer.Option(False, "--watch", "-w", help="Watch pods list in real-time"),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ) -> None:
     """List your running pods"""
-    validate_output_format(output, console)
 
-    if watch and output == "json":
-        console.print("[red]Error: --watch mode is not compatible with --output=json[/red]")
+    if watch and as_json:
+        console.print("[red]Error: --watch mode is not compatible with --json[/red]")
         raise typer.Exit(1)
 
     try:
@@ -187,7 +185,7 @@ def list(
                     key=lambda pod: datetime.fromisoformat(pod.created_at.replace("Z", "+00:00")),
                 )
 
-                if output == "json":
+                if as_json:
                     # Output as JSON with timestamp (for automation)
                     pods_data = []
                     for pod in sorted_pods:
@@ -283,10 +281,9 @@ def list(
 @app.command(no_args_is_help=True, epilog=POD_STATUS_JSON_HELP)
 def status(
     pod_id: str,
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ) -> None:
     """Get detailed status of a specific pod"""
-    validate_output_format(output, console)
 
     try:
         base_client = APIClient()
@@ -303,7 +300,7 @@ def status(
 
         status = statuses[0]
 
-        if output == "json":
+        if as_json:
             # Output as JSON using shared formatting
             status_data = _format_pod_for_status(status, pod_details)
             output_data_as_json(status_data, console)
@@ -965,10 +962,9 @@ def _format_history_for_display(history_item: HistoryObj) -> Dict[str, Any]:
 def history(
     limit: int = typer.Option(100, help="Maximum number of history items to list"),
     offset: int = typer.Option(0, help="Number of history items to skip"),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ) -> None:
     """List your pods history (terminated pods)"""
-    validate_output_format(output, console)
 
     try:
         # Create API clients
@@ -980,7 +976,7 @@ def history(
             limit=limit,
         )
 
-        if output == "json":
+        if as_json:
             # Output as JSON
             history_data = []
             for item in history_list.data:

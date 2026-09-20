@@ -103,14 +103,8 @@ def handle_errors(func):
     return wrapper
 
 
-def _validate_output_format(output: str, allowed: list[str]) -> None:
-    if output not in allowed:
-        console.print(f"[red]Error:[/red] output must be one of: {', '.join(allowed)}")
-        raise typer.Exit(1)
-
-
-def format_output(data: dict, output: str) -> None:
-    if output == "json":
+def format_output(data: dict, as_json: bool) -> None:
+    if as_json:
         output_data_as_json(data, console)
     else:
         syntax = Syntax(json.dumps(data, indent=2), "json", theme="monokai")
@@ -120,7 +114,6 @@ def format_output(data: dict, output: str) -> None:
 @subcommands_app.command("list", epilog=LIST_EVALS_JSON_HELP)
 @handle_errors
 def list_evals(
-    output: str = typer.Option("table", "--output", "-o", help="table|json"),
     num: int = typer.Option(20, "--num", "-n", help="Items per page"),
     page: int = typer.Option(1, "--page", "-p", help="Page number"),
     env: Optional[str] = typer.Option(
@@ -130,9 +123,9 @@ def list_evals(
         "-e",
         help="Filter by environment (e.g., 'gsm8k' or 'owner/gsm8k')",
     ),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ) -> None:
     """List evaluations."""
-    _validate_output_format(output, ["table", "json"])
 
     if num < 1 or page < 1:
         console.print("[red]Error:[/red] --num and --page must be at least 1")
@@ -151,7 +144,7 @@ def list_evals(
             limit=num,
         )
 
-        if output == "json":
+        if as_json:
             output_data_as_json(data, console)
             return
 
@@ -164,7 +157,7 @@ def list_evals(
                 console.print("[yellow]No evaluations found.[/yellow]")
             return
 
-        table = Table(title="Evaluations")
+        table = Table()
         table.add_column("ID", style="cyan")
         table.add_column("Environment", style="blue")
         table.add_column("Model", style="magenta")
@@ -200,10 +193,7 @@ def list_evals(
         console.print(table)
         total = data.get("total", 0)
         if total > page * num:
-            console.print(
-                f"\n[yellow]Showing page {page} of results. "
-                f"Use --page {page + 1} to see more.[/yellow]"
-            )
+            console.print(f"\n[dim]Page {page} - use --page {page + 1} for the next[/dim]")
         else:
             console.print(f"\n[dim]Total: {total} evaluation(s)[/dim]")
 
@@ -213,8 +203,7 @@ def list_evals(
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")
         console.print(
-            "[yellow]Response may contain invalid data. "
-            "Try --output json to see raw response.[/yellow]"
+            "[yellow]Response may contain invalid data. Try --json to see raw response.[/yellow]"
         )
         raise typer.Exit(1)
 
@@ -223,14 +212,12 @@ def list_evals(
 @handle_errors
 def get_eval(
     eval_id: str = typer.Argument(..., help="The ID of the evaluation to retrieve"),
-    output: str = typer.Option("json", "--output", "-o", help="json|pretty"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ) -> None:
-    _validate_output_format(output, ["json", "pretty"])
-
     api_client = APIClient()
     client = EvalsClient(api_client)
     data = client.get_evaluation(eval_id)
-    format_output(data, output)
+    format_output(data, as_json)
 
 
 @subcommands_app.command("samples", epilog=EVAL_SAMPLES_JSON_HELP)
@@ -239,14 +226,12 @@ def get_samples(
     eval_id: str = typer.Argument(..., help="The ID of the evaluation"),
     page: int = typer.Option(1, "--page", "-p", help="Page number"),
     num: int = typer.Option(100, "--num", "-n", help="Items per page"),
-    output: str = typer.Option("json", "--output", "-o", help="json|pretty"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ) -> None:
-    _validate_output_format(output, ["json", "pretty"])
-
     api_client = APIClient()
     client = EvalsClient(api_client)
     data = client.get_samples(eval_id, page=page, limit=num)
-    format_output(data, output)
+    format_output(data, as_json)
 
 
 def _load_eval_directory(directory: Path) -> dict:
@@ -517,12 +502,12 @@ def push_eval(
         "--name",
         help="Explicit evaluation name override",
     ),
-    output: str = typer.Option("pretty", "--output", "-o", help="json|pretty"),
     is_public: bool = typer.Option(
         False,
         "--public",
         help="Make the pushed evaluation public. Evaluations are private by default.",
     ),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ) -> None:
     """Push evaluation data to Prime Evals.
 
@@ -557,7 +542,7 @@ def push_eval(
             current_dir = Path(".")
             if _has_eval_files(current_dir):
                 result_eval_id = _push_single_eval(".", env_id, run_id, eval_id, is_public, name)
-                if output == "json":
+                if as_json:
                     console.print()
                     output_data_as_json({"evaluation_id": result_eval_id}, console)
                 return
@@ -596,7 +581,7 @@ def push_eval(
                 f"evaluations pushed successfully"
             )
 
-            if output == "json":
+            if as_json:
                 output_data_as_json({"results": results}, console)
 
             if success_count < len(eval_dirs):
@@ -606,7 +591,7 @@ def push_eval(
 
         result_eval_id = _push_single_eval(config_path, env_id, run_id, eval_id, is_public, name)
 
-        if output == "json":
+        if as_json:
             console.print()
             output_data_as_json({"evaluation_id": result_eval_id}, console)
 

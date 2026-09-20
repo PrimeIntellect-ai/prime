@@ -38,7 +38,6 @@ from ..utils import (
     get_console,
     json_output_help,
     output_data_as_json,
-    validate_output_format,
 )
 from .images_bulk import (
     PACKAGED_DOCKERFILE_PATH,
@@ -725,7 +724,6 @@ app.command("update-bulk")(update_bulk)
 
 @app.command("list", epilog=LIST_IMAGES_JSON_HELP)
 def list_images(
-    output: str = typer.Option("table", "--output", "-o", help="Output format (table or json)"),
     search: Optional[str] = typer.Option(
         None,
         "--search",
@@ -742,6 +740,7 @@ def list_images(
     ),
     page: int = typer.Option(1, "--page", "-p", help="Page number"),
     num: int = typer.Option(50, "--num", "-n", help="Items per page (max 250)"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ):
     """
     List all images you've pushed to Prime Intellect registry.
@@ -758,10 +757,9 @@ def list_images(
         prime images list -q nvidia
         prime images list --num 100
         prime images list --page 2
-        prime images list --output json
+        prime images list --json
         prime images list --platform-image
     """
-    validate_output_format(output, console)
 
     if num < 1 or page < 1:
         console.print("[red]Error:[/red] --num and --page must be at least 1")
@@ -769,10 +767,10 @@ def list_images(
     if num > 250:
         console.print("[red]Error:[/red] --num cannot exceed 250")
         raise typer.Exit(1)
-    if platform_image and config.team_id and output != "json":
+    if platform_image and config.team_id and not as_json:
         console.print("[dim]Team context ignored: platform images are org-less[/dim]")
 
-    if all_images and output != "json":
+    if all_images and not as_json:
         console.print(
             "[yellow]Warning: --all flag is deprecated and will be removed in a future release. "
             "Images are now scoped to your current context (personal or team).[/yellow]"
@@ -792,7 +790,7 @@ def list_images(
             response.total_count if response.total_count is not None else offset + len(images)
         )
 
-        if output == "json":
+        if as_json:
             output_data_as_json(
                 response.model_dump(by_alias=True, mode="json", exclude_unset=True),
                 console,

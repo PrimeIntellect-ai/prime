@@ -9,7 +9,6 @@ from ..utils import (
     get_console,
     json_output_help,
     output_data_as_json,
-    validate_output_format,
 )
 
 app = PlainTyper(help="List your teams", no_args_is_help=True)
@@ -51,10 +50,9 @@ def fetch_team_members(client: APIClient, team_id: str) -> list[dict]:
 def list_teams(
     limit: int = typer.Option(100, help="Maximum number of teams to list"),
     offset: int = typer.Option(0, help="Number of teams to skip"),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ) -> None:
     """List teams for the current user."""
-    validate_output_format(output, console)
 
     try:
         client = APIClient()
@@ -65,7 +63,7 @@ def list_teams(
             response.get("total_count", len(teams)) if isinstance(response, dict) else len(teams)
         )
 
-        if output == "json":
+        if as_json:
             output_data_as_json(
                 {
                     "teams": teams,
@@ -116,10 +114,9 @@ def list_members(
     team_id: str = typer.Option(
         None, "--team-id", help="Team ID (uses config team_id if not specified)"
     ),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ) -> None:
     """List members of a team."""
-    validate_output_format(output, console)
 
     config = Config()
     resolved_team_id = team_id or config.team_id
@@ -135,7 +132,7 @@ def list_members(
         client = APIClient()
         members = fetch_team_members(client, resolved_team_id)
 
-        if output == "json":
+        if as_json:
             output_data_as_json({"members": members, "total_count": len(members)}, console)
             return
 

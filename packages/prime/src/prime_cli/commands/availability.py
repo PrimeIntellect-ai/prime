@@ -13,7 +13,6 @@ from ..utils import (
     json_output_help,
     output_data_as_json,
     status_color,
-    validate_output_format,
 )
 from ..utils.display import STOCK_STATUS_COLORS
 
@@ -80,10 +79,9 @@ def _format_disk_for_display(disk_entry: Dict[str, Any]) -> Dict[str, Any]:
 
 @app.command(epilog=LIST_GPU_TYPES_JSON_HELP)
 def gpu_types(
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ) -> None:
     """List available GPU types"""
-    validate_output_format(output, console)
 
     try:
         # Create API clients
@@ -94,7 +92,7 @@ def gpu_types(
         availability_data = availability_client.get_available_gpu_types()
         gpu_types = sorted(availability_data, key=lambda x: x.replace("_", " "))
 
-        if output == "json":
+        if as_json:
             output_data_as_json(
                 {"gpu_types": gpu_types, "total_count": len(gpu_types)},
                 console,
@@ -138,10 +136,9 @@ def list(
     group_similar: bool = typer.Option(
         True, help="Group similar configurations from same provider"
     ),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ) -> None:
     """List available GPU resources"""
-    validate_output_format(output, console)
 
     try:
         # Create API clients
@@ -251,7 +248,7 @@ def list(
                     seen_ids.add(gpu_config["short_id"])
                     filtered_gpus.append(gpu_config)
 
-        if output == "json":
+        if as_json:
             # Output as JSON using shared formatting
             json_data = [_format_availability_for_display(gpu_entry) for gpu_entry in filtered_gpus]
             output_data = {
@@ -324,10 +321,9 @@ def disks(
     data_center_id: Optional[str] = typer.Option(
         None, help="Filter by data center ID (e.g., US-1)"
     ),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ) -> None:
     """List available disks"""
-    validate_output_format(output, console)
 
     try:
         # Create API clients
@@ -363,7 +359,7 @@ def disks(
             }
             formatted_disks.append(formatted_disk)
 
-        if output == "json":
+        if as_json:
             json_data = formatted_disks
             output_data = {
                 "disks": json_data,

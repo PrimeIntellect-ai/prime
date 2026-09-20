@@ -40,7 +40,6 @@ from ..utils import (
     output_data_as_json,
     sort_by_created,
     status_color,
-    validate_output_format,
 )
 from ..utils.display import SANDBOX_STATUS_COLORS
 from ..utils.plain import _PlainTyperCommand
@@ -247,10 +246,9 @@ def list_sandboxes_cmd(
     page: int = typer.Option(1, "--page", "-p", help="Page number"),
     num: int = typer.Option(50, "--num", "-n", help="Items per page"),
     all: bool = typer.Option(False, "--all", help="Show all sandboxes including terminated ones"),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ) -> None:
     """List your sandboxes (shortcut: ls)"""
-    validate_output_format(output, console)
 
     if num < 1 or page < 1:
         console.print("[red]Error:[/red] --num and --page must be at least 1")
@@ -289,7 +287,7 @@ def list_sandboxes_cmd(
         # Sort sandboxes by created_at (oldest first)
         sorted_sandboxes = sort_by_created(sandbox_list.sandboxes)
 
-        if output == "json":
+        if as_json:
             # Output as JSON with timestamp (for automation)
             sandboxes_data = []
             for sandbox in sorted_sandboxes:
@@ -338,10 +336,7 @@ def list_sandboxes_cmd(
             console.print(table)
 
             if sandbox_list.has_next:
-                console.print(
-                    f"\n[yellow]Showing page {page} of results. "
-                    f"Use --page {page + 1} to see more.[/yellow]"
-                )
+                console.print(f"\n[dim]Page {page} - use --page {page + 1} for the next[/dim]")
 
     except typer.Exit:
         raise
@@ -363,10 +358,9 @@ def list_sandboxes_cmd(
 @app.command(no_args_is_help=True, epilog=SANDBOX_DETAIL_JSON_HELP)
 def get(
     sandbox_id: str,
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ) -> None:
     """Get detailed information about a specific sandbox"""
-    validate_output_format(output, console)
 
     try:
         base_client = APIClient()
@@ -374,7 +368,7 @@ def get(
 
         sandbox = sandbox_client.get(sandbox_id)
 
-        if output == "json":
+        if as_json:
             # Output as JSON using shared formatting
             sandbox_data = _format_sandbox_for_details(sandbox)
             output_data_as_json(sandbox_data, console)

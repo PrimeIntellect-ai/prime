@@ -28,7 +28,6 @@ from ..utils import (
     json_help,
     json_output_help,
     output_data_as_json,
-    validate_output_format,
 )
 from ..utils.env_metadata import find_environment_metadata
 from ..utils.env_vars import EnvParseError, collect_env_vars
@@ -950,7 +949,7 @@ def _dispatch_full_finetune_run(
     config_path: str,
     env: Optional[List[str]],
     env_file: Optional[List[str]],
-    output: str,
+    as_json: bool,
     yes: bool,
     image_tag: Optional[str] = None,
     gpu_type: Optional[str] = None,
@@ -1097,7 +1096,7 @@ def _dispatch_full_finetune_run(
         gpu_type=resolved_gpu_type,
     )
 
-    # `--output json` is a formatting switch: still dispatch the run,
+    # `--json` is a formatting switch: still dispatch the run,
     # then print the result as JSON. Same contract as the LoRA path
     # ("create then format"), which automation relies on to parse back
     # run_id from the response. Confirmation gating is purely on `--yes`
@@ -1110,13 +1109,13 @@ def _dispatch_full_finetune_run(
 
     api_client = APIClient()
     client = HostedTrainingClient(api_client)
-    # Skip the spinner for --output json: PrimeConsole.status() falls back
+    # Skip the spinner for --json: PrimeConsole.status() falls back
     # to a plain print in --plain mode, which would emit "Creating Hosted
     # Training run..." on stdout ahead of the JSON payload and break
     # automation parsing of run_id.
     status_ctx = (
         console.status("[bold blue]Creating Hosted Training run...", spinner="dots")
-        if output != "json"
+        if not as_json
         else nullcontext()
     )
     try:
@@ -1126,7 +1125,7 @@ def _dispatch_full_finetune_run(
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
 
-    if output == "json":
+    if as_json:
         # Don't expose token_value in JSON output either — the chart
         # binds it via secretKeyRef and printing it leaks credentials
         # into automation logs.
@@ -1309,7 +1308,6 @@ def create_run(
         "--env-file",
         help="Path to .env file containing secrets. Supports ${VAR} expansion from local env.",
     ),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
     skip_action_check: bool = typer.Option(
         False,
         "--skip-action-check",
@@ -1349,6 +1347,7 @@ def create_run(
             "block in the TOML either way."
         ),
     ),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ) -> None:
     """Launch a Hosted Training run from a config file.
 
@@ -1357,7 +1356,6 @@ def create_run(
         prime train config.toml
         prime train config.toml --full-finetune
     """
-    validate_output_format(output, console)
 
     # Dispatch routing: --full-finetune/--fft, or an unambiguous
     # `[deployment]` block (full-FT-only — RLConfig/the LoRA schema has no
@@ -1371,7 +1369,7 @@ def create_run(
             config_path=config_path,
             env=env,
             env_file=env_file,
-            output=output,
+            as_json=as_json,
             yes=yes,
             image_tag=image_tag,
             gpu_type=gpu_type,
@@ -1637,7 +1635,7 @@ def create_run(
             teacher=cfg.teacher.to_api_dict() if cfg.teacher else None,
         )
 
-        if output == "json":
+        if as_json:
             output_data_as_json({"run": run.model_dump()}, console)
             return
 
@@ -1683,12 +1681,12 @@ def create_run(
 
 @app.command("models", rich_help_panel="Commands", epilog=RL_MODELS_JSON_HELP)
 def list_models(
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
     fft_only: bool = typer.Option(
         False,
         "--fft-only",
         help="Suppress the LoRA/Hosted Training section and only show FFT models.",
     ),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ) -> None:
     """List available models for Hosted Training.
 
@@ -1699,8 +1697,6 @@ def list_models(
     output.
     """
     from ..api.training import AvailableFFTModel, HostedTrainingClient
-
-    validate_output_format(output, console)
 
     try:
         api_client = APIClient()
@@ -1724,7 +1720,7 @@ def list_models(
                 raise
             fft_models = []
 
-        if output == "json":
+        if as_json:
             if fft_only:
                 # --fft-only: LoRA wasn't fetched so emitting `models`
                 # would be misleading. Always include the FFT key
@@ -1850,7 +1846,7 @@ def _render_fft_models_table(fft_models: list) -> None:
 
 @app.command("gpus", rich_help_panel="Commands")
 def list_gpus(
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ) -> None:
     """List GPU types you can dispatch a full-FT run on.
 
@@ -1859,8 +1855,6 @@ def list_gpus(
     --gpu-type <value>` to steer dispatch.
     """
     from ..api.training import HostedTrainingClient
-
-    validate_output_format(output, console)
 
     try:
         api_client = APIClient()
@@ -1871,7 +1865,7 @@ def list_gpus(
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
 
-    if output == "json":
+    if as_json:
         output_data_as_json({"gpuTypes": response.gpu_types}, console)
         return
 
@@ -2038,15 +2032,14 @@ RL_CONFIGS_JSON_HELP = json_output_help(
 
 @app.command("configs", rich_help_panel="Commands", epilog=RL_CONFIGS_JSON_HELP)
 def list_configs(
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ) -> None:
     """List available configuration options for Hosted Training."""
-    validate_output_format(output, console)
 
     schema = RLConfig.model_json_schema()
     defs = schema.get("$defs", {})
     rows = _flatten_config_schema(schema, defs)
-    if output == "json":
+    if as_json:
         output_data_as_json(
             {
                 "configs": [
@@ -2063,7 +2056,7 @@ def list_configs(
         )
         return
 
-    table = Table(title="Hosted Training - Config Options")
+    table = Table()
     table.add_column("Section", style="magenta")
     table.add_column("Config", style="cyan")
     table.add_column("Type", style="green")
@@ -2087,10 +2080,9 @@ def list_configs(
 
 
 def _list_runs_impl(
-    team: Optional[str], num: int, page: int, output: str, mine: bool = False
+    team: Optional[str], num: int, page: int, as_json: bool, mine: bool = False
 ) -> None:
     """Implementation for listing Hosted Training runs."""
-    validate_output_format(output, console)
 
     if num < 1 or page < 1:
         console.print("[red]Error:[/red] --num and --page must be at least 1")
@@ -2131,7 +2123,7 @@ def _list_runs_impl(
         else:
             total_count = run_page.total
 
-        if output == "json":
+        if as_json:
             output_data_as_json(
                 {
                     "runs": [r.model_dump() for r in runs],
@@ -2150,7 +2142,7 @@ def _list_runs_impl(
                 console.print("[yellow]No Hosted Training runs found.[/yellow]")
             return
 
-        table = Table(title="Hosted Training Runs")
+        table = Table()
         table.add_column("ID", style="cyan", no_wrap=True)
         table.add_column("Status", style="bold")
         table.add_column("Model", style="magenta")
@@ -2173,10 +2165,7 @@ def _list_runs_impl(
         console.print(table)
 
         if total_count > page * num:
-            console.print(
-                f"\n[yellow]Showing page {page} of results. "
-                f"Use --page {page + 1} to see more.[/yellow]"
-            )
+            console.print(f"\n[dim]Page {page} - use --page {page + 1} for the next[/dim]")
         else:
             console.print(f"\n[dim]Total: {total_count} run(s)[/dim]")
 
@@ -2193,16 +2182,16 @@ def list_runs(
     ),
     num: int = typer.Option(20, "--num", "-n", help="Items per page"),
     page: int = typer.Option(1, "--page", "-p", help="Page number"),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ) -> None:
     """List your runs (alias: ls)."""
-    _list_runs_impl(team, num, page, output, mine=mine)
+    _list_runs_impl(team, num, page, as_json, mine=mine)
 
 
 @app.command("get", rich_help_panel="Commands", epilog=RL_RUN_JSON_HELP)
 def get_run(
     run_id: str = typer.Argument(..., help="Run ID to get details for"),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ) -> None:
     """Get details of a specific run.
 
@@ -2212,7 +2201,6 @@ def get_run(
 
         prime train get <run_id> -o json
     """
-    validate_output_format(output, console)
 
     try:
         api_client = APIClient()
@@ -2220,7 +2208,7 @@ def get_run(
 
         run = rl_client.get_run(run_id)
 
-        if output == "json":
+        if as_json:
             output_data_as_json({"run": run.model_dump()}, console)
             return
 
@@ -2793,7 +2781,7 @@ def list_components(
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
 
-    table = Table(title=f"Components for {run_id}")
+    table = Table()
     table.add_column("Component", style="cyan")
     table.add_column("Env", style="green")
     table.add_column("Status")
@@ -2995,7 +2983,7 @@ def list_checkpoints(
     status_filter: Optional[str] = typer.Option(
         None, "--status", "-s", help="Filter by status (READY, PENDING, UPLOADING, FAILED)"
     ),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ) -> None:
     """List checkpoints for a run.
 
@@ -3005,7 +2993,6 @@ def list_checkpoints(
 
         prime train checkpoints <run_id> --status READY
     """
-    validate_output_format(output, console)
 
     try:
         api_client = APIClient()
@@ -3013,7 +3000,7 @@ def list_checkpoints(
 
         checkpoints = rl_client.list_checkpoints(run_id, status_filter=status_filter)
 
-        if output == "json":
+        if as_json:
             output_data_as_json({"checkpoints": [cp.model_dump() for cp in checkpoints]}, console)
             return
 
@@ -3021,7 +3008,7 @@ def list_checkpoints(
             console.print("[yellow]No checkpoints found for this run.[/yellow]")
             return
 
-        table = Table(title=f"Checkpoints for {run_id}")
+        table = Table()
         table.add_column("ID", style="cyan", no_wrap=True)
         table.add_column("Step", justify="right", style="bold")
         table.add_column("Status", style="bold")

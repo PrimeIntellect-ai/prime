@@ -24,7 +24,6 @@ from ..utils import (
     get_console,
     json_output_help,
     output_data_as_json,
-    validate_output_format,
 )
 
 app = PlainTyper(help="Upload and query traces (Prime Traces)", no_args_is_help=True)
@@ -94,15 +93,14 @@ def upload_traces(
     no_compress: bool = typer.Option(
         False, "--no-compress", help="Skip gzip transport compression"
     ),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ) -> None:
     """Upload a JSONL file of traces. Safe to rerun after interruption:
     identical bytes replay their committed receipts without re-storing."""
-    validate_output_format(output, error_console)
     line_format = LineFormat.EPISODE if episodes else LineFormat.TRACE
 
     def on_batch(batch: Batch, receipt: UploadReceipt) -> None:
-        if output != "json":
+        if not as_json:
             console.print(
                 f"  batch {escape(receipt.upload_id[:12])}… "
                 f"({batch.num_lines} lines, {batch.size / (1024 * 1024):.1f} MiB) "
@@ -134,7 +132,7 @@ def upload_traces(
         error_console.print_exception()
         raise typer.Exit(1)
 
-    if output == "json":
+    if as_json:
         output_data_as_json(
             {
                 "receipts": [r.model_dump() for r in receipts],
@@ -200,10 +198,9 @@ def list_traces(
         "--cursor",
         help="Resume from a cursor returned by a previous page (cannot be combined with --page)",
     ),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ) -> None:
     """List trace summaries, newest first."""
-    validate_output_format(output, error_console)
     if page < 1:
         error_console.print("[red]Error:[/red] --page must be at least 1")
         raise typer.Exit(1)
@@ -246,7 +243,7 @@ def list_traces(
         error_console.print_exception()
         raise typer.Exit(1)
 
-    if output == "json":
+    if as_json:
         output_data_as_json(result.model_dump(mode="json"), console)
         return
 
@@ -301,10 +298,9 @@ def get_trace(
     dest: Optional[Path] = typer.Option(
         None, "--dest", help="With --raw: stream the document to this file"
     ),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ) -> None:
     """Get one trace summary, or the raw trace document with --raw."""
-    validate_output_format(output, error_console)
     if dest is not None and not raw:
         error_console.print("[red]--dest requires --raw[/red]")
         raise typer.Exit(1)
@@ -314,7 +310,7 @@ def get_trace(
         if raw:
             if dest is not None:
                 written = client.download_raw(trace_id, dest)
-                if output == "json":
+                if as_json:
                     output_data_as_json(
                         {"dest": str(dest), "bytes_written": written},
                         console,
@@ -345,7 +341,7 @@ def get_trace(
         error_console.print_exception()
         raise typer.Exit(1)
 
-    if output == "json":
+    if as_json:
         output_data_as_json(summary.model_dump(mode="json"), console)
         return
 

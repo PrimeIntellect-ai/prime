@@ -24,7 +24,6 @@ from ..utils import (
     json_output_help,
     output_data_as_json,
     status_color,
-    validate_output_format,
 )
 from ..utils.display import DISK_STATUS_COLORS
 
@@ -108,13 +107,12 @@ def list(
     limit: int = typer.Option(100, help="Maximum number of disks to list"),
     offset: int = typer.Option(0, help="Number of disks to skip"),
     watch: bool = typer.Option(False, "--watch", "-w", help="Watch disks list in real-time"),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ) -> None:
     """List your persistent disks"""
-    validate_output_format(output, console)
 
-    if watch and output == "json":
-        console.print("[red]Error: --watch mode is not compatible with --output=json[/red]")
+    if watch and as_json:
+        console.print("[red]Error: --watch mode is not compatible with --json[/red]")
         raise typer.Exit(1)
 
     try:
@@ -145,7 +143,7 @@ def list(
                     key=lambda disk: datetime.fromisoformat(disk.created_at.replace("Z", "+00:00")),
                 )
 
-                if output == "json":
+                if as_json:
                     # Output as JSON with timestamp (for automation)
                     disks_data = []
                     for disk in sorted_disks:
@@ -254,10 +252,9 @@ def list(
 @app.command(no_args_is_help=True, epilog=DISK_DETAIL_JSON_HELP)
 def get(
     disk_id: str,
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ) -> None:
     """Get detailed information about a specific disk"""
-    validate_output_format(output, console)
 
     try:
         base_client = APIClient()
@@ -265,7 +262,7 @@ def get(
 
         disk = disks_client.get(disk_id)
 
-        if output == "json":
+        if as_json:
             # Output as JSON using shared formatting
             disk_data = _format_disk_for_detail(disk)
             output_data_as_json(disk_data, console)

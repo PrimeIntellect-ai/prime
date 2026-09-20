@@ -69,7 +69,7 @@ def test_models_command_uses_optional_auth_client(monkeypatch: pytest.MonkeyPatc
 
     result = CliRunner().invoke(
         app,
-        ["inference", "models", "--output", "json"],
+        ["inference", "models", "--json"],
         env=TEST_ENV,
     )
 
@@ -212,8 +212,7 @@ def test_models_json_output_applies_search_and_sort(monkeypatch: pytest.MonkeyPa
         [
             "inference",
             "models",
-            "--output",
-            "json",
+            "--json",
             "--search",
             "/",
             "--sort",
@@ -356,7 +355,7 @@ def test_models_json_output_passes_catalog_fields_through(
 ) -> None:
     _patch_models(monkeypatch, _catalog_fixture())
 
-    result = CliRunner().invoke(app, ["inference", "models", "--output", "json"], env=TEST_ENV)
+    result = CliRunner().invoke(app, ["inference", "models", "--json"], env=TEST_ENV)
 
     assert result.exit_code == 0, result.output
     assert '"display_name": "Claude Haiku 4.5"' in result.output

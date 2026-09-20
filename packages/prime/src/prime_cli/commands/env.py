@@ -44,10 +44,10 @@ from ..utils.prompt import (
     require_selection,
     validate_env_var_name,
 )
-from ..utils.time_utils import format_time_ago, iso_timestamp
+from ..utils.time_utils import format_time_ago
 from .config import TEAM_ID_PATTERN
 
-ENV_COMMAND_ORDER = ("list", "info", "pull", "push", "delete", "version", "secret", "var")
+ENV_COMMAND_ORDER = ("list", "info", "pull", "push", "delete", "secret", "var")
 
 
 class _EnvGroup(PlainAwareTyperGroup):
@@ -57,7 +57,7 @@ class _EnvGroup(PlainAwareTyperGroup):
 
 app = PlainTyper(
     cls=_EnvGroup,
-    help="Manage environments (list, info, pull, push, delete, version, secret, var)",
+    help="Manage environments (list, info, pull, push, delete, secret, var)",
     no_args_is_help=True,
 )
 console = get_console()
@@ -86,6 +86,7 @@ ENV_LIST_JSON_HELP = json_output_help(
 ENV_INFO_JSON_HELP = json_output_help(
     ". = environment version object from the Environments Hub",
     ".latest_version? = {semantic_version?, content_hash?, created_at?}",
+    ".versions[] = {version, sha256, created_at, size}",
 )
 
 ENV_SECRET_LIST_JSON_HELP = json_output_help(
@@ -1649,7 +1650,7 @@ def info(
     version: str = typer.Option("latest", "--version", "-v", help="Version to show"),
     as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ) -> None:
-    """Show environment details, visibility, latest version and installation commands"""
+    """Show environment details, versions and install commands"""
     try:
         client = APIClient(require_auth=False)
 
@@ -1672,12 +1673,17 @@ def info(
             details = response.get("data", response)
             status_response = client.get(f"/environmentshub/{owner}/{name}/status")
             status = status_response.get("data", status_response)
+            versions_response = client.get(f"/environmentshub/{owner}/{name}/versions")
+            versions = versions_response.get("data", versions_response)
+            if isinstance(versions, dict):
+                versions = versions.get("versions", [])
         except APIError as e:
             console.print(f"[red]Failed to get environment details: {e}[/red]")
             raise typer.Exit(1)
 
         if as_json:
             details["latest_version"] = status.get("latest_version")
+            details["versions"] = versions
             output_data_as_json(details, console)
             return
 
@@ -1692,15 +1698,19 @@ def info(
             console.print(f"[dim]{description}[/dim]")
         console.print(f"[dim]Visibility:[/dim] {status.get('visibility', 'UNKNOWN')}")
 
-        latest_version = status.get("latest_version")
-        if latest_version:
-            content_hash = latest_version.get("content_hash") or ""
-            version_str = latest_version.get("semantic_version") or content_hash[:8]
-            created = format_time_ago(latest_version.get("created_at"))
-            console.print(
-                f"[dim]Latest:[/dim] {version_str} ({content_hash[:12] or '-'}, created {created})"
-            )
-
+        if versions:
+            table = Table()
+            table.add_column("Version", style="cyan")
+            table.add_column("Hash", style="yellow")
+            table.add_column("Created", style="dim")
+            for entry in versions:
+                table.add_row(
+                    entry.get("version") or "-",
+                    (entry.get("sha256") or "")[:12],
+                    format_time_ago(entry.get("created_at")),
+                )
+            console.print()
+            console.print(table)
         console.print()
 
         # Display key installation commands based on availability
@@ -1789,176 +1799,27 @@ def process_wheel_url(wheel_url: Optional[str]) -> Optional[str]:
     return wheel_url
 
 
-version_app = PlainTyper(help="Manage environment versions", no_args_is_help=True)
-app.add_typer(version_app, name="version")
-
-
-@version_app.command("list", no_args_is_help=True)
-def list_versions(
-    env_id: str = typer.Argument(..., help="Environment ID (owner/name)"),
-    full_hashes: bool = typer.Option(
-        False, "--full-hashes", help="Show full content hashes instead of shortened ones"
-    ),
-) -> None:
-    """List all versions of an environment"""
-    try:
-        client = APIClient(require_auth=False)
-
-        parts = env_id.split("/")
-        if len(parts) != 2:
-            console.print("[red]Error: Invalid environment ID format. Expected: owner/name[/red]")
-            raise typer.Exit(1)
-
-        owner, name = parts
-
-        console.print(f"Fetching versions for {env_id}...")
-
-        try:
-            response = client.get(f"/environmentshub/{owner}/{name}/versions")
-
-            if "data" in response:
-                versions_data = response["data"]
-            else:
-                versions_data = response
-
-        except APIError as e:
-            console.print(f"[red]Failed to get environment versions: {e}[/red]")
-            raise typer.Exit(1)
-
-        if not versions_data:
-            console.print("No versions found.")
-            return
-
-        table = Table()
-        table.add_column("Version", style="cyan")
-        table.add_column("Created", style="green")
-        table.add_column("Content Hash", style="yellow")
-        table.add_column("Artifacts", style="magenta")
-
-        # Sort versions by creation date (newest first)
-        if isinstance(versions_data, list):
-            versions_list = versions_data
-        else:
-            versions_list = versions_data.get("versions", [])
-
-        for version in versions_list:
-            version_display = version.get("version", "unknown")
-            created_date = version.get("created_at", "")
-            if created_date:
-                # Format date nicely if it's a full timestamp
-                try:
-                    if "T" in created_date:
-                        created_date = iso_timestamp(created_date)
-                except Exception:
-                    pass
-
-            content_hash = version.get("sha256", "")
-            if full_hashes or version_display == "unknown":
-                content_hash_display = content_hash
-            else:
-                content_hash_display = content_hash[:DEFAULT_HASH_LENGTH] if content_hash else ""
-
-            artifact_count = version.get("size", 0)
-            artifacts_str = f"{artifact_count} artifact{'s' if artifact_count != 1 else ''}"
-
-            table.add_row(version_display, created_date, content_hash_display, artifacts_str)
-
-        console.print(table)
-
-        if versions_list:
-            latest = versions_list[0]  # Assuming first is latest
-            console.print(f"\n[dim]Latest version: {latest.get('version', 'unknown')}[/dim]")
-            install_cmd = f"prime env install {env_id}@{latest.get('version', 'latest')}"
-            console.print(f"[dim]Install with: {install_cmd}[/dim]")
-
-    except APIError as e:
-        console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1)
-    except Exception as e:
-        console.print(f"[red]Unexpected error: {e}[/red]")
-        raise typer.Exit(1)
-
-
-@version_app.command("delete", no_args_is_help=True)
-def delete_version(
-    env_id: str = typer.Argument(..., help="Environment ID (owner/name)"),
-    content_hash: str = typer.Argument(..., help="Content hash of the version to delete"),
-    force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation"),
-) -> None:
-    """Delete a specific environment version from the Environments Hub using its content hash"""
-    try:
-        # Validate that we have a proper content hash (basic validation)
-        if len(content_hash) < 8:
-            console.print(
-                "[red]Error: Please provide a valid content hash (at least 8 characters)[/red]"
-            )
-            console.print(
-                "[yellow]Use 'prime env version list' to see available content hashes[/yellow]"
-            )
-            raise typer.Exit(1)
-
-        if not force:
-            try:
-                confirm_msg = (
-                    f"Are you sure you want to permanently delete version with content "
-                    f"hash '{content_hash}' from '{env_id}' on the Environments Hub?"
-                )
-                confirm = typer.confirm(confirm_msg)
-                if not confirm:
-                    console.print("Deletion cancelled.")
-                    raise typer.Exit()
-            except typer.Abort:
-                console.print("Deletion cancelled.")
-                raise typer.Exit()
-
-        client = APIClient()
-
-        parts = env_id.split("/")
-        if len(parts) != 2:
-            console.print("[red]Error: Invalid environment ID format. Expected: owner/name[/red]")
-            raise typer.Exit(1)
-
-        owner, name = parts
-        console.print(f"Deleting version {content_hash} from {env_id}...")
-
-        try:
-            url = f"/environmentshub/{owner}/{name}/@{content_hash}"
-            client.delete(url)
-            console.print(
-                f"[green]✓ Version {content_hash} deleted successfully from {env_id}[/green]"
-            )
-        except APIError as e:
-            if "404" in str(e):
-                console.print(
-                    f"[red]Version with content hash '{content_hash}' "
-                    f"not found in environment '{env_id}'[/red]"
-                )
-            else:
-                console.print(f"[red]Failed to delete version: {e}[/red]")
-            raise typer.Exit(1)
-
-    except APIError as e:
-        console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1)
-    except Exception as e:
-        console.print(f"[red]Unexpected error: {e}[/red]")
-        raise typer.Exit(1)
-
-
 @app.command(no_args_is_help=True)
 def delete(
-    env_id: str = typer.Argument(..., help="Environment ID to delete"),
+    env_id: str = typer.Argument(..., help="Environment ID (owner/name)"),
+    version: Optional[str] = typer.Option(
+        None, "--version", "-v", help="Delete only this version (content hash from `info`)"
+    ),
     force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation"),
 ) -> None:
-    """Delete an entire environment from the Environments Hub"""
+    """Delete an environment or one of its versions from the Environments Hub"""
     try:
+        owner, name = _parse_environment_slug(env_id)
+        if version is not None and len(version) < 8:
+            console.print(
+                "[red]Error: --version needs a content hash of at least 8 characters[/red]"
+            )
+            raise typer.Exit(1)
+
+        target = f"version {version} of {env_id}" if version else f"{env_id} and ALL its versions"
         if not force:
             try:
-                delete_msg = (
-                    f"Are you sure you want to permanently delete entire environment "
-                    f"'{env_id}' and ALL its versions from the Environments Hub?"
-                )
-                confirm = typer.confirm(delete_msg)
+                confirm = typer.confirm(f"Permanently delete {target} from the Environments Hub?")
                 if not confirm:
                     console.print("Deletion cancelled.")
                     raise typer.Exit()
@@ -1967,13 +1828,19 @@ def delete(
                 raise typer.Exit()
 
         client = APIClient()
-        console.print(f"Deleting {env_id} from the Environments Hub...")
+        console.print(f"Deleting {target} from the Environments Hub...")
 
         try:
-            client.delete(f"/environmentshub/{env_id}")
-            console.print(f"[green]✓ Environment {env_id} deleted successfully[/green]")
+            if version:
+                client.delete(f"/environmentshub/{owner}/{name}/@{version}")
+            else:
+                client.delete(f"/environmentshub/{env_id}")
+            console.print(f"[green]✓ Deleted {target}[/green]")
         except APIError as e:
-            console.print(f"[red]Failed to delete environment: {e}[/red]")
+            if version and "404" in str(e):
+                console.print(f"[red]Version '{version}' not found in '{env_id}'[/red]")
+            else:
+                console.print(f"[red]Failed to delete: {e}[/red]")
             raise typer.Exit(1)
 
     except APIError as e:

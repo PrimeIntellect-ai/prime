@@ -65,33 +65,6 @@ detail = client.get_episode(episode_id)      # + member aggregate under .traces
 members = client.list_episode_traces(episode_id, has_error=True)
 ```
 
-## Search indexed content
-
-Case-sensitive literal search within one run. Requires SDK 0.0.5+ and a server
-supporting `GET /api/v1/traces/search`.
-
-```python
-page = client.search("connection refused", run_id="run_9f3k2m", role="tool")
-for match in page.items:
-    print(match.trace_id, match.node_idx, match.excerpt)
-```
-
-```bash
-prime traces search 'connection refused' --run-id run_9f3k2m --role tool -o json
-```
-
-Async uses the same API. Optional filters: `role`, `run_step`, `has_error`,
-`reward_min`, `reward_max`, and `field` (`content`, `reasoning_content`, `tool_calls`).
-String content is decoded; structured content and tool calls use recorded JSON.
-
-Each call scans one bounded page without downloading raw traces. Continue with
-`cursor=page.next_cursor` (CLI: `--cursor`) and unchanged filters until null,
-**even on empty pages**. Cursors are not snapshots; replacing the resumed trace
-requires restarting.
-
-`unindexed_trace_ids` and `partial_index` flag incomplete coverage. Restart after
-pending uploads finish indexing; nodes beyond the indexing cap remain excluded.
-
 ## Async
 
 `AsyncTracesClient` mirrors `TracesClient` method for method.
@@ -130,7 +103,7 @@ Precedence is constructor argument → environment variable → config file.
 
 - **Exports** — the service route exists but is unimplemented, so wrapping it
   would ship a method that cannot succeed.
-- **Cross-run search, regex and arbitrary JSON-path queries.**
+- **Search and free-text queries.**
 
 ## Examples
 

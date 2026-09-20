@@ -89,10 +89,9 @@ def search_traces(
     cursor: Optional[str] = typer.Option(None, "--cursor", help="Continue an unfinished scan"),
     output: str = typer.Option("table", "--output", "-o", help="table or json"),
 ) -> None:
-    """Search one bounded page of indexed trace content; never downloads raw traces.
+    """Search one bounded page of indexed trace content.
 
-    An empty page can have next_cursor. Continue with that cursor and unchanged
-    filters until it is null. Index warnings mean coverage remains incomplete.
+    Follow next_cursor with unchanged filters, even on empty pages.
     """
     validate_output_format(output, error_console)
     if field not in ("content", "reasoning_content", "tool_calls"):

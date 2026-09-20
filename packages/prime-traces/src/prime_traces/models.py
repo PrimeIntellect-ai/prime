@@ -19,7 +19,7 @@ SearchField = Literal["content", "reasoning_content", "tool_calls"]
 
 
 class TraceSearchMatch(BaseModel):
-    """First literal match in one node; offsets are Unicode code points."""
+    """First match; zero-based Unicode code-point offsets, end exclusive."""
 
     model_config = ConfigDict(extra="allow")
 
@@ -38,11 +38,7 @@ class TraceSearchMatch(BaseModel):
 
 
 class TraceSearchPage(BaseModel):
-    """One bounded scan. An empty page with next_cursor is not a completed search.
-
-    Index warnings apply to this page; collect them across continuations.
-    Restart after indexing to include unindexed traces. No snapshot guarantee.
-    """
+    """Bounded scan; follow next_cursor and collect index warnings across pages."""
 
     model_config = ConfigDict(extra="allow")
 

@@ -295,17 +295,10 @@ class TracesClient:
         limit: int = 50,
         cursor: Optional[str] = None,
     ) -> TraceSearchPage:
-        """Search one bounded window of indexed nodes in a run.
+        """Search one bounded page of indexed nodes using case-sensitive literal text.
 
-        Case-sensitive literal matching, one match per node in the selected
-        field. String content is decoded; structured content and tool calls
-        use their recorded JSON representation. No raw traces are downloaded.
-
-        Continue with the returned cursor even when items is empty. A null
-        cursor exhausts this scan, but unindexed_trace_ids / partial_index
-        still mean coverage is incomplete. Cursors bind every filter and the
-        owner; changing the resumed trace invalidates its cursor. Requires a
-        server supporting GET /traces/search (older servers return 404).
+        Follow next_cursor with unchanged filters, even on empty pages.
+        unindexed_trace_ids / partial_index indicate incomplete coverage.
         """
         params = _build_params(
             (

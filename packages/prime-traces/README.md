@@ -67,56 +67,30 @@ members = client.list_episode_traces(episode_id, has_error=True)
 
 ## Search indexed content
 
-Requires SDK 0.0.5 or later and a deployment with `GET /api/v1/traces/search`.
-Search is a case-sensitive literal substring, scoped to one run:
+Case-sensitive literal search within one run. Requires SDK 0.0.5+ and a server
+supporting `GET /api/v1/traces/search`.
 
 ```python
-page = client.search("connection refused", run_id="run_9f3k2m", role="tool", limit=50)
+page = client.search("connection refused", run_id="run_9f3k2m", role="tool")
 for match in page.items:
     print(match.trace_id, match.node_idx, match.excerpt)
-
-# One call searches one bounded page. An empty page can still have a cursor.
-if page.next_cursor:
-    next_page = client.search(
-        "connection refused", run_id="run_9f3k2m", role="tool", limit=50,
-        cursor=page.next_cursor,
-    )
 ```
-
-`AsyncTracesClient.search()` has the same parameters and response. Optional
-filters are `field`, `role`, `run_step`, `has_error`, `reward_min`, and `reward_max`.
-Choose `field="content"` (default), `"reasoning_content"`, or `"tool_calls"`.
-Queries contain 1–256 characters of nonblank text; `limit` is 1–100.
-
-The CLI exposes the same single-page contract:
 
 ```bash
-prime traces search 'connection refused' --run-id run_9f3k2m --role tool
 prime traces search 'connection refused' --run-id run_9f3k2m --role tool -o json
-prime traces search 'connection refused' --run-id run_9f3k2m --role tool --cursor '<next_cursor>'
 ```
 
-Each call examines a bounded window of the existing node index and returns
-small excerpts without downloading raw traces. Stop only when `next_cursor`
-is null; the SDK and CLI never automatically scan an entire run. Keep all
-filters unchanged when resuming. Pages expose `scanned_nodes` and
-`examined_traces` for progress. `unindexed_trace_ids` and `partial_index` indicate
-incomplete coverage for that page, even if its cursor is null: restart after
-pending uploads finish indexing. Nodes beyond the service's indexing cap are
-not searchable. Cursors are not snapshots; changes during a scan can affect
-results, and replacing the resumed trace requires restarting.
+Async uses the same API. Optional filters: `role`, `run_step`, `has_error`,
+`reward_min`, `reward_max`, and `field` (`content`, `reasoning_content`, `tool_calls`).
+String content is decoded; structured content and tool calls use recorded JSON.
 
-There is one result per matching node, at its first occurrence, ordered by
-trace ID and node index. String content is JSON-decoded; structured content and
-tool calls are searched in their recorded JSON representation. `representation`
-is `text` or `json`. `match_start`, `match_end` (exclusive), and `excerpt_start`
-are zero-based Unicode code-point offsets in that representation. The match's
-coordinates within its excerpt are `match_start - excerpt_start` through
-`match_end - excerpt_start`. Results identify their `upload_id` and `generation`.
+Each call scans one bounded page without downloading raw traces. Continue with
+`cursor=page.next_cursor` (CLI: `--cursor`) and unchanged filters until null,
+**even on empty pages**. Cursors are not snapshots; replacing the resumed trace
+requires restarting.
 
-This is literal content search, without regex, relevance ranking, arbitrary
-JSON-path predicates, or cross-run search. An older server returns
-`NotFoundError`; the CLI explains that the search API is required.
+`unindexed_trace_ids` and `partial_index` flag incomplete coverage. Restart after
+pending uploads finish indexing; nodes beyond the indexing cap remain excluded.
 
 ## Async
 

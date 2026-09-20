@@ -25,6 +25,7 @@ from rich.text import Text
 
 from ..client import APIClient, APIError
 from ..utils import (
+    PlainAwareTyperGroup,
     PlainTyper,
     get_console,
     json_output_help,
@@ -47,8 +48,17 @@ from ..utils.prompt import (
 from ..utils.time_utils import format_time_ago, iso_timestamp
 from .config import TEAM_ID_PATTERN
 
+ENV_COMMAND_ORDER = ("list", "info", "pull", "push", "delete", "version", "secret", "var")
+
+
+class _EnvGroup(PlainAwareTyperGroup):
+    def list_commands(self, ctx):
+        return sorted(super().list_commands(ctx), key=ENV_COMMAND_ORDER.index)
+
+
 app = PlainTyper(
-    help=("Manage environments (list, info, push, pull, delete, version, secret, var)"),
+    cls=_EnvGroup,
+    help="Manage environments (list, info, pull, push, delete, version, secret, var)",
     no_args_is_help=True,
 )
 console = get_console()

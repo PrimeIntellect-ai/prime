@@ -513,7 +513,7 @@ def run_eval_cmd(
         env_vars[key] = value
 
     sandboxes = SandboxClient(SandboxAPIClient())
-    with _step("Start sandbox") as step:
+    with _step("Booting sandbox") as step:
         sandbox = sandboxes.create(
             CreateSandboxRequest(
                 name=f"prime-eval-{uuid.uuid4().hex[:8]}",
@@ -525,10 +525,10 @@ def run_eval_cmd(
                 labels=["prime-eval"],
             )
         )
-        step.label = f"Start sandbox {sandbox.id} ({image})"
+        step.label = f"Booting sandbox {sandbox.id} ({image})"
         sandboxes.wait_for_creation(sandbox.id)
     try:
-        with _step(f"Install prime-rl@{ref}"):
+        with _step(f"Installing prime-rl@{ref}"):
             setup_script = EVAL_SETUP_SCRIPT.format(
                 workdir=EVAL_SANDBOX_WORKDIR, repo=PRIME_RL_REPO, ref=shlex.quote(ref)
             )
@@ -540,7 +540,7 @@ def run_eval_cmd(
             )
             _check(setup, "Installing prime-rl")
 
-        with _step("Install environments"):
+        with _step("Installing environments"):
             if env_path is not None:
                 _upload_local_env(sandboxes, sandbox.id, env_path)
             installed = sandboxes.run_background_job(
@@ -559,7 +559,7 @@ def run_eval_cmd(
 
         command = shlex.join(["uv", "run", "eval", *eval_args])
         workdir = f"{EVAL_SANDBOX_WORKDIR}/prime-rl"
-        with _step("Validate config"):
+        with _step("Validating config"):
             dry_run = sandboxes.run_background_job(
                 sandbox.id,
                 f"{command} --dry-run",
@@ -575,7 +575,7 @@ def run_eval_cmd(
                 base=config.base_url.rstrip("/"), sandbox_id=sandbox.id
             )
             job_script = f"{command}; code=$?; {cleanup}; exit $code"
-        with _step(f"Launch {command}"):
+        with _step(f"Launching {command}"):
             job = sandboxes.start_background_job(
                 sandbox.id, job_script, working_dir=workdir, env=env_vars
             )
@@ -592,7 +592,7 @@ def run_eval_cmd(
             else:
                 console.print(f"[dim]Sandbox {sandbox.id} deletes itself when the eval ends[/dim]")
             return
-        with _step("Run eval"):
+        with _step("Running eval"):
             while True:
                 status = sandboxes.get_background_job_status(sandbox.id, job)
                 if status.completed:

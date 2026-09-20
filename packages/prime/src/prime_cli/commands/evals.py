@@ -582,15 +582,9 @@ def run_eval_cmd(
             links = _wait_for_links(sandboxes, sandbox.id, job, workdir)
         for link in links:
             console.print(f"Evaluation: [link={link}]{link}[/link]")
-        console.print(
-            f"[dim]Follow along: prime sandbox run {sandbox.id} -w {workdir} "
-            "-- bash -c 'tail -n 50 outputs/*/logs/latest/eval.log'[/dim]"
-        )
         if not wait:
             if keep:
                 console.print(f"[dim]Sandbox {sandbox.id} keeps running after the eval[/dim]")
-            else:
-                console.print(f"[dim]Sandbox {sandbox.id} deletes itself when the eval ends[/dim]")
             return
         with _step("Running eval"):
             while True:

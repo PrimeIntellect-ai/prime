@@ -602,6 +602,18 @@ class RLClient:
                 raise APIError(f"Failed to get Hosted Training run rollouts: {e.response.text}")
             raise APIError(f"Failed to get Hosted Training run rollouts: {str(e)}")
 
+    def get_dashboard_url(self, run_id: str) -> Optional[str]:
+        """Get the platform-proxied dashboard URL for a Hosted Training run."""
+        try:
+            response = self.client.get(f"/rft/runs/{run_id}/dashboard_url")
+            return response.get("url")
+        except Exception as e:
+            if hasattr(e, "response") and hasattr(e.response, "text"):
+                raise APIError(
+                    f"Failed to get Hosted Training run dashboard URL: {e.response.text}"
+                )
+            raise APIError(f"Failed to get Hosted Training run dashboard URL: {str(e)}")
+
     def get_progress(self, run_id: str) -> Dict[str, Any]:
         """Get progress information for a Hosted Training run."""
         try:

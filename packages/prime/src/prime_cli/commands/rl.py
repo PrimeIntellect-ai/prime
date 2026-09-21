@@ -3049,6 +3049,37 @@ def list_checkpoints(
         raise typer.Exit(1)
 
 
+@app.command("dashboard", rich_help_panel="Monitoring")
+def get_dashboard_url(
+    run_id: str = typer.Argument(..., help="Run ID to get the dashboard URL for"),
+) -> None:
+    """Get the platform-proxied dashboard URL for a Hosted Training run.
+
+    Prints the URL to stdout. Exits non-zero if the run has no dashboard.
+
+    Example:
+
+        prime train dashboard <run_id>
+
+        open $(prime train dashboard <run_id>)
+    """
+    try:
+        api_client = APIClient()
+        rl_client = RLClient(api_client)
+
+        url = rl_client.get_dashboard_url(run_id)
+
+        if not url:
+            console.print(f"[red]Error:[/red] No dashboard available for run {run_id}")
+            raise typer.Exit(1)
+
+        console.print(url)
+
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+
 # `prime train usage` — token usage and price for one run; lives next to the
 # other run-scoped monitoring commands. Implemented in commands/usage.py and
 # also re-exposed as the top-level `prime usage` summary command.

@@ -34,6 +34,7 @@ class InferenceClient:
       - GET /v1/models
       - GET /v1/models/{model_id}
       - POST /v1/chat/completions
+      - POST /v1/evaluations
     """
 
     def __init__(
@@ -163,3 +164,24 @@ class InferenceClient:
                         continue
 
         return _stream()
+
+    def evaluation(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """POST /v1/evaluations — Vercel AI SDK v4 evaluation protocol.
+
+        Evaluation models (e.g. typesafe-ai/jev) answer typed questions
+        (boolean/choice/score) about a shared state. Chat-completions
+        rejects these models by design.
+        """
+        url = f"{self.inference_url}/evaluations"
+        resp = self._client.post(url, json=payload)
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            status = e.response.status_code
+            message = _extract_error_message(e.response)
+            if status == 402:
+                raise InferencePaymentRequiredError(
+                    f"Payment required. {_extract_payment_error_message(e.response)}"
+                ) from e
+            raise InferenceAPIError(f"POST {url} failed: {status} {message}") from e
+        return resp.json()

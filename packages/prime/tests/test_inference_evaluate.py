@@ -43,6 +43,34 @@ def test_parse_boolean_question() -> None:
     assert q == {"type": "boolean", "instructions": "Was a refund issued?"}
 
 
+def test_parse_boolean_preserves_colons_in_instructions() -> None:
+    q = _parse_question("ok:boolean:Was a refund issued: yes or no?")
+    assert q == {"type": "boolean", "instructions": "Was a refund issued: yes or no?"}
+
+
+def test_evaluate_rejects_duplicate_question_ids(monkeypatch) -> None:
+    monkeypatch.setattr("prime_cli.commands.inference.InferenceClient", DummyClient)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "inference",
+            "evaluate",
+            "typesafe-ai/jev",
+            "state",
+            "-q",
+            "ok:boolean:Fine?",
+            "-q",
+            "ok:boolean:Also fine?",
+        ],
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 1
+    assert "Duplicate question id" in result.output
+
+
 def test_parse_choice_question_with_criteria() -> None:
     q = _parse_question("tone:choice:Classify:professional=Formal,casual")
     assert q == {

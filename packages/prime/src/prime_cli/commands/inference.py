@@ -336,30 +336,39 @@ def _parse_question(spec: str) -> Dict[str, Any]:
     choice:  tone:choice:Classify the tone:professional=Formal,casual
     score:   quality:score:Rate it:Bad,Okay,Good,Excellent
     """
-    parts = spec.split(":", 3)
-    if len(parts) < 3:
+    # Split off id and type; everything after the second colon stays intact
+    # so boolean instructions may themselves contain colons.
+    head = spec.split(":", 2)
+    if len(head) < 3:
         raise ValueError(
             f"Invalid --question '{spec}'. "
             "Expected 'id:type:instructions[:extras]' with type in {boolean, choice, score}."
         )
-    qid, qtype, rest = parts[0].strip(), parts[1].strip().lower(), parts[2].lstrip()
+    qid, qtype, tail = head[0].strip(), head[1].strip().lower(), head[2].lstrip()
     if not qid:
         raise ValueError(f"Invalid --question '{spec}': empty question id.")
     if qtype not in _EVAL_QUESTION_TYPES:
         raise ValueError(
             f"Invalid --question '{spec}': type must be one of {', '.join(_EVAL_QUESTION_TYPES)}."
         )
-    instructions: str = rest
-    extras: Optional[str] = None
-    if qtype in ("choice", "score") and len(parts) == 4:
-        extras = parts[3].strip()
+    if qtype == "boolean":
+        # The whole remainder is the instruction; colons are preserved.
+        return {"type": qtype, "instructions": tail}
+    # choice/score carry a trailing criteria field after the LAST colon, so
+    # instructions may contain colons but the criteria field may not.
+    instructions, colon, extras = tail.rpartition(":")
+    if not colon or not extras:
+        required = (
+            "'id:choice:instructions:opt1=Description,opt2' (1-255 options)"
+            if qtype == "choice"
+            else "'id:score:instructions:Low,Mid,High' (at least two levels)"
+        )
+        raise ValueError(
+            f"Invalid --question '{spec}': {qtype} questions need criteria, {required}."
+        )
+    extras = extras.strip()
     question: Dict[str, Any] = {"type": qtype, "instructions": instructions}
     if qtype == "choice":
-        if not extras:
-            raise ValueError(
-                f"Invalid --question '{spec}': choice questions need criteria, "
-                "'id:choice:instructions:opt1=Description,opt2' (1-255 options)."
-            )
         criteria: Dict[str, Any] = {}
         for opt in extras.split(","):
             opt = opt.strip()
@@ -370,12 +379,7 @@ def _parse_question(spec: str) -> Dict[str, Any]:
         if not criteria:
             raise ValueError(f"Invalid --question '{spec}': no choice criteria parsed.")
         question["criteria"] = criteria
-    elif qtype == "score":
-        if not extras:
-            raise ValueError(
-                f"Invalid --question '{spec}': score questions need ordered levels, "
-                "'id:score:instructions:Low,Mid,High' (at least two)."
-            )
+    else:  # score
         levels = [level.strip() for level in extras.split(",") if level.strip()]
         if len(levels) < 2:
             raise ValueError(f"Invalid --question '{spec}': score needs at least two levels.")
@@ -457,7 +461,12 @@ def evaluate(
     try:
         for spec in question:
             q = _parse_question(spec)
-            questions[spec.split(":", 1)[0].strip()] = q
+            qid = spec.split(":", 1)[0].strip()
+            if qid in questions:
+                raise ValueError(
+                    f"Duplicate question id '{qid}' - each --question needs a unique id."
+                )
+            questions[qid] = q
     except ValueError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)

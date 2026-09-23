@@ -11,9 +11,55 @@ new summary columns must not break an older SDK.
 
 from datetime import datetime
 from enum import Enum
-from typing import Dict, List, Optional
+from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict
+
+SearchField = Literal["content", "reasoning_content", "tool_calls"]
+
+
+class TraceSearchMatch(BaseModel):
+    """First match; zero-based Unicode code-point offsets, end exclusive."""
+
+    model_config = ConfigDict(extra="allow")
+
+    trace_id: str
+    upload_id: str
+    generation: int
+    episode_id: Optional[str]
+    node_idx: int
+    role: str
+    field: SearchField
+    representation: Literal["text", "json"]
+    match_start: int
+    match_end: int
+    excerpt: str
+    excerpt_start: int
+
+
+class TraceSearchCoverage(BaseModel):
+    """What the search could not see when it started."""
+
+    model_config = ConfigDict(extra="allow")
+
+    examined_traces: int
+    # A sample of at most 256 traces whose current copy is not indexed yet.
+    unindexed_trace_ids: List[str]
+    # A searched trace reached the node indexing cap; its later nodes are excluded.
+    partial_index: bool
+
+
+class TraceSearchPage(BaseModel):
+    """Search page; coverage is reported on the first page only.
+
+    A first page with ``coverage=None`` means coverage is unknown, not complete.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    items: List[TraceSearchMatch]
+    next_cursor: Optional[str]
+    coverage: Optional[TraceSearchCoverage] = None
 
 
 class LineFormat(str, Enum):

@@ -43,7 +43,11 @@ from .models import (
     LineFormat,
     ModelInfo,
     Score,
+    SearchField,
     TraceListPage,
+    TraceSearchCoverage,
+    TraceSearchMatch,
+    TraceSearchPage,
     TraceSummary,
     UploadReceipt,
 )
@@ -81,6 +85,10 @@ __all__ = [
     "ModelInfo",
     "Score",
     "TraceListPage",
+    "SearchField",
+    "TraceSearchCoverage",
+    "TraceSearchMatch",
+    "TraceSearchPage",
     "TraceSummary",
     "UploadReceipt",
     # Exceptions

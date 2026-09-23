@@ -12,7 +12,7 @@ Deliberately not implemented (open v0 contract decisions — do not freeze
 them here): exports in any form — the service publishes ``GET /traces/export``
 and the job routes, but all three handlers raise ``NotImplementedError``,
 which FastAPI answers as 500, and the streaming route declares no query
-parameters, so there is no filter vocabulary to bind to; ``/search``; episode
+parameters, so there is no filter vocabulary to bind to; episode
 writes (episodes are read-only, written only as a side effect of
 episode-grouped uploads); and the dot-path query compiler (needs the server-side
 field registry).
@@ -37,7 +37,9 @@ from .models import (
     EpisodeDetail,
     EpisodeListPage,
     LineFormat,
+    SearchField,
     TraceListPage,
+    TraceSearchPage,
     TraceSummary,
     UploadReceipt,
 )
@@ -130,6 +132,11 @@ def _encoded_id_segment(identifier: str, *, parameter_name: str) -> str:
 def _trace_endpoint(trace_id: str) -> str:
     """Build a trace endpoint with the ID encoded as one path segment."""
     return f"/traces/{_encoded_id_segment(trace_id, parameter_name='trace_id')}"
+
+
+def _run_search_endpoint(run_id: str) -> str:
+    """Build a run's search endpoint with the ID encoded as one path segment."""
+    return f"/runs/{_encoded_id_segment(run_id, parameter_name='run_id')}/search"
 
 
 def _episode_endpoint(episode_id: str) -> str:
@@ -278,6 +285,43 @@ class TracesClient:
         raise last_error
 
     # -- traces: read -------------------------------------------------------
+
+    def search(
+        self,
+        query: str,
+        *,
+        run_id: str,
+        field: SearchField = "content",
+        role: Optional[str] = None,
+        run_step: Optional[int] = None,
+        has_error: Optional[bool] = None,
+        reward_min: Optional[float] = None,
+        reward_max: Optional[float] = None,
+        limit: int = 50,
+        cursor: Optional[str] = None,
+    ) -> TraceSearchPage:
+        """Return one page of case-sensitive literal matches in indexed nodes.
+
+        ``query`` needs at least three characters. Follow next_cursor with
+        unchanged filters. The first page's ``coverage`` reports traces that
+        were not searchable yet.
+        """
+        params = _build_params(
+            (
+                ("query", query),
+                ("field", field),
+                ("role", role),
+                ("run_step", run_step),
+                ("has_error", has_error),
+                ("reward_min", reward_min),
+                ("reward_max", reward_max),
+                ("limit", limit),
+                ("cursor", cursor),
+            )
+        )
+        return TraceSearchPage.model_validate(
+            self.client.get_json(_run_search_endpoint(run_id), params=params)
+        )
 
     def list(
         self,

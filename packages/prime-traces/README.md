@@ -65,6 +65,39 @@ detail = client.get_episode(episode_id)      # + member aggregate under .traces
 members = client.list_episode_traces(episode_id, has_error=True)
 ```
 
+## Search indexed content
+
+Case-sensitive literal search within one run. Requires SDK 0.0.5+ and a server
+supporting `GET /api/v1/runs/{run_id}/search`.
+
+```python
+page = client.search("connection refused", run_id="run_9f3k2m", role="tool")
+for match in page.items:
+    print(match.trace_id, match.node_idx, match.excerpt)
+```
+
+```bash
+prime traces search 'connection refused' --run-id run_9f3k2m --role tool -o json
+```
+
+Async uses the same API. Optional filters: `role`, `run_step`, `has_error`,
+`reward_min`, `reward_max`, and `field` (`content`, `reasoning_content`, `tool_calls`).
+String content is decoded; structured content and tool calls use recorded JSON.
+
+Search uses server text indexes, so the query needs at least three characters.
+Each call returns one page without downloading raw traces. Continue with
+`cursor=page.next_cursor` (CLI: `--cursor`) and unchanged filters until null.
+Cursors are node positions, not snapshots: a trace replaced mid-search resumes
+at the same position in its new copy.
+
+The first page's `coverage` reports what was not searchable: `unindexed_trace_ids`
+(a bounded sample) and `partial_index`. It is null on later pages, and on a first
+page when the server could not compute it within budget (unknown, not complete). Restart after
+pending uploads finish indexing; nodes beyond the indexing cap remain excluded.
+
+A search that overruns the server's read budget fails with `search_limit_exceeded`
+(HTTP 400). Retrying unchanged will not help; use a more specific query or add filters.
+
 ## Async
 
 `AsyncTracesClient` mirrors `TracesClient` method for method.
@@ -103,7 +136,7 @@ Precedence is constructor argument → environment variable → config file.
 
 - **Exports** — the service route exists but is unimplemented, so wrapping it
   would ship a method that cannot succeed.
-- **Search and free-text queries.**
+- **Cross-run search, regex and arbitrary JSON-path queries.**
 
 ## Examples
 

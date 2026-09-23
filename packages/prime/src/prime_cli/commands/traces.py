@@ -73,6 +73,101 @@ def _parse_context(values: List[str]) -> Optional[Dict[str, str]]:
     return context
 
 
+@app.command("search")
+def search_traces(
+    query: str = typer.Argument(..., help="Case-sensitive literal text (quote phrases)"),
+    run_id: str = typer.Option(..., "--run-id", help="Required run scope"),
+    field: str = typer.Option(
+        "content", "--field", help="content, reasoning_content, or tool_calls"
+    ),
+    role: Optional[str] = typer.Option(None, "--role", help="Message role"),
+    run_step: Optional[int] = typer.Option(None, "--run-step", min=0),
+    has_error: Optional[bool] = typer.Option(None, "--has-error/--no-has-error"),
+    reward_min: Optional[float] = typer.Option(None, "--reward-min"),
+    reward_max: Optional[float] = typer.Option(None, "--reward-max"),
+    limit: int = typer.Option(50, "--limit", min=1, max=100, help="Maximum matches returned"),
+    cursor: Optional[str] = typer.Option(None, "--cursor", help="Continue an unfinished search"),
+    output: str = typer.Option("table", "--output", "-o", help="table or json"),
+) -> None:
+    """Return one page of matches in indexed trace content.
+
+    Follow next_cursor with unchanged filters until the search is exhausted.
+    """
+    validate_output_format(output, error_console)
+    if field not in ("content", "reasoning_content", "tool_calls"):
+        raise typer.BadParameter(
+            "Choose content, reasoning_content, or tool_calls", param_hint="--field"
+        )
+    if "/" in run_id:
+        # The run ID is one URL path segment; the SDK refuses what it cannot address.
+        raise typer.BadParameter("Run IDs containing '/' cannot be searched", param_hint="--run-id")
+    if not query.strip() or not 3 <= len(query) <= 256:
+        raise typer.BadParameter("Provide 3–256 characters of nonblank text", param_hint="query")
+    try:
+        with _traces_client() as client:
+            result = client.search(
+                query,
+                run_id=run_id,
+                field=field,
+                role=role,
+                run_step=run_step,
+                has_error=has_error,
+                reward_min=reward_min,
+                reward_max=reward_max,
+                limit=limit,
+                cursor=cursor,
+            )
+    except NotFoundError as exc:
+        # A server without the route answers with a bare 404 and no error code.
+        if exc.code is None:
+            error_console.print(
+                "[red]Search is unavailable on this server. "
+                "It requires the Prime Traces search API.[/red]"
+            )
+        else:
+            error_console.print(f"[red]Search failed:[/red] {escape(str(exc))}")
+        raise typer.Exit(1)
+    except PrimeTracesError as exc:
+        error_console.print(f"[red]Search failed:[/red] {escape(str(exc))}")
+        raise typer.Exit(1)
+
+    if output == "json":
+        output_data_as_json(result.model_dump(mode="json"), console)
+        return
+    table = Table(title="Trace search")
+    for heading in ("Trace ID", "Node", "Role", "Field", "Match"):
+        table.add_column(heading)
+    for match in result.items:
+        table.add_row(
+            escape(match.trace_id),
+            str(match.node_idx),
+            escape(match.role),
+            match.field,
+            escape(match.excerpt),
+        )
+    console.print(table)
+    coverage = result.coverage
+    if coverage is not None:
+        console.print(f"Searched {coverage.examined_traces} traces.")
+        if coverage.unindexed_trace_ids or coverage.partial_index:
+            error_console.print(
+                "[yellow]Incomplete index coverage: some traces are unindexed or capped. "
+                "Restart after indexing to include pending traces.[/yellow]"
+            )
+    elif cursor is None:
+        # Only resumed pages omit coverage by design; on a first page it means the
+        # server could not compute it, which is unknown rather than complete.
+        error_console.print(
+            "[yellow]Index coverage is unknown: the server could not check whether every "
+            "trace in the run was searchable. Matches may be incomplete.[/yellow]"
+        )
+    if result.next_cursor:
+        console.print("Search has more pages. Continue with the same filters and:")
+        console.print(f"--cursor {escape(result.next_cursor)}", soft_wrap=True)
+    else:
+        console.print("Search exhausted for the currently available index.")
+
+
 @app.command("upload", epilog=UPLOAD_JSON_HELP)
 def upload_traces(
     file: Path = typer.Argument(

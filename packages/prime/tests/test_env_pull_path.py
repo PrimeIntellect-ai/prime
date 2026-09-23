@@ -1,5 +1,10 @@
+import io
+import tarfile
+from pathlib import Path
 from typing import Any
 
+import pytest
+import typer
 from prime_cli.commands import env as env_commands
 from prime_cli.commands.env import _environment_package_download_url, _resolve_pull_environment_path
 
@@ -83,8 +88,13 @@ def test_pull_prefers_tracked_url_and_follows_redirects(tmp_path, monkeypatch):
         def __exit__(self, *_args: Any) -> None:
             return None
 
+        def getmembers(self) -> list[Any]:
+            # Empty members keep _safe_tar_extract validation satisfied; extractall
+            # still writes the demo file as before.
+            return []
+
         def extractall(self, target: Any) -> None:
-            (target / "README.md").write_text("# Demo\n", encoding="utf-8")
+            (Path(target) / "README.md").write_text("# Demo\n", encoding="utf-8")
 
     def fake_stream(
         method: str,
@@ -108,3 +118,103 @@ def test_pull_prefers_tracked_url_and_follows_redirects(tmp_path, monkeypatch):
     env_commands.pull("alice/demo", target=str(target), version="latest")
 
     assert (target / "README.md").read_text(encoding="utf-8") == "# Demo\n"
+
+
+def _gzip_tar_bytes(member_name: str, *, symlink: bool = False) -> bytes:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+        info = tarfile.TarInfo(name=member_name)
+        if symlink:
+            info.type = tarfile.SYMTYPE
+            info.linkname = "/tmp"
+            tar.addfile(info)
+        else:
+            info.size = 0
+            tar.addfile(info)
+    return buffer.getvalue()
+
+
+def _stub_pull_download(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    archive_bytes: bytes,
+    details: dict[str, Any] | None = None,
+) -> None:
+    payload = details or {
+        "id": "env-1",
+        "tracked_package_url": "https://example.test/pkg.tar.gz",
+        "semantic_version": "0.1.0",
+        "metadata": {},
+    }
+
+    class FakeAPIClient:
+        api_key = "test-token"
+
+        def __init__(self, require_auth: bool = False) -> None:
+            assert require_auth is False
+
+        def get(self, path: str) -> dict[str, Any]:
+            return {"data": payload}
+
+    class FakeStream:
+        def __enter__(self) -> "FakeStream":
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def iter_bytes(self, chunk_size: int) -> list[bytes]:
+            return [archive_bytes]
+
+    def fake_stream(*_args: Any, **_kwargs: Any) -> FakeStream:
+        return FakeStream()
+
+    monkeypatch.setattr(env_commands, "APIClient", FakeAPIClient)
+    monkeypatch.setattr(env_commands.httpx, "stream", fake_stream)
+
+
+def test_pull_rejects_path_traversal_archive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_pull_download(
+        monkeypatch, archive_bytes=_gzip_tar_bytes("../../../etc/malicious")
+    )
+    target = tmp_path / "safe-target"
+    outside = tmp_path / "etc"
+    outside.mkdir()
+
+    with pytest.raises(typer.Exit) as exc:
+        env_commands.pull("alice/demo", target=str(target), version="latest")
+
+    assert exc.value.exit_code == 1
+    assert not any(outside.iterdir())
+    assert not (tmp_path / "malicious").exists()
+
+
+def test_pull_rejects_symlink_archive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_pull_download(
+        monkeypatch, archive_bytes=_gzip_tar_bytes("evil_link", symlink=True)
+    )
+    target = tmp_path / "safe-target"
+
+    with pytest.raises(typer.Exit) as exc:
+        env_commands.pull("alice/demo", target=str(target), version="latest")
+
+    assert exc.value.exit_code == 1
+    assert not (target / "evil_link").exists()
+
+
+def test_pull_extracts_safe_archive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+        data = b"ok\n"
+        info = tarfile.TarInfo(name="README.md")
+        info.size = len(data)
+        tar.addfile(info, io.BytesIO(data))
+    _stub_pull_download(monkeypatch, archive_bytes=buffer.getvalue())
+    target = tmp_path / "safe-target"
+
+    env_commands.pull("alice/demo", target=str(target), version="latest")
+
+    assert (target / "README.md").read_text(encoding="utf-8") == "ok\n"

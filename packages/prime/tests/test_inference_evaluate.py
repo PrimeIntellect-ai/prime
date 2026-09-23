@@ -48,6 +48,39 @@ def test_parse_boolean_preserves_colons_in_instructions() -> None:
     assert q == {"type": "boolean", "instructions": "Was a refund issued: yes or no?"}
 
 
+def test_parse_choice_rejects_duplicate_labels() -> None:
+    with pytest.raises(ValueError):
+        _parse_question("q:choice:Classify:yes=positive,yes=negative")
+
+
+def test_evaluate_prints_markup_in_ids_without_crashing(monkeypatch) -> None:
+    class MarkupClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def evaluation(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+            return {"answers": {"[/]q": {"type": "boolean", "probability": 1.0}}}
+
+    monkeypatch.setattr("prime_cli.commands.inference.InferenceClient", MarkupClient)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "inference",
+            "evaluate",
+            "typesafe-ai/jev",
+            "state",
+            "-q",
+            "[/]q:boolean:Fine?",
+        ],
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "[/]q" in result.output
+
+
 def test_evaluate_rejects_duplicate_question_ids(monkeypatch) -> None:
     monkeypatch.setattr("prime_cli.commands.inference.InferenceClient", DummyClient)
 

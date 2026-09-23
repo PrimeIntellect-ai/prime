@@ -375,7 +375,10 @@ def _parse_question(spec: str) -> Dict[str, Any]:
             if not opt:
                 continue
             name, eq, desc = opt.partition("=")
-            criteria[name.strip()] = desc.strip() if eq else None
+            name = name.strip()
+            if name in criteria:
+                raise ValueError(f"Invalid --question '{spec}': duplicate choice label '{name}'.")
+            criteria[name] = desc.strip() if eq else None
         if not criteria:
             raise ValueError(f"Invalid --question '{spec}': no choice criteria parsed.")
         question["criteria"] = criteria
@@ -496,10 +499,17 @@ def evaluate(
         table.add_column("Type")
         table.add_column("Answer")
         for qid, answer in answers.items():
+            # Text() renders cell contents literally; raw question ids,
+            # types, and choices may contain Rich markup (e.g. '[/]'),
+            # which would otherwise raise MarkupError mid-print.
             if not isinstance(answer, dict):
-                table.add_row(qid, "—", str(answer))
+                table.add_row(Text(qid), Text("—"), Text(str(answer)))
                 continue
-            table.add_row(qid, str(answer.get("type", "—")), _format_answer(answer))
+            table.add_row(
+                Text(qid),
+                Text(str(answer.get("type", "—"))),
+                Text(_format_answer(answer)),
+            )
         console.print(table)
 
         usage = result.get("usage") or {}

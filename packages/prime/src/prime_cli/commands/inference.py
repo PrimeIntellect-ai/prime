@@ -318,3 +318,215 @@ def chat(
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {e}")
         raise typer.Exit(1)
+
+
+EVALUATE_JSON_HELP = json_output_help(
+    "Full evaluation response: {answers{}, rounding?, usage?, warnings?}",
+    "Each answer is {type, ...}: boolean -> {probability}, "
+    "choice -> {choice, probabilities?}, score -> {score, probabilities?}",
+)
+
+_EVAL_QUESTION_TYPES = ("boolean", "choice", "score")
+
+
+def _parse_question(spec: str) -> Dict[str, Any]:
+    """Parse 'id:type:instructions[:extras]' into the AI SDK v4 wire shape.
+
+    boolean: refunded:boolean:Was a refund issued?
+    choice:  tone:choice:Classify the tone:professional=Formal,casual
+    score:   quality:score:Rate it:Bad,Okay,Good,Excellent
+    """
+    # Split off id and type; everything after the second colon stays intact
+    # so boolean instructions may themselves contain colons.
+    head = spec.split(":", 2)
+    if len(head) < 3:
+        raise ValueError(
+            f"Invalid --question '{spec}'. "
+            "Expected 'id:type:instructions[:extras]' with type in {boolean, choice, score}."
+        )
+    qid, qtype, tail = head[0].strip(), head[1].strip().lower(), head[2].lstrip()
+    if not qid:
+        raise ValueError(f"Invalid --question '{spec}': empty question id.")
+    if qtype not in _EVAL_QUESTION_TYPES:
+        raise ValueError(
+            f"Invalid --question '{spec}': type must be one of {', '.join(_EVAL_QUESTION_TYPES)}."
+        )
+    if qtype == "boolean":
+        # The whole remainder is the instruction; colons are preserved.
+        return {"type": qtype, "instructions": tail}
+    # choice/score carry a trailing criteria field after the LAST colon, so
+    # instructions may contain colons but the criteria field may not.
+    instructions, colon, extras = tail.rpartition(":")
+    if not colon or not extras:
+        required = (
+            "'id:choice:instructions:opt1=Description,opt2' (1-255 options)"
+            if qtype == "choice"
+            else "'id:score:instructions:Low,Mid,High' (at least two levels)"
+        )
+        raise ValueError(
+            f"Invalid --question '{spec}': {qtype} questions need criteria, {required}."
+        )
+    extras = extras.strip()
+    question: Dict[str, Any] = {"type": qtype, "instructions": instructions}
+    if qtype == "choice":
+        criteria: Dict[str, Any] = {}
+        for opt in extras.split(","):
+            opt = opt.strip()
+            if not opt:
+                continue
+            name, eq, desc = opt.partition("=")
+            name = name.strip()
+            if name in criteria:
+                raise ValueError(f"Invalid --question '{spec}': duplicate choice label '{name}'.")
+            criteria[name] = desc.strip() if eq else None
+        if not criteria:
+            raise ValueError(f"Invalid --question '{spec}': no choice criteria parsed.")
+        question["criteria"] = criteria
+    else:  # score
+        levels = [level.strip() for level in extras.split(",") if level.strip()]
+        if len(levels) < 2:
+            raise ValueError(f"Invalid --question '{spec}': score needs at least two levels.")
+        question["criteria"] = levels
+    return question
+
+
+def _format_answer(answer: Dict[str, Any]) -> str:
+    """Compact one-line rendering of an answer for the text table."""
+    atype = answer.get("type")
+    if atype == "boolean":
+        return f"{answer.get('probability')} (true probability)"
+    if atype == "choice":
+        probs = answer.get("probabilities")
+        extra = f" probs={probs}" if probs else ""
+        return f"{answer.get('choice')}{extra}"
+    if atype == "score":
+        return f"{answer.get('score')}"
+    return str(answer)
+
+
+@app.command("evaluate", epilog=EVALUATE_JSON_HELP)
+def evaluate(
+    model: str = typer.Argument(..., help="Evaluation model id (e.g. typesafe-ai/jev)"),
+    state: Optional[str] = typer.Argument(
+        None, help="Shared state to evaluate. If omitted, reads from stdin."
+    ),
+    question: List[str] = typer.Option(
+        None,
+        "--question",
+        "-q",
+        help="Typed question 'id:type:instructions[:extras]'. Repeatable. "
+        "boolean: '-q ok:boolean:Was a refund issued?' "
+        "choice: '-q tone:choice:Classify:formal=Formal,casual' "
+        "score: '-q quality:score:Rate it:Bad,Okay,Good'",
+    ),
+    state_file: Optional[str] = typer.Option(
+        None, "--state-file", help="Read the shared state from a file instead of an argument"
+    ),
+    output: str = typer.Option("text", "--output", "-o", help="text|json"),
+) -> None:
+    """Evaluate shared state against typed questions with an evaluation model.
+
+    Evaluation models (e.g. typesafe-ai/jev) return structured answers
+    (boolean probabilities, choices, scores) instead of chat text.
+
+    Examples:
+      prime inference evaluate typesafe-ai/jev "Refund issued." \
+        -q "ok:boolean:Was a refund issued?"
+      prime inference evaluate typesafe-ai/jev \
+        -q "tone:choice:Classify:professional=Formal,casual=Rude" < transcript.txt
+    """
+    if output not in ("text", "json"):
+        console.print(f"[red]Error:[/red] invalid output format '{output}'. Supported: text, json")
+        raise typer.Exit(1)
+
+    if not question:
+        console.print("[red]Error:[/red] at least one --question is required.")
+        raise typer.Exit(1)
+
+    if state_file:
+        try:
+            state = open(state_file).read()
+        except OSError as e:
+            console.print(f"[red]Error:[/red] cannot read --state-file: {e}")
+            raise typer.Exit(1)
+    if state is None:
+        if sys.stdin.isatty():
+            console.print(
+                "[red]Error:[/red] no state provided (pass as arg, via stdin, or --state-file)."
+            )
+            raise typer.Exit(1)
+        state = sys.stdin.read()
+    if not state.strip():
+        console.print("[red]Error:[/red] state is empty.")
+        raise typer.Exit(1)
+
+    questions: Dict[str, Any] = {}
+    try:
+        for spec in question:
+            q = _parse_question(spec)
+            qid = spec.split(":", 1)[0].strip()
+            if qid in questions:
+                raise ValueError(
+                    f"Duplicate question id '{qid}' - each --question needs a unique id."
+                )
+            questions[qid] = q
+    except ValueError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+    payload: Dict[str, Any] = {
+        "model": model,
+        "state": state,
+        "questions": questions,
+    }
+
+    try:
+        client = InferenceClient()
+        with console.status(f"[bold blue]Evaluating with {model}...", spinner="dots"):
+            result = client.evaluation(payload)
+
+        if output == "json":
+            output_data_as_json(result, console)
+            return
+
+        answers = result.get("answers") or {}
+        if not answers:
+            console.print("[yellow]No answers returned.[/yellow]")
+            return
+
+        table = Table(title=f"Evaluation — {model}")
+        table.add_column("Question")
+        table.add_column("Type")
+        table.add_column("Answer")
+        for qid, answer in answers.items():
+            # Text() renders cell contents literally; raw question ids,
+            # types, and choices may contain Rich markup (e.g. '[/]'),
+            # which would otherwise raise MarkupError mid-print.
+            if not isinstance(answer, dict):
+                table.add_row(Text(qid), Text("—"), Text(str(answer)))
+                continue
+            table.add_row(
+                Text(qid),
+                Text(str(answer.get("type", "—"))),
+                Text(_format_answer(answer)),
+            )
+        console.print(table)
+
+        usage = result.get("usage") or {}
+        warnings = result.get("warnings") or []
+        if warnings:
+            console.print(f"[yellow]Warnings:[/yellow] {warnings}")
+        if usage:
+            console.print(
+                f"[dim]tokens: {usage.get('inputTokens', '?')} in / "
+                f"{usage.get('outputTokens', '?')} out[/dim]"
+            )
+
+    except typer.Exit:
+        raise
+    except InferenceAPIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Unexpected error:[/red] {e}")
+        raise typer.Exit(1)

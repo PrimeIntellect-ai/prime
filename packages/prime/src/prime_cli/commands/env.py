@@ -1624,7 +1624,9 @@ def pull(
                 try:
                     if is_valid_url(download_url):
                         headers = {}
-                        if client.api_key:
+                        if client.api_key and _is_trusted_download_url(
+                            download_url, client.base_url
+                        ):
                             headers["Authorization"] = f"Bearer {client.api_key}"
                         with httpx.stream(
                             "GET",
@@ -1772,6 +1774,35 @@ def is_valid_url(url: str) -> bool:
     try:
         result = urlparse(url)
         return all([result.scheme in ("http", "https"), result.netloc])
+    except Exception:
+        return False
+
+
+def _is_trusted_download_url(url: str, base_url: str) -> bool:
+    """Return True only when the API key may be attached to a package download.
+
+    The bearer token must reach Prime hosts and nothing else. Package downloads
+    are served from a sibling of the configured API host (api. vs hub.), so an
+    exact-host match is too strict, while presigned object-storage URLs
+    (storage.googleapis.com) carry their own auth and must never receive the
+    token. A malicious or compromised API response that points the download at a
+    third-party host must not leak the key either. Only same-registrable-domain
+    HTTPS URLs are trusted; the leading-dot suffix check rejects lookalikes such
+    as api.primeintellect.ai.evil.com.
+    """
+    try:
+        target = urlparse(url)
+        base = urlparse(base_url)
+        if target.scheme != "https":
+            return False
+        target_host = (target.hostname or "").lower()
+        base_host = (base.hostname or "").lower()
+        if not target_host or not base_host:
+            return False
+        if target_host == base_host:
+            return True
+        base_domain = ".".join(base_host.split(".")[-2:])
+        return target_host == base_domain or target_host.endswith("." + base_domain)
     except Exception:
         return False
 
@@ -2941,7 +2972,7 @@ def _pull_and_build_private_env(
         with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
             temp_file_path = tmp.name
             headers = {}
-            if client.api_key:
+            if client.api_key and _is_trusted_download_url(download_url, client.base_url):
                 headers["Authorization"] = f"Bearer {client.api_key}"
 
             with httpx.stream(

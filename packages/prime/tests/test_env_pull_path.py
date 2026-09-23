@@ -52,6 +52,7 @@ def test_environment_package_download_url_falls_back_to_package_url_when_untrack
 def test_pull_prefers_tracked_url_and_follows_redirects(tmp_path, monkeypatch):
     class FakeAPIClient:
         api_key = "test-token"
+        base_url = "https://api.primeintellect.ai"
 
         def __init__(self, require_auth: bool = False) -> None:
             assert require_auth is False
@@ -61,8 +62,8 @@ def test_pull_prefers_tracked_url_and_follows_redirects(tmp_path, monkeypatch):
             return {
                 "data": {
                     "id": "env-1",
-                    "tracked_package_url": "https://example.test/tracked",
-                    "package_url": "https://example.test/direct",
+                    "tracked_package_url": "https://hub.primeintellect.ai/tracked",
+                    "package_url": "https://storage.googleapis.com/direct",
                     "semantic_version": "0.1.0",
                     "metadata": {},
                 }
@@ -104,7 +105,7 @@ def test_pull_prefers_tracked_url_and_follows_redirects(tmp_path, monkeypatch):
         follow_redirects: bool,
     ) -> FakeStream:
         assert method == "GET"
-        assert url == "https://example.test/tracked"
+        assert url == "https://hub.primeintellect.ai/tracked"
         assert headers == {"Authorization": "Bearer test-token"}
         assert timeout == 60.0
         assert follow_redirects is True
@@ -149,6 +150,7 @@ def _stub_pull_download(
 
     class FakeAPIClient:
         api_key = "test-token"
+        base_url = "https://api.primeintellect.ai"
 
         def __init__(self, require_auth: bool = False) -> None:
             assert require_auth is False
@@ -176,10 +178,10 @@ def _stub_pull_download(
     monkeypatch.setattr(env_commands.httpx, "stream", fake_stream)
 
 
-def test_pull_rejects_path_traversal_archive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _stub_pull_download(
-        monkeypatch, archive_bytes=_gzip_tar_bytes("../../../etc/malicious")
-    )
+def test_pull_rejects_path_traversal_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_pull_download(monkeypatch, archive_bytes=_gzip_tar_bytes("../../../etc/malicious"))
     target = tmp_path / "safe-target"
     outside = tmp_path / "etc"
     outside.mkdir()
@@ -193,9 +195,7 @@ def test_pull_rejects_path_traversal_archive(tmp_path: Path, monkeypatch: pytest
 
 
 def test_pull_rejects_symlink_archive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _stub_pull_download(
-        monkeypatch, archive_bytes=_gzip_tar_bytes("evil_link", symlink=True)
-    )
+    _stub_pull_download(monkeypatch, archive_bytes=_gzip_tar_bytes("evil_link", symlink=True))
     target = tmp_path / "safe-target"
 
     with pytest.raises(typer.Exit) as exc:
@@ -217,4 +217,64 @@ def test_pull_extracts_safe_archive(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 
     env_commands.pull("alice/demo", target=str(target), version="latest")
 
+    assert (target / "README.md").read_text(encoding="utf-8") == "ok\n"
+
+
+def test_pull_omits_api_key_for_untrusted_download_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A download URL off the Prime registrable domain must not receive the bearer token."""
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+        data = b"ok\n"
+        info = tarfile.TarInfo(name="README.md")
+        info.size = len(data)
+        tar.addfile(info, io.BytesIO(data))
+    archive_bytes = buffer.getvalue()
+
+    captured: dict[str, dict[str, str]] = {}
+
+    class FakeAPIClient:
+        api_key = "test-token"
+        base_url = "https://api.primeintellect.ai"
+
+        def __init__(self, require_auth: bool = False) -> None:
+            assert require_auth is False
+
+        def get(self, path: str) -> dict[str, Any]:
+            return {
+                "data": {
+                    "id": "env-1",
+                    # Attacker-controlled response points the download off-domain.
+                    "tracked_package_url": "https://evil.example.com/pkg.tar.gz",
+                    "semantic_version": "0.1.0",
+                    "metadata": {},
+                }
+            }
+
+    class FakeStream:
+        def __enter__(self) -> "FakeStream":
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def iter_bytes(self, chunk_size: int) -> list[bytes]:
+            return [archive_bytes]
+
+    def fake_stream(*_args: Any, **kwargs: Any) -> FakeStream:
+        captured["headers"] = kwargs["headers"]
+        return FakeStream()
+
+    monkeypatch.setattr(env_commands, "APIClient", FakeAPIClient)
+    monkeypatch.setattr(env_commands.httpx, "stream", fake_stream)
+    target = tmp_path / "safe-target"
+
+    env_commands.pull("alice/demo", target=str(target), version="latest")
+
+    assert captured["headers"] == {}
+    assert "Authorization" not in captured["headers"]
     assert (target / "README.md").read_text(encoding="utf-8") == "ok\n"

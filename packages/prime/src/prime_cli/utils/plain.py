@@ -170,6 +170,14 @@ class _PlainMixin:
     def __init__(self, *args, params=None, **kwargs):
         super().__init__(*args, params=_plain_option(params), **kwargs)
 
+    def parse_args(self, ctx, args):
+        # Click only shows no-args help for an empty argument list, so a lone
+        # `--plain` would otherwise parse into a silent no-op.
+        if self.no_args_is_help and args and all(arg == "--plain" for arg in args):
+            ctx.meta["plain"] = True
+            args = []
+        return super().parse_args(ctx, args)
+
     def main(
         self,
         args=None,

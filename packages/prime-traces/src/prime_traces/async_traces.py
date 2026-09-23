@@ -32,7 +32,9 @@ from .models import (
     EpisodeDetail,
     EpisodeListPage,
     LineFormat,
+    SearchField,
     TraceListPage,
+    TraceSearchPage,
     TraceSummary,
     UploadReceipt,
 )
@@ -43,6 +45,7 @@ from .traces import (
     _encode_record,
     _episode_endpoint,
     _record_lines,
+    _run_search_endpoint,
     _trace_endpoint,
 )
 
@@ -313,6 +316,43 @@ class AsyncTracesClient:
         raise last_error
 
     # -- traces: read -------------------------------------------------------
+
+    async def search(
+        self,
+        query: str,
+        *,
+        run_id: str,
+        field: SearchField = "content",
+        role: Optional[str] = None,
+        run_step: Optional[int] = None,
+        has_error: Optional[bool] = None,
+        reward_min: Optional[float] = None,
+        reward_max: Optional[float] = None,
+        limit: int = 50,
+        cursor: Optional[str] = None,
+    ) -> TraceSearchPage:
+        """Return one page of case-sensitive literal matches in indexed nodes.
+
+        ``query`` needs at least three characters. Follow next_cursor with
+        unchanged filters. The first page's ``coverage`` reports traces that
+        were not searchable yet.
+        """
+        params = _build_params(
+            (
+                ("query", query),
+                ("field", field),
+                ("role", role),
+                ("run_step", run_step),
+                ("has_error", has_error),
+                ("reward_min", reward_min),
+                ("reward_max", reward_max),
+                ("limit", limit),
+                ("cursor", cursor),
+            )
+        )
+        return TraceSearchPage.model_validate(
+            await self.client.get_json(_run_search_endpoint(run_id), params=params)
+        )
 
     async def list(
         self,

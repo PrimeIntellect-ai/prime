@@ -1,5 +1,4 @@
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 import typer
@@ -11,13 +10,13 @@ from prime_cli.commands.evals import (
     _resolve_hosted_environment,
 )
 from prime_cli.main import app
+from prime_cli.utils.eval_environment import ResolvedEnvironment
 from prime_cli.utils.hosted_eval import (
     HostedEvalConfig,
     clean_logs,
     filter_progress_bars,
     strip_ansi,
 )
-from prime_cli.verifiers_bridge import ResolvedEnvironment
 from typer.testing import CliRunner
 
 runner = CliRunner()
@@ -1220,18 +1219,14 @@ env_id = "gsm8k"
         captured["endpoints_path"] = path
         return Path(path)
 
-    def fake_load_endpoints(path):
-        return {
-            "test-endpoint": [
-                SimpleNamespace(model="openai/gpt-4.1-mini"),
-            ]
-        }
+    def fake_load_endpoint_models(path):
+        return {"test-endpoint": ["openai/gpt-4.1-mini"]}
 
     monkeypatch.setattr(
-        "verifiers.utils.eval_utils.resolve_endpoints_file",
+        "prime_cli.commands.evals.resolve_endpoints_file",
         fake_resolve_endpoints_file,
     )
-    monkeypatch.setattr("verifiers.utils.eval_utils.load_endpoints", fake_load_endpoints)
+    monkeypatch.setattr("prime_cli.commands.evals.load_endpoint_models", fake_load_endpoint_models)
 
     loaded = _load_hosted_eval_configs(str(config_path))[0]
 
@@ -1254,16 +1249,12 @@ endpoint_id = "test-endpoint"
     )
 
     monkeypatch.setattr(
-        "verifiers.utils.eval_utils.resolve_endpoints_file",
+        "prime_cli.commands.evals.resolve_endpoints_file",
         lambda path: Path(path),
     )
     monkeypatch.setattr(
-        "verifiers.utils.eval_utils.load_endpoints",
-        lambda path: {
-            "test-endpoint": [
-                SimpleNamespace(model="anthropic/claude-sonnet-4"),
-            ]
-        },
+        "prime_cli.commands.evals.load_endpoint_models",
+        lambda path: {"test-endpoint": ["anthropic/claude-sonnet-4"]},
     )
 
     loaded = _load_hosted_eval_configs(str(config_path))[0]
@@ -1286,78 +1277,17 @@ model = "anthropic/claude-sonnet-4"
     )
 
     monkeypatch.setattr(
-        "verifiers.utils.eval_utils.resolve_endpoints_file",
+        "prime_cli.commands.evals.resolve_endpoints_file",
         lambda path: (_ for _ in ()).throw(AssertionError("should not resolve endpoint_id")),
     )
     monkeypatch.setattr(
-        "verifiers.utils.eval_utils.load_endpoints",
+        "prime_cli.commands.evals.load_endpoint_models",
         lambda path: (_ for _ in ()).throw(AssertionError("should not load endpoints")),
     )
 
     loaded = _load_hosted_eval_configs(str(config_path))[0]
 
     assert loaded["model"] == "anthropic/claude-sonnet-4"
-
-
-def test_eval_run_local_toml_passthrough(monkeypatch, tmp_path):
-    captured = {}
-    config_path = tmp_path / "eval.toml"
-    config_path.write_text(
-        """
-model = "openai/gpt-4.1-mini"
-
-[[eval]]
-env_id = "gsm8k"
-""".strip()
-    )
-
-    def fake_run_eval_passthrough(environment, passthrough_args, skip_upload, env_path):
-        captured["environment"] = environment
-        captured["passthrough_args"] = passthrough_args
-        captured["skip_upload"] = skip_upload
-        captured["env_path"] = env_path
-
-    monkeypatch.setattr("prime_cli.commands.evals.run_eval_passthrough", fake_run_eval_passthrough)
-
-    result = runner.invoke(
-        app,
-        ["eval", "run", str(config_path), "--skip-upload"],
-        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
-    )
-
-    assert result.exit_code == 0, result.output
-    assert captured == {
-        "environment": str(config_path),
-        "passthrough_args": [],
-        "skip_upload": True,
-        "env_path": None,
-    }
-
-
-def test_eval_run_local_sampling_args_passthrough(monkeypatch):
-    captured = {}
-
-    def fake_run_eval_passthrough(environment, passthrough_args, skip_upload, env_path):
-        captured["environment"] = environment
-        captured["passthrough_args"] = passthrough_args
-        captured["skip_upload"] = skip_upload
-        captured["env_path"] = env_path
-
-    monkeypatch.setattr("prime_cli.commands.evals.run_eval_passthrough", fake_run_eval_passthrough)
-
-    result = runner.invoke(
-        app,
-        ["eval", "run", "gsm8k", "--sampling-args", '{"temperature":0.2}'],
-        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
-    )
-
-    assert result.exit_code == 0, result.output
-    assert captured == {
-        "environment": "gsm8k",
-        "passthrough_args": ["--sampling-args", '{"temperature":0.2}'],
-        "skip_upload": False,
-        "env_path": None,
-    }
 
 
 @pytest.mark.parametrize(

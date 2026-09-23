@@ -24,7 +24,6 @@ from rich.table import Table
 from rich.text import Text
 
 from ..client import APIClient, APIError
-from ..lab_hygiene import LabHygieneOptions, find_lab_workspace, run_lab_hygiene_preflight
 from ..utils import (
     PlainTyper,
     get_console,
@@ -46,8 +45,7 @@ from ..utils.prompt import (
     validate_env_var_name,
 )
 from ..utils.time_utils import format_time_ago, iso_timestamp
-from ..verifiers_bridge import is_help_request, print_env_build_help, print_env_init_help
-from ..verifiers_plugin import load_verifiers_prime_plugin, resolve_workspace_python
+from ..utils.workspace_python import resolve_workspace_python
 from .config import TEAM_ID_PATTERN
 
 app = PlainTyper(help="Manage verifiers environments", no_args_is_help=True)
@@ -735,34 +733,6 @@ def _resolve_push_environment_path(path: Optional[str], env_id: Optional[str]) -
     return Path(path or ".").resolve()
 
 
-def _emit_lab_hygiene_message(message: str) -> None:
-    console.print(message, markup=False)
-
-
-def _run_env_init_lab_hygiene_preflight() -> None:
-    workspace = find_lab_workspace(Path.cwd())
-    if workspace is None:
-        return
-    run_lab_hygiene_preflight(
-        LabHygieneOptions(fix=True),
-        workspace=workspace,
-        emit=_emit_lab_hygiene_message,
-    )
-
-
-def _run_env_push_lab_hygiene_preflight(env_path: Path) -> None:
-    workspace = find_lab_workspace(env_path)
-    if workspace is None:
-        return
-    result = run_lab_hygiene_preflight(
-        LabHygieneOptions(fix=False, fail_on_tracked=True),
-        workspace=workspace,
-        emit=_emit_lab_hygiene_message,
-    )
-    if result.exit_code != 0:
-        raise typer.Exit(result.exit_code)
-
-
 def _environment_resolve_data(
     env_name: str,
     *,
@@ -860,7 +830,6 @@ def push(
 
     try:
         env_path = _resolve_push_environment_path(path, env_id)
-        _run_env_push_lab_hygiene_preflight(env_path)
 
         # Display upstream environment info if metadata exists
         display_upstream_environment_info(env_path)
@@ -1450,83 +1419,6 @@ def push(
     except Exception as e:
         console.print(f"[red]Unexpected error: {e}[/red]")
         raise typer.Exit(1)
-
-
-@app.command(
-    no_args_is_help=True,
-    rich_help_panel="Manage",
-    context_settings={
-        "allow_extra_args": True,
-        "ignore_unknown_options": True,
-        "help_option_names": [],
-    },
-)
-def init(
-    ctx: typer.Context,
-    name: Optional[str] = typer.Argument(None, help="Name of the new environment"),
-) -> None:
-    """Initialize a new environment."""
-    passthrough_args = list(ctx.args)
-
-    if is_help_request(name or "", passthrough_args):
-        print_env_init_help()
-        raise typer.Exit(0)
-
-    if name is None:
-        console.print("[red]Error:[/red] Missing argument 'NAME'.")
-        console.print("[dim]Example: prime env init my-env --path ./environments[/dim]")
-        raise typer.Exit(2)
-
-    if name.startswith("-"):
-        console.print("[red]Error:[/red] Environment name must be the first argument.")
-        console.print("[dim]Example: prime env init my-env --path ./environments[/dim]")
-        raise typer.Exit(2)
-
-    plugin = load_verifiers_prime_plugin(console=console)
-    command = plugin.build_module_command(plugin.init_module, [name, *passthrough_args])
-    result = subprocess.run(command)
-    if result.returncode != 0:
-        raise typer.Exit(result.returncode)
-    _run_env_init_lab_hygiene_preflight()
-
-
-@app.command(
-    no_args_is_help=True,
-    rich_help_panel="Manage",
-    context_settings={
-        "allow_extra_args": True,
-        "ignore_unknown_options": True,
-        "help_option_names": [],
-    },
-)
-def build(
-    ctx: typer.Context,
-    env_id: Optional[str] = typer.Argument(
-        None, help="Environment ID (hyphenated, e.g. openenv-echo)"
-    ),
-) -> None:
-    """Build an OpenEnv-backed environment image."""
-    passthrough_args = list(ctx.args)
-
-    if is_help_request(env_id or "", passthrough_args):
-        print_env_build_help()
-        raise typer.Exit(0)
-
-    if env_id is None:
-        console.print("[red]Error:[/red] Missing argument 'ENV_ID'.")
-        console.print("[dim]Example: prime env build openenv-echo --path ./environments[/dim]")
-        raise typer.Exit(2)
-
-    if env_id.startswith("-"):
-        console.print("[red]Error:[/red] Environment ID must be the first argument.")
-        console.print("[dim]Example: prime env build openenv-echo --path ./environments[/dim]")
-        raise typer.Exit(2)
-
-    plugin = load_verifiers_prime_plugin(console=console)
-    command = plugin.build_module_command(plugin.build_module, [env_id, *passthrough_args])
-    result = subprocess.run(command)
-    if result.returncode != 0:
-        raise typer.Exit(result.returncode)
 
 
 @app.command(no_args_is_help=True, rich_help_panel="Manage")
@@ -2193,10 +2085,7 @@ def execute_install_command(cmd: List[str], env_id: str, version: str, tool: str
     """
     console.print(f"\n[cyan]Installing {env_id}@{version} with {tool}...[/cyan]")
 
-    display_command = " ".join(cmd)
-    if len(cmd) >= 3 and cmd[1] == "-m" and cmd[2].startswith("verifiers.cli.commands."):
-        display_command = f"prime env install {env_id}"
-    console.print(f"[dim]Command: {display_command}[/dim]")
+    console.print(f"[dim]Command: {' '.join(cmd)}[/dim]")
 
     process = subprocess.Popen(
         cmd,
@@ -2261,7 +2150,6 @@ def install(
     """
     try:
         client = APIClient(require_auth=False)
-        plugin = load_verifiers_prime_plugin(console=console)
 
         # Validate package manager
         if with_tool not in ["uv", "pip"]:
@@ -2299,10 +2187,7 @@ def install(
                 env_path = Path(path) / env_folder
                 if env_path.exists():
                     if with_tool == "uv":
-                        cmd_parts = plugin.build_module_command(
-                            plugin.install_module,
-                            [local_name, "--path", path],
-                        )
+                        cmd_parts = _uv_pip_command("install", "-e", str(env_path))
                     else:
                         cmd_parts = ["pip", "install", "-e", str(env_path)]
                     installable_envs.append((cmd_parts, local_name, "local", local_name))

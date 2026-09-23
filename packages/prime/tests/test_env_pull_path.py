@@ -176,10 +176,10 @@ def _stub_pull_download(
     monkeypatch.setattr(env_commands.httpx, "stream", fake_stream)
 
 
-def test_pull_rejects_path_traversal_archive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _stub_pull_download(
-        monkeypatch, archive_bytes=_gzip_tar_bytes("../../../etc/malicious")
-    )
+def test_pull_rejects_path_traversal_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_pull_download(monkeypatch, archive_bytes=_gzip_tar_bytes("../../../etc/malicious"))
     target = tmp_path / "safe-target"
     outside = tmp_path / "etc"
     outside.mkdir()
@@ -193,9 +193,7 @@ def test_pull_rejects_path_traversal_archive(tmp_path: Path, monkeypatch: pytest
 
 
 def test_pull_rejects_symlink_archive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _stub_pull_download(
-        monkeypatch, archive_bytes=_gzip_tar_bytes("evil_link", symlink=True)
-    )
+    _stub_pull_download(monkeypatch, archive_bytes=_gzip_tar_bytes("evil_link", symlink=True))
     target = tmp_path / "safe-target"
 
     with pytest.raises(typer.Exit) as exc:

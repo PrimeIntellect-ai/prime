@@ -1,12 +1,19 @@
 import json
+import os
 import random
 import shlex
+import shutil
 import string
+import subprocess
+import sys
+import tempfile
 import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 import typer
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from prime_sandboxes import (
     APIClient,
     APIError,
@@ -1427,3 +1434,94 @@ def reset_cache(
         except Exception as e:
             console.print(f"[red]Error clearing cache: {e}[/red]")
             raise typer.Exit(1)
+
+
+@app.command("ssh")
+def ssh_connect(
+    sandbox_id: str = typer.Argument(..., help="VM sandbox ID to SSH into"),
+    ssh_args: Optional[List[str]] = typer.Argument(
+        None, help="Additional SSH arguments (use -- before options)"
+    ),
+    shell: Optional[str] = typer.Option(None, "--shell", "-s", help="Remote shell to run"),
+) -> None:
+    """Connect to a VM sandbox with an ephemeral SSH key."""
+    session_id: Optional[str] = None
+    sandbox_client: Optional[SandboxClient] = None
+    temp_dir: Optional[str] = None
+
+    try:
+        if not shutil.which("ssh"):
+            console.print("[red]Error:[/red] OpenSSH is required.")
+            raise typer.Exit(1)
+
+        sandbox_client = SandboxClient(APIClient())
+        sandbox = sandbox_client.get(sandbox_id)
+        if sandbox.status != "RUNNING":
+            console.print(f"[red]Error:[/red] Sandbox is not running (status: {sandbox.status})")
+            raise typer.Exit(1)
+
+        temp_dir = tempfile.mkdtemp(prefix="prime-ssh-")
+        key_path = os.path.join(temp_dir, "id_ed25519")
+        private_key = Ed25519PrivateKey.generate()
+        key_fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(key_fd, "wb") as key_file:
+            key_file.write(
+                private_key.private_bytes(
+                    serialization.Encoding.PEM,
+                    serialization.PrivateFormat.OpenSSH,
+                    serialization.NoEncryption(),
+                )
+            )
+        public_key = (
+            private_key.public_key()
+            .public_bytes(serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH)
+            .decode()
+        )
+
+        session = sandbox_client.create_ssh_session(sandbox_id, public_key)
+        session_id = session.session_id
+        proxy = shlex.join(
+            [
+                sys.executable,
+                "-m",
+                "prime_cli.ssh_proxy",
+                session.host,
+                str(session.port),
+                session.session_id,
+            ]
+        )
+        command = [
+            "ssh",
+            f"{session.session_id}@{session.host}",
+            "-p",
+            str(session.port),
+            "-i",
+            key_path,
+            "-o",
+            f"ProxyCommand={proxy}",
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+        ]
+        if shell:
+            command.append("-t")
+        if ssh_args:
+            command.extend(ssh_args)
+        if shell:
+            command.append(shell)
+
+        raise typer.Exit(subprocess.run(command).returncode)
+    except KeyboardInterrupt:
+        raise typer.Exit(130)
+    except APIError as error:
+        console.print(f"[red]Error:[/red] {error}")
+        raise typer.Exit(1)
+    finally:
+        if session_id and sandbox_client:
+            try:
+                sandbox_client.close_ssh_session(sandbox_id, session_id)
+            except Exception:
+                pass
+        if temp_dir:
+            shutil.rmtree(temp_dir, ignore_errors=True)

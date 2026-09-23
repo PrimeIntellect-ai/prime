@@ -81,6 +81,7 @@ from .models import (
     SandboxListResponse,
     SandboxLogsResponse,
     SandboxStatusSnapshot,
+    SSHSession,
     validate_egress_lists,
 )
 from .process import AsyncSandboxProcess
@@ -2378,6 +2379,20 @@ class SandboxClient:
         response = self.client.request("GET", f"/sandbox/{sandbox_id}/egress-policy")
         return EgressPolicyStatus.model_validate(response)
 
+    def create_ssh_session(
+        self, sandbox_id: str, public_key: str, ttl_seconds: Optional[int] = None
+    ) -> SSHSession:
+        """Authorize an ephemeral SSH key for a VM sandbox."""
+        payload: Dict[str, Any] = {"public_key": public_key}
+        if ttl_seconds is not None:
+            payload["ttl_seconds"] = ttl_seconds
+        response = self.client.request("POST", f"/sandbox/{sandbox_id}/ssh-session", json=payload)
+        return SSHSession.model_validate(response)
+
+    def close_ssh_session(self, sandbox_id: str, session_id: str) -> None:
+        """Revoke an SSH session."""
+        self.client.request("DELETE", f"/sandbox/{sandbox_id}/ssh-session/{session_id}")
+
     def set_network(
         self,
         sandbox_id: str,
@@ -3756,6 +3771,22 @@ class AsyncSandboxClient:
         """Get the desired and applied network rules of a VM sandbox."""
         response = await self.client.request("GET", f"/sandbox/{sandbox_id}/egress-policy")
         return EgressPolicyStatus.model_validate(response)
+
+    async def create_ssh_session(
+        self, sandbox_id: str, public_key: str, ttl_seconds: Optional[int] = None
+    ) -> SSHSession:
+        """Authorize an ephemeral SSH key for a VM sandbox."""
+        payload: Dict[str, Any] = {"public_key": public_key}
+        if ttl_seconds is not None:
+            payload["ttl_seconds"] = ttl_seconds
+        response = await self.client.request(
+            "POST", f"/sandbox/{sandbox_id}/ssh-session", json=payload
+        )
+        return SSHSession.model_validate(response)
+
+    async def close_ssh_session(self, sandbox_id: str, session_id: str) -> None:
+        """Revoke an SSH session."""
+        await self.client.request("DELETE", f"/sandbox/{sandbox_id}/ssh-session/{session_id}")
 
     async def set_network(
         self,

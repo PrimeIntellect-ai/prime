@@ -51,10 +51,7 @@ def test_ssh_command_authorizes_key_and_uses_session_proxy(monkeypatch, tmp_path
     commands = []
 
     def run(command, **_kwargs):
-        if command[0] == "ssh-keygen":
-            Path(f"{command[-1]}.pub").write_text("ssh-ed25519 key")
-        else:
-            commands.append(command)
+        commands.append(command)
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(sandbox, "APIClient", lambda: object())
@@ -67,5 +64,8 @@ def test_ssh_command_authorizes_key_and_uses_session_proxy(monkeypatch, tmp_path
         sandbox.ssh_connect("sbx-1", None, None)
 
     assert exit_info.value.exit_code == 0
-    assert authorized_keys == ["ssh-ed25519 key"]
+    assert len(authorized_keys) == 1
+    assert authorized_keys[0].startswith("ssh-ed25519 ")
+    key_path = Path(commands[0][commands[0].index("-i") + 1])
+    assert key_path.parent == tmp_path
     assert any("prime_cli.ssh_proxy" in arg for arg in commands[0])

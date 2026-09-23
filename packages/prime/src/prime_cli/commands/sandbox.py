@@ -12,6 +12,8 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 import typer
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from prime_sandboxes import (
     APIClient,
     APIError,
@@ -1448,8 +1450,8 @@ def ssh_connect(
     temp_dir: Optional[str] = None
 
     try:
-        if not shutil.which("ssh") or not shutil.which("ssh-keygen"):
-            console.print("[red]Error:[/red] OpenSSH and ssh-keygen are required.")
+        if not shutil.which("ssh"):
+            console.print("[red]Error:[/red] OpenSSH is required.")
             raise typer.Exit(1)
 
         sandbox_client = SandboxClient(APIClient())
@@ -1460,13 +1462,21 @@ def ssh_connect(
 
         temp_dir = tempfile.mkdtemp(prefix="prime-ssh-")
         key_path = os.path.join(temp_dir, "id_ed25519")
-        subprocess.run(
-            ["ssh-keygen", "-t", "ed25519", "-N", "", "-f", key_path],
-            check=True,
-            capture_output=True,
+        private_key = Ed25519PrivateKey.generate()
+        key_fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(key_fd, "wb") as key_file:
+            key_file.write(
+                private_key.private_bytes(
+                    serialization.Encoding.PEM,
+                    serialization.PrivateFormat.OpenSSH,
+                    serialization.NoEncryption(),
+                )
+            )
+        public_key = (
+            private_key.public_key()
+            .public_bytes(serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH)
+            .decode()
         )
-        with open(f"{key_path}.pub") as public_key_file:
-            public_key = public_key_file.read().strip()
 
         session = sandbox_client.create_ssh_session(sandbox_id, public_key)
         session_id = session.session_id

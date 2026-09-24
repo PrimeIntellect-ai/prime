@@ -14,8 +14,10 @@ from prime_traces import (
     AmbiguousDeleteError,
     ErrorCode,
     ForbiddenError,
+    LineFormatConflictError,
     NotFoundError,
     RetryableAPIError,
+    TraceNotIndexedError,
     TracesAPIClient,
     TransportError,
     UnauthorizedError,
@@ -683,3 +685,94 @@ class TestEpisodes:
 
         page = make_client(handler).list_episode_traces(RESERVED_EPISODE_ID)
         assert page.items[0].trace_id == "8d3f1a2b"
+
+
+NODE = {
+    "node_idx": 3,
+    "parent_idx": 2,
+    "timestamp": 1790286780.99,
+    "sampled": True,
+    "message": {
+        "role": "assistant",
+        "content": None,
+        "reasoning_content": "look around first",
+        "tool_calls": [{"id": "call_1", "name": "Bash", "arguments": '{"command": "ls"}'}],
+        "tool_call_id": None,
+        "name": None,
+        "tool_name": None,
+    },
+}
+
+CALL = {
+    "call_idx": 0,
+    "node_idx": 3,
+    "time_start": 1790286775.3,
+    "time_end": 1790286780.9,
+    "model": "moonshotai/kimi-k3",
+    "endpoint": "/v1/messages",
+    "finish_reason": "tool_calls",
+}
+
+
+class TestNodeAndCallReads:
+    def test_list_nodes_encodes_filters_and_parses_page(self, make_client):
+        captured = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["path"] = request.url.path
+            captured["params"] = request.url.params.multi_items()
+            return httpx.Response(
+                200, json={"items": [NODE], "next_cursor": "c1", "partial_index": False}
+            )
+
+        page = make_client(handler).list_nodes(
+            "8d3f1a2b", role=["assistant", "tool"], sampled=True, limit=100, cursor="c0"
+        )
+
+        assert captured["path"] == "/api/v1/traces/8d3f1a2b/nodes"
+        assert captured["params"] == [
+            ("role", "assistant"),
+            ("role", "tool"),
+            ("sampled", "true"),
+            ("limit", "100"),
+            ("cursor", "c0"),
+        ]
+        [node] = page.items
+        assert node.node_idx == 3
+        assert node.message.role == "assistant"
+        assert node.message.tool_calls[0]["name"] == "Bash"
+        assert page.next_cursor == "c1"
+        assert page.partial_index is False
+
+    def test_list_nodes_after_is_sent_as_start(self, make_client):
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert dict(request.url.params) == {"after": "30"}
+            return httpx.Response(
+                200, json={"items": [], "next_cursor": None, "partial_index": True}
+            )
+
+        assert make_client(handler).list_nodes("8d3f1a2b", after=30).partial_index is True
+
+    def test_list_calls_parses_page(self, make_client):
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/api/v1/traces/8d3f1a2b/calls"
+            assert request.url.params.multi_items() == [("finish_reason", "stop")]
+            return httpx.Response(
+                200, json={"items": [CALL], "next_cursor": None, "partial_index": False}
+            )
+
+        [call] = make_client(handler).list_calls("8d3f1a2b", finish_reason=["stop"]).items
+        assert call.node_idx == 3
+        assert call.finish_reason == "tool_calls"
+
+    def test_not_indexed_409_raises_trace_not_indexed(self, make_client):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                409,
+                json={"error": {"code": "trace_not_indexed", "message": "not indexed yet"}},
+            )
+
+        with pytest.raises(TraceNotIndexedError) as excinfo:
+            make_client(handler).list_nodes("8d3f1a2b")
+        assert excinfo.value.code == ErrorCode.TRACE_NOT_INDEXED
+        assert not isinstance(excinfo.value, LineFormatConflictError)

@@ -1,6 +1,8 @@
+import json
+import os
 import re
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 import click
 import typer
@@ -12,6 +14,7 @@ from prime_traces import (
     PaymentRequiredError,
     PrimeTracesError,
     TraceListPage,
+    TraceNotIndexedError,
     TracesClient,
     TraceSearchMatch,
     UnauthorizedError,
@@ -28,6 +31,19 @@ from ..utils import (
     json_output_help,
     output_data_as_json,
     validate_output_format,
+)
+from ..utils.plain import is_plain_mode
+from .traces_transcript import (
+    Transcript,
+    calls_table,
+    parse_node_range,
+    select_nodes,
+    summary_view,
+    tools_only_table,
+    tools_view,
+    transcript_from_document,
+    transcript_header,
+    transcript_lines,
 )
 
 app = PlainTyper(help="Upload and query traces (Prime Traces)", no_args_is_help=True)
@@ -58,6 +74,13 @@ LIST_TRACES_JSON_HELP = json_output_help(
 GET_TRACE_JSON_HELP = json_output_help(
     ". = trace summary object; with --raw and no --dest, the exact stored trace document",
     "with --raw --dest: {dest, bytes_written}",
+)
+
+TRANSCRIPT_JSON_HELP = json_output_help(
+    ".trace_id = string; .source = index|document (document when the index cannot serve it)",
+    ".nodes[] = {node_idx, parent_idx, timestamp, sampled, message{role, content, ...}}"
+    " after --node/--turn/--role",
+    ".calls[] = {call_idx, node_idx, time_start, time_end, model, finish_reason, usage?}",
 )
 
 
@@ -443,12 +466,16 @@ def get_trace(
     dest: Optional[Path] = typer.Option(
         None, "--dest", help="With --raw: stream the document to this file"
     ),
+    tools: bool = typer.Option(False, "--tools", help="List the trace's tool definitions"),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
     """Get one trace summary, or the raw trace document with --raw."""
     validate_output_format(output, error_console)
     if dest is not None and not raw:
         error_console.print("[red]--dest requires --raw[/red]")
+        raise typer.Exit(1)
+    if tools and raw:
+        error_console.print("[red]--tools cannot be combined with --raw[/red]")
         raise typer.Exit(1)
 
     try:
@@ -491,12 +518,164 @@ def get_trace(
         output_data_as_json(summary.model_dump(mode="json"), console)
         return
 
-    table = Table(title=f"Trace {escape(trace_id)}")
-    table.add_column("Field", style="cyan")
-    table.add_column("Value", style="green")
-    for field, value in summary.model_dump(mode="json").items():
-        table.add_row(escape(field), "-" if value is None else escape(str(value)))
-    console.print(table)
+    if tools:
+        console.print(tools_view(summary))
+        return
+    for renderable in summary_view(summary):
+        console.print(renderable)
+
+
+def _load_transcript(client: TracesClient, trace_id: str) -> Tuple[Transcript, Optional[str]]:
+    """Read nodes and calls from the index, or the raw document when the index can't serve it.
+
+    Returns the transcript and, when it came from the document, why.
+    """
+    nodes: List[dict] = []
+    calls: List[dict] = []
+    try:
+        cursor: Optional[str] = None
+        while True:
+            node_page = client.list_nodes(trace_id, limit=100, cursor=cursor)
+            nodes.extend(n.model_dump(mode="json") for n in node_page.items)
+            if node_page.partial_index:
+                return _document_transcript(client, trace_id), (
+                    "the trace is larger than the node index holds"
+                )
+            if not node_page.next_cursor:
+                break
+            cursor = node_page.next_cursor
+        cursor = None
+        while True:
+            call_page = client.list_calls(trace_id, limit=100, cursor=cursor)
+            calls.extend(c.model_dump(mode="json") for c in call_page.items)
+            if call_page.partial_index:
+                return _document_transcript(client, trace_id), (
+                    "the trace is larger than the call index holds"
+                )
+            if not call_page.next_cursor:
+                break
+            cursor = call_page.next_cursor
+    except TraceNotIndexedError:
+        return _document_transcript(client, trace_id), "the trace is still being indexed"
+    return Transcript(trace_id=trace_id, source="index", nodes=nodes, calls=calls), None
+
+
+def _document_transcript(client: TracesClient, trace_id: str) -> Transcript:
+    try:
+        document = json.loads(client.get_raw(trace_id))
+    except ValueError as e:
+        raise PrimeTracesError(f"the stored document is not valid JSON ({e})") from None
+    try:
+        return transcript_from_document(trace_id, document)
+    except ValueError as e:
+        raise PrimeTracesError(str(e)) from None
+
+
+@app.command("transcript", epilog=TRANSCRIPT_JSON_HELP)
+def transcript_command(
+    trace_id: str = typer.Argument(..., help="Trace ID"),
+    full: bool = typer.Option(
+        False, "--full", help="Show every message in full, without truncation"
+    ),
+    node: Optional[str] = typer.Option(
+        None, "--node", help="Node index or inclusive range: 12, 30:, :9 or 5:9"
+    ),
+    turn: Optional[int] = typer.Option(
+        None, "--turn", help="One model turn (1-based) and the messages that follow it"
+    ),
+    role: List[str] = typer.Option(
+        [],
+        "--role",
+        help="Only messages with this role (repeatable): system, user, assistant, tool",
+    ),
+    system: bool = typer.Option(False, "--system", help="Show the system prompt"),
+    tools_only: bool = typer.Option(
+        False, "--tools-only", help="One row per tool call with the size of its result"
+    ),
+    calls: bool = typer.Option(False, "--calls", help="One row per model call: latency and tokens"),
+    no_pager: bool = typer.Option(
+        False, "--no-pager", help="Print directly instead of opening a pager in a terminal"
+    ),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """Show a trace's conversation: each model turn, its tool calls, and their results."""
+    validate_output_format(output, error_console)
+    if tools_only and calls:
+        error_console.print("[red]Error:[/red] --tools-only cannot be combined with --calls")
+        raise typer.Exit(1)
+    if node is not None and turn is not None:
+        error_console.print("[red]Error:[/red] --node cannot be combined with --turn")
+        raise typer.Exit(1)
+    if turn is not None and turn < 1:
+        error_console.print("[red]Error:[/red] --turn must be at least 1")
+        raise typer.Exit(1)
+    try:
+        node_range = parse_node_range(node) if node is not None else None
+    except ValueError as e:
+        error_console.print(f"[red]Error:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+
+    try:
+        client = _traces_client()
+        summary = client.get(trace_id)
+        transcript, fallback = _load_transcript(client, trace_id)
+    except typer.Exit:
+        raise
+    except UnauthorizedError as e:
+        error_console.print(f"[red]Unauthorized:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except PaymentRequiredError as e:
+        error_console.print(f"[red]Payment Required:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except PrimeTracesError as e:
+        error_console.print(f"[red]Error:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except Exception as e:
+        error_console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
+        error_console.print_exception()
+        raise typer.Exit(1)
+
+    nodes = select_nodes(transcript, node_range=node_range, turn=turn, roles=role or None)
+
+    if output == "json":
+        output_data_as_json(
+            {
+                "trace_id": transcript.trace_id,
+                "source": transcript.source,
+                "nodes": nodes,
+                "calls": transcript.calls,
+            },
+            console,
+        )
+        return
+
+    plain = is_plain_mode()
+    if calls:
+        body = [calls_table(transcript)]
+    elif tools_only:
+        body = [tools_only_table(transcript, nodes, width=console.width)]
+    else:
+        body = transcript_lines(transcript, nodes, full=full, show_system=system, plain=plain)
+    if not nodes and not calls:
+        body = [Text("No messages match these filters.", style="yellow")]
+
+    renderables = [
+        transcript_header(summary, transcript) if not plain else Text(f"trace {trace_id}")
+    ]
+    if fallback:
+        renderables.append(Text(f"Read from the full document: {fallback}.", style="dim"))
+    renderables.extend(body)
+
+    use_pager = not no_pager and not plain and console.is_terminal
+    if use_pager:
+        # Keep colors, and quit straight away when everything fits on one screen.
+        os.environ.setdefault("LESS", "-FRX")
+        with console.pager(styles=True):
+            for renderable in renderables:
+                console.print(renderable)
+    else:
+        for renderable in renderables:
+            console.print(renderable)
 
 
 @app.command("delete")

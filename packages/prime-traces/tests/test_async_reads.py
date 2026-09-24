@@ -21,6 +21,7 @@ from prime_traces import (
     AsyncTracesClient,
     NotFoundError,
     RetryableAPIError,
+    TraceNotIndexedError,
     TransportError,
 )
 
@@ -138,6 +139,7 @@ class TestPointReads:
 
         def handler(request: httpx.Request) -> httpx.Response:
             attempts.append(request)
+
             # An async body: httpx.AsyncClient refuses to stream a sync one.
             async def body():
                 yield b'{"version":4,'
@@ -295,6 +297,7 @@ class TestPointReads:
         assert not dest.exists()
         assert list(tmp_path.glob(".prime-traces-*")) == []
 
+
 class TestReadRetries:
     @pytest.mark.asyncio
     async def test_get_retries_transient_503_honoring_retry_after(
@@ -371,6 +374,7 @@ class TestReadRetries:
         assert written == len(raw)
         assert dest.read_bytes() == raw
         assert len(attempts) == 2
+
 
 class TestDelete:
     @pytest.mark.asyncio
@@ -516,3 +520,51 @@ class TestClientLifecycle:
         with pytest.raises(asyncio.CancelledError):
             await task
         assert transport_closed
+
+
+class TestNodeAndCallReads:
+    @pytest.mark.asyncio
+    async def test_list_nodes_and_calls(self, make_async_client):
+        node = {
+            "node_idx": 0,
+            "parent_idx": None,
+            "timestamp": None,
+            "sampled": False,
+            "message": {"role": "user", "content": "hi"},
+        }
+        call = {
+            "call_idx": 0,
+            "node_idx": 1,
+            "time_start": 1.0,
+            "time_end": 2.0,
+            "model": "m",
+            "endpoint": "/v1/chat/completions",
+            "finish_reason": "stop",
+        }
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/nodes"):
+                assert request.url.params.multi_items() == [("role", "user"), ("limit", "10")]
+                return httpx.Response(
+                    200, json={"items": [node], "next_cursor": None, "partial_index": False}
+                )
+            assert request.url.path == "/api/v1/traces/8d3f1a2b/calls"
+            return httpx.Response(
+                200, json={"items": [call], "next_cursor": None, "partial_index": False}
+            )
+
+        client = make_async_client(handler)
+        nodes = await client.list_nodes("8d3f1a2b", role=["user"], limit=10)
+        calls = await client.list_calls("8d3f1a2b")
+        assert nodes.items[0].message.content == "hi"
+        assert calls.items[0].finish_reason == "stop"
+
+    @pytest.mark.asyncio
+    async def test_not_indexed_409_raises_trace_not_indexed(self, make_async_client):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                409, json={"error": {"code": "trace_not_indexed", "message": "not yet"}}
+            )
+
+        with pytest.raises(TraceNotIndexedError):
+            await make_async_client(handler).list_calls("8d3f1a2b")

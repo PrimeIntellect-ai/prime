@@ -10,6 +10,7 @@ from prime_cli.core import APIClient
 from .display import get_eval_viewer_url
 from .env_metadata import find_environment_metadata
 from .plain import get_console
+from .redact import Redactor, known_secrets
 
 console = get_console()
 
@@ -158,6 +159,19 @@ def push_eval_results_to_hub(
     console.print(f"\n[blue]Uploading evaluation results, using upstream: {env_identifier}[/blue]")
 
     api_client = APIClient()
+    redactor = Redactor(known_secrets(api_client.api_key))
+    # Everything from here on is what the platform receives: redact it all up front. A
+    # secret inside an identifier makes the request fail rather than leak it.
+    env_name, model, job_id, resolved_env_slug, resolved_env_id, metadata, results_samples = (
+        redactor.value(
+            [env_name, model, job_id, resolved_env_slug, resolved_env_id, metadata, results_samples]
+        )
+    )
+    if redactor.count:
+        console.print(
+            f"[yellow]Redacted {redactor.count} occurrence(s) of known secrets; "
+            "local files are unchanged[/yellow]"
+        )
 
     if resolved_env_id:
         environments = [{"id": resolved_env_id}]

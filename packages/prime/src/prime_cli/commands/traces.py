@@ -77,21 +77,15 @@ def _parse_context(values: List[str]) -> Optional[Dict[str, str]]:
 
 
 SEARCH_ROLE_STYLES = {"system": "dim", "user": "green", "assistant": "blue", "tool": "yellow"}
-# The server sends up to 64 characters of context on each side of the literal.
-SEARCH_CONTEXT_CHARS = 128
 
 
 def _search_excerpt(match: TraceSearchMatch, width: int) -> Text:
-    """One line with the literal highlighted; offsets are Unicode code points.
-
-    Leading context is trimmed to keep the hit inside a column of the given width.
-    """
+    """One line with the literal highlighted, trimmed to keep the hit inside `width`."""
     excerpt = match.excerpt
     start = match.match_start - match.excerpt_start
     end = match.match_end - match.excerpt_start
     if not 0 <= start < end <= len(excerpt):
-        # Offsets that do not describe this excerpt: show it unstyled rather than lie.
-        start = end = len(excerpt)
+        start = end = len(excerpt)  # offsets do not describe this excerpt: no highlight
     squash = lambda part: re.sub(r"\s+", " ", part.replace("\\n", " "))  # noqa: E731
     before = squash(excerpt[:start])
     lead = min(40, max(4, (width - (end - start)) * 2 // 5))
@@ -99,17 +93,14 @@ def _search_excerpt(match: TraceSearchMatch, width: int) -> Text:
     if match.excerpt_start > 0 or len(before) > lead:
         text.append("…", style="dim")
     text.append(before[-lead:])
-    # The literal itself may span whitespace; keep the row on one line.
     text.append(squash(excerpt[start:end]), style="bold black on yellow")
     text.append(squash(excerpt[end:]))
-    if len(excerpt) >= (end - start) + SEARCH_CONTEXT_CHARS:
-        # The server window is full, so the node continues past it.
+    if len(excerpt) >= (end - start) + 128:  # the server window is full
         text.append("…", style="dim")
     return text
 
 
 def _search_table(matches: List[TraceSearchMatch], *, query: str, run_id: str, field: str) -> Table:
-    """Matches grouped by trace; the field is constant, so it lives in the title."""
     table = Table(
         title=f'Trace search: "{escape(query)}" in {escape(field)} · run {escape(run_id)}',
         title_justify="left",
@@ -118,9 +109,7 @@ def _search_table(matches: List[TraceSearchMatch], *, query: str, run_id: str, f
     table.add_column("Trace ID", style="cyan", no_wrap=True, min_width=32)
     table.add_column("Node", justify="right", style="dim", no_wrap=True, min_width=4)
     table.add_column("Role", no_wrap=True, min_width=9)
-    # The fixed columns plus borders and padding take 58 cells; the excerpt gets the
-    # rest on a single line so the highlighted hit lines up down the page.
-    width = max(20, console.width - 58)
+    width = max(20, console.width - 58)  # what is left after the fixed columns and borders
     table.add_column("Match", no_wrap=True, overflow="ellipsis", max_width=width)
     previous = None
     for match in matches:

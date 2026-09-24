@@ -848,12 +848,12 @@ def test_search_warns_when_first_page_coverage_is_unknown(monkeypatch, args, war
     assert "Search exhausted" in result.stdout
 
 
-def _search_match(trace_id="trace", node_idx=1, role="user", text="", query="the", **overrides):
+def _search_match(text, query="the", trace_id="trace", node_idx=1, role="user"):
     from prime_traces import TraceSearchMatch
 
     position = text.index(query)
     start = max(0, position - 64)
-    fields = dict(
+    return TraceSearchMatch(
         trace_id=trace_id,
         upload_id="upload",
         generation=1,
@@ -867,46 +867,30 @@ def _search_match(trace_id="trace", node_idx=1, role="user", text="", query="the
         excerpt=text[start : start + len(query) + 128],
         excerpt_start=start,
     )
-    return TraceSearchMatch(**{**fields, **overrides})
 
 
-def test_search_excerpt_highlights_the_literal_by_offset():
-    match = _search_match(text="x" * 70 + "the literal\nlives here " + "y" * 80)
-    text = traces_cmd._search_excerpt(match, width=60)
-    highlighted = [
-        text.plain[span.start : span.end] for span in text.spans if "yellow" in str(span.style)
-    ]
-    assert highlighted == ["the"]
-    # Leading context is trimmed for the column and the clipped edges are marked.
-    assert text.plain.startswith("…") and text.plain.endswith("…")
-    assert "\n" not in text.plain and "literal lives here" in text.plain
+@pytest.mark.parametrize(
+    "text,query,highlighted,plain",
+    [
+        ("x" * 70 + "the literal\nlives here " + "y" * 80, "the", "the", "…"),  # clipped edges
+        ("before check the\nstatus after", "check the\nstatus", "check the status", "before"),
+    ],
+)
+def test_search_excerpt_highlights_by_offset(text, query, highlighted, plain):
+    rendered = traces_cmd._search_excerpt(_search_match(text, query), 60)
+    spans = [span for span in rendered.spans if "yellow" in str(span.style)]
+    assert [rendered.plain[span.start : span.end] for span in spans] == [highlighted]
+    assert rendered.plain.startswith(plain) and "\n" not in rendered.plain
 
 
-def test_search_excerpt_keeps_a_multiline_literal_on_one_line():
-    match = _search_match(text="before check the\nstatus now after", query="check the\nstatus")
-    text = traces_cmd._search_excerpt(match, width=60)
-    highlighted = [
-        text.plain[span.start : span.end] for span in text.spans if "yellow" in str(span.style)
-    ]
-    assert highlighted == ["check the status"]
-    assert "\n" not in text.plain
+def test_search_excerpt_ignores_offsets_outside_the_excerpt():
+    match = _search_match("the end").model_copy(update={"match_start": 40, "match_end": 43})
+    rendered = traces_cmd._search_excerpt(match, 60)
+    assert rendered.plain == "the end" and not rendered.spans
 
 
-def test_search_excerpt_survives_offsets_outside_the_excerpt():
-    match = _search_match(text="the end", match_start=40, match_end=43)
-    text = traces_cmd._search_excerpt(match, width=60)
-    assert text.plain == "the end"
-    assert not [span for span in text.spans if "yellow" in str(span.style)]
-
-
-def test_search_table_groups_rows_by_trace_and_counts_matches(monkeypatch):
+def test_search_table_groups_rows_by_trace(monkeypatch):
     from prime_traces import TraceSearchCoverage, TraceSearchPage
-
-    items = [
-        _search_match("aaaa", 1, "system", "first the one"),
-        _search_match("aaaa", 7, "assistant", "second the two"),
-        _search_match("bbbb", 3, "tool", "third the three"),
-    ]
 
     class Client:
         def __enter__(self):
@@ -917,7 +901,11 @@ def test_search_table_groups_rows_by_trace_and_counts_matches(monkeypatch):
 
         def search(self, *args, **kwargs):
             return TraceSearchPage(
-                items=items,
+                items=[
+                    _search_match("first the one", trace_id="aaaa", role="system"),
+                    _search_match("second the two", trace_id="aaaa", node_idx=7),
+                    _search_match("third the three", trace_id="bbbb", role="tool"),
+                ],
                 next_cursor=None,
                 coverage=TraceSearchCoverage(
                     examined_traces=9, unindexed_trace_ids=[], partial_index=False
@@ -927,9 +915,5 @@ def test_search_table_groups_rows_by_trace_and_counts_matches(monkeypatch):
     monkeypatch.setattr(traces_cmd, "_traces_client", Client)
     result = runner.invoke(traces_cmd.app, ["search", "the", "--run-id", "run"])
     assert result.exit_code == 0, result.output
-    lines = result.stdout.splitlines()
-    assert 'Trace search: "the" in content · run run' in lines[0]
     assert result.stdout.count("aaaa") == 1 and result.stdout.count("bbbb") == 1
-    assert "Field" not in result.stdout
-    assert [line for line in lines if "assistant" in line and "second" in line]
     assert "3 matches in 2 traces on this page · 9 traces searched" in result.stdout

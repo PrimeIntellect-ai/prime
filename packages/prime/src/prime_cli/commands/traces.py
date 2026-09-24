@@ -14,7 +14,6 @@ from prime_traces import (
     PaymentRequiredError,
     PrimeTracesError,
     TraceListPage,
-    TraceNotIndexedError,
     TracesClient,
     TraceSearchMatch,
     UnauthorizedError,
@@ -555,7 +554,11 @@ def _load_transcript(client: TracesClient, trace_id: str) -> Tuple[Transcript, O
             if not call_page.next_cursor:
                 break
             cursor = call_page.next_cursor
-    except TraceNotIndexedError:
+    except APIError as e:
+        # Matched by code rather than by `TraceNotIndexedError`, which only exists from
+        # prime-traces 0.0.6: importing it would break every command on an older SDK.
+        if e.code != "trace_not_indexed":
+            raise
         return _document_transcript(client, trace_id), "the trace is still being indexed"
     return Transcript(trace_id=trace_id, source="index", nodes=nodes, calls=calls), None
 
@@ -614,9 +617,18 @@ def transcript_command(
     except ValueError as e:
         error_console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
+    # A single node is what the truncation hints point at, so show all of it.
+    if node_range is not None and node_range[0] is not None and node_range[0] == node_range[1]:
+        full = True
 
     try:
         client = _traces_client()
+        if not hasattr(client, "list_nodes"):
+            error_console.print(
+                "[red]Error:[/red] prime traces transcript needs prime-traces 0.0.6 or newer."
+                " Upgrade the prime CLI and try again."
+            )
+            raise typer.Exit(1)
         summary = client.get(trace_id)
         transcript, fallback = _load_transcript(client, trace_id)
     except typer.Exit:

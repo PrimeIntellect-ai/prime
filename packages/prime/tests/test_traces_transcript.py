@@ -8,9 +8,12 @@ import json
 
 import pytest
 from prime_cli.commands import traces as traces_cmd
+from prime_cli.commands import traces_transcript as transcript_module
 from prime_cli.commands.traces_transcript import parse_node_range
 from prime_cli.main import app as main_app
 from prime_traces import (
+    APIError,
+    LineFormatConflictError,
     TraceCallPage,
     TraceNodePage,
     TraceNotIndexedError,
@@ -374,7 +377,7 @@ def test_transcript_tools_only(client):
 @pytest.mark.parametrize(
     ("args", "present", "absent"),
     [
-        (["--node", "3"], ["line 1"], ["List the workspace.", "turn 1"]),
+        (["--node", "3"], ["line 1", "line 10"], ["List the workspace.", "turn 1", "more lines"]),
         (["--node", "4:"], ["turn 2", "turn 3"], ["turn 1 "]),
         (["--turn", "2"], ["turn 2", "Error: file not found"], ["turn 1", "turn 3", "line 1"]),
         (["--role", "user"], ["List the workspace."], ["turn 1"]),
@@ -472,3 +475,67 @@ def test_transcript_rejects_document_without_nodes(client):
 )
 def test_parse_node_range(value, expected):
     assert parse_node_range(value) == expected
+
+
+def test_transcript_falls_back_on_not_indexed_code_from_older_sdk(client):
+    # prime-traces 0.0.5 raised every 409 as LineFormatConflictError; the code decides.
+    def not_indexed(trace_id, **_):
+        raise LineFormatConflictError("not indexed", status_code=409, code="trace_not_indexed")
+
+    client.list_nodes = not_indexed
+
+    result = runner.invoke(main_app, ["traces", "transcript", "8d3f1a2b"])
+
+    assert result.exit_code == 0, result.output
+    assert ("raw", "8d3f1a2b") in client.requests
+
+
+def test_transcript_other_index_errors_do_not_fall_back(client):
+    def conflict(trace_id, **_):
+        raise APIError("invalid cursor", status_code=400, code="invalid_cursor")
+
+    client.list_nodes = conflict
+
+    result = runner.invoke(main_app, ["traces", "transcript", "8d3f1a2b"])
+
+    assert result.exit_code == 1
+    assert "invalid cursor" in result.output
+    assert not any(kind == "raw" for kind, _ in client.requests)
+
+
+def test_transcript_asks_for_upgrade_on_sdk_without_node_reads(monkeypatch, client):
+    class OldClient:
+        def get(self, trace_id):
+            raise AssertionError("should stop before any request")
+
+    monkeypatch.setattr(traces_cmd, "_traces_client", OldClient)
+
+    result = runner.invoke(main_app, ["traces", "transcript", "8d3f1a2b"])
+
+    assert result.exit_code == 1
+    assert "prime-traces 0.0.6 or newer" in result.output
+
+
+def test_traces_command_module_imports_only_names_from_prime_traces_0_0_5():
+    # The CLI's dependency floor is prime-traces>=0.0.5 until the release PR raises it,
+    # and `prime_cli.main` imports this module, so a newer-only import breaks every command.
+    import ast
+    import inspect
+
+    added_in_0_0_6 = {
+        "NodeMessage",
+        "TraceCall",
+        "TraceCallPage",
+        "TraceNode",
+        "TraceNodePage",
+        "TraceNotIndexedError",
+    }
+    for module in (traces_cmd, transcript_module):
+        tree = ast.parse(inspect.getsource(module))
+        imported = {
+            alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.module == "prime_traces"
+            for alias in node.names
+        }
+        assert not imported & added_in_0_0_6, module.__name__

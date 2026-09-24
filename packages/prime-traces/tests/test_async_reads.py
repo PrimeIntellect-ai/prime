@@ -438,6 +438,17 @@ class TestDelete:
 
 class TestEpisodes:
     @pytest.mark.asyncio
+    async def test_get_episode_raw_streams_envelope(self, make_async_client):
+        raw = b'{"id":"ep-1","ok":true,"traces":["8d3f1a2b"]}'
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/api/v1/episodes/ep-1"
+            assert dict(request.url.params) == {"raw": "true"}
+            return httpx.Response(200, content=raw)
+
+        assert await make_async_client(handler).get_episode_raw("ep-1") == raw
+
+    @pytest.mark.asyncio
     async def test_list_episode_traces_forwards_backend_filters(self, make_async_client):
         captured = {}
 

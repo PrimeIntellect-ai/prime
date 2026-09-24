@@ -515,6 +515,12 @@ class TracesClient:
         """
         return EpisodeDetail.model_validate(self.client.get_json(_episode_endpoint(episode_id)))
 
+    def get_episode_raw(self, episode_id: str) -> bytes:
+        """Get the stored episode envelope; ``traces`` holds the member trace IDs."""
+        return b"".join(
+            self.client.stream_bytes(_episode_endpoint(episode_id), params={"raw": "true"})
+        )
+
     def list_episode_traces(
         self,
         episode_id: str,

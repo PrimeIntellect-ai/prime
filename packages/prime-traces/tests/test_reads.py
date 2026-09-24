@@ -623,7 +623,33 @@ class TestEpisodes:
 
         assert make_client(handler).get_episode(episode_id).episode_id == episode_id
 
-    @pytest.mark.parametrize("method", ["get_episode", "list_episode_traces"])
+    def test_get_episode_raw_streams_envelope(self, make_client):
+        raw = b'{"id":"ep-1","env":{"id":"gsm8k","name":"gsm8k"},"ok":true,"traces":["8d3f1a2b"]}'
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/api/v1/episodes/ep-1"
+            assert dict(request.url.params) == {"raw": "true"}
+            return httpx.Response(200, content=raw)
+
+        assert make_client(handler).get_episode_raw("ep-1") == raw
+
+    def test_get_episode_raw_encodes_episode_id_before_adding_query(self, make_client):
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.raw_path == ENCODED_EPISODE_PATH + b"?raw=true"
+            return httpx.Response(200, content=b"{}")
+
+        make_client(handler).get_episode_raw(RESERVED_EPISODE_ID)
+
+    def test_get_episode_raw_not_found_is_typed(self, make_client):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                404, json={"error": {"code": "episode_not_found", "message": "no such episode"}}
+            )
+
+        with pytest.raises(NotFoundError):
+            make_client(handler).get_episode_raw("missing")
+
+    @pytest.mark.parametrize("method", ["get_episode", "get_episode_raw", "list_episode_traces"])
     def test_episode_reads_reject_episode_id_with_slash_before_request(self, make_client, method):
         def handler(request: httpx.Request) -> httpx.Response:
             pytest.fail(f"unexpected request: {request.url}")

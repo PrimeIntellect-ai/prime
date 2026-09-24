@@ -62,8 +62,15 @@ Episodes are read-only:
 ```python
 page   = client.list_episodes(run_id="run_9f3k2m")
 detail = client.get_episode(episode_id)      # + member aggregate under .traces
+raw    = client.get_episode_raw(episode_id)  # stored envelope; traces = member IDs
 members = client.list_episode_traces(episode_id, has_error=True)
 ```
+
+`get_episode_raw` returns the envelope the producer uploaded (`env`, `task`,
+`group`, `run`, `ok`, every entry of `errors`) with `traces` narrowed to member
+trace IDs; read each member with `get_raw`. It needs a server that supports
+`GET /api/v1/episodes/{episode_id}?raw=true` — an older one ignores the flag
+and returns the summary JSON.
 
 ## Search indexed content
 

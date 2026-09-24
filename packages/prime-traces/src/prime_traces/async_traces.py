@@ -559,6 +559,21 @@ class AsyncTracesClient:
             await self.client.get_json(_episode_endpoint(episode_id))
         )
 
+    async def get_episode_raw(self, episode_id: str) -> bytes:
+        """Get the stored episode envelope, byte for byte as the server keeps it.
+
+        Every envelope field the producer sent (``env``, ``task``, ``group``,
+        ``run``, ``ok``, the full ``errors``, and any other key) is kept;
+        ``traces`` holds the ordered member trace IDs from upload time. Fetch a
+        member with ``get_raw``; ``list_episode_traces`` is current membership.
+        A server without raw episode reads ignores ``raw`` and returns the
+        summary JSON instead.
+        """
+        stream = self.client.stream_bytes(_episode_endpoint(episode_id), params={"raw": "true"})
+        async with aclosing(stream) as chunks:
+            buffered = [chunk async for chunk in chunks]
+        return b"".join(buffered)
+
     async def list_episode_traces(
         self,
         episode_id: str,

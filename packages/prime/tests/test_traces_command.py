@@ -882,6 +882,16 @@ def test_search_excerpt_highlights_the_literal_by_offset():
     assert "\n" not in text.plain and "literal lives here" in text.plain
 
 
+def test_search_excerpt_keeps_a_multiline_literal_on_one_line():
+    match = _search_match(text="before check the\nstatus now after", query="check the\nstatus")
+    text = traces_cmd._search_excerpt(match, width=60)
+    highlighted = [
+        text.plain[span.start : span.end] for span in text.spans if "yellow" in str(span.style)
+    ]
+    assert highlighted == ["check the status"]
+    assert "\n" not in text.plain
+
+
 def test_search_excerpt_survives_offsets_outside_the_excerpt():
     match = _search_match(text="the end", match_start=40, match_end=43)
     text = traces_cmd._search_excerpt(match, width=60)

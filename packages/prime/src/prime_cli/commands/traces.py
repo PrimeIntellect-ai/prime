@@ -99,7 +99,8 @@ def _search_excerpt(match: TraceSearchMatch, width: int) -> Text:
     if match.excerpt_start > 0 or len(before) > lead:
         text.append("…", style="dim")
     text.append(before[-lead:])
-    text.append(excerpt[start:end], style="bold black on yellow")
+    # The literal itself may span whitespace; keep the row on one line.
+    text.append(squash(excerpt[start:end]), style="bold black on yellow")
     text.append(squash(excerpt[end:]))
     if len(excerpt) >= (end - start) + SEARCH_CONTEXT_CHARS:
         # The server window is full, so the node continues past it.

@@ -101,16 +101,18 @@ def _search_excerpt(match: TraceSearchMatch, width: int) -> Text:
 
 
 def _search_table(matches: List[TraceSearchMatch], *, query: str, run_id: str, field: str) -> Table:
+    # Node, role, borders and padding are fixed; the excerpt takes what is left and
+    # the trace ID gives way first in a narrow terminal.
+    remaining = console.width - 26
+    width = max(16, remaining - 32)
     table = Table(
         title=f'Trace search: "{escape(query)}" in {escape(field)} · run {escape(run_id)}',
         title_justify="left",
-        expand=True,
     )
-    table.add_column("Trace ID", style="cyan", no_wrap=True, min_width=32)
-    table.add_column("Node", justify="right", style="dim", no_wrap=True, min_width=4)
-    table.add_column("Role", no_wrap=True, min_width=9)
-    width = max(20, console.width - 58)  # what is left after the fixed columns and borders
-    table.add_column("Match", no_wrap=True, overflow="ellipsis", max_width=width)
+    table.add_column("Trace ID", style="cyan", no_wrap=True, width=max(8, remaining - width))
+    table.add_column("Node", justify="right", style="dim", no_wrap=True, width=4)
+    table.add_column("Role", no_wrap=True, width=9)
+    table.add_column("Match", no_wrap=True, width=width)
     previous = None
     for match in matches:
         if previous is not None and match.trace_id != previous:

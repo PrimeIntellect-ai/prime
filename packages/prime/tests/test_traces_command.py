@@ -889,8 +889,11 @@ def test_search_excerpt_ignores_offsets_outside_the_excerpt():
     assert rendered.plain == "the end" and not rendered.spans
 
 
-def test_search_table_groups_rows_by_trace(monkeypatch):
+@pytest.mark.parametrize("width", [80, 50])  # narrow terminals keep the match visible
+def test_search_table_groups_rows_by_trace(monkeypatch, width):
     from prime_traces import TraceSearchCoverage, TraceSearchPage
+
+    monkeypatch.setattr(traces_cmd.console, "width", width)
 
     class Client:
         def __enter__(self):
@@ -916,4 +919,5 @@ def test_search_table_groups_rows_by_trace(monkeypatch):
     result = runner.invoke(traces_cmd.app, ["search", "the", "--run-id", "run"])
     assert result.exit_code == 0, result.output
     assert result.stdout.count("aaaa") == 1 and result.stdout.count("bbbb") == 1
+    assert "the one" in result.stdout
     assert "3 matches in 2 traces on this page · 9 traces searched" in result.stdout

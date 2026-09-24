@@ -846,3 +846,78 @@ def test_search_warns_when_first_page_coverage_is_unknown(monkeypatch, args, war
     assert result.exit_code == 0, result.output
     assert ("Index coverage is unknown" in result.stderr) is warns
     assert "Search exhausted" in result.stdout
+
+
+def _search_match(text, query="the", trace_id="trace", node_idx=1, role="user"):
+    from prime_traces import TraceSearchMatch
+
+    position = text.index(query)
+    start = max(0, position - 64)
+    return TraceSearchMatch(
+        trace_id=trace_id,
+        upload_id="upload",
+        generation=1,
+        episode_id=None,
+        node_idx=node_idx,
+        role=role,
+        field="content",
+        representation="text",
+        match_start=position,
+        match_end=position + len(query),
+        excerpt=text[start : start + len(query) + 128],
+        excerpt_start=start,
+    )
+
+
+@pytest.mark.parametrize(
+    "text,query,highlighted,plain",
+    [
+        ("x" * 70 + "the literal\nlives here " + "y" * 80, "the", "the", "…"),  # clipped edges
+        ("before check the\nstatus after", "check the\nstatus", "check the status", "before"),
+    ],
+)
+def test_search_excerpt_highlights_by_offset(text, query, highlighted, plain):
+    rendered = traces_cmd._search_excerpt(_search_match(text, query), 60)
+    spans = [span for span in rendered.spans if "yellow" in str(span.style)]
+    assert [rendered.plain[span.start : span.end] for span in spans] == [highlighted]
+    assert rendered.plain.startswith(plain) and "\n" not in rendered.plain
+
+
+def test_search_excerpt_ignores_offsets_outside_the_excerpt():
+    match = _search_match("the end").model_copy(update={"match_start": 40, "match_end": 43})
+    rendered = traces_cmd._search_excerpt(match, 60)
+    assert rendered.plain == "the end" and not rendered.spans
+
+
+@pytest.mark.parametrize("width", [80, 50])  # narrow terminals keep the match visible
+def test_search_table_groups_rows_by_trace(monkeypatch, width):
+    from prime_traces import TraceSearchCoverage, TraceSearchPage
+
+    monkeypatch.setattr(traces_cmd.console, "width", width)
+
+    class Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def search(self, *args, **kwargs):
+            return TraceSearchPage(
+                items=[
+                    _search_match("first the one", trace_id="aaaa", role="system"),
+                    _search_match("second the two", trace_id="aaaa", node_idx=7),
+                    _search_match("third the three", trace_id="bbbb", role="tool"),
+                ],
+                next_cursor=None,
+                coverage=TraceSearchCoverage(
+                    examined_traces=9, unindexed_trace_ids=[], partial_index=False
+                ),
+            )
+
+    monkeypatch.setattr(traces_cmd, "_traces_client", Client)
+    result = runner.invoke(traces_cmd.app, ["search", "the", "--run-id", "run"])
+    assert result.exit_code == 0, result.output
+    assert result.stdout.count("aaaa") == 1 and result.stdout.count("bbbb") == 1
+    assert "the one" in result.stdout
+    assert "3 matches in 2 traces on this page · 9 traces" in result.stdout

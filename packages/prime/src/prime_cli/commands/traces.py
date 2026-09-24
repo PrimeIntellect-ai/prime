@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
@@ -12,11 +13,13 @@ from prime_traces import (
     PrimeTracesError,
     TraceListPage,
     TracesClient,
+    TraceSearchMatch,
     UnauthorizedError,
     UploadReceipt,
 )
 from rich.markup import escape
 from rich.table import Table
+from rich.text import Text
 
 from ..core import Config
 from ..utils import (
@@ -71,6 +74,57 @@ def _parse_context(values: List[str]) -> Optional[Dict[str, str]]:
             raise typer.Exit(1)
         context[key] = value
     return context
+
+
+SEARCH_ROLE_STYLES = {"system": "dim", "user": "green", "assistant": "blue", "tool": "yellow"}
+
+
+def _search_excerpt(match: TraceSearchMatch, width: int) -> Text:
+    """One line with the literal highlighted, trimmed to keep the hit inside `width`."""
+    excerpt = match.excerpt
+    start = match.match_start - match.excerpt_start
+    end = match.match_end - match.excerpt_start
+    if not 0 <= start < end <= len(excerpt):
+        start = end = len(excerpt)  # offsets do not describe this excerpt: no highlight
+    squash = lambda part: re.sub(r"\s+", " ", part.replace("\\n", " "))  # noqa: E731
+    before = squash(excerpt[:start])
+    lead = min(40, max(4, (width - (end - start)) * 2 // 5))
+    text = Text()
+    if match.excerpt_start > 0 or len(before) > lead:
+        text.append("…", style="dim")
+    text.append(before[-lead:])
+    text.append(squash(excerpt[start:end]), style="bold black on yellow")
+    text.append(squash(excerpt[end:]))
+    if len(excerpt) >= (end - start) + 128:  # the server window is full
+        text.append("…", style="dim")
+    return text
+
+
+def _search_table(matches: List[TraceSearchMatch], *, query: str, run_id: str, field: str) -> Table:
+    # Node, role, borders and padding are fixed; the excerpt takes what is left and
+    # the trace ID gives way first in a narrow terminal.
+    remaining = console.width - 26
+    width = max(16, remaining - 32)
+    table = Table(
+        title=f'Trace search: "{escape(query)}" in {escape(field)} · run {escape(run_id)}',
+        title_justify="left",
+    )
+    table.add_column("Trace ID", style="cyan", no_wrap=True, width=max(8, remaining - width))
+    table.add_column("Node", justify="right", style="dim", no_wrap=True, width=4)
+    table.add_column("Role", no_wrap=True, width=9)
+    table.add_column("Match", no_wrap=True, width=width)
+    previous = None
+    for match in matches:
+        if previous is not None and match.trace_id != previous:
+            table.add_section()
+        table.add_row(
+            escape(match.trace_id) if match.trace_id != previous else "",
+            str(match.node_idx),
+            Text(match.role, style=SEARCH_ROLE_STYLES.get(match.role, "")),
+            _search_excerpt(match, width),
+        )
+        previous = match.trace_id
+    return table
 
 
 @app.command("search")
@@ -134,21 +188,14 @@ def search_traces(
     if output == "json":
         output_data_as_json(result.model_dump(mode="json"), console)
         return
-    table = Table(title="Trace search")
-    for heading in ("Trace ID", "Node", "Role", "Field", "Match"):
-        table.add_column(heading)
-    for match in result.items:
-        table.add_row(
-            escape(match.trace_id),
-            str(match.node_idx),
-            escape(match.role),
-            match.field,
-            escape(match.excerpt),
-        )
-    console.print(table)
+    console.print(_search_table(result.items, query=query, run_id=run_id, field=field))
+    traces = len({match.trace_id for match in result.items})
+    summary = f"{len(result.items)} matches in {traces} traces on this page"
     coverage = result.coverage
     if coverage is not None:
-        console.print(f"Searched {coverage.examined_traces} traces.")
+        summary += f" · {coverage.examined_traces} traces searched"
+    console.print(f"[dim]{escape(summary)}[/dim]")
+    if coverage is not None:
         if coverage.unindexed_trace_ids or coverage.partial_index:
             error_console.print(
                 "[yellow]Incomplete index coverage: some traces are unindexed or capped. "

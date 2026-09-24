@@ -1,5 +1,6 @@
 import asyncio
 import fcntl
+import logging
 import os
 import re
 import subprocess
@@ -28,6 +29,27 @@ _LOG_RE = re.compile(
     r"(.+)"
 )
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+frpc_logger = logging.getLogger("prime_tunnel.frpc")
+
+_FRPC_LEVELS = {
+    "E": logging.ERROR,
+    "W": logging.WARNING,
+    "I": logging.INFO,
+    "D": logging.DEBUG,
+    "T": logging.DEBUG,
+}
+
+
+def _log_frpc_line(raw_line: str, tunnel_id: str | None) -> None:
+    """Forward one frpc output line to the prime_tunnel.frpc logger at its own level."""
+    line = _ANSI_RE.sub("", raw_line)
+    m = _LOG_RE.match(line)
+    if m:
+        level, msg = _FRPC_LEVELS.get(m.group(1), logging.INFO), m.group(2)
+    else:
+        level, msg = logging.INFO, line
+    frpc_logger.log(level, "[%s] %s", tunnel_id or "-", msg)
 
 
 def _parse_frpc_error(
@@ -327,8 +349,10 @@ class Tunnel:
         """Start background threads to drain subprocess pipes.
 
         Keeps the last 50 lines in a ring buffer for diagnostics (e.g. crash
-        output). This prevents the pipe buffer from filling up and blocking
-        frpc when it produces output (logs, reconnection attempts, etc.).
+        output) and forwards every line to the ``prime_tunnel.frpc`` logger,
+        so reconnects and dropped control connections show up in the
+        caller's logs. This also prevents the pipe buffer from filling up and
+        blocking frpc when it produces output.
         """
         if self._process is None:
             return
@@ -336,6 +360,7 @@ class Tunnel:
         self._output_lock = threading.Lock()
         max_lines = 50
         self._recent_output: list[str] = list(self._output_lines[-max_lines:])
+        tunnel_id = self.tunnel_id
 
         def drain_pipe(pipe):
             """Read output from a pipe, retaining recent lines."""
@@ -349,6 +374,7 @@ class Tunnel:
                             self._recent_output.append(line)
                             if len(self._recent_output) > max_lines:
                                 self._recent_output.pop(0)
+                        _log_frpc_line(line, tunnel_id)
             except (OSError, ValueError):
                 pass  # Pipe closed
 

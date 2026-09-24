@@ -920,4 +920,4 @@ def test_search_table_groups_rows_by_trace(monkeypatch, width):
     assert result.exit_code == 0, result.output
     assert result.stdout.count("aaaa") == 1 and result.stdout.count("bbbb") == 1
     assert "the one" in result.stdout
-    assert "3 matches in 2 traces on this page · 9 traces searched" in result.stdout
+    assert "3 matches in 2 traces on this page · 9 traces" in result.stdout

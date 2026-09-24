@@ -1,11 +1,11 @@
 """Which verifiers API an environment package targets (v0 vs v1), for ``prime env push``.
 
-The Hub stores whatever the CLI declares (``--runtime v0|v1``) as the package's
+The Environments Hub stores whatever the CLI declares (``--runtime v0|v1``) as the package's
 runtime. Without the flag, the package's own ``verifiers`` requirement decides:
 v1 shipped as verifiers 0.2.0, so a lower bound at or above 0.2.0 declares v1
 and any other pin declares v0. Entries only an ``extra`` pulls in are ignored.
 No verifiers requirement (or a URL pin, which says nothing about the API) means
-no hint is sent and the Hub lists the package as Unclassified until its owner
+no hint is sent and the Environments Hub lists the package as Unclassified until its owner
 sets the runtime.
 
 Mirrors the server's fallback (platform ``backend/app/utils/environment_runtime.py``).
@@ -35,7 +35,7 @@ _QUOTED_LITERAL = re.compile(r"\"[^\"]*\"|'[^']*'")
 
 
 def parse_runtime_option(value: Optional[str]) -> Optional[str]:
-    """``--runtime`` value → Hub runtime, or None when the flag was not given.
+    """``--runtime`` value → Environments Hub runtime, or None when the flag was not given.
 
     Raises ``ValueError`` for anything other than ``v0`` / ``v1`` (case-insensitive).
     """

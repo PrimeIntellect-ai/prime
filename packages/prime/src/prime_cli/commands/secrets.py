@@ -12,7 +12,6 @@ from ..utils import (
     json_output_help,
     optional_team_params,
     output_data_as_json,
-    validate_output_format,
 )
 from ..utils.prompt import (
     any_provided,
@@ -42,22 +41,16 @@ def _fetch_secrets(client: APIClient, config: Config) -> List[Dict[str, Any]]:
 
 @app.command("list", epilog=SECRET_LIST_JSON_HELP)
 def secret_list(
-    output: str = typer.Option(
-        "table",
-        "--output",
-        "-o",
-        help="Output format: table or json",
-    ),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ) -> None:
     """List your global secrets."""
-    validate_output_format(output, console)
 
     try:
         client = APIClient()
         config = Config()
         secrets = _fetch_secrets(client, config)
 
-        if output == "json":
+        if as_json:
             output_data_as_json({"secrets": secrets}, console)
             return
 
@@ -115,15 +108,9 @@ def secret_create(
         "-f",
         help="Treat value as file content (base64 encoded)",
     ),
-    output: str = typer.Option(
-        "table",
-        "--output",
-        "-o",
-        help="Output format: table or json",
-    ),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ) -> None:
     """Create a new global secret."""
-    validate_output_format(output, console)
 
     try:
         if not name:
@@ -155,7 +142,7 @@ def secret_create(
         response = client.post("/secrets/", json=payload)
         secret = response.get("data", {})
 
-        if output == "json":
+        if as_json:
             output_data_as_json(secret, console)
             return
 
@@ -195,15 +182,9 @@ def secret_update(
         "-d",
         help="New secret description",
     ),
-    output: str = typer.Option(
-        "table",
-        "--output",
-        "-o",
-        help="Output format: table or json",
-    ),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ) -> None:
     """Update an existing global secret."""
-    validate_output_format(output, console)
 
     try:
         client = APIClient()
@@ -243,7 +224,7 @@ def secret_update(
         )
         secret = response.get("data", {})
 
-        if output == "json":
+        if as_json:
             output_data_as_json(secret, console)
             return
 
@@ -309,15 +290,9 @@ def secret_get(
         ...,
         help="Secret ID to get",
     ),
-    output: str = typer.Option(
-        "table",
-        "--output",
-        "-o",
-        help="Output format: table or json",
-    ),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ) -> None:
     """Get details of a specific secret."""
-    validate_output_format(output, console)
 
     try:
         client = APIClient()
@@ -326,7 +301,7 @@ def secret_get(
         response = client.get(f"/secrets/{secret_id}", params=optional_team_params(config))
         secret = response.get("data", {})
 
-        if output == "json":
+        if as_json:
             output_data_as_json(secret, console)
             return
 

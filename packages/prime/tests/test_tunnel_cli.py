@@ -219,7 +219,7 @@ def test_tunnel_list_passes_label_filters(monkeypatch: pytest.MonkeyPatch) -> No
 
     result = runner.invoke(
         app,
-        ["tunnel", "list", "--label", "dev", "--sort-by", "name", "--output", "json"],
+        ["tunnel", "list", "--label", "dev", "--sort-by", "name", "--json"],
     )
 
     assert result.exit_code == 0, result.output
@@ -289,7 +289,7 @@ def test_tunnel_list_uses_temporary_context_config(
 
     monkeypatch.setattr("prime_tunnel.core.client.TunnelClient", FakeTunnelClient)
 
-    result = runner.invoke(app, ["-c", "dev", "tunnel", "list", "--output", "json"])
+    result = runner.invoke(app, ["-c", "dev", "tunnel", "list", "--json"])
 
     assert result.exit_code == 0, result.output
     assert captured == {
@@ -314,7 +314,7 @@ def test_tunnel_list_json_outputs_empty_envelope(
 
     monkeypatch.setattr("prime_tunnel.core.client.TunnelClient", FakeTunnelClient)
 
-    result = runner.invoke(app, ["tunnel", "list", "--output", "json"])
+    result = runner.invoke(app, ["tunnel", "list", "--json"])
 
     assert result.exit_code == 0, result.output
     assert json.loads(result.output) == {

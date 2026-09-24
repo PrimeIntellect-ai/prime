@@ -20,7 +20,7 @@ Prime Intellect CLI & SDKs
 [![Python versions](https://img.shields.io/pypi/pyversions/prime?cacheSeconds=60)](https://pypi.org/project/prime/)
 [![Downloads](https://img.shields.io/pypi/dm/prime)](https://pypi.org/project/prime/)
 
-Command line interface and SDKs for Prime Lab, Hosted Training, GPU resources, sandboxes, and environments.
+Command line interface and SDKs for the Environments Hub, evals, Hosted Training, GPU resources, and sandboxes.
 </div>
 
 ## Quick Start
@@ -35,8 +35,8 @@ uv tool install prime
 # Authenticate
 prime login
 
-# Set up a Lab workspace for environments, evals, GEPA, and Hosted Training
-prime lab setup
+# Evaluate a model on a Hub environment (runs prime-rl in a sandbox)
+prime eval run primeintellect/gsm8k -n 32 -r 4
 
 # See available Hosted Training models, capacity, and pricing
 prime train models
@@ -54,10 +54,9 @@ prime availability list
 
 ## Features
 
-- **Lab Workspaces** - Set up local verifiers workspaces for environments, evals, GEPA, and training
-- **Hosted Training** - Train models against verifiers environments and inspect runs, logs, metrics, and checkpoints
-- **Environments** - Access hundreds of verified environments on our community hub
-- **Evaluations** - Push and manage evaluation results
+- **Environments** - Access hundreds of verified environments on the Environments Hub
+- **Evaluations** - Run prime-rl evals in a sandbox and manage results on the platform
+- **Hosted Training** - Train models against environments and inspect runs, logs, metrics, and checkpoints
 - **GPU Resource Management** - Query and filter available GPU resources
 - **Pod Management** - Create, monitor, and terminate compute pods
 - **Sandboxes** - Easily run AI-generated code in the cloud
@@ -127,7 +126,7 @@ prime config view
 
 ### Environments Hub
 
-Access hundreds of verified environments on our community hub with deep integrations with sandboxes, training, and evaluation stack.
+Access hundreds of verified environments on the Environments Hub with deep integrations with sandboxes, training, and evaluation stack.
 
 ```bash
 # Browse available environments
@@ -136,25 +135,18 @@ prime env list
 # View environment details
 prime env info <environment-name>
 
-# Inspect environment source without downloading the archive
-prime env inspect <environment-name>
+# Show install commands (uv pip install / uv add) for an environment
+prime env info <owner>/<environment-name>
 
-# Install an environment locally
-prime env install <environment-name>
-
-# Create and push your own environment
-prime env init my-environment
+# Push your own environment (scaffold one with `vf-init` from verifiers)
 prime env push my-environment
 ```
 
-### Lab and Hosted Training
+### Hosted Training
 
-Prime Lab connects verifiers environments to evaluations, GEPA prompt optimization, and Hosted Training. Start with `prime lab setup` to create a local workspace with starter configs, then use `prime train models` to choose a Hosted Training model with current capacity and pricing.
+Use `prime train models` to choose a Hosted Training model with current capacity and pricing.
 
 ```bash
-# Set up a Lab workspace
-prime lab setup
-
 # List trainable models, capacity, and token pricing
 prime train models
 
@@ -203,26 +195,21 @@ prime pods ssh <pod-id>
 
 ### Evaluations
 
-Push and manage evaluation results to the Environments Hub.
+`prime eval run` creates a sandbox, installs [prime-rl](https://github.com/PrimeIntellect-ai/prime-rl) plus the environment from the Environments Hub, and runs `uv run eval` with every other argument passed through. Results stream to the platform via the prime monitor and show up in `prime eval list`.
 
 ```bash
-# Auto-discover and push evaluations from current directory
-prime eval push
+# Evaluate a model on a Hub environment (flags after it go to `uv run eval`)
+prime eval run primeintellect/gsm8k -n 32 -r 4 -m openai/gpt-4.1-mini
 
-# Push specific eval directory (verifiers format)
-prime eval push outputs/evals/gsm8k--gpt-4/abc123
+# A local environment package instead of a Hub one
+prime eval run gsm8k --env-path ./environments/gsm8k -n 32
 
-# Push a public evaluation (default is private)
-prime eval push --public
+# Multi-source eval from a local TOML, installing its environments from the Hub
+prime eval run @ eval.toml --install primeintellect/gsm8k --install primeintellect/aime25
 
-# List all evaluations
+# List hosted evaluations and inspect one with its samples
 prime eval list
-
-# Get evaluation details
-prime eval get <eval-id>
-
-# View evaluation samples
-prime eval samples <eval-id>
+prime eval info <eval-id>
 ```
 
 ### Team Management

@@ -8,7 +8,6 @@ from .display import (
     get_eval_viewer_url,
     output_data_as_json,
     status_color,
-    validate_output_format,
 )
 from .formatters import (
     format_ip_display,
@@ -33,7 +32,6 @@ from .time_utils import human_age, iso_timestamp, sort_by_created
 
 __all__ = [
     "output_data_as_json",
-    "validate_output_format",
     "build_table",
     "status_color",
     "get_eval_viewer_url",

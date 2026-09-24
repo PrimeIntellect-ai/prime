@@ -26,7 +26,7 @@ from .models import (
     RunStatus,
     TrainingSpec,
 )
-from .run import MODE_ENV, Run, init
+from .run import HOSTED_ENV, MODE_ENV, Run, init
 
 __version__ = "0.1.3"
 
@@ -39,6 +39,7 @@ __all__ = [
     "ConfigSource",
     "CONFIG_SOURCE_KEY",
     "EnvironmentRef",
+    "HOSTED_ENV",
     "MODE_ENV",
     "metrics",
     "projection",

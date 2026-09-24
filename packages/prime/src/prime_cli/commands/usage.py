@@ -21,7 +21,6 @@ from prime_cli.utils import (
     is_plain_mode,
     json_output_help,
     output_data_as_json,
-    validate_output_format,
 )
 from prime_cli.utils.formatters import format_price_per_mtok, format_usd
 
@@ -138,7 +137,6 @@ def _build_run_usage_table(usage: RunUsage) -> Table:
 
 def run_usage_command(
     run_id: str = typer.Argument(..., help="RFT run ID (e.g. rft_..."),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
     watch: bool = typer.Option(
         False, "--watch", "-w", help="Poll continuously and update in place"
     ),
@@ -149,6 +147,7 @@ def run_usage_command(
         min=2,
         help="Seconds between polls when --watch is set",
     ),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ) -> None:
     """Show token usage and price for a single training run.
 
@@ -158,9 +157,8 @@ def run_usage_command(
 
         prime train usage <run_id> --watch --interval 15
 
-        prime train usage <run_id> --output json
+        prime train usage <run_id> --json
     """
-    validate_output_format(output, console)
 
     billing = BillingClient(APIClient())
 
@@ -168,21 +166,21 @@ def run_usage_command(
         # In JSON mode, errors must go to stderr so stdout stays strictly
         # JSON for agents piping through `jq`. Watch-mode JSON already does
         # this — keep one-shot consistent.
-        err_console = get_console(stderr=True) if output == "json" else console
+        err_console = get_console(stderr=True) if as_json else console
         try:
             usage = billing.get_run_usage(run_id)
         except APIError as exc:
             err_console.print(f"[red]Error: {exc}[/red]")
             raise typer.Exit(1) from exc
 
-        if output == "json":
+        if as_json:
             output_data_as_json(_run_usage_json(usage), console)
             return
         console.print(_build_run_usage_table(usage))
         return
 
     # Watch mode: the watcher does the first fetch itself — no eager call.
-    if output == "json":
+    if as_json:
         _watch_json(billing.get_run_usage, run_id, interval, _run_usage_json)
         return
 

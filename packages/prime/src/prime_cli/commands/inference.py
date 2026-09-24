@@ -13,7 +13,6 @@ from ..utils import (
     get_console,
     json_output_help,
     output_data_as_json,
-    validate_output_format,
 )
 from ..utils.formatters import format_price_per_mtok
 
@@ -84,15 +83,14 @@ def _sort_models(models: List[Dict[str, Any]], sort: str, order: str) -> List[Di
 
 @app.command("models", epilog=MODELS_JSON_HELP)
 def list_models(
-    output: str = typer.Option("table", "--output", "-o", help="table|json"),
     search: Optional[str] = typer.Option(
         None, "--search", "-q", help="Case-insensitive substring match on model id"
     ),
     sort: str = typer.Option("id", "--sort", "-s", help="Sort by: id, input, output"),
     order: str = typer.Option("asc", "--order", "-d", help="Sort order (direction): asc, desc"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ) -> None:
     """List available models from Prime Inference (/v1/models)."""
-    validate_output_format(output, console)
     if sort not in _SORT_KEYS:
         console.print(f"[red]Error:[/red] --sort must be one of: {', '.join(_SORT_KEYS)}")
         raise typer.Exit(1)
@@ -120,7 +118,7 @@ def list_models(
 
         models = _sort_models(models, sort, order)
 
-        if output == "json":
+        if as_json:
             if isinstance(data, dict):
                 payload = dict(data)
                 if "data" in payload:
@@ -245,7 +243,7 @@ def chat(
     max_tokens: Optional[int] = typer.Option(
         None, "--max-tokens", help="Maximum tokens to generate"
     ),
-    output: str = typer.Option("text", "--output", "-o", help="text|json"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ) -> None:
     """Send a one-shot chat message to a Prime Inference model.
 
@@ -254,12 +252,8 @@ def chat(
       echo "explain RL in one line" | prime inference chat <model-id>
       prime inference chat <model-id> "hi" --stream
     """
-    if output not in ("text", "json"):
-        console.print(f"[red]Error:[/red] invalid output format '{output}'. Supported: text, json")
-        raise typer.Exit(1)
-
-    if stream and output == "json":
-        console.print("[red]Error:[/red] --stream is not supported with --output json.")
+    if stream and as_json:
+        console.print("[red]Error:[/red] --stream is not supported with --json.")
         raise typer.Exit(1)
 
     if message is None:
@@ -296,7 +290,7 @@ def chat(
             raise typer.Exit(1)
         result = cast(Dict[str, Any], raw)
 
-        if output == "json":
+        if as_json:
             output_data_as_json(result, console)
             return
 

@@ -37,6 +37,8 @@ from .worker import UploadWorker, deadline_after, time_left
 logger = logging.getLogger(__name__)
 
 MODE_ENV = "PRIME_RUNS_MODE"
+#: Set (to 1/true) by launchers such as `prime eval run`; marks the run as hosted.
+HOSTED_ENV = "PRIME_RUNS_IS_HOSTED"
 #: How long ``finish()`` lets queued uploads drain: one in-flight sample POST
 #: may take this long, and a shorter budget would abandon it about to succeed.
 DEFAULT_FINISH_TIMEOUT = float(UPLOAD_TIMEOUT.read or 300.0)
@@ -468,6 +470,7 @@ def init(
         config=_normalize_config(config),
         kind=kind,
         training=training,
+        hosted=os.getenv(HOSTED_ENV, "").strip().lower() in ("1", "true", "yes"),
     )
     resolved_mode = _resolve_mode(mode, api_key=api_key)
 

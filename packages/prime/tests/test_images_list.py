@@ -863,7 +863,7 @@ def test_list_platform_image_ignores_team_context(monkeypatch):
 def test_list_platform_image_team_context_json_output_stays_clean(monkeypatch):
     result, captured = _run_list_capturing_params(
         monkeypatch,
-        ["--platform-image", "--output", "json"],
+        ["--platform-image", "--json"],
         payload=[_platform_row(image="ubuntu:22.04", pushed_at="2026-04-16T22:24:07")],
         team_id=TEAM_ID,
     )
@@ -880,7 +880,7 @@ def test_list_platform_image_team_context_json_output_stays_clean(monkeypatch):
 def test_list_json_omits_total_count_when_api_omits_it(monkeypatch):
     result, _ = _run_list_capturing_params(
         monkeypatch,
-        ["--output", "json"],
+        ["--json"],
         payload=[_container(pushed_at="2026-04-16T22:24:07")],
         include_total_count=False,
     )

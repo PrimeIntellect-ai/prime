@@ -4,13 +4,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-MODULE_PROBE = (
-    "prime_cli.lab_setup",
-    "prime_lab_app",
-    "prime_lab_app.app",
-    "textual",
-    "verifiers",
-)
+MODULE_PROBE = ("textual", "verifiers")
 
 
 def _repo_root() -> Path:
@@ -55,32 +49,7 @@ def _probe_expression() -> str:
     return f"print(json.dumps({{name: name in sys.modules for name in ({names})}}))"
 
 
-def test_prime_main_import_does_not_load_lab_setup_or_heavy_lab_runtime() -> None:
+def test_prime_main_import_does_not_load_heavy_runtimes() -> None:
     loaded = _run_probe(f"import json, sys\nimport prime_cli.main\n{_probe_expression()}\n")
 
-    assert loaded == {
-        "prime_cli.lab_setup": False,
-        "prime_lab_app": False,
-        "prime_lab_app.app": False,
-        "textual": False,
-        "verifiers": False,
-    }
-
-
-def test_prime_lab_setup_help_does_not_load_textual_or_verifiers() -> None:
-    loaded = _run_probe(
-        "import json, sys\n"
-        "sys.argv = ['prime', 'lab', 'setup', '--help']\n"
-        "from prime_cli.main import run\n"
-        "try:\n"
-        "    run()\n"
-        "except SystemExit:\n"
-        "    pass\n"
-        f"{_probe_expression()}\n"
-    )
-
-    assert loaded["prime_cli.lab_setup"] is True
-    assert loaded["prime_lab_app"] is True
-    assert loaded["prime_lab_app.app"] is False
-    assert loaded["textual"] is False
-    assert loaded["verifiers"] is False
+    assert loaded == {"textual": False, "verifiers": False}

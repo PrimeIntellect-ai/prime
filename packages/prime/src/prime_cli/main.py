@@ -6,17 +6,12 @@ import typer
 from . import __version__
 from .commands.availability import app as availability_app
 from .commands.config import app as config_app
-from .commands.deployments import app as deployments_app
 from .commands.disks import app as disks_app
 from .commands.env import app as env_app
 from .commands.evals import app as evals_app
 from .commands.feedback import app as feedback_app
-from .commands.fork import FORK_JSON_HELP
-from .commands.fork import fork as fork_command
-from .commands.gepa import app as gepa_app
 from .commands.images import app as images_app
 from .commands.inference import app as inference_app
-from .commands.lab import app as lab_app
 from .commands.login import app as login_app
 from .commands.logout import app as logout_app
 from .commands.pods import app as pods_app
@@ -31,36 +26,51 @@ from .commands.upgrade import app as upgrade_app
 from .commands.wallet import WALLET_JSON_HELP, wallet_command
 from .commands.whoami import app as whoami_app
 from .core import Config
-from .utils import PlainTyper, get_console
+from .utils import PlainAwareTyperGroup, PlainTyper, get_console
 from .utils.version_check import check_for_update
+
+HELP_PANEL_ORDER = ("Model Factory", "Compute", "Account")
+
+
+class _RootGroup(PlainAwareTyperGroup):
+    """Order the help panels by HELP_PANEL_ORDER instead of by registration."""
+
+    def list_commands(self, ctx):
+        names = super().list_commands(ctx)
+
+        def panel_rank(name: str) -> int:
+            panel = getattr(self.get_command(ctx, name), "rich_help_panel", None)
+            if panel in HELP_PANEL_ORDER:
+                return HELP_PANEL_ORDER.index(panel)
+            return len(HELP_PANEL_ORDER)
+
+        return sorted(names, key=panel_rank)
+
 
 app = PlainTyper(
     name="prime",
+    cls=_RootGroup,
     help=f"Prime Intellect CLI (v{__version__})",
     no_args_is_help=True,
     context_settings={"help_option_names": ["-h", "--help"]},
 )
 
-# Lab commands
-app.add_typer(lab_app, name="lab", rich_help_panel="Lab")
-app.add_typer(env_app, name="env", rich_help_panel="Lab")
-app.command("fork", rich_help_panel="Lab", epilog=FORK_JSON_HELP)(fork_command)
-app.add_typer(evals_app, name="eval", rich_help_panel="Lab")
-app.add_typer(gepa_app, name="gepa", rich_help_panel="Lab")
-app.add_typer(train_app, name="train", rich_help_panel="Lab")
+# Model Factory commands
+app.add_typer(env_app, name="env", rich_help_panel="Model Factory")
+app.add_typer(evals_app, name="eval", rich_help_panel="Model Factory")
+app.add_typer(train_app, name="train", rich_help_panel="Model Factory")
 app.add_typer(
     train_app,
     name="rl",
     help="Deprecated alias for `prime train`.",
     hidden=True,
-    rich_help_panel="Lab",
+    rich_help_panel="Model Factory",
 )
-app.add_typer(deployments_app, name="deployments", rich_help_panel="Lab")
 # Hidden while Prime Traces is in private beta: production is deployed and the
 # default traces URL reaches it, but the service allowlists owners, so an
 # advertised command group would answer "service not enabled" for most users.
 # Unhide when the allowlist is lifted.
-app.add_typer(traces_app, name="traces", rich_help_panel="Lab", hidden=True)
+app.add_typer(traces_app, name="traces", rich_help_panel="Model Factory", hidden=True)
 
 # Compute commands
 app.add_typer(availability_app, name="availability", rich_help_panel="Compute")
@@ -85,7 +95,7 @@ app.add_typer(upgrade_app, name="update", rich_help_panel="Account", hidden=True
 app.add_typer(feedback_app, name="feedback", rich_help_panel="Account")
 
 
-@app.callback(invoke_without_command=True)
+@app.callback(invoke_without_command=True, cls=_RootGroup)
 def callback(
     ctx: typer.Context,
     version_flag: bool = typer.Option(False, "--version", "-v", help="Show version and exit"),

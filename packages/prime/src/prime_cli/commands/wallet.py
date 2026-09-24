@@ -15,7 +15,6 @@ from prime_cli.utils import (
     get_console,
     json_output_help,
     output_data_as_json,
-    validate_output_format,
 )
 from prime_cli.utils.formatters import format_usd
 
@@ -86,7 +85,7 @@ def wallet_command(
         max=100,
         help="Number of recent billing rows to fetch (max 100)",
     ),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
 ) -> None:
     """Show wallet balance and most recent billing rows.
 
@@ -99,23 +98,22 @@ def wallet_command(
 
         prime wallet
 
-        prime wallet --limit 50 --output json
+        prime wallet --limit 50 --json
     """
-    validate_output_format(output, console)
 
     config = Config()
     client = WalletClient(APIClient())
 
     # In JSON mode, errors must go to stderr so stdout stays strictly JSON
     # for agents piping through `jq`.
-    err_console = get_console(stderr=True) if output == "json" else console
+    err_console = get_console(stderr=True) if as_json else console
     try:
         wallet = client.get(limit=limit, team_id=config.team_id)
     except APIError as exc:
         err_console.print(f"[red]Error: {exc}[/red]")
         raise typer.Exit(1) from exc
 
-    if output == "json":
+    if as_json:
         # mode="json" emits ISO-8601 datetime strings rather than the
         # space-separated repr that default=str produces.
         output_data_as_json(wallet.model_dump(mode="json"), console)

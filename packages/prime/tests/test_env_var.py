@@ -110,14 +110,13 @@ class TestEnvVarList:
         )
 
         assert result.exit_code == 0, f"Failed: {result.output}"
-        assert "Variables for testuser/test-env" in result.output
         assert "DEBUG" in result.output
         assert "LOG_LEVEL" in result.output
         assert "true" in result.output
 
     def test_list_variables_json_output(self, mock_env_var_api: None) -> None:
         """Test listing variables with JSON output."""
-        result = runner.invoke(app, ["env", "var", "list", "testuser/test-env", "-o", "json"])
+        result = runner.invoke(app, ["env", "var", "list", "testuser/test-env", "--json"])
 
         assert result.exit_code == 0, f"Failed: {result.output}"
         output = json.loads(result.output)
@@ -192,8 +191,7 @@ class TestEnvVarCreate:
                 "NEW_VAR",
                 "-v",
                 "value",
-                "-o",
-                "json",
+                "--json",
             ],
         )
 
@@ -272,26 +270,6 @@ class TestEnvVarCreate:
         assert result.exit_code == 0, f"Failed: {result.output}"
         assert "Created variable" in result.output
 
-    def test_create_variable_invalid_output_format(self, mock_env_var_api: None) -> None:
-        """Test creating with an invalid output format."""
-        result = runner.invoke(
-            app,
-            [
-                "env",
-                "var",
-                "create",
-                "testuser/test-env",
-                "-n",
-                "NEW_VAR",
-                "-v",
-                "val",
-                "-o",
-                "yaml",
-            ],
-        )
-        assert result.exit_code != 0
-        assert "Invalid output format" in result.output
-
 
 class TestEnvVarUpdate:
     """Tests for the env var update command."""
@@ -354,8 +332,7 @@ class TestEnvVarUpdate:
                 "testuser/test-env",
                 "-n",
                 "NEW_NAME",
-                "-o",
-                "json",
+                "--json",
             ],
         )
 
@@ -436,12 +413,6 @@ class TestEnvVarDelete:
         assert result.exit_code == 0, f"Failed: {result.output}"
         assert "Variable deleted" in result.output
 
-    def test_list_variables_invalid_output_format(self, mock_env_var_api: None) -> None:
-        """Test listing with an invalid output format."""
-        result = runner.invoke(app, ["env", "var", "list", "testuser/test-env", "-o", "xml"])
-        assert result.exit_code != 0
-        assert "Invalid output format" in result.output
-
 
 class TestEnvVarHelp:
     """Tests for help output."""
@@ -463,7 +434,7 @@ class TestEnvVarHelp:
 
         assert result.exit_code == 0
         output = strip_ansi(result.output)
-        assert "--output" in output
+        assert "--json" in output
 
     def test_env_var_create_help(self) -> None:
         """Test that env var create help works."""

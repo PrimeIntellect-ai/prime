@@ -9,8 +9,8 @@ def _build_json_help(title: str, *lines: str) -> str:
 
 
 def json_output_help(*lines: str) -> str:
-    """Build help text for commands with an explicit ``--output json`` mode."""
-    return _build_json_help("JSON output (--output json):", *lines)
+    """Build help text for commands with a ``--json`` flag."""
+    return _build_json_help("JSON output (--json):", *lines)
 
 
 def json_help(*lines: str) -> str:

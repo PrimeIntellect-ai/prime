@@ -123,7 +123,7 @@ def test_chat_json_output(monkeypatch):
     runner = CliRunner()
     result = runner.invoke(
         app,
-        ["inference", "chat", "some-model", "hi", "--output", "json"],
+        ["inference", "chat", "some-model", "hi", "--json"],
         env=TEST_ENV,
     )
 
@@ -138,7 +138,7 @@ def test_chat_stream_with_json_errors(monkeypatch):
     runner = CliRunner()
     result = runner.invoke(
         app,
-        ["inference", "chat", "some-model", "hi", "--stream", "--output", "json"],
+        ["inference", "chat", "some-model", "hi", "--stream", "--json"],
         env=TEST_ENV,
     )
 

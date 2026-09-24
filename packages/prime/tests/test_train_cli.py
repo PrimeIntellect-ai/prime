@@ -250,3 +250,28 @@ def test_train_stop_survives_any_poll_api_error(monkeypatch) -> None:
     assert result.exit_code == 0, result.output
     assert "did not reach a terminal state" in result.output
     assert "Error:" not in result.output
+
+
+def test_train_volume_flag_and_toml_key_reach_the_fft_payload(monkeypatch, tmp_path: Path) -> None:
+    captured: list[dict[str, Any]] = []
+
+    def fake_create_run(self, payload):
+        captured.append(payload)
+        from prime_cli.api.training import HostedTrainingRunResponse
+
+        return HostedTrainingRunResponse(run_id="r1", token_value="t")
+
+    monkeypatch.setattr("prime_cli.api.training.HostedTrainingClient.create_run", fake_create_run)
+    cfg = tmp_path / "rl.toml"
+    body = '[model]\nname = "Qwen/Qwen3-0.6B"\n\n[deployment]\nnum_train_gpus = 1\nnum_infer_gpus = 1\n'
+    cfg.write_text(body)
+    result = runner.invoke(
+        app, ["train", str(cfg), "--volume", "my-ckpts", "-y", "-o", "json"], env=TEST_ENV
+    )
+    assert result.exit_code == 0, result.output
+    cfg.write_text('volume = "from-toml"\n' + body)
+    result = runner.invoke(app, ["train", str(cfg), "-y", "-o", "json"], env=TEST_ENV)
+    assert result.exit_code == 0, result.output
+
+    assert [p.get("volume") for p in captured] == ["my-ckpts", "from-toml"]
+    assert "volume" not in captured[1]["config"]

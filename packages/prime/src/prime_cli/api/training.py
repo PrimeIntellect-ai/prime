@@ -67,6 +67,21 @@ class AvailableFFTModelsResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class Volume(BaseModel):
+    """A named volume (GET/POST /v1/training/volumes)."""
+
+    name: str
+    size: Optional[str] = None
+    status: str
+    cluster_id: str = Field(..., alias="clusterId")
+    namespace: str
+    pvc_name: str = Field(..., alias="pvcName")
+    created_by: Optional[str] = Field(None, alias="createdBy")
+    created_at: Optional[str] = Field(None, alias="createdAt")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class HostedTrainingClient:
     """Client for the hosted full-FT training endpoint."""
 
@@ -95,6 +110,27 @@ class HostedTrainingClient:
         """
         response = self.client.request("DELETE", f"/training/runs/{run_id}")
         return response if isinstance(response, dict) else {"runId": run_id}
+
+    def create_volume(self, name: str, size: str, team_id: Optional[str] = None) -> Volume:
+        payload: Dict[str, Any] = {"name": name, "size": size}
+        if team_id:
+            payload["teamId"] = team_id
+        return Volume.model_validate(self.client.post("/training/volumes", json=payload))
+
+    def list_volumes(self, team_id: Optional[str] = None) -> List[Volume]:
+        params = {"teamId": team_id} if team_id else None
+        response = self.client.get("/training/volumes", params=params)
+        return [Volume.model_validate(v) for v in response or []]
+
+    def resize_volume(self, name: str, size: str, team_id: Optional[str] = None) -> Volume:
+        payload: Dict[str, Any] = {"size": size}
+        if team_id:
+            payload["teamId"] = team_id
+        return Volume.model_validate(self.client.patch(f"/training/volumes/{name}", json=payload))
+
+    def delete_volume(self, name: str, team_id: Optional[str] = None) -> None:
+        params = {"teamId": team_id} if team_id else None
+        self.client.delete(f"/training/volumes/{name}", params=params)
 
     def list_available_gpu_types(self, team_id: Optional[str] = None) -> AvailableGpuTypesResponse:
         """GET /v1/training/available-gpu-types. Distinct GPU types the
@@ -146,6 +182,7 @@ def build_payload_from_toml(
     wandb_api_key: Optional[str] = None,
     hf_token: Optional[str] = None,
     gpu_type: Optional[str] = None,
+    volume: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build the /v1/training/runs payload from a prime-rl-style TOML dict.
 
@@ -164,6 +201,8 @@ def build_payload_from_toml(
       - gpu_type: narrows the backend picker to clusters with matching
         PrimeCluster.gpuType (e.g. "H200_141GB"); omit for the default
         auto-pick with no type preference.
+      - volume: a named volume the run writes its outputs to, under
+        runs/<runId>/, instead of a per-run PVC.
 
     Cluster targeting is backend-side (auto-pick first uncordoned).
     """
@@ -180,4 +219,6 @@ def build_payload_from_toml(
         payload["hfToken"] = hf_token
     if gpu_type:
         payload["gpuType"] = gpu_type
+    if volume:
+        payload["volume"] = volume
     return payload

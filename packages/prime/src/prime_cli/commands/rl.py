@@ -954,6 +954,7 @@ def _dispatch_full_finetune_run(
     yes: bool,
     image_tag: Optional[str] = None,
     gpu_type: Optional[str] = None,
+    volume: Optional[str] = None,
 ) -> None:
     """Hand off to /api/v1/training/runs (full-FT prime-rl on a registered
     PrimeCluster). Reuses the shared env-file plumbing for WANDB / HF
@@ -1061,6 +1062,16 @@ def _dispatch_full_finetune_run(
         raise typer.Exit(1)
     resolved_gpu_type = gpu_type or config_gpu_type
 
+    # `volume` is request-level too: `--volume` or top-level `volume = "..."`.
+    config_volume = raw_cfg.get("volume")
+    if config_volume is not None and not isinstance(config_volume, str):
+        console.print(
+            f"[red]Error:[/red] volume in {config_path} must be a string, "
+            f"got {type(config_volume).__name__}."
+        )
+        raise typer.Exit(1)
+    resolved_volume = volume or config_volume
+
     # Same deprecation pass as the LoRA path. In the prime-rl-native shape
     # the deprecated keys live one level down, under `[orchestrator]` — and
     # this config ships verbatim to the dedicated training endpoint, where
@@ -1084,7 +1095,7 @@ def _dispatch_full_finetune_run(
     config_payload = {
         k: v
         for k, v in raw_cfg.items()
-        if k not in ("env_file", "env_files", "image_tag", "gpu_type", "type")
+        if k not in ("env_file", "env_files", "image_tag", "gpu_type", "volume", "type")
     }
 
     payload = build_payload_from_toml(
@@ -1095,6 +1106,7 @@ def _dispatch_full_finetune_run(
         wandb_api_key=secrets.get("WANDB_API_KEY"),
         hf_token=secrets.get("HF_TOKEN"),
         gpu_type=resolved_gpu_type,
+        volume=resolved_volume,
     )
 
     # `--output json` is a formatting switch: still dispatch the run,
@@ -1334,6 +1346,15 @@ def create_run(
             "default (no preference, auto-pick)."
         ),
     ),
+    volume: Optional[str] = typer.Option(
+        None,
+        "--volume",
+        help=(
+            "Named volume to write the run's outputs to, under runs/<runId>/ "
+            "(full-FT only; see `prime volumes`). Falls back to a top-level "
+            '`volume = "..."` in the TOML.'
+        ),
+    ),
     full_finetune: bool = typer.Option(
         False,
         "--full-finetune",
@@ -1372,8 +1393,16 @@ def create_run(
             yes=yes,
             image_tag=image_tag,
             gpu_type=gpu_type,
+            volume=volume,
         )
         return
+
+    if volume or raw_cfg.get("volume") is not None:
+        console.print(
+            "[red]Error:[/red] --volume (and top-level `volume` in the TOML) "
+            "is only supported for full-FT runs."
+        )
+        raise typer.Exit(1)
 
     # --gpu-type is full-FT only. The LoRA path below never reads it, so
     # silently letting the flag through would launch a run with the GPU

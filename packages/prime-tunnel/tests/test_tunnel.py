@@ -468,10 +468,10 @@ def test_pipe_drain_forwards_frpc_lines_at_their_level(caplog):
 
     records = [(r.levelno, r.getMessage()) for r in caplog.records if r.name == "prime_tunnel.frpc"]
     assert records == [
-        (logging.INFO, "[t-test123] login to server success, get run id [2985857c77023140]"),
-        (logging.WARNING, "[t-test123] control writer is closing"),
-        (logging.ERROR, "[t-test123] connect to server error: EOF"),
-        (logging.DEBUG, "[t-test123] heartbeat"),
+        (logging.INFO, "frpc t-test123: login to server success, get run id [2985857c77023140]"),
+        (logging.WARNING, "frpc t-test123: control writer is closing"),
+        (logging.ERROR, "frpc t-test123: connect to server error: EOF"),
+        (logging.DEBUG, "frpc t-test123: heartbeat"),
     ]
     assert len(tunnel.recent_output) == 4
 
@@ -485,7 +485,7 @@ def test_pipe_drain_logs_unparsed_lines_at_info(caplog):
         _drain(tunnel, [], ["panic: something unexpected\n"])
 
     assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
-        (logging.INFO, "[t-test123] panic: something unexpected"),
+        (logging.INFO, "frpc t-test123: panic: something unexpected"),
     ]
 
 

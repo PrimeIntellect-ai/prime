@@ -49,7 +49,7 @@ def _log_frpc_line(raw_line: str, tunnel_id: str | None) -> None:
         level, msg = _FRPC_LEVELS.get(m.group(1), logging.INFO), m.group(2)
     else:
         level, msg = logging.INFO, line
-    frpc_logger.log(level, "[%s] %s", tunnel_id or "-", msg)
+    frpc_logger.log(level, "frpc %s: %s", tunnel_id or "-", msg)
 
 
 def _parse_frpc_error(

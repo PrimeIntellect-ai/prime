@@ -8,7 +8,7 @@ interpolated into markup, so trace content is always literal.
 
 import json
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from prime_traces import TraceSummary
 from rich.console import Group, RenderableType
@@ -26,6 +26,7 @@ THINKING_CHARS = 200
 TOOL_LINES = 4
 ARG_CHARS = 150
 TOOL_NAME_WIDTH = 32
+TOOL_NAMES_CHARS = 60
 
 # Argument keys that best describe a tool call in one line, most specific first.
 ARG_SUMMARY_KEYS = ("command", "file_path", "path", "pattern", "query", "url", "description")
@@ -36,7 +37,7 @@ class Transcript:
     """A trace's nodes and calls, from the index or the raw document.
 
     Nodes and calls are plain dicts in the index's response shape, so both
-    sources render through one path. Raw-document calls also carry `usage`.
+    sources render through one path and produce the same JSON.
     """
 
     trace_id: str
@@ -84,7 +85,6 @@ def transcript_from_document(trace_id: str, document: Any) -> Transcript:
                 "model": raw.get("model"),
                 "endpoint": raw.get("endpoint"),
                 "finish_reason": raw.get("finish_reason"),
-                "usage": raw.get("usage") if isinstance(raw.get("usage"), dict) else None,
             }
         )
     return Transcript(trace_id=trace_id, source="document", nodes=nodes, calls=calls)
@@ -118,33 +118,17 @@ def parse_node_range(value: str) -> Tuple[Optional[int], Optional[int]]:
 
 
 def select_nodes(
-    transcript: Transcript,
-    *,
-    node_range: Optional[Tuple[Optional[int], Optional[int]]] = None,
-    turn: Optional[int] = None,
-    roles: Optional[Iterable[str]] = None,
+    transcript: Transcript, node_range: Optional[Tuple[Optional[int], Optional[int]]]
 ) -> List[Dict[str, Any]]:
-    """Filter nodes by index range, one model turn (plus what follows it), and role."""
-    nodes = transcript.nodes
-    if node_range is not None:
-        lo, hi = node_range
-        nodes = [
-            n
-            for n in nodes
-            if (lo is None or n["node_idx"] >= lo) and (hi is None or n["node_idx"] <= hi)
-        ]
-    if turn is not None:
-        selected, inside = [], False
-        for n in nodes:
-            if _role(n) == "assistant":
-                inside = transcript.turn_of.get(n["node_idx"]) == turn
-            if inside:
-                selected.append(n)
-        nodes = selected
-    if roles:
-        wanted = set(roles)
-        nodes = [n for n in nodes if _role(n) in wanted]
-    return nodes
+    """The nodes inside an inclusive index range, or all of them."""
+    if node_range is None:
+        return transcript.nodes
+    lo, hi = node_range
+    return [
+        n
+        for n in transcript.nodes
+        if (lo is None or n["node_idx"] >= lo) and (hi is None or n["node_idx"] <= hi)
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -317,7 +301,19 @@ def summary_view(summary: TraceSummary) -> List[RenderableType]:
 
     tools = extra.get("tool_definitions")
     if isinstance(tools, list) and tools:
-        row("tools", (f"{len(tools)} defined", ""), ("  (--tools to list)", "dim"))
+        names = [_tool_name(t) for t in tools]
+        listed: List[str] = []
+        for name in names:
+            if listed and len(", ".join(listed + [name])) > TOOL_NAMES_CHARS:
+                break
+            listed.append(name)
+        rest = len(names) - len(listed)
+        row(
+            "tools",
+            (f"{len(names)}  ", ""),
+            (", ".join(listed), ""),
+            (f"  +{rest} more" if rest else "", "dim"),
+        )
     if context:
         row("context", (", ".join(f"{k}={v}" for k, v in context.items()), ""))
 
@@ -340,21 +336,11 @@ def summary_view(summary: TraceSummary) -> List[RenderableType]:
     return out
 
 
-def tools_view(summary: TraceSummary) -> Table:
-    """Tool names with the first line of each description."""
-    tools = (summary.model_extra or {}).get("tool_definitions")
-    table = Table(title=Text(f"Tools for {summary.trace_id}"), title_justify="left")
-    table.add_column("Tool", style="yellow", no_wrap=True)
-    table.add_column("Description")
-    for tool in tools if isinstance(tools, list) else []:
-        if not isinstance(tool, dict):
-            continue
-        function = tool.get("function") if isinstance(tool.get("function"), dict) else {}
-        name = tool.get("name") or function.get("name") or "?"
-        description = tool.get("description") or function.get("description") or ""
-        first = next((line for line in str(description).splitlines() if line.strip()), "")
-        table.add_row(Text(str(name)), Text(_clip(first.strip(), 160)))
-    return table
+def _tool_name(tool: Any) -> str:
+    if not isinstance(tool, dict):
+        return "?"
+    function = tool.get("function") if isinstance(tool.get("function"), dict) else {}
+    return str(tool.get("name") or function.get("name") or "?")
 
 
 # ---------------------------------------------------------------------------
@@ -396,7 +382,6 @@ def transcript_lines(
     nodes: List[Dict[str, Any]],
     *,
     full: bool = False,
-    show_system: bool = False,
     plain: bool = False,
 ) -> List[RenderableType]:
     """The conversation, one block per node."""
@@ -416,10 +401,10 @@ def transcript_lines(
 
         if role == "system":
             body = message_text(message.get("content"))
-            if not show_system:
+            if not full:
                 out.append(
                     Text(
-                        f"{where}  system prompt · {len(body):,} chars · hidden (--system to show)",
+                        f"{where}  system prompt · {len(body):,} chars · hidden (--full to show)",
                         "dim",
                     )
                 )
@@ -479,9 +464,6 @@ def _assistant_header(
         span = _span(call)
         if span is not None:
             meta.append(f"{span:.1f}s")
-        usage = call.get("usage") or {}
-        if isinstance(usage.get("completion_tokens"), int):
-            meta.append(f"{usage['completion_tokens']:,} tok out")
         if call.get("finish_reason"):
             meta.append(str(call["finish_reason"]))
     if meta:
@@ -525,10 +507,9 @@ def tools_only_table(
             else:
                 body = message_text((result.get("message") or {}).get("content"))
                 lines = len(body.splitlines())
-                outcome = (
-                    Text("error", style="red")
-                    if _looks_like_error(body)
-                    else Text(f"{lines:,} line{'s' if lines != 1 else ''}", style="green")
+                outcome = Text(
+                    f"{lines:,} line{'s' if lines != 1 else ''}",
+                    style="red" if _looks_like_error(body) else "green",
                 )
             turn = str(transcript.turn_of.get(node["node_idx"], ""))
             rows.append((turn, str(node["node_idx"]), Text(name), Text(summary), outcome))
@@ -548,59 +529,4 @@ def tools_only_table(
     table.add_column("result", no_wrap=True)
     for row in rows:
         table.add_row(*row)
-    return table
-
-
-def calls_table(transcript: Transcript) -> Table:
-    """One row per model call: timing, a latency bar, finish reason, and usage when known."""
-    calls = transcript.calls
-    has_usage = any(isinstance(c.get("usage"), dict) for c in calls)
-    models = {c.get("model") for c in calls if c.get("model")}
-    starts = [c["time_start"] for c in calls if isinstance(c.get("time_start"), (int, float))]
-    origin = min(starts) if starts else None
-    spans = [s for s in (_span(c) for c in calls) if s is not None]
-    longest = max(spans) if spans else 0
-
-    table = Table(box=None, padding=(0, 1), header_style="dim")
-    table.add_column("turn", justify="right", no_wrap=True)
-    table.add_column("node", justify="right", style="dim", no_wrap=True)
-    table.add_column("start", justify="right", no_wrap=True)
-    table.add_column("time", justify="right", no_wrap=True)
-    table.add_column("", no_wrap=True)
-    if len(models) > 1:
-        table.add_column("model", no_wrap=True)
-    if has_usage:
-        for label in ("in", "cached", "out", "think"):
-            table.add_column(label, justify="right", no_wrap=True)
-    table.add_column("finish", no_wrap=True)
-
-    for call in calls:
-        span = _span(call)
-        start = call.get("time_start")
-        bar = "█" * max(1, round(span / longest * 24)) if span and longest else ""
-        node_idx = call.get("node_idx")
-        cells: List[Any] = [
-            str(transcript.turn_of.get(node_idx, "")) if isinstance(node_idx, int) else "",
-            "" if node_idx is None else str(node_idx),
-            f"+{start - origin:.0f}s"
-            if origin is not None and isinstance(start, (int, float))
-            else "",
-            "" if span is None else f"{span:.1f}s",
-            Text(bar, style="magenta"),
-        ]
-        if len(models) > 1:
-            cells.append(Text(str(call.get("model") or "")))
-        if has_usage:
-            usage = call.get("usage") or {}
-            for key in (
-                "prompt_tokens",
-                "cached_input_tokens",
-                "completion_tokens",
-                "reasoning_tokens",
-            ):
-                value = usage.get(key)
-                cells.append(f"{value:,}" if isinstance(value, int) else "")
-        finish = str(call.get("finish_reason") or "")
-        cells.append(Text(finish, style="green" if finish == "stop" else "yellow"))
-        table.add_row(*cells)
     return table

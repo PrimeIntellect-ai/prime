@@ -244,7 +244,7 @@ def test_get_shows_fixed_fields_without_dumping_tool_schemas(client):
         "84,213",
         "407.5 KiB",
         "2 model turns · 2 tool calls · 1 user messages · 5 entries",
-        "2 defined",
+        "2  Bash, Read",
         "source=hosted_eval",
         "smell_pass",
         "prime traces transcript 8d3f1a2b",
@@ -263,22 +263,6 @@ def test_get_json_still_returns_every_field(client):
     payload = json.loads(result.output)
     assert payload["tool_definitions"][0]["name"] == "Bash"
     assert payload["task_hash"] == "h" * 64
-
-
-def test_get_tools_lists_names_and_first_description_line(client):
-    result = runner.invoke(main_app, ["traces", "get", "8d3f1a2b", "--tools"])
-
-    assert result.exit_code == 0, result.output
-    assert "Bash" in result.output and "Read" in result.output
-    assert "Executes a bash command." in result.output
-    assert "Long usage notes" not in result.output
-
-
-def test_get_tools_cannot_combine_with_raw(client):
-    result = runner.invoke(main_app, ["traces", "get", "8d3f1a2b", "--tools", "--raw"])
-
-    assert result.exit_code == 1
-    assert ("raw", "8d3f1a2b") not in client.requests
 
 
 def test_get_summary_without_extra_fields(client):
@@ -322,8 +306,8 @@ def test_transcript_reads_every_index_page(client):
     assert "Read from the full document" not in out
 
 
-def test_transcript_full_and_system(client):
-    result = runner.invoke(main_app, ["traces", "transcript", "8d3f1a2b", "--full", "--system"])
+def test_transcript_full_includes_system_prompt(client):
+    result = runner.invoke(main_app, ["traces", "transcript", "8d3f1a2b", "--full"])
 
     assert result.exit_code == 0, result.output
     assert "You are a careful agent." in result.output
@@ -334,13 +318,12 @@ def test_transcript_full_and_system(client):
 def test_transcript_falls_back_to_document_when_not_indexed(monkeypatch, client):
     client.not_indexed = True
 
-    result = runner.invoke(main_app, ["traces", "transcript", "8d3f1a2b", "--calls"])
+    result = runner.invoke(main_app, ["traces", "transcript", "8d3f1a2b"])
 
     assert result.exit_code == 0, result.output
     assert ("raw", "8d3f1a2b") in client.requests
     assert "Read from the full document: the trace is still being indexed." in result.output
-    # Document calls carry usage, so the token columns appear.
-    assert "cached" in result.output and "16,384" in result.output and "2,002" in result.output
+    assert "● turn 3" in result.output and "3.5s" in result.output
 
 
 def test_transcript_falls_back_to_document_when_index_is_capped(client):
@@ -353,16 +336,9 @@ def test_transcript_falls_back_to_document_when_index_is_capped(client):
     assert payload["source"] == "document"
     assert len(payload["nodes"]) == len(MESSAGES)
     assert payload["nodes"][3]["parent_idx"] == 2
-    assert payload["calls"][0]["usage"]["completion_tokens"] == 100
+    # Both sources produce the same call shape, so JSON consumers see one schema.
+    assert set(payload["calls"][0]) == set(INDEX_CALLS[0])
     assert not any(kind == "calls" for kind, _ in client.requests)
-
-
-def test_transcript_calls_from_index_have_no_token_columns(client):
-    result = runner.invoke(main_app, ["traces", "transcript", "8d3f1a2b", "--calls"])
-
-    assert result.exit_code == 0, result.output
-    assert "7.0s" in result.output and "stop" in result.output
-    assert "cached" not in result.output
 
 
 def test_transcript_tools_only(client):
@@ -370,7 +346,9 @@ def test_transcript_tools_only(client):
 
     assert result.exit_code == 0, result.output
     assert "ls -la" in result.output and "10 lines" in result.output
-    assert "error" in result.output
+    assert "/workspace/a.sv" in result.output and "1 line" in result.output
+    # A result that looks like an error is only colored, never labelled.
+    assert " error" not in result.output
     assert "Start by listing files." not in result.output
 
 
@@ -379,8 +357,7 @@ def test_transcript_tools_only(client):
     [
         (["--node", "3"], ["line 1", "line 10"], ["List the workspace.", "turn 1", "more lines"]),
         (["--node", "4:"], ["turn 2", "turn 3"], ["turn 1 "]),
-        (["--turn", "2"], ["turn 2", "Error: file not found"], ["turn 1", "turn 3", "line 1"]),
-        (["--role", "user"], ["List the workspace."], ["turn 1"]),
+        (["--node", "0"], ["You are a careful agent."], ["List the workspace."]),
     ],
 )
 def test_transcript_selection(client, args, present, absent):
@@ -394,15 +371,15 @@ def test_transcript_selection(client, args, present, absent):
         assert text not in body, text
 
 
-def test_transcript_json_respects_filters(client):
+def test_transcript_json_respects_node_range(client):
     result = runner.invoke(
-        main_app, ["traces", "transcript", "8d3f1a2b", "--role", "assistant", "-o", "json"]
+        main_app, ["traces", "transcript", "8d3f1a2b", "--node", "4:", "-o", "json"]
     )
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert payload["source"] == "index"
-    assert [n["node_idx"] for n in payload["nodes"]] == [2, 4, 6]
+    assert [n["node_idx"] for n in payload["nodes"]] == [4, 5, 6]
     assert len(payload["calls"]) == 3
 
 
@@ -439,9 +416,6 @@ def test_transcript_plain_mode_has_no_panels(client):
 @pytest.mark.parametrize(
     "args",
     [
-        ["--tools-only", "--calls"],
-        ["--node", "1", "--turn", "1"],
-        ["--turn", "0"],
         ["--node", "x"],
         ["--node", "9:3"],
     ],
@@ -539,3 +513,21 @@ def test_traces_command_module_imports_only_names_from_prime_traces_0_0_5():
             for alias in node.names
         }
         assert not imported & added_in_0_0_6, module.__name__
+
+
+def test_transcript_empty_node_range(client):
+    result = runner.invoke(main_app, ["traces", "transcript", "8d3f1a2b", "--node", "50:"])
+
+    assert result.exit_code == 0, result.output
+    assert "No nodes in that range." in result.output
+
+
+def test_get_lists_tool_names_and_counts_the_rest(client):
+    many = [{**TOOLS[0], "name": f"tool_number_{i:02d}"} for i in range(12)]
+    client.get = lambda trace_id: _summary(tool_definitions=many)
+
+    result = runner.invoke(main_app, ["traces", "get", "8d3f1a2b"])
+
+    assert result.exit_code == 0, result.output
+    assert "12  tool_number_00, tool_number_01" in result.output
+    assert "more" in result.output and "tool_number_11" not in result.output

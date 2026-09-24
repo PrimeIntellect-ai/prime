@@ -34,12 +34,10 @@ from ..utils import (
 from ..utils.plain import is_plain_mode
 from .traces_transcript import (
     Transcript,
-    calls_table,
     parse_node_range,
     select_nodes,
     summary_view,
     tools_only_table,
-    tools_view,
     transcript_from_document,
     transcript_header,
     transcript_lines,
@@ -78,8 +76,8 @@ GET_TRACE_JSON_HELP = json_output_help(
 TRANSCRIPT_JSON_HELP = json_output_help(
     ".trace_id = string; .source = index|document (document when the index cannot serve it)",
     ".nodes[] = {node_idx, parent_idx, timestamp, sampled, message{role, content, ...}}"
-    " after --node/--turn/--role",
-    ".calls[] = {call_idx, node_idx, time_start, time_end, model, finish_reason, usage?}",
+    " (only --node's range)",
+    ".calls[] = {call_idx, node_idx, time_start, time_end, model, endpoint, finish_reason}",
 )
 
 
@@ -465,16 +463,12 @@ def get_trace(
     dest: Optional[Path] = typer.Option(
         None, "--dest", help="With --raw: stream the document to this file"
     ),
-    tools: bool = typer.Option(False, "--tools", help="List the trace's tool definitions"),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
     """Get one trace summary, or the raw trace document with --raw."""
     validate_output_format(output, error_console)
     if dest is not None and not raw:
         error_console.print("[red]--dest requires --raw[/red]")
-        raise typer.Exit(1)
-    if tools and raw:
-        error_console.print("[red]--tools cannot be combined with --raw[/red]")
         raise typer.Exit(1)
 
     try:
@@ -517,9 +511,6 @@ def get_trace(
         output_data_as_json(summary.model_dump(mode="json"), console)
         return
 
-    if tools:
-        console.print(tools_view(summary))
-        return
     for renderable in summary_view(summary):
         console.print(renderable)
 
@@ -578,24 +569,16 @@ def _document_transcript(client: TracesClient, trace_id: str) -> Transcript:
 def transcript_command(
     trace_id: str = typer.Argument(..., help="Trace ID"),
     full: bool = typer.Option(
-        False, "--full", help="Show every message in full, without truncation"
+        False, "--full", help="Show every message in full, including the system prompt"
     ),
     node: Optional[str] = typer.Option(
-        None, "--node", help="Node index or inclusive range: 12, 30:, :9 or 5:9"
+        None,
+        "--node",
+        help="Node index or inclusive range: 12, 30:, :9 or 5:9. A single node is shown in full",
     ),
-    turn: Optional[int] = typer.Option(
-        None, "--turn", help="One model turn (1-based) and the messages that follow it"
-    ),
-    role: List[str] = typer.Option(
-        [],
-        "--role",
-        help="Only messages with this role (repeatable): system, user, assistant, tool",
-    ),
-    system: bool = typer.Option(False, "--system", help="Show the system prompt"),
     tools_only: bool = typer.Option(
         False, "--tools-only", help="One row per tool call with the size of its result"
     ),
-    calls: bool = typer.Option(False, "--calls", help="One row per model call: latency and tokens"),
     no_pager: bool = typer.Option(
         False, "--no-pager", help="Print directly instead of opening a pager in a terminal"
     ),
@@ -603,15 +586,6 @@ def transcript_command(
 ) -> None:
     """Show a trace's conversation: each model turn, its tool calls, and their results."""
     validate_output_format(output, error_console)
-    if tools_only and calls:
-        error_console.print("[red]Error:[/red] --tools-only cannot be combined with --calls")
-        raise typer.Exit(1)
-    if node is not None and turn is not None:
-        error_console.print("[red]Error:[/red] --node cannot be combined with --turn")
-        raise typer.Exit(1)
-    if turn is not None and turn < 1:
-        error_console.print("[red]Error:[/red] --turn must be at least 1")
-        raise typer.Exit(1)
     try:
         node_range = parse_node_range(node) if node is not None else None
     except ValueError as e:
@@ -647,7 +621,7 @@ def transcript_command(
         error_console.print_exception()
         raise typer.Exit(1)
 
-    nodes = select_nodes(transcript, node_range=node_range, turn=turn, roles=role or None)
+    nodes = select_nodes(transcript, node_range)
 
     if output == "json":
         output_data_as_json(
@@ -662,14 +636,12 @@ def transcript_command(
         return
 
     plain = is_plain_mode()
-    if calls:
-        body = [calls_table(transcript)]
+    if not nodes:
+        body = [Text("No nodes in that range.", style="yellow")]
     elif tools_only:
         body = [tools_only_table(transcript, nodes, width=console.width)]
     else:
-        body = transcript_lines(transcript, nodes, full=full, show_system=system, plain=plain)
-    if not nodes and not calls:
-        body = [Text("No messages match these filters.", style="yellow")]
+        body = transcript_lines(transcript, nodes, full=full, plain=plain)
 
     renderables = [
         transcript_header(summary, transcript) if not plain else Text(f"trace {trace_id}")

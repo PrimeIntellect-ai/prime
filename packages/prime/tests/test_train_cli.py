@@ -250,3 +250,60 @@ def test_train_stop_survives_any_poll_api_error(monkeypatch) -> None:
     assert result.exit_code == 0, result.output
     assert "did not reach a terminal state" in result.output
     assert "Error:" not in result.output
+
+
+def test_train_dashboard_prints_url_and_exits_zero(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def mock_request(self, method, endpoint, params=None, json=None, timeout=None):
+        captured["method"] = method
+        captured["endpoint"] = endpoint
+        return {"url": "https://platform.example.com/rft/dashboard/run-1"}
+
+    monkeypatch.setattr("prime_cli.core.client.APIClient.request", mock_request)
+
+    result = runner.invoke(
+        app,
+        ["train", "dashboard", "run-1"],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "https://platform.example.com/rft/dashboard/run-1" in result.stdout
+    assert captured["method"] == "GET"
+    assert captured["endpoint"] == "/rft/runs/run-1/dashboard_url"
+
+
+def test_train_dashboard_exits_nonzero_without_url(monkeypatch) -> None:
+    def mock_request(self, method, endpoint, params=None, json=None, timeout=None):
+        return {"url": None}
+
+    monkeypatch.setattr("prime_cli.core.client.APIClient.request", mock_request)
+
+    result = runner.invoke(
+        app,
+        ["train", "dashboard", "run-1"],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key"},
+    )
+
+    assert result.exit_code == 1
+    assert "No dashboard available for run run-1" in result.output
+
+
+def test_train_dashboard_exits_nonzero_on_api_error(monkeypatch) -> None:
+    from prime_cli.core import APIError
+
+    def mock_request(self, method, endpoint, params=None, json=None, timeout=None):
+        raise APIError("404: run not found")
+
+    monkeypatch.setattr("prime_cli.core.client.APIClient.request", mock_request)
+
+    result = runner.invoke(
+        app,
+        ["train", "dashboard", "run-1"],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key"},
+    )
+
+    assert result.exit_code == 1
+    assert "Error:" in result.output
+    assert "404: run not found" in result.output

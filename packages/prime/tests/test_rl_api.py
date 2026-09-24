@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
 from prime_cli.api.rl import RLClient, RLRun
+from prime_cli.core import APIError
 
 
 class FakeAPIClient:
@@ -186,3 +188,32 @@ def test_create_run_omits_default_rl_loss() -> None:
     assert api_client.posts[0][0] == "/rft/runs"
     assert "loss" not in api_client.posts[0][1]
     assert "teacher" not in api_client.posts[0][1]
+
+
+def test_get_dashboard_url_returns_platform_proxied_url() -> None:
+    class DashboardAPIClient:
+        def __init__(self) -> None:
+            self.requests: list[tuple[str, dict[str, Any] | None]] = []
+
+        def get(self, endpoint: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+            self.requests.append((endpoint, params))
+            return {"url": "https://platform.example.com/rft/dashboard/run-1"}
+
+    api_client = DashboardAPIClient()
+    client = RLClient(api_client)  # type: ignore[arg-type]
+
+    url = client.get_dashboard_url("run-1")
+
+    assert api_client.requests == [("/rft/runs/run-1/dashboard_url", None)]
+    assert url == "https://platform.example.com/rft/dashboard/run-1"
+
+
+def test_get_dashboard_url_wraps_transport_errors_as_api_error() -> None:
+    class FailingAPIClient:
+        def get(self, endpoint: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+            raise RuntimeError("boom")
+
+    client = RLClient(FailingAPIClient())  # type: ignore[arg-type]
+
+    with pytest.raises(APIError, match="dashboard URL"):
+        client.get_dashboard_url("run-1")

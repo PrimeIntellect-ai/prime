@@ -2,6 +2,7 @@
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,11 @@ import pytest
 # Test with a known private environment
 ENV_OWNER = "prime-cli-test"
 ENV_NAME = "private-reverse-text"
+
+
+# The prime CLI from the test environment; installs go into a throwaway venv so the
+# environment's dependencies never change the packages the rest of the suite runs on.
+PRIME_BIN = str(Path(sys.executable).parent / "prime")
 
 
 @pytest.fixture
@@ -19,17 +25,30 @@ def temp_home(tmp_path: Path):
 
     yield tmp_path
 
-    # Cleanup: uninstall after tests
-    subprocess.run(
-        ["uv", "pip", "uninstall", ENV_NAME.replace("-", "_"), "-y"],
-        capture_output=True,
-    )
-
     # Restore HOME to original state
     if original_home is None:
         del os.environ["HOME"]
     else:
         os.environ["HOME"] = original_home
+
+
+@pytest.fixture
+def target_venv(tmp_path: Path) -> Path:
+    """An empty virtualenv that `prime env install` installs into."""
+    venv = tmp_path / "target-venv"
+    subprocess.run(["uv", "venv", "--quiet", str(venv)], check=True)
+    return venv
+
+
+def _cli_env(home: Path, venv: Path) -> dict[str, str]:
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "PRIME_API_KEY": os.environ.get("PRIME_API_KEY", ""),
+        "VIRTUAL_ENV": str(venv),
+    }
+    env.pop("UV_PROJECT_ENVIRONMENT", None)
+    return env
 
 
 class TestPrivateEnvInstall:
@@ -39,19 +58,15 @@ class TestPrivateEnvInstall:
         not os.environ.get("PRIME_API_KEY"),
         reason="PRIME_API_KEY not set - required for private env access",
     )
-    def test_install_private_env_creates_cache(self, temp_home: Path):
+    def test_install_private_env_creates_cache(self, temp_home: Path, target_venv: Path):
         """Test that installing a private env creates the correct cache structure."""
         # Install the private environment
         result = subprocess.run(
-            ["uv", "run", "prime", "env", "install", f"{ENV_OWNER}/{ENV_NAME}"],
+            [PRIME_BIN, "env", "install", f"{ENV_OWNER}/{ENV_NAME}"],
             capture_output=True,
             text=True,
             timeout=300,
-            env={
-                **os.environ,
-                "HOME": str(temp_home),
-                "PRIME_API_KEY": os.environ.get("PRIME_API_KEY", ""),
-            },
+            env=_cli_env(temp_home, target_venv),
         )
 
         print(f"stdout: {result.stdout}")
@@ -92,19 +107,15 @@ class TestPrivateEnvInstall:
         not os.environ.get("PRIME_API_KEY"),
         reason="PRIME_API_KEY not set - required for private env access",
     )
-    def test_installed_private_env_exposes_loader(self, temp_home: Path):
+    def test_installed_private_env_exposes_loader(self, temp_home: Path, target_venv: Path):
         """Test that an installed private env exposes a verifiers loader."""
         # First install the environment
         install_result = subprocess.run(
-            ["uv", "run", "prime", "env", "install", f"{ENV_OWNER}/{ENV_NAME}"],
+            [PRIME_BIN, "env", "install", f"{ENV_OWNER}/{ENV_NAME}"],
             capture_output=True,
             text=True,
             timeout=300,
-            env={
-                **os.environ,
-                "HOME": str(temp_home),
-                "PRIME_API_KEY": os.environ.get("PRIME_API_KEY", ""),
-            },
+            env=_cli_env(temp_home, target_venv),
         )
 
         assert install_result.returncode == 0, (
@@ -133,15 +144,11 @@ except Exception as e:
 """
 
         load_result = subprocess.run(
-            ["uv", "run", "python", "-c", load_script],
+            [str(target_venv / "bin" / "python"), "-c", load_script],
             capture_output=True,
             text=True,
             timeout=60,
-            env={
-                **os.environ,
-                "HOME": str(temp_home),
-                "PRIME_API_KEY": os.environ.get("PRIME_API_KEY", ""),
-            },
+            env=_cli_env(temp_home, target_venv),
         )
 
         print(f"Load stdout: {load_result.stdout}")
@@ -156,19 +163,15 @@ except Exception as e:
         not os.environ.get("PRIME_API_KEY"),
         reason="PRIME_API_KEY not set - required for private env access",
     )
-    def test_cached_wheel_is_reused(self, temp_home: Path):
+    def test_cached_wheel_is_reused(self, temp_home: Path, target_venv: Path):
         """Test that subsequent installs reuse the cached wheel."""
         # First install
         result1 = subprocess.run(
-            ["uv", "run", "prime", "env", "install", f"{ENV_OWNER}/{ENV_NAME}"],
+            [PRIME_BIN, "env", "install", f"{ENV_OWNER}/{ENV_NAME}"],
             capture_output=True,
             text=True,
             timeout=300,
-            env={
-                **os.environ,
-                "HOME": str(temp_home),
-                "PRIME_API_KEY": os.environ.get("PRIME_API_KEY", ""),
-            },
+            env=_cli_env(temp_home, target_venv),
         )
         assert result1.returncode == 0, f"First install failed: {result1.stderr}"
 
@@ -182,15 +185,11 @@ except Exception as e:
 
         # Second install (should reuse cache)
         result2 = subprocess.run(
-            ["uv", "run", "prime", "env", "install", f"{ENV_OWNER}/{ENV_NAME}"],
+            [PRIME_BIN, "env", "install", f"{ENV_OWNER}/{ENV_NAME}"],
             capture_output=True,
             text=True,
             timeout=300,
-            env={
-                **os.environ,
-                "HOME": str(temp_home),
-                "PRIME_API_KEY": os.environ.get("PRIME_API_KEY", ""),
-            },
+            env=_cli_env(temp_home, target_venv),
         )
         assert result2.returncode == 0, f"Second install failed: {result2.stderr}"
 

@@ -2,6 +2,7 @@ import argparse
 import inspect
 import json
 import re
+import sys
 import time
 from functools import wraps
 from pathlib import Path
@@ -25,6 +26,22 @@ from ..utils import (
 )
 from ..utils.display import get_eval_viewer_url
 from ..utils.env_metadata import find_environment_metadata
+from ..utils.eval_config import (
+    DEFAULT_ENDPOINTS_PATH,
+    DEFAULT_ENV_DIR_PATH,
+    DEFAULT_MODEL,
+    build_extra_headers,
+    build_hosted_eval_parser,
+    load_endpoint_models,
+    load_toml_config,
+    merge_sampling_args,
+    resolve_endpoints_file,
+)
+from ..utils.eval_environment import (
+    _is_config_target,
+    _resolve_environment_reference,
+    _split_owner_and_name,
+)
 from ..utils.eval_push import load_results_jsonl
 from ..utils.hosted_eval import (
     EvalStatus,
@@ -32,23 +49,9 @@ from ..utils.hosted_eval import (
     clean_logs,
     get_new_log_lines,
 )
-from ..verifiers_bridge import (
-    DEFAULT_ENV_DIR_PATH,
-    DEFAULT_MODEL,
-    _is_config_target,
-    _resolve_environment_reference,
-    _split_owner_and_name,
-    is_help_request,
-    print_eval_run_help,
-    run_eval_passthrough,
-    run_eval_view,
-)
 
 console = get_console()
 
-# verifiers.* must be imported inside functions (not at module top): top-level
-# imports drag in huggingface_hub/datasets/pyarrow/pandas/numpy and triple
-# `prime --version` startup time. Same convention as the rest of prime_cli.
 
 LIST_EVALS_JSON_HELP = json_output_help(
     ".evaluations[] = {evaluation_id|id, environment_names[], model_name, status, metadata}",
@@ -84,9 +87,54 @@ HOSTED_LOGS_RATE_LIMIT_WAIT_SECONDS = 30
 HOSTED_LOGS_RETRY_WAIT_SECONDS = 10
 HOSTED_LOGS_STATUS_UPDATE_EVERY_POLLS = 6
 EVAL_TABLE_MAX_TEXT_WIDTH = 30
-EVAL_RUN_EXAMPLE_COMMAND = "prime eval run gsm8k -n 10"
+EVAL_RUN_EXAMPLE_COMMAND = "prime eval run primeintellect/gsm8k --hosted -n 10"
 EVAL_HOSTED_LABEL = "HOSTED"
 EVAL_LOCAL_LABEL = "LOCAL"
+LOCAL_EVAL_REMOVED_MESSAGE = (
+    "[red]Error:[/red] prime no longer runs evaluations locally. "
+    "Add `--hosted` to run this one on the platform, or run it locally with prime-rl's "
+    "`uv run eval` (or `vf-eval` from verifiers)."
+)
+EVAL_RUN_HELP = """\
+Usage: prime eval run ENVIRONMENT --hosted [OPTIONS]
+
+Run a hosted evaluation on the platform. ENVIRONMENT is an Environments Hub slug
+(owner/name[@version]), a local environment name, or an eval TOML config.
+
+Eval options:
+  -m, --model TEXT                Model to evaluate (default: openai/gpt-4.1-mini)
+  -n, --num-examples INTEGER      Examples to evaluate (-1 for all)
+  -r, --rollouts-per-example INT  Rollouts per example
+  -a, --env-args JSON             Environment arguments
+  -x, --extra-env-kwargs JSON     Extra environment constructor arguments
+  -S, --sampling-args JSON        Sampling arguments
+  -t, --max-tokens INTEGER        Max tokens to generate
+  -T, --temperature FLOAT         Sampling temperature
+  -c, --max-concurrent INTEGER    Max concurrent requests
+      --max-retries INTEGER       Max retries for transient errors
+  -C, --state-columns TEXT        Comma-separated state columns to save
+  -i, --independent-scoring       Score each rollout individually
+  -v, --verbose                   Verbose runner output
+  -b, --api-base-url TEXT         Inference base URL
+  -k, --api-key-var TEXT          Environment variable holding the API key
+      --api-client-type TEXT      Inference client type
+      --header 'Name: Value'      Extra inference header (repeatable)
+      --env-dir-path PATH         Local environments directory (default: ./environments)
+
+Hosted options:
+  --hosted                        Run on the platform (required)
+  --env-path PATH                 Environment directory for upstream resolution
+  --follow                        Stream logs until the evaluation finishes
+  --poll-interval FLOAT           Log polling interval in seconds
+  --timeout-minutes INTEGER       Evaluation timeout in minutes
+  --allow-sandbox-access          Allow sandbox read/write access
+  --allow-instances-access        Allow instance creation and management
+  --allow-tunnel-access           Allow tunnel creation and management
+  --custom-secrets JSON           Custom secrets for the runner
+  --eval-name TEXT                Name for the evaluation
+
+Related: prime eval logs EVAL_ID [-f], prime eval stop EVAL_ID
+"""
 # Legacy verifiers config fields/flags are accepted through the parser only so
 # Prime can reject them with the hosted-specific unsupported-option message.
 HOSTED_EVAL_CONFIG_EXTRA_FIELDS = {
@@ -115,26 +163,6 @@ HOSTED_EVAL_CONFIG_FIELD_TYPES: dict[str, tuple[type[Any], str]] = {
     "api_base_url": (str, "a non-empty string"),
     "api_key_var": (str, "a non-empty string"),
     "eval_name": (str, "a non-empty string"),
-}
-HOSTED_SUPPORTED_VERIFIERS_FIELDS = {
-    "api_base_url",
-    "api_client_type",
-    "api_key_var",
-    "env_args",
-    "env_dir_path",
-    "extra_env_kwargs",
-    "header",
-    "independent_scoring",
-    "max_concurrent",
-    "verbose",
-    "max_retries",
-    "max_tokens",
-    "model",
-    "num_examples",
-    "rollouts_per_example",
-    "sampling_args",
-    "state_columns",
-    "temperature",
 }
 HOSTED_SUPPORTED_TOML_FIELDS = {
     "allow_instances_access",
@@ -176,6 +204,11 @@ class DefaultGroup(DefaultCommandGroup):
 
 
 subcommands_app = PlainTyper()
+
+
+def _write_eval_run_help() -> None:
+    sys.stdout.write(EVAL_RUN_HELP)
+    sys.stdout.flush()
 
 
 def handle_errors(func):
@@ -259,8 +292,6 @@ def _validate_json_object_field(merged: dict[str, Any], field_name: str) -> None
 
 
 def _coerce_hosted_headers(raw: dict[str, Any]) -> list[str] | None:
-    from verifiers.cli.commands.eval import build_extra_headers
-
     try:
         normalized = build_extra_headers(raw)
     except ValueError as exc:
@@ -272,51 +303,39 @@ def _coerce_hosted_headers(raw: dict[str, Any]) -> list[str] | None:
     return [f"{name}: {value}" for name, value in normalized.items()]
 
 
-def _parse_verifiers_eval_namespace(
+def _parse_hosted_eval_args(
     environment: str, passthrough_args: list[str], sampling_args: Optional[str]
-) -> tuple[argparse.Namespace, set[str], dict[str, str]]:
-    from verifiers.cli.commands.eval import build_parser
-
+) -> tuple[argparse.Namespace, set[str]]:
+    """Parse the eval flags a hosted evaluation accepts; return them and the ones given."""
     argv = [environment, *passthrough_args]
     if sampling_args is not None:
         argv.extend(["--sampling-args", sampling_args])
 
-    explicit_parser = build_parser()
-    option_names_by_dest = {}
+    explicit_parser = build_hosted_eval_parser()
     for action in explicit_parser._actions:
         if action.option_strings:
             action.default = argparse.SUPPRESS
-            option_names_by_dest[action.dest] = next(
-                (option for option in action.option_strings if option.startswith("--")),
-                action.option_strings[0],
-            )
 
     try:
-        parsed = build_parser().parse_args(argv)
-        explicit = explicit_parser.parse_args(argv)
+        parsed, unknown = build_hosted_eval_parser().parse_known_args(argv)
+        explicit, _ = explicit_parser.parse_known_args(argv)
     except SystemExit as exc:
         raise typer.Exit(exc.code) from exc
 
-    provided_dests = {dest for dest, value in vars(explicit).items() if dest != "env_id_or_config"}
-    return parsed, provided_dests, option_names_by_dest
+    unsupported_flags: list[str] = []
+    for arg in unknown:
+        flag = arg.split("=", 1)[0]
+        if flag.startswith("-") and flag not in unsupported_flags:
+            unsupported_flags.append(flag)
+    if unsupported_flags:
+        console.print(
+            "[red]Error:[/red] hosted eval CLI does not support: "
+            + ", ".join(f"`{flag}`" for flag in unsupported_flags)
+        )
+        raise typer.Exit(1)
 
-
-def _reject_unsupported_hosted_verifiers_args(
-    provided_dests: set[str], option_names_by_dest: dict[str, str]
-) -> None:
-    unsupported_flags = [
-        option_name
-        for dest, option_name in option_names_by_dest.items()
-        if dest in provided_dests and dest not in HOSTED_SUPPORTED_VERIFIERS_FIELDS
-    ]
-    if not unsupported_flags:
-        return
-
-    console.print(
-        "[red]Error:[/red] hosted eval CLI does not support: "
-        + ", ".join(f"`{flag}`" for flag in unsupported_flags)
-    )
-    raise typer.Exit(1)
+    provided_dests = {dest for dest in vars(explicit) if dest != "env_id_or_config"}
+    return parsed, provided_dests
 
 
 def _reject_legacy_unsupported_hosted_flags(passthrough_args: list[str]) -> None:
@@ -380,7 +399,7 @@ def _resolve_hosted_config_model(raw_config: dict[str, Any], config_path: Path) 
         console.print("[red]Error:[/red] `endpoint_id` must be a non-empty string")
         raise typer.Exit(1)
 
-    endpoints_path = raw_config.get("endpoints_path", "./configs/endpoints.toml")
+    endpoints_path = raw_config.get("endpoints_path", DEFAULT_ENDPOINTS_PATH)
     if type(endpoints_path) is not str or not endpoints_path:
         console.print("[red]Error:[/red] `endpoints_path` must be a non-empty string")
         raise typer.Exit(1)
@@ -388,15 +407,6 @@ def _resolve_hosted_config_model(raw_config: dict[str, Any], config_path: Path) 
     endpoints_path_obj = Path(endpoints_path)
     if "endpoints_path" in raw_config and not endpoints_path_obj.is_absolute():
         endpoints_path = str((config_path.parent / endpoints_path_obj).resolve())
-
-    try:
-        from verifiers.utils.eval_utils import load_endpoints, resolve_endpoints_file
-    except ImportError as exc:
-        console.print(
-            "[red]Error:[/red] verifiers is required to resolve `endpoint_id`. "
-            "Install the `verifiers` package or use `model` instead."
-        )
-        raise typer.Exit(1) from exc
 
     resolved_endpoints_file = resolve_endpoints_file(endpoints_path)
     if resolved_endpoints_file is None or resolved_endpoints_file.suffix != ".toml":
@@ -406,7 +416,11 @@ def _resolve_hosted_config_model(raw_config: dict[str, Any], config_path: Path) 
         )
         raise typer.Exit(1)
 
-    endpoints = load_endpoints(endpoints_path)
+    try:
+        endpoints = load_endpoint_models(endpoints_path)
+    except (OSError, ValueError) as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(1) from exc
     if raw_endpoint_id not in endpoints:
         console.print(
             f"[red]Error:[/red] endpoint_id '{raw_endpoint_id}' not found in {endpoints_path}"
@@ -414,7 +428,7 @@ def _resolve_hosted_config_model(raw_config: dict[str, Any], config_path: Path) 
         raise typer.Exit(1)
 
     endpoint_group = endpoints[raw_endpoint_id]
-    endpoint_models = {entry.model for entry in endpoint_group}
+    endpoint_models = set(endpoint_group)
     if len(endpoint_models) != 1:
         console.print(
             f"[red]Error:[/red] endpoint_id '{raw_endpoint_id}' resolves to multiple models: "
@@ -422,14 +436,12 @@ def _resolve_hosted_config_model(raw_config: dict[str, Any], config_path: Path) 
         )
         raise typer.Exit(1)
 
-    return endpoint_group[0].model
+    return endpoint_group[0]
 
 
 def _validate_single_hosted_eval_config(
     merged: dict[str, Any], config_path: Path
 ) -> dict[str, Any]:
-    from verifiers.cli.commands.eval import merge_sampling_args
-
     unsupported_fields = sorted(
         field_name for field_name in merged if field_name not in HOSTED_SUPPORTED_TOML_FIELDS
     )
@@ -487,8 +499,6 @@ def _validate_single_hosted_eval_config(
 
 
 def _load_hosted_eval_configs(config_path_str: str) -> list[dict[str, Any]]:
-    from verifiers.utils.eval_utils import load_toml_config
-
     config_path = Path(config_path_str)
     try:
         loaded_configs = load_toml_config(
@@ -1139,40 +1149,6 @@ def _push_single_eval(
     return eval_id
 
 
-@subcommands_app.command("view")
-def view_cmd(
-    limit: int = typer.Option(50, "--limit", "-n", help="Max evaluation rows to load"),
-    env_dir: Optional[str] = typer.Option(
-        None, "--env-dir", "-e", help="Path to environments directory"
-    ),
-    outputs_dir: Optional[str] = typer.Option(
-        None, "--outputs-dir", "-o", help="Path to outputs directory"
-    ),
-) -> None:
-    """Launch the interactive evaluation viewer."""
-    if limit < 1:
-        console.print("[red]Error:[/red] --limit must be at least 1")
-        raise typer.Exit(1)
-    run_eval_view(env_dir=env_dir, outputs_dir=outputs_dir, limit=limit)
-
-
-@subcommands_app.command("tui")
-def tui_cmd(
-    _limit: int = typer.Option(
-        50, "--limit", "-n", help="Deprecated; use `prime eval view --limit`."
-    ),
-    _env_dir: Optional[str] = typer.Option(
-        None, "--env-dir", "-e", help="Deprecated; use `prime eval view --env-dir`."
-    ),
-    _outputs_dir: Optional[str] = typer.Option(
-        None, "--outputs-dir", "-o", help="Deprecated; use `prime eval view --outputs-dir`."
-    ),
-) -> None:
-    """Deprecated alias for the evaluation viewer."""
-    console.print("[yellow]Deprecated:[/yellow] `prime eval tui` has moved. Use `prime eval view`.")
-    raise typer.Exit(1)
-
-
 @subcommands_app.command("push", epilog=PUSH_EVAL_JSON_HELP)
 @handle_errors
 def push_eval(
@@ -1384,7 +1360,7 @@ def stop_cmd(
 
 @app.command(
     "run",
-    help="Run an evaluation with API models (default provider = Prime Inference)",
+    help="Run a hosted evaluation on the platform",
     no_args_is_help=True,
     context_settings={
         "allow_extra_args": True,
@@ -1398,11 +1374,6 @@ def run_eval_cmd(
         None,
         help="Environment name/slug or TOML config path",
     ),
-    skip_upload: bool = typer.Option(
-        False,
-        "--skip-upload",
-        help="Skip uploading results to Prime Evals Hub (results are uploaded by default)",
-    ),
     env_path: Optional[str] = typer.Option(
         None,
         "--env-path",
@@ -1414,7 +1385,7 @@ def run_eval_cmd(
     hosted: bool = typer.Option(
         False,
         "--hosted",
-        help="Run the evaluation on the platform instead of locally",
+        help="Run the evaluation on the platform (required)",
     ),
     poll_interval: float = typer.Option(
         HOSTED_RUN_DEFAULT_POLL_INTERVAL_SECONDS,
@@ -1455,7 +1426,7 @@ def run_eval_cmd(
         None,
         "--sampling-args",
         help=(
-            "Sampling args as JSON for local or hosted evals. "
+            "Sampling args as JSON. "
             'Example: {"temperature": 0.7, "extra_body": {"provider": {"order": ["azure"]}}}'
         ),
     ),
@@ -1465,11 +1436,11 @@ def run_eval_cmd(
         help="Custom name for the hosted evaluation",
     ),
 ) -> None:
-    """Run an evaluation with local-first environment resolution."""
+    """Run a hosted evaluation on the platform."""
     passthrough_args = list(ctx.args)
 
-    if is_help_request(environment or "", passthrough_args):
-        print_eval_run_help()
+    if environment in ("-h", "--help") or any(arg in ("-h", "--help") for arg in passthrough_args):
+        _write_eval_run_help()
         raise typer.Exit(0)
 
     if environment is None:
@@ -1486,10 +1457,6 @@ def run_eval_cmd(
     poll_interval_was_provided = (
         ctx.get_parameter_source("poll_interval") == ParameterSource.COMMANDLINE
     )
-    local_passthrough_args = list(passthrough_args)
-    if sampling_args is not None:
-        local_passthrough_args.extend(["--sampling-args", sampling_args])
-
     if not hosted:
         hosted_only_args = {
             "--follow": follow,
@@ -1508,24 +1475,21 @@ def run_eval_cmd(
                 + ", ".join(used_hosted_only_args)
             )
             raise typer.Exit(1)
+        console.print(LOCAL_EVAL_REMOVED_MESSAGE)
+        raise typer.Exit(1)
 
     if hosted:
         _reject_legacy_unsupported_hosted_flags(passthrough_args)
-        parsed_verifiers_args, cli_overrides, option_names_by_dest = (
-            _parse_verifiers_eval_namespace(
-                environment,
-                passthrough_args,
-                sampling_args,
-            )
+        parsed_args, cli_overrides = _parse_hosted_eval_args(
+            environment,
+            passthrough_args,
+            sampling_args,
         )
-        _reject_unsupported_hosted_verifiers_args(cli_overrides, option_names_by_dest)
-        env_dir_path = (
-            parsed_verifiers_args.env_dir_path if "env_dir_path" in cli_overrides else None
-        )
+        env_dir_path = parsed_args.env_dir_path if "env_dir_path" in cli_overrides else None
 
         cli_headers = None
         if "header" in cli_overrides:
-            cli_headers = _coerce_hosted_headers({"header": parsed_verifiers_args.header})
+            cli_headers = _coerce_hosted_headers({"header": parsed_args.header})
 
         hosted_target_configs: list[dict[str, Any]] = []
         if _is_config_target(environment):
@@ -1573,12 +1537,12 @@ def run_eval_cmd(
                     )
                 )
                 num_examples = (
-                    parsed_verifiers_args.num_examples
+                    parsed_args.num_examples
                     if "num_examples" in cli_overrides
                     else default_num_examples
                 )
                 rollouts_per_example = (
-                    parsed_verifiers_args.rollouts_per_example
+                    parsed_args.rollouts_per_example
                     if "rollouts_per_example" in cli_overrides
                     else default_rollouts_per_example
                 )
@@ -1597,7 +1561,7 @@ def run_eval_cmd(
 
             explicit_sampling_args = "sampling_args" in cli_overrides
             base_sampling_args_raw = (
-                parsed_verifiers_args.sampling_args
+                parsed_args.sampling_args
                 if explicit_sampling_args
                 else target_config.get("sampling_args")
             )
@@ -1608,18 +1572,12 @@ def run_eval_cmd(
             else:
                 console.print("[red]Error:[/red] `sampling_args` must be a JSON object")
                 raise typer.Exit(1)
-            from verifiers.cli.commands.eval import merge_sampling_args
-
             effective_sampling_args = (
                 merge_sampling_args(
                     base_sampling_args,
-                    max_tokens=(
-                        parsed_verifiers_args.max_tokens if "max_tokens" in cli_overrides else None
-                    ),
+                    max_tokens=(parsed_args.max_tokens if "max_tokens" in cli_overrides else None),
                     temperature=(
-                        parsed_verifiers_args.temperature
-                        if "temperature" in cli_overrides
-                        else None
+                        parsed_args.temperature if "temperature" in cli_overrides else None
                     ),
                     prefer_existing_keys=explicit_sampling_args,
                 )
@@ -1631,14 +1589,12 @@ def run_eval_cmd(
                     "env_id": target_config["env_id"],
                     "env_dir_path": target_config.get("env_dir_path") or env_dir_path,
                     "model": (
-                        parsed_verifiers_args.model
-                        if "model" in cli_overrides
-                        else target_config["model"]
+                        parsed_args.model if "model" in cli_overrides else target_config["model"]
                     ),
                     "num_examples": num_examples,
                     "rollouts_per_example": rollouts_per_example,
                     "env_args": (
-                        parsed_verifiers_args.env_args
+                        parsed_args.env_args
                         if "env_args" in cli_overrides
                         else target_config.get("env_args")
                     ),
@@ -1665,27 +1621,27 @@ def run_eval_cmd(
                     "custom_secrets": parsed_custom_secrets,
                     "sampling_args": effective_sampling_args,
                     "max_concurrent": (
-                        parsed_verifiers_args.max_concurrent
+                        parsed_args.max_concurrent
                         if "max_concurrent" in cli_overrides
                         else target_config.get("max_concurrent")
                     ),
                     "max_retries": (
-                        parsed_verifiers_args.max_retries
+                        parsed_args.max_retries
                         if "max_retries" in cli_overrides
                         else target_config.get("max_retries")
                     ),
                     "state_columns": (
-                        parsed_verifiers_args.state_columns
+                        parsed_args.state_columns
                         if "state_columns" in cli_overrides
                         else target_config.get("state_columns")
                     ),
                     "independent_scoring": (
-                        parsed_verifiers_args.independent_scoring
+                        parsed_args.independent_scoring
                         if "independent_scoring" in cli_overrides
                         else target_config.get("independent_scoring", False)
                     ),
                     "verbose": (
-                        parsed_verifiers_args.verbose
+                        parsed_args.verbose
                         if "verbose" in cli_overrides
                         else target_config.get("verbose", False)
                     ),
@@ -1693,22 +1649,22 @@ def run_eval_cmd(
                         cli_headers if "header" in cli_overrides else target_config.get("headers")
                     ),
                     "extra_env_kwargs": (
-                        parsed_verifiers_args.extra_env_kwargs
+                        parsed_args.extra_env_kwargs
                         if "extra_env_kwargs" in cli_overrides
                         else target_config.get("extra_env_kwargs")
                     ),
                     "api_client_type": (
-                        parsed_verifiers_args.api_client_type
+                        parsed_args.api_client_type
                         if "api_client_type" in cli_overrides
                         else target_config.get("api_client_type")
                     ),
                     "api_base_url": (
-                        parsed_verifiers_args.api_base_url
+                        parsed_args.api_base_url
                         if "api_base_url" in cli_overrides
                         else target_config.get("api_base_url")
                     ),
                     "api_key_var": (
-                        parsed_verifiers_args.api_key_var
+                        parsed_args.api_key_var
                         if "api_key_var" in cli_overrides
                         else target_config.get("api_key_var")
                     ),
@@ -1839,10 +1795,3 @@ def run_eval_cmd(
         console.print(f"[cyan]Evaluation IDs:[/cyan] {', '.join(all_evaluation_ids)}")
         console.print("[dim]View logs:[/dim] prime eval logs <evaluation-id> -f")
         return
-
-    run_eval_passthrough(
-        environment=environment,
-        passthrough_args=local_passthrough_args,
-        skip_upload=skip_upload,
-        env_path=env_path,
-    )

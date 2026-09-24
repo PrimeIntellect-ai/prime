@@ -12,6 +12,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from prime_traces import TraceSummary
 from rich.console import Group, RenderableType
+from rich.padding import Padding
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
@@ -432,14 +433,18 @@ def transcript_lines(
             thinking = message.get("reasoning_content")
             if isinstance(thinking, str) and thinking.strip():
                 shown = thinking if full else _one_line(thinking)
-                out.append(
-                    Text.assemble(
-                        ("  thinking  ", "dim"), (_clip(shown, limit(THINKING_CHARS)), "dim italic")
-                    )
+                thought = Text.assemble(
+                    ("thinking  ", "dim"), (_clip(shown, limit(THINKING_CHARS)), "dim italic")
                 )
+                out.append(Padding(thought, (0, 0, 0, 2), expand=False))
             content = message_text(message.get("content"))
             if content.strip():
-                out.append(Text(_indent(_clip(content, limit(ASSISTANT_CHARS)), "  ")))
+                # Padding (not a prefix) so wrapped lines stay indented under the turn too.
+                out.append(
+                    Padding(
+                        Text(_clip(content, limit(ASSISTANT_CHARS))), (0, 0, 0, 2), expand=False
+                    )
+                )
             for call in _tool_calls(node):
                 name, summary = tool_call_parts(call)
                 out.append(

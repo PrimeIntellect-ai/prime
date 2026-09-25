@@ -1197,6 +1197,25 @@ def test_episodes_get_raw_to_dest_writes_the_file(fake_client, tmp_path):
     assert json.loads(result.output) == {"dest": str(dest), "bytes_written": 38}
 
 
+def test_episodes_get_raw_failed_write_keeps_the_existing_dest(fake_client, tmp_path, monkeypatch):
+    dest = tmp_path / "episode.json"
+    dest.write_bytes(b"previous")
+
+    def fail_replace(self, target):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(traces_cmd.Path, "replace", fail_replace)
+
+    result = runner.invoke(
+        main_app, ["traces", "episodes", "get", "ep_4c1d", "--raw", "--dest", str(dest)]
+    )
+
+    assert result.exit_code == 1
+    assert "No space left on device" in result.stderr
+    assert dest.read_bytes() == b"previous"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["episode.json"]
+
+
 def test_episodes_get_rejects_dest_without_raw(fake_client, tmp_path):
     dest = tmp_path / "episode.json"
 
@@ -1283,6 +1302,30 @@ def test_traces_list_episode_lists_member_traces_with_the_agent_column(fake_clie
     assert "Traces · episode ep_4c1d" in result.output
     assert "Agent" in result.output
     assert "solver" in result.output
+
+
+def test_traces_list_episode_keeps_the_task_column_when_tasks_differ(fake_client):
+    fake_client.list_episode_traces = lambda episode_id, **kwargs: TraceListPage(
+        items=[
+            _summary(trace_id="t1", task_id="task-a"),
+            _summary(trace_id="t2", task_id=None),
+        ],
+        next_cursor=None,
+    )
+
+    result = runner.invoke(main_app, ["traces", "list", "--episode", "ep_4c1d"])
+
+    assert result.exit_code == 0, result.output
+    assert "Task" in result.output
+    assert "task-a" in result.output
+
+
+def test_traces_list_episode_moves_a_shared_task_to_the_title(fake_client):
+    result = runner.invoke(main_app, ["traces", "list", "--episode", "ep_4c1d"])
+
+    assert result.exit_code == 0, result.output
+    assert "Traces · episode ep_4c1d · tb2-0187" in result.output
+    assert "Task" not in result.output
 
 
 def test_traces_list_episode_rejects_sort(fake_client):

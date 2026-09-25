@@ -27,7 +27,7 @@ def _error_text(error: EpisodeError) -> str:
     return ": ".join(part for part in (error.type, error.message) if part)
 
 
-def _shared(values: Iterable[Optional[str]]) -> Optional[str]:
+def shared_value(values: Iterable[Optional[str]]) -> Optional[str]:
     """The one value every row has, or None when the rows differ or lack it."""
     distinct = set(values)
     return distinct.pop() if len(distinct) == 1 else None
@@ -39,8 +39,8 @@ def episodes_table(page: EpisodeListPage, *, run_id: Optional[str]) -> Table:
     A run or environment that every row shares moves from its column into the
     title, so the table keeps its width for what differs between episodes.
     """
-    run = run_id or _shared(e.run_id for e in page.items)
-    environment = _shared(e.environment_id for e in page.items)
+    run = run_id or shared_value(e.run_id for e in page.items)
+    environment = shared_value(e.environment_id for e in page.items)
     title = " · ".join(part for part in ("Episodes", run and f"run {run}", environment) if part)
     table = Table(title=Text(title), title_justify="left")
     table.add_column("Episode ID", style="cyan", no_wrap=True)
@@ -85,7 +85,7 @@ def episode_view(detail: EpisodeDetail, members: TraceListPage) -> List[Renderab
     row("environment", (detail.environment_id or "-", ""))
     # Members of one episode normally share a task; show it only when every one
     # of them records the same task.
-    task = _shared(t.task_id for t in members.items)
+    task = shared_value(t.task_id for t in members.items)
     if task is not None and not members.next_cursor:
         row("task", (task, ""))
     # The episode's own error and its traces' errors are separate: an environment

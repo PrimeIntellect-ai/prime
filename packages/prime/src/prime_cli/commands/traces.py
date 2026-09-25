@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import tempfile
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple, TypeVar
 
@@ -33,7 +34,7 @@ from ..utils import (
     validate_output_format,
 )
 from ..utils.plain import is_plain_mode
-from .traces_episodes import TIME_FORMAT, episode_view, episodes_table
+from .traces_episodes import TIME_FORMAT, episode_view, episodes_table, shared_value
 from .traces_transcript import (
     Transcript,
     parse_node_range,
@@ -392,6 +393,20 @@ def _print_page_footer(
         )
 
 
+def _write_atomically(dest: Path, data: bytes) -> None:
+    """Replace ``dest`` only once ``data`` is fully written, like `get --raw --dest`."""
+    with tempfile.NamedTemporaryFile(
+        dir=dest.parent, prefix=".prime-traces-", suffix=".partial", delete=False
+    ) as f:
+        partial = Path(f.name)
+    try:
+        partial.write_bytes(data)
+        partial.replace(dest)
+    except BaseException:
+        partial.unlink(missing_ok=True)
+        raise
+
+
 def _episode_not_found(episode_id: str) -> None:
     """Explain a missing episode in terms of the account the lookup ran as.
 
@@ -527,26 +542,29 @@ def list_traces(
         output_data_as_json(result.model_dump(mode="json"), console)
         return
 
-    # An episode's traces share its run and task, so the agent that produced
-    # each one takes their place.
-    title = "Traces" if episode_id is None else f"Traces · episode {episode_id}"
+    # An episode's traces share its run, so the agent that produced each one
+    # takes its place; a task every row shares moves into the title.
+    task = shared_value(s.task_id for s in result.items) if episode_id is not None else None
+    title = " · ".join(
+        part for part in ("Traces", episode_id and f"episode {episode_id}", task) if part
+    )
     table = Table(title=Text(title), title_justify="left")
     table.add_column("Trace ID", style="cyan", no_wrap=True)
     if episode_id is None:
         table.add_column("Run", style="green")
-        table.add_column("Task")
     else:
         table.add_column("Agent", style="green")
+    if task is None:
+        table.add_column("Task")
     table.add_column("Reward", justify="right")
     table.add_column("Outcome")
     table.add_column("Created", no_wrap=True)
 
     for summary in result.items:
         reward = summary.score.reward
-        if episode_id is None:
-            source = [escape(summary.run_id or "-"), escape(summary.task_id or "-")]
-        else:
-            source = [escape(summary.agent_name or "-")]
+        source = [escape((summary.run_id if episode_id is None else summary.agent_name) or "-")]
+        if task is None:
+            source.append(escape(summary.task_id or "-"))
         table.add_row(
             escape(summary.trace_id),
             *source,
@@ -955,7 +973,7 @@ def get_episode(
             stdout.flush()
             return
         try:
-            dest.write_bytes(document)
+            _write_atomically(dest, document)
         except OSError as e:
             error_console.print(
                 f"[red]Error:[/red] could not write {escape(str(dest))}: {escape(str(e))}"

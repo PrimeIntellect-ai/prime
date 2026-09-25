@@ -454,3 +454,114 @@ def test_train_volume_size_needs_volume(tmp_path: Path) -> None:
     result = runner.invoke(app, ["train", str(cfg), "--volume-size", "1Ti", "-y"], env=TEST_ENV)
     assert result.exit_code == 1
     assert "--volume-size" in result.output and "needs" in result.output
+
+
+_FFT_BODY = (
+    '[model]\nname = "Qwen/Qwen3-0.6B"\n\n[deployment]\nnum_train_gpus = 1\nnum_infer_gpus = 1\n'
+)
+
+
+def _capture_fft_dispatch(monkeypatch) -> list[dict[str, Any]]:
+    captured: list[dict[str, Any]] = []
+
+    def fake_create_run(self, payload):
+        captured.append(payload)
+        from prime_cli.api.training import HostedTrainingRunResponse
+
+        return HostedTrainingRunResponse(run_id="r1", token_value="t")
+
+    monkeypatch.setattr("prime_cli.api.training.HostedTrainingClient.create_run", fake_create_run)
+    return captured
+
+
+def test_train_ref_flag_and_toml_key_reach_the_fft_payload(monkeypatch, tmp_path: Path) -> None:
+    captured = _capture_fft_dispatch(monkeypatch)
+    cfg = tmp_path / "rl.toml"
+    cfg.write_text(_FFT_BODY)
+    result = runner.invoke(
+        app, ["train", str(cfg), "--ref", "feat/my-branch", "-y", "-o", "json"], env=TEST_ENV
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["run"]["sourceRef"] == "feat/my-branch"
+
+    cfg.write_text('source_ref = "from-toml"\n' + _FFT_BODY)
+    result = runner.invoke(app, ["train", str(cfg), "-y", "-o", "json"], env=TEST_ENV)
+    assert result.exit_code == 0, result.output
+
+    # CLI flag wins over the TOML key.
+    result = runner.invoke(
+        app, ["train", str(cfg), "--ref", "abc123", "-y", "-o", "json"], env=TEST_ENV
+    )
+    assert result.exit_code == 0, result.output
+
+    assert [p.get("sourceRef") for p in captured] == ["feat/my-branch", "from-toml", "abc123"]
+    assert all("source_ref" not in p["config"] for p in captured)
+
+
+def test_train_pr_flag_resolves_head_sha_and_conflicts_with_ref(
+    monkeypatch, tmp_path: Path
+) -> None:
+    captured = _capture_fft_dispatch(monkeypatch)
+    sha = "0123456789abcdef0123456789abcdef01234567"
+    seen: list[int] = []
+
+    def fake_resolve(pr_number: int) -> str:
+        seen.append(pr_number)
+        return sha
+
+    monkeypatch.setattr("prime_cli.api.training.resolve_pull_request_head", fake_resolve)
+    cfg = tmp_path / "rl.toml"
+    cfg.write_text(_FFT_BODY)
+    result = runner.invoke(app, ["train", str(cfg), "--pr", "42", "-y", "-o", "json"], env=TEST_ENV)
+    assert result.exit_code == 0, result.output
+    assert seen == [42]
+    assert captured[0]["sourceRef"] == sha
+    # --output json must stay pure JSON: no "Resolved PR" line on stdout.
+    assert json.loads(result.output)["run"]["sourceRef"] == sha
+
+    result = runner.invoke(
+        app, ["train", str(cfg), "--pr", "42", "--ref", "main", "-y"], env=TEST_ENV
+    )
+    assert result.exit_code == 1
+    assert "mutually exclusive" in result.output
+    assert len(captured) == 1
+
+
+def test_train_ref_is_rejected_on_the_lora_path(monkeypatch, tmp_path: Path) -> None:
+    cfg = tmp_path / "rl.toml"
+    cfg.write_text('[model]\nname = "Qwen/Qwen3-0.6B"\n')
+    result = runner.invoke(app, ["train", str(cfg), "--ref", "feat/x", "-y"], env=TEST_ENV)
+    assert result.exit_code == 1
+    assert "--ref / --pr" in result.output and "full-FT" in result.output
+
+
+def test_resolve_pull_request_head_rejects_forks(monkeypatch) -> None:
+    import httpx
+    from prime_cli.api.training import resolve_pull_request_head
+    from prime_cli.core import APIError
+
+    def fake_get(url, headers=None, timeout=None):
+        assert url.endswith("/repos/PrimeIntellect-ai/prime-rl/pulls/7")
+        return httpx.Response(
+            200,
+            json={"head": {"sha": "f" * 40, "repo": {"full_name": "someone/prime-rl"}}},
+            request=httpx.Request("GET", url),
+        )
+
+    monkeypatch.setattr("prime_cli.api.training.httpx.get", fake_get)
+    try:
+        resolve_pull_request_head(7)
+    except APIError as e:
+        assert "fork" in str(e)
+    else:
+        raise AssertionError("fork PR should be rejected")
+
+    def fake_get_ok(url, headers=None, timeout=None):
+        return httpx.Response(
+            200,
+            json={"head": {"sha": "a" * 40, "repo": {"full_name": "PrimeIntellect-ai/prime-rl"}}},
+            request=httpx.Request("GET", url),
+        )
+
+    monkeypatch.setattr("prime_cli.api.training.httpx.get", fake_get_ok)
+    assert resolve_pull_request_head(7) == "a" * 40

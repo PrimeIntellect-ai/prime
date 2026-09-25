@@ -8,10 +8,19 @@ token; admin role is gated server-side.
 
 from typing import Any, Dict, List, Optional
 
+import httpx
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic import ValidationError as PydanticValidationError
 
 from prime_cli.core import APIClient, APIError, NotFoundError
+from prime_cli.core.client import _default_user_agent
+
+# The only repo the hosted source overlay runs code from. The platform and
+# validator enforce the same restriction server-side; the CLI just resolves
+# `--pr N` against it so a fork PR fails here with a clear message instead
+# of a 422 from the backend.
+PRIME_RL_GITHUB_REPO = "PrimeIntellect-ai/prime-rl"
+_GITHUB_API = "https://api.github.com"
 
 
 class HostedTrainingRunResponse(BaseModel):
@@ -238,6 +247,50 @@ class HostedTrainingClient:
             raise APIError(f"Failed to parse available FFT models response: {exc}") from exc
 
 
+def resolve_pull_request_head(pr_number: int) -> str:
+    """Head commit sha of a prime-rl pull request, for `prime train --pr N`.
+
+    Unauthenticated call to the public GitHub API (prime-rl is public).
+    Only PRs whose head branch lives in the canonical repo are accepted:
+    the hosted pods can only fetch refs from PrimeIntellect-ai/prime-rl,
+    so a fork PR would fail at dispatch anyway. Raises APIError with a
+    user-facing message on any failure so the command layer can print
+    and exit without string-matching.
+    """
+    url = f"{_GITHUB_API}/repos/{PRIME_RL_GITHUB_REPO}/pulls/{pr_number}"
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": _default_user_agent(),
+    }
+    try:
+        resp = httpx.get(url, headers=headers, timeout=15.0)
+    except httpx.HTTPError as exc:
+        raise APIError(f"Could not reach GitHub to resolve PR #{pr_number}: {exc}") from exc
+    if resp.status_code == 404:
+        raise APIError(f"PR #{pr_number} not found in {PRIME_RL_GITHUB_REPO}.")
+    if resp.status_code in (403, 429):
+        raise APIError(
+            "GitHub API rate limit hit while resolving "
+            f"PR #{pr_number}; retry later or pass --ref <branch-or-sha> directly."
+        )
+    if resp.status_code != 200:
+        raise APIError(f"GitHub returned HTTP {resp.status_code} while resolving PR #{pr_number}.")
+    try:
+        head = resp.json()["head"]
+        head_repo = (head.get("repo") or {}).get("full_name")
+        sha = head["sha"]
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
+        raise APIError(f"Unexpected GitHub response while resolving PR #{pr_number}.") from exc
+    if not isinstance(head_repo, str) or head_repo.lower() != PRIME_RL_GITHUB_REPO.lower():
+        raise APIError(
+            f"PR #{pr_number} comes from a fork ({head_repo or 'unknown'}); fork PRs are "
+            f"not supported. Push the branch to {PRIME_RL_GITHUB_REPO} and use --ref."
+        )
+    if not isinstance(sha, str) or not sha:
+        raise APIError(f"PR #{pr_number} has no head commit sha in the GitHub response.")
+    return sha
+
+
 def build_payload_from_toml(
     cfg: Dict[str, Any],
     *,
@@ -249,6 +302,7 @@ def build_payload_from_toml(
     gpu_type: Optional[str] = None,
     volume: Optional[str] = None,
     mode: Optional[str] = None,
+    source_ref: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build the /v1/training/runs payload from a prime-rl-style TOML dict.
 
@@ -277,6 +331,9 @@ def build_payload_from_toml(
         "sft"). Omitted by default so existing RL payloads stay
         byte-compatible; set to "sft" for SFT configs so the backend +
         validator dispatch to SFTConfig instead of the RL schema.
+      - source_ref: a prime-rl git ref (branch / tag / sha) the pods
+        overlay onto the image at startup, for testing unmerged code
+        without an image build. The platform pins the resolved commit.
 
     Cluster targeting is backend-side (auto-pick first uncordoned).
     """
@@ -297,4 +354,6 @@ def build_payload_from_toml(
         payload["gpuType"] = gpu_type
     if volume:
         payload["volume"] = volume
+    if source_ref:
+        payload["sourceRef"] = source_ref
     return payload

@@ -123,6 +123,11 @@ class RLRun(BaseModel):
     # Stored as a dict to stay forward-compatible if the API adds new fields.
     failure_analysis: Optional[Dict[str, Any]] = Field(None, alias="failureAnalysis")
 
+    # Full-FT source overlay: the prime-rl commit the pods run on top of the
+    # image when the run was dispatched with `--ref` / `--pr`. None for runs
+    # that use the image's baked source.
+    source_commit: Optional[str] = Field(None, alias="sourceCommit")
+
     model_config = ConfigDict(populate_by_name=True)
 
 

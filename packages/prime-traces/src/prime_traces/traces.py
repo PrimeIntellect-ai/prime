@@ -38,7 +38,9 @@ from .models import (
     EpisodeListPage,
     LineFormat,
     SearchField,
+    TraceCallPage,
     TraceListPage,
+    TraceNodePage,
     TraceSearchPage,
     TraceSummary,
     UploadReceipt,
@@ -434,6 +436,63 @@ class TracesClient:
         return written
 
     # -- traces: delete -----------------------------------------------------
+
+    def list_nodes(
+        self,
+        trace_id: str,
+        *,
+        role: Optional[List[str]] = None,
+        sampled: Optional[bool] = None,
+        after: Optional[int] = None,
+        limit: Optional[int] = None,
+        cursor: Optional[str] = None,
+    ) -> TraceNodePage:
+        """List a trace's message nodes in step order (max 100 per page).
+
+        Reads the async node index, so the full document is never downloaded.
+        Raises ``TraceNotIndexedError`` while the index is still being built;
+        when a page has ``partial_index``, nodes past the indexing cap are only
+        in the raw document. ``after`` starts after that node index and cannot
+        be combined with ``cursor``.
+        """
+        params = _build_params(
+            (
+                ("role", role),
+                ("sampled", sampled),
+                ("after", after),
+                ("limit", limit),
+                ("cursor", cursor),
+            )
+        )
+        return TraceNodePage.model_validate(
+            self.client.get_json(f"{_trace_endpoint(trace_id)}/nodes", params=params)
+        )
+
+    def list_calls(
+        self,
+        trace_id: str,
+        *,
+        model: Optional[List[str]] = None,
+        finish_reason: Optional[List[str]] = None,
+        limit: Optional[int] = None,
+        cursor: Optional[str] = None,
+    ) -> TraceCallPage:
+        """List a trace's model calls in order (max 100 per page).
+
+        Same index, errors and ``partial_index`` rule as ``list_nodes``. Token
+        usage is not indexed; read the raw document for it.
+        """
+        params = _build_params(
+            (
+                ("model", model),
+                ("finish_reason", finish_reason),
+                ("limit", limit),
+                ("cursor", cursor),
+            )
+        )
+        return TraceCallPage.model_validate(
+            self.client.get_json(f"{_trace_endpoint(trace_id)}/calls", params=params)
+        )
 
     def delete(self, trace_id: str, *, created_at: Optional[str] = None) -> None:
         """Delete every stored copy of one trace (202 Accepted).

@@ -1,6 +1,8 @@
+import json
+import os
 import re
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 import click
 import typer
@@ -28,6 +30,17 @@ from ..utils import (
     json_output_help,
     output_data_as_json,
     validate_output_format,
+)
+from ..utils.plain import is_plain_mode
+from .traces_transcript import (
+    Transcript,
+    parse_node_range,
+    select_nodes,
+    summary_view,
+    tools_only_table,
+    transcript_from_document,
+    transcript_header,
+    transcript_lines,
 )
 
 app = PlainTyper(help="Upload and query traces (Prime Traces)", no_args_is_help=True)
@@ -58,6 +71,13 @@ LIST_TRACES_JSON_HELP = json_output_help(
 GET_TRACE_JSON_HELP = json_output_help(
     ". = trace summary object; with --raw and no --dest, the exact stored trace document",
     "with --raw --dest: {dest, bytes_written}",
+)
+
+TRANSCRIPT_JSON_HELP = json_output_help(
+    ".trace_id = string; .source = index|document (document when the index cannot serve it)",
+    ".nodes[] = {node_idx, parent_idx, timestamp, sampled, message{role, content, ...}}"
+    " (only --node's range)",
+    ".calls[] = {call_idx, node_idx, time_start, time_end, model, endpoint, finish_reason}",
 )
 
 
@@ -491,12 +511,155 @@ def get_trace(
         output_data_as_json(summary.model_dump(mode="json"), console)
         return
 
-    table = Table(title=f"Trace {escape(trace_id)}")
-    table.add_column("Field", style="cyan")
-    table.add_column("Value", style="green")
-    for field, value in summary.model_dump(mode="json").items():
-        table.add_row(escape(field), "-" if value is None else escape(str(value)))
-    console.print(table)
+    for renderable in summary_view(summary):
+        console.print(renderable)
+
+
+def _load_transcript(client: TracesClient, trace_id: str) -> Tuple[Transcript, Optional[str]]:
+    """Read nodes and calls from the index, or the raw document when the index can't serve it.
+
+    Returns the transcript and, when it came from the document, why.
+    """
+    nodes: List[dict] = []
+    calls: List[dict] = []
+    try:
+        cursor: Optional[str] = None
+        while True:
+            node_page = client.list_nodes(trace_id, limit=100, cursor=cursor)
+            nodes.extend(n.model_dump(mode="json") for n in node_page.items)
+            if node_page.partial_index:
+                return _document_transcript(client, trace_id), (
+                    "the trace is larger than the node index holds"
+                )
+            if not node_page.next_cursor:
+                break
+            cursor = node_page.next_cursor
+        cursor = None
+        while True:
+            call_page = client.list_calls(trace_id, limit=100, cursor=cursor)
+            calls.extend(c.model_dump(mode="json") for c in call_page.items)
+            if call_page.partial_index:
+                return _document_transcript(client, trace_id), (
+                    "the trace is larger than the call index holds"
+                )
+            if not call_page.next_cursor:
+                break
+            cursor = call_page.next_cursor
+    except APIError as e:
+        # Matched by code rather than by `TraceNotIndexedError`, which only exists from
+        # prime-traces 0.0.6: importing it would break every command on an older SDK.
+        if e.code != "trace_not_indexed":
+            raise
+        return _document_transcript(client, trace_id), "the trace is still being indexed"
+    return Transcript(trace_id=trace_id, source="index", nodes=nodes, calls=calls), None
+
+
+def _document_transcript(client: TracesClient, trace_id: str) -> Transcript:
+    try:
+        document = json.loads(client.get_raw(trace_id))
+    except ValueError as e:
+        raise PrimeTracesError(f"the stored document is not valid JSON ({e})") from None
+    try:
+        return transcript_from_document(trace_id, document)
+    except ValueError as e:
+        raise PrimeTracesError(str(e)) from None
+
+
+@app.command("transcript", epilog=TRANSCRIPT_JSON_HELP)
+def transcript_command(
+    trace_id: str = typer.Argument(..., help="Trace ID"),
+    full: bool = typer.Option(
+        False, "--full", help="Show every message in full, including the system prompt"
+    ),
+    node: Optional[str] = typer.Option(
+        None,
+        "--node",
+        help="Node index or inclusive range: 12, 30:, :9 or 5:9. A single node is shown in full",
+    ),
+    tools_only: bool = typer.Option(
+        False, "--tools-only", help="One row per tool call with the size of its result"
+    ),
+    no_pager: bool = typer.Option(
+        False, "--no-pager", help="Print directly instead of opening a pager in a terminal"
+    ),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """Show a trace's conversation: each model turn, its tool calls, and their results."""
+    validate_output_format(output, error_console)
+    try:
+        node_range = parse_node_range(node) if node is not None else None
+    except ValueError as e:
+        error_console.print(f"[red]Error:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    # A single node is what the truncation hints point at, so show all of it.
+    if node_range is not None and node_range[0] is not None and node_range[0] == node_range[1]:
+        full = True
+
+    try:
+        client = _traces_client()
+        if not hasattr(client, "list_nodes"):
+            error_console.print(
+                "[red]Error:[/red] prime traces transcript needs prime-traces 0.0.6 or newer."
+                " Upgrade the prime CLI and try again."
+            )
+            raise typer.Exit(1)
+        summary = client.get(trace_id)
+        transcript, fallback = _load_transcript(client, trace_id)
+    except typer.Exit:
+        raise
+    except UnauthorizedError as e:
+        error_console.print(f"[red]Unauthorized:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except PaymentRequiredError as e:
+        error_console.print(f"[red]Payment Required:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except PrimeTracesError as e:
+        error_console.print(f"[red]Error:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except Exception as e:
+        error_console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
+        error_console.print_exception()
+        raise typer.Exit(1)
+
+    nodes = select_nodes(transcript, node_range)
+
+    if output == "json":
+        output_data_as_json(
+            {
+                "trace_id": transcript.trace_id,
+                "source": transcript.source,
+                "nodes": nodes,
+                "calls": transcript.calls,
+            },
+            console,
+        )
+        return
+
+    plain = is_plain_mode()
+    if not nodes:
+        body = [Text("No nodes in that range.", style="yellow")]
+    elif tools_only:
+        body = [tools_only_table(transcript, nodes, width=console.width)]
+    else:
+        body = transcript_lines(transcript, nodes, full=full, plain=plain)
+
+    renderables = [
+        transcript_header(summary, transcript) if not plain else Text(f"trace {trace_id}")
+    ]
+    if fallback:
+        renderables.append(Text(f"Read from the full document: {fallback}.", style="dim"))
+    renderables.extend(body)
+
+    use_pager = not no_pager and not plain and console.is_terminal
+    if use_pager:
+        # Keep colors, and quit straight away when everything fits on one screen.
+        os.environ.setdefault("LESS", "-FRX")
+        with console.pager(styles=True):
+            for renderable in renderables:
+                console.print(renderable)
+    else:
+        for renderable in renderables:
+            console.print(renderable)
 
 
 @app.command("delete")

@@ -496,7 +496,7 @@ def create(
     ),
     cpu_cores: float = typer.Option(1.0, help="Number of CPU cores"),
     memory_gb: float = typer.Option(1.0, help="Memory in GB"),
-    disk_size_gb: float = typer.Option(10.0, help="Disk size in GB"),
+    disk_size_gb: float = typer.Option(5.0, help="Disk size in GB"),
     gpu_count: int = typer.Option(0, help="Number of GPUs"),
     gpu_type: Optional[str] = typer.Option(
         None,

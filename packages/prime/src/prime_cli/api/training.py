@@ -82,6 +82,17 @@ class Volume(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class VolumeSession(BaseModel):
+    id: str
+    volume_name: str = Field(alias="volumeName")
+    status: str
+    read_only: bool = Field(alias="readOnly")
+    ssh_connection: Optional[str] = Field(None, alias="sshConnection")
+    expires_at: Optional[str] = Field(None, alias="expiresAt")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class HostedTrainingClient:
     """Client for the hosted full-FT training endpoint."""
 
@@ -131,6 +142,30 @@ class HostedTrainingClient:
     def delete_volume(self, name: str, team_id: Optional[str] = None) -> None:
         params = {"teamId": team_id} if team_id else None
         self.client.delete(f"/training/volumes/{name}", params=params)
+
+    def create_volume_session(
+        self, name: str, *, read_only: bool = True, team_id: Optional[str] = None
+    ) -> VolumeSession:
+        payload: Dict[str, Any] = {"readOnly": read_only}
+        if team_id:
+            payload["teamId"] = team_id
+        return VolumeSession.model_validate(
+            self.client.post(f"/training/volumes/{name}/sessions", json=payload)
+        )
+
+    def get_volume_session(
+        self, name: str, session_id: str, *, team_id: Optional[str] = None
+    ) -> VolumeSession:
+        params = {"teamId": team_id} if team_id else None
+        return VolumeSession.model_validate(
+            self.client.get(f"/training/volumes/{name}/sessions/{session_id}", params=params)
+        )
+
+    def stop_volume_session(
+        self, name: str, session_id: str, *, team_id: Optional[str] = None
+    ) -> None:
+        params = {"teamId": team_id} if team_id else None
+        self.client.delete(f"/training/volumes/{name}/sessions/{session_id}", params=params)
 
     def list_available_gpu_types(self, team_id: Optional[str] = None) -> AvailableGpuTypesResponse:
         """GET /v1/training/available-gpu-types. Distinct GPU types the

@@ -9,6 +9,7 @@ import os
 import re
 import shlex
 import subprocess
+import tempfile
 import time
 
 import typer
@@ -117,6 +118,23 @@ _CONNECTION = re.compile(
 )
 
 
+def _pin_known_hosts(session, hostname: str, port: str) -> list[str]:
+    """Return ssh options pinning the session pod's host public key.
+
+    The platform returns the per-session sshd host key with the endpoint,
+    so the CLI writes a scoped known_hosts file instead of disabling host
+    key checking (`StrictHostKeyChecking=no` is never sent). A missing
+    host key falls back to the user's own known_hosts verification.
+    """
+    if not getattr(session, "host_public_key", None):
+        return []
+    bracket = f"[{hostname}]:{port}" if port != "22" else hostname
+    path = os.path.join(tempfile.mkdtemp(prefix="prime-volume-"), "known_hosts")
+    with open(path, "w") as fh:
+        fh.write(f"{bracket} {session.host_public_key}\n")
+    return [f"-o UserKnownHostsFile={path}", "-o StrictHostKeyChecking=yes"]
+
+
 @app.command()
 def shell(
     name: str = typer.Argument(..., help="Volume name"),
@@ -162,15 +180,21 @@ def shell(
         console.print("[red]Invalid SSH endpoint returned by server.[/red]")
         raise typer.Exit(1)
     host = f"{match.group('user')}@{match.group('host')}"
+    hostname = match.group("host")
     port = match.group("port") or "22"
+    known_hosts_opts = _pin_known_hosts(session, hostname, port)
     quoted_key, quoted_host = shlex.quote(key), shlex.quote(host)
-    console.print(f"sftp -i {quoted_key} -P {port} {quoted_host}")
-    console.print(f"scp -i {quoted_key} -P {port} FILE {quoted_host}:/volume/")
-    console.print(
-        f"rsync -av -e {shlex.quote(f'ssh -i {quoted_key} -p {port}')} FILE {quoted_host}:/volume/"
-    )
+    opts = " ".join(f"-o {opt}" for opt in known_hosts_opts)
+    # The same endpoint carries shell, sftp/scp and rsync; print copyable
+    # examples using the pinned host key, never "trust anything".
+    console.print(f"sftp {opts} -i {quoted_key} -P {port} {quoted_host}")
+    console.print(f"scp {opts} -i {quoted_key} -P {port} FILE {quoted_host}:/volume/")
+    rsync_ssh = shlex.quote(f"ssh {opts} -i {quoted_key} -p {port}")
+    console.print(f"rsync -av -e {rsync_ssh} FILE {quoted_host}:/volume/")
     try:
-        code = subprocess.run(["ssh", "-i", key, "-p", port, host], check=False).returncode
+        code = subprocess.run(
+            ["ssh", *known_hosts_opts, "-i", key, "-p", port, host], check=False
+        ).returncode
     except OSError as exc:
         console.print(f"[red]Could not start SSH:[/red] {exc}")
         raise typer.Exit(1) from exc

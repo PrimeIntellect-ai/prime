@@ -87,7 +87,10 @@ class VolumeSession(BaseModel):
     volume_name: str = Field(alias="volumeName")
     status: str
     read_only: bool = Field(alias="readOnly")
+    # Same per-session endpoint carries shell, sftp/scp and rsync.
     ssh_connection: Optional[str] = Field(None, alias="sshConnection")
+    # The session pod's sshd host public key, for scoped known_hosts pinning.
+    host_public_key: Optional[str] = Field(None, alias="hostPublicKey")
     expires_at: Optional[str] = Field(None, alias="expiresAt")
 
     model_config = ConfigDict(populate_by_name=True)

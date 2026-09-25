@@ -19,7 +19,10 @@ from ..utils import (
     validate_output_format,
 )
 
-app = PlainTyper(help="Manage volumes for full-FT run outputs", no_args_is_help=True)
+app = PlainTyper(
+    help="Manage volumes for full-FT run outputs (closed beta)",
+    no_args_is_help=True,
+)
 console = get_console()
 
 

@@ -1351,8 +1351,8 @@ def create_run(
         "--volume",
         help=(
             "Named volume to write the run's outputs to, under runs/<runId>/ "
-            "(full-FT only; see `prime volumes`). Falls back to a top-level "
-            '`volume = "..."` in the TOML.'
+            "(full-FT only; closed beta, see `prime volumes`). Falls back "
+            'to a top-level `volume = "..."` in the TOML.'
         ),
     ),
     full_finetune: bool = typer.Option(

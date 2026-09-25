@@ -5,12 +5,13 @@ from typing import Any, Dict, Optional
 
 import httpx
 from tenacity import (
+    RetryCallState,
     retry,
     retry_if_exception,
-    retry_if_exception_type,
     stop_after_attempt,
     wait_random_exponential,
 )
+from tenacity.wait import wait_base
 
 from .config import Config
 
@@ -30,10 +31,42 @@ IDEMPOTENT_RETRYABLE_EXCEPTIONS = POST_RETRYABLE_EXCEPTIONS + (
 
 IDEMPOTENT_RETRYABLE_STATUSES = frozenset({502, 503, 504})
 IDEMPOTENT_HTTP_METHODS = frozenset({"GET", "HEAD", "PUT", "DELETE", "OPTIONS"})
+_PLATFORM_RATE_LIMIT_DELAYS = (10.0, 30.0)
+
+
+class _RateLimitAwareWait(wait_base):
+    def __init__(self, default_wait: wait_base, rate_limit_delays: tuple[float, ...]):
+        self._default_wait = default_wait
+        self._rate_limit_delays = rate_limit_delays
+
+    def __call__(self, retry_state: RetryCallState) -> float:
+        exception = retry_state.outcome.exception() if retry_state.outcome else None
+        if isinstance(exception, httpx.HTTPStatusError) and exception.response.status_code == 429:
+            return self._rate_limit_delays[
+                min(retry_state.attempt_number - 1, len(self._rate_limit_delays) - 1)
+            ]
+        return self._default_wait(retry_state)
+
+
+# Three attempts permit only two sleeps, so 429s wait 10s then 30s (~40s total).
+# Connection and 5xx errors keep the existing tight random-exponential budget.
+_PLATFORM_RETRY_WAIT = _RateLimitAwareWait(
+    wait_random_exponential(multiplier=0.1, max=2),
+    _PLATFORM_RATE_LIMIT_DELAYS,
+)
+
+
+def _is_rate_limit_error(exc: BaseException) -> bool:
+    # A 429 rejects the request before processing, so retrying is safe for every method.
+    return isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 429
+
+
+def _is_non_idempotent_request_retryable_error(exc: BaseException) -> bool:
+    return isinstance(exc, POST_RETRYABLE_EXCEPTIONS) or _is_rate_limit_error(exc)
 
 
 def _is_idempotent_request_retryable_error(exc: BaseException) -> bool:
-    if isinstance(exc, IDEMPOTENT_RETRYABLE_EXCEPTIONS):
+    if isinstance(exc, IDEMPOTENT_RETRYABLE_EXCEPTIONS) or _is_rate_limit_error(exc):
         return True
     return (
         isinstance(exc, httpx.HTTPStatusError)
@@ -105,7 +138,7 @@ class APIClient:
     @retry(
         retry=retry_if_exception(_is_idempotent_request_retryable_error),
         stop=stop_after_attempt(3),
-        wait=wait_random_exponential(multiplier=0.1, max=2),
+        wait=_PLATFORM_RETRY_WAIT,
         reraise=True,
     )
     def _idempotent_request_with_retry(
@@ -122,9 +155,9 @@ class APIClient:
         return response
 
     @retry(
-        retry=retry_if_exception_type(POST_RETRYABLE_EXCEPTIONS),
+        retry=retry_if_exception(_is_non_idempotent_request_retryable_error),
         stop=stop_after_attempt(3),
-        wait=wait_random_exponential(multiplier=0.1, max=2),
+        wait=_PLATFORM_RETRY_WAIT,
         reraise=True,
     )
     def _non_idempotent_request_with_retry(
@@ -136,12 +169,15 @@ class APIClient:
         timeout: Optional[float] = None,
     ) -> httpx.Response:
         """Make non-idempotent request with only pre-processing safe retries."""
-        return self.client.request(method, url, params=params, json=json, timeout=timeout)
+        response = self.client.request(method, url, params=params, json=json, timeout=timeout)
+        if response.status_code == 429:
+            response.raise_for_status()
+        return response
 
     @retry(
         retry=retry_if_exception(_is_idempotent_request_retryable_error),
         stop=stop_after_attempt(3),
-        wait=wait_random_exponential(multiplier=0.1, max=2),
+        wait=_PLATFORM_RETRY_WAIT,
         reraise=True,
     )
     def _idempotent_post_request_with_retry(
@@ -266,7 +302,7 @@ class AsyncAPIClient:
     @retry(
         retry=retry_if_exception(_is_idempotent_request_retryable_error),
         stop=stop_after_attempt(3),
-        wait=wait_random_exponential(multiplier=0.1, max=2),
+        wait=_PLATFORM_RETRY_WAIT,
         reraise=True,
     )
     async def _idempotent_request_with_retry(
@@ -283,9 +319,9 @@ class AsyncAPIClient:
         return response
 
     @retry(
-        retry=retry_if_exception_type(POST_RETRYABLE_EXCEPTIONS),
+        retry=retry_if_exception(_is_non_idempotent_request_retryable_error),
         stop=stop_after_attempt(3),
-        wait=wait_random_exponential(multiplier=0.1, max=2),
+        wait=_PLATFORM_RETRY_WAIT,
         reraise=True,
     )
     async def _non_idempotent_request_with_retry(
@@ -297,12 +333,15 @@ class AsyncAPIClient:
         timeout: Optional[float] = None,
     ) -> httpx.Response:
         """Make async non-idempotent request with only pre-processing safe retries."""
-        return await self.client.request(method, url, params=params, json=json, timeout=timeout)
+        response = await self.client.request(method, url, params=params, json=json, timeout=timeout)
+        if response.status_code == 429:
+            response.raise_for_status()
+        return response
 
     @retry(
         retry=retry_if_exception(_is_idempotent_request_retryable_error),
         stop=stop_after_attempt(3),
-        wait=wait_random_exponential(multiplier=0.1, max=2),
+        wait=_PLATFORM_RETRY_WAIT,
         reraise=True,
     )
     async def _idempotent_post_request_with_retry(

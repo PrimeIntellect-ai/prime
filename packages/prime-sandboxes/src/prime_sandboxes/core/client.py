@@ -7,7 +7,6 @@ import httpx
 from tenacity import (
     retry,
     retry_if_exception,
-    retry_if_exception_type,
     stop_after_attempt,
     wait_random_exponential,
 )
@@ -32,8 +31,17 @@ IDEMPOTENT_RETRYABLE_STATUSES = frozenset({502, 503, 504})
 IDEMPOTENT_HTTP_METHODS = frozenset({"GET", "HEAD", "PUT", "DELETE", "OPTIONS"})
 
 
+def _is_rate_limit_error(exc: BaseException) -> bool:
+    # A 429 rejects the request before processing, so retrying is safe for every method.
+    return isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 429
+
+
+def _is_non_idempotent_request_retryable_error(exc: BaseException) -> bool:
+    return isinstance(exc, POST_RETRYABLE_EXCEPTIONS) or _is_rate_limit_error(exc)
+
+
 def _is_idempotent_request_retryable_error(exc: BaseException) -> bool:
-    if isinstance(exc, IDEMPOTENT_RETRYABLE_EXCEPTIONS):
+    if isinstance(exc, IDEMPOTENT_RETRYABLE_EXCEPTIONS) or _is_rate_limit_error(exc):
         return True
     return (
         isinstance(exc, httpx.HTTPStatusError)
@@ -122,7 +130,7 @@ class APIClient:
         return response
 
     @retry(
-        retry=retry_if_exception_type(POST_RETRYABLE_EXCEPTIONS),
+        retry=retry_if_exception(_is_non_idempotent_request_retryable_error),
         stop=stop_after_attempt(3),
         wait=wait_random_exponential(multiplier=0.1, max=2),
         reraise=True,
@@ -136,7 +144,10 @@ class APIClient:
         timeout: Optional[float] = None,
     ) -> httpx.Response:
         """Make non-idempotent request with only pre-processing safe retries."""
-        return self.client.request(method, url, params=params, json=json, timeout=timeout)
+        response = self.client.request(method, url, params=params, json=json, timeout=timeout)
+        if response.status_code == 429:
+            response.raise_for_status()
+        return response
 
     @retry(
         retry=retry_if_exception(_is_idempotent_request_retryable_error),
@@ -283,7 +294,7 @@ class AsyncAPIClient:
         return response
 
     @retry(
-        retry=retry_if_exception_type(POST_RETRYABLE_EXCEPTIONS),
+        retry=retry_if_exception(_is_non_idempotent_request_retryable_error),
         stop=stop_after_attempt(3),
         wait=wait_random_exponential(multiplier=0.1, max=2),
         reraise=True,
@@ -297,7 +308,10 @@ class AsyncAPIClient:
         timeout: Optional[float] = None,
     ) -> httpx.Response:
         """Make async non-idempotent request with only pre-processing safe retries."""
-        return await self.client.request(method, url, params=params, json=json, timeout=timeout)
+        response = await self.client.request(method, url, params=params, json=json, timeout=timeout)
+        if response.status_code == 429:
+            response.raise_for_status()
+        return response
 
     @retry(
         retry=retry_if_exception(_is_idempotent_request_retryable_error),

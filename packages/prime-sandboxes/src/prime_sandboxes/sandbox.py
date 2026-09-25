@@ -44,7 +44,6 @@ from pyqwest import HTTPTransport
 from tenacity import (
     retry,
     retry_if_exception,
-    retry_if_exception_type,
     stop_after_attempt,
     wait_exponential,
     wait_random_exponential,
@@ -1519,6 +1518,8 @@ def _is_retryable_gateway_error(exc: BaseException) -> bool:
     """Check if an exception is retryable for idempotent gateway requests."""
     if isinstance(exc, GATEWAY_IDEMPOTENT_RETRYABLE_EXCEPTIONS):
         return True
+    if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 429:
+        return True
     if (
         isinstance(exc, httpx.HTTPStatusError)
         and exc.response.status_code in RETRYABLE_5XX_STATUSES
@@ -1628,6 +1629,8 @@ def _is_retryable_read_file_error(exc: BaseException) -> bool:
         return True
     if isinstance(exc, httpx.HTTPStatusError):
         status = exc.response.status_code
+        if status == 429:
+            return True
         if status == 408 or status in RETRYABLE_5XX_STATUSES:
             if _is_gateway_sandbox_not_found(exc.response):
                 return False
@@ -1635,8 +1638,14 @@ def _is_retryable_read_file_error(exc: BaseException) -> bool:
     return False
 
 
+def _is_retryable_gateway_post_error(exc: BaseException) -> bool:
+    return isinstance(exc, GATEWAY_CONNECTION_RETRYABLE_EXCEPTIONS) or (
+        isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 429
+    )
+
+
 # Retry decorator for idempotent gateway requests (connection errors, ReadError,
-# and 5xx responses). Safe for GET/HEAD/PUT/DELETE since duplicate requests are no-ops.
+# and retryable HTTP responses). Safe for GET/HEAD/PUT/DELETE since duplicates are no-ops.
 _gateway_retry = retry(
     retry=retry_if_exception(_is_retryable_gateway_error),
     stop=stop_after_attempt(4),
@@ -1644,11 +1653,10 @@ _gateway_retry = retry(
     reraise=True,
 )
 
-# Retry decorator for non-idempotent gateway requests (connection errors only —
-# ReadError and 5xx both imply the server received/processed the request, so
-# retrying POSTs on those risks duplicate side effects).
+# Retry decorator for non-idempotent gateway requests. ReadError and 5xx imply
+# the server may have processed the request, so retrying risks duplicate side effects.
 _gateway_post_retry = retry(
-    retry=retry_if_exception_type(GATEWAY_CONNECTION_RETRYABLE_EXCEPTIONS),
+    retry=retry_if_exception(_is_retryable_gateway_post_error),
     stop=stop_after_attempt(4),
     wait=wait_exponential(multiplier=1, min=1, max=30),
     reraise=True,
@@ -2139,9 +2147,12 @@ class SandboxClient:
         files: Optional[Dict[str, Any]] = None,
         params: Optional[Dict[str, Any]] = None,
     ) -> httpx.Response:
-        """Make a POST request to the gateway with retry on connection errors only."""
+        """Make a POST request to the gateway with safe pre-processing retries."""
         with httpx.Client(timeout=timeout) as client:
-            return client.post(url, json=json, files=files, params=params, headers=headers)
+            response = client.post(url, json=json, files=files, params=params, headers=headers)
+        if response.status_code == 429:
+            response.raise_for_status()
+        return response
 
     @staticmethod
     @_gateway_retry
@@ -2154,7 +2165,7 @@ class SandboxClient:
         """Make a GET request to the gateway with retry on transient errors."""
         with httpx.Client(timeout=timeout) as client:
             response = client.get(url, params=params, headers=headers)
-        if response.status_code in RETRYABLE_5XX_STATUSES:
+        if response.status_code == 429 or response.status_code in RETRYABLE_5XX_STATUSES:
             response.raise_for_status()
         return response
 
@@ -2169,7 +2180,7 @@ class SandboxClient:
         """Make a read-file GET request to the gateway with read-timeout retries."""
         with httpx.Client(timeout=timeout) as client:
             response = client.get(url, params=params, headers=headers)
-        if response.status_code == 408 or response.status_code in RETRYABLE_5XX_STATUSES:
+        if response.status_code in {408, 429} or response.status_code in RETRYABLE_5XX_STATUSES:
             response.raise_for_status()
         return response
 
@@ -3528,11 +3539,14 @@ class AsyncSandboxClient:
         files: Optional[Dict[str, Any]] = None,
         params: Optional[Dict[str, Any]] = None,
     ) -> httpx.Response:
-        """Make a POST request to the gateway with retry on connection errors only."""
+        """Make a POST request to the gateway with safe pre-processing retries."""
         gateway_client = self._get_gateway_client()
-        return await gateway_client.post(
+        response = await gateway_client.post(
             url, json=json, files=files, params=params, headers=headers, timeout=timeout
         )
+        if response.status_code == 429:
+            response.raise_for_status()
+        return response
 
     @_gateway_retry
     async def _gateway_get(
@@ -3545,7 +3559,7 @@ class AsyncSandboxClient:
         """Make a GET request to the gateway with retry on transient errors."""
         gateway_client = self._get_gateway_client()
         response = await gateway_client.get(url, params=params, headers=headers, timeout=timeout)
-        if response.status_code in RETRYABLE_5XX_STATUSES:
+        if response.status_code == 429 or response.status_code in RETRYABLE_5XX_STATUSES:
             response.raise_for_status()
         return response
 
@@ -3560,7 +3574,7 @@ class AsyncSandboxClient:
         """Make a read-file GET request to the gateway with read-timeout retries."""
         gateway_client = self._get_gateway_client()
         response = await gateway_client.get(url, params=params, headers=headers, timeout=timeout)
-        if response.status_code == 408 or response.status_code in RETRYABLE_5XX_STATUSES:
+        if response.status_code in {408, 429} or response.status_code in RETRYABLE_5XX_STATUSES:
             response.raise_for_status()
         return response
 

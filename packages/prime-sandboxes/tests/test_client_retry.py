@@ -599,11 +599,12 @@ class TestSyncGatewayRetry:
         assert result == "success"
         assert call_count == 2
 
-    def test_gateway_retry_on_connect_error(self):
-        """Test retry on ConnectError."""
+    def test_gateway_retry_on_connect_error(self, monkeypatch):
+        """Connection errors retain the tight retry curve."""
         from prime_sandboxes.sandbox import _gateway_retry
 
         call_count = 0
+        delays = []
 
         @_gateway_retry
         def connect_error_then_succeed():
@@ -613,9 +614,37 @@ class TestSyncGatewayRetry:
                 raise httpx.ConnectError("Connection refused")
             return "success"
 
+        monkeypatch.setattr(connect_error_then_succeed.retry, "sleep", delays.append)
+
         result = connect_error_then_succeed()
         assert result == "success"
         assert call_count == 2
+        assert delays == [1.0]
+
+    def test_gateway_retry_on_429_uses_long_waits(self, monkeypatch):
+        """Gateway rate limits use the longer inter-attempt delays."""
+        from prime_sandboxes.sandbox import _gateway_retry
+
+        call_count = 0
+        delays = []
+
+        @_gateway_retry
+        def rate_limit_then_succeed():
+            nonlocal call_count
+            call_count += 1
+            if call_count < 4:
+                response = httpx.Response(429, request=httpx.Request("GET", "http://test"))
+                raise httpx.HTTPStatusError(
+                    "429 rate limited", request=response.request, response=response
+                )
+            return "success"
+
+        monkeypatch.setattr(rate_limit_then_succeed.retry, "sleep", delays.append)
+
+        result = rate_limit_then_succeed()
+        assert result == "success"
+        assert call_count == 4
+        assert delays == [10.0, 30.0, 40.0]
 
     def test_gateway_retry_on_read_error(self):
         """Test retry on ReadError (TCP drop mid-response) — idempotent path."""

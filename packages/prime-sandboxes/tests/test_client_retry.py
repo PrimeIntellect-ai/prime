@@ -1230,3 +1230,88 @@ class TestRateLimitRetry:
         assert response.success
         assert transport.call_count == 3
         assert status_checks == 1
+
+
+def _terminated_response(request: httpx.Request) -> httpx.Response:
+    return httpx.Response(
+        410,
+        request=request,
+        json={
+            "error": "sandbox_terminated",
+            "sandboxId": "sandbox-123",
+            "message": "The sandbox has been terminated",
+            "code": "not_found",
+        },
+    )
+
+
+class TestGatewaySandboxTerminated:
+    """Gateway HTTP 410 sandbox_terminated is terminal: typed error, no retry."""
+
+    def test_read_file_raises_not_running_without_retry(self, monkeypatch):
+        from prime_sandboxes.exceptions import SandboxNotRunningError
+
+        calls = 0
+
+        def terminated(url, headers, params, timeout):
+            nonlocal calls
+            calls += 1
+            return _terminated_response(httpx.Request("GET", url))
+
+        monkeypatch.setattr(SandboxClient, "_gateway_read_file_get", staticmethod(terminated))
+        client = SandboxClient.__new__(SandboxClient)
+        client._auth_cache = DummySandboxAuthCache()
+        client._get_sandbox_error_context = lambda _sandbox_id: {  # type: ignore[method-assign]
+            "status": None,
+            "error_type": None,
+            "error_message": None,
+        }
+
+        with pytest.raises(SandboxNotRunningError) as exc_info:
+            client.read_file("sandbox-123", "/tmp/file")
+
+        assert exc_info.value.status == "TERMINATED"
+        assert isinstance(exc_info.value.__cause__, httpx.HTTPStatusError)
+        assert calls == 1
+
+    @pytest.mark.asyncio
+    async def test_async_upload_raises_not_running_without_retry(self):
+        from prime_sandboxes.exceptions import SandboxNotRunningError
+
+        calls = 0
+
+        async def terminated(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            return _terminated_response(request)
+
+        client = AsyncSandboxClient(api_key="test-key")
+        client._auth_cache = AsyncGatewayAuthCache()  # type: ignore[assignment]
+        client._gateway_client = httpx.AsyncClient(transport=httpx.MockTransport(terminated))
+
+        async def error_context(_sandbox_id: str) -> dict:
+            return {"status": None, "error_type": None, "error_message": None}
+
+        client._get_sandbox_error_context = error_context  # type: ignore[method-assign]
+        try:
+            with pytest.raises(SandboxNotRunningError) as exc_info:
+                await client.upload_bytes("sandbox-123", "/tmp/file", b"data", "file")
+        finally:
+            await client.aclose()
+
+        assert exc_info.value.status == "TERMINATED"
+        assert calls == 1
+
+    def test_reachability_does_not_retry_terminated(self):
+        from prime_sandboxes.exceptions import SandboxNotRunningError
+        from prime_sandboxes.sandbox import _is_retryable_reachability_error
+
+        request = httpx.Request("POST", "https://gateway.example/ns/job/exec")
+        cause = httpx.HTTPStatusError(
+            "gone", request=request, response=_terminated_response(request)
+        )
+        error = SandboxNotRunningError("sandbox-123", status="TERMINATED")
+        error.__cause__ = cause
+
+        assert _is_retryable_reachability_error(cause) is False
+        assert _is_retryable_reachability_error(error) is False

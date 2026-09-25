@@ -191,6 +191,51 @@ class TestSyncAPIClientRetry:
         assert result == {"success": True}
         assert transport.call_count == 3
 
+    def test_rate_limit_retries_use_long_waits(self, monkeypatch):
+        """Platform rate limits wait 10s then 30s across three attempts."""
+        call_count = 0
+        delays = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal call_count
+            call_count += 1
+            if call_count < 3:
+                return httpx.Response(429, request=request, text="rate limited")
+            return httpx.Response(200, request=request, json={"success": True})
+
+        monkeypatch.setattr(APIClient._idempotent_request_with_retry.retry, "sleep", delays.append)
+        client = APIClient(api_key="test-key")
+        client.client = httpx.Client(transport=httpx.MockTransport(handler))
+
+        result = client.request("GET", "test")
+
+        assert result == {"success": True}
+        assert call_count == 3
+        assert delays == [10.0, 30.0]
+
+    def test_connection_error_retry_keeps_tight_wait(self, monkeypatch):
+        """Connection errors keep the existing fast first retry."""
+        call_count = 0
+        delays = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise httpx.ConnectError("Connection refused", request=request)
+            return httpx.Response(200, request=request, json={"success": True})
+
+        monkeypatch.setattr(APIClient._idempotent_request_with_retry.retry, "sleep", delays.append)
+        client = APIClient(api_key="test-key")
+        client.client = httpx.Client(transport=httpx.MockTransport(handler))
+
+        result = client.request("GET", "test")
+
+        assert result == {"success": True}
+        assert call_count == 2
+        assert len(delays) == 1
+        assert 0 <= delays[0] <= 0.1
+
     def test_gives_up_after_max_retries(self):
         """Raises after 3 failed attempts."""
         transport = AlwaysFailTransport()

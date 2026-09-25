@@ -42,17 +42,16 @@ from google.protobuf.message import Message
 from pyqwest import Client as HTTPClient
 from pyqwest import HTTPTransport
 from tenacity import (
-    RetryCallState,
     retry,
     retry_if_exception,
     stop_after_attempt,
     wait_exponential,
     wait_random_exponential,
 )
-from tenacity.wait import wait_base
 
 from ._connectrpc import GOOGLE_PROTOBUF_BINARY_CODEC
 from .core import APIClient, APIError, AsyncAPIClient
+from .core.client import _RateLimitAwareWait
 from .exceptions import (
     BatchStatusUnsupportedError,
     CommandTimeoutError,
@@ -1646,18 +1645,7 @@ def _is_retryable_gateway_post_error(exc: BaseException) -> bool:
     )
 
 
-class _GatewayRetryWait(wait_base):
-    def __init__(self, transport_wait: wait_base):
-        self._transport_wait = transport_wait
-
-    def __call__(self, retry_state: RetryCallState) -> float:
-        exception = retry_state.outcome.exception() if retry_state.outcome else None
-        # Four attempts sleep 10s/30s/40s between 429s to clear rate-limit windows;
-        # transport blips keep their tight curve.
-        if isinstance(exception, httpx.HTTPStatusError) and exception.response.status_code == 429:
-            delays = (10.0, 30.0, 40.0)
-            return delays[min(retry_state.attempt_number - 1, len(delays) - 1)]
-        return self._transport_wait(retry_state)
+_GATEWAY_RATE_LIMIT_DELAYS = (10.0, 30.0, 40.0)
 
 
 # Retry decorator for idempotent gateway requests (connection errors, ReadError,
@@ -1665,7 +1653,9 @@ class _GatewayRetryWait(wait_base):
 _gateway_retry = retry(
     retry=retry_if_exception(_is_retryable_gateway_error),
     stop=stop_after_attempt(4),
-    wait=_GatewayRetryWait(wait_exponential(multiplier=1, min=1, max=30)),
+    wait=_RateLimitAwareWait(
+        wait_exponential(multiplier=1, min=1, max=30), _GATEWAY_RATE_LIMIT_DELAYS
+    ),
     reraise=True,
 )
 
@@ -1674,7 +1664,9 @@ _gateway_retry = retry(
 _gateway_post_retry = retry(
     retry=retry_if_exception(_is_retryable_gateway_post_error),
     stop=stop_after_attempt(4),
-    wait=_GatewayRetryWait(wait_exponential(multiplier=1, min=1, max=30)),
+    wait=_RateLimitAwareWait(
+        wait_exponential(multiplier=1, min=1, max=30), _GATEWAY_RATE_LIMIT_DELAYS
+    ),
     reraise=True,
 )
 
@@ -1684,7 +1676,9 @@ _gateway_post_retry = retry(
 _read_file_retry = retry(
     retry=retry_if_exception(_is_retryable_read_file_error),
     stop=stop_after_attempt(4),
-    wait=_GatewayRetryWait(wait_random_exponential(multiplier=1, min=1, max=30)),
+    wait=_RateLimitAwareWait(
+        wait_random_exponential(multiplier=1, min=1, max=30), _GATEWAY_RATE_LIMIT_DELAYS
+    ),
     reraise=True,
 )
 

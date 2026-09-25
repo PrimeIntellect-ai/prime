@@ -568,6 +568,23 @@ class TestEpisodes:
         assert episode.environment_id == "terminal-bench-2"
         assert episode.error.type is None
 
+    def test_list_episodes_forwards_step_filters(self, make_client):
+        # Episodes have no step of their own; the service matches them
+        # through their member traces' run_step.
+        captured = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["params"] = dict(request.url.params)
+            return httpx.Response(200, json={"items": [], "next_cursor": None})
+
+        make_client(handler).list_episodes(run_id="run_9f3k2m", run_step=0, step_min=5, step_max=9)
+        assert captured["params"] == {
+            "run_id": "run_9f3k2m",
+            "run_step": "0",
+            "step_min": "5",
+            "step_max": "9",
+        }
+
     def test_get_episode_nests_member_aggregate(self, make_client):
         # The episode row's own error stays visible alongside the aggregate:
         # an environment-hook failure with every member trace green.

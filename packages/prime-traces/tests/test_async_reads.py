@@ -10,6 +10,7 @@ import threading
 import httpx
 import pytest
 from _samples import (
+    EPISODE,
     SUMMARY,
     UNAVAILABLE,
 )
@@ -451,6 +452,18 @@ class TestEpisodes:
             return httpx.Response(200, content=raw)
 
         assert await make_async_client(handler).get_episode_raw("ep-1") == raw
+
+    @pytest.mark.asyncio
+    async def test_list_episodes_forwards_step_filters(self, make_async_client):
+        captured = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["params"] = dict(request.url.params)
+            return httpx.Response(200, json={"items": [EPISODE], "next_cursor": None})
+
+        page = await make_async_client(handler).list_episodes(run_step=12, step_max=20)
+        assert captured["params"] == {"run_step": "12", "step_max": "20"}
+        assert page.items[0].episode_id == "ep-1"
 
     @pytest.mark.asyncio
     async def test_list_episode_traces_forwards_backend_filters(self, make_async_client):

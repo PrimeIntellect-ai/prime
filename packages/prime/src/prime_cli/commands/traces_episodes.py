@@ -33,7 +33,9 @@ def shared_value(values: Iterable[Optional[str]]) -> Optional[str]:
     return distinct.pop() if len(distinct) == 1 else None
 
 
-def episodes_table(page: EpisodeListPage, *, run_id: Optional[str]) -> Table:
+def episodes_table(
+    page: EpisodeListPage, *, run_id: Optional[str], run_step: Optional[int] = None
+) -> Table:
     """One row per episode.
 
     A run or environment that every row shares moves from its column into the
@@ -41,7 +43,10 @@ def episodes_table(page: EpisodeListPage, *, run_id: Optional[str]) -> Table:
     """
     run = run_id or shared_value(e.run_id for e in page.items)
     environment = shared_value(e.environment_id for e in page.items)
-    title = " · ".join(part for part in ("Episodes", run and f"run {run}", environment) if part)
+    step = None if run_step is None else f"step {run_step}"
+    title = " · ".join(
+        part for part in ("Episodes", run and f"run {run}", step, environment) if part
+    )
     table = Table(title=Text(title), title_justify="left")
     table.add_column("Episode ID", style="cyan", no_wrap=True)
     if run is None:

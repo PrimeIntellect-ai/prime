@@ -541,6 +541,9 @@ class TracesClient:
         environment_id: Optional[str] = None,
         outcome: Optional[str] = None,
         has_error: Optional[bool] = None,
+        run_step: Optional[int] = None,
+        step_min: Optional[int] = None,
+        step_max: Optional[int] = None,
         created_after: Optional[str] = None,
         created_before: Optional[str] = None,
         limit: Optional[int] = None,
@@ -549,7 +552,9 @@ class TracesClient:
         """List episode summaries using the server's complete filter set.
 
         ``environment_id`` is extracted from the canonical episode
-        ``env.id``. Episodes carry no upload ``context`` map.
+        ``env.id``. Episodes carry no upload ``context`` map. Episodes have no
+        step of their own: ``run_step``, ``step_min`` and ``step_max`` match an
+        episode when one of its member traces has a matching ``run_step``.
         """
         params = _build_params(
             (
@@ -557,6 +562,9 @@ class TracesClient:
                 ("environment_id", environment_id),
                 ("outcome", outcome),
                 ("has_error", has_error),
+                ("run_step", run_step),
+                ("step_min", step_min),
+                ("step_max", step_max),
                 ("created_after", created_after),
                 ("created_before", created_before),
                 ("limit", limit),

@@ -849,6 +849,9 @@ def list_episodes(
     has_error: Optional[bool] = typer.Option(
         None, "--has-error/--no-has-error", help="Filter by the episode's own error status"
     ),
+    run_step: Optional[int] = typer.Option(
+        None, "--run-step", min=0, help="Only episodes with a trace from this training step"
+    ),
     created_after: Optional[str] = typer.Option(None, "--created-after", help="ISO timestamp"),
     created_before: Optional[str] = typer.Option(None, "--created-before", help="ISO timestamp"),
     page: int = typer.Option(
@@ -880,6 +883,7 @@ def list_episodes(
                 environment_id=environment_id,
                 outcome=outcome,
                 has_error=has_error,
+                run_step=run_step,
                 created_after=created_after,
                 created_before=created_before,
                 limit=limit,
@@ -908,7 +912,7 @@ def list_episodes(
         return
 
     _print_empty_page("episodes", page, len(result.items))
-    console.print(episodes_table(result, run_id=run_id))
+    console.print(episodes_table(result, run_id=run_id, run_step=run_step))
     _print_page_footer(
         count=len(result.items),
         next_cursor=result.next_cursor,

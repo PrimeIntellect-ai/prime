@@ -1013,6 +1013,7 @@ def test_episodes_list_forwards_filters_and_moves_the_run_to_the_title(fake_clie
         "environment_id": "tb2",
         "outcome": "failed",
         "has_error": True,
+        "run_step": None,
         "created_after": None,
         "created_before": None,
         "limit": 10,
@@ -1027,6 +1028,23 @@ def test_episodes_list_forwards_filters_and_moves_the_run_to_the_title(fake_clie
     assert "Use --page 2 to see more." in result.output
     assert "--cursor ep-cursor-1" in result.output
     assert "prime traces episodes get <episode_id>" in result.output
+
+
+def test_episodes_list_filters_by_run_step_and_names_it_in_the_title(fake_client):
+    result = runner.invoke(
+        main_app, ["traces", "episodes", "list", "--run-id", "run_9f3k2m", "--run-step", "0"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert fake_client.calls["list_episodes"]["run_step"] == 0
+    assert "Episodes · run run_9f3k2m · step 0 · tb2" in result.output
+
+
+def test_episodes_list_rejects_a_negative_run_step(fake_client):
+    result = runner.invoke(main_app, ["traces", "episodes", "list", "--run-step", "-1"])
+
+    assert result.exit_code == 2
+    assert "list_episodes" not in fake_client.calls
 
 
 def test_episodes_list_moves_shared_values_to_the_title_and_keeps_differing_ones(fake_client):

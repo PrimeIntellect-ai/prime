@@ -1248,6 +1248,9 @@ def test_episode_not_found_ignores_the_stored_name_under_a_team_id_override(
     assert result.exit_code == 1
     assert "no episode ep_gone in team team_from_env." in result.stderr
     assert "Research" not in result.stderr
+    # `prime switch` refuses to run while PRIME_TEAM_ID is set.
+    assert "change or unset PRIME_TEAM_ID" in result.stderr
+    assert "prime switch" not in result.stderr
 
 
 def test_episode_not_found_renders_the_team_name_as_literal_text(fake_client, monkeypatch):

@@ -409,7 +409,13 @@ def _episode_not_found(episode_id: str) -> None:
     error_console.print(
         f"[red]Not found:[/red] no episode {escape(episode_id)} in {escape(owner)}."
     )
-    error_console.print("If another account owns it, switch with [bold]prime switch[/bold].")
+    if config.team_id_from_env:
+        # `prime switch` refuses to run while the environment pins the team.
+        error_console.print(
+            "If another account owns it, change or unset [bold]PRIME_TEAM_ID[/bold]."
+        )
+    else:
+        error_console.print("If another account owns it, switch with [bold]prime switch[/bold].")
 
 
 def _is_episode_not_found(error: APIError) -> bool:

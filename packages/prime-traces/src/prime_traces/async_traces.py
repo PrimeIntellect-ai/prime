@@ -581,6 +581,9 @@ class AsyncTracesClient:
         environment_id: Optional[str] = None,
         outcome: Optional[str] = None,
         has_error: Optional[bool] = None,
+        run_step: Optional[int] = None,
+        step_min: Optional[int] = None,
+        step_max: Optional[int] = None,
         created_after: Optional[str] = None,
         created_before: Optional[str] = None,
         limit: Optional[int] = None,
@@ -589,7 +592,9 @@ class AsyncTracesClient:
         """List episode summaries using the server's complete filter set.
 
         ``environment_id`` is extracted from the canonical episode
-        ``env.id``. Episodes carry no upload ``context`` map.
+        ``env.id``. Episodes carry no upload ``context`` map. Episodes have no
+        step of their own: ``run_step``, ``step_min`` and ``step_max`` match an
+        episode when one of its member traces has a matching ``run_step``.
         """
         params = _build_params(
             (
@@ -597,6 +602,9 @@ class AsyncTracesClient:
                 ("environment_id", environment_id),
                 ("outcome", outcome),
                 ("has_error", has_error),
+                ("run_step", run_step),
+                ("step_min", step_min),
+                ("step_max", step_max),
                 ("created_after", created_after),
                 ("created_before", created_before),
                 ("limit", limit),
@@ -645,7 +653,7 @@ class AsyncTracesClient:
         limit: Optional[int] = None,
         cursor: Optional[str] = None,
     ) -> TraceListPage:
-        """List an episode's member traces in upload order.
+        """List an episode's member traces, newest first (by ``created_at``).
 
         The filter vocabulary matches the backend member-trace route and the
         top-level trace listing, except that member traces have no ``sort``

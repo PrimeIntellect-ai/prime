@@ -406,7 +406,9 @@ def _episode_not_found(episode_id: str) -> None:
         owner = f"team {name or config.team_id}"
     else:
         owner = "your personal account"
-    error_console.print(f"[red]Not found:[/red] no episode {escape(episode_id)} in {owner}.")
+    error_console.print(
+        f"[red]Not found:[/red] no episode {escape(episode_id)} in {escape(owner)}."
+    )
     error_console.print("If another account owns it, switch with [bold]prime switch[/bold].")
 
 

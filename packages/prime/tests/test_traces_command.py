@@ -1250,6 +1250,20 @@ def test_episode_not_found_ignores_the_stored_name_under_a_team_id_override(
     assert "Research" not in result.stderr
 
 
+def test_episode_not_found_renders_the_team_name_as_literal_text(fake_client, monkeypatch):
+    class _MarkupTeamConfig(_TeamConfig):
+        team_name = "[/]research"
+
+    monkeypatch.setattr(traces_cmd, "Config", _MarkupTeamConfig)
+    fake_client.get_episode = _episode_missing
+
+    result = runner.invoke(main_app, ["traces", "episodes", "get", "ep_gone"])
+
+    assert result.exit_code == 1
+    assert "no episode ep_gone in team [/]research." in result.stderr
+    assert "MarkupError" not in result.output
+
+
 def test_traces_list_episode_lists_member_traces_with_the_agent_column(fake_client):
     result = runner.invoke(
         main_app, ["traces", "list", "--episode", "ep_4c1d", "--has-error", "--limit", "5"]

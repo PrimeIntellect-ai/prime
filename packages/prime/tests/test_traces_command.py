@@ -1136,6 +1136,18 @@ def test_episodes_get_lists_member_traces_in_the_order_they_ran(fake_client):
     assert result.output.index("t-early") < result.output.index("t-late")
 
 
+def test_episodes_get_omits_the_task_when_a_member_records_none(fake_client):
+    fake_client.list_episode_traces = lambda episode_id, **kwargs: TraceListPage(
+        items=[_summary(trace_id="t1"), _summary(trace_id="t2", task_id=None)],
+        next_cursor=None,
+    )
+
+    result = runner.invoke(main_app, ["traces", "episodes", "get", "ep_4c1d"])
+
+    assert result.exit_code == 0, result.output
+    assert "tb2-0187" not in result.output
+
+
 def test_episodes_get_without_traces_says_so(fake_client):
     fake_client.get_episode = lambda episode_id: _episode_detail(
         episode_id=episode_id, traces={"trace_count": 0, "agent_names": []}
@@ -1198,6 +1210,7 @@ def test_episodes_get_rejects_dest_without_raw(fake_client, tmp_path):
 class _TeamConfig:
     team_id = "team_123"
     team_name = "Research"
+    team_id_from_env = False
 
 
 def _episode_missing(episode_id, **kwargs):
@@ -1218,6 +1231,23 @@ def test_episodes_get_not_found_names_the_account_it_searched(fake_client, monke
     assert result.stdout == ""
     assert "Not found: no episode ep_gone in team Research." in result.stderr
     assert "prime switch" in result.stderr
+
+
+def test_episode_not_found_ignores_the_stored_name_under_a_team_id_override(
+    fake_client, monkeypatch
+):
+    class _EnvTeamConfig(_TeamConfig):
+        team_id = "team_from_env"
+        team_id_from_env = True
+
+    monkeypatch.setattr(traces_cmd, "Config", _EnvTeamConfig)
+    fake_client.get_episode = _episode_missing
+
+    result = runner.invoke(main_app, ["traces", "episodes", "get", "ep_gone"])
+
+    assert result.exit_code == 1
+    assert "no episode ep_gone in team team_from_env." in result.stderr
+    assert "Research" not in result.stderr
 
 
 def test_traces_list_episode_lists_member_traces_with_the_agent_column(fake_client):
@@ -1250,6 +1280,7 @@ def test_traces_list_episode_not_found_names_the_personal_account(fake_client, m
     class _PersonalConfig:
         team_id = None
         team_name = None
+        team_id_from_env = False
 
     monkeypatch.setattr(traces_cmd, "Config", _PersonalConfig)
     fake_client.list_episode_traces = _episode_missing

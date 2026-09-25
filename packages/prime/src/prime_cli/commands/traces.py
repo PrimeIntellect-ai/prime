@@ -401,7 +401,9 @@ def _episode_not_found(episode_id: str) -> None:
     """
     config = Config()
     if config.team_id:
-        owner = f"team {config.team_name or config.team_id}"
+        # The stored name belongs to the stored team, not one PRIME_TEAM_ID selects.
+        name = None if config.team_id_from_env else config.team_name
+        owner = f"team {name or config.team_id}"
     else:
         owner = "your personal account"
     error_console.print(f"[red]Not found:[/red] no episode {escape(episode_id)} in {owner}.")

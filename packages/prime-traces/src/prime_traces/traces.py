@@ -600,7 +600,7 @@ class TracesClient:
         limit: Optional[int] = None,
         cursor: Optional[str] = None,
     ) -> TraceListPage:
-        """List an episode's member traces in upload order.
+        """List an episode's member traces, newest first (by ``created_at``).
 
         The filter vocabulary matches the backend member-trace route and the
         top-level trace listing, except that member traces have no ``sort``

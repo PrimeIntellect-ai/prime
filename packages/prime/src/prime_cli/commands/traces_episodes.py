@@ -83,10 +83,11 @@ def episode_view(detail: EpisodeDetail, members: TraceListPage) -> List[Renderab
     row("episode", (detail.episode_id, "bold"))
     row("run", (detail.run_id or "-", ""))
     row("environment", (detail.environment_id or "-", ""))
-    # Members of one episode normally share a task; show it only when they agree.
-    tasks = {t.task_id for t in members.items if t.task_id}
-    if len(tasks) == 1 and not members.next_cursor:
-        row("task", (tasks.pop(), ""))
+    # Members of one episode normally share a task; show it only when every one
+    # of them records the same task.
+    task = _shared(t.task_id for t in members.items)
+    if task is not None and not members.next_cursor:
+        row("task", (task, ""))
     # The episode's own error and its traces' errors are separate: an environment
     # hook can fail after every trace succeeded, so both are always shown.
     row(

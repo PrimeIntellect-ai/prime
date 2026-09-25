@@ -2,13 +2,14 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple, TypeVar
 
 import click
 import typer
 from prime_traces import (
     APIError,
     Batch,
+    EpisodeListPage,
     LineFormat,
     NotFoundError,
     PaymentRequiredError,
@@ -32,6 +33,7 @@ from ..utils import (
     validate_output_format,
 )
 from ..utils.plain import is_plain_mode
+from .traces_episodes import episode_view, episodes_table
 from .traces_transcript import (
     Transcript,
     parse_node_range,
@@ -44,6 +46,8 @@ from .traces_transcript import (
 )
 
 app = PlainTyper(help="Upload and query traces (Prime Traces)", no_args_is_help=True)
+episodes_app = PlainTyper(help="List and inspect episodes", no_args_is_help=True)
+app.add_typer(episodes_app, name="episodes")
 console = get_console()
 error_console = get_console(stderr=True)
 
@@ -67,6 +71,23 @@ LIST_TRACES_JSON_HELP = json_output_help(
     ".items[] = trace summary {trace_id, run_id, task_id, score, execution, ...}",
     ".next_cursor? = string",
 )
+
+LIST_EPISODES_JSON_HELP = json_output_help(
+    ".items[] = episode summary {episode_id, run_id, environment_id, outcome, has_error,"
+    " error{type, message}, created_at, ...}",
+    ".next_cursor? = string",
+)
+
+GET_EPISODE_JSON_HELP = json_output_help(
+    ". = episode summary plus .traces = {trace_count, total_tokens, total_duration_ms,"
+    " any_trace_error, agent_names[]}",
+    "with --raw and no --dest: the exact stored episode (.traces = member trace IDs)",
+    "with --raw --dest: {dest, bytes_written}",
+)
+
+# Member traces shown under `prime traces episodes get`; the rest are one
+# `prime traces list --episode` away.
+EPISODE_MEMBERS_SHOWN = 20
 
 GET_TRACE_JSON_HELP = json_output_help(
     ". = trace summary object; with --raw and no --dest, the exact stored trace document",
@@ -308,12 +329,15 @@ def upload_traces(
         console.print(f"[green]Uploaded {len(receipts)} batch(es) from {escape(str(file))}[/green]")
 
 
+PageT = TypeVar("PageT", TraceListPage, EpisodeListPage)
+
+
 def _list_page(
-    fetch: Callable[[Optional[str]], TraceListPage],
+    fetch: Callable[[Optional[str]], PageT],
     *,
     page: int,
     cursor: Optional[str],
-) -> TraceListPage:
+) -> PageT:
     """Fetch one page, walking the pages before it when it is not the first.
 
     The service paginates by cursor only, so page N costs N requests. Every
@@ -324,14 +348,76 @@ def _list_page(
     for _ in range(page - 1):
         hop = fetch(cursor)
         if not hop.next_cursor:
-            return TraceListPage(items=[], next_cursor=None)
+            return hop.model_copy(update={"items": [], "next_cursor": None})
         cursor = hop.next_cursor
     return fetch(cursor)
+
+
+def _check_paging(page: int, cursor: Optional[str]) -> None:
+    if page < 1:
+        error_console.print("[red]Error:[/red] --page must be at least 1")
+        raise typer.Exit(1)
+    if cursor is not None and page > 1:
+        error_console.print("[red]Error:[/red] --page cannot be combined with --cursor")
+        raise typer.Exit(1)
+
+
+def _print_empty_page(noun: str, page: int, count: int) -> None:
+    if not count and page > 1:
+        console.print(f"[yellow]No {noun} on page {page}.[/yellow]")
+        console.print("Try [bold]--page 1[/bold] to start from the beginning.")
+
+
+def _print_page_footer(
+    *, count: int, next_cursor: Optional[str], page: int, limit: int, cursor: Optional[str]
+) -> None:
+    # A cursor resume has no page number to report, so it keeps the raw
+    # cursor hint alone; page mode mirrors the other list commands' footer.
+    if cursor is not None:
+        if next_cursor:
+            console.print(f"[dim]More results: --cursor {escape(next_cursor)}[/dim]")
+        return
+    if count and (next_cursor or page > 1):
+        start = (page - 1) * limit + 1
+        end = (page - 1) * limit + count
+        console.print(f"[dim]Page {page} • showing {start}-{end}[/dim]")
+    if next_cursor:
+        # `--page N+1` re-walks from the current top in a fresh process, so a
+        # row that arrives in between shifts every boundary and the row that
+        # fell off this page shows up again on the next. The cursor pins the
+        # boundary to this exact row, so it stays on offer.
+        console.print(f"[dim]Use --page {page + 1} to see more.[/dim]")
+        console.print(
+            f"[dim]Or resume from this exact boundary: --cursor {escape(next_cursor)}[/dim]"
+        )
+
+
+def _episode_not_found(episode_id: str) -> None:
+    """Explain a missing episode in terms of the account the lookup ran as.
+
+    The service answers the same 404 for an episode that does not exist and
+    for one another account owns, and the account is the active team when
+    one is set, so the wrong team is the likeliest cause.
+    """
+    config = Config()
+    if config.team_id:
+        owner = f"team {config.team_name or config.team_id}"
+    else:
+        owner = "your personal account"
+    error_console.print(f"[red]Not found:[/red] no episode {escape(episode_id)} in {owner}.")
+    error_console.print("If another account owns it, switch with [bold]prime switch[/bold].")
+
+
+def _is_episode_not_found(error: APIError) -> bool:
+    return isinstance(error, NotFoundError) and error.code == "episode_not_found"
 
 
 @app.command("list", epilog=LIST_TRACES_JSON_HELP)
 def list_traces(
     run_id: Optional[str] = typer.Option(None, "--run-id", help="Filter by run ID"),
+    episode_id: Optional[str] = typer.Option(
+        None, "--episode", help="Only this episode's traces (newest first; no --sort)"
+    ),
     task_id: Optional[str] = typer.Option(None, "--task-id", help="Filter by task ID"),
     model_id: Optional[str] = typer.Option(None, "--model-id", help="Filter by model ID"),
     outcome: Optional[str] = typer.Option(None, "--outcome", help="Filter by outcome"),
@@ -366,16 +452,32 @@ def list_traces(
 ) -> None:
     """List trace summaries, newest first."""
     validate_output_format(output, error_console)
-    if page < 1:
-        error_console.print("[red]Error:[/red] --page must be at least 1")
-        raise typer.Exit(1)
-    if cursor is not None and page > 1:
-        error_console.print("[red]Error:[/red] --page cannot be combined with --cursor")
+    _check_paging(page, cursor)
+    if episode_id is not None and sort is not None:
+        error_console.print(
+            "[red]Error:[/red] --sort cannot be combined with --episode;"
+            " an episode's traces are listed newest first"
+        )
         raise typer.Exit(1)
     try:
         client = _traces_client()
 
         def fetch(page_cursor: Optional[str]) -> TraceListPage:
+            if episode_id is not None:
+                return client.list_episode_traces(
+                    episode_id,
+                    run_id=run_id,
+                    task_id=task_id,
+                    model_id=model_id,
+                    outcome=outcome,
+                    has_error=has_error,
+                    reward_min=reward_min,
+                    reward_max=reward_max,
+                    created_after=created_after,
+                    created_before=created_before,
+                    limit=limit,
+                    cursor=page_cursor,
+                )
             return client.list(
                 run_id=run_id,
                 task_id=task_id,
@@ -401,7 +503,10 @@ def list_traces(
         error_console.print(f"[red]Payment Required:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except APIError as e:
-        error_console.print(f"[red]Error:[/red] {escape(str(e))}")
+        if episode_id is not None and _is_episode_not_found(e):
+            _episode_not_found(episode_id)
+        else:
+            error_console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except Exception as e:
         error_console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
@@ -412,9 +517,15 @@ def list_traces(
         output_data_as_json(result.model_dump(mode="json"), console)
         return
 
-    table = Table(title="Traces")
+    # An episode's traces share its run, so the agent that produced each one
+    # is the more useful column there.
+    title = "Traces" if episode_id is None else f"Traces · episode {episode_id}"
+    table = Table(title=Text(title))
     table.add_column("Trace ID", style="cyan", no_wrap=True)
-    table.add_column("Run", style="green")
+    if episode_id is None:
+        table.add_column("Run", style="green")
+    else:
+        table.add_column("Agent", style="green")
     table.add_column("Task")
     table.add_column("Reward", justify="right")
     table.add_column("Outcome")
@@ -424,36 +535,21 @@ def list_traces(
         reward = summary.score.reward
         table.add_row(
             escape(summary.trace_id),
-            escape(summary.run_id or "-"),
+            escape((summary.run_id if episode_id is None else summary.agent_name) or "-"),
             escape(summary.task_id or "-"),
             "-" if reward is None else f"{reward:.2f}",
             escape(summary.score.outcome or "-"),
             escape(summary.created_at.isoformat()),
         )
-    if not result.items and page > 1:
-        console.print(f"[yellow]No traces on page {page}.[/yellow]")
-        console.print("Try [bold]--page 1[/bold] to start from the beginning.")
+    _print_empty_page("traces", page, len(result.items))
     console.print(table)
-
-    # A cursor resume has no page number to report, so it keeps the raw
-    # cursor hint alone; page mode mirrors the other list commands' footer.
-    if cursor is not None:
-        if result.next_cursor:
-            console.print(f"[dim]More results: --cursor {escape(result.next_cursor)}[/dim]")
-        return
-    if result.items and (result.next_cursor or page > 1):
-        start = (page - 1) * limit + 1
-        end = (page - 1) * limit + len(result.items)
-        console.print(f"[dim]Page {page} • showing {start}-{end}[/dim]")
-    if result.next_cursor:
-        # `--page N+1` re-walks from the current top in a fresh process, so a
-        # trace that arrives in between shifts every boundary and the row
-        # that fell off this page shows up again on the next. The cursor
-        # pins the boundary to this exact row, so it stays on offer.
-        console.print(f"[dim]Use --page {page + 1} to see more.[/dim]")
-        console.print(
-            f"[dim]Or resume from this exact boundary: --cursor {escape(result.next_cursor)}[/dim]"
-        )
+    _print_page_footer(
+        count=len(result.items),
+        next_cursor=result.next_cursor,
+        page=page,
+        limit=limit,
+        cursor=cursor,
+    )
 
 
 @app.command("get", epilog=GET_TRACE_JSON_HELP)
@@ -710,3 +806,157 @@ def delete_traces(
         error_console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         error_console.print_exception()
         raise typer.Exit(1)
+
+
+@episodes_app.command("list", epilog=LIST_EPISODES_JSON_HELP)
+def list_episodes(
+    run_id: Optional[str] = typer.Option(None, "--run-id", help="Filter by run ID"),
+    environment_id: Optional[str] = typer.Option(
+        None, "--environment-id", "--env", help="Filter by environment ID"
+    ),
+    outcome: Optional[str] = typer.Option(None, "--outcome", help="Filter by outcome"),
+    has_error: Optional[bool] = typer.Option(
+        None, "--has-error/--no-has-error", help="Filter by the episode's own error status"
+    ),
+    created_after: Optional[str] = typer.Option(None, "--created-after", help="ISO timestamp"),
+    created_before: Optional[str] = typer.Option(None, "--created-before", help="ISO timestamp"),
+    page: int = typer.Option(
+        1,
+        "--page",
+        "-p",
+        help=(
+            "Page number; each run walks the pages before it from the current top, so"
+            " boundaries shift as episodes arrive (use --cursor for a fixed boundary)"
+        ),
+    ),
+    limit: int = typer.Option(20, "--limit", help="Max results per page (up to 100)"),
+    cursor: Optional[str] = typer.Option(
+        None,
+        "--cursor",
+        help="Resume from a cursor returned by a previous page (cannot be combined with --page)",
+    ),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """List episode summaries, newest first."""
+    validate_output_format(output, error_console)
+    _check_paging(page, cursor)
+    try:
+        client = _traces_client()
+
+        def fetch(page_cursor: Optional[str]) -> EpisodeListPage:
+            return client.list_episodes(
+                run_id=run_id,
+                environment_id=environment_id,
+                outcome=outcome,
+                has_error=has_error,
+                created_after=created_after,
+                created_before=created_before,
+                limit=limit,
+                cursor=page_cursor,
+            )
+
+        result = _list_page(fetch, page=page, cursor=cursor)
+    except typer.Exit:
+        raise
+    except UnauthorizedError as e:
+        error_console.print(f"[red]Unauthorized:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except PaymentRequiredError as e:
+        error_console.print(f"[red]Payment Required:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except APIError as e:
+        error_console.print(f"[red]Error:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except Exception as e:
+        error_console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
+        error_console.print_exception()
+        raise typer.Exit(1)
+
+    if output == "json":
+        output_data_as_json(result.model_dump(mode="json"), console)
+        return
+
+    _print_empty_page("episodes", page, len(result.items))
+    console.print(episodes_table(result, run_id=run_id))
+    _print_page_footer(
+        count=len(result.items),
+        next_cursor=result.next_cursor,
+        page=page,
+        limit=limit,
+        cursor=cursor,
+    )
+    if result.items:
+        console.print("[dim]Details: prime traces episodes get <episode_id>[/dim]")
+
+
+@episodes_app.command("get", epilog=GET_EPISODE_JSON_HELP)
+def get_episode(
+    episode_id: str = typer.Argument(..., help="Episode ID"),
+    raw: bool = typer.Option(False, "--raw", help="Fetch the exact stored episode"),
+    dest: Optional[Path] = typer.Option(
+        None, "--dest", help="With --raw: write the episode to this file"
+    ),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """Get one episode with its newest traces, or the stored episode with --raw."""
+    validate_output_format(output, error_console)
+    if dest is not None and not raw:
+        error_console.print("[red]--dest requires --raw[/red]")
+        raise typer.Exit(1)
+
+    document: Optional[bytes] = None
+    members: Optional[TraceListPage] = None
+    try:
+        client = _traces_client()
+        if raw:
+            document = client.get_episode_raw(episode_id)
+        else:
+            detail = client.get_episode(episode_id)
+            if output != "json":
+                members = client.list_episode_traces(episode_id, limit=EPISODE_MEMBERS_SHOWN)
+    except typer.Exit:
+        raise
+    except UnauthorizedError as e:
+        error_console.print(f"[red]Unauthorized:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except PaymentRequiredError as e:
+        error_console.print(f"[red]Payment Required:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except APIError as e:
+        if _is_episode_not_found(e):
+            _episode_not_found(episode_id)
+        else:
+            error_console.print(f"[red]Error:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except Exception as e:
+        error_console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
+        error_console.print_exception()
+        raise typer.Exit(1)
+
+    if document is not None:
+        # The stored episode lists its traces by ID only, so it is small enough
+        # to read whole. Keep its exact bytes either way.
+        if dest is None:
+            stdout = click.get_binary_stream("stdout")
+            stdout.write(document)
+            stdout.flush()
+            return
+        try:
+            dest.write_bytes(document)
+        except OSError as e:
+            error_console.print(
+                f"[red]Error:[/red] could not write {escape(str(dest))}: {escape(str(e))}"
+            )
+            raise typer.Exit(1)
+        if output == "json":
+            output_data_as_json({"dest": str(dest), "bytes_written": len(document)}, console)
+        else:
+            console.print(f"[green]Wrote {len(document)} bytes to {escape(str(dest))}[/green]")
+        return
+
+    if output == "json":
+        output_data_as_json(detail.model_dump(mode="json"), console)
+        return
+    assert members is not None
+    for renderable in episode_view(detail, members):
+        console.print(renderable)

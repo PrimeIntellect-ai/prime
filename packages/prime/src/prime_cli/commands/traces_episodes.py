@@ -5,9 +5,15 @@ tests can render without a network. Every producer-written string is wrapped
 in `Text` rather than interpolated into markup, so it is always literal.
 """
 
-from typing import List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple
 
-from prime_traces import EpisodeDetail, EpisodeError, EpisodeListPage, TraceListPage
+from prime_traces import (
+    EpisodeDetail,
+    EpisodeError,
+    EpisodeListPage,
+    TraceListPage,
+    TraceSummary,
+)
 from rich.console import RenderableType
 from rich.table import Table
 from rich.text import Text
@@ -15,39 +21,50 @@ from rich.text import Text
 from .traces_transcript import _duration
 
 TIME_FORMAT = "%Y-%m-%d %H:%M:%SZ"
-ROW_TIME_FORMAT = "%Y-%m-%d %H:%MZ"
 
 
 def _error_text(error: EpisodeError) -> str:
     return ": ".join(part for part in (error.type, error.message) if part)
 
 
+def _shared(values: Iterable[Optional[str]]) -> Optional[str]:
+    """The one value every row has, or None when the rows differ or lack it."""
+    distinct = set(values)
+    return distinct.pop() if len(distinct) == 1 else None
+
+
 def episodes_table(page: EpisodeListPage, *, run_id: Optional[str]) -> Table:
-    """One row per episode. A run filter moves the run from a column to the title."""
-    title = "Episodes" if run_id is None else f"Episodes · run {run_id}"
+    """One row per episode.
+
+    A run or environment that every row shares moves from its column into the
+    title, so the table keeps its width for what differs between episodes.
+    """
+    run = run_id or _shared(e.run_id for e in page.items)
+    environment = _shared(e.environment_id for e in page.items)
+    title = " · ".join(part for part in ("Episodes", run and f"run {run}", environment) if part)
     table = Table(title=Text(title), title_justify="left")
     table.add_column("Episode ID", style="cyan", no_wrap=True)
-    if run_id is None:
+    if run is None:
         table.add_column("Run", style="green", no_wrap=True)
-    table.add_column("Environment", no_wrap=True)
+    if environment is None:
+        table.add_column("Environment", overflow="ellipsis")
     table.add_column("Outcome", no_wrap=True)
     # The type alone keeps every row on one line; `get` shows the message.
-    table.add_column("Error")
+    table.add_column("Error", no_wrap=True)
     table.add_column("Created", no_wrap=True)
     for episode in page.items:
         row = [Text(episode.episode_id)]
-        if run_id is None:
+        if run is None:
             row.append(Text(episode.run_id or "-"))
+        if environment is None:
+            row.append(Text(episode.environment_id or "-"))
         row += [
-            Text(episode.environment_id or "-"),
             Text(episode.outcome or "-", style="red" if episode.has_error else ""),
             Text(
                 episode.error.type or ("yes" if episode.has_error else "-"),
                 style="red" if episode.has_error else "",
-                no_wrap=True,
-                overflow="ellipsis",
             ),
-            Text(episode.created_at.strftime(ROW_TIME_FORMAT)),
+            Text(episode.created_at.strftime(TIME_FORMAT)),
         ]
         table.add_row(*row)
     return table
@@ -103,7 +120,8 @@ def episode_view(detail: EpisodeDetail, members: TraceListPage) -> List[Renderab
         out.append(Text("No traces were recorded for this episode.", style="dim"))
         return out
 
-    out.append(members_table(members))
+    # Oldest first, so the table reads in the order the agents ran.
+    out.append(members_table(members.items[::-1]))
     shown = len(members.items)
     if members.next_cursor:
         out.append(
@@ -117,7 +135,7 @@ def episode_view(detail: EpisodeDetail, members: TraceListPage) -> List[Renderab
     return out
 
 
-def members_table(members: TraceListPage) -> Table:
+def members_table(members: List[TraceSummary]) -> Table:
     table = Table(title="Traces", title_justify="left")
     table.add_column("Trace ID", style="cyan", no_wrap=True)
     table.add_column("Agent")
@@ -126,7 +144,7 @@ def members_table(members: TraceListPage) -> Table:
     table.add_column("Turns", justify="right")
     table.add_column("Tokens", justify="right")
     table.add_column("Duration", justify="right", no_wrap=True)
-    for trace in members.items:
+    for trace in members:
         reward = trace.score.reward
         activity = (trace.model_extra or {}).get("activity")
         turns = activity.get("model_turns") if isinstance(activity, dict) else None

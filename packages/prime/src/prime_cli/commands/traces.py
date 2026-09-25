@@ -33,7 +33,7 @@ from ..utils import (
     validate_output_format,
 )
 from ..utils.plain import is_plain_mode
-from .traces_episodes import episode_view, episodes_table
+from .traces_episodes import TIME_FORMAT, episode_view, episodes_table
 from .traces_transcript import (
     Transcript,
     parse_node_range,
@@ -517,29 +517,32 @@ def list_traces(
         output_data_as_json(result.model_dump(mode="json"), console)
         return
 
-    # An episode's traces share its run, so the agent that produced each one
-    # is the more useful column there.
+    # An episode's traces share its run and task, so the agent that produced
+    # each one takes their place.
     title = "Traces" if episode_id is None else f"Traces · episode {episode_id}"
-    table = Table(title=Text(title))
+    table = Table(title=Text(title), title_justify="left")
     table.add_column("Trace ID", style="cyan", no_wrap=True)
     if episode_id is None:
         table.add_column("Run", style="green")
+        table.add_column("Task")
     else:
         table.add_column("Agent", style="green")
-    table.add_column("Task")
     table.add_column("Reward", justify="right")
     table.add_column("Outcome")
-    table.add_column("Created")
+    table.add_column("Created", no_wrap=True)
 
     for summary in result.items:
         reward = summary.score.reward
+        if episode_id is None:
+            source = [escape(summary.run_id or "-"), escape(summary.task_id or "-")]
+        else:
+            source = [escape(summary.agent_name or "-")]
         table.add_row(
             escape(summary.trace_id),
-            escape((summary.run_id if episode_id is None else summary.agent_name) or "-"),
-            escape(summary.task_id or "-"),
+            *source,
             "-" if reward is None else f"{reward:.2f}",
             escape(summary.score.outcome or "-"),
-            escape(summary.created_at.isoformat()),
+            escape(summary.created_at.strftime(TIME_FORMAT)),
         )
     _print_empty_page("traces", page, len(result.items))
     console.print(table)
@@ -886,7 +889,7 @@ def list_episodes(
         cursor=cursor,
     )
     if result.items:
-        console.print("[dim]Details: prime traces episodes get <episode_id>[/dim]")
+        console.print(Text("Details: prime traces episodes get <episode_id>", style="dim"))
 
 
 @episodes_app.command("get", epilog=GET_EPISODE_JSON_HELP)

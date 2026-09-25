@@ -1018,28 +1018,33 @@ def test_episodes_list_forwards_filters_and_moves_the_run_to_the_title(fake_clie
         "limit": 10,
         "cursor": None,
     }
-    assert "Episodes · run run_9f3k2m" in result.output
+    assert "Episodes · run run_9f3k2m · tb2" in result.output
     assert "Run " not in result.output  # the run is in the title, not a column
     assert "ep_4c1d" in result.output
     assert "EnvHookError" in result.output
     assert "teardown timed out" not in result.output  # the message is left to `get`
-    assert "2026-07-20 18:02Z" in result.output
+    assert "2026-07-20 18:02:11Z" in result.output
     assert "Use --page 2 to see more." in result.output
     assert "--cursor ep-cursor-1" in result.output
     assert "prime traces episodes get <episode_id>" in result.output
 
 
-def test_episodes_list_without_run_filter_shows_the_run_column(fake_client):
+def test_episodes_list_moves_shared_values_to_the_title_and_keeps_differing_ones(fake_client):
     fake_client.list_episodes = lambda **kwargs: EpisodeListPage(
-        items=[_episode(has_error=False, error={"type": None, "message": None})],
+        items=[
+            _episode(episode_id="ep_a", run_id="run_a", has_error=False),
+            _episode(episode_id="ep_b", run_id="run_b", has_error=False),
+        ],
         next_cursor=None,
     )
 
     result = runner.invoke(main_app, ["traces", "episodes", "list"])
 
     assert result.exit_code == 0, result.output
-    assert "Run" in result.output
-    assert "run_9f3k2m" in result.output
+    assert "Episodes · tb2" in result.output  # every row shares the environment
+    assert "Environment" not in result.output
+    assert "Run" in result.output  # the runs differ, so they keep their column
+    assert "run_a" in result.output and "run_b" in result.output
     assert "--page" not in result.output
 
 
@@ -1113,6 +1118,22 @@ def test_episodes_get_points_at_the_full_member_listing(fake_client):
     assert result.exit_code == 0, result.output
     assert "Showing the newest 20 of 45 traces." in result.output
     assert "prime traces list --episode ep_4c1d" in result.output
+
+
+def test_episodes_get_lists_member_traces_in_the_order_they_ran(fake_client):
+    # The service returns newest first; the episode view reads oldest first.
+    fake_client.list_episode_traces = lambda episode_id, **kwargs: TraceListPage(
+        items=[
+            _summary(trace_id="t-late", agent_name="reviewer"),
+            _summary(trace_id="t-early", agent_name="planner"),
+        ],
+        next_cursor=None,
+    )
+
+    result = runner.invoke(main_app, ["traces", "episodes", "get", "ep_4c1d"])
+
+    assert result.exit_code == 0, result.output
+    assert result.output.index("t-early") < result.output.index("t-late")
 
 
 def test_episodes_get_without_traces_says_so(fake_client):

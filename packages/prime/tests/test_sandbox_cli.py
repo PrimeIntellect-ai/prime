@@ -1011,3 +1011,22 @@ def test_sandbox_list_json_includes_expiry_fields(monkeypatch: pytest.MonkeyPatc
     assert by_id["sbx-run"]["expires_at"] is not None
     assert by_id["sbx-pending"]["timeout_minutes"] == 45
     assert by_id["sbx-pending"]["expires_at"] is None
+
+
+def test_sandbox_create_defaults_disk_size_gb_to_5(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_cli(monkeypatch)
+    captured: dict[str, Any] = {}
+
+    def mock_create(self: Any, request: Any) -> Any:
+        captured["request"] = request
+        return SimpleNamespace(id="sbx-default-disk")
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.create", mock_create)
+
+    result = runner.invoke(app, ["sandbox", "create", "team-1/vm:v1", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert captured["request"].disk_size_gb == 5.0
+    assert "5.0GB disk" in strip_ansi(result.output)

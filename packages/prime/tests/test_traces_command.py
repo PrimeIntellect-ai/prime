@@ -1211,7 +1211,8 @@ def test_episodes_get_raw_failed_write_keeps_the_existing_dest(fake_client, tmp_
     )
 
     assert result.exit_code == 1
-    assert "No space left on device" in result.stderr
+    # The message names the full temporary path, so Rich may wrap it anywhere.
+    assert "No space left on device" in " ".join(result.stderr.split())
     assert dest.read_bytes() == b"previous"
     assert sorted(p.name for p in tmp_path.iterdir()) == ["episode.json"]
 

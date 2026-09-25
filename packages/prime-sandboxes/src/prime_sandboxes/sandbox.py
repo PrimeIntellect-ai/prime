@@ -1804,6 +1804,34 @@ def _is_gateway_sandbox_not_found(response: Optional[httpx.Response]) -> bool:
     return body.get("error") == "sandbox_not_found"
 
 
+def _is_gateway_sandbox_terminated(response: httpx.Response) -> bool:
+    """Return True when gateway reports the sandbox was deleted (HTTP 410)."""
+    if response.status_code != 410:
+        return False
+    try:
+        body = response.json()
+    except Exception:
+        return False
+    return isinstance(body, dict) and body.get("error") == "sandbox_terminated"
+
+
+def _raise_sandbox_gone(
+    sandbox_id: str,
+    ctx: dict,
+    cause: BaseException,
+    command: Optional[str] = None,
+) -> NoReturn:
+    """Raise SandboxNotRunningError for a sandbox that is terminated or gone from its node."""
+    ctx["status"] = "TERMINATED"
+    if not ctx.get("error_type"):
+        ctx["error_type"] = "SANDBOX_NOT_FOUND"
+    if not ctx.get("error_message"):
+        ctx["error_message"] = (
+            "Sandbox is terminated or no longer present on its node. Please create a new sandbox."
+        )
+    _raise_not_running_error(sandbox_id, ctx, command=command, cause=cause)
+
+
 def _raise_not_running_error(
     sandbox_id: str,
     ctx: dict,
@@ -2567,16 +2595,12 @@ class SandboxClient:
                     raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
 
                 if e.code == Code.NOT_FOUND:
-                    ctx = self._get_sandbox_error_context(sandbox_id)
-                    ctx["status"] = "TERMINATED"
-                    if not ctx.get("error_type"):
-                        ctx["error_type"] = "SANDBOX_NOT_FOUND"
-                    if not ctx.get("error_message"):
-                        ctx["error_message"] = (
-                            "Sandbox is no longer present on the runtime node. "
-                            "Please create a new sandbox."
-                        )
-                    _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
+                    _raise_sandbox_gone(
+                        sandbox_id,
+                        self._get_sandbox_error_context(sandbox_id),
+                        cause=e,
+                        command=command,
+                    )
 
                 raise APIError(f"Connect RPC failed ({e.code.value}): {e.message}") from e
             except APIError:
@@ -3246,6 +3270,10 @@ class SandboxClient:
             except httpx.TimeoutException as e:
                 raise UploadTimeoutError(sandbox_id, file_path, effective_timeout) from e
             except httpx.HTTPStatusError as e:
+                if _is_gateway_sandbox_terminated(e.response):
+                    _raise_sandbox_gone(
+                        sandbox_id, self._get_sandbox_error_context(sandbox_id), cause=e
+                    )
                 if e.response.status_code == 401 and self._should_retry_401(sandbox_id, reauthed):
                     reauthed = True
                     continue
@@ -3310,6 +3338,10 @@ class SandboxClient:
             except httpx.TimeoutException:
                 raise UploadTimeoutError(sandbox_id, file_path, effective_timeout)
             except httpx.HTTPStatusError as e:
+                if _is_gateway_sandbox_terminated(e.response):
+                    _raise_sandbox_gone(
+                        sandbox_id, self._get_sandbox_error_context(sandbox_id), cause=e
+                    )
                 if e.response.status_code == 401 and self._should_retry_401(sandbox_id, reauthed):
                     reauthed = True
                     continue
@@ -3361,6 +3393,10 @@ class SandboxClient:
             except httpx.TimeoutException as e:
                 raise DownloadTimeoutError(sandbox_id, file_path, effective_timeout) from e
             except httpx.HTTPStatusError as e:
+                if _is_gateway_sandbox_terminated(e.response):
+                    _raise_sandbox_gone(
+                        sandbox_id, self._get_sandbox_error_context(sandbox_id), cause=e
+                    )
                 if e.response.status_code == 401 and self._should_retry_401(sandbox_id, reauthed):
                     reauthed = True
                     continue
@@ -3430,6 +3466,10 @@ class SandboxClient:
                     f"({e.__class__.__name__}): {file_path}"
                 ) from e
             except httpx.HTTPStatusError as e:
+                if _is_gateway_sandbox_terminated(e.response):
+                    _raise_sandbox_gone(
+                        sandbox_id, self._get_sandbox_error_context(sandbox_id), cause=e
+                    )
                 if e.response.status_code == 401 and self._should_retry_401(sandbox_id, reauthed):
                     reauthed = True
                     continue
@@ -4161,16 +4201,12 @@ class AsyncSandboxClient:
                     raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
 
                 if e.code == Code.NOT_FOUND:
-                    ctx = await self._get_sandbox_error_context(sandbox_id)
-                    ctx["status"] = "TERMINATED"
-                    if not ctx.get("error_type"):
-                        ctx["error_type"] = "SANDBOX_NOT_FOUND"
-                    if not ctx.get("error_message"):
-                        ctx["error_message"] = (
-                            "Sandbox is no longer present on the runtime node. "
-                            "Please create a new sandbox."
-                        )
-                    _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
+                    _raise_sandbox_gone(
+                        sandbox_id,
+                        await self._get_sandbox_error_context(sandbox_id),
+                        cause=e,
+                        command=command,
+                    )
 
                 raise APIError(f"Connect RPC failed ({e.code.value}): {e.message}") from e
             except APIError:
@@ -4871,6 +4907,10 @@ class AsyncSandboxClient:
             except httpx.TimeoutException as e:
                 raise UploadTimeoutError(sandbox_id, file_path, effective_timeout) from e
             except httpx.HTTPStatusError as e:
+                if _is_gateway_sandbox_terminated(e.response):
+                    _raise_sandbox_gone(
+                        sandbox_id, await self._get_sandbox_error_context(sandbox_id), cause=e
+                    )
                 if e.response.status_code == 401 and await self._should_retry_401(
                     sandbox_id, reauthed
                 ):
@@ -4936,6 +4976,10 @@ class AsyncSandboxClient:
             except httpx.TimeoutException:
                 raise UploadTimeoutError(sandbox_id, file_path, effective_timeout)
             except httpx.HTTPStatusError as e:
+                if _is_gateway_sandbox_terminated(e.response):
+                    _raise_sandbox_gone(
+                        sandbox_id, await self._get_sandbox_error_context(sandbox_id), cause=e
+                    )
                 if e.response.status_code == 401 and await self._should_retry_401(
                     sandbox_id, reauthed
                 ):
@@ -4992,6 +5036,10 @@ class AsyncSandboxClient:
             except httpx.TimeoutException as e:
                 raise DownloadTimeoutError(sandbox_id, file_path, effective_timeout) from e
             except httpx.HTTPStatusError as e:
+                if _is_gateway_sandbox_terminated(e.response):
+                    _raise_sandbox_gone(
+                        sandbox_id, await self._get_sandbox_error_context(sandbox_id), cause=e
+                    )
                 if e.response.status_code == 401 and await self._should_retry_401(
                     sandbox_id, reauthed
                 ):
@@ -5060,6 +5108,10 @@ class AsyncSandboxClient:
                     f"({e.__class__.__name__}): {file_path}"
                 ) from e
             except httpx.HTTPStatusError as e:
+                if _is_gateway_sandbox_terminated(e.response):
+                    _raise_sandbox_gone(
+                        sandbox_id, await self._get_sandbox_error_context(sandbox_id), cause=e
+                    )
                 if e.response.status_code == 401 and await self._should_retry_401(
                     sandbox_id, reauthed
                 ):

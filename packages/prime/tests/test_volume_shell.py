@@ -95,3 +95,79 @@ def test_client_session_wire_contract():
         ("GET", "/training/volumes/data/sessions/s1", {"teamId": "t1"}),
         ("DELETE", "/training/volumes/data/sessions/s1", {"teamId": "t1"}),
     ]
+
+
+def test_shell_pins_session_host_key(monkeypatch, tmp_path):
+    key = tmp_path / "key"
+    key.write_text("test")
+    monkeypatch.setattr(volumes.Config, "ssh_key_path", property(lambda self: str(key)))
+
+    session = SimpleNamespace(
+        id="s1",
+        status="RUNNING",
+        read_only=True,
+        ssh_connection="ubuntu@vol-shell-1.corp.ts.net",
+        host_public_key="ssh-rsa AAAHOSTKEY",
+    )
+    monkeypatch.setattr(
+        volumes,
+        "_client",
+        lambda: (
+            SimpleNamespace(
+                create_volume_session=lambda *a, **kw: session,
+                get_volume_session=lambda *a, **kw: session,
+            ),
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        volumes.subprocess,
+        "run",
+        lambda cmd, **kw: (commands.append(cmd) or SimpleNamespace(returncode=0)),
+    )
+    commands = []
+    result = CliRunner().invoke(
+        app, ["volumes", "shell", "data"], env={"PRIME_DISABLE_VERSION_CHECK": "1"}
+    )
+    assert result.exit_code == 0, result.output
+    cmd = commands[0]
+    assert cmd[0] == "ssh"
+    assert any(c == "-o StrictHostKeyChecking=yes" for c in cmd)
+    kh = next(
+        c.removeprefix("-o UserKnownHostsFile=")
+        for c in cmd
+        if c.startswith("-o UserKnownHostsFile=")
+    )
+    assert "vol-shell-1.corp.ts.net ssh-rsa AAAHOSTKEY" in open(kh).read()
+    # Printed transfer examples pin the same options.
+    assert "-o StrictHostKeyChecking=yes" in result.output
+
+
+def test_shell_without_host_key_uses_user_known_hosts(monkeypatch, tmp_path):
+    key = tmp_path / "key"
+    key.write_text("test")
+    monkeypatch.setattr(volumes.Config, "ssh_key_path", property(lambda self: str(key)))
+    monkeypatch.setattr(
+        volumes,
+        "_client",
+        lambda: (
+            SimpleNamespace(
+                create_volume_session=lambda *a, **kw: SimpleNamespace(
+                    id="s1", status="RUNNING", read_only=True,
+                    ssh_connection="ubuntu@h.corp.ts.net", host_public_key=None,
+                )
+            ),
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        volumes.subprocess,
+        "run",
+        lambda cmd, **kw: (commands.append(cmd) or SimpleNamespace(returncode=0)),
+    )
+    commands = []
+    result = CliRunner().invoke(
+        app, ["volumes", "shell", "data"], env={"PRIME_DISABLE_VERSION_CHECK": "1"}
+    )
+    assert result.exit_code == 0, result.output
+    assert not any("UserKnownHostsFile" in c for c in commands[0])

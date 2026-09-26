@@ -792,11 +792,102 @@ def test_get_command_raw_to_dest_honors_json_output(fake_client, tmp_path):
     assert json.loads(result.output) == {"dest": str(dest), "bytes_written": 29}
 
 
+TOOLS = [
+    {
+        "type": "function",
+        "name": "Bash",
+        "description": "Executes a bash command.\n\nLong usage notes follow.",
+        "parameters": {"type": "object", "properties": {"command": {"type": "string"}}},
+    },
+    {
+        "type": "function",
+        "name": "Read",
+        "description": "Reads a file.",
+        "parameters": {"type": "object", "properties": {"file_path": {"type": "string"}}},
+    },
+]
+
+# The fields `get` renders beyond the list columns: the full service response.
+GET_FIELDS = {
+    "environment_id": "terminal-bench-2",
+    "duration_ms": 258000,
+    "context": {"source": "hosted_eval", "run_type": "eval"},
+    "user_id": "user_1",
+    "run_step": None,
+    "task_key": "k" * 64,
+    "task_hash": "h" * 64,
+    "metrics": {"graded": 0.0, "smell_pass": 1.0},
+    "activity": {"total_entries": 5, "user_messages": 1, "model_turns": 2, "tool_calls": 2},
+    "tool_definitions": TOOLS,
+}
+
+
+@pytest.fixture()
+def full_get(fake_client, monkeypatch):
+    monkeypatch.setattr(traces_cmd.console, "width", 120)
+    fake_client.get = lambda trace_id: _summary(trace_id=trace_id, **GET_FIELDS)
+    return fake_client
+
+
+def test_get_shows_fixed_fields_without_dumping_tool_schemas(full_get):
+    result = runner.invoke(main_app, ["traces", "get", "8d3f1a2b"])
+
+    assert result.exit_code == 0, result.output
+    out = result.output
+    for expected in (
+        "run_9f3k2m  ·  eval",
+        "prime/deepseek-v4-flash",
+        "done",
+        "reward 0.85",
+        "4m 18s",
+        "84,213",
+        "407.5 KiB",
+        "2 model turns · 2 tool calls · 1 user messages · 5 entries",
+        "2  Bash, Read",
+        "source=hosted_eval",
+        "smell_pass",
+        "ingested 2026-07-20 18:06:02Z",
+        "prime traces get 8d3f1a2b --raw",
+    ):
+        assert expected in out, expected
+    # The schemas, dict reprs and internal keys stay out of the table.
+    assert "Executes a bash command" not in out
+    assert "{'provider'" not in out
+    assert "task_hash" not in out and "k" * 64 not in out
+
+
+def test_get_json_still_returns_every_field(full_get):
+    result = runner.invoke(main_app, ["traces", "get", "8d3f1a2b", "-o", "json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["tool_definitions"][0]["name"] == "Bash"
+    assert payload["task_hash"] == "h" * 64
+
+
+def test_get_summary_without_extra_fields(fake_client, monkeypatch):
+    monkeypatch.setattr(traces_cmd.console, "width", 120)
+
+    result = runner.invoke(main_app, ["traces", "get", "8d3f1a2b"])
+
+    assert result.exit_code == 0, result.output
+    assert "metrics" not in result.output
+    assert "tools" not in result.output
+
+
 def test_export_command_is_not_registered(fake_client, tmp_path):
     """Exports are unimplemented server-side (every handler raises, answering
     500), so the command is deliberately absent rather than shipped broken."""
     result = runner.invoke(main_app, ["traces", "export", str(tmp_path / "out.jsonl")])
     assert result.exit_code != 0
+
+
+@pytest.mark.parametrize("args", [["transcript", "8d3f1a2b"], ["episodes", "list"]])
+def test_removed_commands_are_not_registered(fake_client, args):
+    result = runner.invoke(main_app, ["traces", *args])
+
+    assert result.exit_code == 2
+    assert "No such command" in result.output
 
 
 def test_delete_command_requires_exactly_one_target(fake_client):

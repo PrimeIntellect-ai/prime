@@ -146,9 +146,7 @@ def ssh(
     read_only: bool = typer.Option(
         False, "--read-only", "--read", help="Mount root read-only (default)"
     ),
-    read_write: bool = typer.Option(
-        False, "--read-write", "--write", help="Mount root read-write"
-    ),
+    read_write: bool = typer.Option(False, "--read-write", "--write", help="Mount root read-write"),
 ) -> None:
     """SSH into a corporate-tailnet session mounting the volume."""
     if read_only and read_write:
@@ -173,7 +171,14 @@ def ssh(
         with console.status("Waiting for SSH connection to become available...", spinner="dots"):
             deadline = time.monotonic() + 120
             while not session.ssh_connection and time.monotonic() < deadline:
-                if session.status in ("FAILED", "STOPPED", "TERMINATING", "TOMBSTONED"):
+                if session.status in (
+                    "FAILED",
+                    "STOPPED",
+                    "COMPLETED",
+                    "UNKNOWN",
+                    "TERMINATING",
+                    "TOMBSTONED",
+                ):
                     console.print(f"[red]Session is {session.status}.[/red]")
                     raise typer.Exit(1)
                 time.sleep(5)
@@ -196,18 +201,23 @@ def ssh(
     base = ["ssh", *known_hosts_opts, "-i", key, "-p", port, host]
     # The same endpoint carries shell, sftp/scp and rsync; print copyable
     # examples using the pinned host key, never "trust anything".
-    # soft_wrap: rich must not insert line breaks into copyable commands.
+    # markup=False: Rich must not parse [..] in paths; soft_wrap: it must
+    # not insert line breaks into copyable commands. Read-only sessions
+    # get download-direction examples (uploads would fail on the RO
+    # mount); read-write sessions get uploads.
+    if session.read_only:
+        scp_cmd = ["scp", *known_hosts_opts, "-i", key, "-P", port, f"{host}:/volume/FILE", "."]
+        rsync_cmd = ["rsync", "-av", "-e", shlex.join(base[:-1]), f"{host}:/volume/FILE", "."]
+    else:
+        scp_cmd = ["scp", *known_hosts_opts, "-i", key, "-P", port, "FILE", f"{host}:/volume/"]
+        rsync_cmd = ["rsync", "-av", "-e", shlex.join(base[:-1]), "FILE", f"{host}:/volume/"]
     examples = [
         shlex.join(["sftp", *known_hosts_opts, "-i", key, "-P", port, host]),
-        shlex.join(
-            ["scp", *known_hosts_opts, "-i", key, "-P", port, "FILE", f"{host}:/volume/"]
-        ),
-        shlex.join(
-            ["rsync", "-av", "-e", shlex.join(base), "FILE", f"{host}:/volume/"]
-        ),
+        shlex.join(scp_cmd),
+        shlex.join(rsync_cmd),
     ]
     for example in examples:
-        console.print(example, soft_wrap=True)
+        console.print(example, soft_wrap=True, markup=False)
     try:
         code = subprocess.run(base, check=False).returncode
     except OSError as exc:

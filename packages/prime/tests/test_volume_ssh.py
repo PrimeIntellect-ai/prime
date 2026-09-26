@@ -1,3 +1,4 @@
+import shlex
 from types import SimpleNamespace
 
 import pytest
@@ -57,6 +58,18 @@ def test_shell_modes_and_shared_ssh_endpoint(tmp_path, monkeypatch, flags, expec
     assert captured[0] == {"read_only": expected, "team_id": "t1"}
     assert commands[0] == ["ssh", "-i", str(key), "-p", "22", "research@host.tailnet.ts.net"]
     assert "sftp" in result.output and "rsync" in result.output
+    # The rsync -e string must not contain the host (it would then be
+    # passed to the remote shell as a command).
+    rsync_line = next(ln for ln in result.output.splitlines() if ln.startswith("rsync "))
+    rsync_argv = shlex.split(rsync_line)
+    assert "research@host.tailnet.ts.net" not in rsync_argv[rsync_argv.index("-e") + 1]
+    if expected:
+        # Read-only sessions print download-direction examples.
+        assert "research@host.tailnet.ts.net:/volume/FILE" in rsync_argv
+        assert rsync_argv[-1] == "."
+    else:
+        assert "FILE" in rsync_argv
+        assert rsync_argv[-1] == "research@host.tailnet.ts.net:/volume/"
 
 
 def test_shell_rejects_conflicting_flags_without_api_call(tmp_path, monkeypatch):
@@ -153,8 +166,11 @@ def test_shell_without_host_key_uses_user_known_hosts(monkeypatch, tmp_path):
         lambda: (
             SimpleNamespace(
                 create_volume_session=lambda *a, **kw: SimpleNamespace(
-                    id="s1", status="RUNNING", read_only=True,
-                    ssh_connection="ubuntu@h.corp.ts.net", host_public_key=None,
+                    id="s1",
+                    status="RUNNING",
+                    read_only=True,
+                    ssh_connection="ubuntu@h.corp.ts.net",
+                    host_public_key=None,
                 )
             ),
             None,

@@ -1492,10 +1492,13 @@ def create_run(
         None,
         "--volume",
         help=(
-            "Named volume to write the run's outputs to, under runs/<runId>/ "
-            "(full-FT only; closed beta, see `prime volumes`). Falls back "
-            'to a top-level `volume = "..."` in the TOML. Created on the fly '
-            "(default 1Ti) if it doesn't exist."
+            "Named volume for the run: outputs go under runs/<runId>/, and "
+            "for SFT the volume's datasets/ directory is mounted read-only "
+            "at /datasets, so data.name must be a pre-staged "
+            '"/datasets/<name>" directory on it. Full-FT and SFT only; '
+            "closed beta, see `prime volumes`. Falls back to a top-level "
+            '`volume = "..."` in the TOML. Created on the fly (default 1Ti) '
+            "if it doesn't exist."
         ),
     ),
     volume_size: Optional[str] = typer.Option(
@@ -1504,7 +1507,7 @@ def create_run(
         help=(
             "Size for the --volume if this command creates it, e.g. 500Gi or 2Ti "
             "(default 1Ti). Ignored when the volume already exists. Falls back "
-            'to a top-level `volume_size = "..."` in the TOML.'
+            'to a top-level `volume_size = "..."` in the TOML.' 
         ),
     ),
     full_finetune: bool = typer.Option(
@@ -1527,7 +1530,11 @@ def create_run(
             "training path. Usually unnecessary — an SFT config (a [data] "
             "block and no [trainer]/[orchestrator]) is auto-detected. "
             "Hosted SFT is trainer-only: [eval], [inference], and "
-            "[weight_broadcast] blocks are rejected."
+            "[weight_broadcast] blocks are rejected. Datasets are local "
+            "files staged on a named volume (pass --volume): the run "
+            "mounts that volume's datasets/ directory read-only at "
+            '/datasets, so data.name = "/datasets/<name>"; outputs land '
+            "under runs/<runId>/ on the same volume."
         ),
     ),
 ) -> None:
@@ -1538,6 +1545,7 @@ def create_run(
         prime train config.toml
         prime train config.toml --full-finetune
         prime train sft.toml --sft
+        prime train sft.toml --sft --volume research
     """
     validate_output_format(output, console)
 
@@ -1579,10 +1587,13 @@ def create_run(
             yes=yes,
             image_tag=image_tag,
             gpu_type=gpu_type,
-            # SFT supports named volumes like RL: it is the primary way to
-            # carry pre-staged datasets on the hosted path (data.name ->
-            # a path on the volume). Forward it instead of silently
-            # dropping --volume for SFT configs.
+            # SFT supports named volumes like RL. On SFT the volume is
+            # the dataset contract: the trainer mounts the volume's
+            # `datasets/` directory read-only at /datasets, so `data.name`
+            # must point at a pre-staged directory there
+            # (`/datasets/<name>`), while outputs and processed-data
+            # cache land under runs/<runId>/ on the same volume. Forward
+            # --volume instead of dropping it for SFT configs.
             volume=volume,
             mode="sft",
         )
@@ -1606,7 +1617,8 @@ def create_run(
     if volume or volume_size or any(raw_cfg.get(k) is not None for k in ("volume", "volume_size")):
         console.print(
             "[red]Error:[/red] --volume / --volume-size (and top-level `volume` / "
-            "`volume_size` in the TOML) are only supported for full-FT runs."
+            "`volume_size` in the TOML) are only supported for full-FT and "
+            "SFT runs."
         )
         raise typer.Exit(1)
 

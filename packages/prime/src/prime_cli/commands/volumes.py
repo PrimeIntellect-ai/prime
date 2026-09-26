@@ -1,8 +1,16 @@
-"""`prime volumes`: named volumes FFT runs write their outputs to.
+"""`prime volumes`: named volumes for dedicated training runs (full-FT and SFT).
 
 A volume is a PVC in your team's (or personal) namespace on the cluster it
 was created on. `prime train config.toml --volume <name>` makes the run
 write under `runs/<runId>/` on it, and it outlives every run.
+
+Hosted SFT runs also read pre-staged datasets from the volume: the training
+container mounts the volume's `datasets/` directory read-only at
+`/datasets`, so a SFT config's `[data] name` must be a `"/datasets/<name>"`
+directory staged on the volume before launch. This command manages the
+volume lifecycle only (create/list/resize/delete) — there is no `prime
+volumes upload`; stage datasets with an authorized CPU pod that mounts the
+same PVC (see `prime train --help`).
 """
 
 import typer
@@ -20,7 +28,7 @@ from ..utils import (
 )
 
 app = PlainTyper(
-    help="Manage volumes for full-FT run outputs (closed beta)",
+    help="Manage volumes for dedicated run outputs and SFT datasets (closed beta)",
     no_args_is_help=True,
 )
 console = get_console()

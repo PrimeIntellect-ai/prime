@@ -916,6 +916,59 @@ def _is_full_finetune(cfg: Dict[str, Any], *, flag: bool) -> bool:
     return flag or _has_full_finetune_deployment(cfg)
 
 
+def _looks_like_sft(cfg: Dict[str, Any]) -> bool:
+    """True iff the mega-TOML carries the prime-rl SFT schema shape: a
+    `[data]` block (required by SFTConfig, absent from the RL schema) and
+    no `[trainer]`/`[orchestrator]` blocks (required by the RL schema,
+    absent from SFTConfig). The two prime-rl TOML schemas are disjoint on
+    these keys, so the sniff is unambiguous without parsing the file with
+    either schema.
+    """
+    return "data" in cfg and "trainer" not in cfg and "orchestrator" not in cfg
+
+
+def _is_sft(cfg: Dict[str, Any], *, flag: bool) -> bool:
+    """Dispatch as SFT if `--sft` was passed, or if the config carries the
+    SFT schema shape (see `_looks_like_sft`)."""
+    return flag or _looks_like_sft(cfg)
+
+
+def _validate_sft_config(cfg: Dict[str, Any], config_path: str) -> None:
+    """Fail fast on SFT configs the dedicated path can't run. Guarded
+    client-side even though the validator would reject them server-side:
+    a hosted run submission costs a round trip (and, pre-rejection, a
+    queue slot + user attention), so mis-shaped configs should die before
+    dispatch."""
+    if "trainer" in cfg or "orchestrator" in cfg:
+        console.print(
+            f"[red]Error:[/red] {config_path} has \\[trainer]/\\[orchestrator] "
+            "blocks — that's an RL mega-TOML, not an SFT config. Use "
+            "--full-finetune/--fft (or no flag) for RL configs."
+        )
+        raise typer.Exit(1)
+    if "data" not in cfg:
+        console.print(
+            f"[red]Error:[/red] --sft requires a \\[data] block (the SFT "
+            f"dataset config) in {config_path}."
+        )
+        raise typer.Exit(1)
+    # Online evals need the local/SLURM launcher (an inference server +
+    # weight broadcasts); the dedicated hosted SFT path is trainer-only.
+    # The validator rejects these blocks server-side — mirror that here
+    # so the user learns before submitting rather than from a 400. The
+    # \\[...] escaping keeps rich markup from eating the literal block
+    # names in the rendered message.
+    unsupported = [f"\\[{k}]" for k in ("eval", "inference", "weight_broadcast") if k in cfg]
+    if unsupported:
+        console.print(
+            "[red]Error:[/red] hosted SFT runs are trainer-only — "
+            f"{', '.join(unsupported)} (online evals) "
+            "are not supported on the dedicated path. Remove them, or run "
+            "locally with prime-rl's SFT launcher."
+        )
+        raise typer.Exit(1)
+
+
 def _validate_full_finetune_deployment(cfg: Dict[str, Any], config_path: str) -> None:
     """Full-FT dispatch requires an explicit `[deployment]` table sizing the
     run. Guards the `--full-finetune`-without-`[deployment]` case — the
@@ -955,10 +1008,14 @@ def _dispatch_full_finetune_run(
     image_tag: Optional[str] = None,
     gpu_type: Optional[str] = None,
     volume: Optional[str] = None,
+    mode: Optional[str] = None,
 ) -> None:
-    """Hand off to /api/v1/training/runs (full-FT prime-rl on a registered
-    PrimeCluster). Reuses the shared env-file plumbing for WANDB / HF
-    secrets so the user experience matches the LoRA path.
+    """Hand off to /api/v1/training/runs (prime-rl on a registered
+    PrimeCluster). Serves both dedicated run kinds: full-FT RL mega-TOMLs
+    (mode=None/"rl") and SFT mega-TOMLs (mode="sft" — same endpoint, same
+    raw-TOML handoff; only the backend/validator schema dispatch differs).
+    Reuses the shared env-file plumbing for WANDB / HF secrets so the
+    user experience matches the LoRA path.
 
     Backend always auto-picks the first uncordoned PrimeCluster — the
     CLI never threads a cluster id, so a config that targets the wrong
@@ -1107,6 +1164,7 @@ def _dispatch_full_finetune_run(
         hf_token=secrets.get("HF_TOKEN"),
         gpu_type=resolved_gpu_type,
         volume=resolved_volume,
+        mode=mode,
     )
 
     # `--output json` is a formatting switch: still dispatch the run,
@@ -1350,9 +1408,14 @@ def create_run(
         None,
         "--volume",
         help=(
-            "Named volume to write the run's outputs to, under runs/<runId>/ "
-            "(full-FT only; closed beta, see `prime volumes`). Falls back "
-            'to a top-level `volume = "..."` in the TOML.'
+            "Named volume for the run: outputs go under runs/<runId>/, and "
+            "for SFT the volume's datasets/ directory is mounted read-only "
+            "at /datasets, so data.name must be a pre-staged "
+            '"/datasets/<name>" directory on it. Stage datasets from a CPU '
+            "pod that mounts the volume (no upload command); without a "
+            "volume, SFT only works with fake datasets. Full-FT and SFT "
+            "only; closed beta, see `prime volumes`. Falls back to a "
+            'top-level `volume = "..."` in the TOML.'
         ),
     ),
     full_finetune: bool = typer.Option(
@@ -1367,6 +1430,27 @@ def create_run(
             "block in the TOML either way."
         ),
     ),
+    sft: bool = typer.Option(
+        False,
+        "--sft",
+        help=(
+            "Dispatch this config as a supervised fine-tune on the dedicated "
+            "training path. Usually unnecessary — an SFT config (a [data] "
+            "block and no [trainer]/[orchestrator]) is auto-detected. "
+            "Hosted SFT is trainer-only: [eval], [inference], and "
+            "[weight_broadcast] blocks are rejected. Datasets are local "
+            "files staged on a named volume (pass --volume): the run "
+            "mounts that volume's datasets/ directory read-only at "
+            '/datasets, so data.name = "/datasets/<name>"; outputs land '
+            "under runs/<runId>/ on the same volume. Stage datasets ahead "
+            "of the run from a CPU pod that mounts the volume: "
+            "materialize HF-load_dataset-readable files (Parquet/JSON, "
+            "not save_to_disk) into an immutable /datasets/<name> "
+            "directory, then verify with a fresh-process "
+            'load_dataset("/datasets/<name>") check. Without --volume, '
+            "only fake datasets work."
+        ),
+    ),
 ) -> None:
     """Launch a Hosted Training run from a config file.
 
@@ -1374,14 +1458,60 @@ def create_run(
 
         prime train config.toml
         prime train config.toml --full-finetune
+        prime train sft.toml --sft
+        prime train sft.toml --sft --volume research
     """
     validate_output_format(output, console)
 
-    # Dispatch routing: --full-finetune/--fft, or an unambiguous
-    # `[deployment]` block (full-FT-only — RLConfig/the LoRA schema has no
-    # such field). No longer sniffs `type` — prime-rl owns the config
-    # schema, so a leftover `type` field is dead weight, not a signal.
+    # The dispatch flags own mutually exclusive run kinds — accepting both
+    # would silently resolve to whichever branch is checked first, which
+    # is exactly the kind of ambiguity an expensive hosted launch should
+    # never have.
+    if sft and full_finetune:
+        console.print(
+            "[red]Error:[/red] --sft and --full-finetune/--fft are mutually "
+            "exclusive — pick the run kind matching the config."
+        )
+        raise typer.Exit(1)
+
+    # Dispatch routing: SFT first (a [data] block with no [trainer]/
+    # [orchestrator] is unambiguously the prime-rl SFT schema — the two
+    # mega-TOML schemas are disjoint, and SFT configs have no [deployment]
+    # requirement the full-FT check could lean on). Then --full-finetune/
+    # --fft, or an unambiguous `[deployment]` block (full-FT-only —
+    # RLConfig/the LoRA schema has no such field). No longer sniffs
+    # `type` — prime-rl owns the config schema, so a leftover `type`
+    # field is dead weight, not a signal.
     raw_cfg = _peek_toml(config_path)
+    if _is_sft(raw_cfg, flag=sft):
+        if full_finetune:
+            console.print(
+                f"[red]Error:[/red] {config_path} looks like an SFT config "
+                "(a \\[data] block, no \\[trainer]/\\[orchestrator]) but "
+                "--full-finetune/--fft was passed. Use --sft instead."
+            )
+            raise typer.Exit(1)
+        _validate_sft_config(raw_cfg, config_path)
+        _dispatch_full_finetune_run(
+            raw_cfg=raw_cfg,
+            config_path=config_path,
+            env=env,
+            env_file=env_file,
+            output=output,
+            yes=yes,
+            image_tag=image_tag,
+            gpu_type=gpu_type,
+            # SFT supports named volumes like RL. On SFT the volume is
+            # the dataset contract: the trainer mounts the volume's
+            # `datasets/` directory read-only at /datasets, so `data.name`
+            # must point at a pre-staged directory there
+            # (`/datasets/<name>`), while outputs and processed-data
+            # cache land under runs/<runId>/ on the same volume. Forward
+            # --volume instead of dropping it for SFT configs.
+            volume=volume,
+            mode="sft",
+        )
+        return
     if _is_full_finetune(raw_cfg, flag=full_finetune):
         _validate_full_finetune_deployment(raw_cfg, config_path)
         _dispatch_full_finetune_run(
@@ -1400,7 +1530,7 @@ def create_run(
     if volume or raw_cfg.get("volume") is not None:
         console.print(
             "[red]Error:[/red] --volume (and top-level `volume` in the TOML) "
-            "is only supported for full-FT runs."
+            "is only supported for full-FT and SFT runs."
         )
         raise typer.Exit(1)
 

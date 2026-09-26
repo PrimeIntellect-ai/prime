@@ -51,7 +51,7 @@ def test_shell_modes_and_shared_ssh_endpoint(tmp_path, monkeypatch, flags, expec
     )
     captured, commands = [], []
     result = CliRunner().invoke(
-        app, ["volumes", "shell", "data", *flags], env={"PRIME_DISABLE_VERSION_CHECK": "1"}
+        app, ["volumes", "ssh", "data", *flags], env={"PRIME_DISABLE_VERSION_CHECK": "1"}
     )
     assert result.exit_code == 0, result.output
     assert captured[0] == {"read_only": expected, "team_id": "t1"}
@@ -65,7 +65,7 @@ def test_shell_rejects_conflicting_flags_without_api_call(tmp_path, monkeypatch)
     monkeypatch.setattr(volumes.Config, "ssh_key_path", property(lambda self: str(key)))
     result = CliRunner().invoke(
         app,
-        ["volumes", "shell", "data", "--read", "--write"],
+        ["volumes", "ssh", "data", "--read", "--write"],
         env={"PRIME_DISABLE_VERSION_CHECK": "1"},
     )
     assert result.exit_code == 2
@@ -127,18 +127,18 @@ def test_shell_pins_session_host_key(monkeypatch, tmp_path):
     )
     commands = []
     result = CliRunner().invoke(
-        app, ["volumes", "shell", "data"], env={"PRIME_DISABLE_VERSION_CHECK": "1"}
+        app, ["volumes", "ssh", "data"], env={"PRIME_DISABLE_VERSION_CHECK": "1"}
     )
     assert result.exit_code == 0, result.output
     cmd = commands[0]
     assert cmd[0] == "ssh"
-    assert any(c == "-o StrictHostKeyChecking=yes" for c in cmd)
-    kh = next(
-        c.removeprefix("-o UserKnownHostsFile=")
-        for c in cmd
-        if c.startswith("-o UserKnownHostsFile=")
-    )
-    assert "vol-shell-1.corp.ts.net ssh-rsa AAAHOSTKEY" in open(kh).read()
+    # Separate argv items, not a single "-o UserKnownHostsFile=..." string.
+    assert "-o" in cmd
+    kh = cmd[cmd.index("-o") + 1]
+    assert kh.startswith("UserKnownHostsFile=")
+    assert "StrictHostKeyChecking=yes" in cmd
+    kh_path = kh.removeprefix("UserKnownHostsFile=")
+    assert "vol-shell-1.corp.ts.net ssh-rsa AAAHOSTKEY" in open(kh_path).read()
     # Printed transfer examples pin the same options.
     assert "-o StrictHostKeyChecking=yes" in result.output
 
@@ -167,7 +167,8 @@ def test_shell_without_host_key_uses_user_known_hosts(monkeypatch, tmp_path):
     )
     commands = []
     result = CliRunner().invoke(
-        app, ["volumes", "shell", "data"], env={"PRIME_DISABLE_VERSION_CHECK": "1"}
+        app, ["volumes", "ssh", "data"], env={"PRIME_DISABLE_VERSION_CHECK": "1"}
     )
     assert result.exit_code == 0, result.output
     assert not any("UserKnownHostsFile" in c for c in commands[0])
+    assert "Using SSH key" in result.output

@@ -119,7 +119,7 @@ _CONNECTION = re.compile(
 
 
 def _pin_known_hosts(session, hostname: str, port: str) -> list[str]:
-    """Return ssh options pinning the session pod's host public key.
+    """ssh options (separate argv items) pinning the session pod's host key.
 
     The platform returns the per-session sshd host key with the endpoint,
     so the CLI writes a scoped known_hosts file instead of disabling host
@@ -132,18 +132,25 @@ def _pin_known_hosts(session, hostname: str, port: str) -> list[str]:
     path = os.path.join(tempfile.mkdtemp(prefix="prime-volume-"), "known_hosts")
     with open(path, "w") as fh:
         fh.write(f"{bracket} {session.host_public_key}\n")
-    return [f"-o UserKnownHostsFile={path}", "-o StrictHostKeyChecking=yes"]
+    return [
+        "-o",
+        f"UserKnownHostsFile={path}",
+        "-o",
+        "StrictHostKeyChecking=yes",
+    ]
 
 
-@app.command()
-def shell(
+@app.command(name="ssh", no_args_is_help=True)
+def ssh(
     name: str = typer.Argument(..., help="Volume name"),
     read_only: bool = typer.Option(
         False, "--read-only", "--read", help="Mount root read-only (default)"
     ),
-    read_write: bool = typer.Option(False, "--read-write", "--write", help="Mount root read-write"),
+    read_write: bool = typer.Option(
+        False, "--read-write", "--write", help="Mount root read-write"
+    ),
 ) -> None:
-    """Start a corporate-tailnet volume session and connect over SSH."""
+    """SSH into a corporate-tailnet session mounting the volume."""
     if read_only and read_write:
         console.print("[red]Choose either --read-only or --read-write.[/red]")
         raise typer.Exit(2)
@@ -159,42 +166,50 @@ def shell(
             f"Session {session.id} ({'read-only' if session.read_only else 'read-write'})."
         )
         console.print(f"Stop later with: prime volumes stop {name} {session.id}")
-        # Match `prime pods ssh`: poll until a connection is published, then
-        # invoke local ssh with the configured key. Bound the wait so a failed
-        # provision does not spin forever; stopping remains an explicit action.
-        deadline = time.monotonic() + 120
-        while not session.ssh_connection and time.monotonic() < deadline:
-            if session.status in ("FAILED", "STOPPED", "TERMINATING", "TOMBSTONED"):
-                console.print(f"[red]Session is {session.status}.[/red]")
-                raise typer.Exit(1)
-            time.sleep(5)
-            session = client.get_volume_session(name, session.id, team_id=team_id)
+        # Match `prime pods ssh`: poll until a connection is published,
+        # then invoke local ssh with the configured key. Bound the wait so
+        # a failed provision does not spin forever; stopping remains an
+        # explicit action (transfers may outlive this shell).
+        with console.status("Waiting for SSH connection to become available...", spinner="dots"):
+            deadline = time.monotonic() + 120
+            while not session.ssh_connection and time.monotonic() < deadline:
+                if session.status in ("FAILED", "STOPPED", "TERMINATING", "TOMBSTONED"):
+                    console.print(f"[red]Session is {session.status}.[/red]")
+                    raise typer.Exit(1)
+                time.sleep(5)
+                session = client.get_volume_session(name, session.id, team_id=team_id)
         if not session.ssh_connection:
             console.print("[red]Timed out waiting for SSH. Stop the session when done.[/red]")
             raise typer.Exit(1)
     except APIError as exc:
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(1) from exc
+    console.print(f"[blue]Using SSH key:[/blue] {key}")
+    console.print("[dim]To change SSH key path, use: prime config set-ssh-key-path[/dim]")
     match = _CONNECTION.fullmatch(session.ssh_connection)
     if not match or not 1 <= int(match.group("port") or 22) <= 65535:
         console.print("[red]Invalid SSH endpoint returned by server.[/red]")
         raise typer.Exit(1)
     host = f"{match.group('user')}@{match.group('host')}"
-    hostname = match.group("host")
     port = match.group("port") or "22"
-    known_hosts_opts = _pin_known_hosts(session, hostname, port)
-    quoted_key, quoted_host = shlex.quote(key), shlex.quote(host)
-    opts = " ".join(f"-o {opt}" for opt in known_hosts_opts)
+    known_hosts_opts = _pin_known_hosts(session, match.group("host"), port)
+    base = ["ssh", *known_hosts_opts, "-i", key, "-p", port, host]
     # The same endpoint carries shell, sftp/scp and rsync; print copyable
     # examples using the pinned host key, never "trust anything".
-    console.print(f"sftp {opts} -i {quoted_key} -P {port} {quoted_host}")
-    console.print(f"scp {opts} -i {quoted_key} -P {port} FILE {quoted_host}:/volume/")
-    rsync_ssh = shlex.quote(f"ssh {opts} -i {quoted_key} -p {port}")
-    console.print(f"rsync -av -e {rsync_ssh} FILE {quoted_host}:/volume/")
+    # soft_wrap: rich must not insert line breaks into copyable commands.
+    examples = [
+        shlex.join(["sftp", *known_hosts_opts, "-i", key, "-P", port, host]),
+        shlex.join(
+            ["scp", *known_hosts_opts, "-i", key, "-P", port, "FILE", f"{host}:/volume/"]
+        ),
+        shlex.join(
+            ["rsync", "-av", "-e", shlex.join(base), "FILE", f"{host}:/volume/"]
+        ),
+    ]
+    for example in examples:
+        console.print(example, soft_wrap=True)
     try:
-        code = subprocess.run(
-            ["ssh", *known_hosts_opts, "-i", key, "-p", port, host], check=False
-        ).returncode
+        code = subprocess.run(base, check=False).returncode
     except OSError as exc:
         console.print(f"[red]Could not start SSH:[/red] {exc}")
         raise typer.Exit(1) from exc
@@ -207,7 +222,7 @@ def stop(
     name: str = typer.Argument(..., help="Volume name"),
     session_id: str = typer.Argument(..., help="Session ID"),
 ) -> None:
-    """Stop a volume shell session without deleting the volume."""
+    """Stop a volume SSH session without deleting the volume."""
     client, team_id = _client()
     try:
         client.stop_volume_session(name, session_id, team_id=team_id)

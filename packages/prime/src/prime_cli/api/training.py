@@ -203,7 +203,10 @@ def build_payload_from_toml(
         PrimeCluster.gpuType (e.g. "H200_141GB"); omit for the default
         auto-pick with no type preference.
       - volume: a named volume the run writes its outputs to, under
-        runs/<runId>/, instead of a per-run PVC.
+        runs/<runId>/, instead of a per-run PVC. For SFT runs the volume
+        also supplies the dataset: its datasets/ directory is mounted
+        read-only at /datasets, so config data.name must point at a
+        pre-staged "/datasets/<name>" directory on it.
       - mode: the prime-rl schema family the config belongs to ("rl" or
         "sft"). Omitted by default so existing RL payloads stay
         byte-compatible; set to "sft" for SFT configs so the backend +

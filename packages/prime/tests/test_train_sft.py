@@ -241,3 +241,63 @@ def test_train_fft_dispatch_stays_mode_free(tmp_path: Path, monkeypatch) -> None
     assert result.exit_code == 0, result.output
     assert captured["json"]["config"]["trainer"]["model"]["name"] == "m"
     assert "mode" not in captured["json"]
+
+
+# --- --volume forwarding -----------------------------------------------------
+
+
+def test_train_sft_forwards_volume_flag_to_payload(tmp_path: Path, monkeypatch) -> None:
+    """--volume must reach the SFT dispatch: the volume carries both the
+    run's outputs (runs/<runId>/) and the pre-staged dataset read at
+    /datasets/<name>, so dropping it would silently launch an SFT run that
+    can't see its dataset."""
+    config_path = _write_config(tmp_path, _sft_config())
+    captured = _capture_post(monkeypatch)
+
+    result = runner.invoke(
+        app, ["train", config_path, "--volume", "research", "--yes"], env=TEST_ENV
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = captured["json"]
+    assert payload["mode"] == "sft"
+    assert payload["volume"] == "research"
+    # Request-level key: never embedded in the prime-rl config.
+    assert "volume" not in payload["config"]
+
+
+def test_train_sft_forwards_toml_volume_to_payload(tmp_path: Path, monkeypatch) -> None:
+    config_path = _write_config(tmp_path, _sft_config(volume="research"))
+    captured = _capture_post(monkeypatch)
+
+    result = runner.invoke(app, ["train", config_path, "--yes"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    payload = captured["json"]
+    assert payload["mode"] == "sft"
+    assert payload["volume"] == "research"
+    assert "volume" not in payload["config"]
+
+
+def test_train_sft_volume_flag_overrides_toml(tmp_path: Path, monkeypatch) -> None:
+    config_path = _write_config(tmp_path, _sft_config(volume="from-toml"))
+    captured = _capture_post(monkeypatch)
+
+    result = runner.invoke(
+        app, ["train", config_path, "--volume", "from-flag", "--yes"], env=TEST_ENV
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["json"]["volume"] == "from-flag"
+
+
+def test_train_sft_without_volume_omits_the_key(tmp_path: Path, monkeypatch) -> None:
+    """A fake-only SFT (no named volume) must dispatch without a volume
+    key, exactly like the full-FT path."""
+    config_path = _write_config(tmp_path, _sft_config())
+    captured = _capture_post(monkeypatch)
+
+    result = runner.invoke(app, ["train", config_path, "--yes"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    assert "volume" not in captured["json"]

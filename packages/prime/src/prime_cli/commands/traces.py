@@ -623,7 +623,9 @@ def list_traces(
 
     if isinstance(result, EpisodeListPage):
         _print_empty_page("episodes", page, len(result.items))
-        console.print(episodes_table(result, run_id=run_id, run_step=run_step))
+        console.print(
+            episodes_table(result, run_id=run_id, run_step=run_step, environment_id=environment_id)
+        )
     else:
         _print_empty_page("traces", page, len(result.items))
         user_names = _user_names() if result.items else None
@@ -632,6 +634,7 @@ def list_traces(
                 result,
                 run_id=run_id,
                 episode_id=episode_id,
+                task_id=task_id,
                 user_names=user_names,
                 width=console.width,
             )

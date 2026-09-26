@@ -990,7 +990,11 @@ def test_search_table_groups_rows_by_trace(monkeypatch, width):
 # ---------------------------------------------------------------------------
 
 
-def test_list_episodes_forwards_filters_and_moves_the_run_to_the_title(fake_client):
+def _title(output):
+    return output.splitlines()[0].strip()
+
+
+def test_list_episodes_forwards_filters_and_names_them_in_the_title(fake_client):
     result = runner.invoke(
         main_app,
         [
@@ -1021,8 +1025,10 @@ def test_list_episodes_forwards_filters_and_moves_the_run_to_the_title(fake_clie
         "limit": 10,
         "cursor": None,
     }
-    assert "Episodes · run run_9f3k2m · tb2" in result.output
-    assert "Run " not in result.output  # the run is in the title, not a column
+    assert _title(result.output) == "Episodes · run run_9f3k2m · environment tb2"
+    # Filtered columns would repeat the title.
+    assert "Run " not in result.output
+    assert "Environment" not in result.output
     assert "ep_4c1d" in result.output
     assert "EnvHookError" in result.output
     assert "teardown timed out" not in result.output  # the message is left to `get`
@@ -1039,7 +1045,7 @@ def test_list_episodes_filters_by_run_step_and_names_it_in_the_title(fake_client
 
     assert result.exit_code == 0, result.output
     assert fake_client.calls["list_episodes"]["run_step"] == 0
-    assert "Episodes · run run_9f3k2m · step 0 · tb2" in result.output
+    assert _title(result.output) == "Episodes · run run_9f3k2m · step 0"
 
 
 def test_list_episodes_rejects_a_negative_run_step(fake_client):
@@ -1049,7 +1055,7 @@ def test_list_episodes_rejects_a_negative_run_step(fake_client):
     assert "list_episodes" not in fake_client.calls
 
 
-def test_list_episodes_moves_shared_values_to_the_title_and_keeps_differing_ones(fake_client):
+def test_list_episodes_notes_shared_values_under_the_table_and_keeps_differing_ones(fake_client):
     fake_client.list_episodes = lambda **kwargs: EpisodeListPage(
         items=[
             _episode(episode_id="ep_a", run_id="run_a", has_error=False),
@@ -1061,7 +1067,9 @@ def test_list_episodes_moves_shared_values_to_the_title_and_keeps_differing_ones
     result = runner.invoke(main_app, ["traces", "list", "--episodes"])
 
     assert result.exit_code == 0, result.output
-    assert "Episodes · tb2" in result.output  # every row shares the environment
+    # Every row shares the environment, but no filter chose it: not the title.
+    assert _title(result.output) == "Episodes"
+    assert "All 2 on this page: environment tb2" in result.output
     assert "Environment" not in result.output
     assert "Run" in result.output  # the runs differ, so they keep their column
     assert "run_a" in result.output and "run_b" in result.output
@@ -1322,7 +1330,7 @@ def test_traces_list_episode_id_lists_member_traces_with_the_agent_column(fake_c
     assert call["cursor"] is None
     assert "sort" not in call
     assert "list" not in fake_client.calls
-    assert "Traces · run run_9f3k2m · episode ep_4c1d" in result.output
+    assert _title(result.output) == "Traces · episode ep_4c1d"
     assert "Agent" in result.output
     assert "solver" in result.output
 
@@ -1343,11 +1351,16 @@ def test_traces_list_episode_id_keeps_the_task_column_when_tasks_differ(fake_cli
     assert "task-a" in result.output
 
 
-def test_traces_list_episode_id_moves_a_shared_task_to_the_title(fake_client):
+def test_traces_list_episode_id_notes_a_shared_run_and_task_under_the_table(fake_client):
+    fake_client.list_episode_traces = lambda episode_id, **kwargs: TraceListPage(
+        items=[_summary(trace_id="t1"), _summary(trace_id="t2")], next_cursor=None
+    )
+
     result = runner.invoke(main_app, ["traces", "list", "--episode-id", "ep_4c1d"])
 
     assert result.exit_code == 0, result.output
-    assert "Traces · run run_9f3k2m · episode ep_4c1d · tb2-0187" in result.output
+    assert _title(result.output) == "Traces · episode ep_4c1d"
+    assert "All 2 on this page: run run_9f3k2m · task tb2-0187" in result.output
     assert "Task" not in result.output
 
 
@@ -1423,13 +1436,33 @@ def test_list_command_shows_usage_duration_and_both_times_without_outcome(fake_c
     assert "2026-07-20" in result.output
 
 
-def test_list_command_moves_a_shared_run_and_task_to_the_title(fake_client):
-    result = runner.invoke(main_app, ["traces", "list", "--run-id", "run_9f3k2m"])
+def test_list_command_titles_filters_and_notes_shared_values(fake_client):
+    fake_client.list = lambda **kwargs: TraceListPage(
+        items=[_summary(trace_id="t1"), _summary(trace_id="t2")], next_cursor=None
+    )
+
+    filtered = runner.invoke(main_app, ["traces", "list", "--run-id", "run_9f3k2m"])
+    unfiltered = runner.invoke(main_app, ["traces", "list"])
+
+    assert filtered.exit_code == 0, filtered.output
+    assert _title(filtered.output) == "Traces · run run_9f3k2m"
+    assert "All 2 on this page: task tb2-0187" in filtered.output
+    assert "Run " not in filtered.output and "Task" not in filtered.output
+    # The same rows without a filter: the shared run is what the page holds, not a filter.
+    assert unfiltered.exit_code == 0, unfiltered.output
+    assert _title(unfiltered.output) == "Traces"
+    assert "All 2 on this page: run run_9f3k2m · task tb2-0187" in unfiltered.output
+
+
+def test_list_command_keeps_columns_for_a_single_row(fake_client):
+    fake_client.list = lambda **kwargs: TraceListPage(items=[_summary()], next_cursor=None)
+
+    result = runner.invoke(main_app, ["traces", "list"])
 
     assert result.exit_code == 0, result.output
-    assert "Traces · run run_9f3k2m · tb2-0187" in result.output
-    assert "Run " not in result.output
-    assert "Task" not in result.output
+    assert _title(result.output) == "Traces"
+    assert "Run" in result.output and "Task" in result.output
+    assert "on this page" not in result.output
 
 
 def test_list_command_names_team_uploaders(fake_client, monkeypatch):
@@ -1452,7 +1485,7 @@ def test_list_command_names_team_uploaders(fake_client, monkeypatch):
     assert "u2" in result.output  # a former member keeps their ID
 
 
-def test_list_command_moves_a_shared_uploader_to_the_title(fake_client, monkeypatch):
+def test_list_command_notes_a_shared_uploader_under_the_table(fake_client, monkeypatch):
     monkeypatch.setattr(traces_cmd, "_user_names", lambda: {"u1": "Ada Lovelace"})
     fake_client.list = lambda **kwargs: TraceListPage(
         items=[_summary(trace_id="t1", user_id="u1"), _summary(trace_id="t2", user_id="u1")],
@@ -1462,7 +1495,8 @@ def test_list_command_moves_a_shared_uploader_to_the_title(fake_client, monkeypa
     result = runner.invoke(main_app, ["traces", "list"])
 
     assert result.exit_code == 0, result.output
-    assert "by Ada Lovelace" in result.output
+    assert _title(result.output) == "Traces"
+    assert "uploaded by Ada Lovelace" in result.output
     assert "User" not in result.output
 
 

@@ -14,7 +14,7 @@ from prime_traces import (
     TraceListPage,
     TraceSummary,
 )
-from rich.console import RenderableType
+from rich.console import Group, RenderableType
 from rich.table import Table
 from rich.text import Text
 
@@ -53,6 +53,18 @@ def shared_value(values: Iterable[Optional[str]]) -> Optional[str]:
     """The one value every row has, or None when the rows differ or lack it."""
     distinct = set(values)
     return distinct.pop() if len(distinct) == 1 else None
+
+
+def page_note(count: int, shared: Iterable[Optional[str]]) -> Optional[Text]:
+    """The line under the table for values every row on the page happens to share.
+
+    They leave their columns to keep the table narrow, but they are what this
+    page contains, not a filter, so they go on a line under the table and not in the title.
+    """
+    parts = [part for part in shared if part]
+    if not parts:
+        return None
+    return Text(f"All {count} on this page: " + " · ".join(parts), style="dim")
 
 
 def uploader_id(summary: TraceSummary) -> Optional[str]:
@@ -97,26 +109,30 @@ def traces_table(
     *,
     run_id: Optional[str] = None,
     episode_id: Optional[str] = None,
+    task_id: Optional[str] = None,
     user_names: Optional[Dict[str, str]] = None,
     width: Optional[int] = None,
-) -> Table:
+) -> RenderableType:
     """One row per trace.
 
-    A run, task or uploader that every row shares moves from its column into
-    the title, so the table keeps its width for what differs between traces.
-    `user_names` is None for a personal account, where every trace is the
-    caller's own and the User column would only repeat it.
+    The title names only the filters that were passed. A run, task or uploader
+    that every row shares leaves its column for a line under the table, so the
+    table keeps its width for what differs between traces. `user_names` is None
+    for a personal account, where every trace is the caller's own and the User
+    column would only repeat it.
 
     The trace ID is never shortened, since it is what the other commands take.
     When `width` cannot fit every column, the free-text columns shrink first
     and then the columns in DROP_ORDER go; `get` and JSON keep every field.
     """
     items = page.items
-    run = run_id or shared_value(s.run_id for s in items)
-    task = shared_value(s.task_id for s in items)
+    # One row shares everything with itself, so it keeps its columns.
+    several = len(items) > 1
+    run = shared_value(s.run_id for s in items) if several and run_id is None else None
+    task = shared_value(s.task_id for s in items) if several and task_id is None else None
     uploaders = {uploader_id(s) for s in items}
     show_users = user_names is not None and uploaders - {None} != set()
-    user = shared_value(uploaders) if show_users else None
+    user = shared_value(uploaders) if show_users and several else None
 
     def name(user_id: Optional[str]) -> str:
         if user_id is None:
@@ -127,21 +143,26 @@ def traces_table(
         part
         for part in (
             "Traces",
-            run and f"run {run}",
+            run_id and f"run {run_id}",
             episode_id and f"episode {episode_id}",
-            task,
-            user and f"by {name(user)}",
+            task_id and f"task {task_id}",
         )
         if part
     )
+    note = page_note(
+        len(items),
+        (run and f"run {run}", task and f"task {task}", user and f"uploaded by {name(user)}"),
+    )
+    run_filtered_or_shared = run_id is not None or run is not None
+    task_filtered_or_shared = task_id is not None or task is not None
 
     free_text: List[Tuple[str, str, Callable[[TraceSummary], Optional[str]]]] = []
-    if run is None:
+    if not run_filtered_or_shared:
         free_text.append(("Run", "green", lambda s: s.run_id))
     # An episode's traces are its agents' turns, so each row names its agent.
     if episode_id is not None:
         free_text.append(("Agent", "green", lambda s: s.agent_name))
-    if task is None:
+    if not task_filtered_or_shared:
         free_text.append(("Task", "", lambda s: s.task_id))
     if show_users and user is None:
         free_text.append(("User", "", lambda s: name(uploader_id(s))))
@@ -179,28 +200,50 @@ def traces_table(
             ),
             *(cell(summary) for *_, cell in metrics),
         )
-    return table
+    # Its own line, not a caption, which would wrap to the table's width.
+    return table if note is None else Group(table, note)
 
 
 def episodes_table(
-    page: EpisodeListPage, *, run_id: Optional[str], run_step: Optional[int] = None
-) -> Table:
+    page: EpisodeListPage,
+    *,
+    run_id: Optional[str],
+    run_step: Optional[int] = None,
+    environment_id: Optional[str] = None,
+) -> RenderableType:
     """One row per episode.
 
-    A run or environment that every row shares moves from its column into the
-    title, so the table keeps its width for what differs between episodes.
+    The title names only the filters that were passed. A run or environment
+    that every row shares leaves its column for a line under the table, so the
+    table keeps its width for what differs between episodes.
     """
-    run = run_id or shared_value(e.run_id for e in page.items)
-    environment = shared_value(e.environment_id for e in page.items)
-    step = None if run_step is None else f"step {run_step}"
-    title = " · ".join(
-        part for part in ("Episodes", run and f"run {run}", step, environment) if part
+    several = len(page.items) > 1
+    run = shared_value(e.run_id for e in page.items) if several and run_id is None else None
+    environment = (
+        shared_value(e.environment_id for e in page.items)
+        if several and environment_id is None
+        else None
     )
+    title = " · ".join(
+        part
+        for part in (
+            "Episodes",
+            run_id and f"run {run_id}",
+            run_step is not None and f"step {run_step}",
+            environment_id and f"environment {environment_id}",
+        )
+        if part
+    )
+    note = page_note(
+        len(page.items), (run and f"run {run}", environment and f"environment {environment}")
+    )
+    show_run = run_id is None and run is None
+    show_environment = environment_id is None and environment is None
     table = Table(title=Text(title), title_justify="left")
     table.add_column("Episode ID", style="cyan", no_wrap=True)
-    if run is None:
+    if show_run:
         table.add_column("Run", style="green", no_wrap=True)
-    if environment is None:
+    if show_environment:
         table.add_column("Environment", overflow="ellipsis")
     table.add_column("Outcome", no_wrap=True)
     # The type alone keeps every row on one line; `get` shows the message.
@@ -208,9 +251,9 @@ def episodes_table(
     table.add_column("Created", no_wrap=True)
     for episode in page.items:
         row = [Text(episode.episode_id)]
-        if run is None:
+        if show_run:
             row.append(Text(episode.run_id or "-"))
-        if environment is None:
+        if show_environment:
             row.append(Text(episode.environment_id or "-"))
         row += [
             Text(episode.outcome or "-", style="red" if episode.has_error else ""),
@@ -221,7 +264,8 @@ def episodes_table(
             Text(format_time_ago(episode.created_at)),
         ]
         table.add_row(*row)
-    return table
+    # Its own line, not a caption, which would wrap to the table's width.
+    return table if note is None else Group(table, note)
 
 
 # ---------------------------------------------------------------------------

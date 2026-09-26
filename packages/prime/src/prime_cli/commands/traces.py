@@ -176,10 +176,7 @@ def search_traces(
 ) -> None:
     """Find exact text in the messages of one run's traces.
 
-    The query is plain text matched exactly as typed. It is case-sensitive,
-    and it is not SQL, a regex or a glob: characters such as * . % _ and "
-    match themselves. Quote a query that contains spaces. It must be 3-256
-    characters long.
+    The query is plain text matched exactly as typed.
 
     Each match is one message (a node), shown with the text around the hit.
     Results come one page at a time: to continue, rerun with the same query and

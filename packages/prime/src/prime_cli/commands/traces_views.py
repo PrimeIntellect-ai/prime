@@ -14,7 +14,7 @@ from prime_traces import (
     TraceListPage,
     TraceSummary,
 )
-from rich.console import Group, RenderableType
+from rich.console import RenderableType
 from rich.table import Table
 from rich.text import Text
 
@@ -57,6 +57,10 @@ def shared_value(values: Iterable[Optional[str]]) -> Optional[str]:
 
 def page_note(count: int, shared: Iterable[Optional[str]]) -> Optional[Text]:
     """The line under the table for values every row on the page happens to share.
+
+    Returned beside the table rather than as its caption, which would wrap to
+    the table's width, or in a Group, which would hide the table from plain
+    mode's border stripping.
 
     They leave their columns to keep the table narrow, but they are what this
     page contains, not a filter, so they go on a line under the table and not in the title.
@@ -112,7 +116,7 @@ def traces_table(
     task_id: Optional[str] = None,
     user_names: Optional[Dict[str, str]] = None,
     width: Optional[int] = None,
-) -> RenderableType:
+) -> Tuple[Table, Optional[Text]]:
     """One row per trace.
 
     The title names only the filters that were passed. A run, task or uploader
@@ -200,8 +204,7 @@ def traces_table(
             ),
             *(cell(summary) for *_, cell in metrics),
         )
-    # Its own line, not a caption, which would wrap to the table's width.
-    return table if note is None else Group(table, note)
+    return table, note
 
 
 def episodes_table(
@@ -210,7 +213,7 @@ def episodes_table(
     run_id: Optional[str],
     run_step: Optional[int] = None,
     environment_id: Optional[str] = None,
-) -> RenderableType:
+) -> Tuple[Table, Optional[Text]]:
     """One row per episode.
 
     The title names only the filters that were passed. A run or environment
@@ -264,8 +267,7 @@ def episodes_table(
             Text(format_time_ago(episode.created_at)),
         ]
         table.add_row(*row)
-    # Its own line, not a caption, which would wrap to the table's width.
-    return table if note is None else Group(table, note)
+    return table, note
 
 
 # ---------------------------------------------------------------------------

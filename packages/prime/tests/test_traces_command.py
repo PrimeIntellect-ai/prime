@@ -1595,3 +1595,19 @@ def test_list_forwards_the_environment_filter_in_both_modes(fake_client):
     assert episodes.exit_code == 0, episodes.output
     assert fake_client.calls["list"]["environment_id"] == "tb2"
     assert fake_client.calls["list_episodes"]["environment_id"] == "tb2"
+
+
+@pytest.mark.parametrize("args", [["traces", "list"], ["traces", "list", "--episodes"]])
+def test_plain_list_strips_table_borders_when_rows_share_values(fake_client, args):
+    fake_client.list = lambda **kwargs: TraceListPage(
+        items=[_summary(trace_id="t1"), _summary(trace_id="t2")], next_cursor=None
+    )
+    fake_client.list_episodes = lambda **kwargs: EpisodeListPage(
+        items=[_episode(episode_id="ep_a"), _episode(episode_id="ep_b")], next_cursor=None
+    )
+
+    result = runner.invoke(main_app, ["--plain", *args])
+
+    assert result.exit_code == 0, result.output
+    assert "All 2 on this page: run run_9f3k2m" in result.output
+    assert not set("┏┃━│└") & set(result.output)

@@ -620,22 +620,23 @@ def list_traces(
 
     if isinstance(result, EpisodeListPage):
         _print_empty_page("episodes", page, len(result.items))
-        console.print(
-            episodes_table(result, run_id=run_id, run_step=run_step, environment_id=environment_id)
+        table, note = episodes_table(
+            result, run_id=run_id, run_step=run_step, environment_id=environment_id
         )
     else:
         _print_empty_page("traces", page, len(result.items))
         user_names = _user_names() if result.items else None
-        console.print(
-            traces_table(
-                result,
-                run_id=run_id,
-                episode_id=episode_id,
-                task_id=task_id,
-                user_names=user_names,
-                width=console.width,
-            )
+        table, note = traces_table(
+            result,
+            run_id=run_id,
+            episode_id=episode_id,
+            task_id=task_id,
+            user_names=user_names,
+            width=console.width,
         )
+    console.print(table)
+    if note is not None:
+        console.print(note)
     _print_page_footer(
         count=len(result.items),
         next_cursor=result.next_cursor,

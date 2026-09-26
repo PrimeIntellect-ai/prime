@@ -1411,9 +1411,11 @@ def create_run(
             "Named volume for the run: outputs go under runs/<runId>/, and "
             "for SFT the volume's datasets/ directory is mounted read-only "
             "at /datasets, so data.name must be a pre-staged "
-            '"/datasets/<name>" directory on it. Full-FT and SFT only; '
-            "closed beta, see `prime volumes`. Falls back to a top-level "
-            '`volume = "..."` in the TOML.'
+            '"/datasets/<name>" directory on it. Stage datasets from a CPU '
+            "pod that mounts the volume (no upload command); without a "
+            "volume, SFT only works with fake datasets. Full-FT and SFT "
+            "only; closed beta, see `prime volumes`. Falls back to a "
+            'top-level `volume = "..."` in the TOML.'
         ),
     ),
     full_finetune: bool = typer.Option(
@@ -1440,7 +1442,13 @@ def create_run(
             "files staged on a named volume (pass --volume): the run "
             "mounts that volume's datasets/ directory read-only at "
             '/datasets, so data.name = "/datasets/<name>"; outputs land '
-            "under runs/<runId>/ on the same volume."
+            "under runs/<runId>/ on the same volume. Stage datasets ahead "
+            "of the run from a CPU pod that mounts the volume: "
+            "materialize HF-load_dataset-readable files (Parquet/JSON, "
+            "not save_to_disk) into an immutable /datasets/<name> "
+            "directory, then verify with a fresh-process "
+            'load_dataset("/datasets/<name>") check. Without --volume, '
+            "only fake datasets work."
         ),
     ),
 ) -> None:

@@ -288,16 +288,36 @@ def test_train_sft_volume_flag_overrides_toml(tmp_path: Path, monkeypatch) -> No
     )
 
     assert result.exit_code == 0, result.output
-    assert captured["json"]["volume"] == "from-flag"
+    payload = captured["json"]
+    assert payload["mode"] == "sft"
+    assert payload["volume"] == "from-flag"
+    assert "volume" not in payload["config"]
 
 
 def test_train_sft_without_volume_omits_the_key(tmp_path: Path, monkeypatch) -> None:
-    """A fake-only SFT (no named volume) must dispatch without a volume
-    key, exactly like the full-FT path."""
-    config_path = _write_config(tmp_path, _sft_config())
+    """A fake-data SFT (no named volume) must dispatch without a volume
+    key, exactly like the full-FT path. The dataset name is fake here, so
+    the fixture matches the docstring's claim."""
+    config_path = _write_config(tmp_path, _sft_config(data={"name": "fake", "seq_len": 1024}))
     captured = _capture_post(monkeypatch)
 
     result = runner.invoke(app, ["train", config_path, "--yes"], env=TEST_ENV)
 
     assert result.exit_code == 0, result.output
-    assert "volume" not in captured["json"]
+    payload = captured["json"]
+    assert payload["mode"] == "sft"
+    assert "volume" not in payload
+
+
+def test_train_sft_rejects_non_string_volume_before_post(tmp_path: Path, monkeypatch) -> None:
+    """A top-level `volume` that is not a string must fail client-side,
+    before anything is posted — mirrors the shared helper's guard."""
+    captured = _capture_post(monkeypatch)  # nothing should be posted
+    for bad_volume in (42, ["research"]):
+        config_path = _write_config(tmp_path, _sft_config(volume=bad_volume))
+
+        result = runner.invoke(app, ["train", config_path, "--yes"], env=TEST_ENV)
+
+        assert result.exit_code == 1, result.output
+        assert "volume in" in result.output and "must be a string" in result.output
+        assert "json" not in captured  # the guard fires before any POST

@@ -73,10 +73,9 @@ def test_sync_background_job_polling_checks_status_at_timeout(monkeypatch) -> No
     monkeypatch.setattr("prime_sandboxes.sandbox.time.monotonic", lambda: clock)
     monkeypatch.setattr("prime_sandboxes.sandbox.time.sleep", sleep)
     monkeypatch.setattr(client, "start_background_job", lambda *_args, **_kwargs: _job())
-    monkeypatch.setattr(cast(Any, client)._auth_cache, "is_vm", lambda _sandbox_id: False)
     monkeypatch.setattr(
-        client,
-        "get_background_job_status",
+        cast(Any, client)._background_job_status_batcher,
+        "get",
         lambda *_args, **_kwargs: next(snapshots),
     )
     monkeypatch.setattr(
@@ -113,9 +112,6 @@ async def test_async_background_job_polling_checks_status_at_timeout(monkeypatch
     async def start_background_job(*_args, **_kwargs) -> BackgroundJob:
         return _job()
 
-    async def is_vm(_sandbox_id: str) -> bool:
-        return False
-
     async def get_status(*_args, **_kwargs) -> BackgroundJobStatus:
         return next(snapshots)
 
@@ -125,8 +121,7 @@ async def test_async_background_job_polling_checks_status_at_timeout(monkeypatch
     monkeypatch.setattr("prime_sandboxes.sandbox.time.monotonic", lambda: clock)
     monkeypatch.setattr("prime_sandboxes.sandbox.asyncio.sleep", sleep)
     monkeypatch.setattr(client, "start_background_job", start_background_job)
-    monkeypatch.setattr(cast(Any, client)._auth_cache, "is_vm", is_vm)
-    monkeypatch.setattr(client, "get_background_job_status", get_status)
+    monkeypatch.setattr(cast(Any, client)._background_job_status_batcher, "get", get_status)
     monkeypatch.setattr(cast(Any, client)._background_job_output_coordinator, "get", get_output)
 
     assert await client.run_background_job("sandbox", "command", timeout=10) is result

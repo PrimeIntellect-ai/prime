@@ -94,14 +94,13 @@ asyncio.run(main())
 Use a platform admin or manager key with sandbox-read access to list platform images:
 
 ```python
-from prime_sandboxes import ImageArtifactType, ImageBuildStatus, ImageClient
+from prime_sandboxes import ImageBuildStatus, ImageClient
 
 page = ImageClient().list(platform=True)
-vm_images = [
+completed_images = [
     image.display_ref
     for image in page.data
-    if image.artifact_type == ImageArtifactType.VM_SANDBOX
-    and image.status == ImageBuildStatus.COMPLETED
+    if image.status == ImageBuildStatus.COMPLETED
 ]
 ```
 

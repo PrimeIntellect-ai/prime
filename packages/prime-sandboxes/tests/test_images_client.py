@@ -59,18 +59,18 @@ def _image_list_response() -> dict[str, Any]:
     return {
         "data": [
             {
-                "id": "image-container",
-                "artifactType": "CONTAINER_IMAGE",
-                "imageName": "ubuntu",
+                "id": "image-vm-minimal",
+                "artifactType": "VM_SANDBOX",
+                "imageName": "alpine",
                 "imageTag": "22.04",
                 "status": "COMPLETED",
-                "fullImagePath": "registry.test/ubuntu:22.04",
+                "fullImagePath": "vm/alpine:3.19",
                 "sizeBytes": 1024,
                 "visibility": "PUBLIC",
                 "createdAt": "2026-01-01T00:00:00Z",
                 "pushedAt": "2026-01-01T00:01:00Z",
                 "ownerType": "platform",
-                "displayRef": "ubuntu:22.04",
+                "displayRef": "alpine:3.19",
             },
             {
                 "id": "image-vm",
@@ -122,7 +122,7 @@ def test_image_client_list_forwards_query_and_parses_artifact_rows():
     assert response.status == "ok"
     assert len(response.data) == 2
     assert isinstance(response.data[0], ImageListItem)
-    assert response.data[0].artifact_type == ImageArtifactType.CONTAINER_IMAGE
+    assert response.data[0].artifact_type == ImageArtifactType.VM_SANDBOX
     assert response.data[1].artifact_type == ImageArtifactType.VM_SANDBOX
     assert response.data[1].status == ImageBuildStatus.COMPLETED
     assert response.data[1].owner_type == ImageOwnerType.PLATFORM

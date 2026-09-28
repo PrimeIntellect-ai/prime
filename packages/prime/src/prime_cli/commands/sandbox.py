@@ -192,7 +192,7 @@ def _format_sandbox_for_details(sandbox: Sandbox) -> Dict[str, Any]:
     data: Dict[str, Any] = {
         "id": sandbox.id,
         "name": sandbox.name,
-        "type": "VM" if sandbox.vm else "Container",
+        "type": "VM",
         "docker_image": sandbox.docker_image,
         "start_command": _start_command_data(sandbox.start_command),
         "status": sandbox.status,
@@ -202,7 +202,6 @@ def _format_sandbox_for_details(sandbox: Sandbox) -> Dict[str, Any]:
         "disk_mount_path": sandbox.disk_mount_path,
         "gpu_count": sandbox.gpu_count,
         "gpu_type": getattr(sandbox, "gpu_type", None),
-        "vm": sandbox.vm,
         "network_allowlist": getattr(sandbox, "network_allowlist", None),
         "network_denylist": getattr(sandbox, "network_denylist", None),
         "timeout_minutes": sandbox.timeout_minutes,
@@ -217,7 +216,6 @@ def _format_sandbox_for_details(sandbox: Sandbox) -> Dict[str, Any]:
         "user_id": sandbox.user_id,
         "team_id": sandbox.team_id,
         "region": getattr(sandbox, "region", None),
-        "registry_credentials_id": getattr(sandbox, "registry_credentials_id", None),
     }
 
     if sandbox.started_at:
@@ -437,11 +435,6 @@ def get(
             table.add_row("Team ID", sandbox_data["team_id"] or "Personal")
             if sandbox_data.get("region"):
                 table.add_row("Region", sandbox_data["region"])
-            if sandbox_data.get("registry_credentials_id"):
-                table.add_row(
-                    "Registry Credentials",
-                    sandbox_data["registry_credentials_id"],
-                )
 
             if "environment_vars" in sandbox_data:
                 env_vars = json.dumps(sandbox_data["environment_vars"], indent=2)

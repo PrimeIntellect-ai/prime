@@ -61,7 +61,6 @@ def _fake_detailed_sandbox(**overrides: Any) -> SimpleNamespace:
         advanced_configs=advanced_configs,
         user_id="user-1",
         team_id=None,
-        registry_credentials_id=None,
         **overrides,
     )
 

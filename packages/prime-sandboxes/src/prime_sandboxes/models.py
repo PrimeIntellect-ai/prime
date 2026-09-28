@@ -185,7 +185,6 @@ class Sandbox(BaseModel):
     user_id: Optional[str] = Field(None, alias="userId")
     team_id: Optional[str] = Field(None, alias="teamId")
     region: Optional[str] = None
-    registry_credentials_id: Optional[str] = Field(default=None, alias="registryCredentialsId")
     pending_image_build_id: Optional[str] = Field(default=None, alias="pendingImageBuildId")
 
     model_config = ConfigDict(populate_by_name=True)
@@ -349,7 +348,6 @@ class ImageBuildStatus(str, Enum):
 class ImageArtifactType(str, Enum):
     """Artifact produced for an image."""
 
-    CONTAINER_IMAGE = "CONTAINER_IMAGE"
     VM_SANDBOX = "VM_SANDBOX"
 
 
@@ -365,10 +363,7 @@ class ImageListItem(BaseModel):
     """One artifact row returned by the image-list endpoint."""
 
     id: str
-    artifact_type: ImageArtifactType = Field(
-        default=ImageArtifactType.CONTAINER_IMAGE,
-        alias="artifactType",
-    )
+    artifact_type: ImageArtifactType = Field(..., alias="artifactType")
     image_name: str = Field(..., alias="imageName")
     image_tag: str = Field(..., alias="imageTag")
     status: ImageBuildStatus

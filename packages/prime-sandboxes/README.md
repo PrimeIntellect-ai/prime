@@ -59,6 +59,9 @@ sandbox_client.wait_for_creation(sandbox.id)
 # Checkpoints are asynchronous; poll until state is DURABLE before restoring.
 checkpoint = sandbox_client.checkpoint(sandbox.id)
 checkpoint = sandbox_client.get_checkpoint(checkpoint.id)
+restored = sandbox_client.create(CreateSandboxRequest(
+    name="restored-sandbox", checkpoint_id=checkpoint.id
+))  # after checkpoint.state == "DURABLE"
 
 # Execute commands
 result = sandbox_client.execute_command(sandbox.id, "python --version")

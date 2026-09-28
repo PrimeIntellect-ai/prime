@@ -248,11 +248,12 @@ class CreateSandboxRequest(BaseModel):
     """Create sandbox request model"""
 
     name: str
-    docker_image: str
+    docker_image: Optional[str] = None
+    checkpoint_id: Optional[str] = Field(None, min_length=1, max_length=64)
     start_command: Optional[StartCommand] = None
     cpu_cores: float = 1.0
     memory_gb: float = 1.0
-    disk_size_gb: float = 5.0
+    disk_size_gb: Optional[float] = None
     gpu_count: int = 0
     gpu_type: Optional[str] = None
     network_allowlist: Optional[List[str]] = None
@@ -266,6 +267,18 @@ class CreateSandboxRequest(BaseModel):
     region: Optional[str] = None
     advanced_configs: Optional[AdvancedConfigs] = None
     idempotency_key: Optional[str] = None
+
+    @model_validator(mode="after")
+    def validate_restore_source(self) -> "CreateSandboxRequest":
+        if self.checkpoint_id:
+            if self.docker_image or self.disk_size_gb is not None:
+                raise ValueError("omit docker_image and disk_size_gb when restoring a checkpoint")
+        else:
+            if not self.docker_image:
+                raise ValueError("docker_image is required unless checkpoint_id is set")
+            if self.disk_size_gb is None:
+                self.disk_size_gb = 5.0
+        return self
 
     @model_validator(mode="after")
     def validate_gpu_fields(self) -> "CreateSandboxRequest":

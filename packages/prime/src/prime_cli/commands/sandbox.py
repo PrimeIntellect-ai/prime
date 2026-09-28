@@ -508,6 +508,43 @@ def checkpoint_status(
         raise typer.Exit(1) from exc
 
 
+@app.command("restore")
+def restore(
+    checkpoint_id: str,
+    name: Optional[str] = typer.Option(None, help="Name for the new sandbox"),
+    team_id: Optional[str] = typer.Option(None, help="Team ID (uses config team_id if omitted)"),
+    cpu_cores: float = typer.Option(1.0, help="Number of CPU cores"),
+    memory_gb: float = typer.Option(1.0, help="Memory in GB"),
+    timeout_minutes: int = typer.Option(60, help="Timeout in minutes"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
+) -> None:
+    """Create a new sandbox from a durable filesystem checkpoint."""
+    sandbox_name = name or f"restore-{checkpoint_id[:8]}"
+    try:
+        request = CreateSandboxRequest(
+            name=sandbox_name,
+            checkpoint_id=checkpoint_id,
+            team_id=team_id,
+            cpu_cores=cpu_cores,
+            memory_gb=memory_gb,
+            timeout_minutes=timeout_minutes,
+        )
+        if not confirm_or_skip(
+            f"Create sandbox {sandbox_name} from checkpoint {checkpoint_id}?", yes, default=True
+        ):
+            return
+        with console.status("[bold blue]Restoring sandbox...", spinner="dots"):
+            sandbox = SandboxClient(APIClient()).create(request)
+        console.print(f"[green]Successfully created sandbox {escape(sandbox.id)}[/green]")
+        console.print(f"Use 'prime sandbox get {escape(sandbox.id)}' to check its status")
+    except APIError as exc:
+        console.print(f"[red]Error:[/red] {escape(str(exc))}")
+        raise typer.Exit(1) from exc
+    except ValueError as exc:
+        console.print(f"[red]Error:[/red] {escape(str(exc))}")
+        raise typer.Exit(1) from exc
+
+
 @app.command(cls=_SandboxCreateCommand)
 def create(
     docker_image: Optional[str] = typer.Argument(

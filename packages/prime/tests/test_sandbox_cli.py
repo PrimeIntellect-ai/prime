@@ -48,6 +48,25 @@ def test_checkpoint_command_and_status(monkeypatch: pytest.MonkeyPatch) -> None:
     assert json.loads(durable.output)["state"] == "DURABLE"
 
 
+def test_restore_command_creates_from_checkpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_cli(monkeypatch)
+    captured: dict[str, Any] = {}
+
+    def create(self: Any, request: Any) -> SimpleNamespace:
+        captured["request"] = request
+        return SimpleNamespace(id="restored-1")
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.create", create)
+    result = runner.invoke(app, ["sandbox", "restore", "checkpoint-1", "--name", "fork", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert captured["request"].checkpoint_id == "checkpoint-1"
+    assert captured["request"].name == "fork"
+    assert captured["request"].docker_image is None
+    assert captured["request"].disk_size_gb is None
+    assert "restored-1" in result.output
+
+
 def _fake_sandbox(**overrides: Any) -> SimpleNamespace:
     """A sandbox stand-in with every field the list formatter reads."""
     now = datetime.now(timezone.utc)

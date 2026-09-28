@@ -201,6 +201,7 @@ prime sandbox run <sandbox-id> -- python script.py
 # Request a filesystem checkpoint; check again until it is DURABLE
 prime sandbox checkpoint <sandbox-id>
 prime sandbox checkpoint-status <checkpoint-id>
+prime sandbox restore <checkpoint-id> --name restored-sandbox
 
 # Upload/download files
 prime sandbox upload <sandbox-id> local_file.py /remote/path/
@@ -290,6 +291,9 @@ print(result.stdout)
 # Request a filesystem checkpoint; poll get_checkpoint until state is DURABLE
 checkpoint = sandbox_client.checkpoint(sandbox.id)
 checkpoint = sandbox_client.get_checkpoint(checkpoint.id)
+restored = sandbox_client.create(CreateSandboxRequest(
+    name="restored-sandbox", checkpoint_id=checkpoint.id
+))  # after checkpoint.state == "DURABLE"
 
 # Clean up
 sandbox_client.delete(sandbox.id)

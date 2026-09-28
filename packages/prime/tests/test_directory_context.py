@@ -446,3 +446,17 @@ def test_other_commands_still_report_a_broken_directory_context(repo: Path) -> N
 
     assert result.exit_code == 1
     assert "Unknown context 'missing'" in result.output
+
+
+def test_malformed_pinned_saved_context_is_a_readable_error(repo: Path) -> None:
+    _save_env("customer", frontend_url=None)
+    _pin(repo, {"context": "customer"})
+
+    with pytest.raises(ValueError, match="Invalid context 'customer'"):
+        Config()
+
+    result = runner.invoke(app, ["whoami"], env=TEST_ENV)
+    assert result.exit_code == 1
+    assert "Invalid context 'customer'" in result.output
+    assert "Traceback" not in result.output
+    assert runner.invoke(app, ["config", "unpin"], env=TEST_ENV).exit_code == 0

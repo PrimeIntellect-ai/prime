@@ -34,7 +34,7 @@ def require_loadable_config() -> None:
         return
     try:
         Config()
-    except ValueError as e:
+    except (ValueError, TypeError, AttributeError) as e:
         get_console(stderr=True).print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
 

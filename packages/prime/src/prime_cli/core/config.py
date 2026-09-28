@@ -159,10 +159,18 @@ class Config:
         self.local_context = local
         pinned = local.get("context")
         if pinned:
-            if not self.load_environment(pinned, persist=False):
+            try:
+                loaded = self.load_environment(pinned, persist=False)
+            except (TypeError, AttributeError) as e:
+                # e.g. a saved context with "frontend_url": null
+                raise ValueError(
+                    f"Invalid context '{pinned}' selected by {local_file}: {e}. "
+                    f"Fix {self.environments_dir / pinned}.json or run 'prime config unpin'."
+                ) from e
+            if not loaded:
                 raise ValueError(
                     f"Unknown context '{pinned}' selected by {local_file}. "
-                    "Save it with 'prime config save', or edit or delete that file."
+                    "Save it with 'prime config save', or run 'prime config unpin'."
                 )
             if pinned.casefold() != "production":
                 self._profile_name = pinned

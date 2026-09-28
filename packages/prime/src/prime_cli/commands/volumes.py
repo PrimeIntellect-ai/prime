@@ -202,8 +202,11 @@ def ssh(
         raise typer.Exit(1)
     host = f"{match.group('user')}@{match.group('host')}"
     port = match.group("port") or "22"
-    known_hosts_opts = _pin_known_hosts(session, match.group("host"), port)
-    base = ["ssh", *known_hosts_opts, "-i", key, "-p", port, host]
+    # IdentitiesOnly: offer only the configured key. With several keys in
+    # an ssh-agent, sshd could hit MaxAuthTries on agent keys before
+    # trying this one.
+    ssh_opts = ["-o", "IdentitiesOnly=yes", *_pin_known_hosts(session, match.group("host"), port)]
+    base = ["ssh", *ssh_opts, "-i", key, "-p", port, host]
     # The same endpoint carries shell, sftp/scp and rsync; print copyable
     # examples using the pinned host key, never "trust anything".
     # markup=False: Rich must not parse [..] in paths; soft_wrap: it must
@@ -211,13 +214,13 @@ def ssh(
     # get download-direction examples (uploads would fail on the RO
     # mount); read-write sessions get uploads.
     if session.read_only:
-        scp_cmd = ["scp", *known_hosts_opts, "-i", key, "-P", port, f"{host}:/volume/FILE", "."]
+        scp_cmd = ["scp", *ssh_opts, "-i", key, "-P", port, f"{host}:/volume/FILE", "."]
         rsync_cmd = ["rsync", "-av", "-e", shlex.join(base[:-1]), f"{host}:/volume/FILE", "."]
     else:
-        scp_cmd = ["scp", *known_hosts_opts, "-i", key, "-P", port, "FILE", f"{host}:/volume/"]
+        scp_cmd = ["scp", *ssh_opts, "-i", key, "-P", port, "FILE", f"{host}:/volume/"]
         rsync_cmd = ["rsync", "-av", "-e", shlex.join(base[:-1]), "FILE", f"{host}:/volume/"]
     examples = [
-        shlex.join(["sftp", *known_hosts_opts, "-i", key, "-P", port, host]),
+        shlex.join(["sftp", *ssh_opts, "-i", key, "-P", port, host]),
         shlex.join(scp_cmd),
         shlex.join(rsync_cmd),
     ]

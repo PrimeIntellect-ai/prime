@@ -56,7 +56,16 @@ def test_shell_modes_and_shared_ssh_endpoint(tmp_path, monkeypatch, flags, expec
     )
     assert result.exit_code == 0, result.output
     assert captured[0] == {"read_only": expected, "team_id": "t1"}
-    assert commands[0] == ["ssh", "-i", str(key), "-p", "22", "research@host.tailnet.ts.net"]
+    assert commands[0] == [
+        "ssh",
+        "-o",
+        "IdentitiesOnly=yes",
+        "-i",
+        str(key),
+        "-p",
+        "22",
+        "research@host.tailnet.ts.net",
+    ]
     assert "sftp" in result.output and "rsync" in result.output
     # The rsync -e string must not contain the host (it would then be
     # passed to the remote shell as a command).
@@ -147,8 +156,10 @@ def test_shell_pins_session_host_key(monkeypatch, tmp_path):
     assert cmd[0] == "ssh"
     # Separate argv items, not a single "-o UserKnownHostsFile=..." string.
     assert "-o" in cmd
-    kh = cmd[cmd.index("-o") + 1]
-    assert kh.startswith("UserKnownHostsFile=")
+    kh = next(a for a in cmd if a.startswith("UserKnownHostsFile="))
+    # Only the configured key is offered, never every ssh-agent key.
+    assert cmd[cmd.index("IdentitiesOnly=yes") - 1] == "-o"
+    assert "-o IdentitiesOnly=yes" in result.output
     assert "StrictHostKeyChecking=yes" in cmd
     kh_path = kh.removeprefix("UserKnownHostsFile=")
     assert "vol-shell-1.corp.ts.net ssh-rsa AAAHOSTKEY" in open(kh_path).read()

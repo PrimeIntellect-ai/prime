@@ -23,6 +23,7 @@ from prime_cli.lab_setup import (
     run_lab_sync_service,
 )
 from rich.console import Console
+from rich.text import Text
 from typer.testing import CliRunner
 
 AGENT_WHICH = "prime_cli.lab_agents.shutil.which"
@@ -180,6 +181,30 @@ def test_lab_setup_rejects_prime_rl_flag() -> None:
         parse_lab_setup_args(["--prime-rl", "--no-interactive"])
 
     assert exc_info.value.code == 2
+
+
+def test_lab_commands_accept_plain_flag(tmp_path: Path, monkeypatch: Any) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    setup = CliRunner().invoke(lab_cli_app, ["setup", "--plain", "--no-such-flag"])
+    doctor = CliRunner().invoke(lab_cli_app, ["doctor", "--plain"])
+
+    assert "unrecognized arguments: --no-such-flag" in setup.output
+    assert "--plain" not in setup.output
+    assert "unrecognized arguments" not in doctor.output
+    assert "FAIL" in doctor.output
+    assert "[red]" not in doctor.output
+    assert "\u2503" not in doctor.output
+
+
+def test_lab_setup_call_to_action_is_plain_text_in_plain_mode(monkeypatch: Any) -> None:
+    monkeypatch.setattr(lab_setup, "is_plain_mode", lambda: True)
+
+    cta = lab_setup._post_setup_call_to_action(LabSetupOptions(agents=("codex",)))
+
+    assert isinstance(cta, Text)
+    assert "ask codex: I want to train a model" in cta.plain
+    assert "  $ uv run vf-eval my-env -m openai/gpt-5.4-nano -n 5" in cta.plain
 
 
 def test_lab_register_github_writes_hygiene_workflow(

@@ -3,13 +3,14 @@
 from pathlib import Path
 
 import typer
-from rich.console import Console
 
-app = typer.Typer(
+from ..utils import PlainTyper, get_console
+
+app = PlainTyper(
     help="Set up and maintain Lab workspaces",
     no_args_is_help=True,
 )
-console = Console()
+console = get_console()
 
 
 @app.command(

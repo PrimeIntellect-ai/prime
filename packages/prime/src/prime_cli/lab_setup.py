@@ -39,6 +39,7 @@ from .lab_hygiene import (
     run_lab_hygiene_preflight,
     tracked_lab_hygiene_paths,
 )
+from .utils import is_plain_mode
 
 VERIFIERS_REPO = "primeintellect-ai/verifiers"
 VERIFIERS_REF = "6c64ce6a3a01e8edde7c3c0e8e5315fb236e9faa"
@@ -1336,7 +1337,7 @@ def _ensure_uv_project(workspace: Path, emit: Emit, runner: Runner) -> None:
     _check_command(["uv", "add", VERIFIERS_REQUIREMENT], workspace, emit, runner)
 
 
-def _post_setup_call_to_action(options: LabSetupOptions) -> Panel:
+def _post_setup_call_to_action(options: LabSetupOptions) -> RenderableType:
     primary_agent = options.agents[0] if options.agents else "your coding agent"
     prompt_heading = f"ask {primary_agent}"
     prompt_body = (
@@ -1350,15 +1351,27 @@ def _post_setup_call_to_action(options: LabSetupOptions) -> Panel:
         style="italic",
     )
 
+    commands = (
+        "uv run vf-init my-env",
+        "uv run vf-eval my-env -m openai/gpt-5.4-nano -n 5",
+        "prime train configs/rl/qwen.toml",
+        "uv run vf-gepa my-env -m openai/gpt-5.4-nano",
+    )
+    if is_plain_mode():
+        return Text(
+            "\n".join(
+                [
+                    "get started: idea -> environment -> eval -> training",
+                    f"{prompt_heading}: {prompt_body}",
+                    "quick commands:",
+                    *(f"  $ {command}" for command in commands),
+                ]
+            )
+        )
+
     command_table = Table.grid(padding=(0, 1))
-    command_table.add_row("[bold green]$[/bold green]", "uv run vf-init my-env")
-    command_table.add_row(
-        "[bold green]$[/bold green]", "uv run vf-eval my-env -m openai/gpt-5.4-nano -n 5"
-    )
-    command_table.add_row("[bold green]$[/bold green]", "prime train configs/rl/qwen.toml")
-    command_table.add_row(
-        "[bold green]$[/bold green]", "uv run vf-gepa my-env -m openai/gpt-5.4-nano"
-    )
+    for command in commands:
+        command_table.add_row("[bold green]$[/bold green]", command)
 
     header_text = Text.assemble(
         ("idea -> environment -> eval -> training", "dim"),
@@ -1794,7 +1807,7 @@ def _print_lab_doctor_result(result: LabDoctorResult, console: Console) -> None:
             "FAIL": "red",
         }.get(check.status, "dim")
         table.add_row(
-            f"[{style}]{check.status}[/{style}]",
+            Text(check.status, style=style),
             check.name,
             check.message,
             check.remediation,

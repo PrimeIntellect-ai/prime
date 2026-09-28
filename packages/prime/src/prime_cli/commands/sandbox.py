@@ -466,6 +466,10 @@ def get(
         raise typer.Exit(1)
 
 
+checkpoint_app = PlainTyper(help="Manage filesystem checkpoints", no_args_is_help=True)
+app.add_typer(checkpoint_app, name="checkpoint")
+
+
 def _print_checkpoint(checkpoint: SandboxCheckpoint, output: str) -> None:
     if output == "json":
         output_data_as_json(checkpoint.model_dump(mode="json"), console)
@@ -477,12 +481,12 @@ def _print_checkpoint(checkpoint: SandboxCheckpoint, output: str) -> None:
     elif checkpoint.state != "DURABLE":
         console.print(
             "Restorable once DURABLE. Check with "
-            f"'prime sandbox checkpoints {escape(checkpoint.sandbox_id)}'."
+            f"'prime sandbox checkpoint list {escape(checkpoint.sandbox_id)}'."
         )
 
 
-@app.command("checkpoint")
-def checkpoint(
+@checkpoint_app.command("create")
+def checkpoint_create(
     sandbox_id: str,
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
@@ -496,8 +500,8 @@ def checkpoint(
         raise typer.Exit(1) from exc
 
 
-@app.command("checkpoints")
-def checkpoints(
+@checkpoint_app.command("list")
+def checkpoint_list(
     sandbox_id: str,
     checkpoint_id: Optional[str] = typer.Option(
         None, "--checkpoint-id", help="Show only this checkpoint"
@@ -542,8 +546,8 @@ def checkpoints(
     console.print(table)
 
 
-@app.command("restore")
-def restore(
+@checkpoint_app.command("restore")
+def checkpoint_restore(
     checkpoint_id: str,
     name: Optional[str] = typer.Option(None, help="Name for the new sandbox"),
     team_id: Optional[str] = typer.Option(None, help="Team ID (uses config team_id if omitted)"),

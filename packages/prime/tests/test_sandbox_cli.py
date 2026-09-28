@@ -42,12 +42,12 @@ def test_checkpoint_command_and_status(monkeypatch: pytest.MonkeyPatch) -> None:
         "prime_cli.commands.sandbox.SandboxClient.list_checkpoints", list_checkpoints
     )
 
-    created = runner.invoke(app, ["sandbox", "checkpoint", "sandbox-1"])
+    created = runner.invoke(app, ["sandbox", "checkpoint", "create", "sandbox-1"])
     assert created.exit_code == 0, created.output
     assert "checkpoint-1" in created.output
-    assert "prime sandbox checkpoints sandbox-1" in created.output
+    assert "prime sandbox checkpoint list sandbox-1" in created.output
 
-    table = runner.invoke(app, ["sandbox", "checkpoints", "sandbox-1"])
+    table = runner.invoke(app, ["sandbox", "checkpoint", "list", "sandbox-1"])
     assert table.exit_code == 0, table.output
     assert "checkpoint-1" in table.output and "DURABLE" in table.output
 
@@ -55,7 +55,8 @@ def test_checkpoint_command_and_status(monkeypatch: pytest.MonkeyPatch) -> None:
         app,
         [
             "sandbox",
-            "checkpoints",
+            "checkpoint",
+            "list",
             "sandbox-1",
             "--checkpoint-id",
             "checkpoint-1",
@@ -77,7 +78,9 @@ def test_restore_command_creates_from_checkpoint(monkeypatch: pytest.MonkeyPatch
         return SimpleNamespace(id="restored-1")
 
     monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.create", create)
-    result = runner.invoke(app, ["sandbox", "restore", "checkpoint-1", "--name", "fork", "--yes"])
+    result = runner.invoke(
+        app, ["sandbox", "checkpoint", "restore", "checkpoint-1", "--name", "fork", "--yes"]
+    )
 
     assert result.exit_code == 0, result.output
     assert captured["request"].checkpoint_id == "checkpoint-1"

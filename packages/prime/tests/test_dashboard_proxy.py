@@ -298,6 +298,17 @@ class _FakeChildProcess:
         self.stdout_closed = True
 
 
+def test_proxy_fingerprint_is_stable_and_context_sensitive() -> None:
+    """The reuse key must be stable across calls but distinct per context."""
+    fp_a = _proxy_fingerprint(BASE_URL, "run-1", "token-A")
+    assert _proxy_fingerprint(BASE_URL, "run-1", "token-A") == fp_a
+    assert _proxy_fingerprint(BASE_URL, "run-1", "token-B") != fp_a
+    assert _proxy_fingerprint("https://other.example.com", "run-1", "token-A") != fp_a
+    assert _proxy_fingerprint(BASE_URL, "run-2", "token-A") != fp_a
+    # The token itself must never appear in the digest.
+    assert "token-A" not in fp_a
+
+
 def test_start_detached_spawns_child_and_returns_ready_port(monkeypatch, tmp_path) -> None:
     spawn_calls: list[Any] = []
 

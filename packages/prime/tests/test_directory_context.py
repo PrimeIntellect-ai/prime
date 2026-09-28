@@ -430,3 +430,19 @@ def test_malformed_pinned_saved_context_is_a_readable_error(repo: Path) -> None:
     assert "Invalid context 'customer'" in result.output
     assert "Traceback" not in result.output
     assert runner.invoke(app, ["config", "unpin"], env=TEST_ENV).exit_code == 0
+
+
+def test_persistent_environment_switch_cannot_overwrite_the_pinned_context(
+    repo: Path, home: Path
+) -> None:
+    pinned = _save_env("customer", api_key="customer-key")
+    _save_env("other", api_key="other-key")
+    _pin(repo, {"context": "customer"})
+    pinned_before = pinned.read_text()
+    global_before = _global(home)
+
+    with pytest.raises(ValueError, match="selects context 'customer'"):
+        Config().load_environment("other")
+
+    assert pinned.read_text() == pinned_before
+    assert _global(home) == global_before

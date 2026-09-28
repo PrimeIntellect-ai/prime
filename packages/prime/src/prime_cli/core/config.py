@@ -550,6 +550,13 @@ class Config:
         Returns:
             True if the environment was loaded successfully, False otherwise.
         """
+        if persist and self._profile_name is not None:
+            # Persistent setters would write into the pinned context's file.
+            raise ValueError(
+                f"Cannot switch environments while {self.local_context_file} selects "
+                f"context '{self._profile_name}'; use Config(use_context=False) to "
+                "change the global environment."
+            )
         if name.lower() == "production":
             # Built-in production environment
             if persist:

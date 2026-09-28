@@ -261,6 +261,7 @@ def test_train_volume_flag_and_toml_key_reach_the_fft_payload(monkeypatch, tmp_p
 
         return HostedTrainingRunResponse(run_id="r1", token_value="t")
 
+    _mock_volumes(monkeypatch, [_vol("my-ckpts"), _vol("from-toml")])
     monkeypatch.setattr("prime_cli.api.training.HostedTrainingClient.create_run", fake_create_run)
     cfg = tmp_path / "rl.toml"
     body = (
@@ -278,3 +279,81 @@ def test_train_volume_flag_and_toml_key_reach_the_fft_payload(monkeypatch, tmp_p
 
     assert [p.get("volume") for p in captured] == ["my-ckpts", "from-toml"]
     assert "volume" not in captured[1]["config"]
+
+
+def _vol(name: str, status: str = "RUNNING"):
+    from prime_cli.api.training import Volume
+
+    return Volume(name=name, size="1Ti", status=status, clusterId="c", namespace="n", pvcName="p")
+
+
+def _mock_volumes(monkeypatch, existing, created_status="RUNNING", create_error=None):
+    """Patch volume + dispatch calls. Returns (creates, dispatched)."""
+    from prime_cli.api.training import HostedTrainingRunResponse
+    from prime_cli.client import APIError
+
+    state = {"vols": list(existing)}
+    creates: list[tuple[str, str]] = []
+    dispatched: list[dict[str, Any]] = []
+
+    def create_volume(self, name, size, team_id=None):
+        creates.append((name, size))
+        if create_error:
+            raise APIError(create_error)
+        v = _vol(name, "PENDING")
+        state["vols"].append(_vol(name, created_status))
+        return v
+
+    def create_run(self, payload):
+        dispatched.append(payload)
+        return HostedTrainingRunResponse(run_id="r1", token_value="t")
+
+    p = "prime_cli.api.training.HostedTrainingClient."
+    monkeypatch.setattr(p + "list_volumes", lambda self, team_id=None: list(state["vols"]))
+    monkeypatch.setattr(p + "create_volume", create_volume)
+    monkeypatch.setattr(p + "create_run", create_run)
+    monkeypatch.setattr("prime_cli.commands.rl.time.sleep", lambda s: None)
+    return creates, dispatched
+
+
+def _run_volume(tmp_path: Path):
+    cfg = tmp_path / "rl.toml"
+    cfg.write_text(
+        '[model]\nname = "Qwen/Qwen3-0.6B"\n\n'
+        "[deployment]\nnum_train_gpus = 1\nnum_infer_gpus = 1\n"
+    )
+    return runner.invoke(app, ["train", str(cfg), "--volume", "ckpts", "-y"], env=TEST_ENV)
+
+
+def test_train_volume_exists_does_not_create(monkeypatch, tmp_path: Path) -> None:
+    creates, dispatched = _mock_volumes(monkeypatch, [_vol("ckpts")])
+    assert _run_volume(tmp_path).exit_code == 0
+    assert creates == [] and len(dispatched) == 1
+
+
+def test_train_missing_volume_is_created_then_dispatched(monkeypatch, tmp_path: Path) -> None:
+    creates, dispatched = _mock_volumes(monkeypatch, [])
+    result = _run_volume(tmp_path)
+    assert result.exit_code == 0, result.output
+    assert "Volume 'ckpts' doesn't exist, creating it (1Ti)" in result.output
+    assert creates == [("ckpts", "1Ti")] and len(dispatched) == 1
+
+
+def test_train_volume_create_failure_exits_without_dispatch(monkeypatch, tmp_path: Path) -> None:
+    creates, dispatched = _mock_volumes(monkeypatch, [], create_error="no cluster assigned")
+    result = _run_volume(tmp_path)
+    assert result.exit_code == 1 and "no cluster assigned" in result.output
+    assert len(creates) == 1 and dispatched == []
+
+
+def test_train_volume_failed_status_exits_without_dispatch(monkeypatch, tmp_path: Path) -> None:
+    creates, dispatched = _mock_volumes(monkeypatch, [], created_status="FAILED")
+    result = _run_volume(tmp_path)
+    assert result.exit_code == 1 and "FAILED" in result.output
+    assert dispatched == []
+
+
+def test_train_existing_deploying_volume_is_not_recreated(monkeypatch, tmp_path: Path) -> None:
+    creates, dispatched = _mock_volumes(monkeypatch, [_vol("ckpts", "DEPLOYING")])
+    assert _run_volume(tmp_path).exit_code == 0
+    assert creates == [] and len(dispatched) == 1

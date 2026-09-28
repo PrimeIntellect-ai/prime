@@ -112,6 +112,9 @@ HOSTED_TRAINING_LOG_FOLLOW_POLL_SECONDS = 5
 
 HOSTED_TRAINING_STOP_POLL_SECONDS = 3
 HOSTED_TRAINING_STOP_MAX_POLLS = 60
+VOLUME_READY_POLL_SECONDS = 3
+VOLUME_READY_MAX_SECONDS = 180
+VOLUME_DEFAULT_SIZE = "1Ti"  # same default as `prime volumes create`
 
 TERMINAL_RUN_STATUSES = {"STOPPED", "FAILED", "COMPLETED"}
 
@@ -1126,6 +1129,8 @@ def _dispatch_full_finetune_run(
     # to a plain print in --plain mode, which would emit "Creating Hosted
     # Training run..." on stdout ahead of the JSON payload and break
     # automation parsing of run_id.
+    if resolved_volume:
+        _ensure_volume(client, resolved_volume, team_id, output)
     status_ctx = (
         console.status("[bold blue]Creating Hosted Training run...", spinner="dots")
         if output != "json"
@@ -1157,6 +1162,55 @@ def _dispatch_full_finetune_run(
     dashboard_url = f"{app_config.frontend_url}/dashboard/training/{result.run_id}"
     console.print("\n[cyan]Monitor run at:[/cyan]")
     console.print(f"  [link={dashboard_url}]{dashboard_url}[/link]")
+
+
+def _ensure_volume(client: Any, name: str, team_id: Optional[str], output: str) -> None:
+    """Create `name` if it doesn't exist and wait until it is RUNNING.
+
+    An existing volume in any state is left alone (the backend reports
+    "not ready" at dispatch). Exits 1 on create failure, FAILED/TOMBSTONED,
+    or timeout. Progress goes to stderr for `--output json`.
+    """
+    try:
+        if any(v.name == name for v in client.list_volumes(team_id=team_id)):
+            return
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+    out = get_console(stderr=True) if output == "json" else console
+    out.print(f"Volume '{name}' doesn't exist, creating it ({VOLUME_DEFAULT_SIZE})...")
+    try:
+        volume = client.create_volume(name, VOLUME_DEFAULT_SIZE, team_id=team_id)
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+    status_ctx = (
+        console.status(f"[bold blue]Waiting for volume '{name}' to be ready...", spinner="dots")
+        if output != "json"
+        else nullcontext()
+    )
+    deadline = time.monotonic() + VOLUME_READY_MAX_SECONDS
+    status = volume.status
+    with status_ctx:
+        while status != "RUNNING":
+            if status in ("FAILED", "TOMBSTONED"):
+                console.print(f"[red]Error:[/red] Volume '{name}' is {status}; not dispatching.")
+                raise typer.Exit(1)
+            if time.monotonic() >= deadline:
+                console.print(
+                    f"[red]Error:[/red] Timed out waiting for volume '{name}' "
+                    f"(last status {status}). Check `prime volumes list`."
+                )
+                raise typer.Exit(1)
+            time.sleep(VOLUME_READY_POLL_SECONDS)
+            try:  # a single failed poll is retried on the next loop
+                match = [v for v in client.list_volumes(team_id=team_id) if v.name == name]
+            except APIError:
+                continue
+            if match:
+                status = match[0].status
 
 
 def load_config(path: str) -> RLConfig:

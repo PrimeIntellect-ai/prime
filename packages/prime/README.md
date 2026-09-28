@@ -200,7 +200,7 @@ prime sandbox run <sandbox-id> -- python script.py
 
 # Request a filesystem checkpoint; check again until it is DURABLE
 prime sandbox checkpoint <sandbox-id>
-prime sandbox checkpoint-status <checkpoint-id>
+prime sandbox checkpoints <sandbox-id> [--checkpoint-id <checkpoint-id>]
 prime sandbox restore <checkpoint-id> --name restored-sandbox
 
 # Upload/download files

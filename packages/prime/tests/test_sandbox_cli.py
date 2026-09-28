@@ -29,23 +29,43 @@ def test_checkpoint_command_and_status(monkeypatch: pytest.MonkeyPatch) -> None:
         assert sandbox_id == "sandbox-1"
         return checkpoint
 
-    def status(self: Any, checkpoint_id: str) -> SandboxCheckpoint:
-        assert checkpoint_id == "checkpoint-1"
-        return checkpoint.model_copy(update={"state": "DURABLE"})
+    listed: list[tuple[str, Any]] = []
+
+    def list_checkpoints(
+        self: Any, sandbox_id: str, checkpoint_id: Any = None
+    ) -> list[SandboxCheckpoint]:
+        listed.append((sandbox_id, checkpoint_id))
+        return [checkpoint.model_copy(update={"state": "DURABLE"})]
 
     monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.checkpoint", create)
-    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.get_checkpoint", status)
+    monkeypatch.setattr(
+        "prime_cli.commands.sandbox.SandboxClient.list_checkpoints", list_checkpoints
+    )
 
     created = runner.invoke(app, ["sandbox", "checkpoint", "sandbox-1"])
     assert created.exit_code == 0, created.output
     assert "checkpoint-1" in created.output
-    assert "checkpoint-status" in created.output
+    assert "prime sandbox checkpoints sandbox-1" in created.output
+
+    table = runner.invoke(app, ["sandbox", "checkpoints", "sandbox-1"])
+    assert table.exit_code == 0, table.output
+    assert "checkpoint-1" in table.output and "DURABLE" in table.output
 
     durable = runner.invoke(
-        app, ["sandbox", "checkpoint-status", "checkpoint-1", "--output", "json"]
+        app,
+        [
+            "sandbox",
+            "checkpoints",
+            "sandbox-1",
+            "--checkpoint-id",
+            "checkpoint-1",
+            "--output",
+            "json",
+        ],
     )
     assert durable.exit_code == 0, durable.output
-    assert json.loads(durable.output)["state"] == "DURABLE"
+    assert json.loads(durable.output)["checkpoints"][0]["state"] == "DURABLE"
+    assert listed == [("sandbox-1", None), ("sandbox-1", "checkpoint-1")]
 
 
 def test_restore_command_creates_from_checkpoint(monkeypatch: pytest.MonkeyPatch) -> None:

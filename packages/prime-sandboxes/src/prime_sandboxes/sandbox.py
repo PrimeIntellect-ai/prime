@@ -2321,6 +2321,14 @@ class SandboxClient:
         response = self.client.request("GET", f"/sandbox/checkpoints/{checkpoint_id}")
         return SandboxCheckpoint.model_validate(response)
 
+    def list_checkpoints(
+        self, sandbox_id: str, checkpoint_id: Optional[str] = None
+    ) -> List[SandboxCheckpoint]:
+        """List a sandbox's checkpoints oldest first, optionally only one ID."""
+        params = {"checkpoint_id": checkpoint_id} if checkpoint_id else None
+        response = self.client.request("GET", f"/sandbox/{sandbox_id}/checkpoints", params=params)
+        return [SandboxCheckpoint.model_validate(c) for c in response["checkpoints"]]
+
     def get_sandbox_statuses(self, sandbox_ids: List[str]) -> BatchSandboxStatusResponse:
         """Get lightweight lifecycle state for up to 100 sandboxes."""
         _validate_unique_batch_values(sandbox_ids, "sandbox_ids")
@@ -3715,6 +3723,16 @@ class AsyncSandboxClient:
         """Get the latest state of a filesystem checkpoint."""
         response = await self.client.request("GET", f"/sandbox/checkpoints/{checkpoint_id}")
         return SandboxCheckpoint.model_validate(response)
+
+    async def list_checkpoints(
+        self, sandbox_id: str, checkpoint_id: Optional[str] = None
+    ) -> List[SandboxCheckpoint]:
+        """List a sandbox's checkpoints oldest first, optionally only one ID."""
+        params = {"checkpoint_id": checkpoint_id} if checkpoint_id else None
+        response = await self.client.request(
+            "GET", f"/sandbox/{sandbox_id}/checkpoints", params=params
+        )
+        return [SandboxCheckpoint.model_validate(c) for c in response["checkpoints"]]
 
     async def get_sandbox_statuses(self, sandbox_ids: List[str]) -> BatchSandboxStatusResponse:
         """Get lightweight lifecycle state for up to 100 sandboxes."""

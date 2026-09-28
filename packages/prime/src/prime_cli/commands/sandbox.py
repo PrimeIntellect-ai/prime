@@ -475,7 +475,10 @@ def _print_checkpoint(checkpoint: SandboxCheckpoint, output: str) -> None:
     if checkpoint.error:
         console.print(f"Error: {escape(checkpoint.error)}")
     elif checkpoint.state != "DURABLE":
-        console.print("Restorable once DURABLE. Check with 'prime sandbox checkpoint-status <id>'.")
+        console.print(
+            "Restorable once DURABLE. Check with "
+            f"'prime sandbox checkpoints {escape(checkpoint.sandbox_id)}'."
+        )
 
 
 @app.command("checkpoint")
@@ -493,19 +496,50 @@ def checkpoint(
         raise typer.Exit(1) from exc
 
 
-@app.command("checkpoint-status")
-def checkpoint_status(
-    checkpoint_id: str,
+@app.command("checkpoints")
+def checkpoints(
+    sandbox_id: str,
+    checkpoint_id: Optional[str] = typer.Option(
+        None, "--checkpoint-id", help="Show only this checkpoint"
+    ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """Check whether a filesystem checkpoint is durable."""
+    """List a sandbox's filesystem checkpoints and their state."""
     validate_output_format(output, console)
     try:
-        result = SandboxClient(APIClient()).get_checkpoint(checkpoint_id)
-        _print_checkpoint(result, output)
+        results = SandboxClient(APIClient()).list_checkpoints(sandbox_id, checkpoint_id)
     except APIError as exc:
         console.print(f"[red]Error:[/red] {escape(str(exc))}")
         raise typer.Exit(1) from exc
+    if output == "json":
+        output_data_as_json({"checkpoints": [c.model_dump(mode="json") for c in results]}, console)
+        return
+    if not results:
+        console.print("No checkpoints found.")
+        return
+    table = build_table(
+        f"Checkpoints: {escape(sandbox_id)}",
+        [
+            ("ID", "cyan"),
+            ("Parent", "white"),
+            ("State", "white"),
+            ("Depth", "white"),
+            ("Stored", "white"),
+            ("Age", "white"),
+            ("Error", "red"),
+        ],
+    )
+    for c in results:
+        table.add_row(
+            escape(c.id),
+            escape(c.parent_id or "-"),
+            escape(c.state),
+            str(c.depth),
+            f"{c.stored_bytes / 1024**2:.1f} MiB" if c.stored_bytes is not None else "-",
+            human_age(c.created_at),
+            escape(c.error or ""),
+        )
+    console.print(table)
 
 
 @app.command("restore")

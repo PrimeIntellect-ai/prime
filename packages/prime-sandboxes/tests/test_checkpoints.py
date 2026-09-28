@@ -137,3 +137,41 @@ async def test_checkpoint_async_requests_and_status(monkeypatch: pytest.MonkeyPa
         ("POST", "/sandbox/sandbox-1/checkpoints"),
         ("GET", "/sandbox/checkpoints/checkpoint-1"),
     ]
+
+
+def test_list_checkpoints_sync_and_filter(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = SandboxClient(APIClient(api_key="test-key"))
+    calls = []
+
+    def request(method: str, path: str, params: dict | None = None) -> dict:
+        calls.append((method, path, params))
+        return {"checkpoints": [checkpoint_response("DURABLE")]}
+
+    monkeypatch.setattr(client.client, "request", request)
+    listed = client.list_checkpoints("sandbox-1")
+    filtered = client.list_checkpoints("sandbox-1", "checkpoint-1")
+
+    assert [c.state for c in listed] == ["DURABLE"]
+    assert filtered[0].id == "checkpoint-1"
+    assert calls == [
+        ("GET", "/sandbox/sandbox-1/checkpoints", None),
+        ("GET", "/sandbox/sandbox-1/checkpoints", {"checkpoint_id": "checkpoint-1"}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_checkpoints_async(monkeypatch: pytest.MonkeyPatch) -> None:
+    async with AsyncSandboxClient(api_key="test-key") as client:
+        calls = []
+
+        async def request(method: str, path: str, params: dict | None = None) -> dict:
+            calls.append((method, path, params))
+            return {"checkpoints": []}
+
+        monkeypatch.setattr(client.client, "request", request)
+        listed = await client.list_checkpoints("sandbox-1", "checkpoint-1")
+
+    assert listed == []
+    assert calls == [
+        ("GET", "/sandbox/sandbox-1/checkpoints", {"checkpoint_id": "checkpoint-1"}),
+    ]

@@ -31,6 +31,7 @@ Prime is the official CLI and Python SDK for [Prime Intellect](https://primeinte
 **What can you do with Prime?**
 
 - Deploy GPU pods with H100, A100, and other high-performance GPUs
+- Launch Prime Agent, with automatic installation on first use
 - Set up Lab workspaces for verifiers environments, evals, GEPA, and training
 - Discover and launch Hosted Training runs against verifiers environments
 - Create and manage isolated sandbox environments for running code
@@ -81,6 +82,9 @@ Get your API key from the [Prime Intellect Dashboard](https://app.primeintellect
 ### Basic Usage
 
 ```bash
+# Launch Prime Agent (installs automatically on first use)
+prime agent
+
 # Browse environments on the hub
 prime env list
 

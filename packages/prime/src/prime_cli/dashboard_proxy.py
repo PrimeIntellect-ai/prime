@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import hmac
 import http.server
 import json
 import os
@@ -394,12 +393,8 @@ def _idle_watchdog(
     server.shutdown()
 
 
-_FINGERPRINT_HMAC_KEY = b"prime-cli.dashboard_proxy.fingerprint-v1"
-"""Fixed, NON-secret domain-separation key for the reuse fingerprint.
-
-This is a keying digest, NOT password storage: HMAC-SHA256 over a public
-key separates this fingerprint from CodeQL's insecure-password-hash
-pattern (bare sha256 over a password-class secret)."""
+_FINGERPRINT_SALT = b"prime-cli.dashboard_proxy.fingerprint-v1"
+"""Fixed, NON-secret domain-separation salt for the reuse fingerprint."""
 
 
 def _proxy_fingerprint(base_url: str, run_id: str, api_key: str) -> str:
@@ -408,12 +403,16 @@ def _proxy_fingerprint(base_url: str, run_id: str, api_key: str) -> str:
     Combines the backend origin, the run id and a NON-REVERSIBLE digest
     of the API token (never the token itself), so switching
     PRIME_CONTEXT / base URL / API key starts a fresh proxy instead of
-    reusing one authenticated for a different context. The HMAC key is a
-    constant non-secret; the digest stays stable across restarts.
+    reusing one authenticated for a different context.
+
+    scrypt is used because CodeQL's password-hash policy applies to the
+    token: fast hashes (sha256, even via HMAC) are flagged as insecure for
+    password-class secrets. This is a KEYING fingerprint, not credential
+    storage, so deliberately cheap fixed parameters are fine; the digest
+    stays stable across restarts and derives only once per CLI invocation.
     """
     message = f"{base_url}\n{run_id}\n{api_key}".encode("utf-8")
-    digest = hmac.new(_FINGERPRINT_HMAC_KEY, message, hashlib.sha256)
-    return digest.hexdigest()[:16]
+    return hashlib.scrypt(message, salt=_FINGERPRINT_SALT, n=2**14, r=8, p=1, dklen=16).hex()
 
 
 def proxy_state_path(

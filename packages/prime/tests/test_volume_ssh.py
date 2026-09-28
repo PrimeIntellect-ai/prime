@@ -390,6 +390,16 @@ def test_put_rsync(monkeypatch, tmp_path, _session_dir):
     assert commands[0][:5] == ["/bin/rsync", "-a", "-v", "--partial", "-e"]
 
 
+@pytest.mark.parametrize("tools", [{"ssh", "rsync"}, {"ssh", "scp"}])
+def test_local_path_starting_with_dash_is_not_an_option(monkeypatch, tmp_path, tools):
+    """A local path like "--delete" must never reach rsync/scp as an option."""
+    _, _, commands = _setup(monkeypatch, tmp_path, tools)
+    assert _run("get", "data", "x", "--", "--delete").exit_code == 0
+    assert _run("put", "data", "--", "-f.txt").exit_code == 0
+    assert commands[0][-1] == "./--delete"
+    assert commands[1][-2] == "./-f.txt"
+
+
 def test_scp_fallback(monkeypatch, tmp_path, _session_dir):
     _, _, commands = _setup(monkeypatch, tmp_path, {"ssh", "scp"})
     result = _run("put", "data", "f.txt")

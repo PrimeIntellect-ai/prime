@@ -374,13 +374,17 @@ def _transfer(name: str, read_only: bool, remote: str, local: str, upload: bool)
         console.print(
             "rsync not found, using scp (full copy; install rsync for incremental transfers)"
         )
+    # A local path starting with "-" would be parsed as an option by rsync or
+    # scp; "./" makes it a plain path for every implementation (more portable
+    # than relying on each tool's "--").
+    if local.startswith("-"):
+        local = "./" + local
     session, alias, _key, config = _open_session(name, read_only=read_only)
+    remote_arg = f"{alias}:{remote}"
     if rsync:
-        remote_arg = f"{alias}:{remote}"
         ssh_cmd = shlex.join(["ssh", "-F", str(config)])
         cmd = [rsync, "-a", "-v", "--partial", "-e", ssh_cmd]
     else:
-        remote_arg = f"{alias}:{remote}"
         cmd = ["scp", "-r", "-F", str(config)]
     cmd += [local, remote_arg] if upload else [remote_arg, local]
     try:

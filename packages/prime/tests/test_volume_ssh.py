@@ -406,7 +406,9 @@ def test_no_ssh_tools(monkeypatch, tmp_path):
     assert not created and not commands
 
 
-@pytest.mark.parametrize("bad", ["../x", "a/../b", "a//b", "//a"])
+@pytest.mark.parametrize(
+    "bad", ["../x", "a/../b", "a//b", "//a", "my file", "a/*.pt", "x;rm", "$HOME", "it's"]
+)
 def test_remote_path_rejected(monkeypatch, tmp_path, bad):
     created, _, commands = _setup(monkeypatch, tmp_path, {"ssh", "rsync"})
     assert _run("get", "data", bad).exit_code == 2
@@ -417,6 +419,9 @@ def test_remote_path_normalized():
     assert volumes._remote_path("/") == "/volume/"
     assert volumes._remote_path("a/b") == "/volume/a/b"
     assert volumes._remote_path("/a/b/") == "/volume/a/b/"
+    assert volumes._remote_path("runs/step_100/model-00001.safetensors") == (
+        "/volume/runs/step_100/model-00001.safetensors"
+    )
 
 
 def test_failed_transfer_exit_code(monkeypatch, tmp_path):

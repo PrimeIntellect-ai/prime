@@ -336,14 +336,29 @@ def ssh(
         raise typer.Exit(code)
 
 
+# Remote paths are passed to rsync/scp unquoted. Quoting isn't portable: GNU
+# rsync >= 3.2.4 protects remote args itself (a quoted path would keep its
+# quotes), openrsync and older rsync don't. So only characters that need no
+# quoting on any remote shell are allowed.
+_SAFE_REMOTE_SEGMENT = re.compile(r"[A-Za-z0-9._@%+=,:-]+")
+
+
 def _remote_path(path: str) -> str:
     """Path under the volume root (/volume on the pod); a leading "/" means the
-    root. A trailing "/" is kept. Rejects empty and ".." segments."""
+    root. A trailing "/" is kept. Rejects empty and ".." segments, and any
+    character that would need shell quoting (spaces, *, $, quotes, ...)."""
     rel = path[1:] if path.startswith("/") else path
     parts = rel.removesuffix("/").split("/") if rel else []
     if any(p in ("", "..") for p in parts):
         console.print(
             f"[red]Invalid remote path {escape(repr(path))}: no '..' or empty segments.[/red]"
+        )
+        raise typer.Exit(2)
+    if not all(_SAFE_REMOTE_SEGMENT.fullmatch(p) for p in parts):
+        console.print(
+            f"[red]Invalid remote path {escape(repr(path))}: use letters, digits and "
+            "._-@%+=,: only (no spaces or shell characters). For other names, use "
+            "`prime volumes ssh`.[/red]"
         )
         raise typer.Exit(2)
     return "/volume/" + "/".join(parts) + ("/" if parts and rel.endswith("/") else "")
@@ -361,7 +376,7 @@ def _transfer(name: str, read_only: bool, remote: str, local: str, upload: bool)
         )
     session, alias, _key, config = _open_session(name, read_only=read_only)
     if rsync:
-        remote_arg = f"{alias}:{shlex.quote(remote)}"
+        remote_arg = f"{alias}:{remote}"
         ssh_cmd = shlex.join(["ssh", "-F", str(config)])
         cmd = [rsync, "-a", "-v", "--partial", "-e", ssh_cmd]
     else:

@@ -66,7 +66,11 @@ class StageError(Exception):
 
 
 class UnsupportedRenameError(StageError):
-    """The target filesystem does not support renameat2(RENAME_NOREPLACE)."""
+    """The target filesystem does not support renameat2(RENAME_NOREPLACE).
+
+    Live-verified on the production ceph-filesystem (CephFS) volumes:
+    renameat2 with RENAME_NOREPLACE returns EINVAL, so publication uses a
+    locked no-overwrite rename fallback (see publish_no_replace)."""
 
 
 def _progress(message: str) -> None:
@@ -151,6 +155,70 @@ def _rename_noreplace(src: Path, dst: Path) -> None:
             "rename that could overwrite existing data"
         )
     raise OSError(err, os.strerror(err), str(src), None, str(dst))
+
+
+def _publish_lock_path(datasets_root: Path) -> Path:
+    return datasets_root / ".prime-stage-publish.lock"
+
+
+def publish_no_replace(src: Path, dst: Path) -> str:
+    """Publish `src` as `dst` without ever overwriting existing data.
+
+    Preferred: renameat2(RENAME_NOREPLACE) - atomic no-replace. The
+    production CephFS (ceph-filesystem RWX) volumes do not implement
+    renameat2 flags (EINVAL), so for those filesystems fall back to a
+    publisher lock + existence check + directory rename:
+
+    - an flock on datasets/.prime-stage-publish.lock serializes staging
+      operations targeting the same datasets/ root;
+    - the destination is re-checked for absence under the lock;
+    - os.rename of a directory never *merges* into an existing directory,
+      and fails (EEXIST/ENOTEMPTY) if one appeared anyway, so committed
+      data can never be silently replaced.
+
+    Returns the mechanism used ("renameat2" or "locked_rename").
+    """
+    try:
+        _rename_noreplace(src, dst)
+        return "renameat2"
+    except UnsupportedRenameError:
+        pass
+    import fcntl
+
+    lock_path = _publish_lock_path(dst.parent)
+    have_lock = False
+    lock_file = None
+    try:
+        lock_file = open(lock_path, "a")
+        try:
+            os.chmod(lock_path, 0o644)
+        except OSError:
+            pass
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        have_lock = True
+    except OSError:
+        # Locking unavailable (e.g. lockless fs): best-effort; the
+        # existence check + rename error handling still fail closed.
+        if lock_file is not None:
+            lock_file.close()
+            lock_file = None
+    try:
+        if dst.exists() or dst.is_symlink():
+            raise FileExistsError(errno.EEXIST, "exists", str(src), None, str(dst))
+        try:
+            os.rename(src, dst)
+        except OSError as exc:
+            if exc.errno in (errno.EEXIST, errno.ENOTEMPTY):
+                raise FileExistsError(errno.EEXIST, "exists", str(src), None, str(dst)) from exc
+            raise
+        return "locked_rename"
+    finally:
+        if lock_file is not None:
+            try:
+                if have_lock:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            finally:
+                lock_file.close()
 
 
 def check_layout(root: Path) -> list[str]:
@@ -514,7 +582,7 @@ def _cmd_stage(args: argparse.Namespace) -> int:
         os.chmod(candidate / MANIFEST_NAME, 0o644)
 
         try:
-            _rename_noreplace(candidate, final)
+            publish_no_replace(candidate, final)
         except FileExistsError:
             winner = _read_manifest(final)
             if _manifest_matches(winner, args.source, sha):
@@ -539,6 +607,7 @@ def _cmd_stage(args: argparse.Namespace) -> int:
                 "untouched"
             )
 
+        _progress("published")
         _emit(
             {
                 "status": "staged",

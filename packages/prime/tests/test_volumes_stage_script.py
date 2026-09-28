@@ -128,7 +128,11 @@ def _assert_staged(volume_root: Path, name: str) -> dict:
         else:
             assert child.stat().st_mode & 0o777 == 0o644, child
     assert not (final / ".cache").exists()
-    hidden = [p.name for p in (volume_root / "datasets").iterdir() if p.name.startswith(".")]
+    hidden = [
+        p.name
+        for p in (volume_root / "datasets").iterdir()
+        if p.name.startswith(".") and p.name != ".prime-stage-publish.lock"
+    ]
     assert hidden == [], f"scratch left behind: {hidden}"
     return manifest
 
@@ -666,20 +670,44 @@ def test_concurrent_publication_no_overwrite(tmp_path, monkeypatch, captured_emi
     _assert_staged(volume_root, "tiny-sft")
 
 
-def test_unsupported_rename_fails_safely(tmp_path, monkeypatch) -> None:
+def test_unsupported_rename_falls_back_to_locked_rename(tmp_path, monkeypatch) -> None:
+    """Filesystems without renameat2 flags (production CephFS returns
+    EINVAL) publish via lock + absence check + rename, and still never
+    overwrite."""
     fixture = _make_parquet_fixture(tmp_path / "fixture", rows=2)
     install_fake_hub(monkeypatch, fixture)
     volume_root = tmp_path / "volume"
 
     def unsupported(src, dst):
-        raise stage.UnsupportedRenameError("no renameat2 here")
+        raise stage.UnsupportedRenameError("filesystem lacks renameat2 flags")
 
     monkeypatch.setattr(stage, "_rename_noreplace", unsupported)
-    rc = _run_stage(volume_root)
-    assert rc == 1
-    # nothing published, nothing left behind
-    assert not (volume_root / "datasets" / "tiny-sft").exists()
-    assert not any(p.name.startswith(".prime-stage-") for p in (volume_root / "datasets").iterdir())
+    assert _run_stage(volume_root) == 0
+    _assert_staged(volume_root, "tiny-sft")
+    # the publisher lock is hidden bookkeeping in datasets/
+    assert (volume_root / "datasets" / ".prime-stage-publish.lock").exists()
+
+
+def test_locked_rename_never_overwrites_existing(tmp_path, monkeypatch) -> None:
+    fixture = _make_parquet_fixture(tmp_path / "fixture", rows=2)
+    install_fake_hub(monkeypatch, fixture)
+    volume_root = tmp_path / "volume"
+    manual = volume_root / "datasets" / "tiny-sft"
+    _make_parquet_fixture(manual, rows=7)  # unmanaged existing destination
+
+    def unsupported(src, dst):
+        raise stage.UnsupportedRenameError("filesystem lacks renameat2 flags")
+
+    monkeypatch.setattr(stage, "_rename_noreplace", unsupported)
+    assert _run_stage(volume_root) == 1
+    # existing data untouched, no scratch left
+    assert not (manual / stage.MANIFEST_NAME).exists()
+    leftovers = [
+        p.name
+        for p in (volume_root / "datasets").iterdir()
+        if p.name.startswith(".prime-stage-") and "publish" not in p.name
+    ]
+    assert leftovers == []
 
 
 def test_stage_failure_never_touches_runs_directory(tmp_path, monkeypatch, checked_rename) -> None:

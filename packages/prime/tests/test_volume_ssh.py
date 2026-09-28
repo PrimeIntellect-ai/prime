@@ -312,7 +312,7 @@ def test_list_never_shows_the_namespace(monkeypatch, output):
         size="10Gi",
         status="RUNNING",
         clusterId="c1",
-        namespace="prime-team-secret-ns",
+        namespace="prime-team-secret-ns",  # an old backend still sends it
         pvcName="vol-ckpts",
     )
     monkeypatch.setattr(

@@ -1,7 +1,7 @@
 """`prime volumes`: named volumes FFT runs write their outputs to.
 
-A volume is a PVC in your team's (or personal) namespace on the cluster it
-was created on. `prime train config.toml --volume <name>` makes the run
+A volume is a PVC owned by your team (or you) on the cluster it was
+created on. `prime train config.toml --volume <name>` makes the run
 write under `runs/<runId>/` on it, and it outlives every run.
 """
 
@@ -71,11 +71,8 @@ def list_volumes(
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
-    # The Kubernetes namespace is a platform detail; never show it.
     if output == "json":
-        output_data_as_json(
-            [v.model_dump(by_alias=True, exclude={"namespace"}) for v in volumes], console
-        )
+        output_data_as_json([v.model_dump(by_alias=True) for v in volumes], console)
         return
     table = Table("Name", "Size", "Status", "Created")
     for v in volumes:

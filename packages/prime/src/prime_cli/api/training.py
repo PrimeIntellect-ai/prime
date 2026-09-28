@@ -74,7 +74,6 @@ class Volume(BaseModel):
     size: Optional[str] = None
     status: str
     cluster_id: str = Field(..., alias="clusterId")
-    namespace: str
     pvc_name: str = Field(..., alias="pvcName")
     created_by: Optional[str] = Field(None, alias="createdBy")
     created_at: Optional[str] = Field(None, alias="createdAt")

@@ -22,7 +22,11 @@ from prime_cli.core import Config
 
 from ..api.rl import EnvServerInfo, RLClient, RLRun
 from ..client import APIClient, APIError, ValidationError
-from ..dashboard_proxy import make_dashboard_proxy_server
+from ..dashboard_proxy import (
+    DEFAULT_IDLE_TIMEOUT_SECONDS,
+    make_dashboard_proxy_server,
+    start_detached_dashboard_proxy,
+)
 from ..utils import (
     DefaultCommandGroup,
     PlainTyper,
@@ -3516,19 +3520,29 @@ def get_dashboard_url(
         "--no-browser",
         help="Print the loopback URL without opening a browser.",
     ),
+    foreground: bool = typer.Option(
+        False,
+        "--foreground",
+        help="Serve in this process until Ctrl-C instead of detaching "
+        "(blocks; not safe for command substitution).",
+    ),
 ) -> None:
     """Open the Hosted Training run dashboard in your browser.
 
-    Serves the dashboard through a local proxy on 127.0.0.1 that injects
-    the API token on your behalf, so the browser never needs it. The
-    loopback URL is the last stdout line; the proxy runs until Ctrl-C.
-    Exits non-zero before serving if the run has no dashboard.
+    Starts a local proxy on 127.0.0.1 that injects the API token on your
+    behalf, so the browser never needs it. By default the proxy runs in a
+    detached background process that exits itself after 30 minutes idle:
+    the command prints the loopback URL as the last stdout line and
+    returns immediately, so `open $(prime train dashboard <run_id>
+    --no-browser)` is safe. `--foreground` keeps serving in this process
+    until Ctrl-C. Exits non-zero before starting the proxy if the run has
+    no dashboard.
 
     Example:
 
         prime train dashboard <run_id>
 
-        prime train dashboard <run_id> --no-browser
+        open $(prime train dashboard <run_id> --no-browser)
     """
     # Errors go to stderr so stdout stays strictly the URL and safe for
     # command substitution (`open $(prime train dashboard ...)`).
@@ -3544,27 +3558,49 @@ def get_dashboard_url(
         err_console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
 
-    server, url = make_dashboard_proxy_server(
-        run_id,
-        base_url=api_client.base_url,
-        api_key=api_client.api_key,
-    )
+    if foreground:
+        server, url = make_dashboard_proxy_server(
+            run_id,
+            base_url=api_client.base_url,
+            api_key=api_client.api_key,
+        )
+        # Machine-consumable URL: soft_wrap=True disables terminal-width
+        # wrapping so the URL always stays on one line (mirrors output_data_as_json).
+        console.print(url, markup=False, highlight=False, soft_wrap=True)
+        err_console.print(f"Serving dashboard at {url} — press Ctrl-C to stop.")
+
+        try:
+            if not no_browser:
+                webbrowser.open(url)
+            server.serve_forever()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            server.server_close()
+            if server.upstream_client is not None:
+                server.upstream_client.close()
+        return
+
+    try:
+        url = start_detached_dashboard_proxy(
+            run_id,
+            base_url=api_client.base_url,
+            api_key=api_client.api_key,
+        )
+    except (OSError, RuntimeError) as e:
+        err_console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
 
     # Machine-consumable URL: soft_wrap=True disables terminal-width
     # wrapping so the URL always stays on one line (mirrors output_data_as_json).
     console.print(url, markup=False, highlight=False, soft_wrap=True)
-    err_console.print(f"Serving dashboard at {url} — press Ctrl-C to stop.")
-
-    try:
-        if not no_browser:
-            webbrowser.open(url)
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        server.server_close()
-        if server.upstream_client is not None:
-            server.upstream_client.close()
+    idle_minutes = int(DEFAULT_IDLE_TIMEOUT_SECONDS // 60)
+    err_console.print(
+        f"Dashboard proxy running in the background at {url}; it exits after "
+        f"{idle_minutes} minutes idle. Use --foreground to serve in this process."
+    )
+    if not no_browser:
+        webbrowser.open(url)
 
 
 # `prime train usage` — token usage and price for one run; lives next to the

@@ -774,9 +774,23 @@ def test_resolve_pull_request_head_rejects_forks(monkeypatch) -> None:
 def test_train_dashboard_prints_url_and_exits_zero(monkeypatch) -> None:
 def _fake_proxy_server(monkeypatch, url: str) -> list[dict[str, Any]]:
     """Monkeypatch the proxy factory; record its call kwargs and stop serving.
+def _fake_detached_starter(monkeypatch, url: str) -> list[dict[str, Any]]:
+    """Monkeypatch the detached-proxy starter; record its call kwargs."""
+    calls: list[dict[str, Any]] = []
+
+    def fake_start(run_id: str, **kwargs: Any) -> str:
+        calls.append({"run_id": run_id, **kwargs})
+        return url
+
+    monkeypatch.setattr("prime_cli.commands.rl.start_detached_dashboard_proxy", fake_start)
+    return calls
+
+
+def _fake_foreground_server(monkeypatch, url: str) -> list[dict[str, Any]]:
+    """Monkeypatch the foreground proxy factory; stop serving immediately.
 
     `serve_forever` raises KeyboardInterrupt to simulate the user pressing
-    Ctrl-C immediately, so the command completes without blocking tests.
+    Ctrl-C, so the command completes without blocking tests.
     """
     calls: list[dict[str, Any]] = []
 
@@ -801,7 +815,7 @@ def _fake_proxy_server(monkeypatch, url: str) -> list[dict[str, Any]]:
     return calls
 
 
-def test_train_dashboard_serves_loopback_url_and_opens_browser(monkeypatch) -> None:
+def test_train_dashboard_default_starts_detached_proxy_and_exits(monkeypatch) -> None:
     captured: dict[str, Any] = {}
     opened: list[str] = []
 
@@ -812,7 +826,8 @@ def test_train_dashboard_serves_loopback_url_and_opens_browser(monkeypatch) -> N
 
     monkeypatch.setattr("prime_cli.core.client.APIClient.request", mock_request)
     monkeypatch.setattr("prime_cli.commands.rl.webbrowser.open", lambda url: opened.append(url))
-    factory_calls = _fake_proxy_server(monkeypatch, "http://127.0.0.1:51234/")
+    factory_calls = _fake_foreground_server(monkeypatch, "http://127.0.0.1:51234/")
+    starter_calls = _fake_detached_starter(monkeypatch, "http://127.0.0.1:51234/")
 
     result = runner.invoke(
         app,
@@ -820,19 +835,22 @@ def test_train_dashboard_serves_loopback_url_and_opens_browser(monkeypatch) -> N
         env={**TEST_ENV, "PRIME_API_KEY": "test-key"},
     )
 
+    # The default must return immediately (detached proxy): the command
+    # exits 0 after printing the URL, so `open $(...)` never deadlocks.
     assert result.exit_code == 0, result.output
     assert result.stdout == "http://127.0.0.1:51234/\n"
-    # The serving hint goes to stderr; stdout stays exactly the URL.
-    assert "press Ctrl-C to stop" in result.stderr
+    assert "background" in result.stderr
     assert opened == ["http://127.0.0.1:51234/"]
     # The run is resolved through the platform dashboard_url contract...
     assert captured["method"] == "GET"
     assert captured["endpoint"] == "/rft/runs/run-1/dashboard_url"
-    # ...and the proxy is built with the CLI's stored credentials.
-    assert len(factory_calls) == 1
-    assert factory_calls[0]["run_id"] == "run-1"
-    assert factory_calls[0]["api_key"] == "test-key"
-    assert factory_calls[0]["base_url"].startswith("http")
+    # ...via the detached starter with the CLI's stored credentials, and
+    # never via the blocking in-process server.
+    assert factory_calls == []
+    assert len(starter_calls) == 1
+    assert starter_calls[0]["run_id"] == "run-1"
+    assert starter_calls[0]["api_key"] == "test-key"
+    assert starter_calls[0]["base_url"].startswith("http")
 
 
 def test_train_dashboard_no_browser_skips_opening_and_still_prints_url(monkeypatch) -> None:
@@ -843,7 +861,7 @@ def test_train_dashboard_no_browser_skips_opening_and_still_prints_url(monkeypat
 
     monkeypatch.setattr("prime_cli.core.client.APIClient.request", mock_request)
     monkeypatch.setattr("prime_cli.commands.rl.webbrowser.open", lambda url: opened.append(url))
-    _fake_proxy_server(monkeypatch, "http://127.0.0.1:51234/")
+    _fake_detached_starter(monkeypatch, "http://127.0.0.1:51234/")
 
     result = runner.invoke(
         app,
@@ -853,7 +871,6 @@ def test_train_dashboard_no_browser_skips_opening_and_still_prints_url(monkeypat
 
     assert result.exit_code == 0, result.output
     assert result.stdout == "http://127.0.0.1:51234/\n"
-    assert "press Ctrl-C to stop" in result.stderr
     assert opened == []
 
 
@@ -866,7 +883,7 @@ def test_train_dashboard_long_url_is_not_wrapped(monkeypatch) -> None:
         return {"url": "http://ignored.example.com:7788"}
 
     monkeypatch.setattr("prime_cli.core.client.APIClient.request", mock_request)
-    _fake_proxy_server(monkeypatch, long_url)
+    _fake_detached_starter(monkeypatch, long_url)
 
     result = runner.invoke(
         app,
@@ -878,12 +895,84 @@ def test_train_dashboard_long_url_is_not_wrapped(monkeypatch) -> None:
     assert result.stdout == long_url + "\n"
 
 
+def test_train_dashboard_detached_start_failure_exits_nonzero(monkeypatch) -> None:
+    def mock_request(self, method, endpoint, params=None, json=None, timeout=None):
+        return {"url": "http://ignored.example.com:7788"}
+
+    def failing_start(run_id: str, **kwargs: Any) -> str:
+        raise RuntimeError("The dashboard proxy failed to start.")
+
+    monkeypatch.setattr("prime_cli.core.client.APIClient.request", mock_request)
+    monkeypatch.setattr("prime_cli.commands.rl.start_detached_dashboard_proxy", failing_start)
+
+    result = runner.invoke(
+        app,
+        ["train", "dashboard", "run-1"],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key"},
+    )
+
+    assert result.exit_code == 1
+    assert "Error:" in result.stderr
+    assert "dashboard proxy failed to start" in result.stderr
+    assert result.stdout == ""
+
+
+def test_train_dashboard_foreground_serves_in_process_until_ctrl_c(monkeypatch) -> None:
+    opened: list[str] = []
+
+    def mock_request(self, method, endpoint, params=None, json=None, timeout=None):
+        return {"url": "http://ignored.example.com:7788"}
+
+    monkeypatch.setattr("prime_cli.core.client.APIClient.request", mock_request)
+    monkeypatch.setattr("prime_cli.commands.rl.webbrowser.open", lambda url: opened.append(url))
+    starter_calls = _fake_detached_starter(monkeypatch, "http://127.0.0.1:51234/")
+    factory_calls = _fake_foreground_server(monkeypatch, "http://127.0.0.1:51234/")
+
+    result = runner.invoke(
+        app,
+        ["train", "dashboard", "run-1", "--foreground"],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "http://127.0.0.1:51234/\n"
+    assert "press Ctrl-C to stop" in result.stderr
+    assert opened == ["http://127.0.0.1:51234/"]
+    # --foreground uses the in-process server, not the detached starter.
+    assert starter_calls == []
+    assert len(factory_calls) == 1
+    assert factory_calls[0]["run_id"] == "run-1"
+    assert factory_calls[0]["api_key"] == "test-key"
+
+
+def test_train_dashboard_foreground_no_browser_does_not_open(monkeypatch) -> None:
+    opened: list[str] = []
+
+    def mock_request(self, method, endpoint, params=None, json=None, timeout=None):
+        return {"url": "http://ignored.example.com:7788"}
+
+    monkeypatch.setattr("prime_cli.core.client.APIClient.request", mock_request)
+    monkeypatch.setattr("prime_cli.commands.rl.webbrowser.open", lambda url: opened.append(url))
+    _fake_foreground_server(monkeypatch, "http://127.0.0.1:51234/")
+
+    result = runner.invoke(
+        app,
+        ["train", "dashboard", "run-1", "--foreground", "--no-browser"],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "http://127.0.0.1:51234/\n"
+    assert opened == []
+
+
 def test_train_dashboard_exits_nonzero_without_url(monkeypatch) -> None:
     def mock_request(self, method, endpoint, params=None, json=None, timeout=None):
         return {"url": None}
 
     monkeypatch.setattr("prime_cli.core.client.APIClient.request", mock_request)
-    factory_calls = _fake_proxy_server(monkeypatch, "http://127.0.0.1:51234/")
+    starter_calls = _fake_detached_starter(monkeypatch, "http://127.0.0.1:51234/")
+    factory_calls = _fake_foreground_server(monkeypatch, "http://127.0.0.1:51234/")
 
     result = runner.invoke(
         app,
@@ -894,7 +983,8 @@ def test_train_dashboard_exits_nonzero_without_url(monkeypatch) -> None:
     assert result.exit_code == 1
     assert "No dashboard available for run run-1" in result.stderr
     assert result.stdout == ""
-    # No proxy server may be started when the run has no dashboard.
+    # No proxy may be started when the run has no dashboard.
+    assert starter_calls == []
     assert factory_calls == []
 
 
@@ -905,7 +995,8 @@ def test_train_dashboard_exits_nonzero_on_api_error(monkeypatch) -> None:
         raise APIError("404: run not found")
 
     monkeypatch.setattr("prime_cli.core.client.APIClient.request", mock_request)
-    factory_calls = _fake_proxy_server(monkeypatch, "http://127.0.0.1:51234/")
+    starter_calls = _fake_detached_starter(monkeypatch, "http://127.0.0.1:51234/")
+    factory_calls = _fake_foreground_server(monkeypatch, "http://127.0.0.1:51234/")
 
     result = runner.invoke(
         app,
@@ -917,4 +1008,5 @@ def test_train_dashboard_exits_nonzero_on_api_error(monkeypatch) -> None:
     assert "Error:" in result.stderr
     assert "404: run not found" in result.stderr
     assert result.stdout == ""
+    assert starter_calls == []
     assert factory_calls == []

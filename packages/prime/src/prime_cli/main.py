@@ -1,3 +1,4 @@
+import os
 import sys
 from typing import Optional
 
@@ -104,8 +105,6 @@ def callback(
         raise typer.Exit()
 
     if context:
-        import os
-
         # Ignore any inherited PRIME_CONTEXT while validating the explicit
         # selector, then fully load it before any command can construct a
         # client. A filename alone is not proof that a context is usable.
@@ -136,6 +135,14 @@ def callback(
                 os.environ["PRIME_CONTEXT"] = previous_context
 
         ctx.call_on_close(restore_context)
+    elif not os.environ.get("PRIME_CONTEXT"):
+        # Surface a broken directory context once, readably, instead of as a
+        # traceback from whichever command first builds a Config.
+        try:
+            Config()
+        except ValueError as e:
+            typer.echo(f"Error: {e}", err=True)
+            raise typer.Exit(1)
 
     # Check for updates (only when a subcommand is being executed)
     if ctx.invoked_subcommand is not None:

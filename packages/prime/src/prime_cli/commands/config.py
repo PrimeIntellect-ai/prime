@@ -1,5 +1,6 @@
 import os
 import re
+from pathlib import Path
 from typing import Optional
 
 import typer
@@ -8,9 +9,15 @@ from rich.table import Table
 from rich.text import Text
 
 from prime_cli.core import Config
+from prime_cli.core.config import (
+    find_local_context_file,
+    read_local_context,
+    write_local_context,
+)
 
 from ..client import APIClient, APIError
 from ..utils import PlainTyper, get_console, require_persistent_context
+from ..utils.context import apply_team, describe_local_context, local_context_target
 from .teams import fetch_teams
 
 app = PlainTyper(help="Configure the CLI", no_args_is_help=True)
@@ -47,8 +54,17 @@ def view() -> None:
     def _env_set(*names: str) -> bool:
         return any((val := os.getenv(n)) and val.strip() for n in names)
 
+    local_file = config.local_context_file
+    pinned_context = config.local_context.get("context")
+
     # Show current environment
-    table.add_row("Current Environment", settings["current_environment"])
+    env_label = settings["current_environment"]
+    if config.context_override:
+        env_label += " (from --context)"
+    elif pinned_context:
+        env_label += " (directory context)"
+    table.add_row("Current Environment", Text(env_label))
+    table.add_row("Directory Context", Text(str(local_file) if local_file else "None"))
 
     api_key = settings["api_key"]
     if api_key:
@@ -70,6 +86,8 @@ def view() -> None:
             team_label = f"{team_name} ({team_id})" if team_name else team_id
     else:
         team_label = "Personal Account"
+    if config.team_pinned and not team_from_env:
+        team_label += " (directory context)"
     table.add_row("Team", Text(team_label))
 
     # Show User
@@ -202,14 +220,16 @@ def set_team_id(
         except (APIError, Exception):
             pass
 
-    config.set_team(team_id, team_name=team_name, team_role=team_role)
+    where = apply_team(config, config.local_context_file, team_id, team_name, team_role)
     if team_id:
         if team_name:
-            console.print(f"[green]Team '{team_name}' ({team_id}) configured successfully![/green]")
+            console.print(
+                f"[green]Team '{team_name}' ({team_id}) configured successfully{where}![/green]"
+            )
         else:
-            console.print(f"[green]Team ID '{team_id}' configured successfully![/green]")
+            console.print(f"[green]Team ID '{team_id}' configured successfully{where}![/green]")
     else:
-        console.print("[green]Team ID cleared. Using personal account.[/green]")
+        console.print(f"[green]Team ID cleared. Using personal account{where}.[/green]")
 
 
 @app.command()
@@ -217,8 +237,8 @@ def remove_team_id() -> None:
     """Remove team ID to use personal account"""
     require_persistent_context()
     config = Config()
-    config.set_team(None)
-    console.print("[green]Team ID removed. Using personal account.[/green]")
+    where = apply_team(config, config.local_context_file, None)
+    console.print(f"[green]Team ID removed. Using personal account{where}.[/green]")
 
 
 @app.command()
@@ -332,12 +352,17 @@ def set_traces_url(
 
 
 # Helper functions (not commands)
-def _set_environment(
-    env: str,
-) -> None:
+def _set_environment(env: str, local: bool = False, global_: bool = False) -> None:
     """Set URLs for a specific environment"""
     require_persistent_context()
     config = Config()
+    target = local_context_target(config, local, global_)
+    if target is not None:
+        _pin_environment(config, env, target)
+        return
+    if config.local_context_file is not None:
+        # --global from inside a directory context: write the global config.
+        config = Config(use_context=False)
 
     # Try to load the environment (handles both built-in and custom)
     try:
@@ -354,6 +379,37 @@ def _set_environment(
         raise typer.Exit(1)
 
     console.print("[blue]Run 'prime config view' to see the current configuration[/blue]")
+
+
+def _pin_environment(config: Config, env: str, target: Path) -> None:
+    """Select a saved environment for a directory via its context file."""
+    try:
+        known = {name.casefold(): name for name in config.list_environments()}
+        config._sanitize_environment_name(env)
+    except ValueError as e:
+        console.print(f"[red]Error: {escape(str(e))}[/red]")
+        raise typer.Exit(1)
+    if env.casefold() not in known:
+        console.print(f"[red]Unknown environment: {escape(env)}[/red]")
+        console.print("[yellow]Available environments:[/yellow]")
+        for env_name in known.values():
+            console.print(f"  - {escape(env_name)}")
+        raise typer.Exit(1)
+
+    data = read_local_context(target) if target.is_file() else {}
+    data["context"] = known[env.casefold()]
+    # A pinned team belongs to the previous environment's account.
+    for key in ("team_id", "team_name", "team_role"):
+        data.pop(key, None)
+    write_local_context(target, data)
+    console.print(
+        f"[green]Using environment '{escape(known[env.casefold()])}' "
+        f"{describe_local_context(target)}.[/green]"
+    )
+    console.print(
+        "[dim]Commands and SDKs run in this directory now use it; "
+        "'prime config unpin' removes it.[/dim]"
+    )
 
 
 def _save_environment(
@@ -442,7 +498,7 @@ def reset(
     """Reset configuration to defaults"""
     require_persistent_context()
     if yes or typer.confirm("Are you sure you want to reset all settings?"):
-        config = Config()
+        config = Config(use_context=False)
         config.set_api_key("")
         config.set_team(None)
         config.set_user_id(None)
@@ -461,9 +517,34 @@ def use_environment(
     env: str = typer.Argument(
         ..., help="Environment name: 'production' or a custom saved environment"
     ),
+    local: bool = typer.Option(
+        False,
+        "--local",
+        help="Use it only in the current directory (writes ./.prime/context.json)",
+    ),
+    global_: bool = typer.Option(
+        False,
+        "--global",
+        help="Change the global environment even inside a directory with its own context",
+    ),
 ) -> None:
-    """Switch to a different environment"""
-    _set_environment(env)
+    """Switch to a different environment.
+
+    Inside a directory with a .prime/context.json (see --local), this changes
+    that directory's environment; elsewhere it changes the global one.
+    """
+    _set_environment(env, local=local, global_=global_)
+
+
+@app.command(name="unpin")
+def unpin() -> None:
+    """Remove the directory context (.prime/context.json) in effect here"""
+    path = find_local_context_file()
+    if path is None:
+        console.print("[yellow]No directory context applies here.[/yellow]")
+        return
+    write_local_context(path, {})
+    console.print(f"[green]Removed directory context {escape(str(path))}.[/green]")
 
 
 @app.command(name="save", no_args_is_help=True)

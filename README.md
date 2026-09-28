@@ -235,7 +235,13 @@ prime teams list
 prime switch
 prime switch personal
 prime switch <team-slug>
+
+# Pin a team (or saved context) to the current directory
+prime switch <team-slug> --local
 ```
+
+See [packages/prime/README.md](packages/prime/README.md#per-directory-team-and-account)
+for per-directory contexts.
 
 ## Development
 

@@ -833,6 +833,10 @@ def _add_default_inference_and_key_args(
     api_key_var = _parse_value_option(args, "--api-key-var", "-k")
     if api_key_var is None:
         env["PRIME_API_KEY"] = config.api_key
+    if config.team_id and not config.team_id_from_env:
+        # verifiers reads ~/.prime/config.json itself, so it would miss a team
+        # chosen by --context or a directory's .prime/context.json.
+        env["PRIME_TEAM_ID"] = config.team_id
 
     if base:
         base = base.rstrip("/")

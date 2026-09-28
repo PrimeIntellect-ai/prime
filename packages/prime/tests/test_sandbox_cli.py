@@ -7,6 +7,7 @@ import pytest
 from prime_cli.commands.sandbox import _format_sandbox_expiry
 from prime_cli.main import app
 from prime_cli.utils import strip_ansi
+from prime_sandboxes import StartCommand
 from typer.testing import CliRunner
 
 runner = CliRunner()
@@ -46,7 +47,7 @@ def _fake_detailed_sandbox(**overrides: Any) -> SimpleNamespace:
         }
     )
     return _fake_sandbox(
-        start_command="tail -f /dev/null",
+        start_command=StartCommand(executable="tail", args=["-f", "/dev/null"]),
         disk_size_gb=10.0,
         disk_mount_path="/sandbox-workspace",
         vm=True,

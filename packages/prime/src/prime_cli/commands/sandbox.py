@@ -175,16 +175,14 @@ def _network_access_description(
     return "Unrestricted"
 
 
-def _start_command_data(value: Any) -> Any:
-    if isinstance(value, StartCommand):
-        return value.model_dump()
-    return value
+def _start_command_data(value: StartCommand | None) -> dict[str, Any] | None:
+    return value.model_dump() if value is not None else None
 
 
-def _format_start_command(value: Any) -> str:
-    if isinstance(value, StartCommand):
-        return json.dumps([value.executable, *value.args])
-    return str(value) if value else "N/A"
+def _format_start_command(value: StartCommand | None) -> str:
+    if value is None:
+        return "N/A"
+    return json.dumps([value.executable, *value.args])
 
 
 def _format_sandbox_for_details(sandbox: Sandbox) -> Dict[str, Any]:

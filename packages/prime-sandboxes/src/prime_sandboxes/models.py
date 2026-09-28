@@ -157,7 +157,7 @@ class Sandbox(BaseModel):
     id: str
     name: str
     docker_image: str = Field(..., alias="dockerImage")
-    start_command: Optional[Union[StartCommand, str]] = Field(None, alias="startCommand")
+    start_command: Optional[StartCommand] = Field(None, alias="startCommand")
     cpu_cores: float = Field(..., alias="cpuCores")
     memory_gb: float = Field(..., alias="memoryGB")
     disk_size_gb: float = Field(..., alias="diskSizeGB")

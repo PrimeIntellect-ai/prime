@@ -522,6 +522,12 @@ def reset(
         config.set_ssh_key_path(Config.DEFAULT_SSH_KEY_PATH)
         config.set_current_environment("production")
         console.print("[green]Configuration reset to defaults![/green]")
+        local_file = find_local_context_file()
+        if local_file is not None:
+            console.print(
+                f"[yellow]Note:[/yellow] {escape(str(local_file))} still selects this "
+                "directory's team or context; 'prime config unpin' removes it."
+            )
 
 
 # Environment commands

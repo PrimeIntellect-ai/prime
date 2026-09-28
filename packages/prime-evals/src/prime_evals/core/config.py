@@ -72,8 +72,28 @@ class Config:
         self.config_file = self.config_dir / "config.json"
         self.environments_dir = self.config_dir / "environments"
         self.local_context_file: Optional[Path] = None
+        self._context_error: Optional[ValueError] = None
         self._load_config()
-        self._load_context()
+        try:
+            self._load_context()
+        except ValueError as e:
+            if self.local_context_file is None:
+                raise  # an explicit PRIME_CONTEXT fails immediately
+            # A broken directory pin is raised on first read instead: a caller
+            # passing every value explicitly never reads the config, so it must
+            # not be taken down, while any value the pin would supply fails loudly.
+            self._context_error = e
+
+    @property
+    def config(self) -> dict:
+        """Resolved config values; raises if the selected context is broken."""
+        if self._context_error is not None:
+            raise self._context_error
+        return self._config
+
+    @config.setter
+    def config(self, value: dict) -> None:
+        self._config = value
 
     def _load_config(self) -> None:
         """Load configuration from file"""

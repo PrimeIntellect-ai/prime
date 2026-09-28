@@ -446,3 +446,14 @@ def test_persistent_environment_switch_cannot_overwrite_the_pinned_context(
 
     assert pinned.read_text() == pinned_before
     assert _global(home) == global_before
+
+
+def test_reset_notes_that_the_directory_context_still_applies(repo: Path, home: Path) -> None:
+    pin = _pin(repo, {"team_id": EDISON})
+
+    result = runner.invoke(app, ["config", "reset", "--yes"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    assert "still selects this directory" in result.output
+    assert pin.exists()
+    assert _global(home)["api_key"] == ""

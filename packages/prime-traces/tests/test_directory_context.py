@@ -84,15 +84,17 @@ def test_home_prime_directory_is_not_a_directory_context(repo, monkeypatch) -> N
 
 def test_unknown_pinned_context_is_an_error(repo) -> None:
     _pin(repo, {"context": "missing"})
+    config = Config()
     with pytest.raises(ValueError, match="context.json"):
-        Config()
+        config.team_id
 
 
 def test_malformed_directory_context_is_an_error(repo) -> None:
     (repo / ".prime").mkdir()
     (repo / ".prime" / "context.json").write_text("[]")
+    config = Config()
     with pytest.raises(ValueError, match="expected a JSON object"):
-        Config()
+        config.api_key
 
 
 def test_symlinked_directory_context_is_ignored(repo) -> None:
@@ -107,3 +109,25 @@ def test_symlinked_directory_context_is_ignored(repo) -> None:
 def test_empty_team_env_means_personal_account(repo, monkeypatch) -> None:
     monkeypatch.setenv("PRIME_TEAM_ID", "")
     assert Config().team_id is None
+
+
+def test_broken_directory_context_only_fails_values_read_from_it(repo, monkeypatch) -> None:
+    _pin(repo, {"context": "missing"})
+    monkeypatch.setenv("PRIME_API_KEY", "env-key")
+    monkeypatch.setenv("PRIME_TEAM_ID", "env-team")
+    config = Config()
+    assert config.api_key == "env-key"
+    assert config.team_id == "env-team"
+    with pytest.raises(ValueError, match="context.json"):
+        config.config
+
+
+def test_traces_client_with_explicit_values_ignores_a_broken_pin(repo) -> None:
+    from prime_traces.core.client import BaseTracesAPIClient
+
+    _pin(repo, {"context": "missing"})
+    client = BaseTracesAPIClient(
+        api_key="explicit-key", base_url="https://traces.example", team_id="explicit-team"
+    )
+    assert client.api_key == "explicit-key"
+    assert client.team_id == "explicit-team"

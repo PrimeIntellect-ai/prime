@@ -23,6 +23,7 @@ a still-running proxy instead of spawning another one.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import http.server
 import json
 import os
@@ -61,10 +62,47 @@ _PROXY_STATE_DIR = Path.home() / ".prime" / "dashboard_proxies"
 
 _REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 
+_LOOPBACK_HOSTNAMES = {"127.0.0.1", "localhost", "::1"}
+"""Host header names the loopback proxy may serve (DNS-rebinding guard)."""
+
+
+def _parse_host_header(value: str) -> tuple[Optional[str], Optional[int]]:
+    """Split a ``Host`` header into (hostname, port), tolerating IPv6 forms."""
+    host = value.strip()
+    if not host:
+        return None, None
+    if host.startswith("["):
+        end = host.find("]")
+        if end == -1:
+            return None, None
+        hostname = host[1:end]
+        rest = host[end + 1 :]
+        port: Optional[int] = None
+        if rest.startswith(":") and rest[1:].isdigit():
+            port = int(rest[1:])
+        return hostname.lower(), port
+    before, sep, after = host.rpartition(":")
+    if sep and after.isdigit():
+        return before.lower(), int(after)
+    return host.lower(), None
+
 
 def dashboard_upstream_path(run_id: str, path: str) -> str:
     """Map a loopback request path onto the run-scoped platform proxy route."""
     return f"/api/v1/rft/runs/{run_id}/dashboard/{path.lstrip('/')}"
+
+
+def _has_traversal(path_with_query: str) -> bool:
+    """Detect "." / ".." segments (encoded or backslash-separated).
+
+    The loopback must never forward traversal paths: httpx normalizes dot
+    segments BEFORE the bearer token is attached, which would turn the
+    proxy into an authenticated GET of endpoints outside the run-scoped
+    dashboard route.
+    """
+    parsed = urllib.parse.urlsplit(path_with_query)
+    normalized = urllib.parse.unquote(parsed.path).replace("\\", "/")
+    return any(segment in (".", "..") for segment in normalized.split("/"))
 
 
 def _origin_of(url: urllib.parse.SplitResult) -> Optional[tuple[str, str, int]]:
@@ -88,16 +126,35 @@ def map_dashboard_redirect(location: str, base_url: str, run_id: str) -> Optiona
     URLs, or same-origin paths outside the dashboard scope) returns
     ``None`` so the caller can reject the redirect without leaking the
     upstream origin to the browser.
+
+    Relative locations may themselves be platform-shaped: the platform
+    proxy rewrites upstream redirects onto the fixed
+    ``/api/v1/rft/runs/{run_id}/dashboard/...`` prefix so a browser
+    re-enters platform authZ. The loopback must strip that prefix here —
+    otherwise it would prepend the run prefix a second time and the
+    upstream request would 404 (double-rewrite composition).
     """
     parsed = urllib.parse.urlsplit(location)
+    prefix = dashboard_upstream_path(run_id, "")
+    query = f"?{parsed.query}" if parsed.query else ""
+
     if not parsed.scheme and not parsed.netloc:
+        if parsed.path == prefix.rstrip("/"):
+            return "/" + query
+        if parsed.path.startswith(prefix):
+            return "/" + parsed.path[len(prefix) :] + query
+        if parsed.path.startswith("/api/v1/"):
+            # Platform-shaped but outside this run's dashboard scope: the
+            # loopback cannot serve it (its own prefix would compound).
+            return None
+        # Ordinary dashboard-relative location: resolves identically on
+        # the loopback root.
         return location
 
     base = urllib.parse.urlsplit(base_url)
     if _origin_of(parsed) != _origin_of(base):
         return None
 
-    prefix = dashboard_upstream_path(run_id, "")
     path = parsed.path or "/"
     if path == prefix.rstrip("/"):
         path = "/"
@@ -105,9 +162,7 @@ def map_dashboard_redirect(location: str, base_url: str, run_id: str) -> Optiona
         path = "/" + path[len(prefix) :]
     else:
         return None
-    if parsed.query:
-        path += "?" + parsed.query
-    return path
+    return path + query
 
 
 class DashboardProxyHandler(http.server.BaseHTTPRequestHandler):
@@ -133,6 +188,14 @@ class DashboardProxyHandler(http.server.BaseHTTPRequestHandler):
             server.request_finished()
 
     def _proxy_get(self) -> None:
+        if not self._request_targets_loopback():
+            return
+        if _has_traversal(self.path):
+            # Rejected before URL construction: httpx would normalize dot
+            # segments and attach the bearer token to paths outside the
+            # run-scoped dashboard route.
+            self._send_plain_error(400, "Bad request: path traversal is not allowed.")
+            return
         if self.upstream is None:  # pragma: no cover - guarded by factory
             self._send_plain_error(500, "Dashboard proxy is not configured.")
             return
@@ -167,6 +230,27 @@ class DashboardProxyHandler(http.server.BaseHTTPRequestHandler):
         except httpx.HTTPError:
             self._send_plain_error(502, "Dashboard backend is unreachable.")
 
+    def _request_targets_loopback(self) -> bool:
+        """Reject non-loopback Host/Origin headers (DNS-rebinding guard).
+
+        The proxy serves private run data with the CLI's bearer token
+        injected; a hostile page must not be able to read it through a
+        rebound DNS name pointing at 127.0.0.1. Reject before any
+        upstream work, so forged requests never touch the platform.
+        """
+        hostname, port = _parse_host_header(self.headers.get("Host", ""))
+        bound_port = self.server.server_address[1]
+        if hostname not in _LOOPBACK_HOSTNAMES or (port is not None and port != bound_port):
+            self._send_plain_error(403, "Forbidden: loopback requests only.")
+            return False
+        origin = self.headers.get("Origin")
+        if origin is not None:
+            origin_host = (urllib.parse.urlsplit(origin).hostname or "").lower()
+            if origin_host not in _LOOPBACK_HOSTNAMES:
+                self._send_plain_error(403, "Forbidden: loopback requests only.")
+                return False
+        return True
+
     def _relay(self, response: httpx.Response) -> None:
         # Validate redirects BEFORE sending any status line: the stdlib
         # buffers headers, and a rejected redirect must not flush a
@@ -189,6 +273,15 @@ class DashboardProxyHandler(http.server.BaseHTTPRequestHandler):
             self.send_header("Cache-Control", cache_control)
         if redirect_location is not None:
             self.send_header("Location", redirect_location)
+        # Pre-compressed assets arrive with Content-Encoding even though we
+        # requested identity. httpx DECODES in iter_bytes, so relaying the
+        # compressed Content-Length with decoded bytes would break the
+        # browser. Forward the encoding header and stream RAW bytes so the
+        # body matches the advertised length.
+        content_encoding = response.headers.get("content-encoding")
+        body_iter = response.iter_raw() if content_encoding else response.iter_bytes()
+        if content_encoding:
+            self.send_header("Content-Encoding", content_encoding)
         length = response.headers.get("content-length")
         if length:
             self.send_header("Content-Length", length)
@@ -199,7 +292,7 @@ class DashboardProxyHandler(http.server.BaseHTTPRequestHandler):
             self.send_header("Connection", "close")
         self.end_headers()
         try:
-            for chunk in response.iter_bytes():
+            for chunk in body_iter:
                 self.wfile.write(chunk)
                 self.wfile.flush()  # SSE events must reach the browser immediately
         except (BrokenPipeError, ConnectionResetError):
@@ -300,11 +393,26 @@ def _idle_watchdog(
     server.shutdown()
 
 
-def proxy_state_path(run_id: str, state_dir: Optional[Path] = None) -> Path:
+def _proxy_fingerprint(base_url: str, run_id: str, api_key: str) -> str:
+    """Context fingerprint keying a detached proxy's state file.
+
+    Combines the backend origin, the run id and a NON-REVERSIBLE digest
+    of the API token (never the token itself), so switching
+    PRIME_CONTEXT / base URL / API key starts a fresh proxy instead of
+    reusing one authenticated for a different context.
+    """
+    digest = hashlib.sha256(f"{base_url}\n{run_id}\n{api_key}".encode("utf-8"))
+    return digest.hexdigest()[:16]
+
+
+def proxy_state_path(
+    run_id: str, state_dir: Optional[Path] = None, fingerprint: Optional[str] = None
+) -> Path:
     """Per-run state file holding the detached proxy's pid and port."""
     directory = state_dir or _PROXY_STATE_DIR
     safe = re.sub(r"[^A-Za-z0-9_.-]", "_", run_id)
-    return directory / f"train-dashboard-{safe}.json"
+    suffix = f"-{fingerprint}" if fingerprint else ""
+    return directory / f"train-dashboard-{safe}{suffix}.json"
 
 
 def _read_proxy_state(state_path: Path) -> Optional[dict[str, Any]]:
@@ -339,6 +447,20 @@ def _pid_is_alive(pid: int) -> bool:
     return True
 
 
+def _proxy_still_serves(url: str, timeout: float = 10.0) -> bool:
+    """Probe a live proxy to confirm its credentials still work upstream.
+
+    A proxy whose stored token was revoked or whose backend moved answers
+    with a clean local 502 (the platform rejects the bearer with 4xx).
+    Only such healthy proxies are reused; otherwise a fresh proxy starts.
+    """
+    try:
+        response = httpx.get(url, timeout=timeout, follow_redirects=False)
+    except httpx.HTTPError:
+        return False
+    return response.status_code < 400
+
+
 def _live_proxy_url(state: Optional[dict[str, Any]]) -> Optional[str]:
     """Return the loopback URL of a still-running proxy, if any."""
     if not state:
@@ -355,6 +477,58 @@ def _live_proxy_url(state: Optional[dict[str, Any]]) -> Optional[str]:
     except OSError:
         return None
     return f"http://127.0.0.1:{port}/"
+
+
+def _cleanup_stale_proxy_states(
+    run_id: str, *, keep_fingerprint: str, state_dir: Optional[Path] = None
+) -> None:
+    """Drop state files of this run that belong to a different context.
+
+    A live proxy under a different fingerprint is NOT terminated here:
+    it may be actively serving a dashboard that another terminal (with a
+    different PRIME_CONTEXT / token) opened, and its bearer token is
+    scoped to exactly the context that started it. The idle timeout bounds
+    its lifetime. Dead orphans have their stale state files removed so
+    they can never be mistaken for a reusable proxy.
+    """
+    directory = state_dir or _PROXY_STATE_DIR
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", run_id)
+    pattern = f"train-dashboard-{safe}-*.json"
+    for candidate in sorted(directory.glob(pattern)):
+        suffix = candidate.name[len(f"train-dashboard-{safe}-") : -len(".json")]
+        if suffix == keep_fingerprint:
+            continue
+        state = _read_proxy_state(candidate)
+        pid = state.get("pid") if state else None
+        if isinstance(pid, int) and _pid_is_alive(pid):
+            continue  # live proxy of another context: leave it to its idle exit
+        candidate.unlink(missing_ok=True)
+
+
+def _terminate_child_process(process: "subprocess.Popen[bytes]") -> None:
+    """Kill a detached child and reap it, killing the whole process group.
+
+    The child is its own session leader (``start_new_session=True``), so
+    the group id equals its pid; killing the group also clears anything
+    it may have spawned. On platforms without ``killpg`` fall back to
+    ``Popen.kill()``.
+    """
+    killed = False
+    try:
+        if hasattr(os, "killpg") and hasattr(signal, "SIGKILL"):
+            os.killpg(process.pid, signal.SIGKILL)
+            killed = True
+    except OSError:
+        pass
+    if not killed:
+        try:
+            process.kill()
+        except OSError:
+            pass
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:  # pragma: no cover - stubborn child
+        pass
 
 
 def _read_child_ready_line(process: "subprocess.Popen[bytes]", timeout: float) -> Optional[str]:
@@ -395,10 +569,12 @@ def start_detached_dashboard_proxy(
     user cache dir and exits itself once idle. If a healthy proxy for this
     run is already running, its URL is returned without spawning another.
     """
-    state_path = proxy_state_path(run_id, state_dir)
+    fingerprint = _proxy_fingerprint(base_url, run_id, api_key)
+    state_path = proxy_state_path(run_id, state_dir, fingerprint)
     existing = _live_proxy_url(_read_proxy_state(state_path))
-    if existing is not None:
+    if existing is not None and _proxy_still_serves(existing):
         return existing
+    _cleanup_stale_proxy_states(run_id, keep_fingerprint=fingerprint, state_dir=state_dir)
 
     state_path.parent.mkdir(parents=True, exist_ok=True)
     command = [
@@ -422,16 +598,26 @@ def start_detached_dashboard_proxy(
         start_new_session=True,
         env={**os.environ, _CHILD_API_KEY_ENV: api_key},
     )
+    ready_ok = False
     try:
         ready_line = _read_child_ready_line(process, ready_timeout_seconds)
         port_token = (ready_line or "").split()
-        if len(port_token) != 2 or port_token[0] != "PORT" or not port_token[1].isdigit():
-            raise RuntimeError("The dashboard proxy failed to start.")
-        port = int(port_token[1])
+        if len(port_token) == 2 and port_token[0] == "PORT" and port_token[1].isdigit():
+            ready_ok = True
     finally:
+        if not ready_ok:
+            # A half-started child still holds the API token in its
+            # environment: never leave it running (orphan-on-failure). Kill
+            # FIRST — closing the pipe while the ready-line reader thread is
+            # blocked in readline would wait on the buffered-reader lock
+            # and hang the CLI despite the timeout.
+            _terminate_child_process(process)
+            state_path.unlink(missing_ok=True)  # orphan may have written it
         if process.stdout is not None:
             process.stdout.close()
-    return f"http://127.0.0.1:{port}/"
+    if not ready_ok:
+        raise RuntimeError("The dashboard proxy failed to start.")
+    return f"http://127.0.0.1:{int(port_token[1])}/"
 
 
 def _main(argv: Optional[list[str]] = None) -> int:
@@ -448,9 +634,9 @@ def _main(argv: Optional[list[str]] = None) -> int:
 
     api_key = os.environ.get(_CHILD_API_KEY_ENV)
     if not api_key:
-        # Literals only: CodeQL flags any clear-text output that mentions
-        # credential-named variables, and the child never logs the token.
-        print("the API token environment variable is not set", file=sys.stderr)
+        # No output at all: CodeQL flags clear-text output that mentions
+        # credential-named variables, and the token must never be logged.
+        # The parent surfaces this as a generic "failed to start" error.
         return 2
 
     server, _url = make_dashboard_proxy_server(
@@ -485,10 +671,18 @@ def _main(argv: Optional[list[str]] = None) -> int:
     try:
         server.serve_forever()
     finally:
-        state_path.unlink(missing_ok=True)
         server.server_close()
         if server.upstream_client is not None:
             server.upstream_client.close()
+        # Unlink the state file ONLY if it still names THIS process: a
+        # newer proxy for the same run/context may have replaced it, and
+        # removing its state would break that proxy's reuse.
+        try:
+            recorded = json.loads(state_path.read_text())
+            if isinstance(recorded, dict) and recorded.get("pid") == os.getpid():
+                state_path.unlink(missing_ok=True)
+        except (OSError, ValueError):
+            pass
     return 0
 
 

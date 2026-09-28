@@ -4,14 +4,17 @@ import http.client
 import json
 import os
 import signal
+import socket
 import sys
 import threading
 import time
+from pathlib import Path
 from typing import Any, Optional
 
 import httpx
 import pytest
 from prime_cli.dashboard_proxy import (
+    _proxy_fingerprint,
     make_dashboard_proxy_server,
     proxy_state_path,
     start_detached_dashboard_proxy,
@@ -238,6 +241,14 @@ def test_proxy_rejects_same_origin_redirects_outside_the_run_scope(proxy_factory
         ("https://evil.example.com/dashboard/", None),
         (f"{BASE_URL}/api/v1/rft/runs/run-1/logs", None),
         (f"{BASE_URL}/api/v1/rft/runs/run-2/dashboard/", None),
+        # Platform-rewritten relative locations: strip the run prefix.
+        ("/api/v1/rft/runs/run-1/dashboard/static/x", "/static/x"),
+        ("/api/v1/rft/runs/run-1/dashboard/", "/"),
+        ("/api/v1/rft/runs/run-1/dashboard", "/"),
+        ("/api/v1/rft/runs/run-1/dashboard/a?b=1", "/a?b=1"),
+        # Platform-shaped but out of scope for this run: reject.
+        ("/api/v1/rft/runs/run-2/dashboard/x", None),
+        ("/api/v1/rft/runs/run-1/logs", None),
     ],
 )
 def test_map_dashboard_redirect(location: str, expected: Optional[str]) -> None:
@@ -274,10 +285,17 @@ class _FakeChildProcess:
 
         self.stdout = io.StringIO(ready_line or "")
         self.killed = False
+        self.stdout_closed = False
         self.pid = 424242
 
     def kill(self) -> None:
         self.killed = True
+
+    def wait(self, timeout: float = 0) -> Optional[int]:
+        return 0
+
+    def close_stdout(self) -> None:
+        self.stdout_closed = True
 
 
 def test_start_detached_spawns_child_and_returns_ready_port(monkeypatch, tmp_path) -> None:
@@ -327,12 +345,21 @@ def test_start_detached_fails_cleanly_when_child_never_becomes_ready(monkeypatch
 
 def test_start_detached_reuses_live_proxy_from_state_file(monkeypatch, tmp_path) -> None:
     # A real loopback server counts as a live proxy: its port accepts
-    # connections and the recorded pid is this (running) process.
-    server, url = make_dashboard_proxy_server("run-1", base_url=BASE_URL, api_key="test-key")
+    # connections, the recorded pid is this (running) process, and its
+    # upstream answers the credentials probe with a 2xx.
+    healthy_upstream = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, content=b"<html>ok</html>")
+        )
+    )
+    server, url = make_dashboard_proxy_server(
+        "run-1", base_url=BASE_URL, api_key="test-key", upstream=healthy_upstream
+    )
     serve_thread = threading.Thread(target=server.serve_forever, daemon=True)
     serve_thread.start()
     try:
-        state_path = proxy_state_path("run-1", state_dir=tmp_path)
+        fingerprint = _proxy_fingerprint(BASE_URL, "run-1", "test-key")
+        state_path = proxy_state_path("run-1", state_dir=tmp_path, fingerprint=fingerprint)
         state_path.parent.mkdir(parents=True, exist_ok=True)
         state_path.write_text(
             json.dumps({"run_id": "run-1", "pid": os.getpid(), "port": server.server_address[1]})
@@ -354,9 +381,11 @@ def test_start_detached_reuses_live_proxy_from_state_file(monkeypatch, tmp_path)
 
 
 def test_start_detached_ignores_stale_state_file(monkeypatch, tmp_path) -> None:
-    state_path = proxy_state_path("run-1", state_dir=tmp_path)
+    fingerprint = _proxy_fingerprint(BASE_URL, "run-1", "test-key")
+    state_path = proxy_state_path("run-1", state_dir=tmp_path, fingerprint=fingerprint)
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    # A dead pid and a closed port: the starter must respawn.
+    # A dead pid and a closed port: the starter must clean up the stale
+    # state and respawn.
     state_path.write_text(json.dumps({"run_id": "run-1", "pid": 999999999, "port": 59999}))
 
     def fake_popen(command, **kwargs):
@@ -386,7 +415,10 @@ def test_detached_child_end_to_end(tmp_path) -> None:
     )
 
     port = int(url.rstrip("/").rsplit(":", 1)[1])
-    state_path = proxy_state_path("run-1", state_dir=state_dir)
+    # The parent picks a fingerprinted state file path and passes it to the child.
+    state_paths = list(state_dir.glob("train-dashboard-run-1-*.json"))
+    assert len(state_paths) == 1
+    state_path = state_paths[0]
     state = json.loads(state_path.read_text())
     assert state["port"] == port
     assert state["pid"] > 0
@@ -401,3 +433,394 @@ def test_detached_child_end_to_end(tmp_path) -> None:
     while state_path.exists() and time.monotonic() < deadline:
         time.sleep(0.05)
     assert not state_path.exists(), "child must clean up its state file on SIGTERM"
+
+
+# --- Platform-rewritten redirect composition (astra t018/t020) ---------------
+
+
+def test_proxy_composes_platform_rewritten_redirect_through_loopback(proxy_factory) -> None:
+    """Chain: platform-shaped Location -> CLI strip -> loopback follow-up.
+
+    The platform proxy rewrites upstream redirects onto its own
+    /api/v1/rft/runs/{id}/dashboard/ prefix so a browser re-enters
+    platform authZ. The loopback must strip that prefix and answer the
+    follow-up request with a SINGLE prefix, not a double-rewrite.
+    """
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        if len(seen) == 1:
+            return httpx.Response(
+                302,
+                headers={"Location": "/api/v1/rft/runs/run-1/dashboard/static/index.html?next=1"},
+                content=b"",
+            )
+        return httpx.Response(200, content=b"<html>index</html>")
+
+    _, port = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
+
+    first = _get(port, "/")
+    assert first.status == 302
+    assert first.getheader("Location") == "/static/index.html?next=1"
+
+    # The browser follows the rewritten Location on the loopback root and
+    # the proxy must map it back to exactly one platform prefix.
+    second = _get(port, "/static/index.html?next=1")
+    assert second.status == 200
+    assert second.read() == b"<html>index</html>"
+    assert seen == [
+        f"{BASE_URL}/api/v1/rft/runs/run-1/dashboard/",
+        f"{BASE_URL}/api/v1/rft/runs/run-1/dashboard/static/index.html?next=1",
+    ]
+
+
+def test_proxy_still_passes_ordinary_relative_redirect_unchanged(proxy_factory) -> None:
+    """Reverse composition: an ordinary dashboard-relative Location passes
+    through unchanged (no prefix stripping, no double-rewrite)."""
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        if len(seen) == 1:
+            return httpx.Response(308, headers={"Location": "/static/app.js"}, content=b"")
+        return httpx.Response(200, content=b"js")
+
+    _, port = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
+
+    first = _get(port, "/")
+    assert first.status == 308
+    assert first.getheader("Location") == "/static/app.js"
+
+    second = _get(port, "/static/app.js")
+    assert second.status == 200
+    assert second.read() == b"js"
+    assert seen == [
+        f"{BASE_URL}/api/v1/rft/runs/run-1/dashboard/",
+        f"{BASE_URL}/api/v1/rft/runs/run-1/dashboard/static/app.js",
+    ]
+
+
+def test_proxy_rejects_platform_relative_redirect_for_other_run(proxy_factory) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            302,
+            headers={"Location": "/api/v1/rft/runs/run-2/dashboard/static/index.html"},
+            content=b"",
+        )
+
+    _, port = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
+
+    response = _get(port, "/")
+
+    assert response.status == 502
+    assert response.read().decode("utf-8").startswith("Dashboard backend redirect rejected")
+
+
+# --- DNS-rebinding guard: Host/Origin validation -----------------------------
+
+
+def _raw_get(port: int, host: str, origin: Optional[str] = None) -> tuple[int, bytes]:
+    request = f"GET / HTTP/1.1\r\nHost: {host}\r\n"
+    if origin:
+        request += f"Origin: {origin}\r\n"
+    request += "Connection: close\r\n\r\n"
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+        sock.sendall(request.encode())
+        data = b""
+        while True:
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            data += chunk
+    head, _, body = data.partition(b"\r\n\r\n")
+    status = int(head.split(b" ")[1])
+    return status, body
+
+
+def test_proxy_rejects_forged_host_header(proxy_factory) -> None:
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        return httpx.Response(200, content=b"secret dashboard")
+
+    _, port = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
+
+    # A rebound DNS name (attacker.example.com -> 127.0.0.1) must be
+    # rejected BEFORE any upstream work: the private data never leaves.
+    status, body = _raw_get(port, f"attacker.example.com:{port}")
+    assert status == 403
+    assert seen == []
+    assert b"secret" not in body
+
+
+def test_proxy_rejects_loopback_host_with_wrong_port(proxy_factory) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"secret dashboard")
+
+    _, port = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
+
+    status, _ = _raw_get(port, "127.0.0.1:1")
+    assert status == 403
+
+
+def test_proxy_allows_localhost_and_loopback_hosts(proxy_factory) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"dashboard")
+
+    _, port = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
+
+    assert _raw_get(port, f"localhost:{port}")[0] == 200
+    assert _raw_get(port, f"127.0.0.1:{port}")[0] == 200
+
+
+def test_proxy_rejects_forged_origin(proxy_factory) -> None:
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        return httpx.Response(200, content=b"secret dashboard")
+
+    _, port = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
+
+    # A hostile page on another origin fetching the loopback port: reject.
+    status, _ = _raw_get(port, f"127.0.0.1:{port}", origin="http://evil.example.com")
+    assert status == 403
+    assert seen == []
+
+
+def test_proxy_allows_loopback_origin(proxy_factory) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"dashboard")
+
+    _, port = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
+
+    assert _raw_get(port, f"127.0.0.1:{port}", origin=f"http://127.0.0.1:{port}")[0] == 200
+
+
+# --- Traversal guard ---------------------------------------------------------
+
+
+def _raw_path_get(port: int, path: str) -> int:
+    request = f"GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+        sock.sendall(request.encode())
+        data = b""
+        while True:
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            data += chunk
+    return int(data.split(b" ")[1])
+
+
+def test_proxy_rejects_dot_segment_traversal_before_upstream(proxy_factory) -> None:
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        return httpx.Response(200, content=b"x")
+
+    _, port = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
+
+    # Raw and percent-encoded dot segments must be rejected locally:
+    # httpx would normalize them and attach the bearer token to paths
+    # outside the run-scoped dashboard route.
+    assert _raw_path_get(port, "/static/../../rft/runs/run-2") == 400
+    assert _raw_path_get(port, "/static/%2e%2e/%2e%2e/rft/runs/run-2") == 400
+    assert _raw_path_get(port, "/a/b/../c") == 400
+    # The upstream was never contacted.
+    assert seen == []
+
+
+# --- Pre-compressed body passthrough ------------------------------------------
+
+
+class _RawByteStream(httpx.SyncByteStream):
+    """Wire-format stream: yields the RAW (still compressed) bytes."""
+
+    def __init__(self, payload: bytes) -> None:
+        self.payload = payload
+
+    def __iter__(self):
+        yield self.payload
+
+
+def test_proxy_passes_precompressed_bodies_verbatim(proxy_factory) -> None:
+    import gzip
+
+    payload = gzip.compress(b"<html>precompressed</html>" * 100)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # httpx.Response(content=...) treats the body as DECODED and would
+        # try to decompress it again; mirror the wire with a raw stream.
+        return httpx.Response(
+            200,
+            headers={
+                "Content-Type": "text/html",
+                "Content-Encoding": "gzip",
+                "Content-Length": str(len(payload)),
+            },
+            stream=_RawByteStream(payload),
+        )
+
+    _, port = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
+
+    response = _get(port, "/")
+    body = response.read()
+
+    # The compressed bytes, encoding header and compressed length must all
+    # agree; httpx decompresses in iter_bytes, so raw passthrough is used.
+    assert response.status == 200
+    assert response.getheader("Content-Encoding") == "gzip"
+    assert int(response.getheader("Content-Length")) == len(payload)
+    assert body == payload
+    assert gzip.decompress(body).startswith(b"<html>")
+
+
+# --- Detached reuse: context fingerprints and credentials --------------------
+
+
+def test_start_detached_never_reuses_across_contexts(monkeypatch, tmp_path) -> None:
+    """Same run, different token: a fresh proxy must start, not be reused."""
+    healthy_upstream = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, content=b"<html>ok</html>")
+        )
+    )
+    server, _ = make_dashboard_proxy_server(
+        "run-1", base_url=BASE_URL, api_key="token-A", upstream=healthy_upstream
+    )
+    serve_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    serve_thread.start()
+    try:
+        fp_a = _proxy_fingerprint(BASE_URL, "run-1", "token-A")
+        state_a = proxy_state_path("run-1", state_dir=tmp_path, fingerprint=fp_a)
+        state_a.parent.mkdir(parents=True, exist_ok=True)
+        state_a.write_text(
+            json.dumps({"run_id": "run-1", "pid": os.getpid(), "port": server.server_address[1]})
+        )
+
+        def fake_popen(command, **kwargs):
+            return _FakeChildProcess("PORT 51236\n")
+
+        monkeypatch.setattr("prime_cli.dashboard_proxy.subprocess.Popen", fake_popen)
+
+        # token-B invocation: different fingerprint, no reuse, fresh spawn.
+        url_b = start_detached_dashboard_proxy(
+            "run-1", base_url=BASE_URL, api_key="token-B", state_dir=tmp_path
+        )
+
+        assert url_b == "http://127.0.0.1:51236/"
+        # The other context's state file is untouched (live proxy left to
+        # its own idle exit — it serves a different, valid context).
+        assert state_a.exists()
+        assert not _proxy_fingerprint(BASE_URL, "run-1", "token-B") == fp_a
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_start_detached_respawns_when_live_proxy_credentials_are_stale(
+    monkeypatch, tmp_path
+) -> None:
+    """A live proxy whose upstream rejects its token must not be reused."""
+    rejected_upstream = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(401, json={"detail": "token revoked"})
+        )
+    )
+    server, stale_url = make_dashboard_proxy_server(
+        "run-1", base_url=BASE_URL, api_key="revoked-token", upstream=rejected_upstream
+    )
+    serve_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    serve_thread.start()
+    try:
+        fingerprint = _proxy_fingerprint(BASE_URL, "run-1", "revoked-token")
+        state_path = proxy_state_path("run-1", state_dir=tmp_path, fingerprint=fingerprint)
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(
+            json.dumps({"run_id": "run-1", "pid": os.getpid(), "port": server.server_address[1]})
+        )
+
+        def fake_popen(command, **kwargs):
+            return _FakeChildProcess("PORT 51237\n")
+
+        monkeypatch.setattr("prime_cli.dashboard_proxy.subprocess.Popen", fake_popen)
+
+        url = start_detached_dashboard_proxy(
+            "run-1", base_url=BASE_URL, api_key="revoked-token", state_dir=tmp_path
+        )
+
+        # The stale proxy answered the credentials probe with a 502
+        # (platform rejects the bearer), so a fresh proxy started.
+        assert url == "http://127.0.0.1:51237/"
+        assert url != stale_url
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_start_detached_kills_orphan_and_cleans_state_on_failure(monkeypatch, tmp_path) -> None:
+    """A half-started child (no PORT line) must be killed, not orphaned."""
+    child = _FakeChildProcess(None)  # never emits the ready line
+    state_path_passed: list[Path] = []
+
+    def fake_popen(command, **kwargs):
+        state_file = Path(command[command.index("--state-file") + 1])
+        state_path_passed.append(state_file)
+        # A real half-started orphan may already have written its state
+        # file before failing to print the ready line.
+        state_file.write_text(json.dumps({"run_id": "run-1", "pid": 424242, "port": 1}))
+        return child
+
+    monkeypatch.setattr("prime_cli.dashboard_proxy.subprocess.Popen", fake_popen)
+
+    with pytest.raises(RuntimeError, match="failed to start"):
+        start_detached_dashboard_proxy(
+            "run-1",
+            base_url=BASE_URL,
+            api_key="test-key",
+            state_dir=tmp_path,
+            ready_timeout_seconds=0.2,
+        )
+
+    # The orphan was terminated (it holds the API token in its env), its
+    # pipe was closed only after the kill, and the state file the orphan
+    # may have written is gone, so it can never be mistaken for a live
+    # reusable proxy.
+    assert child.killed is True
+    assert child.stdout.closed is True
+    assert state_path_passed[0].exists() is False
+
+
+def test_detached_child_leaves_replaced_state_file_alone(tmp_path) -> None:
+    """A newer proxy's state file must survive the old child's exit."""
+    pytest.importorskip("signal")
+    state_dir = tmp_path / "state"
+    start_detached_dashboard_proxy(
+        "run-1",
+        base_url="http://127.0.0.1:1",
+        api_key="test-key",
+        state_dir=state_dir,
+        idle_timeout_seconds=600,
+    )
+    state_paths = list(state_dir.glob("train-dashboard-run-1-*.json"))
+    assert len(state_paths) == 1
+    state_path = state_paths[0]
+    state = json.loads(state_path.read_text())
+
+    # Simulate a replacement proxy taking over the state file.
+    state_path.write_text(
+        json.dumps({"run_id": "run-1", "pid": os.getpid() + 1, "port": state["port"]})
+    )
+    os.kill(state["pid"], signal.SIGTERM)
+    deadline = time.monotonic() + 10
+    while state_path.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    # The child exited (SIGTERM accepted) but did NOT unlink the file: the
+    # recorded pid no longer names its own process.
+    assert (
+        not state_path.exists() or json.loads(state_path.read_text()).get("pid") == os.getpid() + 1
+    ), "child must not delete a newer proxy's state file"

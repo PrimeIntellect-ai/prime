@@ -44,7 +44,6 @@ from pyqwest import HTTPTransport
 from tenacity import (
     retry,
     retry_if_exception,
-    retry_if_exception_type,
     stop_after_attempt,
     wait_exponential,
     wait_random_exponential,
@@ -52,6 +51,7 @@ from tenacity import (
 
 from ._connectrpc import GOOGLE_PROTOBUF_BINARY_CODEC
 from .core import APIClient, APIError, AsyncAPIClient
+from .core.client import _RateLimitAwareWait
 from .exceptions import (
     BatchStatusUnsupportedError,
     CommandTimeoutError,
@@ -81,6 +81,7 @@ from .models import (
     SandboxListResponse,
     SandboxLogsResponse,
     SandboxStatusSnapshot,
+    SSHSession,
     validate_egress_lists,
 )
 from .process import AsyncSandboxProcess
@@ -1518,6 +1519,8 @@ def _is_retryable_gateway_error(exc: BaseException) -> bool:
     """Check if an exception is retryable for idempotent gateway requests."""
     if isinstance(exc, GATEWAY_IDEMPOTENT_RETRYABLE_EXCEPTIONS):
         return True
+    if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 429:
+        return True
     if (
         isinstance(exc, httpx.HTTPStatusError)
         and exc.response.status_code in RETRYABLE_5XX_STATUSES
@@ -1627,6 +1630,8 @@ def _is_retryable_read_file_error(exc: BaseException) -> bool:
         return True
     if isinstance(exc, httpx.HTTPStatusError):
         status = exc.response.status_code
+        if status == 429:
+            return True
         if status == 408 or status in RETRYABLE_5XX_STATUSES:
             if _is_gateway_sandbox_not_found(exc.response):
                 return False
@@ -1634,22 +1639,34 @@ def _is_retryable_read_file_error(exc: BaseException) -> bool:
     return False
 
 
+def _is_retryable_gateway_post_error(exc: BaseException) -> bool:
+    return isinstance(exc, GATEWAY_CONNECTION_RETRYABLE_EXCEPTIONS) or (
+        isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 429
+    )
+
+
+_GATEWAY_RATE_LIMIT_DELAYS = (10.0, 30.0, 40.0)
+
+
 # Retry decorator for idempotent gateway requests (connection errors, ReadError,
-# and 5xx responses). Safe for GET/HEAD/PUT/DELETE since duplicate requests are no-ops.
+# and retryable HTTP responses). Safe for GET/HEAD/PUT/DELETE since duplicates are no-ops.
 _gateway_retry = retry(
     retry=retry_if_exception(_is_retryable_gateway_error),
     stop=stop_after_attempt(4),
-    wait=wait_exponential(multiplier=1, min=1, max=30),
+    wait=_RateLimitAwareWait(
+        wait_exponential(multiplier=1, min=1, max=30), _GATEWAY_RATE_LIMIT_DELAYS
+    ),
     reraise=True,
 )
 
-# Retry decorator for non-idempotent gateway requests (connection errors only —
-# ReadError and 5xx both imply the server received/processed the request, so
-# retrying POSTs on those risks duplicate side effects).
+# Retry decorator for non-idempotent gateway requests. ReadError and 5xx imply
+# the server may have processed the request, so retrying risks duplicate side effects.
 _gateway_post_retry = retry(
-    retry=retry_if_exception_type(GATEWAY_CONNECTION_RETRYABLE_EXCEPTIONS),
+    retry=retry_if_exception(_is_retryable_gateway_post_error),
     stop=stop_after_attempt(4),
-    wait=wait_exponential(multiplier=1, min=1, max=30),
+    wait=_RateLimitAwareWait(
+        wait_exponential(multiplier=1, min=1, max=30), _GATEWAY_RATE_LIMIT_DELAYS
+    ),
     reraise=True,
 )
 
@@ -1659,7 +1676,9 @@ _gateway_post_retry = retry(
 _read_file_retry = retry(
     retry=retry_if_exception(_is_retryable_read_file_error),
     stop=stop_after_attempt(4),
-    wait=wait_random_exponential(multiplier=1, min=1, max=30),
+    wait=_RateLimitAwareWait(
+        wait_random_exponential(multiplier=1, min=1, max=30), _GATEWAY_RATE_LIMIT_DELAYS
+    ),
     reraise=True,
 )
 
@@ -1783,6 +1802,34 @@ def _is_gateway_sandbox_not_found(response: Optional[httpx.Response]) -> bool:
         return False
 
     return body.get("error") == "sandbox_not_found"
+
+
+def _is_gateway_sandbox_terminated(response: httpx.Response) -> bool:
+    """Return True when gateway reports the sandbox was deleted (HTTP 410)."""
+    if response.status_code != 410:
+        return False
+    try:
+        body = response.json()
+    except Exception:
+        return False
+    return isinstance(body, dict) and body.get("error") == "sandbox_terminated"
+
+
+def _raise_sandbox_gone(
+    sandbox_id: str,
+    ctx: dict,
+    cause: BaseException,
+    command: Optional[str] = None,
+) -> NoReturn:
+    """Raise SandboxNotRunningError for a sandbox that is terminated or gone from its node."""
+    ctx["status"] = "TERMINATED"
+    if not ctx.get("error_type"):
+        ctx["error_type"] = "SANDBOX_NOT_FOUND"
+    if not ctx.get("error_message"):
+        ctx["error_message"] = (
+            "Sandbox is terminated or no longer present on its node. Please create a new sandbox."
+        )
+    _raise_not_running_error(sandbox_id, ctx, command=command, cause=cause)
 
 
 def _raise_not_running_error(
@@ -2138,9 +2185,12 @@ class SandboxClient:
         files: Optional[Dict[str, Any]] = None,
         params: Optional[Dict[str, Any]] = None,
     ) -> httpx.Response:
-        """Make a POST request to the gateway with retry on connection errors only."""
+        """Make a POST request to the gateway with safe pre-processing retries."""
         with httpx.Client(timeout=timeout) as client:
-            return client.post(url, json=json, files=files, params=params, headers=headers)
+            response = client.post(url, json=json, files=files, params=params, headers=headers)
+        if response.status_code == 429:
+            response.raise_for_status()
+        return response
 
     @staticmethod
     @_gateway_retry
@@ -2153,7 +2203,7 @@ class SandboxClient:
         """Make a GET request to the gateway with retry on transient errors."""
         with httpx.Client(timeout=timeout) as client:
             response = client.get(url, params=params, headers=headers)
-        if response.status_code in RETRYABLE_5XX_STATUSES:
+        if response.status_code == 429 or response.status_code in RETRYABLE_5XX_STATUSES:
             response.raise_for_status()
         return response
 
@@ -2168,7 +2218,7 @@ class SandboxClient:
         """Make a read-file GET request to the gateway with read-timeout retries."""
         with httpx.Client(timeout=timeout) as client:
             response = client.get(url, params=params, headers=headers)
-        if response.status_code == 408 or response.status_code in RETRYABLE_5XX_STATUSES:
+        if response.status_code in {408, 429} or response.status_code in RETRYABLE_5XX_STATUSES:
             response.raise_for_status()
         return response
 
@@ -2378,6 +2428,20 @@ class SandboxClient:
         response = self.client.request("GET", f"/sandbox/{sandbox_id}/egress-policy")
         return EgressPolicyStatus.model_validate(response)
 
+    def create_ssh_session(
+        self, sandbox_id: str, public_key: str, ttl_seconds: Optional[int] = None
+    ) -> SSHSession:
+        """Authorize an ephemeral SSH key for a VM sandbox."""
+        payload: Dict[str, Any] = {"public_key": public_key}
+        if ttl_seconds is not None:
+            payload["ttl_seconds"] = ttl_seconds
+        response = self.client.request("POST", f"/sandbox/{sandbox_id}/ssh-session", json=payload)
+        return SSHSession.model_validate(response)
+
+    def close_ssh_session(self, sandbox_id: str, session_id: str) -> None:
+        """Revoke an SSH session."""
+        self.client.request("DELETE", f"/sandbox/{sandbox_id}/ssh-session/{session_id}")
+
     def set_network(
         self,
         sandbox_id: str,
@@ -2531,16 +2595,12 @@ class SandboxClient:
                     raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
 
                 if e.code == Code.NOT_FOUND:
-                    ctx = self._get_sandbox_error_context(sandbox_id)
-                    ctx["status"] = "TERMINATED"
-                    if not ctx.get("error_type"):
-                        ctx["error_type"] = "SANDBOX_NOT_FOUND"
-                    if not ctx.get("error_message"):
-                        ctx["error_message"] = (
-                            "Sandbox is no longer present on the runtime node. "
-                            "Please create a new sandbox."
-                        )
-                    _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
+                    _raise_sandbox_gone(
+                        sandbox_id,
+                        self._get_sandbox_error_context(sandbox_id),
+                        cause=e,
+                        command=command,
+                    )
 
                 raise APIError(f"Connect RPC failed ({e.code.value}): {e.message}") from e
             except APIError:
@@ -3210,6 +3270,10 @@ class SandboxClient:
             except httpx.TimeoutException as e:
                 raise UploadTimeoutError(sandbox_id, file_path, effective_timeout) from e
             except httpx.HTTPStatusError as e:
+                if _is_gateway_sandbox_terminated(e.response):
+                    _raise_sandbox_gone(
+                        sandbox_id, self._get_sandbox_error_context(sandbox_id), cause=e
+                    )
                 if e.response.status_code == 401 and self._should_retry_401(sandbox_id, reauthed):
                     reauthed = True
                     continue
@@ -3274,6 +3338,10 @@ class SandboxClient:
             except httpx.TimeoutException:
                 raise UploadTimeoutError(sandbox_id, file_path, effective_timeout)
             except httpx.HTTPStatusError as e:
+                if _is_gateway_sandbox_terminated(e.response):
+                    _raise_sandbox_gone(
+                        sandbox_id, self._get_sandbox_error_context(sandbox_id), cause=e
+                    )
                 if e.response.status_code == 401 and self._should_retry_401(sandbox_id, reauthed):
                     reauthed = True
                     continue
@@ -3325,6 +3393,10 @@ class SandboxClient:
             except httpx.TimeoutException as e:
                 raise DownloadTimeoutError(sandbox_id, file_path, effective_timeout) from e
             except httpx.HTTPStatusError as e:
+                if _is_gateway_sandbox_terminated(e.response):
+                    _raise_sandbox_gone(
+                        sandbox_id, self._get_sandbox_error_context(sandbox_id), cause=e
+                    )
                 if e.response.status_code == 401 and self._should_retry_401(sandbox_id, reauthed):
                     reauthed = True
                     continue
@@ -3394,6 +3466,10 @@ class SandboxClient:
                     f"({e.__class__.__name__}): {file_path}"
                 ) from e
             except httpx.HTTPStatusError as e:
+                if _is_gateway_sandbox_terminated(e.response):
+                    _raise_sandbox_gone(
+                        sandbox_id, self._get_sandbox_error_context(sandbox_id), cause=e
+                    )
                 if e.response.status_code == 401 and self._should_retry_401(sandbox_id, reauthed):
                     reauthed = True
                     continue
@@ -3513,11 +3589,14 @@ class AsyncSandboxClient:
         files: Optional[Dict[str, Any]] = None,
         params: Optional[Dict[str, Any]] = None,
     ) -> httpx.Response:
-        """Make a POST request to the gateway with retry on connection errors only."""
+        """Make a POST request to the gateway with safe pre-processing retries."""
         gateway_client = self._get_gateway_client()
-        return await gateway_client.post(
+        response = await gateway_client.post(
             url, json=json, files=files, params=params, headers=headers, timeout=timeout
         )
+        if response.status_code == 429:
+            response.raise_for_status()
+        return response
 
     @_gateway_retry
     async def _gateway_get(
@@ -3530,7 +3609,7 @@ class AsyncSandboxClient:
         """Make a GET request to the gateway with retry on transient errors."""
         gateway_client = self._get_gateway_client()
         response = await gateway_client.get(url, params=params, headers=headers, timeout=timeout)
-        if response.status_code in RETRYABLE_5XX_STATUSES:
+        if response.status_code == 429 or response.status_code in RETRYABLE_5XX_STATUSES:
             response.raise_for_status()
         return response
 
@@ -3545,7 +3624,7 @@ class AsyncSandboxClient:
         """Make a read-file GET request to the gateway with read-timeout retries."""
         gateway_client = self._get_gateway_client()
         response = await gateway_client.get(url, params=params, headers=headers, timeout=timeout)
-        if response.status_code == 408 or response.status_code in RETRYABLE_5XX_STATUSES:
+        if response.status_code in {408, 429} or response.status_code in RETRYABLE_5XX_STATUSES:
             response.raise_for_status()
         return response
 
@@ -3756,6 +3835,22 @@ class AsyncSandboxClient:
         """Get the desired and applied network rules of a VM sandbox."""
         response = await self.client.request("GET", f"/sandbox/{sandbox_id}/egress-policy")
         return EgressPolicyStatus.model_validate(response)
+
+    async def create_ssh_session(
+        self, sandbox_id: str, public_key: str, ttl_seconds: Optional[int] = None
+    ) -> SSHSession:
+        """Authorize an ephemeral SSH key for a VM sandbox."""
+        payload: Dict[str, Any] = {"public_key": public_key}
+        if ttl_seconds is not None:
+            payload["ttl_seconds"] = ttl_seconds
+        response = await self.client.request(
+            "POST", f"/sandbox/{sandbox_id}/ssh-session", json=payload
+        )
+        return SSHSession.model_validate(response)
+
+    async def close_ssh_session(self, sandbox_id: str, session_id: str) -> None:
+        """Revoke an SSH session."""
+        await self.client.request("DELETE", f"/sandbox/{sandbox_id}/ssh-session/{session_id}")
 
     async def set_network(
         self,
@@ -4106,16 +4201,12 @@ class AsyncSandboxClient:
                     raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
 
                 if e.code == Code.NOT_FOUND:
-                    ctx = await self._get_sandbox_error_context(sandbox_id)
-                    ctx["status"] = "TERMINATED"
-                    if not ctx.get("error_type"):
-                        ctx["error_type"] = "SANDBOX_NOT_FOUND"
-                    if not ctx.get("error_message"):
-                        ctx["error_message"] = (
-                            "Sandbox is no longer present on the runtime node. "
-                            "Please create a new sandbox."
-                        )
-                    _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
+                    _raise_sandbox_gone(
+                        sandbox_id,
+                        await self._get_sandbox_error_context(sandbox_id),
+                        cause=e,
+                        command=command,
+                    )
 
                 raise APIError(f"Connect RPC failed ({e.code.value}): {e.message}") from e
             except APIError:
@@ -4816,6 +4907,10 @@ class AsyncSandboxClient:
             except httpx.TimeoutException as e:
                 raise UploadTimeoutError(sandbox_id, file_path, effective_timeout) from e
             except httpx.HTTPStatusError as e:
+                if _is_gateway_sandbox_terminated(e.response):
+                    _raise_sandbox_gone(
+                        sandbox_id, await self._get_sandbox_error_context(sandbox_id), cause=e
+                    )
                 if e.response.status_code == 401 and await self._should_retry_401(
                     sandbox_id, reauthed
                 ):
@@ -4881,6 +4976,10 @@ class AsyncSandboxClient:
             except httpx.TimeoutException:
                 raise UploadTimeoutError(sandbox_id, file_path, effective_timeout)
             except httpx.HTTPStatusError as e:
+                if _is_gateway_sandbox_terminated(e.response):
+                    _raise_sandbox_gone(
+                        sandbox_id, await self._get_sandbox_error_context(sandbox_id), cause=e
+                    )
                 if e.response.status_code == 401 and await self._should_retry_401(
                     sandbox_id, reauthed
                 ):
@@ -4937,6 +5036,10 @@ class AsyncSandboxClient:
             except httpx.TimeoutException as e:
                 raise DownloadTimeoutError(sandbox_id, file_path, effective_timeout) from e
             except httpx.HTTPStatusError as e:
+                if _is_gateway_sandbox_terminated(e.response):
+                    _raise_sandbox_gone(
+                        sandbox_id, await self._get_sandbox_error_context(sandbox_id), cause=e
+                    )
                 if e.response.status_code == 401 and await self._should_retry_401(
                     sandbox_id, reauthed
                 ):
@@ -5005,6 +5108,10 @@ class AsyncSandboxClient:
                     f"({e.__class__.__name__}): {file_path}"
                 ) from e
             except httpx.HTTPStatusError as e:
+                if _is_gateway_sandbox_terminated(e.response):
+                    _raise_sandbox_gone(
+                        sandbox_id, await self._get_sandbox_error_context(sandbox_id), cause=e
+                    )
                 if e.response.status_code == 401 and await self._should_retry_401(
                     sandbox_id, reauthed
                 ):

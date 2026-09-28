@@ -25,7 +25,8 @@ app = PlainTyper(
 console = get_console()
 
 MODELS_JSON_HELP = json_output_help(
-    "Typical OpenAI schema: .object?, .data[] = {id, display_name?, created, pricing?, specs?}",
+    "Typical OpenAI schema: .object?, .data[] = "
+    "{id, display_name?, created, serving?, pricing?, specs?}",
     "Compatibility fallback: .models[] may be present instead of .data[]",
 )
 
@@ -65,21 +66,44 @@ def _price(m: Dict[str, Any], key: str) -> Optional[float]:
         return None
 
 
+def _format_serving(value: Any) -> str:
+    """Human label for a model's serving tier.
+
+    Only the two published tiers get product labels; anything else is
+    upstream data and renders verbatim so it is never silently mapped to
+    Hosted or Gateway. Missing renders as an em-dash.
+    """
+    if value == "hosted":
+        return "Hosted by Prime"
+    if value == "gateway":
+        return "Gateway"
+    if value is None or value == "":
+        return "—"
+    return str(value)
+
+
 def _sort_models(models: List[Dict[str, Any]], sort: str, order: str) -> List[Dict[str, Any]]:
     reverse = order == "desc"
     if sort == "id":
-        return sorted(models, key=lambda m: str(m.get("id", "")).lower(), reverse=reverse)
+        base = sorted(models, key=lambda m: str(m.get("id", "")).lower(), reverse=reverse)
+    else:
+        price_key = "input_usd_per_mtok" if sort == "input" else "output_usd_per_mtok"
 
-    price_key = "input_usd_per_mtok" if sort == "input" else "output_usd_per_mtok"
+        # Null pricing always sorts last regardless of order.
+        def key(m: Dict[str, Any]) -> tuple:
+            p = _price(m, price_key)
+            if p is None:
+                return (1, 0.0)
+            return (0, -p if reverse else p)
 
-    # Null pricing always sorts last regardless of order.
-    def key(m: Dict[str, Any]) -> tuple:
-        p = _price(m, price_key)
-        if p is None:
-            return (1, 0.0)
-        return (0, -p if reverse else p)
+        base = sorted(models, key=key)
 
-    return sorted(models, key=key)
+    # Prime-hosted models lead the list. The partition is stable, so the
+    # requested sort order is preserved within each tier group; rows without
+    # a known hosted tier stay in the tail untouched.
+    hosted = [m for m in base if m.get("serving") == "hosted"]
+    rest = [m for m in base if m.get("serving") != "hosted"]
+    return hosted + rest
 
 
 @app.command("models", epilog=MODELS_JSON_HELP)
@@ -142,6 +166,7 @@ def list_models(
         # Catalog columns appear only when the endpoint serves the data, so
         # the table stays slim against older /models responses.
         show_name = any(m.get("display_name") for m in models)
+        show_serving = any(m.get("serving") for m in models)
         show_cache = any(
             (m.get("pricing") or {}).get("cache_read_usd_per_mtok") is not None
             or (m.get("pricing") or {}).get("cache_write_usd_per_mtok") is not None
@@ -152,6 +177,8 @@ def list_models(
         table.add_column("id", style="cyan", overflow="fold")
         if show_name:
             table.add_column("name")
+        if show_serving:
+            table.add_column("serving")
         table.add_column("input $/1M tok", style="green", justify="right")
         table.add_column("output $/1M tok", style="green", justify="right")
         if show_cache:
@@ -173,6 +200,10 @@ def list_models(
             if show_name:
                 name = m.get("display_name")
                 row.append(Text(str(name)) if name else "—")
+            if show_serving:
+                # Raw serving values are untrusted upstream data; Text cells
+                # render them verbatim, so Rich markup cannot restyle the table.
+                row.append(Text(_format_serving(m.get("serving"))))
             row.append(format_price_per_mtok(pricing.get("input_usd_per_mtok")))
             row.append(format_price_per_mtok(pricing.get("output_usd_per_mtok")))
             if show_cache:

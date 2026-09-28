@@ -185,3 +185,46 @@ async def test_async_create_injects_vm_true_on_the_wire():
     payload = client.client.request.call_args.kwargs["json"]
     assert payload["vm"] is True
     assert isinstance(sandbox, Sandbox)
+
+
+def _ssh_response() -> dict:
+    return {
+        "session_id": "session-1",
+        "sandbox_id": "sbx-1",
+        "host": "ssh.example.com",
+        "port": 2222,
+        "expires_at": "2026-01-01T00:05:00+00:00",
+        "ttl_seconds": 300,
+    }
+
+
+def test_sync_vm_ssh_session_sends_public_key():
+    client = _make_sync_client(is_vm=True)
+    client.client = MagicMock()
+    client.client.request.return_value = _ssh_response()
+
+    session = client.create_ssh_session("sbx-1", "ssh-ed25519 key", ttl_seconds=300)
+    client.close_ssh_session("sbx-1", session.session_id)
+
+    assert client.client.request.call_args_list[0].kwargs["json"] == {
+        "public_key": "ssh-ed25519 key",
+        "ttl_seconds": 300,
+    }
+    assert client.client.request.call_args_list[1].args == (
+        "DELETE",
+        "/sandbox/sbx-1/ssh-session/session-1",
+    )
+
+
+@pytest.mark.asyncio
+async def test_async_vm_ssh_session_sends_public_key():
+    client = _make_async_client(is_vm=True)
+    client.client = MagicMock()
+    client.client.request = AsyncMock(return_value=_ssh_response())
+
+    session = await client.create_ssh_session("sbx-1", "ssh-ed25519 key")
+    await client.close_ssh_session("sbx-1", session.session_id)
+
+    assert client.client.request.await_args_list[0].kwargs["json"] == {
+        "public_key": "ssh-ed25519 key"
+    }

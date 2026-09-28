@@ -35,6 +35,7 @@ from ..exceptions import (
     NotFoundError,
     PaymentRequiredError,
     RetryableAPIError,
+    TraceNotIndexedError,
     TransportError,
     UnauthorizedError,
     ValidationRejectedError,
@@ -213,6 +214,8 @@ def raise_for_response(response: httpx.Response) -> None:
     if status == 400:
         raise ValidationRejectedError(message, status_code=status, code=code)
     if status == 409:
+        if code == "trace_not_indexed":
+            raise TraceNotIndexedError(message, status_code=status, code=code)
         raise LineFormatConflictError(message, status_code=status, code=code)
     if status in (429, 502, 503, 504):
         # 502/504 come from gateways in front of the service, not the service

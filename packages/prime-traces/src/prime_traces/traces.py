@@ -12,7 +12,7 @@ Deliberately not implemented (open v0 contract decisions — do not freeze
 them here): exports in any form — the service publishes ``GET /traces/export``
 and the job routes, but all three handlers raise ``NotImplementedError``,
 which FastAPI answers as 500, and the streaming route declares no query
-parameters, so there is no filter vocabulary to bind to; ``/search``; episode
+parameters, so there is no filter vocabulary to bind to; episode
 writes (episodes are read-only, written only as a side effect of
 episode-grouped uploads); and the dot-path query compiler (needs the server-side
 field registry).
@@ -37,7 +37,11 @@ from .models import (
     EpisodeDetail,
     EpisodeListPage,
     LineFormat,
+    SearchField,
+    TraceCallPage,
     TraceListPage,
+    TraceNodePage,
+    TraceSearchPage,
     TraceSummary,
     UploadReceipt,
 )
@@ -130,6 +134,11 @@ def _encoded_id_segment(identifier: str, *, parameter_name: str) -> str:
 def _trace_endpoint(trace_id: str) -> str:
     """Build a trace endpoint with the ID encoded as one path segment."""
     return f"/traces/{_encoded_id_segment(trace_id, parameter_name='trace_id')}"
+
+
+def _run_search_endpoint(run_id: str) -> str:
+    """Build a run's search endpoint with the ID encoded as one path segment."""
+    return f"/runs/{_encoded_id_segment(run_id, parameter_name='run_id')}/search"
 
 
 def _episode_endpoint(episode_id: str) -> str:
@@ -279,6 +288,43 @@ class TracesClient:
 
     # -- traces: read -------------------------------------------------------
 
+    def search(
+        self,
+        query: str,
+        *,
+        run_id: str,
+        field: SearchField = "content",
+        role: Optional[str] = None,
+        run_step: Optional[int] = None,
+        has_error: Optional[bool] = None,
+        reward_min: Optional[float] = None,
+        reward_max: Optional[float] = None,
+        limit: int = 50,
+        cursor: Optional[str] = None,
+    ) -> TraceSearchPage:
+        """Return one page of case-sensitive literal matches in indexed nodes.
+
+        ``query`` needs at least three characters. Follow next_cursor with
+        unchanged filters. The first page's ``coverage`` reports traces that
+        were not searchable yet.
+        """
+        params = _build_params(
+            (
+                ("query", query),
+                ("field", field),
+                ("role", role),
+                ("run_step", run_step),
+                ("has_error", has_error),
+                ("reward_min", reward_min),
+                ("reward_max", reward_max),
+                ("limit", limit),
+                ("cursor", cursor),
+            )
+        )
+        return TraceSearchPage.model_validate(
+            self.client.get_json(_run_search_endpoint(run_id), params=params)
+        )
+
     def list(
         self,
         *,
@@ -391,6 +437,63 @@ class TracesClient:
 
     # -- traces: delete -----------------------------------------------------
 
+    def list_nodes(
+        self,
+        trace_id: str,
+        *,
+        role: Optional[List[str]] = None,
+        sampled: Optional[bool] = None,
+        after: Optional[int] = None,
+        limit: Optional[int] = None,
+        cursor: Optional[str] = None,
+    ) -> TraceNodePage:
+        """List a trace's message nodes in step order (max 100 per page).
+
+        Reads the async node index, so the full document is never downloaded.
+        Raises ``TraceNotIndexedError`` while the index is still being built;
+        when a page has ``partial_index``, nodes past the indexing cap are only
+        in the raw document. ``after`` starts after that node index and cannot
+        be combined with ``cursor``.
+        """
+        params = _build_params(
+            (
+                ("role", role),
+                ("sampled", sampled),
+                ("after", after),
+                ("limit", limit),
+                ("cursor", cursor),
+            )
+        )
+        return TraceNodePage.model_validate(
+            self.client.get_json(f"{_trace_endpoint(trace_id)}/nodes", params=params)
+        )
+
+    def list_calls(
+        self,
+        trace_id: str,
+        *,
+        model: Optional[List[str]] = None,
+        finish_reason: Optional[List[str]] = None,
+        limit: Optional[int] = None,
+        cursor: Optional[str] = None,
+    ) -> TraceCallPage:
+        """List a trace's model calls in order (max 100 per page).
+
+        Same index, errors and ``partial_index`` rule as ``list_nodes``. Token
+        usage is not indexed; read the raw document for it.
+        """
+        params = _build_params(
+            (
+                ("model", model),
+                ("finish_reason", finish_reason),
+                ("limit", limit),
+                ("cursor", cursor),
+            )
+        )
+        return TraceCallPage.model_validate(
+            self.client.get_json(f"{_trace_endpoint(trace_id)}/calls", params=params)
+        )
+
     def delete(self, trace_id: str, *, created_at: Optional[str] = None) -> None:
         """Delete every stored copy of one trace (202 Accepted).
 
@@ -438,6 +541,9 @@ class TracesClient:
         environment_id: Optional[str] = None,
         outcome: Optional[str] = None,
         has_error: Optional[bool] = None,
+        run_step: Optional[int] = None,
+        step_min: Optional[int] = None,
+        step_max: Optional[int] = None,
         created_after: Optional[str] = None,
         created_before: Optional[str] = None,
         limit: Optional[int] = None,
@@ -446,7 +552,9 @@ class TracesClient:
         """List episode summaries using the server's complete filter set.
 
         ``environment_id`` is extracted from the canonical episode
-        ``env.id``. Episodes carry no upload ``context`` map.
+        ``env.id``. Episodes carry no upload ``context`` map. Episodes have no
+        step of their own: ``run_step``, ``step_min`` and ``step_max`` match an
+        episode when one of its member traces has a matching ``run_step``.
         """
         params = _build_params(
             (
@@ -454,6 +562,9 @@ class TracesClient:
                 ("environment_id", environment_id),
                 ("outcome", outcome),
                 ("has_error", has_error),
+                ("run_step", run_step),
+                ("step_min", step_min),
+                ("step_max", step_max),
                 ("created_after", created_after),
                 ("created_before", created_before),
                 ("limit", limit),
@@ -470,6 +581,12 @@ class TracesClient:
         stays visible even when every individual trace succeeded.
         """
         return EpisodeDetail.model_validate(self.client.get_json(_episode_endpoint(episode_id)))
+
+    def get_episode_raw(self, episode_id: str) -> bytes:
+        """Get the stored episode envelope; ``traces`` holds the member trace IDs."""
+        return b"".join(
+            self.client.stream_bytes(_episode_endpoint(episode_id), params={"raw": "true"})
+        )
 
     def list_episode_traces(
         self,
@@ -491,7 +608,7 @@ class TracesClient:
         limit: Optional[int] = None,
         cursor: Optional[str] = None,
     ) -> TraceListPage:
-        """List an episode's member traces in upload order.
+        """List an episode's member traces, newest first (by ``created_at``).
 
         The filter vocabulary matches the backend member-trace route and the
         top-level trace listing, except that member traces have no ``sort``

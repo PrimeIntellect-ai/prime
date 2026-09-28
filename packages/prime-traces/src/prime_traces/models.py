@@ -11,9 +11,55 @@ new summary columns must not break an older SDK.
 
 from datetime import datetime
 from enum import Enum
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict
+
+SearchField = Literal["content", "reasoning_content", "tool_calls"]
+
+
+class TraceSearchMatch(BaseModel):
+    """First match; zero-based Unicode code-point offsets, end exclusive."""
+
+    model_config = ConfigDict(extra="allow")
+
+    trace_id: str
+    upload_id: str
+    generation: int
+    episode_id: Optional[str]
+    node_idx: int
+    role: str
+    field: SearchField
+    representation: Literal["text", "json"]
+    match_start: int
+    match_end: int
+    excerpt: str
+    excerpt_start: int
+
+
+class TraceSearchCoverage(BaseModel):
+    """What the search could not see when it started."""
+
+    model_config = ConfigDict(extra="allow")
+
+    examined_traces: int
+    # A sample of at most 256 traces whose current copy is not indexed yet.
+    unindexed_trace_ids: List[str]
+    # A searched trace reached the node indexing cap; its later nodes are excluded.
+    partial_index: bool
+
+
+class TraceSearchPage(BaseModel):
+    """Search page; coverage is reported on the first page only.
+
+    A first page with ``coverage=None`` means coverage is unknown, not complete.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    items: List[TraceSearchMatch]
+    next_cursor: Optional[str]
+    coverage: Optional[TraceSearchCoverage] = None
 
 
 class LineFormat(str, Enum):
@@ -82,6 +128,10 @@ class ErrorCode(str, Enum):
 
     # Not found (404)
     TRACE_NOT_FOUND = "trace_not_found"
+    # 409, and distinct from `trace_not_found`: the trace exists, but its
+    # node/call index is still being built or is being rebuilt after a
+    # re-upload. Retry later, or read the raw document instead.
+    TRACE_NOT_INDEXED = "trace_not_indexed"
     # A run holding no traces for this owner. The store records no run entity,
     # so "no such run" and "run already emptied" are the same observation.
     RUN_NOT_FOUND = "run_not_found"
@@ -232,3 +282,71 @@ class EpisodeListPage(BaseModel):
 
     items: List[EpisodeSummary]
     next_cursor: Optional[str]
+
+
+class NodeMessage(BaseModel):
+    """One node's message as the producer wrote it.
+
+    ``content`` and ``tool_calls`` are whatever JSON the producer stored (a
+    string, a list of content parts, ...); the index never interprets them.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    role: Optional[str]
+    content: Any = None
+    reasoning_content: Optional[str] = None
+    tool_calls: Any = None
+    tool_call_id: Optional[str] = None
+    name: Optional[str] = None
+    tool_name: Optional[str] = None
+
+
+class TraceNode(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    node_idx: int
+    parent_idx: Optional[int]
+    timestamp: Optional[float]
+    sampled: bool
+    message: NodeMessage
+
+
+class TraceNodePage(BaseModel):
+    """One page of message nodes in step order.
+
+    ``partial_index`` is true when the trace reached the per-trace indexing
+    cap: pages end at the cap rather than at the document, and the rest is
+    only available from the raw document.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    items: List[TraceNode]
+    next_cursor: Optional[str]
+    partial_index: bool
+
+
+class TraceCall(BaseModel):
+    """One model call. Token usage is not indexed; read the raw document for it."""
+
+    model_config = ConfigDict(extra="allow")
+
+    call_idx: int
+    node_idx: Optional[int]
+    time_start: Optional[float]
+    time_end: Optional[float]
+    model: Optional[str]
+    endpoint: Optional[str]
+    finish_reason: Optional[str]
+
+
+class TraceCallPage(BaseModel):
+    """One page of model calls. Same cursor and ``partial_index`` rules as
+    ``TraceNodePage``."""
+
+    model_config = ConfigDict(extra="allow")
+
+    items: List[TraceCall]
+    next_cursor: Optional[str]
+    partial_index: bool

@@ -10,6 +10,7 @@ import threading
 import httpx
 import pytest
 from _samples import (
+    EPISODE,
     SUMMARY,
     UNAVAILABLE,
 )
@@ -21,6 +22,7 @@ from prime_traces import (
     AsyncTracesClient,
     NotFoundError,
     RetryableAPIError,
+    TraceNotIndexedError,
     TransportError,
 )
 
@@ -138,6 +140,7 @@ class TestPointReads:
 
         def handler(request: httpx.Request) -> httpx.Response:
             attempts.append(request)
+
             # An async body: httpx.AsyncClient refuses to stream a sync one.
             async def body():
                 yield b'{"version":4,'
@@ -295,6 +298,7 @@ class TestPointReads:
         assert not dest.exists()
         assert list(tmp_path.glob(".prime-traces-*")) == []
 
+
 class TestReadRetries:
     @pytest.mark.asyncio
     async def test_get_retries_transient_503_honoring_retry_after(
@@ -372,6 +376,7 @@ class TestReadRetries:
         assert dest.read_bytes() == raw
         assert len(attempts) == 2
 
+
 class TestDelete:
     @pytest.mark.asyncio
     async def test_delete_trace_with_created_at_hint(self, make_async_client):
@@ -437,6 +442,29 @@ class TestDelete:
 
 
 class TestEpisodes:
+    @pytest.mark.asyncio
+    async def test_get_episode_raw_streams_envelope(self, make_async_client):
+        raw = b'{"id":"ep-1","ok":true,"traces":["8d3f1a2b"]}'
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/api/v1/episodes/ep-1"
+            assert dict(request.url.params) == {"raw": "true"}
+            return httpx.Response(200, content=raw)
+
+        assert await make_async_client(handler).get_episode_raw("ep-1") == raw
+
+    @pytest.mark.asyncio
+    async def test_list_episodes_forwards_step_filters(self, make_async_client):
+        captured = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["params"] = dict(request.url.params)
+            return httpx.Response(200, json={"items": [EPISODE], "next_cursor": None})
+
+        page = await make_async_client(handler).list_episodes(run_step=12, step_max=20)
+        assert captured["params"] == {"run_step": "12", "step_max": "20"}
+        assert page.items[0].episode_id == "ep-1"
+
     @pytest.mark.asyncio
     async def test_list_episode_traces_forwards_backend_filters(self, make_async_client):
         captured = {}
@@ -516,3 +544,51 @@ class TestClientLifecycle:
         with pytest.raises(asyncio.CancelledError):
             await task
         assert transport_closed
+
+
+class TestNodeAndCallReads:
+    @pytest.mark.asyncio
+    async def test_list_nodes_and_calls(self, make_async_client):
+        node = {
+            "node_idx": 0,
+            "parent_idx": None,
+            "timestamp": None,
+            "sampled": False,
+            "message": {"role": "user", "content": "hi"},
+        }
+        call = {
+            "call_idx": 0,
+            "node_idx": 1,
+            "time_start": 1.0,
+            "time_end": 2.0,
+            "model": "m",
+            "endpoint": "/v1/chat/completions",
+            "finish_reason": "stop",
+        }
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/nodes"):
+                assert request.url.params.multi_items() == [("role", "user"), ("limit", "10")]
+                return httpx.Response(
+                    200, json={"items": [node], "next_cursor": None, "partial_index": False}
+                )
+            assert request.url.path == "/api/v1/traces/8d3f1a2b/calls"
+            return httpx.Response(
+                200, json={"items": [call], "next_cursor": None, "partial_index": False}
+            )
+
+        client = make_async_client(handler)
+        nodes = await client.list_nodes("8d3f1a2b", role=["user"], limit=10)
+        calls = await client.list_calls("8d3f1a2b")
+        assert nodes.items[0].message.content == "hi"
+        assert calls.items[0].finish_reason == "stop"
+
+    @pytest.mark.asyncio
+    async def test_not_indexed_409_raises_trace_not_indexed(self, make_async_client):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                409, json={"error": {"code": "trace_not_indexed", "message": "not yet"}}
+            )
+
+        with pytest.raises(TraceNotIndexedError):
+            await make_async_client(handler).list_calls("8d3f1a2b")

@@ -115,6 +115,17 @@ class EgressPolicyStatus(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class SSHSession(BaseModel):
+    """Ephemeral SSH access to a VM sandbox."""
+
+    session_id: str
+    sandbox_id: str
+    host: str
+    port: int
+    expires_at: datetime
+    ttl_seconds: int
+
+
 class AdvancedConfigs(BaseModel):
     """Advanced configuration options for sandbox"""
 

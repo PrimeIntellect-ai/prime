@@ -9,10 +9,75 @@ from prime_cli.commands import traces as traces_cmd
 from prime_cli.core import Config
 from prime_cli.core.config import ConfigModel
 from prime_cli.main import app as main_app
-from prime_traces import APIError, Batch, TraceListPage, TraceSummary, UploadReceipt
+from prime_traces import (
+    APIError,
+    Batch,
+    EpisodeDetail,
+    EpisodeListPage,
+    EpisodeSummary,
+    NotFoundError,
+    TraceListPage,
+    TraceSummary,
+    UploadReceipt,
+)
 from typer.testing import CliRunner
 
 runner = CliRunner()
+
+
+def test_search_json_preserves_continuation_coverage_and_scope(monkeypatch):
+    from prime_traces import TraceSearchCoverage, TraceSearchPage
+
+    calls = []
+
+    class Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def search(self, query, **kwargs):
+            calls.append((query, kwargs))
+            return TraceSearchPage(
+                items=[],
+                next_cursor="cursor",
+                coverage=TraceSearchCoverage(
+                    examined_traces=256,
+                    unindexed_trace_ids=["pending"],
+                    partial_index=False,
+                ),
+            )
+
+    monkeypatch.setattr(traces_cmd, "_traces_client", Client)
+    result = runner.invoke(
+        traces_cmd.app,
+        ["search", "connection refused", "--run-id", "run", "--run-step", "0", "-o", "json"],
+    )
+    assert result.exit_code == 0, result.output
+    body = json.loads(result.stdout)
+    assert body["next_cursor"] == "cursor"
+    assert body["coverage"]["unindexed_trace_ids"] == ["pending"]
+    assert len(calls) == 1 and calls[0][0] == "connection refused"
+    assert calls[0][1]["run_id"] == "run" and calls[0][1]["run_step"] == 0
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["search", "hello"],
+        ["search", " ", "--run-id", "run"],
+        ["search", "he", "--run-id", "run"],
+        ["search", "hello", "--run-id", "team/run"],
+        ["search", "hello", "--run-id", "run", "--field", "sql"],
+    ],
+)
+def test_search_rejects_invalid_arguments_before_network(monkeypatch, args):
+    def fail():
+        pytest.fail("invalid input must not make a network request")
+
+    monkeypatch.setattr(traces_cmd, "_traces_client", fail)
+    assert runner.invoke(traces_cmd.app, args).exit_code != 0
 
 
 class _StubConfig:
@@ -289,6 +354,37 @@ def _summary(**overrides):
     return TraceSummary.model_validate(fields)
 
 
+def _episode(**overrides):
+    fields = {
+        "episode_id": "ep_4c1d",
+        "upload_id": "5ee85e41",
+        "schema_version": 1,
+        "created_at": "2026-07-20T18:02:11.482Z",
+        "ingested_at": "2026-07-20T18:06:02.117Z",
+        "run_id": "run_9f3k2m",
+        "environment_id": "tb2",
+        "outcome": "failed",
+        "has_error": True,
+        "error": {"type": "EnvHookError", "message": "teardown timed out"},
+    }
+    fields.update(overrides)
+    return EpisodeSummary.model_validate(fields)
+
+
+def _episode_detail(**overrides):
+    traces = {
+        "trace_count": 1,
+        "total_tokens": 84213,
+        "total_duration_ms": 215537,
+        "any_trace_error": False,
+        "agent_names": ["solver"],
+    }
+    traces.update(overrides.pop("traces", {}))
+    return EpisodeDetail.model_validate(
+        {**_episode(**overrides).model_dump(mode="json"), "traces": traces}
+    )
+
+
 class FakeTracesClient:
     def __init__(self):
         self.calls: dict = {}
@@ -323,6 +419,25 @@ class FakeTracesClient:
 
     def delete_run(self, run_id):
         self.calls["delete_run"] = run_id
+
+    def list_episodes(self, **kwargs):
+        self.calls["list_episodes"] = kwargs
+        return EpisodeListPage(items=[_episode()], next_cursor="ep-cursor-1")
+
+    def get_episode(self, episode_id):
+        self.calls["get_episode"] = episode_id
+        return _episode_detail(episode_id=episode_id)
+
+    def get_episode_raw(self, episode_id):
+        self.calls["get_episode_raw"] = episode_id
+        return b'{"id":"%s","traces":["8d3f1a2b"]}' % episode_id.encode()
+
+    def list_episode_traces(self, episode_id, **kwargs):
+        self.calls["list_episode_traces"] = {"episode_id": episode_id, **kwargs}
+        return TraceListPage(
+            items=[_summary(episode_id=episode_id, activity={"model_turns": 12})],
+            next_cursor=None,
+        )
 
 
 @pytest.fixture()
@@ -711,3 +826,565 @@ def test_delete_success_treats_target_as_literal_text(fake_client):
     assert result.exit_code == 0, result.output
     assert fake_client.calls["delete"] == ("[red]", None)
     assert "Deletion of trace [red] accepted" in result.output
+
+
+@pytest.mark.parametrize("code", [None, "run_not_found", "search_limit_exceeded"])
+def test_search_error_keeps_json_stdout_clean(monkeypatch, code):
+    from prime_traces import NotFoundError
+
+    class Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def search(self, *args, **kwargs):
+            raise NotFoundError("Run [red]missing[/] not found", code=code)
+
+    monkeypatch.setattr(traces_cmd, "_traces_client", Client)
+    result = runner.invoke(traces_cmd.app, ["search", "hello", "--run-id", "run", "-o", "json"])
+    assert result.exit_code == 1
+    assert result.stdout_bytes == b""
+    if code is None:
+        assert "requires the Prime Traces search API" in result.stderr
+    else:
+        assert "Search failed: Run [red]missing[/] not found" in result.stderr
+        assert "requires the Prime Traces search API" not in result.stderr
+
+
+@pytest.mark.parametrize("cursor", ["cursor[red]opaque[/red]", "cursor[/]"])
+@pytest.mark.parametrize("output", ["table", "json"])
+def test_search_preserves_opaque_cursor(monkeypatch, cursor, output):
+    from prime_traces import TraceSearchPage
+
+    class Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def search(self, *args, **kwargs):
+            return TraceSearchPage(
+                items=[],
+                next_cursor=cursor,
+                coverage=None,
+            )
+
+    monkeypatch.setattr(traces_cmd, "_traces_client", Client)
+    result = runner.invoke(traces_cmd.app, ["search", "hello", "--run-id", "run", "-o", output])
+    assert result.exit_code == 0, result.output
+    if output == "json":
+        assert json.loads(result.stdout)["next_cursor"] == cursor
+    else:
+        assert f"--cursor {cursor}" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "args,warns",
+    [
+        ([], True),  # first page without coverage: completeness is unknown
+        (["--cursor", "resume"], False),  # resumed pages omit coverage by design
+    ],
+)
+def test_search_warns_when_first_page_coverage_is_unknown(monkeypatch, args, warns):
+    from prime_traces import TraceSearchPage
+
+    class Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def search(self, *args, **kwargs):
+            return TraceSearchPage(items=[], next_cursor=None, coverage=None)
+
+    monkeypatch.setattr(traces_cmd, "_traces_client", Client)
+    result = runner.invoke(traces_cmd.app, ["search", "hello", "--run-id", "run", *args])
+    assert result.exit_code == 0, result.output
+    assert ("Index coverage is unknown" in result.stderr) is warns
+    assert "Search exhausted" in result.stdout
+
+
+def _search_match(text, query="the", trace_id="trace", node_idx=1, role="user"):
+    from prime_traces import TraceSearchMatch
+
+    position = text.index(query)
+    start = max(0, position - 64)
+    return TraceSearchMatch(
+        trace_id=trace_id,
+        upload_id="upload",
+        generation=1,
+        episode_id=None,
+        node_idx=node_idx,
+        role=role,
+        field="content",
+        representation="text",
+        match_start=position,
+        match_end=position + len(query),
+        excerpt=text[start : start + len(query) + 128],
+        excerpt_start=start,
+    )
+
+
+@pytest.mark.parametrize(
+    "text,query,highlighted,plain",
+    [
+        ("x" * 70 + "the literal\nlives here " + "y" * 80, "the", "the", "…"),  # clipped edges
+        ("before check the\nstatus after", "check the\nstatus", "check the status", "before"),
+    ],
+)
+def test_search_excerpt_highlights_by_offset(text, query, highlighted, plain):
+    rendered = traces_cmd._search_excerpt(_search_match(text, query), 60)
+    spans = [span for span in rendered.spans if "yellow" in str(span.style)]
+    assert [rendered.plain[span.start : span.end] for span in spans] == [highlighted]
+    assert rendered.plain.startswith(plain) and "\n" not in rendered.plain
+
+
+def test_search_excerpt_ignores_offsets_outside_the_excerpt():
+    match = _search_match("the end").model_copy(update={"match_start": 40, "match_end": 43})
+    rendered = traces_cmd._search_excerpt(match, 60)
+    assert rendered.plain == "the end" and not rendered.spans
+
+
+@pytest.mark.parametrize("width", [80, 50])  # narrow terminals keep the match visible
+def test_search_table_groups_rows_by_trace(monkeypatch, width):
+    from prime_traces import TraceSearchCoverage, TraceSearchPage
+
+    monkeypatch.setattr(traces_cmd.console, "width", width)
+
+    class Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def search(self, *args, **kwargs):
+            return TraceSearchPage(
+                items=[
+                    _search_match("first the one", trace_id="aaaa", role="system"),
+                    _search_match("second the two", trace_id="aaaa", node_idx=7),
+                    _search_match("third the three", trace_id="bbbb", role="tool"),
+                ],
+                next_cursor=None,
+                coverage=TraceSearchCoverage(
+                    examined_traces=9, unindexed_trace_ids=[], partial_index=False
+                ),
+            )
+
+    monkeypatch.setattr(traces_cmd, "_traces_client", Client)
+    result = runner.invoke(traces_cmd.app, ["search", "the", "--run-id", "run"])
+    assert result.exit_code == 0, result.output
+    assert result.stdout.count("aaaa") == 1 and result.stdout.count("bbbb") == 1
+    assert "the one" in result.stdout
+    assert "3 matches in 2 traces on this page · 9 traces" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# Episodes: `prime traces episodes list|get` and `prime traces list --episode`
+# ---------------------------------------------------------------------------
+
+
+def test_episodes_list_forwards_filters_and_moves_the_run_to_the_title(fake_client):
+    result = runner.invoke(
+        main_app,
+        [
+            "traces",
+            "episodes",
+            "list",
+            "--run-id",
+            "run_9f3k2m",
+            "--env",
+            "tb2",
+            "--outcome",
+            "failed",
+            "--has-error",
+            "--limit",
+            "10",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert fake_client.calls["list_episodes"] == {
+        "run_id": "run_9f3k2m",
+        "environment_id": "tb2",
+        "outcome": "failed",
+        "has_error": True,
+        "run_step": None,
+        "created_after": None,
+        "created_before": None,
+        "limit": 10,
+        "cursor": None,
+    }
+    assert "Episodes · run run_9f3k2m · tb2" in result.output
+    assert "Run " not in result.output  # the run is in the title, not a column
+    assert "ep_4c1d" in result.output
+    assert "EnvHookError" in result.output
+    assert "teardown timed out" not in result.output  # the message is left to `get`
+    assert "2026-07-20 18:02:11Z" in result.output
+    assert "Use --page 2 to see more." in result.output
+    assert "--cursor ep-cursor-1" in result.output
+    assert "prime traces episodes get <episode_id>" in result.output
+
+
+def test_episodes_list_filters_by_run_step_and_names_it_in_the_title(fake_client):
+    result = runner.invoke(
+        main_app, ["traces", "episodes", "list", "--run-id", "run_9f3k2m", "--run-step", "0"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert fake_client.calls["list_episodes"]["run_step"] == 0
+    assert "Episodes · run run_9f3k2m · step 0 · tb2" in result.output
+
+
+def test_episodes_list_rejects_a_negative_run_step(fake_client):
+    result = runner.invoke(main_app, ["traces", "episodes", "list", "--run-step", "-1"])
+
+    assert result.exit_code == 2
+    assert "list_episodes" not in fake_client.calls
+
+
+def test_episodes_list_moves_shared_values_to_the_title_and_keeps_differing_ones(fake_client):
+    fake_client.list_episodes = lambda **kwargs: EpisodeListPage(
+        items=[
+            _episode(episode_id="ep_a", run_id="run_a", has_error=False),
+            _episode(episode_id="ep_b", run_id="run_b", has_error=False),
+        ],
+        next_cursor=None,
+    )
+
+    result = runner.invoke(main_app, ["traces", "episodes", "list"])
+
+    assert result.exit_code == 0, result.output
+    assert "Episodes · tb2" in result.output  # every row shares the environment
+    assert "Environment" not in result.output
+    assert "Run" in result.output  # the runs differ, so they keep their column
+    assert "run_a" in result.output and "run_b" in result.output
+    assert "--page" not in result.output
+
+
+def test_episodes_list_page_walks_cursors_and_stops_past_the_end(fake_client):
+    calls = []
+    pages = {None: ([_episode(episode_id="ep_p1")], "c1"), "c1": ([], None)}
+
+    def list_episodes(**kwargs):
+        calls.append(kwargs)
+        items, next_cursor = pages[kwargs["cursor"]]
+        return EpisodeListPage(items=items, next_cursor=next_cursor)
+
+    fake_client.list_episodes = list_episodes
+
+    result = runner.invoke(main_app, ["traces", "episodes", "list", "--page", "4"])
+
+    assert result.exit_code == 0, result.output
+    assert [call["cursor"] for call in calls] == [None, "c1"]
+    assert "No episodes on page 4." in result.output
+    assert "ep_p1" not in result.output
+
+
+def test_episodes_list_rejects_page_with_cursor(fake_client):
+    result = runner.invoke(
+        main_app, ["traces", "episodes", "list", "--page", "2", "--cursor", "c1"]
+    )
+
+    assert result.exit_code == 1
+    assert "--page cannot be combined with --cursor" in result.output
+    assert "list_episodes" not in fake_client.calls
+
+
+def test_episodes_list_json_output_is_the_page(fake_client):
+    result = runner.invoke(main_app, ["traces", "episodes", "list", "-o", "json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["items"][0]["episode_id"] == "ep_4c1d"
+    assert payload["items"][0]["error"]["type"] == "EnvHookError"
+    assert payload["next_cursor"] == "ep-cursor-1"
+
+
+def test_episodes_get_shows_both_error_sources_and_member_traces(fake_client):
+    result = runner.invoke(main_app, ["traces", "episodes", "get", "ep_4c1d"])
+
+    assert result.exit_code == 0, result.output
+    assert fake_client.calls["get_episode"] == "ep_4c1d"
+    assert fake_client.calls["list_episode_traces"] == {"episode_id": "ep_4c1d", "limit": 20}
+    # An environment hook failure with every trace green: both flags are shown.
+    assert "episode error yes" in result.output
+    assert "trace errors no" in result.output
+    assert "EnvHookError: teardown timed out" in result.output
+    assert "task         tb2-0187" in result.output
+    assert "8d3f1a2b" in result.output
+    assert "solver" in result.output
+    assert "84,213" in result.output
+    assert "prime traces transcript <trace_id>" in result.output
+    assert "prime traces list --episode" not in result.output
+
+
+def test_episodes_get_points_at_the_full_member_listing(fake_client):
+    fake_client.get_episode = lambda episode_id: _episode_detail(
+        episode_id=episode_id, traces={"trace_count": 45}
+    )
+    fake_client.list_episode_traces = lambda episode_id, **kwargs: TraceListPage(
+        items=[_summary(trace_id=f"t{i}") for i in range(20)], next_cursor="more"
+    )
+
+    result = runner.invoke(main_app, ["traces", "episodes", "get", "ep_4c1d"])
+
+    assert result.exit_code == 0, result.output
+    assert "Showing the newest 20 of 45 traces." in result.output
+    assert "prime traces list --episode ep_4c1d" in result.output
+
+
+def test_episodes_get_lists_member_traces_in_the_order_they_ran(fake_client):
+    # The service returns newest first; the episode view reads oldest first.
+    fake_client.list_episode_traces = lambda episode_id, **kwargs: TraceListPage(
+        items=[
+            _summary(trace_id="t-late", agent_name="reviewer"),
+            _summary(trace_id="t-early", agent_name="planner"),
+        ],
+        next_cursor=None,
+    )
+
+    result = runner.invoke(main_app, ["traces", "episodes", "get", "ep_4c1d"])
+
+    assert result.exit_code == 0, result.output
+    assert result.output.index("t-early") < result.output.index("t-late")
+
+
+def test_episodes_get_omits_the_task_when_a_member_records_none(fake_client):
+    fake_client.list_episode_traces = lambda episode_id, **kwargs: TraceListPage(
+        items=[_summary(trace_id="t1"), _summary(trace_id="t2", task_id=None)],
+        next_cursor=None,
+    )
+
+    result = runner.invoke(main_app, ["traces", "episodes", "get", "ep_4c1d"])
+
+    assert result.exit_code == 0, result.output
+    assert "tb2-0187" not in result.output
+
+
+def test_episodes_get_without_traces_says_so(fake_client):
+    fake_client.get_episode = lambda episode_id: _episode_detail(
+        episode_id=episode_id, traces={"trace_count": 0, "agent_names": []}
+    )
+    fake_client.list_episode_traces = lambda episode_id, **kwargs: TraceListPage(
+        items=[], next_cursor=None
+    )
+
+    result = runner.invoke(main_app, ["traces", "episodes", "get", "ep_4c1d"])
+
+    assert result.exit_code == 0, result.output
+    assert "No traces were recorded for this episode." in result.output
+    assert "Trace ID" not in result.output
+
+
+def test_episodes_get_json_is_the_detail_alone(fake_client):
+    result = runner.invoke(main_app, ["traces", "episodes", "get", "ep_4c1d", "-o", "json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["episode_id"] == "ep_4c1d"
+    assert payload["traces"]["trace_count"] == 1
+    assert "list_episode_traces" not in fake_client.calls
+
+
+def test_episodes_get_raw_preserves_exact_bytes(fake_client):
+    raw = b'{"id":"ep_4c1d","traces":["a"]}\n\xff'
+    fake_client.get_episode_raw = lambda episode_id: raw
+
+    result = runner.invoke(main_app, ["traces", "episodes", "get", "ep_4c1d", "--raw"])
+
+    assert result.exit_code == 0
+    assert result.stdout_bytes == raw
+    assert "get_episode" not in fake_client.calls
+
+
+def test_episodes_get_raw_to_dest_writes_the_file(fake_client, tmp_path):
+    dest = tmp_path / "episode.json"
+
+    result = runner.invoke(
+        main_app,
+        ["traces", "episodes", "get", "ep_4c1d", "--raw", "--dest", str(dest), "-o", "json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert dest.read_bytes() == b'{"id":"ep_4c1d","traces":["8d3f1a2b"]}'
+    assert json.loads(result.output) == {"dest": str(dest), "bytes_written": 38}
+
+
+def test_episodes_get_raw_failed_write_keeps_the_existing_dest(fake_client, tmp_path, monkeypatch):
+    dest = tmp_path / "episode.json"
+    dest.write_bytes(b"previous")
+
+    def fail_replace(self, target):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(traces_cmd.Path, "replace", fail_replace)
+
+    result = runner.invoke(
+        main_app, ["traces", "episodes", "get", "ep_4c1d", "--raw", "--dest", str(dest)]
+    )
+
+    assert result.exit_code == 1
+    # The message names the full temporary path, so Rich may wrap it anywhere.
+    assert "No space left on device" in " ".join(result.stderr.split())
+    assert dest.read_bytes() == b"previous"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["episode.json"]
+
+
+def test_episodes_get_rejects_dest_without_raw(fake_client, tmp_path):
+    dest = tmp_path / "episode.json"
+
+    result = runner.invoke(main_app, ["traces", "episodes", "get", "ep_4c1d", "--dest", str(dest)])
+
+    assert result.exit_code == 1
+    assert "--dest requires --raw" in result.output
+    assert "get_episode" not in fake_client.calls
+
+
+class _TeamConfig:
+    team_id = "team_123"
+    team_name = "Research"
+    team_id_from_env = False
+
+
+def _episode_missing(episode_id, **kwargs):
+    raise NotFoundError(
+        f"No episode '{episode_id}' for this owner", status_code=404, code="episode_not_found"
+    )
+
+
+@pytest.mark.parametrize("args", [["--raw"], ["-o", "json"], []])
+def test_episodes_get_not_found_names_the_account_it_searched(fake_client, monkeypatch, args):
+    monkeypatch.setattr(traces_cmd, "Config", _TeamConfig)
+    fake_client.get_episode = _episode_missing
+    fake_client.get_episode_raw = _episode_missing
+
+    result = runner.invoke(main_app, ["traces", "episodes", "get", "ep_gone", *args])
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert "Not found: no episode ep_gone in team Research." in result.stderr
+    assert "prime switch" in result.stderr
+
+
+def test_episode_not_found_ignores_the_stored_name_under_a_team_id_override(
+    fake_client, monkeypatch
+):
+    class _EnvTeamConfig(_TeamConfig):
+        team_id = "team_from_env"
+        team_id_from_env = True
+
+    monkeypatch.setattr(traces_cmd, "Config", _EnvTeamConfig)
+    fake_client.get_episode = _episode_missing
+
+    result = runner.invoke(main_app, ["traces", "episodes", "get", "ep_gone"])
+
+    assert result.exit_code == 1
+    assert "no episode ep_gone in team team_from_env." in result.stderr
+    assert "Research" not in result.stderr
+    # `prime switch` refuses to run while PRIME_TEAM_ID is set.
+    assert "change or unset PRIME_TEAM_ID" in result.stderr
+    assert "prime switch" not in result.stderr
+
+
+def test_episode_not_found_renders_the_team_name_as_literal_text(fake_client, monkeypatch):
+    class _MarkupTeamConfig(_TeamConfig):
+        team_name = "[/]research"
+
+    monkeypatch.setattr(traces_cmd, "Config", _MarkupTeamConfig)
+    fake_client.get_episode = _episode_missing
+
+    result = runner.invoke(main_app, ["traces", "episodes", "get", "ep_gone"])
+
+    assert result.exit_code == 1
+    assert "no episode ep_gone in team [/]research." in result.stderr
+    assert "MarkupError" not in result.output
+
+
+def test_traces_list_episode_lists_member_traces_with_the_agent_column(fake_client):
+    result = runner.invoke(
+        main_app, ["traces", "list", "--episode", "ep_4c1d", "--has-error", "--limit", "5"]
+    )
+
+    assert result.exit_code == 0, result.output
+    call = fake_client.calls["list_episode_traces"]
+    assert call["episode_id"] == "ep_4c1d"
+    assert call["has_error"] is True
+    assert call["limit"] == 5
+    assert call["cursor"] is None
+    assert "sort" not in call
+    assert "list" not in fake_client.calls
+    assert "Traces · episode ep_4c1d" in result.output
+    assert "Agent" in result.output
+    assert "solver" in result.output
+
+
+def test_traces_list_episode_keeps_the_task_column_when_tasks_differ(fake_client):
+    fake_client.list_episode_traces = lambda episode_id, **kwargs: TraceListPage(
+        items=[
+            _summary(trace_id="t1", task_id="task-a"),
+            _summary(trace_id="t2", task_id=None),
+        ],
+        next_cursor=None,
+    )
+
+    result = runner.invoke(main_app, ["traces", "list", "--episode", "ep_4c1d"])
+
+    assert result.exit_code == 0, result.output
+    assert "Task" in result.output
+    assert "task-a" in result.output
+
+
+def test_traces_list_episode_moves_a_shared_task_to_the_title(fake_client):
+    result = runner.invoke(main_app, ["traces", "list", "--episode", "ep_4c1d"])
+
+    assert result.exit_code == 0, result.output
+    assert "Traces · episode ep_4c1d · tb2-0187" in result.output
+    assert "Task" not in result.output
+
+
+def test_traces_list_episode_rejects_sort(fake_client):
+    result = runner.invoke(main_app, ["traces", "list", "--episode", "ep_4c1d", "--sort", "reward"])
+
+    assert result.exit_code == 1
+    assert "--sort cannot be combined with --episode" in result.output
+    assert "list_episode_traces" not in fake_client.calls
+
+
+def test_traces_list_episode_not_found_names_the_personal_account(fake_client, monkeypatch):
+    class _PersonalConfig:
+        team_id = None
+        team_name = None
+        team_id_from_env = False
+
+    monkeypatch.setattr(traces_cmd, "Config", _PersonalConfig)
+    fake_client.list_episode_traces = _episode_missing
+
+    result = runner.invoke(main_app, ["traces", "list", "--episode", "ep_gone"])
+
+    assert result.exit_code == 1
+    assert "Not found: no episode ep_gone in your personal account." in result.stderr
+
+
+def test_episode_tables_treat_values_as_literal_text(fake_client):
+    markup = "[/]"
+    fake_client.list_episodes = lambda **kwargs: EpisodeListPage(
+        items=[_episode(episode_id=markup, environment_id=markup, outcome=markup)],
+        next_cursor=None,
+    )
+    fake_client.get_episode = lambda episode_id: _episode_detail(
+        episode_id=episode_id, run_id=markup, traces={"agent_names": [markup]}
+    )
+
+    listed = runner.invoke(main_app, ["traces", "episodes", "list"])
+    fetched = runner.invoke(main_app, ["traces", "episodes", "get", "[red]ep"])
+
+    assert listed.exit_code == 0, listed.output
+    assert markup in listed.output
+    assert fetched.exit_code == 0, fetched.output
+    assert "[red]ep" in fetched.output
+    assert markup in fetched.output

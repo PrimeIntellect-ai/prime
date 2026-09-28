@@ -362,3 +362,122 @@ def test_models_json_output_passes_catalog_fields_through(
     assert '"display_name": "Claude Haiku 4.5"' in result.output
     assert '"context_window": 200000' in result.output
     assert '"cache_read_usd_per_mtok": 0.1' in result.output
+
+
+def _serving_fixture() -> Dict[str, Any]:
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": "openrouter/cheap-gateway",
+                "serving": "gateway",
+                "pricing": {"input_usd_per_mtok": 0.10, "output_usd_per_mtok": 0.40},
+            },
+            {
+                "id": "prime/zeta-hosted",
+                "serving": "hosted",
+                "pricing": {"input_usd_per_mtok": 1.40, "output_usd_per_mtok": 4.40},
+            },
+            {
+                "id": "openrouter/alpha-gateway",
+                "serving": "gateway",
+                "pricing": {"input_usd_per_mtok": 0.05, "output_usd_per_mtok": 0.10},
+            },
+            {
+                "id": "legacy/no-field",
+                "pricing": {"input_usd_per_mtok": 2.00, "output_usd_per_mtok": 6.00},
+            },
+            {
+                "id": "mystery/new-tier",
+                "serving": "edge",
+                "pricing": {"input_usd_per_mtok": 3.00, "output_usd_per_mtok": 9.00},
+            },
+        ],
+    }
+
+
+def test_models_table_shows_serving_column_with_labels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_models(monkeypatch, _serving_fixture())
+
+    result = CliRunner().invoke(app, ["inference", "models"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    out = result.output
+    assert "serving" in out
+    assert "Hosted by Prime" in out
+    assert "Gateway" in out
+    # Unknown values render verbatim, never mapped to a published tier.
+    assert "edge" in out
+    # Missing field renders as an em-dash, not a default tier.
+    assert "legacy/no-field" in out
+    assert "—" in out
+
+
+def test_models_table_omits_serving_column_for_legacy_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_models(monkeypatch, _models_fixture())
+
+    result = CliRunner().invoke(app, ["inference", "models"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    assert "serving" not in result.output
+    assert "Hosted by Prime" not in result.output
+    assert "Gateway" not in result.output
+
+
+def test_models_pins_hosted_first_then_keeps_sort_within_groups(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_models(monkeypatch, _serving_fixture())
+
+    result = CliRunner().invoke(app, ["inference", "models"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    # Default id sort: hosted group first, then the rest alphabetically.
+    positions = _ids_in_order(
+        result.output,
+        ["prime/zeta-hosted", "legacy/no-field", "mystery/new-tier", "openrouter/alpha-gateway"],
+    )
+    assert all(p >= 0 for p in positions)
+    assert positions == sorted(positions)
+
+
+def test_models_pin_is_stable_under_price_sort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_models(monkeypatch, _serving_fixture())
+
+    result = CliRunner().invoke(app, ["inference", "models", "--sort", "input"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    # Hosted first despite a higher price; tail keeps the ascending order.
+    positions = _ids_in_order(
+        result.output,
+        [
+            "prime/zeta-hosted",
+            "openrouter/alpha-gateway",
+            "openrouter/cheap-gateway",
+            "legacy/no-field",
+        ],
+    )
+    assert all(p >= 0 for p in positions)
+    assert positions == sorted(positions)
+
+
+def test_models_json_passes_serving_through_and_pins_hosted_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_models(monkeypatch, _serving_fixture())
+
+    result = CliRunner().invoke(app, ["inference", "models", "--output", "json"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    out = result.output
+    assert '"serving": "hosted"' in out
+    assert '"serving": "gateway"' in out
+    assert '"serving": "edge"' in out
+    # The hosted-first order applies to JSON output too.
+    assert out.find("prime/zeta-hosted") < out.find("legacy/no-field")

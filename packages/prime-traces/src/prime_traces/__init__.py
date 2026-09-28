@@ -27,6 +27,7 @@ from .exceptions import (
     PaymentRequiredError,
     PrimeTracesError,
     RetryableAPIError,
+    TraceNotIndexedError,
     TraceTooLargeError,
     TransportError,
     UnauthorizedError,
@@ -42,14 +43,23 @@ from .models import (
     Execution,
     LineFormat,
     ModelInfo,
+    NodeMessage,
     Score,
+    SearchField,
+    TraceCall,
+    TraceCallPage,
     TraceListPage,
+    TraceNode,
+    TraceNodePage,
+    TraceSearchCoverage,
+    TraceSearchMatch,
+    TraceSearchPage,
     TraceSummary,
     UploadReceipt,
 )
 from .traces import SupportsToRecord, TraceRecord, TracesClient
 
-__version__ = "0.0.4"
+__version__ = "0.0.7"
 
 __all__ = [
     # Clients & config
@@ -79,8 +89,17 @@ __all__ = [
     "Execution",
     "LineFormat",
     "ModelInfo",
+    "NodeMessage",
     "Score",
+    "TraceCall",
+    "TraceCallPage",
     "TraceListPage",
+    "TraceNode",
+    "TraceNodePage",
+    "SearchField",
+    "TraceSearchCoverage",
+    "TraceSearchMatch",
+    "TraceSearchPage",
     "TraceSummary",
     "UploadReceipt",
     # Exceptions
@@ -91,6 +110,7 @@ __all__ = [
     "ForbiddenError",
     "LineFormatConflictError",
     "NotFoundError",
+    "TraceNotIndexedError",
     "PaymentRequiredError",
     "RetryableAPIError",
     "TraceTooLargeError",

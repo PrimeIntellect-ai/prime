@@ -105,6 +105,12 @@ class LineFormatConflictError(APIError):
     previously submitted under a different ``X-Prime-Line-Format``."""
 
 
+class TraceNotIndexedError(APIError):
+    """409 ``trace_not_indexed`` — the trace exists, but its node/call index
+    is still being built (or rebuilt after a re-upload). Retry later, or read
+    the raw document instead."""
+
+
 class RetryableAPIError(APIError):
     """429, 502, 503 or 504 — retry the exact same bytes after ``retry_after``
     seconds.

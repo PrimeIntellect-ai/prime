@@ -23,6 +23,7 @@ from .commands.teams import app as teams_app
 from .commands.traces import app as traces_app
 from .commands.tunnel import app as tunnel_app
 from .commands.upgrade import app as upgrade_app
+from .commands.volumes import app as volumes_app
 from .commands.wallet import WALLET_JSON_HELP, wallet_command
 from .commands.whoami import app as whoami_app
 from .core import Config
@@ -40,6 +41,7 @@ app = PlainTyper(
 app.add_typer(env_app, name="env", rich_help_panel="Model Factory")
 app.add_typer(evals_app, name="eval", rich_help_panel="Model Factory")
 app.add_typer(train_app, name="train", rich_help_panel="Model Factory")
+app.add_typer(volumes_app, name="volumes", rich_help_panel="Model Factory")
 app.add_typer(
     train_app,
     name="rl",

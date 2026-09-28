@@ -1435,10 +1435,13 @@ def create_run(
         "--volume",
         help=(
             "Named volume: outputs land under runs/<runId>/ on it, and for "
-            "hosted SFT the staged dataset named by [data] name = "
-            '"/datasets/<name>" is read from it (stage with `prime volumes '
-            "stage`). Full-FT only; closed beta, see `prime volumes`. Falls "
-            'back to a top-level `volume = "..."` in the TOML.'
+            "hosted SFT the dataset named by [data] name is read from it "
+            "(name may be a Hugging Face dataset Hub ID, e.g. "
+            "`willcb/R1-reverse-wikipedia-paragraphs-v1-1000`; the platform "
+            "stages it onto the volume before training. A local "
+            '"/datasets/<name>" path also works for already-staged data.) '
+            "Full-FT only; closed beta, see `prime volumes`. Falls back to "
+            'a top-level `volume = "..."` in the TOML.'
         ),
     ),
     volume_size: Optional[str] = typer.Option(

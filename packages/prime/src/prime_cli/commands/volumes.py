@@ -167,9 +167,11 @@ def ssh(
         # Match `prime pods ssh`: poll until a connection is published,
         # then invoke local ssh with the configured key. Bound the wait so
         # a failed provision does not spin forever; stopping remains an
-        # explicit action (transfers may outlive this shell).
+        # explicit action (transfers may outlive this shell). 7 minutes
+        # covers the platform's 5m session install timeout plus helm's
+        # buffer, so a failed deploy surfaces as FAILED, not a timeout.
         with console.status("Waiting for SSH connection to become available...", spinner="dots"):
-            deadline = time.monotonic() + 120
+            deadline = time.monotonic() + 420
             while not session.ssh_connection and time.monotonic() < deadline:
                 if session.status in (
                     "FAILED",

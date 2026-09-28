@@ -1184,7 +1184,7 @@ def test_missing_container_exit_code_is_failure(scenario) -> None:
         env=TEST_ENV,
     )
     assert result.exit_code == 1, result.output
-    assert "no container exit code" in _flat(result.output)
+    assert "no valid container exit code" in _flat(result.output)
 
 
 def test_interrupt_right_after_pod_reporter_cleans_up(scenario, monkeypatch) -> None:
@@ -1325,3 +1325,76 @@ def test_help_recipe_path_matches_toml_name() -> None:
         source = stage_line.split("prime volumes stage ")[1].split()[0]
         staged_path = volumes_stage.validate_dataset_path(source.split("/")[-1])
     assert f"/datasets/{staged_path}" == toml_name
+
+
+# ---------------------------------------------------------------------------
+# Re-review probes (t033 rereview-040fff6f), converted
+# ---------------------------------------------------------------------------
+
+
+def test_cleanup_confirmation_transport_failure_is_not_success() -> None:
+    """A get_pod error during deletion confirmation means UNKNOWN
+    cleanup, not confirmed: only a NotFound read proves the pod is gone."""
+
+    class Kube:
+        context = "ctx"
+        namespace = "ns"
+
+        def delete_pod(self, name):
+            pass
+
+        def get_pod(self, name):
+            raise volumes_stage.StageError("API transport timeout")
+
+    errors = volumes_stage._cleanup(Kube(), "pod", None, lambda message: None, "op")
+    assert errors, "unknown deletion status reported as cleaned"
+    assert "could not be confirmed" in errors[0]
+
+
+def test_missing_public_metadata_flags_keeps_token(monkeypatch) -> None:
+    """HTTP 200 metadata without explicit private/gated flags is NOT
+    proof of public: absence keeps the user-supplied token."""
+    import httpx
+
+    monkeypatch.setattr(
+        httpx, "get", lambda *a, **kw: httpx.Response(200, json={"id": "acme/data"})
+    )
+    assert volumes_stage._dataset_is_public("acme/data") is False
+
+    # the same holds for partially-declared metadata
+    monkeypatch.setattr(
+        httpx, "get", lambda *a, **kw: httpx.Response(200, json={"id": "acme/x", "private": False})
+    )
+    assert volumes_stage._dataset_is_public("acme/x") is False
+    # malformed metadata also keeps the token
+    monkeypatch.setattr(httpx, "get", lambda *a, **kw: httpx.Response(200, json="not-a-dict"))
+    assert volumes_stage._dataset_is_public("acme/y") is False
+
+
+@pytest.mark.parametrize("bad_field", ["null_exit", "empty_config_splits", "non_numeric_bytes"])
+def test_invalid_result_schema_fails(scenario, bad_field) -> None:
+    """A malformed result must never be a success: null exit codes, config
+    summaries without split details, and nonnumeric byte counts all fail."""
+    terminal = _terminal("Succeeded")
+    if bad_field == "null_exit":
+        terminal["state"]["terminated"]["exitCode"] = None
+    scenario["configure"](phases=[_pod(terminal, "Succeeded")])
+
+    def factory(operation):
+        raw = _result_line(operation, "acme/tiny-sft", "tiny-sft")
+        payload = json.loads(raw[len(RESULT_MARKER) :])
+        if bad_field == "empty_config_splits":
+            payload["configs"] = {"default": {}}
+        if bad_field == "non_numeric_bytes":
+            payload["bytes"] = "not-an-integer"
+        return RESULT_MARKER + json.dumps(payload)
+
+    scenario["result_after_pod"] = factory
+    result = runner.invoke(
+        app,
+        ["volumes", "stage", "acme/tiny-sft", "--volume", "sft-datasets", "--output", "json"],
+        env=TEST_ENV,
+    )
+    assert result.exit_code != 0, result.output + "\n" + result.stderr
+    if bad_field == "null_exit":
+        assert "exit code" in _flat(result.output + result.stderr)

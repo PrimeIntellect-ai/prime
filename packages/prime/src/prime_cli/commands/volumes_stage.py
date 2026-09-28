@@ -425,7 +425,10 @@ def _dataset_is_public(source: str) -> bool:
         return False
     if not isinstance(metadata, dict):
         return False
-    return not metadata.get("private") and not metadata.get("gated")
+    # Absence is not proof of public: only explicit, correctly typed
+    # private == False AND gated == False count as provably public;
+    # unknown/malformed metadata keeps a user-supplied token.
+    return metadata.get("private") is False and metadata.get("gated") is False
 
 
 def _pod_manifest(
@@ -545,6 +548,42 @@ def _secret_manifest(
 def _container_status(pod: dict[str, Any]) -> dict[str, Any]:
     statuses = pod.get("status", {}).get("containerStatuses") or [{}]
     return statuses[0]
+
+
+def _result_problems(result: dict[str, Any]) -> list[str]:
+    """One place validates the in-pod result before it can ever be
+    returned or printed as success: identity, status, revision, nested
+    verification summary (at least one nonempty split), and numeric
+    bytes/files."""
+    problems: list[str] = []
+    if result.get("status") not in ("staged", "already_staged"):
+        problems.append(f"staging result reports an unexpected status ({result.get('status')!r})")
+    revision = result.get("revision")
+    if not isinstance(revision, str) or not revision:
+        problems.append("staging result has no resolved revision")
+    configs = result.get("configs")
+    if not isinstance(configs, dict) or not configs:
+        problems.append("staging result has no verification summary")
+    else:
+        any_nonempty_split = False
+        for config, summary in configs.items():
+            splits = summary.get("splits") if isinstance(summary, dict) else None
+            if not isinstance(splits, dict) or not splits:
+                problems.append(f"staging result config {config!r} has no split summary")
+                continue
+            for split, info in splits.items():
+                rows = info.get("rows") if isinstance(info, dict) else None
+                if not isinstance(rows, int) or rows <= 0:
+                    problems.append(f"staging result split {split!r} has no row count")
+                else:
+                    any_nonempty_split = True
+        if not any_nonempty_split:
+            problems.append("staging result summary lists no nonempty split")
+    for field in ("bytes", "files"):
+        value = result.get(field)
+        if value is not None and not isinstance(value, int):
+            problems.append(f"staging result {field} is not a number")
+    return problems
 
 
 def _human_bytes(count: int) -> str:
@@ -730,13 +769,13 @@ def stage_dataset(
 
         if failure is None:
             terminated = _container_status(pod_view).get("state", {}).get("terminated", {})
-            if "exitCode" not in terminated:
-                # No explicit termination info: never default to success.
-                failure = "staging pod succeeded but reported no container exit code"
-            else:
-                exit_code = int(terminated["exitCode"] or 0)
-                if exit_code != 0:
-                    failure = f"staging container exited with code {exit_code}"
+            exit_code = terminated.get("exitCode")
+            # A real integer zero is required: missing or null exit codes
+            # must not be coerced into success.
+            if not isinstance(exit_code, int) or isinstance(exit_code, bool):
+                failure = "staging pod succeeded but reported no valid container exit code"
+            elif exit_code != 0:
+                failure = f"staging container exited with code {exit_code}"
 
         if failure is None:
             if result is None:
@@ -750,15 +789,8 @@ def stage_dataset(
                 or result.get("datasetName") != dataset_name
             ):
                 failure = "staging result does not match this operation/source/destination"
-            elif result.get("status") not in ("staged", "already_staged"):
-                failure = (
-                    f"staging result reports an unexpected status "
-                    f"({result.get('status')!r}); not treating it as success"
-                )
-            elif not isinstance(result.get("revision"), str) or not result.get("revision"):
-                failure = "staging result has no resolved revision; not treating it as success"
-            elif not isinstance(result.get("configs"), dict) or not result.get("configs"):
-                failure = "staging result has no verification summary; not treating it as success"
+            elif _result_problems(result):
+                failure = "; ".join(_result_problems(result)) + "; not treating it as success"
     except KeyboardInterrupt:
         # Cancellation: cleanup runs before exiting with code 130.
         try:
@@ -835,18 +867,20 @@ def _cleanup(
         errors.append(f"pod {pod_name}: {exc}")
     else:
         # An accepted delete request is not deletion: bound-verify the pod
-        # is actually gone before claiming clean cleanup.
+        # is actually gone before claiming clean cleanup. ONLY a successful
+        # NotFound read confirms deletion; any other read error means the
+        # cleanup status is UNKNOWN and must surface, never pass.
         confirmed = False
         for _ in range(_DELETE_CONFIRM_POLLS):
             try:
                 if kubectl.get_pod(pod_name) is None:
                     confirmed = True
                     break
-            except StageError:
-                confirmed = True
+            except StageError as exc:
+                errors.append(f"pod {pod_name}: deletion could not be confirmed ({exc})")
                 break
             time.sleep(_DELETE_CONFIRM_SECONDS)
-        if not confirmed:
+        if not confirmed and not errors:
             errors.append(f"pod {pod_name}: delete accepted but still present")
     if secret_name:
         try:

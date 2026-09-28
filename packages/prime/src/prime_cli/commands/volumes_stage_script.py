@@ -32,7 +32,6 @@ import errno
 import json
 import os
 import platform
-import re
 import shutil
 import signal
 import subprocess
@@ -221,16 +220,19 @@ def publish_no_replace(src: Path, dst: Path) -> str:
             os.mkdir(dst)  # atomic reservation; EEXIST if already occupied
             reserved = True
             os.rename(src, dst)  # replaces only OUR empty marker
-        except OSError as exc:
+        except BaseException as exc:
             if reserved:
-                # Only ever remove the marker if it is still empty and
-                # ours: os.rmdir refuses non-empty directories, so
-                # anything that raced into the marker survives untouched.
+                # Cancellation (Ctrl+C, the SIGTERM handler) or a filesystem
+                # error in the reservation window: remove the marker so a
+                # retry is not permanently blocked by an empty final dir.
+                # Only our own still-empty marker is removed: os.rmdir
+                # refuses non-empty directories, so anything that raced
+                # into the marker survives untouched.
                 try:
                     os.rmdir(dst)
                 except OSError:
                     pass
-            if exc.errno in (errno.EEXIST, errno.ENOTEMPTY):
+            if isinstance(exc, OSError) and exc.errno in (errno.EEXIST, errno.ENOTEMPTY):
                 raise FileExistsError(errno.EEXIST, "exists", str(src), None, str(dst)) from exc
             raise
         return "locked_rename"
@@ -278,14 +280,79 @@ def _inventory_problems(root: Path, manifest: dict[str, Any]) -> list[str]:
     return problems
 
 
-_FRONT_MATTER_PATH_RE = re.compile(r"^\s*path\s*:\s*(\S.*)$")
-_EXTERNAL_REFERENCE_PREFIXES = ("/", "~", "file://", "http://", "https://")
+def _existing_dataset_problems(final: Path, name: str) -> list[str]:
+    """Shared containment validator for existing staged directories, used
+    by BOTH the idempotent re-stage path and the concurrent-winner branch:
+    a symlink destination is never followed, adopted, or replaced."""
+    if final.is_symlink():
+        return [
+            f"destination datasets/{name} is a symlink; refusing to stage "
+            "onto (or through) a symlink destination"
+        ]
+    return []
+
+
+def _front_matter_block(text: str) -> Optional[str]:
+    """The YAML metadata block of an HF dataset card, if present."""
+    if not text.startswith("---"):
+        return None
+    end = text.find("\n---", 3)
+    if end < 0:
+        end = text.find("\r\n---", 3)
+    return text[3:end] if end >= 0 else text[3:]
+
+
+def _iter_data_file_paths(data_files: Any) -> list[str]:
+    """Normalize every supported data_files spelling to a list of path
+    strings: a bare scalar, a flow list, a block list of scalars or
+    {split: ..., path: ...} mappings, {split: path} dicts, and multi-line
+    (folded) strings are all normal YAML, so this walks the parsed
+    structure instead of scanning lines."""
+    paths: list[str] = []
+    if data_files is None:
+        return paths
+    if isinstance(data_files, str):
+        return [data_files]
+    if isinstance(data_files, list):
+        for item in data_files:
+            paths.extend(_iter_data_file_paths(item))
+        return paths
+    if isinstance(data_files, dict):
+        for key, value in data_files.items():
+            paths.extend(_iter_data_file_paths(value))
+        return paths
+    return paths
+
+
+def _data_file_problems(root: Path, path_str: str) -> list[str]:
+    value = str(path_str).strip()
+    if not value:
+        return []
+    if value.startswith(("http://", "https://", "file://", "ftp://", "s3://", "gs://")):
+        return [f"data_files references the external URL {value!r}"]
+    if value.startswith(("/", "~")) or "\\" in value:
+        return [f"data_files references {value!r} outside the dataset snapshot"]
+    if ".." in PurePosixPath(value.replace("\\", "/")).parts:
+        return [f"data_files references {value!r} outside the dataset snapshot"]
+    root_resolved = root.resolve()
+    resolved = (root / value).resolve()
+    try:
+        resolved.relative_to(root_resolved)
+    except ValueError:
+        return [f"data_files path {value!r} resolves outside the dataset snapshot"]
+    if not (root / value.split("*")[0]).exists() and "*" not in value:
+        # Missing shard files fail in the fresh load anyway; external
+        # references are the containment problem handled here.
+        pass
+    return []
 
 
 def check_metadata_references(root: Path) -> list[str]:
-    """Reject dataset card (README) config blocks that point data_files at
-    anything outside the snapshot: absolute local paths, ~, and file/HTTP
-    URLs are external references a local-only load must not follow."""
+    """Reject dataset card (README) configs that point data_files at
+    anything outside the snapshot: the card is parsed as YAML (all normal
+    spellings - scalars, flow lists, folded strings - are structural), and
+    every resolved file path must stay inside the snapshot root. HF
+    offline mode blocks the network, not other local paths."""
     readme = root / "README.md"
     if not readme.is_file():
         return []
@@ -293,28 +360,36 @@ def check_metadata_references(root: Path) -> list[str]:
         text = readme.read_text()
     except OSError:
         return []
-    if not text.startswith("---"):
+    block = _front_matter_block(text)
+    if block is None:
         return []
-    end = text.find("\n---", 3)
-    if end < 0:
-        end = text.find("\r\n---", 3)
-    block = text[3:end] if end >= 0 else text[3:]
+    try:
+        import yaml
+    except ImportError:  # pragma: no cover - huggingface_hub depends on pyyaml
+        return ["cannot validate the dataset card (pyyaml unavailable)"]
+    try:
+        metadata = yaml.safe_load(block)
+    except Exception as exc:  # noqa: BLE001 - any card parse problem fails closed
+        return [f"dataset card metadata is not valid YAML: {exc}"]
+    if metadata is None:
+        return []
+    if not isinstance(metadata, dict):
+        return ["dataset card metadata block is not a mapping"]
+    configs = metadata.get("configs")
+    if configs is None:
+        return []
+    if not isinstance(configs, list):
+        return ["dataset card 'configs' is not a list"]
     problems: list[str] = []
-    for line in block.splitlines():
-        match = _FRONT_MATTER_PATH_RE.match(line)
-        if not match:
+    for config in configs:
+        if not isinstance(config, dict):
+            problems.append("dataset card config entry is not a mapping")
             continue
-        value = match.group(1).strip().strip("\"'").strip("\"'")
-        if not value:
-            continue
-        if (
-            value.startswith(_EXTERNAL_REFERENCE_PREFIXES)
-            or ".." in PurePosixPath(value.replace("\\", "/")).parts
-        ):
-            problems.append(
-                f"README data_files references {value!r} outside the dataset "
-                "snapshot; external references are not supported"
-            )
+        for path_str in _iter_data_file_paths(config.get("data_files")):
+            if isinstance(path_str, str):
+                problems.extend(_data_file_problems(root, path_str))
+            else:
+                problems.append("dataset card data_files entry is not a path")
     return problems
 
 
@@ -542,6 +617,18 @@ def _cmd_verify(args: argparse.Namespace) -> int:
 
 
 def _cmd_stage(args: argparse.Namespace) -> int:
+    # CLI cancellation deletes the pod, which SIGTERMs this container: a
+    # plain SIGTERM would skip Python's finally blocks and leave operation
+    # scratch behind (live-probed: leftover .prime-stage-* on SIGTERM 143).
+    # Route SIGTERM through the KeyboardInterrupt path so owned scratch is
+    # removed on unwind - installed FIRST, so the early re-stage path is
+    # covered too (signal handlers only install from the main thread).
+    def _sigterm(signum, frame):
+        raise KeyboardInterrupt()
+
+    if threading.current_thread() is threading.main_thread():
+        signal.signal(signal.SIGTERM, _sigterm)
+
     volume_root = Path(args.volume_root)
     datasets_root = volume_root / "datasets"
     datasets_root.mkdir(parents=True, exist_ok=True)
@@ -589,11 +676,9 @@ def _cmd_stage(args: argparse.Namespace) -> int:
 
     # A symlink destination is never followed, replaced, or removed:
     # the API-visible path must be the real dataset directory.
-    if final.is_symlink():
-        raise _fail(
-            f"destination datasets/{args.dataset_name} is a symlink; refusing "
-            "to stage onto (or through) a symlink destination"
-        )
+    destination_problems = _existing_dataset_problems(final, args.dataset_name)
+    if destination_problems:
+        raise _fail("; ".join(destination_problems))
 
     # Idempotent re-stage: same repo + same resolved SHA verifies and
     # returns already_staged without touching existing data.
@@ -608,12 +693,18 @@ def _cmd_stage(args: argparse.Namespace) -> int:
                     "existing staged dataset no longer matches its manifest: " + "; ".join(problems)
                 )
             reverify_cache = datasets_root / f".prime-stage-{operation}-cache"
-            verified = _run_verifier(final, reverify_cache)
-            cleanup_problems = _remove_scratch([reverify_cache])
-            if cleanup_problems:
+            try:
+                verified = _run_verifier(final, reverify_cache)
+            finally:
+                # A verifier failure must not leak the re-verification
+                # cache; cleanup problems surface, never silently pass.
+                cache_problems = _remove_scratch([reverify_cache])
+                for problem in cache_problems:
+                    print(f"scratch cleanup failed: {problem}", file=sys.stderr, flush=True)
+            if cache_problems:
                 raise _fail(
                     "staged data verified but scratch cleanup failed: "
-                    + "; ".join(cleanup_problems)
+                    + "; ".join(cache_problems)
                     + " (remove the leftover .prime-stage-* directory)"
                 )
             _emit(
@@ -643,19 +734,6 @@ def _cmd_stage(args: argparse.Namespace) -> int:
     # is never resumed blindly.
     _remove_scratch([candidate, cache])
     candidate.mkdir(parents=True)
-
-    # CLI cancellation deletes the pod, which SIGTERMs this container: a
-    # plain SIGTERM would skip Python's finally blocks and leave operation
-    # scratch behind (live-probed: leftover .prime-stage-* on SIGTERM 143).
-    # Route SIGTERM through the KeyboardInterrupt path so owned scratch is
-    # removed and the download/verify child is killed on unwind.
-    def _sigterm(signum, frame):
-        raise KeyboardInterrupt()
-
-    # signal handlers only install from the main thread (tests may stage
-    # from worker threads; the pod always runs in the main thread).
-    if threading.current_thread() is threading.main_thread():
-        signal.signal(signal.SIGTERM, _sigterm)
 
     started = time.monotonic()  # elapsed time in the emitted result
     cleanup_problems: list[str] = []
@@ -696,8 +774,14 @@ def _cmd_stage(args: argparse.Namespace) -> int:
         configs = verified.get("configs", {})
 
         # Remove download bookkeeping/verification scratch, keep dataset
-        # metadata (README card etc.). The loader must not see hub metadata.
-        _remove_scratch([candidate / ".cache"])
+        # metadata (README card etc.). The loader must not see hub
+        # metadata; if the bookkeeping cannot be removed, fail closed.
+        bookkeeping_problems = _remove_scratch([candidate / ".cache"])
+        if bookkeeping_problems:
+            raise _fail(
+                "could not remove download bookkeeping before publication: "
+                + "; ".join(bookkeeping_problems)
+            )
         _apply_trainer_readable_permissions(candidate)
 
         dataset_bytes = _tree_bytes(candidate)
@@ -720,6 +804,9 @@ def _cmd_stage(args: argparse.Namespace) -> int:
         try:
             publish_no_replace(candidate, final)
         except FileExistsError:
+            winner_problems = _existing_dataset_problems(final, args.dataset_name)
+            if winner_problems:
+                raise _fail("; ".join(winner_problems))
             winner = _read_manifest(final)
             if not _manifest_matches(winner, args.source, sha):
                 raise _fail(
@@ -771,9 +858,13 @@ def _cmd_stage(args: argparse.Namespace) -> int:
         rc[0] = 0
     finally:
         # Owned scratch only: the candidate, its cache, and nothing else.
-        # Cleanup errors are NOT swallowed: success requires successful
-        # cleanup, so the operation fails instead of pretending success.
+        # Cleanup errors are NOT swallowed: they are printed on EVERY
+        # path (failure and cancellation included, where the already-
+        # pending exception would otherwise skip the reporting below) and
+        # fail the operation instead of pretending success.
         cleanup_problems.extend(_remove_scratch([candidate, cache]))
+        for problem in cleanup_problems:
+            print(f"scratch cleanup failed: {problem}", file=sys.stderr, flush=True)
     if rc[0] != 0:
         return 1
     if cleanup_problems:

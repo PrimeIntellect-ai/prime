@@ -1012,3 +1012,130 @@ def test_sigterm_mid_download_cleans_scratch(tmp_path) -> None:
     # owned scratch is gone; nothing was published
     assert not scratch.exists()
     assert not (volume_root / "datasets" / "tiny-sft").exists()
+
+
+# ---------------------------------------------------------------------------
+# Re-review probes (t033 rereview-040fff6f), converted
+# ---------------------------------------------------------------------------
+
+
+def _external_card(candidate: Path, shape: str, outside: Path) -> None:
+    shapes = {
+        "scalar": f"  data_files: {outside}",
+        "flow": f"  data_files: [{{split: train, path: {outside}}}]",
+        "list": "  data_files:\n  - " + str(outside),
+        "folded": "  data_files:\n  - split: train\n    path: >-\n      " + str(outside),
+    }
+    readme = "---" + chr(10)
+    readme += "configs:" + chr(10)
+    readme += "- config_name: default" + chr(10)
+    readme += shapes[shape] + chr(10)
+    readme += "---" + chr(10)
+    (candidate / "README.md").write_text(readme)
+
+
+@pytest.mark.parametrize("style", ["scalar", "flow", "list", "folded"])
+def test_structural_yaml_external_paths_rejected(tmp_path, style) -> None:
+    """All valid YAML spellings of data_files pointing at an absolute
+    local file outside the snapshot must fail real fresh-process
+    verification - line-based scanning is not enough."""
+    outside = tmp_path / "outside.jsonl"
+    outside.write_text('{"x":"external"}')
+    candidate = _make_jsonl_fixture(tmp_path / "candidate")
+    _external_card(candidate, style, outside)
+    with pytest.raises(stage.StageError):
+        stage._run_verifier(candidate, tmp_path / "cache")
+
+
+def test_concurrent_winner_root_symlink_rejected(tmp_path, monkeypatch) -> None:
+    """A raced winner that is a SYMLINK to an external directory with a
+    valid-looking manifest must never be adopted as already_staged."""
+    fixture = _make_jsonl_fixture(tmp_path / "fixture")
+    install_fake_hub(monkeypatch, fixture)
+    volume = tmp_path / "volume"
+    outside = tmp_path / "outside"
+
+    def injected_winner(src, dst):
+        shutil.copytree(src, outside)
+        dst.symlink_to(outside, target_is_directory=True)
+        raise FileExistsError(errno.EEXIST, "raced winner")
+
+    monkeypatch.setattr(stage, "publish_no_replace", injected_winner)
+    assert _run_stage(volume) == 1
+
+
+def test_interrupted_reservation_is_removed(tmp_path, monkeypatch) -> None:
+    """Ctrl+C (or the SIGTERM handler) inside the fallback reservation
+    window must remove the operation's empty marker: a leftover empty
+    final directory would block every retry."""
+    src, dst = tmp_path / "candidate", tmp_path / "final"
+    src.mkdir()
+    (src / "data.jsonl").write_text('{"x":1}')
+
+    def interrupted(*args):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(stage, "_rename_noreplace", unsupported_rename)
+    monkeypatch.setattr(stage.os, "rename", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        stage.publish_no_replace(src, dst)
+    assert not dst.exists(), "normal cancellation leaves final empty and blocks retry"
+
+
+def test_failed_restage_verifier_cleans_cache(tmp_path, monkeypatch) -> None:
+    """A verifier failure during an idempotent re-stage must still remove
+    the re-verification scratch cache."""
+    fixture = _make_jsonl_fixture(tmp_path / "fixture")
+    install_fake_hub(monkeypatch, fixture)
+    volume = tmp_path / "volume"
+    final = _make_jsonl_fixture(volume / "datasets" / "tiny-sft")
+    manifest = {
+        "schemaVersion": 1,
+        "source": REPO,
+        "revision": SHA,
+        "files": [
+            entry for entry in stage._file_inventory(final) if entry["path"] != stage.MANIFEST_NAME
+        ],
+    }
+    (final / stage.MANIFEST_NAME).write_text(json.dumps(manifest))
+
+    def failing_verifier(dataset, cache):
+        cache.mkdir(parents=True)
+        (cache / "partial").write_text("data")
+        raise stage.StageError("simulated verifier failure")
+
+    monkeypatch.setattr(stage, "_run_verifier", failing_verifier)
+    assert _run_stage(volume) == 1
+    assert not (volume / "datasets" / ".prime-stage-op1-cache").exists()
+
+
+def test_cleanup_failures_surface_on_error_paths(tmp_path, monkeypatch, capsys) -> None:
+    """Cleanup problems must be reported when the operation FAILS too,
+    not only on the success return path."""
+    fixture = _make_jsonl_fixture(tmp_path / "fixture")
+    install_fake_hub(monkeypatch, fixture)
+    volume_root = tmp_path / "volume"
+    real_rmtree = _REAL_RMTREE
+
+    def rmtree(path, *args, **kwargs):
+        if str(path).endswith("-cache") and Path(path).exists():
+            raise PermissionError("simulated cache cleanup error")
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(stage.shutil, "rmtree", rmtree)
+
+    def failing_download(**kwargs):
+        # a partial run that already created the verification cache
+        cache = Path(kwargs["local_dir"]).parent / ".prime-stage-op1-cache"
+        cache.mkdir(parents=True, exist_ok=True)
+        (cache / "partial").write_text("data")
+        raise OSError("hub down")
+
+    import sys
+
+    fake_hub = sys.modules["huggingface_hub"]
+    fake_hub.snapshot_download = failing_download
+    rc = _run_stage(volume_root)
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "scratch cleanup failed" in err

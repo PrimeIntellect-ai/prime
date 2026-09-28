@@ -611,17 +611,22 @@ class RLClient:
                 raise APIError(f"Failed to get Hosted Training run rollouts: {e.response.text}")
             raise APIError(f"Failed to get Hosted Training run rollouts: {str(e)}")
 
-    def get_dashboard_url(self, run_id: str) -> Optional[str]:
-        """Get the platform-proxied dashboard URL for a Hosted Training run."""
+    def has_dashboard(self, run_id: str) -> bool:
+        """Check whether a Hosted Training run has a dashboard.
+
+        The endpoint is a presence probe: it answers whether a dashboard
+        exists for the run (``{"has_dashboard": true|false}``) and returns
+        no URL. The dashboard itself is streamed through the platform
+        proxy route ``GET /api/v1/rft/runs/{id}/dashboard/{path}``, which
+        the CLI's loopback proxy serves to the browser.
+        """
         try:
             response = self.client.get(f"/rft/runs/{run_id}/dashboard_url")
-            return response.get("url")
+            return bool(response.get("has_dashboard"))
         except Exception as e:
             if hasattr(e, "response") and hasattr(e.response, "text"):
-                raise APIError(
-                    f"Failed to get Hosted Training run dashboard URL: {e.response.text}"
-                )
-            raise APIError(f"Failed to get Hosted Training run dashboard URL: {str(e)}")
+                raise APIError(f"Failed to check Hosted Training run dashboard: {e.response.text}")
+            raise APIError(f"Failed to check Hosted Training run dashboard: {str(e)}")
 
     def get_progress(self, run_id: str) -> Dict[str, Any]:
         """Get progress information for a Hosted Training run."""

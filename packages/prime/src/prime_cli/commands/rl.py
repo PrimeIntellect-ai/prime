@@ -3551,7 +3551,7 @@ def get_dashboard_url(
         api_client = APIClient()
         rl_client = RLClient(api_client)
 
-        if not rl_client.get_dashboard_url(run_id):
+        if not rl_client.has_dashboard(run_id):
             err_console.print(f"[red]Error:[/red] No dashboard available for run {run_id}")
             raise typer.Exit(1)
     except APIError as e:

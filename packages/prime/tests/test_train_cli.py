@@ -822,7 +822,7 @@ def test_train_dashboard_default_starts_detached_proxy_and_exits(monkeypatch) ->
     def mock_request(self, method, endpoint, params=None, json=None, timeout=None):
         captured["method"] = method
         captured["endpoint"] = endpoint
-        return {"url": "http://ignored.example.com:7788"}
+        return {"has_dashboard": True}
 
     monkeypatch.setattr("prime_cli.core.client.APIClient.request", mock_request)
     monkeypatch.setattr("prime_cli.commands.rl.webbrowser.open", lambda url: opened.append(url))
@@ -857,7 +857,7 @@ def test_train_dashboard_no_browser_skips_opening_and_still_prints_url(monkeypat
     opened: list[str] = []
 
     def mock_request(self, method, endpoint, params=None, json=None, timeout=None):
-        return {"url": "http://ignored.example.com:7788"}
+        return {"has_dashboard": True}
 
     monkeypatch.setattr("prime_cli.core.client.APIClient.request", mock_request)
     monkeypatch.setattr("prime_cli.commands.rl.webbrowser.open", lambda url: opened.append(url))
@@ -880,7 +880,7 @@ def test_train_dashboard_long_url_is_not_wrapped(monkeypatch) -> None:
     long_url = "http://127.0.0.1:51234/" + "x" * 120
 
     def mock_request(self, method, endpoint, params=None, json=None, timeout=None):
-        return {"url": "http://ignored.example.com:7788"}
+        return {"has_dashboard": True}
 
     monkeypatch.setattr("prime_cli.core.client.APIClient.request", mock_request)
     _fake_detached_starter(monkeypatch, long_url)
@@ -897,7 +897,7 @@ def test_train_dashboard_long_url_is_not_wrapped(monkeypatch) -> None:
 
 def test_train_dashboard_detached_start_failure_exits_nonzero(monkeypatch) -> None:
     def mock_request(self, method, endpoint, params=None, json=None, timeout=None):
-        return {"url": "http://ignored.example.com:7788"}
+        return {"has_dashboard": True}
 
     def failing_start(run_id: str, **kwargs: Any) -> str:
         raise RuntimeError("The dashboard proxy failed to start.")
@@ -921,7 +921,7 @@ def test_train_dashboard_foreground_serves_in_process_until_ctrl_c(monkeypatch) 
     opened: list[str] = []
 
     def mock_request(self, method, endpoint, params=None, json=None, timeout=None):
-        return {"url": "http://ignored.example.com:7788"}
+        return {"has_dashboard": True}
 
     monkeypatch.setattr("prime_cli.core.client.APIClient.request", mock_request)
     monkeypatch.setattr("prime_cli.commands.rl.webbrowser.open", lambda url: opened.append(url))
@@ -949,7 +949,7 @@ def test_train_dashboard_foreground_no_browser_does_not_open(monkeypatch) -> Non
     opened: list[str] = []
 
     def mock_request(self, method, endpoint, params=None, json=None, timeout=None):
-        return {"url": "http://ignored.example.com:7788"}
+        return {"has_dashboard": True}
 
     monkeypatch.setattr("prime_cli.core.client.APIClient.request", mock_request)
     monkeypatch.setattr("prime_cli.commands.rl.webbrowser.open", lambda url: opened.append(url))
@@ -968,7 +968,7 @@ def test_train_dashboard_foreground_no_browser_does_not_open(monkeypatch) -> Non
 
 def test_train_dashboard_exits_nonzero_without_url(monkeypatch) -> None:
     def mock_request(self, method, endpoint, params=None, json=None, timeout=None):
-        return {"url": None}
+        return {"has_dashboard": False}
 
     monkeypatch.setattr("prime_cli.core.client.APIClient.request", mock_request)
     starter_calls = _fake_detached_starter(monkeypatch, "http://127.0.0.1:51234/")

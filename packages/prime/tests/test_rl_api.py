@@ -190,30 +190,40 @@ def test_create_run_omits_default_rl_loss() -> None:
     assert "teacher" not in api_client.posts[0][1]
 
 
-def test_get_dashboard_url_returns_platform_proxied_url() -> None:
+def test_has_dashboard_returns_platform_presence_flag() -> None:
     class DashboardAPIClient:
         def __init__(self) -> None:
             self.requests: list[tuple[str, dict[str, Any] | None]] = []
 
         def get(self, endpoint: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
             self.requests.append((endpoint, params))
-            return {"url": "https://platform.example.com/rft/dashboard/run-1"}
+            # New platform contract (t011): a presence probe with no URL.
+            return {"has_dashboard": True}
 
     api_client = DashboardAPIClient()
     client = RLClient(api_client)  # type: ignore[arg-type]
 
-    url = client.get_dashboard_url("run-1")
+    assert client.has_dashboard("run-1") is True
 
     assert api_client.requests == [("/rft/runs/run-1/dashboard_url", None)]
-    assert url == "https://platform.example.com/rft/dashboard/run-1"
 
 
-def test_get_dashboard_url_wraps_transport_errors_as_api_error() -> None:
+def test_has_dashboard_false_when_platform_reports_no_dashboard() -> None:
+    class NoDashboardAPIClient:
+        def get(self, endpoint: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+            return {"has_dashboard": False}
+
+    client = RLClient(NoDashboardAPIClient())  # type: ignore[arg-type]
+
+    assert client.has_dashboard("run-1") is False
+
+
+def test_has_dashboard_wraps_transport_errors_as_api_error() -> None:
     class FailingAPIClient:
         def get(self, endpoint: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
             raise RuntimeError("boom")
 
     client = RLClient(FailingAPIClient())  # type: ignore[arg-type]
 
-    with pytest.raises(APIError, match="dashboard URL"):
-        client.get_dashboard_url("run-1")
+    with pytest.raises(APIError, match="dashboard"):
+        client.has_dashboard("run-1")

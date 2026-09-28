@@ -96,6 +96,25 @@ class VolumeSession(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class VolumeStage(BaseModel):
+    """A staging operation's state (POST/GET /v1/training/volumes/{name}/stage)."""
+
+    stage_id: str = Field(..., alias="stageId")
+    volume: str
+    status: str
+    source: str
+    requested_revision: str = Field(..., alias="requestedRevision")
+    data_name: str = Field(..., alias="dataName")
+    namespace: str
+    cluster_id: str = Field(..., alias="clusterId")
+    pvc_name: str = Field(..., alias="pvcName")
+    expires_at: Optional[str] = Field(None, alias="expiresAt")
+    result: Optional[Dict[str, Any]] = None
+    error: Optional[Dict[str, Any]] = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class HostedTrainingClient:
     """Client for the hosted full-FT training endpoint."""
 
@@ -209,6 +228,64 @@ class HostedTrainingClient:
             return AvailableFFTModelsResponse.model_validate(response).models
         except PydanticValidationError as exc:
             raise APIError(f"Failed to parse available FFT models response: {exc}") from exc
+
+    # -- dataset staging onto a volume (public datasets, v1) --------------
+
+    def stage_volume(
+        self,
+        volume: str,
+        *,
+        source: str,
+        revision: Optional[str] = None,
+        path: Optional[str] = None,
+        team_id: Optional[str] = None,
+        timeout_seconds: Optional[int] = None,
+        idempotency_key: str = "",
+    ) -> VolumeStage:
+        """POST /v1/training/volumes/{volume}/stage.
+
+        The backend admits (or recovers) one CPU staging Job and returns
+        202 + the operation envelope; nothing downloads in this request.
+        `idempotency_key` is the operation UUID: generate one per
+        invocation and reuse it on network retries so a lost response
+        recovers the SAME operation instead of double-staging.
+        """
+        payload: Dict[str, Any] = {"source": source}
+        if revision:
+            payload["revision"] = revision
+        if path:
+            payload["path"] = path
+        if team_id:
+            payload["teamId"] = team_id
+        if timeout_seconds:
+            payload["timeoutSeconds"] = timeout_seconds
+        response = self.client.post(
+            f"/training/volumes/{volume}/stage",
+            json=payload,
+            headers={"Idempotency-Key": idempotency_key},
+        )
+        return VolumeStage.model_validate(response)
+
+    def get_volume_stage(
+        self, volume: str, stage_id: str, *, team_id: Optional[str] = None
+    ) -> VolumeStage:
+        """GET /v1/training/volumes/{volume}/stage/{stage_id}."""
+        params = {"teamId": team_id} if team_id else None
+        response = self.client.get(f"/training/volumes/{volume}/stage/{stage_id}", params=params)
+        return VolumeStage.model_validate(response)
+
+    def cancel_volume_stage(
+        self, volume: str, stage_id: str, *, team_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """DELETE /v1/training/volumes/{volume}/stage/{stage_id}.
+
+        Foreground-deletes only the staging Job; published data survives.
+        Idempotent for an already-absent operation.
+        """
+        params = {"teamId": team_id} if team_id else None
+        return self.client.request(
+            "DELETE", f"/training/volumes/{volume}/stage/{stage_id}", params=params
+        )
 
 
 def build_payload_from_toml(

@@ -259,7 +259,9 @@ def scenario(monkeypatch):
 
 def test_help_mentions_recipe_and_prerequisites() -> None:
     # plain mode avoids rich line-wrapping breaking up the recipe strings
-    result = runner.invoke(app, ["volumes", "stage", "--help", "--plain"], env=TEST_ENV)
+    result = runner.invoke(
+        app, ["volumes", "stage", "--kube-context", "ctx-ok", "--help", "--plain"], env=TEST_ENV
+    )
     assert result.exit_code == 0, result.output
     help_text = result.output
     assert "prime volumes stage" in help_text
@@ -277,7 +279,7 @@ def test_rejects_urls_and_aliases(scenario) -> None:
     ):
         result = runner.invoke(
             app,
-            ["volumes", "stage", bad, "--volume", "sft-datasets"],
+            ["volumes", "stage", "--kube-context", "ctx-ok", bad, "--volume", "sft-datasets"],
             env=TEST_ENV,
         )
         assert result.exit_code == 1, result.output
@@ -290,7 +292,7 @@ def test_rejects_existing_local_path(scenario, tmp_path) -> None:
     local.mkdir()
     result = runner.invoke(
         app,
-        ["volumes", "stage", str(local), "--volume", "sft-datasets"],
+        ["volumes", "stage", "--kube-context", "ctx-ok", str(local), "--volume", "sft-datasets"],
         env=TEST_ENV,
     )
     assert result.exit_code == 1, result.output
@@ -305,6 +307,10 @@ def test_rejects_invalid_dataset_path(scenario) -> None:
             [
                 "volumes",
                 "stage",
+                "--kube-context",
+                "ctx-ok",
+                "--kube-context",
+                "ctx-ok",
                 "acme/tiny-sft",
                 "--volume",
                 "sft-datasets",
@@ -323,6 +329,10 @@ def test_rejects_non_hf_env_arg(scenario) -> None:
         [
             "volumes",
             "stage",
+            "--kube-context",
+            "ctx-ok",
+            "--kube-context",
+            "ctx-ok",
             "acme/tiny-sft",
             "--volume",
             "sft-datasets",
@@ -342,6 +352,10 @@ def test_rejects_missing_env_file(scenario, tmp_path) -> None:
         [
             "volumes",
             "stage",
+            "--kube-context",
+            "ctx-ok",
+            "--kube-context",
+            "ctx-ok",
             "acme/tiny-sft",
             "--volume",
             "sft-datasets",
@@ -382,7 +396,7 @@ def test_unknown_volume_fails_without_cluster_calls(scenario) -> None:
     scenario["configure"]()
     result = runner.invoke(
         app,
-        ["volumes", "stage", "acme/tiny-sft", "--volume", "nope"],
+        ["volumes", "stage", "--kube-context", "ctx-ok", "acme/tiny-sft", "--volume", "nope"],
         env=TEST_ENV,
     )
     assert result.exit_code == 1, result.output
@@ -412,7 +426,15 @@ def test_not_running_volume_fails(scenario, monkeypatch) -> None:
     )
     result = runner.invoke(
         app,
-        ["volumes", "stage", "acme/tiny-sft", "--volume", "sft-datasets"],
+        [
+            "volumes",
+            "stage",
+            "--kube-context",
+            "ctx-ok",
+            "acme/tiny-sft",
+            "--volume",
+            "sft-datasets",
+        ],
         env=TEST_ENV,
     )
     assert result.exit_code == 1, result.output
@@ -426,6 +448,10 @@ def test_namespace_mismatch_fails_before_cluster(scenario) -> None:
         [
             "volumes",
             "stage",
+            "--kube-context",
+            "ctx-ok",
+            "--kube-context",
+            "ctx-ok",
             "acme/tiny-sft",
             "--volume",
             "sft-datasets",
@@ -443,7 +469,15 @@ def test_volume_lookup_uses_active_team_scope(scenario) -> None:
     scenario["configure"]()
     runner.invoke(
         app,
-        ["volumes", "stage", "acme/tiny-sft", "--volume", "sft-datasets"],
+        [
+            "volumes",
+            "stage",
+            "--kube-context",
+            "ctx-ok",
+            "acme/tiny-sft",
+            "--volume",
+            "sft-datasets",
+        ],
         env=TEST_ENV,
     )
     # stage ran through; the fake client recorded team_id=None
@@ -459,7 +493,15 @@ def test_missing_pvc_fails_without_creating_pod(scenario) -> None:
     scenario["configure"](pvc=None)
     result = runner.invoke(
         app,
-        ["volumes", "stage", "acme/tiny-sft", "--volume", "sft-datasets"],
+        [
+            "volumes",
+            "stage",
+            "--kube-context",
+            "ctx-ok",
+            "acme/tiny-sft",
+            "--volume",
+            "sft-datasets",
+        ],
         env=TEST_ENV,
     )
     assert result.exit_code == 1, result.output
@@ -482,7 +524,15 @@ def test_pvc_label_mismatch_fails_closed(scenario, labels, message) -> None:
     scenario["configure"](pvc=_fake_pvc(labels=labels))
     result = runner.invoke(
         app,
-        ["volumes", "stage", "acme/tiny-sft", "--volume", "sft-datasets"],
+        [
+            "volumes",
+            "stage",
+            "--kube-context",
+            "ctx-ok",
+            "acme/tiny-sft",
+            "--volume",
+            "sft-datasets",
+        ],
         env=TEST_ENV,
     )
     assert result.exit_code == 1, result.output
@@ -495,7 +545,15 @@ def test_unbound_pvc_fails(scenario) -> None:
     scenario["configure"](pvc=_fake_pvc(phase="Pending"))
     result = runner.invoke(
         app,
-        ["volumes", "stage", "acme/tiny-sft", "--volume", "sft-datasets"],
+        [
+            "volumes",
+            "stage",
+            "--kube-context",
+            "ctx-ok",
+            "acme/tiny-sft",
+            "--volume",
+            "sft-datasets",
+        ],
         env=TEST_ENV,
     )
     assert result.exit_code == 1, result.output
@@ -523,7 +581,15 @@ def test_team_label_checked_in_team_context(scenario, monkeypatch) -> None:
     )
     result = runner.invoke(
         app,
-        ["volumes", "stage", "acme/tiny-sft", "--volume", "sft-datasets"],
+        [
+            "volumes",
+            "stage",
+            "--kube-context",
+            "ctx-ok",
+            "acme/tiny-sft",
+            "--volume",
+            "sft-datasets",
+        ],
         env=TEST_ENV,
     )
     assert result.exit_code == 1, result.output
@@ -534,7 +600,15 @@ def test_permission_preflight_denied(scenario) -> None:
     scenario["configure"](can_i=False)
     result = runner.invoke(
         app,
-        ["volumes", "stage", "acme/tiny-sft", "--volume", "sft-datasets"],
+        [
+            "volumes",
+            "stage",
+            "--kube-context",
+            "ctx-ok",
+            "acme/tiny-sft",
+            "--volume",
+            "sft-datasets",
+        ],
         env=TEST_ENV,
     )
     assert result.exit_code == 1, result.output
@@ -544,19 +618,28 @@ def test_permission_preflight_denied(scenario) -> None:
     assert fake.created_pod_manifests == []
 
 
-def test_current_context_resolved_once_and_pinned(scenario) -> None:
-    """Without --kube-context, the current context is resolved once and
-    every cluster call carries it explicitly (immutable selection)."""
+def test_explicit_kube_context_overrides_the_kubeconfig_current(scenario) -> None:
+    """An explicit --kube-context wins over the kubeconfig's current
+    context: every cluster call carries the given context explicitly
+    (immutable selection)."""
     scenario["configure"]()
-    FakeKubectl.current_context_value = "ctx-from-kubeconfig"
+    FakeKubectl.current_context_value = "ctx-wrong"
     result = runner.invoke(
         app,
-        ["volumes", "stage", "acme/tiny-sft", "--volume", "sft-datasets"],
+        [
+            "volumes",
+            "stage",
+            "--kube-context",
+            "ctx-ok",
+            "acme/tiny-sft",
+            "--volume",
+            "sft-datasets",
+        ],
         env=TEST_ENV,
     )
     assert result.exit_code == 1, result.output  # no result line scripted
     fake = scenario["fakes"][0]
-    assert fake.context == "ctx-from-kubeconfig"
+    assert fake.context == "ctx-ok"
     assert fake.namespace == "prime-user-1-local-test"
     FakeKubectl.current_context_value = "ctx-ok"
 
@@ -569,6 +652,10 @@ def test_explicit_kube_context_used(scenario) -> None:
         [
             "volumes",
             "stage",
+            "--kube-context",
+            "ctx-ok",
+            "--kube-context",
+            "ctx-ok",
             "acme/tiny-sft",
             "--volume",
             "sft-datasets",
@@ -593,7 +680,17 @@ def test_public_dataset_stages_without_secret(scenario, monkeypatch) -> None:
     scenario["result_after_pod"] = _result_line_factory("acme/tiny-sft", "tiny-sft")
     result = runner.invoke(
         app,
-        ["volumes", "stage", "acme/tiny-sft", "--volume", "sft-datasets", "--output", "json"],
+        [
+            "volumes",
+            "stage",
+            "--kube-context",
+            "ctx-ok",
+            "acme/tiny-sft",
+            "--volume",
+            "sft-datasets",
+            "--output",
+            "json",
+        ],
         env=TEST_ENV,
     )
     assert result.exit_code == 0, result.output + "\nstderr: " + result.stderr
@@ -623,7 +720,15 @@ def test_human_output_prints_recipe(scenario, monkeypatch) -> None:
     scenario["result_after_pod"] = _result_line_factory("acme/tiny-sft", "tiny-sft")
     result = runner.invoke(
         app,
-        ["volumes", "stage", "acme/tiny-sft", "--volume", "sft-datasets"],
+        [
+            "volumes",
+            "stage",
+            "--kube-context",
+            "ctx-ok",
+            "acme/tiny-sft",
+            "--volume",
+            "sft-datasets",
+        ],
         env=TEST_ENV,
     )
     assert result.exit_code == 0, result.output
@@ -648,7 +753,17 @@ def test_already_staged_is_idempotent(scenario) -> None:
     )
     result = runner.invoke(
         app,
-        ["volumes", "stage", "acme/tiny-sft", "--volume", "sft-datasets", "--output", "json"],
+        [
+            "volumes",
+            "stage",
+            "--kube-context",
+            "ctx-ok",
+            "acme/tiny-sft",
+            "--volume",
+            "sft-datasets",
+            "--output",
+            "json",
+        ],
         env=TEST_ENV,
     )
     assert result.exit_code == 0, result.output
@@ -666,6 +781,10 @@ def test_private_dataset_uses_token_secret_without_leaks(scenario, monkeypatch) 
         [
             "volumes",
             "stage",
+            "--kube-context",
+            "ctx-ok",
+            "--kube-context",
+            "ctx-ok",
             "acme/tiny-sft",
             "--volume",
             "sft-datasets",
@@ -710,7 +829,15 @@ def test_pod_manifest_is_cpu_only_and_unprivileged(scenario, monkeypatch) -> Non
     scenario["result_after_pod"] = _result_line_factory("acme/tiny-sft", "tiny-sft")
     result = runner.invoke(
         app,
-        ["volumes", "stage", "acme/tiny-sft", "--volume", "sft-datasets"],
+        [
+            "volumes",
+            "stage",
+            "--kube-context",
+            "ctx-ok",
+            "acme/tiny-sft",
+            "--volume",
+            "sft-datasets",
+        ],
         env=TEST_ENV,
     )
     assert result.exit_code == 0, result.output
@@ -750,7 +877,15 @@ def test_pod_manifest_is_cpu_only_and_unprivileged(scenario, monkeypatch) -> Non
 
 def _run(scenario, monkeypatch, phases, logs="", fail_pod_delete=False, extra_args=None):
     scenario["configure"](phases=phases, logs=logs, fail_pod_delete=fail_pod_delete)
-    args = ["volumes", "stage", "acme/tiny-sft", "--volume", "sft-datasets"] + (extra_args or [])
+    args = [
+        "volumes",
+        "stage",
+        "--kube-context",
+        "ctx-ok",
+        "acme/tiny-sft",
+        "--volume",
+        "sft-datasets",
+    ] + (extra_args or [])
     return runner.invoke(app, args, env=TEST_ENV)
 
 
@@ -813,7 +948,15 @@ def test_mismatched_source_in_result_is_rejected(scenario) -> None:
     scenario["result_after_pod"] = _result_line_factory("evil/other-repo", "tiny-sft")
     result = runner.invoke(
         app,
-        ["volumes", "stage", "acme/tiny-sft", "--volume", "sft-datasets"],
+        [
+            "volumes",
+            "stage",
+            "--kube-context",
+            "ctx-ok",
+            "acme/tiny-sft",
+            "--volume",
+            "sft-datasets",
+        ],
         env=TEST_ENV,
     )
     assert result.exit_code == 1, result.output
@@ -844,7 +987,15 @@ def test_ctrl_c_cleans_up_and_exits_130(scenario, monkeypatch) -> None:
     FakeKubectl.raise_in_get_pod = KeyboardInterrupt()
     result = runner.invoke(
         app,
-        ["volumes", "stage", "acme/tiny-sft", "--volume", "sft-datasets"],
+        [
+            "volumes",
+            "stage",
+            "--kube-context",
+            "ctx-ok",
+            "acme/tiny-sft",
+            "--volume",
+            "sft-datasets",
+        ],
         env=TEST_ENV,
     )
     assert result.exit_code == 130, result.output
@@ -859,7 +1010,15 @@ def test_cleanup_failure_is_not_green(scenario) -> None:
     FakeKubectl.fail_pod_delete = True
     result = runner.invoke(
         app,
-        ["volumes", "stage", "acme/tiny-sft", "--volume", "sft-datasets"],
+        [
+            "volumes",
+            "stage",
+            "--kube-context",
+            "ctx-ok",
+            "acme/tiny-sft",
+            "--volume",
+            "sft-datasets",
+        ],
         env=TEST_ENV,
     )
     assert result.exit_code == 1, result.output
@@ -893,6 +1052,10 @@ def test_secret_creation_failure_fails_the_run(scenario, monkeypatch) -> None:
         [
             "volumes",
             "stage",
+            "--kube-context",
+            "ctx-ok",
+            "--kube-context",
+            "ctx-ok",
             "acme/tiny-sft",
             "--volume",
             "sft-datasets",
@@ -934,6 +1097,10 @@ def test_invalid_output_format_rejected(scenario) -> None:
         [
             "volumes",
             "stage",
+            "--kube-context",
+            "ctx-ok",
+            "--kube-context",
+            "ctx-ok",
             "acme/tiny-sft",
             "--volume",
             "sft-datasets",
@@ -1023,6 +1190,10 @@ def test_private_flow_keeps_token_when_gated_metadata_is_200(scenario, monkeypat
         [
             "volumes",
             "stage",
+            "--kube-context",
+            "ctx-ok",
+            "--kube-context",
+            "ctx-ok",
             "acme/tiny-sft",
             "--volume",
             "sft-datasets",
@@ -1063,6 +1234,10 @@ def test_secret_rbac_preflight_fails_closed(scenario, monkeypatch) -> None:
         [
             "volumes",
             "stage",
+            "--kube-context",
+            "ctx-ok",
+            "--kube-context",
+            "ctx-ok",
             "acme/tiny-sft",
             "--volume",
             "sft-datasets",
@@ -1089,7 +1264,15 @@ def test_terminating_pvc_fails(scenario) -> None:
     scenario["configure"](pvc=pvc)
     result = runner.invoke(
         app,
-        ["volumes", "stage", "acme/tiny-sft", "--volume", "sft-datasets"],
+        [
+            "volumes",
+            "stage",
+            "--kube-context",
+            "ctx-ok",
+            "acme/tiny-sft",
+            "--volume",
+            "sft-datasets",
+        ],
         env=TEST_ENV,
     )
     assert result.exit_code == 1, result.output
@@ -1120,7 +1303,15 @@ def test_unknown_personal_owner_fails_closed(scenario, monkeypatch) -> None:
     )
     result = runner.invoke(
         app,
-        ["volumes", "stage", "acme/tiny-sft", "--volume", "sft-datasets"],
+        [
+            "volumes",
+            "stage",
+            "--kube-context",
+            "ctx-ok",
+            "acme/tiny-sft",
+            "--volume",
+            "sft-datasets",
+        ],
         env=TEST_ENV,
     )
     assert result.exit_code == 1, result.output
@@ -1132,7 +1323,15 @@ def test_empty_owner_label_fails_closed(scenario) -> None:
     scenario["configure"](pvc=_fake_pvc(labels={"volume-name": "sft-datasets", "user-id": ""}))
     result = runner.invoke(
         app,
-        ["volumes", "stage", "acme/tiny-sft", "--volume", "sft-datasets"],
+        [
+            "volumes",
+            "stage",
+            "--kube-context",
+            "ctx-ok",
+            "acme/tiny-sft",
+            "--volume",
+            "sft-datasets",
+        ],
         env=TEST_ENV,
     )
     assert result.exit_code == 1, result.output
@@ -1145,7 +1344,15 @@ def test_failed_result_status_is_never_success(scenario) -> None:
     )
     result = runner.invoke(
         app,
-        ["volumes", "stage", "acme/tiny-sft", "--volume", "sft-datasets"],
+        [
+            "volumes",
+            "stage",
+            "--kube-context",
+            "ctx-ok",
+            "acme/tiny-sft",
+            "--volume",
+            "sft-datasets",
+        ],
         env=TEST_ENV,
     )
     assert result.exit_code == 1, result.output
@@ -1163,7 +1370,15 @@ def test_result_without_configs_is_rejected(scenario) -> None:
     scenario["result_after_pod"] = factory
     result = runner.invoke(
         app,
-        ["volumes", "stage", "acme/tiny-sft", "--volume", "sft-datasets"],
+        [
+            "volumes",
+            "stage",
+            "--kube-context",
+            "ctx-ok",
+            "acme/tiny-sft",
+            "--volume",
+            "sft-datasets",
+        ],
         env=TEST_ENV,
     )
     assert result.exit_code == 1, result.output
@@ -1180,7 +1395,15 @@ def test_missing_container_exit_code_is_failure(scenario) -> None:
     scenario["configure"](phases=phases, logs=_result_line("op", "acme/tiny-sft", "tiny-sft"))
     result = runner.invoke(
         app,
-        ["volumes", "stage", "acme/tiny-sft", "--volume", "sft-datasets"],
+        [
+            "volumes",
+            "stage",
+            "--kube-context",
+            "ctx-ok",
+            "acme/tiny-sft",
+            "--volume",
+            "sft-datasets",
+        ],
         env=TEST_ENV,
     )
     assert result.exit_code == 1, result.output
@@ -1197,7 +1420,15 @@ def test_interrupt_right_after_pod_reporter_cleans_up(scenario, monkeypatch) -> 
     monkeypatch.setattr(volumes_stage._Reporter, "__call__", interrupting_reporter)
     result = runner.invoke(
         app,
-        ["volumes", "stage", "acme/tiny-sft", "--volume", "sft-datasets"],
+        [
+            "volumes",
+            "stage",
+            "--kube-context",
+            "ctx-ok",
+            "acme/tiny-sft",
+            "--volume",
+            "sft-datasets",
+        ],
         env=TEST_ENV,
     )
     assert result.exit_code == 130, result.output
@@ -1225,7 +1456,15 @@ def test_failed_pod_create_still_cleans_known_name(scenario, monkeypatch) -> Non
     monkeypatch.setattr(volumes_stage, "Kubectl", FailingCreateFake)
     result = runner.invoke(
         app,
-        ["volumes", "stage", "acme/tiny-sft", "--volume", "sft-datasets"],
+        [
+            "volumes",
+            "stage",
+            "--kube-context",
+            "ctx-ok",
+            "acme/tiny-sft",
+            "--volume",
+            "sft-datasets",
+        ],
         env=TEST_ENV,
     )
     assert result.exit_code == 1, result.output
@@ -1254,6 +1493,10 @@ def test_token_echo_in_logs_is_redacted(scenario, monkeypatch) -> None:
         [
             "volumes",
             "stage",
+            "--kube-context",
+            "ctx-ok",
+            "--kube-context",
+            "ctx-ok",
             "acme/tiny-sft",
             "--volume",
             "sft-datasets",
@@ -1273,6 +1516,10 @@ def test_token_echo_in_logs_is_redacted(scenario, monkeypatch) -> None:
         [
             "volumes",
             "stage",
+            "--kube-context",
+            "ctx-ok",
+            "--kube-context",
+            "ctx-ok",
             "acme/tiny-sft",
             "--volume",
             "sft-datasets",
@@ -1298,7 +1545,15 @@ def test_multi_config_output_does_not_pick_last_config(scenario) -> None:
     scenario["result_after_pod"] = factory
     result = runner.invoke(
         app,
-        ["volumes", "stage", "acme/tiny-sft", "--volume", "sft-datasets"],
+        [
+            "volumes",
+            "stage",
+            "--kube-context",
+            "ctx-ok",
+            "acme/tiny-sft",
+            "--volume",
+            "sft-datasets",
+        ],
         env=TEST_ENV,
     )
     assert result.exit_code == 0, result.output
@@ -1392,7 +1647,17 @@ def test_invalid_result_schema_fails(scenario, bad_field) -> None:
     scenario["result_after_pod"] = factory
     result = runner.invoke(
         app,
-        ["volumes", "stage", "acme/tiny-sft", "--volume", "sft-datasets", "--output", "json"],
+        [
+            "volumes",
+            "stage",
+            "--kube-context",
+            "ctx-ok",
+            "acme/tiny-sft",
+            "--volume",
+            "sft-datasets",
+            "--output",
+            "json",
+        ],
         env=TEST_ENV,
     )
     assert result.exit_code != 0, result.output + "\n" + result.stderr

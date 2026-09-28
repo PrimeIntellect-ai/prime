@@ -31,7 +31,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Optional
 
-from prime_cli.core import APIError
+from prime_cli.core import APIError, APITimeoutError
 
 from ..utils.env_vars import EnvParseError, parse_env_arg, parse_env_file
 from ..utils.plain import get_console
@@ -944,4 +944,232 @@ def print_stage_output(output: dict[str, Any], json_mode: bool) -> None:
     console.print(
         "[dim]Staged datasets are immutable: re-staging the same revision is "
         "idempotent; changed upstream content needs a new --path.[/dim]"
+    )
+
+
+# ---------------------------------------------------------------------------
+# API mode: the platform stages the dataset; no kubectl, no kubeconfig
+# ---------------------------------------------------------------------------
+
+API_POLL_SECONDS = 2.0
+_API_MAX_BACKOFF_SECONDS = 30.0
+_STAGE_UUID_RE = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE
+)
+
+
+def _stage_status_url(volume_name: str, stage_id: str, team_id: Optional[str]) -> str:
+    url = f"/api/v1/training/volumes/{volume_name}/stage/{stage_id}"
+    if team_id:
+        url += f"?teamId={team_id}"
+    return url
+
+
+def _api_result_problems(result: dict[str, Any]) -> list[str]:
+    """The API result must prove the same things the local path proves:
+    staged/already_staged, a resolved revision, a verification summary
+    with nonempty splits, and nonnegative integer counts (bools are not
+    ints). Parsed BEFORE any 'Staged' line is printed."""
+    problems = list(_result_problems(result))
+    for field in ("bytes", "files"):
+        value = result.get(field)
+        if value is not None and (isinstance(value, bool) or value < 0):
+            problems.append(f"{field} is not a nonnegative integer")
+    return problems
+
+
+def _backoff_sleep(attempt: int) -> None:
+    delay = min(_API_MAX_BACKOFF_SECONDS, API_POLL_SECONDS * (2 ** min(attempt, 5)))
+    time.sleep(delay * (0.5 + 0.5 * os.urandom(1)[0] / 255.0))
+
+
+def _cancel_api_stage(
+    client: Any, volume_name: str, stage_id: str, team_id: Optional[str], reporter: _Reporter
+) -> None:
+    """Best-effort cancel with an honest report: if confirmation cannot be
+    obtained, the operation may still be running - it is still bounded by
+    the server-side deadline."""
+    status_url = _stage_status_url(volume_name, stage_id, team_id)
+    try:
+        client.cancel_volume_stage(volume_name, stage_id, team_id=team_id)
+        reporter(f"Cancelling stage {stage_id} ({status_url})", dim=True)
+    except Exception as exc:  # noqa: BLE001 - best effort during unwind
+        reporter(
+            f"could not confirm cancellation ({exc}); the operation may still "
+            f"be running - it is bounded by the server deadline. Status: GET {status_url}",
+            dim=True,
+        )
+
+
+def stage_dataset_api(
+    *,
+    client: Any,
+    team_id: Optional[str],
+    source: str,
+    volume_name: str,
+    path: Optional[str],
+    namespace: str,
+    revision: str,
+    timeout_seconds: int,
+    json_mode: bool,
+    token_unused: Optional[str] = None,
+) -> dict[str, Any]:
+    """Stage a public HF dataset via the Prime API: POST admits a
+    platform-run CPU staging Job, then poll its status. No kubectl, no
+    kubeconfig, no cluster credentials - never falls back to the operator
+    kubectl path.
+
+    v1 is public-only: an ambient/env-file HF_TOKEN is neither sent nor
+    used (reported without its value); explicit -e HF_TOKEN is rejected
+    by the command layer before any POST."""
+    from prime_cli.api.training import HostedTrainingClient  # noqa: F401 - doc anchor
+
+    reporter = _Reporter(json_mode, None)
+    source = validate_source(source)
+    dataset_name = validate_dataset_path(path or source.split("/")[-1])
+    assert isinstance(client, HostedTrainingClient) or client is not None
+
+    # Same API the kubectl path trusts for volume resolution: early,
+    # human-facing 404/ambiguous/RUNNING checks. The server re-resolves
+    # and re-validates everything on its own.
+    volume = _get(client, team_id, volume_name)
+    if namespace != "auto" and namespace != volume.namespace:
+        raise StageError(
+            f"--namespace {namespace!r} does not match the volume namespace "
+            f"{volume.namespace!r}. The API-returned namespace is authoritative."
+        )
+
+    if token_unused:
+        reporter(
+            "HF_TOKEN is set but is not used: API staging is public-only "
+            "in v1 (public datasets only)",
+            dim=True,
+        )
+
+    stage_id = str(uuid.uuid4())
+    reporter(
+        f"Volume {volume.name} · cluster {volume.cluster_id} · API staging (no kubectl required)"
+    )
+    try:
+        envelope = client.stage_volume(
+            volume_name,
+            source=source,
+            revision=revision,
+            path=path,
+            team_id=team_id,
+            timeout_seconds=timeout_seconds,
+            idempotency_key=stage_id,
+        )
+    except APIError as exc:
+        _report_api_stage_conflict(volume_name, team_id, str(exc), reporter)
+        raise StageError(f"staging was not admitted: {exc}") from exc
+    except APITimeoutError as exc:
+        # A timed-out admission may still have been accepted: recover with
+        # the SAME idempotency key on the next attempt, never a blind retry.
+        raise StageError(
+            f"the staging request timed out ({exc}); it may still have been "
+            "admitted - retry the same command to recover, or check the "
+            f"volume later: GET {_stage_status_url(volume_name, stage_id, team_id)}"
+        ) from exc
+    except Exception as exc:
+        raise StageError(f"staging was not admitted: {exc}") from exc
+
+    status_url = _stage_status_url(volume_name, envelope.stage_id, team_id)
+    reporter(f"Stage {envelope.stage_id} admitted · status {envelope.status}")
+    reporter(f"GET {status_url}", dim=True)
+
+    attempt = 0
+    started = time.monotonic()
+    try:
+        while True:
+            try:
+                envelope = client.get_volume_stage(volume_name, envelope.stage_id, team_id=team_id)
+                attempt = 0
+            except APIError as exc:
+                code = getattr(exc, "status_code", None)
+                if code in (429, 503):
+                    reporter(f"Status read throttled ({code}); backing off", dim=True)
+                    attempt += 1
+                    _backoff_sleep(attempt)
+                    continue
+                if code == 404:
+                    raise StageError(
+                        "the staging operation is gone (cancelled or expired); "
+                        "re-stage to re-verify the on-volume data"
+                    ) from exc
+                raise StageError(f"could not read staging status: {exc}") from exc
+            except APITimeoutError as exc:
+                _cancel_api_stage(client, volume_name, envelope.stage_id, team_id, reporter)
+                raise StageError(
+                    f"the staging status read timed out ({exc}); cancellation "
+                    "was attempted - if it could not be confirmed the "
+                    "operation may still be running (bounded by the server "
+                    f"deadline). Status: GET {status_url}"
+                ) from exc
+
+            status = envelope.status
+            if status in ("PENDING", "RUNNING", "CANCELLING"):
+                elapsed = int(time.monotonic() - started)
+                reporter(f"Status {status} ({elapsed}s elapsed)", dim=True)
+            if status == "SUCCEEDED":
+                break
+            if status == "FAILED":
+                error = envelope.error or {}
+                code = error.get("code", "UNKNOWN")
+                message = error.get("message", "staging failed")
+                raise StageError(f"staging failed ({code}): {message}")
+            time.sleep(API_POLL_SECONDS)
+    except KeyboardInterrupt:
+        _cancel_api_stage(client, volume_name, envelope.stage_id, team_id, reporter)
+        reporter(f"Interrupted; stage {envelope.stage_id} status: GET {status_url}", dim=True)
+        raise
+
+    result = envelope.result
+    # Parse and validate BEFORE printing any success: a SUCCEEDED status
+    # without a provable result is never a success.
+    if result is None:
+        raise StageError(
+            "staging reported success but returned no result payload; not treating it as success"
+        )
+    if (
+        result.get("operationId") != envelope.stage_id
+        or result.get("source") != source
+        or result.get("datasetName") != dataset_name
+    ):
+        raise StageError("the staging result does not match this operation/source/destination")
+    if _api_result_problems(result):
+        raise StageError("; ".join(_api_result_problems(result)) + "; not treating it as success")
+
+    return {
+        "status": str(result["status"]),
+        "source": source,
+        "revision": result.get("revision"),
+        "requestedRevision": result.get("requestedRevision", revision),
+        "volume": volume.name,
+        "clusterId": volume.cluster_id,
+        "namespace": volume.namespace,
+        "pvcName": volume.pvc_name,
+        "dataName": f"/datasets/{dataset_name}",
+        "bytes": result.get("bytes"),
+        "files": result.get("files"),
+        "configs": result.get("configs") or {},
+        "stageId": envelope.stage_id,
+        "kubeContext": None,
+        "image": STAGING_IMAGE_REF,
+        "elapsedSeconds": result.get("elapsedSeconds"),
+    }
+
+
+def _report_api_stage_conflict(
+    volume_name: str, team_id: Optional[str], message: str, reporter: _Reporter
+) -> None:
+    """On a 409 active-stage conflict, surface the existing operation's ID
+    and status URL instead of launching another stage."""
+    match = _STAGE_UUID_RE.search(message)
+    if not match:
+        return
+    stage_id = match.group(0)
+    reporter(
+        f"An operation is already active: GET {_stage_status_url(volume_name, stage_id, team_id)}",
+        dim=True,
     )

@@ -37,6 +37,7 @@ from .volumes_stage import (
     redact,
     resolve_hf_token,
     stage_dataset,
+    stage_dataset_api,
 )
 
 app = PlainTyper(
@@ -120,8 +121,9 @@ def stage(
         None,
         "--kube-context",
         help=(
-            "Kubeconfig context to use. Defaults to the current context; the "
-            "context must point at the volume's cluster."
+            "Operator-only kubectl fallback: stage through YOUR kubeconfig "
+            "context (must point at the volume's cluster). Default is the "
+            "public API mode, which needs no kubectl."
         ),
     ),
     revision: str = typer.Option(
@@ -142,11 +144,18 @@ def stage(
 ) -> None:
     """Stage an HF dataset repository onto a volume for hosted SFT.
 
-    Downloads the dataset snapshot inside a short-lived CPU pod on the
-    volume's cluster, verifies it offline in a fresh process, then
-    publishes it atomically under datasets/<name>. Requires kubectl and
-    an authorized kubeconfig context for the volume's namespace (pods,
-    pod logs, PVC read; plus Secrets for private datasets).
+    Default: the public API mode. The platform downloads the dataset
+    snapshot inside a short-lived CPU pod on the volume's cluster,
+    verifies it offline in a fresh process, then publishes it atomically
+    under datasets/<name>. You only need a Prime API key - no kubectl,
+    kubeconfig, or cluster credentials. v1 stages public dataset
+    repositories only; an HF token is neither used nor sent (explicit
+    -e HF_TOKEN is rejected: private API staging is not supported yet).
+
+    Operator fallback: --kube-context <context> drives the same staging
+    pod through YOUR authorized kubeconfig (pods, pod logs, PVC read;
+    plus Secrets for private datasets). It never runs automatically -
+    API errors are never hidden by falling back.
 
     Recipe:
 
@@ -179,20 +188,44 @@ def stage(
         raise typer.Exit(1)
 
     json_mode = output == "json"
+    explicit_token_args = [arg for arg in env_var if arg.startswith("HF_TOKEN=")]
     try:
-        result = stage_dataset(
-            client=client,
-            team_id=team_id,
-            source=source,
-            volume_name=volume,
-            path=path,
-            namespace=namespace,
-            kube_context=kube_context,
-            revision=revision,
-            token=token,
-            timeout_seconds=timeout_seconds,
-            json_mode=json_mode,
-        )
+        if kube_context:
+            # Explicit operator fallback: the kubectl path keeps the
+            # private-repo token support.
+            result = stage_dataset(
+                client=client,
+                team_id=team_id,
+                source=source,
+                volume_name=volume,
+                path=path,
+                namespace=namespace,
+                kube_context=kube_context,
+                revision=revision,
+                token=token,
+                timeout_seconds=timeout_seconds,
+                json_mode=json_mode,
+            )
+        else:
+            if explicit_token_args:
+                raise StageError(
+                    "explicit HF_TOKEN is not supported in API mode: v1 "
+                    "stages public datasets only. Private API staging is "
+                    "not yet supported; use --kube-context (operator) for "
+                    "private datasets in the meantime."
+                )
+            result = stage_dataset_api(
+                client=client,
+                team_id=team_id,
+                source=source,
+                volume_name=volume,
+                path=path,
+                namespace=namespace,
+                revision=revision,
+                timeout_seconds=timeout_seconds,
+                json_mode=json_mode,
+                token_unused=token,
+            )
     except StageError as e:
         console.print(f"[red]Error:[/red] {redact(str(e), token)}")
         raise typer.Exit(1)

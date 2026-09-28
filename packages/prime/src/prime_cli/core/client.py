@@ -15,9 +15,14 @@ def _default_user_agent() -> str:
 
 
 class APIError(Exception):
-    """Base API exception"""
+    """Base API exception.
 
-    pass
+    status_code is populated by the HTTP-error paths so callers can
+    branch on the code (e.g. 429/503 backoff, 409 conflict) without
+    string-matching the message.
+    """
+
+    status_code: Optional[int] = None
 
 
 class UnauthorizedError(APIError):
@@ -111,6 +116,7 @@ class APIClient:
         params: Optional[Dict[str, Any]] = None,
         json: Optional[Dict[str, Any]] = None,
         timeout: Optional[int] = None,
+        headers: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         """Make a request to the API"""
         self._check_auth_required()
@@ -124,7 +130,9 @@ class APIClient:
         url = f"{self.base_url}{endpoint}"
 
         try:
-            response = self.client.request(method, url, params=params, json=json, timeout=timeout)
+            response = self.client.request(
+                method, url, params=params, json=json, timeout=timeout, headers=headers
+            )
             response.raise_for_status()
 
             if response.status_code == 204 and not response.content:
@@ -160,11 +168,15 @@ class APIClient:
             try:
                 error_response = e.response.json()
                 if isinstance(error_response, dict) and "detail" in error_response:
-                    raise error_cls(f"HTTP {e.response.status_code}: {error_response['detail']}")
+                    error = error_cls(f"HTTP {e.response.status_code}: {error_response['detail']}")
+                    error.status_code = e.response.status_code
+                    raise error from e
             except (ValueError, KeyError):
                 pass
 
-            raise error_cls(f"HTTP {e.response.status_code}: {e.response.text or str(e)}") from e
+            error = error_cls(f"HTTP {e.response.status_code}: {e.response.text or str(e)}")
+            error.status_code = e.response.status_code
+            raise error from e
         except httpx.TimeoutException as e:
             raise APITimeoutError(f"Request timed out: {e}") from e
         except httpx.RequestError as e:
@@ -182,9 +194,14 @@ class APIClient:
         """Make a GET request to the API"""
         return self.request("GET", endpoint, params=params, timeout=timeout)
 
-    def post(self, endpoint: str, json: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def post(
+        self,
+        endpoint: str,
+        json: Optional[Dict[str, Any]] = None,
+        headers: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
         """Make a POST request to the API"""
-        return self.request("POST", endpoint, json=json)
+        return self.request("POST", endpoint, json=json, headers=headers)
 
     def patch(
         self,
@@ -306,11 +323,15 @@ class AsyncAPIClient:
             try:
                 error_response = e.response.json()
                 if isinstance(error_response, dict) and "detail" in error_response:
-                    raise error_cls(f"HTTP {e.response.status_code}: {error_response['detail']}")
+                    error = error_cls(f"HTTP {e.response.status_code}: {error_response['detail']}")
+                    error.status_code = e.response.status_code
+                    raise error from e
             except (ValueError, KeyError):
                 pass
 
-            raise error_cls(f"HTTP {e.response.status_code}: {e.response.text or str(e)}") from e
+            error = error_cls(f"HTTP {e.response.status_code}: {e.response.text or str(e)}")
+            error.status_code = e.response.status_code
+            raise error from e
         except httpx.TimeoutException as e:
             raise APITimeoutError(f"Request timed out: {e}") from e
         except httpx.RequestError as e:

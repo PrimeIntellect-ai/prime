@@ -90,17 +90,20 @@ DROP_ORDER = ("Ingested", "Duration", "Tokens")
 
 def _reward(summary: TraceSummary) -> Text:
     reward = summary.score.reward
-    # With no Outcome column, a failed trace shows as a red reward.
-    return Text(
-        "-" if reward is None else f"{reward:.2f}",
-        style="red" if summary.execution.has_error else "",
-    )
+    return Text("-" if reward is None else f"{reward:.2f}")
 
 
-# (header, right-aligned, cell). Relative times keep both timestamps narrow;
-# `get` and JSON have the exact ones.
+def _error(summary: TraceSummary) -> Text:
+    # A word, not just a color, so a failure still reads in --plain mode,
+    # piped output and NO_COLOR terminals.
+    return Text("yes", style="red") if summary.execution.has_error else Text("-")
+
+
+# (header, right-aligned, cell). Error is never in DROP_ORDER. Relative times
+# keep both timestamps narrow; `get` and JSON have the exact ones.
 METRIC_COLUMNS: List[Tuple[str, bool, Callable[[TraceSummary], Text]]] = [
     ("Reward", True, _reward),
+    ("Error", False, _error),
     ("Tokens", True, lambda s: Text(f"{s.total_tokens:,}")),
     ("Duration", True, lambda s: Text(_duration(s.duration_ms / 1000))),
     ("Created", False, lambda s: Text(format_time_ago(s.created_at))),

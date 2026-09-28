@@ -1688,6 +1688,31 @@ def test_list_forwards_the_environment_filter_in_both_modes(fake_client):
     assert fake_client.calls["list_episodes"]["environment_id"] == "tb2"
 
 
+def test_plain_list_marks_failed_traces_in_words(fake_client):
+    fake_client.list = lambda **kwargs: TraceListPage(
+        items=[
+            _summary(trace_id="t-failed", execution={"has_error": True, "is_truncated": False}),
+            _summary(trace_id="t-ok"),
+        ],
+        next_cursor=None,
+    )
+
+    result = runner.invoke(main_app, ["--plain", "traces", "list"])
+
+    assert result.exit_code == 0, result.output
+    rows = {
+        line.split()[0]: line.split()
+        for line in result.output.splitlines()
+        if line.startswith("t-")
+    }
+    header = next(
+        line.split() for line in result.output.splitlines() if line.startswith("Trace ID")
+    )
+    column = header.index("Error") - 1  # "Trace ID" is two words in the header
+    assert rows["t-failed"][column] == "yes"
+    assert rows["t-ok"][column] == "-"
+
+
 @pytest.mark.parametrize("args", [["traces", "list"], ["traces", "list", "--episodes"]])
 def test_plain_list_strips_table_borders_when_rows_share_values(fake_client, args):
     fake_client.list = lambda **kwargs: TraceListPage(

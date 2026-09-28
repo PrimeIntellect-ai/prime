@@ -331,3 +331,105 @@ def test_list_never_shows_the_namespace(monkeypatch, output):
     assert "ckpts" in result.output
     assert "prime-team-secret-ns" not in result.output
     assert "amespace" not in result.output
+
+
+def _setup(monkeypatch, tmp_path, which, run_code=0, stuck=False):
+    key = tmp_path / "key"
+    key.write_text("test")
+    monkeypatch.setattr(volumes.Config, "ssh_key_path", property(lambda self: str(key)))
+    created, stopped, commands = [], [], []
+    session = SimpleNamespace(
+        id="s1",
+        status="RUNNING",
+        read_only=True,
+        error_message=None,
+        ssh_connection=None if stuck else "u@host.tailnet.ts.net",
+    )
+
+    def create(*a, **kw):
+        created.append(kw)
+        session.read_only = kw["read_only"]
+        return session
+
+    client = SimpleNamespace(
+        create_volume_session=create,
+        stop_volume_session=lambda *a, **kw: stopped.append(a),
+    )
+    monkeypatch.setattr(volumes, "_client", lambda: (client, "t1"))
+    monkeypatch.setattr(volumes.shutil, "which", lambda n: f"/bin/{n}" if n in which else None)
+    monkeypatch.setattr(
+        volumes.subprocess,
+        "run",
+        lambda cmd, **kw: commands.append(cmd) or SimpleNamespace(returncode=run_code),
+    )
+    return created, stopped, commands
+
+
+def _run(*args):
+    return CliRunner().invoke(app, ["volumes", *args], env={"PRIME_DISABLE_VERSION_CHECK": "1"})
+
+
+def test_get_rsync(monkeypatch, tmp_path, _session_dir):
+    created, _, commands = _setup(monkeypatch, tmp_path, {"ssh", "rsync", "scp"})
+    result = _run("get", "data", "/runs/a", "out")
+    assert result.exit_code == 0, result.output
+    assert created == [{"read_only": True, "team_id": "t1"}]
+    ssh_e = shlex.join(["ssh", "-F", str(_session_dir / "config")])
+    assert commands == [
+        ["/bin/rsync", "-a", "-v", "--partial", "-e", ssh_e, "host:/volume/runs/a", "out"]
+    ]
+    assert "prime volumes stop data s1" in result.output
+
+
+def test_put_rsync(monkeypatch, tmp_path, _session_dir):
+    created, _, commands = _setup(monkeypatch, tmp_path, {"ssh", "rsync"})
+    result = _run("put", "data", "f.txt", "dir/")
+    assert result.exit_code == 0, result.output
+    assert created == [{"read_only": False, "team_id": "t1"}]
+    assert commands[0][-2:] == ["f.txt", "host:/volume/dir/"]
+    assert commands[0][:5] == ["/bin/rsync", "-a", "-v", "--partial", "-e"]
+
+
+def test_scp_fallback(monkeypatch, tmp_path, _session_dir):
+    _, _, commands = _setup(monkeypatch, tmp_path, {"ssh", "scp"})
+    result = _run("put", "data", "f.txt")
+    assert result.exit_code == 0, result.output
+    assert commands == [["scp", "-r", "-F", str(_session_dir / "config"), "f.txt", "host:/volume/"]]
+    assert "rsync not found, using scp (full copy; install rsync for incremental transfers)" in (
+        result.output
+    )
+
+
+def test_no_ssh_tools(monkeypatch, tmp_path):
+    created, _, commands = _setup(monkeypatch, tmp_path, set())
+    assert _run("get", "data", "x").exit_code == 1
+    assert not created and not commands
+
+
+@pytest.mark.parametrize("bad", ["../x", "a/../b", "a//b", "//a"])
+def test_remote_path_rejected(monkeypatch, tmp_path, bad):
+    created, _, commands = _setup(monkeypatch, tmp_path, {"ssh", "rsync"})
+    assert _run("get", "data", bad).exit_code == 2
+    assert not created and not commands
+
+
+def test_remote_path_normalized():
+    assert volumes._remote_path("/") == "/volume/"
+    assert volumes._remote_path("a/b") == "/volume/a/b"
+    assert volumes._remote_path("/a/b/") == "/volume/a/b/"
+
+
+def test_failed_transfer_exit_code(monkeypatch, tmp_path):
+    _setup(monkeypatch, tmp_path, {"ssh", "rsync"}, run_code=23)
+    result = _run("get", "data", "x")
+    assert result.exit_code == 23
+    assert "tailnet" in result.output
+
+
+def test_wait_failure_stops_session(monkeypatch, tmp_path):
+    _, stopped, commands = _setup(monkeypatch, tmp_path, {"ssh", "rsync"}, stuck=True)
+    monkeypatch.setattr(volumes.time, "sleep", lambda s: None)
+    monkeypatch.setattr(volumes.time, "monotonic", iter([0, 1000]).__next__)
+    result = _run("get", "data", "x")
+    assert result.exit_code == 1
+    assert stopped == [("data", "s1")] and not commands

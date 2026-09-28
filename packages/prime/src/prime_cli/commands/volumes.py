@@ -8,6 +8,7 @@ write under `runs/<runId>/` on it, and it outlives every run.
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -158,7 +159,7 @@ def _write_ssh_config(session, alias: str, host: str, user: str, port: str, key:
         f"  HostName {host}",
         f"  User {user}",
         f"  Port {port}",
-        f'  IdentityFile "{key}"',
+        f'  IdentityFile "{Path(key).as_posix()}"',
         "  IdentitiesOnly yes",
     ]
     if getattr(session, "host_public_key", None):
@@ -169,7 +170,7 @@ def _write_ssh_config(session, alias: str, host: str, user: str, port: str, key:
         pinned.append(f"{entry} {session.host_public_key}")
         known_hosts.write_text("\n".join(pinned) + "\n")
         known_hosts.chmod(0o600)
-        lines += [f'  UserKnownHostsFile "{known_hosts}"', "  StrictHostKeyChecking yes"]
+        lines += [f'  UserKnownHostsFile "{known_hosts.as_posix()}"', "  StrictHostKeyChecking yes"]
     config = folder / "config"
     existing = config.read_text() if config.exists() else ""
     config.write_text(_replace_block(existing, alias, "\n".join(lines) + "\n"))
@@ -179,7 +180,10 @@ def _write_ssh_config(session, alias: str, host: str, user: str, port: str, key:
 
 def _shell_path(path: Path, home_var: str) -> str:
     """`path` as the user would type it: `~/...` (or `$HOME/...` inside
-    double quotes) when it's under their home, else shell-quoted."""
+    double quotes) when it's under their home, else shell-quoted. On Windows
+    there is no `~`/`$HOME` in cmd/PowerShell: forward-slash path in quotes."""
+    if os.name == "nt":
+        return f'"{path.as_posix()}"'
     try:
         rel = path.relative_to(Path.home())
     except ValueError:
@@ -247,18 +251,9 @@ def _stop_quietly(client, name: str, session_id: str, team_id) -> None:
         )
 
 
-@app.command(name="ssh", no_args_is_help=True)
-def ssh(
-    name: str = typer.Argument(..., help="Volume name"),
-    read_only: bool = typer.Option(
-        False, "--read-only", "--read", help="Mount root read-only (default)"
-    ),
-    read_write: bool = typer.Option(False, "--read-write", "--write", help="Mount root read-write"),
-) -> None:
-    """SSH into a corporate-tailnet session mounting the volume."""
-    if read_only and read_write:
-        console.print("[red]Choose either --read-only or --read-write.[/red]")
-        raise typer.Exit(2)
+def _open_session(name: str, read_only: bool):
+    """Create or reuse a session, wait for its endpoint and write the ssh
+    config block. Returns (session, alias, key, config)."""
     key = Config().ssh_key_path
     if not key or not os.path.isfile(os.path.expanduser(key)):
         console.print("[red]SSH key not found; use prime config set-ssh-key-path.[/red]")
@@ -266,7 +261,7 @@ def ssh(
     key = os.path.expanduser(key)
     client, team_id = _client()
     try:
-        session = client.create_volume_session(name, read_only=not read_write, team_id=team_id)
+        session = client.create_volume_session(name, read_only=read_only, team_id=team_id)
     except APIError as exc:
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(1) from exc
@@ -294,6 +289,22 @@ def ssh(
     config = _write_ssh_config(
         session, alias, host, match.group("user"), match.group("port") or "22", key
     )
+    return session, alias, key, config
+
+
+@app.command(name="ssh", no_args_is_help=True)
+def ssh(
+    name: str = typer.Argument(..., help="Volume name"),
+    read_only: bool = typer.Option(
+        False, "--read-only", "--read", help="Mount root read-only (default)"
+    ),
+    read_write: bool = typer.Option(False, "--read-write", "--write", help="Mount root read-write"),
+) -> None:
+    """SSH into a corporate-tailnet session mounting the volume."""
+    if read_only and read_write:
+        console.print("[red]Choose either --read-only or --read-write.[/red]")
+        raise typer.Exit(2)
+    session, alias, key, config = _open_session(name, read_only=not read_write)
     base = ["ssh", "-F", str(config), alias]
     console.print(
         f"[blue]Using SSH key:[/blue] {escape(_shell_path(Path(key), '~'))} "
@@ -303,14 +314,16 @@ def ssh(
     # soft_wrap: it must not insert line breaks into commands. Read-only
     # sessions get downloads (uploads would fail on the RO mount),
     # read-write sessions get uploads.
-    cfg = _shell_path(config, "~")
     cfg_in_quotes = _shell_path(config, "$HOME")
     if session.read_only:
         src, dst = f"{alias}:/volume/FILE", "."
+        easy = f"prime volumes get {name} FILE ."
     else:
         src, dst = "FILE", f"{alias}:/volume/"
+        easy = f"prime volumes put {name} FILE /"
     console.print("Copy files (sftp works too):")
-    console.print(f"  scp -F {cfg} {src} {dst}", soft_wrap=True, markup=False)
+    console.print(f"  {easy}", soft_wrap=True, markup=False)
+    console.print("Or raw (power users):")
     console.print(
         f'  rsync -av -e "ssh -F {cfg_in_quotes}" {src} {dst}', soft_wrap=True, markup=False
     )
@@ -321,6 +334,71 @@ def ssh(
         raise typer.Exit(1) from exc
     if code:
         raise typer.Exit(code)
+
+
+def _remote_path(path: str) -> str:
+    """Path under the volume root (/volume on the pod); a leading "/" means the
+    root. A trailing "/" is kept. Rejects empty and ".." segments."""
+    rel = path[1:] if path.startswith("/") else path
+    parts = rel.removesuffix("/").split("/") if rel else []
+    if any(p in ("", "..") for p in parts):
+        console.print(
+            f"[red]Invalid remote path {escape(repr(path))}: no '..' or empty segments.[/red]"
+        )
+        raise typer.Exit(2)
+    return "/volume/" + "/".join(parts) + ("/" if parts and rel.endswith("/") else "")
+
+
+def _transfer(name: str, read_only: bool, remote: str, local: str, upload: bool) -> None:
+    remote = _remote_path(remote)
+    rsync = shutil.which("rsync")
+    if not (shutil.which("ssh") and (rsync or shutil.which("scp"))):
+        console.print("[red]ssh and scp (or rsync) are required; install the OpenSSH client.[/red]")
+        raise typer.Exit(1)
+    if not rsync:
+        console.print(
+            "rsync not found, using scp (full copy; install rsync for incremental transfers)"
+        )
+    session, alias, _key, config = _open_session(name, read_only=read_only)
+    if rsync:
+        remote_arg = f"{alias}:{shlex.quote(remote)}"
+        ssh_cmd = shlex.join(["ssh", "-F", str(config)])
+        cmd = [rsync, "-a", "-v", "--partial", "-e", ssh_cmd]
+    else:
+        remote_arg = f"{alias}:{remote}"
+        cmd = ["scp", "-r", "-F", str(config)]
+    cmd += [local, remote_arg] if upload else [remote_arg, local]
+    try:
+        code = subprocess.run(cmd, check=False).returncode
+    except OSError as exc:
+        console.print(f"[red]Could not start transfer:[/red] {exc}")
+        raise typer.Exit(1) from exc
+    if code:
+        console.print(
+            "[red]Transfer failed.[/red] Check that you are on the tailnet "
+            f"(host {alias} must resolve) and the path exists."
+        )
+        raise typer.Exit(code)
+
+
+@app.command(no_args_is_help=True)
+def get(
+    name: str = typer.Argument(..., help="Volume name"),
+    remote_path: str = typer.Argument(..., help="Path in the volume; / is the volume root"),
+    local_dest: str = typer.Argument(".", help="Local destination"),
+) -> None:
+    """Download from a volume over a read-only session (rsync, else scp)."""
+    _transfer(name, True, remote_path, local_dest, upload=False)
+
+
+@app.command(no_args_is_help=True)
+def put(
+    name: str = typer.Argument(..., help="Volume name"),
+    local_path: str = typer.Argument(..., help="Local file or directory"),
+    remote_path: str = typer.Argument("/", help="Path in the volume; trailing / = into directory"),
+) -> None:
+    """Upload to a volume over a read-write session (rsync, else scp)."""
+    _transfer(name, False, remote_path, local_path, upload=True)
 
 
 @app.command()

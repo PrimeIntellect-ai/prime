@@ -38,7 +38,14 @@ def local_context_target(config: Config, local: bool, global_: bool) -> Optional
     if global_:
         return None
     if local:
-        return Path.cwd() / LOCAL_CONTEXT_FILE
+        target = Path.cwd() / LOCAL_CONTEXT_FILE
+        if target.is_symlink() or target.parent.is_symlink():
+            get_console(stderr=True).print(
+                f"[red]Error:[/red] {escape(str(target))} or its directory is a symlink; "
+                "replace it with a plain file or directory first."
+            )
+            raise typer.Exit(1)
+        return target
     return config.local_context_file
 
 

@@ -15,7 +15,8 @@ def find_local_context_file() -> Optional[Path]:
 
     Written by ``prime switch --local`` / ``prime config use --local``. The walk
     stops at the home directory, whose ``.prime`` is the global config directory,
-    and skips files owned by another user. Mirrors the Prime CLI's resolution.
+    and skips symlinks and files owned by another user. Mirrors the Prime CLI's
+    resolution.
     """
     try:
         current = Path.cwd().resolve()
@@ -28,6 +29,10 @@ def find_local_context_file() -> Optional[Path]:
             return None
         candidate = directory / LOCAL_CONTEXT_FILE
         try:
+            # A symlinked pin could point writes (e.g. `prime switch`) at another
+            # file such as ~/.prime/config.json, so only plain files count.
+            if candidate.parent.is_symlink() or candidate.is_symlink():
+                continue
             if candidate.is_file() and (getuid is None or candidate.stat().st_uid == getuid()):
                 return candidate
         except OSError:

@@ -833,10 +833,12 @@ def _add_default_inference_and_key_args(
     api_key_var = _parse_value_option(args, "--api-key-var", "-k")
     if api_key_var is None:
         env["PRIME_API_KEY"] = config.api_key
-    if config.team_id and not config.team_id_from_env:
+    if not config.team_id_from_env:
         # verifiers reads ~/.prime/config.json itself, so it would miss a team
-        # chosen by --context or a directory's .prime/context.json.
-        env["PRIME_TEAM_ID"] = config.team_id
+        # chosen by --context or a directory's .prime/context.json. Empty means
+        # the personal account to the prime SDKs, so a personal selection must
+        # be forwarded too rather than left to fall back to the global team.
+        env["PRIME_TEAM_ID"] = config.team_id or ""
 
     if base:
         base = base.rstrip("/")

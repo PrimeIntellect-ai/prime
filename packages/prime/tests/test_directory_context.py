@@ -360,3 +360,63 @@ def test_logout_in_pinned_context_only_clears_that_context(repo: Path, home: Pat
     assert json.loads(env_file.read_text())["api_key"] == ""
     assert _global(home)["api_key"] == "global-key"
     assert _global(home)["team_id"] == GLOBAL_TEAM
+
+
+def test_symlinked_directory_context_is_ignored(repo: Path, home: Path) -> None:
+    (repo / ".prime").mkdir()
+    (repo / ".prime" / "context.json").symlink_to(home / ".prime" / "config.json")
+
+    assert find_local_context_file() is None
+    assert Config().local_context_file is None
+
+
+def test_symlinked_prime_directory_is_ignored(repo: Path, tmp_path: Path) -> None:
+    elsewhere = tmp_path / "elsewhere"
+    _pin(elsewhere, {"team_id": EDISON})
+    (repo / ".prime").symlink_to(elsewhere / ".prime")
+
+    assert find_local_context_file() is None
+
+
+def test_switch_local_refuses_to_write_through_a_symlink(
+    repo: Path, home: Path, teams_api: None
+) -> None:
+    global_before = _global(home)
+    (repo / ".prime").symlink_to(home / ".prime")
+
+    result = runner.invoke(app, ["switch", "edison", "--local"], env=TEST_ENV)
+
+    assert result.exit_code == 1
+    assert "symlink" in result.output
+    assert _global(home) == global_before
+    assert not (home / ".prime" / "context.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("pin", "expected"),
+    [({"team_id": EDISON}, EDISON), ({"team_id": None}, ""), (None, GLOBAL_TEAM)],
+)
+def test_eval_forwards_the_resolved_team_to_verifiers(
+    repo: Path, pin: Optional[dict], expected: str
+) -> None:
+    from prime_cli.verifiers_bridge import _add_default_inference_and_key_args
+
+    if pin is not None:
+        _pin(repo, pin)
+
+    _args, env, _model, _base = _add_default_inference_and_key_args([], Config())
+
+    assert env["PRIME_TEAM_ID"] == expected
+
+
+def test_eval_keeps_a_team_set_in_the_environment(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from prime_cli.verifiers_bridge import _add_default_inference_and_key_args
+
+    _pin(repo, {"team_id": None})
+    monkeypatch.setenv("PRIME_TEAM_ID", ACME)
+
+    _args, env, _model, _base = _add_default_inference_and_key_args([], Config())
+
+    assert env["PRIME_TEAM_ID"] == ACME

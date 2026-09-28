@@ -32,7 +32,7 @@ def find_local_context_file(start: Optional[Path] = None) -> Optional[Path]:
     """Return the nearest ``.prime/context.json`` at or above ``start`` (default: cwd).
 
     The walk stops at the home directory, whose ``.prime`` is the global config
-    directory, and skips files owned by another user.
+    directory, and skips symlinks and files owned by another user.
     """
     try:
         current = (start or Path.cwd()).resolve()
@@ -45,6 +45,10 @@ def find_local_context_file(start: Optional[Path] = None) -> Optional[Path]:
             return None
         candidate = directory / LOCAL_CONTEXT_FILE
         try:
+            # A symlinked pin could point writes (e.g. `prime switch`) at another
+            # file such as ~/.prime/config.json, so only plain files count.
+            if candidate.parent.is_symlink() or candidate.is_symlink():
+                continue
             if candidate.is_file() and (getuid is None or candidate.stat().st_uid == getuid()):
                 return candidate
         except OSError:
@@ -77,6 +81,8 @@ def read_local_context(path: Path) -> dict:
 
 def write_local_context(path: Path, data: dict) -> None:
     """Write a directory context file, removing it (and an empty ``.prime``) when empty."""
+    if path.is_symlink() or path.parent.is_symlink():
+        raise ValueError(f"Refusing to write {path}: it or its directory is a symlink")
     if not data:
         path.unlink(missing_ok=True)
         try:

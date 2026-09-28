@@ -93,3 +93,17 @@ def test_malformed_directory_context_is_an_error(repo) -> None:
     (repo / ".prime" / "context.json").write_text("[]")
     with pytest.raises(ValueError, match="expected a JSON object"):
         Config()
+
+
+def test_symlinked_directory_context_is_ignored(repo) -> None:
+    home = repo.parent.parent
+    (repo / ".prime").mkdir()
+    (repo / ".prime" / "context.json").symlink_to(home / ".prime" / "config.json")
+    config = Config()
+    assert config.local_context_file is None
+    assert config.team_id == "global-team"
+
+
+def test_empty_team_env_means_personal_account(repo, monkeypatch) -> None:
+    monkeypatch.setenv("PRIME_TEAM_ID", "")
+    assert Config().team_id is None

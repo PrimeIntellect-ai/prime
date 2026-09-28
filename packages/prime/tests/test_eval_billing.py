@@ -18,6 +18,7 @@ class DummyConfig:
     api_key = "test-api-key"
     inference_url = "https://api.pinference.ai/api/v1"
     team_id = None
+    team_id_from_env = False
 
 
 class DummyPlugin:

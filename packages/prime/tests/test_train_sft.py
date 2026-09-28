@@ -164,7 +164,7 @@ def test_train_sft_json_output_keeps_run_id_parseable(tmp_path: Path, monkeypatc
 
 
 def test_train_rejects_sft_config_with_online_eval_blocks(tmp_path: Path, monkeypatch) -> None:
-    _capture_post(monkeypatch)  # nothing should be posted
+    _capture_post(monkeypatch)
     config_path = _write_config(
         tmp_path, _sft_config(eval={"sources": {}}, inference={"model": {}})
     )
@@ -296,8 +296,7 @@ def test_train_sft_volume_flag_overrides_toml(tmp_path: Path, monkeypatch) -> No
 
 def test_train_sft_without_volume_omits_the_key(tmp_path: Path, monkeypatch) -> None:
     """A fake-data SFT (no named volume) must dispatch without a volume
-    key, exactly like the full-FT path. The dataset name is fake here, so
-    the fixture matches the docstring's claim."""
+    key, exactly like the full-FT path."""
     config_path = _write_config(tmp_path, _sft_config(data={"name": "fake", "seq_len": 1024}))
     captured = _capture_post(monkeypatch)
 
@@ -312,7 +311,7 @@ def test_train_sft_without_volume_omits_the_key(tmp_path: Path, monkeypatch) -> 
 def test_train_sft_rejects_non_string_volume_before_post(tmp_path: Path, monkeypatch) -> None:
     """A top-level `volume` that is not a string must fail client-side,
     before anything is posted — mirrors the shared helper's guard."""
-    captured = _capture_post(monkeypatch)  # nothing should be posted
+    captured = _capture_post(monkeypatch)
     for bad_volume in (42, ["research"]):
         config_path = _write_config(tmp_path, _sft_config(volume=bad_volume))
 

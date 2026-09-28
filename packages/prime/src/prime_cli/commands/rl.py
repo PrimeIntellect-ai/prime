@@ -955,12 +955,9 @@ def _validate_sft_config(cfg: Dict[str, Any], config_path: str) -> None:
             f"dataset config) in {config_path}."
         )
         raise typer.Exit(1)
-    # Online evals need the local/SLURM launcher (an inference server +
-    # weight broadcasts); the dedicated hosted SFT path is trainer-only.
-    # The validator rejects these blocks server-side — mirror that here
-    # so the user learns before submitting rather than from a 400. The
-    # \\[...] escaping keeps rich markup from eating the literal block
-    # names in the rendered message.
+    # Online evals need the local/SLURM launcher, so the dedicated path
+    # is trainer-only — mirror the server-side validator so the user
+    # fails before submitting. \\[...] escapes rich markup in the message.
     unsupported = [f"\\[{k}]" for k in ("eval", "inference", "weight_broadcast") if k in cfg]
     if unsupported:
         console.print(
@@ -1557,10 +1554,8 @@ def create_run(
     """
     validate_output_format(output, console)
 
-    # The dispatch flags own mutually exclusive run kinds — accepting both
-    # would silently resolve to whichever branch is checked first, which
-    # is exactly the kind of ambiguity an expensive hosted launch should
-    # never have.
+    # Mutually exclusive run kinds: accepting both would silently resolve
+    # to whichever branch is checked first.
     if sft and full_finetune:
         console.print(
             "[red]Error:[/red] --sft and --full-finetune/--fft are mutually "
@@ -1568,14 +1563,11 @@ def create_run(
         )
         raise typer.Exit(1)
 
-    # Dispatch routing: SFT first (a [data] block with no [trainer]/
-    # [orchestrator] is unambiguously the prime-rl SFT schema — the two
-    # mega-TOML schemas are disjoint, and SFT configs have no [deployment]
-    # requirement the full-FT check could lean on). Then --full-finetune/
-    # --fft, or an unambiguous `[deployment]` block (full-FT-only —
-    # RLConfig/the LoRA schema has no such field). No longer sniffs
-    # `type` — prime-rl owns the config schema, so a leftover `type`
-    # field is dead weight, not a signal.
+    # Dispatch routing: SFT first — a [data] block with no [trainer]/
+    # [orchestrator] is unambiguously the prime-rl SFT schema (the two
+    # mega-TOML schemas are disjoint). Then --full-finetune/--fft, or an
+    # unambiguous `[deployment]` block (full-FT-only — the RL/LoRA schema
+    # has no such field).
     raw_cfg = _peek_toml(config_path)
     if _is_sft(raw_cfg, flag=sft):
         if full_finetune:
@@ -1595,13 +1587,10 @@ def create_run(
             yes=yes,
             image_tag=image_tag,
             gpu_type=gpu_type,
-            # SFT supports named volumes like RL. On SFT the volume is
-            # the dataset contract: the trainer mounts the volume's
-            # `datasets/` directory read-only at /datasets, so `data.name`
-            # must point at a pre-staged directory there
-            # (`/datasets/<name>`), while outputs and processed-data
-            # cache land under runs/<runId>/ on the same volume. Forward
-            # --volume instead of dropping it for SFT configs.
+            # On SFT the volume is also the dataset contract: its
+            # `datasets/` directory mounts read-only at /datasets, so
+            # `data.name` must point at a pre-staged `/datasets/<name>`
+            # directory. Forward --volume instead of dropping it.
             volume=volume,
             mode="sft",
         )

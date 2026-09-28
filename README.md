@@ -240,9 +240,6 @@ prime switch <team-slug>
 prime switch <team-slug> --local
 ```
 
-See [packages/prime/README.md](packages/prime/README.md#per-directory-team-and-account)
-for per-directory contexts.
-
 ## Development
 
 ```bash

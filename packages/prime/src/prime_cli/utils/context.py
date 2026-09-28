@@ -79,7 +79,11 @@ def update_local_context(path: Path, **fields: Optional[str]) -> None:
 
 
 def pin_team(path: Path, team_id: Optional[str], team_name: Optional[str] = None) -> None:
-    """Pin a team (None: the personal account) in a directory context file."""
+    """Pin a team (None: the personal account) in a directory context file.
+
+    The role is deliberately not stored: the file may be committed and shared,
+    and a role is per-user, so it would show the pinner's role to teammates.
+    """
     update_local_context(
         path,
         team_id=team_id or None,

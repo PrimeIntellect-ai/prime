@@ -410,7 +410,7 @@ class BuildImageRequest(BaseModel):
     image_tag: Optional[str] = None
     dockerfile_path: str = "Dockerfile"
     source_image: Optional[str] = Field(default=None, alias="sourceImage")
-    platform: str = "linux/amd64"
+    platform: Literal["linux/amd64", "linux/arm64"] = "linux/amd64"
     team_id: Optional[str] = Field(default=None, alias="teamId")
     visibility: Optional[ImageVisibility] = None
     owner_scope: Optional[Literal["platform"]] = Field(default=None, alias="ownerScope")
@@ -419,9 +419,6 @@ class BuildImageRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_build(self) -> "BuildImageRequest":
-        if self.platform not in ("linux/amd64", "linux/arm64"):
-            raise ValueError("platform must be linux/amd64 or linux/arm64")
-
         sources = [source.strip() for source in (self.source_image or "").split(",")]
         docker_hub_sources = [
             source for source in sources if source and is_docker_hub_reference(source)

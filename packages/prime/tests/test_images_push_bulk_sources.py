@@ -73,6 +73,7 @@ class FakeTransferAPI:
             build_id = f"build-{self.build_counter}"
             return {
                 "build_id": build_id,
+                "buildIds": [build_id],
                 "fullImagePath": f"user/{json.get('image_name') or 'derived'}",
             }
         if method == "GET" and path.startswith("/images/build/"):

@@ -246,7 +246,7 @@ def test_build_image_request_requires_supported_arch(source_image: str | None):
         source_image=source_image,
         platform="linux/arm64",
     )
-    with pytest.raises(ValueError, match="platform must be linux/amd64 or linux/arm64"):
+    with pytest.raises(ValueError, match="literal_error"):
         BuildImageRequest(
             image_name="app" if source_image is None else None,
             source_image=source_image,

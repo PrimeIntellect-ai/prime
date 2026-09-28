@@ -227,3 +227,77 @@ def test_shell_reports_terminal_session_error(monkeypatch, tmp_path, error_messa
     )
     assert result.exit_code == 1
     assert expected in result.output
+
+
+def _poll_client(monkeypatch, tmp_path, polls, stopped):
+    """A fake client: create returns a DEPLOYING session, then each poll
+    pops the next item from `polls` (an exception to raise or a session)."""
+    key = tmp_path / "key"
+    key.write_text("test")
+    monkeypatch.setattr(volumes.Config, "ssh_key_path", property(lambda self: str(key)))
+    monkeypatch.setattr(volumes.time, "sleep", lambda s: None)
+
+    def get(*a, **kw):
+        item = polls.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    monkeypatch.setattr(
+        volumes,
+        "_client",
+        lambda: (
+            SimpleNamespace(
+                create_volume_session=lambda *a, **kw: SimpleNamespace(
+                    id="s1",
+                    status="DEPLOYING",
+                    read_only=True,
+                    ssh_connection=None,
+                    host_public_key=None,
+                    error_message=None,
+                ),
+                get_volume_session=get,
+                stop_volume_session=lambda name, sid, **kw: stopped.append((name, sid)),
+            ),
+            None,
+        ),
+    )
+    monkeypatch.setattr(volumes.subprocess, "run", lambda cmd, **kw: SimpleNamespace(returncode=0))
+
+
+def test_shell_retries_a_failed_status_poll(monkeypatch, tmp_path):
+    """A single failed poll (network blip, 5xx) is retried, not fatal."""
+    from prime_cli.core import APIError
+
+    running = SimpleNamespace(
+        id="s1",
+        status="RUNNING",
+        read_only=True,
+        ssh_connection="prime@h.corp.ts.net",
+        host_public_key=None,
+        error_message=None,
+    )
+    stopped = []
+    _poll_client(monkeypatch, tmp_path, [APIError("502 Bad Gateway"), running], stopped)
+    result = CliRunner().invoke(
+        app, ["volumes", "ssh", "data"], env={"PRIME_DISABLE_VERSION_CHECK": "1"}
+    )
+    assert result.exit_code == 0, result.output
+    assert stopped == []
+
+
+def test_shell_stops_a_session_it_never_connected_to(monkeypatch, tmp_path):
+    """Polls that keep failing end the command, and the session it just
+    created is stopped instead of being left behind."""
+    from prime_cli.core import APIError
+
+    stopped = []
+    _poll_client(
+        monkeypatch, tmp_path, [APIError("502") for _ in range(volumes._MAX_POLL_ERRORS)], stopped
+    )
+    result = CliRunner().invoke(
+        app, ["volumes", "ssh", "data"], env={"PRIME_DISABLE_VERSION_CHECK": "1"}
+    )
+    assert result.exit_code == 1
+    assert stopped == [("data", "s1")]
+    assert "Stopped session s1" in result.output

@@ -141,6 +141,64 @@ def _pin_known_hosts(session, hostname: str, port: str) -> list[str]:
     ]
 
 
+# Terminal session states: the wait stops polling and reports them.
+_DEAD_SESSION_STATES = (
+    "FAILED",
+    "STOPPED",
+    "COMPLETED",
+    "UNKNOWN",
+    "TERMINATING",
+    "TOMBSTONED",
+)
+# Consecutive failed status polls tolerated before giving up (5s apart).
+_MAX_POLL_ERRORS = 6
+
+
+def _wait_for_connection(client, name: str, session, team_id):
+    """Poll until the session publishes its SSH endpoint. Raises typer.Exit
+    on a dead session, a timeout, or a status API that keeps failing; a
+    single failed poll (network blip, 5xx) is retried.
+
+    Match `prime pods ssh`: poll, then invoke local ssh. The platform fails
+    a session deploy at 5m plus a 2m helm buffer (7m, measured 7m12s); 8
+    minutes leaves margin so a failed deploy surfaces as FAILED, not a
+    timeout.
+    """
+    errors = 0
+    with console.status("Waiting for SSH connection to become available...", spinner="dots"):
+        deadline = time.monotonic() + 480
+        while not session.ssh_connection and time.monotonic() < deadline:
+            if session.status in _DEAD_SESSION_STATES:
+                detail = f": {session.error_message}" if session.error_message else "."
+                console.print(f"[red]Session is {session.status}{escape(detail)}[/red]")
+                raise typer.Exit(1)
+            time.sleep(5)
+            try:
+                session = client.get_volume_session(name, session.id, team_id=team_id)
+                errors = 0
+            except APIError as exc:
+                errors += 1
+                if errors >= _MAX_POLL_ERRORS:
+                    console.print(f"[red]Error:[/red] {escape(str(exc))}")
+                    raise typer.Exit(1) from exc
+    if not session.ssh_connection:
+        console.print("[red]Timed out waiting for SSH.[/red]")
+        raise typer.Exit(1)
+    return session
+
+
+def _stop_quietly(client, name: str, session_id: str, team_id) -> None:
+    """Best-effort stop of a session this command created but never used."""
+    try:
+        client.stop_volume_session(name, session_id, team_id=team_id)
+        console.print(f"Stopped session {session_id}.")
+    except Exception:
+        console.print(
+            f"[yellow]Could not stop session {session_id}; run: "
+            f"prime volumes stop {escape(name)} {session_id}[/yellow]"
+        )
+
+
 @app.command(name="ssh", no_args_is_help=True)
 def ssh(
     name: str = typer.Argument(..., help="Volume name"),
@@ -161,39 +219,22 @@ def ssh(
     client, team_id = _client()
     try:
         session = client.create_volume_session(name, read_only=not read_write, team_id=team_id)
-        console.print(
-            f"Session {session.id} ({'read-only' if session.read_only else 'read-write'})."
-        )
-        console.print(f"Stop later with: prime volumes stop {name} {session.id}")
-        # Match `prime pods ssh`: poll until a connection is published,
-        # then invoke local ssh with the configured key. Bound the wait so
-        # a failed provision does not spin forever; stopping remains an
-        # explicit action (transfers may outlive this shell). The platform
-        # fails a session deploy at 5m plus a 2m helm buffer (7m, measured
-        # 7m12s); 8 minutes leaves margin so a failed deploy surfaces as
-        # FAILED, not a timeout.
-        with console.status("Waiting for SSH connection to become available...", spinner="dots"):
-            deadline = time.monotonic() + 480
-            while not session.ssh_connection and time.monotonic() < deadline:
-                if session.status in (
-                    "FAILED",
-                    "STOPPED",
-                    "COMPLETED",
-                    "UNKNOWN",
-                    "TERMINATING",
-                    "TOMBSTONED",
-                ):
-                    detail = f": {session.error_message}" if session.error_message else "."
-                    console.print(f"[red]Session is {session.status}{escape(detail)}[/red]")
-                    raise typer.Exit(1)
-                time.sleep(5)
-                session = client.get_volume_session(name, session.id, team_id=team_id)
-        if not session.ssh_connection:
-            console.print("[red]Timed out waiting for SSH. Stop the session when done.[/red]")
-            raise typer.Exit(1)
     except APIError as exc:
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(1) from exc
+    console.print(f"Session {session.id} ({'read-only' if session.read_only else 'read-write'}).")
+    console.print(f"Stop later with: prime volumes stop {name} {session.id}")
+    connected = False
+    try:
+        session = _wait_for_connection(client, name, session, team_id)
+        connected = True
+    finally:
+        # Never leave a session behind that this command created but never
+        # connected to (a poll that kept failing, a timeout, Ctrl-C). The
+        # platform's idle watchdog would reap it after 30 minutes anyway;
+        # stopping it here is immediate. Best-effort.
+        if not connected:
+            _stop_quietly(client, name, session.id, team_id)
     console.print(f"[blue]Using SSH key:[/blue] {key}")
     console.print("[dim]To change SSH key path, use: prime config set-ssh-key-path[/dim]")
     match = _CONNECTION.fullmatch(session.ssh_connection)

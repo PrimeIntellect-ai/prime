@@ -202,6 +202,23 @@ class SandboxListResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class SandboxCheckpoint(BaseModel):
+    """A filesystem checkpoint; only DURABLE checkpoints can be restored."""
+
+    id: str
+    sandbox_id: str
+    parent_id: Optional[str] = None
+    team_id: Optional[str] = None
+    state: str
+    depth: int
+    docker_image: str
+    disk_size_bytes: Optional[int] = None
+    stored_bytes: Optional[int] = None
+    error: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+
 class SandboxStatusSnapshot(BaseModel):
     """Lightweight sandbox lifecycle state returned by a batch status lookup."""
 

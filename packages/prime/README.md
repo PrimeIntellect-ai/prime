@@ -198,6 +198,10 @@ prime sandbox list
 # Execute commands
 prime sandbox run <sandbox-id> -- python script.py
 
+# Request a filesystem checkpoint; check again until it is DURABLE
+prime sandbox checkpoint <sandbox-id>
+prime sandbox checkpoint-status <checkpoint-id>
+
 # Upload/download files
 prime sandbox upload <sandbox-id> local_file.py /remote/path/
 prime sandbox download <sandbox-id> /remote/file.txt ./local/
@@ -282,6 +286,10 @@ sandbox_client.wait_for_creation(sandbox.id)
 # Execute commands
 result = sandbox_client.execute_command(sandbox.id, "python --version")
 print(result.stdout)
+
+# Request a filesystem checkpoint; poll get_checkpoint until state is DURABLE
+checkpoint = sandbox_client.checkpoint(sandbox.id)
+checkpoint = sandbox_client.get_checkpoint(checkpoint.id)
 
 # Clean up
 sandbox_client.delete(sandbox.id)

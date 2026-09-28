@@ -56,6 +56,10 @@ vm = sandbox_client.create(CreateSandboxRequest(
 
 sandbox_client.wait_for_creation(sandbox.id)
 
+# Checkpoints are asynchronous; poll until state is DURABLE before restoring.
+checkpoint = sandbox_client.checkpoint(sandbox.id)
+checkpoint = sandbox_client.get_checkpoint(checkpoint.id)
+
 # Execute commands
 result = sandbox_client.execute_command(sandbox.id, "python --version")
 print(result.stdout)

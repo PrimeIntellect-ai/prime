@@ -7,10 +7,45 @@ import pytest
 from prime_cli.commands.sandbox import _format_sandbox_expiry
 from prime_cli.main import app
 from prime_cli.utils import strip_ansi
-from prime_sandboxes import StartCommand
+from prime_sandboxes import SandboxCheckpoint, StartCommand
 from typer.testing import CliRunner
 
 runner = CliRunner()
+
+
+def test_checkpoint_command_and_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_cli(monkeypatch)
+    checkpoint = SandboxCheckpoint(
+        id="checkpoint-1",
+        sandbox_id="sandbox-1",
+        state="PENDING",
+        depth=1,
+        docker_image="python:3.11-slim",
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+
+    def create(self: Any, sandbox_id: str) -> SandboxCheckpoint:
+        assert sandbox_id == "sandbox-1"
+        return checkpoint
+
+    def status(self: Any, checkpoint_id: str) -> SandboxCheckpoint:
+        assert checkpoint_id == "checkpoint-1"
+        return checkpoint.model_copy(update={"state": "DURABLE"})
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.checkpoint", create)
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.get_checkpoint", status)
+
+    created = runner.invoke(app, ["sandbox", "checkpoint", "sandbox-1"])
+    assert created.exit_code == 0, created.output
+    assert "checkpoint-1" in created.output
+    assert "checkpoint-status" in created.output
+
+    durable = runner.invoke(
+        app, ["sandbox", "checkpoint-status", "checkpoint-1", "--output", "json"]
+    )
+    assert durable.exit_code == 0, durable.output
+    assert json.loads(durable.output)["state"] == "DURABLE"
 
 
 def _fake_sandbox(**overrides: Any) -> SimpleNamespace:

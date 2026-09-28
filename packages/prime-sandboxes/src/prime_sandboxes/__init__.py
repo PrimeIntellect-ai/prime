@@ -58,6 +58,7 @@ from .models import (
     PlatformImageOwner,
     ReadFileResponse,
     Sandbox,
+    SandboxCheckpoint,
     SandboxEgressPolicy,
     SandboxListResponse,
     SandboxStatus,
@@ -91,6 +92,7 @@ __all__ = [
     "AsyncImageClient",
     # Models
     "Sandbox",
+    "SandboxCheckpoint",
     "SandboxEgressPolicy",
     "SandboxStatus",
     "SandboxListResponse",

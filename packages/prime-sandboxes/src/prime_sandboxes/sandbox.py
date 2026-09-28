@@ -78,6 +78,7 @@ from .models import (
     FileUploadResponse,
     ReadFileResponse,
     Sandbox,
+    SandboxCheckpoint,
     SandboxListResponse,
     SandboxLogsResponse,
     SandboxStatusSnapshot,
@@ -2310,6 +2311,16 @@ class SandboxClient:
         response = self.client.request("GET", f"/sandbox/{sandbox_id}")
         return Sandbox.model_validate(response)
 
+    def checkpoint(self, sandbox_id: str) -> SandboxCheckpoint:
+        """Request a filesystem checkpoint; poll get_checkpoint until DURABLE."""
+        response = self.client.request("POST", f"/sandbox/{sandbox_id}/checkpoints")
+        return SandboxCheckpoint.model_validate(response)
+
+    def get_checkpoint(self, checkpoint_id: str) -> SandboxCheckpoint:
+        """Get the latest state of a filesystem checkpoint."""
+        response = self.client.request("GET", f"/sandbox/checkpoints/{checkpoint_id}")
+        return SandboxCheckpoint.model_validate(response)
+
     def get_sandbox_statuses(self, sandbox_ids: List[str]) -> BatchSandboxStatusResponse:
         """Get lightweight lifecycle state for up to 100 sandboxes."""
         _validate_unique_batch_values(sandbox_ids, "sandbox_ids")
@@ -3694,6 +3705,16 @@ class AsyncSandboxClient:
         """Get a specific sandbox"""
         response = await self.client.request("GET", f"/sandbox/{sandbox_id}")
         return Sandbox.model_validate(response)
+
+    async def checkpoint(self, sandbox_id: str) -> SandboxCheckpoint:
+        """Request a filesystem checkpoint; poll get_checkpoint until DURABLE."""
+        response = await self.client.request("POST", f"/sandbox/{sandbox_id}/checkpoints")
+        return SandboxCheckpoint.model_validate(response)
+
+    async def get_checkpoint(self, checkpoint_id: str) -> SandboxCheckpoint:
+        """Get the latest state of a filesystem checkpoint."""
+        response = await self.client.request("GET", f"/sandbox/checkpoints/{checkpoint_id}")
+        return SandboxCheckpoint.model_validate(response)
 
     async def get_sandbox_statuses(self, sandbox_ids: List[str]) -> BatchSandboxStatusResponse:
         """Get lightweight lifecycle state for up to 100 sandboxes."""

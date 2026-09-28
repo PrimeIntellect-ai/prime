@@ -24,6 +24,7 @@ from prime_sandboxes import (
     EgressPolicyStatus,
     PaymentRequiredError,
     Sandbox,
+    SandboxCheckpoint,
     SandboxClient,
     SandboxNotRunningError,
     StartCommand,
@@ -463,6 +464,48 @@ def get(
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         console.print_exception(show_locals=True)
         raise typer.Exit(1)
+
+
+def _print_checkpoint(checkpoint: SandboxCheckpoint, output: str) -> None:
+    if output == "json":
+        output_data_as_json(checkpoint.model_dump(mode="json"), console)
+        return
+    console.print(f"Checkpoint ID: [cyan]{escape(checkpoint.id)}[/cyan]")
+    console.print(f"State: {escape(checkpoint.state)}")
+    if checkpoint.error:
+        console.print(f"Error: {escape(checkpoint.error)}")
+    elif checkpoint.state != "DURABLE":
+        console.print("Restorable once DURABLE. Check with 'prime sandbox checkpoint-status <id>'.")
+
+
+@app.command("checkpoint")
+def checkpoint(
+    sandbox_id: str,
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """Request a filesystem checkpoint of a running sandbox."""
+    validate_output_format(output, console)
+    try:
+        result = SandboxClient(APIClient()).checkpoint(sandbox_id)
+        _print_checkpoint(result, output)
+    except APIError as exc:
+        console.print(f"[red]Error:[/red] {escape(str(exc))}")
+        raise typer.Exit(1) from exc
+
+
+@app.command("checkpoint-status")
+def checkpoint_status(
+    checkpoint_id: str,
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """Check whether a filesystem checkpoint is durable."""
+    validate_output_format(output, console)
+    try:
+        result = SandboxClient(APIClient()).get_checkpoint(checkpoint_id)
+        _print_checkpoint(result, output)
+    except APIError as exc:
+        console.print(f"[red]Error:[/red] {escape(str(exc))}")
+        raise typer.Exit(1) from exc
 
 
 @app.command(cls=_SandboxCreateCommand)

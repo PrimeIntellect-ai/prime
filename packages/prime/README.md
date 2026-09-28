@@ -226,28 +226,20 @@ prime pods list
 
 ### Per-Directory Team and Account
 
-Team and account selection is global by default. To use a different one inside a
-repository (for example, one repo per customer), pin it to that directory:
+Pin a team or saved context to a directory (e.g. one repo per customer):
 
 ```bash
-cd ~/code/edison
-prime switch edison --local          # this directory (and subdirectories) use team "edison"
-prime config use customer --local    # or: use a saved context (own API key, team, URLs)
-prime config view                    # "Directory Context" shows the file in effect
-prime config unpin                   # back to the global selection
+prime switch edison --local          # this directory and below use team "edison"
+prime config use customer --local    # or a saved context (own login, team, URLs)
+prime config unpin                   # back to global
 ```
 
-The pin lives in `.prime/context.json`: the nearest one at or above the working
-directory applies to the CLI and to the `prime-sandboxes`, `prime-evals`,
-`prime-tunnel` and `prime-traces` SDKs. It only names a team and/or a saved context,
-never an API key; credentials stay in `~/.prime`. Inside a pinned directory,
-`prime switch` and `prime config use` update the pin (pass `--global` to change
-the global selection instead), and `prime login` / `logout` act on the pinned
-context. A context comes from `prime config save <name>`, so one repo can use a
-separate login: save a context, pin it, then run `prime login` there.
+This writes `.prime/context.json`, which the CLI and SDKs read from the nearest
+parent directory. It holds no credentials. Inside a pinned directory, `prime switch`
+and `prime config use` update the pin (`--global` to bypass it), and `prime login`
+logs in to the pinned context.
 
-Precedence, highest first: `PRIME_*` environment variables, `--context` /
-`PRIME_CONTEXT`, `.prime/context.json`, `~/.prime/config.json`.
+Precedence: `PRIME_*` env vars > `--context` > `.prime/context.json` > `~/.prime/config.json`.
 
 ## Configuration
 

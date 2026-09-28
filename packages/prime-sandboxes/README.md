@@ -115,7 +115,6 @@ images. They do not return upload metadata. A single source returns `build_id`
 and `build_ids`. Comma-separated sources return `BulkBuildImageResponse` with
 ordered `results`: each entry has `source_image`, `build` (a `BuildImageResponse`
 or `None`), `error`, and `retryable`. There are no `success` or `failed` fields.
-The SDK also accepts the old flat bulk response during rollout.
 
 The server uses mixed wire casing: `build_id`, `upload_url`, and `expires_in`,
 but `buildIds`, `fullImagePath`, and `sourceImage`. SDK attributes use snake_case.
@@ -287,8 +286,8 @@ while True:
 sandbox_client.download_file(sandbox.id, "/app/model.pt", "./model.pt")
 ```
 
-`get_background_jobs` is VM-only. Container sandboxes retain the existing
-`get_background_job` polling behavior. Once an exit code is observed, completion
+Status lookups are batched; gateways without the batch endpoint fall back to
+per-job polling. Once an exit code is observed, completion
 remains authoritative even if output retrieval exhausts its bounded retry
 deadline: the unavailable stream is `None` and its `stdout_error` or
 `stderr_error` field describes the retrieval failure.

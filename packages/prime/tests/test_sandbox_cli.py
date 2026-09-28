@@ -512,7 +512,7 @@ def test_sandbox_create_omitted_image_preserves_command_argv(
 def test_sandbox_create_defaults_to_vm_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Without --vm/--container the CLI resolves the runtime to VM."""
+    """Without --vm the CLI resolves the runtime to VM."""
     _configure_cli(monkeypatch)
     captured: dict[str, Any] = {}
 

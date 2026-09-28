@@ -333,6 +333,9 @@ def _parse_hosted_eval_args(
             + ", ".join(f"`{flag}`" for flag in unsupported_flags)
         )
         raise typer.Exit(1)
+    if unknown:
+        console.print(f"[red]Error:[/red] unrecognized arguments: {' '.join(unknown)}")
+        raise typer.Exit(2)
 
     provided_dests = {dest for dest in vars(explicit) if dest != "env_id_or_config"}
     return parsed, provided_dests

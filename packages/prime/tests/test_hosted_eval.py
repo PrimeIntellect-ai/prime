@@ -1321,6 +1321,21 @@ def test_eval_run_hosted_rejects_unsupported_passthrough_flags(extra_args, expec
     assert f"`{expected_flag}`" in result.output
 
 
+@pytest.mark.parametrize(
+    "extra_args",
+    [["owner/b"], ["owner/b", "-n", "2"], ["-n", "2", "owner/b"]],
+)
+def test_eval_run_hosted_rejects_extra_positional_arguments(extra_args):
+    result = runner.invoke(
+        app,
+        ["eval", "run", "owner/a", "--hosted", *extra_args],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 2
+    assert "unrecognized arguments: owner/b" in result.output
+
+
 def test_eval_run_hosted_accepts_negative_num_examples_value(monkeypatch):
     captured = {}
 

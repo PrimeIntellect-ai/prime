@@ -173,6 +173,17 @@ def test_push_bulk_help_documents_source_contract():
     assert "platform images" in result.output
 
 
+def test_push_source_arm_alias_sends_arm64_platform(fake_api, monkeypatch):
+    monkeypatch.setattr("prime_cli.commands.images.APIClient", lambda: fake_api)
+    result = runner.invoke(
+        app,
+        ["images", "push", "--source-image", "ghcr.io/org/app:v1", "--arch", "arm"],
+        env=TEST_ENV,
+    )
+    assert result.exit_code == 0, result.output
+    assert fake_api.payloads[0]["platform"] == "linux/arm64"
+
+
 def test_transfer_bulk_command_is_gone():
     result = runner.invoke(app, ["images", "transfer-bulk", "--help"], env=TEST_ENV)
 

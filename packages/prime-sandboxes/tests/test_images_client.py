@@ -240,12 +240,17 @@ def test_image_client_dockerfile_build_requires_upload_metadata(response: dict[s
 
 
 @pytest.mark.parametrize("source_image", [None, "ubuntu:22.04", "ghcr.io/org/app:v1"])
-def test_build_image_request_requires_amd64(source_image: str | None):
-    with pytest.raises(ValueError, match="platform must be linux/amd64"):
+def test_build_image_request_requires_supported_arch(source_image: str | None):
+    BuildImageRequest(
+        image_name="app" if source_image is None else None,
+        source_image=source_image,
+        platform="linux/arm64",
+    )
+    with pytest.raises(ValueError, match="platform must be linux/amd64 or linux/arm64"):
         BuildImageRequest(
             image_name="app" if source_image is None else None,
             source_image=source_image,
-            platform="linux/arm64",
+            platform="linux/s390x",
         )
 
 

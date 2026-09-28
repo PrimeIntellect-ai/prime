@@ -489,6 +489,9 @@ def create(
     memory_gb: float = typer.Option(1.0, help="Memory in GB"),
     disk_size_gb: float = typer.Option(5.0, help="Disk size in GB"),
     gpu_count: int = typer.Option(0, help="Number of GPUs"),
+    arch: str = typer.Option(
+        "amd64", "--arch", help="VM architecture: amd64, arm64, or arm (alias)"
+    ),
     gpu_type: Optional[str] = typer.Option(
         None,
         "--gpu-type",
@@ -582,6 +585,12 @@ def create(
             )
             raise typer.Exit(1)
 
+        if arch == "arm":
+            arch = "arm64"
+        if arch not in ("amd64", "arm64"):
+            console.print("[red]Error: --arch must be amd64, arm64, or arm[/red]")
+            raise typer.Exit(1)
+
         if gpu_count == 0 and gpu_type:
             console.print(
                 "[red]GPU type provided without GPUs.[/red] "
@@ -650,6 +659,7 @@ def create(
         request = CreateSandboxRequest(
             name=name,
             docker_image=docker_image,
+            arch="arm64" if arch == "arm64" else "amd64",
             start_command=resolved_start_command,
             cpu_cores=cpu_cores,
             memory_gb=memory_gb,
@@ -671,6 +681,7 @@ def create(
         console.print("\n[bold]Sandbox Configuration:[/bold]")
         console.print(f"Name: {name}")
         console.print(f"Docker Image: {docker_image}")
+        console.print(f"Architecture: {arch}")
         console.print(f"Start Command: {_format_start_command(resolved_start_command)}")
         console.print(f"Resources: {cpu_cores} CPU, {memory_gb}GB RAM, {disk_size_gb}GB disk")
         runtime_label = "VM (default)" if runtime_defaulted else "VM"

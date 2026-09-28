@@ -35,6 +35,7 @@ API_KEYS_DOCS_URL = "https://docs.primeintellect.ai/api-reference/api-keys"
 
 def _print_inference_usage(base_model: str, adapter_id: str) -> None:
     model_id = f"{base_model}:{adapter_id}"
+    inference_url = Config().inference_url
     console.print("\n[bold]Once deployed, you can run inference with:[/bold]")
     console.print(f'[dim]prime inference chat "{model_id}" "Hello" --max-tokens 100[/dim]')
     console.print(
@@ -45,7 +46,7 @@ def _print_inference_usage(base_model: str, adapter_id: str) -> None:
         f"""
 [dim]export PRIME_API_KEY=<insert_key_here>
 
-curl -X POST https://api.pinference.ai/api/v1/chat/completions \\
+curl -X POST {inference_url}/chat/completions \\
   -H "Content-Type: application/json" \\
   -H "Authorization: Bearer $PRIME_API_KEY" \\
   -d '{{
@@ -115,7 +116,9 @@ def list_deployments(
         try:
             deployable_models = deployments_client.get_deployable_models()
         except APIError:
-            console.print("[dim]Warning: Could not fetch deployable models list.[/dim]")
+            # Keep stdout parseable in JSON mode.
+            warn_console = get_console(stderr=True) if output == "json" else console
+            warn_console.print("[dim]Warning: Could not fetch deployable models list.[/dim]")
 
         if output == "json":
             models_data = []

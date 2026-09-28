@@ -133,6 +133,56 @@ prime train metrics <run-id>
 prime train checkpoints <run-id>
 ```
 
+### Volumes: staged SFT datasets and run outputs
+
+`prime volumes` manages named volumes (PVCs) in your team's or personal
+namespace. Hosted full-FT runs write their outputs under `runs/<runId>/` on a
+volume, and hosted SFT runs read staged datasets from it.
+
+```bash
+# Create a volume (closed beta)
+prime volumes create research
+
+# Stage an HF dataset repository onto it (downloads run in a short-lived
+# CPU pod on the volume's cluster, then verify offline in a fresh process)
+prime volumes stage PrimeIntellect/INTELLECT-3-SFT-10K --volume research
+
+# Private/gated datasets: pass a token (forwarded via a pod-owned Secret)
+prime volumes stage org/private-dataset --volume research --env-file hf.env
+
+# Point your SFT config at the staged data, then train
+#   [data]
+#   type = "sft"
+#   name = "/datasets/intellect-3-sft-10k"
+#   splits = ["math"]        # a split from the list printed above
+prime train sft.toml --volume research
+
+# Manage volumes
+prime volumes list
+prime volumes resize research --size 2Ti
+prime volumes delete research
+```
+
+Prerequisites and limits:
+
+- Staging requires `kubectl` and a kubeconfig whose context is authorized
+  for the volume's namespace: create/get/delete pods, read pod logs, read
+  the PVC, and create/delete Secrets for private datasets. Namespace access
+  is separate from your Prime API key. `--kube-context` picks the context;
+  volume metadata has no automatic cluster-to-context mapping.
+- HF auth: `HF_TOKEN` via `-e/--env-var` (highest precedence), `--env-file`,
+  or the process environment. Only `HF_TOKEN` is forwarded; gated datasets
+  need accepted terms.
+- `--path` sets the directory name under `datasets/` (default: the repository
+  basename, kept exactly).
+- Staged datasets are immutable: re-staging the same revision is idempotent
+  ("already staged"); changed upstream content requires a new `--path`.
+  Existing data is never overwritten or merged.
+- Supported sources: data-only HF dataset repositories (Parquet/JSON/JSONL).
+  Loading scripts, `save_to_disk` caches, and external-file references fail
+  closed. Local laptop uploads are deferred in v1 - publish a dataset
+  repository first.
+
 ### Environments Hub
 
 Access hundreds of RL environments on our community hub with deep integrations with sandboxes, training, and evaluation stack.

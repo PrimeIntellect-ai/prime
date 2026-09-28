@@ -1434,10 +1434,11 @@ def create_run(
         None,
         "--volume",
         help=(
-            "Named volume to write the run's outputs to, under runs/<runId>/ "
-            "(full-FT only; closed beta, see `prime volumes`). Falls back "
-            'to a top-level `volume = "..."` in the TOML. Created on the fly '
-            "(default 1Ti) if it doesn't exist."
+            "Named volume: outputs land under runs/<runId>/ on it, and for "
+            "hosted SFT the staged dataset named by [data] name = "
+            '"/datasets/<name>" is read from it (stage with `prime volumes '
+            "stage`). Full-FT only; closed beta, see `prime volumes`. Falls "
+            'back to a top-level `volume = "..."` in the TOML.'
         ),
     ),
     volume_size: Optional[str] = typer.Option(

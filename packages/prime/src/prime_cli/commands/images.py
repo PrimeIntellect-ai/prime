@@ -489,15 +489,11 @@ def push_image(
 
             if isinstance(response, BulkBuildImageResponse):
                 builds = [result.build for result in response.results if result.build is not None]
-                build_ids = [
-                    build_id
-                    for build in builds
-                    for build_id in (build.build_ids or [build.build_id])
-                ]
+                build_ids = [build_id for build in builds for build_id in build.build_ids]
                 failed_results = [result for result in response.results if result.build is None]
                 image_path = builds[0].full_image_path if len(builds) == 1 else None
             else:
-                build_ids = response.build_ids or [response.build_id]
+                build_ids = list(response.build_ids)
                 failed_results = []
                 image_path = response.full_image_path
 

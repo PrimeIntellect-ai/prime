@@ -4,7 +4,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationInfo, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, model_validator
 
 from .image_references import is_docker_hub_reference
 
@@ -449,12 +449,8 @@ class BuildImageRequest(BaseModel):
 
 class BuildImageResponse(BaseModel):
     # Server quirk: build_id/upload_url/expires_in stay snake_case on the wire;
-    # buildIds/fullImagePath use camelCase. buildId is accepted for older backends.
-    build_id: str = Field(
-        ...,
-        alias="build_id",
-        validation_alias=AliasChoices("build_id", "buildId"),
-    )
+    # buildIds/fullImagePath use camelCase.
+    build_id: str
     build_ids: List[str] = Field(default_factory=list, alias="buildIds")
     upload_url: Optional[str] = None
     expires_in: Optional[int] = None
@@ -481,18 +477,6 @@ class SourceImageBuildResult(BaseModel):
     retryable: bool = False
 
     model_config = ConfigDict(populate_by_name=True)
-
-    @model_validator(mode="before")
-    @classmethod
-    def accept_legacy_result(cls, value: Any) -> Any:
-        # Accept old backends during the CLI-first rollout; emit only the new shape.
-        # TODO: remove after the platform backend deploy lands.
-        if isinstance(value, dict) and "build" not in value and "success" in value:
-            value = {
-                **value,
-                "build": value if value["success"] else None,
-            }
-        return value
 
 
 class BulkBuildImageResponse(BaseModel):

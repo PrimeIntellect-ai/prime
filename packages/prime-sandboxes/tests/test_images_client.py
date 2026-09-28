@@ -371,25 +371,21 @@ def test_image_client_transfer_image_accepts_bulk_transfer_response():
                 "results": [
                     {
                         "sourceImage": "ubuntu:22.04",
-                        "success": True,
-                        "buildId": "build-123",
-                        "fullImagePath": "prime/research/ubuntu:22.04",
-                        "visibility": "PRIVATE",
+                        "build": {
+                            "build_id": "build-123",
+                            "buildIds": ["build-123"],
+                            "fullImagePath": "prime/research/ubuntu:22.04",
+                            "visibility": "PRIVATE",
+                        },
+                        "error": None,
+                        "retryable": False,
                     },
                     {
                         "sourceImage": "missing:notfound",
-                        "success": False,
+                        "build": None,
                         "error": "source image not found",
                         "retryable": False,
                     },
-                ],
-                "failed": [
-                    {
-                        "sourceImage": "missing:notfound",
-                        "success": False,
-                        "error": "source image not found",
-                        "retryable": False,
-                    }
                 ],
             }
         )
@@ -665,8 +661,7 @@ def test_async_image_client_update_images():
 
 
 @pytest.mark.parametrize("async_client", [False, True])
-@pytest.mark.parametrize("legacy", [False, True])
-def test_source_build_wire_contract(async_client, legacy):
+def test_source_build_wire_contract(async_client):
     build = {
         "build_id": "build-123",
         "buildIds": ["build-123"],
@@ -682,19 +677,7 @@ def test_source_build_wire_contract(async_client, legacy):
         "error": "source unavailable",
         "retryable": True,
     }
-    if legacy:
-        success = {
-            "sourceImage": "ubuntu:22.04",
-            "success": True,
-            "buildId": "build-123",
-            "fullImagePath": "ubuntu:22.04",
-            "visibility": "PUBLIC",
-        }
-        failure = {key: value for key, value in failure.items() if key != "build"}
-        failure["success"] = False
     wire = {"results": [success, failure]}
-    if legacy:
-        wire["failed"] = [failure]
     captured = {}
     if async_client:
         response = asyncio.run(

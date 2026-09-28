@@ -48,10 +48,6 @@ class FakeTransferAPI:
         self.default_poll = ["COMPLETED"]
         # Exceptions raised (FIFO) by POST /images/build before any source build is queued.
         self.build_error_queue = []
-        # Respond with the per-source results shape instead of a top-level build_id.
-        self.respond_bulk_shape = False
-        self.bulk_entry_error = None
-        self.bulk_results_count = 1
 
     def request(self, method, path, json=None, params=None):
         self.calls.append((method, path))
@@ -72,26 +68,9 @@ class FakeTransferAPI:
                     "expires_in": 3600,
                     "fullImagePath": f"user/{json['image_name']}",
                 }
-            if self.respond_bulk_shape and self.bulk_entry_error is not None:
-                entry = {
-                    "sourceImage": json["source_image"],
-                    "build": None,
-                    "error": self.bulk_entry_error,
-                    "retryable": False,
-                }
-                return {"results": [entry]}
             self.payloads.append(json)
             self.build_counter += 1
             build_id = f"build-{self.build_counter}"
-            if self.respond_bulk_shape:
-                entry = {
-                    "sourceImage": json["source_image"],
-                    "build": {
-                        "build_id": build_id,
-                        "fullImagePath": f"user/{json.get('image_name') or 'derived'}",
-                    },
-                }
-                return {"results": [entry] * self.bulk_results_count}
             return {
                 "build_id": build_id,
                 "fullImagePath": f"user/{json.get('image_name') or 'derived'}",
@@ -661,18 +640,6 @@ def test_rate_limited_submit_defers_and_retries(tmp_path, fake_api):
     assert fake_api.post_build_count() == 3
 
 
-def test_bulk_shape_response_is_unwrapped(tmp_path, fake_api):
-    fake_api.respond_bulk_shape = True
-    manifest = tmp_path / "transfers.jsonl"
-    _write_manifest(manifest, [{"source": "a/app-a:v1"}, {"source": "b/app-b:v1"}])
-    result = runner.invoke(app, ["images", "push-bulk", "--manifest", str(manifest)], env=TEST_ENV)
-    assert result.exit_code == 0, result.output
-    assert "All images pushed successfully" in result.output
-    # The build ids from the unwrapped entries are what gets polled.
-    assert ("GET", "/images/build/build-1") in fake_api.calls
-    assert ("GET", "/images/build/build-2") in fake_api.calls
-
-
 def test_comma_separated_sources_rejected_in_manifest_and_hf(tmp_path, fake_api, monkeypatch):
     manifest = tmp_path / "transfers.jsonl"
     _write_manifest(manifest, [{"source": "a/app:v1,b/app:v2"}])
@@ -696,27 +663,6 @@ def test_comma_separated_sources_rejected_in_manifest_and_hf(tmp_path, fake_api,
     assert "row 0" in result.output
     assert "commas" in result.output
     assert fake_api.post_build_count() == 0
-
-
-def test_bulk_shape_multi_entry_response_fails_loudly(tmp_path, fake_api):
-    fake_api.respond_bulk_shape = True
-    fake_api.bulk_results_count = 2
-    manifest = tmp_path / "transfers.jsonl"
-    _write_manifest(manifest, [{"source": "a/app-a:v1"}])
-    result = runner.invoke(app, ["images", "push-bulk", "--manifest", str(manifest)], env=TEST_ENV)
-    assert result.exit_code == 1
-    assert "SUBMIT_FAILED" in result.output
-
-
-def test_bulk_shape_failed_entry_records_submit_failed(tmp_path, fake_api):
-    fake_api.respond_bulk_shape = True
-    fake_api.bulk_entry_error = "Invalid source image: nope"
-    manifest = tmp_path / "transfers.jsonl"
-    _write_manifest(manifest, [{"source": "a/app-a:v1"}])
-    result = runner.invoke(app, ["images", "push-bulk", "--manifest", str(manifest)], env=TEST_ENV)
-    assert result.exit_code == 1
-    assert "0/1 builds completed" in result.output
-    assert "Invalid source image: nope" in result.output
 
 
 def test_persistent_rate_limit_gives_up_instead_of_pacing_forever(tmp_path, fake_api, monkeypatch):

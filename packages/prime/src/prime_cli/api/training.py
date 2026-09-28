@@ -91,6 +91,8 @@ class VolumeSession(BaseModel):
     ssh_connection: Optional[str] = Field(None, alias="sshConnection")
     # The session pod's sshd host public key, for scoped known_hosts pinning.
     host_public_key: Optional[str] = Field(None, alias="hostPublicKey")
+    # Why the session failed (FAILED/TOMBSTONED only).
+    error_message: Optional[str] = Field(None, alias="errorMessage")
 
     model_config = ConfigDict(populate_by_name=True)
 

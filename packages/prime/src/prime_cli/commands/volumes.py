@@ -13,6 +13,7 @@ import tempfile
 import time
 
 import typer
+from rich.markup import escape
 from rich.table import Table
 
 from prime_cli.api.training import HostedTrainingClient
@@ -182,7 +183,8 @@ def ssh(
                     "TERMINATING",
                     "TOMBSTONED",
                 ):
-                    console.print(f"[red]Session is {session.status}.[/red]")
+                    detail = f": {session.error_message}" if session.error_message else "."
+                    console.print(f"[red]Session is {session.status}{escape(detail)}[/red]")
                     raise typer.Exit(1)
                 time.sleep(5)
                 session = client.get_volume_session(name, session.id, team_id=team_id)

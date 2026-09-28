@@ -188,3 +188,31 @@ def test_shell_without_host_key_uses_user_known_hosts(monkeypatch, tmp_path):
     assert result.exit_code == 0, result.output
     assert not any("UserKnownHostsFile" in c for c in commands[0])
     assert "Using SSH key" in result.output
+
+
+@pytest.mark.parametrize(
+    "error_message,expected",
+    [("pod crashed [x]", "Session is FAILED: pod crashed [x]"), (None, "Session is FAILED.")],
+)
+def test_shell_reports_terminal_session_error(monkeypatch, tmp_path, error_message, expected):
+    key = tmp_path / "key"
+    key.write_text("test")
+    monkeypatch.setattr(volumes.Config, "ssh_key_path", property(lambda self: str(key)))
+    session = SimpleNamespace(
+        id="s1",
+        status="FAILED",
+        read_only=True,
+        ssh_connection=None,
+        host_public_key=None,
+        error_message=error_message,
+    )
+    monkeypatch.setattr(
+        volumes,
+        "_client",
+        lambda: (SimpleNamespace(create_volume_session=lambda *a, **kw: session), None),
+    )
+    result = CliRunner().invoke(
+        app, ["volumes", "ssh", "data"], env={"PRIME_DISABLE_VERSION_CHECK": "1", "COLUMNS": "200"}
+    )
+    assert result.exit_code == 1
+    assert expected in result.output

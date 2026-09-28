@@ -3520,6 +3520,9 @@ def get_dashboard_url(
 
         open $(prime train dashboard <run_id>)
     """
+    # Errors go to stderr so stdout stays strictly the URL and safe for
+    # command substitution (`open $(prime train dashboard ...)`).
+    err_console = get_console(stderr=True)
     try:
         api_client = APIClient()
         rl_client = RLClient(api_client)
@@ -3527,13 +3530,15 @@ def get_dashboard_url(
         url = rl_client.get_dashboard_url(run_id)
 
         if not url:
-            console.print(f"[red]Error:[/red] No dashboard available for run {run_id}")
+            err_console.print(f"[red]Error:[/red] No dashboard available for run {run_id}")
             raise typer.Exit(1)
 
-        console.print(url)
+        # Machine-consumable URL: soft_wrap=True disables terminal-width
+        # wrapping so long URLs stay on one line (mirrors output_data_as_json).
+        console.print(url, markup=False, highlight=False, soft_wrap=True)
 
     except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        err_console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
 
 

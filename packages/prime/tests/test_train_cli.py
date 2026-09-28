@@ -788,9 +788,30 @@ def test_train_dashboard_prints_url_and_exits_zero(monkeypatch) -> None:
     )
 
     assert result.exit_code == 0, result.output
-    assert "https://platform.example.com/rft/dashboard/run-1" in result.stdout
+    assert result.stdout.strip() == "https://platform.example.com/rft/dashboard/run-1"
+    assert result.stderr == ""
     assert captured["method"] == "GET"
     assert captured["endpoint"] == "/rft/runs/run-1/dashboard_url"
+
+
+def test_train_dashboard_long_url_is_not_wrapped(monkeypatch) -> None:
+    # Rich wraps stdout at ~80 columns in non-TTY mode; the URL must stay on
+    # one line so `open $(prime train dashboard ...)` gets a single argument.
+    long_url = "https://platform.example.com/rft/dashboard/" + "x" * 120
+
+    def mock_request(self, method, endpoint, params=None, json=None, timeout=None):
+        return {"url": long_url}
+
+    monkeypatch.setattr("prime_cli.core.client.APIClient.request", mock_request)
+
+    result = runner.invoke(
+        app,
+        ["train", "dashboard", "run-1"],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == long_url + "\n"
 
 
 def test_train_dashboard_exits_nonzero_without_url(monkeypatch) -> None:
@@ -806,7 +827,8 @@ def test_train_dashboard_exits_nonzero_without_url(monkeypatch) -> None:
     )
 
     assert result.exit_code == 1
-    assert "No dashboard available for run run-1" in result.output
+    assert "No dashboard available for run run-1" in result.stderr
+    assert result.stdout == ""
 
 
 def test_train_dashboard_exits_nonzero_on_api_error(monkeypatch) -> None:
@@ -824,6 +846,6 @@ def test_train_dashboard_exits_nonzero_on_api_error(monkeypatch) -> None:
     )
 
     assert result.exit_code == 1
-    assert "Error:" in result.output
-    assert "404: run not found" in result.output
-
+    assert "Error:" in result.stderr
+    assert "404: run not found" in result.stderr
+    assert result.stdout == ""

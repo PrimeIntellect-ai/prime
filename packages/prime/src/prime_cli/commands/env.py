@@ -2475,13 +2475,17 @@ def install(
             for env_id, version in installed_envs:
                 console.print(f"[green]✓ {env_id}@{version}[/green]")
 
-        if install_failed_envs:
+        # Environments that could not be resolved or built count as failed too.
+        all_failed_envs = failed_envs + install_failed_envs
+        if all_failed_envs:
             console.print(
-                f"\n[bold]Failed to install {len(install_failed_envs)} "
-                f"environment{'s' if len(install_failed_envs) != 1 else ''}:[/bold]"
+                f"\n[bold]Failed to install {len(all_failed_envs)} "
+                f"environment{'s' if len(all_failed_envs) != 1 else ''}:[/bold]"
             )
-            for env_id, reason in install_failed_envs:
+            for env_id, reason in all_failed_envs:
                 console.print(f"[red]✗ {env_id} - {reason}")
+            # Scripts and runners rely on the exit code to stop before using the env.
+            raise typer.Exit(1)
 
     except typer.Exit:
         raise

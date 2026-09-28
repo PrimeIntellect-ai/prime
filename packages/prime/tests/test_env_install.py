@@ -138,3 +138,68 @@ def test_info_displays_scoped_install_index(monkeypatch):
     output = "".join(result.output.split())
     assert SCOPED_INDEX_URL in output
     assert INDEX_URL not in output
+
+
+def _hub_install_setup(monkeypatch, execute):
+    client = Mock()
+    client.get.return_value = {
+        "data": {
+            "wheel_url": WHEEL_URL,
+            "install_index_url": SCOPED_INDEX_URL,
+            "visibility": "PUBLIC",
+        }
+    }
+    monkeypatch.setattr(env, "APIClient", lambda **kwargs: client)
+    monkeypatch.setattr(env, "load_verifiers_prime_plugin", lambda **kwargs: None)
+    monkeypatch.setattr(env.shutil, "which", lambda tool: f"/bin/{tool}")
+    monkeypatch.setattr(env, "execute_install_command", execute)
+    return client
+
+
+def test_install_exits_nonzero_when_the_install_fails(monkeypatch):
+    # e.g. pip's ResolutionImpossible under a PIP_CONSTRAINT
+    execute = Mock(side_effect=RuntimeError("Installation failed with exit code 1"))
+    _hub_install_setup(monkeypatch, execute)
+
+    result = CliRunner().invoke(env.app, ["install", "primeintellect/deep-swe", "--with", "pip"])
+
+    assert result.exit_code == 1, result.output
+    assert "Failed to install 1 environment" in result.output
+    assert "Installation failed with exit code 1" in result.output
+
+
+def test_install_exits_nonzero_when_any_of_several_installs_fails(monkeypatch):
+    execute = Mock(side_effect=[None, RuntimeError("Installation failed with exit code 1")])
+    _hub_install_setup(monkeypatch, execute)
+
+    result = CliRunner().invoke(
+        env.app, ["install", "primeintellect/deep-swe", "primeintellect/gsm8k"]
+    )
+
+    assert result.exit_code == 1, result.output
+    assert execute.call_count == 2
+    assert "Installed 1 environment" in result.output
+    assert "Failed to install 1 environment" in result.output
+
+
+def test_install_exits_nonzero_when_an_environment_does_not_resolve(monkeypatch):
+    execute = Mock()
+    _hub_install_setup(monkeypatch, execute)
+    real_fetch = env.fetch_environment_details
+
+    def fetch(client, owner, name, version):
+        if name == "missing":
+            raise env.APIError("404 Not Found")
+        return real_fetch(client, owner, name, version)
+
+    monkeypatch.setattr(env, "fetch_environment_details", fetch)
+
+    result = CliRunner().invoke(
+        env.app, ["install", "primeintellect/deep-swe", "primeintellect/missing"]
+    )
+
+    assert result.exit_code == 1, result.output
+    # The environment that resolved is still installed.
+    execute.assert_called_once()
+    assert "Failed to install 1 environment" in result.output
+    assert "primeintellect/missing@latest - 404 Not Found" in result.output

@@ -12,6 +12,7 @@ from .commands.evals import app as evals_app
 from .commands.feedback import app as feedback_app
 from .commands.images import app as images_app
 from .commands.inference import app as inference_app
+from .commands.lab import app as lab_app
 from .commands.login import app as login_app
 from .commands.logout import app as logout_app
 from .commands.pods import app as pods_app
@@ -38,6 +39,7 @@ app = PlainTyper(
 )
 
 # Lab commands
+app.add_typer(lab_app, name="lab", rich_help_panel="Model Factory")
 app.add_typer(env_app, name="env", rich_help_panel="Model Factory")
 app.add_typer(evals_app, name="eval", rich_help_panel="Model Factory")
 app.add_typer(train_app, name="train", rich_help_panel="Model Factory")

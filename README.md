@@ -35,6 +35,9 @@ uv tool install prime
 # Authenticate
 prime login
 
+# Set up a Lab workspace for environments, evals, GEPA, and Hosted Training
+prime lab setup
+
 # See available Hosted Training models, capacity, and pricing
 prime train models
 
@@ -51,6 +54,7 @@ prime availability list
 
 ## Features
 
+- **Lab Workspaces** - Set up local verifiers workspaces for environments, evals, GEPA, and training
 - **Hosted Training** - Train models against verifiers environments and inspect runs, logs, metrics, and checkpoints
 - **Environments** - Access hundreds of verified environments on our community hub
 - **Evaluations** - Run hosted evaluations and push and manage results
@@ -142,11 +146,14 @@ prime env install <environment-name>
 prime env push my-environment
 ```
 
-### Hosted Training
+### Lab and Hosted Training
 
-Use `prime train models` to choose a Hosted Training model with current capacity and pricing, then generate and launch a config.
+Start with `prime lab setup` to create a local workspace with starter configs, coding-agent skills and a verifiers install; build and evaluate environments there with verifiers' `vf-init` and `vf-eval`. Then use `prime train models` to choose a Hosted Training model with current capacity and pricing.
 
 ```bash
+# Set up a Lab workspace
+prime lab setup
+
 # List trainable models, capacity, and token pricing
 prime train models
 

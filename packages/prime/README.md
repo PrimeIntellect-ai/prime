@@ -31,6 +31,7 @@ Prime is the official CLI and Python SDK for [Prime Intellect](https://primeinte
 **What can you do with Prime?**
 
 - Deploy GPU pods with H100, A100, and other high-performance GPUs
+- Set up Lab workspaces for verifiers environments, evals, GEPA, and training
 - Discover and launch Hosted Training runs against verifiers environments
 - Create and manage isolated sandbox environments for running code
 - Access hundreds of pre-configured development environments
@@ -83,6 +84,9 @@ Get your API key from the [Prime Intellect Dashboard](https://app.primeintellect
 # Browse environments on the hub
 prime env list
 
+# Set up a Lab workspace for environments, evals, GEPA, and Hosted Training
+prime lab setup
+
 # See available Hosted Training models, capacity, and pricing
 prime train models
 
@@ -105,11 +109,14 @@ prime sandbox create python:3.11
 
 ## Features
 
-### Hosted Training
+### Lab and Hosted Training
 
-Use `prime train models` to choose a Hosted Training model with current capacity and pricing, then generate and launch a config.
+Start with `prime lab setup` to create a local workspace with starter configs, coding-agent skills and a verifiers install; build and evaluate environments there with verifiers' `vf-init` and `vf-eval`. Then use `prime train models` to choose a Hosted Training model with current capacity and pricing.
 
 ```bash
+# Set up a Lab workspace
+prime lab setup
+
 # List trainable models, capacity, and token pricing
 prime train models
 

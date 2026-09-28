@@ -42,7 +42,10 @@ from .lab_hygiene import (
 from .utils import is_plain_mode
 
 VERIFIERS_REPO = "primeintellect-ai/verifiers"
-VERIFIERS_REF = "6c64ce6a3a01e8edde7c3c0e8e5315fb236e9faa"
+# Skills and workspace guidance come from verifiers' `release/v0.2` branch: the
+# v0.2.0 release with the guidance pointed at `uv run init/eval/validate` instead
+# of the prime commands removed in 0.8. Its configs are unchanged from v0.2.0.
+VERIFIERS_REF = "9e93e218388982d1c91e757c48808aeabb76d384"
 # Lab configs must match the pinned legacy-stack verifiers below; main is
 # moving to a v1-only layout that the pinned stack cannot consume.
 VERIFIERS_CONFIG_REF = VERIFIERS_REF
@@ -1352,10 +1355,9 @@ def _post_setup_call_to_action(options: LabSetupOptions) -> RenderableType:
     )
 
     commands = (
-        "uv run vf-init my-env",
-        "uv run vf-eval my-env -m openai/gpt-5.4-nano -n 5",
+        "uv run init my-task-v1",
+        "uv run eval my-task-v1 -m openai/gpt-5.4-nano -n 5",
         "prime train configs/rl/qwen.toml",
-        "uv run vf-gepa my-env -m openai/gpt-5.4-nano",
     )
     if is_plain_mode():
         return Text(

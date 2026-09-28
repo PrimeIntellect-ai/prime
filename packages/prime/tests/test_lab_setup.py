@@ -204,7 +204,7 @@ def test_lab_setup_call_to_action_is_plain_text_in_plain_mode(monkeypatch: Any) 
 
     assert isinstance(cta, Text)
     assert "ask codex: I want to train a model" in cta.plain
-    assert "  $ uv run vf-eval my-env -m openai/gpt-5.4-nano -n 5" in cta.plain
+    assert "  $ uv run eval my-task-v1 -m openai/gpt-5.4-nano -n 5" in cta.plain
 
 
 def test_lab_register_github_writes_hygiene_workflow(
@@ -371,10 +371,10 @@ def test_lab_setup_service_emits_post_setup_call_to_action(
     assert "idea -> environment -> eval -> training" in output
     assert "ask codex" in output
     assert "I want to train a model for <my task domain>" in output
-    assert "uv run vf-init my-env" in output
-    assert "uv run vf-eval my-env -m openai/gpt-5.4-nano -n 5" in output
+    assert "uv run init my-task-v1" in output
+    assert "uv run eval my-task-v1 -m openai/gpt-5.4-nano -n 5" in output
     assert "prime train configs/rl/" in output
-    assert "uv run vf-gepa my-env -m openai/gpt-5.4-nano" in output
+    assert "vf-gepa" not in output
     assert "prime eval view" not in output
 
 

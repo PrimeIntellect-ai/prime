@@ -8,17 +8,14 @@ from typing import Any, Callable
 import pytest
 from prime_cli.commands import images as images_cmd
 from prime_cli.commands.images import (
-    ArtifactPartition,
     ImageRow,
     _completed_size_mb,
     _display_created,
-    _group_sort_key,
     _image_ref_column_width,
-    _partition_group,
+    _latest,
     _render_image_reference,
-    _render_status_column,
-    _render_status_slot,
-    _render_type_column,
+    _render_status,
+    _row_timestamp,
     _truncate_ref_left,
 )
 from prime_cli.main import app
@@ -47,8 +44,7 @@ TEST_ENV: dict[str, str] = {
 # ---------------------------------------------------------------------------
 
 
-def _art(
-    artifact_type: ImageArtifactType = ImageArtifactType.CONTAINER_IMAGE,
+def _vm(
     status: ImageBuildStatus = ImageBuildStatus.COMPLETED,
     *,
     image: str = "nvidia-basic-dev:latest",
@@ -65,8 +61,8 @@ def _art(
     scope = f"team-{team_id}" if team_id else USER_ID
     return ImageListItem.model_validate(
         {
-            "id": f"{artifact_type.value}:{name}:{tag}",
-            "artifactType": artifact_type,
+            "id": f"{name}:{tag}",
+            "artifactType": ImageArtifactType.VM_SANDBOX,
             "imageName": name,
             "imageTag": tag,
             "status": status,
@@ -82,45 +78,26 @@ def _art(
     )
 
 
-def _container(**kw: Any) -> ImageRow:
-    return _art(ImageArtifactType.CONTAINER_IMAGE, **kw)
-
-
-def _vm(**kw: Any) -> ImageRow:
-    return _art(ImageArtifactType.VM_SANDBOX, **kw)
-
-
 # ---------------------------------------------------------------------------
-# _partition_group — only the newest row per artifact type survives
+# _latest — only the newest row per group survives
 # ---------------------------------------------------------------------------
 
 
-def test_partition_keeps_newest_completed_per_type():
-    part = _partition_group(
+def test_latest_keeps_newest_row_per_group():
+    latest = _latest(
         [
-            _container(pushed_at="2026-04-16T22:24:07"),
             _vm(pushed_at="2026-04-16T22:24:07"),
+            _vm(status=ImageBuildStatus.FAILED, completed_at="2026-04-16T21:00:00"),
+            _vm(status=ImageBuildStatus.FAILED, completed_at="2026-04-16T20:55:00"),
         ]
     )
-    assert part[ImageArtifactType.CONTAINER_IMAGE].latest.status == ImageBuildStatus.COMPLETED
-    assert part[ImageArtifactType.VM_SANDBOX].latest.status == ImageBuildStatus.COMPLETED
+    assert latest.status == ImageBuildStatus.COMPLETED
 
 
-def test_partition_newer_completed_beats_older_failed():
-    part = _partition_group(
-        [
-            _container(status=ImageBuildStatus.FAILED, completed_at="2026-04-16T21:00:00"),
-            _container(pushed_at="2026-04-16T22:24:07"),
-            _container(status=ImageBuildStatus.FAILED, completed_at="2026-04-16T20:55:00"),
-        ]
-    )
-    assert part[ImageArtifactType.CONTAINER_IMAGE].latest.status == ImageBuildStatus.COMPLETED
-
-
-def test_partition_fresh_completed_wins_over_stale_building_zombie():
+def test_latest_fresh_completed_wins_over_stale_building_zombie():
     # Real-world case: a stale BUILDING row from 8 days ago (never reaped)
     # alongside a fresh COMPLETED push. The fresher COMPLETED row wins.
-    part = _partition_group(
+    latest = _latest(
         [
             _vm(
                 status=ImageBuildStatus.BUILDING,
@@ -130,36 +107,34 @@ def test_partition_fresh_completed_wins_over_stale_building_zombie():
             _vm(pushed_at="2026-04-17T18:21:28", completed_at="2026-04-17T18:21:28"),
         ]
     )
-    assert part[ImageArtifactType.VM_SANDBOX].latest.status == ImageBuildStatus.COMPLETED
+    assert latest.status == ImageBuildStatus.COMPLETED
 
 
-def test_partition_active_build_wins_over_older_completed():
-    part = _partition_group(
+def test_latest_active_build_wins_over_older_completed():
+    latest = _latest(
         [
-            _container(pushed_at="2026-04-15T20:57:52"),
-            _container(
+            _vm(pushed_at="2026-04-15T20:57:52"),
+            _vm(
                 status=ImageBuildStatus.BUILDING,
                 started_at="2026-04-17T10:00:05",
                 created_at="2026-04-17T10:00:00",
             ),
         ]
     )
-    assert part[ImageArtifactType.CONTAINER_IMAGE].latest.status == ImageBuildStatus.BUILDING
+    assert latest.status == ImageBuildStatus.BUILDING
 
 
-def test_partition_surfaces_failure_when_only_failed_rows_exist():
-    part = _partition_group(
+def test_latest_surfaces_failure_when_only_failed_rows_exist():
+    latest = _latest(
         [
-            _container(status=ImageBuildStatus.FAILED, completed_at="2026-04-16T21:00:00"),
             _vm(status=ImageBuildStatus.FAILED, completed_at="2026-04-16T21:00:00"),
         ]
     )
-    assert part[ImageArtifactType.CONTAINER_IMAGE].latest.status == ImageBuildStatus.FAILED
-    assert part[ImageArtifactType.VM_SANDBOX].latest.status == ImageBuildStatus.FAILED
+    assert latest.status == ImageBuildStatus.FAILED
 
 
 # ---------------------------------------------------------------------------
-# _render_status_slot — renders the raw status of the latest row
+# _render_status — renders the raw status of the latest row
 # ---------------------------------------------------------------------------
 
 
@@ -174,118 +149,8 @@ def test_partition_surfaces_failure_when_only_failed_rows_exist():
         (ImageBuildStatus.CANCELLED, "Cancelled", "dim"),
     ],
 )
-def test_render_status_slot_known(status, expected_plain, expected_style):
-    assert _render_status_slot(ArtifactPartition(latest=_container(status=status))) == Text(
-        expected_plain, style=expected_style
-    )
-
-
-@pytest.mark.parametrize("empty", [None, ArtifactPartition()])
-def test_render_status_slot_empty_returns_dash(empty):
-    assert _render_status_slot(empty) == Text("—", style="dim")
-
-
-# ---------------------------------------------------------------------------
-# _render_type_column
-# ---------------------------------------------------------------------------
-
-
-def test_render_type_column_container_and_vm():
-    text = _render_type_column(
-        _partition_group(
-            [_container(pushed_at="2026-04-16T22:24:07"), _vm(pushed_at="2026-04-16T22:24:07")]
-        )
-    )
-    assert text.plain == "Container / VM"
-    assert [span.style for span in text.spans] == ["cyan", "magenta"]
-
-
-def test_render_type_column_container_only():
-    text = _render_type_column(_partition_group([_container(pushed_at="2026-04-16T22:24:07")]))
-    assert "Container" in text
-    assert "VM" not in text
-    assert " / " not in text
-
-
-# ---------------------------------------------------------------------------
-# _render_status_column (positional slots)
-# ---------------------------------------------------------------------------
-
-
-def test_render_status_column_healthy_slots():
-    text = _render_status_column(
-        _partition_group(
-            [_container(pushed_at="2026-04-16T22:24:07"), _vm(pushed_at="2026-04-16T22:24:07")]
-        )
-    )
-    assert text.plain == "Ready / Ready"
-    assert [span.style for span in text.spans] == ["green", "green"]
-
-
-def test_render_status_column_partial_failure_aligned():
-    text = _render_status_column(
-        _partition_group(
-            [
-                _container(pushed_at="2026-04-16T22:24:07"),
-                _vm(status=ImageBuildStatus.FAILED, completed_at="2026-04-16T22:00:00"),
-            ]
-        )
-    )
-    assert text.plain == "Ready / Failed"
-    assert [span.style for span in text.spans] == ["green", "red"]
-
-
-def test_render_status_column_container_only():
-    text = _render_status_column(_partition_group([_container(pushed_at="2026-04-16T22:24:07")]))
-    assert text.plain == "Ready"
-    assert [span.style for span in text.spans] == ["green"]
-    assert " / " not in text
-
-
-def test_render_status_column_stale_zombie_hidden_by_fresh_completed():
-    # Mirrors the real nvidia-basic-dev:latest payload: a week-old stuck
-    # BUILDING VM row + a fresh successful build + recent failures. Only the
-    # newest row per type is rendered, so only "Ready / Ready" is shown.
-    text = _render_status_column(
-        _partition_group(
-            [
-                _container(pushed_at="2026-04-17T18:21:28"),
-                _vm(pushed_at="2026-04-17T18:21:28"),
-                _vm(
-                    status=ImageBuildStatus.BUILDING,
-                    started_at="2026-04-09T20:52:01",
-                    created_at="2026-04-09T20:52:00",
-                ),
-                _container(status=ImageBuildStatus.FAILED, completed_at="2026-04-16T21:00:00"),
-                _vm(status=ImageBuildStatus.FAILED, completed_at="2026-04-16T21:00:00"),
-            ]
-        )
-    )
-    assert text.plain == "Ready / Ready"
-    assert [span.style for span in text.spans] == ["green", "green"]
-
-
-def test_render_status_column_active_build_on_top_of_older_completed():
-    text = _render_status_column(
-        _partition_group(
-            [
-                _container(pushed_at="2026-04-15T20:57:52"),
-                _container(
-                    status=ImageBuildStatus.BUILDING,
-                    started_at="2026-04-17T10:00:05",
-                    created_at="2026-04-17T10:00:00",
-                ),
-                _vm(pushed_at="2026-04-15T20:57:52"),
-                _vm(
-                    status=ImageBuildStatus.BUILDING,
-                    started_at="2026-04-17T10:00:05",
-                    created_at="2026-04-17T10:00:00",
-                ),
-            ]
-        )
-    )
-    assert text.plain == "Building / Building"
-    assert [span.style for span in text.spans] == ["yellow", "yellow"]
+def test_render_status_known(status, expected_plain, expected_style):
+    assert _render_status(_vm(status=status)) == Text(expected_plain, style=expected_style)
 
 
 # ---------------------------------------------------------------------------
@@ -295,20 +160,20 @@ def test_render_status_column_active_build_on_top_of_older_completed():
 
 def test_render_image_reference_always_shows_user_prefix_for_personal():
     assert (
-        _render_image_reference(_container(image="myapp:v1"), is_team_listing=False)
+        _render_image_reference(_vm(image="myapp:v1"), is_team_listing=False)
         == f"prime/{USER_ID}/myapp:v1"
     )
 
 
 def test_render_image_reference_keeps_team_prefix_for_team_listing():
     assert (
-        _render_image_reference(_container(image="myapp:v1", team_id=TEAM_ID), is_team_listing=True)
+        _render_image_reference(_vm(image="myapp:v1", team_id=TEAM_ID), is_team_listing=True)
         == f"prime/team-{TEAM_ID}/myapp:v1"
     )
 
 
 def test_render_image_reference_falls_back_without_display_ref():
-    image = _container(image="fallback-image:v2").model_copy(
+    image = _vm(image="fallback-image:v2").model_copy(
         update={"display_ref": None, "full_image_path": None}
     )
     assert _render_image_reference(image, is_team_listing=False) == "fallback-image:v2"
@@ -365,84 +230,55 @@ def test_image_ref_column_width_team_shrinks_ref_budget():
 # ---------------------------------------------------------------------------
 
 
-def test_completed_size_sums_only_latest_completed_rows():
-    part = _partition_group(
-        [
-            _container(pushed_at="2026-04-16T22:00:00", size_bytes=100 * 1024 * 1024),
-            _vm(pushed_at="2026-04-16T22:00:00", size_bytes=200 * 1024 * 1024),
-        ]
-    )
-    assert _completed_size_mb(part) == "300.0 MB"
+def test_completed_size_shows_latest_completed_row():
+    row = _vm(pushed_at="2026-04-16T22:00:00", size_bytes=200 * 1024 * 1024)
+    assert _completed_size_mb(row) == "200.0 MB"
 
 
 def test_completed_size_ignores_older_completed_if_newer_is_not_completed():
-    # If the latest row is BUILDING, that type contributes 0 — even if an
+    # If the latest row is BUILDING it contributes nothing — even if an
     # older COMPLETED row has a size. Size reflects the *current* picture.
-    part = _partition_group(
-        [
-            _container(pushed_at="2026-04-15T20:00:00", size_bytes=100 * 1024 * 1024),
-            _container(
-                status=ImageBuildStatus.BUILDING,
-                started_at="2026-04-17T10:00:05",
-                created_at="2026-04-17T10:00:00",
-            ),
-        ]
+    row = _vm(
+        status=ImageBuildStatus.BUILDING,
+        started_at="2026-04-17T10:00:05",
+        created_at="2026-04-17T10:00:00",
+        size_bytes=100 * 1024 * 1024,
     )
-    assert _completed_size_mb(part) == Text("—", style="dim")
+    assert _completed_size_mb(row) == Text("—", style="dim")
 
 
-def test_completed_size_returns_dash_when_no_completed():
-    part = _partition_group(
-        [
-            _container(status=ImageBuildStatus.BUILDING, started_at="2026-04-17T09:00:00"),
-            _vm(status=ImageBuildStatus.PENDING, created_at="2026-04-17T08:00:00"),
-        ]
-    )
-    assert _completed_size_mb(part) == Text("—", style="dim")
+def test_completed_size_returns_dash_when_size_missing():
+    row = _vm(pushed_at="2026-04-16T22:00:00")
+    assert _completed_size_mb(row) == Text("—", style="dim")
 
 
 # ---------------------------------------------------------------------------
-# _display_created / _group_sort_key
+# _display_created / _row_timestamp
 # ---------------------------------------------------------------------------
 
 
-def test_display_created_uses_latest_pushed_at_when_completed_exists():
-    part = _partition_group(
-        [
-            _container(pushed_at="2026-04-15T20:57:52"),
-            _vm(pushed_at="2026-04-16T22:24:07"),
-        ]
-    )
-    assert _display_created(part) == "2026-04-16 22:24"
+def test_display_created_uses_pushed_at_when_completed():
+    row = _vm(pushed_at="2026-04-16T22:24:07")
+    assert _display_created(row) == "2026-04-16 22:24"
 
 
 def test_display_created_falls_back_to_started_at_for_active_builds():
-    part = _partition_group(
-        [
-            _container(
-                status=ImageBuildStatus.BUILDING,
-                started_at="2026-04-17T09:00:00",
-                created_at="2026-04-17T08:59:00",
-            ),
-            _vm(status=ImageBuildStatus.PENDING, created_at="2026-04-17T08:00:00"),
-        ]
+    row = _vm(
+        status=ImageBuildStatus.BUILDING,
+        started_at="2026-04-17T09:00:00",
+        created_at="2026-04-17T08:59:00",
     )
-    assert _display_created(part) == "2026-04-17 09:00"
+    assert _display_created(row) == "2026-04-17 09:00"
 
 
 def test_display_created_falls_back_to_completed_at_for_failures():
-    part = _partition_group(
-        [
-            _container(status=ImageBuildStatus.FAILED, completed_at="2026-04-16T12:00:00"),
-            _vm(status=ImageBuildStatus.FAILED, completed_at="2026-04-16T13:00:00"),
-        ]
-    )
-    assert _display_created(part) == "2026-04-16 13:00"
+    row = _vm(status=ImageBuildStatus.FAILED, completed_at="2026-04-16T12:00:00")
+    assert _display_created(row) == "2026-04-16 12:00"
 
 
-def test_group_sort_key_matches_display_created():
-    part = _partition_group([_container(pushed_at="2026-04-16T22:24:07")])
-    assert _group_sort_key(part).strftime("%Y-%m-%d %H:%M") == _display_created(part)
+def test_row_timestamp_matches_display_created():
+    row = _vm(pushed_at="2026-04-16T22:24:07")
+    assert _row_timestamp(row).strftime("%Y-%m-%d %H:%M") == _display_created(row)
 
 
 # ---------------------------------------------------------------------------
@@ -511,27 +347,23 @@ def run_images_list(monkeypatch) -> Callable[..., Any]:
     return _run
 
 
-def test_list_cli_shows_type_and_positional_status(run_images_list):
+def test_list_cli_shows_latest_status(run_images_list):
     result = run_images_list(
         [
-            _container(pushed_at="2026-04-16T22:24:07", size_bytes=100 * 1024 * 1024),
             _vm(pushed_at="2026-04-16T22:24:07", size_bytes=200 * 1024 * 1024),
-            _container(status=ImageBuildStatus.FAILED, completed_at="2026-04-16T20:00:00"),
             _vm(status=ImageBuildStatus.FAILED, completed_at="2026-04-16T20:00:00"),
         ]
     )
     assert result.exit_code == 0, result.output
-    assert "Container / VM" in result.output
-    assert "Ready / Ready" in result.output
+    assert "Ready" in result.output
     assert "Failed" not in result.output  # stale, hidden by newer COMPLETED
     assert f"prime/{USER_ID}/nvidia-basic-dev:latest" in result.output
-    assert "300.0 MB" in result.output
+    assert "200.0 MB" in result.output
 
 
 def test_list_cli_ignores_stale_building_zombie_when_completed_is_newer(run_images_list):
     result = run_images_list(
         [
-            _container(pushed_at="2026-04-17T18:21:28", size_bytes=992_290_762),
             _vm(pushed_at="2026-04-17T18:21:28", size_bytes=2_585_571_832),
             # The week-old stuck BUILDING row (as seen in production DB).
             _vm(
@@ -542,20 +374,14 @@ def test_list_cli_ignores_stale_building_zombie_when_completed_is_newer(run_imag
         ]
     )
     assert result.exit_code == 0, result.output
-    assert "Ready / Ready" in result.output
+    assert "Ready" in result.output
     assert "Building" not in result.output
 
 
 def test_list_cli_shows_building_when_build_is_newer_than_last_completed(run_images_list):
     result = run_images_list(
         [
-            _container(pushed_at="2026-04-15T20:57:52", size_bytes=50 * 1024 * 1024),
             _vm(pushed_at="2026-04-15T20:57:52", size_bytes=50 * 1024 * 1024),
-            _container(
-                status=ImageBuildStatus.BUILDING,
-                started_at="2026-04-17T10:00:05",
-                created_at="2026-04-17T10:00:00",
-            ),
             _vm(
                 status=ImageBuildStatus.BUILDING,
                 started_at="2026-04-17T10:00:05",
@@ -564,14 +390,14 @@ def test_list_cli_shows_building_when_build_is_newer_than_last_completed(run_ima
         ]
     )
     assert result.exit_code == 0, result.output
-    assert "Building / Building" in result.output
+    assert "Building" in result.output
     assert "2026-04-17 10:00" in result.output
 
 
 def test_list_cli_plain_output_has_no_markup_leaks(run_images_list):
     result = run_images_list(
         [
-            _container(
+            _vm(
                 image="plainapp:latest",
                 team_id=TEAM_ID,
                 pushed_at="2026-04-16T22:24:07",
@@ -583,7 +409,6 @@ def test_list_cli_plain_output_has_no_markup_leaks(run_images_list):
         env=dict(TEST_ENV, COLUMNS="200"),
     )
     assert result.exit_code == 0, result.output
-    assert "Container" in result.output
     assert "Ready" in result.output
     assert "Private" in result.output
     assert "Team" in result.output
@@ -594,12 +419,6 @@ def test_list_cli_plain_output_has_no_markup_leaks(run_images_list):
 def test_list_cli_team_listing_keeps_owner_column_and_prefix(run_images_list):
     result = run_images_list(
         [
-            _container(
-                image="teamapp:latest",
-                team_id=TEAM_ID,
-                pushed_at="2026-04-16T22:24:07",
-                size_bytes=10 * 1024 * 1024,
-            ),
             _vm(
                 image="teamapp:latest",
                 team_id=TEAM_ID,
@@ -614,30 +433,9 @@ def test_list_cli_team_listing_keeps_owner_column_and_prefix(run_images_list):
     assert f"prime/team-{TEAM_ID}/teamapp:latest" in result.output
 
 
-def test_list_cli_container_only_image(run_images_list):
-    result = run_images_list(
-        [
-            _container(
-                image="container-only:latest",
-                pushed_at="2026-04-16T22:24:07",
-                size_bytes=10 * 1024 * 1024,
-            ),
-        ]
-    )
-    assert result.exit_code == 0, result.output
-    assert "Container" in result.output
-    assert "Ready" in result.output
-    assert "VM" not in result.output
-
-
 def test_list_cli_first_time_build_shows_building(run_images_list):
     result = run_images_list(
         [
-            _container(
-                status=ImageBuildStatus.BUILDING,
-                started_at="2026-04-17T09:00:05",
-                created_at="2026-04-17T09:00:00",
-            ),
             _vm(
                 status=ImageBuildStatus.BUILDING,
                 started_at="2026-04-17T09:00:05",
@@ -646,14 +444,13 @@ def test_list_cli_first_time_build_shows_building(run_images_list):
         ]
     )
     assert result.exit_code == 0, result.output
-    assert "Container / VM" in result.output
-    assert "Building / Building" in result.output
+    assert "Building" in result.output
     assert "—" in result.output
 
 
 def test_list_cli_truncates_owner_prefix_on_narrow_terminal(run_images_list):
     result = run_images_list(
-        [_container(pushed_at="2026-04-16T22:24:07", size_bytes=1024 * 1024)],
+        [_vm(pushed_at="2026-04-16T22:24:07", size_bytes=1024 * 1024)],
         env=dict(TEST_ENV, COLUMNS="90"),
     )
     assert result.exit_code == 0, result.output
@@ -713,7 +510,7 @@ def test_list_forwards_search_param(monkeypatch):
     result, captured = _run_list_capturing_params(
         monkeypatch,
         ["--search", "myapp"],
-        payload=[_container(image="myapp:latest", pushed_at="2026-04-16T22:24:07")],
+        payload=[_vm(image="myapp:latest", pushed_at="2026-04-16T22:24:07")],
     )
     assert result.exit_code == 0, result.output
     assert captured["params"].get("search") == "myapp"
@@ -723,7 +520,7 @@ def test_list_search_short_flag_q_forwards_param(monkeypatch):
     result, captured = _run_list_capturing_params(
         monkeypatch,
         ["-q", "nvidia"],
-        payload=[_container(pushed_at="2026-04-16T22:24:07")],
+        payload=[_vm(pushed_at="2026-04-16T22:24:07")],
     )
     assert result.exit_code == 0, result.output
     assert captured["params"].get("search") == "nvidia"
@@ -733,7 +530,7 @@ def test_list_without_search_omits_param(monkeypatch):
     result, captured = _run_list_capturing_params(
         monkeypatch,
         [],
-        payload=[_container(pushed_at="2026-04-16T22:24:07")],
+        payload=[_vm(pushed_at="2026-04-16T22:24:07")],
     )
     assert result.exit_code == 0, result.output
     assert captured["params"].get("search") is None
@@ -803,12 +600,8 @@ def test_list_out_of_range_page_without_total_count_no_search(monkeypatch):
 def test_list_cli_newest_group_first(run_images_list):
     result = run_images_list(
         [
-            _container(
-                image="old-image:latest", pushed_at="2026-03-24T20:11:46", size_bytes=1024 * 1024
-            ),
-            _container(
-                image="new-image:latest", pushed_at="2026-04-16T22:24:07", size_bytes=1024 * 1024
-            ),
+            _vm(image="old-image:latest", pushed_at="2026-03-24T20:11:46", size_bytes=1024 * 1024),
+            _vm(image="new-image:latest", pushed_at="2026-04-16T22:24:07", size_bytes=1024 * 1024),
         ]
     )
     assert result.exit_code == 0, result.output
@@ -823,7 +616,7 @@ def test_list_cli_newest_group_first(run_images_list):
 
 
 def _platform_row(**kw: Any) -> ImageRow:
-    row = _container(**kw)
+    row = _vm(**kw)
     return row.model_copy(
         update={
             "owner_type": ImageOwnerType.PLATFORM,
@@ -874,14 +667,14 @@ def test_list_platform_image_team_context_json_output_stays_clean(monkeypatch):
     payload = json.loads(result.output)
     assert payload["totalCount"] == 1
     assert "total_count" not in payload
-    assert payload["data"][0]["artifactType"] == "CONTAINER_IMAGE"
+    assert payload["data"][0]["artifactType"] == "VM_SANDBOX"
 
 
 def test_list_json_omits_total_count_when_api_omits_it(monkeypatch):
     result, _ = _run_list_capturing_params(
         monkeypatch,
         ["--output", "json"],
-        payload=[_container(pushed_at="2026-04-16T22:24:07")],
+        payload=[_vm(pushed_at="2026-04-16T22:24:07")],
         include_total_count=False,
     )
 
@@ -903,7 +696,7 @@ def test_list_without_platform_flag_omits_owner_scope(monkeypatch):
     result, captured = _run_list_capturing_params(
         monkeypatch,
         [],
-        payload=[_container(pushed_at="2026-04-16T22:24:07")],
+        payload=[_vm(pushed_at="2026-04-16T22:24:07")],
     )
     assert result.exit_code == 0, result.output
     assert captured["params"].get("platform") is False

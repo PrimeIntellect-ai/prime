@@ -23,7 +23,6 @@ from prime_sandboxes import (
     APIError,
     Config,
     ImageVisibility,
-    SourceImageBuildResult,
     UnauthorizedError,
 )
 from prime_sandboxes.image_references import is_docker_hub_reference
@@ -486,28 +485,12 @@ def submit_source_build(
             raise SubmitRateLimited(str(e), retry_after=SOURCE_RATE_LIMIT_PAUSE_SECONDS) from e
         raise
 
-    # Single-source builds return a top-level build_id today. Also accept the
-    # bulk shape without silently dropping results if the server contract shifts.
-    results = response.get("results")
-    if isinstance(results, list):
-        # Each spec holds one source, so any count other than one is invalid.
-        if len(results) != 1 or not isinstance(results[0], dict):
-            raise APIError(
-                "invalid response from server "
-                f"(expected one source-build result, got {len(results)})"
-            )
-        entry = SourceImageBuildResult.model_validate(results[0])
-        if entry.build is None:
-            error = entry.error or "invalid response from server (source build not queued)"
-            if any(marker in error.lower() for marker in _QUOTA_DETAIL_MARKERS):
-                raise QuotaExceededError(error)
-            raise APIError(error)
-        return entry.build.build_id, entry.build.full_image_path
-
-    build_id = response.get("build_id") or response.get("buildId")
-    if not build_id:
-        raise APIError("invalid response from server (missing build_id)")
-    return build_id, response.get("fullImagePath") or spec.image_ref
+    # Single-source builds return a top-level BuildImageResponse.
+    build_id = response.get("build_id")
+    full_image_path = response.get("fullImagePath")
+    if not build_id or not full_image_path:
+        raise APIError("invalid response from server (missing build_id or fullImagePath)")
+    return build_id, full_image_path
 
 
 # ---------------------------------------------------------------------------

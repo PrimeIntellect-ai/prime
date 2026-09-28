@@ -7,6 +7,7 @@ import pytest
 from prime_cli.commands.sandbox import _format_sandbox_expiry
 from prime_cli.main import app
 from prime_cli.utils import strip_ansi
+from prime_sandboxes import StartCommand
 from typer.testing import CliRunner
 
 runner = CliRunner()
@@ -46,7 +47,7 @@ def _fake_detailed_sandbox(**overrides: Any) -> SimpleNamespace:
         }
     )
     return _fake_sandbox(
-        start_command="tail -f /dev/null",
+        start_command=StartCommand(executable="tail", args=["-f", "/dev/null"]),
         disk_size_gb=10.0,
         disk_mount_path="/sandbox-workspace",
         vm=True,
@@ -61,7 +62,6 @@ def _fake_detailed_sandbox(**overrides: Any) -> SimpleNamespace:
         advanced_configs=advanced_configs,
         user_id="user-1",
         team_id=None,
-        registry_credentials_id=None,
         **overrides,
     )
 
@@ -513,7 +513,7 @@ def test_sandbox_create_omitted_image_preserves_command_argv(
 def test_sandbox_create_defaults_to_vm_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Without --vm/--container the CLI resolves the runtime to VM."""
+    """Without --vm the CLI resolves the runtime to VM."""
     _configure_cli(monkeypatch)
     captured: dict[str, Any] = {}
 

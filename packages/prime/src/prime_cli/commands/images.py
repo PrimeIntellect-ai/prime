@@ -1,6 +1,5 @@
 """Commands for managing image artifacts in the Prime Intellect registry."""
 
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, List, Optional
@@ -12,7 +11,6 @@ from prime_sandboxes import (
     APIError,
     BulkBuildImageResponse,
     Config,
-    ImageArtifactType,
     ImageBuildStatus,
     ImageClient,
     ImageListItem,
@@ -79,28 +77,6 @@ LIST_IMAGES_JSON_HELP = json_output_help(
 ImageRow = ImageListItem
 
 
-@dataclass
-class ArtifactPartition:
-    """Per-artifact-type view of a grouped image.
-
-    Holds the single most recently updated row for this artifact type. The
-    status of that row is what gets rendered — we intentionally ignore older
-    rows (including stale ``BUILDING`` / ``PENDING`` entries the backend may
-    have orphaned) so the display reflects the current truth rather than a
-    composite derived from history.
-    """
-
-    latest: Optional[ImageRow] = None
-
-    def is_empty(self) -> bool:
-        """True when no row exists for this artifact type."""
-        return self.latest is None
-
-
-# Mapping of artifact type (e.g. ``CONTAINER_IMAGE``) to its partition bucket.
-PartitionMap = dict[ImageArtifactType, ArtifactPartition]
-
-
 def _aware_utc(value: datetime) -> datetime:
     """Return a timezone-aware timestamp for stable comparisons."""
     if value.tzinfo is None:
@@ -114,34 +90,16 @@ def _row_timestamp(row: ImageRow) -> datetime:
     return _aware_utc(value)
 
 
-def _latest(rows: list[ImageRow]) -> Optional[tuple[ImageRow, datetime]]:
-    """Return the newest row and the timestamp used to select it."""
-    if not rows:
-        return None
-    row = max(rows, key=_row_timestamp)
-    return row, _row_timestamp(row)
+def _latest(artifacts: list[ImageRow]) -> ImageRow:
+    """Return the most recently updated row of one name:tag group.
 
+    The status of that row is what gets rendered — we intentionally ignore
+    older rows (including stale ``BUILDING`` / ``PENDING`` entries the backend
+    may have orphaned) so the display reflects the current truth rather than a
+    composite derived from history.
+    """
+    return max(artifacts, key=_row_timestamp)
 
-def _partition_group(artifacts: list[ImageRow]) -> PartitionMap:
-    """Group artifact rows by type, keeping only the most recent row per type."""
-    by_type: dict[ImageArtifactType, list[ImageRow]] = {}
-    for artifact in artifacts:
-        by_type.setdefault(artifact.artifact_type, []).append(artifact)
-
-    result: PartitionMap = {}
-    for artifact_type, rows in by_type.items():
-        latest = _latest(rows)
-        if latest is not None:
-            result[artifact_type] = ArtifactPartition(latest=latest[0])
-    return result
-
-
-# Cell values are rich Text objects, not markup strings, so --plain table
-# rendering never leaks raw "[cyan]..." tags into the output.
-_TYPE_LABELS: tuple[tuple[ImageArtifactType, str, str], ...] = (
-    (ImageArtifactType.CONTAINER_IMAGE, "Container", "cyan"),
-    (ImageArtifactType.VM_SANDBOX, "VM", "magenta"),
-)
 
 _STATUS_LABELS: dict[ImageBuildStatus, tuple[str, str]] = {
     ImageBuildStatus.COMPLETED: ("Ready", "green"),
@@ -157,58 +115,16 @@ def _empty_dash() -> Text:
     return Text("—", style="dim")
 
 
-def _ordered_present_types(
-    partition: PartitionMap,
-) -> list[tuple[ImageArtifactType, str, str]]:
-    """Return present artifact types in display order."""
-    return [
-        (artifact_type, label, style)
-        for artifact_type, label, style in _TYPE_LABELS
-        if not partition.get(artifact_type, ArtifactPartition()).is_empty()
-    ]
-
-
-def _render_type_column(partition: PartitionMap) -> Text:
-    """Build the Type cell: ``Container / VM`` with color, only for types present."""
-    text = Text()
-    for _artifact_type, label, style in _ordered_present_types(partition):
-        if text.plain:
-            text.append(" / ")
-        text.append(label, style=style)
-    return text if text.plain else _empty_dash()
-
-
 def _render_visibility(visibility: ImageVisibility) -> Text:
     if visibility == ImageVisibility.PUBLIC:
         return Text("Public", style="green")
     return Text("Private", style="dim")
 
 
-def _render_status_slot(part: Optional[ArtifactPartition]) -> Text:
-    """Render the status of the latest row for one artifact type."""
-    if part is None or part.latest is None:
-        return _empty_dash()
-    label, style = _STATUS_LABELS[part.latest.status]
+def _render_status(row: ImageRow) -> Text:
+    """Render the status of a group's latest row."""
+    label, style = _STATUS_LABELS[row.status]
     return Text(label, style=style)
-
-
-def _render_status_column(partition: PartitionMap) -> Text:
-    """Build the Status cell as positional slots aligned with the Type column.
-
-    Example: if Type is ``Container / VM``, Status for ``rehl:latest`` with a
-    container that's Ready and a VM that's Failed becomes ``Ready / Failed``.
-    When an artifact has an active rebuild on top of a completed image, its
-    slot is ``(rebuilding)``.
-    """
-    ordered = _ordered_present_types(partition)
-    if not ordered:
-        return _empty_dash()
-    text = Text()
-    for index, (art_type, _label, _style) in enumerate(ordered):
-        if index:
-            text.append(" / ")
-        text.append(_render_status_slot(partition.get(art_type)))
-    return text
 
 
 def _render_image_reference(img: ImageRow, *, is_team_listing: bool) -> str:
@@ -252,8 +168,7 @@ def _image_ref_column_width(console_width: int, is_team_listing: bool) -> int:
 
     The remaining columns have roughly fixed widths (worst-case labels):
 
-        Type     ~14 chars ("Container / VM")
-        Status   ~20 chars ("Uploading / Uploading")
+        Status   ~9 chars ("Cancelled")
         Visibility ~9 chars
         Size     ~10 chars
         Created  ~17 chars ("YYYY-MM-DD HH:MM ")
@@ -264,54 +179,30 @@ def _image_ref_column_width(console_width: int, is_team_listing: bool) -> int:
     so the column is neither absurdly wide on large terminals nor unusable on
     tiny ones.
     """
-    reserved = 14 + 20 + 9 + 10 + 17 + (10 if is_team_listing else 0)
-    num_cols = 6 + (1 if is_team_listing else 0)
+    reserved = 9 + 9 + 10 + 17 + (10 if is_team_listing else 0)
+    num_cols = 5 + (1 if is_team_listing else 0)
     reserved += 3 * num_cols
     budget = console_width - reserved
     return max(30, min(80, budget))
 
 
-def _completed_size_mb(partition: PartitionMap) -> str | Text:
-    """Sum sizes of the latest COMPLETED rows per artifact type.
+def _completed_size_mb(row: ImageRow) -> str | Text:
+    """Render the size of a group's latest row when it is COMPLETED.
 
     Only completed artifacts carry a meaningful ``sizeBytes``; in-flight and
-    failed rows contribute nothing, so summing across the latest-per-type
-    gives the current on-disk footprint of the image.
+    failed rows contribute nothing.
     """
-    total = 0
-    for part in partition.values():
-        row = part.latest
-        if row is None or row.status != ImageBuildStatus.COMPLETED:
-            continue
-        total += row.size_bytes or 0
+    if row.status != ImageBuildStatus.COMPLETED:
+        return _empty_dash()
+    total = row.size_bytes or 0
     if total <= 0:
         return _empty_dash()
     return f"{total / 1024 / 1024:.1f} MB"
 
 
-def _pick_display_datetime(partition: PartitionMap) -> Optional[datetime]:
-    """Return the newest timestamp across the latest row of each artifact type."""
-    latest_rows: list[ImageRow] = [
-        part.latest for part in partition.values() if part.latest is not None
-    ]
-    if not latest_rows:
-        return None
-    result = _latest(latest_rows)
-    if result is None:
-        return None
-    return result[1]
-
-
-def _display_created(partition: PartitionMap) -> str:
-    """Format the Created column value for a grouped image row."""
-    ts = _pick_display_datetime(partition)
-    return ts.strftime("%Y-%m-%d %H:%M") if ts is not None else ""
-
-
-def _group_sort_key(partition: PartitionMap) -> datetime:
-    """Key function to sort groups newest-first by their display timestamp."""
-    ts = _pick_display_datetime(partition)
-    return ts if ts is not None else datetime.min.replace(tzinfo=timezone.utc)
+def _display_created(row: ImageRow) -> str:
+    """Format the Created column value from a group's latest row."""
+    return _row_timestamp(row).strftime("%Y-%m-%d %H:%M")
 
 
 @app.command("push")
@@ -489,15 +380,11 @@ def push_image(
 
             if isinstance(response, BulkBuildImageResponse):
                 builds = [result.build for result in response.results if result.build is not None]
-                build_ids = [
-                    build_id
-                    for build in builds
-                    for build_id in (build.build_ids or [build.build_id])
-                ]
+                build_ids = [build_id for build in builds for build_id in build.build_ids]
                 failed_results = [result for result in response.results if result.build is None]
                 image_path = builds[0].full_image_path if len(builds) == 1 else None
             else:
-                build_ids = response.build_ids or [response.build_id]
+                build_ids = list(response.build_ids)
                 failed_results = []
                 image_path = response.full_image_path
 
@@ -860,42 +747,31 @@ def list_images(
             min_width=ref_max_width,
             max_width=ref_max_width,
         )
-        table.add_column("Type", justify="center", no_wrap=True)
         if is_team_listing:
             table.add_column("Owner", justify="center")
-        # Worst-case label is ``Cancelled / Cancelled`` (21 chars); pin to 21
-        # so Rich never wraps the status text across two lines.
-        table.add_column("Status", justify="center", no_wrap=True, min_width=21)
+        table.add_column("Status", justify="center", no_wrap=True)
         table.add_column("Visibility", justify="center", no_wrap=True)
         table.add_column("Size", justify="right", no_wrap=True)
         table.add_column("Created", style="dim", no_wrap=True, min_width=16)
 
-        sortable: list[tuple[datetime, list[ImageRow], PartitionMap]] = []
+        # One group per owner/name:tag; each group renders its latest row.
+        sortable: list[tuple[datetime, ImageRow]] = []
         for _key, artifacts in grouped.items():
-            partition = _partition_group(artifacts)
-            sortable.append((_group_sort_key(partition), artifacts, partition))
+            latest = _latest(artifacts)
+            sortable.append((_row_timestamp(latest), latest))
         sortable.sort(key=lambda item: item[0], reverse=True)
 
-        for _ts, artifacts, partition in sortable:
-            # Prefer the latest container row for a copyable image reference,
-            # then fall back to the latest VM row or the first artifact.
-            container_latest = (
-                partition.get(ImageArtifactType.CONTAINER_IMAGE) or ArtifactPartition()
-            ).latest
-            vm_latest = (partition.get(ImageArtifactType.VM_SANDBOX) or ArtifactPartition()).latest
-            preferred = container_latest or vm_latest or artifacts[0]
-
+        for _ts, preferred in sortable:
             image_ref: str = _truncate_ref_left(
                 _render_image_reference(preferred, is_team_listing=is_team_listing),
                 ref_max_width,
             )
-            type_display: Text = _render_type_column(partition)
-            status_display: Text = _render_status_column(partition)
+            status_display: Text = _render_status(preferred)
             visibility_display: Text = _render_visibility(preferred.visibility)
-            size_mb: str | Text = _completed_size_mb(partition)
-            date_str: str = _display_created(partition)
+            size_mb: str | Text = _completed_size_mb(preferred)
+            date_str: str = _display_created(preferred)
 
-            row: list[str | Text] = [image_ref, type_display]
+            row: list[str | Text] = [image_ref]
             if is_team_listing:
                 owner_display = (
                     Text("Team", style="blue")

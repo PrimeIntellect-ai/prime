@@ -270,16 +270,10 @@ class _SyncVMAuthCache:
     def get_or_refresh(self, _sandbox_id: str) -> dict[str, Any]:
         return {}
 
-    def is_vm(self, _sandbox_id: str) -> bool:
-        return True
-
 
 class _AsyncVMAuthCache:
     async def get_or_refresh(self, _sandbox_id: str) -> dict[str, Any]:
         return {}
-
-    async def is_vm(self, _sandbox_id: str) -> bool:
-        return True
 
 
 def test_concurrent_sync_creation_waits_share_one_platform_batch() -> None:

@@ -1967,24 +1967,6 @@ class SandboxAuthCache:
                 if ev is not None:
                     ev.set()
 
-    def is_vm(self, sandbox_id: str) -> bool:
-        """Return True if sandbox is VM-backed, cached alongside auth token data."""
-        with self._lock:
-            cached = _check_cached_auth(self._auth_cache, sandbox_id)
-            if cached and isinstance(cached.get("is_vm"), bool):
-                return bool(cached["is_vm"])
-
-        sandbox_data = self.client.request("GET", f"/sandbox/{sandbox_id}")
-        sandbox = Sandbox.model_validate(sandbox_data)
-        is_vm = sandbox.vm
-
-        with self._lock:
-            if sandbox_id in self._auth_cache:
-                self._auth_cache[sandbox_id]["is_vm"] = is_vm
-                self._save_cache()
-
-        return is_vm
-
     def set(self, sandbox_id: str, auth_info: Dict[str, Any]) -> None:
         with self._lock:
             self._auth_cache[sandbox_id] = auth_info
@@ -2077,25 +2059,6 @@ class AsyncSandboxAuthCache:
                     ev = self._inflight.pop(sandbox_id, None)
                 if ev is not None:
                     ev.set()
-
-    async def is_vm(self, sandbox_id: str) -> bool:
-        """Return True if sandbox is VM-backed, cached alongside auth token data."""
-        async with self._lock:
-            await self._ensure_loaded()
-            cached = _check_cached_auth(self._auth_cache, sandbox_id)
-            if cached and isinstance(cached.get("is_vm"), bool):
-                return bool(cached["is_vm"])
-
-        sandbox_data = await self.client.request("GET", f"/sandbox/{sandbox_id}")
-        sandbox = Sandbox.model_validate(sandbox_data)
-        is_vm = sandbox.vm
-
-        async with self._lock:
-            if sandbox_id in self._auth_cache:
-                self._auth_cache[sandbox_id]["is_vm"] = is_vm
-                await self._save_cache()
-
-        return is_vm
 
     async def set(self, sandbox_id: str, auth_info: Dict[str, Any]) -> None:
         async with self._lock:
@@ -2292,15 +2255,6 @@ class SandboxClient:
     def clear_auth_cache(self) -> None:
         """Clear all cached auth tokens"""
         self._auth_cache.clear()
-
-    def is_vm(self, sandbox_id: str) -> bool:
-        """Return True if the sandbox is VM-backed.
-
-        Uses the internal auth cache when available and falls back to a
-        ``GET /sandbox/<id>`` lookup on a cold cache. The result is cached
-        alongside the auth token so subsequent calls are essentially free.
-        """
-        return self._auth_cache.is_vm(sandbox_id)
 
     def create(self, request: CreateSandboxRequest) -> Sandbox:
         """Create a new sandbox"""
@@ -2782,12 +2736,6 @@ class SandboxClient:
         jobs: List[BackgroundJob],
         timeout: Optional[int],
     ) -> List[BackgroundJobStatusSnapshot]:
-        for sandbox_id in dict.fromkeys(job.sandbox_id for job in jobs):
-            self._auth_cache.get_or_refresh(sandbox_id)
-            if not self._auth_cache.is_vm(sandbox_id):
-                raise BatchStatusUnsupportedError(
-                    "Batched background job status is only supported for VM sandboxes."
-                )
         return [
             self._get_background_job_status_unleased(job.sandbox_id, job, timeout) for job in jobs
         ]
@@ -2986,15 +2934,11 @@ class SandboxClient:
             SandboxNotRunningError: If the sandbox terminates while the command is running
         """
         job = self.start_background_job(sandbox_id, command, working_dir=working_dir, env=env)
-        use_batch_status = self._auth_cache.is_vm(sandbox_id)
         deadline = time.monotonic() + timeout
         poll_delay = min(float(poll_interval), BACKGROUND_JOB_POLL_MAX_DELAY)
         while True:
             try:
-                if use_batch_status:
-                    snapshot = self._background_job_status_batcher.get((sandbox_id, job.job_id))
-                else:
-                    snapshot = self.get_background_job_status(sandbox_id, job)
+                snapshot = self._background_job_status_batcher.get((sandbox_id, job.job_id))
             except APIError as error:
                 # Error classification gets a separate bounded grace period so a
                 # status poll that overruns the job deadline can still report that
@@ -3699,15 +3643,6 @@ class AsyncSandboxClient:
         """Clear all cached auth tokens."""
         await self._auth_cache.clear()
 
-    async def is_vm(self, sandbox_id: str) -> bool:
-        """Return True if the sandbox is VM-backed.
-
-        Uses the internal auth cache when available and falls back to a
-        ``GET /sandbox/<id>`` lookup on a cold cache. The result is cached
-        alongside the auth token so subsequent calls are essentially free.
-        """
-        return await self._auth_cache.is_vm(sandbox_id)
-
     async def create(self, request: CreateSandboxRequest) -> Sandbox:
         """Create a new sandbox"""
         payload = request.model_dump(by_alias=False, exclude_none=True)
@@ -3945,8 +3880,7 @@ class AsyncSandboxClient:
         """Start a live process in a VM sandbox.
 
         The returned handle streams stdout and stderr, accepts stdin writes,
-        waits for the exit code, and can signal the process. Container sandboxes
-        do not expose this transport and fail fast. If the stream drops before
+        waits for the exit code, and can signal the process. If the stream drops before
         the first StartEvent, the SDK retries Start with the same session_uuid
         (create-or-attach); after it, the SDK re-attaches with Connect by
         session selector. Either way sandboxd re-announces the StartEvent and,
@@ -3955,8 +3889,6 @@ class AsyncSandboxClient:
         Output emitted while detached is not replayed.
         """
         await self._auth_cache.get_or_refresh(sandbox_id)
-        if not await self._auth_cache.is_vm(sandbox_id):
-            raise APIError("Live processes are only supported for VM sandboxes.")
         if user is not None:
             raise ValueError("The 'user' parameter is not supported for VM sandbox processes.")
 
@@ -4389,12 +4321,6 @@ class AsyncSandboxClient:
         jobs: List[BackgroundJob],
         timeout: Optional[int],
     ) -> List[BackgroundJobStatusSnapshot]:
-        for sandbox_id in dict.fromkeys(job.sandbox_id for job in jobs):
-            await self._auth_cache.get_or_refresh(sandbox_id)
-            if not await self._auth_cache.is_vm(sandbox_id):
-                raise BatchStatusUnsupportedError(
-                    "Batched background job status is only supported for VM sandboxes."
-                )
         return list(
             await asyncio.gather(
                 *(
@@ -4598,17 +4524,11 @@ class AsyncSandboxClient:
             SandboxNotRunningError: If the sandbox terminates while the command is running
         """
         job = await self.start_background_job(sandbox_id, command, working_dir=working_dir, env=env)
-        use_batch_status = await self._auth_cache.is_vm(sandbox_id)
         deadline = time.monotonic() + timeout
         poll_delay = min(float(poll_interval), BACKGROUND_JOB_POLL_MAX_DELAY)
         while True:
             try:
-                if use_batch_status:
-                    snapshot = await self._background_job_status_batcher.get(
-                        (sandbox_id, job.job_id)
-                    )
-                else:
-                    snapshot = await self.get_background_job_status(sandbox_id, job)
+                snapshot = await self._background_job_status_batcher.get((sandbox_id, job.job_id))
             except APIError as error:
                 # Error classification gets a separate bounded grace period so a
                 # status poll that overruns the job deadline can still report that

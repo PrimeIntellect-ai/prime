@@ -265,7 +265,7 @@ def test_train_volume_flag_and_toml_key_reach_the_fft_payload(monkeypatch, tmp_p
     cfg = tmp_path / "rl.toml"
     body = (
         '[model]\nname = "Qwen/Qwen3-0.6B"\n\n'
-        '[deployment]\nnum_train_gpus = 1\nnum_infer_gpus = 1\n'
+        "[deployment]\nnum_train_gpus = 1\nnum_infer_gpus = 1\n"
     )
     cfg.write_text(body)
     result = runner.invoke(

@@ -25,13 +25,10 @@ def _auth_payload():
 
 
 class _AsyncFakeCache:
-    """Always-VM async auth-cache double for gateway RPC tests."""
+    """Async auth-cache double for gateway RPC tests."""
 
     async def get_or_refresh(self, _sandbox_id: str):
         return _auth_payload()
-
-    async def is_vm(self, _sandbox_id: str) -> bool:
-        return True
 
 
 def _start_event(pid, response_type=pb.StartResponse):

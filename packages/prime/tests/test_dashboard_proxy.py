@@ -5,6 +5,7 @@ import json
 import os
 import signal
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -249,6 +250,17 @@ def test_proxy_rejects_same_origin_redirects_outside_the_run_scope(proxy_factory
         # Platform-shaped but out of scope for this run: reject.
         ("/api/v1/rft/runs/run-2/dashboard/x", None),
         ("/api/v1/rft/runs/run-1/logs", None),
+        # Double slash after the prefix: single joining slash, never "//".
+        ("/api/v1/rft/runs/run-1/dashboard//static/x", "/static/x"),
+        (f"{BASE_URL}/api/v1/rft/runs/run-1/dashboard//static/x", "/static/x"),
+        # Remainders with a leading "//" (triple slash) would build a
+        # protocol-relative Location: reject as out-of-scope.
+        ("/api/v1/rft/runs/run-1/dashboard///evil.example.com/x", None),
+        (f"{BASE_URL}/api/v1/rft/runs/run-1/dashboard///evil.example.com/x", None),
+        # A bare protocol-relative Location (netloc form): reject — the
+        # browser would otherwise leave the loopback origin entirely.
+        ("//evil.example.com/x", None),
+        ("//127.0.0.1:9999/x", None),
     ],
 )
 def test_map_dashboard_redirect(location: str, expected: Optional[str]) -> None:
@@ -835,3 +847,212 @@ def test_detached_child_leaves_replaced_state_file_alone(tmp_path) -> None:
     assert (
         not state_path.exists() or json.loads(state_path.read_text()).get("pid") == os.getpid() + 1
     ), "child must not delete a newer proxy's state file"
+
+
+# --- t024: strict Host/Origin parser hardening (astra raw-socket matrix) ------
+
+
+def _raw_request(port: int, header_lines: list[str], path: str = "/") -> tuple[int, bytes]:
+    request = (
+        f"GET {path} HTTP/1.1\r\n" + "\r\n".join(header_lines) + "\r\nConnection: close\r\n\r\n"
+    )
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+        sock.sendall(request.encode())
+        data = b""
+        while True:
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            data += chunk
+    head, _, body = data.partition(b"\r\n\r\n")
+    status = int(head.split(b" ")[1])
+    return status, body
+
+
+@pytest.mark.parametrize(
+    "host_line",
+    [
+        "[::1]attacker.example",
+        "[::1]:notaport",
+        "[::1]:",
+        "[::1]garbage:123",
+        "127.0.0.1:123x",
+    ],
+)
+def test_proxy_rejects_malformed_host_authorities(proxy_factory, host_line: str) -> None:
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        return httpx.Response(200, content=b"secret dashboard")
+
+    _, port = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
+
+    status, body = _raw_request(port, [f"Host: {host_line}"])
+    assert status == 403, host_line
+    assert seen == []
+    assert b"secret" not in body
+
+
+def test_proxy_accepts_well_formed_ipv6_bracket_host(proxy_factory) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"dashboard")
+
+    _, port = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
+
+    assert _raw_request(port, [f"Host: [::1]:{port}"])[0] == 200
+    assert _raw_request(port, ["Host: [::1]"])[0] == 200
+
+
+def test_proxy_rejects_duplicate_host_headers(proxy_factory) -> None:
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        return httpx.Response(200, content=b"secret dashboard")
+
+    _, port = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
+
+    # Good Host first, hostile second: duplicated Host is rejected outright.
+    status, body = _raw_request(port, [f"Host: 127.0.0.1:{port}", "Host: attacker.example:80"])
+    assert status == 403
+    assert seen == []
+    assert b"secret" not in body
+
+
+@pytest.mark.parametrize(
+    "origin_line",
+    [
+        "http://127.0.0.1:1",  # wrong local port
+        "ftp://{placeholder}",  # non-http scheme
+        "http://127.0.0.1:notaport",  # malformed port
+        "http://[::1",  # malformed bracket: must 403, never raise
+        "http://localhost:1",
+    ],
+)
+def test_proxy_rejects_invalid_origins(proxy_factory, origin_line: str) -> None:
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        return httpx.Response(200, content=b"secret dashboard")
+
+    _, port = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
+
+    line = origin_line.replace("{placeholder}", f"127.0.0.1:{port}")
+    status, body = _raw_request(port, [f"Host: 127.0.0.1:{port}", f"Origin: {line}"])
+    assert status == 403, line
+    assert seen == []
+    assert b"secret" not in body
+
+
+def test_proxy_still_accepts_same_origin_with_bound_port(proxy_factory) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"dashboard")
+
+    _, port = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
+
+    status, _ = _raw_request(port, [f"Host: 127.0.0.1:{port}", f"Origin: http://127.0.0.1:{port}"])
+    assert status == 200
+
+
+# --- t024 fold-ins: failed-start unlink ownership + platform detach flags ----
+
+
+def test_failed_start_leaves_replaced_state_file_alone(monkeypatch, tmp_path) -> None:
+    """A failed start must not delete a replacement proxy's state file."""
+    child = _FakeChildProcess(None)  # never emits the ready line
+    child.pid = 424242
+
+    def fake_popen(command, **kwargs):
+        state_file = Path(command[command.index("--state-file") + 1])
+        state_file.parent.mkdir(parents=True, exist_ok=True)
+        # A replacement proxy already claimed the state file.
+        state_file.write_text(json.dumps({"run_id": "run-1", "pid": 999999, "port": 51299}))
+        return child
+
+    monkeypatch.setattr("prime_cli.dashboard_proxy.subprocess.Popen", fake_popen)
+
+    with pytest.raises(RuntimeError, match="failed to start"):
+        start_detached_dashboard_proxy(
+            "run-1",
+            base_url=BASE_URL,
+            api_key="test-key",
+            state_dir=tmp_path,
+            ready_timeout_seconds=0.2,
+        )
+
+    # The child was still killed, but the replacement's state file survives.
+    assert child.killed is True
+    state_paths = list(tmp_path.glob("train-dashboard-run-1-*.json"))
+    assert len(state_paths) == 1
+    assert json.loads(state_paths[0].read_text())["pid"] == 999999
+
+
+def test_failed_start_still_removes_orphans_own_state(monkeypatch, tmp_path) -> None:
+    """When the state file still names the dead child, it IS cleaned up."""
+    child = _FakeChildProcess(None)
+    child.pid = 424242
+
+    def fake_popen(command, **kwargs):
+        state_file = Path(command[command.index("--state-file") + 1])
+        state_file.parent.mkdir(parents=True, exist_ok=True)
+        # The orphan wrote its own pid before failing to report the port.
+        state_file.write_text(json.dumps({"run_id": "run-1", "pid": child.pid, "port": 1}))
+        return child
+
+    monkeypatch.setattr("prime_cli.dashboard_proxy.subprocess.Popen", fake_popen)
+
+    with pytest.raises(RuntimeError, match="failed to start"):
+        start_detached_dashboard_proxy(
+            "run-1",
+            base_url=BASE_URL,
+            api_key="test-key",
+            state_dir=tmp_path,
+            ready_timeout_seconds=0.2,
+        )
+
+    assert child.killed is True
+    assert list(tmp_path.glob("train-dashboard-run-1-*.json")) == []
+
+
+def test_detached_popen_uses_windows_flags_on_windows(monkeypatch, tmp_path) -> None:
+    seen: dict[str, Any] = {}
+
+    def fake_popen(command, **kwargs):
+        seen.update(kwargs)
+        return _FakeChildProcess("PORT 51234\n")
+
+    monkeypatch.setattr("prime_cli.dashboard_proxy.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("prime_cli.dashboard_proxy.sys.platform", "win32")
+
+    url = start_detached_dashboard_proxy(
+        "run-1", base_url=BASE_URL, api_key="test-key", state_dir=tmp_path
+    )
+
+    assert url == "http://127.0.0.1:51234/"
+    # POSIX-only kwarg must not be sent on Windows; detach via creation flags.
+    assert "start_new_session" not in seen
+    expected_flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(
+        subprocess, "CREATE_NEW_PROCESS_GROUP", 0
+    )
+    assert seen.get("creationflags") == expected_flags
+
+
+def test_detached_popen_uses_start_new_session_on_posix(monkeypatch, tmp_path) -> None:
+    seen: dict[str, Any] = {}
+
+    def fake_popen(command, **kwargs):
+        seen.update(kwargs)
+        return _FakeChildProcess("PORT 51234\n")
+
+    monkeypatch.setattr("prime_cli.dashboard_proxy.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("prime_cli.dashboard_proxy.sys.platform", "darwin")
+
+    url = start_detached_dashboard_proxy(
+        "run-1", base_url=BASE_URL, api_key="test-key", state_dir=tmp_path
+    )
+
+    assert url == "http://127.0.0.1:51234/"
+    assert seen.get("start_new_session") is True
+    assert "creationflags" not in seen

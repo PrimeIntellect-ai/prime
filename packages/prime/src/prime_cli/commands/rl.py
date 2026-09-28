@@ -3531,9 +3531,11 @@ def get_dashboard_url(
 
     Starts a local proxy on 127.0.0.1 that injects the API token on your
     behalf, so the browser never needs it. By default the proxy runs in a
-    detached background process that exits itself after 30 minutes idle:
-    the command prints the loopback URL as the last stdout line and
-    returns immediately, so `open $(prime train dashboard <run_id>
+    detached background process that exits itself after 30 minutes of
+    INACTIVITY — an actively used dashboard (e.g. an open tab with a live
+    stream) keeps the proxy alive past 30 minutes of wall time. The
+    command prints the loopback URL as the last stdout line and returns
+    immediately, so `open $(prime train dashboard <run_id>
     --no-browser)` is safe. `--foreground` keeps serving in this process
     until Ctrl-C. Exits non-zero before starting the proxy if the run has
     no dashboard.
@@ -3597,7 +3599,8 @@ def get_dashboard_url(
     idle_minutes = int(DEFAULT_IDLE_TIMEOUT_SECONDS // 60)
     err_console.print(
         f"Dashboard proxy running in the background at {url}; it exits after "
-        f"{idle_minutes} minutes idle. Use --foreground to serve in this process."
+        f"{idle_minutes} minutes of inactivity (active dashboards keep it "
+        f"alive longer). Use --foreground to serve in this process."
     )
     if not no_browser:
         webbrowser.open(url)

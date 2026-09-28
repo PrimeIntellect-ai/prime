@@ -66,25 +66,56 @@ _LOOPBACK_HOSTNAMES = {"127.0.0.1", "localhost", "::1"}
 """Host header names the loopback proxy may serve (DNS-rebinding guard)."""
 
 
-def _parse_host_header(value: str) -> tuple[Optional[str], Optional[int]]:
-    """Split a ``Host`` header into (hostname, port), tolerating IPv6 forms."""
+def _origin_is_loopback(origin: str, bound_port: int) -> bool:
+    """Strictly validate an ``Origin`` header against the loopback proxy.
+
+    Accepted only when the scheme is http/https, the host is a loopback
+    name, and the port matches the bound port (browser origins always
+    carry an explicit port). Any malformed value — including brackets or
+    ports that make the parser raise — is a clean rejection, never an
+    exception.
+    """
+    try:
+        parsed = urllib.parse.urlsplit(origin.strip())
+        port = parsed.port
+    except ValueError:
+        return False
+    if (parsed.scheme or "").lower() not in ("http", "https"):
+        return False
+    if (parsed.hostname or "").lower() not in _LOOPBACK_HOSTNAMES:
+        return False
+    return port is not None and port == bound_port
+
+
+def _parse_host_header(value: str) -> tuple[Optional[str], Optional[int], bool]:
+    """Strictly parse a ``Host`` header into (hostname, port, well_formed).
+
+    Bracketed IPv6 authorities must end exactly at the closing bracket,
+    optionally followed by ``:<int port>``: any trailing garbage
+    (``[::1]attacker.example``, ``[::1]:notaport``, ``[::1]:``) is
+    malformed and must be rejected, not tolerated. Non-bracket forms
+    allow at most one ``:<int port>`` suffix.
+    """
     host = value.strip()
     if not host:
-        return None, None
+        return None, None, False
     if host.startswith("["):
         end = host.find("]")
         if end == -1:
-            return None, None
+            return None, None, False
         hostname = host[1:end]
         rest = host[end + 1 :]
-        port: Optional[int] = None
+        if not rest:
+            return hostname.lower(), None, True
         if rest.startswith(":") and rest[1:].isdigit():
-            port = int(rest[1:])
-        return hostname.lower(), port
+            return hostname.lower(), int(rest[1:]), True
+        return None, None, False
     before, sep, after = host.rpartition(":")
-    if sep and after.isdigit():
-        return before.lower(), int(after)
-    return host.lower(), None
+    if sep:
+        if not after.isdigit():
+            return None, None, False
+        return before.lower(), int(after), True
+    return host.lower(), None, True
 
 
 def dashboard_upstream_path(run_id: str, path: str) -> str:
@@ -142,7 +173,15 @@ def map_dashboard_redirect(location: str, base_url: str, run_id: str) -> Optiona
         if parsed.path == prefix.rstrip("/"):
             return "/" + query
         if parsed.path.startswith(prefix):
-            return "/" + parsed.path[len(prefix) :] + query
+            remainder = parsed.path[len(prefix) :]
+            if remainder.startswith("//"):
+                # Protocol-relative escape: the browser would leave the
+                # loopback origin for an attacker-controlled host.
+                return None
+            if remainder.startswith("/"):
+                # Double slash after the prefix: keep a single joining slash.
+                return remainder + query
+            return "/" + remainder + query
         if parsed.path.startswith("/api/v1/"):
             # Platform-shaped but outside this run's dashboard scope: the
             # loopback cannot serve it (its own prefix would compound).
@@ -159,7 +198,10 @@ def map_dashboard_redirect(location: str, base_url: str, run_id: str) -> Optiona
     if path == prefix.rstrip("/"):
         path = "/"
     elif path.startswith(prefix):
-        path = "/" + path[len(prefix) :]
+        remainder = path[len(prefix) :]
+        if remainder.startswith("//"):
+            return None
+        path = remainder if remainder.startswith("/") else "/" + remainder
     else:
         return None
     return path + query
@@ -237,18 +279,27 @@ class DashboardProxyHandler(http.server.BaseHTTPRequestHandler):
         injected; a hostile page must not be able to read it through a
         rebound DNS name pointing at 127.0.0.1. Reject before any
         upstream work, so forged requests never touch the platform.
+        Malformed or duplicated headers are rejected, never tolerated.
         """
-        hostname, port = _parse_host_header(self.headers.get("Host", ""))
         bound_port = self.server.server_address[1]
-        if hostname not in _LOOPBACK_HOSTNAMES or (port is not None and port != bound_port):
+        hosts = self.headers.get_all("Host") or []
+        if len(hosts) != 1:
+            # Duplicate Host headers (good first, hostile second) are a
+            # smuggling vector: reject outright.
+            self._send_plain_error(403, "Forbidden: loopback requests only.")
+            return False
+        hostname, port, well_formed = _parse_host_header(hosts[0])
+        if (
+            not well_formed
+            or hostname not in _LOOPBACK_HOSTNAMES
+            or (port is not None and port != bound_port)
+        ):
             self._send_plain_error(403, "Forbidden: loopback requests only.")
             return False
         origin = self.headers.get("Origin")
-        if origin is not None:
-            origin_host = (urllib.parse.urlsplit(origin).hostname or "").lower()
-            if origin_host not in _LOOPBACK_HOSTNAMES:
-                self._send_plain_error(403, "Forbidden: loopback requests only.")
-                return False
+        if origin is not None and not _origin_is_loopback(origin, bound_port):
+            self._send_plain_error(403, "Forbidden: loopback requests only.")
+            return False
         return True
 
     def _relay(self, response: httpx.Response) -> None:
@@ -489,6 +540,20 @@ def _live_proxy_url(state: Optional[dict[str, Any]]) -> Optional[str]:
     return f"http://127.0.0.1:{port}/"
 
 
+def _unlink_state_if_owned(state_path: Path, pid: int) -> None:
+    """Unlink a proxy state file only if it still records the given pid.
+
+    A newer/replacement proxy may have overwritten the file; removing its
+    record would break that proxy's reuse.
+    """
+    try:
+        recorded = json.loads(state_path.read_text())
+    except (OSError, ValueError):
+        return
+    if isinstance(recorded, dict) and recorded.get("pid") == pid:
+        state_path.unlink(missing_ok=True)
+
+
 def _cleanup_stale_proxy_states(
     run_id: str, *, keep_fingerprint: str, state_dir: Optional[Path] = None
 ) -> None:
@@ -515,7 +580,7 @@ def _cleanup_stale_proxy_states(
         candidate.unlink(missing_ok=True)
 
 
-def _terminate_child_process(process: "subprocess.Popen[bytes]") -> None:
+def _terminate_child_process(process: "subprocess.Popen[Any]") -> None:
     """Kill a detached child and reap it, killing the whole process group.
 
     The child is its own session leader (``start_new_session=True``), so
@@ -541,7 +606,7 @@ def _terminate_child_process(process: "subprocess.Popen[bytes]") -> None:
         pass
 
 
-def _read_child_ready_line(process: "subprocess.Popen[bytes]", timeout: float) -> Optional[str]:
+def _read_child_ready_line(process: "subprocess.Popen[Any]", timeout: float) -> Optional[str]:
     """Read the child's ``PORT <n>`` line with a timeout (pipes cannot select)."""
     line: Optional[str] = None
 
@@ -600,13 +665,22 @@ def start_detached_dashboard_proxy(
         "--idle-timeout-seconds",
         str(idle_timeout_seconds),
     ]
+    detach_kwargs: dict[str, Any] = {}
+    if sys.platform == "win32":
+        # start_new_session is POSIX-only; without a new process group a
+        # terminal Ctrl-C would kill the dashboard proxy early on Windows.
+        detach_kwargs["creationflags"] = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(
+            subprocess, "CREATE_NEW_PROCESS_GROUP", 0
+        )
+    else:
+        detach_kwargs["start_new_session"] = True
     process = subprocess.Popen(  # noqa: S603 - fixed module command
         command,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
-        start_new_session=True,
         env={**os.environ, _CHILD_API_KEY_ENV: api_key},
+        **detach_kwargs,
     )
     ready_ok = False
     try:
@@ -622,7 +696,10 @@ def start_detached_dashboard_proxy(
             # blocked in readline would wait on the buffered-reader lock
             # and hang the CLI despite the timeout.
             _terminate_child_process(process)
-            state_path.unlink(missing_ok=True)  # orphan may have written it
+            # The orphan may have written the state file before failing,
+            # but only remove it if it still names THIS child: a
+            # concurrent/replacement proxy may already have claimed it.
+            _unlink_state_if_owned(state_path, process.pid)
         if process.stdout is not None:
             process.stdout.close()
     if not ready_ok:
@@ -687,12 +764,7 @@ def _main(argv: Optional[list[str]] = None) -> int:
         # Unlink the state file ONLY if it still names THIS process: a
         # newer proxy for the same run/context may have replaced it, and
         # removing its state would break that proxy's reuse.
-        try:
-            recorded = json.loads(state_path.read_text())
-            if isinstance(recorded, dict) and recorded.get("pid") == os.getpid():
-                state_path.unlink(missing_ok=True)
-        except (OSError, ValueError):
-            pass
+        _unlink_state_if_owned(state_path, os.getpid())
     return 0
 
 

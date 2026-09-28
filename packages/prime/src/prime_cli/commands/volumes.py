@@ -71,12 +71,15 @@ def list_volumes(
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
+    # The Kubernetes namespace is a platform detail; never show it.
     if output == "json":
-        output_data_as_json([v.model_dump(by_alias=True) for v in volumes], console)
+        output_data_as_json(
+            [v.model_dump(by_alias=True, exclude={"namespace"}) for v in volumes], console
+        )
         return
-    table = Table("Name", "Size", "Status", "Namespace", "Created")
+    table = Table("Name", "Size", "Status", "Created")
     for v in volumes:
-        table.add_row(v.name, v.size or "-", v.status, v.namespace, v.created_at or "-")
+        table.add_row(v.name, v.size or "-", v.status, v.created_at or "-")
     console.print(table)
 
 

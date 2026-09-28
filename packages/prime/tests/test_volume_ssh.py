@@ -301,3 +301,29 @@ def test_shell_stops_a_session_it_never_connected_to(monkeypatch, tmp_path):
     assert result.exit_code == 1
     assert stopped == [("data", "s1")]
     assert "Stopped session s1" in result.output
+
+
+@pytest.mark.parametrize("output", ["table", "json"])
+def test_list_never_shows_the_namespace(monkeypatch, output):
+    from prime_cli.api.training import Volume
+
+    vol = Volume(
+        name="ckpts",
+        size="10Gi",
+        status="RUNNING",
+        clusterId="c1",
+        namespace="prime-team-secret-ns",
+        pvcName="vol-ckpts",
+    )
+    monkeypatch.setattr(
+        volumes, "_client", lambda: (SimpleNamespace(list_volumes=lambda **kw: [vol]), None)
+    )
+    result = CliRunner().invoke(
+        app,
+        ["volumes", "list", "-o", output],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1", "COLUMNS": "200"},
+    )
+    assert result.exit_code == 0, result.output
+    assert "ckpts" in result.output
+    assert "prime-team-secret-ns" not in result.output
+    assert "amespace" not in result.output

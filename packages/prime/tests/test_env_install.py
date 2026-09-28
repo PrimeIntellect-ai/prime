@@ -35,7 +35,6 @@ def test_install_prefers_scoped_index_with_legacy_server_fallback(
         }
     }
     monkeypatch.setattr(env, "APIClient", lambda **kwargs: client)
-    monkeypatch.setattr(env, "load_verifiers_prime_plugin", lambda **kwargs: None)
     monkeypatch.setattr(env.shutil, "which", lambda tool: f"/bin/{tool}")
     execute = Mock()
     monkeypatch.setattr(env, "execute_install_command", execute)

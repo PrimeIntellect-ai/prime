@@ -95,8 +95,8 @@ def test_remote_script_compiles_and_keeps_cleanup_best_effort(tmp_path):
         "    installed_runtime_regression_checks()\n"
         "    write_smoke_environment()" in script
     )
-    assert script.index('"--save-results"') < script.index('"--skip-upload"')
-    assert 'ENV_DIR / "outputs"' in script
+    assert '"--skip-upload"' not in script
+    assert "eval_dir = write_eval_results_for_push()" in script
 
 
 def test_run_in_sandbox_uses_background_job_for_long_timeout(tmp_path, capsys):

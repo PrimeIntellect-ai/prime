@@ -31,7 +31,6 @@ from .lab_agents import (
     agent_project_skills_dirs,
     agent_user_skills_dir,
     known_agent_names,
-    write_agent_native_surface,
 )
 from .lab_hygiene import (
     LabHygieneOptions,
@@ -40,6 +39,7 @@ from .lab_hygiene import (
     run_lab_hygiene_preflight,
     tracked_lab_hygiene_paths,
 )
+from .utils import is_plain_mode
 
 VERIFIERS_REPO = "primeintellect-ai/verifiers"
 VERIFIERS_REF = "6c64ce6a3a01e8edde7c3c0e8e5315fb236e9faa"
@@ -380,7 +380,6 @@ def _run_lab_setup_steps(
     _prepare_workspace_skill_dir(workspace, managed_skill_names, emit)
     _prepare_agent_skill_dirs(workspace, options.agents, managed_skill_names, emit)
     _report_missing_agent_requirements(options.agents, emit)
-    _prepare_agent_native_surfaces(workspace, options.agents, emit)
     _sync_lab_metadata(workspace, options.agents, setup_source="prime lab setup")
 
     if not options.skip_agents_md:
@@ -418,7 +417,6 @@ def _run_lab_sync_steps(
     if agents:
         _prepare_agent_skill_dirs(workspace, agents, managed_skill_names, emit)
         _report_missing_agent_requirements(agents, emit)
-        _prepare_agent_native_surfaces(workspace, agents, emit)
         _sync_lab_metadata(workspace, agents, setup_source="prime lab sync")
     else:
         reason = (
@@ -853,17 +851,6 @@ def _report_missing_agent_requirements(agents: tuple[str, ...], emit: Emit) -> N
                 )
 
 
-def _prepare_agent_native_surfaces(workspace: Path, agents: tuple[str, ...], emit: Emit) -> None:
-    for agent in agents:
-        paths = write_agent_native_surface(workspace, agent)
-        for path in paths:
-            try:
-                display = str(path.relative_to(workspace))
-            except ValueError:
-                display = str(path)
-            emit(f"Prepared {display}\n")
-
-
 def _lab_doctor_checks(options: LabDoctorOptions, workspace: Path) -> list[LabDoctorCheck]:
     if options.fix:
         run_lab_hygiene_preflight(LabHygieneOptions(fix=True), workspace=workspace)
@@ -916,7 +903,7 @@ def _lab_doctor_checks(options: LabDoctorOptions, workspace: Path) -> list[LabDo
             for agent_skill_dir in agent_skill_dirs:
                 if agent_skill_dir is not None:
                     checks.append(_agent_managed_skills_check(label, agent_skill_dir, agent))
-            checks.append(_agent_native_surface_check(agent, workspace))
+            checks.append(_agent_requirements_check(agent))
     else:
         checks.append(
             LabDoctorCheck(
@@ -1042,10 +1029,9 @@ def _managed_skill_names_from_manifest() -> tuple[str, ...]:
     return tuple(str(name) for name in skills)
 
 
-def _agent_native_surface_check(agent: str, workspace: Path) -> LabDoctorCheck:
+def _agent_requirements_check(agent: str) -> LabDoctorCheck:
     capability = agent_capability(agent)
-    name = f"{capability.label} native tools"
-    path_based_surfaces = {"mcp_config", "acp_mcp", "droid_mcp_config", "pi_extension"}
+    name = f"{capability.label} CLI"
     if capability.status == "not_supported":
         return LabDoctorCheck(
             name=name,
@@ -1067,54 +1053,11 @@ def _agent_native_surface_check(agent: str, workspace: Path) -> LabDoctorCheck:
             message="Missing " + ", ".join(requirement.binary for requirement in missing),
             remediation="Install selected agent dependency: " + ", ".join(remediations) + ".",
         )
-    if capability.native_surface == "codex_app_server":
-        return LabDoctorCheck(
-            name=name,
-            status="PASS",
-            message=(
-                f"{capability.label} receives native Lab tools through {capability.native_surface}."
-            ),
-        )
-    if capability.native_surface == "letta_external_tools":
-        return LabDoctorCheck(
-            name=name,
-            status="PASS",
-            message=f"{capability.label} receives native Lab tools through external tools.",
-        )
-    if capability.native_surface == "none":
-        return LabDoctorCheck(
-            name=name,
-            status="PASS",
-            message=f"{capability.label} native Lab tools are not scaffolded by setup yet.",
-        )
-    if capability.native_surface not in path_based_surfaces:
-        return LabDoctorCheck(
-            name=name,
-            status="WARN",
-            message=f"Unknown native surface type: {capability.native_surface}.",
-            remediation="Update Lab doctor native-surface handling.",
-        )
-    expected_paths = capability.resolved_surface_paths(workspace)
-    if not expected_paths:
-        return LabDoctorCheck(
-            name=name,
-            status="WARN",
-            message=f"{capability.label} declares {capability.native_surface} but no path.",
-            remediation=f"Add an expected surface path or update {capability.name} setup.",
-        )
-    missing_paths = [path for path in expected_paths if not path.exists()]
-    if not missing_paths:
-        return LabDoctorCheck(
-            name=name,
-            status="PASS",
-            message=", ".join(str(path) for path in expected_paths)
-            or f"{capability.label} receives Lab tools at session start.",
-        )
     return LabDoctorCheck(
         name=name,
-        status="WARN",
-        message="Missing " + ", ".join(str(path) for path in missing_paths),
-        remediation=f"Run prime lab sync --agent {capability.name}.",
+        status="PASS",
+        message=", ".join(requirement.binary for requirement in capability.requirements)
+        + " installed.",
     )
 
 
@@ -1186,7 +1129,7 @@ def _config_validity_check(workspace: Path) -> LabDoctorCheck:
             name="Config TOML",
             status="WARN",
             message="No TOML configs found.",
-            remediation="Run prime lab setup or save a config copy from Lab.",
+            remediation="Run prime lab setup or copy a template from .prime/lab/templates/configs.",
         )
     invalid: list[str] = []
     for path in config_paths:
@@ -1223,7 +1166,7 @@ def _config_deprecated_fields_check(workspace: Path) -> LabDoctorCheck:
             name="Config deprecated fields",
             status="WARN",
             message="No TOML configs found.",
-            remediation="Run prime lab setup or save a config copy from Lab.",
+            remediation="Run prime lab setup or copy a template from .prime/lab/templates/configs.",
         )
     findings: list[str] = []
     for path in config_paths:
@@ -1276,7 +1219,7 @@ def _config_environment_reference_check(workspace: Path) -> LabDoctorCheck:
             name="Config environment refs",
             status="WARN",
             message="No TOML configs found.",
-            remediation="Run prime lab setup or save a config copy from Lab.",
+            remediation="Run prime lab setup or copy a template from .prime/lab/templates/configs.",
         )
     missing_local: list[str] = []
     local_names = _local_environment_names(workspace)
@@ -1394,7 +1337,7 @@ def _ensure_uv_project(workspace: Path, emit: Emit, runner: Runner) -> None:
     _check_command(["uv", "add", VERIFIERS_REQUIREMENT], workspace, emit, runner)
 
 
-def _post_setup_call_to_action(options: LabSetupOptions) -> Panel:
+def _post_setup_call_to_action(options: LabSetupOptions) -> RenderableType:
     primary_agent = options.agents[0] if options.agents else "your coding agent"
     prompt_heading = f"ask {primary_agent}"
     prompt_body = (
@@ -1408,16 +1351,27 @@ def _post_setup_call_to_action(options: LabSetupOptions) -> Panel:
         style="italic",
     )
 
+    commands = (
+        "uv run vf-init my-env",
+        "uv run vf-eval my-env -m openai/gpt-5.4-nano -n 5",
+        "prime train configs/rl/qwen.toml",
+        "uv run vf-gepa my-env -m openai/gpt-5.4-nano",
+    )
+    if is_plain_mode():
+        return Text(
+            "\n".join(
+                [
+                    "get started: idea -> environment -> eval -> training",
+                    f"{prompt_heading}: {prompt_body}",
+                    "quick commands:",
+                    *(f"  $ {command}" for command in commands),
+                ]
+            )
+        )
+
     command_table = Table.grid(padding=(0, 1))
-    command_table.add_row("[bold green]$[/bold green]", "prime env init my-env")
-    command_table.add_row(
-        "[bold green]$[/bold green]", "prime eval run my-env -m openai/gpt-5.4-nano -n 5"
-    )
-    command_table.add_row("[bold green]$[/bold green]", "prime eval view")
-    command_table.add_row("[bold green]$[/bold green]", "prime train configs/rl/qwen.toml")
-    command_table.add_row(
-        "[bold green]$[/bold green]", "prime gepa run my-env -m openai/gpt-5.4-nano"
-    )
+    for command in commands:
+        command_table.add_row("[bold green]$[/bold green]", command)
 
     header_text = Text.assemble(
         ("idea -> environment -> eval -> training", "dim"),
@@ -1853,7 +1807,7 @@ def _print_lab_doctor_result(result: LabDoctorResult, console: Console) -> None:
             "FAIL": "red",
         }.get(check.status, "dim")
         table.add_row(
-            f"[{style}]{check.status}[/{style}]",
+            Text(check.status, style=style),
             check.name,
             check.message,
             check.remediation,

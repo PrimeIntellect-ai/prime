@@ -1,37 +1,16 @@
-"""Lab platform commands."""
+"""Lab workspace commands."""
 
 from pathlib import Path
 
 import typer
-from rich.console import Console
 
-app = typer.Typer(
-    help="Lab platform commands",
-    invoke_without_command=True,
-    no_args_is_help=False,
+from ..utils import PlainTyper, get_console
+
+app = PlainTyper(
+    help="Set up and maintain Lab workspaces",
+    no_args_is_help=True,
 )
-console = Console()
-
-
-@app.callback()
-def lab(
-    ctx: typer.Context,
-    limit: int = typer.Option(1000, "--limit", "-n", help="Max rows to load per section"),
-    env_dir: str = typer.Option(
-        "./environments",
-        "--env-dir",
-        help="Local environments directory for discovering eval outputs",
-    ),
-    outputs_dir: str = typer.Option(
-        "./outputs",
-        "--outputs-dir",
-        help="Local outputs directory for discovering eval outputs",
-    ),
-) -> None:
-    """Launch the interactive Lab viewer."""
-    if ctx.invoked_subcommand is not None:
-        return
-    _launch_view(limit=limit, env_dir=env_dir, outputs_dir=outputs_dir)
+console = get_console()
 
 
 @app.command(
@@ -111,51 +90,3 @@ def register_github() -> None:
 
     path = write_lab_github_workflow(Path.cwd())
     console.print(f"Wrote {path}", markup=False)
-
-
-@app.command("view")
-def view(
-    limit: int = typer.Option(1000, "--limit", "-n", help="Max rows to load per section"),
-    env_dir: str = typer.Option(
-        "./environments",
-        "--env-dir",
-        help="Local environments directory for discovering eval outputs",
-    ),
-    outputs_dir: str = typer.Option(
-        "./outputs",
-        "--outputs-dir",
-        help="Local outputs directory for discovering eval outputs",
-    ),
-) -> None:
-    """Launch the interactive Lab viewer."""
-    _launch_view(limit=limit, env_dir=env_dir, outputs_dir=outputs_dir)
-
-
-@app.command("mcp")
-def mcp(
-    workspace: Path | None = typer.Option(
-        None,
-        "--workspace",
-        help="Workspace whose running Lab TUI should receive MCP tool calls.",
-    ),
-) -> None:
-    """Run the Lab MCP server over stdio."""
-
-    from ..lab_mcp import run_lab_mcp_server
-
-    run_lab_mcp_server(workspace or Path.cwd())
-
-
-def _launch_view(*, limit: int, env_dir: str, outputs_dir: str) -> None:
-    if limit < 1:
-        console.print("[red]Error:[/red] --limit must be at least 1")
-        raise typer.Exit(1)
-
-    from prime_lab_app import run_lab_view
-
-    run_lab_view(
-        limit=limit,
-        env_dir=env_dir,
-        outputs_dir=outputs_dir,
-        workspace=Path.cwd(),
-    )

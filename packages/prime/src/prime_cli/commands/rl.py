@@ -4,6 +4,7 @@ import json
 import os
 import re
 import time
+import webbrowser
 from contextlib import nullcontext
 from decimal import Decimal
 from pathlib import Path
@@ -21,6 +22,7 @@ from prime_cli.core import Config
 
 from ..api.rl import EnvServerInfo, RLClient, RLRun
 from ..client import APIClient, APIError, ValidationError
+from ..dashboard_proxy import make_dashboard_proxy_server
 from ..utils import (
     DefaultCommandGroup,
     PlainTyper,
@@ -3508,17 +3510,25 @@ def list_checkpoints(
 
 @app.command("dashboard", rich_help_panel="Monitoring")
 def get_dashboard_url(
-    run_id: str = typer.Argument(..., help="Run ID to get the dashboard URL for"),
+    run_id: str = typer.Argument(..., help="Run ID to open the dashboard for"),
+    no_browser: bool = typer.Option(
+        False,
+        "--no-browser",
+        help="Print the loopback URL without opening a browser.",
+    ),
 ) -> None:
-    """Get the platform-proxied dashboard URL for a Hosted Training run.
+    """Open the Hosted Training run dashboard in your browser.
 
-    Prints the URL to stdout. Exits non-zero if the run has no dashboard.
+    Serves the dashboard through a local proxy on 127.0.0.1 that injects
+    the API token on your behalf, so the browser never needs it. The
+    loopback URL is the last stdout line; the proxy runs until Ctrl-C.
+    Exits non-zero before serving if the run has no dashboard.
 
     Example:
 
         prime train dashboard <run_id>
 
-        open $(prime train dashboard <run_id>)
+        prime train dashboard <run_id> --no-browser
     """
     # Errors go to stderr so stdout stays strictly the URL and safe for
     # command substitution (`open $(prime train dashboard ...)`).
@@ -3527,19 +3537,34 @@ def get_dashboard_url(
         api_client = APIClient()
         rl_client = RLClient(api_client)
 
-        url = rl_client.get_dashboard_url(run_id)
-
-        if not url:
+        if not rl_client.get_dashboard_url(run_id):
             err_console.print(f"[red]Error:[/red] No dashboard available for run {run_id}")
             raise typer.Exit(1)
-
-        # Machine-consumable URL: soft_wrap=True disables terminal-width
-        # wrapping so long URLs stay on one line (mirrors output_data_as_json).
-        console.print(url, markup=False, highlight=False, soft_wrap=True)
-
     except APIError as e:
         err_console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
+
+    server, url = make_dashboard_proxy_server(
+        run_id,
+        base_url=api_client.base_url,
+        api_key=api_client.api_key,
+    )
+
+    # Machine-consumable URL: soft_wrap=True disables terminal-width
+    # wrapping so the URL always stays on one line (mirrors output_data_as_json).
+    console.print(url, markup=False, highlight=False, soft_wrap=True)
+    err_console.print(f"Serving dashboard at {url} — press Ctrl-C to stop.")
+
+    try:
+        if not no_browser:
+            webbrowser.open(url)
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+        if server.upstream_client is not None:
+            server.upstream_client.close()
 
 
 # `prime train usage` — token usage and price for one run; lives next to the

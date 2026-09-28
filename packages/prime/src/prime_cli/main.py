@@ -34,6 +34,7 @@ from .commands.wallet import WALLET_JSON_HELP, wallet_command
 from .commands.whoami import app as whoami_app
 from .core import Config
 from .utils import PlainTyper, get_console
+from .utils.context import require_loadable_config
 from .utils.version_check import check_for_update
 
 app = PlainTyper(
@@ -135,14 +136,10 @@ def callback(
                 os.environ["PRIME_CONTEXT"] = previous_context
 
         ctx.call_on_close(restore_context)
-    elif not os.environ.get("PRIME_CONTEXT"):
-        # Surface a broken directory context once, readably, instead of as a
-        # traceback from whichever command first builds a Config.
-        try:
-            Config()
-        except ValueError as e:
-            typer.echo(f"Error: {e}", err=True)
-            raise typer.Exit(1)
+    elif ctx.invoked_subcommand != "config":
+        # `prime config` runs this itself so that `config unpin` can remove a
+        # broken directory context.
+        require_loadable_config()
 
     # Check for updates (only when a subcommand is being executed)
     if ctx.invoked_subcommand is not None:

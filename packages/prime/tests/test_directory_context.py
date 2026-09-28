@@ -420,3 +420,29 @@ def test_eval_keeps_a_team_set_in_the_environment(
     _args, env, _model, _base = _add_default_inference_and_key_args([], Config())
 
     assert env["PRIME_TEAM_ID"] == ACME
+
+
+@pytest.mark.parametrize("content", ['{"context": "missing"}', "{not json"])
+def test_unpin_removes_a_broken_directory_context(repo: Path, content: str) -> None:
+    path = repo / ".prime" / "context.json"
+    path.parent.mkdir()
+    path.write_text(content)
+
+    blocked = runner.invoke(app, ["config", "view"], env=TEST_ENV)
+    assert blocked.exit_code == 1
+    assert "context.json" in blocked.output.replace("\n", "")
+
+    result = runner.invoke(app, ["config", "unpin"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    assert not path.exists()
+    assert runner.invoke(app, ["config", "view"], env=TEST_ENV).exit_code == 0
+
+
+def test_other_commands_still_report_a_broken_directory_context(repo: Path) -> None:
+    _pin(repo, {"context": "missing"})
+
+    result = runner.invoke(app, ["whoami"], env=TEST_ENV)
+
+    assert result.exit_code == 1
+    assert "Unknown context 'missing'" in result.output

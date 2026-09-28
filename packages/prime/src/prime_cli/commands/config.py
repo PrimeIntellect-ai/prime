@@ -17,11 +17,24 @@ from prime_cli.core.config import (
 
 from ..client import APIClient, APIError
 from ..utils import PlainTyper, get_console, require_persistent_context
-from ..utils.context import apply_team, describe_local_context, local_context_target
+from ..utils.context import (
+    apply_team,
+    describe_local_context,
+    local_context_target,
+    require_loadable_config,
+)
 from .teams import fetch_teams
 
 app = PlainTyper(help="Configure the CLI", no_args_is_help=True)
 console = get_console()
+
+
+@app.callback()
+def _config_callback(ctx: typer.Context) -> None:
+    # `unpin` must still work when the directory context it removes is broken.
+    if ctx.invoked_subcommand != "unpin":
+        require_loadable_config()
+
 
 # Team ID validation pattern: CUID (v1)
 TEAM_ID_PATTERN = re.compile(r"^c[a-z0-9]{24}$")

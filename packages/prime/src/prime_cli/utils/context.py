@@ -1,5 +1,6 @@
 """Helpers for commands that persist CLI configuration."""
 
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -23,6 +24,19 @@ def require_persistent_context() -> None:
     console.print(f"[red]Error:[/red] Temporary context '{safe_context}' is read-only.")
     console.print(f"[dim]First run: prime config use {safe_context}; then retry without -c.[/dim]")
     raise typer.Exit(1)
+
+
+def require_loadable_config() -> None:
+    """Exit readably when the active config cannot load (e.g. a broken directory
+    context), instead of a traceback from whichever code first builds a Config."""
+    if os.environ.get("PRIME_CONTEXT"):
+        # A temporary context replaces the directory context and was validated.
+        return
+    try:
+        Config()
+    except ValueError as e:
+        get_console(stderr=True).print(f"[red]Error:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
 
 
 def local_context_target(config: Config, local: bool, global_: bool) -> Optional[Path]:

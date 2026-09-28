@@ -199,7 +199,7 @@ def test_push_samples_reports_progress_and_reuses_http_client(monkeypatch):
         result = client.push_samples(
             "eval-1",
             [{"x": "a"}, {"x": "b" * 50}, {"x": "c"}],
-            max_payload_bytes=35,
+            max_payload_bytes=27,
             max_workers=1,
             progress_callback=progress.append,
         )
@@ -246,7 +246,7 @@ def test_async_push_samples_reports_progress_and_reuses_http_client(monkeypatch)
         client.push_samples(
             "eval-1",
             [{"x": "a"}, {"x": "b"}],
-            max_payload_bytes=35,
+            max_payload_bytes=27,
             max_concurrent=1,
             progress_callback=progress.append,
         )

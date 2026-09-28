@@ -8,6 +8,15 @@ from prime_cli.main import app
 from typer.testing import CliRunner
 
 
+@pytest.fixture(autouse=True)
+def _session_dir(tmp_path, monkeypatch):
+    """Keep the ssh config and known_hosts out of the real ~/.prime."""
+    folder = tmp_path / "volume-ssh"
+    folder.mkdir()
+    monkeypatch.setattr(volumes, "_session_dir", lambda: folder)
+    return folder
+
+
 @pytest.mark.parametrize(
     "flags,expected",
     [
@@ -23,7 +32,7 @@ from typer.testing import CliRunner
         (["--read-write"], False),
     ],
 )
-def test_shell_modes_and_shared_ssh_endpoint(tmp_path, monkeypatch, flags, expected):
+def test_shell_modes_and_shared_ssh_endpoint(tmp_path, monkeypatch, _session_dir, flags, expected):
     key = tmp_path / "key"
     key.write_text("test")
     monkeypatch.setattr(volumes.Config, "ssh_key_path", property(lambda self: str(key)))
@@ -56,29 +65,24 @@ def test_shell_modes_and_shared_ssh_endpoint(tmp_path, monkeypatch, flags, expec
     )
     assert result.exit_code == 0, result.output
     assert captured[0] == {"read_only": expected, "team_id": "t1"}
-    assert commands[0] == [
-        "ssh",
-        "-o",
-        "IdentitiesOnly=yes",
-        "-i",
-        str(key),
-        "-p",
-        "22",
-        "research@host.tailnet.ts.net",
-    ]
-    assert "sftp" in result.output and "rsync" in result.output
-    # The rsync -e string must not contain the host (it would then be
-    # passed to the remote shell as a command).
-    rsync_line = next(ln for ln in result.output.splitlines() if ln.startswith("rsync "))
+    config = _session_dir / "config"
+    # The CLI's own ssh: only the config file and the short alias.
+    assert commands[0] == ["ssh", "-F", str(config), "host"]
+    text = config.read_text()
+    assert "Host host\n" in text and "HostName host.tailnet.ts.net" in text
+    assert "User research" in text and "Port 22" in text
+    assert f'IdentityFile "{key}"' in text and "IdentitiesOnly yes" in text
+    # The printed examples are short: no inline -o options.
+    assert "-o " not in result.output and "sftp works too" in result.output
+    rsync_line = next(ln.strip() for ln in result.output.splitlines() if "rsync " in ln)
     rsync_argv = shlex.split(rsync_line)
-    assert "research@host.tailnet.ts.net" not in rsync_argv[rsync_argv.index("-e") + 1]
+    # The rsync -e string never contains the host (it would be run remotely).
+    assert "host" not in rsync_argv[rsync_argv.index("-e") + 1].split()
     if expected:
         # Read-only sessions print download-direction examples.
-        assert "research@host.tailnet.ts.net:/volume/FILE" in rsync_argv
-        assert rsync_argv[-1] == "."
+        assert rsync_argv[-2:] == ["host:/volume/FILE", "."]
     else:
-        assert "FILE" in rsync_argv
-        assert rsync_argv[-1] == "research@host.tailnet.ts.net:/volume/"
+        assert rsync_argv[-2:] == ["FILE", "host:/volume/"]
 
 
 def test_shell_rejects_conflicting_flags_without_api_call(tmp_path, monkeypatch):
@@ -119,7 +123,7 @@ def test_client_session_wire_contract():
     ]
 
 
-def test_shell_pins_session_host_key(monkeypatch, tmp_path):
+def test_shell_pins_session_host_key(monkeypatch, tmp_path, _session_dir):
     key = tmp_path / "key"
     key.write_text("test")
     monkeypatch.setattr(volumes.Config, "ssh_key_path", property(lambda self: str(key)))
@@ -152,19 +156,19 @@ def test_shell_pins_session_host_key(monkeypatch, tmp_path):
         app, ["volumes", "ssh", "data"], env={"PRIME_DISABLE_VERSION_CHECK": "1"}
     )
     assert result.exit_code == 0, result.output
-    cmd = commands[0]
-    assert cmd[0] == "ssh"
-    # Separate argv items, not a single "-o UserKnownHostsFile=..." string.
-    assert "-o" in cmd
-    kh = next(a for a in cmd if a.startswith("UserKnownHostsFile="))
-    # Only the configured key is offered, never every ssh-agent key.
-    assert cmd[cmd.index("IdentitiesOnly=yes") - 1] == "-o"
-    assert "-o IdentitiesOnly=yes" in result.output
-    assert "StrictHostKeyChecking=yes" in cmd
-    kh_path = kh.removeprefix("UserKnownHostsFile=")
-    assert "vol-shell-1.corp.ts.net ssh-rsa AAAHOSTKEY" in open(kh_path).read()
-    # Printed transfer examples pin the same options.
-    assert "-o StrictHostKeyChecking=yes" in result.output
+    # Pinned in the CLI-owned known_hosts; checking is strict, never disabled.
+    known_hosts = _session_dir / "known_hosts"
+    assert known_hosts.read_text() == "vol-shell-1.corp.ts.net ssh-rsa AAAHOSTKEY\n"
+    text = (_session_dir / "config").read_text()
+    assert f'UserKnownHostsFile "{known_hosts}"' in text
+    assert "StrictHostKeyChecking yes" in text
+    assert commands[0] == ["ssh", "-F", str(_session_dir / "config"), "vol-shell-1"]
+    # A second session for another host keeps the first one's block and pin,
+    # and re-running for the same host replaces (never duplicates) them.
+    CliRunner().invoke(app, ["volumes", "ssh", "data"], env={"PRIME_DISABLE_VERSION_CHECK": "1"})
+    assert text.count("Host vol-shell-1") == 1
+    assert (_session_dir / "config").read_text().count("Host vol-shell-1") == 1
+    assert known_hosts.read_text().count("vol-shell-1.corp.ts.net") == 1
 
 
 def test_shell_without_host_key_uses_user_known_hosts(monkeypatch, tmp_path):

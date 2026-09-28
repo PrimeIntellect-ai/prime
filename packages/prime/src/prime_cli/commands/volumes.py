@@ -9,8 +9,8 @@ import os
 import re
 import shlex
 import subprocess
-import tempfile
 import time
+from pathlib import Path
 
 import typer
 from rich.markup import escape
@@ -119,26 +119,74 @@ _CONNECTION = re.compile(
 )
 
 
-def _pin_known_hosts(session, hostname: str, port: str) -> list[str]:
-    """ssh options (separate argv items) pinning the session pod's host key.
+def _session_dir() -> Path:
+    """Where the CLI keeps volume-session ssh config and pinned host keys."""
+    path = Path(Config().config_dir) / "volume-ssh"
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return path
 
-    The platform returns the per-session sshd host key with the endpoint,
-    so the CLI writes a scoped known_hosts file instead of disabling host
-    key checking (`StrictHostKeyChecking=no` is never sent). A missing
-    host key falls back to the user's own known_hosts verification.
+
+def _replace_block(text: str, alias: str, block: str) -> str:
+    """ssh config text with the `Host <alias>` block replaced by `block`."""
+    kept, skipping = [], False
+    for line in text.splitlines():
+        if line.startswith("Host "):
+            skipping = line.split(None, 1)[1].strip() == alias
+        if not skipping:
+            kept.append(line)
+    body = "\n".join(kept).strip()
+    return (body + "\n\n" if body else "") + block
+
+
+def _write_ssh_config(session, alias: str, host: str, user: str, port: str, key: str) -> Path:
+    """Write the session's options ONCE into ~/.prime/volume-ssh/config under a
+    short Host alias, so ssh, scp, sftp and rsync only need `-F <file> <alias>`.
+
+    The platform returns the session pod's sshd host key, so it is pinned in
+    a CLI-owned known_hosts with StrictHostKeyChecking=yes (host-key checking
+    is never disabled; with no host key, ssh falls back to the user's own
+    ~/.ssh/known_hosts). IdentitiesOnly: offer only the configured key, so a
+    loaded ssh-agent can't exhaust MaxAuthTries first. `-F` also keeps the
+    user's ~/.ssh/config (e.g. ControlMaster) out of these connections.
+
+    ponytail: blocks for ended sessions accumulate (a few lines each); prune
+    them if the file ever gets noisy.
     """
-    if not getattr(session, "host_public_key", None):
-        return []
-    bracket = f"[{hostname}]:{port}" if port != "22" else hostname
-    path = os.path.join(tempfile.mkdtemp(prefix="prime-volume-"), "known_hosts")
-    with open(path, "w") as fh:
-        fh.write(f"{bracket} {session.host_public_key}\n")
-    return [
-        "-o",
-        f"UserKnownHostsFile={path}",
-        "-o",
-        "StrictHostKeyChecking=yes",
+    folder = _session_dir()
+    lines = [
+        f"Host {alias}",
+        f"  HostName {host}",
+        f"  User {user}",
+        f"  Port {port}",
+        f'  IdentityFile "{key}"',
+        "  IdentitiesOnly yes",
     ]
+    if getattr(session, "host_public_key", None):
+        known_hosts = folder / "known_hosts"
+        entry = f"[{host}]:{port}" if port != "22" else host
+        old = known_hosts.read_text().splitlines() if known_hosts.exists() else []
+        pinned = [line for line in old if line.split(" ", 1)[0] != entry]
+        pinned.append(f"{entry} {session.host_public_key}")
+        known_hosts.write_text("\n".join(pinned) + "\n")
+        known_hosts.chmod(0o600)
+        lines += [f'  UserKnownHostsFile "{known_hosts}"', "  StrictHostKeyChecking yes"]
+    config = folder / "config"
+    existing = config.read_text() if config.exists() else ""
+    config.write_text(_replace_block(existing, alias, "\n".join(lines) + "\n"))
+    config.chmod(0o600)
+    return config
+
+
+def _shell_path(path: Path, home_var: str) -> str:
+    """`path` as the user would type it: `~/...` (or `$HOME/...` inside
+    double quotes) when it's under their home, else shell-quoted."""
+    try:
+        rel = path.relative_to(Path.home())
+    except ValueError:
+        return shlex.quote(str(path))
+    if any(c.isspace() for c in str(rel)) or any(c.isspace() for c in str(Path.home())):
+        return shlex.quote(str(path))
+    return f"{home_var}/{rel}"
 
 
 # Terminal session states: the wait stops polling and reports them.
@@ -222,8 +270,10 @@ def ssh(
     except APIError as exc:
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(1) from exc
-    console.print(f"Session {session.id} ({'read-only' if session.read_only else 'read-write'}).")
-    console.print(f"Stop later with: prime volumes stop {name} {session.id}")
+    mode = "read-only" if session.read_only else "read-write"
+    console.print(
+        f"Session {session.id} ({mode}). Stop with: prime volumes stop {escape(name)} {session.id}"
+    )
     connected = False
     try:
         session = _wait_for_connection(client, name, session, team_id)
@@ -235,38 +285,35 @@ def ssh(
         # stopping it here is immediate. Best-effort.
         if not connected:
             _stop_quietly(client, name, session.id, team_id)
-    console.print(f"[blue]Using SSH key:[/blue] {key}")
-    console.print("[dim]To change SSH key path, use: prime config set-ssh-key-path[/dim]")
     match = _CONNECTION.fullmatch(session.ssh_connection)
     if not match or not 1 <= int(match.group("port") or 22) <= 65535:
         console.print("[red]Invalid SSH endpoint returned by server.[/red]")
         raise typer.Exit(1)
-    host = f"{match.group('user')}@{match.group('host')}"
-    port = match.group("port") or "22"
-    # IdentitiesOnly: offer only the configured key. With several keys in
-    # an ssh-agent, sshd could hit MaxAuthTries on agent keys before
-    # trying this one.
-    ssh_opts = ["-o", "IdentitiesOnly=yes", *_pin_known_hosts(session, match.group("host"), port)]
-    base = ["ssh", *ssh_opts, "-i", key, "-p", port, host]
-    # The same endpoint carries shell, sftp/scp and rsync; print copyable
-    # examples using the pinned host key, never "trust anything".
-    # markup=False: Rich must not parse [..] in paths; soft_wrap: it must
-    # not insert line breaks into copyable commands. Read-only sessions
-    # get download-direction examples (uploads would fail on the RO
-    # mount); read-write sessions get uploads.
+    host = match.group("host")
+    alias = host.split(".", 1)[0]
+    config = _write_ssh_config(
+        session, alias, host, match.group("user"), match.group("port") or "22", key
+    )
+    base = ["ssh", "-F", str(config), alias]
+    console.print(
+        f"[blue]Using SSH key:[/blue] {escape(_shell_path(Path(key), '~'))} "
+        "[dim](change with: prime config set-ssh-key-path)[/dim]"
+    )
+    # Copyable examples. markup=False: Rich must not parse [..] in paths;
+    # soft_wrap: it must not insert line breaks into commands. Read-only
+    # sessions get downloads (uploads would fail on the RO mount),
+    # read-write sessions get uploads.
+    cfg = _shell_path(config, "~")
+    cfg_in_quotes = _shell_path(config, "$HOME")
     if session.read_only:
-        scp_cmd = ["scp", *ssh_opts, "-i", key, "-P", port, f"{host}:/volume/FILE", "."]
-        rsync_cmd = ["rsync", "-av", "-e", shlex.join(base[:-1]), f"{host}:/volume/FILE", "."]
+        src, dst = f"{alias}:/volume/FILE", "."
     else:
-        scp_cmd = ["scp", *ssh_opts, "-i", key, "-P", port, "FILE", f"{host}:/volume/"]
-        rsync_cmd = ["rsync", "-av", "-e", shlex.join(base[:-1]), "FILE", f"{host}:/volume/"]
-    examples = [
-        shlex.join(["sftp", *ssh_opts, "-i", key, "-P", port, host]),
-        shlex.join(scp_cmd),
-        shlex.join(rsync_cmd),
-    ]
-    for example in examples:
-        console.print(example, soft_wrap=True, markup=False)
+        src, dst = "FILE", f"{alias}:/volume/"
+    console.print("Copy files (sftp works too):")
+    console.print(f"  scp -F {cfg} {src} {dst}", soft_wrap=True, markup=False)
+    console.print(
+        f'  rsync -av -e "ssh -F {cfg_in_quotes}" {src} {dst}', soft_wrap=True, markup=False
+    )
     try:
         code = subprocess.run(base, check=False).returncode
     except OSError as exc:

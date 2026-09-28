@@ -20,13 +20,13 @@ Prime Intellect CLI & SDKs
 [![Python versions](https://img.shields.io/pypi/pyversions/prime?cacheSeconds=60)](https://pypi.org/project/prime/)
 [![Downloads](https://img.shields.io/pypi/dm/prime)](https://pypi.org/project/prime/)
 
-Command line interface and SDKs for Prime Lab, Hosted Training, GPU resources, sandboxes, and environments.
+Command line interface and SDKs for Hosted Training, hosted evaluations, GPU resources, sandboxes, and environments.
 
 </div>
 
 ## Overview
 
-Prime is the official CLI and Python SDK for [Prime Intellect](https://primeintellect.ai), providing seamless access to Prime Lab workflows, Hosted Training, GPU compute infrastructure, remote code execution environments (sandboxes), and AI inference capabilities.
+Prime is the official CLI and Python SDK for [Prime Intellect](https://primeintellect.ai), providing seamless access to Hosted Training, hosted evaluations, GPU compute infrastructure, remote code execution environments (sandboxes), and AI inference capabilities.
 
 **What can you do with Prime?**
 
@@ -84,7 +84,7 @@ Get your API key from the [Prime Intellect Dashboard](https://app.primeintellect
 # Browse environments on the hub
 prime env list
 
-# Set up a Lab workspace
+# Set up a Lab workspace for environments, evals, GEPA, and Hosted Training
 prime lab setup
 
 # See available Hosted Training models, capacity, and pricing
@@ -111,7 +111,7 @@ prime sandbox create python:3.11
 
 ### Lab and Hosted Training
 
-Prime Lab connects verifiers environments to evaluations, GEPA prompt optimization, and Hosted Training. Start with `prime lab setup` to create a local workspace with starter configs, then use `prime train models` to choose a Hosted Training model with current capacity and pricing.
+Start with `prime lab setup` to create a local workspace with starter configs, coding-agent skills and a verifiers install; build and evaluate environments there with verifiers' `vf-init` and `vf-eval`. Then use `prime train models` to choose a Hosted Training model with current capacity and pricing.
 
 ```bash
 # Set up a Lab workspace
@@ -150,8 +150,7 @@ prime env inspect <environment-name>
 # Install an environment locally
 prime env install <environment-name>
 
-# Create and push your own environment
-prime env init my-environment
+# Push your own environment (scaffold one with verifiers' `vf-init`)
 prime env push my-environment
 ```
 

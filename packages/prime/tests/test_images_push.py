@@ -1045,15 +1045,9 @@ def test_push_image_source_image_result_shape_uses_full_image_path(monkeypatch):
     class DummyAPIClient:
         def request(self, method, path, json=None, params=None):
             return {
-                "results": [
-                    {
-                        "sourceImage": "ubuntu:jammy",
-                        "success": True,
-                        "buildId": "buildabc",
-                        "fullImagePath": "prime/cmkabc/ubuntu:jammy",
-                    }
-                ],
-                "failed": [],
+                "build_id": "buildabc",
+                "buildIds": ["buildabc"],
+                "fullImagePath": "prime/cmkabc/ubuntu:jammy",
             }
 
     monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
@@ -1079,15 +1073,7 @@ def test_push_image_source_image_result_shape_reports_all_failures(monkeypatch):
                 "results": [
                     {
                         "sourceImage": "missing:notfound",
-                        "success": False,
-                        "error": "source image not found",
-                        "retryable": False,
-                    }
-                ],
-                "failed": [
-                    {
-                        "sourceImage": "missing:notfound",
-                        "success": False,
+                        "build": None,
                         "error": "source image not found",
                         "retryable": False,
                     }
@@ -1112,26 +1098,25 @@ def test_push_image_source_image_result_shape_reports_partial_failures(monkeypat
     monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
     monkeypatch.delenv("PRIME_TEAM_ID", raising=False)
 
-    failed = {
-        "sourceImage": "missing:notfound",
-        "success": False,
-        "error": "source image not found",
-        "retryable": False,
-    }
-
     class DummyAPIClient:
         def request(self, method, path, json=None, params=None):
             return {
                 "results": [
                     {
                         "sourceImage": "ubuntu:jammy",
-                        "success": True,
-                        "buildId": "buildabc",
-                        "fullImagePath": "prime/cmkabc/ubuntu:jammy",
+                        "build": {
+                            "build_id": "buildabc",
+                            "buildIds": ["buildabc"],
+                            "fullImagePath": "prime/cmkabc/ubuntu:jammy",
+                        },
                     },
-                    failed,
+                    {
+                        "sourceImage": "missing:notfound",
+                        "build": None,
+                        "error": "source image not found",
+                        "retryable": False,
+                    },
                 ],
-                "failed": [failed],
             }
 
     monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)

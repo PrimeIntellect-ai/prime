@@ -20,7 +20,7 @@ Prime Intellect CLI & SDKs
 [![Python versions](https://img.shields.io/pypi/pyversions/prime?cacheSeconds=60)](https://pypi.org/project/prime/)
 [![Downloads](https://img.shields.io/pypi/dm/prime)](https://pypi.org/project/prime/)
 
-Command line interface and SDKs for Prime Lab, Hosted Training, GPU resources, sandboxes, and environments.
+Command line interface and SDKs for Hosted Training, hosted evaluations, GPU resources, sandboxes, and environments.
 </div>
 
 ## Quick Start
@@ -57,7 +57,7 @@ prime availability list
 - **Lab Workspaces** - Set up local verifiers workspaces for environments, evals, GEPA, and training
 - **Hosted Training** - Train models against verifiers environments and inspect runs, logs, metrics, and checkpoints
 - **Environments** - Access hundreds of verified environments on our community hub
-- **Evaluations** - Push and manage evaluation results
+- **Evaluations** - Run hosted evaluations and push and manage results
 - **GPU Resource Management** - Query and filter available GPU resources
 - **Pod Management** - Create, monitor, and terminate compute pods
 - **Sandboxes** - Easily run AI-generated code in the cloud
@@ -142,14 +142,13 @@ prime env inspect <environment-name>
 # Install an environment locally
 prime env install <environment-name>
 
-# Create and push your own environment
-prime env init my-environment
+# Push your own environment (scaffold one with verifiers' `vf-init`)
 prime env push my-environment
 ```
 
 ### Lab and Hosted Training
 
-Prime Lab connects verifiers environments to evaluations, GEPA prompt optimization, and Hosted Training. Start with `prime lab setup` to create a local workspace with starter configs, then use `prime train models` to choose a Hosted Training model with current capacity and pricing.
+Start with `prime lab setup` to create a local workspace with starter configs, coding-agent skills and a verifiers install; build and evaluate environments there with verifiers' `vf-init` and `vf-eval`. Then use `prime train models` to choose a Hosted Training model with current capacity and pricing.
 
 ```bash
 # Set up a Lab workspace

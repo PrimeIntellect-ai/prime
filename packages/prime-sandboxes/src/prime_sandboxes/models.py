@@ -4,7 +4,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationInfo, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, model_validator
 
 from .image_references import is_docker_hub_reference
 
@@ -157,7 +157,7 @@ class Sandbox(BaseModel):
     id: str
     name: str
     docker_image: str = Field(..., alias="dockerImage")
-    start_command: Optional[Union[StartCommand, str]] = Field(None, alias="startCommand")
+    start_command: Optional[StartCommand] = Field(None, alias="startCommand")
     cpu_cores: float = Field(..., alias="cpuCores")
     memory_gb: float = Field(..., alias="memoryGB")
     disk_size_gb: float = Field(..., alias="diskSizeGB")
@@ -185,7 +185,6 @@ class Sandbox(BaseModel):
     user_id: Optional[str] = Field(None, alias="userId")
     team_id: Optional[str] = Field(None, alias="teamId")
     region: Optional[str] = None
-    registry_credentials_id: Optional[str] = Field(default=None, alias="registryCredentialsId")
     pending_image_build_id: Optional[str] = Field(default=None, alias="pendingImageBuildId")
 
     model_config = ConfigDict(populate_by_name=True)
@@ -349,7 +348,6 @@ class ImageBuildStatus(str, Enum):
 class ImageArtifactType(str, Enum):
     """Artifact produced for an image."""
 
-    CONTAINER_IMAGE = "CONTAINER_IMAGE"
     VM_SANDBOX = "VM_SANDBOX"
 
 
@@ -365,10 +363,7 @@ class ImageListItem(BaseModel):
     """One artifact row returned by the image-list endpoint."""
 
     id: str
-    artifact_type: ImageArtifactType = Field(
-        default=ImageArtifactType.CONTAINER_IMAGE,
-        alias="artifactType",
-    )
+    artifact_type: ImageArtifactType = Field(..., alias="artifactType")
     image_name: str = Field(..., alias="imageName")
     image_tag: str = Field(..., alias="imageTag")
     status: ImageBuildStatus
@@ -449,12 +444,8 @@ class BuildImageRequest(BaseModel):
 
 class BuildImageResponse(BaseModel):
     # Server quirk: build_id/upload_url/expires_in stay snake_case on the wire;
-    # buildIds/fullImagePath use camelCase. buildId is accepted for older backends.
-    build_id: str = Field(
-        ...,
-        alias="build_id",
-        validation_alias=AliasChoices("build_id", "buildId"),
-    )
+    # buildIds/fullImagePath use camelCase.
+    build_id: str
     build_ids: List[str] = Field(default_factory=list, alias="buildIds")
     upload_url: Optional[str] = None
     expires_in: Optional[int] = None
@@ -481,18 +472,6 @@ class SourceImageBuildResult(BaseModel):
     retryable: bool = False
 
     model_config = ConfigDict(populate_by_name=True)
-
-    @model_validator(mode="before")
-    @classmethod
-    def accept_legacy_result(cls, value: Any) -> Any:
-        # Accept old backends during the CLI-first rollout; emit only the new shape.
-        # TODO: remove after the platform backend deploy lands.
-        if isinstance(value, dict) and "build" not in value and "success" in value:
-            value = {
-                **value,
-                "build": value if value["success"] else None,
-            }
-        return value
 
 
 class BulkBuildImageResponse(BaseModel):

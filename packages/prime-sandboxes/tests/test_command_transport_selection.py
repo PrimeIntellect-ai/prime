@@ -10,9 +10,9 @@ from connectrpc.errors import ConnectError
 
 from prime_sandboxes._connectrpc import GOOGLE_PROTOBUF_BINARY_CODEC
 from prime_sandboxes._proto.command_session import command_session_pb2
-from prime_sandboxes.core.client import APIClient, APIError
+from prime_sandboxes.core.client import APIClient
 from prime_sandboxes.models import CommandResponse
-from prime_sandboxes.sandbox import AsyncSandboxClient, SandboxAuthCache, SandboxClient
+from prime_sandboxes.sandbox import AsyncSandboxClient, SandboxClient
 
 
 def _auth_payload():
@@ -26,30 +26,18 @@ def _auth_payload():
 
 
 class _FakeCache:
-    def __init__(self, is_vm: bool):
-        self._is_vm = is_vm
-
     def get_or_refresh(self, _sandbox_id: str):
         return _auth_payload()
 
-    def is_vm(self, _sandbox_id: str) -> bool:
-        return self._is_vm
-
 
 class _AsyncFakeCache:
-    def __init__(self, is_vm: bool):
-        self._is_vm = is_vm
-
     async def get_or_refresh(self, _sandbox_id: str):
         return _auth_payload()
-
-    async def is_vm(self, _sandbox_id: str) -> bool:
-        return self._is_vm
 
 
 def test_sync_execute_command_uses_connect():
     client = SandboxClient(APIClient(api_key="test-key"))
-    cast(Any, client)._auth_cache = _FakeCache(is_vm=True)
+    cast(Any, client)._auth_cache = _FakeCache()
 
     called = {"connect": False}
 
@@ -69,7 +57,7 @@ def test_sync_execute_command_uses_connect():
 @pytest.mark.asyncio
 async def test_async_execute_command_uses_connect():
     client = AsyncSandboxClient(api_key="test-key")
-    cast(Any, client)._auth_cache = _AsyncFakeCache(is_vm=True)
+    cast(Any, client)._auth_cache = _AsyncFakeCache()
 
     called = {"connect": False}
 
@@ -151,7 +139,7 @@ async def test_async_open_process_streams_vm_command_session(monkeypatch):
     monkeypatch.setattr("prime_sandboxes.sandbox.ConnectClient", _FakeConnectClient)
 
     client = AsyncSandboxClient(api_key="test-key")
-    cast(Any, client)._auth_cache = _AsyncFakeCache(is_vm=True)
+    cast(Any, client)._auth_cache = _AsyncFakeCache()
     try:
         process = await client.open_process(
             "sbx-vm",
@@ -188,17 +176,6 @@ async def test_async_open_process_streams_vm_command_session(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_async_open_process_rejects_container_sandbox():
-    client = AsyncSandboxClient(api_key="test-key")
-    cast(Any, client)._auth_cache = _AsyncFakeCache(is_vm=False)
-    try:
-        with pytest.raises(APIError, match="only supported for VM sandboxes"):
-            await client.open_process("sbx-container", "cat")
-    finally:
-        await client.aclose()
-
-
-@pytest.mark.asyncio
 async def test_process_recovery_retries_start_and_refreshes_rejected_auth(monkeypatch):
     start_requests = []
     retry_tokens = []
@@ -214,9 +191,6 @@ async def test_process_recovery_retries_start_and_refreshes_rejected_auth(monkey
 
         async def invalidate(self, _sandbox_id: str):
             self.invalidations += 1
-
-        async def is_vm(self, _sandbox_id: str):
-            return True
 
     class _FakeConnectClient:
         def __init__(self, _address: str, **_kwargs):
@@ -273,53 +247,6 @@ async def test_process_recovery_retries_start_and_refreshes_rejected_auth(monkey
         await client.aclose()
 
 
-def test_auth_cache_stores_vm_flag_for_reuse(tmp_path):
-    class _FakeAPIClient:
-        def __init__(self):
-            self.calls = 0
-
-        def request(self, method: str, path: str):
-            if method == "GET" and path == "/sandbox/sbx-1":
-                self.calls += 1
-                return {
-                    "id": "sbx-1",
-                    "name": "vm-box",
-                    "dockerImage": "img",
-                    "startCommand": None,
-                    "cpuCores": 1.0,
-                    "memoryGB": 2.0,
-                    "diskSizeGB": 10.0,
-                    "diskMountPath": "/sandbox-workspace",
-                    "gpuCount": 0,
-                    "gpuType": None,
-                    "vm": True,
-                    "status": "RUNNING",
-                    "timeoutMinutes": 60,
-                    "environmentVars": None,
-                    "secrets": None,
-                    "advancedConfigs": None,
-                    "labels": [],
-                    "createdAt": datetime.now(timezone.utc).isoformat(),
-                    "updatedAt": datetime.now(timezone.utc).isoformat(),
-                    "startedAt": None,
-                    "terminatedAt": None,
-                    "exitCode": None,
-                    "errorType": None,
-                    "errorMessage": None,
-                    "userId": "user",
-                    "teamId": "team",
-                    "registryCredentialsId": None,
-                }
-            raise AssertionError(f"Unexpected request: {method} {path}")
-
-    cache = SandboxAuthCache(tmp_path / "auth_cache.json", _FakeAPIClient())
-    cache.set("sbx-1", _auth_payload())
-
-    assert cache.is_vm("sbx-1")
-    assert cache.is_vm("sbx-1")
-    assert cache.client.calls == 1
-
-
 def test_sync_connect_execution_collects_stdout_stderr(monkeypatch):
     client_init_kwargs = {}
 
@@ -354,7 +281,7 @@ def test_sync_connect_execution_collects_stdout_stderr(monkeypatch):
     monkeypatch.setattr("prime_sandboxes.sandbox.ConnectClientSync", _FakeConnectClient)
 
     client = SandboxClient(APIClient(api_key="test-key"))
-    cast(Any, client)._auth_cache = _FakeCache(is_vm=True)
+    cast(Any, client)._auth_cache = _FakeCache()
     result = client._execute_command_connect_rpc(
         sandbox_id="sbx-gpu",
         command="echo hi",
@@ -381,7 +308,7 @@ def test_sync_connect_execution_maps_deadline_to_timeout(monkeypatch):
     monkeypatch.setattr("prime_sandboxes.sandbox.ConnectClientSync", _FakeConnectClient)
 
     client = SandboxClient(APIClient(api_key="test-key"))
-    cast(Any, client)._auth_cache = _FakeCache(is_vm=True)
+    cast(Any, client)._auth_cache = _FakeCache()
     cast(Any, client)._get_sandbox_error_context = lambda sandbox_id: {
         "status": "RUNNING",
         "error_type": None,

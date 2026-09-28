@@ -392,36 +392,6 @@ def test_switch_local_refuses_to_write_through_a_symlink(
     assert not (home / ".prime" / "context.json").exists()
 
 
-@pytest.mark.parametrize(
-    ("pin", "expected"),
-    [({"team_id": EDISON}, EDISON), ({"team_id": None}, ""), (None, GLOBAL_TEAM)],
-)
-def test_eval_forwards_the_resolved_team_to_verifiers(
-    repo: Path, pin: Optional[dict], expected: str
-) -> None:
-    from prime_cli.verifiers_bridge import _add_default_inference_and_key_args
-
-    if pin is not None:
-        _pin(repo, pin)
-
-    _args, env, _model, _base = _add_default_inference_and_key_args([], Config())
-
-    assert env["PRIME_TEAM_ID"] == expected
-
-
-def test_eval_keeps_a_team_set_in_the_environment(
-    repo: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from prime_cli.verifiers_bridge import _add_default_inference_and_key_args
-
-    _pin(repo, {"team_id": None})
-    monkeypatch.setenv("PRIME_TEAM_ID", ACME)
-
-    _args, env, _model, _base = _add_default_inference_and_key_args([], Config())
-
-    assert env["PRIME_TEAM_ID"] == ACME
-
-
 @pytest.mark.parametrize("content", ['{"context": "missing"}', "{not json"])
 def test_unpin_removes_a_broken_directory_context(repo: Path, content: str) -> None:
     path = repo / ".prime" / "context.json"

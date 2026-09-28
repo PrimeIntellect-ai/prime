@@ -6,13 +6,11 @@ backend. The backend is selected by the standard env overrides
 (PRIME_API_KEY / PRIME_API_BASE_URL / PRIME_TEAM_ID, or PRIME_CONTEXT when
 the config home is not patched), so the same suite runs against dev and prod.
 
-Source-transfer tests exercise the pre-ENG-5865 backend wire contract: the
-legacy bulk shape ``{sourceImage, success, buildId, fullImagePath}`` plus a
-``failed[]`` mirror is normalized by ``SourceImageBuildResult``'s
-``accept_legacy_result`` validator, and the single-source response carries
-``buildId`` (accepted via the SDK's alias choices). The assertions on the
-normalized objects prove the dual-accept path ran against the live legacy
-wire, complementing the hermetic shape tests in test_images_client.py.
+Source-transfer tests pin the post-ENG-5865 backend wire contract: the
+single-source response carries ``build_id`` (snake) with ``buildIds``/
+``fullImagePath`` (camel), and the bulk response nests each per-source build
+under ``build``. The assertions on the parsed objects prove the live wire
+matches the hermetic shape tests in test_images_client.py.
 """
 
 import io
@@ -106,7 +104,6 @@ def test_single_source_transfer_live(image_client):
     team_id = _team_id()
     response = image_client.transfer_image(SOURCE_IMAGE_OK, team_id=team_id)
     assert isinstance(response, BuildImageResponse)
-    # The legacy single-source wire uses the buildId key; the SDK accepts both.
     assert response.build_id
     assert response.build_ids and response.build_id in response.build_ids
     assert response.full_image_path
@@ -124,7 +121,7 @@ def test_single_source_transfer_live(image_client):
 
 
 def test_bulk_source_transfer_partial_failure_live(image_client):
-    """Comma-separated sources: ordered best-effort results, legacy shape normalized.
+    """Comma-separated sources: ordered best-effort results, per-source builds nested.
 
     The partial failure is a duplicate destination: a repeated source
     resolves to the same name:tag and the backend rejects the second copy
@@ -140,8 +137,6 @@ def test_bulk_source_transfer_partial_failure_live(image_client):
         SOURCE_IMAGE_OK_ALT,
     ]
     ok, bad = response.results
-    # Legacy rows carry flat success/buildId fields; normalization nests them
-    # under build and leaves only the new shape on serialization.
     assert ok.build is not None
     assert ok.build.build_id
     assert ok.error is None

@@ -9,9 +9,8 @@ license = {text = "MIT"}
 authors = [
     { name = "Prime Intellect", email = "contact@primeintellect.ai" }
 ]
-# Deliberately a leaf package. The `prime` CLI depends on `verifiers`, so
-# verifiers can never depend on `prime` — and verifiers is a first-class
-# consumer of this SDK. Nothing here may pull in prime, verifiers, typer,
+# Deliberately a leaf package: verifiers and prime-rl are first-class
+# consumers of this SDK, so nothing here may pull in prime, verifiers, typer,
 # rich or textual, directly or transitively.
 #
 # Kept to what is actually imported. This package models no response bodies

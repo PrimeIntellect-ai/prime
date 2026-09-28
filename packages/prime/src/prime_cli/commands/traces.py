@@ -1,9 +1,7 @@
-import json
-import os
 import re
 import tempfile
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple, TypeVar
+from typing import Callable, Dict, List, Optional, TypeVar
 
 import click
 import typer
@@ -25,6 +23,7 @@ from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
 
+from ..client import APIClient
 from ..core import Config
 from ..utils import (
     PlainTyper,
@@ -33,22 +32,10 @@ from ..utils import (
     output_data_as_json,
     validate_output_format,
 )
-from ..utils.plain import is_plain_mode
-from .traces_episodes import TIME_FORMAT, episode_view, episodes_table, shared_value
-from .traces_transcript import (
-    Transcript,
-    parse_node_range,
-    select_nodes,
-    summary_view,
-    tools_only_table,
-    transcript_from_document,
-    transcript_header,
-    transcript_lines,
-)
+from .teams import fetch_team_members
+from .traces_views import episode_view, episodes_table, summary_view, traces_table
 
 app = PlainTyper(help="Upload and query traces (Prime Traces)", no_args_is_help=True)
-episodes_app = PlainTyper(help="List and inspect episodes", no_args_is_help=True)
-app.add_typer(episodes_app, name="episodes")
 console = get_console()
 error_console = get_console(stderr=True)
 
@@ -68,39 +55,25 @@ UPLOAD_JSON_HELP = json_output_help(
     ".num_batches = number",
 )
 
-LIST_TRACES_JSON_HELP = json_output_help(
-    ".items[] = trace summary {trace_id, run_id, task_id, score, execution, ...}",
+LIST_JSON_HELP = json_output_help(
+    ".items[] = trace summary {trace_id, run_id, task_id, user_id, score, total_tokens,"
+    " duration_ms, created_at, ingested_at, ...}",
+    "with --episodes: .items[] = episode summary {episode_id, run_id, environment_id,"
+    " outcome, has_error, error{type, message}, created_at, ...}",
     ".next_cursor? = string",
 )
 
-LIST_EPISODES_JSON_HELP = json_output_help(
-    ".items[] = episode summary {episode_id, run_id, environment_id, outcome, has_error,"
-    " error{type, message}, created_at, ...}",
-    ".next_cursor? = string",
-)
-
-GET_EPISODE_JSON_HELP = json_output_help(
-    ". = episode summary plus .traces = {trace_count, total_tokens, total_duration_ms,"
-    " any_trace_error, agent_names[]}",
-    "with --raw and no --dest: the exact stored episode (.traces = member trace IDs)",
-    "with --raw --dest: {dest, bytes_written}",
-)
-
-# Member traces shown under `prime traces episodes get`; the rest are one
-# `prime traces list --episode` away.
-EPISODE_MEMBERS_SHOWN = 20
-
-GET_TRACE_JSON_HELP = json_output_help(
+GET_JSON_HELP = json_output_help(
     ". = trace summary object; with --raw and no --dest, the exact stored trace document",
+    "with --episodes: . = episode summary plus .traces = {trace_count, total_tokens,"
+    " total_duration_ms, any_trace_error, agent_names[]}; with --raw and no --dest,"
+    " the exact stored episode (.traces = member trace IDs)",
     "with --raw --dest: {dest, bytes_written}",
 )
 
-TRANSCRIPT_JSON_HELP = json_output_help(
-    ".trace_id = string; .source = index|document (document when the index cannot serve it)",
-    ".nodes[] = {node_idx, parent_idx, timestamp, sampled, message{role, content, ...}}"
-    " (only --node's range)",
-    ".calls[] = {call_idx, node_idx, time_start, time_end, model, endpoint, finish_reason}",
-)
+# Member traces shown under `prime traces get --episodes`; the rest are one
+# `prime traces list --episode-id` away.
+EPISODE_MEMBERS_SHOWN = 20
 
 
 def _parse_context(values: List[str]) -> Optional[Dict[str, str]]:
@@ -171,23 +144,49 @@ def _search_table(matches: List[TraceSearchMatch], *, query: str, run_id: str, f
 
 @app.command("search")
 def search_traces(
-    query: str = typer.Argument(..., help="Case-sensitive literal text (quote phrases)"),
-    run_id: str = typer.Option(..., "--run-id", help="Required run scope"),
-    field: str = typer.Option(
-        "content", "--field", help="content, reasoning_content, or tool_calls"
+    query: str = typer.Argument(
+        ...,
+        help="Exact text to find: case-sensitive, 3-256 characters, no regex or wildcards",
     ),
-    role: Optional[str] = typer.Option(None, "--role", help="Message role"),
-    run_step: Optional[int] = typer.Option(None, "--run-step", min=0),
-    has_error: Optional[bool] = typer.Option(None, "--has-error/--no-has-error"),
-    reward_min: Optional[float] = typer.Option(None, "--reward-min"),
-    reward_max: Optional[float] = typer.Option(None, "--reward-max"),
-    limit: int = typer.Option(50, "--limit", min=1, max=100, help="Maximum matches returned"),
-    cursor: Optional[str] = typer.Option(None, "--cursor", help="Continue an unfinished search"),
+    run_id: str = typer.Option(..., "--run-id", help="Run to search (required)"),
+    field: str = typer.Option(
+        "content",
+        "--field",
+        help=(
+            "What to search: content (message text), reasoning_content, or tool_calls"
+            " (the calls' JSON: tool names and arguments)"
+        ),
+    ),
+    role: Optional[str] = typer.Option(
+        None, "--role", help="Only messages from this role: system, user, assistant or tool"
+    ),
+    run_step: Optional[int] = typer.Option(
+        None, "--run-step", min=0, help="Only traces from this training step"
+    ),
+    has_error: Optional[bool] = typer.Option(
+        None, "--has-error/--no-has-error", help="Only traces with (or without) an error"
+    ),
+    reward_min: Optional[float] = typer.Option(None, "--reward-min", help="Minimum reward"),
+    reward_max: Optional[float] = typer.Option(None, "--reward-max", help="Maximum reward"),
+    limit: int = typer.Option(50, "--limit", min=1, max=100, help="Maximum matches per page"),
+    cursor: Optional[str] = typer.Option(
+        None, "--cursor", help="Continue a search from the cursor the previous page printed"
+    ),
     output: str = typer.Option("table", "--output", "-o", help="table or json"),
 ) -> None:
-    """Return one page of matches in indexed trace content.
+    """Find exact text in the messages of one run's traces.
 
-    Follow next_cursor with unchanged filters until the search is exhausted.
+    The query is plain text matched exactly as typed.
+
+    Each match is one message (a node), shown with the text around the hit.
+    Results come one page at a time: to continue, rerun with the same query and
+    filters plus the --cursor the page prints.
+
+    \b
+    Examples:
+        prime traces search "Traceback" --run-id <run_id>
+        prime traces search "rm -rf" --run-id <run_id> --field tool_calls
+        prime traces search "I cannot" --run-id <run_id> --role assistant --has-error
     """
     validate_output_format(output, error_console)
     if field not in ("content", "reasoning_content", "tool_calls"):
@@ -437,26 +436,73 @@ def _is_episode_not_found(error: APIError) -> bool:
     return isinstance(error, NotFoundError) and error.code == "episode_not_found"
 
 
-@app.command("list", epilog=LIST_TRACES_JSON_HELP)
+def _user_names() -> Optional[Dict[str, str]]:
+    """Display names of the active team's members, keyed by user ID.
+
+    None for a personal account, whose traces are all the caller's own. The
+    lookup only decorates the table, so when it fails the IDs stand in.
+    """
+    config = Config()
+    if not config.team_id:
+        return None
+    try:
+        members = fetch_team_members(APIClient(), config.team_id)
+    except Exception:
+        return {}
+    return {
+        str(m["userId"]): str(m.get("userName") or m.get("userEmail") or m["userId"])
+        for m in members
+        if isinstance(m, dict) and m.get("userId")
+    }
+
+
+def _reject_options(mode: str, given: Dict[str, bool]) -> None:
+    names = [name for name, present in given.items() if present]
+    if names:
+        error_console.print(f"[red]Error:[/red] {', '.join(names)} cannot be combined with {mode}")
+        raise typer.Exit(1)
+
+
+@app.command("list", epilog=LIST_JSON_HELP)
 def list_traces(
+    episodes: bool = typer.Option(False, "--episodes", help="List episodes instead of traces"),
     run_id: Optional[str] = typer.Option(None, "--run-id", help="Filter by run ID"),
     episode_id: Optional[str] = typer.Option(
-        None, "--episode", help="Only this episode's traces (newest first; no --sort)"
+        None, "--episode-id", help="Only this episode's traces (newest first; no --sort)"
     ),
-    task_id: Optional[str] = typer.Option(None, "--task-id", help="Filter by task ID"),
-    model_id: Optional[str] = typer.Option(None, "--model-id", help="Filter by model ID"),
+    environment_id: Optional[str] = typer.Option(
+        None, "--environment-id", "--env", help="Filter by environment ID"
+    ),
+    task_id: Optional[str] = typer.Option(
+        None, "--task-id", help="Filter by task ID (traces only)"
+    ),
+    model_id: Optional[str] = typer.Option(
+        None, "--model-id", help="Filter by model ID (traces only)"
+    ),
     outcome: Optional[str] = typer.Option(None, "--outcome", help="Filter by outcome"),
     has_error: Optional[bool] = typer.Option(
         None, "--has-error/--no-has-error", help="Filter by error status"
     ),
-    reward_min: Optional[float] = typer.Option(None, "--reward-min", help="Minimum reward"),
-    reward_max: Optional[float] = typer.Option(None, "--reward-max", help="Maximum reward"),
+    reward_min: Optional[float] = typer.Option(
+        None, "--reward-min", help="Minimum reward (traces only)"
+    ),
+    reward_max: Optional[float] = typer.Option(
+        None, "--reward-max", help="Maximum reward (traces only)"
+    ),
+    run_step: Optional[int] = typer.Option(
+        None,
+        "--run-step",
+        min=0,
+        help="With --episodes: only episodes with a trace from this training step",
+    ),
     created_after: Optional[str] = typer.Option(
         None, "--created-after", help="ISO timestamp; also the cheapest filter"
     ),
     created_before: Optional[str] = typer.Option(None, "--created-before", help="ISO timestamp"),
     sort: Optional[str] = typer.Option(
-        None, "--sort", help="Sort key: created_at (default, newest first), reward, duration_ms"
+        None,
+        "--sort",
+        help="Sort key (traces only): created_at (default, newest first), reward, duration_ms",
     ),
     page: int = typer.Option(
         1,
@@ -464,7 +510,7 @@ def list_traces(
         "-p",
         help=(
             "Page number; each run walks the pages before it from the current top, so"
-            " boundaries shift as traces arrive (use --cursor for a fixed boundary)"
+            " boundaries shift as new rows arrive (use --cursor for a fixed boundary)"
         ),
     ),
     limit: int = typer.Option(20, "--limit", help="Max results per page (up to 100)"),
@@ -475,23 +521,52 @@ def list_traces(
     ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """List trace summaries, newest first."""
+    """List trace summaries, or episode summaries with --episodes, newest first."""
     validate_output_format(output, error_console)
     _check_paging(page, cursor)
+    if episodes:
+        # Episodes carry no task, model, reward or sort key of their own.
+        _reject_options(
+            "--episodes",
+            {
+                "--episode-id": episode_id is not None,
+                "--task-id": task_id is not None,
+                "--model-id": model_id is not None,
+                "--reward-min": reward_min is not None,
+                "--reward-max": reward_max is not None,
+                "--sort": sort is not None,
+            },
+        )
+    else:
+        _reject_options("a trace listing (add --episodes)", {"--run-step": run_step is not None})
     if episode_id is not None and sort is not None:
         error_console.print(
-            "[red]Error:[/red] --sort cannot be combined with --episode;"
+            "[red]Error:[/red] --sort cannot be combined with --episode-id;"
             " an episode's traces are listed newest first"
         )
         raise typer.Exit(1)
     try:
         client = _traces_client()
 
-        def fetch(page_cursor: Optional[str]) -> TraceListPage:
+        def fetch_episodes(page_cursor: Optional[str]) -> EpisodeListPage:
+            return client.list_episodes(
+                run_id=run_id,
+                environment_id=environment_id,
+                outcome=outcome,
+                has_error=has_error,
+                run_step=run_step,
+                created_after=created_after,
+                created_before=created_before,
+                limit=limit,
+                cursor=page_cursor,
+            )
+
+        def fetch_traces(page_cursor: Optional[str]) -> TraceListPage:
             if episode_id is not None:
                 return client.list_episode_traces(
                     episode_id,
                     run_id=run_id,
+                    environment_id=environment_id,
                     task_id=task_id,
                     model_id=model_id,
                     outcome=outcome,
@@ -505,6 +580,7 @@ def list_traces(
                 )
             return client.list(
                 run_id=run_id,
+                environment_id=environment_id,
                 task_id=task_id,
                 model_id=model_id,
                 outcome=outcome,
@@ -518,7 +594,7 @@ def list_traces(
                 cursor=page_cursor,
             )
 
-        result = _list_page(fetch, page=page, cursor=cursor)
+        result = _list_page(fetch_episodes if episodes else fetch_traces, page=page, cursor=cursor)
     except typer.Exit:
         raise
     except UnauthorizedError as e:
@@ -542,38 +618,25 @@ def list_traces(
         output_data_as_json(result.model_dump(mode="json"), console)
         return
 
-    # An episode's traces share its run, so the agent that produced each one
-    # takes its place; a task every row shares moves into the title.
-    task = shared_value(s.task_id for s in result.items) if episode_id is not None else None
-    title = " · ".join(
-        part for part in ("Traces", episode_id and f"episode {episode_id}", task) if part
-    )
-    table = Table(title=Text(title), title_justify="left")
-    table.add_column("Trace ID", style="cyan", no_wrap=True)
-    if episode_id is None:
-        table.add_column("Run", style="green")
-    else:
-        table.add_column("Agent", style="green")
-    if task is None:
-        table.add_column("Task")
-    table.add_column("Reward", justify="right")
-    table.add_column("Outcome")
-    table.add_column("Created", no_wrap=True)
-
-    for summary in result.items:
-        reward = summary.score.reward
-        source = [escape((summary.run_id if episode_id is None else summary.agent_name) or "-")]
-        if task is None:
-            source.append(escape(summary.task_id or "-"))
-        table.add_row(
-            escape(summary.trace_id),
-            *source,
-            "-" if reward is None else f"{reward:.2f}",
-            escape(summary.score.outcome or "-"),
-            escape(summary.created_at.strftime(TIME_FORMAT)),
+    if isinstance(result, EpisodeListPage):
+        _print_empty_page("episodes", page, len(result.items))
+        table, note = episodes_table(
+            result, run_id=run_id, run_step=run_step, environment_id=environment_id
         )
-    _print_empty_page("traces", page, len(result.items))
+    else:
+        _print_empty_page("traces", page, len(result.items))
+        user_names = _user_names() if result.items else None
+        table, note = traces_table(
+            result,
+            run_id=run_id,
+            episode_id=episode_id,
+            task_id=task_id,
+            user_names=user_names,
+            width=console.width,
+        )
     console.print(table)
+    if note is not None:
+        console.print(note)
     _print_page_footer(
         count=len(result.items),
         next_cursor=result.next_cursor,
@@ -581,23 +644,30 @@ def list_traces(
         limit=limit,
         cursor=cursor,
     )
+    if isinstance(result, EpisodeListPage) and result.items:
+        console.print(Text("Details: prime traces get <episode_id> --episodes", style="dim"))
 
 
-@app.command("get", epilog=GET_TRACE_JSON_HELP)
+@app.command("get", epilog=GET_JSON_HELP)
 def get_trace(
-    trace_id: str = typer.Argument(..., help="Trace ID"),
-    raw: bool = typer.Option(False, "--raw", help="Fetch the exact stored trace document"),
+    trace_id: str = typer.Argument(..., help="Trace ID, or episode ID with --episodes"),
+    episodes: bool = typer.Option(
+        False, "--episodes", help="Get an episode and its newest traces instead of a trace"
+    ),
+    raw: bool = typer.Option(False, "--raw", help="Fetch the exact stored document"),
     dest: Optional[Path] = typer.Option(
-        None, "--dest", help="With --raw: stream the document to this file"
+        None, "--dest", help="With --raw: write the document to this file"
     ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """Get one trace summary, or the raw trace document with --raw."""
+    """Get one trace, or one episode with --episodes; --raw fetches the stored document."""
     validate_output_format(output, error_console)
     if dest is not None and not raw:
         error_console.print("[red]--dest requires --raw[/red]")
         raise typer.Exit(1)
-
+    if episodes:
+        _get_episode(trace_id, raw=raw, dest=dest, output=output)
+        return
     try:
         client = _traces_client()
         if raw:
@@ -642,303 +712,8 @@ def get_trace(
         console.print(renderable)
 
 
-def _load_transcript(client: TracesClient, trace_id: str) -> Tuple[Transcript, Optional[str]]:
-    """Read nodes and calls from the index, or the raw document when the index can't serve it.
-
-    Returns the transcript and, when it came from the document, why.
-    """
-    nodes: List[dict] = []
-    calls: List[dict] = []
-    try:
-        cursor: Optional[str] = None
-        while True:
-            node_page = client.list_nodes(trace_id, limit=100, cursor=cursor)
-            nodes.extend(n.model_dump(mode="json") for n in node_page.items)
-            if node_page.partial_index:
-                return _document_transcript(client, trace_id), (
-                    "the trace is larger than the node index holds"
-                )
-            if not node_page.next_cursor:
-                break
-            cursor = node_page.next_cursor
-        cursor = None
-        while True:
-            call_page = client.list_calls(trace_id, limit=100, cursor=cursor)
-            calls.extend(c.model_dump(mode="json") for c in call_page.items)
-            if call_page.partial_index:
-                return _document_transcript(client, trace_id), (
-                    "the trace is larger than the call index holds"
-                )
-            if not call_page.next_cursor:
-                break
-            cursor = call_page.next_cursor
-    except APIError as e:
-        # Matched by code rather than by `TraceNotIndexedError`, which only exists from
-        # prime-traces 0.0.6: importing it would break every command on an older SDK.
-        if e.code != "trace_not_indexed":
-            raise
-        return _document_transcript(client, trace_id), "the trace is still being indexed"
-    return Transcript(trace_id=trace_id, source="index", nodes=nodes, calls=calls), None
-
-
-def _document_transcript(client: TracesClient, trace_id: str) -> Transcript:
-    try:
-        document = json.loads(client.get_raw(trace_id))
-    except ValueError as e:
-        raise PrimeTracesError(f"the stored document is not valid JSON ({e})") from None
-    try:
-        return transcript_from_document(trace_id, document)
-    except ValueError as e:
-        raise PrimeTracesError(str(e)) from None
-
-
-@app.command("transcript", epilog=TRANSCRIPT_JSON_HELP)
-def transcript_command(
-    trace_id: str = typer.Argument(..., help="Trace ID"),
-    full: bool = typer.Option(
-        False, "--full", help="Show every message in full, including the system prompt"
-    ),
-    node: Optional[str] = typer.Option(
-        None,
-        "--node",
-        help="Node index or inclusive range: 12, 30:, :9 or 5:9. A single node is shown in full",
-    ),
-    tools_only: bool = typer.Option(
-        False, "--tools-only", help="One row per tool call with the size of its result"
-    ),
-    no_pager: bool = typer.Option(
-        False, "--no-pager", help="Print directly instead of opening a pager in a terminal"
-    ),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
-) -> None:
-    """Show a trace's conversation: each model turn, its tool calls, and their results."""
-    validate_output_format(output, error_console)
-    try:
-        node_range = parse_node_range(node) if node is not None else None
-    except ValueError as e:
-        error_console.print(f"[red]Error:[/red] {escape(str(e))}")
-        raise typer.Exit(1)
-    # A single node is what the truncation hints point at, so show all of it.
-    if node_range is not None and node_range[0] is not None and node_range[0] == node_range[1]:
-        full = True
-
-    try:
-        client = _traces_client()
-        if not hasattr(client, "list_nodes"):
-            error_console.print(
-                "[red]Error:[/red] prime traces transcript needs prime-traces 0.0.6 or newer."
-                " Upgrade the prime CLI and try again."
-            )
-            raise typer.Exit(1)
-        summary = client.get(trace_id)
-        transcript, fallback = _load_transcript(client, trace_id)
-    except typer.Exit:
-        raise
-    except UnauthorizedError as e:
-        error_console.print(f"[red]Unauthorized:[/red] {escape(str(e))}")
-        raise typer.Exit(1)
-    except PaymentRequiredError as e:
-        error_console.print(f"[red]Payment Required:[/red] {escape(str(e))}")
-        raise typer.Exit(1)
-    except PrimeTracesError as e:
-        error_console.print(f"[red]Error:[/red] {escape(str(e))}")
-        raise typer.Exit(1)
-    except Exception as e:
-        error_console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
-        error_console.print_exception()
-        raise typer.Exit(1)
-
-    nodes = select_nodes(transcript, node_range)
-
-    if output == "json":
-        output_data_as_json(
-            {
-                "trace_id": transcript.trace_id,
-                "source": transcript.source,
-                "nodes": nodes,
-                "calls": transcript.calls,
-            },
-            console,
-        )
-        return
-
-    plain = is_plain_mode()
-    if not nodes:
-        body = [Text("No nodes in that range.", style="yellow")]
-    elif tools_only:
-        body = [tools_only_table(transcript, nodes, width=console.width)]
-    else:
-        body = transcript_lines(transcript, nodes, full=full, plain=plain)
-
-    renderables = [
-        transcript_header(summary, transcript) if not plain else Text(f"trace {trace_id}")
-    ]
-    if fallback:
-        renderables.append(Text(f"Read from the full document: {fallback}.", style="dim"))
-    renderables.extend(body)
-
-    use_pager = not no_pager and not plain and console.is_terminal
-    if use_pager:
-        # Keep colors, and quit straight away when everything fits on one screen.
-        os.environ.setdefault("LESS", "-FRX")
-        with console.pager(styles=True):
-            for renderable in renderables:
-                console.print(renderable)
-    else:
-        for renderable in renderables:
-            console.print(renderable)
-
-
-@app.command("delete")
-def delete_traces(
-    trace_id: Optional[str] = typer.Argument(None, help="Trace ID to delete"),
-    run_id: Optional[str] = typer.Option(
-        None, "--run-id", help="Delete every trace in this run instead"
-    ),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation"),
-) -> None:
-    """Delete every stored copy of one trace, or a whole run with --run-id.
-
-    202 confirms logical deletion, not physical reclamation. Deleting
-    something the owner does not have is an error, not a no-op, so repeating
-    a delete that already succeeded reports "not found".
-    """
-    if bool(trace_id) == bool(run_id):
-        error_console.print("[red]Provide exactly one of TRACE_ID or --run-id[/red]")
-        raise typer.Exit(1)
-
-    target = f"trace {trace_id}" if trace_id else f"every trace in run {run_id}"
-    if not yes and not typer.confirm(f"Delete {target}?"):
-        raise typer.Exit(0)
-
-    try:
-        client = _traces_client()
-        if trace_id:
-            client.delete(trace_id)
-        else:
-            assert run_id is not None
-            client.delete_run(run_id)
-        console.print(f"[green]Deletion of {escape(target)} accepted[/green]")
-    except typer.Exit:
-        raise
-    except NotFoundError as e:
-        error_console.print(f"[red]Not found:[/red] {escape(str(e))}")
-        raise typer.Exit(1)
-    except UnauthorizedError as e:
-        error_console.print(f"[red]Unauthorized:[/red] {escape(str(e))}")
-        raise typer.Exit(1)
-    except PaymentRequiredError as e:
-        error_console.print(f"[red]Payment Required:[/red] {escape(str(e))}")
-        raise typer.Exit(1)
-    except APIError as e:
-        error_console.print(f"[red]Error:[/red] {escape(str(e))}")
-        raise typer.Exit(1)
-    except Exception as e:
-        error_console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
-        error_console.print_exception()
-        raise typer.Exit(1)
-
-
-@episodes_app.command("list", epilog=LIST_EPISODES_JSON_HELP)
-def list_episodes(
-    run_id: Optional[str] = typer.Option(None, "--run-id", help="Filter by run ID"),
-    environment_id: Optional[str] = typer.Option(
-        None, "--environment-id", "--env", help="Filter by environment ID"
-    ),
-    outcome: Optional[str] = typer.Option(None, "--outcome", help="Filter by outcome"),
-    has_error: Optional[bool] = typer.Option(
-        None, "--has-error/--no-has-error", help="Filter by the episode's own error status"
-    ),
-    run_step: Optional[int] = typer.Option(
-        None, "--run-step", min=0, help="Only episodes with a trace from this training step"
-    ),
-    created_after: Optional[str] = typer.Option(None, "--created-after", help="ISO timestamp"),
-    created_before: Optional[str] = typer.Option(None, "--created-before", help="ISO timestamp"),
-    page: int = typer.Option(
-        1,
-        "--page",
-        "-p",
-        help=(
-            "Page number; each run walks the pages before it from the current top, so"
-            " boundaries shift as episodes arrive (use --cursor for a fixed boundary)"
-        ),
-    ),
-    limit: int = typer.Option(20, "--limit", help="Max results per page (up to 100)"),
-    cursor: Optional[str] = typer.Option(
-        None,
-        "--cursor",
-        help="Resume from a cursor returned by a previous page (cannot be combined with --page)",
-    ),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
-) -> None:
-    """List episode summaries, newest first."""
-    validate_output_format(output, error_console)
-    _check_paging(page, cursor)
-    try:
-        client = _traces_client()
-
-        def fetch(page_cursor: Optional[str]) -> EpisodeListPage:
-            return client.list_episodes(
-                run_id=run_id,
-                environment_id=environment_id,
-                outcome=outcome,
-                has_error=has_error,
-                run_step=run_step,
-                created_after=created_after,
-                created_before=created_before,
-                limit=limit,
-                cursor=page_cursor,
-            )
-
-        result = _list_page(fetch, page=page, cursor=cursor)
-    except typer.Exit:
-        raise
-    except UnauthorizedError as e:
-        error_console.print(f"[red]Unauthorized:[/red] {escape(str(e))}")
-        raise typer.Exit(1)
-    except PaymentRequiredError as e:
-        error_console.print(f"[red]Payment Required:[/red] {escape(str(e))}")
-        raise typer.Exit(1)
-    except APIError as e:
-        error_console.print(f"[red]Error:[/red] {escape(str(e))}")
-        raise typer.Exit(1)
-    except Exception as e:
-        error_console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
-        error_console.print_exception()
-        raise typer.Exit(1)
-
-    if output == "json":
-        output_data_as_json(result.model_dump(mode="json"), console)
-        return
-
-    _print_empty_page("episodes", page, len(result.items))
-    console.print(episodes_table(result, run_id=run_id, run_step=run_step))
-    _print_page_footer(
-        count=len(result.items),
-        next_cursor=result.next_cursor,
-        page=page,
-        limit=limit,
-        cursor=cursor,
-    )
-    if result.items:
-        console.print(Text("Details: prime traces episodes get <episode_id>", style="dim"))
-
-
-@episodes_app.command("get", epilog=GET_EPISODE_JSON_HELP)
-def get_episode(
-    episode_id: str = typer.Argument(..., help="Episode ID"),
-    raw: bool = typer.Option(False, "--raw", help="Fetch the exact stored episode"),
-    dest: Optional[Path] = typer.Option(
-        None, "--dest", help="With --raw: write the episode to this file"
-    ),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
-) -> None:
-    """Get one episode with its newest traces, or the stored episode with --raw."""
-    validate_output_format(output, error_console)
-    if dest is not None and not raw:
-        error_console.print("[red]--dest requires --raw[/red]")
-        raise typer.Exit(1)
-
+def _get_episode(episode_id: str, *, raw: bool, dest: Optional[Path], output: str) -> None:
+    """`get --episodes`: one episode with its newest traces, or the stored episode."""
     document: Optional[bytes] = None
     members: Optional[TraceListPage] = None
     try:
@@ -995,3 +770,53 @@ def get_episode(
     assert members is not None
     for renderable in episode_view(detail, members):
         console.print(renderable)
+
+
+@app.command("delete")
+def delete_traces(
+    trace_id: Optional[str] = typer.Argument(None, help="Trace ID to delete"),
+    run_id: Optional[str] = typer.Option(
+        None, "--run-id", help="Delete every trace in this run instead"
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation"),
+) -> None:
+    """Delete every stored copy of one trace, or a whole run with --run-id.
+
+    202 confirms logical deletion, not physical reclamation. Deleting
+    something the owner does not have is an error, not a no-op, so repeating
+    a delete that already succeeded reports "not found".
+    """
+    if bool(trace_id) == bool(run_id):
+        error_console.print("[red]Provide exactly one of TRACE_ID or --run-id[/red]")
+        raise typer.Exit(1)
+
+    target = f"trace {trace_id}" if trace_id else f"every trace in run {run_id}"
+    if not yes and not typer.confirm(f"Delete {target}?"):
+        raise typer.Exit(0)
+
+    try:
+        client = _traces_client()
+        if trace_id:
+            client.delete(trace_id)
+        else:
+            assert run_id is not None
+            client.delete_run(run_id)
+        console.print(f"[green]Deletion of {escape(target)} accepted[/green]")
+    except typer.Exit:
+        raise
+    except NotFoundError as e:
+        error_console.print(f"[red]Not found:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except UnauthorizedError as e:
+        error_console.print(f"[red]Unauthorized:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except PaymentRequiredError as e:
+        error_console.print(f"[red]Payment Required:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except APIError as e:
+        error_console.print(f"[red]Error:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except Exception as e:
+        error_console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
+        error_console.print_exception()
+        raise typer.Exit(1)

@@ -144,8 +144,10 @@ volume, and hosted SFT runs read staged datasets from it.
 prime volumes create research
 
 # Stage an HF dataset repository onto it (downloads run in a short-lived
-# CPU pod on the volume's cluster, then verify offline in a fresh process)
-prime volumes stage PrimeIntellect/INTELLECT-3-SFT-10K --volume research
+# CPU pod on the volume's cluster, then verify offline in a fresh process).
+# --path sets the directory name under datasets/; the default is the repo
+# basename, kept exactly (e.g. INTELLECT-3-SFT-10K).
+prime volumes stage PrimeIntellect/INTELLECT-3-SFT-10K --volume research --path intellect-3-sft-10k
 
 # Private/gated datasets: pass a token (forwarded via a pod-owned Secret)
 prime volumes stage org/private-dataset --volume research --env-file hf.env
@@ -156,6 +158,9 @@ prime volumes stage org/private-dataset --volume research --env-file hf.env
 #   name = "/datasets/intellect-3-sft-10k"
 #   splits = ["math"]        # a split from the list printed above
 prime train sft.toml --volume research
+
+# Note the name in the TOML matches the staged --path (or the unchanged
+# repo basename if you staged without --path).
 
 # Manage volumes
 prime volumes list

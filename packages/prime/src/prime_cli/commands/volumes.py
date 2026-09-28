@@ -31,7 +31,13 @@ from ..utils import (
     validate_output_format,
 )
 from ..utils.env_vars import EnvParseError
-from .volumes_stage import StageError, print_stage_output, resolve_hf_token, stage_dataset
+from .volumes_stage import (
+    StageError,
+    print_stage_output,
+    redact,
+    resolve_hf_token,
+    stage_dataset,
+)
 
 app = PlainTyper(
     help="Manage volumes for full-FT run outputs (closed beta)",
@@ -146,7 +152,10 @@ def stage(
 
     \b
         prime volumes create research
-        prime volumes stage PrimeIntellect/INTELLECT-3-SFT-10K --volume research
+        # --path: directory name under datasets/ (default: repo basename,
+        # kept exactly - e.g. INTELLECT-3-SFT-10K)
+        prime volumes stage PrimeIntellect/INTELLECT-3-SFT-10K \
+            --volume research --path intellect-3-sft-10k
         # then in your SFT TOML:  [data]
         #     type = "sft"
         #     name = "/datasets/intellect-3-sft-10k"
@@ -165,6 +174,7 @@ def stage(
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
     except StageError as e:
+        # No token was resolved here, so nothing to redact.
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
 
@@ -184,7 +194,7 @@ def stage(
             json_mode=json_mode,
         )
     except StageError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {redact(str(e), token)}")
         raise typer.Exit(1)
     except KeyboardInterrupt:
         raise typer.Exit(130)

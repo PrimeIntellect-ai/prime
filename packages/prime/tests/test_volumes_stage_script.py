@@ -13,6 +13,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 import types
 from pathlib import Path
 
@@ -137,6 +138,16 @@ def _assert_staged(volume_root: Path, name: str) -> dict:
     return manifest
 
 
+def _leftover_scratch(datasets_root: Path) -> list[str]:
+    """Operation scratch that must be cleaned up; the publish lock is
+    bookkeeping, not scratch."""
+    return [
+        p.name
+        for p in datasets_root.iterdir()
+        if p.name.startswith(".prime-stage-") and p.name != ".prime-stage-publish.lock"
+    ]
+
+
 def _supports_noreplace(tmp_path: Path) -> bool:
     src = tmp_path / "probe-src"
     dst = tmp_path / "probe-dst"
@@ -151,24 +162,6 @@ def _supports_noreplace(tmp_path: Path) -> bool:
         return False
     shutil.rmtree(dst)
     return True
-
-
-@pytest.fixture()
-def checked_rename(monkeypatch, tmp_path):
-    """On filesystems without renameat2(RENAME_NOREPLACE) (macOS APFS),
-    fall back to a check-then-rename for single-process publication tests.
-    The concurrency test skips there instead of using this shim."""
-    if _supports_noreplace(tmp_path):
-        yield
-        return
-
-    def checked(src, dst):
-        if dst.exists():
-            raise FileExistsError(errno.EEXIST, "exists", str(src), None, str(dst))
-        os.rename(src, dst)
-
-    monkeypatch.setattr(stage, "_rename_noreplace", checked)
-    yield
 
 
 @pytest.fixture()
@@ -377,7 +370,7 @@ def test_verify_zero_row_parquet_fails_closed(tmp_path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_stage_publishes_dataset(tmp_path, monkeypatch, checked_rename, captured_emit) -> None:
+def test_stage_publishes_dataset(tmp_path, monkeypatch, captured_emit) -> None:
     fixture = _make_parquet_fixture(tmp_path / "fixture", rows=4)
     install_fake_hub(monkeypatch, fixture)
     volume_root = tmp_path / "volume"
@@ -393,7 +386,7 @@ def test_stage_publishes_dataset(tmp_path, monkeypatch, checked_rename, captured
     assert payload["configs"]["default"]["splits"]["train"]["rows"] == 4
 
 
-def test_stage_jsonl_dataset(tmp_path, monkeypatch, checked_rename, captured_emit) -> None:
+def test_stage_jsonl_dataset(tmp_path, monkeypatch, captured_emit) -> None:
     fixture = _make_jsonl_fixture(tmp_path / "fixture", rows=5)
     install_fake_hub(monkeypatch, fixture)
     volume_root = tmp_path / "volume"
@@ -405,7 +398,7 @@ def test_stage_jsonl_dataset(tmp_path, monkeypatch, checked_rename, captured_emi
     assert payload["configs"]["default"]["splits"]["train"]["rows"] == 5
 
 
-def test_stage_same_sha_is_idempotent(tmp_path, monkeypatch, checked_rename, captured_emit) -> None:
+def test_stage_same_sha_is_idempotent(tmp_path, monkeypatch, captured_emit) -> None:
     fixture = _make_parquet_fixture(tmp_path / "fixture", rows=2)
     hub = install_fake_hub(monkeypatch, fixture)
     volume_root = tmp_path / "volume"
@@ -423,9 +416,7 @@ def test_stage_same_sha_is_idempotent(tmp_path, monkeypatch, checked_rename, cap
     _assert_staged(volume_root, "tiny-sft")
 
 
-def test_stage_changed_sha_is_a_conflict(
-    tmp_path, monkeypatch, checked_rename, captured_emit
-) -> None:
+def test_stage_changed_sha_is_a_conflict(tmp_path, monkeypatch, captured_emit) -> None:
     fixture = _make_parquet_fixture(tmp_path / "fixture", rows=2)
     install_fake_hub(monkeypatch, fixture)
     volume_root = tmp_path / "volume"
@@ -450,10 +441,10 @@ def test_stage_changed_sha_is_a_conflict(
         next((volume_root / "datasets" / "tiny-sft" / "data").glob("*.parquet")).read_bytes()
         == data_file
     )
-    assert not any(p.name.startswith(".prime-stage-") for p in (volume_root / "datasets").iterdir())
+    assert _leftover_scratch(volume_root / "datasets") == []
 
 
-def test_preexisting_unmanaged_path_is_a_conflict(tmp_path, monkeypatch, checked_rename) -> None:
+def test_preexisting_unmanaged_path_is_a_conflict(tmp_path, monkeypatch) -> None:
     fixture = _make_parquet_fixture(tmp_path / "fixture", rows=2)
     install_fake_hub(monkeypatch, fixture)
     volume_root = tmp_path / "volume"
@@ -466,7 +457,7 @@ def test_preexisting_unmanaged_path_is_a_conflict(tmp_path, monkeypatch, checked
     assert not (manual / stage.MANIFEST_NAME).exists()
 
 
-def test_stage_download_failure_publishes_nothing(tmp_path, monkeypatch, checked_rename) -> None:
+def test_stage_download_failure_publishes_nothing(tmp_path, monkeypatch) -> None:
     fixture = _make_parquet_fixture(tmp_path / "fixture", rows=2)
     install_fake_hub(monkeypatch, fixture, download_raises=OSError("connection reset"))
     volume_root = tmp_path / "volume"
@@ -474,10 +465,10 @@ def test_stage_download_failure_publishes_nothing(tmp_path, monkeypatch, checked
     rc = _run_stage(volume_root)
     assert rc == 1
     assert not (volume_root / "datasets" / "tiny-sft").exists()
-    assert not any(p.name.startswith(".prime-stage-") for p in (volume_root / "datasets").iterdir())
+    assert _leftover_scratch(volume_root / "datasets") == []
 
 
-def test_stage_unsupported_layout_publishes_nothing(tmp_path, monkeypatch, checked_rename) -> None:
+def test_stage_unsupported_layout_publishes_nothing(tmp_path, monkeypatch) -> None:
     fixture = tmp_path / "fixture"
     fixture.mkdir()
     (fixture / "README.md").write_text("# no data files\n")
@@ -489,7 +480,7 @@ def test_stage_unsupported_layout_publishes_nothing(tmp_path, monkeypatch, check
     assert not (volume_root / "datasets" / "tiny-sft").exists()
 
 
-def test_stage_enospc_hint_resizes_volume(tmp_path, monkeypatch, checked_rename) -> None:
+def test_stage_enospc_hint_resizes_volume(tmp_path, monkeypatch) -> None:
     fixture = _make_parquet_fixture(tmp_path / "fixture", rows=2)
     install_fake_hub(monkeypatch, fixture)
     FakeDatasetInfo.siblings = [Sibling(10**18)]
@@ -503,9 +494,7 @@ def test_stage_enospc_hint_resizes_volume(tmp_path, monkeypatch, checked_rename)
         FakeDatasetInfo.siblings = [Sibling(1000)]
 
 
-def test_stage_download_failure_enospc_suggests_resize(
-    tmp_path, monkeypatch, checked_rename, capsys
-) -> None:
+def test_stage_download_failure_enospc_suggests_resize(tmp_path, monkeypatch, capsys) -> None:
     fixture = _make_parquet_fixture(tmp_path / "fixture", rows=2)
     install_fake_hub(
         monkeypatch, fixture, download_raises=OSError(errno.ENOSPC, "No space left on device")
@@ -520,9 +509,7 @@ def test_stage_download_failure_enospc_suggests_resize(
     assert not (volume_root / "datasets" / "tiny-sft").exists()
 
 
-def test_stage_private_uses_token_file_only(
-    tmp_path, monkeypatch, checked_rename, captured_emit
-) -> None:
+def test_stage_private_uses_token_file_only(tmp_path, monkeypatch, captured_emit) -> None:
     fixture = _make_parquet_fixture(tmp_path / "fixture", rows=2)
     install_fake_hub(monkeypatch, fixture)
     volume_root = tmp_path / "volume"
@@ -537,9 +524,7 @@ def test_stage_private_uses_token_file_only(
     assert "hf_token_value_123" not in payload_text
 
 
-def test_stage_rejects_no_space_before_download(
-    tmp_path, monkeypatch, checked_rename, capsys
-) -> None:
+def test_stage_rejects_no_space_before_download(tmp_path, monkeypatch, capsys) -> None:
     fixture = _make_parquet_fixture(tmp_path / "fixture", rows=2)
     install_fake_hub(monkeypatch, fixture)
     FakeDatasetInfo.siblings = [Sibling(2**60)]
@@ -562,7 +547,7 @@ def test_stage_rejects_no_space_before_download(
 
 
 def test_publish_conflict_same_sha_returns_already_staged(
-    tmp_path, monkeypatch, checked_rename, captured_emit
+    tmp_path, monkeypatch, captured_emit
 ) -> None:
     """EEXIST during publish with a matching winner manifest ->
     already_staged (concurrent identical publishers are idempotent)."""
@@ -584,7 +569,7 @@ def test_publish_conflict_same_sha_returns_already_staged(
         "schemaVersion": mod.MANIFEST_SCHEMA_VERSION,
         "source": REPO,
         "revision": SHA,
-        "files": [{"path": "data/train-00000-of-00001.parquet", "bytes": 1}],
+        "files": mod._file_inventory(winner),
     }
     (winner / mod.MANIFEST_NAME).write_text(json.dumps(manifest))
 
@@ -592,10 +577,10 @@ def test_publish_conflict_same_sha_returns_already_staged(
     assert rc == 0
     assert captured_emit[-1]["status"] == "already_staged"
     # the loser's candidate scratch is gone
-    assert not any(p.name.startswith(".prime-stage-") for p in (volume_root / "datasets").iterdir())
+    assert _leftover_scratch(volume_root / "datasets") == []
 
 
-def test_publish_conflict_different_source_fails(tmp_path, monkeypatch, checked_rename) -> None:
+def test_publish_conflict_different_source_fails(tmp_path, monkeypatch) -> None:
     fixture = _make_parquet_fixture(tmp_path / "fixture", rows=2)
     install_fake_hub(monkeypatch, fixture)
     volume_root = tmp_path / "volume"
@@ -626,10 +611,9 @@ def test_publish_conflict_different_source_fails(tmp_path, monkeypatch, checked_
 
 def test_concurrent_publication_no_overwrite(tmp_path, monkeypatch, captured_emit) -> None:
     """Two simultaneous publishers of the same repo+sha: exactly one wins,
-    the other returns already_staged; the published data is the winner's."""
-    if not _supports_noreplace(tmp_path):
-        pytest.skip("filesystem lacks renameat2(RENAME_NOREPLACE)")
-
+    the other returns already_staged (verifying the winner); the published
+    data is the winner's. Works through renameat2 where supported and the
+    locked fallback where not (e.g. macOS APFS, and production CephFS)."""
     import threading
 
     fixture = _make_parquet_fixture(tmp_path / "fixture", rows=2)
@@ -710,7 +694,7 @@ def test_locked_rename_never_overwrites_existing(tmp_path, monkeypatch) -> None:
     assert leftovers == []
 
 
-def test_stage_failure_never_touches_runs_directory(tmp_path, monkeypatch, checked_rename) -> None:
+def test_stage_failure_never_touches_runs_directory(tmp_path, monkeypatch) -> None:
     fixture = _make_parquet_fixture(tmp_path / "fixture", rows=2)
     install_fake_hub(monkeypatch, fixture)
     volume_root = tmp_path / "volume"
@@ -734,3 +718,297 @@ def test_main_verify_subcommand_emits_result(tmp_path, capsys) -> None:
     out = capsys.readouterr().out
     line = [line for line in out.splitlines() if line.startswith(stage.RESULT_MARKER)][0]
     assert json.loads(line[len(stage.RESULT_MARKER) :])["status"] == "verified"
+
+
+# the genuine shutil.rmtree before any test monkeypatches it
+_REAL_RMTREE = shutil.rmtree
+
+
+def unsupported_rename(src, dst):
+    raise stage.UnsupportedRenameError("filesystem lacks renameat2 flags")
+
+
+def pair(tmp_path):
+    """A candidate/publish pair for direct publish_no_replace tests."""
+    src, dst = tmp_path / "candidate", tmp_path / "published"
+    src.mkdir()
+    (src / "data.jsonl").write_text('{"x": 1}')
+    return src, dst
+
+
+# ---------------------------------------------------------------------------
+# Roast-driven regressions (t033 probes, converted)
+# ---------------------------------------------------------------------------
+
+
+def test_lock_failure_aborts_publication(tmp_path, monkeypatch) -> None:
+    """A filesystem without working advisory locks must not get a silently
+    weakened check-then-rename: publication aborts, nothing is published."""
+    import fcntl
+
+    src, dst = pair(tmp_path)
+    monkeypatch.setattr(stage, "_rename_noreplace", unsupported_rename)
+
+    def fail_lock(fd, operation):
+        raise OSError(errno.ENOLCK, "no locks available")
+
+    monkeypatch.setattr(fcntl, "flock", fail_lock)
+    with pytest.raises((OSError, stage.StageError)):
+        stage.publish_no_replace(src, dst)
+    assert not dst.exists()
+
+
+def test_raced_unmanaged_empty_directory_is_not_replaced(tmp_path, monkeypatch) -> None:
+    """An unmanaged writer that does not take the CLI's lock creates an
+    empty destination between the check and the rename: the rename must
+    fail closed, never occupy the other writer's directory."""
+    src, dst = pair(tmp_path)
+    original_rename = os.rename
+
+    monkeypatch.setattr(stage, "_rename_noreplace", unsupported_rename)
+
+    def racing_rename(source, destination):
+        destination.mkdir()  # a manual writer races in with an empty dir
+        original_rename(source, destination)
+
+    monkeypatch.setattr(stage.os, "rename", racing_rename)
+    with pytest.raises(FileExistsError):
+        stage.publish_no_replace(src, dst)
+    assert not (dst / "data.jsonl").exists()
+    assert src.is_dir()  # the candidate survives untouched
+
+
+def test_empty_reservation_marker_is_cleaned_on_failure(tmp_path, monkeypatch) -> None:
+    """If publication fails after the empty marker was reserved, only the
+    (still empty, operation-owned) marker is removed - os.rmdir refuses
+    non-empty directories, so raced-in content survives."""
+    src, dst = pair(tmp_path)
+    monkeypatch.setattr(stage, "_rename_noreplace", unsupported_rename)
+
+    def foreign_content(source, destination):
+        (destination / "foreign.txt").write_text("not ours")
+        raise OSError(errno.ENOTEMPTY, "not empty")
+
+    monkeypatch.setattr(stage.os, "rename", foreign_content)
+    with pytest.raises(FileExistsError):
+        stage.publish_no_replace(src, dst)
+    # the marker now holds foreign content and was left alone
+    assert (dst / "foreign.txt").exists()
+
+
+def test_eperm_rename_is_not_evaded_by_fallback(tmp_path, monkeypatch) -> None:
+    """A denied operation (EPERM) must fail the stage, not silently select
+    the weaker publication path."""
+    fixture = _make_jsonl_fixture(tmp_path / "fixture")
+    install_fake_hub(monkeypatch, fixture)
+    volume_root = tmp_path / "volume"
+
+    def denied(src, dst):
+        raise OSError(errno.EPERM, "operation not permitted")
+
+    monkeypatch.setattr(stage, "_rename_noreplace", denied)
+    assert _run_stage(volume_root) == 1
+    assert not (volume_root / "datasets" / "tiny-sft").exists()
+
+
+def test_datasets_root_symlink_rejected(tmp_path, monkeypatch) -> None:
+    """datasets/ -> runs/ would redirect scratch and published data into
+    run outputs; staging must refuse before any write."""
+    fixture = _make_jsonl_fixture(tmp_path / "fixture")
+    install_fake_hub(monkeypatch, fixture)
+    volume_root = tmp_path / "volume"
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (volume_root / "datasets").mkdir(parents=True)
+    (volume_root / "datasets").rmdir()
+    (volume_root / "datasets").symlink_to(elsewhere, target_is_directory=True)
+
+    assert _run_stage(volume_root) == 1
+    assert list(elsewhere.iterdir()) == []
+
+
+def test_final_symlink_destination_rejected(tmp_path, monkeypatch) -> None:
+    """datasets/<name> pointing at another directory must never be
+    followed, replaced, or adopted as already_staged."""
+    fixture = _make_jsonl_fixture(tmp_path / "fixture")
+    install_fake_hub(monkeypatch, fixture)
+    outside = _make_jsonl_fixture(tmp_path / "outside")
+    (outside / stage.MANIFEST_NAME).write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "source": REPO,
+                "revision": SHA,
+                "files": [{"path": "data.jsonl", "bytes": (outside / "data.jsonl").stat().st_size}],
+            }
+        )
+    )
+    volume_root = tmp_path / "volume"
+    (volume_root / "datasets").mkdir(parents=True)
+    (volume_root / "datasets" / "tiny-sft").symlink_to(outside, target_is_directory=True)
+
+    assert _run_stage(volume_root) == 1
+    # the symlink itself and its target are untouched
+    assert (volume_root / "datasets" / "tiny-sft").is_symlink()
+    assert (outside / "data.jsonl").exists()
+
+
+def test_missing_manifest_shard_fails_restage(tmp_path, monkeypatch) -> None:
+    """A staged dataset with a deleted shard must not be re-certified as
+    already_staged (inventory check, real fresh-process verifier)."""
+    fixture = _make_jsonl_fixture(tmp_path / "fixture")
+    install_fake_hub(monkeypatch, fixture)
+    volume_root = tmp_path / "volume"
+    final = _make_jsonl_fixture(volume_root / "datasets" / "tiny-sft")
+    (final / stage.MANIFEST_NAME).write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "source": REPO,
+                "revision": SHA,
+                "files": [
+                    {"path": "data.jsonl", "bytes": (final / "data.jsonl").stat().st_size},
+                    {"path": "missing.jsonl", "bytes": 99},
+                ],
+            }
+        )
+    )
+    assert _run_stage(volume_root) == 1
+    # and a fully consistent manifest re-verifies idempotently
+    (final / stage.MANIFEST_NAME).write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "source": REPO,
+                "revision": SHA,
+                "files": [
+                    entry
+                    for entry in stage._file_inventory(final)
+                    if entry["path"] != stage.MANIFEST_NAME
+                ],
+            }
+        )
+    )
+    assert _run_stage(volume_root) == 0
+
+
+def test_restage_detects_unlisted_and_resized_files(tmp_path, monkeypatch) -> None:
+    fixture = _make_jsonl_fixture(tmp_path / "fixture")
+    install_fake_hub(monkeypatch, fixture)
+    volume_root = tmp_path / "volume"
+
+    assert _run_stage(volume_root) == 0
+    final = volume_root / "datasets" / "tiny-sft"
+    (final / "extra.jsonl").write_text('{"x": 1}')
+    assert _run_stage(volume_root) == 1  # unlisted file
+    (final / "extra.jsonl").unlink()
+    (final / "data.jsonl").write_text("{}")  # resized, still listed
+    assert _run_stage(volume_root) == 1
+
+
+def test_absolute_local_external_reference_rejected(tmp_path) -> None:
+    """HF offline mode blocks the network, not other local paths: a README
+    data_files entry naming an absolute local file must fail the verifier
+    (real fresh-process verification, no mocks)."""
+    outside = tmp_path / "outside.jsonl"
+    outside.write_text('{"x": "external"}')
+    candidate = _make_jsonl_fixture(tmp_path / "candidate")
+    readme = "---" + chr(10)
+    readme += "configs:" + chr(10)
+    readme += "- config_name: default" + chr(10)
+    readme += "  data_files:" + chr(10)
+    readme += "  - split: train" + chr(10)
+    readme += "    path: " + str(outside) + chr(10)
+    readme += "---" + chr(10)
+    readme += "# references a file outside the snapshot" + chr(10)
+    (candidate / "README.md").write_text(readme)
+    with pytest.raises(stage.StageError):
+        stage._run_verifier(candidate, tmp_path / "cache")
+
+
+def test_scratch_cleanup_error_fails_after_publication(tmp_path, monkeypatch, capsys) -> None:
+    """A post-publication scratch cleanup failure must not be reported as
+    success: no staged result line, nonzero exit, explicit residual path."""
+    fixture = _make_jsonl_fixture(tmp_path / "fixture")
+    install_fake_hub(monkeypatch, fixture)
+    volume_root = tmp_path / "volume"
+    real_rmtree = _REAL_RMTREE
+
+    def rmtree(path, *args, **kwargs):
+        if str(path).endswith("-cache") and Path(path).exists():
+            if kwargs.get("ignore_errors"):
+                return
+            raise PermissionError("simulated cache cleanup error")
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(stage.shutil, "rmtree", rmtree)
+    rc = _run_stage(volume_root)
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "scratch cleanup incomplete" in err
+    assert "published" in err  # the rename happened; the user is told
+    out = capsys.readouterr().out
+    assert stage.RESULT_MARKER not in out  # no success result line
+    # the committed dataset stays (never delete committed data)
+    assert (volume_root / "datasets" / "tiny-sft" / "data.jsonl").exists()
+
+
+def test_sigterm_mid_download_cleans_scratch(tmp_path) -> None:
+    """SIGTERM (how kubectl deletes the pod) must unwind through the
+    cleanup path: owned scratch removed, nonzero exit."""
+    import signal
+    import subprocess
+    import sys as _sys
+
+    volume_root = tmp_path / "volume"
+    import prime_cli
+
+    src_root = Path(prime_cli.__file__).parent
+    driver = tmp_path / "sigterm_driver.py"
+    driver_lines = [
+        "import sys, time, types",
+        "sys.path.insert(0, " + repr(str(src_root)) + ")",
+        "from prime_cli.commands import volumes_stage_script as stage",
+        "class Sib:",
+        "    def __init__(self, size):",
+        "        self.size = size",
+        "class Info:",
+        "    sha = " + repr(SHA),
+        "    siblings = [Sib(1000)]",
+        "class Api:",
+        "    def __init__(self, token=None):",
+        "        pass",
+        "    def dataset_info(self, repo_id, revision=None):",
+        "        return Info()",
+        "def slow_snapshot_download(**kwargs):",
+        "    from pathlib import Path",
+        "    dst = Path(kwargs['local_dir'])",
+        "    (dst / 'data.jsonl').write_text('{x: 1}')",
+        "    (dst / 'download.incomplete').write_text('halfway')",
+        "    time.sleep(60)",
+        "hub = types.ModuleType('huggingface_hub')",
+        "hub.HfApi = Api",
+        "hub.snapshot_download = slow_snapshot_download",
+        "sys.modules['huggingface_hub'] = hub",
+        "rc = stage.main([",
+        "    'stage', '--source', " + repr(REPO) + ", '--revision', 'main',",
+        "    '--dataset-name', 'tiny-sft', '--volume-root', " + repr(str(volume_root)) + ",",
+        "    '--operation-id', 'sigterm1',",
+        "])",
+        "sys.exit(rc)",
+    ]
+    driver.write_text(chr(10).join(driver_lines) + chr(10))
+    proc = subprocess.Popen([_sys.executable, str(driver)], cwd=str(tmp_path))
+    scratch = volume_root / "datasets" / ".prime-stage-sigterm1"
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline and not (scratch / "download.incomplete").exists():
+        if proc.poll() is not None:
+            raise AssertionError(f"driver exited early with {proc.returncode}")
+        time.sleep(0.05)
+    assert (scratch / "download.incomplete").exists(), "download never started"
+    proc.send_signal(signal.SIGTERM)
+    proc.wait(timeout=30)
+    assert proc.returncode != 0, proc.returncode
+    # owned scratch is gone; nothing was published
+    assert not scratch.exists()
+    assert not (volume_root / "datasets" / "tiny-sft").exists()

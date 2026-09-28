@@ -32,12 +32,15 @@ import errno
 import json
 import os
 import platform
+import re
 import shutil
+import signal
 import subprocess
 import sys
+import threading
 import time
 from importlib.metadata import PackageNotFoundError, version
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Optional, cast
 
 # The CLI tail()s container logs and looks for this marker; it also
@@ -148,7 +151,7 @@ def _rename_noreplace(src: Path, dst: Path) -> None:
     err = ctypes.get_errno()
     if err == errno.EEXIST:
         raise FileExistsError(err, os.strerror(err), str(src), None, str(dst))
-    if err in (errno.ENOSYS, errno.EINVAL, errno.EOPNOTSUPP, errno.ENOTSUP, errno.EPERM):
+    if err in (errno.ENOSYS, errno.EINVAL, errno.EOPNOTSUPP, errno.ENOTSUP):
         raise UnsupportedRenameError(
             f"filesystem does not support renameat2(RENAME_NOREPLACE) "
             f"(errno {err}, {os.strerror(err)}); refusing to publish with a "
@@ -167,14 +170,20 @@ def publish_no_replace(src: Path, dst: Path) -> str:
     Preferred: renameat2(RENAME_NOREPLACE) - atomic no-replace. The
     production CephFS (ceph-filesystem RWX) volumes do not implement
     renameat2 flags (EINVAL), so for those filesystems fall back to a
-    publisher lock + existence check + directory rename:
+    locked reservation + directory rename:
 
     - an flock on datasets/.prime-stage-publish.lock serializes staging
-      operations targeting the same datasets/ root;
-    - the destination is re-checked for absence under the lock;
-    - os.rename of a directory never *merges* into an existing directory,
-      and fails (EEXIST/ENOTEMPTY) if one appeared anyway, so committed
-      data can never be silently replaced.
+      operations targeting the same datasets/ root. A lock failure is a
+      HARD failure: publication aborts without any rename, because an
+      unlocked check-then-rename could overwrite a racing writer.
+    - under the lock, an empty destination marker directory is created
+      atomically (os.mkdir fails EEXIST if anything - including an
+      unmanaged manual directory - already occupies the destination).
+    - the candidate directory is renamed onto OUR OWN empty marker: a
+      same-filesystem atomic replace of an empty, operation-owned
+      directory. A foreign/managed destination is never the rename
+      target; anything that appears between reservation and rename
+      surfaces as EEXIST/ENOTEMPTY and is treated as a conflict.
 
     Returns the mechanism used ("renameat2" or "locked_rename").
     """
@@ -186,28 +195,41 @@ def publish_no_replace(src: Path, dst: Path) -> str:
     import fcntl
 
     lock_path = _publish_lock_path(dst.parent)
-    have_lock = False
     lock_file = None
+    have_lock = False
     try:
         lock_file = open(lock_path, "a")
         try:
             os.chmod(lock_path, 0o644)
         except OSError:
             pass
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        except OSError as exc:
+            # Hard fail-closed: without the advisory lock the check-then-
+            # rename sequence below could overwrite a racing publisher,
+            # so publication aborts entirely. Nothing was published.
+            raise StageError(
+                f"publisher lock unavailable on this filesystem ({exc}); "
+                "refusing to publish without an overwrite guarantee"
+            ) from exc
         have_lock = True
-    except OSError:
-        # Locking unavailable (e.g. lockless fs): best-effort; the
-        # existence check + rename error handling still fail closed.
-        if lock_file is not None:
-            lock_file.close()
-            lock_file = None
-    try:
         if dst.exists() or dst.is_symlink():
             raise FileExistsError(errno.EEXIST, "exists", str(src), None, str(dst))
+        reserved = False
         try:
-            os.rename(src, dst)
+            os.mkdir(dst)  # atomic reservation; EEXIST if already occupied
+            reserved = True
+            os.rename(src, dst)  # replaces only OUR empty marker
         except OSError as exc:
+            if reserved:
+                # Only ever remove the marker if it is still empty and
+                # ours: os.rmdir refuses non-empty directories, so
+                # anything that raced into the marker survives untouched.
+                try:
+                    os.rmdir(dst)
+                except OSError:
+                    pass
             if exc.errno in (errno.EEXIST, errno.ENOTEMPTY):
                 raise FileExistsError(errno.EEXIST, "exists", str(src), None, str(dst)) from exc
             raise
@@ -219,6 +241,81 @@ def publish_no_replace(src: Path, dst: Path) -> str:
                     fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
             finally:
                 lock_file.close()
+
+
+def _inventory_problems(root: Path, manifest: dict[str, Any]) -> list[str]:
+    """The published tree must still match the manifest inventory exactly:
+    every recorded file present with the recorded size, nothing unlisted."""
+    problems: list[str] = []
+    recorded: dict[str, int] = {}
+    for entry in manifest.get("files") or []:
+        if not isinstance(entry, dict) or "path" not in entry:
+            continue
+        recorded[str(entry["path"])] = int(entry.get("bytes", -1))
+    for rel, expected_bytes in recorded.items():
+        parts = PurePosixPath(rel).parts
+        if not rel or rel.startswith(("/", "..", "\\")) or ".." in parts:
+            problems.append(f"manifest inventory entry escapes the dataset root: {rel}")
+            continue
+        path = root / rel
+        if path.is_symlink() or not path.is_file():
+            problems.append(f"manifest inventory entry is missing (or a symlink): {rel}")
+        elif path.stat().st_size != expected_bytes:
+            problems.append(
+                f"manifest inventory entry has changed size: {rel} "
+                f"(expected {expected_bytes} bytes)"
+            )
+    for path in root.rglob("*"):
+        if (
+            path.is_file()
+            and not path.is_symlink()
+            and path.name != MANIFEST_NAME
+            and path.relative_to(root).as_posix() not in recorded
+        ):
+            problems.append(
+                f"dataset file is not in the stage manifest: {path.relative_to(root).as_posix()}"
+            )
+    return problems
+
+
+_FRONT_MATTER_PATH_RE = re.compile(r"^\s*path\s*:\s*(\S.*)$")
+_EXTERNAL_REFERENCE_PREFIXES = ("/", "~", "file://", "http://", "https://")
+
+
+def check_metadata_references(root: Path) -> list[str]:
+    """Reject dataset card (README) config blocks that point data_files at
+    anything outside the snapshot: absolute local paths, ~, and file/HTTP
+    URLs are external references a local-only load must not follow."""
+    readme = root / "README.md"
+    if not readme.is_file():
+        return []
+    try:
+        text = readme.read_text()
+    except OSError:
+        return []
+    if not text.startswith("---"):
+        return []
+    end = text.find("\n---", 3)
+    if end < 0:
+        end = text.find("\r\n---", 3)
+    block = text[3:end] if end >= 0 else text[3:]
+    problems: list[str] = []
+    for line in block.splitlines():
+        match = _FRONT_MATTER_PATH_RE.match(line)
+        if not match:
+            continue
+        value = match.group(1).strip().strip("\"'").strip("\"'")
+        if not value:
+            continue
+        if (
+            value.startswith(_EXTERNAL_REFERENCE_PREFIXES)
+            or ".." in PurePosixPath(value.replace("\\", "/")).parts
+        ):
+            problems.append(
+                f"README data_files references {value!r} outside the dataset "
+                "snapshot; external references are not supported"
+            )
+    return problems
 
 
 def check_layout(root: Path) -> list[str]:
@@ -397,6 +494,10 @@ def verify_dataset(dataset: Path) -> dict[str, Any]:
     """
     from datasets import get_dataset_config_names, load_dataset
 
+    problems = check_metadata_references(dataset)
+    if problems:
+        raise _fail("; ".join(problems))
+
     configs = get_dataset_config_names(str(dataset))
     if not configs:
         raise _fail("no dataset configs discovered")
@@ -444,6 +545,12 @@ def _cmd_stage(args: argparse.Namespace) -> int:
     volume_root = Path(args.volume_root)
     datasets_root = volume_root / "datasets"
     datasets_root.mkdir(parents=True, exist_ok=True)
+    if datasets_root.is_symlink():
+        # A symlinked datasets/ root (e.g. datasets -> runs) would redirect
+        # operation scratch and published datasets somewhere else entirely.
+        raise _fail(
+            f"volume path '{datasets_root}/datasets' is a symlink; refusing to stage through it"
+        )
     final = datasets_root / args.dataset_name
     operation = args.operation_id
     token = _read_token(args.hf_token_file)
@@ -480,34 +587,48 @@ def _cmd_stage(args: argparse.Namespace) -> int:
     else:
         _progress(f"repository size unknown · volume free {free} bytes")
 
+    # A symlink destination is never followed, replaced, or removed:
+    # the API-visible path must be the real dataset directory.
+    if final.is_symlink():
+        raise _fail(
+            f"destination datasets/{args.dataset_name} is a symlink; refusing "
+            "to stage onto (or through) a symlink destination"
+        )
+
     # Idempotent re-stage: same repo + same resolved SHA verifies and
     # returns already_staged without touching existing data.
     if final.exists():
         manifest = _read_manifest(final)
         if _manifest_matches(manifest, args.source, sha):
             problems = check_layout(final)
+            if manifest:
+                problems += _inventory_problems(final, manifest)
             if problems:
                 raise _fail(
                     "existing staged dataset no longer matches its manifest: " + "; ".join(problems)
                 )
             reverify_cache = datasets_root / f".prime-stage-{operation}-cache"
-            try:
-                verified = _run_verifier(final, reverify_cache)
-                _emit(
-                    {
-                        "status": "already_staged",
-                        "operationId": operation,
-                        "source": args.source,
-                        "requestedRevision": args.revision,
-                        "revision": sha,
-                        "datasetName": args.dataset_name,
-                        "bytes": _tree_bytes(final),
-                        "files": len(manifest.get("files", [])) if manifest else 0,
-                        "configs": verified.get("configs", {}),
-                    }
+            verified = _run_verifier(final, reverify_cache)
+            cleanup_problems = _remove_scratch([reverify_cache])
+            if cleanup_problems:
+                raise _fail(
+                    "staged data verified but scratch cleanup failed: "
+                    + "; ".join(cleanup_problems)
+                    + " (remove the leftover .prime-stage-* directory)"
                 )
-            finally:
-                shutil.rmtree(reverify_cache, ignore_errors=True)
+            _emit(
+                {
+                    "status": "already_staged",
+                    "operationId": operation,
+                    "source": args.source,
+                    "requestedRevision": args.revision,
+                    "revision": sha,
+                    "datasetName": args.dataset_name,
+                    "bytes": _tree_bytes(final),
+                    "files": len(manifest.get("files", [])) if manifest else 0,
+                    "configs": verified.get("configs", {}),
+                }
+            )
             return 0
         raise _fail(
             f"destination datasets/{args.dataset_name} already exists with a "
@@ -520,11 +641,25 @@ def _cmd_stage(args: argparse.Namespace) -> int:
     cache = datasets_root / f".prime-stage-{operation}-cache"
     # A retry always starts clean: leftover scratch from a hard-killed pod
     # is never resumed blindly.
-    shutil.rmtree(candidate, ignore_errors=True)
-    shutil.rmtree(cache, ignore_errors=True)
+    _remove_scratch([candidate, cache])
     candidate.mkdir(parents=True)
 
+    # CLI cancellation deletes the pod, which SIGTERMs this container: a
+    # plain SIGTERM would skip Python's finally blocks and leave operation
+    # scratch behind (live-probed: leftover .prime-stage-* on SIGTERM 143).
+    # Route SIGTERM through the KeyboardInterrupt path so owned scratch is
+    # removed and the download/verify child is killed on unwind.
+    def _sigterm(signum, frame):
+        raise KeyboardInterrupt()
+
+    # signal handlers only install from the main thread (tests may stage
+    # from worker threads; the pod always runs in the main thread).
+    if threading.current_thread() is threading.main_thread():
+        signal.signal(signal.SIGTERM, _sigterm)
+
     started = time.monotonic()  # elapsed time in the emitted result
+    cleanup_problems: list[str] = []
+    rc = [1]
     try:
         from huggingface_hub import snapshot_download
 
@@ -562,7 +697,7 @@ def _cmd_stage(args: argparse.Namespace) -> int:
 
         # Remove download bookkeeping/verification scratch, keep dataset
         # metadata (README card etc.). The loader must not see hub metadata.
-        shutil.rmtree(candidate / ".cache", ignore_errors=True)
+        _remove_scratch([candidate / ".cache"])
         _apply_trainer_readable_permissions(candidate)
 
         dataset_bytes = _tree_bytes(candidate)
@@ -581,35 +716,47 @@ def _cmd_stage(args: argparse.Namespace) -> int:
         (candidate / MANIFEST_NAME).write_text(json.dumps(manifest, indent=2))
         os.chmod(candidate / MANIFEST_NAME, 0o644)
 
+        published: Optional[dict[str, Any]] = None
         try:
             publish_no_replace(candidate, final)
         except FileExistsError:
             winner = _read_manifest(final)
-            if _manifest_matches(winner, args.source, sha):
-                _progress("another staging operation published the same revision")
-                _emit(
-                    {
-                        "status": "already_staged",
-                        "operationId": operation,
-                        "source": args.source,
-                        "requestedRevision": args.revision,
-                        "revision": sha,
-                        "datasetName": args.dataset_name,
-                        "bytes": _tree_bytes(final),
-                        "files": len(winner.get("files", [])) if winner else 0,
-                        "configs": (winner or {}).get("configs", configs),
-                    }
+            if not _manifest_matches(winner, args.source, sha):
+                raise _fail(
+                    f"destination datasets/{args.dataset_name} was published "
+                    "by a different source/revision concurrently; existing "
+                    "data was left untouched"
                 )
-                return 0
-            raise _fail(
-                f"destination datasets/{args.dataset_name} was published by a "
-                "different source/revision concurrently; existing data was left "
-                "untouched"
-            )
-
-        _progress("published")
-        _emit(
-            {
+            # Same repo+SHA won the race: verify the winner's directory as
+            # strictly as a re-stage would, never trust the manifest alone.
+            winner_problems = check_layout(final)
+            if winner:
+                winner_problems += _inventory_problems(final, winner)
+            if winner_problems:
+                raise _fail(
+                    "another operation published this revision but the "
+                    "published data does not match its manifest: " + "; ".join(winner_problems)
+                )
+            winner_verified = _run_verifier(final, cache)
+            _progress("another staging operation published the same revision")
+            published = {
+                "status": "already_staged",
+                "operationId": operation,
+                "source": args.source,
+                "requestedRevision": args.revision,
+                "revision": sha,
+                "datasetName": args.dataset_name,
+                "bytes": _tree_bytes(final),
+                "files": len(winner.get("files", [])) if winner else 0,
+                "configs": winner_verified.get("configs", configs),
+            }
+        except OSError as exc:
+            # A filesystem-level failure (e.g. EPERM) must not be evaded by
+            # a weaker publication path, nor crash with a raw traceback.
+            raise _fail(f"publication failed on this filesystem: {exc}") from exc
+        else:
+            _progress("published")
+            published = {
                 "status": "staged",
                 "operationId": operation,
                 "source": args.source,
@@ -621,12 +768,43 @@ def _cmd_stage(args: argparse.Namespace) -> int:
                 "configs": configs,
                 "elapsedSeconds": round(time.monotonic() - started, 1),
             }
-        )
-        return 0
+        rc[0] = 0
     finally:
         # Owned scratch only: the candidate, its cache, and nothing else.
-        shutil.rmtree(candidate, ignore_errors=True)
-        shutil.rmtree(cache, ignore_errors=True)
+        # Cleanup errors are NOT swallowed: success requires successful
+        # cleanup, so the operation fails instead of pretending success.
+        cleanup_problems.extend(_remove_scratch([candidate, cache]))
+    if rc[0] != 0:
+        return 1
+    if cleanup_problems:
+        # Publication may already have happened (the rename commits before
+        # this check): report it as incomplete, never as a green success -
+        # and emit no success result line.
+        print(
+            "published, but scratch cleanup incomplete: "
+            + "; ".join(cleanup_problems)
+            + f" - remove the leftover {candidate} directory",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 1
+    _emit(published if published is not None else {})
+    return 0
+
+
+def _remove_scratch(paths: list[Path]) -> list[str]:
+    """Best-effort removal of operation-owned scratch directories. A
+    directory that is already gone counts as cleaned; anything else is
+    reported so the operation can fail instead of pretending success."""
+    problems: list[str] = []
+    for path in paths:
+        try:
+            shutil.rmtree(path)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            problems.append(f"{path}: {exc}")
+    return problems
 
 
 def build_parser() -> argparse.ArgumentParser:

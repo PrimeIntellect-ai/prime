@@ -52,6 +52,8 @@ STAGING_IMAGE_REF = "ghcr.io/primeintellect-ai/prime-rl:commit-6f4ab3b73"
 
 REQUEST_TIMEOUT = "30s"
 POLL_SECONDS = 2.0
+_DELETE_CONFIRM_POLLS = 3
+_DELETE_CONFIRM_SECONDS = 1.0
 KUBECTL_BINARY = "kubectl"
 HF_DATASET_API_URL = "https://huggingface.co/api/datasets/{repo}"
 
@@ -77,13 +79,23 @@ class KubectlError(StageError):
         super().__init__(f"kubectl failed (exit {returncode}): kubectl {rendered} ...{detail}")
 
 
+def redact(text: str, token: Optional[str]) -> str:
+    """Replace the raw token value anywhere it might appear (streamed pod
+    logs, error messages) so a token-echoing failure cannot leak it."""
+    if not token:
+        return text
+    return text.replace(token, "[redacted]")
+
+
 class _Reporter:
     """Progress lines: stdout in human mode, stderr with --output json."""
 
-    def __init__(self, json_mode: bool) -> None:
+    def __init__(self, json_mode: bool, token: Optional[str] = None) -> None:
         self.json_mode = json_mode
+        self.token = token
 
     def __call__(self, message: str, *, dim: bool = False) -> None:
+        message = redact(message, self.token)
         if self.json_mode:
             print(message, file=sys.stderr, flush=True)
             return
@@ -313,7 +325,9 @@ def _get(client: Any, team_id: Optional[str], name: str) -> Any:
     return volume
 
 
-def _preflight(kubectl: Kubectl, volume: Any, team_id: Optional[str]) -> None:
+def _preflight(
+    kubectl: Kubectl, volume: Any, team_id: Optional[str], needs_secret: bool = False
+) -> None:
     """Read the exact PVC, verify ownership labels against API ownership,
     and confirm namespace permissions. No writes; fails closed."""
     pvc = kubectl.get_pvc(volume.pvc_name)
@@ -323,6 +337,11 @@ def _preflight(kubectl: Kubectl, volume: Any, team_id: Optional[str]) -> None:
             f"'{volume.namespace}'. The volume lives on Prime cluster "
             f"'{volume.cluster_id}' - point --kube-context at that "
             "cluster's authorized kubeconfig and retry."
+        )
+    if pvc.get("metadata", {}).get("deletionTimestamp"):
+        raise StageError(
+            f"PVC '{volume.pvc_name}' is terminating (deletionTimestamp set); "
+            "staging requires a Bound, non-terminating volume."
         )
     if pvc.get("status", {}).get("phase") != "Bound":
         phase = pvc.get("status", {}).get("phase")
@@ -349,7 +368,13 @@ def _preflight(kubectl: Kubectl, volume: Any, team_id: Optional[str]) -> None:
                 f"PVC '{volume.pvc_name}' has no user-id ownership label; "
                 "refusing to stage onto an unowned PVC."
             )
-        if volume.created_by and owner_label != volume.created_by:
+        if volume.created_by is None:
+            raise StageError(
+                f"PVC '{volume.pvc_name}' carries user-id '{owner_label}' but the "
+                "volume's creator is unknown from the API; refusing to stage "
+                "onto a PVC whose ownership cannot be verified."
+            )
+        if owner_label != volume.created_by:
             raise StageError(
                 f"PVC '{volume.pvc_name}' user-id label does not match the "
                 f"volume creator ({volume.created_by})."
@@ -361,28 +386,46 @@ def _preflight(kubectl: Kubectl, volume: Any, team_id: Optional[str]) -> None:
         ("delete", "pods"),
         ("get", "pods/log"),
     ]
+    if needs_secret:
+        required += [("create", "secrets"), ("delete", "secrets")]
+    denied = []
     for verb, resource in required:
         if not kubectl.can_i(verb, resource):
-            action = resource.replace("/", " ")
-            raise StageError(
-                f"this kubeconfig context cannot {verb} {action} in namespace "
-                f"'{volume.namespace}'. Staging needs an authorized operator "
-                "kubeconfig for the volume namespace; ask the volume owner for "
-                "access. (No RBAC is created by this command.)"
-            )
+            denied.append(f"{verb} {resource.replace('/', ' ')}")
+    if denied:
+        raise StageError(
+            "this kubeconfig context is missing required permissions in namespace "
+            f"'{volume.namespace}': {', '.join(denied)}. Staging needs an "
+            "authorized operator kubeconfig for the volume namespace; ask the "
+            "volume owner for access. (No RBAC is created by this command.)"
+        )
 
 
 def _dataset_is_public(source: str) -> bool:
-    """Anonymous reachability check to decide whether a Secret is needed.
-    Network errors default to 'possibly private' (fail-safe): the pod's
-    own resolution is authoritative."""
+    """Anonymous metadata check to decide whether a Secret is needed.
+
+    A repo only counts as public when it is reachable anonymously AND its
+    metadata declares it neither private nor gated: gated repos often
+    answer HTTP 200 for metadata while requiring a token for files
+    (live-verified: bigcode/the-stack returns 200 with "gated": "auto"),
+    so metadata 200 alone must never drop a user-supplied token. Network
+    errors also default to 'possibly private' (fail-safe); the pod's own
+    resolution with the token stays authoritative."""
     import httpx
 
     try:
         response = httpx.get(HF_DATASET_API_URL.format(repo=source), timeout=15.0)
     except httpx.HTTPError:
         return False
-    return response.status_code == 200
+    if response.status_code != 200:
+        return False
+    try:
+        metadata = response.json()
+    except ValueError:
+        return False
+    if not isinstance(metadata, dict):
+        return False
+    return not metadata.get("private") and not metadata.get("gated")
 
 
 def _pod_manifest(
@@ -395,6 +438,7 @@ def _pod_manifest(
     operation_id: str,
     timeout_seconds: int,
     token_secret: Optional[str],
+    pod_name: str,
 ) -> dict[str, Any]:
     """One CPU container on the pinned prime-rl image: no GPU requests or
     tolerations, no privileged/host mounts, no service-account token,
@@ -431,7 +475,7 @@ def _pod_manifest(
         "apiVersion": "v1",
         "kind": "Pod",
         "metadata": {
-            "generateName": "prime-volume-stage-",
+            "name": pod_name,
             "namespace": namespace,
             "labels": {
                 "app.kubernetes.io/managed-by": "prime-cli",
@@ -532,7 +576,7 @@ def stage_dataset(
     trace by the command layer). KeyboardInterrupt cancels: cleanup runs,
     then the exit code is 130.
     """
-    reporter = _Reporter(json_mode)
+    reporter = _Reporter(json_mode, token)
     source = validate_source(source)
     dataset_name = validate_dataset_path(path or source.split("/")[-1])
 
@@ -563,13 +607,20 @@ def stage_dataset(
     reporter(f"Volume {volume.name} · cluster {volume.cluster_id} · kube-context {context}")
     reporter(f"Namespace {volume.namespace} · PVC {volume.pvc_name}")
 
-    _preflight(kubectl, volume, team_id)
-    reporter("Preflight ok (PVC bound, ownership labels verified, permissions present)")
-
     operation_id = uuid.uuid4().hex[:10]
     secret_name = f"prime-volume-stage-{operation_id}-hf-token"
+    # A user-supplied token is kept through the metadata probe: gated repos
+    # can answer HTTP 200 for metadata while requiring a token for files,
+    # so only a repo that is provably public drops the token.
     needs_secret = token is not None and not _dataset_is_public(source)
 
+    _preflight(kubectl, volume, team_id, needs_secret=needs_secret)
+    reporter("Preflight ok (PVC bound, ownership labels verified, permissions present)")
+
+    # The pod name is explicit and known BEFORE creation: a create whose
+    # response is lost (timeout after the API accepted it) still leaves a
+    # known name to delete - generateName would not.
+    pod_name = f"prime-volume-stage-{operation_id}"
     manifest = _pod_manifest(
         namespace=volume.namespace,
         pvc_name=volume.pvc_name,
@@ -579,15 +630,7 @@ def stage_dataset(
         operation_id=operation_id,
         timeout_seconds=timeout_seconds,
         token_secret=secret_name if needs_secret else None,
-    )
-
-    pod = kubectl.create_pod(manifest)
-    pod_name = pod["metadata"]["name"]
-    reporter(f"Pod {pod_name}")
-    reporter(
-        f"kubectl --context {context} --namespace {volume.namespace} delete pod "
-        f"{pod_name}   # manual cleanup if this command dies",
-        dim=True,
+        pod_name=pod_name,
     )
 
     started = time.monotonic()
@@ -607,67 +650,79 @@ def stage_dataset(
     result: Optional[dict[str, Any]] = None
     # the polled pod status view; the created pod object stays `pod`
     pod_view: dict[str, Any] = {}
+    # The WHOLE pod lifecycle - creation, secret creation, polling, result
+    # capture - lives inside the cleanup guard: any failure after the pod
+    # manifest was accepted still removes this operation's pod and secret
+    # (the ownerReference covers a SIGKILL).
     try:
+        created_pod = kubectl.create_pod(manifest)
+        reporter(f"Pod {pod_name}")
+        reporter(
+            f"kubectl --context {context} --namespace {volume.namespace} delete pod "
+            f"{pod_name}   # manual cleanup if this command dies",
+            dim=True,
+        )
+
         if needs_secret:
             # Created after the pod, via stdin (never argv), owned by the
             # pod: the Pending pod starts as soon as the Secret appears,
             # and the ownerReference garbage-collects the Secret with the
             # pod even if this CLI dies here.
+            pod_uid = created_pod.get("metadata", {}).get("uid")
+            if not pod_uid:
+                raise StageError(
+                    f"staging pod {pod_name} was created but its UID could not "
+                    "be read; the private-dataset Secret was not created"
+                )
             kubectl.create_secret(
                 _secret_manifest(
                     namespace=volume.namespace,
                     name=secret_name,
                     token=token or "",
                     pod_name=pod_name,
-                    pod_uid=pod["metadata"]["uid"],
+                    pod_uid=pod_uid,
                 )
             )
 
-        try:
-            while True:
-                pod_view = kubectl.get_pod(pod_name) or {}
-                if not pod_view:
-                    failure = (
-                        f"staging pod {pod_name} disappeared (evicted or deleted) before completing"
-                    )
-                    break
-                _tail_logs()
-                phase = pod_view.get("status", {}).get("phase")
-                if phase == "Pending":
-                    waiting = _container_status(pod_view).get("state", {}).get("waiting", {})
-                    if waiting:
-                        reporter(
-                            f"Pending: {waiting.get('reason', 'unknown')} - "
-                            f"{waiting.get('message', '')}",
-                            dim=True,
-                        )
-                if phase == "Succeeded":
-                    break
-                if phase == "Failed":
-                    state = _container_status(pod_view)
-                    terminated = state.get("state", {}).get("terminated", {})
-                    last = state.get("lastState", {}).get("terminated", {})
-                    done = terminated or last
-                    failure = (
-                        f"staging pod failed: reason {done.get('reason', 'Unknown')}, "
-                        f"exit code {done.get('exitCode', '?')}"
-                        + (f" ({done.get('message')})" if done.get("message") else "")
-                    )
-                    break
-                if time.monotonic() - started > timeout_seconds:
-                    failure = (
-                        f"staging did not finish within {timeout_seconds}s; the pod "
-                        "may still be running (bare pods have no TTL) - remove it "
-                        f"with: kubectl --context {context} --namespace "
-                        f"{volume.namespace} delete pod {pod_name}"
-                    )
-                    break
-                time.sleep(POLL_SECONDS)
-        except KeyboardInterrupt:
-            # Cancellation: cleanup runs before exiting with code 130.
+        while True:
+            pod_view = kubectl.get_pod(pod_name) or {}
+            if not pod_view:
+                failure = (
+                    f"staging pod {pod_name} disappeared (evicted or deleted) before completing"
+                )
+                break
             _tail_logs()
-            _cleanup(kubectl, pod_name, _owned_secret(), reporter)
-            raise
+            phase = pod_view.get("status", {}).get("phase")
+            if phase == "Pending":
+                waiting = _container_status(pod_view).get("state", {}).get("waiting", {})
+                if waiting:
+                    reporter(
+                        f"Pending: {waiting.get('reason', 'unknown')} - "
+                        f"{waiting.get('message', '')}",
+                        dim=True,
+                    )
+            if phase == "Succeeded":
+                break
+            if phase == "Failed":
+                state = _container_status(pod_view)
+                terminated = state.get("state", {}).get("terminated", {})
+                last = state.get("lastState", {}).get("terminated", {})
+                done = terminated or last
+                failure = (
+                    f"staging pod failed: reason {done.get('reason', 'Unknown')}, "
+                    f"exit code {done.get('exitCode', '?')}"
+                    + (f" ({done.get('message')})" if done.get("message") else "")
+                )
+                break
+            if time.monotonic() - started > timeout_seconds:
+                failure = (
+                    f"staging did not finish within {timeout_seconds}s; the pod "
+                    "may still be running (bare pods have no TTL) - remove it "
+                    f"with: kubectl --context {context} --namespace "
+                    f"{volume.namespace} delete pod {pod_name}"
+                )
+                break
+            time.sleep(POLL_SECONDS)
 
         # Capture output before deleting the pod (and its logs).
         logs = _tail_logs()
@@ -675,9 +730,13 @@ def stage_dataset(
 
         if failure is None:
             terminated = _container_status(pod_view).get("state", {}).get("terminated", {})
-            exit_code = int(terminated.get("exitCode", 0) or 0)
-            if exit_code != 0:
-                failure = f"staging container exited with code {exit_code}"
+            if "exitCode" not in terminated:
+                # No explicit termination info: never default to success.
+                failure = "staging pod succeeded but reported no container exit code"
+            else:
+                exit_code = int(terminated["exitCode"] or 0)
+                if exit_code != 0:
+                    failure = f"staging container exited with code {exit_code}"
 
         if failure is None:
             if result is None:
@@ -691,19 +750,33 @@ def stage_dataset(
                 or result.get("datasetName") != dataset_name
             ):
                 failure = "staging result does not match this operation/source/destination"
-    except BaseException:
-        # Any unexpected failure after pod creation still removes this
-        # operation's pod and secret (the ownerReference covers a SIGKILL).
+            elif result.get("status") not in ("staged", "already_staged"):
+                failure = (
+                    f"staging result reports an unexpected status "
+                    f"({result.get('status')!r}); not treating it as success"
+                )
+            elif not isinstance(result.get("revision"), str) or not result.get("revision"):
+                failure = "staging result has no resolved revision; not treating it as success"
+            elif not isinstance(result.get("configs"), dict) or not result.get("configs"):
+                failure = "staging result has no verification summary; not treating it as success"
+    except KeyboardInterrupt:
+        # Cancellation: cleanup runs before exiting with code 130.
         try:
-            _cleanup(kubectl, pod_name, _owned_secret(), reporter)
+            _cleanup(kubectl, pod_name, _owned_secret(), reporter, operation_id)
+        except Exception:  # noqa: BLE001 - best effort during unwind
+            pass
+        raise
+    except BaseException:
+        try:
+            _cleanup(kubectl, pod_name, _owned_secret(), reporter, operation_id)
         except Exception:  # noqa: BLE001 - best effort during unwind
             pass
         raise
 
-    cleanup_errors = _cleanup(kubectl, pod_name, _owned_secret(), reporter)
+    cleanup_errors = _cleanup(kubectl, pod_name, _owned_secret(), reporter, operation_id)
 
     if failure is not None:
-        raise StageError(failure)
+        raise StageError(redact(failure, token))
 
     if cleanup_errors:
         # Success requires verified publication AND successful cleanup.
@@ -746,7 +819,11 @@ def _result_from_log_text(logs: str) -> Optional[dict[str, Any]]:
 
 
 def _cleanup(
-    kubectl: Kubectl, pod_name: str, secret_name: Optional[str], reporter: _Reporter
+    kubectl: Kubectl,
+    pod_name: str,
+    secret_name: Optional[str],
+    reporter: _Reporter,
+    operation_id: Optional[str] = None,
 ) -> list[str]:
     """Delete exactly this operation's pod and secret. Cleanup errors are
     explicit: the caller turns a non-empty list into a non-zero exit even
@@ -756,17 +833,38 @@ def _cleanup(
         kubectl.delete_pod(pod_name)
     except StageError as exc:
         errors.append(f"pod {pod_name}: {exc}")
+    else:
+        # An accepted delete request is not deletion: bound-verify the pod
+        # is actually gone before claiming clean cleanup.
+        confirmed = False
+        for _ in range(_DELETE_CONFIRM_POLLS):
+            try:
+                if kubectl.get_pod(pod_name) is None:
+                    confirmed = True
+                    break
+            except StageError:
+                confirmed = True
+                break
+            time.sleep(_DELETE_CONFIRM_SECONDS)
+        if not confirmed:
+            errors.append(f"pod {pod_name}: delete accepted but still present")
     if secret_name:
         try:
             kubectl.delete_secret(secret_name)
         except StageError as exc:
             errors.append(f"secret {secret_name}: {exc}")
     for _ in errors:
+        # Two separate commands: `delete pod A secret B` would parse the
+        # trailing words as pod names.
         reporter(
             f"kubectl --context {kubectl.context} --namespace "
             f"{kubectl.namespace} delete pod {pod_name}"
-            + (f" secret {secret_name}" if secret_name else "")
         )
+        if secret_name:
+            reporter(
+                f"kubectl --context {kubectl.context} --namespace "
+                f"{kubectl.namespace} delete secret {secret_name}"
+            )
     return errors
 
 
@@ -793,11 +891,20 @@ def print_stage_output(output: dict[str, Any], json_mode: bool) -> None:
         console.print(f"Config: {config} · splits: {', '.join(split_names)}")
         splits = split_names
     console.print()
-    console.print("# SFT data block - choose a split listed above:")
-    console.print("[data]")
-    console.print(f'name = "{data_name}"')
-    if splits:
-        console.print(f'splits = ["{splits[0]}"]')
+    if len(configs) > 1:
+        # A multi-config dataset needs an explicit config selection; do not
+        # print a TOML block that silently picks the last listed config.
+        console.print("# SFT data block: pick ONE config above and its splits - e.g. for")
+        console.print(f'# the "{next(iter(configs))}" config:')
+        console.print("[data]")
+        console.print(f'name = "{data_name}"')
+        console.print(f"# choose splits from: {', '.join(splits)}")
+    else:
+        console.print("# SFT data block - choose a split listed above:")
+        console.print("[data]")
+        console.print(f'name = "{data_name}"')
+        if splits:
+            console.print(f'splits = ["{splits[0]}"]')
     console.print()
     console.print(f"prime train sft.toml --volume {output['volume']}")
     console.print(

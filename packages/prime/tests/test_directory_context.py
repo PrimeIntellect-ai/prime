@@ -365,3 +365,19 @@ def test_cli_notice_when_a_pin_changes_the_account(
 def test_cli_without_a_pin_does_not_need_a_loadable_config(home: Path) -> None:
     (home / ".prime" / "config.json").write_text("{corrupt")
     assert _invoke("sandbox", "--help").exit_code == 0
+
+
+def test_cli_switch_global_uses_the_global_account(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _pin(repo, {"context": "customer"})
+    used: list = []
+
+    def get(self: Any, endpoint: str, params: Optional[dict] = None, **_: Any) -> dict:
+        used.append(self.api_key)
+        return {"data": [{"teamId": ACME, "name": "Acme", "slug": "acme"}]}
+
+    monkeypatch.setattr("prime_cli.core.APIClient.get", get)
+
+    assert _invoke("switch", "acme", "--global").exit_code == 0
+    assert used == ["global-key"]

@@ -73,9 +73,10 @@ class APIClient:
         api_key: Optional[str] = None,
         require_auth: bool = True,
         user_agent: Optional[str] = None,
+        config: Optional[Config] = None,
     ):
         # Load config
-        self.config = Config()
+        self.config = config or Config()
 
         # Use provided API key or fall back to config
         self.api_key = api_key or self.config.api_key

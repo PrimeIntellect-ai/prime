@@ -101,8 +101,14 @@ def switch(
             _switch_to_personal(config, destination)
             return
 
+    # --global inside a directory context: list and match teams with the global
+    # account, since that is where the selection is stored.
+    team_config = config
+    if destination is None and config.local_context_file is not None:
+        team_config = Config(use_context=False)
+
     try:
-        client = APIClient()
+        client = APIClient(config=team_config)
         teams = fetch_teams(client)
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
@@ -122,7 +128,7 @@ def switch(
         return
 
     console.print("\n[bold]Switch account:[/bold]\n")
-    current_team_id = config.team_id
+    current_team_id = team_config.team_id
 
     personal_label = "Personal"
     if current_team_id is None:

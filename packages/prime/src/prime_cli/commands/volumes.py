@@ -374,18 +374,26 @@ def _transfer(name: str, read_only: bool, remote: str, local: str, upload: bool)
         console.print(
             "rsync not found, using scp (full copy; install rsync for incremental transfers)"
         )
-    # A local path starting with "-" would be parsed as an option by rsync or
-    # scp; "./" makes it a plain path for every implementation (more portable
-    # than relying on each tool's "--").
-    if local.startswith("-"):
+    # A relative local path starting with "-" would be parsed as an option, and
+    # one containing ":" as a HOST:PATH remote operand, by rsync and scp alike.
+    # A "./" prefix makes it a plain local path for every implementation
+    # (more portable than relying on each tool's "--").
+    if not os.path.isabs(local) and (local.startswith("-") or ":" in local):
         local = "./" + local
     session, alias, _key, config = _open_session(name, read_only=read_only)
-    remote_arg = f"{alias}:{remote}"
     if rsync:
         ssh_cmd = shlex.join(["ssh", "-F", str(config)])
         cmd = [rsync, "-a", "-v", "--partial", "-e", ssh_cmd]
     else:
         cmd = ["scp", "-r", "-F", str(config)]
+        # rsync copies a directory's CONTENTS when the source ends in "/";
+        # scp would copy the directory itself. "dir/." gives scp rsync's
+        # layout, so the result doesn't depend on which tool is installed.
+        if upload and local.endswith(("/", os.sep)):
+            local += "."
+        elif not upload and remote.endswith("/"):
+            remote += "."
+    remote_arg = f"{alias}:{remote}"
     cmd += [local, remote_arg] if upload else [remote_arg, local]
     try:
         code = subprocess.run(cmd, check=False).returncode

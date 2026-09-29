@@ -400,6 +400,29 @@ def test_local_path_starting_with_dash_is_not_an_option(monkeypatch, tmp_path, t
     assert commands[1][-2] == "./-f.txt"
 
 
+@pytest.mark.parametrize("tools", [{"ssh", "rsync"}, {"ssh", "scp"}])
+def test_local_path_with_colon_is_not_a_remote_operand(monkeypatch, tmp_path, tools):
+    """A local name like "checkpoint:final" must stay local for rsync and scp."""
+    _, _, commands = _setup(monkeypatch, tmp_path, tools)
+    assert _run("put", "data", "checkpoint:final", "/").exit_code == 0
+    assert _run("get", "data", "x", "out:1").exit_code == 0
+    assert _run("get", "data", "x", "/abs/out:1").exit_code == 0
+    assert commands[0][-2] == "./checkpoint:final"
+    assert commands[1][-1] == "./out:1"
+    assert commands[2][-1] == "/abs/out:1"
+
+
+def test_scp_keeps_rsync_trailing_slash_layout(monkeypatch, tmp_path):
+    """A source ending in "/" copies its contents with scp too ("dir/.")."""
+    _, _, commands = _setup(monkeypatch, tmp_path, {"ssh", "scp"})
+    assert _run("put", "data", "dir/", "x/").exit_code == 0
+    assert _run("get", "data", "runs/a/", "out").exit_code == 0
+    assert _run("put", "data", "dir", "x/").exit_code == 0
+    assert commands[0][-2:] == ["dir/.", "host:/volume/x/"]
+    assert commands[1][-2:] == ["host:/volume/runs/a/.", "out"]
+    assert commands[2][-2:] == ["dir", "host:/volume/x/"]
+
+
 def test_scp_fallback(monkeypatch, tmp_path, _session_dir):
     _, _, commands = _setup(monkeypatch, tmp_path, {"ssh", "scp"})
     result = _run("put", "data", "f.txt")

@@ -2641,6 +2641,15 @@ def _handle_logs_api_error(e: APIError) -> None:
     raise typer.Exit(1)
 
 
+# API ceilings for /rft/runs/{run_id}/logs: the search backend caps each
+# query at 5000 entries and the lookback window at 24h. Plain,
+# unfiltered orchestrator fetches are served from a 200-line snapshot;
+# --all / --since / --search / --level route through the search backend,
+# which honours --tail up to 5000.
+_MAX_LOG_TAIL_LINES = 5_000
+_MAX_LOG_WINDOW_SECONDS = 86_400
+_DEFAULT_LOG_TAIL_LINES = 1_000
+
 _SINCE_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86_400}
 
 
@@ -2669,6 +2678,38 @@ def _parse_since(since: Optional[str]) -> Optional[int]:
             param_hint="--since",
         )
     return seconds
+
+
+def _resolve_log_query(
+    tail: Optional[int], since: Optional[str], all_logs: bool
+) -> tuple[int, Optional[int]]:
+    """Resolve --tail / --since / --all into (tail_lines, since_seconds).
+
+    ``--all`` is shorthand for the API maxima: 5000 lines over the last
+    24h. Without it, --tail defaults to 1000 and is capped at the API
+    maximum with a clear error instead of a silent truncation.
+    """
+    if all_logs:
+        if tail is not None:
+            raise typer.BadParameter(
+                "--all already fetches the API maximum "
+                f"({_MAX_LOG_TAIL_LINES} lines); drop --tail.",
+                param_hint="--tail",
+            )
+        if since is not None:
+            raise typer.BadParameter(
+                "--all already uses the widest window (24h); drop --since.",
+                param_hint="--since",
+            )
+        return _MAX_LOG_TAIL_LINES, _MAX_LOG_WINDOW_SECONDS
+    if tail is None:
+        tail = _DEFAULT_LOG_TAIL_LINES
+    elif not 1 <= tail <= _MAX_LOG_TAIL_LINES:
+        raise typer.BadParameter(
+            f"--tail must be between 1 and {_MAX_LOG_TAIL_LINES} (API hard cap).",
+            param_hint="--tail",
+        )
+    return tail, _parse_since(since)
 
 
 def _parse_env_qualifier_with_index(env: str) -> tuple[str, int, bool]:
@@ -2701,7 +2742,25 @@ def get_logs(
             "List with 'prime train components <run_id>'."
         ),
     ),
-    tail: int = typer.Option(1000, "--tail", "-n", help="Number of lines to show"),
+    tail: Optional[int] = typer.Option(
+        None,
+        "--tail",
+        "-n",
+        help=(
+            f"Number of lines to show (default {_DEFAULT_LOG_TAIL_LINES}, "
+            f"max {_MAX_LOG_TAIL_LINES})"
+        ),
+    ),
+    all_logs: bool = typer.Option(
+        False,
+        "--all",
+        help=(
+            "Fetch everything the API serves: the last 24h, up to "
+            f"{_MAX_LOG_TAIL_LINES} lines. Shorthand for "
+            f"--tail {_MAX_LOG_TAIL_LINES} --since 24h. "
+            "Mutually exclusive with --tail and --since."
+        ),
+    ),
     follow: bool = typer.Option(False, "--follow", "-f", help="Follow log output"),
     raw: bool = typer.Option(False, "--raw", "-r", help="Show raw logs without formatting"),
     search: Optional[str] = typer.Option(
@@ -2726,9 +2785,9 @@ def get_logs(
         None,
         "--since",
         help=(
-            "Time window for filtered queries. Accepts e.g. '15m', '1h', '6h', "
-            "'24h', or a raw integer seconds value. Default 15m. "
-            "Applies when --search or --level is set."
+            "How far back to look. Accepts e.g. '15m', '1h', '6h', "
+            "'24h', or a raw integer seconds value (60-86400). "
+            "Default 15m."
         ),
     ),
 ) -> None:
@@ -2746,6 +2805,12 @@ def get_logs(
     invocation already dedupes the in-pod rank fan-out, and per-pod
     inspection on multi-node runs requires kubectl + the PVC log files.
 
+    The API imposes hard ceilings: at most 5000 lines per request and a
+    24h lookback window. Plain, unfiltered fetches are served from a
+    200-line window; ``--all`` / ``--since`` / ``--search`` / ``--level``
+    route through the search backend, which honours ``--tail`` up to
+    5000 lines.
+
     Examples:
 
         prime train logs <run_id>
@@ -2753,6 +2818,7 @@ def get_logs(
         prime train logs <run_id> --search Backpressure
         prime train logs <run_id> --level ERROR --since 1h
         prime train logs <run_id> --search 'Step \\d+' --regex
+        prime train logs <run_id> --all
         prime train logs <run_id> -c trainer
         prime train logs <run_id> -c inference
         prime train logs <run_id> --env reverse-text
@@ -2793,7 +2859,7 @@ def get_logs(
             param_hint="--regex",
         )
 
-    since_seconds = _parse_since(since)
+    tail, since_seconds = _resolve_log_query(tail, since, all_logs)
 
     try:
         api_client = APIClient()

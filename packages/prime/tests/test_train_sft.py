@@ -337,8 +337,59 @@ def test_train_sft_rejects_non_string_volume_before_post(tmp_path: Path, monkeyp
     for bad_volume in (42, ["research"]):
         config_path = _write_config(tmp_path, _sft_config(volume=bad_volume))
 
-        result = runner.invoke(app, ["train", config_path, "--yes"], env=TEST_ENV)
+        # The guard message embeds the tmp config path; at Rich's 80-col
+        # default (CI: no tty) the line wraps and can split the asserted
+        # substrings. Widen the console so the message never wraps.
+        result = runner.invoke(
+            app, ["train", config_path, "--yes"], env={**TEST_ENV, "COLUMNS": "200"}
+        )
 
         assert result.exit_code == 1, result.output
         assert "volume in" in result.output and "must be a string" in result.output
         assert "json" not in captured  # the guard fires before any POST
+
+
+def test_train_sft_missing_volume_created_with_requested_size(tmp_path: Path, monkeypatch) -> None:
+    """--volume-size must flow through the SFT dispatch too: the
+    auto-created dataset volume honors it instead of the 1Ti default."""
+    config_path = _write_config(tmp_path, _sft_config())
+    captured = _capture_post(monkeypatch)
+
+    state: list[Any] = []
+    creates: list[tuple[str, str]] = []
+
+    def create_volume(self: Any, name: str, size: str, team_id=None) -> Any:
+        creates.append((name, size))
+
+        class _V:
+            pass
+
+        created = _V()
+        created.name = name
+        created.size = size
+        created.status = "PENDING"
+        running = _V()
+        running.name = name
+        running.size = size
+        running.status = "RUNNING"
+        state.append(running)
+        return created
+
+    monkeypatch.setattr(
+        "prime_cli.api.training.HostedTrainingClient.list_volumes",
+        lambda self, team_id=None: list(state),
+    )
+    monkeypatch.setattr("prime_cli.api.training.HostedTrainingClient.create_volume", create_volume)
+    monkeypatch.setattr("prime_cli.commands.rl.time.sleep", lambda s: None)
+
+    result = runner.invoke(
+        app,
+        ["train", config_path, "--volume", "research", "--volume-size", "500Gi", "--yes"],
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert creates == [("research", "500Gi")]
+    payload = captured["json"]
+    assert payload["mode"] == "sft"
+    assert payload["volume"] == "research"

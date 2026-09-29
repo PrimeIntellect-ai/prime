@@ -1596,6 +1596,7 @@ def create_run(
             # `prime volumes ssh --read-write` + the huggingface CLI).
             # Forward --volume instead of dropping it.
             volume=volume,
+            volume_size=volume_size,
             mode="sft",
         )
         return

@@ -1576,6 +1576,7 @@ def create_run(
     ref: Optional[str] = typer.Option(
         None,
         "--ref",
+        hidden=True,
         help=(
             "Internal only: prime-rl git ref (branch, tag, or sha) to run on top "
             "of the image (full-FT only). Needs an admin `trainings:create` grant "
@@ -1589,6 +1590,7 @@ def create_run(
     pr: Optional[int] = typer.Option(
         None,
         "--pr",
+        hidden=True,
         help=(
             "Internal only: prime-rl pull request number to run (full-FT only; "
             "same gate as --ref). Shorthand for --ref <PR head sha>; fork and "

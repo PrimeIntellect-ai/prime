@@ -1579,9 +1579,10 @@ def create_run(
         hidden=True,
         help=(
             "Internal only: prime-rl git ref (branch, tag, or sha) to run on top "
-            "of the image (full-FT only). Needs an admin `trainings:create` grant "
-            "and a deployment with source overlays enabled; other callers get a "
-            "403. The pods overlay that source onto the image at startup, so "
+            "of the image (full-FT only). Needs an admin "
+            "`training_source_refs:create` grant and a deployment with source "
+            "overlays enabled; other callers get a 403. The pods overlay that "
+            "source onto the image at startup, so "
             "unmerged code runs without an image build; the platform pins the "
             "resolved commit for the run. Falls back to a top-level "
             '`source_ref = "..."` in the TOML.'

@@ -331,3 +331,226 @@ def test_list_never_shows_the_namespace(monkeypatch, output):
     assert "ckpts" in result.output
     assert "prime-team-secret-ns" not in result.output
     assert "amespace" not in result.output
+
+
+def _setup(monkeypatch, tmp_path, which, run_code=0, stuck=False, find_stdout=""):
+    key = tmp_path / "key"
+    key.write_text("test")
+    monkeypatch.setattr(volumes.Config, "ssh_key_path", property(lambda self: str(key)))
+    created, stopped, commands = [], [], []
+    session = SimpleNamespace(
+        id="s1",
+        status="RUNNING",
+        read_only=True,
+        error_message=None,
+        ssh_connection=None if stuck else "u@host.tailnet.ts.net",
+    )
+
+    def create(*a, **kw):
+        created.append(kw)
+        session.read_only = kw["read_only"]
+        return session
+
+    client = SimpleNamespace(
+        create_volume_session=create,
+        stop_volume_session=lambda *a, **kw: stopped.append(a),
+    )
+    monkeypatch.setattr(volumes, "_client", lambda: (client, "t1"))
+    monkeypatch.setattr(volumes.shutil, "which", lambda n: f"/bin/{n}" if n in which else None)
+
+    def run(cmd, **kw):
+        commands.append(cmd)
+        # _transfer's only "ssh" argv is the scp fallback's symlink check.
+        return SimpleNamespace(returncode=run_code, stdout=find_stdout if cmd[0] == "ssh" else "")
+
+    monkeypatch.setattr(volumes.subprocess, "run", run)
+    return created, stopped, commands
+
+
+def _run(*args):
+    return CliRunner().invoke(app, ["volumes", *args], env={"PRIME_DISABLE_VERSION_CHECK": "1"})
+
+
+def test_get_rsync(monkeypatch, tmp_path, _session_dir):
+    created, _, commands = _setup(monkeypatch, tmp_path, {"ssh", "rsync", "scp"})
+    result = _run("get", "data", "/runs/a", "out")
+    assert result.exit_code == 0, result.output
+    assert created == [{"read_only": True, "team_id": "t1"}]
+    ssh_e = shlex.join(["ssh", "-F", str(_session_dir / "config")])
+    assert commands == [
+        [
+            "/bin/rsync",
+            "-a",
+            "-v",
+            "--partial-dir=.rsync-partial",
+            "-e",
+            ssh_e,
+            "host:/volume/runs/a",
+            "out",
+        ]
+    ]
+    assert "prime volumes stop data s1" in result.output
+
+
+def test_put_rsync(monkeypatch, tmp_path, _session_dir):
+    created, _, commands = _setup(monkeypatch, tmp_path, {"ssh", "rsync"})
+    result = _run("put", "data", "f.txt", "dir/")
+    assert result.exit_code == 0, result.output
+    assert created == [{"read_only": False, "team_id": "t1"}]
+    assert commands[0][-2:] == ["f.txt", "host:/volume/dir/"]
+    assert commands[0][:5] == ["/bin/rsync", "-a", "-v", "--partial-dir=.rsync-partial", "-e"]
+
+
+@pytest.mark.parametrize("tools", [{"ssh", "rsync"}, {"ssh", "scp"}])
+def test_local_path_starting_with_dash_is_not_an_option(monkeypatch, tmp_path, tools):
+    """A local path like "--delete" must never reach rsync/scp as an option."""
+    _, _, commands = _setup(monkeypatch, tmp_path, tools)
+    assert _run("get", "data", "x", "--", "--delete").exit_code == 0
+    assert _run("put", "data", "--", "-f.txt").exit_code == 0
+    transfers = [c for c in commands if c[0] != "ssh"]  # scp's symlink check
+    assert transfers[0][-1] == "./--delete"
+    assert transfers[1][-2] == "./-f.txt"
+
+
+@pytest.mark.parametrize("tools", [{"ssh", "rsync"}, {"ssh", "scp"}])
+def test_local_path_with_colon_is_not_a_remote_operand(monkeypatch, tmp_path, tools):
+    """A local name like "checkpoint:final" must stay local for rsync and scp."""
+    _, _, commands = _setup(monkeypatch, tmp_path, tools)
+    assert _run("put", "data", "checkpoint:final", "/").exit_code == 0
+    assert _run("get", "data", "x", "out:1").exit_code == 0
+    assert _run("get", "data", "x", "/abs/out:1").exit_code == 0
+    transfers = [c for c in commands if c[0] != "ssh"]  # scp's symlink check
+    assert transfers[0][-2] == "./checkpoint:final"
+    assert transfers[1][-1] == "./out:1"
+    assert transfers[2][-1] == "/abs/out:1"
+
+
+def test_scp_keeps_rsync_trailing_slash_layout(monkeypatch, tmp_path):
+    """A source ending in "/" copies its contents with scp too ("dir/.")."""
+    _, _, commands = _setup(monkeypatch, tmp_path, {"ssh", "scp"})
+    assert _run("put", "data", "dir/", "x/").exit_code == 0
+    assert _run("get", "data", "runs/a/", "out").exit_code == 0
+    assert _run("put", "data", "dir", "x/").exit_code == 0
+    scp = [c for c in commands if c[0] != "ssh"]  # the get's symlink check
+    assert scp[0][-2:] == ["dir/.", "host:/volume/x/"]
+    assert scp[1][-2:] == ["host:/volume/runs/a/.", "out"]
+    assert scp[2][-2:] == ["dir", "host:/volume/x/"]
+
+
+def test_scp_fallback(monkeypatch, tmp_path, _session_dir):
+    _, _, commands = _setup(monkeypatch, tmp_path, {"ssh", "scp"})
+    result = _run("put", "data", "f.txt")
+    assert result.exit_code == 0, result.output
+    assert commands == [["scp", "-r", "-F", str(_session_dir / "config"), "f.txt", "host:/volume/"]]
+    assert "rsync not found, using scp (full copy; install rsync for incremental transfers)" in (
+        result.output
+    )
+
+
+def test_scp_put_refuses_a_symlink_tree(monkeypatch, tmp_path):
+    """scp -r follows links (rsync -a copies them as links), so the scp
+    fallback refuses a source tree containing one, before copying."""
+    _, _, commands = _setup(monkeypatch, tmp_path, {"ssh", "scp"})
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    (tree / "f.txt").write_text("x")
+    (tree / "link").symlink_to(tmp_path / "key")
+    result = _run("put", "data", str(tree), "/")
+    assert result.exit_code == 1
+    assert "The source contains symbolic links, which scp would follow" in result.output
+    assert "Install rsync" in result.output
+    assert commands == []
+
+
+def test_scp_put_copies_a_tree_without_links(monkeypatch, tmp_path, _session_dir):
+    _, _, commands = _setup(monkeypatch, tmp_path, {"ssh", "scp"})
+    tree = tmp_path / "tree"
+    (tree / "sub").mkdir(parents=True)
+    (tree / "sub" / "f.txt").write_text("x")
+    result = _run("put", "data", str(tree), "/")
+    assert result.exit_code == 0, result.output
+    config = str(_session_dir / "config")
+    assert commands == [["scp", "-r", "-F", config, str(tree), "host:/volume/"]]
+
+
+def test_scp_get_refuses_a_remote_symlink(monkeypatch, tmp_path, _session_dir):
+    """The scp fallback checks the remote source for links over ssh first
+    and refuses (scp would follow them) before any scp call."""
+    _, _, commands = _setup(monkeypatch, tmp_path, {"ssh", "scp"}, find_stdout="/volume/x/link\n")
+    result = _run("get", "data", "x", "out")
+    assert result.exit_code == 1
+    assert "The source contains symbolic links, which scp would follow" in result.output
+    assert commands == [
+        ["ssh", "-F", str(_session_dir / "config"), "host", "find /volume/x -type l | head -n 1"]
+    ]
+
+
+def test_scp_get_copies_when_remote_tree_is_clean(monkeypatch, tmp_path, _session_dir):
+    _, _, commands = _setup(monkeypatch, tmp_path, {"ssh", "scp"})
+    result = _run("get", "data", "x", "out")
+    assert result.exit_code == 0, result.output
+    config = str(_session_dir / "config")
+    assert commands == [
+        ["ssh", "-F", config, "host", "find /volume/x -type l | head -n 1"],
+        ["scp", "-r", "-F", config, "host:/volume/x", "out"],
+    ]
+
+
+def test_scp_get_failed_symlink_check_hints_tailnet(monkeypatch, tmp_path):
+    """An ssh check that cannot run is reported like a failed transfer."""
+    _, _, commands = _setup(monkeypatch, tmp_path, {"ssh", "scp"}, run_code=255)
+    result = _run("get", "data", "x", "out")
+    assert result.exit_code == 255
+    assert "tailnet" in result.output
+    assert [c[0] for c in commands] == ["ssh"]
+
+
+def test_rsync_unaffected_by_the_symlink_refusal(monkeypatch, tmp_path):
+    """rsync -a copies links as links: no refusal, and no ssh find check."""
+    _, _, commands = _setup(monkeypatch, tmp_path, {"ssh", "rsync"})
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    (tree / "link").symlink_to(tmp_path / "key")
+    assert _run("put", "data", str(tree), "/").exit_code == 0
+    assert _run("get", "data", "x", "out").exit_code == 0
+    assert [c[0] for c in commands] == ["/bin/rsync", "/bin/rsync"]
+
+
+def test_no_ssh_tools(monkeypatch, tmp_path):
+    created, _, commands = _setup(monkeypatch, tmp_path, set())
+    assert _run("get", "data", "x").exit_code == 1
+    assert not created and not commands
+
+
+@pytest.mark.parametrize(
+    "bad", ["../x", "a/../b", "a//b", "//a", "my file", "a/*.pt", "x;rm", "$HOME", "it's"]
+)
+def test_remote_path_rejected(monkeypatch, tmp_path, bad):
+    created, _, commands = _setup(monkeypatch, tmp_path, {"ssh", "rsync"})
+    assert _run("get", "data", bad).exit_code == 2
+    assert not created and not commands
+
+
+def test_remote_path_normalized():
+    assert volumes._remote_path("/") == "/volume/"
+    assert volumes._remote_path("a/b") == "/volume/a/b"
+    assert volumes._remote_path("/a/b/") == "/volume/a/b/"
+    assert volumes._remote_path("runs/step_100/model-00001.safetensors") == (
+        "/volume/runs/step_100/model-00001.safetensors"
+    )
+
+
+def test_failed_transfer_exit_code(monkeypatch, tmp_path):
+    _setup(monkeypatch, tmp_path, {"ssh", "rsync"}, run_code=23)
+    result = _run("get", "data", "x")
+    assert result.exit_code == 23
+    assert "tailnet" in result.output
+
+
+def test_wait_failure_stops_session(monkeypatch, tmp_path):
+    _, stopped, commands = _setup(monkeypatch, tmp_path, {"ssh", "rsync"}, stuck=True)
+    monkeypatch.setattr(volumes.time, "sleep", lambda s: None)
+    monkeypatch.setattr(volumes.time, "monotonic", iter([0, 1000]).__next__)
+    result = _run("get", "data", "x")
+    assert result.exit_code == 1
+    assert stopped == [("data", "s1")] and not commands

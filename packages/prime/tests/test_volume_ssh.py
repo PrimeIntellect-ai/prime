@@ -1,10 +1,20 @@
+import hashlib
+import os
+import select
 import shlex
+import socket
+import ssl
+import subprocess
+import sys
+import threading
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
 from prime_cli.api.training import HostedTrainingClient
 from prime_cli.commands import volumes
 from prime_cli.main import app
+from prime_cli.volume_gateway import GatewayError, relay
 from typer.testing import CliRunner
 
 
@@ -20,13 +30,8 @@ def _session_dir(tmp_path, monkeypatch):
 @pytest.mark.parametrize(
     "flags,expected",
     [
-        ([], True),
-        (
-            [
-                "--read",
-            ],
-            True,
-        ),
+        ([], False),
+        (["--read"], True),
         (["--read-only"], True),
         (["--write"], False),
         (["--read-write"], False),
@@ -64,7 +69,7 @@ def test_shell_modes_and_shared_ssh_endpoint(tmp_path, monkeypatch, _session_dir
         app, ["volumes", "ssh", "data", *flags], env={"PRIME_DISABLE_VERSION_CHECK": "1"}
     )
     assert result.exit_code == 0, result.output
-    assert captured[0] == {"read_only": expected, "team_id": "t1"}
+    assert captured[0] == {"read_only": expected, "allow_writable": False, "team_id": "t1"}
     config = _session_dir / "config"
     # The CLI's own ssh: only the config file and the short alias.
     assert commands[0] == ["ssh", "-F", str(config), "host"]
@@ -114,10 +119,16 @@ def test_client_session_wire_contract():
 
     client = HostedTrainingClient(FakeAPI())
     assert not client.create_volume_session("data", read_only=False, team_id="t1").read_only
+    client.create_volume_session("data", read_only=True, allow_writable=True, team_id="t1")
     assert client.get_volume_session("data", "s1", team_id="t1").status == "RUNNING"
     client.stop_volume_session("data", "s1", team_id="t1")
     assert requests == [
         ("POST", "/training/volumes/data/sessions", {"readOnly": False, "teamId": "t1"}),
+        (
+            "POST",
+            "/training/volumes/data/sessions",
+            {"readOnly": True, "allowWritable": True, "teamId": "t1"},
+        ),
         ("GET", "/training/volumes/data/sessions/s1", {"teamId": "t1"}),
         ("DELETE", "/training/volumes/data/sessions/s1", {"teamId": "t1"}),
     ]
@@ -375,7 +386,7 @@ def test_get_rsync(monkeypatch, tmp_path, _session_dir):
     created, _, commands = _setup(monkeypatch, tmp_path, {"ssh", "rsync", "scp"})
     result = _run("get", "data", "/runs/a", "out")
     assert result.exit_code == 0, result.output
-    assert created == [{"read_only": True, "team_id": "t1"}]
+    assert created == [{"read_only": True, "allow_writable": True, "team_id": "t1"}]
     ssh_e = shlex.join(["ssh", "-F", str(_session_dir / "config")])
     assert commands == [
         [
@@ -396,9 +407,28 @@ def test_put_rsync(monkeypatch, tmp_path, _session_dir):
     created, _, commands = _setup(monkeypatch, tmp_path, {"ssh", "rsync"})
     result = _run("put", "data", "f.txt", "dir/")
     assert result.exit_code == 0, result.output
-    assert created == [{"read_only": False, "team_id": "t1"}]
+    assert created == [{"read_only": False, "allow_writable": False, "team_id": "t1"}]
     assert commands[0][-2:] == ["f.txt", "host:/volume/dir/"]
     assert commands[0][:5] == ["/bin/rsync", "-a", "-v", "--partial-dir=.rsync-partial", "-e"]
+
+
+def test_get_says_when_it_reuses_a_read_write_session(monkeypatch, tmp_path):
+    _setup(monkeypatch, tmp_path, {"ssh", "rsync"})
+    reused = SimpleNamespace(
+        id="s9",
+        status="RUNNING",
+        read_only=False,
+        error_message=None,
+        ssh_connection="u@host.tailnet.ts.net",
+    )
+    monkeypatch.setattr(
+        volumes,
+        "_client",
+        lambda: (SimpleNamespace(create_volume_session=lambda *a, **kw: reused), "t1"),
+    )
+    result = _run("get", "data", "x")
+    assert result.exit_code == 0, result.output
+    assert "Reusing session s9 (read-write)" in result.output
 
 
 @pytest.mark.parametrize("tools", [{"ssh", "rsync"}, {"ssh", "scp"}])
@@ -554,3 +584,307 @@ def test_wait_failure_stops_session(monkeypatch, tmp_path):
     result = _run("get", "data", "x")
     assert result.exit_code == 1
     assert stopped == [("data", "s1")] and not commands
+
+
+SHA = "ab" * 32
+GATEWAY = SimpleNamespace(host="gw.example.com", port=443, cert_sha256=SHA.upper())
+
+
+def _proxy_argv(config_text):
+    line = next(ln for ln in config_text.splitlines() if ln.strip().startswith("ProxyCommand "))
+    return shlex.split(line.split("ProxyCommand ", 1)[1].replace("%%", "%"))
+
+
+def _gateway_ssh(monkeypatch, tmp_path, gateway=GATEWAY):
+    key = tmp_path / "key"
+    key.write_text("test")
+    monkeypatch.setattr(volumes.Config, "ssh_key_path", property(lambda self: str(key)))
+    session = SimpleNamespace(
+        id="s1",
+        status="RUNNING",
+        read_only=True,
+        error_message=None,
+        ssh_connection="u@vol-ssh-0123.tailnet.ts.net",
+        gateway=gateway,
+    )
+    client = SimpleNamespace(create_volume_session=lambda *a, **kw: session)
+    monkeypatch.setattr(volumes, "_client", lambda: (client, "t1"))
+    commands = []
+    monkeypatch.setattr(
+        volumes.shutil, "which", lambda n: f"/bin/{n}" if n in {"ssh", "rsync"} else None
+    )
+    monkeypatch.setattr(
+        volumes.subprocess,
+        "run",
+        lambda cmd, **kw: (commands.append(cmd) or SimpleNamespace(returncode=0, stdout="")),
+    )
+    return commands
+
+
+def test_gateway_adds_a_proxy_command_with_the_short_name_as_sni(
+    monkeypatch, tmp_path, _session_dir
+):
+    commands = _gateway_ssh(monkeypatch, tmp_path)
+    result = _run("ssh", "data")
+    assert result.exit_code == 0, result.output
+    config = _session_dir / "config"
+    text = config.read_text()
+    # HostName stays the tailnet name (the known_hosts pin), the SNI is the alias.
+    assert "HostName vol-ssh-0123.tailnet.ts.net" in text
+    assert _proxy_argv(text) == [
+        sys.executable,
+        "-m",
+        "prime_cli.main",
+        "volumes",
+        "proxy",
+        "--gateway",
+        "gw.example.com:443",
+        "--cert-sha256",
+        SHA,
+        "vol-ssh-0123",
+    ]
+    assert commands == [["ssh", "-F", str(config), "vol-ssh-0123"]]
+
+
+def test_direct_and_missing_gateway_write_no_proxy_command(monkeypatch, tmp_path, _session_dir):
+    _gateway_ssh(monkeypatch, tmp_path)
+    direct = _run("ssh", "data", "--direct")
+    assert direct.exit_code == 0
+    assert "prime volumes get data FILE . --direct" in direct.output
+    assert "ProxyCommand" not in (_session_dir / "config").read_text()
+    _gateway_ssh(monkeypatch, tmp_path, gateway=None)
+    plain = _run("ssh", "data")
+    assert plain.exit_code == 0
+    assert "--direct" not in plain.output
+    assert "ProxyCommand" not in (_session_dir / "config").read_text()
+
+
+@pytest.mark.parametrize(
+    "gateway",
+    [
+        SimpleNamespace(host="gw\n  ProxyCommand x", port=443, cert_sha256=SHA),
+        SimpleNamespace(host="gw.example.com", port=0, cert_sha256=SHA),
+        SimpleNamespace(host="gw.example.com", port=443, cert_sha256="abc"),
+    ],
+)
+def test_invalid_gateway_is_ignored(monkeypatch, tmp_path, _session_dir, gateway):
+    _gateway_ssh(monkeypatch, tmp_path, gateway=gateway)
+    result = _run("ssh", "data")
+    assert result.exit_code == 0, result.output
+    assert "ProxyCommand" not in (_session_dir / "config").read_text()
+
+
+def test_proxy_command_escapes_percent_for_ssh(monkeypatch):
+    monkeypatch.setattr(sys, "executable", "/opt/100%/py thon")
+    argv = shlex.split(volumes._proxy_command(("gw:443", SHA), "vol-ssh-0123").replace("%%", "%"))
+    assert argv[0] == "/opt/100%/py thon"
+
+
+@pytest.mark.parametrize("command", ["get", "put"])
+def test_transfers_inherit_the_proxy_through_the_config(
+    monkeypatch, tmp_path, _session_dir, command
+):
+    commands = _gateway_ssh(monkeypatch, tmp_path)
+    args = ["get", "data", "x", "out"] if command == "get" else ["put", "data", "f", "/"]
+    assert _run(*args).exit_code == 0
+    config = _session_dir / "config"
+    assert "ProxyCommand" in config.read_text()
+    # argv is the same as without a gateway: no -o ProxyCommand on the command line.
+    assert commands[0][:5] == ["/bin/rsync", "-a", "-v", "--partial-dir=.rsync-partial", "-e"]
+    assert commands[0][5] == shlex.join(["ssh", "-F", str(config)])
+    assert "ProxyCommand" not in " ".join(commands[0])
+
+
+def test_failed_transfer_hint_names_the_gateway_or_the_tailnet(monkeypatch, tmp_path):
+    _gateway_ssh(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        volumes.subprocess, "run", lambda cmd, **kw: SimpleNamespace(returncode=23, stdout="")
+    )
+    via = _run("get", "data", "x", "out")
+    assert via.exit_code == 23 and "gateway" in via.output and "tailnet" not in via.output
+    direct = _run("get", "data", "x", "out", "--direct")
+    assert direct.exit_code == 23 and "gateway" not in direct.output and "tailnet" in direct.output
+
+
+def _self_signed():
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "vol-bastion")])
+    now = datetime.now(timezone.utc)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(days=1))
+        .not_valid_after(now + timedelta(days=1))
+        .sign(key, hashes.SHA256())
+    )
+    pem = cert.public_bytes(serialization.Encoding.PEM)
+    key_pem = key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    )
+    return pem, key_pem, hashlib.sha256(cert.public_bytes(serialization.Encoding.DER)).hexdigest()
+
+
+@pytest.fixture
+def tls_echo_gateway(tmp_path):
+    """A local TLS server: reads one request, echoes it, closes. Records the SNI."""
+    cert_pem, key_pem, fingerprint = _self_signed()
+    (tmp_path / "cert.pem").write_bytes(cert_pem)
+    (tmp_path / "key.pem").write_bytes(key_pem)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(tmp_path / "cert.pem", tmp_path / "key.pem")
+    seen = []
+    context.sni_callback = lambda sock, name, ctx: seen.append(name)
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    listener.settimeout(60)
+
+    def serve():
+        while True:
+            try:
+                conn, _ = listener.accept()
+            except OSError:
+                return
+            conn.settimeout(10)
+            try:
+                with context.wrap_socket(conn, server_side=True) as tls:
+                    tls.sendall(tls.recv(4096))
+            except (OSError, ssl.SSLError):
+                pass
+
+    threading.Thread(target=serve, daemon=True).start()
+    yield f"127.0.0.1:{listener.getsockname()[1]}", fingerprint, seen
+    listener.close()
+
+
+def test_proxy_relays_when_the_fingerprint_matches(tls_echo_gateway):
+    gateway, fingerprint, seen = tls_echo_gateway
+    in_r, in_w = os.pipe()
+    out_r, out_w = os.pipe()
+    os.write(in_w, b"SSH-2.0-hello")
+    os.close(in_w)
+    # Upper-case with colons is accepted, like `openssl x509 -fingerprint`.
+    pretty = ":".join(fingerprint[i : i + 2].upper() for i in range(0, 64, 2))
+    done = threading.Thread(
+        target=relay, args=(gateway, pretty, "vol-ssh-0123", in_r, out_w), daemon=True
+    )
+    done.start()
+    assert select.select([out_r], [], [], 10)[0]
+    assert os.read(out_r, 64) == b"SSH-2.0-hello"
+    done.join(10)
+    assert not done.is_alive()
+    assert seen == ["vol-ssh-0123"]
+    for fd in (in_r, out_r, out_w):
+        os.close(fd)
+
+
+def test_proxy_refuses_a_different_certificate(tls_echo_gateway):
+    gateway, fingerprint, _ = tls_echo_gateway
+    wrong = "0" * 64
+    with pytest.raises(GatewayError, match="unexpected certificate"):
+        relay(gateway, wrong, "vol-ssh-0123", 0, 1)
+
+
+def _start_proxy_process(gateway, fingerprint):
+    return subprocess.Popen(
+        [
+            sys.executable, "-m", "prime_cli.main", "volumes", "proxy",
+            "--gateway", gateway, "--cert-sha256", fingerprint, "vol-ssh-0123",
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env={**os.environ, "PRIME_DISABLE_VERSION_CHECK": "1"},
+    )  # fmt: skip
+
+
+def test_proxy_process_exits_nonzero_on_a_mismatch(tls_echo_gateway):
+    gateway, _, _ = tls_echo_gateway
+    process = _start_proxy_process(gateway, "0" * 64)
+    out, err = process.communicate(timeout=10)
+    assert process.returncode == 1
+    assert b"unexpected certificate" in err
+    assert out == b""
+
+
+def test_proxy_process_pipes_stdin_to_stdout(tls_echo_gateway):
+    gateway, fingerprint, _ = tls_echo_gateway
+    process = _start_proxy_process(gateway, fingerprint)
+    out, err = process.communicate(b"ping", timeout=10)
+    assert process.returncode == 0, err
+    assert out == b"ping"
+
+
+def test_proxy_relays_full_duplex_while_the_peer_is_not_reading(tmp_path):
+    """The gateway sends a payload without reading; the client sends its own.
+    Both exceed the socket buffers, so a blocking TLS write in the relay would
+    deadlock: neither side would ever read."""
+    cert_pem, key_pem, fingerprint = _self_signed()
+    (tmp_path / "cert.pem").write_bytes(cert_pem)
+    (tmp_path / "key.pem").write_bytes(key_pem)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(tmp_path / "cert.pem", tmp_path / "key.pem")
+    size = 8 * 1024 * 1024
+    to_client, from_client = os.urandom(size), os.urandom(size)
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+    listener.listen()
+    listener.settimeout(60)
+    received = bytearray()
+    sent = threading.Event()
+
+    def serve():
+        conn, _ = listener.accept()
+        conn.settimeout(60)
+        conn.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+        with context.wrap_socket(conn, server_side=True) as tls:
+            tls.sendall(to_client)  # completes only once the client drains it
+            sent.set()
+            while chunk := tls.recv(64 * 1024):
+                received.extend(chunk)
+
+    server = threading.Thread(target=serve, daemon=True)
+    server.start()
+    process = subprocess.Popen(
+        [
+            sys.executable, "-m", "prime_cli.main", "volumes", "proxy",
+            "--gateway", f"127.0.0.1:{listener.getsockname()[1]}",
+            "--cert-sha256", fingerprint, "vol-ssh-0123",
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env={**os.environ, "PRIME_DISABLE_VERSION_CHECK": "1"},
+    )  # fmt: skip
+    try:
+        out, err = process.communicate(from_client, timeout=30)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        pytest.fail("relay deadlocked")
+    finally:
+        listener.close()
+    server.join(10)
+    assert process.returncode == 0, err
+    assert out == to_client
+    assert bytes(received) == from_client
+
+
+def test_proxy_reports_an_unreachable_gateway():
+    with pytest.raises(GatewayError, match="cannot connect"):
+        relay("127.0.0.1:1", SHA, "vol-ssh-0123", 0, 1)
+
+
+def test_proxy_command_is_hidden():
+    result = CliRunner().invoke(app, ["volumes", "--help"])
+    assert "proxy" not in result.output

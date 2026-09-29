@@ -10,6 +10,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from rich.table import Table
 
 from prime_cli.api.training import HostedTrainingClient
 from prime_cli.core import APIClient, APIError, Config
+from prime_cli.volume_gateway import GatewayError, relay
 
 from ..utils import (
     PlainTyper,
@@ -139,7 +141,42 @@ def _replace_block(text: str, alias: str, block: str) -> str:
     return (body + "\n\n" if body else "") + block
 
 
-def _write_ssh_config(session, alias: str, host: str, user: str, port: str, key: str) -> Path:
+_DIRECT_HELP = "Connect over the tailnet even if the server offers a public gateway"
+_GATEWAY_HOST = re.compile(r"[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9-]+)*")
+_SHA256_HEX = re.compile(r"[0-9a-fA-F]{64}")
+
+
+def _gateway_of(session, direct: bool):
+    """The session's gateway as (host:port, sha256), or None to connect over
+    the tailnet: `--direct`, no gateway offered, or an offer that does not look
+    like a host, port and digest (it is written into the ssh config)."""
+    gateway = getattr(session, "gateway", None)
+    if direct or gateway is None:
+        return None
+    if not (
+        _GATEWAY_HOST.fullmatch(gateway.host)
+        and 0 < gateway.port < 65536
+        and _SHA256_HEX.fullmatch(gateway.cert_sha256)
+    ):
+        console.print("[yellow]Ignoring an invalid gateway from the server.[/yellow]")
+        return None
+    return f"{gateway.host}:{gateway.port}", gateway.cert_sha256.lower()
+
+
+def _proxy_command(gateway: tuple[str, str], sni: str) -> str:
+    """ProxyCommand running `prime volumes proxy` with the interpreter that runs
+    this CLI (works from a pipx install, `uv run` or a venv). ssh expands `%`
+    tokens in it; %h would be the tailnet name and the gateway routes on the
+    short one, so the SNI is written out."""
+    argv = [sys.executable, "-m", "prime_cli.main", "volumes", "proxy"]
+    argv += ["--gateway", gateway[0], "--cert-sha256", gateway[1], sni]
+    command = subprocess.list2cmdline(argv) if os.name == "nt" else shlex.join(argv)
+    return command.replace("%", "%%")
+
+
+def _write_ssh_config(
+    session, alias: str, host: str, user: str, port: str, key: str, gateway=None
+) -> Path:
     """Write the session's options ONCE into ~/.prime/volume-ssh/config under a
     short Host alias, so ssh, scp, sftp and rsync only need `-F <file> <alias>`.
 
@@ -149,6 +186,10 @@ def _write_ssh_config(session, alias: str, host: str, user: str, port: str, key:
     ~/.ssh/known_hosts). IdentitiesOnly: offer only the configured key, so a
     loaded ssh-agent can't exhaust MaxAuthTries first. `-F` also keeps the
     user's ~/.ssh/config (e.g. ControlMaster) out of these connections.
+
+    With a `gateway` (from _gateway_of), ssh reaches HostName through
+    `prime volumes proxy` instead of the tailnet; the pinned host key still
+    matches because HostName stays the tailnet name.
 
     ponytail: blocks for ended sessions accumulate (a few lines each); prune
     them if the file ever gets noisy.
@@ -162,6 +203,8 @@ def _write_ssh_config(session, alias: str, host: str, user: str, port: str, key:
         f'  IdentityFile "{Path(key).as_posix()}"',
         "  IdentitiesOnly yes",
     ]
+    if gateway:
+        lines.append(f"  ProxyCommand {_proxy_command(gateway, alias)}")
     if getattr(session, "host_public_key", None):
         known_hosts = folder / "known_hosts"
         entry = f"[{host}]:{port}" if port != "22" else host
@@ -251,9 +294,17 @@ def _stop_quietly(client, name: str, session_id: str, team_id) -> None:
         )
 
 
-def _open_session(name: str, read_only: bool):
+def _open_session(
+    name: str,
+    read_only: bool,
+    direct: bool = False,
+    allow_writable: bool = False,
+):
     """Create or reuse a session, wait for its endpoint and write the ssh
-    config block. Returns (session, alias, key, config)."""
+    config block. Returns (session, alias, key, config, via_gateway).
+
+    `allow_writable` lets a read-only request reuse the caller's live
+    read-write session."""
     key = Config().ssh_key_path
     if not key or not os.path.isfile(os.path.expanduser(key)):
         console.print("[red]SSH key not found; use prime config set-ssh-key-path.[/red]")
@@ -261,13 +312,16 @@ def _open_session(name: str, read_only: bool):
     key = os.path.expanduser(key)
     client, team_id = _client()
     try:
-        session = client.create_volume_session(name, read_only=read_only, team_id=team_id)
+        session = client.create_volume_session(
+            name, read_only=read_only, allow_writable=allow_writable, team_id=team_id
+        )
     except APIError as exc:
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(1) from exc
     mode = "read-only" if session.read_only else "read-write"
+    label = "Reusing session" if allow_writable and not session.read_only else "Session"
     console.print(
-        f"Session {session.id} ({mode}). Stop with: prime volumes stop {escape(name)} {session.id}"
+        f"{label} {session.id} ({mode}). Stop with: prime volumes stop {escape(name)} {session.id}"
     )
     connected = False
     try:
@@ -286,25 +340,27 @@ def _open_session(name: str, read_only: bool):
         raise typer.Exit(1)
     host = match.group("host")
     alias = host.split(".", 1)[0]
+    gateway = _gateway_of(session, direct)
     config = _write_ssh_config(
-        session, alias, host, match.group("user"), match.group("port") or "22", key
+        session, alias, host, match.group("user"), match.group("port") or "22", key, gateway
     )
-    return session, alias, key, config
+    return session, alias, key, config, gateway is not None
 
 
 @app.command(name="ssh", no_args_is_help=True)
 def ssh(
     name: str = typer.Argument(..., help="Volume name"),
-    read_only: bool = typer.Option(
-        False, "--read-only", "--read", help="Mount root read-only (default)"
+    read_only: bool = typer.Option(False, "--read-only", "--read", help="Mount root read-only"),
+    read_write: bool = typer.Option(
+        False, "--read-write", "--write", help="Mount root read-write (default)"
     ),
-    read_write: bool = typer.Option(False, "--read-write", "--write", help="Mount root read-write"),
+    direct: bool = typer.Option(False, "--direct", help=_DIRECT_HELP),
 ) -> None:
-    """SSH into a corporate-tailnet session mounting the volume."""
+    """SSH into a session mounting the volume."""
     if read_only and read_write:
         console.print("[red]Choose either --read-only or --read-write.[/red]")
         raise typer.Exit(2)
-    session, alias, key, config = _open_session(name, read_only=not read_write)
+    session, alias, key, config, _ = _open_session(name, read_only=read_only, direct=direct)
     base = ["ssh", "-F", str(config), alias]
     console.print(
         f"[blue]Using SSH key:[/blue] {escape(_shell_path(Path(key), '~'))} "
@@ -321,6 +377,8 @@ def ssh(
     else:
         src, dst = "FILE", f"{alias}:/volume/"
         easy = f"prime volumes put {name} FILE /"
+    if direct:
+        easy += " --direct"
     console.print("Copy files (sftp works too):")
     console.print(f"  {easy}", soft_wrap=True, markup=False)
     console.print("Or raw (power users):")
@@ -364,12 +422,13 @@ def _remote_path(path: str) -> str:
     return "/volume/" + "/".join(parts) + ("/" if parts and rel.endswith("/") else "")
 
 
-def _transfer_failed(alias: str, code: int) -> None:
-    """The tailnet hint a failed transfer (or symlink check) reports."""
-    console.print(
-        "[red]Transfer failed.[/red] Check that you are on the tailnet "
-        f"(host {alias} must resolve) and the path exists."
-    )
+def _transfer_failed(alias: str, code: int, via_gateway: bool) -> None:
+    """The connectivity hint a failed transfer (or symlink check) reports."""
+    if via_gateway:
+        reach = "that you can reach the gateway (outbound TCP 443)"
+    else:
+        reach = f"that you are on the tailnet (host {alias} must resolve)"
+    console.print(f"[red]Transfer failed.[/red] Check {reach} and the path exists.")
     raise typer.Exit(code)
 
 
@@ -388,7 +447,7 @@ def _local_tree_has_symlink(path: str) -> bool:
     )
 
 
-def _remote_tree_has_symlink(alias: str, config: Path, remote: str) -> bool:
+def _remote_tree_has_symlink(alias: str, config: Path, remote: str, via_gateway: bool) -> bool:
     """True if `remote` (on the session pod) or anything under it is a
     symlink. One ssh call: the pod's BusyBox find supports -type l and
     tests the starting point too, and `head` caps the output and makes the
@@ -401,11 +460,13 @@ def _remote_tree_has_symlink(alias: str, config: Path, remote: str) -> bool:
         text=True,
     )
     if check.returncode:
-        _transfer_failed(alias, check.returncode)
+        _transfer_failed(alias, check.returncode, via_gateway)
     return bool(check.stdout.strip())
 
 
-def _transfer(name: str, read_only: bool, remote: str, local: str, upload: bool) -> None:
+def _transfer(
+    name: str, read_only: bool, remote: str, local: str, upload: bool, direct: bool
+) -> None:
     remote = _remote_path(remote)
     rsync = shutil.which("rsync")
     if not (shutil.which("ssh") and (rsync or shutil.which("scp"))):
@@ -421,7 +482,12 @@ def _transfer(name: str, read_only: bool, remote: str, local: str, upload: bool)
     # (more portable than relying on each tool's "--").
     if not os.path.isabs(local) and (local.startswith("-") or ":" in local):
         local = "./" + local
-    session, alias, _key, config = _open_session(name, read_only=read_only)
+    session, alias, _key, config, via_gateway = _open_session(
+        name,
+        read_only=read_only,
+        direct=direct,
+        allow_writable=read_only,
+    )
     if rsync:
         ssh_cmd = shlex.join(["ssh", "-F", str(config)])
         # A flag subset both sides take: macOS's openrsync (the laptop) and the
@@ -437,7 +503,7 @@ def _transfer(name: str, read_only: bool, remote: str, local: str, upload: bool)
         if upload:
             linked = _local_tree_has_symlink(local)
         else:
-            linked = _remote_tree_has_symlink(alias, config, remote)
+            linked = _remote_tree_has_symlink(alias, config, remote, via_gateway)
         if linked:
             console.print(
                 "[red]The source contains symbolic links, which scp would follow "
@@ -461,7 +527,7 @@ def _transfer(name: str, read_only: bool, remote: str, local: str, upload: bool)
         console.print(f"[red]Could not start transfer:[/red] {exc}")
         raise typer.Exit(1) from exc
     if code:
-        _transfer_failed(alias, code)
+        _transfer_failed(alias, code, via_gateway)
 
 
 @app.command(no_args_is_help=True)
@@ -469,9 +535,10 @@ def get(
     name: str = typer.Argument(..., help="Volume name"),
     remote_path: str = typer.Argument(..., help="Path in the volume; / is the volume root"),
     local_dest: str = typer.Argument(".", help="Local destination"),
+    direct: bool = typer.Option(False, "--direct", help=_DIRECT_HELP),
 ) -> None:
     """Download from a volume over a read-only session (rsync, else scp)."""
-    _transfer(name, True, remote_path, local_dest, upload=False)
+    _transfer(name, True, remote_path, local_dest, upload=False, direct=direct)
 
 
 @app.command(no_args_is_help=True)
@@ -479,9 +546,26 @@ def put(
     name: str = typer.Argument(..., help="Volume name"),
     local_path: str = typer.Argument(..., help="Local file or directory"),
     remote_path: str = typer.Argument("/", help="Path in the volume; trailing / = into directory"),
+    direct: bool = typer.Option(False, "--direct", help=_DIRECT_HELP),
 ) -> None:
     """Upload to a volume over a read-write session (rsync, else scp)."""
-    _transfer(name, False, remote_path, local_path, upload=True)
+    _transfer(name, False, remote_path, local_path, upload=True, direct=direct)
+
+
+@app.command(hidden=True)
+def proxy(
+    sni: str = typer.Argument(..., help="Session hostname (vol-ssh-<hex>) the gateway routes on"),
+    gateway: str = typer.Option(..., "--gateway", help="Gateway host:port"),
+    cert_sha256: str = typer.Option(
+        ..., "--cert-sha256", help="Pinned SHA-256 of the gateway cert"
+    ),
+) -> None:
+    """ssh ProxyCommand: relay stdin/stdout to a session through the gateway."""
+    try:
+        relay(gateway, cert_sha256, sni, sys.stdin.fileno(), sys.stdout.fileno())
+    except GatewayError as exc:
+        typer.echo(f"prime volumes proxy: {exc}", err=True)
+        raise typer.Exit(1) from exc
 
 
 @app.command()

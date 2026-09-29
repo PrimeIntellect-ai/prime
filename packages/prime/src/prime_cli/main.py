@@ -155,3 +155,7 @@ def run() -> None:
     except typer.Abort:
         typer.echo("\nOperation cancelled")
         raise typer.Exit(0)
+
+
+if __name__ == "__main__":
+    run()

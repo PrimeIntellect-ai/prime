@@ -81,6 +81,14 @@ class Volume(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class VolumeSessionGateway(BaseModel):
+    host: str
+    port: int
+    cert_sha256: str = Field(alias="certSha256")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class VolumeSession(BaseModel):
     id: str
     volume_name: str = Field(alias="volumeName")
@@ -88,6 +96,8 @@ class VolumeSession(BaseModel):
     read_only: bool = Field(alias="readOnly")
     # Same per-session endpoint carries shell, sftp/scp and rsync.
     ssh_connection: Optional[str] = Field(None, alias="sshConnection")
+    # Public gateway that reaches the session from outside the tailnet.
+    gateway: Optional[VolumeSessionGateway] = None
     # The session pod's sshd host public key, for scoped known_hosts pinning.
     host_public_key: Optional[str] = Field(None, alias="hostPublicKey")
     # Why the session failed (FAILED/TOMBSTONED only).
@@ -147,9 +157,16 @@ class HostedTrainingClient:
         self.client.delete(f"/training/volumes/{name}", params=params)
 
     def create_volume_session(
-        self, name: str, *, read_only: bool = True, team_id: Optional[str] = None
+        self,
+        name: str,
+        *,
+        read_only: bool = True,
+        allow_writable: bool = False,
+        team_id: Optional[str] = None,
     ) -> VolumeSession:
         payload: Dict[str, Any] = {"readOnly": read_only}
+        if allow_writable:
+            payload["allowWritable"] = True
         if team_id:
             payload["teamId"] = team_id
         return VolumeSession.model_validate(

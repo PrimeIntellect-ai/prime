@@ -431,24 +431,6 @@ def test_get_says_when_it_reuses_a_read_write_session(monkeypatch, tmp_path):
     assert "Reusing session s9 (read-write)" in result.output
 
 
-def test_put_says_why_it_starts_a_read_write_session(monkeypatch, tmp_path):
-    _setup(monkeypatch, tmp_path, {"ssh", "rsync"})
-    pending = SimpleNamespace(
-        id="s2", status="PENDING", read_only=False, error_message=None, ssh_connection=None
-    )
-    ready = SimpleNamespace(**{**vars(pending), "ssh_connection": "u@host.tailnet.ts.net"})
-    client = SimpleNamespace(
-        create_volume_session=lambda *a, **kw: pending,
-        get_volume_session=lambda *a, **kw: ready,
-    )
-    monkeypatch.setattr(volumes, "_client", lambda: (client, "t1"))
-    monkeypatch.setattr(volumes.time, "sleep", lambda s: None)
-    result = _run("put", "data", "f.txt")
-    assert result.exit_code == 0, result.output
-    assert "a read-only session can't be written to" in result.output
-    assert "Reusing" not in result.output
-
-
 @pytest.mark.parametrize("tools", [{"ssh", "rsync"}, {"ssh", "scp"}])
 def test_local_path_starting_with_dash_is_not_an_option(monkeypatch, tmp_path, tools):
     """A local path like "--delete" must never reach rsync/scp as an option."""

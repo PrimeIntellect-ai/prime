@@ -299,14 +299,12 @@ def _open_session(
     read_only: bool,
     direct: bool = False,
     allow_writable: bool = False,
-    new_session_note: str = "",
 ):
     """Create or reuse a session, wait for its endpoint and write the ssh
     config block. Returns (session, alias, key, config, via_gateway).
 
     `allow_writable` lets a read-only request reuse the caller's live
-    read-write session; `new_session_note` is printed when a session is
-    being started rather than reused."""
+    read-write session."""
     key = Config().ssh_key_path
     if not key or not os.path.isfile(os.path.expanduser(key)):
         console.print("[red]SSH key not found; use prime config set-ssh-key-path.[/red]")
@@ -321,8 +319,6 @@ def _open_session(
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(1) from exc
     mode = "read-only" if session.read_only else "read-write"
-    if new_session_note and not session.ssh_connection:
-        console.print(new_session_note)
     label = "Reusing session" if allow_writable and not session.read_only else "Session"
     console.print(
         f"{label} {session.id} ({mode}). Stop with: prime volumes stop {escape(name)} {session.id}"
@@ -491,11 +487,6 @@ def _transfer(
         read_only=read_only,
         direct=direct,
         allow_writable=read_only,
-        new_session_note=(
-            ""
-            if read_only
-            else "Starting a read-write session (a read-only session can't be written to)."
-        ),
     )
     if rsync:
         ssh_cmd = shlex.join(["ssh", "-F", str(config)])

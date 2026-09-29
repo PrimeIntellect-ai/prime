@@ -546,6 +546,36 @@ def test_train_pr_flag_resolves_head_sha_and_conflicts_with_ref(
     assert len(captured) == 2  # the json + table dispatches above, nothing since
 
 
+def test_train_ref_shape_is_checked_before_dispatch(monkeypatch, tmp_path: Path) -> None:
+    captured = _capture_fft_dispatch(monkeypatch)
+    cfg = tmp_path / "rl.toml"
+    cfg.write_text(_FFT_BODY)
+    for bad in (
+        "pull/42/head",
+        "refs/heads/x",
+        "",
+        "a b",
+        "feat/../main",
+        "-x",
+        "x.lock",
+        "a" * 201,
+    ):
+        result = runner.invoke(app, ["train", str(cfg), "--ref", bad, "-y"], env=TEST_ENV)
+        assert result.exit_code == 1, bad
+        assert "--ref" in result.output, bad
+    # The TOML key gets the same check, named by its origin.
+    cfg.write_text('source_ref = "pull/42/head"\n' + _FFT_BODY)
+    result = runner.invoke(app, ["train", str(cfg), "-y"], env=TEST_ENV)
+    assert result.exit_code == 1
+    assert "source_ref in" in result.output and "--pr" in result.output
+    assert captured == []
+
+    # An empty --ref no longer slips past the --pr exclusivity check.
+    result = runner.invoke(app, ["train", str(cfg), "--ref", "", "--pr", "42", "-y"], env=TEST_ENV)
+    assert result.exit_code == 1
+    assert "mutually exclusive" in result.output
+
+
 def test_train_ref_is_rejected_on_the_lora_path(monkeypatch, tmp_path: Path) -> None:
     cfg = tmp_path / "rl.toml"
     cfg.write_text('[model]\nname = "Qwen/Qwen3-0.6B"\n')

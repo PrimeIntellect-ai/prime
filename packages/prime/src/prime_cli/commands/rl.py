@@ -973,6 +973,24 @@ def _warn_legacy_full_finetune_type(cfg: Dict[str, Any], config_path: str) -> No
         )
 
 
+# Mirrors the platform's `sourceRef` rules (branch / tag / sha charset, 200
+# chars, no `..`, no trailing `/` or `.lock`) and rl-validator's refusal of
+# pull-request namespaces, so a typo fails at the prompt instead of as a 422.
+_SOURCE_REF_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._/-]{0,199}\Z")
+
+
+def _source_ref_error(ref: str) -> Optional[str]:
+    """Why `ref` can't be a prime-rl source ref, or None when it can."""
+    if not _SOURCE_REF_RE.match(ref) or ".." in ref or ref.endswith(("/", ".lock")):
+        return f"{ref!r} is not a valid git ref (branches, tags and commit shas only)."
+    if ref.startswith(("refs/", "pull/")):
+        return (
+            f"{ref!r}: pull-request and refs/ names are not accepted; "
+            "use --pr N for a pull request."
+        )
+    return None
+
+
 def _resolve_pr_ref(pr_number: int) -> str:
     """`--pr N` -> the PR's head commit sha, via the public GitHub API.
 
@@ -1152,6 +1170,16 @@ def _dispatch_full_finetune_run(
             f"got {type(config_source_ref).__name__}."
         )
         raise typer.Exit(1)
+    # Each source is checked where it was given (so `--ref ""` is an error,
+    # not a silent fall-through to the TOML) before the CLI flag wins.
+    for label, candidate in (
+        ("--ref", source_ref),
+        (f"source_ref in {config_path}", config_source_ref),
+    ):
+        problem = _source_ref_error(candidate) if candidate is not None else None
+        if problem:
+            console.print(f"[red]Error:[/red] {label}: {problem}")
+            raise typer.Exit(1)
     resolved_source_ref = source_ref or config_source_ref
     if source_pr is not None:
         # Resolved here, after the local checks above, so a run that would
@@ -1626,7 +1654,7 @@ def create_run(
     # unambiguous `[deployment]` block (full-FT-only — the RL/LoRA schema
     # has no such field).
     raw_cfg = _peek_toml(config_path)
-    if ref and pr is not None:
+    if ref is not None and pr is not None:
         console.print("[red]Error:[/red] --ref and --pr are mutually exclusive.")
         raise typer.Exit(1)
 
@@ -1679,7 +1707,7 @@ def create_run(
     # --ref / --pr are full-FT only: the LoRA path runs on shared
     # deployments and has no per-run source to overlay. Reject rather than
     # silently launching without the requested code.
-    if ref or pr is not None or raw_cfg.get("source_ref") is not None:
+    if ref is not None or pr is not None or raw_cfg.get("source_ref") is not None:
         console.print(
             "[red]Error:[/red] --ref / --pr (and top-level `source_ref` in the "
             "TOML) are only supported for full-FT runs."

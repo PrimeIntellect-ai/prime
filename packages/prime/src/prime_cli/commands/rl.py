@@ -1585,14 +1585,14 @@ def create_run(
         "--ref",
         hidden=True,
         help=(
-            "Internal only: prime-rl git ref (branch, tag, or sha) to run on top "
-            "of the image (full-FT only). Needs an admin "
-            "`training_source_refs:create` grant and a deployment with source "
-            "overlays enabled; other callers get a 403. The pods overlay that "
-            "source onto the image at startup, so "
-            "unmerged code runs without an image build; the platform pins the "
-            "resolved commit for the run. Falls back to a top-level "
-            '`source_ref = "..."` in the TOML.'
+            "Restricted: prime-rl git ref (branch, tag, or sha) to run on top "
+            "of the image (full-FT only). The dispatch must be a team run and "
+            "the team needs sourceRef access granted by Prime (contact "
+            "support), on a deployment with source overlays enabled; other "
+            "callers get a 403. The pods overlay that source onto the image at "
+            "startup, so unmerged code runs without an image build; the "
+            "platform pins the resolved commit for the run. Falls back to a "
+            'top-level `source_ref = "..."` in the TOML.'
         ),
     ),
     pr: Optional[int] = typer.Option(
@@ -1600,9 +1600,9 @@ def create_run(
         "--pr",
         hidden=True,
         help=(
-            "Internal only: prime-rl pull request number to run (full-FT only; "
-            "same gate as --ref). Shorthand for --ref <PR head sha>; fork and "
-            "already-merged PRs are not supported."
+            "Restricted: prime-rl pull request number to run (full-FT only; "
+            "same access as --ref). Shorthand for --ref <PR head sha>; fork "
+            "and already-merged PRs are not supported."
         ),
     ),
     full_finetune: bool = typer.Option(

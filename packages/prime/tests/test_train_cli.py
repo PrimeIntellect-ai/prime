@@ -536,13 +536,14 @@ def test_train_pr_flag_resolves_head_sha_and_conflicts_with_ref(
 
 
 def test_train_help_hides_source_overlay_flags() -> None:
-    # --ref / --pr are internal-only: they still parse (see the payload
-    # tests above) but must not appear in the public help panel.
+    # --ref / --pr are restricted (granted per team on the platform): they
+    # still parse (see the payload tests above) but must not appear in the
+    # public help panel.
     result = runner.invoke(app, ["train", "--help"], env=TEST_ENV)
     assert result.exit_code == 0
     text = " ".join(result.output.split())
     assert not re.search(r"--(ref|pr)(?![\w-])", text), text
-    assert "Internal only" not in text
+    assert "sourceRef access" not in text
 
 
 def test_train_ref_shape_is_checked_before_dispatch(monkeypatch, tmp_path: Path) -> None:

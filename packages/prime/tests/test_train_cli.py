@@ -316,13 +316,13 @@ def _mock_volumes(monkeypatch, existing, created_status="RUNNING", create_error=
     return creates, dispatched
 
 
-def _run_volume(tmp_path: Path):
+def _run_volume(tmp_path: Path, *extra: str, toml_extra: str = ""):
     cfg = tmp_path / "rl.toml"
     cfg.write_text(
-        '[model]\nname = "Qwen/Qwen3-0.6B"\n\n'
+        toml_extra + '[model]\nname = "Qwen/Qwen3-0.6B"\n\n'
         "[deployment]\nnum_train_gpus = 1\nnum_infer_gpus = 1\n"
     )
-    return runner.invoke(app, ["train", str(cfg), "--volume", "ckpts", "-y"], env=TEST_ENV)
+    return runner.invoke(app, ["train", str(cfg), "--volume", "ckpts", "-y", *extra], env=TEST_ENV)
 
 
 def test_train_volume_exists_does_not_create(monkeypatch, tmp_path: Path) -> None:
@@ -357,3 +357,38 @@ def test_train_existing_deploying_volume_is_not_recreated(monkeypatch, tmp_path:
     creates, dispatched = _mock_volumes(monkeypatch, [_vol("ckpts", "DEPLOYING")])
     assert _run_volume(tmp_path).exit_code == 0
     assert creates == [] and len(dispatched) == 1
+
+
+def test_train_volume_size_flag_and_toml_key_set_the_created_size(
+    monkeypatch, tmp_path: Path
+) -> None:
+    creates, dispatched = _mock_volumes(monkeypatch, [])
+    result = _run_volume(tmp_path, "--volume-size", "500Gi")
+    assert result.exit_code == 0, result.output
+    assert "creating it (500Gi)" in result.output
+    assert creates == [("ckpts", "500Gi")]
+    # The TOML key works too, and never reaches the prime-rl config.
+    creates, dispatched = _mock_volumes(monkeypatch, [])
+    result = _run_volume(tmp_path, toml_extra='volume_size = "2Ti"\n')
+    assert result.exit_code == 0, result.output
+    assert creates == [("ckpts", "2Ti")]
+    assert "volume_size" not in str(dispatched[0])
+
+
+def test_train_volume_size_is_ignored_for_an_existing_volume(monkeypatch, tmp_path: Path) -> None:
+    creates, dispatched = _mock_volumes(monkeypatch, [_vol("ckpts")])
+    result = _run_volume(tmp_path, "--volume-size", "5Ti")
+    assert result.exit_code == 0, result.output
+    assert creates == [] and len(dispatched) == 1
+    assert "already exists (1Ti); --volume-size 5Ti is ignored" in result.output
+
+
+def test_train_volume_size_needs_volume(tmp_path: Path) -> None:
+    cfg = tmp_path / "rl.toml"
+    cfg.write_text(
+        '[model]\nname = "Qwen/Qwen3-0.6B"\n\n'
+        "[deployment]\nnum_train_gpus = 1\nnum_infer_gpus = 1\n"
+    )
+    result = runner.invoke(app, ["train", str(cfg), "--volume-size", "1Ti", "-y"], env=TEST_ENV)
+    assert result.exit_code == 1
+    assert "--volume-size" in result.output and "needs" in result.output

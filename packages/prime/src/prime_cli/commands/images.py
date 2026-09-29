@@ -315,14 +315,6 @@ def push_image(
             image_name = image_reference
             image_tag = "latest"
 
-        # Validate image name doesn't contain slashes
-        if image_name is not None and "/" in image_name and not platform_image:
-            console.print(
-                "[red]Error: Image name cannot contain '/'. "
-                "Use simple names like 'myapp:v1.0.0'.[/red]"
-            )
-            raise typer.Exit(1)
-
         if is_source_build:
             automatic_docker_hub_build = bool(docker_hub_sources)
             platform_source_build = platform_image or automatic_docker_hub_build

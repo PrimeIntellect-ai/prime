@@ -52,6 +52,11 @@ MAX_CONSECUTIVE_SUBMIT_DEFERRALS = 20
 FAILURE_TABLE_MAX_ROWS = 20
 
 _TAG_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$")
+# Mirrors the backend's owned-name grammar: "/"-separated segments that each
+# start with an alphanumeric (no empty, "." or ".." segments).
+_OWNED_NAME_RE = re.compile(
+    r"(?=.{1,128}\Z)[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*"
+)
 _BUILD_MANIFEST_KEYS = {"image", "context", "dockerfile"}
 _SOURCE_MANIFEST_KEY = "source"
 
@@ -311,17 +316,17 @@ def parse_source_manifest_row(
             dest_name, dest_tag = image.rsplit(":", 1)
         else:
             dest_name, dest_tag = image, "latest"
-        # '/' separates owner from name in personal/team image paths, so
-        # only platform images (org-less, stored under their source repository
-        # namespace) may use a single-level namespace in the destination.
-        segments = dest_name.split("/")
-        if len(segments) > (2 if platform_image else 1) or not all(segments):
-            hint = (
-                "use 'name:tag' or a namespaced 'ns/name:tag'"
-                if platform_image
-                else "use simple names like 'myapp:v1'"
-            )
-            return [f"{where}: invalid destination '{image}'; {hint}"]
+        if platform_image:
+            segments = dest_name.split("/")
+            if len(segments) > 2 or not all(segments):
+                return [
+                    f"{where}: invalid destination '{image}'; "
+                    "use 'name:tag' or a namespaced 'ns/name:tag'"
+                ]
+        elif not dest_name or ("/" in dest_name and not _OWNED_NAME_RE.fullmatch(dest_name)):
+            return [
+                f"{where}: invalid destination '{image}'; use 'name:tag' or a nested 'org/name:tag'"
+            ]
         if not _TAG_RE.match(dest_tag):
             return [f"{where}: invalid destination tag '{dest_tag}'"]
         override = True
@@ -566,10 +571,10 @@ def load_manifest(
         if not image_name or not image_tag:
             problems.append(f"{where}: invalid image reference '{image}'")
             continue
-        if "/" in image_name:
+        if "/" in image_name and not _OWNED_NAME_RE.fullmatch(image_name):
             problems.append(
-                f"{where}: image name cannot contain '/' ('{image_name}'); "
-                "use simple names like 'myapp:v1'"
+                f"{where}: invalid image name '{image_name}'; "
+                "use 'name:tag' or a nested 'org/name:tag'"
             )
             continue
         if not _TAG_RE.match(image_tag):

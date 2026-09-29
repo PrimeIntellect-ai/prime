@@ -1436,10 +1436,10 @@ def create_run(
         help=(
             "Named volume: outputs land under runs/<runId>/ on it, and for "
             "hosted SFT the dataset named by [data] name is read from it "
-            "(name may be a Hugging Face dataset Hub ID, e.g. "
-            "`willcb/R1-reverse-wikipedia-paragraphs-v1-1000`; the platform "
-            "stages it onto the volume before training. A local "
-            '"/datasets/<name>" path also works for already-staged data.) '
+            '(data.name must be a local path "/datasets/<name>" pointing '
+            "at a dataset directory already on the volume; get one there "
+            "with `prime volumes ssh <name> --read-write` and the huggingface "
+            "CLI — see `prime volumes`). "
             "Full-FT only; closed beta, see `prime volumes`. Falls back to "
             'a top-level `volume = "..."` in the TOML.'
         ),

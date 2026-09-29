@@ -3,10 +3,11 @@
 A volume is a PVC owned by your team (or you) on the cluster it was
 created on. `prime train config.toml --volume <name>` makes the run
 write under `runs/<runId>/` on it, and it outlives every run. For hosted
-SFT, `[data] name` may be a Hugging Face dataset Hub ID (e.g.
-`org/dataset-name`) — the platform stages it onto the named volume before
-training. A local `"/datasets/<name>"` path also works for data that is
-already on the volume.
+SFT, `[data] name` must point at a dataset directory on the volume
+(`/datasets/<name>`); use `prime volumes ssh <name> --read-write` and the
+huggingface CLI (`hf download <repo> --repo-type dataset --local-dir
+datasets/<name>`) to put a dataset there yourself — the trainer never
+downloads.
 """
 
 import os

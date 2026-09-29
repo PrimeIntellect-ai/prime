@@ -143,14 +143,19 @@ volume, and hosted SFT runs read their dataset from it.
 # Create a volume (closed beta)
 prime volumes create research
 
-# Point your SFT config at the dataset, then train
+# Put the dataset on the volume yourself: open a read-write session and
+# download it with the huggingface CLI (available on the session pod)
+prime volumes ssh research --read-write
+#   (inside the session) hf download willcb/R1-reverse-wikipedia-paragraphs-v1-1000 \
+#       --repo-type dataset --local-dir datasets/r1-reverse-wikipedia-paragraphs
+
+# Point your SFT config at the local dataset path, then train
 #   [data]
 #   type = "sft"
-#   name = "willcb/R1-reverse-wikipedia-paragraphs-v1-1000"   # HF dataset Hub ID
+#   name = "/datasets/r1-reverse-wikipedia-paragraphs"
 #   splits = ["math"]
 prime train sft.toml --volume research
-# The platform stages the Hub ID onto the named volume before training.
-# A local "/datasets/<name>" path also works for data already on the volume.
+# The trainer reads the dataset from the volume; it never downloads.
 
 # Manage volumes
 prime volumes list

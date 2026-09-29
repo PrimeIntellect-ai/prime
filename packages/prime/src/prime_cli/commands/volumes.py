@@ -294,9 +294,19 @@ def _stop_quietly(client, name: str, session_id: str, team_id) -> None:
         )
 
 
-def _open_session(name: str, read_only: bool, direct: bool = False):
+def _open_session(
+    name: str,
+    read_only: bool,
+    direct: bool = False,
+    allow_writable: bool = False,
+    new_session_note: str = "",
+):
     """Create or reuse a session, wait for its endpoint and write the ssh
-    config block. Returns (session, alias, key, config, via_gateway)."""
+    config block. Returns (session, alias, key, config, via_gateway).
+
+    `allow_writable` lets a read-only request reuse the caller's live
+    read-write session; `new_session_note` is printed when a session is
+    being started rather than reused."""
     key = Config().ssh_key_path
     if not key or not os.path.isfile(os.path.expanduser(key)):
         console.print("[red]SSH key not found; use prime config set-ssh-key-path.[/red]")
@@ -304,13 +314,18 @@ def _open_session(name: str, read_only: bool, direct: bool = False):
     key = os.path.expanduser(key)
     client, team_id = _client()
     try:
-        session = client.create_volume_session(name, read_only=read_only, team_id=team_id)
+        session = client.create_volume_session(
+            name, read_only=read_only, allow_writable=allow_writable, team_id=team_id
+        )
     except APIError as exc:
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(1) from exc
     mode = "read-only" if session.read_only else "read-write"
+    if new_session_note and not session.ssh_connection:
+        console.print(new_session_note)
+    label = "Reusing session" if allow_writable and not session.read_only else "Session"
     console.print(
-        f"Session {session.id} ({mode}). Stop with: prime volumes stop {escape(name)} {session.id}"
+        f"{label} {session.id} ({mode}). Stop with: prime volumes stop {escape(name)} {session.id}"
     )
     connected = False
     try:
@@ -339,17 +354,17 @@ def _open_session(name: str, read_only: bool, direct: bool = False):
 @app.command(name="ssh", no_args_is_help=True)
 def ssh(
     name: str = typer.Argument(..., help="Volume name"),
-    read_only: bool = typer.Option(
-        False, "--read-only", "--read", help="Mount root read-only (default)"
+    read_only: bool = typer.Option(False, "--read-only", "--read", help="Mount root read-only"),
+    read_write: bool = typer.Option(
+        False, "--read-write", "--write", help="Mount root read-write (default)"
     ),
-    read_write: bool = typer.Option(False, "--read-write", "--write", help="Mount root read-write"),
     direct: bool = typer.Option(False, "--direct", help=_DIRECT_HELP),
 ) -> None:
     """SSH into a session mounting the volume."""
     if read_only and read_write:
         console.print("[red]Choose either --read-only or --read-write.[/red]")
         raise typer.Exit(2)
-    session, alias, key, config, _ = _open_session(name, read_only=not read_write, direct=direct)
+    session, alias, key, config, _ = _open_session(name, read_only=read_only, direct=direct)
     base = ["ssh", "-F", str(config), alias]
     console.print(
         f"[blue]Using SSH key:[/blue] {escape(_shell_path(Path(key), '~'))} "
@@ -472,7 +487,15 @@ def _transfer(
     if not os.path.isabs(local) and (local.startswith("-") or ":" in local):
         local = "./" + local
     session, alias, _key, config, via_gateway = _open_session(
-        name, read_only=read_only, direct=direct
+        name,
+        read_only=read_only,
+        direct=direct,
+        allow_writable=read_only,
+        new_session_note=(
+            ""
+            if read_only
+            else "Starting a read-write session (a read-only session can't be written to)."
+        ),
     )
     if rsync:
         ssh_cmd = shlex.join(["ssh", "-F", str(config)])

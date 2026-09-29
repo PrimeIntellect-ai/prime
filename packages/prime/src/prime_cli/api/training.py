@@ -157,9 +157,16 @@ class HostedTrainingClient:
         self.client.delete(f"/training/volumes/{name}", params=params)
 
     def create_volume_session(
-        self, name: str, *, read_only: bool = True, team_id: Optional[str] = None
+        self,
+        name: str,
+        *,
+        read_only: bool = True,
+        allow_writable: bool = False,
+        team_id: Optional[str] = None,
     ) -> VolumeSession:
         payload: Dict[str, Any] = {"readOnly": read_only}
+        if allow_writable:
+            payload["allowWritable"] = True
         if team_id:
             payload["teamId"] = team_id
         return VolumeSession.model_validate(

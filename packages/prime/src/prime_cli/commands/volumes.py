@@ -45,20 +45,26 @@ def _client() -> tuple[HostedTrainingClient, str | None]:
 def create(
     name: str = typer.Argument(..., help="Volume name (lowercase letters, digits, '-')"),
     size: str = typer.Option("1Ti", "--size", help="Size, e.g. 500Gi or 2Ti. Can grow later."),
+    cluster: str | None = typer.Option(
+        None,
+        "--cluster",
+        help="Cluster name to create the volume on (default: your first available cluster)",
+    ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
     """Create a volume on your team's (or personal) cluster."""
     validate_output_format(output, console)
     client, team_id = _client()
     try:
-        volume = client.create_volume(name, size, team_id=team_id)
+        volume = client.create_volume(name, size, team_id=team_id, cluster=cluster)
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
     if output == "json":
         output_data_as_json(volume.model_dump(by_alias=True), console)
         return
-    console.print(f"[green]Creating volume {volume.name} ({volume.size}).[/green]")
+    on = f" on {escape(volume.cluster)}" if volume.cluster else ""
+    console.print(f"[green]Creating volume {volume.name} ({volume.size}){on}.[/green]")
     console.print(f"Use it with: prime train config.toml --volume {volume.name}")
 
 
@@ -77,9 +83,9 @@ def list_volumes(
     if output == "json":
         output_data_as_json([v.model_dump(by_alias=True) for v in volumes], console)
         return
-    table = Table("Name", "Size", "Status", "Created")
+    table = Table("Name", "Size", "Cluster", "Status", "Created")
     for v in volumes:
-        table.add_row(v.name, v.size or "-", v.status, v.created_at or "-")
+        table.add_row(v.name, v.size or "-", v.cluster or "-", v.status, v.created_at or "-")
     console.print(table)
 
 

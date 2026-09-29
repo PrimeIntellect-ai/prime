@@ -74,6 +74,8 @@ class Volume(BaseModel):
     size: Optional[str] = None
     status: str
     cluster_id: str = Field(..., alias="clusterId")
+    # Cluster name; absent from older backends.
+    cluster: Optional[str] = None
     pvc_name: str = Field(..., alias="pvcName")
     created_by: Optional[str] = Field(None, alias="createdBy")
     created_at: Optional[str] = Field(None, alias="createdAt")
@@ -135,10 +137,18 @@ class HostedTrainingClient:
         response = self.client.request("DELETE", f"/training/runs/{run_id}")
         return response if isinstance(response, dict) else {"runId": run_id}
 
-    def create_volume(self, name: str, size: str, team_id: Optional[str] = None) -> Volume:
+    def create_volume(
+        self,
+        name: str,
+        size: str,
+        team_id: Optional[str] = None,
+        cluster: Optional[str] = None,
+    ) -> Volume:
         payload: Dict[str, Any] = {"name": name, "size": size}
         if team_id:
             payload["teamId"] = team_id
+        if cluster:
+            payload["cluster"] = cluster
         return Volume.model_validate(self.client.post("/training/volumes", json=payload))
 
     def list_volumes(self, team_id: Optional[str] = None) -> List[Volume]:

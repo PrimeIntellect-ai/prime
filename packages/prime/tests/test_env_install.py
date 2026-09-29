@@ -137,3 +137,49 @@ def test_info_displays_scoped_install_index(monkeypatch):
     output = "".join(result.output.split())
     assert SCOPED_INDEX_URL in output
     assert INDEX_URL not in output
+
+
+@pytest.mark.parametrize("error", [RuntimeError("installer failed"), FileNotFoundError("uv")])
+@pytest.mark.parametrize("partial_success", [False, True])
+def test_install_exits_nonzero_after_installer_failure(monkeypatch, error, partial_success):
+    client = Mock()
+    client.get.return_value = {"data": {"simple_index_url": INDEX_URL, "visibility": "PUBLIC"}}
+    monkeypatch.setattr(env, "APIClient", lambda **kwargs: client)
+    monkeypatch.setattr(env.shutil, "which", lambda tool: f"/bin/{tool}")
+    outcomes = [error, None] if partial_success else [error]
+    execute = Mock(side_effect=outcomes)
+    monkeypatch.setattr(env, "execute_install_command", execute)
+    slugs = ["primeintellect/failing"]
+    if partial_success:
+        slugs.append("primeintellect/working")
+
+    result = CliRunner().invoke(env.app, ["install", *slugs])
+
+    assert result.exit_code == 1, result.output
+    assert "Failed to install 1 environment" in result.output
+    assert execute.call_count == len(slugs)
+    if partial_success:
+        assert "Installed 1 environment" in result.output
+
+
+@pytest.mark.parametrize("uninstallable", ["missing-local", "owner/invalid/slug", "owner/no-wheel"])
+def test_install_exits_nonzero_when_another_requested_environment_is_uninstallable(
+    monkeypatch, tmp_path, uninstallable
+):
+    client = Mock()
+    client.get.side_effect = lambda path: {
+        "data": {"visibility": "PUBLIC"}
+        | ({"simple_index_url": INDEX_URL} if "working" in path else {})
+    }
+    monkeypatch.setattr(env, "APIClient", lambda **kwargs: client)
+    monkeypatch.setattr(env.shutil, "which", lambda tool: f"/bin/{tool}")
+    execute = Mock()
+    monkeypatch.setattr(env, "execute_install_command", execute)
+
+    result = CliRunner().invoke(
+        env.app, ["install", uninstallable, "owner/working", "--path", str(tmp_path)]
+    )
+
+    assert result.exit_code == 1, result.output
+    assert "Installed 1 environment" in result.output
+    execute.assert_called_once()

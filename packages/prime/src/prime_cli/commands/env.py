@@ -2368,6 +2368,9 @@ def install(
             for env_id, reason in install_failed_envs:
                 console.print(f"[red]✗ {env_id} - {reason}")
 
+        if install_failed_envs or failed_envs or skipped_envs:
+            raise typer.Exit(1)
+
     except typer.Exit:
         raise
     except APIError as e:

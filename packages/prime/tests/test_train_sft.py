@@ -244,6 +244,25 @@ def test_train_fft_dispatch_stays_mode_free(tmp_path: Path, monkeypatch) -> None
 
 
 # --- --volume forwarding -----------------------------------------------------
+#
+# main's dispatch auto-creates a missing --volume (ENG-6354 #975): the SFT
+# --volume tests need list_volumes to report the volume as existing so the
+# dispatch skips creation and posts the run payload directly.
+
+
+def _existing_volume(monkeypatch, name: str) -> None:
+    """Make the dispatch see `name` as an existing RUNNING volume."""
+
+    class _V:
+        pass
+
+    v = _V()
+    v.name = name
+    v.size = "1Ti"
+    monkeypatch.setattr(
+        "prime_cli.api.training.HostedTrainingClient.list_volumes",
+        lambda self, team_id=None: [v],
+    )
 
 
 def test_train_sft_forwards_volume_flag_to_payload(tmp_path: Path, monkeypatch) -> None:
@@ -253,6 +272,7 @@ def test_train_sft_forwards_volume_flag_to_payload(tmp_path: Path, monkeypatch) 
     can't see its dataset."""
     config_path = _write_config(tmp_path, _sft_config())
     captured = _capture_post(monkeypatch)
+    _existing_volume(monkeypatch, "research")
 
     result = runner.invoke(
         app, ["train", config_path, "--volume", "research", "--yes"], env=TEST_ENV
@@ -269,6 +289,7 @@ def test_train_sft_forwards_volume_flag_to_payload(tmp_path: Path, monkeypatch) 
 def test_train_sft_forwards_toml_volume_to_payload(tmp_path: Path, monkeypatch) -> None:
     config_path = _write_config(tmp_path, _sft_config(volume="research"))
     captured = _capture_post(monkeypatch)
+    _existing_volume(monkeypatch, "research")
 
     result = runner.invoke(app, ["train", config_path, "--yes"], env=TEST_ENV)
 
@@ -282,6 +303,7 @@ def test_train_sft_forwards_toml_volume_to_payload(tmp_path: Path, monkeypatch) 
 def test_train_sft_volume_flag_overrides_toml(tmp_path: Path, monkeypatch) -> None:
     config_path = _write_config(tmp_path, _sft_config(volume="from-toml"))
     captured = _capture_post(monkeypatch)
+    _existing_volume(monkeypatch, "from-flag")
 
     result = runner.invoke(
         app, ["train", config_path, "--volume", "from-flag", "--yes"], env=TEST_ENV

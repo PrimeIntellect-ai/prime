@@ -30,13 +30,8 @@ def _session_dir(tmp_path, monkeypatch):
 @pytest.mark.parametrize(
     "flags,expected",
     [
-        ([], True),
-        (
-            [
-                "--read",
-            ],
-            True,
-        ),
+        ([], False),
+        (["--read"], True),
         (["--read-only"], True),
         (["--write"], False),
         (["--read-write"], False),
@@ -74,7 +69,7 @@ def test_shell_modes_and_shared_ssh_endpoint(tmp_path, monkeypatch, _session_dir
         app, ["volumes", "ssh", "data", *flags], env={"PRIME_DISABLE_VERSION_CHECK": "1"}
     )
     assert result.exit_code == 0, result.output
-    assert captured[0] == {"read_only": expected, "team_id": "t1"}
+    assert captured[0] == {"read_only": expected, "allow_writable": False, "team_id": "t1"}
     config = _session_dir / "config"
     # The CLI's own ssh: only the config file and the short alias.
     assert commands[0] == ["ssh", "-F", str(config), "host"]
@@ -124,10 +119,16 @@ def test_client_session_wire_contract():
 
     client = HostedTrainingClient(FakeAPI())
     assert not client.create_volume_session("data", read_only=False, team_id="t1").read_only
+    client.create_volume_session("data", read_only=True, allow_writable=True, team_id="t1")
     assert client.get_volume_session("data", "s1", team_id="t1").status == "RUNNING"
     client.stop_volume_session("data", "s1", team_id="t1")
     assert requests == [
         ("POST", "/training/volumes/data/sessions", {"readOnly": False, "teamId": "t1"}),
+        (
+            "POST",
+            "/training/volumes/data/sessions",
+            {"readOnly": True, "allowWritable": True, "teamId": "t1"},
+        ),
         ("GET", "/training/volumes/data/sessions/s1", {"teamId": "t1"}),
         ("DELETE", "/training/volumes/data/sessions/s1", {"teamId": "t1"}),
     ]
@@ -385,7 +386,7 @@ def test_get_rsync(monkeypatch, tmp_path, _session_dir):
     created, _, commands = _setup(monkeypatch, tmp_path, {"ssh", "rsync", "scp"})
     result = _run("get", "data", "/runs/a", "out")
     assert result.exit_code == 0, result.output
-    assert created == [{"read_only": True, "team_id": "t1"}]
+    assert created == [{"read_only": True, "allow_writable": True, "team_id": "t1"}]
     ssh_e = shlex.join(["ssh", "-F", str(_session_dir / "config")])
     assert commands == [
         [
@@ -406,9 +407,28 @@ def test_put_rsync(monkeypatch, tmp_path, _session_dir):
     created, _, commands = _setup(monkeypatch, tmp_path, {"ssh", "rsync"})
     result = _run("put", "data", "f.txt", "dir/")
     assert result.exit_code == 0, result.output
-    assert created == [{"read_only": False, "team_id": "t1"}]
+    assert created == [{"read_only": False, "allow_writable": False, "team_id": "t1"}]
     assert commands[0][-2:] == ["f.txt", "host:/volume/dir/"]
     assert commands[0][:5] == ["/bin/rsync", "-a", "-v", "--partial-dir=.rsync-partial", "-e"]
+
+
+def test_get_says_when_it_reuses_a_read_write_session(monkeypatch, tmp_path):
+    _setup(monkeypatch, tmp_path, {"ssh", "rsync"})
+    reused = SimpleNamespace(
+        id="s9",
+        status="RUNNING",
+        read_only=False,
+        error_message=None,
+        ssh_connection="u@host.tailnet.ts.net",
+    )
+    monkeypatch.setattr(
+        volumes,
+        "_client",
+        lambda: (SimpleNamespace(create_volume_session=lambda *a, **kw: reused), "t1"),
+    )
+    result = _run("get", "data", "x")
+    assert result.exit_code == 0, result.output
+    assert "Reusing session s9 (read-write)" in result.output
 
 
 @pytest.mark.parametrize("tools", [{"ssh", "rsync"}, {"ssh", "scp"}])

@@ -973,22 +973,19 @@ def _warn_legacy_full_finetune_type(cfg: Dict[str, Any], config_path: str) -> No
         )
 
 
-def _resolve_pr_ref(pr_number: int, *, output: str) -> str:
+def _resolve_pr_ref(pr_number: int) -> str:
     """`--pr N` -> the PR's head commit sha, via the public GitHub API.
 
     Resolved client-side so the run is pinned to the exact commit the user
-    saw, and so a fork PR fails here with an actionable message. Nothing
-    is printed in --output json mode (stdout must stay pure JSON)."""
+    saw, and so a fork or merged PR fails here with an actionable message.
+    The caller shows the sha in its pre-confirmation banner."""
     from ..api.training import resolve_pull_request_head
 
     try:
-        sha = resolve_pull_request_head(pr_number)
+        return resolve_pull_request_head(pr_number)
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
-    if output != "json":
-        console.print(f"[dim]Resolved PR #{pr_number} to {sha}[/dim]")
-    return sha
 
 
 def _dispatch_full_finetune_run(
@@ -1005,6 +1002,7 @@ def _dispatch_full_finetune_run(
     volume_size: Optional[str] = None,
     mode: Optional[str] = None,
     source_ref: Optional[str] = None,
+    source_pr: Optional[int] = None,
 ) -> None:
     """Hand off to /api/v1/training/runs (prime-rl on a registered
     PrimeCluster). Serves both dedicated run kinds: full-FT RL mega-TOMLs
@@ -1155,6 +1153,11 @@ def _dispatch_full_finetune_run(
         )
         raise typer.Exit(1)
     resolved_source_ref = source_ref or config_source_ref
+    if source_pr is not None:
+        # Resolved here, after the local checks above, so a run that would
+        # fail on a bad secret, image tag or volume never pays the GitHub
+        # round trip (and never burns anonymous API quota).
+        resolved_source_ref = _resolve_pr_ref(source_pr)
 
     # Same deprecation pass as the LoRA path. In the prime-rl-native shape
     # the deprecated keys live one level down, under `[orchestrator]` — and
@@ -1212,7 +1215,8 @@ def _dispatch_full_finetune_run(
         console.print("[bold]prime-rl build[/bold]")
         console.print(f"  Image tag: {resolved_image_tag or '(platform default)'}")
         if resolved_source_ref:
-            console.print(f"  Source ref: {resolved_source_ref}")
+            via_pr = f" (PR #{source_pr})" if source_pr is not None else ""
+            console.print(f"  Source ref: {resolved_source_ref}{via_pr}")
         console.print()
 
     # `--output json` is a formatting switch: still dispatch the run,
@@ -1656,9 +1660,6 @@ def create_run(
         return
     if _is_full_finetune(raw_cfg, flag=full_finetune):
         _validate_full_finetune_deployment(raw_cfg, config_path)
-        source_ref = ref
-        if pr is not None:
-            source_ref = _resolve_pr_ref(pr, output=output)
         _dispatch_full_finetune_run(
             raw_cfg=raw_cfg,
             config_path=config_path,
@@ -1670,7 +1671,8 @@ def create_run(
             gpu_type=gpu_type,
             volume=volume,
             volume_size=volume_size,
-            source_ref=source_ref,
+            source_ref=ref,
+            source_pr=pr,
         )
         return
 

@@ -519,12 +519,31 @@ def test_train_pr_flag_resolves_head_sha_and_conflicts_with_ref(
     # --output json must stay pure JSON: no "Resolved PR" line on stdout.
     assert json.loads(result.output)["run"]["sourceRef"] == sha
 
+    # Table mode shows the resolved sha once, in the build banner, with the
+    # PR it came from.
+    result = runner.invoke(app, ["train", str(cfg), "--pr", "42", "-y"], env=TEST_ENV)
+    assert result.exit_code == 0, result.output
+    assert f"Source ref: {sha} (PR #42)" in result.output
+    assert result.output.count(sha) == 1
+
+    # A run that fails a local check never reaches GitHub.
+    def never(pr_number: int) -> str:
+        raise AssertionError("resolved a PR for a dispatch that fails locally")
+
+    monkeypatch.setattr("prime_cli.api.training.resolve_pull_request_head", never)
+    result = runner.invoke(
+        app, ["train", str(cfg), "--pr", "42", "-e", "FOO=bar", "-y"], env=TEST_ENV
+    )
+    assert result.exit_code == 1
+    assert "secret(s): FOO" in result.output
+    monkeypatch.setattr("prime_cli.api.training.resolve_pull_request_head", fake_resolve)
+
     result = runner.invoke(
         app, ["train", str(cfg), "--pr", "42", "--ref", "main", "-y"], env=TEST_ENV
     )
     assert result.exit_code == 1
     assert "mutually exclusive" in result.output
-    assert len(captured) == 1
+    assert len(captured) == 2  # the json + table dispatches above, nothing since
 
 
 def test_train_ref_is_rejected_on_the_lora_path(monkeypatch, tmp_path: Path) -> None:

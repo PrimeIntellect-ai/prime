@@ -8,7 +8,12 @@ import typer
 from rich.markup import escape
 
 from prime_cli.core import Config
-from prime_cli.core.config import LOCAL_CONTEXT_FILE, read_local_context, write_local_context
+from prime_cli.core.config import (
+    LOCAL_CONTEXT_FILE,
+    find_local_context_file,
+    read_local_context,
+    write_local_context,
+)
 
 from .plain import get_console
 
@@ -32,8 +37,10 @@ def require_loadable_config(notice: bool = False) -> None:
     With ``notice``, also say on stderr when a directory context changes the
     account, since pins can arrive with a cloned repository.
     """
-    if os.environ.get("PRIME_CONTEXT"):
-        return  # replaces the directory context and was validated already
+    if os.environ.get("PRIME_CONTEXT") or find_local_context_file() is None:
+        # Nothing to check: without a pin every command behaves as before, even
+        # --help with an unwritable or corrupt ~/.prime.
+        return
     try:
         message = Config().local_context_notice()
     except (ValueError, TypeError, AttributeError) as e:

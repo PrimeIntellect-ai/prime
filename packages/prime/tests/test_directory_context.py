@@ -360,3 +360,8 @@ def test_cli_notice_when_a_pin_changes_the_account(
     output = _invoke("switch", "acme", **env).output.replace("\n", "")
 
     assert (shown in output) if shown else ("pinned by" not in output)
+
+
+def test_cli_without_a_pin_does_not_need_a_loadable_config(home: Path) -> None:
+    (home / ".prime" / "config.json").write_text("{corrupt")
+    assert _invoke("sandbox", "--help").exit_code == 0

@@ -661,8 +661,33 @@ def test_resolve_pull_request_head_error_mapping(monkeypatch) -> None:
         (429, {}, {}, r"rate limit.*GITHUB_TOKEN"),
         (403, {"x-ratelimit-remaining": "0"}, {}, r"rate limit"),
         (403, {"retry-after": "60"}, {}, r"rate limit"),
+        # A secondary limit may carry neither header (GitHub documents both
+        # as optional); the error body is then the only signal.
+        (
+            403,
+            {"x-ratelimit-remaining": "57"},
+            {"message": "You have exceeded a secondary rate limit. Please wait a few minutes."},
+            r"rate limit",
+        ),
+        (
+            403,
+            {},
+            {"message": "You have triggered an abuse detection mechanism. Please wait."},
+            r"rate limit",
+        ),
+        (
+            403,
+            {},
+            {
+                "message": "Forbidden",
+                "documentation_url": "https://docs.github.com/rest/overview/"
+                "rate-limits-for-the-rest-api#about-secondary-rate-limits",
+            },
+            r"rate limit",
+        ),
         # A 403 that isn't a quota is a refusal, reported with GitHub's reason.
         (403, {}, {"message": "Resource protected by organization SAML"}, r"refused.*SAML"),
+        (403, {}, "not an object", r"refused"),
         (500, {}, {}, r"HTTP 500"),
         (200, {}, {"nope": True}, r"Unexpected GitHub response"),
         (200, {}, _pull_body(sha=""), r"no head commit sha"),

@@ -247,13 +247,42 @@ class HostedTrainingClient:
             raise APIError(f"Failed to parse available FFT models response: {exc}") from exc
 
 
+def _github_error_body(resp: httpx.Response) -> Dict[str, str]:
+    """The string fields of a GitHub error body (`message`,
+    `documentation_url`), or {} when the body isn't a JSON object."""
+    try:
+        body = resp.json()
+    except ValueError:
+        return {}
+    if not isinstance(body, dict):
+        return {}
+    return {k: v for k, v in body.items() if isinstance(k, str) and isinstance(v, str)}
+
+
 def _github_message(resp: httpx.Response) -> str:
     """`: <message>` from a GitHub error body, or "" when there is none."""
-    try:
-        message = resp.json().get("message")
-    except ValueError:
-        return ""
-    return f": {message}" if isinstance(message, str) and message else ""
+    message = _github_error_body(resp).get("message")
+    return f": {message}" if message else ""
+
+
+def _github_rate_limited(resp: httpx.Response) -> bool:
+    """Whether a 403 / 429 from GitHub is a quota, not a refusal.
+
+    A primary limit sets x-ratelimit-remaining: 0 and a secondary limit
+    usually sets retry-after, but GitHub documents both headers as optional
+    on a secondary limit; the one guaranteed signal there is the error
+    message ("You have exceeded a secondary rate limit", or the older "abuse
+    detection mechanism"), so fall back to the body. Any other 403 (SSO
+    enforcement, a bad token) is a refusal and must not be reported as
+    "retry later".
+    """
+    if resp.status_code == 429:
+        return True
+    if resp.headers.get("x-ratelimit-remaining") == "0" or "retry-after" in resp.headers:
+        return True
+    body = _github_error_body(resp)
+    text = f"{body.get('message', '')} {body.get('documentation_url', '')}".lower()
+    return "rate limit" in text or "rate-limit" in text or "abuse detection" in text
 
 
 def resolve_pull_request_head(pr_number: int) -> str:
@@ -283,14 +312,7 @@ def resolve_pull_request_head(pr_number: int) -> str:
     if resp.status_code == 404:
         raise APIError(f"PR #{pr_number} not found in {PRIME_RL_GITHUB_REPO}.")
     if resp.status_code in (403, 429):
-        # GitHub signals both quota kinds on 403: primary with
-        # x-ratelimit-remaining: 0, secondary with retry-after. Any other
-        # 403 is a refusal (SSO, abuse detection, a bad token) and must not
-        # be reported as "retry later".
-        rate_limited = resp.status_code == 429 or (
-            resp.headers.get("x-ratelimit-remaining") == "0" or "retry-after" in resp.headers
-        )
-        if rate_limited:
+        if _github_rate_limited(resp):
             hint = "" if token else " (set GITHUB_TOKEN to lift the anonymous limit)"
             raise APIError(
                 f"GitHub API rate limit hit while resolving PR #{pr_number}; retry "

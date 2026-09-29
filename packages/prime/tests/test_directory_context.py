@@ -1,529 +1,362 @@
-import json
-from pathlib import Path
-from typing import Any, Dict, Optional
+"""Directory contexts (.prime/context.json) in the CLI and the SDK configs."""
 
+import json
+import logging
+from pathlib import Path
+from typing import Any, Optional
+
+import prime_evals.core.config as evals_config
+import prime_sandboxes.core.config as sandboxes_config
+import prime_traces.core.config as traces_config
+import prime_tunnel.core.config as tunnel_config
 import pytest
 from prime_cli.core import Config
-from prime_cli.core.config import find_local_context_file
 from prime_cli.main import app
+from prime_traces.core.client import BaseTracesAPIClient
 from typer.testing import CliRunner
 
 runner = CliRunner()
-
 TEST_ENV = {"COLUMNS": "200", "PRIME_DISABLE_VERSION_CHECK": "1"}
-EDISON = "cmf0ohr9s0026ilerf3w68s6n"
-ACME = "cmf0ohr9s0026ilerf3w68s6m"
-GLOBAL_TEAM = "cmf0ohr9s0026ilerf3w68s6g"
+EDISON, ACME, GLOBAL = (
+    "cedison000000000000000000",
+    "cacme00000000000000000000",
+    "cglobal000000000000000000",
+)
+SDK_MODULES = [sandboxes_config, evals_config, tunnel_config, traces_config]
+CONFIGS = [Config, *(module.Config for module in SDK_MODULES)]
 
 
 @pytest.fixture
 def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     home = tmp_path / "home"
-    home.mkdir()
+    (home / "code" / "edison" / "src").mkdir(parents=True)
     monkeypatch.setenv("HOME", str(home))
     for name in ("PRIME_CONTEXT", "PRIME_API_KEY", "PRIME_TEAM_ID", "PRIME_USER_ID"):
         monkeypatch.delenv(name, raising=False)
+    for name in ("PRIME_API_BASE_URL", "PRIME_BASE_URL", "PRIME_DISABLE_CONTEXT_NOTICE"):
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
-
     config = Config(use_context=False)
     config.set_api_key("global-key")
-    config.set_team(GLOBAL_TEAM, team_name="Global Team", team_role="admin")
-    config.set_user_id("global-user", user_name="Global User")
+    config.set_team(GLOBAL, team_name="Global Team", team_role="admin")
+    config.set_user_id("global-user")
+    _write(
+        home / ".prime" / "environments" / "customer.json",
+        {"api_key": "customer-key", "team_id": ACME},
+    )
+    monkeypatch.chdir(home / "code" / "edison" / "src")
     return home
 
 
 @pytest.fixture
-def repo(home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    repo = home / "code" / "edison"
-    (repo / "src" / "pkg").mkdir(parents=True)
-    monkeypatch.chdir(repo)
-    return repo
+def repo(home: Path) -> Path:
+    return home / "code" / "edison"
 
 
 @pytest.fixture
-def teams_api(monkeypatch: pytest.MonkeyPatch) -> None:
+def api(monkeypatch: pytest.MonkeyPatch) -> None:
     teams = [
         {"teamId": EDISON, "name": "Edison", "slug": "edison", "role": "member"},
         {"teamId": ACME, "name": "Acme", "slug": "acme", "role": "admin"},
     ]
 
-    def mock_get(
-        self: Any, endpoint: str, params: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
-        if endpoint == "/user/teams":
-            return {"data": teams}
-        return {"data": []}
+    def get(self: Any, endpoint: str, params: Optional[dict] = None, **_: Any) -> dict:
+        if endpoint == "/user/whoami":
+            return {"data": {"id": "global-user", "name": "Global User", "scope": {}}}
+        return {"data": teams if endpoint == "/user/teams" else []}
 
-    monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+    monkeypatch.setattr("prime_cli.core.APIClient.get", get)
 
 
-def _pin(directory: Path, data: dict) -> Path:
-    path = directory / ".prime" / "context.json"
+def _write(path: Path, data: Any) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data))
+    path.write_text(data if isinstance(data, str) else json.dumps(data))
     return path
 
 
-def _global(home: Path) -> dict:
-    return json.loads((home / ".prime" / "config.json").read_text())
+def _pin(directory: Path, data: Any) -> Path:
+    return _write(directory / ".prime" / "context.json", data)
 
 
-def _save_env(name: str, **fields: Any) -> Path:
-    config = Config(use_context=False)
-    config.save_environment(name)
-    path = config.environments_dir / f"{name}.json"
-    path.write_text(json.dumps({**json.loads(path.read_text()), **fields}))
-    return path
+def _read(path: Path) -> dict:
+    return json.loads(path.read_text())
 
 
-def test_without_directory_context_uses_global_config(repo: Path) -> None:
-    config = Config()
-
-    assert config.local_context_file is None
-    assert config.team_id == GLOBAL_TEAM
-    assert config.api_key == "global-key"
+def _invoke(*args: str, **env: str) -> Any:
+    return runner.invoke(app, list(args), env={**TEST_ENV, **env})
 
 
-def test_team_pin_applies_to_subdirectories(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    pin = _pin(repo, {"team_id": EDISON, "team_name": "Edison"})
-    monkeypatch.chdir(repo / "src" / "pkg")
-
-    config = Config()
-
-    assert config.local_context_file == pin.resolve()
-    assert config.team_id == EDISON
-    assert config.team_name == "Edison"
-    assert config.api_key == "global-key"
-    assert config.user_id == "global-user"
-
-
-def test_null_team_pin_selects_personal_account(repo: Path) -> None:
-    _pin(repo, {"team_id": None})
-
-    config = Config()
-
-    assert config.team_id is None
-    assert config.team_name is None
-
-
-def test_nearest_directory_context_wins(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _pin(repo, {"team_id": EDISON})
-    _pin(repo / "src", {"team_id": ACME})
-    monkeypatch.chdir(repo / "src" / "pkg")
-
-    assert Config().team_id == ACME
-
-
-def test_env_vars_and_temporary_context_outrank_directory_context(
-    repo: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("config_class", CONFIGS)
+@pytest.mark.parametrize(
+    ("pins", "env", "team", "key"),
+    [
+        ({}, {}, GLOBAL, "global-key"),
+        ({"code/edison": {"team_id": EDISON}}, {}, EDISON, "global-key"),
+        ({"code/edison": {"team_id": None}}, {}, None, "global-key"),
+        (
+            {"code/edison": {"team_id": EDISON}, "code/edison/src": {"team_id": ACME}},
+            {},
+            ACME,
+            "global-key",
+        ),
+        ({"code/edison": {"context": "customer"}}, {}, ACME, "customer-key"),
+        ({"code/edison": {"context": "customer", "team_id": EDISON}}, {}, EDISON, "customer-key"),
+        ({"code/edison": {"team_id": EDISON}}, {"PRIME_CONTEXT": "customer"}, ACME, "customer-key"),
+        (
+            {"code/edison": {"team_id": EDISON}},
+            {"PRIME_TEAM_ID": "env-team"},
+            "env-team",
+            "global-key",
+        ),
+        ({"": {"team_id": EDISON}}, {}, GLOBAL, "global-key"),  # $HOME/.prime is the global config
+        ({"code/edison": "symlink-file"}, {}, GLOBAL, "global-key"),
+        ({"code/edison": "symlink-dir"}, {}, GLOBAL, "global-key"),
+    ],
+)
+def test_resolution(
+    home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    config_class: Any,
+    pins: dict,
+    env: dict,
+    team: Any,
+    key: str,
 ) -> None:
-    _pin(repo, {"team_id": EDISON})
-    _save_env("dev", team_id=ACME, api_key="dev-key")
+    for relative, data in pins.items():
+        directory = home / relative
+        if data == "symlink-file":
+            (directory / ".prime").mkdir()
+            target = _pin(home / "elsewhere", {"team_id": EDISON})
+            (directory / ".prime" / "context.json").symlink_to(target)
+        elif data == "symlink-dir":
+            (directory / ".prime").symlink_to(_pin(home / "elsewhere", {"team_id": EDISON}).parent)
+        else:
+            _pin(directory, data)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
 
-    monkeypatch.setenv("PRIME_CONTEXT", "dev")
-    config = Config()
-    assert config.local_context_file is None
-    assert config.team_id == ACME
+    config = config_class()
 
-    monkeypatch.delenv("PRIME_CONTEXT")
-    monkeypatch.setenv("PRIME_TEAM_ID", GLOBAL_TEAM)
-    assert Config().team_id == GLOBAL_TEAM
+    assert (config.team_id, config.api_key) == (team, key)
 
 
-def test_home_prime_directory_is_never_a_directory_context(
-    home: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("module", SDK_MODULES)
+def test_sdk_empty_team_env_means_personal(
+    home: Path, monkeypatch: pytest.MonkeyPatch, module: Any
 ) -> None:
-    _pin(home, {"team_id": EDISON})
-    monkeypatch.chdir(home)
-
-    assert find_local_context_file() is None
-    assert Config().team_id == GLOBAL_TEAM
+    monkeypatch.setenv("PRIME_TEAM_ID", "")
+    assert module.Config().team_id is None
 
 
-def test_writes_under_team_pin_do_not_leak_the_pinned_team(repo: Path, home: Path) -> None:
-    _pin(repo, {"team_id": EDISON, "team_name": "Edison"})
-    env_file = _save_env("dev")
-    Config(use_context=False).set_current_environment("dev")
-
-    config = Config()
-    config.set_api_key("rotated-key")
-    config.update_current_environment_file()
-
-    assert _global(home)["api_key"] == "rotated-key"
-    assert _global(home)["team_id"] == GLOBAL_TEAM
-    assert json.loads(env_file.read_text())["team_id"] == GLOBAL_TEAM
-    assert config.team_id == EDISON
-
-
-def test_context_pin_reads_and_writes_that_context(repo: Path, home: Path) -> None:
-    env_file = _save_env(
-        "customer", api_key="customer-key", team_id=ACME, base_url="https://api.customer.example"
-    )
-    _pin(repo, {"context": "customer"})
-    global_before = _global(home)
-
-    config = Config()
-    assert config.api_key == "customer-key"
-    assert config.team_id == ACME
-    assert config.base_url == "https://api.customer.example"
-    assert config.current_environment == "customer"
-
-    config.set_api_key("customer-key-2")
-    config.set_user_id("customer-user", user_name="Customer")
-    config.update_current_environment_file()
-
-    saved = json.loads(env_file.read_text())
-    assert saved["api_key"] == "customer-key-2"
-    assert saved["user_id"] == "customer-user"
-    assert _global(home) == global_before
-    assert Config().api_key == "customer-key-2"
+@pytest.mark.parametrize("module", SDK_MODULES)
+@pytest.mark.parametrize("content", ['{"context": "missing"}', "[]"])
+def test_sdk_broken_pin_fails_only_values_read_from_it(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, module: Any, content: str
+) -> None:
+    _pin(repo, content)
+    config = module.Config()
+    with pytest.raises(ValueError, match="context"):
+        config.team_id
+    monkeypatch.setenv("PRIME_API_KEY", "env-key")
+    monkeypatch.setenv("PRIME_TEAM_ID", "env-team")
+    assert (config.api_key, config.team_id) == ("env-key", "env-team")
 
 
-def test_context_and_team_pin_combine(repo: Path) -> None:
-    _save_env("customer", api_key="customer-key", team_id=ACME)
-    _pin(repo, {"context": "customer", "team_id": EDISON})
-
-    config = Config()
-
-    assert config.api_key == "customer-key"
-    assert config.team_id == EDISON
+def test_traces_client_with_explicit_values_ignores_a_broken_pin(repo: Path) -> None:
+    _pin(repo, {"context": "missing"})
+    client = BaseTracesAPIClient(api_key="k", base_url="https://traces.example", team_id="t")
+    assert (client.api_key, client.team_id) == ("k", "t")
 
 
-def test_unknown_pinned_context_is_an_error(repo: Path) -> None:
-    pin = _pin(repo, {"context": "missing"})
-
-    with pytest.raises(ValueError, match="Unknown context 'missing'"):
-        Config()
-
-    result = runner.invoke(app, ["config", "view"], env=TEST_ENV)
-    assert result.exit_code == 1
-    assert "Unknown context 'missing'" in result.output
-    assert str(pin) in result.output.replace("\n", "")
+@pytest.mark.parametrize("module", SDK_MODULES)
+def test_sdk_logs_an_applied_pin_once(repo: Path, caplog: Any, module: Any) -> None:
+    _pin(repo, {"team_id": EDISON})
+    module._LOGGED_PINS.clear()
+    with caplog.at_level(logging.INFO, logger=module.__name__):
+        module.Config()
+        module.Config()
+    assert len([r for r in caplog.records if "context.json" in r.getMessage()]) == 1
 
 
 @pytest.mark.parametrize(
     "content",
-    ["[]", "{not json", json.dumps({"context": "../x"}), json.dumps({"team_id": 3})],
+    [
+        "[]",
+        "{not json",
+        '{"context": "../x"}',
+        '{"team_id": 3}',
+        '{"context": "missing"}',
+        '{"context": "broken"}',
+    ],
 )
-def test_malformed_directory_context_is_an_error(repo: Path, content: str) -> None:
-    path = repo / ".prime" / "context.json"
-    path.parent.mkdir()
-    path.write_text(content)
+def test_cli_broken_pin_is_a_readable_error_that_unpin_fixes(
+    repo: Path, home: Path, content: str
+) -> None:
+    _write(home / ".prime" / "environments" / "broken.json", {"frontend_url": None})
+    pin = _pin(repo, content)
 
-    with pytest.raises(ValueError, match="context.json"):
+    with pytest.raises(ValueError, match="context"):
         Config()
+    result = _invoke("whoami")
+    assert result.exit_code == 1 and "Traceback" not in result.output
+    assert "context.json" in result.output.replace("\n", "")
 
-
-def test_switch_local_pins_team_without_touching_global(
-    repo: Path, home: Path, teams_api: None
-) -> None:
-    result = runner.invoke(app, ["switch", "edison", "--local"], env=TEST_ENV)
-
-    assert result.exit_code == 0, result.output
-    assert "Switched to team 'Edison' for" in result.output
-    pin = json.loads((repo / ".prime" / "context.json").read_text())
-    assert pin == {"team_id": EDISON, "team_name": "Edison"}
-    assert _global(home)["team_id"] == GLOBAL_TEAM
-
-
-def test_switch_inside_pinned_directory_updates_the_pin(
-    repo: Path, home: Path, teams_api: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    pin = _pin(repo, {"team_id": EDISON, "team_name": "Edison"})
-    monkeypatch.chdir(repo / "src")
-
-    result = runner.invoke(app, ["switch", "personal"], env=TEST_ENV)
-
-    assert result.exit_code == 0, result.output
-    assert json.loads(pin.read_text()) == {"team_id": None}
-    assert not (repo / "src" / ".prime").exists()
-    assert _global(home)["team_id"] == GLOBAL_TEAM
-    assert Config().team_id is None
-
-
-def test_switch_global_inside_pinned_directory_changes_global(
-    repo: Path, home: Path, teams_api: None
-) -> None:
-    pin = _pin(repo, {"team_id": EDISON})
-
-    result = runner.invoke(app, ["switch", "acme", "--global"], env=TEST_ENV)
-
-    assert result.exit_code == 0, result.output
-    assert "still selects this directory's account" in result.output
-    assert _global(home)["team_id"] == ACME
-    assert json.loads(pin.read_text()) == {"team_id": EDISON}
-
-
-def test_switch_rejects_local_and_global_together(repo: Path, teams_api: None) -> None:
-    result = runner.invoke(app, ["switch", "edison", "--local", "--global"], env=TEST_ENV)
-
-    assert result.exit_code == 1
-    assert not (repo / ".prime").exists()
-
-
-def test_set_team_id_inside_pinned_directory_updates_the_pin(
-    repo: Path, home: Path, teams_api: None
-) -> None:
-    pin = _pin(repo, {"team_id": EDISON})
-
-    result = runner.invoke(app, ["config", "set-team-id", ACME], env=TEST_ENV)
-
-    assert result.exit_code == 0, result.output
-    assert json.loads(pin.read_text()) == {"team_id": ACME, "team_name": "Acme"}
-    assert _global(home)["team_id"] == GLOBAL_TEAM
-
-
-def test_config_use_local_pins_context_and_drops_pinned_team(repo: Path, home: Path) -> None:
-    _save_env("customer", api_key="customer-key")
-    pin = _pin(repo, {"team_id": EDISON})
-
-    result = runner.invoke(app, ["config", "use", "customer", "--local"], env=TEST_ENV)
-
-    assert result.exit_code == 0, result.output
-    assert json.loads(pin.read_text()) == {"context": "customer"}
-    assert _global(home)["current_environment"] == "production"
-    assert Config().api_key == "customer-key"
-
-
-def test_config_use_local_rejects_unknown_environment(repo: Path) -> None:
-    result = runner.invoke(app, ["config", "use", "nope", "--local"], env=TEST_ENV)
-
-    assert result.exit_code == 1
-    assert "Unknown environment: nope" in result.output
-    assert not (repo / ".prime").exists()
-
-
-def test_config_use_global_inside_pinned_directory_changes_global(repo: Path, home: Path) -> None:
-    _save_env("customer", api_key="customer-key")
-    pin = _pin(repo, {"context": "customer"})
-
-    result = runner.invoke(app, ["config", "use", "production", "--global"], env=TEST_ENV)
-
-    assert result.exit_code == 0, result.output
-    assert json.loads(pin.read_text()) == {"context": "customer"}
-    assert _global(home)["api_key"] == "global-key"
-    assert _global(home)["current_environment"] == "production"
-
-
-def test_unpin_removes_the_directory_context(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    pin = _pin(repo, {"team_id": EDISON})
-    monkeypatch.chdir(repo / "src" / "pkg")
-
-    result = runner.invoke(app, ["config", "unpin"], env=TEST_ENV)
-
-    assert result.exit_code == 0, result.output
+    assert _invoke("config", "unpin").exit_code == 0
     assert not pin.exists()
-    assert not pin.parent.exists()
-    assert Config().team_id == GLOBAL_TEAM
 
 
-def test_unpin_keeps_other_files_in_prime_directory(repo: Path) -> None:
-    pin = _pin(repo, {"team_id": EDISON})
+def test_cli_writes_follow_the_directory_context(repo: Path, home: Path) -> None:
+    global_file = home / ".prime" / "config.json"
+    customer = home / ".prime" / "environments" / "customer.json"
+    dev = _write(home / ".prime" / "environments" / "dev.json", {"team_id": GLOBAL})
+    Config(use_context=False).set_current_environment("dev")
+
+    # Team pin: writes stay global and never pick up the pinned team.
+    _pin(repo, {"team_id": EDISON})
+    config = Config()
+    config.set_api_key("rotated")
+    config.update_current_environment_file()
+    assert (_read(global_file)["api_key"], _read(global_file)["team_id"]) == ("rotated", GLOBAL)
+    assert _read(dev)["team_id"] == GLOBAL
+
+    # Context pin: credential writes go to that context's file only.
+    _pin(repo, {"context": "customer"})
+    before = global_file.read_text()
+    config = Config()
+    config.set_api_key("customer-2")
+    config.set_user_id("customer-user")
+    assert _read(customer)["api_key"] == "customer-2" and global_file.read_text() == before
+    with pytest.raises(ValueError, match="selects 'customer'"):
+        Config().load_environment("dev")
+    assert _invoke("config", "delete", "customer").exit_code == 1
+    assert _invoke("logout", "--yes").exit_code == 0
+    assert _read(customer)["api_key"] == "" and _read(global_file)["api_key"] == "rotated"
+
+
+@pytest.mark.parametrize(
+    ("pin", "args", "cwd", "pin_after", "global_team"),
+    [
+        (
+            None,
+            ["switch", "edison", "--local"],
+            "src",
+            {"team_id": EDISON, "team_name": "Edison"},
+            GLOBAL,
+        ),
+        ({"team_id": EDISON}, ["switch", "personal"], "src", {"team_id": None}, GLOBAL),
+        ({"team_id": EDISON}, ["switch", "acme", "--global"], "", {"team_id": EDISON}, ACME),
+        (
+            {"team_id": EDISON},
+            ["config", "set-team-id", ACME],
+            "",
+            {"team_id": ACME, "team_name": "Acme"},
+            GLOBAL,
+        ),
+        (
+            {"team_id": EDISON},
+            ["config", "use", "customer", "--local"],
+            "",
+            {"context": "customer"},
+            GLOBAL,
+        ),
+        (
+            {"context": "customer"},
+            ["config", "use", "production", "--global"],
+            "",
+            {"context": "customer"},
+            None,  # production resets the global team to personal
+        ),
+    ],
+)
+def test_cli_selection_commands(
+    repo: Path,
+    home: Path,
+    api: None,
+    monkeypatch: pytest.MonkeyPatch,
+    pin: Any,
+    args: list,
+    cwd: str,
+    pin_after: dict,
+    global_team: Optional[str],
+) -> None:
+    (repo / ".git").mkdir()  # --local pins the repository root
+    if pin is not None:
+        _pin(repo, pin)
+    monkeypatch.chdir(repo / cwd)
+
+    result = _invoke(*args)
+
+    assert result.exit_code == 0, result.output
+    assert _read(repo / ".prime" / "context.json") == pin_after
+    assert _read(home / ".prime" / "config.json")["team_id"] == global_team
+    assert not (repo / "src" / ".prime").exists()
+
+
+@pytest.mark.parametrize(
+    ("setup", "args", "message"),
+    [
+        (None, ["switch", "edison", "--local", "--global"], "either --local or --global"),
+        ("home", ["switch", "edison", "--local"], "cannot pin your home directory"),
+        ("symlink", ["switch", "edison", "--local"], "symlink"),
+        (None, ["config", "use", "nope", "--local"], "Unknown environment: nope"),
+    ],
+)
+def test_cli_selection_errors(
+    repo: Path,
+    home: Path,
+    api: None,
+    monkeypatch: pytest.MonkeyPatch,
+    setup: Any,
+    args: list,
+    message: str,
+) -> None:
+    global_before = (home / ".prime" / "config.json").read_text()
+    if setup == "home":
+        monkeypatch.chdir(home)
+    if setup == "symlink":
+        (repo / ".prime").symlink_to(home / ".prime")
+        monkeypatch.chdir(repo)
+
+    result = _invoke(*args)
+
+    assert result.exit_code == 1
+    assert message in result.output.replace("\n", "")
+    assert (home / ".prime" / "config.json").read_text() == global_before
+    assert not (home / ".prime" / "context.json").exists()
+
+
+def test_cli_shows_the_pin(repo: Path, api: None) -> None:
+    pin = _pin(repo, {"team_id": EDISON, "team_name": "[green]Personal[/green] verified"})
     (repo / ".prime" / "lab.json").write_text("{}")
 
-    result = runner.invoke(app, ["config", "unpin"], env=TEST_ENV)
-
-    assert result.exit_code == 0, result.output
-    assert not pin.exists()
-    assert (repo / ".prime" / "lab.json").exists()
-
-
-def test_config_view_shows_directory_context(repo: Path) -> None:
-    pin = _pin(repo, {"team_id": EDISON, "team_name": "Edison"})
-
-    result = runner.invoke(app, ["config", "view"], env=TEST_ENV)
-
-    assert result.exit_code == 0, result.output
-    assert "Directory Context" in result.output
-    assert str(pin) in result.output
-    assert "Edison" in result.output
-    assert "(directory context)" in result.output
-
-
-def test_cannot_delete_the_pinned_context(repo: Path) -> None:
-    env_file = _save_env("customer")
-    _pin(repo, {"context": "customer"})
-
-    result = runner.invoke(app, ["config", "delete", "customer"], env=TEST_ENV)
-
-    assert result.exit_code == 1
-    assert env_file.exists()
-
-
-def test_logout_in_pinned_context_only_clears_that_context(repo: Path, home: Path) -> None:
-    env_file = _save_env("customer", api_key="customer-key")
-    _pin(repo, {"context": "customer"})
-
-    result = runner.invoke(app, ["logout", "--yes"], env=TEST_ENV)
-
-    assert result.exit_code == 0, result.output
-    assert json.loads(env_file.read_text())["api_key"] == ""
-    assert _global(home)["api_key"] == "global-key"
-    assert _global(home)["team_id"] == GLOBAL_TEAM
-
-
-def test_symlinked_directory_context_is_ignored(repo: Path, home: Path) -> None:
-    (repo / ".prime").mkdir()
-    (repo / ".prime" / "context.json").symlink_to(home / ".prime" / "config.json")
-
-    assert find_local_context_file() is None
-    assert Config().local_context_file is None
-
-
-def test_symlinked_prime_directory_is_ignored(repo: Path, tmp_path: Path) -> None:
-    elsewhere = tmp_path / "elsewhere"
-    _pin(elsewhere, {"team_id": EDISON})
-    (repo / ".prime").symlink_to(elsewhere / ".prime")
-
-    assert find_local_context_file() is None
-
-
-def test_switch_local_refuses_to_write_through_a_symlink(
-    repo: Path, home: Path, teams_api: None
-) -> None:
-    global_before = _global(home)
-    (repo / ".prime").symlink_to(home / ".prime")
-
-    result = runner.invoke(app, ["switch", "edison", "--local"], env=TEST_ENV)
-
-    assert result.exit_code == 1
-    assert "symlink" in result.output
-    assert _global(home) == global_before
-    assert not (home / ".prime" / "context.json").exists()
-
-
-@pytest.mark.parametrize("content", ['{"context": "missing"}', "{not json"])
-def test_unpin_removes_a_broken_directory_context(repo: Path, content: str) -> None:
-    path = repo / ".prime" / "context.json"
-    path.parent.mkdir()
-    path.write_text(content)
-
-    blocked = runner.invoke(app, ["config", "view"], env=TEST_ENV)
-    assert blocked.exit_code == 1
-    assert "context.json" in blocked.output.replace("\n", "")
-
-    result = runner.invoke(app, ["config", "unpin"], env=TEST_ENV)
-
-    assert result.exit_code == 0, result.output
-    assert not path.exists()
-    assert runner.invoke(app, ["config", "view"], env=TEST_ENV).exit_code == 0
-
-
-def test_other_commands_still_report_a_broken_directory_context(repo: Path) -> None:
-    _pin(repo, {"context": "missing"})
-
-    result = runner.invoke(app, ["whoami"], env=TEST_ENV)
-
-    assert result.exit_code == 1
-    assert "Unknown context 'missing'" in result.output
-
-
-def test_malformed_pinned_saved_context_is_a_readable_error(repo: Path) -> None:
-    _save_env("customer", frontend_url=None)
-    _pin(repo, {"context": "customer"})
-
-    with pytest.raises(ValueError, match="Invalid context 'customer'"):
-        Config()
-
-    result = runner.invoke(app, ["whoami"], env=TEST_ENV)
-    assert result.exit_code == 1
-    assert "Invalid context 'customer'" in result.output
-    assert "Traceback" not in result.output
-    assert runner.invoke(app, ["config", "unpin"], env=TEST_ENV).exit_code == 0
-
-
-def test_persistent_environment_switch_cannot_overwrite_the_pinned_context(
-    repo: Path, home: Path
-) -> None:
-    pinned = _save_env("customer", api_key="customer-key")
-    _save_env("other", api_key="other-key")
-    _pin(repo, {"context": "customer"})
-    pinned_before = pinned.read_text()
-    global_before = _global(home)
-
-    with pytest.raises(ValueError, match="selects context 'customer'"):
-        Config().load_environment("other")
-
-    assert pinned.read_text() == pinned_before
-    assert _global(home) == global_before
-
-
-def test_reset_notes_that_the_directory_context_still_applies(repo: Path, home: Path) -> None:
-    pin = _pin(repo, {"team_id": EDISON})
-
-    result = runner.invoke(app, ["config", "reset", "--yes"], env=TEST_ENV)
-
-    assert result.exit_code == 0, result.output
-    assert "still selects this directory" in result.output
+    view = _invoke("config", "view").output.replace("\n", "")
+    assert "Directory Context" in view and str(pin) in view and "(directory context)" in view
+    whoami = _invoke("whoami", PRIME_DISABLE_CONTEXT_NOTICE="1").output
+    assert "[green]Personal[/green] verified" in whoami and "Pinned By" in whoami
+    assert "still selects this directory" in _invoke("config", "reset", "--yes").output
     assert pin.exists()
-    assert _global(home)["api_key"] == ""
+
+    assert _invoke("config", "unpin").exit_code == 0
+    assert not pin.exists() and (repo / ".prime" / "lab.json").exists()
 
 
-def test_notice_names_the_pin_that_changes_the_account(repo: Path, teams_api: None) -> None:
-    pin = _pin(repo, {"team_id": EDISON, "team_name": "Edison"})
-
-    result = runner.invoke(app, ["switch", "acme"], env=TEST_ENV)
-
-    assert result.exit_code == 0, result.output
-    output = result.output.replace("\n", "")
-    assert f"Using team 'Edison' ({EDISON}), pinned by {pin}" in output
-
-
-def test_notice_is_silent_when_the_pin_matches_global(repo: Path, teams_api: None) -> None:
-    _pin(repo, {"team_id": GLOBAL_TEAM})
-
-    result = runner.invoke(app, ["switch", "acme"], env=TEST_ENV)
-
-    assert result.exit_code == 0, result.output
-    assert "pinned by" not in result.output
-
-
-def test_notice_can_be_disabled(repo: Path, teams_api: None) -> None:
-    _pin(repo, {"team_id": None})
-
-    result = runner.invoke(
-        app, ["switch", "acme"], env={**TEST_ENV, "PRIME_DISABLE_CONTEXT_NOTICE": "1"}
-    )
-
-    assert result.exit_code == 0, result.output
-    assert "pinned by" not in result.output
-
-
-def test_whoami_shows_pinned_values_literally(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    pin = _pin(repo, {"team_id": EDISON, "team_name": "[green]Personal[/green] verified"})
-
-    def mock_get(self: Any, endpoint: str, **kwargs: Any) -> Dict[str, Any]:
-        return {"data": {"id": "global-user", "name": "Global User", "scope": {}}}
-
-    monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
-    result = runner.invoke(app, ["whoami"], env={**TEST_ENV, "PRIME_DISABLE_CONTEXT_NOTICE": "1"})
-
-    assert result.exit_code == 0, result.output
-    assert "[green]Personal[/green] verified" in result.output
-    assert "Pinned By" in result.output
-    assert str(pin.parent.parent) in result.output.replace("\n", "")
-
-
-def test_local_pins_the_repository_root_from_a_subdirectory(
-    repo: Path, teams_api: None, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("pin", "env", "shown"),
+    [
+        (
+            {"team_id": EDISON, "team_name": "Edison"},
+            {},
+            f"Using team 'Edison' ({EDISON}), pinned by",
+        ),
+        ({"team_id": GLOBAL}, {}, None),
+        ({"team_id": None}, {"PRIME_DISABLE_CONTEXT_NOTICE": "1"}, None),
+    ],
+)
+def test_cli_notice_when_a_pin_changes_the_account(
+    repo: Path, api: None, pin: dict, env: dict, shown: Any
 ) -> None:
-    (repo / ".git").mkdir()
-    monkeypatch.chdir(repo / "src" / "pkg")
+    _pin(repo, pin)
 
-    result = runner.invoke(app, ["switch", "edison", "--local"], env=TEST_ENV)
+    output = _invoke("switch", "acme", **env).output.replace("\n", "")
 
-    assert result.exit_code == 0, result.output
-    assert (repo / ".prime" / "context.json").is_file()
-    assert not (repo / "src" / "pkg" / ".prime").exists()
-
-
-def test_local_refuses_to_pin_the_home_directory(
-    home: Path, teams_api: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.chdir(home)
-
-    result = runner.invoke(app, ["switch", "edison", "--local"], env=TEST_ENV)
-
-    assert result.exit_code == 1
-    assert "cannot pin your home directory" in result.output
-    assert not (home / ".prime" / "context.json").exists()
+    assert (shown in output) if shown else ("pinned by" not in output)

@@ -30,7 +30,7 @@ from .commands.wallet import WALLET_JSON_HELP, wallet_command
 from .commands.whoami import app as whoami_app
 from .core import Config
 from .utils import PlainTyper, get_console
-from .utils.context import print_local_context_notice, require_loadable_config
+from .utils.context import require_loadable_config
 from .utils.version_check import check_for_update
 
 app = PlainTyper(
@@ -132,9 +132,7 @@ def callback(
     elif ctx.invoked_subcommand != "config":
         # `prime config` runs this itself so that `config unpin` can remove a
         # broken directory context.
-        require_loadable_config()
-        if ctx.invoked_subcommand is not None:
-            print_local_context_notice()
+        require_loadable_config(notice=ctx.invoked_subcommand is not None)
 
     # Check for updates (only when a subcommand is being executed)
     if ctx.invoked_subcommand is not None:

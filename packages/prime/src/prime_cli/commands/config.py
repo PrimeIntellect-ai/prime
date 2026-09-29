@@ -11,7 +11,6 @@ from rich.text import Text
 from prime_cli.core import Config
 from prime_cli.core.config import (
     find_local_context_file,
-    read_local_context,
     write_local_context,
 )
 
@@ -19,7 +18,6 @@ from ..client import APIClient, APIError
 from ..utils import PlainTyper, get_console, require_persistent_context
 from ..utils.context import (
     apply_team,
-    describe_local_context,
     local_context_target,
     require_loadable_config,
 )
@@ -396,28 +394,18 @@ def _set_environment(env: str, local: bool = False, global_: bool = False) -> No
 
 def _pin_environment(config: Config, env: str, target: Path) -> None:
     """Select a saved environment for a directory via its context file."""
-    try:
-        known = {name.casefold(): name for name in config.list_environments()}
-        config._sanitize_environment_name(env)
-    except ValueError as e:
-        console.print(f"[red]Error: {escape(str(e))}[/red]")
-        raise typer.Exit(1)
+    known = {name.casefold(): name for name in config.list_environments()}
     if env.casefold() not in known:
         console.print(f"[red]Unknown environment: {escape(env)}[/red]")
         console.print("[yellow]Available environments:[/yellow]")
         for env_name in known.values():
             console.print(f"  - {escape(env_name)}")
         raise typer.Exit(1)
-
-    data = read_local_context(target) if target.is_file() else {}
-    data["context"] = known[env.casefold()]
-    # A pinned team belongs to the previous environment's account.
-    for key in ("team_id", "team_name", "team_role"):
-        data.pop(key, None)
-    write_local_context(target, data)
+    # Replaces any pinned team: it belongs to the previous environment's account.
+    write_local_context(target, {"context": known[env.casefold()]})
     console.print(
         f"[green]Using environment '{escape(known[env.casefold()])}' "
-        f"{describe_local_context(target)}.[/green]"
+        f"for {escape(str(target.parent.parent))}.[/green]"
     )
     console.print(
         "[dim]Commands and SDKs run in this directory now use it; "

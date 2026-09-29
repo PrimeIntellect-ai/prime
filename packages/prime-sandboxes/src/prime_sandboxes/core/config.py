@@ -8,19 +8,14 @@ from pathlib import Path
 from typing import Optional
 
 LOCAL_CONTEXT_FILE = Path(".prime") / "context.json"
+_CONTEXT_NAME = re.compile(r"[a-zA-Z0-9_-]+")
 _logger = logging.getLogger(__name__)
 _LOGGED_PINS: set = set()
-_CONTEXT_NAME = re.compile(r"[a-zA-Z0-9_-]+")
 
 
 def find_local_context_file() -> Optional[Path]:
-    """Nearest ``.prime/context.json`` at or above the working directory.
-
-    Written by ``prime switch --local`` / ``prime config use --local``. The walk
-    stops at the home directory, whose ``.prime`` is the global config directory,
-    and skips symlinks and files owned by another user. Mirrors the Prime CLI's
-    resolution.
-    """
+    """Nearest ``.prime/context.json`` at or above the cwd, as the Prime CLI finds it:
+    stops at ``$HOME``, skips symlinks and files owned by another user."""
     try:
         current = Path.cwd().resolve()
         home = Path.home().resolve()
@@ -32,8 +27,6 @@ def find_local_context_file() -> Optional[Path]:
             return None
         candidate = directory / LOCAL_CONTEXT_FILE
         try:
-            # A symlinked pin could point writes (e.g. `prime switch`) at another
-            # file such as ~/.prime/config.json, so only plain files count.
             if candidate.parent.is_symlink() or candidate.is_symlink():
                 continue
             if candidate.is_file() and (getuid is None or candidate.stat().st_uid == getuid()):
@@ -51,21 +44,17 @@ def _read_local_context(path: Path) -> dict:
     if not isinstance(data, dict):
         raise ValueError(f"Invalid {path}: expected a JSON object")
     context = data.get("context")
-    if context is not None and (
-        not isinstance(context, str) or _CONTEXT_NAME.fullmatch(context) is None
-    ):
+    if context is not None and not (isinstance(context, str) and _CONTEXT_NAME.fullmatch(context)):
         raise ValueError(f"Invalid {path}: bad context name {context!r}")
-    for key in ("team_id", "team_name", "team_role"):
-        if data.get(key) is not None and not isinstance(data[key], str):
-            raise ValueError(f"Invalid {path}: {key} must be a string or null")
+    if data.get("team_id") is not None and not isinstance(data["team_id"], str):
+        raise ValueError(f"Invalid {path}: team_id must be a string or null")
     return data
 
 
 class Config:
     """Minimal configuration class for SDK packages.
 
-    Reads ~/.prime/config.json, the context selected by PRIME_CONTEXT or the
-    nearest .prime/context.json, and environment variables (highest precedence).
+    Reads PRIME_* env vars > PRIME_CONTEXT > .prime/context.json > ~/.prime/config.json.
     This is a simplified version that doesn't write configs.
     """
 
@@ -82,15 +71,12 @@ class Config:
             self._load_context()
         except ValueError as e:
             if self.local_context_file is None:
-                raise  # an explicit PRIME_CONTEXT fails immediately
-            # A broken directory pin is raised on first read instead: a caller
-            # passing every value explicitly never reads the config, so it must
-            # not be taken down, while any value the pin would supply fails loudly.
+                raise  # a broken PRIME_CONTEXT fails immediately
+            # A broken pin fails on first read, so callers passing every value work.
             self._context_error = e
 
     @property
     def config(self) -> dict:
-        """Resolved config values; raises if the selected context is broken."""
         if self._context_error is not None:
             raise self._context_error
         return self._config
@@ -111,12 +97,8 @@ class Config:
             self.config = {}
 
     def _load_context(self) -> None:
-        """Overlay the context selected for this process or directory.
-
-        PRIME_CONTEXT (set by ``prime --context``) wins. Otherwise the nearest
-        ``.prime/context.json`` may select a saved context and/or pin a team
-        (``team_id`` present; null means the personal account).
-        """
+        """Overlay PRIME_CONTEXT, else the nearest .prime/context.json (a saved
+        context and/or ``team_id``, null meaning personal)."""
         context = os.getenv("PRIME_CONTEXT")
         local: dict = {}
         source = "PRIME_CONTEXT"
@@ -130,23 +112,10 @@ class Config:
         if context:
             self._apply_context(context, source)
         if "team_id" in local:
-            team_id = local.get("team_id") or None
-            self.config.update(
-                {
-                    "team_id": team_id,
-                    "team_name": local.get("team_name") if team_id else None,
-                    "team_role": local.get("team_role") if team_id else None,
-                }
-            )
-        if self.local_context_file is not None and self.local_context_file not in _LOGGED_PINS:
-            # Pins can arrive with a cloned repository, so say once which applies.
+            self.config.update(team_id=local["team_id"] or None, team_name=None, team_role=None)
+        if self.local_context_file and self.local_context_file not in _LOGGED_PINS:
             _LOGGED_PINS.add(self.local_context_file)
-            _logger.info(
-                "Using %s (context=%s, team_id=%s)",
-                self.local_context_file,
-                local.get("context"),
-                local.get("team_id"),
-            )
+            _logger.info("Using %s: %s", self.local_context_file, local)
 
     def _apply_context(self, context: str, source: str) -> None:
         if context.casefold() == "production":

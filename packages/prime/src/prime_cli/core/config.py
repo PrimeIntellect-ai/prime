@@ -9,33 +9,21 @@ from pydantic import BaseModel, ConfigDict
 
 LOCAL_CONTEXT_FILE = Path(".prime") / "context.json"
 _CONTEXT_NAME = re.compile(r"[a-zA-Z0-9_-]+")
-_TEAM_KEYS = ("team_id", "team_name", "team_role")
-# Keys a saved environment (context) file holds; writes to any other key always
-# go to the global config file.
+# Keys a saved environment file holds; other keys are always written globally.
 _ENVIRONMENT_KEYS = frozenset(
-    {
-        "api_key",
-        "team_id",
-        "team_name",
-        "team_role",
-        "user_id",
-        "user_name",
-        "base_url",
-        "frontend_url",
-        "inference_url",
-        "traces_url",
-    }
+    "api_key team_id team_name team_role user_id user_name "
+    "base_url frontend_url inference_url traces_url".split()
 )
 
 
-def find_local_context_file(start: Optional[Path] = None) -> Optional[Path]:
-    """Return the nearest ``.prime/context.json`` at or above ``start`` (default: cwd).
+def find_local_context_file() -> Optional[Path]:
+    """Nearest ``.prime/context.json`` at or above the cwd, stopping at ``$HOME``.
 
-    The walk stops at the home directory, whose ``.prime`` is the global config
-    directory, and skips symlinks and files owned by another user.
+    Symlinks (which could redirect writes, e.g. to ~/.prime/config.json) and
+    files owned by another user are skipped.
     """
     try:
-        current = (start or Path.cwd()).resolve()
+        current = Path.cwd().resolve()
         home = Path.home().resolve()
     except (OSError, RuntimeError):
         return None
@@ -45,8 +33,6 @@ def find_local_context_file(start: Optional[Path] = None) -> Optional[Path]:
             return None
         candidate = directory / LOCAL_CONTEXT_FILE
         try:
-            # A symlinked pin could point writes (e.g. `prime switch`) at another
-            # file such as ~/.prime/config.json, so only plain files count.
             if candidate.parent.is_symlink() or candidate.is_symlink():
                 continue
             if candidate.is_file() and (getuid is None or candidate.stat().st_uid == getuid()):
@@ -57,11 +43,8 @@ def find_local_context_file(start: Optional[Path] = None) -> Optional[Path]:
 
 
 def read_local_context(path: Path) -> dict:
-    """Parse and validate a directory context file.
-
-    It may select a saved ``context`` and/or pin a team (``team_id`` present,
-    ``null`` meaning the personal account). It never holds credentials or URLs.
-    """
+    """Parse a directory context file: an optional ``context`` name and/or
+    ``team_id`` (null: personal). It never holds credentials or URLs."""
     try:
         data = json.loads(path.read_text())
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
@@ -69,29 +52,27 @@ def read_local_context(path: Path) -> dict:
     if not isinstance(data, dict):
         raise ValueError(f"Invalid {path}: expected a JSON object")
     context = data.get("context")
-    if context is not None and (
-        not isinstance(context, str) or _CONTEXT_NAME.fullmatch(context) is None
-    ):
+    if context is not None and not (isinstance(context, str) and _CONTEXT_NAME.fullmatch(context)):
         raise ValueError(f"Invalid {path}: bad context name {context!r}")
-    for key in _TEAM_KEYS:
+    for key in ("team_id", "team_name"):
         if data.get(key) is not None and not isinstance(data[key], str):
             raise ValueError(f"Invalid {path}: {key} must be a string or null")
     return data
 
 
 def write_local_context(path: Path, data: dict) -> None:
-    """Write a directory context file, removing it (and an empty ``.prime``) when empty."""
+    """Write a directory context file; empty data removes it (and an empty ``.prime``)."""
     if path.is_symlink() or path.parent.is_symlink():
         raise ValueError(f"Refusing to write {path}: it or its directory is a symlink")
-    if not data:
-        path.unlink(missing_ok=True)
-        try:
-            path.parent.rmdir()
-        except OSError:
-            pass
+    if data:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=2) + "\n")
         return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2) + "\n")
+    path.unlink(missing_ok=True)
+    try:
+        path.parent.rmdir()
+    except OSError:
+        pass
 
 
 class ConfigModel(BaseModel):
@@ -120,22 +101,14 @@ class Config:
     DEFAULT_SSH_KEY_PATH: str = str(Path.home() / ".ssh" / "id_rsa")
 
     def __init__(self, use_context: bool = True) -> None:
-        """Load the global config, then any context selected for this invocation.
-
-        Precedence (highest first): per-field env vars (PRIME_API_KEY, ...), a
-        temporary ``--context``/PRIME_CONTEXT, the nearest directory context file
-        (``.prime/context.json``), then ``~/.prime/config.json``. With
-        ``use_context=False`` only the global config is loaded, so every write
-        goes to it.
-        """
+        """Precedence: PRIME_* env vars > --context/PRIME_CONTEXT > .prime/context.json
+        > ~/.prime/config.json. ``use_context=False`` loads (and writes) only the last."""
         self.config_dir = Path.home() / ".prime"
         self.config_file = self.config_dir / "config.json"
         self.environments_dir = self.config_dir / "environments"
-        # Directory context in effect, if any (never set alongside PRIME_CONTEXT).
         self.local_context_file: Optional[Path] = None
         self.local_context: dict = {}
-        # Saved environment a directory context selects: credential writes go
-        # to its file instead of the global config.
+        # Saved environment a directory context selects; credential writes go there.
         self._profile_name: Optional[str] = None
         self._profile_overlay: dict = {}
         self._team_overlay: dict = {}
@@ -161,26 +134,19 @@ class Config:
         if pinned:
             try:
                 loaded = self.load_environment(pinned, persist=False)
-            except (TypeError, AttributeError) as e:
-                # e.g. a saved context with "frontend_url": null
-                raise ValueError(
-                    f"Invalid context '{pinned}' selected by {local_file}: {e}. "
-                    f"Fix {self.environments_dir / pinned}.json or run 'prime config unpin'."
-                ) from e
+            except (TypeError, AttributeError):  # e.g. "frontend_url": null in its file
+                loaded = False
             if not loaded:
                 raise ValueError(
-                    f"Unknown context '{pinned}' selected by {local_file}. "
-                    "Save it with 'prime config save', or run 'prime config unpin'."
+                    f"Context '{pinned}' selected by {local_file} is missing or invalid; "
+                    "fix it with 'prime config save' or run 'prime config unpin'."
                 )
             if pinned.casefold() != "production":
                 self._profile_name = pinned
         if "team_id" in local:
             team_id = local.get("team_id") or None
-            self._team_overlay = {
-                "team_id": team_id,
-                "team_name": local.get("team_name") if team_id else None,
-                "team_role": local.get("team_role") if team_id else None,
-            }
+            team_name = local.get("team_name") if team_id else None
+            self._team_overlay = {"team_id": team_id, "team_name": team_name, "team_role": None}
             self._refresh()
 
     @property
@@ -222,7 +188,6 @@ class Config:
         self._refresh()
 
     def _refresh(self) -> None:
-        """Recompute the effective config: global file, then context, then team pin."""
         self.config = {**self._stored, **self._profile_overlay, **self._team_overlay}
 
     def _save_config(self, config: dict) -> None:
@@ -259,11 +224,7 @@ class Config:
         return bool(self._team_overlay)
 
     def local_context_notice(self) -> Optional[str]:
-        """Describe what the directory context selects, when it differs from global.
-
-        None when no directory context applies or it matches the global config,
-        so the notice only appears when a pin actually changes the account.
-        """
+        """What the directory context selects, or None if it matches the global config."""
         if self.local_context_file is None:
             return None
         environment = self.current_environment
@@ -414,7 +375,6 @@ class Config:
         """Persist only the traces URL for the command's selected environment."""
         traces_url = self._strip_api_v1(value) if value else None
         if self._profile_name is not None:
-            # A directory context selects this environment: only its file changes.
             self._update(traces_url=traces_url)
             return
         selected_environment = self.current_environment
@@ -575,12 +535,8 @@ class Config:
             True if the environment was loaded successfully, False otherwise.
         """
         if persist and self._profile_name is not None:
-            # Persistent setters would write into the pinned context's file.
-            raise ValueError(
-                f"Cannot switch environments while {self.local_context_file} selects "
-                f"context '{self._profile_name}'; use Config(use_context=False) to "
-                "change the global environment."
-            )
+            # Its setters would write into the pinned context's file.
+            raise ValueError(f"{self.local_context_file} selects '{self._profile_name}'")
         if name.lower() == "production":
             # Built-in production environment
             if persist:
@@ -672,12 +628,8 @@ class Config:
         return False
 
     def update_current_environment_file(self) -> None:
-        """Mirror the global config into the saved file of its current environment.
-
-        Uses the stored values only: env var overrides, a temporary context and a
-        directory context never leak onto disk. A no-op while a directory context
-        selects an environment, since writes already went to that file.
-        """
+        """Mirror the stored global config (never env or context overrides) into its
+        current environment's file. No-op when a directory context selects one."""
         if self._profile_name is not None:
             return
         stored = self._stored

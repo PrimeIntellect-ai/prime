@@ -62,7 +62,64 @@ def test_train_init_defaults_to_rl_toml() -> None:
         assert result.exit_code == 0, result.output
         assert "Created rl.toml" in result.output
         assert "Run with: prime train rl.toml" in result.output
+        assert "stop accepting new runs on" in result.output
+        assert "October 5, 2026" in result.output
+        assert "https://docs.primeintellect.ai/hosted-training/full-finetuning" in result.output
         assert Path("rl.toml").exists()
+        assert "stop accepting new runs on October 5, 2026" in Path("rl.toml").read_text()
+
+
+def test_train_legacy_run_warns_before_confirmation_without_warning_fft(
+    monkeypatch, tmp_path: Path
+) -> None:
+    from prime_cli.commands import rl
+
+    legacy_config = tmp_path / "legacy.toml"
+    legacy_config.write_text(rl.generate_rl_config_template())
+    monkeypatch.setattr(rl, "APIClient", lambda: object())
+    monkeypatch.setattr(
+        rl, "RLClient", lambda _: type("Client", (), {"list_models": lambda self, team_id: []})()
+    )
+    monkeypatch.setattr(rl, "Config", lambda: type("Config", (), {"team_id": None})())
+    seen: list[str] = []
+
+    def cancel(_message: str, _yes: bool, *, default: bool) -> bool:
+        seen.append("confirm")
+        return False
+
+    monkeypatch.setattr(rl, "confirm_or_skip", cancel)
+    result = runner.invoke(app, ["train", str(legacy_config)], env=TEST_ENV)
+    assert result.exit_code == 0, result.output
+    assert "stop accepting new runs on" in result.output
+    assert "October 5, 2026" in result.output
+    assert result.output.index("stop accepting new runs") < result.output.index("Configuration:")
+    assert seen == ["confirm"]
+
+    fft_config = tmp_path / "fft.toml"
+    fft_config.write_text(
+        '[model]\nname = "Qwen/Qwen3-0.6B"\n[deployment]\nnum_train_gpus = 1\nnum_infer_gpus = 1\n'
+    )
+    monkeypatch.setattr(rl, "_dispatch_full_finetune_run", lambda **kwargs: None)
+    result = runner.invoke(app, ["train", str(fft_config)], env=TEST_ENV)
+    assert result.exit_code == 0, result.output
+    assert "stop accepting new runs" not in result.output
+
+
+def test_train_legacy_json_warning_uses_stderr(monkeypatch, tmp_path: Path) -> None:
+    from prime_cli.commands import rl
+
+    config = tmp_path / "legacy.toml"
+    config.write_text(rl.generate_rl_config_template())
+    monkeypatch.setattr(rl, "APIClient", lambda: object())
+    monkeypatch.setattr(
+        rl, "RLClient", lambda _: type("Client", (), {"list_models": lambda self, team_id: []})()
+    )
+    monkeypatch.setattr(rl, "Config", lambda: type("Config", (), {"team_id": None})())
+    monkeypatch.setattr(rl, "confirm_or_skip", lambda *args, **kwargs: False)
+    result = runner.invoke(app, ["train", str(config), "--output", "json"], env=TEST_ENV)
+    assert result.exit_code == 0, result.output
+    assert "stop accepting new runs on October 5, 2026" in result.stderr
+    assert "stop accepting new runs" not in result.stdout
 
 
 def test_train_request_submits_model_request(monkeypatch) -> None:

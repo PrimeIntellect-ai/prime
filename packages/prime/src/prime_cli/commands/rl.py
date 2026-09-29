@@ -974,14 +974,21 @@ def _warn_legacy_full_finetune_type(cfg: Dict[str, Any], config_path: str) -> No
 
 
 # Mirrors the platform's `sourceRef` rules (branch / tag / sha charset, 200
-# chars, no `..`, no trailing `/` or `.lock`) and rl-validator's refusal of
-# pull-request namespaces, so a typo fails at the prompt instead of as a 422.
+# chars, no `..`, `//` or `/.`, no trailing `/` or `.lock`) and rl-validator's
+# refusal of pull-request namespaces, so a typo fails at the prompt instead of
+# as a 422.
 _SOURCE_REF_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._/-]{0,199}\Z")
 
 
 def _source_ref_error(ref: str) -> Optional[str]:
     """Why `ref` can't be a prime-rl source ref, or None when it can."""
-    if not _SOURCE_REF_RE.match(ref) or ".." in ref or ref.endswith(("/", ".lock")):
+    if (
+        not _SOURCE_REF_RE.match(ref)
+        or ".." in ref
+        or "//" in ref
+        or "/." in ref
+        or ref.endswith(("/", ".lock"))
+    ):
         return f"{ref!r} is not a valid git ref (branches, tags and commit shas only)."
     if ref.startswith(("refs/", "pull/")):
         return (

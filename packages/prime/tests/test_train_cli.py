@@ -555,6 +555,8 @@ def test_train_ref_shape_is_checked_before_dispatch(monkeypatch, tmp_path: Path)
         "",
         "a b",
         "feat/../main",
+        "feat//x",
+        "feat/.hidden",
         "-x",
         "x.lock",
         "a" * 201,

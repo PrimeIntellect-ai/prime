@@ -4,13 +4,15 @@ A volume is a PVC owned by your team (or you) on the cluster it was
 created on. `prime train config.toml --volume <name>` makes the run
 write under `runs/<runId>/` on it, and it outlives every run.
 
-Hosted SFT runs also read pre-staged datasets from the volume: the training
+Hosted SFT runs also read their dataset from the volume: the training
 container mounts the volume's `datasets/` directory read-only at
-`/datasets`, so a SFT config's `[data] name` must be a `"/datasets/<name>"`
-directory staged on the volume before launch. This command manages the
-volume lifecycle only (create/list/resize/delete) — there is no `prime
-volumes upload`; stage datasets with an authorized CPU pod that mounts the
-same PVC (see `prime train --help`).
+`/datasets`, so an SFT config's `[data] name` must be a `"/datasets/<name>"`
+directory already on the volume before launch. This command manages the
+volume lifecycle (create/list/resize/delete, plus `prime volumes ssh` for
+read-write sessions); put datasets there yourself with
+`prime volumes ssh <name> --read-write` and the huggingface CLI inside
+that session (`hf download <repo> --repo-type dataset --local-dir
+datasets/<name>`) — the trainer never downloads.
 """
 
 import os

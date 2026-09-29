@@ -1491,9 +1491,10 @@ def create_run(
         help=(
             "Named volume for the run: outputs go under runs/<runId>/, and "
             "for SFT the volume's datasets/ directory is mounted read-only "
-            "at /datasets, so data.name must be a pre-staged "
-            '"/datasets/<name>" directory on it. Stage datasets from a CPU '
-            "pod that mounts the volume (no upload command); without a "
+            'at /datasets, so data.name must be a "/datasets/<name>" '
+            "directory already on it. Get a dataset there yourself with "
+            "`prime volumes ssh <volume> --read-write` and the huggingface "
+            "CLI inside that session (see `prime volumes`); without a "
             "volume, SFT only works with fake datasets. Full-FT and SFT "
             "only; closed beta, see `prime volumes`. Falls back to a "
             'top-level `volume = "..."` in the TOML. Created on the fly '
@@ -1530,16 +1531,17 @@ def create_run(
             "block and no [trainer]/[orchestrator]) is auto-detected. "
             "Hosted SFT is trainer-only: [eval], [inference], and "
             "[weight_broadcast] blocks are rejected. Datasets are local "
-            "files staged on a named volume (pass --volume): the run "
-            "mounts that volume's datasets/ directory read-only at "
-            '/datasets, so data.name = "/datasets/<name>"; outputs land '
-            "under runs/<runId>/ on the same volume. Stage datasets ahead "
-            "of the run from a CPU pod that mounts the volume: "
-            "materialize HF-load_dataset-readable files (Parquet/JSON, "
-            "not save_to_disk) into an immutable /datasets/<name> "
-            "directory, then verify with a fresh-process "
-            'load_dataset("/datasets/<name>") check. Without --volume, '
-            "only fake datasets work."
+            "files on a named volume (pass --volume): the run mounts that "
+            "volume's datasets/ directory read-only at /datasets, so "
+            'data.name = "/datasets/<name>"; outputs land under runs/<runId>/ '
+            "on the same volume. Get datasets there yourself with "
+            "`prime volumes ssh <volume> --read-write` and the huggingface "
+            "CLI inside that session (hf download <repo> --repo-type "
+            "dataset --local-dir datasets/<name>): materialize HF "
+            "load_dataset-readable files (Parquet/JSON, not save_to_disk) "
+            "into an immutable /datasets/<name> directory, then verify with "
+            "a fresh-process load_dataset('/datasets/<name>') check. "
+            "Without --volume, only fake datasets work."
         ),
     ),
 ) -> None:
@@ -1589,8 +1591,10 @@ def create_run(
             gpu_type=gpu_type,
             # On SFT the volume is also the dataset contract: its
             # `datasets/` directory mounts read-only at /datasets, so
-            # `data.name` must point at a pre-staged `/datasets/<name>`
-            # directory. Forward --volume instead of dropping it.
+            # `data.name` must point at a `/datasets/<name>` directory
+            # already on the volume (users put it there via
+            # `prime volumes ssh --read-write` + the huggingface CLI).
+            # Forward --volume instead of dropping it.
             volume=volume,
             mode="sft",
         )

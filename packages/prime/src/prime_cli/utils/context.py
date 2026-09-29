@@ -39,10 +39,45 @@ def require_loadable_config() -> None:
         raise typer.Exit(1)
 
 
+def print_local_context_notice() -> None:
+    """Tell the user on stderr when a directory context changes the account.
+
+    Pins can arrive with a cloned repository, so their effect should never be
+    silent. PRIME_DISABLE_CONTEXT_NOTICE=1 turns this off.
+    """
+    if os.environ.get("PRIME_DISABLE_CONTEXT_NOTICE", "").lower() in ("1", "true", "yes"):
+        return
+    if os.environ.get("PRIME_CONTEXT"):
+        return
+    try:
+        notice = Config().local_context_notice()
+    except (ValueError, TypeError, AttributeError):
+        return
+    if notice:
+        get_console(stderr=True).print(f"[dim]{escape(notice)}[/dim]")
+
+
+def local_pin_directory(start: Path) -> Path:
+    """Directory `--local` pins: the nearest git or Lab workspace root, else ``start``.
+
+    Pinning the repository root means a pin made from a subdirectory covers the
+    whole checkout, like Lab's own `.prime/lab.json` marker.
+    """
+    current = start.resolve()
+    home = Path.home().resolve()
+    for directory in (current, *current.parents):
+        if directory == home:
+            break
+        if (directory / ".git").exists() or (directory / ".prime" / "lab.json").is_file():
+            return directory
+    return current
+
+
 def local_context_target(config: Config, local: bool, global_: bool) -> Optional[Path]:
     """Directory context file a selection should be written to, or None for global.
 
-    ``--local`` targets ``./.prime/context.json``; ``--global`` the global config.
+    ``--local`` targets ``.prime/context.json`` at the repository root (see
+    ``local_pin_directory``); ``--global`` the global config.
     Without either, the directory context already in effect (if any) is updated,
     so a selection made inside a pinned directory takes effect there.
     """
@@ -52,7 +87,14 @@ def local_context_target(config: Config, local: bool, global_: bool) -> Optional
     if global_:
         return None
     if local:
-        target = Path.cwd() / LOCAL_CONTEXT_FILE
+        directory = local_pin_directory(Path.cwd())
+        if directory == Path.home().resolve():
+            get_console(stderr=True).print(
+                "[red]Error:[/red] --local cannot pin your home directory; "
+                "~/.prime is the global config. Run it inside a project directory."
+            )
+            raise typer.Exit(1)
+        target = directory / LOCAL_CONTEXT_FILE
         if target.is_symlink() or target.parent.is_symlink():
             get_console(stderr=True).print(
                 f"[red]Error:[/red] {escape(str(target))} or its directory is a symlink; "

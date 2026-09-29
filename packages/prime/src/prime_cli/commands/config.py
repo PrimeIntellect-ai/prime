@@ -539,7 +539,7 @@ def use_environment(
     local: bool = typer.Option(
         False,
         "--local",
-        help="Use it only in the current directory (writes ./.prime/context.json)",
+        help="Use it only in this repository (writes .prime/context.json at the git root)",
     ),
     global_: bool = typer.Option(
         False,

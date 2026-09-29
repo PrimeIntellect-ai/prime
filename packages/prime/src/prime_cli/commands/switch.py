@@ -71,7 +71,7 @@ def switch(
     local: bool = typer.Option(
         False,
         "--local",
-        help="Pin the team to the current directory (writes ./.prime/context.json)",
+        help="Pin the team to this repository (writes .prime/context.json at the git root)",
     ),
     global_: bool = typer.Option(
         False,

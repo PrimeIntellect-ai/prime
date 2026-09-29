@@ -131,3 +131,18 @@ def test_traces_client_with_explicit_values_ignores_a_broken_pin(repo) -> None:
     )
     assert client.api_key == "explicit-key"
     assert client.team_id == "explicit-team"
+
+
+def test_applied_pin_is_logged_once(repo, caplog) -> None:
+    import logging
+
+    from prime_traces.core import config as config_module
+
+    _pin(repo, {"team_id": "edison-team"})
+    config_module._LOGGED_PINS.clear()
+    with caplog.at_level(logging.INFO, logger=config_module.__name__):
+        Config()
+        Config()
+    messages = [r.getMessage() for r in caplog.records if "context.json" in r.getMessage()]
+    assert len(messages) == 1
+    assert "team_id=edison-team" in messages[0]

@@ -1,12 +1,15 @@
 """Lightweight configuration for SDK packages."""
 
 import json
+import logging
 import os
 import re
 from pathlib import Path
 from typing import Optional
 
 LOCAL_CONTEXT_FILE = Path(".prime") / "context.json"
+_logger = logging.getLogger(__name__)
+_LOGGED_PINS: set = set()
 _CONTEXT_NAME = re.compile(r"[a-zA-Z0-9_-]+")
 
 
@@ -134,6 +137,15 @@ class Config:
                     "team_name": local.get("team_name") if team_id else None,
                     "team_role": local.get("team_role") if team_id else None,
                 }
+            )
+        if self.local_context_file is not None and self.local_context_file not in _LOGGED_PINS:
+            # Pins can arrive with a cloned repository, so say once which applies.
+            _LOGGED_PINS.add(self.local_context_file)
+            _logger.info(
+                "Using %s (context=%s, team_id=%s)",
+                self.local_context_file,
+                local.get("context"),
+                local.get("team_id"),
             )
 
     def _apply_context(self, context: str, source: str) -> None:

@@ -120,3 +120,18 @@ def test_broken_directory_context_only_fails_values_read_from_it(repo, monkeypat
     assert config.team_id == "env-team"
     with pytest.raises(ValueError, match="context.json"):
         config.config
+
+
+def test_applied_pin_is_logged_once(repo, caplog) -> None:
+    import logging
+
+    from prime_evals.core import config as config_module
+
+    _pin(repo, {"team_id": "edison-team"})
+    config_module._LOGGED_PINS.clear()
+    with caplog.at_level(logging.INFO, logger=config_module.__name__):
+        Config()
+        Config()
+    messages = [r.getMessage() for r in caplog.records if "context.json" in r.getMessage()]
+    assert len(messages) == 1
+    assert "team_id=edison-team" in messages[0]

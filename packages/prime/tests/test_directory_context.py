@@ -457,3 +457,73 @@ def test_reset_notes_that_the_directory_context_still_applies(repo: Path, home: 
     assert "still selects this directory" in result.output
     assert pin.exists()
     assert _global(home)["api_key"] == ""
+
+
+def test_notice_names_the_pin_that_changes_the_account(repo: Path, teams_api: None) -> None:
+    pin = _pin(repo, {"team_id": EDISON, "team_name": "Edison"})
+
+    result = runner.invoke(app, ["switch", "acme"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    output = result.output.replace("\n", "")
+    assert f"Using team 'Edison' ({EDISON}), pinned by {pin}" in output
+
+
+def test_notice_is_silent_when_the_pin_matches_global(repo: Path, teams_api: None) -> None:
+    _pin(repo, {"team_id": GLOBAL_TEAM})
+
+    result = runner.invoke(app, ["switch", "acme"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    assert "pinned by" not in result.output
+
+
+def test_notice_can_be_disabled(repo: Path, teams_api: None) -> None:
+    _pin(repo, {"team_id": None})
+
+    result = runner.invoke(
+        app, ["switch", "acme"], env={**TEST_ENV, "PRIME_DISABLE_CONTEXT_NOTICE": "1"}
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "pinned by" not in result.output
+
+
+def test_whoami_shows_pinned_values_literally(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    pin = _pin(repo, {"team_id": EDISON, "team_name": "[green]Personal[/green] verified"})
+
+    def mock_get(self: Any, endpoint: str, **kwargs: Any) -> Dict[str, Any]:
+        return {"data": {"id": "global-user", "name": "Global User", "scope": {}}}
+
+    monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+    result = runner.invoke(app, ["whoami"], env={**TEST_ENV, "PRIME_DISABLE_CONTEXT_NOTICE": "1"})
+
+    assert result.exit_code == 0, result.output
+    assert "[green]Personal[/green] verified" in result.output
+    assert "Pinned By" in result.output
+    assert str(pin.parent.parent) in result.output.replace("\n", "")
+
+
+def test_local_pins_the_repository_root_from_a_subdirectory(
+    repo: Path, teams_api: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (repo / ".git").mkdir()
+    monkeypatch.chdir(repo / "src" / "pkg")
+
+    result = runner.invoke(app, ["switch", "edison", "--local"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    assert (repo / ".prime" / "context.json").is_file()
+    assert not (repo / "src" / "pkg" / ".prime").exists()
+
+
+def test_local_refuses_to_pin_the_home_directory(
+    home: Path, teams_api: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(home)
+
+    result = runner.invoke(app, ["switch", "edison", "--local"], env=TEST_ENV)
+
+    assert result.exit_code == 1
+    assert "cannot pin your home directory" in result.output
+    assert not (home / ".prime" / "context.json").exists()

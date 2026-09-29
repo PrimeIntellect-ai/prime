@@ -258,6 +258,30 @@ class Config:
         """Whether the directory context file pins the team."""
         return bool(self._team_overlay)
 
+    def local_context_notice(self) -> Optional[str]:
+        """Describe what the directory context selects, when it differs from global.
+
+        None when no directory context applies or it matches the global config,
+        so the notice only appears when a pin actually changes the account.
+        """
+        if self.local_context_file is None:
+            return None
+        environment = self.current_environment
+        global_environment = str(self._stored.get("current_environment", "production"))
+        team_id = self.config.get("team_id") or None
+        if environment.casefold() == global_environment.casefold() and team_id == (
+            self._stored.get("team_id") or None
+        ):
+            return None
+        if team_id:
+            name = self.config.get("team_name")
+            account = f"team '{name}' ({team_id})" if name else f"team {team_id}"
+        else:
+            account = "the personal account"
+        if self.local_context.get("context"):
+            account += f" in context '{environment}'"
+        return f"Using {account}, pinned by {self.local_context_file}"
+
     @property
     def api_key(self) -> str:
         """Get API key with precedence: env > file > empty."""

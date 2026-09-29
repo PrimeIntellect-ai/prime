@@ -560,6 +560,8 @@ def test_train_ref_shape_is_checked_before_dispatch(monkeypatch, tmp_path: Path)
         "feat/.hidden",
         "-x",
         "x.lock",
+        "feat/x.lock/y",  # any component ending in .lock, not just the last
+        "feat/x.",  # trailing dot
         "a" * 201,
     ):
         result = runner.invoke(app, ["train", str(cfg), "--ref", bad, "-y"], env=TEST_ENV)
@@ -576,6 +578,23 @@ def test_train_ref_shape_is_checked_before_dispatch(monkeypatch, tmp_path: Path)
     result = runner.invoke(app, ["train", str(cfg), "--ref", "", "--pr", "42", "-y"], env=TEST_ENV)
     assert result.exit_code == 1
     assert "mutually exclusive" in result.output
+
+
+def test_source_ref_check_keeps_valid_git_refs() -> None:
+    # Dots and `.lock`-like text are fine wherever git allows them; the
+    # check must only reject what git-check-ref-format rejects.
+    from prime_cli.commands.rl import _source_ref_error
+
+    for ok in (
+        "main",
+        "v1.2.3",
+        "feat/my.branch",
+        "release/1.0.lockfile",
+        "lock/x",
+        "0123456789abcdef0123456789abcdef01234567",
+        "a" * 200,
+    ):
+        assert _source_ref_error(ok) is None, ok
 
 
 def test_train_source_overlay_is_rejected_on_the_lora_path(monkeypatch, tmp_path: Path) -> None:

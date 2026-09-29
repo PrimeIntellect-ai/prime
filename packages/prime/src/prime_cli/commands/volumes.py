@@ -364,6 +364,47 @@ def _remote_path(path: str) -> str:
     return "/volume/" + "/".join(parts) + ("/" if parts and rel.endswith("/") else "")
 
 
+def _transfer_failed(alias: str, code: int) -> None:
+    """The tailnet hint a failed transfer (or symlink check) reports."""
+    console.print(
+        "[red]Transfer failed.[/red] Check that you are on the tailnet "
+        f"(host {alias} must resolve) and the path exists."
+    )
+    raise typer.Exit(code)
+
+
+def _local_tree_has_symlink(path: str) -> bool:
+    """True if `path` itself or anything under it is a symlink. os.walk
+    (followlinks=False) lists symlinked directories but never enters them,
+    so every entry in the tree is checked and no link is followed."""
+    if os.path.islink(path):
+        return True
+    if not os.path.isdir(path):
+        return False
+    return any(
+        os.path.islink(os.path.join(root, name))
+        for root, dirs, files in os.walk(path, followlinks=False)
+        for name in dirs + files
+    )
+
+
+def _remote_tree_has_symlink(alias: str, config: Path, remote: str) -> bool:
+    """True if `remote` (on the session pod) or anything under it is a
+    symlink. One ssh call: the pod's BusyBox find supports -type l and
+    tests the starting point too, and `head` caps the output and makes the
+    pipeline report 0 even when find hits many links. `remote` is limited
+    to shell-safe characters by _remote_path, so it needs no quoting."""
+    check = subprocess.run(
+        ["ssh", "-F", str(config), alias, f"find {remote} -type l | head -n 1"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if check.returncode:
+        _transfer_failed(alias, check.returncode)
+    return bool(check.stdout.strip())
+
+
 def _transfer(name: str, read_only: bool, remote: str, local: str, upload: bool) -> None:
     remote = _remote_path(remote)
     rsync = shutil.which("rsync")
@@ -385,6 +426,21 @@ def _transfer(name: str, read_only: bool, remote: str, local: str, upload: bool)
         ssh_cmd = shlex.join(["ssh", "-F", str(config)])
         cmd = [rsync, "-a", "-v", "--partial", "-e", ssh_cmd]
     else:
+        # scp -r FOLLOWS symlinks and copies their TARGETS; rsync -a copies
+        # them as links. Refuse a source containing one instead of letting
+        # what gets copied depend on which tool is installed (on upload, a
+        # link could copy files from outside the tree, e.g. ~/.ssh).
+        if upload:
+            linked = _local_tree_has_symlink(local)
+        else:
+            linked = _remote_tree_has_symlink(alias, config, remote)
+        if linked:
+            console.print(
+                "[red]The source contains symbolic links, which scp would follow "
+                "(it copies their targets). Install rsync, which copies links as "
+                "links, or remove the links.[/red]"
+            )
+            raise typer.Exit(1)
         cmd = ["scp", "-r", "-F", str(config)]
         # rsync copies a directory's CONTENTS when the source ends in "/";
         # scp would copy the directory itself. "dir/." gives scp rsync's
@@ -401,11 +457,7 @@ def _transfer(name: str, read_only: bool, remote: str, local: str, upload: bool)
         console.print(f"[red]Could not start transfer:[/red] {exc}")
         raise typer.Exit(1) from exc
     if code:
-        console.print(
-            "[red]Transfer failed.[/red] Check that you are on the tailnet "
-            f"(host {alias} must resolve) and the path exists."
-        )
-        raise typer.Exit(code)
+        _transfer_failed(alias, code)
 
 
 @app.command(no_args_is_help=True)

@@ -628,10 +628,14 @@ def test_gateway_adds_a_proxy_command_with_the_short_name_as_sni(
 
 def test_direct_and_missing_gateway_write_no_proxy_command(monkeypatch, tmp_path, _session_dir):
     _gateway_ssh(monkeypatch, tmp_path)
-    assert _run("ssh", "data", "--direct").exit_code == 0
+    direct = _run("ssh", "data", "--direct")
+    assert direct.exit_code == 0
+    assert "prime volumes get data FILE . --direct" in direct.output
     assert "ProxyCommand" not in (_session_dir / "config").read_text()
     _gateway_ssh(monkeypatch, tmp_path, gateway=None)
-    assert _run("ssh", "data").exit_code == 0
+    plain = _run("ssh", "data")
+    assert plain.exit_code == 0
+    assert "--direct" not in plain.output
     assert "ProxyCommand" not in (_session_dir / "config").read_text()
 
 
@@ -799,6 +803,61 @@ def test_proxy_process_pipes_stdin_to_stdout(tls_echo_gateway):
     out, err = process.communicate(b"ping", timeout=10)
     assert process.returncode == 0, err
     assert out == b"ping"
+
+
+def test_proxy_relays_full_duplex_while_the_peer_is_not_reading(tmp_path):
+    """The gateway sends a payload without reading; the client sends its own.
+    Both exceed the socket buffers, so a blocking TLS write in the relay would
+    deadlock: neither side would ever read."""
+    cert_pem, key_pem, fingerprint = _self_signed()
+    (tmp_path / "cert.pem").write_bytes(cert_pem)
+    (tmp_path / "key.pem").write_bytes(key_pem)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(tmp_path / "cert.pem", tmp_path / "key.pem")
+    size = 8 * 1024 * 1024
+    to_client, from_client = os.urandom(size), os.urandom(size)
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+    listener.listen()
+    listener.settimeout(60)
+    received = bytearray()
+    sent = threading.Event()
+
+    def serve():
+        conn, _ = listener.accept()
+        conn.settimeout(60)
+        conn.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+        with context.wrap_socket(conn, server_side=True) as tls:
+            tls.sendall(to_client)  # completes only once the client drains it
+            sent.set()
+            while chunk := tls.recv(64 * 1024):
+                received.extend(chunk)
+
+    server = threading.Thread(target=serve, daemon=True)
+    server.start()
+    process = subprocess.Popen(
+        [
+            sys.executable, "-m", "prime_cli.main", "volumes", "proxy",
+            "--gateway", f"127.0.0.1:{listener.getsockname()[1]}",
+            "--cert-sha256", fingerprint, "vol-ssh-0123",
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env={**os.environ, "PRIME_DISABLE_VERSION_CHECK": "1"},
+    )  # fmt: skip
+    try:
+        out, err = process.communicate(from_client, timeout=30)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        pytest.fail("relay deadlocked")
+    finally:
+        listener.close()
+    server.join(10)
+    assert process.returncode == 0, err
+    assert out == to_client
+    assert bytes(received) == from_client
 
 
 def test_proxy_reports_an_unreachable_gateway():

@@ -366,6 +366,8 @@ def ssh(
     else:
         src, dst = "FILE", f"{alias}:/volume/"
         easy = f"prime volumes put {name} FILE /"
+    if direct:
+        easy += " --direct"
     console.print("Copy files (sftp works too):")
     console.print(f"  {easy}", soft_wrap=True, markup=False)
     console.print("Or raw (power users):")

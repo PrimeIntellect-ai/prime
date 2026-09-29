@@ -535,6 +535,42 @@ def test_train_ref_is_rejected_on_the_lora_path(monkeypatch, tmp_path: Path) -> 
     assert "--ref / --pr" in result.output and "full-FT" in result.output
 
 
+def _gh_pull(monkeypatch, status: int = 200, body: Any = None, headers: dict | None = None):
+    """Fake the one GitHub call resolve_pull_request_head makes; returns the
+    request headers it was sent so tests can assert on auth."""
+    import httpx
+
+    sent: dict[str, Any] = {}
+
+    def fake_get(url, headers=None, timeout=None):
+        sent.update(headers or {})
+        return httpx.Response(
+            status, json=body, headers=headers_ or {}, request=httpx.Request("GET", url)
+        )
+
+    headers_ = headers
+    monkeypatch.setattr("prime_cli.api.training.httpx.get", fake_get)
+    return sent
+
+
+def _pull_body(sha: str = "a" * 40, repo: str = "PrimeIntellect-ai/prime-rl", **extra) -> dict:
+    return {"head": {"sha": sha, "repo": {"full_name": repo}}, **extra}
+
+
+def test_resolve_pull_request_head_refuses_a_merged_pr(monkeypatch) -> None:
+    import pytest
+    from prime_cli.api.training import resolve_pull_request_head
+    from prime_cli.core import APIError
+
+    _gh_pull(monkeypatch, body=_pull_body(merged=True, merge_commit_sha="b" * 40))
+    with pytest.raises(APIError, match=r"already merged.*--ref main.*" + "b" * 40):
+        resolve_pull_request_head(7)
+
+    # `merged: false` on an open PR resolves as before.
+    _gh_pull(monkeypatch, body=_pull_body(merged=False))
+    assert resolve_pull_request_head(7) == "a" * 40
+
+
 def test_resolve_pull_request_head_rejects_forks(monkeypatch) -> None:
     import httpx
     from prime_cli.api.training import resolve_pull_request_head

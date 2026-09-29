@@ -276,11 +276,20 @@ def resolve_pull_request_head(pr_number: int) -> str:
     if resp.status_code != 200:
         raise APIError(f"GitHub returned HTTP {resp.status_code} while resolving PR #{pr_number}.")
     try:
-        head = resp.json()["head"]
+        pull = resp.json()
+        head = pull["head"]
         head_repo = (head.get("repo") or {}).get("full_name")
         sha = head["sha"]
+        merged = bool(pull.get("merged"))
+        merge_commit = pull.get("merge_commit_sha")
     except (ValueError, KeyError, TypeError, AttributeError) as exc:
         raise APIError(f"Unexpected GitHub response while resolving PR #{pr_number}.") from exc
+    if merged:
+        # A merged PR's head sha is usually gone from the repo's branches
+        # (deleted branch, squash merge), so the platform would refuse it as
+        # a commit it can't attribute; the merged code lives on main.
+        via = f" (its merge commit is {merge_commit})" if isinstance(merge_commit, str) else ""
+        raise APIError(f"PR #{pr_number} is already merged; run its code with --ref main{via}.")
     if not isinstance(head_repo, str) or head_repo.lower() != PRIME_RL_GITHUB_REPO.lower():
         raise APIError(
             f"PR #{pr_number} comes from a fork ({head_repo or 'unknown'}); fork PRs are "

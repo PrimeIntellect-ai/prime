@@ -314,7 +314,12 @@ def test_train_stop_survives_any_poll_api_error(monkeypatch) -> None:
     assert "Error:" not in result.output
 
 
-def test_train_volume_flag_and_toml_key_reach_the_fft_payload(monkeypatch, tmp_path: Path) -> None:
+_FFT_BODY = (
+    '[model]\nname = "Qwen/Qwen3-0.6B"\n\n[deployment]\nnum_train_gpus = 1\nnum_infer_gpus = 1\n'
+)
+
+
+def _capture_fft_dispatch(monkeypatch) -> list[dict[str, Any]]:
     captured: list[dict[str, Any]] = []
 
     def fake_create_run(self, payload):
@@ -323,19 +328,20 @@ def test_train_volume_flag_and_toml_key_reach_the_fft_payload(monkeypatch, tmp_p
 
         return HostedTrainingRunResponse(run_id="r1", token_value="t")
 
-    _mock_volumes(monkeypatch, [_vol("my-ckpts"), _vol("from-toml")])
     monkeypatch.setattr("prime_cli.api.training.HostedTrainingClient.create_run", fake_create_run)
+    return captured
+
+
+def test_train_volume_flag_and_toml_key_reach_the_fft_payload(monkeypatch, tmp_path: Path) -> None:
+    _mock_volumes(monkeypatch, [_vol("my-ckpts"), _vol("from-toml")])
+    captured = _capture_fft_dispatch(monkeypatch)  # after _mock_volumes: last create_run patch wins
     cfg = tmp_path / "rl.toml"
-    body = (
-        '[model]\nname = "Qwen/Qwen3-0.6B"\n\n'
-        "[deployment]\nnum_train_gpus = 1\nnum_infer_gpus = 1\n"
-    )
-    cfg.write_text(body)
+    cfg.write_text(_FFT_BODY)
     result = runner.invoke(
         app, ["train", str(cfg), "--volume", "my-ckpts", "-y", "-o", "json"], env=TEST_ENV
     )
     assert result.exit_code == 0, result.output
-    cfg.write_text('volume = "from-toml"\n' + body)
+    cfg.write_text('volume = "from-toml"\n' + _FFT_BODY)
     result = runner.invoke(app, ["train", str(cfg), "-y", "-o", "json"], env=TEST_ENV)
     assert result.exit_code == 0, result.output
 
@@ -456,24 +462,6 @@ def test_train_volume_size_needs_volume(tmp_path: Path) -> None:
     assert "--volume-size" in result.output and "needs" in result.output
 
 
-_FFT_BODY = (
-    '[model]\nname = "Qwen/Qwen3-0.6B"\n\n[deployment]\nnum_train_gpus = 1\nnum_infer_gpus = 1\n'
-)
-
-
-def _capture_fft_dispatch(monkeypatch) -> list[dict[str, Any]]:
-    captured: list[dict[str, Any]] = []
-
-    def fake_create_run(self, payload):
-        captured.append(payload)
-        from prime_cli.api.training import HostedTrainingRunResponse
-
-        return HostedTrainingRunResponse(run_id="r1", token_value="t")
-
-    monkeypatch.setattr("prime_cli.api.training.HostedTrainingClient.create_run", fake_create_run)
-    return captured
-
-
 def test_train_ref_flag_and_toml_key_reach_the_fft_payload(monkeypatch, tmp_path: Path) -> None:
     captured = _capture_fft_dispatch(monkeypatch)
     cfg = tmp_path / "rl.toml"
@@ -584,12 +572,22 @@ def test_train_ref_shape_is_checked_before_dispatch(monkeypatch, tmp_path: Path)
     assert "mutually exclusive" in result.output
 
 
-def test_train_ref_is_rejected_on_the_lora_path(monkeypatch, tmp_path: Path) -> None:
+def test_train_source_overlay_is_rejected_on_the_lora_path(monkeypatch, tmp_path: Path) -> None:
+    def never(pr_number: int) -> str:
+        raise AssertionError("the LoRA path must not resolve a PR")
+
+    monkeypatch.setattr("prime_cli.api.training.resolve_pull_request_head", never)
+    lora = '[model]\nname = "Qwen/Qwen3-0.6B"\n'
     cfg = tmp_path / "rl.toml"
-    cfg.write_text('[model]\nname = "Qwen/Qwen3-0.6B"\n')
-    result = runner.invoke(app, ["train", str(cfg), "--ref", "feat/x", "-y"], env=TEST_ENV)
-    assert result.exit_code == 1
-    assert "--ref / --pr" in result.output and "full-FT" in result.output
+    for body, args in (
+        (lora, ["--ref", "feat/x"]),
+        (lora, ["--pr", "42"]),
+        ('source_ref = "feat/x"\n' + lora, []),
+    ):
+        cfg.write_text(body)
+        result = runner.invoke(app, ["train", str(cfg), *args, "-y"], env=TEST_ENV)
+        assert result.exit_code == 1, args
+        assert "--ref / --pr" in result.output and "full-FT" in result.output, args
 
 
 def _gh_pull(monkeypatch, status: int = 200, body: Any = None, headers: dict | None = None):
@@ -688,32 +686,18 @@ def test_resolve_pull_request_head_error_mapping(monkeypatch) -> None:
 
 
 def test_resolve_pull_request_head_rejects_forks(monkeypatch) -> None:
-    import httpx
+    import pytest
     from prime_cli.api.training import resolve_pull_request_head
     from prime_cli.core import APIError
 
-    def fake_get(url, headers=None, timeout=None):
-        assert url.endswith("/repos/PrimeIntellect-ai/prime-rl/pulls/7")
-        return httpx.Response(
-            200,
-            json={"head": {"sha": "f" * 40, "repo": {"full_name": "someone/prime-rl"}}},
-            request=httpx.Request("GET", url),
-        )
-
-    monkeypatch.setattr("prime_cli.api.training.httpx.get", fake_get)
-    try:
+    _gh_pull(monkeypatch, body=_pull_body(sha="f" * 40, repo="someone/prime-rl"))
+    with pytest.raises(APIError, match=r"fork"):
         resolve_pull_request_head(7)
-    except APIError as e:
-        assert "fork" in str(e)
-    else:
-        raise AssertionError("fork PR should be rejected")
 
-    def fake_get_ok(url, headers=None, timeout=None):
-        return httpx.Response(
-            200,
-            json={"head": {"sha": "a" * 40, "repo": {"full_name": "PrimeIntellect-ai/prime-rl"}}},
-            request=httpx.Request("GET", url),
-        )
+    # A deleted fork leaves `head.repo` null: still a fork, never a crash.
+    _gh_pull(monkeypatch, body={"head": {"sha": "f" * 40, "repo": None}})
+    with pytest.raises(APIError, match=r"fork \(unknown\)"):
+        resolve_pull_request_head(7)
 
-    monkeypatch.setattr("prime_cli.api.training.httpx.get", fake_get_ok)
+    _gh_pull(monkeypatch, body=_pull_body())
     assert resolve_pull_request_head(7) == "a" * 40

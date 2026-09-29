@@ -13,8 +13,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic import ValidationError as PydanticValidationError
 
-from prime_cli.core import APIClient, APIError, NotFoundError
-from prime_cli.core.client import _default_user_agent
+from prime_cli.core import APIClient, APIError, NotFoundError, default_user_agent
 
 # The only repo the hosted source overlay runs code from. The platform and
 # validator enforce the same restriction server-side; the CLI just resolves
@@ -272,7 +271,7 @@ def resolve_pull_request_head(pr_number: int) -> str:
     url = f"{_GITHUB_API}/repos/{PRIME_RL_GITHUB_REPO}/pulls/{pr_number}"
     headers = {
         "Accept": "application/vnd.github+json",
-        "User-Agent": _default_user_agent(),
+        "User-Agent": default_user_agent(),
     }
     token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
     if token:

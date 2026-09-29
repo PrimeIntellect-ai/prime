@@ -6,7 +6,7 @@ import httpx
 from .config import Config
 
 
-def _default_user_agent() -> str:
+def default_user_agent() -> str:
     """Build default User-Agent string for prime-cli"""
     from prime_cli import __version__
 
@@ -90,7 +90,7 @@ class APIClient:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
         # Set User-Agent (default to prime-cli if not provided)
-        headers["User-Agent"] = user_agent if user_agent else _default_user_agent()
+        headers["User-Agent"] = user_agent if user_agent else default_user_agent()
 
         self.client = httpx.Client(
             headers=headers,
@@ -233,7 +233,7 @@ class AsyncAPIClient:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
         # Set User-Agent (default to prime-cli if not provided)
-        headers["User-Agent"] = user_agent if user_agent else _default_user_agent()
+        headers["User-Agent"] = user_agent if user_agent else default_user_agent()
 
         self.client = httpx.AsyncClient(
             headers=headers,

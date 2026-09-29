@@ -112,6 +112,9 @@ HOSTED_TRAINING_LOG_FOLLOW_POLL_SECONDS = 5
 
 HOSTED_TRAINING_STOP_POLL_SECONDS = 3
 HOSTED_TRAINING_STOP_MAX_POLLS = 60
+VOLUME_READY_POLL_SECONDS = 3
+VOLUME_READY_MAX_SECONDS = 180
+VOLUME_DEFAULT_SIZE = "1Ti"  # same default as `prime volumes create`
 
 TERMINAL_RUN_STATUSES = {"STOPPED", "FAILED", "COMPLETED"}
 
@@ -955,6 +958,7 @@ def _dispatch_full_finetune_run(
     image_tag: Optional[str] = None,
     gpu_type: Optional[str] = None,
     volume: Optional[str] = None,
+    volume_size: Optional[str] = None,
 ) -> None:
     """Hand off to /api/v1/training/runs (full-FT prime-rl on a registered
     PrimeCluster). Reuses the shared env-file plumbing for WANDB / HF
@@ -1071,6 +1075,22 @@ def _dispatch_full_finetune_run(
         )
         raise typer.Exit(1)
     resolved_volume = volume or config_volume
+    # Size for a volume this command creates: `--volume-size` or top-level
+    # `volume_size = "..."`. Only used when the volume doesn't exist yet.
+    config_volume_size = raw_cfg.get("volume_size")
+    if config_volume_size is not None and not isinstance(config_volume_size, str):
+        console.print(
+            f"[red]Error:[/red] volume_size in {config_path} must be a string like "
+            f'"500Gi" or "2Ti", got {type(config_volume_size).__name__}.'
+        )
+        raise typer.Exit(1)
+    resolved_volume_size = volume_size or config_volume_size
+    if resolved_volume_size and not resolved_volume:
+        console.print(
+            "[red]Error:[/red] --volume-size (and top-level `volume_size`) needs "
+            "--volume (or top-level `volume`)."
+        )
+        raise typer.Exit(1)
 
     # Same deprecation pass as the LoRA path. In the prime-rl-native shape
     # the deprecated keys live one level down, under `[orchestrator]` — and
@@ -1095,7 +1115,8 @@ def _dispatch_full_finetune_run(
     config_payload = {
         k: v
         for k, v in raw_cfg.items()
-        if k not in ("env_file", "env_files", "image_tag", "gpu_type", "volume", "type")
+        if k
+        not in ("env_file", "env_files", "image_tag", "gpu_type", "volume", "volume_size", "type")
     }
 
     payload = build_payload_from_toml(
@@ -1126,6 +1147,8 @@ def _dispatch_full_finetune_run(
     # to a plain print in --plain mode, which would emit "Creating Hosted
     # Training run..." on stdout ahead of the JSON payload and break
     # automation parsing of run_id.
+    if resolved_volume:
+        _ensure_volume(client, resolved_volume, team_id, output, size=resolved_volume_size)
     status_ctx = (
         console.status("[bold blue]Creating Hosted Training run...", spinner="dots")
         if output != "json"
@@ -1157,6 +1180,67 @@ def _dispatch_full_finetune_run(
     dashboard_url = f"{app_config.frontend_url}/dashboard/training/{result.run_id}"
     console.print("\n[cyan]Monitor run at:[/cyan]")
     console.print(f"  [link={dashboard_url}]{dashboard_url}[/link]")
+
+
+def _ensure_volume(
+    client: Any, name: str, team_id: Optional[str], output: str, size: Optional[str] = None
+) -> None:
+    """Create `name` (with `size`, default VOLUME_DEFAULT_SIZE) if it doesn't
+    exist and wait until it is RUNNING.
+
+    An existing volume in any state is left alone (the backend reports
+    "not ready" at dispatch); a `size` for it is ignored with a note (resizing
+    is `prime volumes resize`). Exits 1 on create failure, FAILED/TOMBSTONED,
+    or timeout. Progress goes to stderr for `--output json`. The backend
+    validates the size (e.g. 500Gi, 2Ti) and returns its error on create.
+    """
+    out = get_console(stderr=True) if output == "json" else console
+    try:
+        existing = [v for v in client.list_volumes(team_id=team_id) if v.name == name]
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+    if existing:
+        if size and size != existing[0].size:
+            out.print(
+                f"Volume '{name}' already exists ({existing[0].size or 'unknown size'}); "
+                f"--volume-size {size} is ignored. Resize with: prime volumes resize"
+            )
+        return
+
+    size = size or VOLUME_DEFAULT_SIZE
+    out.print(f"Volume '{name}' doesn't exist, creating it ({size})...")
+    try:
+        volume = client.create_volume(name, size, team_id=team_id)
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+    status_ctx = (
+        console.status(f"[bold blue]Waiting for volume '{name}' to be ready...", spinner="dots")
+        if output != "json"
+        else nullcontext()
+    )
+    deadline = time.monotonic() + VOLUME_READY_MAX_SECONDS
+    status = volume.status
+    with status_ctx:
+        while status != "RUNNING":
+            if status in ("FAILED", "TOMBSTONED"):
+                console.print(f"[red]Error:[/red] Volume '{name}' is {status}; not dispatching.")
+                raise typer.Exit(1)
+            if time.monotonic() >= deadline:
+                console.print(
+                    f"[red]Error:[/red] Timed out waiting for volume '{name}' "
+                    f"(last status {status}). Check `prime volumes list`."
+                )
+                raise typer.Exit(1)
+            time.sleep(VOLUME_READY_POLL_SECONDS)
+            try:  # a single failed poll is retried on the next loop
+                match = [v for v in client.list_volumes(team_id=team_id) if v.name == name]
+            except APIError:
+                continue
+            if match:
+                status = match[0].status
 
 
 def load_config(path: str) -> RLConfig:
@@ -1352,7 +1436,17 @@ def create_run(
         help=(
             "Named volume to write the run's outputs to, under runs/<runId>/ "
             "(full-FT only; closed beta, see `prime volumes`). Falls back "
-            'to a top-level `volume = "..."` in the TOML.'
+            'to a top-level `volume = "..."` in the TOML. Created on the fly '
+            "(default 1Ti) if it doesn't exist."
+        ),
+    ),
+    volume_size: Optional[str] = typer.Option(
+        None,
+        "--volume-size",
+        help=(
+            "Size for the --volume if this command creates it, e.g. 500Gi or 2Ti "
+            "(default 1Ti). Ignored when the volume already exists. Falls back "
+            'to a top-level `volume_size = "..."` in the TOML.'
         ),
     ),
     full_finetune: bool = typer.Option(
@@ -1394,13 +1488,14 @@ def create_run(
             image_tag=image_tag,
             gpu_type=gpu_type,
             volume=volume,
+            volume_size=volume_size,
         )
         return
 
-    if volume or raw_cfg.get("volume") is not None:
+    if volume or volume_size or any(raw_cfg.get(k) is not None for k in ("volume", "volume_size")):
         console.print(
-            "[red]Error:[/red] --volume (and top-level `volume` in the TOML) "
-            "is only supported for full-FT runs."
+            "[red]Error:[/red] --volume / --volume-size (and top-level `volume` / "
+            "`volume_size` in the TOML) are only supported for full-FT runs."
         )
         raise typer.Exit(1)
 

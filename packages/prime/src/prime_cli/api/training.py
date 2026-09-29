@@ -6,6 +6,7 @@ own helm release on a registered PrimeCluster. Auth is the standard API
 token; admin role is gated server-side.
 """
 
+import os
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -247,11 +248,22 @@ class HostedTrainingClient:
             raise APIError(f"Failed to parse available FFT models response: {exc}") from exc
 
 
+def _github_message(resp: httpx.Response) -> str:
+    """`: <message>` from a GitHub error body, or "" when there is none."""
+    try:
+        message = resp.json().get("message")
+    except ValueError:
+        return ""
+    return f": {message}" if isinstance(message, str) and message else ""
+
+
 def resolve_pull_request_head(pr_number: int) -> str:
     """Head commit sha of a prime-rl pull request, for `prime train --pr N`.
 
-    Unauthenticated call to the public GitHub API (prime-rl is public).
-    Only PRs whose head branch lives in the canonical repo are accepted:
+    Public GitHub API (prime-rl is public); a GITHUB_TOKEN / GH_TOKEN in the
+    environment is sent so a shared egress IP (CI, office NAT) isn't stuck
+    on the anonymous 60/hour quota. Only PRs whose head branch lives in the
+    canonical repo are accepted:
     the hosted pods can only fetch refs from PrimeIntellect-ai/prime-rl,
     so a fork PR would fail at dispatch anyway. Raises APIError with a
     user-facing message on any failure so the command layer can print
@@ -262,6 +274,9 @@ def resolve_pull_request_head(pr_number: int) -> str:
         "Accept": "application/vnd.github+json",
         "User-Agent": _default_user_agent(),
     }
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     try:
         resp = httpx.get(url, headers=headers, timeout=15.0)
     except httpx.HTTPError as exc:
@@ -269,9 +284,22 @@ def resolve_pull_request_head(pr_number: int) -> str:
     if resp.status_code == 404:
         raise APIError(f"PR #{pr_number} not found in {PRIME_RL_GITHUB_REPO}.")
     if resp.status_code in (403, 429):
+        # GitHub signals both quota kinds on 403: primary with
+        # x-ratelimit-remaining: 0, secondary with retry-after. Any other
+        # 403 is a refusal (SSO, abuse detection, a bad token) and must not
+        # be reported as "retry later".
+        rate_limited = resp.status_code == 429 or (
+            resp.headers.get("x-ratelimit-remaining") == "0" or "retry-after" in resp.headers
+        )
+        if rate_limited:
+            hint = "" if token else " (set GITHUB_TOKEN to lift the anonymous limit)"
+            raise APIError(
+                f"GitHub API rate limit hit while resolving PR #{pr_number}; retry "
+                f"later{hint}, or pass --ref <branch-or-sha> directly."
+            )
         raise APIError(
-            "GitHub API rate limit hit while resolving "
-            f"PR #{pr_number}; retry later or pass --ref <branch-or-sha> directly."
+            f"GitHub refused the request for PR #{pr_number} (HTTP 403"
+            f"{_github_message(resp)}); pass --ref <branch-or-sha> directly."
         )
     if resp.status_code != 200:
         raise APIError(f"GitHub returned HTTP {resp.status_code} while resolving PR #{pr_number}.")

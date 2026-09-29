@@ -571,6 +571,65 @@ def test_resolve_pull_request_head_refuses_a_merged_pr(monkeypatch) -> None:
     assert resolve_pull_request_head(7) == "a" * 40
 
 
+def test_resolve_pull_request_head_sends_a_github_token_when_set(monkeypatch) -> None:
+    from prime_cli.api.training import resolve_pull_request_head
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    sent = _gh_pull(monkeypatch, body=_pull_body())
+    resolve_pull_request_head(7)
+    assert "Authorization" not in sent
+
+    monkeypatch.setenv("GH_TOKEN", "ghp_x")
+    sent = _gh_pull(monkeypatch, body=_pull_body())
+    resolve_pull_request_head(7)
+    assert sent["Authorization"] == "Bearer ghp_x"
+
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_y")  # GITHUB_TOKEN wins over GH_TOKEN
+    sent = _gh_pull(monkeypatch, body=_pull_body())
+    resolve_pull_request_head(7)
+    assert sent["Authorization"] == "Bearer ghp_y"
+
+
+def test_resolve_pull_request_head_error_mapping(monkeypatch) -> None:
+    import pytest
+    from prime_cli.api.training import resolve_pull_request_head
+    from prime_cli.core import APIError
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    cases = [
+        (404, {}, {}, r"not found"),
+        (429, {}, {}, r"rate limit.*GITHUB_TOKEN"),
+        (403, {"x-ratelimit-remaining": "0"}, {}, r"rate limit"),
+        (403, {"retry-after": "60"}, {}, r"rate limit"),
+        # A 403 that isn't a quota is a refusal, reported with GitHub's reason.
+        (403, {}, {"message": "Resource protected by organization SAML"}, r"refused.*SAML"),
+        (500, {}, {}, r"HTTP 500"),
+        (200, {}, {"nope": True}, r"Unexpected GitHub response"),
+        (200, {}, _pull_body(sha=""), r"no head commit sha"),
+    ]
+    for status, resp_headers, body, pattern in cases:
+        _gh_pull(monkeypatch, status=status, body=body, headers=resp_headers)
+        with pytest.raises(APIError, match=pattern):
+            resolve_pull_request_head(7)
+
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_y")
+    _gh_pull(monkeypatch, status=403, body={}, headers={"x-ratelimit-remaining": "0"})
+    with pytest.raises(APIError, match=r"rate limit") as err:
+        resolve_pull_request_head(7)
+    assert "GITHUB_TOKEN" not in str(err.value)  # hint only when no token is set
+
+    def boom(url, headers=None, timeout=None):
+        import httpx
+
+        raise httpx.ConnectError("refused")
+
+    monkeypatch.setattr("prime_cli.api.training.httpx.get", boom)
+    with pytest.raises(APIError, match=r"Could not reach GitHub"):
+        resolve_pull_request_head(7)
+
+
 def test_resolve_pull_request_head_rejects_forks(monkeypatch) -> None:
     import httpx
     from prime_cli.api.training import resolve_pull_request_head

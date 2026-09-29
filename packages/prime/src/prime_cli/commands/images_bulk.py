@@ -53,9 +53,11 @@ FAILURE_TABLE_MAX_ROWS = 20
 
 _TAG_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$")
 # Mirrors the backend's owned-name grammar: "/"-separated segments that each
-# start with an alphanumeric (no empty, "." or ".." segments).
+# start with an alphanumeric (no empty, "." or ".." segments), and no leading
+# "prime/" or "team-<id>/" segment, which bare refs would read as an owner.
 _OWNED_NAME_RE = re.compile(
-    r"(?=.{1,128}\Z)[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*"
+    r"(?=.{1,128}\Z)(?!prime/)(?!team-[^/]*/)"
+    r"[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*"
 )
 _BUILD_MANIFEST_KEYS = {"image", "context", "dockerfile"}
 _SOURCE_MANIFEST_KEY = "source"

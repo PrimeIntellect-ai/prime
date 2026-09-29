@@ -909,15 +909,16 @@ def test_nested_destination_override_accepted_for_owned_image(tmp_path, fake_api
     assert fake_api.payloads[0]["image_tag"] == "v1"
 
 
-def test_malformed_nested_destination_override_rejected(tmp_path, fake_api):
+@pytest.mark.parametrize("image", ["org//app:v1", "prime/x/app:v1", "team-x/app:v1"])
+def test_malformed_nested_destination_override_rejected(tmp_path, fake_api, image):
     manifest = tmp_path / "transfers.jsonl"
     _write_manifest(
         manifest,
-        [{"source": "ghcr.io/org/app:v1", "image": "org//app:v1"}],
+        [{"source": "ghcr.io/org/app:v1", "image": image}],
     )
     result = runner.invoke(app, ["images", "push-bulk", "--manifest", str(manifest)], env=TEST_ENV)
     assert result.exit_code == 1
-    assert "invalid destination 'org//app:v1'" in result.output
+    assert f"invalid destination '{image}'" in result.output
     assert fake_api.post_build_count() == 0
 
 

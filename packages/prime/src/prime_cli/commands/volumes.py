@@ -424,7 +424,11 @@ def _transfer(name: str, read_only: bool, remote: str, local: str, upload: bool)
     session, alias, _key, config = _open_session(name, read_only=read_only)
     if rsync:
         ssh_cmd = shlex.join(["ssh", "-F", str(config)])
-        cmd = [rsync, "-a", "-v", "--partial", "-e", ssh_cmd]
+        # A flag subset both sides take: macOS's openrsync (the laptop) and the
+        # pod's Alpine GNU rsync. --partial-dir (implies --partial) parks an
+        # interrupted file in <dest>/.rsync-partial/ instead of under its final
+        # name, and a rerun resumes from the parked file in either direction.
+        cmd = [rsync, "-a", "-v", "--partial-dir=.rsync-partial", "-e", ssh_cmd]
     else:
         # scp -r FOLLOWS symlinks and copies their TARGETS; rsync -a copies
         # them as links. Refuse a source containing one instead of letting

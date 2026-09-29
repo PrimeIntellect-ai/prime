@@ -378,7 +378,16 @@ def test_get_rsync(monkeypatch, tmp_path, _session_dir):
     assert created == [{"read_only": True, "team_id": "t1"}]
     ssh_e = shlex.join(["ssh", "-F", str(_session_dir / "config")])
     assert commands == [
-        ["/bin/rsync", "-a", "-v", "--partial", "-e", ssh_e, "host:/volume/runs/a", "out"]
+        [
+            "/bin/rsync",
+            "-a",
+            "-v",
+            "--partial-dir=.rsync-partial",
+            "-e",
+            ssh_e,
+            "host:/volume/runs/a",
+            "out",
+        ]
     ]
     assert "prime volumes stop data s1" in result.output
 
@@ -389,7 +398,7 @@ def test_put_rsync(monkeypatch, tmp_path, _session_dir):
     assert result.exit_code == 0, result.output
     assert created == [{"read_only": False, "team_id": "t1"}]
     assert commands[0][-2:] == ["f.txt", "host:/volume/dir/"]
-    assert commands[0][:5] == ["/bin/rsync", "-a", "-v", "--partial", "-e"]
+    assert commands[0][:5] == ["/bin/rsync", "-a", "-v", "--partial-dir=.rsync-partial", "-e"]
 
 
 @pytest.mark.parametrize("tools", [{"ssh", "rsync"}, {"ssh", "scp"}])

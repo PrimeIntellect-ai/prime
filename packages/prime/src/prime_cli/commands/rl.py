@@ -2453,6 +2453,8 @@ def get_run(
         console.print(f"  Rollouts per Example: {formatted['rollouts']}")
         if run.max_tokens:
             console.print(f"  Max Tokens: {run.max_tokens}")
+        if run.volume_name:
+            console.print(f"  Volume: [cyan]{run.volume_name}[/cyan]")
         if run.wandb_project:
             console.print(f"  W&B: {run.wandb_entity or ''}/{run.wandb_project}")
         if run.team_id:

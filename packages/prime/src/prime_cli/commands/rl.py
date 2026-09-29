@@ -936,39 +936,6 @@ def _is_sft(cfg: Dict[str, Any], *, flag: bool) -> bool:
     return flag or _looks_like_sft(cfg)
 
 
-def _validate_sft_config(cfg: Dict[str, Any], config_path: str) -> None:
-    """Fail fast on SFT configs the dedicated path can't run. Guarded
-    client-side even though the validator would reject them server-side:
-    a hosted run submission costs a round trip (and, pre-rejection, a
-    queue slot + user attention), so mis-shaped configs should die before
-    dispatch."""
-    if "trainer" in cfg or "orchestrator" in cfg:
-        console.print(
-            f"[red]Error:[/red] {config_path} has \\[trainer]/\\[orchestrator] "
-            "blocks — that's an RL mega-TOML, not an SFT config. Use "
-            "--full-finetune/--fft (or no flag) for RL configs."
-        )
-        raise typer.Exit(1)
-    if "data" not in cfg:
-        console.print(
-            f"[red]Error:[/red] --sft requires a \\[data] block (the SFT "
-            f"dataset config) in {config_path}."
-        )
-        raise typer.Exit(1)
-    # Online evals need the local/SLURM launcher, so the dedicated path
-    # is trainer-only — mirror the server-side validator so the user
-    # fails before submitting. \\[...] escapes rich markup in the message.
-    unsupported = [f"\\[{k}]" for k in ("eval", "inference", "weight_broadcast") if k in cfg]
-    if unsupported:
-        console.print(
-            "[red]Error:[/red] hosted SFT runs are trainer-only — "
-            f"{', '.join(unsupported)} (online evals) "
-            "are not supported on the dedicated path. Remove them, or run "
-            "locally with prime-rl's SFT launcher."
-        )
-        raise typer.Exit(1)
-
-
 def _validate_full_finetune_deployment(cfg: Dict[str, Any], config_path: str) -> None:
     """Full-FT dispatch requires an explicit `[deployment]` table sizing the
     run. Guards the `--full-finetune`-without-`[deployment]` case — the
@@ -1579,7 +1546,6 @@ def create_run(
                 "--full-finetune/--fft was passed. Use --sft instead."
             )
             raise typer.Exit(1)
-        _validate_sft_config(raw_cfg, config_path)
         _dispatch_full_finetune_run(
             raw_cfg=raw_cfg,
             config_path=config_path,

@@ -1,10 +1,13 @@
 """SFT dispatch tests for `prime train` (dedicated training path).
 
-Covers the three layers of the SFT handoff:
+Covers the SFT handoff:
   - detection: `[data]` + no `[trainer]`/`[orchestrator]` -> SFT, `--sft` flag
-  - client-side fail-fast UX: missing `[data]`, RL blocks, online-eval blocks
   - payload building: `mode: "sft"` on the /training/runs request; RL
     payloads stay mode-free
+
+Config-shape validation (missing `[data]`, RL blocks, online-eval blocks)
+lives server-side: the admission check returns a 400 synchronously, so the
+CLI doesn't duplicate it.
 """
 
 from pathlib import Path
@@ -12,7 +15,7 @@ from typing import Any
 
 import toml
 from prime_cli.api.training import build_payload_from_toml
-from prime_cli.commands.rl import _is_sft, _looks_like_sft, _validate_sft_config
+from prime_cli.commands.rl import _is_sft, _looks_like_sft
 from prime_cli.main import app
 from typer.testing import CliRunner
 
@@ -73,39 +76,9 @@ def test_sft_detection_requires_data_without_rl_blocks() -> None:
 
 def test_sft_flag_forces_the_sft_path() -> None:
     assert _is_sft({}, flag=True) is True
-    assert _is_sft({"trainer": {}}, flag=True) is True  # flag forces; validation rejects
+    assert _is_sft({"trainer": {}}, flag=True) is True  # flag forces; server validates
     assert _is_sft({"data": {}}, flag=False) is True
     assert _is_sft({}, flag=False) is False
-
-
-# --- fail-fast validation ----------------------------------------------------
-
-
-def _validate_exits(cfg: dict[str, Any]) -> Any:
-    import pytest
-    from typer import Exit
-
-    with pytest.raises(Exit) as excinfo:
-        _validate_sft_config(cfg, "sft.toml")
-    return excinfo.value
-
-
-def test_sft_validation_requires_data_block() -> None:
-    _validate_exits({"model": {}})
-
-
-def test_sft_validation_rejects_rl_blocks() -> None:
-    _validate_exits({"data": {}, "trainer": {}, "orchestrator": {}})
-
-
-def test_sft_validation_rejects_online_eval_blocks() -> None:
-    for block in ("eval", "inference", "weight_broadcast"):
-        _validate_exits({"data": {}, block: {}})
-
-
-def test_sft_validation_accepts_trainer_only_config() -> None:
-    # No exit: the bare trainer-only shape passes client-side checks.
-    _validate_sft_config({"data": {}, "deployment": {}, "ckpt": {}}, "sft.toml")
 
 
 # --- payload building --------------------------------------------------------
@@ -161,48 +134,6 @@ def test_train_sft_json_output_keeps_run_id_parseable(tmp_path: Path, monkeypatc
 
     data = json.loads(result.stdout)
     assert data["run"]["runId"] == "run-1"
-
-
-def test_train_rejects_sft_config_with_online_eval_blocks(tmp_path: Path, monkeypatch) -> None:
-    _capture_post(monkeypatch)
-    config_path = _write_config(
-        tmp_path, _sft_config(eval={"sources": {}}, inference={"model": {}})
-    )
-
-    result = runner.invoke(app, ["train", config_path, "--yes"], env=TEST_ENV)
-
-    assert result.exit_code == 1
-    assert "trainer-only" in result.output
-    assert "[eval]" in result.output and "[inference]" in result.output
-
-
-def test_train_rejects_sft_flag_without_data_block(tmp_path: Path, monkeypatch) -> None:
-    _capture_post(monkeypatch)
-    config_path = _write_config(
-        tmp_path, toml.dumps({"model": {"name": "m"}, "deployment": {"type": "single_node"}})
-    )
-
-    result = runner.invoke(app, ["train", config_path, "--sft", "--yes"], env=TEST_ENV)
-
-    assert result.exit_code == 1
-    assert "--sft requires a [data] block" in result.output
-
-
-def test_train_rejects_sft_flag_on_rl_config(tmp_path: Path, monkeypatch) -> None:
-    _capture_post(monkeypatch)
-    rl_cfg = toml.dumps(
-        {
-            "trainer": {"model": {"name": "m"}},
-            "orchestrator": {"env": {}},
-            "deployment": {"type": "single_node", "num_train_gpus": 1},
-        }
-    )
-    config_path = _write_config(tmp_path, rl_cfg)
-
-    result = runner.invoke(app, ["train", config_path, "--sft", "--yes"], env=TEST_ENV)
-
-    assert result.exit_code == 1
-    assert "RL mega-TOML" in result.output
 
 
 def test_train_rejects_fft_flag_on_sft_config(tmp_path: Path, monkeypatch) -> None:

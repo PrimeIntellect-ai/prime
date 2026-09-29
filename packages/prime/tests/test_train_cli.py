@@ -546,6 +546,14 @@ def test_train_pr_flag_resolves_head_sha_and_conflicts_with_ref(
     assert len(captured) == 2  # the json + table dispatches above, nothing since
 
 
+def test_train_help_marks_source_overlay_flags_internal() -> None:
+    result = runner.invoke(app, ["train", "--help"], env=TEST_ENV)
+    assert result.exit_code == 0
+    text = " ".join(result.output.split())
+    assert "--ref" in text and "--pr" in text
+    assert text.count("Internal only") == 2
+
+
 def test_train_ref_shape_is_checked_before_dispatch(monkeypatch, tmp_path: Path) -> None:
     captured = _capture_fft_dispatch(monkeypatch)
     cfg = tmp_path / "rl.toml"

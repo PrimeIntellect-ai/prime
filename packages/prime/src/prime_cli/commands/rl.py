@@ -1577,19 +1577,22 @@ def create_run(
         None,
         "--ref",
         help=(
-            "prime-rl git ref (branch, tag, or sha) to run on top of the image "
-            "(full-FT only). The pods overlay that source onto the image at "
-            "startup, so unmerged code runs without an image build; the "
-            "platform pins the resolved commit for the run. Falls back to a "
-            'top-level `source_ref = "..."` in the TOML.'
+            "Internal only: prime-rl git ref (branch, tag, or sha) to run on top "
+            "of the image (full-FT only). Needs an admin `trainings:create` grant "
+            "and a deployment with source overlays enabled; other callers get a "
+            "403. The pods overlay that source onto the image at startup, so "
+            "unmerged code runs without an image build; the platform pins the "
+            "resolved commit for the run. Falls back to a top-level "
+            '`source_ref = "..."` in the TOML.'
         ),
     ),
     pr: Optional[int] = typer.Option(
         None,
         "--pr",
         help=(
-            "prime-rl pull request number to run (full-FT only). Shorthand for "
-            "--ref <PR head sha>; fork PRs are not supported."
+            "Internal only: prime-rl pull request number to run (full-FT only; "
+            "same gate as --ref). Shorthand for --ref <PR head sha>; fork and "
+            "already-merged PRs are not supported."
         ),
     ),
     full_finetune: bool = typer.Option(

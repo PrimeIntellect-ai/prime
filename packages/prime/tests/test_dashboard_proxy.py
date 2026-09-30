@@ -2019,9 +2019,14 @@ def test_consumed_lookup_survives_concurrent_consume(monkeypatch) -> None:
 
         monkeypatch.setattr(hmac_module, "compare_digest", paused_cmp)
 
-        # No RuntimeError: the lookup iterates a locked snapshot and
-        # still authorizes the cookie-backed refresh.
-        assert server.matches_consumed_entry_token(second.encode()) is True
+        # GUARANTEED-NONMATCH lookup: the token is not in the consumed
+        # set, so the lookup must iterate EVERY snapshot candidate. With
+        # the old live-set iteration this deterministically raises
+        # RuntimeError on the second comparison (the set grew by `third`
+        # mid-iteration); a matching lookup would have let any()
+        # short-circuit and hide the bug. The locked-snapshot lookup must
+        # complete normally and return False.
+        assert server.matches_consumed_entry_token(b"guaranteed-nonmatch-token") is False
         release.wait(timeout=5)
         assert entered.is_set()
     finally:

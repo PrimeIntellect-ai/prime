@@ -43,6 +43,12 @@ from .usage import RUN_USAGE_JSON_HELP, run_usage_command
 
 console = get_console()
 
+LEGACY_TRAINING_NOTICE = (
+    "Shared Hosted Training for LoRA runs will stop accepting new runs on October 5, 2026. "
+    "Hosted Training is transitioning to dedicated runs. "
+    "Existing LoRA adapters will remain downloadable and deployable until further notice."
+)
+
 V1_ENV_CONFIG_FIELDS = (
     "taskset",
     "harness",
@@ -240,6 +246,9 @@ def generate_rl_config_template(environment: str | None = None) -> str:
     env_value = environment or "primeintellect/reverse-text"
 
     return f'''\
+# Shared Hosted Training for LoRA runs will stop accepting new runs on October 5, 2026.
+# Hosted Training is transitioning to dedicated runs.
+# Existing LoRA adapters will remain downloadable and deployable until further notice.
 model = "Qwen/Qwen3.5-0.8B"
 loss = "rl" # "rl" | "sft"; OPD is not yet supported on hosted runtimes
 max_steps = 100
@@ -1606,6 +1615,10 @@ def create_run(
 
     console.print(f"[dim]Loading config from {config_path}[/dim]\n")
     cfg = load_config(config_path)
+    if output == "json":
+        typer.echo(f"Warning: {LEGACY_TRAINING_NOTICE}", err=True)
+    else:
+        console.print(f"[yellow]Warning:[/yellow] {LEGACY_TRAINING_NOTICE}\n")
 
     # Collect secrets from all sources
     def warn(msg: str) -> None:
@@ -3140,6 +3153,7 @@ def init_config(
     path.write_text(template)
 
     console.print(f"[green]✓[/green] Created {output_path}")
+    console.print(f"[yellow]Warning:[/yellow] {LEGACY_TRAINING_NOTICE}")
     console.print(f"\n[dim]Run with:[/dim] prime train {output_path}")
 
 

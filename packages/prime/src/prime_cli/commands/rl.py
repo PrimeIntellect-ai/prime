@@ -3530,7 +3530,10 @@ def get_dashboard_url(
     """Open the Hosted Training run dashboard in your browser.
 
     Starts a local proxy on 127.0.0.1 that injects the API token on your
-    behalf, so the browser never needs it. By default the proxy runs in a
+    behalf, so the browser never needs it. The printed loopback URL embeds
+    a random per-spawn capability token in its path — every request must
+    carry it, so other local users cannot read the dashboard by
+    port-scanning the proxy. By default the proxy runs in a
     detached background process that exits itself after 30 minutes of
     INACTIVITY — an actively used dashboard (e.g. an open tab with a live
     stream) keeps the proxy alive past 30 minutes of wall time. The

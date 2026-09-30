@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 from pathlib import Path
 from typing import Any, Optional
 
@@ -28,7 +29,7 @@ BASE_URL = "https://api.example.com"
 def proxy_factory():
     servers: list[Any] = []
 
-    def start(upstream: httpx.Client, run_id: str = "run-1") -> tuple[str, int]:
+    def start(upstream: httpx.Client, run_id: str = "run-1") -> tuple[str, int, str]:
         server, url = make_dashboard_proxy_server(
             run_id,
             base_url=BASE_URL,
@@ -38,7 +39,7 @@ def proxy_factory():
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         servers.append(server)
-        return url, server.server_address[1]
+        return url, server.server_address[1], server.capability_token
 
     yield start
 
@@ -47,10 +48,73 @@ def proxy_factory():
         server.server_close()
 
 
-def _get(port: int, path: str) -> http.client.HTTPResponse:
+def _get(
+    port: int,
+    token: str,
+    path: str,
+    headers: Optional[dict[str, str]] = None,
+) -> http.client.HTTPResponse:
+    """GET ``path`` (token-relative) through the proxy."""
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
-    conn.request("GET", path)
+    conn.request("GET", f"/{token}{path}", headers=headers or {})
     return conn.getresponse()
+
+
+def test_loopback_url_embeds_unguessable_capability_token(proxy_factory) -> None:
+    """Every spawn mints a fresh token and embeds it in the URL path."""
+    url, port, token = proxy_factory(
+        httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+    )
+
+    assert url == f"http://127.0.0.1:{port}/{token}/"
+    assert len(token) >= 32  # unguessable: ~256 bits of entropy
+    url_2, _, token_2 = proxy_factory(
+        httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+    )
+    assert token_2 != token  # per-spawn randomness, never derived from the run
+    assert token_2 in url_2
+
+
+def test_proxy_rejects_requests_without_capability_token(proxy_factory) -> None:
+    """Another local user who port-scans the loopback port gets nothing.
+
+    Without the capability token a request is rejected with 403 BEFORE
+    the Host/Origin checks and BEFORE any upstream work — the victim's
+    bearer token is never used.
+    """
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        return httpx.Response(200, content=b"secret dashboard")
+
+    _, port, token = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
+
+    # No token at all.
+    status, body = _raw_request(port, [f"Host: 127.0.0.1:{port}"], path="/")
+    assert status == 403
+    assert seen == []
+    assert b"secret" not in body
+
+    # A wrong token (including near-misses on the real one).
+    for wrong in ("", "wrong-token", token[:-1], token + "x", token.upper()):
+        status, body = _raw_request(port, [f"Host: 127.0.0.1:{port}"], path=f"/{wrong}/")
+        assert status == 403, wrong
+        assert seen == []
+        assert b"secret" not in body
+
+    # Malformed and non-ASCII targets must be a clean 403, never a crash.
+    for path in ("//[::1", "/[::1", "/%C3%A9/x", "/\u00e9/x"):
+        status, body = _raw_request(port, [f"Host: 127.0.0.1:{port}"], path=path)
+        assert status == 403, path
+        assert seen == []
+        assert b"secret" not in body
+
+    # The right token goes through.
+    response = _get(port, token, "/")
+    assert response.status == 200
+    assert response.read() == b"secret dashboard"
+    assert len(seen) == 1
 
 
 def test_proxy_maps_root_to_run_scoped_route(proxy_factory) -> None:
@@ -67,9 +131,9 @@ def test_proxy_maps_root_to_run_scoped_route(proxy_factory) -> None:
             content=b"<html>dashboard</html>",
         )
 
-    _, port = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
+    _, port, token = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
 
-    response = _get(port, "/")
+    response = _get(port, token, "/")
 
     assert response.status == 200
     assert response.getheader("Content-Type") == "text/html; charset=utf-8"
@@ -91,9 +155,9 @@ def test_proxy_maps_root_relative_paths_and_query_strings(proxy_factory) -> None
             content=b"console.log(1)",
         )
 
-    _, port = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
+    _, port, token = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
 
-    response = _get(port, "/static/app.js?v=2")
+    response = _get(port, token, "/static/app.js?v=2")
 
     assert response.status == 200
     assert response.getheader("Content-Type") == "text/javascript"
@@ -117,9 +181,9 @@ def test_proxy_streams_sse_events_through_incrementally(proxy_factory) -> None:
             content=sse_body(),
         )
 
-    _, port = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
+    _, port, token = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
 
-    response = _get(port, "/api/view/events")
+    response = _get(port, token, "/api/view/events")
 
     assert response.status == 200
     assert response.getheader("Content-Type") == "text/event-stream"
@@ -133,6 +197,70 @@ def test_proxy_streams_sse_events_through_incrementally(proxy_factory) -> None:
     assert upstream_done.is_set()
 
 
+def test_proxy_forwards_accept_and_last_event_id_headers(proxy_factory) -> None:
+    """SSE negotiation: the browser's Accept and Last-Event-ID reach upstream.
+
+    Accept lets the EventSource negotiate text/event-stream; Last-Event-ID
+    lets a reconnecting stream RESUME instead of restarting (which would
+    duplicate events).
+    """
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["accept"] = request.headers.get("accept", "")
+        seen["last_event_id"] = request.headers.get("last-event-id", "")
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/event-stream"},
+            content=b"data: 1\n\n",
+        )
+
+    _, port, token = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
+
+    response = _get(
+        port,
+        token,
+        "/api/view/events",
+        headers={"Accept": "text/event-stream", "Last-Event-ID": "42"},
+    )
+
+    assert response.status == 200
+    assert seen["accept"] == "text/event-stream"
+    assert seen["last_event_id"] == "42"
+
+
+def test_proxy_forwards_no_other_request_headers(proxy_factory) -> None:
+    """Only Accept and Last-Event-ID cross to the platform, nothing else."""
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["cookie"] = request.headers.get("cookie", "")
+        seen["x_custom"] = request.headers.get("x-custom", "")
+        seen["forwarded"] = request.headers.get("forwarded", "")
+        seen["user_agent"] = request.headers.get("user-agent", "")
+        return httpx.Response(200, content=b"ok")
+
+    _, port, token = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
+
+    response = _get(
+        port,
+        token,
+        "/",
+        headers={
+            "Cookie": "session=attacker",
+            "X-Custom": "leak-me",
+            "Forwarded": "for=1.2.3.4",
+            "User-Agent": "evil-browser",
+        },
+    )
+
+    assert response.status == 200
+    assert seen["cookie"] == ""
+    assert seen["x_custom"] == ""
+    assert seen["forwarded"] == ""
+    assert seen["user_agent"] not in ("", "evil-browser")  # CLI default only
+
+
 def test_proxy_surfaces_upstream_http_errors_as_clean_local_errors(proxy_factory) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         # Raw upstream failures must not leak internal hosts to the browser.
@@ -142,9 +270,9 @@ def test_proxy_surfaces_upstream_http_errors_as_clean_local_errors(proxy_factory
             content=b'{"detail": "upstream http://rl-dashboard.tail-9.ts.net:7788 down"}',
         )
 
-    _, port = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
+    _, port, token = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
 
-    response = _get(port, "/")
+    response = _get(port, token, "/")
 
     body = response.read()
     assert response.status == 502
@@ -156,9 +284,9 @@ def test_proxy_surfaces_transport_failures_as_clean_local_errors(proxy_factory) 
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("connection refused to 10.0.0.1:7788")
 
-    _, port = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
+    _, port, token = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
 
-    response = _get(port, "/")
+    response = _get(port, token, "/")
 
     body = response.read()
     assert response.status == 502
@@ -175,26 +303,74 @@ def test_proxy_rewrites_same_origin_redirect_to_loopback_root(proxy_factory) -> 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(302, headers={"Location": redirect_target}, content=b"")
 
-    _, port = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
+    _, port, token = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
 
-    response = _get(port, "/")
+    response = _get(port, token, "/")
 
-    # Absolute in-prefix Location must become a root-relative loopback path
+    # Absolute in-prefix Location must become a token-prefixed loopback path
     # (scheme, host, run prefix and query preserved on the loopback root).
     assert response.status == 302
-    assert response.getheader("Location") == "/static/index.html?v=2"
+    assert response.getheader("Location") == f"/{token}/static/index.html?v=2"
 
 
 def test_proxy_forwards_relative_redirect_unchanged(proxy_factory) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(308, headers={"Location": "/static/app.js"}, content=b"")
 
-    _, port = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
+    _, port, token = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
 
-    response = _get(port, "/")
+    response = _get(port, token, "/")
 
     assert response.status == 308
-    assert response.getheader("Location") == "/static/app.js"
+    # Ordinary root-relative locations pass through semantically unchanged;
+    # the handler re-prefixes the capability token so the browser's
+    # follow-up request passes the token check.
+    assert response.getheader("Location") == f"/{token}/static/app.js"
+
+
+def test_proxy_passes_truly_relative_redirect_through_verbatim(proxy_factory) -> None:
+    """A location WITHOUT a leading slash resolves below the token segment.
+
+    It must be relayed verbatim: prefixing it would corrupt the path the
+    browser resolves against the token-prefixed current URL.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(308, headers={"Location": "static/app.js"}, content=b"")
+
+    _, port, token = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
+
+    response = _get(port, token, "/")
+    assert response.status == 308
+    assert response.getheader("Location") == "static/app.js"
+
+
+def test_proxy_preserves_fragments_in_rewritten_redirects(proxy_factory) -> None:
+    """Absolute same-origin redirect with a fragment keeps it on the rewrite."""
+    redirect_target = f"{BASE_URL}/api/v1/rft/runs/run-1/dashboard/#/metrics"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(302, headers={"Location": redirect_target}, content=b"")
+
+    _, port, token = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
+
+    response = _get(port, token, "/")
+    assert response.status == 302
+    assert response.getheader("Location") == f"/{token}/#/metrics"
+
+
+def test_proxy_preserves_fragments_in_platform_shaped_redirects(proxy_factory) -> None:
+    """Platform-shaped relative redirect with query AND fragment keeps both."""
+    redirect_target = "/api/v1/rft/runs/run-1/dashboard/static/index?next=1#/metrics"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(302, headers={"Location": redirect_target}, content=b"")
+
+    _, port, token = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
+
+    response = _get(port, token, "/")
+    assert response.status == 302
+    assert response.getheader("Location") == f"/{token}/static/index?next=1#/metrics"
 
 
 def test_proxy_rejects_cross_origin_redirects(proxy_factory) -> None:
@@ -205,9 +381,9 @@ def test_proxy_rejects_cross_origin_redirects(proxy_factory) -> None:
             content=b"",
         )
 
-    _, port = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
+    _, port, token = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
 
-    response = _get(port, "/")
+    response = _get(port, token, "/")
 
     body = response.read()
     assert response.status == 502
@@ -224,9 +400,9 @@ def test_proxy_rejects_same_origin_redirects_outside_the_run_scope(proxy_factory
             content=b"",
         )
 
-    _, port = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
+    _, port, token = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
 
-    response = _get(port, "/")
+    response = _get(port, token, "/")
 
     assert response.status == 502
     assert response.read().decode("utf-8").startswith("Dashboard backend redirect rejected")
@@ -261,6 +437,14 @@ def test_proxy_rejects_same_origin_redirects_outside_the_run_scope(proxy_factory
         # browser would otherwise leave the loopback origin entirely.
         ("//evil.example.com/x", None),
         ("//127.0.0.1:9999/x", None),
+        # Fragments are SPA routing state: they must survive every rewrite.
+        ("/static/x#/metrics", "/static/x#/metrics"),
+        (f"{BASE_URL}/api/v1/rft/runs/run-1/dashboard/#/metrics", "/#/metrics"),
+        ("/api/v1/rft/runs/run-1/dashboard/static/x?q=1#/metrics", "/static/x?q=1#/metrics"),
+        (f"{BASE_URL}/api/v1/rft/runs/run-1/dashboard/a/b#/metrics", "/a/b#/metrics"),
+        # Cross-origin/rejected locations with fragments stay rejected.
+        ("https://evil.example.com/dashboard/#/metrics", None),
+        ("/api/v1/rft/runs/run-2/dashboard/x#/metrics", None),
     ],
 )
 def test_map_dashboard_redirect(location: str, expected: Optional[str]) -> None:
@@ -326,7 +510,7 @@ def test_start_detached_spawns_child_and_returns_ready_port(monkeypatch, tmp_pat
 
     def fake_popen(command, **kwargs):
         spawn_calls.append({"command": command, **kwargs})
-        return _FakeChildProcess("PORT 51234\n")
+        return _FakeChildProcess("PORT 51234 fake-capability-token\n")
 
     monkeypatch.setattr("prime_cli.dashboard_proxy.subprocess.Popen", fake_popen)
 
@@ -337,13 +521,16 @@ def test_start_detached_spawns_child_and_returns_ready_port(monkeypatch, tmp_pat
         state_dir=tmp_path,
     )
 
-    assert url == "http://127.0.0.1:51234/"
+    assert url == "http://127.0.0.1:51234/fake-capability-token/"
     assert len(spawn_calls) == 1
     call = spawn_calls[0]
     assert call["command"][:3] == [sys.executable, "-m", "prime_cli.dashboard_proxy"]
     # The API token must travel via the environment, never the command line
     # (process tables are world-readable).
     assert "test-key" not in " ".join(call["command"])
+    # The capability token also never travels on the command line: it
+    # crosses the private ready pipe and the 0600 state file only.
+    assert "fake-capability-token" not in " ".join(call["command"])
     assert call["env"]["PRIME_DASHBOARD_PROXY_API_KEY"] == "test-key"
     assert call["start_new_session"] is True
 
@@ -385,7 +572,14 @@ def test_start_detached_reuses_live_proxy_from_state_file(monkeypatch, tmp_path)
         state_path = proxy_state_path("run-1", state_dir=tmp_path, fingerprint=fingerprint)
         state_path.parent.mkdir(parents=True, exist_ok=True)
         state_path.write_text(
-            json.dumps({"run_id": "run-1", "pid": os.getpid(), "port": server.server_address[1]})
+            json.dumps(
+                {
+                    "run_id": "run-1",
+                    "pid": os.getpid(),
+                    "port": server.server_address[1],
+                    "token": server.capability_token,
+                }
+            )
         )
 
         def no_spawn(command, **kwargs):
@@ -412,7 +606,7 @@ def test_start_detached_ignores_stale_state_file(monkeypatch, tmp_path) -> None:
     state_path.write_text(json.dumps({"run_id": "run-1", "pid": 999999999, "port": 59999}))
 
     def fake_popen(command, **kwargs):
-        return _FakeChildProcess("PORT 51235\n")
+        return _FakeChildProcess("PORT 51235 stale-capability-token\n")
 
     monkeypatch.setattr("prime_cli.dashboard_proxy.subprocess.Popen", fake_popen)
 
@@ -420,7 +614,7 @@ def test_start_detached_ignores_stale_state_file(monkeypatch, tmp_path) -> None:
         "run-1", base_url=BASE_URL, api_key="test-key", state_dir=tmp_path
     )
 
-    assert url == "http://127.0.0.1:51235/"
+    assert url == "http://127.0.0.1:51235/stale-capability-token/"
 
 
 def test_detached_child_end_to_end(tmp_path) -> None:
@@ -437,7 +631,8 @@ def test_detached_child_end_to_end(tmp_path) -> None:
         idle_timeout_seconds=600,
     )
 
-    port = int(url.rstrip("/").rsplit(":", 1)[1])
+    port = int(url.rstrip("/").rsplit(":", 1)[1].partition("/")[0])
+    token = urllib.parse.urlsplit(url).path.strip("/")
     # The parent picks a fingerprinted state file path and passes it to the child.
     state_paths = list(state_dir.glob("train-dashboard-run-1-*.json"))
     assert len(state_paths) == 1
@@ -445,8 +640,11 @@ def test_detached_child_end_to_end(tmp_path) -> None:
     state = json.loads(state_path.read_text())
     assert state["port"] == port
     assert state["pid"] > 0
+    assert state["token"] == token
+    # The state file carries the capability token: it must be user-only.
+    assert state_path.stat().st_mode & 0o777 == 0o600
 
-    response = _get(port, "/")
+    response = _get(port, token, "/")
     body = response.read()
     assert response.status == 502
     assert b"unreachable" in body
@@ -481,15 +679,15 @@ def test_proxy_composes_platform_rewritten_redirect_through_loopback(proxy_facto
             )
         return httpx.Response(200, content=b"<html>index</html>")
 
-    _, port = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
+    _, port, token = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
 
-    first = _get(port, "/")
+    first = _get(port, token, "/")
     assert first.status == 302
-    assert first.getheader("Location") == "/static/index.html?next=1"
+    assert first.getheader("Location") == f"/{token}/static/index.html?next=1"
 
     # The browser follows the rewritten Location on the loopback root and
     # the proxy must map it back to exactly one platform prefix.
-    second = _get(port, "/static/index.html?next=1")
+    second = _get(port, token, "/static/index.html?next=1")
     assert second.status == 200
     assert second.read() == b"<html>index</html>"
     assert seen == [
@@ -509,13 +707,13 @@ def test_proxy_still_passes_ordinary_relative_redirect_unchanged(proxy_factory) 
             return httpx.Response(308, headers={"Location": "/static/app.js"}, content=b"")
         return httpx.Response(200, content=b"js")
 
-    _, port = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
+    _, port, token = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
 
-    first = _get(port, "/")
+    first = _get(port, token, "/")
     assert first.status == 308
-    assert first.getheader("Location") == "/static/app.js"
+    assert first.getheader("Location") == f"/{token}/static/app.js"
 
-    second = _get(port, "/static/app.js")
+    second = _get(port, token, "/static/app.js")
     assert second.status == 200
     assert second.read() == b"js"
     assert seen == [
@@ -532,9 +730,9 @@ def test_proxy_rejects_platform_relative_redirect_for_other_run(proxy_factory) -
             content=b"",
         )
 
-    _, port = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
+    _, port, token = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
 
-    response = _get(port, "/")
+    response = _get(port, token, "/")
 
     assert response.status == 502
     assert response.read().decode("utf-8").startswith("Dashboard backend redirect rejected")
@@ -543,8 +741,11 @@ def test_proxy_rejects_platform_relative_redirect_for_other_run(proxy_factory) -
 # --- DNS-rebinding guard: Host/Origin validation -----------------------------
 
 
-def _raw_get(port: int, host: str, origin: Optional[str] = None) -> tuple[int, bytes]:
-    request = f"GET / HTTP/1.1\r\nHost: {host}\r\n"
+def _raw_get(
+    port: int, host: str, origin: Optional[str] = None, token: Optional[str] = None
+) -> tuple[int, bytes]:
+    path = f"/{token}/" if token else "/"
+    request = f"GET {path} HTTP/1.1\r\nHost: {host}\r\n"
     if origin:
         request += f"Origin: {origin}\r\n"
     request += "Connection: close\r\n\r\n"
@@ -568,11 +769,11 @@ def test_proxy_rejects_forged_host_header(proxy_factory) -> None:
         seen.append(str(request.url))
         return httpx.Response(200, content=b"secret dashboard")
 
-    _, port = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
+    _, port, token = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
 
     # A rebound DNS name (attacker.example.com -> 127.0.0.1) must be
     # rejected BEFORE any upstream work: the private data never leaves.
-    status, body = _raw_get(port, f"attacker.example.com:{port}")
+    status, body = _raw_get(port, f"attacker.example.com:{port}", token=token)
     assert status == 403
     assert seen == []
     assert b"secret" not in body
@@ -582,9 +783,9 @@ def test_proxy_rejects_loopback_host_with_wrong_port(proxy_factory) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=b"secret dashboard")
 
-    _, port = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
+    _, port, token = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
 
-    status, _ = _raw_get(port, "127.0.0.1:1")
+    status, _ = _raw_get(port, "127.0.0.1:1", token=token)
     assert status == 403
 
 
@@ -592,10 +793,10 @@ def test_proxy_allows_localhost_and_loopback_hosts(proxy_factory) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=b"dashboard")
 
-    _, port = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
+    _, port, token = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
 
-    assert _raw_get(port, f"localhost:{port}")[0] == 200
-    assert _raw_get(port, f"127.0.0.1:{port}")[0] == 200
+    assert _raw_get(port, f"localhost:{port}", token=token)[0] == 200
+    assert _raw_get(port, f"127.0.0.1:{port}", token=token)[0] == 200
 
 
 def test_proxy_rejects_forged_origin(proxy_factory) -> None:
@@ -605,10 +806,10 @@ def test_proxy_rejects_forged_origin(proxy_factory) -> None:
         seen.append(str(request.url))
         return httpx.Response(200, content=b"secret dashboard")
 
-    _, port = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
+    _, port, token = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
 
     # A hostile page on another origin fetching the loopback port: reject.
-    status, _ = _raw_get(port, f"127.0.0.1:{port}", origin="http://evil.example.com")
+    status, _ = _raw_get(port, f"127.0.0.1:{port}", origin="http://evil.example.com", token=token)
     assert status == 403
     assert seen == []
 
@@ -617,9 +818,12 @@ def test_proxy_allows_loopback_origin(proxy_factory) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=b"dashboard")
 
-    _, port = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
+    _, port, token = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
 
-    assert _raw_get(port, f"127.0.0.1:{port}", origin=f"http://127.0.0.1:{port}")[0] == 200
+    assert (
+        _raw_get(port, f"127.0.0.1:{port}", origin=f"http://127.0.0.1:{port}", token=token)[0]
+        == 200
+    )
 
 
 # --- Traversal guard ---------------------------------------------------------
@@ -645,14 +849,14 @@ def test_proxy_rejects_dot_segment_traversal_before_upstream(proxy_factory) -> N
         seen.append(str(request.url))
         return httpx.Response(200, content=b"x")
 
-    _, port = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
+    _, port, token = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
 
     # Raw and percent-encoded dot segments must be rejected locally:
     # httpx would normalize them and attach the bearer token to paths
     # outside the run-scoped dashboard route.
-    assert _raw_path_get(port, "/static/../../rft/runs/run-2") == 400
-    assert _raw_path_get(port, "/static/%2e%2e/%2e%2e/rft/runs/run-2") == 400
-    assert _raw_path_get(port, "/a/b/../c") == 400
+    assert _raw_path_get(port, f"/{token}/static/../../rft/runs/run-2") == 400
+    assert _raw_path_get(port, f"/{token}/static/%2e%2e/%2e%2e/rft/runs/run-2") == 400
+    assert _raw_path_get(port, f"/{token}/a/b/../c") == 400
     # The upstream was never contacted.
     assert seen == []
 
@@ -688,9 +892,9 @@ def test_proxy_passes_precompressed_bodies_verbatim(proxy_factory) -> None:
             stream=_RawByteStream(payload),
         )
 
-    _, port = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
+    _, port, token = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
 
-    response = _get(port, "/")
+    response = _get(port, token, "/")
     body = response.read()
 
     # The compressed bytes, encoding header and compressed length must all
@@ -722,11 +926,18 @@ def test_start_detached_never_reuses_across_contexts(monkeypatch, tmp_path) -> N
         state_a = proxy_state_path("run-1", state_dir=tmp_path, fingerprint=fp_a)
         state_a.parent.mkdir(parents=True, exist_ok=True)
         state_a.write_text(
-            json.dumps({"run_id": "run-1", "pid": os.getpid(), "port": server.server_address[1]})
+            json.dumps(
+                {
+                    "run_id": "run-1",
+                    "pid": os.getpid(),
+                    "port": server.server_address[1],
+                    "token": server.capability_token,
+                }
+            )
         )
 
         def fake_popen(command, **kwargs):
-            return _FakeChildProcess("PORT 51236\n")
+            return _FakeChildProcess("PORT 51236 other-context-token\n")
 
         monkeypatch.setattr("prime_cli.dashboard_proxy.subprocess.Popen", fake_popen)
 
@@ -735,7 +946,7 @@ def test_start_detached_never_reuses_across_contexts(monkeypatch, tmp_path) -> N
             "run-1", base_url=BASE_URL, api_key="token-B", state_dir=tmp_path
         )
 
-        assert url_b == "http://127.0.0.1:51236/"
+        assert url_b == "http://127.0.0.1:51236/other-context-token/"
         # The other context's state file is untouched (live proxy left to
         # its own idle exit — it serves a different, valid context).
         assert state_a.exists()
@@ -764,11 +975,18 @@ def test_start_detached_respawns_when_live_proxy_credentials_are_stale(
         state_path = proxy_state_path("run-1", state_dir=tmp_path, fingerprint=fingerprint)
         state_path.parent.mkdir(parents=True, exist_ok=True)
         state_path.write_text(
-            json.dumps({"run_id": "run-1", "pid": os.getpid(), "port": server.server_address[1]})
+            json.dumps(
+                {
+                    "run_id": "run-1",
+                    "pid": os.getpid(),
+                    "port": server.server_address[1],
+                    "token": server.capability_token,
+                }
+            )
         )
 
         def fake_popen(command, **kwargs):
-            return _FakeChildProcess("PORT 51237\n")
+            return _FakeChildProcess("PORT 51237 fresh-capability-token\n")
 
         monkeypatch.setattr("prime_cli.dashboard_proxy.subprocess.Popen", fake_popen)
 
@@ -778,7 +996,7 @@ def test_start_detached_respawns_when_live_proxy_credentials_are_stale(
 
         # The stale proxy answered the credentials probe with a 502
         # (platform rejects the bearer), so a fresh proxy started.
-        assert url == "http://127.0.0.1:51237/"
+        assert url == "http://127.0.0.1:51237/fresh-capability-token/"
         assert url != stale_url
     finally:
         server.shutdown()
@@ -852,7 +1070,11 @@ def test_detached_child_leaves_replaced_state_file_alone(tmp_path) -> None:
 # --- t024: strict Host/Origin parser hardening (astra raw-socket matrix) ------
 
 
-def _raw_request(port: int, header_lines: list[str], path: str = "/") -> tuple[int, bytes]:
+def _raw_request(
+    port: int, header_lines: list[str], path: str = "/", token: Optional[str] = None
+) -> tuple[int, bytes]:
+    if token and path == "/":
+        path = f"/{token}/"
     request = (
         f"GET {path} HTTP/1.1\r\n" + "\r\n".join(header_lines) + "\r\nConnection: close\r\n\r\n"
     )
@@ -886,9 +1108,9 @@ def test_proxy_rejects_malformed_host_authorities(proxy_factory, host_line: str)
         seen.append(str(request.url))
         return httpx.Response(200, content=b"secret dashboard")
 
-    _, port = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
+    _, port, token = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
 
-    status, body = _raw_request(port, [f"Host: {host_line}"])
+    status, body = _raw_request(port, [f"Host: {host_line}"], token=token)
     assert status == 403, host_line
     assert seen == []
     assert b"secret" not in body
@@ -898,10 +1120,10 @@ def test_proxy_accepts_well_formed_ipv6_bracket_host(proxy_factory) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=b"dashboard")
 
-    _, port = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
+    _, port, token = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
 
-    assert _raw_request(port, [f"Host: [::1]:{port}"])[0] == 200
-    assert _raw_request(port, ["Host: [::1]"])[0] == 200
+    assert _raw_request(port, [f"Host: [::1]:{port}"], token=token)[0] == 200
+    assert _raw_request(port, ["Host: [::1]"], token=token)[0] == 200
 
 
 def test_proxy_rejects_duplicate_host_headers(proxy_factory) -> None:
@@ -911,10 +1133,12 @@ def test_proxy_rejects_duplicate_host_headers(proxy_factory) -> None:
         seen.append(str(request.url))
         return httpx.Response(200, content=b"secret dashboard")
 
-    _, port = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
+    _, port, token = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
 
     # Good Host first, hostile second: duplicated Host is rejected outright.
-    status, body = _raw_request(port, [f"Host: 127.0.0.1:{port}", "Host: attacker.example:80"])
+    status, body = _raw_request(
+        port, [f"Host: 127.0.0.1:{port}", "Host: attacker.example:80"], token=token
+    )
     assert status == 403
     assert seen == []
     assert b"secret" not in body
@@ -937,10 +1161,10 @@ def test_proxy_rejects_invalid_origins(proxy_factory, origin_line: str) -> None:
         seen.append(str(request.url))
         return httpx.Response(200, content=b"secret dashboard")
 
-    _, port = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
+    _, port, token = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
 
     line = origin_line.replace("{placeholder}", f"127.0.0.1:{port}")
-    status, body = _raw_request(port, [f"Host: 127.0.0.1:{port}", f"Origin: {line}"])
+    status, body = _raw_request(port, [f"Host: 127.0.0.1:{port}", f"Origin: {line}"], token=token)
     assert status == 403, line
     assert seen == []
     assert b"secret" not in body
@@ -950,9 +1174,11 @@ def test_proxy_still_accepts_same_origin_with_bound_port(proxy_factory) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=b"dashboard")
 
-    _, port = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
+    _, port, token = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
 
-    status, _ = _raw_request(port, [f"Host: 127.0.0.1:{port}", f"Origin: http://127.0.0.1:{port}"])
+    status, _ = _raw_request(
+        port, [f"Host: 127.0.0.1:{port}", f"Origin: http://127.0.0.1:{port}"], token=token
+    )
     assert status == 200
 
 
@@ -1021,7 +1247,7 @@ def test_detached_popen_uses_windows_flags_on_windows(monkeypatch, tmp_path) -> 
 
     def fake_popen(command, **kwargs):
         seen.update(kwargs)
-        return _FakeChildProcess("PORT 51234\n")
+        return _FakeChildProcess("PORT 51234 fake-capability-token\n")
 
     monkeypatch.setattr("prime_cli.dashboard_proxy.subprocess.Popen", fake_popen)
     monkeypatch.setattr("prime_cli.dashboard_proxy.sys.platform", "win32")
@@ -1030,7 +1256,7 @@ def test_detached_popen_uses_windows_flags_on_windows(monkeypatch, tmp_path) -> 
         "run-1", base_url=BASE_URL, api_key="test-key", state_dir=tmp_path
     )
 
-    assert url == "http://127.0.0.1:51234/"
+    assert url == "http://127.0.0.1:51234/fake-capability-token/"
     # POSIX-only kwarg must not be sent on Windows; detach via creation flags.
     assert "start_new_session" not in seen
     expected_flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(
@@ -1044,7 +1270,7 @@ def test_detached_popen_uses_start_new_session_on_posix(monkeypatch, tmp_path) -
 
     def fake_popen(command, **kwargs):
         seen.update(kwargs)
-        return _FakeChildProcess("PORT 51234\n")
+        return _FakeChildProcess("PORT 51234 fake-capability-token\n")
 
     monkeypatch.setattr("prime_cli.dashboard_proxy.subprocess.Popen", fake_popen)
     monkeypatch.setattr("prime_cli.dashboard_proxy.sys.platform", "darwin")
@@ -1053,6 +1279,6 @@ def test_detached_popen_uses_start_new_session_on_posix(monkeypatch, tmp_path) -
         "run-1", base_url=BASE_URL, api_key="test-key", state_dir=tmp_path
     )
 
-    assert url == "http://127.0.0.1:51234/"
+    assert url == "http://127.0.0.1:51234/fake-capability-token/"
     assert seen.get("start_new_session") is True
     assert "creationflags" not in seen

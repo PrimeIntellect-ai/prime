@@ -11,6 +11,16 @@ Root-relative assets, API calls and SSE streams (``text/event-stream``)
 work unmodified because the loopback server serves the dashboard at its
 own root.
 
+Binding to 127.0.0.1 alone does not restrict access to the launching OS
+account: another local user can port-scan the proxy and send valid
+loopback Host headers. Every spawn therefore mints an unguessable
+capability token (``secrets.token_urlsafe``) that becomes the FIRST PATH
+SEGMENT of the loopback URL (``http://127.0.0.1:<port>/<token>/``).
+Every request must present it (constant-time comparison, validated
+BEFORE the Host/Origin checks), and the token is never logged or put in
+command lines — it reaches the detached child only via the private
+ready pipe and a 0600 state file.
+
 The proxy normally runs in a detached child process
 (:func:`start_detached_dashboard_proxy`) so the CLI can print the
 loopback URL and exit — command substitution like
@@ -24,10 +34,12 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import hmac
 import http.server
 import json
 import os
 import re
+import secrets
 import signal
 import socket
 import subprocess
@@ -64,6 +76,16 @@ _REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 
 _LOOPBACK_HOSTNAMES = {"127.0.0.1", "localhost", "::1"}
 """Host header names the loopback proxy may serve (DNS-rebinding guard)."""
+
+_CAPABILITY_TOKEN_BYTES = 32
+"""Entropy (bytes) of the per-spawn loopback capability token.
+
+Binding to 127.0.0.1 does not restrict access to the launching OS
+account — another local user can port-scan the loopback port and send
+valid loopback Host headers with no Origin, reading the dashboard
+through the victim's bearer token. The unguessable capability token in
+every loopback URL closes that hole: without it a request is rejected
+(403) before any Host/Origin or upstream work."""
 
 
 def _origin_is_loopback(origin: str, bound_port: int) -> bool:
@@ -156,7 +178,9 @@ def map_dashboard_redirect(location: str, base_url: str, run_id: str) -> Optiona
     loopback root and pass through unchanged. Anything else (off-origin
     URLs, or same-origin paths outside the dashboard scope) returns
     ``None`` so the caller can reject the redirect without leaking the
-    upstream origin to the browser.
+    upstream origin to the browser. Query strings and fragments are both
+    preserved on rewritten locations — fragments carry SPA routing
+    state that the browser never re-sends to the server.
 
     Relative locations may themselves be platform-shaped: the platform
     proxy rewrites upstream redirects onto the fixed
@@ -168,10 +192,14 @@ def map_dashboard_redirect(location: str, base_url: str, run_id: str) -> Optiona
     parsed = urllib.parse.urlsplit(location)
     prefix = dashboard_upstream_path(run_id, "")
     query = f"?{parsed.query}" if parsed.query else ""
+    # Fragments are client-side routing state (SPA routes like
+    # ``.../dashboard/#/metrics``): a rewritten Location that drops them
+    # strands the browser on the app root.
+    fragment = f"#{parsed.fragment}" if parsed.fragment else ""
 
     if not parsed.scheme and not parsed.netloc:
         if parsed.path == prefix.rstrip("/"):
-            return "/" + query
+            return "/" + query + fragment
         if parsed.path.startswith(prefix):
             remainder = parsed.path[len(prefix) :]
             if remainder.startswith("//"):
@@ -180,14 +208,14 @@ def map_dashboard_redirect(location: str, base_url: str, run_id: str) -> Optiona
                 return None
             if remainder.startswith("/"):
                 # Double slash after the prefix: keep a single joining slash.
-                return remainder + query
-            return "/" + remainder + query
+                return remainder + query + fragment
+            return "/" + remainder + query + fragment
         if parsed.path.startswith("/api/v1/"):
             # Platform-shaped but outside this run's dashboard scope: the
             # loopback cannot serve it (its own prefix would compound).
             return None
         # Ordinary dashboard-relative location: resolves identically on
-        # the loopback root.
+        # the loopback root (its fragment travels with it unchanged).
         return location
 
     base = urllib.parse.urlsplit(base_url)
@@ -204,20 +232,22 @@ def map_dashboard_redirect(location: str, base_url: str, run_id: str) -> Optiona
         path = remainder if remainder.startswith("/") else "/" + remainder
     else:
         return None
-    return path + query
+    return path + query + fragment
 
 
 class DashboardProxyHandler(http.server.BaseHTTPRequestHandler):
     """Forward every loopback GET to the platform dashboard proxy route.
 
-    Class attributes ``run_id``, ``base_url``, ``api_key`` and ``upstream``
-    are bound by :func:`make_dashboard_proxy_server`.
+    Class attributes ``run_id``, ``base_url``, ``api_key``,
+    ``capability_token`` and ``upstream`` are bound by
+    :func:`make_dashboard_proxy_server`.
     """
 
     protocol_version = "HTTP/1.1"
     run_id: str = ""
     base_url: str = ""
     api_key: str = ""
+    capability_token: str = ""
     upstream: Optional[httpx.Client] = None
 
     def do_GET(self) -> None:
@@ -230,9 +260,16 @@ class DashboardProxyHandler(http.server.BaseHTTPRequestHandler):
             server.request_finished()
 
     def _proxy_get(self) -> None:
+        # The capability token is validated BEFORE the Host/Origin checks:
+        # another local user who port-scans the loopback port must never
+        # reach any upstream work without the unguessable token.
+        remaining_path = self._path_without_capability_token()
+        if remaining_path is None:
+            self._send_plain_error(403, "Forbidden: unknown dashboard proxy URL.")
+            return
         if not self._request_targets_loopback():
             return
-        if _has_traversal(self.path):
+        if _has_traversal(remaining_path):
             # Rejected before URL construction: httpx would normalize dot
             # segments and attach the bearer token to paths outside the
             # run-scoped dashboard route.
@@ -243,17 +280,19 @@ class DashboardProxyHandler(http.server.BaseHTTPRequestHandler):
             return
         # Absolute URL built like APIClient does (base_url + /api/v1 route),
         # so the proxy does not depend on upstream client defaults.
-        url = f"{self.base_url.rstrip('/')}{dashboard_upstream_path(self.run_id, self.path)}"
+        url = f"{self.base_url.rstrip('/')}{dashboard_upstream_path(self.run_id, remaining_path)}"
         try:
             with self.upstream.stream(
                 "GET",
                 url,
                 # The API token travels in the Authorization header only —
                 # never in the URL — so it stays out of access logs.
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Accept-Encoding": "identity",
-                },
+                # The browser's Accept and Last-Event-ID are the only
+                # caller headers forwarded: Accept negotiates SSE
+                # (text/event-stream) correctly, and Last-Event-ID lets an
+                # EventSource RESUME a stream after reconnecting instead
+                # of restarting (which would duplicate events).
+                headers=self._upstream_headers(),
             ) as response:
                 if response.status_code >= 400:
                     # Relay a clean local error: upstream bodies may name
@@ -271,6 +310,56 @@ class DashboardProxyHandler(http.server.BaseHTTPRequestHandler):
                     self.close_connection = True
         except httpx.HTTPError:
             self._send_plain_error(502, "Dashboard backend is unreachable.")
+
+    def _path_without_capability_token(self) -> Optional[str]:
+        """Validate the URL's capability-token segment; return the rest.
+
+        Every loopback URL embeds the per-spawn capability token as its
+        first path segment (``/<token>/<dashboard-path>``); the browser
+        keeps it on every request because the dashboard is served from
+        below it with relative references. The comparison is
+        constant-time and runs BEFORE any Host/Origin or upstream work,
+        so another local user who port-scans the port cannot read the
+        dashboard through the victim's bearer token. Returns the
+        dashboard-relative path (query preserved) on success, ``None``
+        when the token is absent or wrong.
+        """
+        try:
+            parsed = urllib.parse.urlsplit(self.path)
+        except ValueError:
+            # Malformed request targets (e.g. a bogus bracketed netloc) are
+            # a clean rejection, never an exception.
+            return None
+        head, sep, rest = parsed.path.lstrip("/").partition("/")
+        # compare_digest requires ASCII; bytes comparison accepts any
+        # request target, including non-UTF-8 path segments.
+        presented = head.encode("utf-8", "surrogateescape")
+        expected = self.capability_token.encode("utf-8")
+        if not head or not hmac.compare_digest(presented, expected):
+            return None
+        path = f"/{rest}" if sep else "/"
+        if parsed.query:
+            path += f"?{parsed.query}"
+        return path
+
+    def _upstream_headers(self) -> dict[str, str]:
+        """Headers forwarded upstream: auth, transport, SSE negotiation.
+
+        Only ``Accept`` and ``Last-Event-ID`` are taken from the browser
+        request — everything else (cookies, host-specific headers) stays
+        local and is never relayed.
+        """
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Accept-Encoding": "identity",
+        }
+        accept = self.headers.get("Accept")
+        if accept:
+            headers["Accept"] = accept
+        last_event_id = self.headers.get("Last-Event-ID")
+        if last_event_id:
+            headers["Last-Event-ID"] = last_event_id
+        return headers
 
     def _request_targets_loopback(self) -> bool:
         """Reject non-loopback Host/Origin headers (DNS-rebinding guard).
@@ -323,6 +412,12 @@ class DashboardProxyHandler(http.server.BaseHTTPRequestHandler):
         if cache_control:
             self.send_header("Cache-Control", cache_control)
         if redirect_location is not None:
+            if redirect_location.startswith("/"):
+                # Root-relative locations (rewritten or passed through) lose
+                # the capability token when the browser follows them from
+                # the token-prefixed URL: re-prefix it. Truly relative
+                # locations already resolve below the token segment.
+                redirect_location = f"/{self.capability_token}{redirect_location}"
             self.send_header("Location", redirect_location)
         # Pre-compressed assets arrive with Content-Encoding even though we
         # requested identity. httpx DECODES in iter_bytes, so relaying the
@@ -368,6 +463,7 @@ class DashboardProxyServer(http.server.ThreadingHTTPServer):
 
     daemon_threads = True
     run_id: str = ""
+    capability_token: str = ""
     upstream_client: Optional[httpx.Client] = None
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -404,14 +500,18 @@ def make_dashboard_proxy_server(
 ) -> tuple[DashboardProxyServer, str]:
     """Start a loopback dashboard proxy on an ephemeral port.
 
-    Returns ``(server, url)``. The caller runs ``server.serve_forever()``
-    and, on shutdown, closes the server and ``server.upstream_client``.
-    ``upstream`` may be injected for tests.
+    Returns ``(server, url)`` where ``url`` embeds the per-spawn
+    capability token as its first path segment
+    (``http://127.0.0.1:<port>/<token>/``); ``server.capability_token``
+    exposes it for callers that need the raw value. The caller runs
+    ``server.serve_forever()`` and, on shutdown, closes the server and
+    ``server.upstream_client``. ``upstream`` may be injected for tests.
     """
     upstream_client = upstream or httpx.Client(
         headers={"User-Agent": user_agent or _default_user_agent()},
         timeout=_UPSTREAM_REQUEST_TIMEOUT,
     )
+    capability_token = secrets.token_urlsafe(_CAPABILITY_TOKEN_BYTES)
     handler_cls = type(
         "BoundDashboardProxyHandler",
         (DashboardProxyHandler,),
@@ -419,13 +519,18 @@ def make_dashboard_proxy_server(
             "run_id": run_id,
             "base_url": base_url,
             "api_key": api_key,
+            "capability_token": capability_token,
             "upstream": upstream_client,
         },
     )
     server = DashboardProxyServer((host, 0), handler_cls)
     server.run_id = run_id
+    server.capability_token = capability_token
     server.upstream_client = upstream_client
-    url = f"http://{host}:{server.server_address[1]}/"
+    # The capability token is the FIRST PATH SEGMENT of the URL: the
+    # browser keeps it on every relative request below it, and every
+    # request is validated against it before any upstream work.
+    url = f"http://{host}:{server.server_address[1]}/{capability_token}/"
     return server, url
 
 
@@ -523,12 +628,19 @@ def _proxy_still_serves(url: str, timeout: float = 10.0) -> bool:
 
 
 def _live_proxy_url(state: Optional[dict[str, Any]]) -> Optional[str]:
-    """Return the loopback URL of a still-running proxy, if any."""
+    """Return the loopback URL of a still-running proxy, if any.
+
+    The URL embeds the proxy's capability token from the state file; a
+    state file without a token (pre-capability format) is not reusable.
+    """
     if not state:
         return None
     pid = state.get("pid")
     port = state.get("port")
-    if not isinstance(pid, int) or not isinstance(port, int):
+    token = state.get("token")
+    if not isinstance(pid, int) or not isinstance(port, int) or not isinstance(token, str):
+        return None
+    if not token:
         return None
     if not _pid_is_alive(pid):
         return None
@@ -537,7 +649,7 @@ def _live_proxy_url(state: Optional[dict[str, Any]]) -> Optional[str]:
             pass
     except OSError:
         return None
-    return f"http://127.0.0.1:{port}/"
+    return f"http://127.0.0.1:{port}/{token}/"
 
 
 def _unlink_state_if_owned(state_path: Path, pid: int) -> None:
@@ -607,7 +719,7 @@ def _terminate_child_process(process: "subprocess.Popen[Any]") -> None:
 
 
 def _read_child_ready_line(process: "subprocess.Popen[Any]", timeout: float) -> Optional[str]:
-    """Read the child's ``PORT <n>`` line with a timeout (pipes cannot select)."""
+    """Read the child's ``PORT <n> <token>`` line with a timeout (pipes cannot select)."""
     line: Optional[str] = None
 
     def reader() -> None:
@@ -640,9 +752,13 @@ def start_detached_dashboard_proxy(
     """Start (or reuse) a detached loopback proxy and return its URL.
 
     The proxy runs in its own session (``start_new_session=True``) so it
-    survives the CLI exiting; it writes a pid/port state file under the
-    user cache dir and exits itself once idle. If a healthy proxy for this
-    run is already running, its URL is returned without spawning another.
+    survives the CLI exiting; it writes a pid/port/token state file
+    (0600) under the user cache dir and exits itself once idle. If a
+    healthy proxy for this run is already running, its URL is returned
+    without spawning another. The returned URL embeds the proxy's
+    capability token as its first path segment — the token reaches this
+    process only through the child's private ready pipe or the 0600
+    state file, never through logs or command lines.
     """
     fingerprint = _proxy_fingerprint(base_url, run_id, api_key)
     state_path = proxy_state_path(run_id, state_dir, fingerprint)
@@ -683,10 +799,19 @@ def start_detached_dashboard_proxy(
         **detach_kwargs,
     )
     ready_ok = False
+    ready_parts: list[str] = []
     try:
         ready_line = _read_child_ready_line(process, ready_timeout_seconds)
-        port_token = (ready_line or "").split()
-        if len(port_token) == 2 and port_token[0] == "PORT" and port_token[1].isdigit():
+        ready_parts = str(ready_line or "").split()
+        # ``PORT <port> <capability-token>``: the private pipe hands the
+        # per-spawn token to the parent without ever putting it on a
+        # command line (process tables are world-readable) or in a log.
+        if (
+            len(ready_parts) == 3
+            and ready_parts[0] == "PORT"
+            and ready_parts[1].isdigit()
+            and ready_parts[2]
+        ):
             ready_ok = True
     finally:
         if not ready_ok:
@@ -704,7 +829,7 @@ def start_detached_dashboard_proxy(
             process.stdout.close()
     if not ready_ok:
         raise RuntimeError("The dashboard proxy failed to start.")
-    return f"http://127.0.0.1:{int(port_token[1])}/"
+    return f"http://127.0.0.1:{int(ready_parts[1])}/{ready_parts[2]}/"
 
 
 def _main(argv: Optional[list[str]] = None) -> int:
@@ -734,10 +859,24 @@ def _main(argv: Optional[list[str]] = None) -> int:
     port = server.server_address[1]
     state_path = Path(args.state_file)
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    state_path.write_text(json.dumps({"run_id": args.run_id, "pid": os.getpid(), "port": port}))
-    # Report the port, then detach stdout: the parent may exit (closing the
-    # pipe) at any time and this process must never block writing to it.
-    print(f"PORT {port}", flush=True)
+    # The state file carries the capability token (needed to reuse the
+    # proxy), so it is created with user-only permissions: another local
+    # user must not be able to read it.
+    state_fd = os.open(state_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(state_fd, "w") as state_file_obj:
+        json.dump(
+            {
+                "run_id": args.run_id,
+                "pid": os.getpid(),
+                "port": port,
+                "token": server.capability_token,
+            },
+            state_file_obj,
+        )
+    # Report the port and capability token, then detach stdout: the parent
+    # may exit (closing the pipe) at any time and this process must never
+    # block writing to it.
+    print(f"PORT {port} {server.capability_token}", flush=True)
     os.dup2(os.open(os.devnull, os.O_WRONLY), 1)
 
     if hasattr(signal, "SIGTERM"):

@@ -16,9 +16,9 @@ account: another local user can port-scan the proxy and send valid
 loopback Host headers. Every spawn therefore mints an unguessable
 capability token (``secrets.token_urlsafe``) pair: the printed loopback
 URL carries a SINGLE-USE entry token as its SOLE PATH SEGMENT
-(``http://127.0.0.1:<port>/<token>``) — the one-time browser handoff.
-``token_urlsafe`` output is glob-safe (letters, digits, ``-`` and ``_``
-only), so even unquoted command substitution like
+(``http://<random>.localhost:<port>/<token>``) — the one-time browser
+handoff. ``token_urlsafe`` output is glob-safe (letters, digits, ``-``
+and ``_`` only), so even unquoted command substitution like
 ``open $(prime train dashboard ...)`` survives zsh's glob expansion
 (a ``?t=`` query form would raise zsh's "no matches found"). The entry
 request CONSUMES that token (a replay gets 403 — the URL is briefly
@@ -26,14 +26,33 @@ visible in process arguments, so it must never live longer than its
 first use) and sets a DIFFERENT loopback cookie secret
 (``Path=/; HttpOnly; SameSite=Strict``). EVERY subsequent request must
 present that cookie (constant-time validation BEFORE the Host/Origin
-checks), which
-keeps root-relative assets, API calls and SSE streams working exactly
-as before: the browser attaches the cookie to every path on the
-loopback host. A DNS-rebound origin never receives the
-127.0.0.1-host-keyed cookie, and SameSite=Strict blocks cross-site
-sends; the Host/Origin checks stay on as the second layer. The token is
-never logged or put in command lines — it reaches the detached child
-only via the private ready pipe and a 0600 state file.
+checks), which keeps root-relative assets, API calls and SSE streams
+working exactly as before: the browser attaches the cookie to every
+path on the proxy's host.
+
+The proxy serves on 127.0.0.1 but is ADDRESSED through a per-spawn
+random hostname under ``.localhost`` (e.g.
+``pd-a3f9c2d1b7e4.localhost``). Browsers resolve ``*.localhost`` to
+loopback (RFC 6761; major browsers also special-case it in the URL
+spec), while cookies are HOST-keyed, not port-keyed: the capability
+cookie set on ``pd-<random>.localhost`` is therefore NOT sent to
+``127.0.0.1:<other port>`` or to any other ``<id>.localhost`` name.
+An unrelated local HTTP service on another loopback port — which a
+cookie on the shared ``127.0.0.1`` host WOULD be sent to — no longer
+receives the dashboard capability. The Host/Origin checks require the
+EXACT advertised authority (``<random>.localhost:<bound port>``), which
+also rejects omitted ports, loopback aliases and DNS-rebound names.
+REMAINING SHARED-USER CAVEAT (deliberately accepted for now): cookies
+are still not origin-scoped. A local attacker who LEARNS this proxy's
+random hostname (e.g. from the browser address bar or process
+arguments) can serve that same hostname on ANOTHER loopback port and
+receive the cookie if the victim uses it. Closing that gap needs an
+origin-scoped credential (browser storage attached per-request) instead
+of an ambient cookie; that redesign is a tracked follow-up decision, not
+part of this change. SameSite=Strict still blocks cross-site sends, the
+token is never logged or put in command lines, and it reaches the
+detached child only via the private ready pipe and a 0600 state file
+(which also records the hostname).
 
 The proxy normally runs in a detached child process
 (:func:`start_detached_dashboard_proxy`) so the CLI can print the
@@ -114,8 +133,34 @@ _PROXY_STATE_DIR = Path.home() / ".prime" / "dashboard_proxies"
 
 _REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 
-_LOOPBACK_HOSTNAMES = {"127.0.0.1", "localhost", "::1"}
-"""Host header names the loopback proxy may serve (DNS-rebinding guard)."""
+_PROXY_HOSTNAME_PREFIX = "pd"
+"""Label prefix of the per-spawn ``<id>.localhost`` proxy hostname."""
+
+
+def _random_proxy_hostname() -> str:
+    """Per-spawn random hostname under ``.localhost``.
+
+    Browsers resolve ``*.localhost`` to loopback (RFC 6761 / the WHATWG
+    URL standard), so the URL still reaches the 127.0.0.1-bound server —
+    while the capability cookie stays HOST-keyed to this unguessable
+    name instead of the shared ``127.0.0.1`` host, where every other
+    local HTTP service would receive it (cookies ignore ports). A new
+    random name per spawn also keeps concurrent dashboards from sharing
+    a cookie host. ``token_hex`` output is a valid DNS label, so the
+    name needs no escaping in URLs, Host headers or state files."""
+    return f"{_PROXY_HOSTNAME_PREFIX}-{secrets.token_hex(8)}.localhost"
+
+
+def _proxy_hostname_from_url_part(value: str) -> Optional[str]:
+    """Validate a child-reported proxy hostname before using it in a URL.
+
+    The hostname arrives over the ready pipe or the 0600 state file;
+    both are private to the owning user, but the URL built from it is
+    printed and opened, so accept only the exact shape we generate."""
+    if re.fullmatch(rf"{_PROXY_HOSTNAME_PREFIX}-[0-9a-f]{{16}}\.localhost", value):
+        return value
+    return None
+
 
 _CAPABILITY_TOKEN_BYTES = 32
 """Entropy (bytes) of the per-spawn loopback capability secrets.
@@ -136,12 +181,13 @@ before any Host/Origin or upstream work."""
 def _capability_cookie_name(cookie_capability: str) -> str:
     """Deterministic PER-PROXY cookie name for the capability secret.
 
-    Browsers do NOT scope cookies by port: two dashboards opened in the
-    same browser profile share the 127.0.0.1 host, so a fixed cookie name
-    would let the second proxy's Set-Cookie REPLACE the first's
-    capability (its asset/API calls would then 403). The name derives
-    from the cookie secret (a one-way digest of a 256-bit random value):
-    unique per spawn, and it leaks nothing.
+    Browsers do NOT scope cookies by port, and the proxy's per-spawn
+    ``.localhost`` hostnames already keep two dashboards in one browser
+    profile apart; the derived name adds belt-and-braces so a fixed name
+    could never let one proxy's Set-Cookie REPLACE another's capability
+    (its asset/API calls would then 403) even if two proxies ever shared
+    a host. The name derives from the cookie secret (a one-way digest
+    of a 256-bit random value): unique per spawn, and it leaks nothing.
     """
     digest = hashlib.sha256(
         b"prime-cli.dashboard_proxy.cookie-name-v1:" + cookie_capability.encode("utf-8")
@@ -159,12 +205,15 @@ caller with a dead URL). Authenticated with the cookie capability that
 only the 0600 state file and the browser (HttpOnly) hold."""
 
 
-def _origin_is_loopback(origin: str, bound_port: int) -> bool:
-    """Strictly validate an ``Origin`` header against the loopback proxy.
+def _origin_matches_advertised(origin: str, hostname: str, bound_port: int) -> bool:
+    """Strictly validate an ``Origin`` header against the advertised origin.
 
-    Accepted only when the scheme is http/https, the host is a loopback
-    name, and the port matches the bound port (browser origins always
-    carry an explicit port). Any malformed value — including brackets or
+    Accepted only when the scheme is http/https, the host is EXACTLY
+    this proxy's random ``.localhost`` hostname, and the port matches
+    the bound port (browser origins always carry an explicit port).
+    Loopback aliases (127.0.0.1, localhost, ::1) are rejected: they are
+    not the advertised origin, and accepting them would reopen the
+    shared-cookie host. Any malformed value — including brackets or
     ports that make the parser raise — is a clean rejection, never an
     exception.
     """
@@ -175,7 +224,7 @@ def _origin_is_loopback(origin: str, bound_port: int) -> bool:
         return False
     if (parsed.scheme or "").lower() not in ("http", "https"):
         return False
-    if (parsed.hostname or "").lower() not in _LOOPBACK_HOSTNAMES:
+    if (parsed.hostname or "").lower() != hostname.lower():
         return False
     return port is not None and port == bound_port
 
@@ -239,6 +288,31 @@ def _origin_of(url: urllib.parse.SplitResult) -> Optional[tuple[str, str, int]]:
     return (scheme, url.hostname.lower(), port)
 
 
+def _redirect_value_is_browser_safe(location: str) -> bool:
+    r"""Reject ``Location`` values a browser would normalize into an escape.
+
+    Browsers treat ``\`` like ``/`` in HTTP URLs (``/\evil.test/x``
+    parses as ``///evil.test/x`` and navigates to ``http://evil.test``),
+    strip ASCII tab/newline characters before parsing (a smuggled tab
+    can shift where an authority appears), and collapse two or more
+    LEADING slashes into a network-path reference (``///evil.test/x``
+    leaves the origin entirely — Python's ``urlsplit`` instead folds
+    the leading ``//`` into an EMPTY netloc, so the parsed path looks
+    harmlessly like ``/evil.test/x``). Only the BROWSER decides the
+    navigation target, so any such value is rejected here, before the
+    origin check and before any prefix handling — both rewrite layers
+    (platform and CLI) hold this line.
+    """
+    stripped = location.strip()
+    if "\\" in location:
+        return False
+    if any(ord(ch) <= 0x1F or ch == "\x7f" for ch in location):
+        return False
+    if stripped.startswith("//"):
+        return False
+    return True
+
+
 def map_dashboard_redirect(location: str, base_url: str, run_id: str) -> Optional[str]:
     """Map an upstream ``Location`` header onto a loopback-root-relative path.
 
@@ -247,9 +321,11 @@ def map_dashboard_redirect(location: str, base_url: str, run_id: str) -> Optiona
     ``/api/v1/rft/runs/{run_id}/dashboard/`` are rewritten to loopback
     paths, and already-relative locations resolve identically against the
     loopback root and pass through unchanged. Anything else (off-origin
-    URLs, or same-origin paths outside the dashboard scope) returns
-    ``None`` so the caller can reject the redirect without leaking the
-    upstream origin to the browser. Query strings and fragments are both
+    URLs, same-origin paths outside the dashboard scope, or values a
+    browser would normalize into a network-path escape — backslashes,
+    control characters, or two or more leading slashes) returns ``None``
+    so the caller can reject the redirect without leaking the upstream
+    origin to the browser. Query strings and fragments are both
     preserved on rewritten locations — fragments carry SPA routing
     state that the browser never re-sends to the server.
 
@@ -270,6 +346,12 @@ def map_dashboard_redirect(location: str, base_url: str, run_id: str) -> Optiona
 
 
 def _map_dashboard_redirect(location: str, base_url: str, run_id: str) -> Optional[str]:
+    if not _redirect_value_is_browser_safe(location):
+        # Backslashes and control characters parse as ordinary path
+        # characters in urlsplit but as scheme/authority separators in a
+        # browser: ``/\evil.test/x`` navigates to ``http://evil.test``.
+        # Reject before any origin check or prefix handling.
+        return None
     parsed = urllib.parse.urlsplit(location)
     prefix = dashboard_upstream_path(run_id, "")
     query = f"?{parsed.query}" if parsed.query else ""
@@ -279,41 +361,75 @@ def _map_dashboard_redirect(location: str, base_url: str, run_id: str) -> Option
     fragment = f"#{parsed.fragment}" if parsed.fragment else ""
 
     if not parsed.scheme and not parsed.netloc:
+        if parsed.path.startswith("//"):
+            # Network-path forms — including three or more leading
+            # slashes (``///evil.test/x``, which Chrome resolves to
+            # ``http://evil.test/x``) — would leave the loopback origin
+            # for an attacker-controlled host.
+            return None
         if parsed.path == prefix.rstrip("/"):
-            return "/" + query + fragment
-        if parsed.path.startswith(prefix):
+            result = "/" + query + fragment
+        elif parsed.path.startswith(prefix):
             remainder = parsed.path[len(prefix) :]
             if remainder.startswith("//"):
-                # Protocol-relative escape: the browser would leave the
-                # loopback origin for an attacker-controlled host.
+                # Protocol-relative escape after prefix stripping: the
+                # browser would leave the loopback origin for an
+                # attacker-controlled host.
                 return None
             if remainder.startswith("/"):
                 # Double slash after the prefix: keep a single joining slash.
-                return remainder + query + fragment
-            return "/" + remainder + query + fragment
-        if parsed.path.startswith("/api/v1/"):
+                result = remainder + query + fragment
+            else:
+                result = "/" + remainder + query + fragment
+        elif parsed.path.startswith("/api/v1/"):
             # Platform-shaped but outside this run's dashboard scope: the
             # loopback cannot serve it (its own prefix would compound).
             return None
-        # Ordinary dashboard-relative location: resolves identically on
-        # the loopback root (its fragment travels with it unchanged).
-        return location
-
-    base = urllib.parse.urlsplit(base_url)
-    if _origin_of(parsed) != _origin_of(base):
-        return None
-
-    path = parsed.path or "/"
-    if path == prefix.rstrip("/"):
-        path = "/"
-    elif path.startswith(prefix):
-        remainder = path[len(prefix) :]
-        if remainder.startswith("//"):
-            return None
-        path = remainder if remainder.startswith("/") else "/" + remainder
+        else:
+            # Ordinary dashboard-relative location: resolves identically on
+            # the loopback root (its fragment travels with it unchanged).
+            result = location
     else:
+        base = urllib.parse.urlsplit(base_url)
+        if _origin_of(parsed) != _origin_of(base):
+            return None
+
+        path = parsed.path or "/"
+        if path == prefix.rstrip("/"):
+            path = "/"
+        elif path.startswith(prefix):
+            remainder = path[len(prefix) :]
+            if remainder.startswith("//"):
+                return None
+            path = remainder if remainder.startswith("/") else "/" + remainder
+        else:
+            return None
+        result = path + query + fragment
+
+    # Final guard on the EMITTED value, validated the way a browser
+    # would parse it: only a same-origin relative path may leave the
+    # mapper, so no composition of prefix stripping, query or fragment
+    # handling can re-emerge as an off-origin navigation.
+    return _browser_normalized_same_origin_path(result)
+
+
+def _browser_normalized_same_origin_path(value: str) -> Optional[str]:
+    """Final guard on the EMITTED Location: it must stay loopback-relative.
+
+    The rewritten value is re-validated the way a browser would parse it
+    (backslash as slash, network-path on leading ``//``): only a
+    relative path with an empty authority may leave the mapper, so no
+    composition of prefix stripping, query or fragment handling can
+    re-emerge as an off-origin navigation.
+    """
+    if not _redirect_value_is_browser_safe(value):
         return None
-    return path + query + fragment
+    parsed = urllib.parse.urlsplit(value)
+    if parsed.scheme or parsed.netloc:
+        return None
+    if parsed.path.startswith("//"):
+        return None
+    return value
 
 
 class DashboardProxyHandler(http.server.BaseHTTPRequestHandler):
@@ -497,9 +613,12 @@ class DashboardProxyHandler(http.server.BaseHTTPRequestHandler):
         ``Path=/`` covers every root-relative asset/API/SSE request the
         dashboard makes; ``HttpOnly`` keeps the token out of JavaScript;
         ``SameSite=Strict`` blocks cross-site sends, so a hostile page on
-        another origin can never present the cookie. Cookies are also
-        host-keyed: a DNS-rebound name pointing at 127.0.0.1 never
-        receives the 127.0.0.1 cookie in the first place. ``Secure`` is
+        another origin can never present the cookie. NO ``Domain``
+        attribute is set, so the cookie is HOST-ONLY for this proxy's
+        random ``<id>.localhost`` name: it is not sent to 127.0.0.1, to
+        any other local port, or to sibling ``*.localhost`` names —
+        cookies have host scope, not port or origin scope, and the
+        per-spawn hostname is what scopes this capability. ``Secure`` is
         omitted deliberately — the loopback origin is plain http.
         """
         server = self._proxy_server()
@@ -525,15 +644,23 @@ class DashboardProxyHandler(http.server.BaseHTTPRequestHandler):
         return headers
 
     def _request_targets_loopback(self) -> bool:
-        """Reject non-loopback Host/Origin headers (DNS-rebinding guard).
+        """Require the EXACT advertised Host/Origin (DNS-rebinding guard).
 
         The proxy serves private run data with the CLI's bearer token
         injected; a hostile page must not be able to read it through a
-        rebound DNS name pointing at 127.0.0.1. Reject before any
-        upstream work, so forged requests never touch the platform.
-        Malformed or duplicated headers are rejected, never tolerated.
+        rebound DNS name pointing at 127.0.0.1. The only accepted Host is
+        this proxy's per-spawn ``<random>.localhost:<bound port>``
+        authority — the one the printed URL advertises. Loopback aliases
+        (127.0.0.1, localhost, ::1), omitted ports, wrong ports, foreign
+        names and duplicate Host headers are all rejected: cookies are
+        host-keyed to the random name, so the exact-authority check is
+        what separates this proxy from every other 127.0.0.1 service.
+        Reject before any upstream work, so forged requests never touch
+        the platform.
         """
-        bound_port = self.server.server_address[1]
+        server = self._proxy_server()
+        bound_port = server.server_address[1]
+        advertised_hostname = server.assigned_hostname
         hosts = self.headers.get_all("Host") or []
         if len(hosts) != 1:
             # Duplicate Host headers (good first, hostile second) are a
@@ -541,15 +668,13 @@ class DashboardProxyHandler(http.server.BaseHTTPRequestHandler):
             self._send_plain_error(403, "Forbidden: loopback requests only.")
             return False
         hostname, port, well_formed = _parse_host_header(hosts[0])
-        if (
-            not well_formed
-            or hostname not in _LOOPBACK_HOSTNAMES
-            or (port is not None and port != bound_port)
-        ):
+        if not well_formed or hostname != advertised_hostname.lower() or port != bound_port:
             self._send_plain_error(403, "Forbidden: loopback requests only.")
             return False
         origin = self.headers.get("Origin")
-        if origin is not None and not _origin_is_loopback(origin, bound_port):
+        if origin is not None and not _origin_matches_advertised(
+            origin, advertised_hostname, bound_port
+        ):
             self._send_plain_error(403, "Forbidden: loopback requests only.")
             return False
         return True
@@ -715,6 +840,13 @@ class DashboardProxyServer(http.server.ThreadingHTTPServer):
 
     daemon_threads = True
     run_id: str = ""
+    assigned_hostname: str = ""
+    """Per-spawn random ``<id>.localhost`` hostname of the advertised URL.
+
+    The server still BINDS to 127.0.0.1 (browsers resolve ``*.localhost``
+    to loopback), but the Host/Origin checks accept only this exact
+    hostname, and the capability cookie is host-only for it — so other
+    local HTTP services on 127.0.0.1 never receive the cookie."""
     entry_token: str = ""
     """The NEWEST minted handoff token (observability; validation uses the
     outstanding/consumed sets)."""
@@ -790,8 +922,18 @@ class DashboardProxyServer(http.server.ThreadingHTTPServer):
         segment would 404); without the cookie the request is rejected as
         usual. Dead tokens grant nothing on their own — only holders of
         the cookie (already authorized) benefit.
+
+        The consumed set is SNAPSHOT under the same lock the mint/consume
+        path uses, and the comparison runs on the snapshot: iterating the
+        live set while another browser consumes a newly reserved handoff
+        raises ``RuntimeError: Set changed size during iteration`` and
+        kills the in-flight request. (Retained token history is currently
+        unbounded for the proxy's lifetime — an accepted follow-up
+        consideration, not a second finding; proxies idle-exit after 30
+        minutes, so the set stays small in practice.)
         """
-        consumed = self._consumed_entry_tokens
+        with self._entry_lock:
+            consumed = tuple(self._consumed_entry_tokens)
         return any(
             hmac.compare_digest(presented, candidate.encode("utf-8")) for candidate in consumed
         )
@@ -832,14 +974,20 @@ def make_dashboard_proxy_server(
     capability. The entry token is consumed on first use, so its brief
     exposure in process arguments (browser open) cannot be replayed;
     ``server.entry_token`` always holds the current (unconsumed) token
-    and ``server.cookie_capability`` the cookie secret. The caller runs
-    ``server.serve_forever()`` and, on shutdown, closes the server and
-    ``server.upstream_client``. ``upstream`` may be injected for tests.
+    and ``server.cookie_capability`` the cookie secret. The URL is
+    addressed through ``server.assigned_hostname`` — a per-spawn random
+    ``<id>.localhost`` name that resolves to loopback in every major
+    browser — so the capability cookie is host-keyed to that name and no
+    other local HTTP service on 127.0.0.1 receives it (cookies ignore
+    ports). The caller runs ``server.serve_forever()`` and, on shutdown,
+    closes the server and ``server.upstream_client``. ``upstream`` may
+    be injected for tests.
     """
     upstream_client = upstream or httpx.Client(
         headers={"User-Agent": user_agent or _default_user_agent()},
         timeout=_UPSTREAM_REQUEST_TIMEOUT,
     )
+    hostname = _random_proxy_hostname()
     entry_token = secrets.token_urlsafe(_CAPABILITY_TOKEN_BYTES)
     cookie_capability = secrets.token_urlsafe(_CAPABILITY_TOKEN_BYTES)
     handler_cls = type(
@@ -854,12 +1002,13 @@ def make_dashboard_proxy_server(
     )
     server = DashboardProxyServer((host, 0), handler_cls)
     server.run_id = run_id
+    server.assigned_hostname = hostname
     server.entry_token = entry_token
     server._outstanding_entry_tokens.add(entry_token)
     server.cookie_capability = cookie_capability
     server.cookie_name = _capability_cookie_name(cookie_capability)
     server.upstream_client = upstream_client
-    url = f"http://{host}:{server.server_address[1]}/{entry_token}"
+    url = f"http://{hostname}:{server.server_address[1]}/{entry_token}"
     return server, url
 
 
@@ -942,7 +1091,36 @@ def _pid_is_alive(pid: int) -> bool:
     return True
 
 
-def _proxy_still_serves(port: int, cookie_capability: str, timeout: float = 10.0) -> bool:
+def _loopback_ipc_request(
+    hostname: str, port: int, path: str, headers: dict[str, str], timeout: float
+) -> Optional[httpx.Response]:
+    """One CLI-to-loopback IPC GET, isolated from ambient proxies.
+
+    ``trust_env=False`` plus the loopback entries in ``NO_PROXY``/
+    ``no_proxy`` keep an inherited ``HTTP_PROXY``/``ALL_PROXY``
+    configuration from forwarding this request — which carries the
+    long-lived cookie capability — to a third-party proxy that could
+    capture it or forge the health/handoff reply. The connection dials
+    127.0.0.1 directly (no dependence on ``*.localhost`` resolution) and
+    presents the proxy's assigned hostname in the Host header, which the
+    proxy's exact-authority validation requires. Returns ``None`` on any
+    transport error.
+    """
+    try:
+        return httpx.get(
+            f"http://127.0.0.1:{port}{path}",
+            headers={**headers, "Host": f"{hostname}:{port}"},
+            timeout=timeout,
+            follow_redirects=False,
+            trust_env=False,
+        )
+    except httpx.HTTPError:
+        return None
+
+
+def _proxy_still_serves(
+    hostname: str, port: int, cookie_capability: str, timeout: float = 10.0
+) -> bool:
     """Probe a live proxy to confirm its credentials still work upstream.
 
     The probe authenticates with the stored COOKIE capability on the
@@ -953,19 +1131,21 @@ def _proxy_still_serves(port: int, cookie_capability: str, timeout: float = 10.0
     with 4xx). Only such healthy proxies are reused; otherwise a fresh
     proxy starts.
     """
-    try:
-        response = httpx.get(
-            f"http://127.0.0.1:{port}/",
-            headers={"Cookie": f"{_capability_cookie_name(cookie_capability)}={cookie_capability}"},
-            timeout=timeout,
-            follow_redirects=False,
-        )
-    except httpx.HTTPError:
+    response = _loopback_ipc_request(
+        hostname,
+        port,
+        "/",
+        {"Cookie": f"{_capability_cookie_name(cookie_capability)}={cookie_capability}"},
+        timeout,
+    )
+    if response is None:
         return False
     return response.status_code < 400
 
 
-def _reserve_entry_token(port: int, cookie_capability: str, timeout: float = 5.0) -> Optional[str]:
+def _reserve_entry_token(
+    hostname: str, port: int, cookie_capability: str, timeout: float = 5.0
+) -> Optional[str]:
     """Ask a live proxy to MINT and RESERVE a fresh single-use entry token.
 
     Every CLI invocation must hand out its OWN token: reusing the state
@@ -975,16 +1155,14 @@ def _reserve_entry_token(port: int, cookie_capability: str, timeout: float = 5.0
     another caller's URL. Returns ``None`` when the proxy is unreachable,
     unhealthy, or predates the control endpoint (the caller respawns).
     """
-    try:
-        response = httpx.get(
-            f"http://127.0.0.1:{port}{_HANDOFF_CONTROL_PATH}",
-            headers={"Cookie": f"{_capability_cookie_name(cookie_capability)}={cookie_capability}"},
-            timeout=timeout,
-            follow_redirects=False,
-        )
-    except httpx.HTTPError:
-        return None
-    if response.status_code != 200:
+    response = _loopback_ipc_request(
+        hostname,
+        port,
+        _HANDOFF_CONTROL_PATH,
+        {"Cookie": f"{_capability_cookie_name(cookie_capability)}={cookie_capability}"},
+        timeout,
+    )
+    if response is None or response.status_code != 200:
         return None
     token = response.text.strip()
     # Only accept a token-shaped value from our own server.
@@ -993,21 +1171,26 @@ def _reserve_entry_token(port: int, cookie_capability: str, timeout: float = 5.0
     return token
 
 
-def _live_proxy_url(state: Optional[dict[str, Any]]) -> Optional[tuple[str, int]]:
-    """Return (cookie capability, port) of a still-running proxy.
+def _live_proxy_url(state: Optional[dict[str, Any]]) -> Optional[tuple[str, int, str]]:
+    """Return (cookie capability, port, hostname) of a still-running proxy.
 
     The handoff URL is no longer taken from the state file — the entry
     token there may already be printed (and consumed) by an earlier
     invocation; the caller asks the live proxy to reserve a fresh one
     instead (see :func:`_reserve_entry_token`). A state file without the
-    cookie capability (pre-capability format) is not reusable.
+    cookie capability or the assigned ``.localhost`` hostname
+    (pre-capability or pre-hostname format) is not reusable: the caller
+    respawns, and the old proxy exits on its idle timeout.
     """
     if not state:
         return None
     pid = state.get("pid")
     port = state.get("port")
     token = state.get("token")
+    hostname = state.get("host")
     if not isinstance(pid, int) or not isinstance(port, int) or not isinstance(token, str):
+        return None
+    if not isinstance(hostname, str) or _proxy_hostname_from_url_part(hostname) is None:
         return None
     if not token:
         return None
@@ -1018,7 +1201,7 @@ def _live_proxy_url(state: Optional[dict[str, Any]]) -> Optional[tuple[str, int]
             pass
     except OSError:
         return None
-    return token, port
+    return token, port, hostname
 
 
 def _unlink_state_if_owned(state_path: Path, pid: int) -> None:
@@ -1121,27 +1304,28 @@ def start_detached_dashboard_proxy(
     """Start (or reuse) a detached loopback proxy and return its URL.
 
     The proxy runs in its own session (``start_new_session=True``) so it
-    survives the CLI exiting; it writes a pid/port/token state file
+    survives the CLI exiting; it writes a pid/port/token/host state file
     (0600) under the user cache dir and exits itself once idle. If a
     healthy proxy for this run is already running, its URL is returned
     without spawning another. The returned URL carries the proxy's CURRENT
     single-use entry token as its sole path segment (the one-time,
     glob-safe browser handoff; the child re-mints and re-records it on
-    every consumption) — the token reaches this process only through
-    the child's private ready pipe or the 0600 state file, never through
-    logs or command lines.
+    every consumption) and is addressed through the proxy's per-spawn
+    ``<id>.localhost`` hostname — the token and hostname reach this
+    process only through the child's private ready pipe or the 0600
+    state file, never through logs or command lines.
     """
     fingerprint = _proxy_fingerprint(base_url, run_id, api_key)
     state_path = proxy_state_path(run_id, state_dir, fingerprint)
     live = _live_proxy_url(_read_proxy_state(state_path))
-    if live is not None and _proxy_still_serves(live[1], live[0]):
+    if live is not None and _proxy_still_serves(live[2], live[1], live[0]):
         # A healthy proxy is REUSED with a freshly reserved single-use
         # handoff token (each invocation gets its own; sharing the state
         # file's token would let one caller's first visit strand every
         # other caller's printed URL with a 403).
-        handoff = _reserve_entry_token(live[1], live[0])
+        handoff = _reserve_entry_token(live[2], live[1], live[0])
         if handoff is not None:
-            return f"http://127.0.0.1:{live[1]}/{handoff}"
+            return f"http://{live[2]}:{live[1]}/{handoff}"
         # Minting failed (proxy predates the control endpoint, or hiccupped):
         # fall through and spawn a fresh proxy.
     _cleanup_stale_proxy_states(run_id, keep_fingerprint=fingerprint, state_dir=state_dir)
@@ -1169,12 +1353,21 @@ def start_detached_dashboard_proxy(
         )
     else:
         detach_kwargs["start_new_session"] = True
+    child_env = {**os.environ, _CHILD_API_KEY_ENV: api_key}
+    # Loopback IPC in this process AND in the child must never traverse an
+    # inherited HTTP_PROXY/ALL_PROXY: a configured proxy would capture the
+    # long-lived cookie capability or forge health/handoff replies. Merge
+    # the loopback hosts into the existing NO_PROXY value (an explicit
+    # user exclusion list must survive) rather than replacing it.
+    existing_no_proxy = child_env.get("NO_PROXY") or child_env.get("no_proxy") or ""
+    loopback = "127.0.0.1,localhost,::1"
+    child_env["NO_PROXY"] = child_env["no_proxy"] = f"{existing_no_proxy},{loopback}".lstrip(",")
     process = subprocess.Popen(  # noqa: S603 - fixed module command
         command,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
-        env={**os.environ, _CHILD_API_KEY_ENV: api_key},
+        env=child_env,
         **detach_kwargs,
     )
     ready_ok = False
@@ -1182,14 +1375,16 @@ def start_detached_dashboard_proxy(
     try:
         ready_line = _read_child_ready_line(process, ready_timeout_seconds)
         ready_parts = str(ready_line or "").split()
-        # ``PORT <port> <capability-token>``: the private pipe hands the
-        # per-spawn token to the parent without ever putting it on a
+        # ``PORT <port> <capability-token> <hostname>``: the private pipe
+        # hands the per-spawn token AND the assigned ``.localhost``
+        # hostname to the parent without ever putting either on a
         # command line (process tables are world-readable) or in a log.
         if (
-            len(ready_parts) == 3
+            len(ready_parts) == 4
             and ready_parts[0] == "PORT"
             and ready_parts[1].isdigit()
             and ready_parts[2]
+            and _proxy_hostname_from_url_part(ready_parts[3]) is not None
         ):
             ready_ok = True
     finally:
@@ -1208,7 +1403,7 @@ def start_detached_dashboard_proxy(
             process.stdout.close()
     if not ready_ok:
         raise RuntimeError("The dashboard proxy failed to start.")
-    return f"http://127.0.0.1:{int(ready_parts[1])}/{ready_parts[2]}"
+    return f"http://{ready_parts[3]}:{int(ready_parts[1])}/{ready_parts[2]}"
 
 
 def _main(argv: Optional[list[str]] = None) -> int:
@@ -1242,10 +1437,12 @@ def _main(argv: Optional[list[str]] = None) -> int:
     def _write_state(entry_token: str) -> None:
         """(Re)write the 0600 state file (user-only: it carries secrets).
 
-        The cookie capability keys the reuse health probe; the current
-        single-use entry token is the handoff URL the next CLI invocation
-        prints. It is re-recorded whenever the entry token is consumed so
-        a reused proxy always hands out a fresh, unconsumed one.
+        The cookie capability keys the reuse health probe; the assigned
+        ``.localhost`` hostname scopes the cookie and the exact Host
+        check; the current single-use entry token is the handoff URL the
+        next CLI invocation prints. It is re-recorded whenever the entry
+        token is consumed so a reused proxy always hands out a fresh,
+        unconsumed one.
         """
         state_fd = os.open(state_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(state_fd, "w") as state_file_obj:
@@ -1255,6 +1452,7 @@ def _main(argv: Optional[list[str]] = None) -> int:
                     "pid": os.getpid(),
                     "port": port,
                     "token": server.cookie_capability,
+                    "host": server.assigned_hostname,
                     "entry_token": entry_token,
                 },
                 state_file_obj,
@@ -1262,11 +1460,11 @@ def _main(argv: Optional[list[str]] = None) -> int:
 
     _write_state(server.entry_token)
     server._persist_entry_token = _write_state
-    # Report the port and the single-use entry token (the parent prints it
-    # as the URL's path segment), then detach stdout: the parent may exit
-    # (closing the pipe) at any time and this process must never block
-    # writing to it.
-    print(f"PORT {port} {server.entry_token}", flush=True)
+    # Report the port, the single-use entry token (the parent prints it as
+    # the URL's path segment) and the assigned hostname (the URL's
+    # authority), then detach stdout: the parent may exit (closing the
+    # pipe) at any time and this process must never block writing to it.
+    print(f"PORT {port} {server.entry_token} {server.assigned_hostname}", flush=True)
     os.dup2(os.open(os.devnull, os.O_WRONLY), 1)
 
     if hasattr(signal, "SIGTERM"):

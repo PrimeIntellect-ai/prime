@@ -3529,15 +3529,20 @@ def get_dashboard_url(
 ) -> None:
     """Open the Hosted Training run dashboard in your browser.
 
-    Starts a local proxy on 127.0.0.1 that injects the API token on your
-    behalf, so the browser never needs it. The printed loopback URL
-    embeds a random per-spawn SINGLE-USE entry token as its sole path
-    segment — a one-time handoff (glob-safe: no ?*[] characters, so even
-    unquoted command substitution survives zsh) that the browser
-    exchanges for a DISTINCT local cookie secret; every request must
-    present that cookie, and a replay of the consumed entry token is
-    rejected, so other local users cannot read the dashboard by
-    port-scanning the proxy or lifting the URL from the process table.
+    Starts a local proxy (bound to 127.0.0.1) that injects the API token
+    on your behalf, so the browser never needs it. The printed URL uses a
+    random per-spawn <id>.localhost hostname — browsers resolve it to
+    loopback — so the local cookie capability is scoped to that name and
+    no other local HTTP service receives it, and it embeds a random
+    per-spawn SINGLE-USE entry token as its sole path segment — a
+    one-time handoff (glob-safe: no ?*[] characters, so even unquoted
+    command substitution survives zsh) that the browser exchanges for a
+    DISTINCT local cookie secret; every request must present that cookie,
+    and a replay of the consumed entry token is rejected, so other local
+    users cannot read the dashboard by port-scanning the proxy or
+    lifting the URL from the process table (an attacker who learns the
+    hostname could still serve it on another local port; a full
+    origin-scoped credential is a tracked follow-up).
     By default the proxy runs in a
     detached background process that exits itself after 30 minutes of
     INACTIVITY — an actively used dashboard (e.g. an open tab with a live

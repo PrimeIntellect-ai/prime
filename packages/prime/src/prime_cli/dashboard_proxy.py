@@ -14,16 +14,19 @@ own root.
 Binding to 127.0.0.1 alone does not restrict access to the launching OS
 account: another local user can port-scan the proxy and send valid
 loopback Host headers. Every spawn therefore mints an unguessable
-capability token (``secrets.token_urlsafe``). The printed loopback URL
-places it as the SOLE PATH SEGMENT
+capability token (``secrets.token_urlsafe``) pair: the printed loopback
+URL carries a SINGLE-USE entry token as its SOLE PATH SEGMENT
 (``http://127.0.0.1:<port>/<token>``) — the one-time browser handoff.
 ``token_urlsafe`` output is glob-safe (letters, digits, ``-`` and ``_``
 only), so even unquoted command substitution like
 ``open $(prime train dashboard ...)`` survives zsh's glob expansion
 (a ``?t=`` query form would raise zsh's "no matches found"). The entry
-response sets a loopback cookie (``Path=/; HttpOnly;
-SameSite=Strict``), and EVERY subsequent request must present that
-cookie (constant-time validation BEFORE the Host/Origin checks), which
+request CONSUMES that token (a replay gets 403 — the URL is briefly
+visible in process arguments, so it must never live longer than its
+first use) and sets a DIFFERENT loopback cookie secret
+(``Path=/; HttpOnly; SameSite=Strict``). EVERY subsequent request must
+present that cookie (constant-time validation BEFORE the Host/Origin
+checks), which
 keeps root-relative assets, API calls and SSE streams working exactly
 as before: the browser attaches the cookie to every path on the
 loopback host. A DNS-rebound origin never receives the
@@ -62,7 +65,7 @@ import threading
 import time
 import urllib.parse
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import httpx
 
@@ -83,6 +86,20 @@ of waiting for the next write to fail: without this, a browser tab
 closed mid-stream would leave the request "in flight" forever and the
 detached proxy (holding the API credential) would never idle-exit."""
 
+_STREAM_QUEUE_MAX_CHUNKS = 32
+"""Chunks the reader thread may buffer ahead of the browser.
+
+Backpressure: a fast upstream with a slow browser must not drain an
+unbounded response into memory (OOM kill). The reader blocks on this
+bound, so at most this many chunks are in flight."""
+
+_STREAM_ABANDON_POLL_SECONDS = 0.5
+"""How often a blocked reader re-checks whether the pump has left.
+
+Lets the pump abandon a full queue promptly (browser gone, write
+failure, mid-stream upstream error) without leaving a thread parked
+forever on a full queue."""
+
 _CHILD_READY_TIMEOUT_SECONDS = 15.0
 """How long the parent waits for the detached proxy to report its port."""
 
@@ -101,16 +118,19 @@ _LOOPBACK_HOSTNAMES = {"127.0.0.1", "localhost", "::1"}
 """Host header names the loopback proxy may serve (DNS-rebinding guard)."""
 
 _CAPABILITY_TOKEN_BYTES = 32
-"""Entropy (bytes) of the per-spawn loopback capability token.
+"""Entropy (bytes) of the per-spawn loopback capability secrets.
 
 Binding to 127.0.0.1 does not restrict access to the launching OS
 account — another local user can port-scan the loopback port and send
 valid loopback Host headers with no Origin, reading the dashboard
-through the victim's bearer token. The unguessable capability token
-closes that hole: the printed URL hands it to the browser once (as its
-sole path segment), the entry response exchanges it for a loopback
-cookie, and every request without that cookie is rejected (403) before
-any Host/Origin or upstream work."""
+through the victim's bearer token. Two unguessable per-spawn secrets
+close that hole: the single-use ENTRY token (the sole path segment of
+the printed URL) and the long-lived COOKIE capability it is exchanged
+for. The entry token is consumed on first use — the URL is briefly
+visible in process arguments (browser open, command substitution), so
+a local user who recovers it from the process table can only replay a
+dead token — and every request without the cookie is rejected (403)
+before any Host/Origin or upstream work."""
 
 _CAPABILITY_COOKIE_NAME = "t"
 
@@ -216,6 +236,16 @@ def map_dashboard_redirect(location: str, base_url: str, run_id: str) -> Optiona
     otherwise it would prepend the run prefix a second time and the
     upstream request would 404 (double-rewrite composition).
     """
+    try:
+        return _map_dashboard_redirect(location, base_url, run_id)
+    except ValueError:
+        # Malformed authorities (unmatched IPv6 brackets, nonnumeric
+        # ports) make urlsplit/parsed.port raise: a clean rejection,
+        # never a dead connection mid-response.
+        return None
+
+
+def _map_dashboard_redirect(location: str, base_url: str, run_id: str) -> Optional[str]:
     parsed = urllib.parse.urlsplit(location)
     prefix = dashboard_upstream_path(run_id, "")
     query = f"?{parsed.query}" if parsed.query else ""
@@ -265,16 +295,16 @@ def map_dashboard_redirect(location: str, base_url: str, run_id: str) -> Optiona
 class DashboardProxyHandler(http.server.BaseHTTPRequestHandler):
     """Forward every loopback GET to the platform dashboard proxy route.
 
-    Class attributes ``run_id``, ``base_url``, ``api_key``,
-    ``capability_token`` and ``upstream`` are bound by
-    :func:`make_dashboard_proxy_server`.
+    Class attributes ``run_id``, ``base_url``, ``api_key`` and
+    ``upstream`` are bound by :func:`make_dashboard_proxy_server`; the
+    capability secrets live on the server (single-use entry token +
+    cookie secret) so the entry token can be re-minted atomically.
     """
 
     protocol_version = "HTTP/1.1"
     run_id: str = ""
     base_url: str = ""
     api_key: str = ""
-    capability_token: str = ""
     _issue_capability_cookie = False
     upstream: Optional[httpx.Client] = None
 
@@ -340,13 +370,19 @@ class DashboardProxyHandler(http.server.BaseHTTPRequestHandler):
         except httpx.HTTPError:
             self._send_plain_error(502, "Dashboard backend is unreachable.")
 
-    def _authorize_request(self) -> Optional[str]:
-        """Validate the capability cookie (or the token path segment).
+    def _proxy_server(self) -> DashboardProxyServer:
+        server = self.server
+        assert isinstance(server, DashboardProxyServer)
+        return server
 
-        Every request must present the per-spawn capability token:
-        normally as the loopback cookie the entry response sets, or — for
-        the printed URL's first hit — as the token path segment, which
-        additionally (re)issues the cookie. The comparison is
+    def _authorize_request(self) -> Optional[str]:
+        """Validate the capability cookie (or the single-use entry token).
+
+        Every request must present a per-spawn capability: normally the
+        long-lived loopback cookie the entry response sets, or — for the
+        printed URL's first hit — the SINGLE-USE entry token in the path,
+        which is consumed atomically (a replay gets 403) and exchanged
+        for the cookie. The comparison is
         constant-time and runs BEFORE any Host/Origin or upstream work,
         so another local user who port-scans the port cannot read the
         dashboard through the victim's bearer token. Returns the
@@ -361,15 +397,16 @@ class DashboardProxyHandler(http.server.BaseHTTPRequestHandler):
             return None
         # compare_digest requires ASCII; bytes comparison accepts any
         # request target, including non-UTF-8 path segments.
-        expected = self.capability_token.encode("utf-8")
+        server = self._proxy_server()
+        expected = server.cookie_capability.encode("utf-8")
         authorized = False
         path = parsed.path or "/"
         head, sep, rest = parsed.path.lstrip("/").partition("/")
-        if head and hmac.compare_digest(head.encode("utf-8", "surrogateescape"), expected):
-            # The one-time handoff URL: the token is the sole path segment.
-            # Authorize, strip it from the dashboard path (so both
-            # /<token> and /<token>/static/... map to the dashboard root
-            # and subpaths), and (re)issue the cookie that authorizes
+        if head and server.consume_entry_token(head.encode("utf-8", "surrogateescape")):
+            # The one-time handoff URL: the single-use entry token is the
+            # sole path segment. Authorize, strip it from the dashboard path
+            # (so both /<entry> and /<entry>/static/... map to the dashboard
+            # root and subpaths), and (re)issue the cookie that authorizes
             # every subsequent root-relative request.
             authorized = True
             self._issue_capability_cookie = True
@@ -396,7 +433,7 @@ class DashboardProxyHandler(http.server.BaseHTTPRequestHandler):
         return path
 
     def _capability_set_cookie(self) -> str:
-        """The entry response's Set-Cookie value for the capability token.
+        """The entry response's Set-Cookie value for the cookie secret.
 
         ``Path=/`` covers every root-relative asset/API/SSE request the
         dashboard makes; ``HttpOnly`` keeps the token out of JavaScript;
@@ -407,7 +444,8 @@ class DashboardProxyHandler(http.server.BaseHTTPRequestHandler):
         omitted deliberately — the loopback origin is plain http.
         """
         return (
-            f"{_CAPABILITY_COOKIE_NAME}={self.capability_token}; Path=/; HttpOnly; SameSite=Strict"
+            f"{_CAPABILITY_COOKIE_NAME}={self._proxy_server().cookie_capability}; "
+            "Path=/; HttpOnly; SameSite=Strict"
         )
 
     def _upstream_headers(self) -> dict[str, str]:
@@ -517,45 +555,67 @@ class DashboardProxyHandler(http.server.BaseHTTPRequestHandler):
         the request would never finish, keeping the idle watchdog's
         in-flight counter nonzero and pinning the detached proxy (and
         its API credential) indefinitely. The upstream iterator is
-        therefore consumed on a helper thread; while the main loop waits
-        for chunks it polls the client socket for a half-close and drops
-        out as soon as the browser is gone.
+        therefore consumed on a helper thread into a BOUNDED queue
+        (backpressure: a fast upstream cannot out-run a slow browser and
+        balloon memory); while the main loop waits for chunks it polls
+        the client socket for a half-close and drops out as soon as the
+        browser is gone, abandoning the queue so the blocked reader
+        unblocks instead of parking on a full queue forever.
         """
-        chunks: queue.Queue[Any] = queue.Queue()
+        chunks: queue.Queue[Any] = queue.Queue(maxsize=_STREAM_QUEUE_MAX_CHUNKS)
         finished = object()
+        abandoned = threading.Event()
+
+        def _offer(item: Any) -> bool:
+            """Put with abandon-aware backpressure; False when abandoned."""
+            while not abandoned.is_set():
+                try:
+                    chunks.put(item, timeout=_STREAM_ABANDON_POLL_SECONDS)
+                    return True
+                except queue.Full:
+                    continue
+            return False
 
         def _read_upstream() -> None:
             try:
                 for chunk in body_iter:
-                    chunks.put(chunk)
+                    if not _offer(chunk):
+                        return
             except Exception as error:  # noqa: BLE001 - relayed to the pump
-                chunks.put(error)
+                # A mid-stream upstream error: best-effort relay to the
+                # pump (dropped if the queue is full and abandoned).
+                _offer(error)
             finally:
-                chunks.put(finished)
+                if not abandoned.is_set():
+                    _offer(finished)
 
         threading.Thread(target=_read_upstream, daemon=True).start()
-        while True:
-            try:
-                item = chunks.get(timeout=_STREAM_LIVENESS_POLL_SECONDS)
-            except queue.Empty:
-                if self._downstream_disconnected():
-                    # The browser closed the tab mid-stream: stop pumping
-                    # and let the response context manager close the
-                    # upstream so the reader thread unblocks and this
-                    # request finally finishes (idle shutdown stays armed).
-                    self.close_connection = True
+        try:
+            while True:
+                try:
+                    item = chunks.get(timeout=_STREAM_LIVENESS_POLL_SECONDS)
+                except queue.Empty:
+                    if self._downstream_disconnected():
+                        # The browser closed the tab mid-stream: stop pumping
+                        # and let the response context manager close the
+                        # upstream so the reader thread unblocks and this
+                        # request finally finishes (idle shutdown stays armed).
+                        self.close_connection = True
+                        return
+                    continue
+                if item is finished:
                     return
-                continue
-            if item is finished:
-                return
-            if isinstance(item, Exception):
-                raise item
-            try:
+                if isinstance(item, Exception):
+                    raise item
                 self.wfile.write(item)
                 self.wfile.flush()  # SSE events must reach the browser immediately
-            except (BrokenPipeError, ConnectionResetError):
-                # The browser tab was closed mid-stream; drop the connection.
-                return
+        except (BrokenPipeError, ConnectionResetError):
+            # The browser tab was closed mid-stream; drop the connection.
+            return
+        finally:
+            # Unblock a reader parked on a full queue (browser gone or
+            # write failure) so it stops holding the upstream response.
+            abandoned.set()
 
     def _downstream_disconnected(self) -> bool:
         """Peek the client socket for a half-close without consuming bytes.
@@ -598,14 +658,45 @@ class DashboardProxyServer(http.server.ThreadingHTTPServer):
 
     daemon_threads = True
     run_id: str = ""
-    capability_token: str = ""
+    entry_token: str = ""
+    cookie_capability: str = ""
     upstream_client: Optional[httpx.Client] = None
+    _persist_entry_token: Optional[Callable[[str], None]] = None
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._state_lock = threading.Lock()
         self._active_requests = 0
         self._last_activity = time.monotonic()
+        self._entry_lock = threading.Lock()
+
+    def consume_entry_token(self, presented: bytes) -> bool:
+        """Consume the SINGLE-USE entry token; return False on mismatch.
+
+        The entry token is the printed URL's path segment — it is briefly
+        exposed in process arguments (browser open, command
+        substitution), so it must never double as the long-lived cookie
+        secret and must die on first use. On a match the next entry token
+        is minted immediately (a replay can never match again) and, when
+        a persistence callback is registered (the detached child's 0600
+        state file), recorded so a later CLI invocation can reuse the
+        proxy through a fresh handoff URL. The comparison is
+        constant-time and atomic with the re-mint under one lock.
+        """
+        with self._entry_lock:
+            if not hmac.compare_digest(presented, self.entry_token.encode("utf-8")):
+                return False
+            self.entry_token = secrets.token_urlsafe(_CAPABILITY_TOKEN_BYTES)
+            next_token = self.entry_token
+            persist = self._persist_entry_token
+        if persist is not None:
+            try:
+                persist(next_token)
+            except OSError:
+                # The state file disappeared (proxy shutting down): reuse
+                # simply will not find the fresh token; serving continues.
+                pass
+        return True
 
     def request_started(self) -> None:
         with self._state_lock:
@@ -635,11 +726,15 @@ def make_dashboard_proxy_server(
 ) -> tuple[DashboardProxyServer, str]:
     """Start a loopback dashboard proxy on an ephemeral port.
 
-    Returns ``(server, url)`` where ``url`` carries the per-spawn
-    capability token once as its sole path segment — the one-time
-    browser handoff (glob-safe under zsh) that the entry response
-    exchanges for a loopback cookie; ``server.capability_token`` exposes
-    it for callers that need the raw value. The caller runs
+    Returns ``(server, url)`` where ``url`` carries the SINGLE-USE entry
+    token as its sole path segment — the one-time, glob-safe browser
+    handoff (token_urlsafe output has no ``?*[]`` characters, so
+    unquoted command substitution survives zsh's glob expansion) that
+    the entry response exchanges for a DISTINCT loopback cookie
+    capability. The entry token is consumed on first use, so its brief
+    exposure in process arguments (browser open) cannot be replayed;
+    ``server.entry_token`` always holds the current (unconsumed) token
+    and ``server.cookie_capability`` the cookie secret. The caller runs
     ``server.serve_forever()`` and, on shutdown, closes the server and
     ``server.upstream_client``. ``upstream`` may be injected for tests.
     """
@@ -647,7 +742,8 @@ def make_dashboard_proxy_server(
         headers={"User-Agent": user_agent or _default_user_agent()},
         timeout=_UPSTREAM_REQUEST_TIMEOUT,
     )
-    capability_token = secrets.token_urlsafe(_CAPABILITY_TOKEN_BYTES)
+    entry_token = secrets.token_urlsafe(_CAPABILITY_TOKEN_BYTES)
+    cookie_capability = secrets.token_urlsafe(_CAPABILITY_TOKEN_BYTES)
     handler_cls = type(
         "BoundDashboardProxyHandler",
         (DashboardProxyHandler,),
@@ -655,21 +751,15 @@ def make_dashboard_proxy_server(
             "run_id": run_id,
             "base_url": base_url,
             "api_key": api_key,
-            "capability_token": capability_token,
             "upstream": upstream_client,
         },
     )
     server = DashboardProxyServer((host, 0), handler_cls)
     server.run_id = run_id
-    server.capability_token = capability_token
+    server.entry_token = entry_token
+    server.cookie_capability = cookie_capability
     server.upstream_client = upstream_client
-    # The URL carries the capability token ONCE as its sole path segment —
-    # the one-time browser handoff. token_urlsafe output is glob-safe (no
-    # ?*[] characters), so unquoted command substitution survives zsh's
-    # glob expansion. The entry response exchanges the token for a
-    # loopback cookie that authorizes every subsequent request, so the
-    # dashboard's root-relative asset/API/SSE URLs keep working.
-    url = f"http://{host}:{server.server_address[1]}/{capability_token}"
+    url = f"http://{host}:{server.server_address[1]}/{entry_token}"
     return server, url
 
 
@@ -752,25 +842,36 @@ def _pid_is_alive(pid: int) -> bool:
     return True
 
 
-def _proxy_still_serves(url: str, timeout: float = 10.0) -> bool:
+def _proxy_still_serves(port: int, cookie_capability: str, timeout: float = 10.0) -> bool:
     """Probe a live proxy to confirm its credentials still work upstream.
 
-    A proxy whose stored token was revoked or whose backend moved answers
-    with a clean local 502 (the platform rejects the bearer with 4xx).
-    Only such healthy proxies are reused; otherwise a fresh proxy starts.
+    The probe authenticates with the stored COOKIE capability on the
+    loopback ROOT only — never by presenting the single-use entry token,
+    which would consume the handoff URL the next CLI invocation must
+    print. A proxy whose stored token was revoked or whose backend moved
+    answers with a clean local 502 (the platform rejects the bearer
+    with 4xx). Only such healthy proxies are reused; otherwise a fresh
+    proxy starts.
     """
     try:
-        response = httpx.get(url, timeout=timeout, follow_redirects=False)
+        response = httpx.get(
+            f"http://127.0.0.1:{port}/",
+            headers={"Cookie": f"{_CAPABILITY_COOKIE_NAME}={cookie_capability}"},
+            timeout=timeout,
+            follow_redirects=False,
+        )
     except httpx.HTTPError:
         return False
     return response.status_code < 400
 
 
-def _live_proxy_url(state: Optional[dict[str, Any]]) -> Optional[str]:
-    """Return the loopback URL of a still-running proxy, if any.
+def _live_proxy_url(state: Optional[dict[str, Any]]) -> Optional[tuple[str, str, int]]:
+    """Return (loopback URL, cookie capability, port) of a still-running proxy.
 
-    The URL carries the proxy's capability token as the one-time
-    path-segment handoff; a state file without a token (pre-capability
+    The URL carries the proxy's current single-use entry token as the
+    one-time path-segment handoff (the detached child re-mints and
+    re-records it on every consumption); the cookie capability keys the
+    health probe. A state file without either secret (pre-capability
     format) is not reusable.
     """
     if not state:
@@ -778,9 +879,15 @@ def _live_proxy_url(state: Optional[dict[str, Any]]) -> Optional[str]:
     pid = state.get("pid")
     port = state.get("port")
     token = state.get("token")
-    if not isinstance(pid, int) or not isinstance(port, int) or not isinstance(token, str):
-        return None
-    if not token:
+    entry_token = state.get("entry_token")
+    if (
+        not isinstance(pid, int)
+        or not isinstance(port, int)
+        or not isinstance(token, str)
+        or not isinstance(entry_token, str)
+        or not token
+        or not entry_token
+    ):
         return None
     if not _pid_is_alive(pid):
         return None
@@ -789,7 +896,7 @@ def _live_proxy_url(state: Optional[dict[str, Any]]) -> Optional[str]:
             pass
     except OSError:
         return None
-    return f"http://127.0.0.1:{port}/{token}"
+    return f"http://127.0.0.1:{port}/{entry_token}", token, port
 
 
 def _unlink_state_if_owned(state_path: Path, pid: int) -> None:
@@ -895,17 +1002,18 @@ def start_detached_dashboard_proxy(
     survives the CLI exiting; it writes a pid/port/token state file
     (0600) under the user cache dir and exits itself once idle. If a
     healthy proxy for this run is already running, its URL is returned
-    without spawning another. The returned URL carries the proxy's
-    capability token once as its sole path segment (the one-time,
-    glob-safe browser handoff) — the token reaches this process only
-    through the child's private ready pipe or the 0600 state file, never
-    through logs or command lines.
+    without spawning another. The returned URL carries the proxy's CURRENT
+    single-use entry token as its sole path segment (the one-time,
+    glob-safe browser handoff; the child re-mints and re-records it on
+    every consumption) — the token reaches this process only through
+    the child's private ready pipe or the 0600 state file, never through
+    logs or command lines.
     """
     fingerprint = _proxy_fingerprint(base_url, run_id, api_key)
     state_path = proxy_state_path(run_id, state_dir, fingerprint)
-    existing = _live_proxy_url(_read_proxy_state(state_path))
-    if existing is not None and _proxy_still_serves(existing):
-        return existing
+    live = _live_proxy_url(_read_proxy_state(state_path))
+    if live is not None and _proxy_still_serves(live[2], live[1]):
+        return live[0]
     _cleanup_stale_proxy_states(run_id, keep_fingerprint=fingerprint, state_dir=state_dir)
 
     state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1000,24 +1108,35 @@ def _main(argv: Optional[list[str]] = None) -> int:
     port = server.server_address[1]
     state_path = Path(args.state_file)
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    # The state file carries the capability token (needed to reuse the
-    # proxy), so it is created with user-only permissions: another local
-    # user must not be able to read it.
-    state_fd = os.open(state_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(state_fd, "w") as state_file_obj:
-        json.dump(
-            {
-                "run_id": args.run_id,
-                "pid": os.getpid(),
-                "port": port,
-                "token": server.capability_token,
-            },
-            state_file_obj,
-        )
-    # Report the port and capability token, then detach stdout: the parent
-    # may exit (closing the pipe) at any time and this process must never
-    # block writing to it.
-    print(f"PORT {port} {server.capability_token}", flush=True)
+
+    def _write_state(entry_token: str) -> None:
+        """(Re)write the 0600 state file (user-only: it carries secrets).
+
+        The cookie capability keys the reuse health probe; the current
+        single-use entry token is the handoff URL the next CLI invocation
+        prints. It is re-recorded whenever the entry token is consumed so
+        a reused proxy always hands out a fresh, unconsumed one.
+        """
+        state_fd = os.open(state_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(state_fd, "w") as state_file_obj:
+            json.dump(
+                {
+                    "run_id": args.run_id,
+                    "pid": os.getpid(),
+                    "port": port,
+                    "token": server.cookie_capability,
+                    "entry_token": entry_token,
+                },
+                state_file_obj,
+            )
+
+    _write_state(server.entry_token)
+    server._persist_entry_token = _write_state
+    # Report the port and the single-use entry token (the parent prints it
+    # as the URL's path segment), then detach stdout: the parent may exit
+    # (closing the pipe) at any time and this process must never block
+    # writing to it.
+    print(f"PORT {port} {server.entry_token}", flush=True)
     os.dup2(os.open(os.devnull, os.O_WRONLY), 1)
 
     if hasattr(signal, "SIGTERM"):

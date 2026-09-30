@@ -40,7 +40,10 @@ def proxy_factory():
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         servers.append(server)
-        return url, server.server_address[1], server.capability_token
+        # The third element is the long-lived cookie capability (what a
+        # warmed-up browser presents); the single-use entry token is the
+        # URL's path segment.
+        return url, server.server_address[1], server.cookie_capability
 
     yield start
 
@@ -64,24 +67,36 @@ def _get(
 
 
 def _entry(port: int, token: str, path: str = "") -> http.client.HTTPResponse:
-    """GET the printed URL: the one-time token path-segment handoff."""
+    """GET the printed URL: the one-time entry-token path handoff."""
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
     conn.request("GET", f"/{token}{path}")
     return conn.getresponse()
 
 
-def test_loopback_url_embeds_unguessable_capability_token(proxy_factory) -> None:
-    """Every spawn mints a fresh token and embeds it in the URL path."""
-    url, port, token = proxy_factory(
-        httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200)))
-    )
+def _entry_token_of(url: str) -> str:
+    """The single-use entry token embedded in the printed URL's path."""
+    return urllib.parse.urlsplit(url).path.strip("/")
 
-    assert url == f"http://127.0.0.1:{port}/{token}"
-    assert len(token) >= 32  # unguessable: ~256 bits of entropy
-    _, _, token_2 = proxy_factory(
+
+def test_loopback_url_embeds_unguessable_capability_token(proxy_factory) -> None:
+    """Every spawn mints a fresh entry token and embeds it in the URL path."""
+    url, port, cookie = proxy_factory(
         httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200)))
     )
-    assert token_2 != token  # per-spawn randomness, never derived from the run
+    entry = _entry_token_of(url)
+
+    assert url == f"http://127.0.0.1:{port}/{entry}"
+    assert len(entry) >= 32  # unguessable: ~256 bits of entropy
+    url_2, _, cookie_2 = proxy_factory(
+        httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+    )
+    entry_2 = _entry_token_of(url_2)
+    assert entry_2 != entry  # per-spawn randomness, never derived from the run
+    assert cookie_2 != cookie
+    # The cookie secret is DISTINCT from the URL token: the entry token is
+    # exposed in process arguments (browser open), the cookie never is.
+    assert cookie != entry
+    assert cookie not in url
 
 
 def test_printed_url_is_glob_safe_for_command_substitution(proxy_factory) -> None:
@@ -96,11 +111,12 @@ def test_printed_url_is_glob_safe_for_command_substitution(proxy_factory) -> Non
     ``=``. (Quoting the substitution is still good practice, but the
     CLI's documented command-substitution contract must not require it.)
     """
-    url, _, token = proxy_factory(
+    url, _, _cookie = proxy_factory(
         httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200)))
     )
+    entry = _entry_token_of(url)
     # token_urlsafe alphabet plus the authority separators only.
-    assert set(token) <= set(string.ascii_letters + string.digits + "_-")
+    assert set(entry) <= set(string.ascii_letters + string.digits + "_-")
     assert set(url) <= set(string.ascii_letters + string.digits + ".:/_-")
     assert not set(url) & set("?*[]=~^")
 
@@ -167,37 +183,46 @@ def test_proxy_rejects_requests_without_capability_cookie(proxy_factory) -> None
     assert seen[1].endswith("/dashboard/[::1")
 
 
-def test_entry_request_with_path_token_sets_capability_cookie(proxy_factory) -> None:
-    """The printed URL's token segment becomes the loopback cookie.
+def test_entry_request_exchanges_single_use_token_for_distinct_cookie(proxy_factory) -> None:
+    """The printed URL's entry token becomes a DIFFERENT cookie secret.
 
-    ``GET /<token>`` serves the dashboard root directly (no redirect)
-    and sets the cookie that authorizes every subsequent request.
+    ``GET /<entry>`` serves the dashboard root directly (no redirect)
+    and sets the cookie that authorizes every subsequent request. The
+    entry token is SINGLE-USE: it is briefly visible in process
+    arguments (browser open, command substitution), so a replay must be
+    rejected and the cookie value must differ from the URL token.
     """
     seen: dict[str, Any] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen["url"] = str(request.url)
+        seen.setdefault("urls", []).append(str(request.url))
         return httpx.Response(200, headers={"Content-Type": "text/html"}, content=b"<html>x</html>")
 
-    _, port, token = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
+    url, port, cookie = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
+    entry = _entry_token_of(url)
 
-    response = _entry(port, token)
+    response = _entry(port, entry)
 
     assert response.status == 200
     assert response.read() == b"<html>x</html>"
     # HttpOnly keeps the token out of page JavaScript; SameSite=Strict
     # blocks cross-site sends; Path=/ covers every root-relative request.
-    assert response.getheader("Set-Cookie") == f"t={token}; Path=/; HttpOnly; SameSite=Strict"
-    # The handoff token never reaches the upstream path.
+    assert response.getheader("Set-Cookie") == f"t={cookie}; Path=/; HttpOnly; SameSite=Strict"
+    # The cookie secret is DISTINCT from the single-use URL token, and the
+    # handoff token never reaches the upstream path.
+    assert cookie != entry
     assert seen["url"] == f"{BASE_URL}/api/v1/rft/runs/run-1/dashboard/"
 
-    # The token segment also authorizes subpaths directly (no cookie yet)
-    # and strips itself: /<token>/static/x maps to the dashboard subpath.
-    seen.clear()
-    response = _entry(port, token, path="/static/x")
-    assert response.status == 200
-    assert response.getheader("Set-Cookie") == f"t={token}; Path=/; HttpOnly; SameSite=Strict"
-    assert seen["url"] == f"{BASE_URL}/api/v1/rft/runs/run-1/dashboard/static/x"
+    # Replaying the consumed entry token: 403, zero NEW upstream work.
+    replay = _entry(port, entry)
+    assert replay.status == 403
+    assert replay.read() == b"Forbidden: unknown dashboard proxy URL.\n"
+    assert len(seen["urls"]) == 1
+
+    # The consumed token stays dead on subpaths too (no partial replay).
+    assert _entry(port, entry, path="/static/x").status == 403
+    assert len(seen["urls"]) == 1
 
 
 def test_root_relative_dashboard_requests_work_with_capability_cookie(proxy_factory) -> None:
@@ -220,12 +245,13 @@ def test_root_relative_dashboard_requests_work_with_capability_cookie(proxy_fact
             )
         return httpx.Response(200, content=b"asset-or-api")
 
-    _, port, token = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
+    url, port, cookie = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
 
-    # Browser opens the printed URL (handoff), then loads root-relative assets.
-    assert _entry(port, token).status == 200
+    # Browser opens the printed URL (single-use handoff), then loads
+    # root-relative assets on the cookie alone.
+    assert _entry(port, _entry_token_of(url)).status == 200
     for path in ("/static/app.js?v=2", "/api/view/events", "/api/v1/rft/runs/run-1/x"):
-        response = _get(port, token, path)
+        response = _get(port, cookie, path)
         assert response.status == 200, path
         assert response.read() in (b"asset-or-api", b"data: 1\n\n")
 
@@ -377,7 +403,7 @@ def test_proxy_detects_client_disconnect_on_quiet_sse_streams(monkeypatch) -> No
         # the response's file object, so it never delivers the FIN the way
         # a real browser tab close does. shutdown() does.
         sock = socket.create_connection(("127.0.0.1", port), timeout=5)
-        sock.sendall(f"GET /{server.capability_token} HTTP/1.1\r\n".encode())
+        sock.sendall(f"GET /{server.entry_token} HTTP/1.1\r\n".encode())
         sock.sendall(f"Host: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n".encode())
         data = b""
         while b"data: 1\n" not in data:
@@ -398,6 +424,41 @@ def test_proxy_detects_client_disconnect_on_quiet_sse_streams(monkeypatch) -> No
         release.set()
         server.shutdown()
         server.server_close()
+
+
+def test_proxy_backpressure_bounds_buffered_response_memory(proxy_factory) -> None:
+    """A fast upstream cannot out-run a slow browser into OOM.
+
+    The reader thread must BLOCK once the chunk queue is full: with an
+    idle browser, the upstream iterator stalls near the queue bound
+    instead of draining a huge response into unbounded memory.
+    """
+    produced = 0
+    payload = b"x" * 65536
+
+    def big_body():
+        nonlocal produced
+        for _ in range(1000):
+            produced += 1  # incremented when the READER pulls the chunk
+            yield payload
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=big_body())
+
+    url, port, cookie = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
+
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    conn.request("GET", "/", headers={"Cookie": f"t={cookie}", "Connection": "close"})
+    response = conn.getresponse()
+    assert response.status == 200
+    assert response.read(65536) == payload  # browser reads ONE chunk, then stalls
+
+    time.sleep(1.5)  # the reader keeps pulling while the queue has room
+    # The queue bound is 32 chunks; httpx- and client-side buffering adds
+    # a few in flight, so anything near the bound passes — an unbounded
+    # queue would race to 1000.
+    assert produced <= 80, "reader must stall near the queue bound, not drain 1000 chunks"
+    conn.close()
 
 
 def test_proxy_forwards_accept_and_last_event_id_headers(proxy_factory) -> None:
@@ -579,6 +640,37 @@ def test_proxy_preserves_fragments_in_platform_shaped_redirects(proxy_factory) -
     assert response.getheader("Location") == "/static/index?next=1#/metrics"
 
 
+def test_proxy_rejects_malformed_redirects_as_clean_502s(proxy_factory) -> None:
+    """A Location the URL parser cannot handle gets a clean 502.
+
+    urlsplit/parsed.port raise ValueError on unmatched IPv6 brackets and
+    nonnumeric ports. httpx's own redirect validation rejects these
+    first (RemoteProtocolError -> the generic upstream-unreachable 502);
+    the mapper's own guard turns any parser error into a redirect-
+    rejected 502 as defense-in-depth. Either way: a clean local 502,
+    never a dead connection mid-response.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(302, headers={"Location": "https://[::1/x"}, content=b"")
+
+    _, port, cookie = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
+
+    response = _get(port, cookie, "/")
+    body = response.read()
+    assert response.status == 502  # clean local error, not a dropped connection
+
+    def handler2(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(302, headers={"Location": f"{BASE_URL}:notaport/x"}, content=b"")
+
+    _, port, cookie = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler2)))
+
+    response = _get(port, cookie, "/")
+    body = response.read()
+    assert response.status == 502
+    assert b"Forbidden" not in body  # authorization held; only the redirect was bad
+
+
 def test_proxy_rejects_cross_origin_redirects(proxy_factory) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -651,6 +743,11 @@ def test_proxy_rejects_same_origin_redirects_outside_the_run_scope(proxy_factory
         # Cross-origin/rejected locations with fragments stay rejected.
         ("https://evil.example.com/dashboard/#/metrics", None),
         ("/api/v1/rft/runs/run-2/dashboard/x#/metrics", None),
+        # Malformed authorities (unmatched IPv6 bracket, nonnumeric port)
+        # are a clean rejection, never a ValueError that kills the
+        # connection mid-response.
+        ("https://[::1/x", None),
+        (f"{BASE_URL}:notaport/x", None),
     ],
 )
 def test_map_dashboard_redirect(location: str, expected: Optional[str]) -> None:
@@ -783,7 +880,8 @@ def test_start_detached_reuses_live_proxy_from_state_file(monkeypatch, tmp_path)
                     "run_id": "run-1",
                     "pid": os.getpid(),
                     "port": server.server_address[1],
-                    "token": server.capability_token,
+                    "token": server.cookie_capability,
+                    "entry_token": server.entry_token,
                 }
             )
         )
@@ -798,6 +896,15 @@ def test_start_detached_reuses_live_proxy_from_state_file(monkeypatch, tmp_path)
         )
 
         assert reused == url
+        # The health probe must NOT have consumed the single-use entry
+        # token: the URL handed back to the caller still authorizes the
+        # browser handoff (this was a live bug — the probe once GET'd the
+        # entry URL itself, killing the token the CLI was about to print).
+        response = _entry(server.server_address[1], server.entry_token)
+        assert response.status == 200
+        assert response.getheader("Set-Cookie") == (
+            f"t={server.cookie_capability}; Path=/; HttpOnly; SameSite=Strict"
+        )
     finally:
         server.shutdown()
         server.server_close()
@@ -839,8 +946,7 @@ def test_detached_child_end_to_end(tmp_path) -> None:
 
     parsed_url = urllib.parse.urlsplit(url)
     port = parsed_url.port
-    assert parsed_url.path.startswith("/")
-    token = parsed_url.path.strip("/")
+    entry = parsed_url.path.strip("/")
     # The parent picks a fingerprinted state file path and passes it to the child.
     state_paths = list(state_dir.glob("train-dashboard-run-1-*.json"))
     assert len(state_paths) == 1
@@ -848,14 +954,25 @@ def test_detached_child_end_to_end(tmp_path) -> None:
     state = json.loads(state_path.read_text())
     assert state["port"] == port
     assert state["pid"] > 0
-    assert state["token"] == token
-    # The state file carries the capability token: it must be user-only.
+    assert state["entry_token"] == entry
+    cookie = state["token"]
+    assert cookie != entry  # cookie secret is distinct from the URL token
+    # The state file carries both capability secrets: it must be user-only.
     assert state_path.stat().st_mode & 0o777 == 0o600
 
-    response = _get(port, token, "/")
+    # The single-use entry handoff is answered even when the upstream is
+    # dead (clean local 502, plus the cookie exchange), and a replay of
+    # the consumed entry token is rejected.
+    response = _entry(port, entry)
     body = response.read()
     assert response.status == 502
     assert b"unreachable" in body
+    assert response.getheader("Set-Cookie") == f"t={cookie}; Path=/; HttpOnly; SameSite=Strict"
+    assert _entry(port, entry).status == 403
+    # The minted replacement entry token is persisted for the next invocation.
+    refreshed = json.loads(state_path.read_text())
+    assert refreshed["entry_token"] != entry
+    assert refreshed["token"] == cookie
 
     os.kill(state["pid"], signal.SIGTERM)
     deadline = time.monotonic() + 10
@@ -1143,7 +1260,8 @@ def test_start_detached_never_reuses_across_contexts(monkeypatch, tmp_path) -> N
                     "run_id": "run-1",
                     "pid": os.getpid(),
                     "port": server.server_address[1],
-                    "token": server.capability_token,
+                    "token": server.cookie_capability,
+                    "entry_token": server.entry_token,
                 }
             )
         )
@@ -1192,7 +1310,8 @@ def test_start_detached_respawns_when_live_proxy_credentials_are_stale(
                     "run_id": "run-1",
                     "pid": os.getpid(),
                     "port": server.server_address[1],
-                    "token": server.capability_token,
+                    "token": server.cookie_capability,
+                    "entry_token": server.entry_token,
                 }
             )
         )

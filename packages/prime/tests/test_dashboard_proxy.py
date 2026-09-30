@@ -17,6 +17,7 @@ from typing import Any, Optional
 import httpx
 import pytest
 from prime_cli.dashboard_proxy import (
+    _capability_cookie_name,
     _proxy_fingerprint,
     make_dashboard_proxy_server,
     proxy_state_path,
@@ -59,7 +60,7 @@ def _get(
     headers: Optional[dict[str, str]] = None,
 ) -> http.client.HTTPResponse:
     """GET ``path`` with the capability cookie (a warmed-up browser)."""
-    merged = {"Cookie": f"t={token}"}
+    merged = {"Cookie": f"{_capability_cookie_name(token)}={token}"}
     merged.update(headers or {})
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
     conn.request("GET", path, headers=merged)
@@ -147,7 +148,9 @@ def test_proxy_rejects_requests_without_capability_cookie(proxy_factory) -> None
     # "t"-keyed value.
     for wrong in ("", "wrong-token", token[:-1], token + "x", token.upper()):
         status, body = _raw_request(
-            port, [f"Host: 127.0.0.1:{port}", f"Cookie: t={wrong}"], path="/"
+            port,
+            [f"Host: 127.0.0.1:{port}", f"Cookie: {_capability_cookie_name(token)}={wrong}"],
+            path="/",
         )
         assert status == 403, wrong
         status, body = _raw_request(port, [f"Host: 127.0.0.1:{port}"], path=f"/{wrong}")
@@ -176,7 +179,9 @@ def test_proxy_rejects_requests_without_capability_cookie(proxy_factory) -> None
     # An authorized request with a weird-but-in-scope target never crashes
     # either: it stays mapped inside the run-scoped dashboard route.
     status, body = _raw_request(
-        port, [f"Host: 127.0.0.1:{port}", f"Cookie: t={token}"], path="/[::1"
+        port,
+        [f"Host: 127.0.0.1:{port}", f"Cookie: {_capability_cookie_name(token)}={token}"],
+        path="/[::1",
     )
     assert status == 200
     assert len(seen) == 2
@@ -208,7 +213,9 @@ def test_entry_request_exchanges_single_use_token_for_distinct_cookie(proxy_fact
     assert response.read() == b"<html>x</html>"
     # HttpOnly keeps the token out of page JavaScript; SameSite=Strict
     # blocks cross-site sends; Path=/ covers every root-relative request.
-    assert response.getheader("Set-Cookie") == f"t={cookie}; Path=/; HttpOnly; SameSite=Strict"
+    assert response.getheader("Set-Cookie") == (
+        f"{_capability_cookie_name(cookie)}={cookie}; Path=/; HttpOnly; SameSite=Strict"
+    )
     # The cookie secret is DISTINCT from the single-use URL token, and the
     # handoff token never reaches the upstream path.
     assert cookie != entry
@@ -252,14 +259,20 @@ def test_consumed_entry_url_refreshes_serve_the_dashboard(proxy_factory) -> None
     # Refresh of the SAME address-bar URL (cookie held, token consumed):
     # serves the dashboard root, not /<token> as a dashboard path.
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
-    conn.request("GET", f"/{entry}", headers={"Cookie": f"t={cookie}"})
+    conn.request(
+        "GET", f"/{entry}", headers={"Cookie": f"{_capability_cookie_name(cookie)}={cookie}"}
+    )
     refreshed = conn.getresponse()
     assert refreshed.status == 200
     assert refreshed.read() == b"dashboard"
     assert seen[-1] == f"{BASE_URL}/api/v1/rft/runs/run-1/dashboard/"
 
     # Deep-path refresh: /<consumed>/static/x maps to the dashboard subpath.
-    conn.request("GET", f"/{entry}/static/x", headers={"Cookie": f"t={cookie}"})
+    conn.request(
+        "GET",
+        f"/{entry}/static/x",
+        headers={"Cookie": f"{_capability_cookie_name(cookie)}={cookie}"},
+    )
     deep = conn.getresponse()
     assert deep.status == 200
     assert seen[-1] == f"{BASE_URL}/api/v1/rft/runs/run-1/dashboard/static/x"
@@ -271,6 +284,71 @@ def test_consumed_entry_url_refreshes_serve_the_dashboard(proxy_factory) -> None
     assert replay.read() == b"Forbidden: unknown dashboard proxy URL.\n"
     # And the wrong token stays 403 with or without a cookie.
     assert _raw_request(port, [f"Host: 127.0.0.1:{port}"], path="/totally-unknown-token")[0] == 403
+
+
+def test_two_proxies_keep_working_in_one_browser_profile(proxy_factory) -> None:
+    """Two dashboards in ONE browser profile must not clobber each other.
+
+    Browsers do NOT scope cookies by port: both proxies live on 127.0.0.1,
+    so a fixed cookie name would let the second proxy's Set-Cookie REPLACE
+    the first's capability — its asset/API calls would 403. The cookie
+    name derives per proxy, and each server accepts ONLY its own value
+    (the other proxy's cookie in the shared jar is ignored).
+    """
+    seen: dict[str, list[str]] = {"one": [], "two": []}
+
+    def upstream(tag: str) -> httpx.Response:
+        return httpx.Response(200, content=f"dashboard-{tag}".encode())
+
+    def handler_one(request: httpx.Request) -> httpx.Response:
+        seen["one"].append(str(request.url))
+        return upstream("one")
+
+    def handler_two(request: httpx.Request) -> httpx.Response:
+        seen["two"].append(str(request.url))
+        return upstream("two")
+
+    url_one, port_one, cookie_one = proxy_factory(
+        httpx.Client(transport=httpx.MockTransport(handler_one)), run_id="run-1"
+    )
+    url_two, port_two, cookie_two = proxy_factory(
+        httpx.Client(transport=httpx.MockTransport(handler_two)), run_id="run-2"
+    )
+    assert port_one != port_two
+    assert cookie_one != cookie_two
+
+    first_one = _entry(port_one, _entry_token_of(url_one))
+    first_two = _entry(port_two, _entry_token_of(url_two))
+    assert first_one.status == 200 and first_two.status == 200
+    name_one = first_one.getheader("Set-Cookie").split("=", 1)[0]
+    name_two = first_two.getheader("Set-Cookie").split("=", 1)[0]
+    assert name_one != name_two  # per-proxy names: no replacement
+
+    # One shared browser jar carrying BOTH proxies' cookies:
+    jar = f"{name_one}={cookie_one}; {name_two}={cookie_two}"
+    conn_one = http.client.HTTPConnection("127.0.0.1", port_one, timeout=10)
+    conn_one.request("GET", "/static/app.js", headers={"Cookie": jar})
+    response_one = conn_one.getresponse()
+    assert response_one.status == 200
+    assert response_one.read() == b"dashboard-one"
+    conn_one.close()
+
+    conn_two = http.client.HTTPConnection("127.0.0.1", port_two, timeout=10)
+    conn_two.request("GET", "/static/app.js", headers={"Cookie": jar})
+    response_two = conn_two.getresponse()
+    assert response_two.status == 200
+    assert response_two.read() == b"dashboard-two"
+    conn_two.close()
+
+    # Each proxy only ever hit its OWN upstream (entry + one asset each).
+    assert seen["one"] == [
+        f"{BASE_URL}/api/v1/rft/runs/run-1/dashboard/",
+        f"{BASE_URL}/api/v1/rft/runs/run-1/dashboard/static/app.js",
+    ]
+    assert seen["two"] == [
+        f"{BASE_URL}/api/v1/rft/runs/run-2/dashboard/",
+        f"{BASE_URL}/api/v1/rft/runs/run-2/dashboard/static/app.js",
+    ]
 
 
 def test_root_relative_dashboard_requests_work_with_capability_cookie(proxy_factory) -> None:
@@ -496,7 +574,11 @@ def test_proxy_backpressure_bounds_buffered_response_memory(proxy_factory) -> No
     url, port, cookie = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
 
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
-    conn.request("GET", "/", headers={"Cookie": f"t={cookie}", "Connection": "close"})
+    conn.request(
+        "GET",
+        "/",
+        headers={"Cookie": f"{_capability_cookie_name(cookie)}={cookie}", "Connection": "close"},
+    )
     response = conn.getresponse()
     assert response.status == 200
     assert response.read(65536) == payload  # browser reads ONE chunk, then stalls
@@ -561,7 +643,7 @@ def test_proxy_forwards_no_other_request_headers(proxy_factory) -> None:
         headers={
             # A real browser would send its own jar alongside the
             # capability cookie; the merge below must keep both.
-            "Cookie": f"t={token}; session=attacker",
+            "Cookie": f"{_capability_cookie_name(token)}={token}; session=attacker",
             "X-Custom": "leak-me",
             "Forwarded": "for=1.2.3.4",
             "User-Agent": "evil-browser",
@@ -942,17 +1024,26 @@ def test_start_detached_reuses_live_proxy_from_state_file(monkeypatch, tmp_path)
         reused = start_detached_dashboard_proxy(
             "run-1", base_url=BASE_URL, api_key="test-key", state_dir=tmp_path
         )
-
-        assert reused == url
-        # The health probe must NOT have consumed the single-use entry
-        # token: the URL handed back to the caller still authorizes the
-        # browser handoff (this was a live bug — the probe once GET'd the
-        # entry URL itself, killing the token the CLI was about to print).
-        response = _entry(server.server_address[1], server.entry_token)
-        assert response.status == 200
-        assert response.getheader("Set-Cookie") == (
-            f"t={server.cookie_capability}; Path=/; HttpOnly; SameSite=Strict"
+        reused_2 = start_detached_dashboard_proxy(
+            "run-1", base_url=BASE_URL, api_key="test-key", state_dir=tmp_path
         )
+
+        # Each invocation reserves its OWN fresh single-use handoff token
+        # (the health probe must not consume anything either — it
+        # authenticates with the cookie, and the mint endpoint reserves
+        # side by side instead of replacing).
+        port = server.server_address[1]
+        assert reused != url and reused_2 not in (url, reused)
+        assert all(f"http://127.0.0.1:{port}/" in candidate for candidate in (reused, reused_2))
+        # ALL THREE handoffs work: the minted ones never invalidated each
+        # other, and the original factory URL's token is still outstanding.
+        for candidate in (url, reused, reused_2):
+            response = _entry(port, _entry_token_of(candidate))
+            assert response.status == 200, candidate
+            assert response.getheader("Set-Cookie") == (
+                f"{server.cookie_name}={server.cookie_capability}; "
+                "Path=/; HttpOnly; SameSite=Strict"
+            )
     finally:
         server.shutdown()
         server.server_close()
@@ -1015,12 +1106,30 @@ def test_detached_child_end_to_end(tmp_path) -> None:
     body = response.read()
     assert response.status == 502
     assert b"unreachable" in body
-    assert response.getheader("Set-Cookie") == f"t={cookie}; Path=/; HttpOnly; SameSite=Strict"
+    assert response.getheader("Set-Cookie") == (
+        f"{_capability_cookie_name(cookie)}={cookie}; Path=/; HttpOnly; SameSite=Strict"
+    )
     assert _entry(port, entry).status == 403
-    # The minted replacement entry token is persisted for the next invocation.
+    # The handoff control endpoint reserves a FRESH single-use token for
+    # the next invocation (persisted to the state file); the consumed one
+    # stays dead.
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    conn.request(
+        "GET",
+        "/.prime-cli/handoff",
+        headers={"Cookie": f"{_capability_cookie_name(cookie)}={cookie}"},
+    )
+    minted_response = conn.getresponse()
+    assert minted_response.status == 200
+    minted = minted_response.read().decode("utf-8").strip()
+    assert minted not in ("", entry)
     refreshed = json.loads(state_path.read_text())
-    assert refreshed["entry_token"] != entry
+    assert refreshed["entry_token"] == minted
     assert refreshed["token"] == cookie
+    # The reserved handoff authorizes; the consumed one still does not.
+    assert _entry(port, minted).status == 502  # upstream dead, but authorized
+    assert _entry(port, entry).status == 403
+    conn.close()
 
     os.kill(state["pid"], signal.SIGTERM)
     deadline = time.monotonic() + 10
@@ -1119,7 +1228,7 @@ def _raw_get(
 ) -> tuple[int, bytes]:
     request = f"GET / HTTP/1.1\r\nHost: {host}\r\n"
     if token:
-        request += f"Cookie: t={token}\r\n"
+        request += f"Cookie: {_capability_cookie_name(token)}={token}\r\n"
     if origin:
         request += f"Origin: {origin}\r\n"
     request += "Connection: close\r\n\r\n"
@@ -1206,7 +1315,7 @@ def test_proxy_allows_loopback_origin(proxy_factory) -> None:
 def _raw_path_get(port: int, path: str, token: Optional[str] = None) -> int:
     request = f"GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n"
     if token:
-        request += f"Cookie: t={token}\r\n"
+        request += f"Cookie: {_capability_cookie_name(token)}={token}\r\n"
     request += "Connection: close\r\n\r\n"
     with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
         sock.sendall(request.encode())
@@ -1453,7 +1562,10 @@ def _raw_request(
     port: int, header_lines: list[str], path: str = "/", token: Optional[str] = None
 ) -> tuple[int, bytes]:
     if token:
-        header_lines = [*header_lines, f"Cookie: t={token}"]
+        header_lines = [
+            *header_lines,
+            f"Cookie: {_capability_cookie_name(token)}={token}",
+        ]
     request = (
         f"GET {path} HTTP/1.1\r\n" + "\r\n".join(header_lines) + "\r\nConnection: close\r\n\r\n"
     )

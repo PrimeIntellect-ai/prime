@@ -132,7 +132,31 @@ a local user who recovers it from the process table can only replay a
 dead token — and every request without the cookie is rejected (403)
 before any Host/Origin or upstream work."""
 
-_CAPABILITY_COOKIE_NAME = "t"
+
+def _capability_cookie_name(cookie_capability: str) -> str:
+    """Deterministic PER-PROXY cookie name for the capability secret.
+
+    Browsers do NOT scope cookies by port: two dashboards opened in the
+    same browser profile share the 127.0.0.1 host, so a fixed cookie name
+    would let the second proxy's Set-Cookie REPLACE the first's
+    capability (its asset/API calls would then 403). The name derives
+    from the cookie secret (a one-way digest of a 256-bit random value):
+    unique per spawn, and it leaks nothing.
+    """
+    digest = hashlib.sha256(
+        b"prime-cli.dashboard_proxy.cookie-name-v1:" + cookie_capability.encode("utf-8")
+    ).hexdigest()
+    return f"pd_{digest[:16]}"
+
+
+_HANDOFF_CONTROL_PATH = "/.prime-cli/handoff"
+"""Reserved loopback path that mints a fresh single-use entry token.
+
+Used by the CLI's reuse flow so every invocation gets its OWN reserved
+handoff token (the state file's token may already be printed — and
+later consumed — by another invocation, which would strand the second
+caller with a dead URL). Authenticated with the cookie capability that
+only the 0600 state file and the browser (HttpOnly) hold."""
 
 
 def _origin_is_loopback(origin: str, bound_port: int) -> bool:
@@ -337,6 +361,12 @@ class DashboardProxyHandler(http.server.BaseHTTPRequestHandler):
         if self.upstream is None:  # pragma: no cover - guarded by factory
             self._send_plain_error(500, "Dashboard proxy is not configured.")
             return
+        if remaining_path.split("?", 1)[0] == _HANDOFF_CONTROL_PATH:
+            # Reserved control path (cookie-authenticated like any request):
+            # mint and RESERVE a fresh single-use handoff token for this
+            # caller without disturbing other outstanding ones.
+            self._send_handoff()
+            return
         # Absolute URL built like APIClient does (base_url + /api/v1 route),
         # so the proxy does not depend on upstream client defaults.
         url = f"{self.base_url.rstrip('/')}{dashboard_upstream_path(self.run_id, remaining_path)}"
@@ -412,7 +442,7 @@ class DashboardProxyHandler(http.server.BaseHTTPRequestHandler):
                 jar.load(cookie_header)
             except http.cookies.CookieError:  # pragma: no cover - tolerant parser
                 pass
-            morsel = jar.get(_CAPABILITY_COOKIE_NAME)
+            morsel = jar.get(server.cookie_name)
             if morsel is not None and hmac.compare_digest(
                 morsel.value.encode("utf-8", "surrogateescape"), expected
             ):
@@ -445,6 +475,22 @@ class DashboardProxyHandler(http.server.BaseHTTPRequestHandler):
             path += "?" + parsed.query
         return path
 
+    def _send_handoff(self) -> None:
+        """Serve the handoff control endpoint: a freshly reserved token.
+
+        The response never reaches a browser page — the CLI's reuse flow
+        consumes it (validated token shape) to print a handoff URL of its
+        own. ``no-store`` keeps intermediates from caching it.
+        """
+        token = self._proxy_server().mint_entry_token()
+        body = (token + "\n").encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def _capability_set_cookie(self) -> str:
         """The entry response's Set-Cookie value for the cookie secret.
 
@@ -456,10 +502,8 @@ class DashboardProxyHandler(http.server.BaseHTTPRequestHandler):
         receives the 127.0.0.1 cookie in the first place. ``Secure`` is
         omitted deliberately — the loopback origin is plain http.
         """
-        return (
-            f"{_CAPABILITY_COOKIE_NAME}={self._proxy_server().cookie_capability}; "
-            "Path=/; HttpOnly; SameSite=Strict"
-        )
+        server = self._proxy_server()
+        return f"{server.cookie_name}={server.cookie_capability}; Path=/; HttpOnly; SameSite=Strict"
 
     def _upstream_headers(self) -> dict[str, str]:
         """Headers forwarded upstream: auth, transport, SSE negotiation.
@@ -672,7 +716,10 @@ class DashboardProxyServer(http.server.ThreadingHTTPServer):
     daemon_threads = True
     run_id: str = ""
     entry_token: str = ""
+    """The NEWEST minted handoff token (observability; validation uses the
+    outstanding/consumed sets)."""
     cookie_capability: str = ""
+    cookie_name: str = ""
     upstream_client: Optional[httpx.Client] = None
     _persist_entry_token: Optional[Callable[[str], None]] = None
 
@@ -682,53 +729,72 @@ class DashboardProxyServer(http.server.ThreadingHTTPServer):
         self._active_requests = 0
         self._last_activity = time.monotonic()
         self._entry_lock = threading.Lock()
-        self._consumed_entry_token = ""
+        # Printed but not yet consumed handoff tokens (each CLI invocation
+        # reserves its own; consuming one never invalidates another's).
+        self._outstanding_entry_tokens: set[str] = set()
+        # Consumed tokens, for cookie-backed refreshes of the address-bar URL.
+        self._consumed_entry_tokens: set[str] = set()
 
     def consume_entry_token(self, presented: bytes) -> bool:
-        """Consume the SINGLE-USE entry token; return False on mismatch.
+        """Consume one SINGLE-USE entry token; return False on mismatch.
 
-        The entry token is the printed URL's path segment — it is briefly
-        exposed in process arguments (browser open, command
-        substitution), so it must never double as the long-lived cookie
-        secret and must die on first use. On a match the next entry token
-        is minted immediately (a replay can never match again) and, when
-        a persistence callback is registered (the detached child's 0600
-        state file), recorded so a later CLI invocation can reuse the
-        proxy through a fresh handoff URL. The comparison is
-        constant-time and atomic with the re-mint under one lock.
+        Entry tokens are the printed URLs' path segments — they are
+        briefly exposed in process arguments (browser open, command
+        substitution), so they must never double as the long-lived
+        cookie secret and must die on first use. OUTSTANDING tokens stay
+        valid side by side: each CLI invocation reserves its own, so one
+        caller consuming theirs never invalidates another caller's
+        printed URL. The comparison is constant-time per candidate and
+        atomic with the bookkeeping under one lock.
         """
         with self._entry_lock:
-            if not hmac.compare_digest(presented, self.entry_token.encode("utf-8")):
-                return False
-            # Remember the consumed token: the printed URL stays in the
-            # browser's address bar, and its refreshes must be recognized
-            # (see matches_consumed_entry_token).
-            self._consumed_entry_token = self.entry_token
-            self.entry_token = secrets.token_urlsafe(_CAPABILITY_TOKEN_BYTES)
-            next_token = self.entry_token
+            for candidate in self._outstanding_entry_tokens:
+                if hmac.compare_digest(presented, candidate.encode("utf-8")):
+                    # Consume: remember it for cookie-backed refreshes (the
+                    # URL stays in the browser's address bar) and never
+                    # accept it again as an entry authorization.
+                    self._outstanding_entry_tokens.discard(candidate)
+                    self._consumed_entry_tokens.add(candidate)
+                    return True
+            return False
+
+    def mint_entry_token(self) -> str:
+        """Mint and RESERVE a fresh single-use entry token (IPC).
+
+        Serving the handoff control path: the token is added to the
+        outstanding set (earlier printed tokens keep working) and, when a
+        persistence callback is registered (the detached child's 0600
+        state file), recorded as the newest handoff for observability.
+        """
+        with self._entry_lock:
+            token = secrets.token_urlsafe(_CAPABILITY_TOKEN_BYTES)
+            self._outstanding_entry_tokens.add(token)
+            self.entry_token = token
             persist = self._persist_entry_token
         if persist is not None:
             try:
-                persist(next_token)
+                persist(token)
             except OSError:
                 # The state file disappeared (proxy shutting down): reuse
-                # simply will not find the fresh token; serving continues.
+                # falls back to respawning; serving continues.
                 pass
-        return True
+        return token
 
     def matches_consumed_entry_token(self, presented: bytes) -> bool:
-        """Whether ``presented`` is the LAST-CONSUMED entry token.
+        """Whether ``presented`` is any CONSUMED entry token.
 
         The handoff URL stays in the browser's address bar after the
         first load; on refresh the token segment is already dead. With a
         valid capability cookie the dead segment must be STRIPPED and the
         mapped path served (forwarding it upstream as a dashboard path
         segment would 404); without the cookie the request is rejected as
-        usual. The dead token grants nothing on its own — only holders of
+        usual. Dead tokens grant nothing on their own — only holders of
         the cookie (already authorized) benefit.
         """
-        consumed = self._consumed_entry_token
-        return bool(consumed) and hmac.compare_digest(presented, consumed.encode("utf-8"))
+        consumed = self._consumed_entry_tokens
+        return any(
+            hmac.compare_digest(presented, candidate.encode("utf-8")) for candidate in consumed
+        )
 
     def request_started(self) -> None:
         with self._state_lock:
@@ -789,7 +855,9 @@ def make_dashboard_proxy_server(
     server = DashboardProxyServer((host, 0), handler_cls)
     server.run_id = run_id
     server.entry_token = entry_token
+    server._outstanding_entry_tokens.add(entry_token)
     server.cookie_capability = cookie_capability
+    server.cookie_name = _capability_cookie_name(cookie_capability)
     server.upstream_client = upstream_client
     url = f"http://{host}:{server.server_address[1]}/{entry_token}"
     return server, url
@@ -888,7 +956,7 @@ def _proxy_still_serves(port: int, cookie_capability: str, timeout: float = 10.0
     try:
         response = httpx.get(
             f"http://127.0.0.1:{port}/",
-            headers={"Cookie": f"{_CAPABILITY_COOKIE_NAME}={cookie_capability}"},
+            headers={"Cookie": f"{_capability_cookie_name(cookie_capability)}={cookie_capability}"},
             timeout=timeout,
             follow_redirects=False,
         )
@@ -897,29 +965,51 @@ def _proxy_still_serves(port: int, cookie_capability: str, timeout: float = 10.0
     return response.status_code < 400
 
 
-def _live_proxy_url(state: Optional[dict[str, Any]]) -> Optional[tuple[str, str, int]]:
-    """Return (loopback URL, cookie capability, port) of a still-running proxy.
+def _reserve_entry_token(port: int, cookie_capability: str, timeout: float = 5.0) -> Optional[str]:
+    """Ask a live proxy to MINT and RESERVE a fresh single-use entry token.
 
-    The URL carries the proxy's current single-use entry token as the
-    one-time path-segment handoff (the detached child re-mints and
-    re-records it on every consumption); the cookie capability keys the
-    health probe. A state file without either secret (pre-capability
-    format) is not reusable.
+    Every CLI invocation must hand out its OWN token: reusing the state
+    file's token would let one caller's first visit consume it and strand
+    every other invocation's printed URL with a 403. The proxy keeps
+    outstanding tokens valid side by side, so reserving never invalidates
+    another caller's URL. Returns ``None`` when the proxy is unreachable,
+    unhealthy, or predates the control endpoint (the caller respawns).
+    """
+    try:
+        response = httpx.get(
+            f"http://127.0.0.1:{port}{_HANDOFF_CONTROL_PATH}",
+            headers={"Cookie": f"{_capability_cookie_name(cookie_capability)}={cookie_capability}"},
+            timeout=timeout,
+            follow_redirects=False,
+        )
+    except httpx.HTTPError:
+        return None
+    if response.status_code != 200:
+        return None
+    token = response.text.strip()
+    # Only accept a token-shaped value from our own server.
+    if not re.fullmatch(r"[A-Za-z0-9_-]{40,64}", token):
+        return None
+    return token
+
+
+def _live_proxy_url(state: Optional[dict[str, Any]]) -> Optional[tuple[str, int]]:
+    """Return (cookie capability, port) of a still-running proxy.
+
+    The handoff URL is no longer taken from the state file — the entry
+    token there may already be printed (and consumed) by an earlier
+    invocation; the caller asks the live proxy to reserve a fresh one
+    instead (see :func:`_reserve_entry_token`). A state file without the
+    cookie capability (pre-capability format) is not reusable.
     """
     if not state:
         return None
     pid = state.get("pid")
     port = state.get("port")
     token = state.get("token")
-    entry_token = state.get("entry_token")
-    if (
-        not isinstance(pid, int)
-        or not isinstance(port, int)
-        or not isinstance(token, str)
-        or not isinstance(entry_token, str)
-        or not token
-        or not entry_token
-    ):
+    if not isinstance(pid, int) or not isinstance(port, int) or not isinstance(token, str):
+        return None
+    if not token:
         return None
     if not _pid_is_alive(pid):
         return None
@@ -928,7 +1018,7 @@ def _live_proxy_url(state: Optional[dict[str, Any]]) -> Optional[tuple[str, str,
             pass
     except OSError:
         return None
-    return f"http://127.0.0.1:{port}/{entry_token}", token, port
+    return token, port
 
 
 def _unlink_state_if_owned(state_path: Path, pid: int) -> None:
@@ -1044,8 +1134,16 @@ def start_detached_dashboard_proxy(
     fingerprint = _proxy_fingerprint(base_url, run_id, api_key)
     state_path = proxy_state_path(run_id, state_dir, fingerprint)
     live = _live_proxy_url(_read_proxy_state(state_path))
-    if live is not None and _proxy_still_serves(live[2], live[1]):
-        return live[0]
+    if live is not None and _proxy_still_serves(live[1], live[0]):
+        # A healthy proxy is REUSED with a freshly reserved single-use
+        # handoff token (each invocation gets its own; sharing the state
+        # file's token would let one caller's first visit strand every
+        # other caller's printed URL with a 403).
+        handoff = _reserve_entry_token(live[1], live[0])
+        if handoff is not None:
+            return f"http://127.0.0.1:{live[1]}/{handoff}"
+        # Minting failed (proxy predates the control endpoint, or hiccupped):
+        # fall through and spawn a fresh proxy.
     _cleanup_stale_proxy_states(run_id, keep_fingerprint=fingerprint, state_dir=state_dir)
 
     state_path.parent.mkdir(parents=True, exist_ok=True)

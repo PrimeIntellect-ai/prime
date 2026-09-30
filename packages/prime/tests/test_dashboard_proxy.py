@@ -5,6 +5,7 @@ import json
 import os
 import signal
 import socket
+import string
 import subprocess
 import sys
 import threading
@@ -62,11 +63,10 @@ def _get(
     return conn.getresponse()
 
 
-def _entry(port: int, token: str, path: str = "/") -> http.client.HTTPResponse:
-    """GET the printed URL: the one-time ``?t=`` token handoff."""
-    target = f"{path}?t={token}" if "?" not in path else f"{path}&t={token}"
+def _entry(port: int, token: str, path: str = "") -> http.client.HTTPResponse:
+    """GET the printed URL: the one-time token path-segment handoff."""
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
-    conn.request("GET", target)
+    conn.request("GET", f"/{token}{path}")
     return conn.getresponse()
 
 
@@ -76,13 +76,33 @@ def test_loopback_url_embeds_unguessable_capability_token(proxy_factory) -> None
         httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200)))
     )
 
-    assert url == f"http://127.0.0.1:{port}/?t={token}"
+    assert url == f"http://127.0.0.1:{port}/{token}"
     assert len(token) >= 32  # unguessable: ~256 bits of entropy
-    url_2, _, token_2 = proxy_factory(
+    _, _, token_2 = proxy_factory(
         httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200)))
     )
     assert token_2 != token  # per-spawn randomness, never derived from the run
-    assert f"?t={token_2}" in url_2
+
+
+def test_printed_url_is_glob_safe_for_command_substitution(proxy_factory) -> None:
+    """The stdout URL must survive UNQUOTED command substitution on zsh.
+
+    `open $(prime train dashboard <id> --no-browser)` runs the printed
+    URL through zsh's glob expansion: a ``?`` (the earlier ``?t=``
+    handoff) makes zsh's default NOMATCH abort with "no matches found".
+    The token is token_urlsafe output used as the sole path segment, so
+    the URL must contain only glob-safe characters — letters, digits,
+    ``-``, ``_``, ``:`` and ``/`` — and no ``?``, ``*``, ``[``, ``]`` or
+    ``=``. (Quoting the substitution is still good practice, but the
+    CLI's documented command-substitution contract must not require it.)
+    """
+    url, _, token = proxy_factory(
+        httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+    )
+    # token_urlsafe alphabet plus the authority separators only.
+    assert set(token) <= set(string.ascii_letters + string.digits + "_-")
+    assert set(url) <= set(string.ascii_letters + string.digits + ".:/_-")
+    assert not set(url) & set("?*[]=~^")
 
 
 def test_proxy_rejects_requests_without_capability_cookie(proxy_factory) -> None:
@@ -100,20 +120,21 @@ def test_proxy_rejects_requests_without_capability_cookie(proxy_factory) -> None
 
     _, port, token = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
 
-    # No capability at all: no cookie, no ?t= handoff.
+    # No capability at all: no cookie, no token path segment.
     status, body = _raw_request(port, [f"Host: 127.0.0.1:{port}"], path="/")
     assert status == 403
     assert seen == []
     assert b"secret" not in body
 
-    # A wrong cookie (including near-misses on the real token), a wrong
-    # ?t= handoff, and a cookie jar without a "t"-keyed value.
+    # A wrong cookie and a wrong token path segment (including
+    # near-misses on the real token), plus a cookie jar without a
+    # "t"-keyed value.
     for wrong in ("", "wrong-token", token[:-1], token + "x", token.upper()):
         status, body = _raw_request(
             port, [f"Host: 127.0.0.1:{port}", f"Cookie: t={wrong}"], path="/"
         )
         assert status == 403, wrong
-        status, body = _raw_request(port, [f"Host: 127.0.0.1:{port}"], path=f"/?t={wrong}")
+        status, body = _raw_request(port, [f"Host: 127.0.0.1:{port}"], path=f"/{wrong}")
         assert status == 403, wrong
         assert seen == []
         assert b"secret" not in body
@@ -146,8 +167,12 @@ def test_proxy_rejects_requests_without_capability_cookie(proxy_factory) -> None
     assert seen[1].endswith("/dashboard/[::1")
 
 
-def test_entry_request_with_query_token_sets_capability_cookie(proxy_factory) -> None:
-    """The printed URL's ?t= handoff becomes the loopback cookie."""
+def test_entry_request_with_path_token_sets_capability_cookie(proxy_factory) -> None:
+    """The printed URL's token segment becomes the loopback cookie.
+
+    ``GET /<token>`` serves the dashboard root directly (no redirect)
+    and sets the cookie that authorizes every subsequent request.
+    """
     seen: dict[str, Any] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -163,8 +188,16 @@ def test_entry_request_with_query_token_sets_capability_cookie(proxy_factory) ->
     # HttpOnly keeps the token out of page JavaScript; SameSite=Strict
     # blocks cross-site sends; Path=/ covers every root-relative request.
     assert response.getheader("Set-Cookie") == f"t={token}; Path=/; HttpOnly; SameSite=Strict"
-    # The one-time handoff parameter never reaches the upstream query.
+    # The handoff token never reaches the upstream path.
     assert seen["url"] == f"{BASE_URL}/api/v1/rft/runs/run-1/dashboard/"
+
+    # The token segment also authorizes subpaths directly (no cookie yet)
+    # and strips itself: /<token>/static/x maps to the dashboard subpath.
+    seen.clear()
+    response = _entry(port, token, path="/static/x")
+    assert response.status == 200
+    assert response.getheader("Set-Cookie") == f"t={token}; Path=/; HttpOnly; SameSite=Strict"
+    assert seen["url"] == f"{BASE_URL}/api/v1/rft/runs/run-1/dashboard/static/x"
 
 
 def test_root_relative_dashboard_requests_work_with_capability_cookie(proxy_factory) -> None:
@@ -252,6 +285,29 @@ def test_proxy_maps_root_relative_paths_and_query_strings(proxy_factory) -> None
     assert seen["url"] == f"{BASE_URL}/api/v1/rft/runs/run-1/dashboard/static/app.js?v=2"
 
 
+def test_proxy_forwards_the_raw_query_verbatim(proxy_factory) -> None:
+    """The browser's query bytes reach upstream UNCHANGED.
+
+    Rebuilding the query (parse_qsl + urlencode) would rewrite commas,
+    colons, slashes and spaces — dashboard API calls can change meaning
+    even when no handoff parameter is present. The proxy must not
+    re-encode anything.
+    """
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["query"] = urllib.parse.urlsplit(str(request.url)).query
+        return httpx.Response(200, content=b"ok")
+
+    _, port, token = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
+
+    raw_query = "q=a,b:c/d%20e&filter=x%2Fy&empty=&flag"
+    response = _get(port, token, f"/search?{raw_query}")
+
+    assert response.status == 200
+    assert seen["query"] == raw_query  # byte-identical, no re-encoding
+
+
 def test_proxy_streams_sse_events_through_incrementally(proxy_factory) -> None:
     upstream_done = threading.Event()
 
@@ -321,7 +377,7 @@ def test_proxy_detects_client_disconnect_on_quiet_sse_streams(monkeypatch) -> No
         # the response's file object, so it never delivers the FIN the way
         # a real browser tab close does. shutdown() does.
         sock = socket.create_connection(("127.0.0.1", port), timeout=5)
-        sock.sendall(f"GET /?t={server.capability_token} HTTP/1.1\r\n".encode())
+        sock.sendall(f"GET /{server.capability_token} HTTP/1.1\r\n".encode())
         sock.sendall(f"Host: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n".encode())
         data = b""
         while b"data: 1\n" not in data:
@@ -671,7 +727,7 @@ def test_start_detached_spawns_child_and_returns_ready_port(monkeypatch, tmp_pat
         state_dir=tmp_path,
     )
 
-    assert url == "http://127.0.0.1:51234/?t=fake-capability-token"
+    assert url == "http://127.0.0.1:51234/fake-capability-token"
     assert len(spawn_calls) == 1
     call = spawn_calls[0]
     assert call["command"][:3] == [sys.executable, "-m", "prime_cli.dashboard_proxy"]
@@ -764,7 +820,7 @@ def test_start_detached_ignores_stale_state_file(monkeypatch, tmp_path) -> None:
         "run-1", base_url=BASE_URL, api_key="test-key", state_dir=tmp_path
     )
 
-    assert url == "http://127.0.0.1:51235/?t=stale-capability-token"
+    assert url == "http://127.0.0.1:51235/stale-capability-token"
 
 
 def test_detached_child_end_to_end(tmp_path) -> None:
@@ -783,8 +839,8 @@ def test_detached_child_end_to_end(tmp_path) -> None:
 
     parsed_url = urllib.parse.urlsplit(url)
     port = parsed_url.port
-    assert parsed_url.path == "/"
-    token = urllib.parse.parse_qs(parsed_url.query)["t"][0]
+    assert parsed_url.path.startswith("/")
+    token = parsed_url.path.strip("/")
     # The parent picks a fingerprinted state file path and passes it to the child.
     state_paths = list(state_dir.glob("train-dashboard-run-1-*.json"))
     assert len(state_paths) == 1
@@ -1102,7 +1158,7 @@ def test_start_detached_never_reuses_across_contexts(monkeypatch, tmp_path) -> N
             "run-1", base_url=BASE_URL, api_key="token-B", state_dir=tmp_path
         )
 
-        assert url_b == "http://127.0.0.1:51236/?t=other-context-token"
+        assert url_b == "http://127.0.0.1:51236/other-context-token"
         # The other context's state file is untouched (live proxy left to
         # its own idle exit — it serves a different, valid context).
         assert state_a.exists()
@@ -1152,7 +1208,7 @@ def test_start_detached_respawns_when_live_proxy_credentials_are_stale(
 
         # The stale proxy answered the credentials probe with a 502
         # (platform rejects the bearer), so a fresh proxy started.
-        assert url == "http://127.0.0.1:51237/?t=fresh-capability-token"
+        assert url == "http://127.0.0.1:51237/fresh-capability-token"
         assert url != stale_url
     finally:
         server.shutdown()
@@ -1412,7 +1468,7 @@ def test_detached_popen_uses_windows_flags_on_windows(monkeypatch, tmp_path) -> 
         "run-1", base_url=BASE_URL, api_key="test-key", state_dir=tmp_path
     )
 
-    assert url == "http://127.0.0.1:51234/?t=fake-capability-token"
+    assert url == "http://127.0.0.1:51234/fake-capability-token"
     # POSIX-only kwarg must not be sent on Windows; detach via creation flags.
     assert "start_new_session" not in seen
     expected_flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(
@@ -1435,6 +1491,6 @@ def test_detached_popen_uses_start_new_session_on_posix(monkeypatch, tmp_path) -
         "run-1", base_url=BASE_URL, api_key="test-key", state_dir=tmp_path
     )
 
-    assert url == "http://127.0.0.1:51234/?t=fake-capability-token"
+    assert url == "http://127.0.0.1:51234/fake-capability-token"
     assert seen.get("start_new_session") is True
     assert "creationflags" not in seen

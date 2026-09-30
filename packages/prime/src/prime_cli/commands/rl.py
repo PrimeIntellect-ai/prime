@@ -3531,10 +3531,12 @@ def get_dashboard_url(
 
     Starts a local proxy on 127.0.0.1 that injects the API token on your
     behalf, so the browser never needs it. The printed loopback URL embeds
-    a random per-spawn capability token as a one-time ?t= handoff that
-    the browser exchanges for a local cookie; every request must present
-    it, so other local users cannot read the dashboard by port-scanning
-    the proxy. By default the proxy runs in a
+    a random per-spawn capability token as its sole path segment — a
+    one-time handoff (glob-safe: no ?*[] characters, so even unquoted
+    command substitution survives zsh) that the browser exchanges for a
+    local cookie; every request must present it, so other local users
+    cannot read the dashboard by port-scanning the proxy. By default the
+    proxy runs in a
     detached background process that exits itself after 30 minutes of
     INACTIVITY — an actively used dashboard (e.g. an open tab with a live
     stream) keeps the proxy alive past 30 minutes of wall time. The

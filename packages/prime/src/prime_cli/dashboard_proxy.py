@@ -15,17 +15,22 @@ Binding to 127.0.0.1 alone does not restrict access to the launching OS
 account: another local user can port-scan the proxy and send valid
 loopback Host headers. Every spawn therefore mints an unguessable
 capability token (``secrets.token_urlsafe``). The printed loopback URL
-carries it ONCE as a ``?t=`` query parameter — the one-time browser
-handoff — and the entry response sets it as a loopback cookie
-(``Path=/; HttpOnly; SameSite=Strict``). EVERY request must present that
+places it as the SOLE PATH SEGMENT
+(``http://127.0.0.1:<port>/<token>``) — the one-time browser handoff.
+``token_urlsafe`` output is glob-safe (letters, digits, ``-`` and ``_``
+only), so even unquoted command substitution like
+``open $(prime train dashboard ...)`` survives zsh's glob expansion
+(a ``?t=`` query form would raise zsh's "no matches found"). The entry
+response sets a loopback cookie (``Path=/; HttpOnly;
+SameSite=Strict``), and EVERY subsequent request must present that
 cookie (constant-time validation BEFORE the Host/Origin checks), which
 keeps root-relative assets, API calls and SSE streams working exactly
-as before: the browser attaches the cookie to every path on the loopback
-host. A DNS-rebound origin never receives the 127.0.0.1-host-keyed
-cookie, and SameSite=Strict blocks cross-site sends; the Host/Origin
-checks stay on as the second layer. The token is never logged or put in
-command lines — it reaches the detached child only via the private
-ready pipe and a 0600 state file.
+as before: the browser attaches the cookie to every path on the
+loopback host. A DNS-rebound origin never receives the
+127.0.0.1-host-keyed cookie, and SameSite=Strict blocks cross-site
+sends; the Host/Origin checks stay on as the second layer. The token is
+never logged or put in command lines — it reaches the detached child
+only via the private ready pipe and a 0600 state file.
 
 The proxy normally runs in a detached child process
 (:func:`start_detached_dashboard_proxy`) so the CLI can print the
@@ -102,13 +107,12 @@ Binding to 127.0.0.1 does not restrict access to the launching OS
 account — another local user can port-scan the loopback port and send
 valid loopback Host headers with no Origin, reading the dashboard
 through the victim's bearer token. The unguessable capability token
-closes that hole: the printed URL hands it to the browser once
-(``?t=<token>``), the entry response exchanges it for a loopback
+closes that hole: the printed URL hands it to the browser once (as its
+sole path segment), the entry response exchanges it for a loopback
 cookie, and every request without that cookie is rejected (403) before
 any Host/Origin or upstream work."""
 
 _CAPABILITY_COOKIE_NAME = "t"
-_CAPABILITY_QUERY_PARAM = "t"
 
 
 def _origin_is_loopback(origin: str, bound_port: int) -> bool:
@@ -337,39 +341,39 @@ class DashboardProxyHandler(http.server.BaseHTTPRequestHandler):
             self._send_plain_error(502, "Dashboard backend is unreachable.")
 
     def _authorize_request(self) -> Optional[str]:
-        """Validate the capability cookie (or the one-time ``?t=`` handoff).
+        """Validate the capability cookie (or the token path segment).
 
         Every request must present the per-spawn capability token:
         normally as the loopback cookie the entry response sets, or — for
-        the printed URL's first hit — as the ``?t=<token>`` query
-        parameter, which additionally (re)issues the cookie. The
-        comparison is constant-time and runs BEFORE any Host/Origin or
-        upstream work, so another local user who port-scans the port
-        cannot read the dashboard through the victim's bearer token.
-        Returns the dashboard-relative path (handoff parameter stripped)
-        when authorized, ``None`` when the token is absent or wrong.
+        the printed URL's first hit — as the token path segment, which
+        additionally (re)issues the cookie. The comparison is
+        constant-time and runs BEFORE any Host/Origin or upstream work,
+        so another local user who port-scans the port cannot read the
+        dashboard through the victim's bearer token. Returns the
+        dashboard-relative path when authorized, ``None`` when the token
+        is absent or wrong.
         """
         try:
             parsed = urllib.parse.urlsplit(self.path)
-            query_pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
         except ValueError:
             # Malformed request targets (e.g. a bogus bracketed netloc) are
             # a clean rejection, never an exception.
             return None
         # compare_digest requires ASCII; bytes comparison accepts any
-        # request target, including non-UTF-8 values.
+        # request target, including non-UTF-8 path segments.
         expected = self.capability_token.encode("utf-8")
         authorized = False
-        remaining: list[tuple[str, str]] = []
-        for key, value in query_pairs:
-            if key == _CAPABILITY_QUERY_PARAM and hmac.compare_digest(
-                value.encode("utf-8", "surrogateescape"), expected
-            ):
-                # The one-time handoff: authorize and (re)issue the cookie.
-                authorized = True
-                self._issue_capability_cookie = True
-                continue
-            remaining.append((key, value))
+        path = parsed.path or "/"
+        head, sep, rest = parsed.path.lstrip("/").partition("/")
+        if head and hmac.compare_digest(head.encode("utf-8", "surrogateescape"), expected):
+            # The one-time handoff URL: the token is the sole path segment.
+            # Authorize, strip it from the dashboard path (so both
+            # /<token> and /<token>/static/... map to the dashboard root
+            # and subpaths), and (re)issue the cookie that authorizes
+            # every subsequent root-relative request.
+            authorized = True
+            self._issue_capability_cookie = True
+            path = f"/{rest}" if sep else "/"
         cookie_header = self.headers.get("Cookie")
         if cookie_header:
             jar = http.cookies.SimpleCookie()
@@ -384,9 +388,11 @@ class DashboardProxyHandler(http.server.BaseHTTPRequestHandler):
                 authorized = True
         if not authorized:
             return None
-        path = parsed.path or "/"
-        if remaining:
-            path += "?" + urllib.parse.urlencode(remaining)
+        if parsed.query:
+            # The RAW query passes through VERBATIM: re-encoding would
+            # rewrite commas, colons, slashes and spaces and could change
+            # the meaning of dashboard API calls.
+            path += "?" + parsed.query
         return path
 
     def _capability_set_cookie(self) -> str:
@@ -479,8 +485,8 @@ class DashboardProxyHandler(http.server.BaseHTTPRequestHandler):
             # of path, so no token prefixing is needed here.
             self.send_header("Location", redirect_location)
         if self._issue_capability_cookie:
-            # The one-time ?t= handoff: exchange the query token for the
-            # cookie that authorizes every subsequent request.
+            # The one-time handoff: exchange the path-segment token for
+            # the cookie that authorizes every subsequent request.
             self.send_header("Set-Cookie", self._capability_set_cookie())
         # Pre-compressed assets arrive with Content-Encoding even though we
         # requested identity. httpx DECODES in iter_bytes, so relaying the
@@ -630,10 +636,10 @@ def make_dashboard_proxy_server(
     """Start a loopback dashboard proxy on an ephemeral port.
 
     Returns ``(server, url)`` where ``url`` carries the per-spawn
-    capability token once as ``?t=<token>`` — the one-time browser
-    handoff that the entry response exchanges for a loopback cookie;
-    ``server.capability_token`` exposes it for callers that need the raw
-    value. The caller runs
+    capability token once as its sole path segment — the one-time
+    browser handoff (glob-safe under zsh) that the entry response
+    exchanges for a loopback cookie; ``server.capability_token`` exposes
+    it for callers that need the raw value. The caller runs
     ``server.serve_forever()`` and, on shutdown, closes the server and
     ``server.upstream_client``. ``upstream`` may be injected for tests.
     """
@@ -657,11 +663,13 @@ def make_dashboard_proxy_server(
     server.run_id = run_id
     server.capability_token = capability_token
     server.upstream_client = upstream_client
-    # The URL carries the capability token ONCE as a query parameter — the
-    # one-time browser handoff. The entry response exchanges it for a
+    # The URL carries the capability token ONCE as its sole path segment —
+    # the one-time browser handoff. token_urlsafe output is glob-safe (no
+    # ?*[] characters), so unquoted command substitution survives zsh's
+    # glob expansion. The entry response exchanges the token for a
     # loopback cookie that authorizes every subsequent request, so the
     # dashboard's root-relative asset/API/SSE URLs keep working.
-    url = f"http://{host}:{server.server_address[1]}/?t={capability_token}"
+    url = f"http://{host}:{server.server_address[1]}/{capability_token}"
     return server, url
 
 
@@ -761,9 +769,9 @@ def _proxy_still_serves(url: str, timeout: float = 10.0) -> bool:
 def _live_proxy_url(state: Optional[dict[str, Any]]) -> Optional[str]:
     """Return the loopback URL of a still-running proxy, if any.
 
-    The URL carries the proxy's capability token as the one-time ``?t=``
-    handoff; a state file without a token (pre-capability format) is not
-    reusable.
+    The URL carries the proxy's capability token as the one-time
+    path-segment handoff; a state file without a token (pre-capability
+    format) is not reusable.
     """
     if not state:
         return None
@@ -781,7 +789,7 @@ def _live_proxy_url(state: Optional[dict[str, Any]]) -> Optional[str]:
             pass
     except OSError:
         return None
-    return f"http://127.0.0.1:{port}/?t={token}"
+    return f"http://127.0.0.1:{port}/{token}"
 
 
 def _unlink_state_if_owned(state_path: Path, pid: int) -> None:
@@ -888,10 +896,10 @@ def start_detached_dashboard_proxy(
     (0600) under the user cache dir and exits itself once idle. If a
     healthy proxy for this run is already running, its URL is returned
     without spawning another. The returned URL carries the proxy's
-    capability token once as ``?t=<token>`` (the one-time browser
-    handoff) — the token reaches this process only through the child's
-    private ready pipe or the 0600 state file, never through logs or
-    command lines.
+    capability token once as its sole path segment (the one-time,
+    glob-safe browser handoff) — the token reaches this process only
+    through the child's private ready pipe or the 0600 state file, never
+    through logs or command lines.
     """
     fingerprint = _proxy_fingerprint(base_url, run_id, api_key)
     state_path = proxy_state_path(run_id, state_dir, fingerprint)
@@ -962,7 +970,7 @@ def start_detached_dashboard_proxy(
             process.stdout.close()
     if not ready_ok:
         raise RuntimeError("The dashboard proxy failed to start.")
-    return f"http://127.0.0.1:{int(ready_parts[1])}/?t={ready_parts[2]}"
+    return f"http://127.0.0.1:{int(ready_parts[1])}/{ready_parts[2]}"
 
 
 def _main(argv: Optional[list[str]] = None) -> int:

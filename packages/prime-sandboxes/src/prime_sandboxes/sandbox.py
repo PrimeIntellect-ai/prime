@@ -2467,8 +2467,9 @@ class SandboxClient:
         working_dir: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
         timeout: Optional[int] = None,
+        user: Optional[str] = None,
     ) -> CommandResponse:
-        """Execute command directly via gateway."""
+        """Execute via gateway, optionally as an existing guest username."""
         self._auth_cache.get_or_refresh(sandbox_id)
         return self._execute_command_connect_rpc(
             sandbox_id=sandbox_id,
@@ -2476,6 +2477,7 @@ class SandboxClient:
             working_dir=working_dir,
             env=env,
             timeout=timeout,
+            user=user,
         )
 
     def _execute_command_connect_rpc(
@@ -2485,10 +2487,11 @@ class SandboxClient:
         working_dir: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
         timeout: Optional[int] = None,
+        user: Optional[str] = None,
     ) -> CommandResponse:
         effective_timeout = timeout if timeout is not None else 300
         request = build_command_session_start_request(
-            command=command, working_dir=working_dir, env=env
+            command=command, working_dir=working_dir, env=env, user=user
         )
 
         reauthed = False
@@ -2570,6 +2573,7 @@ class SandboxClient:
         command: str,
         working_dir: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
+        user: Optional[str] = None,
     ) -> BackgroundJob:
         """Start a long-running command in the background.
 
@@ -2581,6 +2585,7 @@ class SandboxClient:
             command: Command to execute
             working_dir: Working directory for command execution
             env: Environment variables
+            user: Existing guest username; omitted preserves the sandbox default.
 
         Returns:
             BackgroundJob with job_id and file paths for polling
@@ -2628,6 +2633,7 @@ class SandboxClient:
                     sandbox_id,
                     bg_cmd,
                     timeout=_BACKGROUND_JOB_LAUNCH_TIMEOUT_SECONDS,
+                    user=user,
                 )
                 break
             except CommandTimeoutError:
@@ -3858,8 +3864,9 @@ class AsyncSandboxClient:
         working_dir: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
         timeout: Optional[int] = None,
+        user: Optional[str] = None,
     ) -> CommandResponse:
-        """Execute command directly via gateway (async)."""
+        """Execute via gateway, optionally as an existing guest username (async)."""
         await self._auth_cache.get_or_refresh(sandbox_id)
         return await self._execute_command_connect_rpc(
             sandbox_id=sandbox_id,
@@ -3867,6 +3874,7 @@ class AsyncSandboxClient:
             working_dir=working_dir,
             env=env,
             timeout=timeout,
+            user=user,
         )
 
     async def open_process(
@@ -3889,13 +3897,23 @@ class AsyncSandboxClient:
         Output emitted while detached is not replayed.
         """
         await self._auth_cache.get_or_refresh(sandbox_id)
-        if user is not None:
-            raise ValueError("The 'user' parameter is not supported for VM sandbox processes.")
 
         auth = await self._auth_cache.get_or_refresh(sandbox_id)
         gateway_url = auth["gateway_url"].rstrip("/")
         base_url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}"
         headers = {"Authorization": f"Bearer {auth['token']}"}
+        # session_uuid is the Start idempotency key: re-issuing the same request
+        # attaches to (or replays) the session instead of spawning a second
+        # process.
+        session_uuid = _canonical_uuid_key()
+        request = build_command_session_start_request(
+            command=command,
+            working_dir=working_dir,
+            env=env,
+            stdin=True,
+            session_uuid=session_uuid,
+            user=user,
+        )
         # Each live process gets its own transport: the session stream occupies one
         # HTTP/2 stream for the process's whole lifetime, and the gateway caps
         # concurrent streams per connection. On the shared default transport, enough
@@ -3909,17 +3927,6 @@ class AsyncSandboxClient:
             codec=GOOGLE_PROTOBUF_BINARY_CODEC,
             send_compression=None,
             http_client=http_client,
-        )
-        # session_uuid is the Start idempotency key: re-issuing the same request
-        # attaches to (or replays) the session instead of spawning a second
-        # process.
-        session_uuid = _canonical_uuid_key()
-        request = build_command_session_start_request(
-            command=command,
-            working_dir=working_dir,
-            env=env,
-            stdin=True,
-            session_uuid=session_uuid,
         )
         stream = rpc_client.execute_server_stream(
             request=request,
@@ -4069,10 +4076,11 @@ class AsyncSandboxClient:
         working_dir: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
         timeout: Optional[int] = None,
+        user: Optional[str] = None,
     ) -> CommandResponse:
         effective_timeout = timeout if timeout is not None else 300
         request = build_command_session_start_request(
-            command=command, working_dir=working_dir, env=env
+            command=command, working_dir=working_dir, env=env, user=user
         )
 
         reauthed = False
@@ -4154,6 +4162,7 @@ class AsyncSandboxClient:
         command: str,
         working_dir: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
+        user: Optional[str] = None,
     ) -> BackgroundJob:
         """Start a long-running command in the background (async).
 
@@ -4165,6 +4174,7 @@ class AsyncSandboxClient:
             command: Command to execute
             working_dir: Working directory for command execution
             env: Environment variables
+            user: Existing guest username; omitted preserves the sandbox default.
 
         Returns:
             BackgroundJob with job_id and file paths for polling
@@ -4212,6 +4222,7 @@ class AsyncSandboxClient:
                     sandbox_id,
                     bg_cmd,
                     timeout=_BACKGROUND_JOB_LAUNCH_TIMEOUT_SECONDS,
+                    user=user,
                 )
                 break
             except CommandTimeoutError:

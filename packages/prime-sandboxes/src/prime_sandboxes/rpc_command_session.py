@@ -13,6 +13,7 @@ from ._proto.command_session import command_session_pb2
 
 class _CommandSpecLike(Protocol):
     cwd: str
+    user: str
 
 
 class _CommandSpecFactory(Protocol):
@@ -221,6 +222,7 @@ def build_command_session_start_request(
     env: Optional[Dict[str, str]],
     stdin: bool = False,
     session_uuid: str | None = None,
+    user: str | None = None,
 ) -> Message:
     command_spec = _COMMAND_SPEC_FACTORY(
         cmd="/bin/bash",
@@ -229,6 +231,11 @@ def build_command_session_start_request(
     )
     if working_dir is not None:
         command_spec.cwd = working_dir
+
+    if user is not None:
+        if not user:
+            raise ValueError("user must be a non-empty guest username")
+        command_spec.user = user
 
     return _COMMAND_SESSION_START_REQUEST_FACTORY(
         command=command_spec,

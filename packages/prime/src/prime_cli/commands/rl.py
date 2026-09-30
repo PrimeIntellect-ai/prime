@@ -45,7 +45,7 @@ console = get_console()
 
 LEGACY_TRAINING_NOTICE = (
     "Shared Hosted Training for LoRA runs will stop accepting new runs on October 5, 2026. "
-    "Hosted Training is transitioning to full fine-tuning (FFT). "
+    "Hosted Training is transitioning to dedicated runs. "
     "Existing LoRA adapters will remain downloadable and deployable until further notice."
 )
 
@@ -247,7 +247,7 @@ def generate_rl_config_template(environment: str | None = None) -> str:
 
     return f'''\
 # Shared Hosted Training for LoRA runs will stop accepting new runs on October 5, 2026.
-# Hosted Training is transitioning to full fine-tuning (FFT).
+# Hosted Training is transitioning to dedicated runs.
 # Existing LoRA adapters will remain downloadable and deployable until further notice.
 model = "Qwen/Qwen3.5-0.8B"
 loss = "rl" # "rl" | "sft"; OPD is not yet supported on hosted runtimes

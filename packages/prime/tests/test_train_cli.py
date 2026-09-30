@@ -64,12 +64,11 @@ def test_train_init_defaults_to_rl_toml() -> None:
         assert "Run with: prime train rl.toml" in result.output
         assert "stop accepting new runs on" in result.output
         assert "October 5, 2026" in result.output
-        assert "Hosted Training is transitioning to full fine-tuning (FFT)." in result.output
+        assert "Hosted Training is transitioning to dedicated runs." in result.output
         assert Path("rl.toml").exists()
         assert "stop accepting new runs on October 5, 2026" in Path("rl.toml").read_text()
         assert (
-            "# Hosted Training is transitioning to full fine-tuning (FFT)."
-            in Path("rl.toml").read_text()
+            "# Hosted Training is transitioning to dedicated runs." in Path("rl.toml").read_text()
         )
 
 
@@ -96,7 +95,7 @@ def test_train_legacy_run_warns_before_confirmation_without_warning_fft(
     assert result.exit_code == 0, result.output
     assert "stop accepting new runs on" in result.output
     assert "October 5, 2026" in result.output
-    assert "Hosted Training is transitioning to full fine-tuning (FFT)." in result.output
+    assert "Hosted Training is transitioning to dedicated runs." in result.output
     assert result.output.index("stop accepting new runs") < result.output.index("Configuration:")
     assert seen == ["confirm"]
 
@@ -124,7 +123,7 @@ def test_train_legacy_json_warning_uses_stderr(monkeypatch, tmp_path: Path) -> N
     result = runner.invoke(app, ["train", str(config), "--output", "json"], env=TEST_ENV)
     assert result.exit_code == 0, result.output
     assert "stop accepting new runs on October 5, 2026" in result.stderr
-    assert "Hosted Training is transitioning to full fine-tuning (FFT)." in result.stderr
+    assert "Hosted Training is transitioning to dedicated runs." in result.stderr
     assert "stop accepting new runs" not in result.stdout
 
 

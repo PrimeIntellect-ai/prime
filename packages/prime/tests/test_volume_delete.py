@@ -190,13 +190,54 @@ def test_choice_3_cancels_and_stops_nothing(run, answer):
     assert client.calls == [("delete", "data"), ("list", "data")]
 
 
-def test_other_members_sessions_suppress_the_prompt(run):
-    client = FakeClient([_in_use("sessions", 3)], sessions=["s1"])
-    result = run(client, input="y\n")
+def test_stale_count_race_ends_own_sessions_and_deletes_without_blaming_others(run):
+    """The refusal counted 2, but one session ended before the list call: the
+    caller's one session is stopped, the retry succeeds, and nothing claims
+    other members own sessions."""
+    client = FakeClient(
+        [_in_use("sessions", 2), None], sessions=["s1"], polls={"s1": [NotFoundError("gone")]}
+    )
+    result = run(client, input="y\n1\n")
+    assert result.exit_code == 0, result.output
+    out = _out(result)
+    assert "2 session(s) are blocking this volume; 1 of them are yours" in out
+    assert "Select [3]" in out
+    assert "not yours to end" not in out
+    assert client.calls == [
+        ("delete", "data"),
+        ("list", "data"),
+        ("stop", "s1"),
+        ("get", "s1"),
+        ("delete", "data"),
+    ]
+    assert "Deleting volume data." in out
+
+
+def test_other_members_sessions_are_reported_from_the_fresh_refusal(run):
+    client = FakeClient(
+        [_in_use("sessions", 3), _in_use("sessions", 1)],
+        sessions=["s1"],
+        polls={"s1": ["STOPPED"]},
+    )
+    result = run(client, "--yes")
     assert result.exit_code == 1
-    assert "Only 1 of the 3 session(s) are yours" in _out(result)
+    out = _out(result)
+    assert (
+        "1 session(s) still block this volume and are not yours to end — other team "
+        "members must end them"
+    ) in out
+    assert client.calls[-1] == ("delete", "data")
+    assert ("stop", "s1") in client.calls
+
+
+def test_no_own_sessions_retries_the_delete_directly(run):
+    """Nothing of ours to stop: the retried delete tells whether the refused
+    sessions already ended."""
+    client = FakeClient([_in_use("sessions", 1), None])
+    result = run(client, input="y\n")
+    assert result.exit_code == 0, result.output
     assert "Select" not in result.output
-    assert client.calls == [("delete", "data"), ("list", "data")]
+    assert client.calls == [("delete", "data"), ("list", "data"), ("delete", "data")]
 
 
 @pytest.mark.parametrize("status", [404, 405])

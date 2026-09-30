@@ -188,6 +188,15 @@ def delete(
             client.delete_volume(name, team_id=team_id)
         except APIError as retry_error:
             console.print(f"[red]Error:[/red] {escape(str(retry_error))}")
+            retry_body = retry_error.body or {}
+            if retry_body.get("kind") == "sessions":
+                # Every session of ours has ended by now, so the fresh count
+                # is sessions we cannot see or stop.
+                console.print(
+                    f"{retry_body.get('count')} session(s) still block this volume and are "
+                    "not yours to end — other team members must end them (idle sessions "
+                    "end after 30 minutes)."
+                )
             raise typer.Exit(1) from retry_error
     console.print(f"[green]Deleting volume {name}.[/green]")
 
@@ -208,7 +217,7 @@ def _end_sessions(client, name: str, team_id, count: int, yes: bool) -> bool:
     """Show the caller's SSH sessions that block deleting `name`, ask what to
     do (`yes` picks 1), then stop them and wait until none counts any more.
     Returns True when the volume should be deleted next. Raises typer.Exit on
-    cancel, when sessions belong to someone else, or on timeout."""
+    cancel or timeout."""
     manual = f"Stop them with `prime volumes stop {escape(name)} <session-id>` and retry."
     try:
         sessions = client.list_volume_sessions(name, team_id=team_id)
@@ -218,12 +227,16 @@ def _end_sessions(client, name: str, team_id, count: int, yes: bool) -> bool:
             raise typer.Exit(1) from e
         console.print(f"This platform cannot list the sessions. {manual}")
         raise typer.Exit(1)
+    # Fewer listed than refused: other members own some, or some ended since
+    # the refusal. Only the retried delete can tell which.
+    if not sessions:
+        console.print("You have no sessions on this volume to end; retrying the delete.")
+        return True
     if len(sessions) < count:
         console.print(
-            f"Only {len(sessions)} of the {count} session(s) are yours. The others belong "
-            "to other team members, who must end them (idle sessions end after 30 minutes)."
+            f"{count} session(s) are blocking this volume; {len(sessions)} of them are "
+            "yours and can be ended here."
         )
-        raise typer.Exit(1)
     console.print()
     console.print(_sessions_table(sessions))
     if yes:

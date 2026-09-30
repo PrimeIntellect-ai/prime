@@ -10,14 +10,19 @@ from typer.testing import CliRunner
 
 
 def _in_use(kind: str | None, count: int = 2) -> APIError:
-    message = (
-        f"HTTP 409: volume 'data' is mounted by {count} live run(s); "
-        "stop them before deleting the volume"
-    )
-    error = APIError(message)
+    if kind == "sessions":
+        detail = (
+            f"volume 'data' has {count} active volume SSH session(s); "
+            "end them before deleting the volume"
+        )
+    else:
+        detail = (
+            f"volume 'data' is mounted by {count} live run(s); stop them before deleting the volume"
+        )
+    error = APIError(f"HTTP 409: {detail}")
     if kind:
         error.body = {
-            "detail": message,
+            "detail": detail,
             "errorCode": "volume_in_use",
             "kind": kind,
             "count": count,
@@ -140,7 +145,13 @@ def test_choice_1_shows_sessions_ends_them_waits_then_retries_delete(run):
     result = run(client, input="y\n1\n")
     assert result.exit_code == 0, result.output
     out = _out(result)
-    assert "Volume 'data' has 2 active SSH session(s)." in out
+    # The standard error line comes first, then the table, then the prompt.
+    assert out.startswith(
+        "Delete volume data and all run data on it? [y/N]: y "
+        "Error: HTTP 409: volume 'data' has 2 active volume SSH session(s); "
+        "end them before deleting the volume ┏"
+    )
+    assert "active SSH session(s). ┏" not in out
     assert "┃ Session ┃ Status ┃ Read-only ┃ Created ┃" in out
     assert "│ s1 │ RUNNING │ yes │ 2026-09-30T00:00:00 │" in out
     assert "1) end session(s) and delete the volume" in out
@@ -183,7 +194,7 @@ def test_other_members_sessions_suppress_the_prompt(run):
     client = FakeClient([_in_use("sessions", 3)], sessions=["s1"])
     result = run(client, input="y\n")
     assert result.exit_code == 1
-    assert "1 of them are yours" in _out(result)
+    assert "Only 1 of the 3 session(s) are yours" in _out(result)
     assert "Select" not in result.output
     assert client.calls == [("delete", "data"), ("list", "data")]
 
@@ -193,7 +204,7 @@ def test_backend_without_list_route_asks_to_stop_manually(run, status):
     client = FakeClient([_in_use("sessions")], list_error=_unsupported(status))
     result = run(client, "--yes")
     assert result.exit_code == 1
-    assert "cannot list them" in _out(result)
+    assert "cannot list the sessions" in _out(result)
     assert "prime volumes stop data <session-id>" in _out(result)
     assert "Select" not in result.output
     assert client.calls == [("delete", "data"), ("list", "data")]

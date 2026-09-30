@@ -170,8 +170,8 @@ def delete(
         client.delete_volume(name, team_id=team_id)
     except APIError as e:
         body = e.body or {}
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
         if body.get("errorCode") != "volume_in_use" or body.get("kind") != "sessions":
-            console.print(f"[red]Error:[/red] {escape(str(e))}")
             if body.get("kind") == "runs":
                 console.print("Stop them with: prime train stop <run-id>")
             elif body.get("errorCode") is None and "live run(s)" in str(e):
@@ -216,19 +216,15 @@ def _end_sessions(client, name: str, team_id, count: int, yes: bool) -> bool:
         if not _no_session_list(e):
             console.print(f"[red]Error:[/red] {escape(str(e))}")
             raise typer.Exit(1) from e
-        console.print(
-            f"[red]Volume {escape(name)} has {count} active SSH session(s)[/red], and this "
-            f"platform cannot list them. {manual}"
-        )
+        console.print(f"This platform cannot list the sessions. {manual}")
         raise typer.Exit(1)
     if len(sessions) < count:
         console.print(
-            f"[red]Volume {escape(name)} has {count} active SSH session(s); "
-            f"{len(sessions)} of them are yours.[/red] The others belong to other team "
-            "members, who must end them (idle sessions end after 30 minutes)."
+            f"Only {len(sessions)} of the {count} session(s) are yours. The others belong "
+            "to other team members, who must end them (idle sessions end after 30 minutes)."
         )
         raise typer.Exit(1)
-    console.print(f"Volume '{escape(name)}' has {len(sessions)} active SSH session(s).")
+    console.print()
     console.print(_sessions_table(sessions))
     if yes:
         choice = "1"

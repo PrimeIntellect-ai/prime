@@ -39,6 +39,22 @@ def test_create_backend_wire_contract_keeps_default_payload():
     assert portable == Volume.model_validate({**body, "backend": "juicefs"})
 
 
+def test_explicit_backend_requires_server_confirmation():
+    api = Mock()
+    # An older API may ignore the request's backend field.
+    api.post.return_value = {
+        "name": "models",
+        "status": "PENDING",
+        "clusterId": "a",
+        "pvcName": "vol-models",
+    }
+    client = HostedTrainingClient(api)
+    with pytest.raises(APIError, match="may have been created"):
+        client.create_volume("models", "1Ti", backend=VolumeBackend.JUICEFS)
+    api.delete.assert_not_called()
+    assert api.post.call_count == 1
+
+
 def test_create_juicefs_cli_passes_backend_and_cluster(monkeypatch):
     body = {
         "name": "models",

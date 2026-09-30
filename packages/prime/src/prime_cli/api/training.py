@@ -169,7 +169,14 @@ class HostedTrainingClient:
             payload["cluster"] = cluster
         if backend is not None:
             payload["backend"] = backend.value
-        return Volume.model_validate(self.client.post("/training/volumes", json=payload))
+        volume = Volume.model_validate(self.client.post("/training/volumes", json=payload))
+        if backend is not None and volume.backend != backend:
+            raise APIError(
+                f"The server returned a {volume.backend.value} volume after {backend.value} was "
+                "requested. The volume may have been created; check `prime volumes list` "
+                "before retrying. This backend requires matching platform support."
+            )
+        return volume
 
     def list_volumes(self, team_id: Optional[str] = None) -> List[Volume]:
         params = {"teamId": team_id} if team_id else None

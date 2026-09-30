@@ -1,5 +1,6 @@
 """Tests for `prime train logs` (orchestrator + env-server) and components."""
 
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 
@@ -12,6 +13,14 @@ from prime_cli.main import app
 from typer.testing import CliRunner
 
 RUN_ID = "rl-run-123"
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
+
+
+def _plain(output: str) -> str:
+    """Rich styles each char of an option separately in terminal mode, so a
+    raw '--tail' never appears contiguously under CI's color-forced runs."""
+    return _ANSI_RE.sub("", output)
 
 
 @pytest.fixture(autouse=True)
@@ -82,8 +91,8 @@ def test_logs_default_hits_orchestrator(monkeypatch: pytest.MonkeyPatch) -> None
     result = CliRunner().invoke(app, ["rl", "logs", RUN_ID, "--raw"])
 
     assert result.exit_code == 0, result.output
-    assert "orch-line-1" in result.output
-    assert "orch-line-2" in result.output
+    assert "orch-line-1" in _plain(result.output)
+    assert "orch-line-2" in _plain(result.output)
     assert len(orch) == 1
     assert orch[0]["tail_lines"] == 1000
     assert env == []
@@ -387,10 +396,11 @@ def test_logs_env_server_follow_dedupes(monkeypatch: pytest.MonkeyPatch) -> None
         ],
     )
 
+    plain = _plain(result.output)
     assert result.exit_code == 0, result.output
-    assert result.output.count("line-1") == 1
-    assert result.output.count("line-2") == 1
-    assert result.output.count("line-3") == 1
+    assert plain.count("line-1") == 1
+    assert plain.count("line-2") == 1
+    assert plain.count("line-3") == 1
     assert call_count["n"] >= 2
 
 
@@ -543,7 +553,7 @@ def test_logs_all_with_tail_conflicts(monkeypatch: pytest.MonkeyPatch) -> None:
     result = CliRunner().invoke(app, ["rl", "logs", RUN_ID, "--all", "--tail", "3000"])
 
     assert result.exit_code != 0
-    assert "--tail" in result.output
+    assert "--tail" in _plain(result.output)
 
 
 def test_logs_all_with_since_conflicts(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -555,7 +565,7 @@ def test_logs_all_with_since_conflicts(monkeypatch: pytest.MonkeyPatch) -> None:
     result = CliRunner().invoke(app, ["rl", "logs", RUN_ID, "--all", "--since", "2h"])
 
     assert result.exit_code != 0
-    assert "--since" in result.output
+    assert "--since" in _plain(result.output)
 
 
 def test_logs_tail_above_api_cap_rejected(monkeypatch: pytest.MonkeyPatch) -> None:

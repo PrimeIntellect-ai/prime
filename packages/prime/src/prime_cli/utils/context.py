@@ -1,6 +1,7 @@
 """Helpers for commands that persist CLI configuration."""
 
 import os
+import subprocess
 from pathlib import Path
 from typing import Optional
 
@@ -85,6 +86,62 @@ def local_context_target(config: Config, local: bool, global_: bool) -> Optional
     return target
 
 
+def _git(directory: Path, *args: str) -> Optional[str]:
+    """stdout of a git command run in ``directory``, or None when it fails."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(directory), *args],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def keep_out_of_git(path: Path) -> Optional[str]:
+    """Add a pin to the repository's ``.git/info/exclude`` so it is not committed
+    by accident. A context pin names a saved context from this user's ~/.prime,
+    so a committed one breaks every clone and CI job that lacks it.
+
+    Returns "excluded" when an entry was added, "tracked" when the pin is already
+    committed (a deliberate choice, left alone), else None.
+    """
+    directory = path.parent.parent
+    top = _git(directory, "rev-parse", "--show-toplevel")
+    if not top:
+        return None
+    if _git(directory, "ls-files", "--error-unmatch", "--", str(path)) is not None:
+        return "tracked"
+    if _git(directory, "check-ignore", "-q", "--", str(path)) is not None:
+        return None
+    exclude = _git(directory, "rev-parse", "--git-path", "info/exclude")
+    if not exclude:
+        return None
+    try:
+        pattern = "/" + path.resolve().relative_to(Path(top).resolve()).as_posix()
+        exclude_file = directory / exclude
+        exclude_file.parent.mkdir(parents=True, exist_ok=True)
+        existing = exclude_file.read_text() if exclude_file.is_file() else ""
+        separator = "" if not existing or existing.endswith("\n") else "\n"
+        exclude_file.write_text(f"{existing}{separator}{pattern}\n")
+    except (OSError, ValueError):
+        return None
+    return "excluded"
+
+
+def write_pin(path: Path, data: dict) -> None:
+    """Write a directory context file, keeping a new one out of git."""
+    write_local_context(path, data)
+    if keep_out_of_git(path) == "excluded":
+        get_console(stderr=True).print(
+            f"[dim]Added {escape(str(LOCAL_CONTEXT_FILE))} to .git/info/exclude so it stays "
+            "local; 'git add -f' it to share a team pin with the repository.[/dim]"
+        )
+
+
 def pin_team(path: Path, team_id: Optional[str], team_name: Optional[str] = None) -> None:
     """Pin a team (None: personal) in a directory context file.
 
@@ -96,7 +153,7 @@ def pin_team(path: Path, team_id: Optional[str], team_name: Optional[str] = None
     data["team_id"] = team_id or None
     if team_id and team_name:
         data["team_name"] = team_name
-    write_local_context(path, data)
+    write_pin(path, data)
 
 
 def apply_team(

@@ -2,6 +2,8 @@
 
 import json
 import logging
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Any, Optional
 
@@ -86,43 +88,20 @@ def _invoke(*args: str, **env: str) -> Any:
     return runner.invoke(app, list(args), env={**TEST_ENV, **env})
 
 
+# The shared resolution spec: every Config below, and other pin readers such as
+# prime-agent, should agree on these cases.
+CASES = json.loads((Path(__file__).parent / "data" / "directory_context_cases.json").read_text())
+assert CASES["global"] == {"api_key": "global-key", "team_id": GLOBAL, "team_name": "Global Team"}
+
+
 @pytest.mark.parametrize("config_class", CONFIGS)
-@pytest.mark.parametrize(
-    ("pins", "env", "team", "key"),
-    [
-        ({}, {}, GLOBAL, "global-key"),
-        ({"code/edison": {"team_id": EDISON}}, {}, EDISON, "global-key"),
-        ({"code/edison": {"team_id": None}}, {}, None, "global-key"),
-        (
-            {"code/edison": {"team_id": EDISON}, "code/edison/src": {"team_id": ACME}},
-            {},
-            ACME,
-            "global-key",
-        ),
-        ({"code/edison": {"context": "customer"}}, {}, ACME, "customer-key"),
-        ({"code/edison": {"context": "customer", "team_id": EDISON}}, {}, EDISON, "customer-key"),
-        ({"code/edison": {"team_id": EDISON}}, {"PRIME_CONTEXT": "customer"}, ACME, "customer-key"),
-        (
-            {"code/edison": {"team_id": EDISON}},
-            {"PRIME_TEAM_ID": "env-team"},
-            "env-team",
-            "global-key",
-        ),
-        ({"": {"team_id": EDISON}}, {}, GLOBAL, "global-key"),  # $HOME/.prime is the global config
-        ({"code/edison": "symlink-file"}, {}, GLOBAL, "global-key"),
-        ({"code/edison": "symlink-dir"}, {}, GLOBAL, "global-key"),
-    ],
-)
+@pytest.mark.parametrize("case", CASES["cases"], ids=lambda case: case["name"])
 def test_resolution(
-    home: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    config_class: Any,
-    pins: dict,
-    env: dict,
-    team: Any,
-    key: str,
+    home: Path, monkeypatch: pytest.MonkeyPatch, config_class: Any, case: dict
 ) -> None:
-    for relative, data in pins.items():
+    for name, saved in CASES["saved_contexts"].items():
+        _write(home / ".prime" / "environments" / f"{name}.json", saved)
+    for relative, data in case["pins"].items():
         directory = home / relative
         if data == "symlink-file":
             (directory / ".prime").mkdir()
@@ -132,12 +111,17 @@ def test_resolution(
             (directory / ".prime").symlink_to(_pin(home / "elsewhere", {"team_id": EDISON}).parent)
         else:
             _pin(directory, data)
-    for name, value in env.items():
+    for name, value in case["env"].items():
         monkeypatch.setenv(name, value)
 
+    if case.get("error"):
+        with pytest.raises(ValueError):
+            config = config_class()
+            (config.team_id, config.api_key)
+        return
     config = config_class()
 
-    assert (config.team_id, config.api_key) == (team, key)
+    assert (config.team_id, config.api_key) == (case["team_id"], case["api_key"])
 
 
 @pytest.mark.parametrize("module", SDK_MODULES)
@@ -381,3 +365,39 @@ def test_cli_switch_global_uses_the_global_account(
 
     assert _invoke("switch", "acme", "--global").exit_code == 0
     assert used == ["global-key"]
+
+
+def _git(repo: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(repo), *args], capture_output=True, check=True, text=True
+    ).stdout
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+def test_cli_local_pin_stays_out_of_git(repo: Path, api: None) -> None:
+    _git(repo, "init", "-q")
+
+    result = _invoke("switch", "edison", "--local")
+
+    assert result.exit_code == 0, result.output
+    assert "/.prime/context.json" in (repo / ".git" / "info" / "exclude").read_text().splitlines()
+    assert _git(repo, "status", "--porcelain", "--untracked-files=all") == ""
+    assert _invoke("switch", "acme").exit_code == 0  # no duplicate entry on later writes
+    exclude = (repo / ".git" / "info" / "exclude").read_text()
+    assert exclude.count("/.prime/context.json") == 1
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+def test_cli_committed_pin_is_left_alone(repo: Path, api: None) -> None:
+    _git(repo, "init", "-q")
+    _pin(repo, {"team_id": EDISON})
+    _git(repo, "add", ".prime/context.json")
+    exclude = repo / ".git" / "info" / "exclude"
+    exclude_before = exclude.read_text() if exclude.exists() else None
+
+    switched = _invoke("switch", "acme")
+    used = _invoke("config", "use", "customer", "--local")
+
+    assert switched.exit_code == 0 and used.exit_code == 0, used.output
+    assert (exclude.read_text() if exclude.exists() else None) == exclude_before
+    assert "is committed" in used.output.replace("\n", "")

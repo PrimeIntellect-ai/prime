@@ -18,8 +18,10 @@ from ..client import APIClient, APIError
 from ..utils import PlainTyper, get_console, require_persistent_context
 from ..utils.context import (
     apply_team,
+    keep_out_of_git,
     local_context_target,
     require_loadable_config,
+    write_pin,
 )
 from .teams import fetch_teams
 
@@ -401,12 +403,19 @@ def _pin_environment(config: Config, env: str, target: Path) -> None:
         for env_name in known.values():
             console.print(f"  - {escape(env_name)}")
         raise typer.Exit(1)
+    name = known[env.casefold()]
     # Replaces any pinned team: it belongs to the previous environment's account.
-    write_local_context(target, {"context": known[env.casefold()]})
+    write_pin(target, {"context": name})
     console.print(
-        f"[green]Using environment '{escape(known[env.casefold()])}' "
+        f"[green]Using environment '{escape(name)}' "
         f"for {escape(str(target.parent.parent))}.[/green]"
     )
+    if name.casefold() != "production" and keep_out_of_git(target) == "tracked":
+        console.print(
+            f"[yellow]Note:[/yellow] {escape(str(target))} is committed. Clones and CI "
+            f"without a saved context named '{escape(name)}' will fail until they save "
+            "one or run 'prime config unpin'."
+        )
     console.print(
         "[dim]Commands and SDKs run in this directory now use it; "
         "'prime config unpin' removes it.[/dim]"

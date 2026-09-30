@@ -1040,8 +1040,8 @@ def test_sandbox_run_forwards_guest_user(monkeypatch, user_option):
         def __init__(self, _client):
             pass
 
-        def execute_command(self, *args, **kwargs):
-            calls.append((args, kwargs))
+        def execute_command(self, *args, user=None, **kwargs):
+            calls.append((args, {**kwargs, "user": user}))
             return SimpleNamespace(stdout="", stderr="", exit_code=0)
 
     monkeypatch.setattr("prime_cli.commands.sandbox.APIClient", lambda: object())
@@ -1050,3 +1050,15 @@ def test_sandbox_run_forwards_guest_user(monkeypatch, user_option):
     assert result.exit_code == 0, result.output
     assert calls[0][0][:2] == ("sbx-1", "id")
     assert calls[0][1].get("user") == ("ubuntu" if user_option else None)
+
+
+def test_sandbox_run_rejects_user_with_old_sdk(monkeypatch):
+    class OldSandboxClient:
+        def execute_command(self, *args, **kwargs):
+            raise AssertionError("an unsupported SDK must not execute the command")
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient", OldSandboxClient)
+    result = runner.invoke(app, ["sandbox", "run", "sbx-1", "--user", "ubuntu", "--", "id"])
+    assert result.exit_code == 1
+    assert "does not support --user" in result.output
+    assert "Upgrade prime-sandboxes" in " ".join(result.output.split())

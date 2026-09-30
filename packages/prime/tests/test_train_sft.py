@@ -198,8 +198,8 @@ def _existing_volume(monkeypatch, name: str) -> None:
 
 def test_train_sft_forwards_volume_flag_to_payload(tmp_path: Path, monkeypatch) -> None:
     """--volume must reach the SFT dispatch: the volume carries both the
-    run's outputs (runs/<runId>/) and the pre-staged dataset read at
-    /datasets/<name>, so dropping it would silently launch an SFT run that
+    run's outputs (runs/<runId>/) and the dataset read at
+    /volume/<name>, so dropping it would silently launch an SFT run that
     can't see its dataset."""
     config_path = _write_config(tmp_path, _sft_config())
     captured = _capture_post(monkeypatch)

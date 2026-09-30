@@ -5,9 +5,10 @@ created on. `prime train config.toml --volume <name>` makes the run
 write under `runs/<runId>/` on it, and it outlives every run.
 
 Hosted SFT runs also read their dataset from the volume: the training
-container mounts the volume's `datasets/` directory read-only at
-`/datasets`, so an SFT config's `[data] name` must be a `"/datasets/<name>"`
-directory already on the volume before launch. This command manages the
+container mounts the volume read-only at `/volume`, so an SFT config's
+`[data] name` must point at a path on the volume (e.g.
+`/volume/datasets/<name>`, or the relative `datasets/<name>` — the
+platform resolves it) before launch. This command manages the
 volume lifecycle (create/list/resize/delete, plus `prime volumes ssh` for
 read-write sessions); put datasets there yourself with
 `prime volumes ssh <name> --read-write` and the huggingface CLI inside

@@ -14,10 +14,16 @@ own root.
 Binding to 127.0.0.1 alone does not restrict access to the launching OS
 account: another local user can port-scan the proxy and send valid
 loopback Host headers. Every spawn therefore mints an unguessable
-capability token (``secrets.token_urlsafe``) that becomes the FIRST PATH
-SEGMENT of the loopback URL (``http://127.0.0.1:<port>/<token>/``).
-Every request must present it (constant-time comparison, validated
-BEFORE the Host/Origin checks), and the token is never logged or put in
+capability token (``secrets.token_urlsafe``). The printed loopback URL
+carries it ONCE as a ``?t=`` query parameter — the one-time browser
+handoff — and the entry response sets it as a loopback cookie
+(``Path=/; HttpOnly; SameSite=Strict``). EVERY request must present that
+cookie (constant-time validation BEFORE the Host/Origin checks), which
+keeps root-relative assets, API calls and SSE streams working exactly
+as before: the browser attaches the cookie to every path on the loopback
+host. A DNS-rebound origin never receives the 127.0.0.1-host-keyed
+cookie, and SameSite=Strict blocks cross-site sends; the Host/Origin
+checks stay on as the second layer. The token is never logged or put in
 command lines — it reaches the detached child only via the private
 ready pipe and a 0600 state file.
 
@@ -35,11 +41,14 @@ from __future__ import annotations
 import argparse
 import hashlib
 import hmac
+import http.cookies
 import http.server
 import json
 import os
+import queue
 import re
 import secrets
+import select
 import signal
 import socket
 import subprocess
@@ -59,6 +68,15 @@ _UPSTREAM_REQUEST_TIMEOUT = httpx.Timeout(30.0, connect=10.0, read=None)
 
 DEFAULT_IDLE_TIMEOUT_SECONDS = 30 * 60
 """Detached proxies self-exit after this long without any live request."""
+
+_STREAM_LIVENESS_POLL_SECONDS = 5.0
+"""How long a quiet streamed body waits before re-checking the browser.
+
+Upstream reads have no timeout (a quiet SSE stream must not be cut
+off), so the handler polls the client socket for a half-close instead
+of waiting for the next write to fail: without this, a browser tab
+closed mid-stream would leave the request "in flight" forever and the
+detached proxy (holding the API credential) would never idle-exit."""
 
 _CHILD_READY_TIMEOUT_SECONDS = 15.0
 """How long the parent waits for the detached proxy to report its port."""
@@ -83,9 +101,14 @@ _CAPABILITY_TOKEN_BYTES = 32
 Binding to 127.0.0.1 does not restrict access to the launching OS
 account — another local user can port-scan the loopback port and send
 valid loopback Host headers with no Origin, reading the dashboard
-through the victim's bearer token. The unguessable capability token in
-every loopback URL closes that hole: without it a request is rejected
-(403) before any Host/Origin or upstream work."""
+through the victim's bearer token. The unguessable capability token
+closes that hole: the printed URL hands it to the browser once
+(``?t=<token>``), the entry response exchanges it for a loopback
+cookie, and every request without that cookie is rejected (403) before
+any Host/Origin or upstream work."""
+
+_CAPABILITY_COOKIE_NAME = "t"
+_CAPABILITY_QUERY_PARAM = "t"
 
 
 def _origin_is_loopback(origin: str, bound_port: int) -> bool:
@@ -248,6 +271,7 @@ class DashboardProxyHandler(http.server.BaseHTTPRequestHandler):
     base_url: str = ""
     api_key: str = ""
     capability_token: str = ""
+    _issue_capability_cookie = False
     upstream: Optional[httpx.Client] = None
 
     def do_GET(self) -> None:
@@ -260,10 +284,11 @@ class DashboardProxyHandler(http.server.BaseHTTPRequestHandler):
             server.request_finished()
 
     def _proxy_get(self) -> None:
-        # The capability token is validated BEFORE the Host/Origin checks:
+        # The capability cookie is validated BEFORE the Host/Origin checks:
         # another local user who port-scans the loopback port must never
         # reach any upstream work without the unguessable token.
-        remaining_path = self._path_without_capability_token()
+        self._issue_capability_cookie = False
+        remaining_path = self._authorize_request()
         if remaining_path is None:
             self._send_plain_error(403, "Forbidden: unknown dashboard proxy URL.")
             return
@@ -311,36 +336,73 @@ class DashboardProxyHandler(http.server.BaseHTTPRequestHandler):
         except httpx.HTTPError:
             self._send_plain_error(502, "Dashboard backend is unreachable.")
 
-    def _path_without_capability_token(self) -> Optional[str]:
-        """Validate the URL's capability-token segment; return the rest.
+    def _authorize_request(self) -> Optional[str]:
+        """Validate the capability cookie (or the one-time ``?t=`` handoff).
 
-        Every loopback URL embeds the per-spawn capability token as its
-        first path segment (``/<token>/<dashboard-path>``); the browser
-        keeps it on every request because the dashboard is served from
-        below it with relative references. The comparison is
-        constant-time and runs BEFORE any Host/Origin or upstream work,
-        so another local user who port-scans the port cannot read the
-        dashboard through the victim's bearer token. Returns the
-        dashboard-relative path (query preserved) on success, ``None``
-        when the token is absent or wrong.
+        Every request must present the per-spawn capability token:
+        normally as the loopback cookie the entry response sets, or — for
+        the printed URL's first hit — as the ``?t=<token>`` query
+        parameter, which additionally (re)issues the cookie. The
+        comparison is constant-time and runs BEFORE any Host/Origin or
+        upstream work, so another local user who port-scans the port
+        cannot read the dashboard through the victim's bearer token.
+        Returns the dashboard-relative path (handoff parameter stripped)
+        when authorized, ``None`` when the token is absent or wrong.
         """
         try:
             parsed = urllib.parse.urlsplit(self.path)
+            query_pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
         except ValueError:
             # Malformed request targets (e.g. a bogus bracketed netloc) are
             # a clean rejection, never an exception.
             return None
-        head, sep, rest = parsed.path.lstrip("/").partition("/")
         # compare_digest requires ASCII; bytes comparison accepts any
-        # request target, including non-UTF-8 path segments.
-        presented = head.encode("utf-8", "surrogateescape")
+        # request target, including non-UTF-8 values.
         expected = self.capability_token.encode("utf-8")
-        if not head or not hmac.compare_digest(presented, expected):
+        authorized = False
+        remaining: list[tuple[str, str]] = []
+        for key, value in query_pairs:
+            if key == _CAPABILITY_QUERY_PARAM and hmac.compare_digest(
+                value.encode("utf-8", "surrogateescape"), expected
+            ):
+                # The one-time handoff: authorize and (re)issue the cookie.
+                authorized = True
+                self._issue_capability_cookie = True
+                continue
+            remaining.append((key, value))
+        cookie_header = self.headers.get("Cookie")
+        if cookie_header:
+            jar = http.cookies.SimpleCookie()
+            try:
+                jar.load(cookie_header)
+            except http.cookies.CookieError:  # pragma: no cover - tolerant parser
+                pass
+            morsel = jar.get(_CAPABILITY_COOKIE_NAME)
+            if morsel is not None and hmac.compare_digest(
+                morsel.value.encode("utf-8", "surrogateescape"), expected
+            ):
+                authorized = True
+        if not authorized:
             return None
-        path = f"/{rest}" if sep else "/"
-        if parsed.query:
-            path += f"?{parsed.query}"
+        path = parsed.path or "/"
+        if remaining:
+            path += "?" + urllib.parse.urlencode(remaining)
         return path
+
+    def _capability_set_cookie(self) -> str:
+        """The entry response's Set-Cookie value for the capability token.
+
+        ``Path=/`` covers every root-relative asset/API/SSE request the
+        dashboard makes; ``HttpOnly`` keeps the token out of JavaScript;
+        ``SameSite=Strict`` blocks cross-site sends, so a hostile page on
+        another origin can never present the cookie. Cookies are also
+        host-keyed: a DNS-rebound name pointing at 127.0.0.1 never
+        receives the 127.0.0.1 cookie in the first place. ``Secure`` is
+        omitted deliberately — the loopback origin is plain http.
+        """
+        return (
+            f"{_CAPABILITY_COOKIE_NAME}={self.capability_token}; Path=/; HttpOnly; SameSite=Strict"
+        )
 
     def _upstream_headers(self) -> dict[str, str]:
         """Headers forwarded upstream: auth, transport, SSE negotiation.
@@ -412,13 +474,14 @@ class DashboardProxyHandler(http.server.BaseHTTPRequestHandler):
         if cache_control:
             self.send_header("Cache-Control", cache_control)
         if redirect_location is not None:
-            if redirect_location.startswith("/"):
-                # Root-relative locations (rewritten or passed through) lose
-                # the capability token when the browser follows them from
-                # the token-prefixed URL: re-prefix it. Truly relative
-                # locations already resolve below the token segment.
-                redirect_location = f"/{self.capability_token}{redirect_location}"
+            # Rewritten locations are loopback-root-relative; the browser
+            # sends the capability cookie with every follow-up regardless
+            # of path, so no token prefixing is needed here.
             self.send_header("Location", redirect_location)
+        if self._issue_capability_cookie:
+            # The one-time ?t= handoff: exchange the query token for the
+            # cookie that authorizes every subsequent request.
+            self.send_header("Set-Cookie", self._capability_set_cookie())
         # Pre-compressed assets arrive with Content-Encoding even though we
         # requested identity. httpx DECODES in iter_bytes, so relaying the
         # compressed Content-Length with decoded bytes would break the
@@ -437,19 +500,85 @@ class DashboardProxyHandler(http.server.BaseHTTPRequestHandler):
             self.close_connection = True
             self.send_header("Connection", "close")
         self.end_headers()
-        try:
-            for chunk in body_iter:
-                self.wfile.write(chunk)
+        self._pump_body(body_iter)
+
+    def _pump_body(self, body_iter: Any) -> None:
+        """Stream the upstream body to the browser, noticing disconnects.
+
+        The upstream read has no timeout (a quiet SSE stream must not be
+        cut off between events), so discovering a closed tab only on the
+        next write is not enough: a quiet stream would block forever and
+        the request would never finish, keeping the idle watchdog's
+        in-flight counter nonzero and pinning the detached proxy (and
+        its API credential) indefinitely. The upstream iterator is
+        therefore consumed on a helper thread; while the main loop waits
+        for chunks it polls the client socket for a half-close and drops
+        out as soon as the browser is gone.
+        """
+        chunks: queue.Queue[Any] = queue.Queue()
+        finished = object()
+
+        def _read_upstream() -> None:
+            try:
+                for chunk in body_iter:
+                    chunks.put(chunk)
+            except Exception as error:  # noqa: BLE001 - relayed to the pump
+                chunks.put(error)
+            finally:
+                chunks.put(finished)
+
+        threading.Thread(target=_read_upstream, daemon=True).start()
+        while True:
+            try:
+                item = chunks.get(timeout=_STREAM_LIVENESS_POLL_SECONDS)
+            except queue.Empty:
+                if self._downstream_disconnected():
+                    # The browser closed the tab mid-stream: stop pumping
+                    # and let the response context manager close the
+                    # upstream so the reader thread unblocks and this
+                    # request finally finishes (idle shutdown stays armed).
+                    self.close_connection = True
+                    return
+                continue
+            if item is finished:
+                return
+            if isinstance(item, Exception):
+                raise item
+            try:
+                self.wfile.write(item)
                 self.wfile.flush()  # SSE events must reach the browser immediately
-        except (BrokenPipeError, ConnectionResetError):
-            # The browser tab was closed mid-stream; drop the connection.
-            pass
+            except (BrokenPipeError, ConnectionResetError):
+                # The browser tab was closed mid-stream; drop the connection.
+                return
+
+    def _downstream_disconnected(self) -> bool:
+        """Peek the client socket for a half-close without consuming bytes.
+
+        ``select`` first so the peek never blocks (Windows has no
+        ``MSG_DONTWAIT``); a readable socket that peeks back EOF means
+        the browser closed the connection. A readable socket with data
+        stays "connected" — the browser cannot legally send another
+        request mid-response, so we do not try to interpret it.
+        """
+        conn = self.connection
+        try:
+            readable, _, _ = select.select([conn], [], [], 0)
+            if not readable:
+                return False
+            return conn.recv(1, socket.MSG_PEEK) == b""
+        except (OSError, ValueError):
+            # Reset/invalid socket: treat as disconnected.
+            return True
 
     def _send_plain_error(self, status: int, message: str) -> None:
         body = (message + "\n").encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        if self._issue_capability_cookie:
+            # Even a failing entry response exchanges the handoff token for
+            # the cookie, so the browser is not stranded after a retry.
+            self.send_header("Set-Cookie", self._capability_set_cookie())
         self.end_headers()
         self.wfile.write(body)
 
@@ -500,10 +629,11 @@ def make_dashboard_proxy_server(
 ) -> tuple[DashboardProxyServer, str]:
     """Start a loopback dashboard proxy on an ephemeral port.
 
-    Returns ``(server, url)`` where ``url`` embeds the per-spawn
-    capability token as its first path segment
-    (``http://127.0.0.1:<port>/<token>/``); ``server.capability_token``
-    exposes it for callers that need the raw value. The caller runs
+    Returns ``(server, url)`` where ``url`` carries the per-spawn
+    capability token once as ``?t=<token>`` — the one-time browser
+    handoff that the entry response exchanges for a loopback cookie;
+    ``server.capability_token`` exposes it for callers that need the raw
+    value. The caller runs
     ``server.serve_forever()`` and, on shutdown, closes the server and
     ``server.upstream_client``. ``upstream`` may be injected for tests.
     """
@@ -527,10 +657,11 @@ def make_dashboard_proxy_server(
     server.run_id = run_id
     server.capability_token = capability_token
     server.upstream_client = upstream_client
-    # The capability token is the FIRST PATH SEGMENT of the URL: the
-    # browser keeps it on every relative request below it, and every
-    # request is validated against it before any upstream work.
-    url = f"http://{host}:{server.server_address[1]}/{capability_token}/"
+    # The URL carries the capability token ONCE as a query parameter — the
+    # one-time browser handoff. The entry response exchanges it for a
+    # loopback cookie that authorizes every subsequent request, so the
+    # dashboard's root-relative asset/API/SSE URLs keep working.
+    url = f"http://{host}:{server.server_address[1]}/?t={capability_token}"
     return server, url
 
 
@@ -630,8 +761,9 @@ def _proxy_still_serves(url: str, timeout: float = 10.0) -> bool:
 def _live_proxy_url(state: Optional[dict[str, Any]]) -> Optional[str]:
     """Return the loopback URL of a still-running proxy, if any.
 
-    The URL embeds the proxy's capability token from the state file; a
-    state file without a token (pre-capability format) is not reusable.
+    The URL carries the proxy's capability token as the one-time ``?t=``
+    handoff; a state file without a token (pre-capability format) is not
+    reusable.
     """
     if not state:
         return None
@@ -649,7 +781,7 @@ def _live_proxy_url(state: Optional[dict[str, Any]]) -> Optional[str]:
             pass
     except OSError:
         return None
-    return f"http://127.0.0.1:{port}/{token}/"
+    return f"http://127.0.0.1:{port}/?t={token}"
 
 
 def _unlink_state_if_owned(state_path: Path, pid: int) -> None:
@@ -755,10 +887,11 @@ def start_detached_dashboard_proxy(
     survives the CLI exiting; it writes a pid/port/token state file
     (0600) under the user cache dir and exits itself once idle. If a
     healthy proxy for this run is already running, its URL is returned
-    without spawning another. The returned URL embeds the proxy's
-    capability token as its first path segment — the token reaches this
-    process only through the child's private ready pipe or the 0600
-    state file, never through logs or command lines.
+    without spawning another. The returned URL carries the proxy's
+    capability token once as ``?t=<token>`` (the one-time browser
+    handoff) — the token reaches this process only through the child's
+    private ready pipe or the 0600 state file, never through logs or
+    command lines.
     """
     fingerprint = _proxy_fingerprint(base_url, run_id, api_key)
     state_path = proxy_state_path(run_id, state_dir, fingerprint)
@@ -829,7 +962,7 @@ def start_detached_dashboard_proxy(
             process.stdout.close()
     if not ready_ok:
         raise RuntimeError("The dashboard proxy failed to start.")
-    return f"http://127.0.0.1:{int(ready_parts[1])}/{ready_parts[2]}/"
+    return f"http://127.0.0.1:{int(ready_parts[1])}/?t={ready_parts[2]}"
 
 
 def _main(argv: Optional[list[str]] = None) -> int:

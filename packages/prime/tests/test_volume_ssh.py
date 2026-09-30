@@ -1,4 +1,5 @@
 import hashlib
+import json
 import os
 import select
 import shlex
@@ -342,6 +343,63 @@ def test_list_never_shows_the_namespace(monkeypatch, output):
     assert "ckpts" in result.output
     assert "prime-team-secret-ns" not in result.output
     assert "amespace" not in result.output
+
+
+def test_list_shows_the_cluster_name(monkeypatch):
+    from prime_cli.api.training import Volume
+
+    vols = [
+        Volume(name="a", status="RUNNING", clusterId="c1", cluster="gpu-east", pvcName="vol-a"),
+        Volume(name="b", status="RUNNING", clusterId="c2", pvcName="vol-b"),  # older backend
+    ]
+    monkeypatch.setattr(
+        volumes, "_client", lambda: (SimpleNamespace(list_volumes=lambda **kw: vols), None)
+    )
+    env = {"PRIME_DISABLE_VERSION_CHECK": "1", "COLUMNS": "200"}
+
+    table = CliRunner().invoke(app, ["volumes", "list"], env=env)
+    assert table.exit_code == 0, table.output
+    assert "Cluster" in table.output and "gpu-east" in table.output
+
+    as_json = CliRunner().invoke(app, ["volumes", "list", "-o", "json"], env=env)
+    assert [v["cluster"] for v in json.loads(as_json.output)] == ["gpu-east", None]
+
+
+def test_create_passes_the_cluster_through(monkeypatch):
+    from prime_cli.api.training import Volume
+
+    calls = []
+
+    def create_volume(name, size, team_id=None, cluster=None):
+        calls.append((name, size, team_id, cluster))
+        return Volume(
+            name=name, size=size, status="PENDING", clusterId="c1", cluster="gpu-east", pvcName="v"
+        )
+
+    monkeypatch.setattr(
+        volumes, "_client", lambda: (SimpleNamespace(create_volume=create_volume), "t1")
+    )
+    env = {"PRIME_DISABLE_VERSION_CHECK": "1", "COLUMNS": "200"}
+
+    result = CliRunner().invoke(
+        app, ["volumes", "create", "ckpts", "--cluster", "gpu-east"], env=env
+    )
+    assert result.exit_code == 0, result.output
+    assert "on gpu-east" in result.output
+    as_json = CliRunner().invoke(app, ["volumes", "create", "ckpts", "-o", "json"], env=env)
+    assert json.loads(as_json.output)["cluster"] == "gpu-east"
+    assert calls == [("ckpts", "1Ti", "t1", "gpu-east"), ("ckpts", "1Ti", "t1", None)]
+
+
+def test_client_sends_cluster_only_when_set():
+    posted = []
+    body = {"name": "v", "status": "PENDING", "clusterId": "c1", "pvcName": "vol-v"}
+    api = SimpleNamespace(post=lambda path, json=None: posted.append(json) or body)
+    client = HostedTrainingClient(api)
+    client.create_volume("v", "1Ti", cluster="gpu-east")
+    client.create_volume("v", "1Ti")
+    assert posted[0]["cluster"] == "gpu-east"
+    assert "cluster" not in posted[1]
 
 
 def _setup(monkeypatch, tmp_path, which, run_code=0, stuck=False, find_stdout=""):

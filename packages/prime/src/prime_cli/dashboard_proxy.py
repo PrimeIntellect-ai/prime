@@ -381,8 +381,11 @@ class DashboardProxyHandler(http.server.BaseHTTPRequestHandler):
         Every request must present a per-spawn capability: normally the
         long-lived loopback cookie the entry response sets, or — for the
         printed URL's first hit — the SINGLE-USE entry token in the path,
-        which is consumed atomically (a replay gets 403) and exchanged
-        for the cookie. The comparison is
+        which is consumed atomically (a replay without the cookie gets
+        403) and exchanged for the cookie. A refresh of the consumed
+        handoff URL (which stays in the address bar) rides on the cookie:
+        the dead token segment is stripped instead of being forwarded
+        upstream as a dashboard path (which would 404). The comparison is
         constant-time and runs BEFORE any Host/Origin or upstream work,
         so another local user who port-scans the port cannot read the
         dashboard through the victim's bearer token. Returns the
@@ -399,18 +402,9 @@ class DashboardProxyHandler(http.server.BaseHTTPRequestHandler):
         # request target, including non-UTF-8 path segments.
         server = self._proxy_server()
         expected = server.cookie_capability.encode("utf-8")
-        authorized = False
-        path = parsed.path or "/"
-        head, sep, rest = parsed.path.lstrip("/").partition("/")
-        if head and server.consume_entry_token(head.encode("utf-8", "surrogateescape")):
-            # The one-time handoff URL: the single-use entry token is the
-            # sole path segment. Authorize, strip it from the dashboard path
-            # (so both /<entry> and /<entry>/static/... map to the dashboard
-            # root and subpaths), and (re)issue the cookie that authorizes
-            # every subsequent root-relative request.
-            authorized = True
-            self._issue_capability_cookie = True
-            path = f"/{rest}" if sep else "/"
+        # Validate the long-lived cookie FIRST: a refresh of the consumed
+        # handoff URL (still resident in the address bar) rides on it.
+        cookie_ok = False
         cookie_header = self.headers.get("Cookie")
         if cookie_header:
             jar = http.cookies.SimpleCookie()
@@ -422,7 +416,26 @@ class DashboardProxyHandler(http.server.BaseHTTPRequestHandler):
             if morsel is not None and hmac.compare_digest(
                 morsel.value.encode("utf-8", "surrogateescape"), expected
             ):
+                cookie_ok = True
+        authorized = cookie_ok
+        path = parsed.path or "/"
+        head, sep, rest = parsed.path.lstrip("/").partition("/")
+        if head:
+            presented = head.encode("utf-8", "surrogateescape")
+            if server.consume_entry_token(presented):
+                # The one-time handoff URL: the single-use entry token is
+                # the sole path segment. Authorize, strip it from the
+                # dashboard path (so both /<entry> and /<entry>/static/...
+                # map to the dashboard root and subpaths), and (re)issue
+                # the cookie that authorizes every subsequent
+                # root-relative request.
                 authorized = True
+                self._issue_capability_cookie = True
+                path = f"/{rest}" if sep else "/"
+            elif cookie_ok and server.matches_consumed_entry_token(presented):
+                # Address-bar refresh of the already-consumed handoff URL:
+                # strip the dead token segment and serve the mapped path.
+                path = f"/{rest}" if sep else "/"
         if not authorized:
             return None
         if parsed.query:
@@ -669,6 +682,7 @@ class DashboardProxyServer(http.server.ThreadingHTTPServer):
         self._active_requests = 0
         self._last_activity = time.monotonic()
         self._entry_lock = threading.Lock()
+        self._consumed_entry_token = ""
 
     def consume_entry_token(self, presented: bytes) -> bool:
         """Consume the SINGLE-USE entry token; return False on mismatch.
@@ -686,6 +700,10 @@ class DashboardProxyServer(http.server.ThreadingHTTPServer):
         with self._entry_lock:
             if not hmac.compare_digest(presented, self.entry_token.encode("utf-8")):
                 return False
+            # Remember the consumed token: the printed URL stays in the
+            # browser's address bar, and its refreshes must be recognized
+            # (see matches_consumed_entry_token).
+            self._consumed_entry_token = self.entry_token
             self.entry_token = secrets.token_urlsafe(_CAPABILITY_TOKEN_BYTES)
             next_token = self.entry_token
             persist = self._persist_entry_token
@@ -697,6 +715,20 @@ class DashboardProxyServer(http.server.ThreadingHTTPServer):
                 # simply will not find the fresh token; serving continues.
                 pass
         return True
+
+    def matches_consumed_entry_token(self, presented: bytes) -> bool:
+        """Whether ``presented`` is the LAST-CONSUMED entry token.
+
+        The handoff URL stays in the browser's address bar after the
+        first load; on refresh the token segment is already dead. With a
+        valid capability cookie the dead segment must be STRIPPED and the
+        mapped path served (forwarding it upstream as a dashboard path
+        segment would 404); without the cookie the request is rejected as
+        usual. The dead token grants nothing on its own — only holders of
+        the cookie (already authorized) benefit.
+        """
+        consumed = self._consumed_entry_token
+        return bool(consumed) and hmac.compare_digest(presented, consumed.encode("utf-8"))
 
     def request_started(self) -> None:
         with self._state_lock:

@@ -225,6 +225,54 @@ def test_entry_request_exchanges_single_use_token_for_distinct_cookie(proxy_fact
     assert len(seen["urls"]) == 1
 
 
+def test_consumed_entry_url_refreshes_serve_the_dashboard(proxy_factory) -> None:
+    """A refresh of the consumed handoff URL must not 404 (Bugbot t035).
+
+    The printed URL stays in the address bar after the first load; on
+    refresh the token segment is already consumed. With the capability
+    cookie the dead segment must be STRIPPED and the mapped path served —
+    forwarding it upstream as a dashboard path segment would 404. Without
+    the cookie a replay stays rejected.
+    """
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        return httpx.Response(200, content=b"dashboard")
+
+    url, port, cookie = proxy_factory(httpx.Client(transport=httpx.MockTransport(handler)))
+    entry = _entry_token_of(url)
+
+    # First load: the single-use handoff is consumed, the cookie is set.
+    first = _entry(port, entry)
+    assert first.status == 200
+    assert first.read() == b"dashboard"
+    assert seen == [f"{BASE_URL}/api/v1/rft/runs/run-1/dashboard/"]
+
+    # Refresh of the SAME address-bar URL (cookie held, token consumed):
+    # serves the dashboard root, not /<token> as a dashboard path.
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    conn.request("GET", f"/{entry}", headers={"Cookie": f"t={cookie}"})
+    refreshed = conn.getresponse()
+    assert refreshed.status == 200
+    assert refreshed.read() == b"dashboard"
+    assert seen[-1] == f"{BASE_URL}/api/v1/rft/runs/run-1/dashboard/"
+
+    # Deep-path refresh: /<consumed>/static/x maps to the dashboard subpath.
+    conn.request("GET", f"/{entry}/static/x", headers={"Cookie": f"t={cookie}"})
+    deep = conn.getresponse()
+    assert deep.status == 200
+    assert seen[-1] == f"{BASE_URL}/api/v1/rft/runs/run-1/dashboard/static/x"
+    conn.close()
+
+    # Without the cookie the dead token still grants nothing.
+    replay = _entry(port, entry)
+    assert replay.status == 403
+    assert replay.read() == b"Forbidden: unknown dashboard proxy URL.\n"
+    # And the wrong token stays 403 with or without a cookie.
+    assert _raw_request(port, [f"Host: 127.0.0.1:{port}"], path="/totally-unknown-token")[0] == 403
+
+
 def test_root_relative_dashboard_requests_work_with_capability_cookie(proxy_factory) -> None:
     """THE regression the path-prefix design broke (Bugbot t028).
 

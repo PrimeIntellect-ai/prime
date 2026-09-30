@@ -45,10 +45,9 @@ console = get_console()
 
 LEGACY_TRAINING_NOTICE = (
     "Shared Hosted Training for LoRA runs will stop accepting new runs on October 5, 2026. "
-    "Use full fine-tuning (FFT) for new hosted runs. "
+    "Hosted Training is transitioning to full fine-tuning (FFT). "
     "Existing LoRA adapters will remain downloadable and deployable until further notice."
 )
-FULL_FINETUNING_DOCS_URL = "https://docs.primeintellect.ai/hosted-training/full-finetuning"
 
 V1_ENV_CONFIG_FIELDS = (
     "taskset",
@@ -248,8 +247,7 @@ def generate_rl_config_template(environment: str | None = None) -> str:
 
     return f'''\
 # Shared Hosted Training for LoRA runs will stop accepting new runs on October 5, 2026.
-# Use full fine-tuning (FFT) for new hosted runs:
-# https://docs.primeintellect.ai/hosted-training/full-finetuning
+# Hosted Training is transitioning to full fine-tuning (FFT).
 # Existing LoRA adapters will remain downloadable and deployable until further notice.
 model = "Qwen/Qwen3.5-0.8B"
 loss = "rl" # "rl" | "sft"; OPD is not yet supported on hosted runtimes
@@ -1525,12 +1523,9 @@ def create_run(
     console.print(f"[dim]Loading config from {config_path}[/dim]\n")
     cfg = load_config(config_path)
     if output == "json":
-        typer.echo(f"Warning: {LEGACY_TRAINING_NOTICE} {FULL_FINETUNING_DOCS_URL}", err=True)
+        typer.echo(f"Warning: {LEGACY_TRAINING_NOTICE}", err=True)
     else:
-        console.print(
-            f"[yellow]Warning:[/yellow] {LEGACY_TRAINING_NOTICE} "
-            f"[link={FULL_FINETUNING_DOCS_URL}]{FULL_FINETUNING_DOCS_URL}[/link]\n"
-        )
+        console.print(f"[yellow]Warning:[/yellow] {LEGACY_TRAINING_NOTICE}\n")
 
     # Collect secrets from all sources
     def warn(msg: str) -> None:
@@ -2998,7 +2993,6 @@ def init_config(
 
     console.print(f"[green]✓[/green] Created {output_path}")
     console.print(f"[yellow]Warning:[/yellow] {LEGACY_TRAINING_NOTICE}")
-    console.print(f"[link={FULL_FINETUNING_DOCS_URL}]{FULL_FINETUNING_DOCS_URL}[/link]")
     console.print(f"\n[dim]Run with:[/dim] prime train {output_path}")
 
 

@@ -226,6 +226,36 @@ prime switch <team-id>  # fallback for teams without a slug
 prime pods list
 ```
 
+## Copying a training volume (stopgap)
+
+An existing cluster-local volume can be copied into a **new** volume on another
+cluster where the platform enables volume copy:
+
+```bash
+prime volumes copy my-checkpoints my-checkpoints-e2e --cluster e2e-spk
+prime volumes list
+# After my-checkpoints-e2e is RUNNING:
+prime train config.toml --volume my-checkpoints-e2e
+```
+
+The server runs rsync on the destination cluster through the existing volume
+gateway. The data does not pass through your laptop. The source is retained;
+this does not move or share its PVC. The destination defaults to the source's
+size; `--size` can override it within the usual volume limits.
+
+The source must be idle, and new managed writers are blocked during the copy.
+An existing destination name is rejected. The destination cannot be used until
+verification succeeds. Job retries can reuse completed files, but interrupted
+files are recopied. An ultimate failure or cancellation cleans up the new,
+unpublished destination; a fresh retry recopies from the source. Cancel uses
+`prime volumes delete DEST` and its existing permissions.
+
+The first copy job is limited to 23 hours and to files the managed source export
+can read. Gateway throughput is not guaranteed. This feature does not require
+JuiceFS or change the storage backend, and it does not add managed inference's
+local-model support. For inference, use a supported completed model export, not
+raw distributed trainer checkpoints.
+
 ## Configuration
 
 ### API Key

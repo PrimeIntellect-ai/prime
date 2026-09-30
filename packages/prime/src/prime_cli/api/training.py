@@ -7,6 +7,7 @@ token; admin role is gated server-side.
 """
 
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote
 
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic import ValidationError as PydanticValidationError
@@ -150,6 +151,23 @@ class HostedTrainingClient:
         if cluster:
             payload["cluster"] = cluster
         return Volume.model_validate(self.client.post("/training/volumes", json=payload))
+
+    def copy_volume(
+        self,
+        source: str,
+        name: str,
+        cluster: str,
+        *,
+        size: str | None = None,
+        team_id: str | None = None,
+    ) -> Volume:
+        payload: Dict[str, Any] = {"name": name, "cluster": cluster}
+        if size is not None:
+            payload["size"] = size
+        if team_id:
+            payload["teamId"] = team_id
+        path = f"/training/volumes/{quote(source, safe='')}/copy"
+        return Volume.model_validate(self.client.post(path, json=payload))
 
     def list_volumes(self, team_id: Optional[str] = None) -> List[Volume]:
         params = {"teamId": team_id} if team_id else None

@@ -79,6 +79,33 @@ def create(
     console.print(f"Use it with: prime train config.toml --volume {volume.name}")
 
 
+@app.command("copy")
+def copy_volume(
+    source: str = typer.Argument(..., help="Source volume name"),
+    destination: str = typer.Argument(..., help="New destination volume name"),
+    cluster: str = typer.Option(..., "--cluster", help="Destination cluster name or id"),
+    size: str | None = typer.Option(None, "--size", help="Destination size (default: source size)"),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """Copy an idle volume to a new volume; the original is retained."""
+    validate_output_format(output, console)
+    client, team_id = _client()
+    try:
+        volume = client.copy_volume(source, destination, cluster, size=size, team_id=team_id)
+    except APIError as exc:
+        console.print(f"[red]Error:[/red] {escape(str(exc))}")
+        raise typer.Exit(1) from exc
+    if output == "json":
+        output_data_as_json(volume.model_dump(by_alias=True), console)
+        return
+    target = volume.cluster or volume.cluster_id
+    console.print(
+        f"Copy requested: {escape(source)} -> {escape(volume.name)} on {escape(target)} "
+        f"({escape(volume.status)}). The source is retained."
+    )
+    console.print("Check `prime volumes list`; use the destination only when it is RUNNING.")
+
+
 @app.command("list")
 def list_volumes(
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),

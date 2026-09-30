@@ -97,6 +97,10 @@ class RLRun(BaseModel):
     max_inflight_rollouts: Optional[int] = Field(None, alias="maxInflightRollouts")
     oversampling_factor: Optional[float] = Field(None, alias="oversamplingFactor")
     max_async_level: Optional[int] = Field(None, alias="maxAsyncLevel")
+    # User-facing name of the named volume a DEDICATED_FULL_FT run
+    # mounted via --volume (outputs under runs/<runId>/ on it). Only
+    # set on the run-detail read; None for runs without a volume.
+    volume_name: Optional[str] = Field(None, alias="volumeName")
 
     # Monitoring
     wandb_entity: Optional[str] = Field(None, alias="wandbEntity")

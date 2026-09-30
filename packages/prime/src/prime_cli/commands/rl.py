@@ -919,6 +919,23 @@ def _is_full_finetune(cfg: Dict[str, Any], *, flag: bool) -> bool:
     return flag or _has_full_finetune_deployment(cfg)
 
 
+def _looks_like_sft(cfg: Dict[str, Any]) -> bool:
+    """True iff the mega-TOML carries the prime-rl SFT schema shape: a
+    `[data]` block (required by SFTConfig, absent from the RL schema) and
+    no `[trainer]`/`[orchestrator]` blocks (required by the RL schema,
+    absent from SFTConfig). The two prime-rl TOML schemas are disjoint on
+    these keys, so the sniff is unambiguous without parsing the file with
+    either schema.
+    """
+    return "data" in cfg and "trainer" not in cfg and "orchestrator" not in cfg
+
+
+def _is_sft(cfg: Dict[str, Any], *, flag: bool) -> bool:
+    """Dispatch as SFT if `--sft` was passed, or if the config carries the
+    SFT schema shape (see `_looks_like_sft`)."""
+    return flag or _looks_like_sft(cfg)
+
+
 def _validate_full_finetune_deployment(cfg: Dict[str, Any], config_path: str) -> None:
     """Full-FT dispatch requires an explicit `[deployment]` table sizing the
     run. Guards the `--full-finetune`-without-`[deployment]` case — the
@@ -959,10 +976,14 @@ def _dispatch_full_finetune_run(
     gpu_type: Optional[str] = None,
     volume: Optional[str] = None,
     volume_size: Optional[str] = None,
+    mode: Optional[str] = None,
 ) -> None:
-    """Hand off to /api/v1/training/runs (full-FT prime-rl on a registered
-    PrimeCluster). Reuses the shared env-file plumbing for WANDB / HF
-    secrets so the user experience matches the LoRA path.
+    """Hand off to /api/v1/training/runs (prime-rl on a registered
+    PrimeCluster). Serves both dedicated run kinds: full-FT RL mega-TOMLs
+    (mode=None/"rl") and SFT mega-TOMLs (mode="sft" — same endpoint, same
+    raw-TOML handoff; only the backend/validator schema dispatch differs).
+    Reuses the shared env-file plumbing for WANDB / HF secrets so the
+    user experience matches the LoRA path.
 
     Backend always auto-picks the first uncordoned PrimeCluster — the
     CLI never threads a cluster id, so a config that targets the wrong
@@ -1128,6 +1149,7 @@ def _dispatch_full_finetune_run(
         hf_token=secrets.get("HF_TOKEN"),
         gpu_type=resolved_gpu_type,
         volume=resolved_volume,
+        mode=mode,
     )
 
     # `--output json` is a formatting switch: still dispatch the run,
@@ -1434,9 +1456,16 @@ def create_run(
         None,
         "--volume",
         help=(
-            "Named volume to write the run's outputs to, under runs/<runId>/ "
-            "(full-FT only; closed beta, see `prime volumes`). Falls back "
-            'to a top-level `volume = "..."` in the TOML. Created on the fly '
+            "Named volume for the run: outputs go under runs/<runId>/, and "
+            "for SFT the volume is mounted read-only at /volume, so "
+            "data.name must point at a path on the volume (e.g. "
+            '/volume/datasets/<name> or the relative "datasets/<name>" — '
+            "the platform resolves it). Get a dataset there yourself with "
+            "`prime volumes ssh <volume> --read-write` and the huggingface "
+            "CLI inside that session (see `prime volumes`); without a "
+            "volume, SFT only works with fake datasets. Full-FT and SFT "
+            "only; closed beta, see `prime volumes`. Falls back to a "
+            'top-level `volume = "..."` in the TOML. Created on the fly '
             "(default 1Ti) if it doesn't exist."
         ),
     ),
@@ -1461,6 +1490,29 @@ def create_run(
             "block in the TOML either way."
         ),
     ),
+    sft: bool = typer.Option(
+        False,
+        "--sft",
+        help=(
+            "Dispatch this config as a supervised fine-tune on the dedicated "
+            "training path. Usually unnecessary — an SFT config (a [data] "
+            "block and no [trainer]/[orchestrator]) is auto-detected. "
+            "Hosted SFT is trainer-only: [eval], [inference], and "
+            "[weight_broadcast] blocks are rejected. Datasets are local "
+            "files on a named volume (pass --volume): the run mounts that "
+            "volume read-only at /volume, so data.name points at a path "
+            "on it (e.g. /volume/datasets/<name> or the relative "
+            '"datasets/<name>" — the platform resolves it); outputs land '
+            "under runs/<runId>/ on the same volume. Get datasets there "
+            "yourself with `prime volumes ssh <volume> --read-write` and "
+            "the huggingface CLI inside that session (hf download <repo> "
+            "--repo-type dataset --local-dir datasets/<name>): materialize "
+            "HF load_dataset-readable files (Parquet/JSON, not "
+            "save_to_disk) into the volume's datasets/ directory, then "
+            "verify with a fresh-process load_dataset check. Without "
+            "--volume, only fake datasets work."
+        ),
+    ),
 ) -> None:
     """Launch a Hosted Training run from a config file.
 
@@ -1468,14 +1520,54 @@ def create_run(
 
         prime train config.toml
         prime train config.toml --full-finetune
+        prime train sft.toml --sft
+        prime train sft.toml --sft --volume research
     """
     validate_output_format(output, console)
 
-    # Dispatch routing: --full-finetune/--fft, or an unambiguous
-    # `[deployment]` block (full-FT-only — RLConfig/the LoRA schema has no
-    # such field). No longer sniffs `type` — prime-rl owns the config
-    # schema, so a leftover `type` field is dead weight, not a signal.
+    # Mutually exclusive run kinds: accepting both would silently resolve
+    # to whichever branch is checked first.
+    if sft and full_finetune:
+        console.print(
+            "[red]Error:[/red] --sft and --full-finetune/--fft are mutually "
+            "exclusive — pick the run kind matching the config."
+        )
+        raise typer.Exit(1)
+
+    # Dispatch routing: SFT first — a [data] block with no [trainer]/
+    # [orchestrator] is unambiguously the prime-rl SFT schema (the two
+    # mega-TOML schemas are disjoint). Then --full-finetune/--fft, or an
+    # unambiguous `[deployment]` block (full-FT-only — the RL/LoRA schema
+    # has no such field).
     raw_cfg = _peek_toml(config_path)
+    if _is_sft(raw_cfg, flag=sft):
+        if full_finetune:
+            console.print(
+                f"[red]Error:[/red] {config_path} looks like an SFT config "
+                "(a \\[data] block, no \\[trainer]/\\[orchestrator]) but "
+                "--full-finetune/--fft was passed. Use --sft instead."
+            )
+            raise typer.Exit(1)
+        _dispatch_full_finetune_run(
+            raw_cfg=raw_cfg,
+            config_path=config_path,
+            env=env,
+            env_file=env_file,
+            output=output,
+            yes=yes,
+            image_tag=image_tag,
+            gpu_type=gpu_type,
+            # On SFT the volume is also the dataset contract: it is
+            # mounted read-only at /volume, so `data.name` must point at
+            # a path on the volume (e.g. /volume/datasets/<name> or the
+            # relative datasets/<name> — the platform resolves it; users
+            # stage it via `prime volumes ssh --read-write` + the HF CLI).
+            # Forward --volume instead of dropping it.
+            volume=volume,
+            volume_size=volume_size,
+            mode="sft",
+        )
+        return
     if _is_full_finetune(raw_cfg, flag=full_finetune):
         _validate_full_finetune_deployment(raw_cfg, config_path)
         _dispatch_full_finetune_run(
@@ -1495,7 +1587,8 @@ def create_run(
     if volume or volume_size or any(raw_cfg.get(k) is not None for k in ("volume", "volume_size")):
         console.print(
             "[red]Error:[/red] --volume / --volume-size (and top-level `volume` / "
-            "`volume_size` in the TOML) are only supported for full-FT runs."
+            "`volume_size` in the TOML) are only supported for full-FT and "
+            "SFT runs."
         )
         raise typer.Exit(1)
 
@@ -2362,6 +2455,8 @@ def get_run(
         console.print(f"  Rollouts per Example: {formatted['rollouts']}")
         if run.max_tokens:
             console.print(f"  Max Tokens: {run.max_tokens}")
+        if run.volume_name:
+            console.print(f"  Volume: [cyan]{run.volume_name}[/cyan]")
         if run.wandb_project:
             console.print(f"  W&B: {run.wandb_entity or ''}/{run.wandb_project}")
         if run.team_id:

@@ -1,8 +1,19 @@
-"""`prime volumes`: named volumes FFT runs write their outputs to.
+"""`prime volumes`: named volumes for dedicated training runs (full-FT and SFT).
 
 A volume is a PVC owned by your team (or you) on the cluster it was
 created on. `prime train config.toml --volume <name>` makes the run
 write under `runs/<runId>/` on it, and it outlives every run.
+
+Hosted SFT runs also read their dataset from the volume: the training
+container mounts the volume read-only at `/volume`, so an SFT config's
+`[data] name` must point at a path on the volume (e.g.
+`/volume/datasets/<name>`, or the relative `datasets/<name>` — the
+platform resolves it) before launch. This command manages the
+volume lifecycle (create/list/resize/delete, plus `prime volumes ssh` for
+read-write sessions); put datasets there yourself with
+`prime volumes ssh <name> --read-write` and the huggingface CLI inside
+that session (`hf download <repo> --repo-type dataset --local-dir
+datasets/<name>`) — the trainer never downloads.
 """
 
 import os
@@ -31,7 +42,7 @@ from ..utils import (
 )
 
 app = PlainTyper(
-    help="Manage volumes for full-FT run outputs (closed beta)",
+    help="Manage volumes for dedicated run outputs and SFT datasets (closed beta)",
     no_args_is_help=True,
 )
 console = get_console()

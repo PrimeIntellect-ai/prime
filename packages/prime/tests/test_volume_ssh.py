@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 from prime_cli.api.training import HostedTrainingClient
-from prime_cli.commands import volumes
+from prime_cli.commands import factory, volumes
 from prime_cli.main import app
 from prime_cli.volume_gateway import GatewayError, relay
 from typer.testing import CliRunner
@@ -400,6 +400,123 @@ def test_client_sends_cluster_only_when_set():
     client.create_volume("v", "1Ti")
     assert posted[0]["cluster"] == "gpu-east"
     assert "cluster" not in posted[1]
+
+
+def test_factory_list_shows_name_id_and_gpus(monkeypatch):
+    from prime_cli.api.training import TrainingClusterInfo
+
+    clusters = [
+        TrainingClusterInfo(
+            clusterId="c1",
+            name="telus",
+            displayName="telus",
+            gpuType="H200_141GB",
+            totalGpus=32,
+            freeGpus=24,
+            cordoned=False,
+            status="online",
+        ),
+        # Cordoned + offline: shown with the reason, not hidden.
+        TrainingClusterInfo(
+            clusterId="c2",
+            name="hostpath-box",
+            displayName="hostpath-box",
+            gpuType=None,
+            totalGpus=None,
+            freeGpus=None,
+            cordoned=True,
+            status="offline",
+        ),
+    ]
+    monkeypatch.setattr(
+        factory, "_client", lambda: (SimpleNamespace(list_clusters=lambda **kw: clusters), None)
+    )
+    env = {"PRIME_DISABLE_VERSION_CHECK": "1", "COLUMNS": "200"}
+
+    table = CliRunner().invoke(app, ["factory", "list"], env=env)
+    assert table.exit_code == 0, table.output
+    assert "GPU type" in table.output and "GPUs" in table.output
+    assert "telus" in table.output and "c1" in table.output
+    assert "24/32" in table.output
+    assert "hostpath-box" in table.output and "c2" in table.output
+
+    as_json = CliRunner().invoke(app, ["factory", "list", "-o", "json"], env=env)
+    assert json.loads(as_json.output) == [
+        {
+            "clusterId": "c1",
+            "name": "telus",
+            "displayName": "telus",
+            "gpuType": "H200_141GB",
+            "totalGpus": 32,
+            "freeGpus": 24,
+            "cordoned": False,
+            "status": "online",
+        },
+        {
+            "clusterId": "c2",
+            "name": "hostpath-box",
+            "displayName": "hostpath-box",
+            "gpuType": None,
+            "totalGpus": None,
+            "freeGpus": None,
+            "cordoned": True,
+            "status": "offline",
+        },
+    ]
+
+
+def test_factory_list_empty_message(monkeypatch):
+    monkeypatch.setattr(
+        factory, "_client", lambda: (SimpleNamespace(list_clusters=lambda **kw: []), None)
+    )
+    result = CliRunner().invoke(
+        app,
+        ["factory", "list"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1", "COLUMNS": "200"},
+    )
+    assert result.exit_code == 0, result.output
+    assert "No clusters assigned yet." in result.output
+
+
+def test_create_help_points_at_the_discovery_command():
+    # COLUMNS=200 keeps the --cluster help on one line; wrapped help puts
+    # the box border between the words and breaks substring asserts.
+    result = CliRunner().invoke(
+        app,
+        ["volumes", "create", "--help"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1", "COLUMNS": "200"},
+    )
+    assert result.exit_code == 0, result.output
+    assert "Cluster name or id to create the volume on" in result.output
+    assert "prime factory list" in result.output
+
+
+def test_client_list_clusters_wire_contract():
+    from prime_cli.api.training import TrainingClusterInfo
+
+    requested = []
+    body = {
+        "clusters": [
+            {
+                "clusterId": "c1",
+                "name": "telus",
+                "displayName": "telus",
+                "gpuType": "H200_141GB",
+                "totalGpus": 32,
+                "freeGpus": 24,
+                "cordoned": False,
+                "status": "online",
+            }
+        ]
+    }
+    api = SimpleNamespace(get=lambda path, params: requested.append((path, params)) or body)
+    client = HostedTrainingClient(api)
+    assert client.list_clusters() == [TrainingClusterInfo(**body["clusters"][0])]
+    client.list_clusters("t1")
+    assert requested == [
+        ("/training/clusters", None),
+        ("/training/clusters", {"teamId": "t1"}),
+    ]
 
 
 def _setup(monkeypatch, tmp_path, which, run_code=0, stuck=False, find_stdout=""):

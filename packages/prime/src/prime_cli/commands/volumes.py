@@ -59,7 +59,10 @@ def create(
     cluster: str | None = typer.Option(
         None,
         "--cluster",
-        help="Cluster name to create the volume on (default: your first available cluster)",
+        help=(
+            "Cluster name or id to create the volume on (default: your first "
+            "available cluster). Run `prime factory list` to see your choices."
+        ),
     ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:

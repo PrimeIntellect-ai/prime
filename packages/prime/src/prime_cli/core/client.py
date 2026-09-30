@@ -17,7 +17,9 @@ def _default_user_agent() -> str:
 class APIError(Exception):
     """Base API exception"""
 
-    pass
+    # The JSON error response, when there was one; carries structured
+    # fields next to `detail` (e.g. errorCode) for callers that branch on them.
+    body: Optional[Dict[str, Any]] = None
 
 
 class UnauthorizedError(APIError):
@@ -160,7 +162,9 @@ class APIClient:
             try:
                 error_response = e.response.json()
                 if isinstance(error_response, dict) and "detail" in error_response:
-                    raise error_cls(f"HTTP {e.response.status_code}: {error_response['detail']}")
+                    error = error_cls(f"HTTP {e.response.status_code}: {error_response['detail']}")
+                    error.body = error_response
+                    raise error
             except (ValueError, KeyError):
                 pass
 
@@ -306,7 +310,9 @@ class AsyncAPIClient:
             try:
                 error_response = e.response.json()
                 if isinstance(error_response, dict) and "detail" in error_response:
-                    raise error_cls(f"HTTP {e.response.status_code}: {error_response['detail']}")
+                    error = error_cls(f"HTTP {e.response.status_code}: {error_response['detail']}")
+                    error.body = error_response
+                    raise error
             except (ValueError, KeyError):
                 pass
 

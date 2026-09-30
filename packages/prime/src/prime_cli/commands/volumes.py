@@ -30,7 +30,7 @@ from rich.markup import escape
 from rich.table import Table
 
 from prime_cli.api.training import HostedTrainingClient
-from prime_cli.core import APIClient, APIError, Config
+from prime_cli.core import APIClient, APIError, Config, NotFoundError
 from prime_cli.volume_gateway import GatewayError, relay
 
 from ..utils import (
@@ -127,9 +127,102 @@ def delete(
     try:
         client.delete_volume(name, team_id=team_id)
     except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+        body = e.body or {}
+        if body.get("errorCode") != "volume_in_use" or body.get("kind") != "sessions":
+            console.print(f"[red]Error:[/red] {escape(str(e))}")
+            if body.get("kind") == "runs":
+                console.print("Stop them with: prime train stop <run-id>")
+            elif body.get("errorCode") is None and "live run(s)" in str(e):
+                # Older backends count runs and SSH sessions together.
+                console.print(
+                    "Stop runs with `prime train stop <run-id>` and SSH sessions "
+                    f"with `prime volumes stop {escape(name)} <session-id>`."
+                )
+            raise typer.Exit(1)
+        _end_sessions(client, name, team_id, body.get("count", 0), yes)
+        try:
+            client.delete_volume(name, team_id=team_id)
+        except APIError as retry_error:
+            console.print(f"[red]Error:[/red] {escape(str(retry_error))}")
+            raise typer.Exit(1) from retry_error
     console.print(f"[green]Deleting volume {name}.[/green]")
+
+
+# Session states that still block a volume delete (the platform's guard);
+# anything else, or a session that is gone (404), no longer counts.
+_BLOCKING_SESSION_STATES = ("PENDING", "DEPLOYING", "RUNNING", "TERMINATING", "TOMBSTONED")
+# How long `prime volumes delete` waits for ended sessions to tear down.
+_SESSION_END_TIMEOUT = 300
+
+
+def _end_sessions(client, name: str, team_id, count: int, yes: bool) -> None:
+    """Offer to stop the caller's SSH sessions that block deleting `name`,
+    then wait until none of them counts any more. Raises typer.Exit when the
+    user declines, when sessions belong to someone else, or on timeout."""
+    manual = f"Stop them with `prime volumes stop {escape(name)} <session-id>` and retry."
+    try:
+        sessions = client.list_volume_sessions(name, team_id=team_id)
+    except NotFoundError:
+        console.print(
+            f"[red]Volume {escape(name)} has {count} active SSH session(s)[/red], and this "
+            f"platform cannot list them. {manual}"
+        )
+        raise typer.Exit(1)
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
+        raise typer.Exit(1) from e
+    if len(sessions) < count:
+        console.print(
+            f"[red]Volume {escape(name)} has {count} active SSH session(s); "
+            f"{len(sessions)} of them are yours.[/red] The others belong to other team "
+            "members, who must end them (idle sessions end after 30 minutes)."
+        )
+        raise typer.Exit(1)
+    if not confirm_or_skip(
+        f"Volume {name} has {len(sessions)} active SSH session(s). End them and delete the volume?",
+        yes,
+    ):
+        raise typer.Exit(0)
+    for s in sessions:
+        try:
+            client.stop_volume_session(name, s.id, team_id=team_id)
+        except NotFoundError:
+            continue
+        except APIError as e:
+            console.print(f"[red]Error stopping session {s.id}:[/red] {escape(str(e))}")
+            raise typer.Exit(1) from e
+        console.print(f"Stopping session {s.id}.")
+
+    pending = {s.id for s in sessions}
+    errors = 0
+    deadline = time.monotonic() + _SESSION_END_TIMEOUT
+    with console.status(
+        f"Waiting for {len(pending)} session(s) to end (up to 5 minutes)...", spinner="dots"
+    ):
+        while pending:
+            for session_id in sorted(pending):
+                try:
+                    session = client.get_volume_session(name, session_id, team_id=team_id)
+                except NotFoundError:
+                    session = None
+                except APIError as e:
+                    errors += 1
+                    if errors >= _MAX_POLL_ERRORS:
+                        console.print(f"[red]Error:[/red] {escape(str(e))}")
+                        raise typer.Exit(1) from e
+                    continue
+                errors = 0
+                if session is None or session.status not in _BLOCKING_SESSION_STATES:
+                    pending.discard(session_id)
+                    console.print(f"Session {session_id} ended.")
+            if pending and time.monotonic() >= deadline:
+                console.print(
+                    f"[yellow]{len(pending)} session(s) are still ending. Retry "
+                    f"`prime volumes delete {escape(name)}` in a few minutes.[/yellow]"
+                )
+                raise typer.Exit(1)
+            if pending:
+                time.sleep(5)
 
 
 # Explicitly parse the backend endpoint instead of passing an untrusted string

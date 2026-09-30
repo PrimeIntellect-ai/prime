@@ -9,7 +9,6 @@ import sys
 import tempfile
 import time
 from datetime import datetime, timedelta
-from inspect import signature
 from typing import Any, Dict, List, Optional
 
 import typer
@@ -1208,12 +1207,6 @@ def run(
         prime sandbox run <id> -- bash -c "echo hello"
     """
     try:
-        if user is not None and "user" not in signature(SandboxClient.execute_command).parameters:
-            console.print(
-                "[red]The installed prime-sandboxes SDK does not support --user. "
-                "Upgrade prime-sandboxes to a release with command-user support.[/red]"
-            )
-            raise typer.Exit(1)
         base_client = APIClient()
         sandbox_client = SandboxClient(base_client)
 

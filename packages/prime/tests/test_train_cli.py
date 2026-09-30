@@ -615,6 +615,26 @@ def test_train_source_overlay_is_rejected_on_the_lora_path(monkeypatch, tmp_path
         assert "--ref / --pr" in result.output and "full-FT" in result.output, args
 
 
+def test_train_source_overlay_reaches_the_sft_payload(monkeypatch, tmp_path: Path) -> None:
+    # SFT shares the dedicated-run dispatch with full-FT, so --ref / --pr
+    # are forwarded there too (never silently dropped).
+    captured = _capture_fft_dispatch(monkeypatch)
+    sha = "0123456789abcdef0123456789abcdef01234567"
+    monkeypatch.setattr("prime_cli.api.training.resolve_pull_request_head", lambda pr_number: sha)
+    cfg = tmp_path / "sft.toml"
+    sft = '[model]\nname = "Qwen/Qwen3-0.6B"\n\n[data]\nname = "/volume/datasets/x"\n'
+    cfg.write_text(sft)
+    result = runner.invoke(
+        app, ["train", str(cfg), "--sft", "--ref", "feat/x", "-y", "-o", "json"], env=TEST_ENV
+    )
+    assert result.exit_code == 0, result.output
+    result = runner.invoke(
+        app, ["train", str(cfg), "--sft", "--pr", "42", "-y", "-o", "json"], env=TEST_ENV
+    )
+    assert result.exit_code == 0, result.output
+    assert [(p["mode"], p["sourceRef"]) for p in captured] == [("sft", "feat/x"), ("sft", sha)]
+
+
 def _gh_pull(monkeypatch, status: int = 200, body: Any = None, headers: dict | None = None):
     """Fake the one GitHub call resolve_pull_request_head makes; returns the
     request headers it was sent so tests can assert on auth."""

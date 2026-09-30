@@ -1590,7 +1590,7 @@ def create_run(
         hidden=True,
         help=(
             "Restricted: prime-rl git ref (branch, tag, or sha) to run on top "
-            "of the image (full-FT only). The dispatch must be a team run and "
+            "of the image (full-FT / SFT only). The dispatch must be a team run and "
             "the team needs sourceRef access granted by Prime (contact "
             "support), on a deployment with source overlays enabled; other "
             "callers get a 403. The pods overlay that source onto the image at "
@@ -1604,8 +1604,8 @@ def create_run(
         "--pr",
         hidden=True,
         help=(
-            "Restricted: prime-rl pull request number to run (full-FT only; "
-            "same access as --ref). Shorthand for --ref <PR head sha>; fork "
+            "Restricted: prime-rl pull request number to run (full-FT / SFT "
+            "only; same access as --ref). Shorthand for --ref <PR head sha>; fork "
             "and already-merged PRs are not supported."
         ),
     ),
@@ -1701,6 +1701,12 @@ def create_run(
             volume=volume,
             volume_size=volume_size,
             mode="sft",
+            # Same dedicated-pod dispatch as full-FT, so the source overlay
+            # applies here too. Forwarded rather than dropped: the helper
+            # already honours a TOML `source_ref` for SFT, and a silently
+            # ignored --ref / --pr would launch without the requested code.
+            source_ref=ref,
+            source_pr=pr,
         )
         return
     if _is_full_finetune(raw_cfg, flag=full_finetune):
@@ -1721,13 +1727,14 @@ def create_run(
         )
         return
 
-    # --ref / --pr are full-FT only: the LoRA path runs on shared
-    # deployments and has no per-run source to overlay. Reject rather than
-    # silently launching without the requested code.
+    # --ref / --pr are for the dedicated (full-FT / SFT) dispatch only: the
+    # LoRA path runs on shared deployments and has no per-run source to
+    # overlay. Reject rather than silently launching without the requested
+    # code.
     if ref is not None or pr is not None or raw_cfg.get("source_ref") is not None:
         console.print(
             "[red]Error:[/red] --ref / --pr (and top-level `source_ref` in the "
-            "TOML) are only supported for full-FT runs."
+            "TOML) are only supported for full-FT and SFT runs."
         )
         raise typer.Exit(1)
 

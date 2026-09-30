@@ -33,7 +33,12 @@ def _out(result) -> str:
 class FakeClient:
     def __init__(self, delete_errors, sessions=(), polls=None, list_error=None):
         self.delete_errors = list(delete_errors)
-        self.sessions = [SimpleNamespace(id=s) for s in sessions]
+        self.sessions = [
+            SimpleNamespace(
+                id=s, status="RUNNING", read_only=True, created_at="2026-09-30T00:00:00"
+            )
+            for s in sessions
+        ]
         # Per session id, the statuses (or errors) successive polls return.
         self.polls = {k: list(v) for k, v in (polls or {}).items()}
         self.list_error = list_error
@@ -98,55 +103,100 @@ def test_old_backend_refusal_hints_both_stop_commands(run):
     assert client.calls == [("delete", "data")]
 
 
-def test_sessions_refusal_ends_sessions_waits_then_retries_delete(run):
-    client = FakeClient(
-        [_in_use("sessions"), None],
+def _unsupported(status: int) -> APIError:
+    """What a backend without GET /volumes/{name}/sessions answers."""
+    detail = {404: "Not Found", 405: "Method Not Allowed"}[status]
+    error = (NotFoundError if status == 404 else APIError)(f"HTTP {status}: {detail}")
+    error.body = {"detail": detail}
+    return error
+
+
+FULL_FLOW_CALLS = [
+    ("delete", "data"),
+    ("list", "data"),
+    ("stop", "s1"),
+    ("stop", "s2"),
+    ("get", "s1"),
+    ("get", "s2"),
+    ("get", "s1"),
+    ("get", "s2"),
+    ("delete", "data"),
+]
+
+
+def _two_sessions(delete_errors):
+    return FakeClient(
+        delete_errors,
         sessions=["s1", "s2"],
         polls={
             "s1": ["TERMINATING", NotFoundError("gone")],
             "s2": [APIError("502"), "STOPPED"],
         },
     )
-    result = run(client, input="y\ny\n")
+
+
+def test_choice_1_shows_sessions_ends_them_waits_then_retries_delete(run):
+    client = _two_sessions([_in_use("sessions"), None])
+    result = run(client, input="y\n1\n")
     assert result.exit_code == 0, result.output
-    assert "has 2 active SSH session(s). End them and delete the volume?" in _out(result)
-    assert client.calls == [
-        ("delete", "data"),
-        ("list", "data"),
-        ("stop", "s1"),
-        ("stop", "s2"),
-        ("get", "s1"),
-        ("get", "s2"),
-        ("get", "s1"),
-        ("get", "s2"),
-        ("delete", "data"),
-    ]
-    assert "Session s1 ended. Session s2 ended." in _out(result)
-    assert "Deleting volume data." in _out(result)
+    out = _out(result)
+    assert "Volume 'data' has 2 active SSH session(s)." in out
+    assert "┃ Session ┃ Status ┃ Read-only ┃ Created ┃" in out
+    assert "│ s1 │ RUNNING │ yes │ 2026-09-30T00:00:00 │" in out
+    assert "1) end session(s) and delete the volume" in out
+    assert "3) cancel Select [3]:" in out
+    # The table comes before the prompt.
+    assert out.index("│ s2 │") < out.index("Select [3]")
+    assert client.calls == FULL_FLOW_CALLS
+    assert "Session s1 ended. Session s2 ended." in out
+    assert "Deleting volume data." in out
 
 
-def test_declining_the_prompt_stops_nothing(run):
+def test_yes_picks_choice_1_without_prompting(run):
+    client = _two_sessions([_in_use("sessions"), None])
+    result = run(client, "--yes")
+    assert result.exit_code == 0, result.output
+    assert "Select" not in result.output
+    assert "│ s1 │ RUNNING │" in _out(result)
+    assert client.calls == FULL_FLOW_CALLS
+
+
+def test_choice_2_ends_sessions_and_keeps_the_volume(run):
+    client = _two_sessions([_in_use("sessions")])
+    result = run(client, input="y\n2\n")
+    assert result.exit_code == 0, result.output
+    assert client.calls == FULL_FLOW_CALLS[:-1]
+    assert "Session(s) ended; volume data kept." in _out(result)
+    assert "Deleting volume" not in result.output
+
+
+@pytest.mark.parametrize("answer", ["3\n", "\n"], ids=["choice-3", "enter-defaults-to-3"])
+def test_choice_3_cancels_and_stops_nothing(run, answer):
     client = FakeClient([_in_use("sessions", 1)], sessions=["s1"])
-    result = run(client, input="y\nn\n")
+    result = run(client, input="y\n" + answer)
     assert result.exit_code == 0
+    assert "prime volumes stop data <session-id>" in _out(result)
     assert client.calls == [("delete", "data"), ("list", "data")]
 
 
-def test_other_members_sessions_are_not_touched(run):
+def test_other_members_sessions_suppress_the_prompt(run):
     client = FakeClient([_in_use("sessions", 3)], sessions=["s1"])
-    result = run(client, "--yes")
+    result = run(client, input="y\n")
     assert result.exit_code == 1
     assert "1 of them are yours" in _out(result)
+    assert "Select" not in result.output
     assert client.calls == [("delete", "data"), ("list", "data")]
 
 
-def test_backend_without_list_route_asks_to_stop_manually(run):
-    client = FakeClient([_in_use("sessions")], list_error=NotFoundError("HTTP 404"))
+@pytest.mark.parametrize("status", [404, 405])
+def test_backend_without_list_route_asks_to_stop_manually(run, status):
+    client = FakeClient([_in_use("sessions")], list_error=_unsupported(status))
     result = run(client, "--yes")
     assert result.exit_code == 1
     assert "cannot list them" in _out(result)
     assert "prime volumes stop data <session-id>" in _out(result)
-    assert ("stop", "s1") not in client.calls
+    assert "Select" not in result.output
+    assert client.calls == [("delete", "data"), ("list", "data")]
 
 
 def test_sessions_that_never_end_time_out_without_retrying(run, monkeypatch):

@@ -25,6 +25,7 @@ import sys
 import time
 from pathlib import Path
 
+import click
 import typer
 from rich.markup import escape
 from rich.table import Table
@@ -100,6 +101,42 @@ def list_volumes(
     console.print(table)
 
 
+def _sessions_table(sessions) -> Table:
+    table = Table("Session", "Status", "Read-only", "Created")
+    for s in sessions:
+        table.add_row(s.id, s.status, "yes" if s.read_only else "no", s.created_at or "-")
+    return table
+
+
+def _no_session_list(error: APIError) -> bool:
+    """True when the backend predates GET /volumes/{name}/sessions. Its router
+    answers 405 (POST exists on the path) or a bare 404, never the volume's
+    own "not found" message."""
+    return (error.body or {}).get("detail") in ("Not Found", "Method Not Allowed")
+
+
+@app.command(no_args_is_help=True)
+def sessions(
+    name: str = typer.Argument(..., help="Volume name"),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """List your SSH sessions on a volume."""
+    validate_output_format(output, console)
+    client, team_id = _client()
+    try:
+        found = client.list_volume_sessions(name, team_id=team_id)
+    except APIError as e:
+        if _no_session_list(e):
+            console.print("[red]Listing volume sessions is not supported by this backend.[/red]")
+        else:
+            console.print(f"[red]Error:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    if output == "json":
+        output_data_as_json([s.model_dump(by_alias=True) for s in found], console)
+        return
+    console.print(_sessions_table(found))
+
+
 @app.command()
 def resize(
     name: str = typer.Argument(..., help="Volume name"),
@@ -118,7 +155,12 @@ def resize(
 @app.command()
 def delete(
     name: str = typer.Argument(..., help="Volume name"),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation"),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip confirmations; if your SSH sessions block the delete, end them and delete",
+    ),
 ) -> None:
     """Delete a volume and everything on it."""
     if not confirm_or_skip(f"Delete volume {name} and all run data on it?", yes):
@@ -139,7 +181,9 @@ def delete(
                     f"with `prime volumes stop {escape(name)} <session-id>`."
                 )
             raise typer.Exit(1)
-        _end_sessions(client, name, team_id, body.get("count", 0), yes)
+        if not _end_sessions(client, name, team_id, body.get("count", 0), yes):
+            console.print(f"Session(s) ended; volume {escape(name)} kept.")
+            return
         try:
             client.delete_volume(name, team_id=team_id)
         except APIError as retry_error:
@@ -153,24 +197,30 @@ def delete(
 _BLOCKING_SESSION_STATES = ("PENDING", "DEPLOYING", "RUNNING", "TERMINATING", "TOMBSTONED")
 # How long `prime volumes delete` waits for ended sessions to tear down.
 _SESSION_END_TIMEOUT = 300
+_SESSION_CHOICES = """
+  1) end session(s) and delete the volume
+  2) end session(s) only — stop them, keep the volume
+  3) cancel
+"""
 
 
-def _end_sessions(client, name: str, team_id, count: int, yes: bool) -> None:
-    """Offer to stop the caller's SSH sessions that block deleting `name`,
-    then wait until none of them counts any more. Raises typer.Exit when the
-    user declines, when sessions belong to someone else, or on timeout."""
+def _end_sessions(client, name: str, team_id, count: int, yes: bool) -> bool:
+    """Show the caller's SSH sessions that block deleting `name`, ask what to
+    do (`yes` picks 1), then stop them and wait until none counts any more.
+    Returns True when the volume should be deleted next. Raises typer.Exit on
+    cancel, when sessions belong to someone else, or on timeout."""
     manual = f"Stop them with `prime volumes stop {escape(name)} <session-id>` and retry."
     try:
         sessions = client.list_volume_sessions(name, team_id=team_id)
-    except NotFoundError:
+    except APIError as e:
+        if not _no_session_list(e):
+            console.print(f"[red]Error:[/red] {escape(str(e))}")
+            raise typer.Exit(1) from e
         console.print(
             f"[red]Volume {escape(name)} has {count} active SSH session(s)[/red], and this "
             f"platform cannot list them. {manual}"
         )
         raise typer.Exit(1)
-    except APIError as e:
-        console.print(f"[red]Error:[/red] {escape(str(e))}")
-        raise typer.Exit(1) from e
     if len(sessions) < count:
         console.print(
             f"[red]Volume {escape(name)} has {count} active SSH session(s); "
@@ -178,10 +228,17 @@ def _end_sessions(client, name: str, team_id, count: int, yes: bool) -> None:
             "members, who must end them (idle sessions end after 30 minutes)."
         )
         raise typer.Exit(1)
-    if not confirm_or_skip(
-        f"Volume {name} has {len(sessions)} active SSH session(s). End them and delete the volume?",
-        yes,
-    ):
+    console.print(f"Volume '{escape(name)}' has {len(sessions)} active SSH session(s).")
+    console.print(_sessions_table(sessions))
+    if yes:
+        choice = "1"
+    else:
+        console.print(_SESSION_CHOICES)
+        choice = typer.prompt(
+            "Select", type=click.Choice(["1", "2", "3"]), default="3", show_choices=False
+        )
+    if choice == "3":
+        console.print(manual)
         raise typer.Exit(0)
     for s in sessions:
         try:
@@ -216,13 +273,18 @@ def _end_sessions(client, name: str, team_id, count: int, yes: bool) -> None:
                     pending.discard(session_id)
                     console.print(f"Session {session_id} ended.")
             if pending and time.monotonic() >= deadline:
+                retry = (
+                    f"Retry `prime volumes delete {escape(name)}` in a few minutes."
+                    if choice == "1"
+                    else "They will finish shortly."
+                )
                 console.print(
-                    f"[yellow]{len(pending)} session(s) are still ending. Retry "
-                    f"`prime volumes delete {escape(name)}` in a few minutes.[/yellow]"
+                    f"[yellow]{len(pending)} session(s) are still ending. {retry}[/yellow]"
                 )
                 raise typer.Exit(1)
             if pending:
                 time.sleep(5)
+    return choice == "1"
 
 
 # Explicitly parse the backend endpoint instead of passing an untrusted string

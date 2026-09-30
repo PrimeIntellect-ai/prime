@@ -1,8 +1,9 @@
 """`prime volumes`: named volumes for dedicated training runs (full-FT and SFT).
 
-A volume is a PVC owned by your team (or you) on the cluster it was
-created on. `prime train config.toml --volume <name>` makes the run
-write under `runs/<runId>/` on it, and it outlives every run.
+A volume is a PVC owned by your team (or you). Cluster-native volumes stay
+on their creation cluster; enabled JuiceFS volumes can attach to other clusters.
+`prime train config.toml --volume <name>` writes under `runs/<runId>/` on the
+volume, and the volume outlives every run.
 
 Hosted SFT runs also read their dataset from the volume: the training
 container mounts the volume read-only at `/volume`, so an SFT config's
@@ -29,7 +30,7 @@ import typer
 from rich.markup import escape
 from rich.table import Table
 
-from prime_cli.api.training import HostedTrainingClient
+from prime_cli.api.training import HostedTrainingClient, VolumeBackend
 from prime_cli.core import APIClient, APIError, Config
 from prime_cli.volume_gateway import GatewayError, relay
 
@@ -61,13 +62,18 @@ def create(
         "--cluster",
         help="Cluster name to create the volume on (default: your first available cluster)",
     ),
+    backend: VolumeBackend | None = typer.Option(
+        None,
+        "--backend",
+        help="Storage backend (default: cluster-native; juicefs requires enablement)",
+    ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
     """Create a volume on your team's (or personal) cluster."""
     validate_output_format(output, console)
     client, team_id = _client()
     try:
-        volume = client.create_volume(name, size, team_id=team_id, cluster=cluster)
+        volume = client.create_volume(name, size, team_id=team_id, cluster=cluster, backend=backend)
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
@@ -94,10 +100,55 @@ def list_volumes(
     if output == "json":
         output_data_as_json([v.model_dump(by_alias=True) for v in volumes], console)
         return
-    table = Table("Name", "Size", "Cluster", "Status", "Created")
+    table = Table("Name", "Size", "Backend", "Cluster", "Attachments", "Status", "Created")
     for v in volumes:
-        table.add_row(v.name, v.size or "-", v.cluster or "-", v.status, v.created_at or "-")
+        attachments = ", ".join(f"{a.cluster or a.cluster_id} ({a.status})" for a in v.attachments)
+        table.add_row(
+            v.name,
+            v.size or "-",
+            v.backend.value,
+            v.cluster or "-",
+            attachments or "-",
+            v.status,
+            v.created_at or "-",
+        )
     console.print(table)
+
+
+@app.command()
+def attach(
+    name: str = typer.Argument(..., help="JuiceFS volume name"),
+    cluster: str = typer.Option(..., "--cluster", help="Target cluster name or id"),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """Attach a portable volume on another cluster without copying its data."""
+    validate_output_format(output, console)
+    client, team_id = _client()
+    try:
+        attachment = client.attach_volume(name, cluster, team_id=team_id)
+    except APIError as exc:
+        console.print(f"[red]Error:[/red] {escape(str(exc))}")
+        raise typer.Exit(1)
+    if output == "json":
+        output_data_as_json(attachment.model_dump(by_alias=True), console)
+        return
+    target = attachment.cluster or attachment.cluster_id
+    console.print(f"Attachment on {escape(target)}: {escape(attachment.status)}")
+
+
+@app.command()
+def detach(
+    name: str = typer.Argument(..., help="JuiceFS volume name"),
+    cluster: str = typer.Option(..., "--cluster", help="Attached cluster name or id"),
+) -> None:
+    """Detach an unused cluster binding, retaining the volume's data."""
+    client, team_id = _client()
+    try:
+        client.detach_volume(name, cluster, team_id=team_id)
+    except APIError as exc:
+        console.print(f"[red]Error:[/red] {escape(str(exc))}")
+        raise typer.Exit(1)
+    console.print(f"Detaching volume {escape(name)} from {escape(cluster)}; data is retained.")
 
 
 @app.command()

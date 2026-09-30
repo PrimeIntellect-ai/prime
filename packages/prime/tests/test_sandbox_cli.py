@@ -1030,3 +1030,23 @@ def test_sandbox_create_defaults_disk_size_gb_to_5(
     assert result.exit_code == 0, result.output
     assert captured["request"].disk_size_gb == 5.0
     assert "5.0GB disk" in strip_ansi(result.output)
+
+
+@pytest.mark.parametrize("user_option", [[], ["--user", "ubuntu"], ["-u", "ubuntu"]])
+def test_sandbox_run_forwards_guest_user(monkeypatch, user_option):
+    calls = []
+
+    class FakeSandboxClient:
+        def __init__(self, _client):
+            pass
+
+        def execute_command(self, *args, user=None, **kwargs):
+            calls.append((args, {**kwargs, "user": user}))
+            return SimpleNamespace(stdout="", stderr="", exit_code=0)
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.APIClient", lambda: object())
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient", FakeSandboxClient)
+    result = runner.invoke(app, ["sandbox", "run", "sbx-1", *user_option, "--", "id"])
+    assert result.exit_code == 0, result.output
+    assert calls[0][0][:2] == ("sbx-1", "id")
+    assert calls[0][1].get("user") == ("ubuntu" if user_option else None)

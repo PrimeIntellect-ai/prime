@@ -35,7 +35,8 @@ class _AsyncFakeCache:
         return _auth_payload()
 
 
-def test_sync_execute_command_uses_connect():
+@pytest.mark.parametrize("user", [None, "ubuntu"])
+def test_sync_execute_command_uses_connect(user):
     client = SandboxClient(APIClient(api_key="test-key"))
     cast(Any, client)._auth_cache = _FakeCache()
 
@@ -43,19 +44,21 @@ def test_sync_execute_command_uses_connect():
 
     def _connect(*_args, **_kwargs):
         called["connect"] = True
+        assert _kwargs["user"] == user
         return CommandResponse(stdout="ok", stderr="", exit_code=0)
 
     client_any = cast(Any, client)
     client_any._execute_command_connect_rpc = _connect
 
-    result = client.execute_command("sbx-gpu", "echo hi")
+    result = client.execute_command("sbx-gpu", "echo hi", user=user)
 
     assert called["connect"]
     assert result.exit_code == 0
 
 
 @pytest.mark.asyncio
-async def test_async_execute_command_uses_connect():
+@pytest.mark.parametrize("user", [None, "ubuntu"])
+async def test_async_execute_command_uses_connect(user):
     client = AsyncSandboxClient(api_key="test-key")
     cast(Any, client)._auth_cache = _AsyncFakeCache()
 
@@ -63,13 +66,14 @@ async def test_async_execute_command_uses_connect():
 
     async def _connect(*_args, **_kwargs):
         called["connect"] = True
+        assert _kwargs["user"] == user
         return CommandResponse(stdout="ok", stderr="", exit_code=0)
 
     client_any = cast(Any, client)
     client_any._execute_command_connect_rpc = _connect
 
     try:
-        result = await client.execute_command("sbx-gpu", "echo hi")
+        result = await client.execute_command("sbx-gpu", "echo hi", user=user)
 
         assert called["connect"]
         assert result.exit_code == 0
@@ -146,6 +150,7 @@ async def test_async_open_process_streams_vm_command_session(monkeypatch):
             "cat",
             working_dir="/workspace",
             env={"KEY": "value"},
+            user="ubuntu",
         )
         await process.write_stdin(b"input\n")
         await process.terminate()
@@ -162,6 +167,7 @@ async def test_async_open_process_streams_vm_command_session(monkeypatch):
         assert start_kwargs["timeout_ms"] == 24 * 60 * 60 * 1000
         assert client_init_kwargs["codec"] is GOOGLE_PROTOBUF_BINARY_CODEC
         assert client_init_kwargs["send_compression"] is None
+        assert calls[0][1].command.user == "ubuntu"
         assert calls[0][1].command.cwd == "/workspace"
         assert calls[0][1].command.envs == {"KEY": "value"}
         session_uuid = calls[0][1].session_uuid
@@ -232,13 +238,14 @@ async def test_process_recovery_retries_start_and_refreshes_rejected_auth(monkey
     cache = _RejectedTokenCache()
     cast(Any, client)._auth_cache = cache
     try:
-        process = await client.open_process("sbx-vm", "sleep 1")
+        process = await client.open_process("sbx-vm", "sleep 1", user="ubuntu")
 
         assert await process.wait() == 0
         # The PID was never observed, so recovery re-issues Start; the shared
         # session_uuid turns the retries into create-or-attach instead of respawns.
         assert len(start_requests) == 3
         assert len({request.session_uuid for request in start_requests}) == 1
+        assert all(request.command.user == "ubuntu" for request in start_requests)
         assert start_requests[0].session_uuid
         assert retry_tokens == ["Bearer stale", "Bearer fresh"]
         assert cache.invalidations == 1

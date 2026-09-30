@@ -1195,6 +1195,9 @@ def run(
         "--timeout",
         help="Timeout for the command in seconds",
     ),
+    user: Optional[str] = typer.Option(
+        None, "-u", "--user", help="Existing guest username (default: sandbox's configured user)"
+    ),
 ) -> None:
     """Execute a command in a sandbox.
 
@@ -1228,6 +1231,8 @@ def run(
             command_str = shlex.join(command)
 
         console.print(f"[bold blue]Executing command:[/bold blue] {command_str}")
+        if user is not None:
+            console.print(f"[bold blue]User:[/bold blue] {escape(user)}")
         if working_dir:
             console.print(f"[bold blue]Working directory:[/bold blue] {working_dir}")
         if env_vars:
@@ -1245,6 +1250,7 @@ def run(
                 working_dir,
                 env_vars if env_vars else None,
                 timeout=timeout,
+                **({"user": user} if user is not None else {}),
             )
 
         # End timing

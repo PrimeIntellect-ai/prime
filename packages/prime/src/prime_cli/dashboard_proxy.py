@@ -1359,9 +1359,21 @@ def start_detached_dashboard_proxy(
     # long-lived cookie capability or forge health/handoff replies. Merge
     # the loopback hosts into the existing NO_PROXY value (an explicit
     # user exclusion list must survive) rather than replacing it.
-    existing_no_proxy = child_env.get("NO_PROXY") or child_env.get("no_proxy") or ""
-    loopback = "127.0.0.1,localhost,::1"
-    child_env["NO_PROXY"] = child_env["no_proxy"] = f"{existing_no_proxy},{loopback}".lstrip(",")
+    # HTTPX treats a defined lowercase no_proxy as overriding uppercase NO_PROXY,
+    # so the user's effective exclusions are the UNION of both lists; merge them
+    # instead of letting either casing drop the other's entries.
+    upper_no_proxy = (child_env.get("NO_PROXY") or "").strip()
+    lower_no_proxy = (child_env.get("no_proxy") or "").strip()
+    merged: list[str] = []
+    for entry in (*upper_no_proxy.split(","), *lower_no_proxy.split(",")):
+        entry = entry.strip()
+        if entry and entry not in merged:
+            merged.append(entry)
+    merged.append("127.0.0.1")
+    merged.append("localhost")
+    merged.append("::1")
+    union_no_proxy = ",".join(merged)
+    child_env["NO_PROXY"] = child_env["no_proxy"] = union_no_proxy
     process = subprocess.Popen(  # noqa: S603 - fixed module command
         command,
         stdin=subprocess.DEVNULL,

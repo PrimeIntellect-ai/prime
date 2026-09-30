@@ -1050,3 +1050,28 @@ def test_sandbox_run_forwards_guest_user(monkeypatch, user_option):
     assert result.exit_code == 0, result.output
     assert calls[0][0][:2] == ("sbx-1", "id")
     assert calls[0][1].get("user") == ("ubuntu" if user_option else None)
+
+
+@pytest.mark.parametrize("user_option", [[], ["--user", "ubuntu"]])
+def test_sandbox_run_with_old_sdk(monkeypatch, user_option):
+    calls = []
+
+    class OldSandboxClient:
+        def __init__(self, _client):
+            pass
+
+        def execute_command(self, sandbox_id, command, working_dir, env, timeout=None):
+            calls.append((sandbox_id, command))
+            return SimpleNamespace(stdout="", stderr="", exit_code=0)
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.APIClient", lambda: object())
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient", OldSandboxClient)
+    result = runner.invoke(app, ["sandbox", "run", "sbx-1", *user_option, "--", "id"])
+    if user_option:
+        assert result.exit_code == 1
+        assert "does not support --user" in result.output
+        assert "Upgrade prime-sandboxes" in " ".join(result.output.split())
+        assert calls == []
+    else:
+        assert result.exit_code == 0, result.output
+        assert calls == [("sbx-1", "id")]

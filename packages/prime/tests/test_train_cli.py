@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -314,7 +315,12 @@ def test_train_stop_survives_any_poll_api_error(monkeypatch) -> None:
     assert "Error:" not in result.output
 
 
-def test_train_volume_flag_and_toml_key_reach_the_fft_payload(monkeypatch, tmp_path: Path) -> None:
+_FFT_BODY = (
+    '[model]\nname = "Qwen/Qwen3-0.6B"\n\n[deployment]\nnum_train_gpus = 1\nnum_infer_gpus = 1\n'
+)
+
+
+def _capture_fft_dispatch(monkeypatch) -> list[dict[str, Any]]:
     captured: list[dict[str, Any]] = []
 
     def fake_create_run(self, payload):
@@ -323,19 +329,20 @@ def test_train_volume_flag_and_toml_key_reach_the_fft_payload(monkeypatch, tmp_p
 
         return HostedTrainingRunResponse(run_id="r1", token_value="t")
 
-    _mock_volumes(monkeypatch, [_vol("my-ckpts"), _vol("from-toml")])
     monkeypatch.setattr("prime_cli.api.training.HostedTrainingClient.create_run", fake_create_run)
+    return captured
+
+
+def test_train_volume_flag_and_toml_key_reach_the_fft_payload(monkeypatch, tmp_path: Path) -> None:
+    _mock_volumes(monkeypatch, [_vol("my-ckpts"), _vol("from-toml")])
+    captured = _capture_fft_dispatch(monkeypatch)  # after _mock_volumes: last create_run patch wins
     cfg = tmp_path / "rl.toml"
-    body = (
-        '[model]\nname = "Qwen/Qwen3-0.6B"\n\n'
-        "[deployment]\nnum_train_gpus = 1\nnum_infer_gpus = 1\n"
-    )
-    cfg.write_text(body)
+    cfg.write_text(_FFT_BODY)
     result = runner.invoke(
         app, ["train", str(cfg), "--volume", "my-ckpts", "-y", "-o", "json"], env=TEST_ENV
     )
     assert result.exit_code == 0, result.output
-    cfg.write_text('volume = "from-toml"\n' + body)
+    cfg.write_text('volume = "from-toml"\n' + _FFT_BODY)
     result = runner.invoke(app, ["train", str(cfg), "-y", "-o", "json"], env=TEST_ENV)
     assert result.exit_code == 0, result.output
 
@@ -454,3 +461,313 @@ def test_train_volume_size_needs_volume(tmp_path: Path) -> None:
     result = runner.invoke(app, ["train", str(cfg), "--volume-size", "1Ti", "-y"], env=TEST_ENV)
     assert result.exit_code == 1
     assert "--volume-size" in result.output and "needs" in result.output
+
+
+def test_train_ref_flag_and_toml_key_reach_the_fft_payload(monkeypatch, tmp_path: Path) -> None:
+    captured = _capture_fft_dispatch(monkeypatch)
+    cfg = tmp_path / "rl.toml"
+    cfg.write_text(_FFT_BODY)
+    result = runner.invoke(
+        app, ["train", str(cfg), "--ref", "feat/my-branch", "-y", "-o", "json"], env=TEST_ENV
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["run"]["sourceRef"] == "feat/my-branch"
+
+    cfg.write_text('source_ref = "from-toml"\n' + _FFT_BODY)
+    result = runner.invoke(app, ["train", str(cfg), "-y", "-o", "json"], env=TEST_ENV)
+    assert result.exit_code == 0, result.output
+
+    # CLI flag wins over the TOML key.
+    result = runner.invoke(
+        app, ["train", str(cfg), "--ref", "abc123", "-y", "-o", "json"], env=TEST_ENV
+    )
+    assert result.exit_code == 0, result.output
+
+    assert [p.get("sourceRef") for p in captured] == ["feat/my-branch", "from-toml", "abc123"]
+    assert all("source_ref" not in p["config"] for p in captured)
+
+
+def test_train_pr_flag_resolves_head_sha_and_conflicts_with_ref(
+    monkeypatch, tmp_path: Path
+) -> None:
+    captured = _capture_fft_dispatch(monkeypatch)
+    sha = "0123456789abcdef0123456789abcdef01234567"
+    seen: list[int] = []
+
+    def fake_resolve(pr_number: int) -> str:
+        seen.append(pr_number)
+        return sha
+
+    monkeypatch.setattr("prime_cli.api.training.resolve_pull_request_head", fake_resolve)
+    cfg = tmp_path / "rl.toml"
+    cfg.write_text(_FFT_BODY)
+    result = runner.invoke(app, ["train", str(cfg), "--pr", "42", "-y", "-o", "json"], env=TEST_ENV)
+    assert result.exit_code == 0, result.output
+    assert seen == [42]
+    assert captured[0]["sourceRef"] == sha
+    # --output json must stay pure JSON: no "Resolved PR" line on stdout.
+    assert json.loads(result.output)["run"]["sourceRef"] == sha
+
+    # Table mode shows the resolved sha once, in the build banner, with the
+    # PR it came from.
+    result = runner.invoke(app, ["train", str(cfg), "--pr", "42", "-y"], env=TEST_ENV)
+    assert result.exit_code == 0, result.output
+    assert f"Source ref: {sha} (PR #42)" in result.output
+    assert result.output.count(sha) == 1
+
+    # A run that fails a local check never reaches GitHub.
+    def never(pr_number: int) -> str:
+        raise AssertionError("resolved a PR for a dispatch that fails locally")
+
+    monkeypatch.setattr("prime_cli.api.training.resolve_pull_request_head", never)
+    result = runner.invoke(
+        app, ["train", str(cfg), "--pr", "42", "-e", "FOO=bar", "-y"], env=TEST_ENV
+    )
+    assert result.exit_code == 1
+    assert "secret(s): FOO" in result.output
+    monkeypatch.setattr("prime_cli.api.training.resolve_pull_request_head", fake_resolve)
+
+    result = runner.invoke(
+        app, ["train", str(cfg), "--pr", "42", "--ref", "main", "-y"], env=TEST_ENV
+    )
+    assert result.exit_code == 1
+    assert "mutually exclusive" in result.output
+    assert len(captured) == 2  # the json + table dispatches above, nothing since
+
+
+def test_train_help_hides_source_overlay_flags() -> None:
+    # --ref / --pr are restricted (granted per team on the platform): they
+    # still parse (see the payload tests above) but must not appear in the
+    # public help panel.
+    result = runner.invoke(app, ["train", "--help"], env=TEST_ENV)
+    assert result.exit_code == 0
+    text = " ".join(result.output.split())
+    assert not re.search(r"--(ref|pr)(?![\w-])", text), text
+    assert "sourceRef access" not in text
+
+
+def test_train_ref_shape_is_checked_before_dispatch(monkeypatch, tmp_path: Path) -> None:
+    captured = _capture_fft_dispatch(monkeypatch)
+    cfg = tmp_path / "rl.toml"
+    cfg.write_text(_FFT_BODY)
+    for bad in (
+        "pull/42/head",
+        "refs/heads/x",
+        "",
+        "a b",
+        "feat/../main",
+        "feat//x",
+        "feat/.hidden",
+        "-x",
+        "x.lock",
+        "feat/x.lock/y",  # any component ending in .lock, not just the last
+        "feat/x.",  # trailing dot
+        "a" * 201,
+    ):
+        result = runner.invoke(app, ["train", str(cfg), "--ref", bad, "-y"], env=TEST_ENV)
+        assert result.exit_code == 1, bad
+        assert "--ref" in result.output, bad
+    # The TOML key gets the same check, named by its origin.
+    cfg.write_text('source_ref = "pull/42/head"\n' + _FFT_BODY)
+    result = runner.invoke(app, ["train", str(cfg), "-y"], env=TEST_ENV)
+    assert result.exit_code == 1
+    assert "source_ref in" in result.output and "--pr" in result.output
+    assert captured == []
+
+    # An empty --ref no longer slips past the --pr exclusivity check.
+    result = runner.invoke(app, ["train", str(cfg), "--ref", "", "--pr", "42", "-y"], env=TEST_ENV)
+    assert result.exit_code == 1
+    assert "mutually exclusive" in result.output
+
+
+def test_source_ref_check_keeps_valid_git_refs() -> None:
+    # Dots and `.lock`-like text are fine wherever git allows them; the
+    # check must only reject what git-check-ref-format rejects.
+    from prime_cli.commands.rl import _source_ref_error
+
+    for ok in (
+        "main",
+        "v1.2.3",
+        "feat/my.branch",
+        "release/1.0.lockfile",
+        "lock/x",
+        "0123456789abcdef0123456789abcdef01234567",
+        "a" * 200,
+    ):
+        assert _source_ref_error(ok) is None, ok
+
+
+def test_train_source_overlay_is_rejected_on_the_lora_path(monkeypatch, tmp_path: Path) -> None:
+    def never(pr_number: int) -> str:
+        raise AssertionError("the LoRA path must not resolve a PR")
+
+    monkeypatch.setattr("prime_cli.api.training.resolve_pull_request_head", never)
+    lora = '[model]\nname = "Qwen/Qwen3-0.6B"\n'
+    cfg = tmp_path / "rl.toml"
+    for body, args in (
+        (lora, ["--ref", "feat/x"]),
+        (lora, ["--pr", "42"]),
+        ('source_ref = "feat/x"\n' + lora, []),
+    ):
+        cfg.write_text(body)
+        result = runner.invoke(app, ["train", str(cfg), *args, "-y"], env=TEST_ENV)
+        assert result.exit_code == 1, args
+        assert "--ref / --pr" in result.output and "full-FT" in result.output, args
+
+
+def test_train_source_overlay_reaches_the_sft_payload(monkeypatch, tmp_path: Path) -> None:
+    # SFT shares the dedicated-run dispatch with full-FT, so --ref / --pr
+    # are forwarded there too (never silently dropped).
+    captured = _capture_fft_dispatch(monkeypatch)
+    sha = "0123456789abcdef0123456789abcdef01234567"
+    monkeypatch.setattr("prime_cli.api.training.resolve_pull_request_head", lambda pr_number: sha)
+    cfg = tmp_path / "sft.toml"
+    sft = '[model]\nname = "Qwen/Qwen3-0.6B"\n\n[data]\nname = "/volume/datasets/x"\n'
+    cfg.write_text(sft)
+    result = runner.invoke(
+        app, ["train", str(cfg), "--sft", "--ref", "feat/x", "-y", "-o", "json"], env=TEST_ENV
+    )
+    assert result.exit_code == 0, result.output
+    result = runner.invoke(
+        app, ["train", str(cfg), "--sft", "--pr", "42", "-y", "-o", "json"], env=TEST_ENV
+    )
+    assert result.exit_code == 0, result.output
+    assert [(p["mode"], p["sourceRef"]) for p in captured] == [("sft", "feat/x"), ("sft", sha)]
+
+
+def _gh_pull(monkeypatch, status: int = 200, body: Any = None, headers: dict | None = None):
+    """Fake the one GitHub call resolve_pull_request_head makes; returns the
+    request headers it was sent so tests can assert on auth."""
+    import httpx
+
+    sent: dict[str, Any] = {}
+
+    def fake_get(url, headers=None, timeout=None):
+        sent.update(headers or {})
+        return httpx.Response(
+            status, json=body, headers=headers_ or {}, request=httpx.Request("GET", url)
+        )
+
+    headers_ = headers
+    monkeypatch.setattr("prime_cli.api.training.httpx.get", fake_get)
+    return sent
+
+
+def _pull_body(sha: str = "a" * 40, repo: str = "PrimeIntellect-ai/prime-rl", **extra) -> dict:
+    return {"head": {"sha": sha, "repo": {"full_name": repo}}, **extra}
+
+
+def test_resolve_pull_request_head_refuses_a_merged_pr(monkeypatch) -> None:
+    import pytest
+    from prime_cli.api.training import resolve_pull_request_head
+    from prime_cli.core import APIError
+
+    _gh_pull(monkeypatch, body=_pull_body(merged=True, merge_commit_sha="b" * 40))
+    with pytest.raises(APIError, match=r"already merged.*--ref main.*" + "b" * 40):
+        resolve_pull_request_head(7)
+
+    # `merged: false` on an open PR resolves as before.
+    _gh_pull(monkeypatch, body=_pull_body(merged=False))
+    assert resolve_pull_request_head(7) == "a" * 40
+
+
+def test_resolve_pull_request_head_sends_a_github_token_when_set(monkeypatch) -> None:
+    from prime_cli.api.training import resolve_pull_request_head
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    sent = _gh_pull(monkeypatch, body=_pull_body())
+    resolve_pull_request_head(7)
+    assert "Authorization" not in sent
+
+    monkeypatch.setenv("GH_TOKEN", "ghp_x")
+    sent = _gh_pull(monkeypatch, body=_pull_body())
+    resolve_pull_request_head(7)
+    assert sent["Authorization"] == "Bearer ghp_x"
+
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_y")  # GITHUB_TOKEN wins over GH_TOKEN
+    sent = _gh_pull(monkeypatch, body=_pull_body())
+    resolve_pull_request_head(7)
+    assert sent["Authorization"] == "Bearer ghp_y"
+
+
+def test_resolve_pull_request_head_error_mapping(monkeypatch) -> None:
+    import pytest
+    from prime_cli.api.training import resolve_pull_request_head
+    from prime_cli.core import APIError
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    cases = [
+        (404, {}, {}, r"not found"),
+        (429, {}, {}, r"rate limit.*GITHUB_TOKEN"),
+        (403, {"x-ratelimit-remaining": "0"}, {}, r"rate limit"),
+        (403, {"retry-after": "60"}, {}, r"rate limit"),
+        # A secondary limit may carry neither header (GitHub documents both
+        # as optional); the error body is then the only signal.
+        (
+            403,
+            {"x-ratelimit-remaining": "57"},
+            {"message": "You have exceeded a secondary rate limit. Please wait a few minutes."},
+            r"rate limit",
+        ),
+        (
+            403,
+            {},
+            {"message": "You have triggered an abuse detection mechanism. Please wait."},
+            r"rate limit",
+        ),
+        (
+            403,
+            {},
+            {
+                "message": "Forbidden",
+                "documentation_url": "https://docs.github.com/rest/overview/"
+                "rate-limits-for-the-rest-api#about-secondary-rate-limits",
+            },
+            r"rate limit",
+        ),
+        # A 403 that isn't a quota is a refusal, reported with GitHub's reason.
+        (403, {}, {"message": "Resource protected by organization SAML"}, r"refused.*SAML"),
+        (403, {}, "not an object", r"refused"),
+        (500, {}, {}, r"HTTP 500"),
+        (200, {}, {"nope": True}, r"Unexpected GitHub response"),
+        (200, {}, _pull_body(sha=""), r"no head commit sha"),
+    ]
+    for status, resp_headers, body, pattern in cases:
+        _gh_pull(monkeypatch, status=status, body=body, headers=resp_headers)
+        with pytest.raises(APIError, match=pattern):
+            resolve_pull_request_head(7)
+
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_y")
+    _gh_pull(monkeypatch, status=403, body={}, headers={"x-ratelimit-remaining": "0"})
+    with pytest.raises(APIError, match=r"rate limit") as err:
+        resolve_pull_request_head(7)
+    assert "GITHUB_TOKEN" not in str(err.value)  # hint only when no token is set
+
+    def boom(url, headers=None, timeout=None):
+        import httpx
+
+        raise httpx.ConnectError("refused")
+
+    monkeypatch.setattr("prime_cli.api.training.httpx.get", boom)
+    with pytest.raises(APIError, match=r"Could not reach GitHub"):
+        resolve_pull_request_head(7)
+
+
+def test_resolve_pull_request_head_rejects_forks(monkeypatch) -> None:
+    import pytest
+    from prime_cli.api.training import resolve_pull_request_head
+    from prime_cli.core import APIError
+
+    _gh_pull(monkeypatch, body=_pull_body(sha="f" * 40, repo="someone/prime-rl"))
+    with pytest.raises(APIError, match=r"fork"):
+        resolve_pull_request_head(7)
+
+    # A deleted fork leaves `head.repo` null: still a fork, never a crash.
+    _gh_pull(monkeypatch, body={"head": {"sha": "f" * 40, "repo": None}})
+    with pytest.raises(APIError, match=r"fork \(unknown\)"):
+        resolve_pull_request_head(7)
+
+    _gh_pull(monkeypatch, body=_pull_body())
+    assert resolve_pull_request_head(7) == "a" * 40

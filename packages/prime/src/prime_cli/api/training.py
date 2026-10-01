@@ -6,14 +6,23 @@ own helm release on a registered PrimeCluster. Auth is the standard API
 token; admin role is gated server-side.
 """
 
+import os
 from enum import Enum
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 
+import httpx
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic import ValidationError as PydanticValidationError
 
-from prime_cli.core import APIClient, APIError, NotFoundError
+from prime_cli.core import APIClient, APIError, NotFoundError, default_user_agent
+
+# The only repo the hosted source overlay runs code from. The platform and
+# validator enforce the same restriction server-side; the CLI just resolves
+# `--pr N` against it so a fork PR fails here with a clear message instead
+# of a 422 from the backend.
+PRIME_RL_GITHUB_REPO = "PrimeIntellect-ai/prime-rl"
+_GITHUB_API = "https://api.github.com"
 
 
 class HostedTrainingRunResponse(BaseModel):
@@ -279,6 +288,108 @@ class HostedTrainingClient:
             raise APIError(f"Failed to parse available FFT models response: {exc}") from exc
 
 
+def _github_error_body(resp: httpx.Response) -> Dict[str, str]:
+    """The string fields of a GitHub error body (`message`,
+    `documentation_url`), or {} when the body isn't a JSON object."""
+    try:
+        body = resp.json()
+    except ValueError:
+        return {}
+    if not isinstance(body, dict):
+        return {}
+    return {k: v for k, v in body.items() if isinstance(k, str) and isinstance(v, str)}
+
+
+def _github_message(resp: httpx.Response) -> str:
+    """`: <message>` from a GitHub error body, or "" when there is none."""
+    message = _github_error_body(resp).get("message")
+    return f": {message}" if message else ""
+
+
+def _github_rate_limited(resp: httpx.Response) -> bool:
+    """Whether a 403 / 429 from GitHub is a quota, not a refusal.
+
+    A primary limit sets x-ratelimit-remaining: 0 and a secondary limit
+    usually sets retry-after, but GitHub documents both headers as optional
+    on a secondary limit; the one guaranteed signal there is the error
+    message ("You have exceeded a secondary rate limit", or the older "abuse
+    detection mechanism"), so fall back to the body. Any other 403 (SSO
+    enforcement, a bad token) is a refusal and must not be reported as
+    "retry later".
+    """
+    if resp.status_code == 429:
+        return True
+    if resp.headers.get("x-ratelimit-remaining") == "0" or "retry-after" in resp.headers:
+        return True
+    body = _github_error_body(resp)
+    text = f"{body.get('message', '')} {body.get('documentation_url', '')}".lower()
+    return "rate limit" in text or "rate-limit" in text or "abuse detection" in text
+
+
+def resolve_pull_request_head(pr_number: int) -> str:
+    """Head commit sha of a prime-rl pull request, for `prime train --pr N`.
+
+    Public GitHub API (prime-rl is public); a GITHUB_TOKEN / GH_TOKEN in the
+    environment is sent so a shared egress IP (CI, office NAT) isn't stuck
+    on the anonymous 60/hour quota. Only PRs whose head branch lives in the
+    canonical repo are accepted:
+    the hosted pods can only fetch refs from PrimeIntellect-ai/prime-rl,
+    so a fork PR would fail at dispatch anyway. Raises APIError with a
+    user-facing message on any failure so the command layer can print
+    and exit without string-matching.
+    """
+    url = f"{_GITHUB_API}/repos/{PRIME_RL_GITHUB_REPO}/pulls/{pr_number}"
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": default_user_agent(),
+    }
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    try:
+        resp = httpx.get(url, headers=headers, timeout=15.0)
+    except httpx.HTTPError as exc:
+        raise APIError(f"Could not reach GitHub to resolve PR #{pr_number}: {exc}") from exc
+    if resp.status_code == 404:
+        raise APIError(f"PR #{pr_number} not found in {PRIME_RL_GITHUB_REPO}.")
+    if resp.status_code in (403, 429):
+        if _github_rate_limited(resp):
+            hint = "" if token else " (set GITHUB_TOKEN to lift the anonymous limit)"
+            raise APIError(
+                f"GitHub API rate limit hit while resolving PR #{pr_number}; retry "
+                f"later{hint}, or pass --ref <branch-or-sha> directly."
+            )
+        raise APIError(
+            f"GitHub refused the request for PR #{pr_number} (HTTP 403"
+            f"{_github_message(resp)}); pass --ref <branch-or-sha> directly."
+        )
+    if resp.status_code != 200:
+        raise APIError(f"GitHub returned HTTP {resp.status_code} while resolving PR #{pr_number}.")
+    try:
+        pull = resp.json()
+        head = pull["head"]
+        head_repo = (head.get("repo") or {}).get("full_name")
+        sha = head["sha"]
+        merged = bool(pull.get("merged"))
+        merge_commit = pull.get("merge_commit_sha")
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
+        raise APIError(f"Unexpected GitHub response while resolving PR #{pr_number}.") from exc
+    if merged:
+        # A merged PR's head sha is usually gone from the repo's branches
+        # (deleted branch, squash merge), so the platform would refuse it as
+        # a commit it can't attribute; the merged code lives on main.
+        via = f" (its merge commit is {merge_commit})" if isinstance(merge_commit, str) else ""
+        raise APIError(f"PR #{pr_number} is already merged; run its code with --ref main{via}.")
+    if not isinstance(head_repo, str) or head_repo.lower() != PRIME_RL_GITHUB_REPO.lower():
+        raise APIError(
+            f"PR #{pr_number} comes from a fork ({head_repo or 'unknown'}); fork PRs are "
+            f"not supported. Push the branch to {PRIME_RL_GITHUB_REPO} and use --ref."
+        )
+    if not isinstance(sha, str) or not sha:
+        raise APIError(f"PR #{pr_number} has no head commit sha in the GitHub response.")
+    return sha
+
+
 def build_payload_from_toml(
     cfg: Dict[str, Any],
     *,
@@ -290,6 +401,7 @@ def build_payload_from_toml(
     gpu_type: Optional[str] = None,
     volume: Optional[str] = None,
     mode: Optional[str] = None,
+    source_ref: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build the /v1/training/runs payload from a prime-rl-style TOML dict.
 
@@ -318,6 +430,9 @@ def build_payload_from_toml(
         "sft"). Omitted by default so existing RL payloads stay
         byte-compatible; set to "sft" for SFT configs so the backend +
         validator dispatch to SFTConfig instead of the RL schema.
+      - source_ref: a prime-rl git ref (branch / tag / sha) the pods
+        overlay onto the image at startup, for testing unmerged code
+        without an image build. The platform pins the resolved commit.
 
     Cluster targeting is backend-side (auto-pick first uncordoned).
     """
@@ -338,4 +453,6 @@ def build_payload_from_toml(
         payload["gpuType"] = gpu_type
     if volume:
         payload["volume"] = volume
+    if source_ref:
+        payload["sourceRef"] = source_ref
     return payload

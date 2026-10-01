@@ -175,6 +175,26 @@ sandbox = sandbox_client.create(request)
 
 **Note:** Secrets are never displayed in logs or outputs. When retrieving sandbox details, only the secret keys are shown with values masked as `***`.
 
+### Run Commands as a Guest User
+
+Commands use the sandbox's configured user (normally root) when `user` is omitted.
+Select an existing account in the guest image per command:
+
+```python
+result = sandbox_client.execute_command(sandbox.id, "id", user="ubuntu")
+# Async execute_command, open_process, and sync/async start_background_job also accept user.
+```
+
+Empty or unknown usernames fail; accounts are not created automatically. Commands
+use the account's UID, GID, and supplementary groups. `HOME`, `USER`, and `LOGNAME`
+follow that account unless explicitly overridden through `env`. Working-directory
+selection stays unchanged; pass `working_dir` if the image default is inaccessible.
+
+Requires a sandboxd version supporting command-level users. Roll out sandboxd to
+all reachable guests before releasing this SDK: older servers can ignore the
+protobuf field and execute as their default user. Existing guests must be upgraded
+or recreated before using this option.
+
 ### File Operations
 
 ```python

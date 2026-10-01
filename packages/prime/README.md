@@ -197,6 +197,9 @@ prime sandbox list
 # Execute commands
 prime sandbox run <sandbox-id> -- python script.py
 
+# Run as an existing guest account
+prime sandbox run <sandbox-id> --user ubuntu -- id
+
 # Upload/download files
 prime sandbox upload <sandbox-id> local_file.py /remote/path/
 prime sandbox download <sandbox-id> /remote/file.txt ./local/

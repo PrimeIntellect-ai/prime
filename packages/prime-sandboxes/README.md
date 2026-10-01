@@ -101,6 +101,18 @@ async def main():
 asyncio.run(main())
 ```
 
+Concurrent waits on the same client automatically share cross-sandbox status
+requests, with up to 100 checkpoint IDs per request:
+
+```python
+checkpoints = await asyncio.gather(*(client.checkpoint(s.id) for s in sandboxes))
+durable = await asyncio.gather(*(client.wait_for_checkpoint(c.id) for c in checkpoints))
+```
+
+Sync waits from concurrent threads share requests too. `get_checkpoints(ids)`
+provides an explicit batch lookup with `checkpoints` and per-ID `errors`. Waits
+fall back to individual lookups on platforms without the batch endpoint.
+
 ## List Platform Images
 
 Use a platform admin or manager key with sandbox-read access to list platform images:

@@ -219,6 +219,21 @@ class SandboxCheckpoint(BaseModel):
     updated_at: datetime
 
 
+class CheckpointLookupError(BaseModel):
+    """A missing or inaccessible checkpoint in a batch lookup."""
+
+    checkpoint_id: str
+    code: Literal["NOT_FOUND"]
+    message: str
+
+
+class BatchCheckpointResponse(BaseModel):
+    """Checkpoints and per-ID errors from a cross-sandbox lookup."""
+
+    checkpoints: List[SandboxCheckpoint]
+    errors: List[CheckpointLookupError]
+
+
 class SandboxStatusSnapshot(BaseModel):
     """Lightweight sandbox lifecycle state returned by a batch status lookup."""
 

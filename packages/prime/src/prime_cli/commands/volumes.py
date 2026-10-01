@@ -425,6 +425,8 @@ def _remote_path(path: str) -> str:
     and a leading "volume/" segment (the in-session mount path, not a
     volume-relative path)."""
     rel = path[1:] if path.startswith("/") else path
+    # Drop "." segments first so "./volume/x" can't slip past the check below.
+    rel = "/".join(p for p in rel.split("/") if p != ".")
     # "/volume/..." is the mount path inside an SSH session. As a put/get
     # remote it would name a directory literally called "volume" under the
     # root — almost never what the user wants (data.name accepts both forms,

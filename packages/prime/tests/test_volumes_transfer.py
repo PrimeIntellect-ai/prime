@@ -23,6 +23,7 @@ def _capture_console(monkeypatch) -> Console:
         ("a/b/c.bin", "/volume/a/b/c.bin"),
         ("", "/volume/"),
         ("/", "/volume/"),
+        ("./datasets/./my-data/", "/volume/datasets/my-data/"),
     ],
 )
 def test_remote_path_is_volume_relative(given, expected):
@@ -37,6 +38,8 @@ def test_remote_path_is_volume_relative(given, expected):
         "volume/datasets/my-data/",
         "/volume",
         "volume/",
+        "./volume/datasets/my-data",
+        "/./volume/datasets/my-data",
     ],
 )
 def test_remote_path_rejects_in_session_mount_path(given, monkeypatch):

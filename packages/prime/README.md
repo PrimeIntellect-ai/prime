@@ -226,7 +226,7 @@ prime switch <team-id>  # fallback for teams without a slug
 prime pods list
 ```
 
-## Copying a training volume (stopgap)
+## Copying a training volume
 
 An existing cluster-local volume can be copied into a **new** volume on another
 cluster where the platform enables volume copy:
@@ -234,24 +234,25 @@ cluster where the platform enables volume copy:
 ```bash
 prime volumes copy my-checkpoints my-checkpoints-e2e --cluster e2e-spk
 prime volumes list
-# After my-checkpoints-e2e is RUNNING:
+# After my-checkpoints-e2e is RUNNING (it is DEPLOYING while the copy runs):
 prime train config.toml --volume my-checkpoints-e2e
 ```
 
-The server runs rsync on the destination cluster through the existing volume
-gateway. The data does not pass through your laptop. The source is retained;
-this does not move or share its PVC. The destination defaults to the source's
-size; `--size` can override it within the usual volume limits.
+The server copies the volume through Cloudflare R2: a push Job on the source
+cluster uploads it (rclone) to a prefix-scoped R2 staging area, and a pull Job on
+the destination cluster downloads it. The data does not pass through your laptop,
+but it does transit Cloudflare R2. The source is retained and is not moved or
+shared. The destination defaults to the source's size; `--size` can override it
+within the usual volume limits.
 
-The source must be idle, and new managed writers are blocked during the copy.
-An existing destination name is rejected. The destination cannot be used until
-verification succeeds. Job retries can reuse completed files, but interrupted
-files are recopied. An ultimate failure or cancellation cleans up the new,
-unpublished destination; a fresh retry recopies from the source. Cancel uses
-`prime volumes delete DEST` and its existing permissions.
+The destination stays `DEPLOYING` until the pull Job completes and verifies the
+data (48 hour deadline); use it only once it is `RUNNING`. The source must be
+idle (no live runs or SSH sessions) when the copy starts, otherwise the request
+is rejected with 409. An existing destination name or an invalid request is
+rejected with 400. If the server has volume copy disabled, it responds 503.
 
-The first copy job is limited to 23 hours and to files the managed source export
-can read. Gateway throughput is not guaranteed. This feature does not require
+File data, directories, symlinks, and mode/uid/gid/mtime are preserved. Hard
+links are not: each link becomes a separate copy. This feature does not require
 JuiceFS or change the storage backend, and it does not add managed inference's
 local-model support. For inference, use a supported completed model export, not
 raw distributed trainer checkpoints.

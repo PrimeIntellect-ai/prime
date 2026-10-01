@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import re
 import select
 import shlex
 import socket
@@ -427,6 +428,19 @@ def test_factory_list_shows_name_id_and_gpus(monkeypatch):
             cordoned=True,
             status="offline",
         ),
+        # Cordoned but the controller still heartbeats: status alone says
+        # "online", yet `volumes create --cluster` rejects it. The table must
+        # say cordoned, or the discovery surface advertises an unusable target.
+        TrainingClusterInfo(
+            clusterId="c3",
+            name="maintenance-box",
+            displayName="maintenance-box",
+            gpuType="H200_141GB",
+            totalGpus=8,
+            freeGpus=8,
+            cordoned=True,
+            status="online",
+        ),
     ]
     monkeypatch.setattr(
         factory, "_client", lambda: (SimpleNamespace(list_clusters=lambda **kw: clusters), None)
@@ -439,6 +453,9 @@ def test_factory_list_shows_name_id_and_gpus(monkeypatch):
     assert "telus" in table.output and "c1" in table.output
     assert "24/32" in table.output
     assert "hostpath-box" in table.output and "c2" in table.output
+    # The cordoned-but-online cluster must not read as a usable "online".
+    assert "maintenance-box" in table.output and "c3" in table.output
+    assert "cordoned" in table.output
 
     as_json = CliRunner().invoke(app, ["factory", "list", "-o", "json"], env=env)
     assert json.loads(as_json.output) == [
@@ -462,6 +479,16 @@ def test_factory_list_shows_name_id_and_gpus(monkeypatch):
             "cordoned": True,
             "status": "offline",
         },
+        {
+            "clusterId": "c3",
+            "name": "maintenance-box",
+            "displayName": "maintenance-box",
+            "gpuType": "H200_141GB",
+            "totalGpus": 8,
+            "freeGpus": 8,
+            "cordoned": True,
+            "status": "online",
+        },
     ]
 
 
@@ -479,16 +506,18 @@ def test_factory_list_empty_message(monkeypatch):
 
 
 def test_create_help_points_at_the_discovery_command():
-    # COLUMNS=200 keeps the --cluster help on one line; wrapped help puts
-    # the box border between the words and breaks substring asserts.
+    # The help table wraps on the box border (and COLUMNS is not honoured
+    # inside CliRunner), which puts "| " between the words of a phrase and
+    # breaks substring asserts; compare against the unwrapped text.
     result = CliRunner().invoke(
         app,
         ["volumes", "create", "--help"],
         env={"PRIME_DISABLE_VERSION_CHECK": "1", "COLUMNS": "200"},
     )
     assert result.exit_code == 0, result.output
-    assert "Cluster name or id to create the volume on" in result.output
-    assert "prime factory list" in result.output
+    plain = re.sub(r"[\s\u2502\u256d\u256e\u2570\u256f\u2500]+", " ", result.output)
+    assert "Cluster name or id to create the volume on" in plain
+    assert "prime factory list" in plain
 
 
 def test_client_list_clusters_wire_contract():

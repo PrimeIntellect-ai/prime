@@ -50,5 +50,9 @@ def list_clusters(
     table = Table("Name", "ID", "GPU type", "GPUs", "Status")
     for c in clusters:
         gpus = f"{c.free_gpus}/{c.total_gpus}" if c.free_gpus is not None and c.total_gpus else "-"
-        table.add_row(c.name, c.cluster_id, c.gpu_type or "-", gpus, c.status)
+        # A cordoned cluster is still "online" (the controller runs) but
+        # cannot be picked for `volumes create --cluster`. Both facts are
+        # shown, since this table is the discovery surface for that flag.
+        status = "cordoned" if c.cordoned else c.status
+        table.add_row(c.name, c.cluster_id, c.gpu_type or "-", gpus, status)
     console.print(table)

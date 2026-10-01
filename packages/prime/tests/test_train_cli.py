@@ -771,9 +771,8 @@ def test_resolve_pull_request_head_rejects_forks(monkeypatch) -> None:
 
     _gh_pull(monkeypatch, body=_pull_body())
     assert resolve_pull_request_head(7) == "a" * 40
-def test_train_dashboard_prints_url_and_exits_zero(monkeypatch) -> None:
-def _fake_proxy_server(monkeypatch, url: str) -> list[dict[str, Any]]:
-    """Monkeypatch the proxy factory; record its call kwargs and stop serving.
+
+
 def _fake_detached_starter(monkeypatch, url: str) -> list[dict[str, Any]]:
     """Monkeypatch the detached-proxy starter; record its call kwargs."""
     calls: list[dict[str, Any]] = []

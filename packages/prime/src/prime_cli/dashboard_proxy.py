@@ -88,7 +88,7 @@ from typing import Any, Callable, Optional
 
 import httpx
 
-from .core.client import _default_user_agent
+from .core.client import default_user_agent as _default_user_agent
 
 _UPSTREAM_REQUEST_TIMEOUT = httpx.Timeout(30.0, connect=10.0, read=None)
 """No read timeout: SSE event streams must not be cut off between events."""

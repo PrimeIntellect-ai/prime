@@ -13,7 +13,7 @@ import threading
 import time
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Union
 
-from . import _fork
+from . import _fork, projection
 from ._http import DEFAULT_TIMEOUT, UPLOAD_TIMEOUT, PlatformClient
 from .backend import Backend, DisabledBackend, EvalsBackend, RftBackend, disabled_run_id
 from .config import Config
@@ -481,6 +481,13 @@ def init(
     opted_out = resolved_mode != "disabled" and (
         traces_opt_out if traces_opt_out is not None else settings.traces_opt_out
     )
+    if opted_out and kind == "train" and not projection.parquet_available():
+        # Without it the legacy training sink turns itself off, and with Prime
+        # Traces opted out nothing would store the run's episodes.
+        raise ConfigurationError(
+            "Opting out of Prime Traces sends training samples to the legacy "
+            "table, which needs pyarrow: pip install 'prime-runs[train]'"
+        )
 
     backend: Backend
     sinks: List[Sink]

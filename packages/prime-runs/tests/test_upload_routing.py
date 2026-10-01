@@ -38,6 +38,8 @@ def open_run(monkeypatch, make_platform_client, eval_routes, rft_routes, uploads
         )
         legacy_training = FakeSink(name="rft_samples")
         monkeypatch.setattr("prime_runs.run.RftSamplesSink", lambda _: legacy_training)
+        # The fake stands in for the Parquet encoder, so pyarrow is not needed.
+        monkeypatch.setattr("prime_runs.projection.parquet_available", lambda: True)
         run = pr.init(
             kind=kind,
             model="model",
@@ -176,6 +178,48 @@ def test_an_unknown_opt_out_env_value_is_rejected_before_the_run_is_created(
         pr.init(model="model", environments=["gsm8k"], api_key="test-key", team_id="team-1")
 
     assert platform.paths() == []
+
+
+def test_a_training_opt_out_without_pyarrow_is_rejected_before_the_run_is_created(
+    monkeypatch, make_platform_client, rft_routes
+):
+    """Otherwise the legacy sink turns itself off and nothing stores the episodes."""
+    platform = RecordingHandler(rft_routes)
+    monkeypatch.setattr("prime_runs.run.PlatformClient", lambda **_: make_platform_client(platform))
+    monkeypatch.setattr("prime_runs.projection.parquet_available", lambda: False)
+
+    with pytest.raises(pr.exceptions.ConfigurationError, match=r"prime-runs\[train\]"):
+        pr.init(
+            kind="train",
+            model="model",
+            environments=["gsm8k"],
+            api_key="test-key",
+            team_id="team-1",
+            traces_opt_out=True,
+        )
+
+    assert platform.paths() == []
+
+
+def test_an_eval_opt_out_does_not_need_pyarrow(
+    monkeypatch, make_platform_client, eval_routes, uploads
+):
+    calls, _ = uploads
+    platform = RecordingHandler(eval_routes)
+    monkeypatch.setattr("prime_runs.run.PlatformClient", lambda **_: make_platform_client(platform))
+    monkeypatch.setattr("prime_runs.projection.parquet_available", lambda: False)
+
+    with pr.init(
+        model="model",
+        environments=["gsm8k"],
+        api_key="test-key",
+        team_id="team-1",
+        traces_opt_out=True,
+    ) as run:
+        run.log_episodes([make_episode("e0")])
+
+    assert calls == []
+    assert platform.bodies_for("/api/v1/evaluations/eval-abc/samples")
 
 
 def test_a_disabled_run_ignores_the_opt_out_env_var(monkeypatch):

@@ -476,6 +476,7 @@ def reset(
         config.set_inference_url(Config.DEFAULT_INFERENCE_URL)
         config.set_traces_url("")
         config.set_ssh_key_path(Config.DEFAULT_SSH_KEY_PATH)
+        config.set_runs_legacy_samples(False)
         config.set_current_environment("production")
         console.print("[green]Configuration reset to defaults![/green]")
 

@@ -98,6 +98,14 @@ class TestRunsLegacySamples:
         assert result.exit_code == 1
         assert "true" in result.output and "false" in result.output
 
+    def test_reset_clears_the_flag(self, config_file: Path) -> None:
+        runner.invoke(app, ["config", "set-runs-legacy-samples", "true"])
+
+        result = runner.invoke(app, ["config", "reset", "--yes"])
+
+        assert result.exit_code == 0, result.output
+        assert Config().runs_legacy_samples is False
+
     def test_view_shows_the_setting(self, config_file: Path) -> None:
         runner.invoke(app, ["config", "set-runs-legacy-samples", "true"])
 

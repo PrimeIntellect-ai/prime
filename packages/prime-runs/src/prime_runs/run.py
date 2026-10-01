@@ -475,6 +475,11 @@ def init(
         training=training,
     )
     resolved_mode = _resolve_mode(mode, api_key=api_key)
+    # Resolved before any platform call: a bad value must fail here, not after
+    # the run has been created with no handle to finish it.
+    use_legacy_samples = resolved_mode != "disabled" and (
+        legacy_samples if legacy_samples is not None else settings.legacy_samples
+    )
 
     backend: Backend
     sinks: List[Sink]
@@ -511,7 +516,7 @@ def init(
         # The worker visits traces first; an explicit no-access response sends
         # that same batch, and subsequent batches, to the legacy sample table.
         traces = TracesSink(api_key=api_key, team_id=team_id)
-        if legacy_samples if legacy_samples is not None else settings.legacy_samples:
+        if use_legacy_samples:
             traces.use_legacy_samples()
         if kind == "train":
             sinks = [traces, LegacySamplesFallback(traces, RftSamplesSink(client))]

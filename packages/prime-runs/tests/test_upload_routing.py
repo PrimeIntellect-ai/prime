@@ -164,10 +164,24 @@ def test_an_explicit_argument_overrides_the_legacy_env_var(open_run, uploads, mo
     assert not any("/samples" in path for path in platform.paths())
 
 
-def test_an_unknown_legacy_env_value_is_rejected(open_run, monkeypatch):
+def test_an_unknown_legacy_env_value_is_rejected_before_the_run_is_created(
+    monkeypatch, make_platform_client, eval_routes
+):
+    """Failing after create would strand a RUNNING run nobody holds a handle to."""
+    platform = RecordingHandler(eval_routes)
+    monkeypatch.setattr("prime_runs.run.PlatformClient", lambda **_: make_platform_client(platform))
     monkeypatch.setenv("PRIME_RUNS_LEGACY_SAMPLES", "maybe")
+
     with pytest.raises(pr.exceptions.ConfigurationError, match="PRIME_RUNS_LEGACY_SAMPLES"):
-        open_run()
+        pr.init(model="model", environments=["gsm8k"], api_key="test-key", team_id="team-1")
+
+    assert platform.paths() == []
+
+
+def test_a_disabled_run_ignores_the_legacy_env_var(monkeypatch):
+    monkeypatch.setenv("PRIME_RUNS_LEGACY_SAMPLES", "maybe")
+    with pr.init(mode="disabled") as run:
+        run.log_episodes([make_episode()])
 
 
 @pytest.mark.parametrize(

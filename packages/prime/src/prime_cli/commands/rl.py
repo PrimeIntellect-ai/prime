@@ -1251,11 +1251,22 @@ def _dispatch_full_finetune_run(
     # ref is caught at the prompt, not by a failed dispatch. Skipped for
     # --output json, which must emit nothing but the JSON payload.
     if output != "json" and (resolved_image_tag or resolved_source_ref):
-        console.print("[bold]prime-rl build[/bold]")
-        console.print(f"  Image tag: {resolved_image_tag or '(platform default)'}")
+        console.print("[cyan]prime-rl build[/cyan]")
+        image_display = (
+            f"[green]{rich_escape(resolved_image_tag)}[/green]"
+            if resolved_image_tag
+            else "[dim](platform default)[/dim]"
+        )
+        # highlight=False: Rich's auto-highlighter would otherwise recolour
+        # the digits inside the tag / sha / PR number on top of these styles.
+        console.print(f"  Image tag:  {image_display}", highlight=False)
         if resolved_source_ref:
-            via_pr = f" (PR #{source_pr})" if source_pr is not None else ""
-            console.print(f"  Source ref: {resolved_source_ref}{via_pr}")
+            via_pr = f" [dim](PR #{source_pr})[/dim]" if source_pr is not None else ""
+            console.print(
+                f"  Source ref: [bold magenta]{rich_escape(resolved_source_ref)}[/bold magenta]"
+                f"{via_pr}",
+                highlight=False,
+            )
         console.print()
 
     # `--output json` is a formatting switch: still dispatch the run,

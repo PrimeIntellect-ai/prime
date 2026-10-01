@@ -118,11 +118,11 @@ def view() -> None:
     share_label = str(settings.get("share_resources_with_team", False))
     table.add_row("Share Resources With Team", share_label)
 
-    # Show whether run samples upload to the legacy tables instead of Prime Traces
-    legacy_label = str(settings.get("runs_legacy_samples", False))
-    if _env_set("PRIME_RUNS_LEGACY_SAMPLES"):
-        legacy_label = f"{os.environ['PRIME_RUNS_LEGACY_SAMPLES']} (from env var)"
-    table.add_row("Runs Legacy Samples", legacy_label)
+    # Show whether runs opt out of Prime Traces (samples go to the legacy tables)
+    opt_out_label = str(settings.get("traces_opt_out", False))
+    if _env_set("PRIME_TRACES_OPT_OUT"):
+        opt_out_label = f"{os.environ['PRIME_TRACES_OPT_OUT']} (from env var)"
+    table.add_row("Traces Opt Out", opt_out_label)
 
     console.print(table)
 
@@ -428,13 +428,13 @@ def set_share_resources_with_team(
 
 
 @app.command(no_args_is_help=True)
-def set_runs_legacy_samples(
+def set_traces_opt_out(
     enabled: str = typer.Argument(
         ...,
-        help="Upload run samples to the legacy tables instead of Prime Traces: true or false",
+        help="Opt out of Prime Traces (run samples go to the legacy tables): true or false",
     ),
 ) -> None:
-    """Set whether runs upload samples to the legacy tables instead of Prime Traces"""
+    """Opt runs out of Prime Traces; their samples upload to the legacy tables instead"""
     require_persistent_context()
     value = enabled.lower()
     if value not in ("true", "false"):
@@ -442,8 +442,8 @@ def set_runs_legacy_samples(
         raise typer.Exit(1)
 
     config = Config()
-    config.set_runs_legacy_samples(value == "true")
-    console.print(f"[green]Runs legacy samples set to: {value}[/green]")
+    config.set_traces_opt_out(value == "true")
+    console.print(f"[green]Traces opt-out set to: {value}[/green]")
 
 
 @app.command(no_args_is_help=True)
@@ -476,7 +476,7 @@ def reset(
         config.set_inference_url(Config.DEFAULT_INFERENCE_URL)
         config.set_traces_url("")
         config.set_ssh_key_path(Config.DEFAULT_SSH_KEY_PATH)
-        config.set_runs_legacy_samples(False)
+        config.set_traces_opt_out(False)
         config.set_current_environment("production")
         console.print("[green]Configuration reset to defaults![/green]")
 

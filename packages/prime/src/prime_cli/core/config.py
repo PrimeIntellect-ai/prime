@@ -22,7 +22,7 @@ class ConfigModel(BaseModel):
     ssh_key_path: str = str(Path.home() / ".ssh" / "id_rsa")
     current_environment: str = "production"
     share_resources_with_team: bool = False
-    runs_legacy_samples: bool = False
+    traces_opt_out: bool = False
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -295,20 +295,20 @@ class Config:
         self._save_config(self.config)
 
     @property
-    def runs_legacy_samples(self) -> bool:
-        """Get runs_legacy_samples setting from config file.
+    def traces_opt_out(self) -> bool:
+        """Get traces_opt_out setting from config file.
 
-        Read by prime-runs: when true, run samples upload to the legacy sample
-        tables instead of Prime Traces.
+        Read by prime-runs: when true, runs opt out of Prime Traces and their
+        samples upload to the legacy sample tables instead.
         """
-        val = self.config.get("runs_legacy_samples", False)
+        val = self.config.get("traces_opt_out", False)
         if isinstance(val, str):
             return val.lower() == "true"
         return bool(val)
 
-    def set_runs_legacy_samples(self, value: bool) -> None:
-        """Set runs_legacy_samples in config file"""
-        self.config["runs_legacy_samples"] = value
+    def set_traces_opt_out(self, value: bool) -> None:
+        """Set traces_opt_out in config file"""
+        self.config["traces_opt_out"] = value
         self._save_config(self.config)
 
     @property
@@ -349,7 +349,7 @@ class Config:
             "ssh_key_path": self.ssh_key_path,
             "current_environment": self.current_environment,
             "share_resources_with_team": self.share_resources_with_team,
-            "runs_legacy_samples": self.runs_legacy_samples,
+            "traces_opt_out": self.traces_opt_out,
         }
 
     def save_environment(self, name: str) -> None:

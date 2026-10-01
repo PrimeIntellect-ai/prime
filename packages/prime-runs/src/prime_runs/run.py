@@ -425,7 +425,7 @@ def init(
     kind: RunKind = "eval",
     id: Optional[str] = None,
     training: Optional[TrainingSpec] = None,
-    legacy_samples: Optional[bool] = None,
+    traces_opt_out: Optional[bool] = None,
 ) -> Run:
     """Open a run and return its handle. Call it before the first rollout.
 
@@ -435,9 +435,10 @@ def init(
     ``config_source``) or a mapping taken as given. ``finish_timeout`` bounds
     the drain in :meth:`Run.finish`.
 
-    ``legacy_samples=True`` uploads samples to the legacy sample tables and never
-    contacts Prime Traces; it defaults to ``$PRIME_RUNS_LEGACY_SAMPLES``, then
-    ``runs_legacy_samples`` in the config file, then off.
+    ``traces_opt_out=True`` opts the run out of Prime Traces: samples upload to
+    the legacy sample tables and Prime Traces is never contacted. It defaults to
+    ``$PRIME_TRACES_OPT_OUT``, then ``traces_opt_out`` in the config file, then
+    off.
 
     ``kind="train"`` opens an external training run: ``model`` is the base
     model, ``environments`` the hub ids, ``training`` the display fields, and a
@@ -477,8 +478,8 @@ def init(
     resolved_mode = _resolve_mode(mode, api_key=api_key)
     # Resolved before any platform call: a bad value must fail here, not after
     # the run has been created with no handle to finish it.
-    use_legacy_samples = resolved_mode != "disabled" and (
-        legacy_samples if legacy_samples is not None else settings.legacy_samples
+    opted_out = resolved_mode != "disabled" and (
+        traces_opt_out if traces_opt_out is not None else settings.traces_opt_out
     )
 
     backend: Backend
@@ -516,8 +517,8 @@ def init(
         # The worker visits traces first; an explicit no-access response sends
         # that same batch, and subsequent batches, to the legacy sample table.
         traces = TracesSink(api_key=api_key, team_id=team_id)
-        if use_legacy_samples:
-            traces.use_legacy_samples()
+        if opted_out:
+            traces.opt_out()
         if kind == "train":
             sinks = [traces, LegacySamplesFallback(traces, RftSamplesSink(client))]
             metrics_sinks = [RftMetricsSink(client)]

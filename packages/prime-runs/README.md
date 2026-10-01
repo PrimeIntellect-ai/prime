@@ -113,21 +113,24 @@ network I/O.
 
 ### Opting out of Prime Traces
 
-To keep a run's samples in the legacy sample tables, opt out before the run
-starts. The run then never contacts Prime Traces and behaves exactly as it does
-for an account without access:
+Runs upload to Prime Traces by default. To opt a run out, set one of the
+following before it starts. Its samples then upload to the legacy sample tables,
+and the run never contacts Prime Traces, exactly as for an account without
+access:
 
 ```python
-run = prime_runs.init(..., legacy_samples=True)  # one run
+run = prime_runs.init(..., traces_opt_out=True)  # one run
 ```
 
 ```bash
-export PRIME_RUNS_LEGACY_SAMPLES=true                  # one shell or job
-prime config set-runs-legacy-samples true              # this machine
+export PRIME_TRACES_OPT_OUT=true       # one shell or job
+prime config set-traces-opt-out true   # this machine
 ```
 
 An account can also opt out for every client and SDK version from the billing
-page of the dashboard. Runs already in Prime Traces stay readable either way.
+page of the dashboard. Runs already in Prime Traces stay readable in the
+dashboard either way; an account-level opt-out also turns off trace reads from
+the SDK and CLI.
 
 ## Configuration
 
@@ -139,8 +142,8 @@ page of the dashboard. Runs already in Prime Traces stay readable either way.
 | `PRIME_FRONTEND_URL`   | Dashboard; defaults to `https://app.primeintellect.ai`                 |
 | `PRIME_TRACES_URL`     | Prime Traces service, resolved by `prime-traces`                       |
 | `PRIME_RUNS_MODE`      | `online` or `disabled`; unset means online when there is an API key    |
-| `PRIME_RUNS_LEGACY_SAMPLES` | `true` uploads samples to the legacy tables instead of Prime Traces |
-| `~/.prime/config.json` | Shared prime CLI config (`api_key`, `team_id`, `base_url`, `runs_legacy_samples`) |
+| `PRIME_TRACES_OPT_OUT` | `true` opts out of Prime Traces; samples go to the legacy tables        |
+| `~/.prime/config.json` | Shared prime CLI config (`api_key`, `team_id`, `base_url`, `traces_opt_out`) |
 
 Precedence is `init()` argument → environment variable → config file. A missing
 API key disables the run with a warning. `base_url` is normally the platform

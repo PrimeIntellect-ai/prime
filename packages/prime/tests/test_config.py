@@ -68,48 +68,48 @@ class TestTeamIdValidation:
         assert validate_team_id(invalid_id) is False
 
 
-class TestRunsLegacySamples:
-    """`prime config set-runs-legacy-samples` writes the key prime-runs reads."""
+class TestTracesOptOut:
+    """`prime config set-traces-opt-out` writes the key prime-runs reads."""
 
     @pytest.fixture
     def config_file(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
         monkeypatch.delenv("PRIME_CONTEXT", raising=False)
-        monkeypatch.delenv("PRIME_RUNS_LEGACY_SAMPLES", raising=False)
+        monkeypatch.delenv("PRIME_TRACES_OPT_OUT", raising=False)
         return tmp_path / ".prime" / "config.json"
 
     def test_defaults_to_prime_traces(self, config_file: Path) -> None:
-        assert Config().runs_legacy_samples is False
+        assert Config().traces_opt_out is False
 
     @pytest.mark.parametrize("value,expected", [("true", True), ("false", False)])
     def test_set_persists_the_flag(self, config_file: Path, value: str, expected: bool) -> None:
-        result = runner.invoke(app, ["config", "set-runs-legacy-samples", value])
+        result = runner.invoke(app, ["config", "set-traces-opt-out", value])
 
         assert result.exit_code == 0, result.output
-        assert json.loads(config_file.read_text())["runs_legacy_samples"] is expected
+        assert json.loads(config_file.read_text())["traces_opt_out"] is expected
         # Survives the load/save round trip other config commands make.
         Config().set_api_key("key")
-        assert Config().runs_legacy_samples is expected
+        assert Config().traces_opt_out is expected
 
     def test_rejects_other_values(self, config_file: Path) -> None:
-        result = runner.invoke(app, ["config", "set-runs-legacy-samples", "maybe"])
+        result = runner.invoke(app, ["config", "set-traces-opt-out", "maybe"])
 
         assert result.exit_code == 1
         assert "true" in result.output and "false" in result.output
 
     def test_reset_clears_the_flag(self, config_file: Path) -> None:
-        runner.invoke(app, ["config", "set-runs-legacy-samples", "true"])
+        runner.invoke(app, ["config", "set-traces-opt-out", "true"])
 
         result = runner.invoke(app, ["config", "reset", "--yes"])
 
         assert result.exit_code == 0, result.output
-        assert Config().runs_legacy_samples is False
+        assert Config().traces_opt_out is False
 
     def test_view_shows_the_setting(self, config_file: Path) -> None:
-        runner.invoke(app, ["config", "set-runs-legacy-samples", "true"])
+        runner.invoke(app, ["config", "set-traces-opt-out", "true"])
 
         result = runner.invoke(app, ["config", "view"])
 
         assert result.exit_code == 0, result.output
-        assert "Runs Legacy Samples" in result.output
+        assert "Traces Opt Out" in result.output

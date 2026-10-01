@@ -35,7 +35,7 @@ class TracesSink(Sink):
         if receipt_history_size < 0:
             raise ValueError("receipt_history_size must be non-negative")
         self.enabled = True
-        # Only an explicit account-level denial permits the legacy fallback.
+        # Only an account-level denial or an explicit opt-out permits the legacy fallback.
         self.service_not_enabled = False
         self._client = client
         self._injected_client = client is not None
@@ -60,14 +60,14 @@ class TracesSink(Sink):
         if self.enabled:
             self._ensure_client()
 
-    def use_legacy_samples(self) -> None:
+    def opt_out(self) -> None:
         """Opt out before the first upload.
 
         Leaves the sink exactly as an account-level denial would, so the legacy
         fallback takes every batch, without ever contacting Prime Traces.
         """
         self.service_not_enabled = True
-        self._retire_quietly("legacy samples were requested; not uploading to Prime Traces")
+        self._retire_quietly("opted out of Prime Traces; uploading to legacy samples")
 
     def _ensure_client(self) -> None:
         """Build the client lazily, so a fork reset is repaired on the next write."""

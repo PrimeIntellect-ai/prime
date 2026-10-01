@@ -109,26 +109,26 @@ def test_no_beta_access_routes_first_and_later_batches_to_legacy(open_run, uploa
         assert len(legacy.batches) == 2
 
 
-def _request_legacy(source, monkeypatch, home):
+def _opt_out_via(source, monkeypatch, home):
     """Opt out through one of the three supported sources; returns init kwargs."""
     if source == "argument":
-        return {"legacy_samples": True}
+        return {"traces_opt_out": True}
     if source == "env":
-        monkeypatch.setenv("PRIME_RUNS_LEGACY_SAMPLES", "true")
+        monkeypatch.setenv("PRIME_TRACES_OPT_OUT", "true")
     else:
         (home / ".prime").mkdir()
-        (home / ".prime" / "config.json").write_text(json.dumps({"runs_legacy_samples": True}))
+        (home / ".prime" / "config.json").write_text(json.dumps({"traces_opt_out": True}))
     return {}
 
 
 @pytest.mark.parametrize("source", ["argument", "env", "config"])
 @pytest.mark.parametrize("kind", ["eval", "train"])
-def test_legacy_samples_opt_out_never_contacts_prime_traces(
+def test_opting_out_never_contacts_prime_traces(
     open_run, uploads, monkeypatch, isolated_prime_config, kind, source
 ):
     calls, _ = uploads
     run, platform, legacy = open_run(
-        kind, **_request_legacy(source, monkeypatch, isolated_prime_config)
+        kind, **_opt_out_via(source, monkeypatch, isolated_prime_config)
     )
     with run:
         for index in range(2):
@@ -153,10 +153,10 @@ def test_legacy_samples_opt_out_never_contacts_prime_traces(
         assert len(legacy.batches) == 2
 
 
-def test_an_explicit_argument_overrides_the_legacy_env_var(open_run, uploads, monkeypatch):
+def test_an_explicit_argument_overrides_the_opt_out_env_var(open_run, uploads, monkeypatch):
     calls, _ = uploads
-    monkeypatch.setenv("PRIME_RUNS_LEGACY_SAMPLES", "1")
-    run, platform, _ = open_run(legacy_samples=False)
+    monkeypatch.setenv("PRIME_TRACES_OPT_OUT", "1")
+    run, platform, _ = open_run(traces_opt_out=False)
     with run:
         run.log_episodes([make_episode()])
 
@@ -164,22 +164,22 @@ def test_an_explicit_argument_overrides_the_legacy_env_var(open_run, uploads, mo
     assert not any("/samples" in path for path in platform.paths())
 
 
-def test_an_unknown_legacy_env_value_is_rejected_before_the_run_is_created(
+def test_an_unknown_opt_out_env_value_is_rejected_before_the_run_is_created(
     monkeypatch, make_platform_client, eval_routes
 ):
     """Failing after create would strand a RUNNING run nobody holds a handle to."""
     platform = RecordingHandler(eval_routes)
     monkeypatch.setattr("prime_runs.run.PlatformClient", lambda **_: make_platform_client(platform))
-    monkeypatch.setenv("PRIME_RUNS_LEGACY_SAMPLES", "maybe")
+    monkeypatch.setenv("PRIME_TRACES_OPT_OUT", "maybe")
 
-    with pytest.raises(pr.exceptions.ConfigurationError, match="PRIME_RUNS_LEGACY_SAMPLES"):
+    with pytest.raises(pr.exceptions.ConfigurationError, match="PRIME_TRACES_OPT_OUT"):
         pr.init(model="model", environments=["gsm8k"], api_key="test-key", team_id="team-1")
 
     assert platform.paths() == []
 
 
-def test_a_disabled_run_ignores_the_legacy_env_var(monkeypatch):
-    monkeypatch.setenv("PRIME_RUNS_LEGACY_SAMPLES", "maybe")
+def test_a_disabled_run_ignores_the_opt_out_env_var(monkeypatch):
+    monkeypatch.setenv("PRIME_TRACES_OPT_OUT", "maybe")
     with pr.init(mode="disabled") as run:
         run.log_episodes([make_episode()])
 

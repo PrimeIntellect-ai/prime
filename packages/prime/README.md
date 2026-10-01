@@ -288,12 +288,12 @@ sandbox_client.wait_for_creation(sandbox.id)
 result = sandbox_client.execute_command(sandbox.id, "python --version")
 print(result.stdout)
 
-# Request a filesystem checkpoint; poll get_checkpoint until state is DURABLE
+# Request a filesystem checkpoint and wait until it is durable
 checkpoint = sandbox_client.checkpoint(sandbox.id)
-checkpoint = sandbox_client.get_checkpoint(checkpoint.id)
+checkpoint = sandbox_client.wait_for_checkpoint(checkpoint.id, timeout_seconds=300)
 restored = sandbox_client.create(CreateSandboxRequest(
     name="restored-sandbox", checkpoint_id=checkpoint.id
-))  # after checkpoint.state == "DURABLE"
+))
 
 # Clean up
 sandbox_client.delete(sandbox.id)

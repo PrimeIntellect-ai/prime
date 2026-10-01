@@ -2312,7 +2312,7 @@ class SandboxClient:
         return Sandbox.model_validate(response)
 
     def checkpoint(self, sandbox_id: str) -> SandboxCheckpoint:
-        """Request a filesystem checkpoint; poll get_checkpoint until DURABLE."""
+        """Request a filesystem checkpoint; use wait_for_checkpoint before restoring."""
         response = self.client.request("POST", f"/sandbox/{sandbox_id}/checkpoints")
         return SandboxCheckpoint.model_validate(response)
 
@@ -2320,6 +2320,38 @@ class SandboxClient:
         """Get the latest state of a filesystem checkpoint."""
         response = self.client.request("GET", f"/sandbox/checkpoints/{checkpoint_id}")
         return SandboxCheckpoint.model_validate(response)
+
+    def wait_for_checkpoint(
+        self, checkpoint_id: str, timeout_seconds: float = 300
+    ) -> SandboxCheckpoint:
+        """Wait for a filesystem checkpoint to become DURABLE.
+
+        Polls with backoff until timeout_seconds elapse, returning the durable
+        checkpoint. Raises RuntimeError on FAILED or DELETING and TimeoutError
+        on expiry.
+        In-flight requests follow the API client's timeout and retry policy.
+        """
+        if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be finite and greater than zero")
+        deadline = time.monotonic() + timeout_seconds
+        poll_index = 0
+        while time.monotonic() < deadline:
+            checkpoint = self.get_checkpoint(checkpoint_id)
+            if checkpoint.state == "DURABLE":
+                return checkpoint
+            if checkpoint.state in ("FAILED", "DELETING"):
+                raise RuntimeError(
+                    f"Checkpoint {checkpoint_id} cannot become durable (state={checkpoint.state}): "
+                    f"{checkpoint.error or 'no error details'}"
+                )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(_creation_poll_delay(poll_index), remaining))
+            poll_index += 1
+        raise TimeoutError(
+            f"Checkpoint {checkpoint_id} did not become DURABLE within {timeout_seconds:g}s"
+        )
 
     def list_checkpoints(
         self, sandbox_id: str, checkpoint_id: Optional[str] = None
@@ -3715,7 +3747,7 @@ class AsyncSandboxClient:
         return Sandbox.model_validate(response)
 
     async def checkpoint(self, sandbox_id: str) -> SandboxCheckpoint:
-        """Request a filesystem checkpoint; poll get_checkpoint until DURABLE."""
+        """Request a filesystem checkpoint; use wait_for_checkpoint before restoring."""
         response = await self.client.request("POST", f"/sandbox/{sandbox_id}/checkpoints")
         return SandboxCheckpoint.model_validate(response)
 
@@ -3723,6 +3755,38 @@ class AsyncSandboxClient:
         """Get the latest state of a filesystem checkpoint."""
         response = await self.client.request("GET", f"/sandbox/checkpoints/{checkpoint_id}")
         return SandboxCheckpoint.model_validate(response)
+
+    async def wait_for_checkpoint(
+        self, checkpoint_id: str, timeout_seconds: float = 300
+    ) -> SandboxCheckpoint:
+        """Wait for a filesystem checkpoint to become DURABLE.
+
+        Polls with backoff until timeout_seconds elapse, returning the durable
+        checkpoint. Raises RuntimeError on FAILED or DELETING and TimeoutError
+        on expiry.
+        In-flight requests follow the API client's timeout and retry policy.
+        """
+        if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be finite and greater than zero")
+        deadline = time.monotonic() + timeout_seconds
+        poll_index = 0
+        while time.monotonic() < deadline:
+            checkpoint = await self.get_checkpoint(checkpoint_id)
+            if checkpoint.state == "DURABLE":
+                return checkpoint
+            if checkpoint.state in ("FAILED", "DELETING"):
+                raise RuntimeError(
+                    f"Checkpoint {checkpoint_id} cannot become durable (state={checkpoint.state}): "
+                    f"{checkpoint.error or 'no error details'}"
+                )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(_creation_poll_delay(poll_index), remaining))
+            poll_index += 1
+        raise TimeoutError(
+            f"Checkpoint {checkpoint_id} did not become DURABLE within {timeout_seconds:g}s"
+        )
 
     async def list_checkpoints(
         self, sandbox_id: str, checkpoint_id: Optional[str] = None

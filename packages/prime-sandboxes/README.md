@@ -56,12 +56,12 @@ vm = sandbox_client.create(CreateSandboxRequest(
 
 sandbox_client.wait_for_creation(sandbox.id)
 
-# Checkpoints are asynchronous; poll until state is DURABLE before restoring.
+# Wait for checkpoint durability before restoring.
 checkpoint = sandbox_client.checkpoint(sandbox.id)
-checkpoint = sandbox_client.get_checkpoint(checkpoint.id)
+checkpoint = sandbox_client.wait_for_checkpoint(checkpoint.id, timeout_seconds=300)
 restored = sandbox_client.create(CreateSandboxRequest(
     name="restored-sandbox", checkpoint_id=checkpoint.id
-))  # after checkpoint.state == "DURABLE"
+))
 
 # Execute commands
 result = sandbox_client.execute_command(sandbox.id, "python --version")
@@ -89,6 +89,11 @@ async def main():
         await client.wait_for_creation(sandbox.id)
         result = await client.execute_command(sandbox.id, "echo 'Hello from async!'")
         print(result.stdout)
+
+        # Wait for checkpoint durability
+        checkpoint = await client.checkpoint(sandbox.id)
+        durable = await client.wait_for_checkpoint(checkpoint.id, timeout_seconds=300)
+        print(durable.state)
 
         # Clean up
         await client.delete(sandbox.id)

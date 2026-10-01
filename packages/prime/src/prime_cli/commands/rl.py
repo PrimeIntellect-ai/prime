@@ -973,6 +973,50 @@ def _warn_legacy_full_finetune_type(cfg: Dict[str, Any], config_path: str) -> No
         )
 
 
+# Mirrors the platform's `sourceRef` rules (branch / tag / sha charset, 200
+# chars, no `..`, `//` or `/.`, no trailing `/`) and rl-validator's refusal of
+# pull-request namespaces, so a typo fails at the prompt instead of as a 422.
+# Also applies the two git-check-ref-format rules the platform doesn't yet
+# check (no trailing `.`, no `/`-separated component ending in `.lock`): a
+# name breaking either can't resolve, so it would only fail later, at the
+# validator's fetch, after the user has already confirmed.
+_SOURCE_REF_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._/-]{0,199}\Z")
+
+
+def _source_ref_error(ref: str) -> Optional[str]:
+    """Why `ref` can't be a prime-rl source ref, or None when it can."""
+    if (
+        not _SOURCE_REF_RE.match(ref)
+        or ".." in ref
+        or "//" in ref
+        or "/." in ref
+        or ref.endswith(("/", "."))
+        or any(part.endswith(".lock") for part in ref.split("/"))
+    ):
+        return f"{ref!r} is not a valid git ref (branches, tags and commit shas only)."
+    if ref.startswith(("refs/", "pull/")):
+        return (
+            f"{ref!r}: pull-request and refs/ names are not accepted; "
+            "use --pr N for a pull request."
+        )
+    return None
+
+
+def _resolve_pr_ref(pr_number: int) -> str:
+    """`--pr N` -> the PR's head commit sha, via the public GitHub API.
+
+    Resolved client-side so the run is pinned to the exact commit the user
+    saw, and so a fork or merged PR fails here with an actionable message.
+    The caller shows the sha in its pre-confirmation banner."""
+    from ..api.training import resolve_pull_request_head
+
+    try:
+        return resolve_pull_request_head(pr_number)
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+
 def _dispatch_full_finetune_run(
     *,
     raw_cfg: Dict[str, Any],
@@ -986,6 +1030,8 @@ def _dispatch_full_finetune_run(
     volume: Optional[str] = None,
     volume_size: Optional[str] = None,
     mode: Optional[str] = None,
+    source_ref: Optional[str] = None,
+    source_pr: Optional[int] = None,
 ) -> None:
     """Hand off to /api/v1/training/runs (prime-rl on a registered
     PrimeCluster). Serves both dedicated run kinds: full-FT RL mega-TOMLs
@@ -1122,6 +1168,36 @@ def _dispatch_full_finetune_run(
         )
         raise typer.Exit(1)
 
+    # `source_ref` is request-level too: a prime-rl git ref (branch / tag /
+    # sha) the pods overlay onto the image at startup so unmerged code can
+    # be tested without an image build. `--ref` / `--pr` on the CLI, or
+    # top-level `source_ref = "..."` in the TOML. CLI flag wins. The
+    # platform resolves the ref to a commit at dispatch and pins that sha
+    # on the run, so a branch name here never drifts mid-run.
+    config_source_ref = raw_cfg.get("source_ref")
+    if config_source_ref is not None and not isinstance(config_source_ref, str):
+        console.print(
+            f"[red]Error:[/red] source_ref in {config_path} must be a string, "
+            f"got {type(config_source_ref).__name__}."
+        )
+        raise typer.Exit(1)
+    # Each source is checked where it was given (so `--ref ""` is an error,
+    # not a silent fall-through to the TOML) before the CLI flag wins.
+    for label, candidate in (
+        ("--ref", source_ref),
+        (f"source_ref in {config_path}", config_source_ref),
+    ):
+        problem = _source_ref_error(candidate) if candidate is not None else None
+        if problem:
+            console.print(f"[red]Error:[/red] {label}: {problem}")
+            raise typer.Exit(1)
+    resolved_source_ref = source_ref or config_source_ref
+    if source_pr is not None:
+        # Resolved here, after the local checks above, so a run that would
+        # fail on a bad secret, image tag or volume never pays the GitHub
+        # round trip (and never burns anonymous API quota).
+        resolved_source_ref = _resolve_pr_ref(source_pr)
+
     # Same deprecation pass as the LoRA path. In the prime-rl-native shape
     # the deprecated keys live one level down, under `[orchestrator]` — and
     # this config ships verbatim to the dedicated training endpoint, where
@@ -1146,7 +1222,16 @@ def _dispatch_full_finetune_run(
         k: v
         for k, v in raw_cfg.items()
         if k
-        not in ("env_file", "env_files", "image_tag", "gpu_type", "volume", "volume_size", "type")
+        not in (
+            "env_file",
+            "env_files",
+            "image_tag",
+            "gpu_type",
+            "volume",
+            "volume_size",
+            "source_ref",
+            "type",
+        )
     }
 
     payload = build_payload_from_toml(
@@ -1159,7 +1244,30 @@ def _dispatch_full_finetune_run(
         gpu_type=resolved_gpu_type,
         volume=resolved_volume,
         mode=mode,
+        source_ref=resolved_source_ref,
     )
+
+    # Surface the image + source pins before the confirmation so a typo'd
+    # ref is caught at the prompt, not by a failed dispatch. Skipped for
+    # --output json, which must emit nothing but the JSON payload.
+    if output != "json" and (resolved_image_tag or resolved_source_ref):
+        console.print("[cyan]prime-rl build[/cyan]")
+        image_display = (
+            f"[green]{rich_escape(resolved_image_tag)}[/green]"
+            if resolved_image_tag
+            else "[dim](platform default)[/dim]"
+        )
+        # highlight=False: Rich's auto-highlighter would otherwise recolour
+        # the digits inside the tag / sha / PR number on top of these styles.
+        console.print(f"  Image tag:  {image_display}", highlight=False)
+        if resolved_source_ref:
+            via_pr = f" [dim](PR #{source_pr})[/dim]" if source_pr is not None else ""
+            console.print(
+                f"  Source ref: [bold magenta]{rich_escape(resolved_source_ref)}[/bold magenta]"
+                f"{via_pr}",
+                highlight=False,
+            )
+        console.print()
 
     # `--output json` is a formatting switch: still dispatch the run,
     # then print the result as JSON. Same contract as the LoRA path
@@ -1196,10 +1304,10 @@ def _dispatch_full_finetune_run(
         # Don't expose token_value in JSON output either — the chart
         # binds it via secretKeyRef and printing it leaks credentials
         # into automation logs.
-        output_data_as_json(
-            {"run": {"runId": result.run_id}},
-            console,
-        )
+        run_json: Dict[str, Any] = {"runId": result.run_id}
+        if resolved_source_ref:
+            run_json["sourceRef"] = resolved_source_ref
+        output_data_as_json({"run": run_json}, console)
         return
 
     # Don't print result.token_value: the platform wires it into the
@@ -1487,6 +1595,31 @@ def create_run(
             'to a top-level `volume_size = "..."` in the TOML.'
         ),
     ),
+    ref: Optional[str] = typer.Option(
+        None,
+        "--ref",
+        hidden=True,
+        help=(
+            "Restricted: prime-rl git ref (branch, tag, or sha) to run on top "
+            "of the image (full-FT / SFT only). The dispatch must be a team run and "
+            "the team needs sourceRef access granted by Prime (contact "
+            "support), on a deployment with source overlays enabled; other "
+            "callers get a 403. The pods overlay that source onto the image at "
+            "startup, so unmerged code runs without an image build; the "
+            "platform pins the resolved commit for the run. Falls back to a "
+            'top-level `source_ref = "..."` in the TOML.'
+        ),
+    ),
+    pr: Optional[int] = typer.Option(
+        None,
+        "--pr",
+        hidden=True,
+        help=(
+            "Restricted: prime-rl pull request number to run (full-FT / SFT "
+            "only; same access as --ref). Shorthand for --ref <PR head sha>; fork "
+            "and already-merged PRs are not supported."
+        ),
+    ),
     full_finetune: bool = typer.Option(
         False,
         "--full-finetune",
@@ -1549,6 +1682,10 @@ def create_run(
     # unambiguous `[deployment]` block (full-FT-only — the RL/LoRA schema
     # has no such field).
     raw_cfg = _peek_toml(config_path)
+    if ref is not None and pr is not None:
+        console.print("[red]Error:[/red] --ref and --pr are mutually exclusive.")
+        raise typer.Exit(1)
+
     if _is_sft(raw_cfg, flag=sft):
         if full_finetune:
             console.print(
@@ -1575,6 +1712,12 @@ def create_run(
             volume=volume,
             volume_size=volume_size,
             mode="sft",
+            # Same dedicated-pod dispatch as full-FT, so the source overlay
+            # applies here too. Forwarded rather than dropped: the helper
+            # already honours a TOML `source_ref` for SFT, and a silently
+            # ignored --ref / --pr would launch without the requested code.
+            source_ref=ref,
+            source_pr=pr,
         )
         return
     if _is_full_finetune(raw_cfg, flag=full_finetune):
@@ -1590,8 +1733,21 @@ def create_run(
             gpu_type=gpu_type,
             volume=volume,
             volume_size=volume_size,
+            source_ref=ref,
+            source_pr=pr,
         )
         return
+
+    # --ref / --pr are for the dedicated (full-FT / SFT) dispatch only: the
+    # LoRA path runs on shared deployments and has no per-run source to
+    # overlay. Reject rather than silently launching without the requested
+    # code.
+    if ref is not None or pr is not None or raw_cfg.get("source_ref") is not None:
+        console.print(
+            "[red]Error:[/red] --ref / --pr (and top-level `source_ref` in the "
+            "TOML) are only supported for full-FT and SFT runs."
+        )
+        raise typer.Exit(1)
 
     if volume or volume_size or any(raw_cfg.get(k) is not None for k in ("volume", "volume_size")):
         console.print(
@@ -2474,6 +2630,8 @@ def get_run(
             console.print(f"  W&B: {run.wandb_entity or ''}/{run.wandb_project}")
         if run.team_id:
             console.print(f"  Team: {run.team_id}")
+        if run.source_commit:
+            console.print(f"  Source Commit: {run.source_commit}")
         console.print(f"  Created: [dim]{formatted['created_at']}[/dim]")
         if run.started_at:
             console.print(f"  Started: [dim]{run.started_at.strftime('%Y-%m-%d %H:%M')}[/dim]")

@@ -5,6 +5,7 @@ on this, so nothing here imports a producer package; records are duck-typed.
 """
 
 from . import metrics, projection
+from .config import LEGACY_SAMPLES_ENV
 from .exceptions import (
     APIError,
     ConfigurationError,
@@ -39,6 +40,7 @@ __all__ = [
     "ConfigSource",
     "CONFIG_SOURCE_KEY",
     "EnvironmentRef",
+    "LEGACY_SAMPLES_ENV",
     "MODE_ENV",
     "metrics",
     "projection",

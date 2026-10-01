@@ -118,6 +118,12 @@ def view() -> None:
     share_label = str(settings.get("share_resources_with_team", False))
     table.add_row("Share Resources With Team", share_label)
 
+    # Show whether run samples upload to the legacy tables instead of Prime Traces
+    legacy_label = str(settings.get("runs_legacy_samples", False))
+    if _env_set("PRIME_RUNS_LEGACY_SAMPLES"):
+        legacy_label = f"{os.environ['PRIME_RUNS_LEGACY_SAMPLES']} (from env var)"
+    table.add_row("Runs Legacy Samples", legacy_label)
+
     console.print(table)
 
 
@@ -419,6 +425,25 @@ def set_share_resources_with_team(
     config = Config()
     config.set_share_resources_with_team(value == "true")
     console.print(f"[green]Share resources with team set to: {value}[/green]")
+
+
+@app.command(no_args_is_help=True)
+def set_runs_legacy_samples(
+    enabled: str = typer.Argument(
+        ...,
+        help="Upload run samples to the legacy tables instead of Prime Traces: true or false",
+    ),
+) -> None:
+    """Set whether runs upload samples to the legacy tables instead of Prime Traces"""
+    require_persistent_context()
+    value = enabled.lower()
+    if value not in ("true", "false"):
+        console.print("[red]Error: Value must be 'true' or 'false'[/red]")
+        raise typer.Exit(1)
+
+    config = Config()
+    config.set_runs_legacy_samples(value == "true")
+    console.print(f"[green]Runs legacy samples set to: {value}[/green]")
 
 
 @app.command(no_args_is_help=True)

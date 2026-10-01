@@ -425,6 +425,7 @@ def init(
     kind: RunKind = "eval",
     id: Optional[str] = None,
     training: Optional[TrainingSpec] = None,
+    legacy_samples: Optional[bool] = None,
 ) -> Run:
     """Open a run and return its handle. Call it before the first rollout.
 
@@ -433,6 +434,10 @@ def init(
     to the file the run was launched from (stored byte for byte under
     ``config_source``) or a mapping taken as given. ``finish_timeout`` bounds
     the drain in :meth:`Run.finish`.
+
+    ``legacy_samples=True`` uploads samples to the legacy sample tables and never
+    contacts Prime Traces; it defaults to ``$PRIME_RUNS_LEGACY_SAMPLES``, then
+    ``runs_legacy_samples`` in the config file, then off.
 
     ``kind="train"`` opens an external training run: ``model`` is the base
     model, ``environments`` the hub ids, ``training`` the display fields, and a
@@ -506,6 +511,8 @@ def init(
         # The worker visits traces first; an explicit no-access response sends
         # that same batch, and subsequent batches, to the legacy sample table.
         traces = TracesSink(api_key=api_key, team_id=team_id)
+        if legacy_samples if legacy_samples is not None else settings.legacy_samples:
+            traces.use_legacy_samples()
         if kind == "train":
             sinks = [traces, LegacySamplesFallback(traces, RftSamplesSink(client))]
             metrics_sinks = [RftMetricsSink(client)]

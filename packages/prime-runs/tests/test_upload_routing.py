@@ -1,5 +1,7 @@
 """Exercise exclusive routing through init, the worker, and real Traces HTTP calls."""
 
+import json
+
 import httpx
 import pytest
 from _fakes import make_episode, make_trace, make_train_episode
@@ -105,6 +107,67 @@ def test_no_beta_access_routes_first_and_later_batches_to_legacy(open_run, uploa
     else:
         assert len(legacy.started) == 1
         assert len(legacy.batches) == 2
+
+
+def _request_legacy(source, monkeypatch, home):
+    """Opt out through one of the three supported sources; returns init kwargs."""
+    if source == "argument":
+        return {"legacy_samples": True}
+    if source == "env":
+        monkeypatch.setenv("PRIME_RUNS_LEGACY_SAMPLES", "true")
+    else:
+        (home / ".prime").mkdir()
+        (home / ".prime" / "config.json").write_text(json.dumps({"runs_legacy_samples": True}))
+    return {}
+
+
+@pytest.mark.parametrize("source", ["argument", "env", "config"])
+@pytest.mark.parametrize("kind", ["eval", "train"])
+def test_legacy_samples_opt_out_never_contacts_prime_traces(
+    open_run, uploads, monkeypatch, isolated_prime_config, kind, source
+):
+    calls, _ = uploads
+    run, platform, legacy = open_run(
+        kind, **_request_legacy(source, monkeypatch, isolated_prime_config)
+    )
+    with run:
+        for index in range(2):
+            episode = (
+                make_episode(f"e{index}")
+                if kind == "eval"
+                else make_train_episode(f"e{index}", step=10)
+            )
+            run.log_episodes([episode])
+            run.flush()
+
+    assert calls == []
+    assert run.failed_records == {}
+    assert run.errors == []
+    if kind == "eval":
+        bodies = platform.bodies_for("/api/v1/evaluations/eval-abc/samples")
+        assert [body["samples"][0]["sample_id"] for body in bodies] == ["e0", "e1"]
+        # Same summary a server-side denial leaves, so completion checks agree.
+        assert run.summary["prime_runs"]["traces_episodes_written"] == 0
+    else:
+        assert len(legacy.started) == 1
+        assert len(legacy.batches) == 2
+
+
+def test_an_explicit_argument_overrides_the_legacy_env_var(open_run, uploads, monkeypatch):
+    calls, _ = uploads
+    monkeypatch.setenv("PRIME_RUNS_LEGACY_SAMPLES", "1")
+    run, platform, _ = open_run(legacy_samples=False)
+    with run:
+        run.log_episodes([make_episode()])
+
+    assert len(calls) == 1
+    assert not any("/samples" in path for path in platform.paths())
+
+
+def test_an_unknown_legacy_env_value_is_rejected(open_run, monkeypatch):
+    monkeypatch.setenv("PRIME_RUNS_LEGACY_SAMPLES", "maybe")
+    with pytest.raises(pr.exceptions.ConfigurationError, match="PRIME_RUNS_LEGACY_SAMPLES"):
+        open_run()
 
 
 @pytest.mark.parametrize(

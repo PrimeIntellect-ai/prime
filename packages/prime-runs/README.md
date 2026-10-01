@@ -111,6 +111,24 @@ receipt-backed upload counts used by hosted evaluation completion checks.
 `log_*()` are queue puts, safe inside a coroutine; `init()` and `finish()` do
 network I/O.
 
+### Opting out of Prime Traces
+
+To keep a run's samples in the legacy sample tables, opt out before the run
+starts. The run then never contacts Prime Traces and behaves exactly as it does
+for an account without access:
+
+```python
+run = prime_runs.init(..., legacy_samples=True)  # one run
+```
+
+```bash
+export PRIME_RUNS_LEGACY_SAMPLES=true                  # one shell or job
+prime config set-runs-legacy-samples true              # this machine
+```
+
+An account can also opt out for every client and SDK version from the billing
+page of the dashboard. Runs already in Prime Traces stay readable either way.
+
 ## Configuration
 
 | Source                 | Meaning                                                                |
@@ -121,7 +139,8 @@ network I/O.
 | `PRIME_FRONTEND_URL`   | Dashboard; defaults to `https://app.primeintellect.ai`                 |
 | `PRIME_TRACES_URL`     | Prime Traces service, resolved by `prime-traces`                       |
 | `PRIME_RUNS_MODE`      | `online` or `disabled`; unset means online when there is an API key    |
-| `~/.prime/config.json` | Shared prime CLI config (`api_key`, `team_id`, `base_url`)             |
+| `PRIME_RUNS_LEGACY_SAMPLES` | `true` uploads samples to the legacy tables instead of Prime Traces |
+| `~/.prime/config.json` | Shared prime CLI config (`api_key`, `team_id`, `base_url`, `runs_legacy_samples`) |
 
 Precedence is `init()` argument → environment variable → config file. A missing
 API key disables the run with a warning. `base_url` is normally the platform

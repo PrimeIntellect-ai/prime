@@ -57,7 +57,17 @@ class TracesSink(Sink):
     def start(self, run_id: str, context: Mapping[str, str]) -> None:
         self._run_id = run_id
         self._context = {key: str(value) for key, value in context.items() if value is not None}
-        self._ensure_client()
+        if self.enabled:
+            self._ensure_client()
+
+    def use_legacy_samples(self) -> None:
+        """Opt out before the first upload.
+
+        Leaves the sink exactly as an account-level denial would, so the legacy
+        fallback takes every batch, without ever contacting Prime Traces.
+        """
+        self.service_not_enabled = True
+        self._retire_quietly("legacy samples were requested; not uploading to Prime Traces")
 
     def _ensure_client(self) -> None:
         """Build the client lazily, so a fork reset is repaired on the next write."""

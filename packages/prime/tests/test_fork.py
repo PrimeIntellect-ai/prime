@@ -87,7 +87,7 @@ def test_prime_fork_team_slug_overrides_configured_team_id(monkeypatch):
 
     result = runner.invoke(
         app,
-        ["fork", "openai/gsm8k", "--team", "research", "--output", "json"],
+        ["fork", "openai/gsm8k", "--team", "research", "--json"],
         env=TEST_ENV,
     )
 

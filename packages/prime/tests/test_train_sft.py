@@ -127,7 +127,7 @@ def test_train_sft_json_output_keeps_run_id_parseable(tmp_path: Path, monkeypatc
     config_path = _write_config(tmp_path, _sft_config())
     _capture_post(monkeypatch)
 
-    result = runner.invoke(app, ["train", config_path, "--yes", "--output", "json"], env=TEST_ENV)
+    result = runner.invoke(app, ["train", config_path, "--yes", "--json"], env=TEST_ENV)
 
     assert result.exit_code == 0, result.output
     import json

@@ -362,7 +362,7 @@ def test_list_shows_the_cluster_name(monkeypatch):
     assert table.exit_code == 0, table.output
     assert "Cluster" in table.output and "gpu-east" in table.output
 
-    as_json = CliRunner().invoke(app, ["volumes", "list", "-o", "json"], env=env)
+    as_json = CliRunner().invoke(app, ["volumes", "list", "--json"], env=env)
     assert [v["cluster"] for v in json.loads(as_json.output)] == ["gpu-east", None]
 
 
@@ -387,7 +387,7 @@ def test_create_passes_the_cluster_through(monkeypatch):
     )
     assert result.exit_code == 0, result.output
     assert "on gpu-east" in result.output
-    as_json = CliRunner().invoke(app, ["volumes", "create", "ckpts", "-o", "json"], env=env)
+    as_json = CliRunner().invoke(app, ["volumes", "create", "ckpts", "--json"], env=env)
     assert json.loads(as_json.output)["cluster"] == "gpu-east"
     assert calls == [("ckpts", "1Ti", "t1", "gpu-east"), ("ckpts", "1Ti", "t1", None)]
 

@@ -156,7 +156,7 @@ class TestEnvInspect:
     def test_json_output(self, mock_env_inspect_api: None) -> None:
         result = runner.invoke(
             app,
-            ["env", "inspect", "testuser/test-env", "--output", "json"],
+            ["env", "inspect", "testuser/test-env", "--json"],
         )
 
         assert result.exit_code == 0, result.output
@@ -167,7 +167,7 @@ class TestEnvInspect:
     def test_json_file_output_preserves_long_content(self, mock_env_inspect_api: None) -> None:
         result = runner.invoke(
             app,
-            ["env", "inspect", "testuser/test-env", "LONG.md", "--output", "json"],
+            ["env", "inspect", "testuser/test-env", "LONG.md", "--json"],
             env={"COLUMNS": "40", "LINES": "50"},
         )
 

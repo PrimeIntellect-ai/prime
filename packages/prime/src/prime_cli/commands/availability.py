@@ -11,9 +11,10 @@ from ..utils import (
     PlainTyper,
     get_console,
     json_output_help,
+    legacy_output_option,
     output_data_as_json,
+    resolve_output_format,
     status_color,
-    validate_output_format,
 )
 from ..utils.display import STOCK_STATUS_COLORS
 
@@ -80,10 +81,11 @@ def _format_disk_for_display(disk_entry: Dict[str, Any]) -> Dict[str, Any]:
 
 @app.command(epilog=LIST_GPU_TYPES_JSON_HELP)
 def gpu_types(
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
+    output: Optional[str] = legacy_output_option(),
 ) -> None:
     """List available GPU types"""
-    validate_output_format(output, console)
+    output = resolve_output_format(as_json, output, console)
 
     try:
         # Create API clients
@@ -138,10 +140,11 @@ def list(
     group_similar: bool = typer.Option(
         True, help="Group similar configurations from same provider"
     ),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
+    output: Optional[str] = legacy_output_option(),
 ) -> None:
     """List available GPU resources"""
-    validate_output_format(output, console)
+    output = resolve_output_format(as_json, output, console)
 
     try:
         # Create API clients
@@ -324,10 +327,11 @@ def disks(
     data_center_id: Optional[str] = typer.Option(
         None, help="Filter by data center ID (e.g., US-1)"
     ),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
+    output: Optional[str] = legacy_output_option(),
 ) -> None:
     """List available disks"""
-    validate_output_format(output, console)
+    output = resolve_output_format(as_json, output, console)
 
     try:
         # Create API clients

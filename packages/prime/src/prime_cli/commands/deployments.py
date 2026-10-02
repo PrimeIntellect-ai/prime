@@ -12,8 +12,9 @@ from ..utils import (
     PlainTyper,
     get_console,
     json_output_help,
+    legacy_output_option,
     output_data_as_json,
-    validate_output_format,
+    resolve_output_format,
 )
 
 console = get_console()
@@ -80,7 +81,8 @@ def list_deployments(
     team: Optional[str] = typer.Option(None, "--team", "-t", help="Filter by team ID"),
     num: int = typer.Option(20, "--num", "-n", help="Items per page"),
     page: int = typer.Option(1, "--page", "-p", help="Page number"),
-    output: str = typer.Option("table", "-o", "--output", help="Output format: table or json"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
+    output: Optional[str] = legacy_output_option(),
 ) -> None:
     """List adapters and their deployment status.
 
@@ -92,11 +94,11 @@ def list_deployments(
 
         prime deployments list --page 2
 
-        prime deployments list -o json
+        prime deployments list --json
 
         prime deployments list --team <team_id>
     """
-    validate_output_format(output, console)
+    output = resolve_output_format(as_json, output, console)
 
     if num < 1 or page < 1:
         console.print("[red]Error:[/red] --num and --page must be at least 1")

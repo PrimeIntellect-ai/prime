@@ -39,8 +39,9 @@ from ..utils import (
     PlainTyper,
     confirm_or_skip,
     get_console,
+    legacy_output_option,
     output_data_as_json,
-    validate_output_format,
+    resolve_output_format,
 )
 
 app = PlainTyper(
@@ -63,10 +64,11 @@ def create(
         "--cluster",
         help="Cluster name to create the volume on (default: your first available cluster)",
     ),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
+    output: str | None = legacy_output_option(),
 ) -> None:
     """Create a volume on your team's (or personal) cluster."""
-    validate_output_format(output, console)
+    output = resolve_output_format(as_json, output, console)
     client, team_id = _client()
     try:
         volume = client.create_volume(name, size, team_id=team_id, cluster=cluster)
@@ -83,10 +85,11 @@ def create(
 
 @app.command("list")
 def list_volumes(
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
+    output: str | None = legacy_output_option(),
 ) -> None:
     """List your volumes."""
-    validate_output_format(output, console)
+    output = resolve_output_format(as_json, output, console)
     client, team_id = _client()
     try:
         volumes = client.list_volumes(team_id=team_id)
@@ -904,16 +907,17 @@ def transfers_list(
     name: str = typer.Argument(..., help="Volume name"),
     transfer_id: str | None = typer.Option(None, "--id", help="Show one transfer by id"),
     follow: bool = typer.Option(False, "--follow", help="Poll one transfer until it finishes"),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
+    output: str | None = legacy_output_option(),
 ) -> None:
     """List a volume's transfers, newest first, or one with --id."""
-    validate_output_format(output, console)
+    output = resolve_output_format(as_json, output, console)
     if follow:
         if not transfer_id:
             console.print("[red]Error:[/red] --follow needs --id (one transfer).")
             raise typer.Exit(2)
         if output == "json":
-            console.print("[red]Error:[/red] --follow cannot be combined with --output json.")
+            console.print("[red]Error:[/red] --follow cannot be combined with --json.")
             raise typer.Exit(2)
         client, team_id = _client()
         _follow_transfer(client, name, transfer_id, team_id)

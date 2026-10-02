@@ -12,8 +12,9 @@ from ..utils import (
     PlainTyper,
     get_console,
     json_output_help,
+    legacy_output_option,
     output_data_as_json,
-    validate_output_format,
+    resolve_output_format,
 )
 from ..utils.formatters import format_price_per_mtok
 
@@ -108,7 +109,8 @@ def _sort_models(models: List[Dict[str, Any]], sort: str, order: str) -> List[Di
 
 @app.command("models", epilog=MODELS_JSON_HELP)
 def list_models(
-    output: str = typer.Option("table", "--output", "-o", help="table|json"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
+    output: Optional[str] = legacy_output_option(),
     search: Optional[str] = typer.Option(
         None, "--search", "-q", help="Case-insensitive substring match on model id"
     ),
@@ -116,7 +118,7 @@ def list_models(
     order: str = typer.Option("asc", "--order", "-d", help="Sort order (direction): asc, desc"),
 ) -> None:
     """List available models from Prime Inference (/v1/models)."""
-    validate_output_format(output, console)
+    output = resolve_output_format(as_json, output, console)
     if sort not in _SORT_KEYS:
         console.print(f"[red]Error:[/red] --sort must be one of: {', '.join(_SORT_KEYS)}")
         raise typer.Exit(1)
@@ -276,7 +278,8 @@ def chat(
     max_tokens: Optional[int] = typer.Option(
         None, "--max-tokens", help="Maximum tokens to generate"
     ),
-    output: str = typer.Option("text", "--output", "-o", help="text|json"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of text"),
+    output: Optional[str] = legacy_output_option(),
 ) -> None:
     """Send a one-shot chat message to a Prime Inference model.
 
@@ -285,12 +288,10 @@ def chat(
       echo "explain RL in one line" | prime inference chat <model-id>
       prime inference chat <model-id> "hi" --stream
     """
-    if output not in ("text", "json"):
-        console.print(f"[red]Error:[/red] invalid output format '{output}'. Supported: text, json")
-        raise typer.Exit(1)
+    output = resolve_output_format(as_json, output, console, default="text")
 
     if stream and output == "json":
-        console.print("[red]Error:[/red] --stream is not supported with --output json.")
+        console.print("[red]Error:[/red] --stream is not supported with --json.")
         raise typer.Exit(1)
 
     if message is None:
@@ -453,7 +454,8 @@ def evaluate(
     state_file: Optional[str] = typer.Option(
         None, "--state-file", help="Read the shared state from a file instead of an argument"
     ),
-    output: str = typer.Option("text", "--output", "-o", help="text|json"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of text"),
+    output: Optional[str] = legacy_output_option(),
 ) -> None:
     """Evaluate shared state against typed questions with an evaluation model.
 
@@ -466,9 +468,7 @@ def evaluate(
       prime inference evaluate typesafe-ai/jev \
         -q "tone:choice:Classify:professional=Formal,casual=Rude" < transcript.txt
     """
-    if output not in ("text", "json"):
-        console.print(f"[red]Error:[/red] invalid output format '{output}'. Supported: text, json")
-        raise typer.Exit(1)
+    output = resolve_output_format(as_json, output, console, default="text")
 
     if not question:
         console.print("[red]Error:[/red] at least one --question is required.")

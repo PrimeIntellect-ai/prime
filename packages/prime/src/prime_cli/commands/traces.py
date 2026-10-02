@@ -29,8 +29,9 @@ from ..utils import (
     PlainTyper,
     get_console,
     json_output_help,
+    legacy_output_option,
     output_data_as_json,
-    validate_output_format,
+    resolve_output_format,
 )
 from .teams import fetch_team_members
 from .traces_views import episode_view, episodes_table, summary_view, traces_table
@@ -172,7 +173,8 @@ def search_traces(
     cursor: Optional[str] = typer.Option(
         None, "--cursor", help="Continue a search from the cursor the previous page printed"
     ),
-    output: str = typer.Option("table", "--output", "-o", help="table or json"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
+    output: Optional[str] = legacy_output_option(),
 ) -> None:
     """Find exact text in the messages of one run's traces.
 
@@ -188,7 +190,7 @@ def search_traces(
         prime traces search "rm -rf" --run-id <run_id> --field tool_calls
         prime traces search "I cannot" --run-id <run_id> --role assistant --has-error
     """
-    validate_output_format(output, error_console)
+    output = resolve_output_format(as_json, output, error_console)
     if field not in ("content", "reasoning_content", "tool_calls"):
         raise typer.BadParameter(
             "Choose content, reasoning_content, or tool_calls", param_hint="--field"
@@ -277,11 +279,12 @@ def upload_traces(
     no_compress: bool = typer.Option(
         False, "--no-compress", help="Skip gzip transport compression"
     ),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
+    output: Optional[str] = legacy_output_option(),
 ) -> None:
     """Upload a JSONL file of traces. Safe to rerun after interruption:
     identical bytes replay their committed receipts without re-storing."""
-    validate_output_format(output, error_console)
+    output = resolve_output_format(as_json, output, error_console)
     line_format = LineFormat.EPISODE if episodes else LineFormat.TRACE
 
     def on_batch(batch: Batch, receipt: UploadReceipt) -> None:
@@ -519,10 +522,11 @@ def list_traces(
         "--cursor",
         help="Resume from a cursor returned by a previous page (cannot be combined with --page)",
     ),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
+    output: Optional[str] = legacy_output_option(),
 ) -> None:
     """List trace summaries, or episode summaries with --episodes, newest first."""
-    validate_output_format(output, error_console)
+    output = resolve_output_format(as_json, output, error_console)
     _check_paging(page, cursor)
     if episodes:
         # Episodes carry no task, model, reward or sort key of their own.
@@ -658,10 +662,11 @@ def get_trace(
     dest: Optional[Path] = typer.Option(
         None, "--dest", help="With --raw: write the document to this file"
     ),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
+    output: Optional[str] = legacy_output_option(),
 ) -> None:
     """Get one trace, or one episode with --episodes; --raw fetches the stored document."""
-    validate_output_format(output, error_console)
+    output = resolve_output_format(as_json, output, error_console)
     if dest is not None and not raw:
         error_console.print("[red]--dest requires --raw[/red]")
         raise typer.Exit(1)

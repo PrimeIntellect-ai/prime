@@ -22,7 +22,9 @@ from ..utils import (
     PlainTyper,
     get_console,
     json_output_help,
+    legacy_output_option,
     output_data_as_json,
+    resolve_output_format,
 )
 from ..utils.display import get_eval_viewer_url
 from ..utils.env_metadata import find_environment_metadata
@@ -792,7 +794,8 @@ def _resolve_hosted_environment(
 @subcommands_app.command("list", epilog=LIST_EVALS_JSON_HELP)
 @handle_errors
 def list_evals(
-    output: str = typer.Option("table", "--output", "-o", help="table|json"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
+    output: Optional[str] = legacy_output_option(),
     num: int = typer.Option(20, "--num", "-n", help="Items per page"),
     page: int = typer.Option(1, "--page", "-p", help="Page number"),
     env: Optional[str] = typer.Option(
@@ -804,7 +807,7 @@ def list_evals(
     ),
 ) -> None:
     """List evaluations."""
-    _validate_output_format(output, ["table", "json"])
+    output = resolve_output_format(as_json, output, console)
 
     if num < 1 or page < 1:
         console.print("[red]Error:[/red] --num and --page must be at least 1")
@@ -885,8 +888,7 @@ def list_evals(
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")
         console.print(
-            "[yellow]Response may contain invalid data. "
-            "Try --output json to see raw response.[/yellow]"
+            "[yellow]Response may contain invalid data. Try --json to see raw response.[/yellow]"
         )
         raise typer.Exit(1)
 
@@ -895,9 +897,12 @@ def list_evals(
 @handle_errors
 def get_eval(
     eval_id: str = typer.Argument(..., help="The ID of the evaluation to retrieve"),
+    as_json: bool = typer.Option(False, "--json", help="Output plain JSON (the default)"),
     output: str = typer.Option("json", "--output", "-o", help="json|pretty"),
 ) -> None:
     _validate_output_format(output, ["json", "pretty"])
+    if as_json:
+        output = "json"
 
     api_client = APIClient()
     client = EvalsClient(api_client)
@@ -911,9 +916,12 @@ def get_samples(
     eval_id: str = typer.Argument(..., help="The ID of the evaluation"),
     page: int = typer.Option(1, "--page", "-p", help="Page number"),
     num: int = typer.Option(100, "--num", "-n", help="Items per page"),
+    as_json: bool = typer.Option(False, "--json", help="Output plain JSON (the default)"),
     output: str = typer.Option("json", "--output", "-o", help="json|pretty"),
 ) -> None:
     _validate_output_format(output, ["json", "pretty"])
+    if as_json:
+        output = "json"
 
     api_client = APIClient()
     client = EvalsClient(api_client)
@@ -1189,7 +1197,8 @@ def push_eval(
         "--name",
         help="Explicit evaluation name override",
     ),
-    output: str = typer.Option("pretty", "--output", "-o", help="json|pretty"),
+    as_json: bool = typer.Option(False, "--json", help="Also print the result as JSON"),
+    output: Optional[str] = legacy_output_option(),
     is_public: bool = typer.Option(
         False,
         "--public",
@@ -1209,6 +1218,8 @@ def push_eval(
         prime eval push --public                           # Create a public evaluation
         prime eval push --eval xyz789 --name "rerun"      # Update an existing evaluation name
     """
+    output = resolve_output_format(as_json, output, console, default="pretty")
+
     try:
         if eval_id and is_public:
             console.print(

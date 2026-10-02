@@ -127,7 +127,7 @@ class TestEnvSecretList:
 
     def test_list_secrets_json_output(self, mock_env_secret_api: None) -> None:
         """Test listing env secrets with JSON output."""
-        result = runner.invoke(app, ["env", "secret", "list", "testuser/test-env", "-o", "json"])
+        result = runner.invoke(app, ["env", "secret", "list", "testuser/test-env", "--json"])
         assert result.exit_code == 0, f"Failed: {result.output}"
         output = json.loads(result.output)
         assert "secrets" in output
@@ -225,8 +225,7 @@ class TestEnvSecretCreate:
                 "NEW_SECRET",
                 "-v",
                 "value",
-                "-o",
-                "json",
+                "--json",
             ],
         )
         assert result.exit_code == 0, f"Failed: {result.output}"
@@ -362,8 +361,7 @@ class TestEnvSecretUpdate:
                 "esecret-id-001",
                 "-n",
                 "NEW_NAME",
-                "-o",
-                "json",
+                "--json",
             ],
         )
         assert result.exit_code == 0, f"Failed: {result.output}"
@@ -492,8 +490,7 @@ class TestEnvSecretLink:
                 "link",
                 "global-secret-id-123",
                 "testuser/test-env",
-                "-o",
-                "json",
+                "--json",
             ],
         )
         assert result.exit_code == 0, f"Failed: {result.output}"
@@ -555,7 +552,8 @@ class TestEnvSecretHelp:
         result = runner.invoke(app, ["env", "secret", "list", "--help"])
         assert result.exit_code == 0
         output = strip_ansi(result.output)
-        assert "--output" in output
+        assert "--json" in output
+        assert "--output" not in output
 
     def test_env_secret_create_help(self) -> None:
         """Test that env secret create help shows options."""

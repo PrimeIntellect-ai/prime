@@ -8,8 +8,9 @@ from ..utils import (
     PlainTyper,
     get_console,
     json_output_help,
+    legacy_output_option,
     output_data_as_json,
-    validate_output_format,
+    resolve_output_format,
 )
 
 app = PlainTyper(help="List your teams", no_args_is_help=True)
@@ -51,10 +52,11 @@ def fetch_team_members(client: APIClient, team_id: str) -> list[dict]:
 def list_teams(
     limit: int = typer.Option(100, help="Maximum number of teams to list"),
     offset: int = typer.Option(0, help="Number of teams to skip"),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
+    output: str | None = legacy_output_option(),
 ) -> None:
     """List teams for the current user."""
-    validate_output_format(output, console)
+    output = resolve_output_format(as_json, output, console)
 
     try:
         client = APIClient()
@@ -116,10 +118,11 @@ def list_members(
     team_id: str = typer.Option(
         None, "--team-id", help="Team ID (uses config team_id if not specified)"
     ),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
+    output: str | None = legacy_output_option(),
 ) -> None:
     """List members of a team."""
-    validate_output_format(output, console)
+    output = resolve_output_format(as_json, output, console)
 
     config = Config()
     resolved_team_id = team_id or config.team_id

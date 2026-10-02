@@ -3,7 +3,13 @@ from typing import Dict, Optional, Tuple
 import typer
 
 from ..client import APIClient, APIError
-from ..utils import get_console, json_output_help, output_data_as_json, validate_output_format
+from ..utils import (
+    get_console,
+    json_output_help,
+    legacy_output_option,
+    output_data_as_json,
+    resolve_output_format,
+)
 
 console = get_console()
 
@@ -44,15 +50,11 @@ def fork(
         "-t",
         help="Team slug to fork into (uses configured team ID if omitted)",
     ),
-    output: str = typer.Option(
-        "table",
-        "--output",
-        "-o",
-        help="Output format: table or json",
-    ),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
+    output: Optional[str] = legacy_output_option(),
 ) -> None:
     """Fork a public environment into your Prime Intellect namespace."""
-    validate_output_format(output, console)
+    output = resolve_output_format(as_json, output, console)
 
     try:
         owner, name = _parse_fork_source(environment)

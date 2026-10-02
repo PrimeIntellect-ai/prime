@@ -199,7 +199,7 @@ prime sandbox create python:3.11-slim --env KEY=VALUE --secret API_KEY=secret123
 prime sandbox run SANDBOX_ID -- python script.py
 
 # Get sandbox details
-prime sandbox get SANDBOX_ID [--output json]
+prime sandbox get SANDBOX_ID [--json]
 
 # Show or replace network rules
 prime sandbox network SANDBOX_ID
@@ -237,7 +237,7 @@ prime images push-bulk --hf org/dataset --dockerfile-column dockerfile --name-co
 prime images push-bulk --hf org/dataset --column docker_image
 
 # List images
-prime images list [--search TERM] [--page N] [--num N] [--output json]
+prime images list [--search TERM] [--page N] [--num N] [--json]
 
 # Change visibility
 prime images publish myapp:v1.0.0

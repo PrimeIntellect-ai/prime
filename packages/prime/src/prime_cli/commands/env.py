@@ -28,8 +28,9 @@ from ..utils import (
     PlainTyper,
     get_console,
     json_output_help,
+    legacy_output_option,
     output_data_as_json,
-    validate_output_format,
+    resolve_output_format,
 )
 from ..utils.env_metadata import find_environment_metadata
 from ..utils.environment_runtime import (
@@ -515,7 +516,8 @@ def list_cmd(
     visibility: Optional[str] = typer.Option(
         None, "--visibility", help="Filter by visibility (PUBLIC/PRIVATE)"
     ),
-    output: str = typer.Option("table", "--output", help="Output format: table or json"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
+    output: Optional[str] = legacy_output_option(short=False),
     search: Optional[str] = typer.Option(
         None, "--search", "-s", help="Search by name or description"
     ),
@@ -556,7 +558,7 @@ def list_cmd(
         prime env list --search "math"       # Search by name/description
         prime env list --sort stars          # Sort by most starred
     """
-    validate_output_format(output, console)
+    output = resolve_output_format(as_json, output, console)
 
     if num < 1 or page < 1:
         console.print("[red]Error:[/red] --num and --page must be at least 1")
@@ -689,16 +691,17 @@ def list_cmd(
 @app.command("status", rich_help_panel="Explore", epilog=ENV_STATUS_JSON_HELP)
 def status_cmd(
     env_id: str = typer.Argument(..., help="Environment ID (owner/name)"),
-    output: str = typer.Option("table", "--output", help="Output format: table or json"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
+    output: Optional[str] = legacy_output_option(short=False),
 ) -> None:
     """Show an environment's visibility and latest version.
 
     \b
     Examples:
         prime env status owner/my-env
-        prime env status owner/my-env --output json
+        prime env status owner/my-env --json
     """
-    validate_output_format(output, console)
+    output = resolve_output_format(as_json, output, console)
 
     # Parse env_id
     owner_name, env_name = _parse_environment_slug(env_id)
@@ -1961,7 +1964,8 @@ def inspect_cmd(
         help="Optional file or directory path inside the environment source",
     ),
     version: str = typer.Option("latest", "--version", "-v", help="Version to inspect"),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
+    output: Optional[str] = legacy_output_option(),
     max_bytes: int = typer.Option(
         100000,
         "--max-bytes",
@@ -1971,7 +1975,7 @@ def inspect_cmd(
     ),
 ) -> None:
     """Inspect environment source without downloading the archive locally."""
-    validate_output_format(output, console)
+    output = resolve_output_format(as_json, output, console)
 
     try:
         try:
@@ -3112,15 +3116,11 @@ def env_secret_list(
         None,
         help="Environment slug (e.g., 'owner/environment-name'). Auto-detected if not provided.",
     ),
-    output: str = typer.Option(
-        "table",
-        "--output",
-        "-o",
-        help="Output format: table or json",
-    ),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
+    output: Optional[str] = legacy_output_option(),
 ) -> None:
     """List all secrets for an environment."""
-    validate_output_format(output, console)
+    output = resolve_output_format(as_json, output, console)
     owner, env_name = _resolve_environment(environment)
 
     try:
@@ -3184,15 +3184,11 @@ def env_secret_create(
         "-d",
         help="Secret description",
     ),
-    output: str = typer.Option(
-        "table",
-        "--output",
-        "-o",
-        help="Output format: table or json",
-    ),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
+    output: Optional[str] = legacy_output_option(),
 ) -> None:
     """Create an environment-specific secret."""
-    validate_output_format(output, console)
+    output = resolve_output_format(as_json, output, console)
     owner, env_name = _resolve_environment(environment)
 
     try:
@@ -3266,15 +3262,11 @@ def env_secret_update(
         "-d",
         help="New secret description",
     ),
-    output: str = typer.Option(
-        "table",
-        "--output",
-        "-o",
-        help="Output format: table or json",
-    ),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
+    output: Optional[str] = legacy_output_option(),
 ) -> None:
     """Update an environment-specific secret."""
-    validate_output_format(output, console)
+    output = resolve_output_format(as_json, output, console)
     owner, env_name = _resolve_environment(environment)
 
     try:
@@ -3392,15 +3384,11 @@ def env_secret_link(
         None,
         help="Environment slug (e.g., 'owner/environment-name'). Auto-detected if not provided.",
     ),
-    output: str = typer.Option(
-        "table",
-        "--output",
-        "-o",
-        help="Output format: table or json",
-    ),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
+    output: Optional[str] = legacy_output_option(),
 ) -> None:
     """Link a global secret to an environment."""
-    validate_output_format(output, console)
+    output = resolve_output_format(as_json, output, console)
     owner, env_name = _resolve_environment(environment)
 
     try:
@@ -3475,15 +3463,11 @@ def var_list(
         None,
         help="Environment slug (e.g., 'owner/environment-name'). Auto-detected if not provided.",
     ),
-    output: str = typer.Option(
-        "table",
-        "--output",
-        "-o",
-        help="Output format: table or json",
-    ),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
+    output: Optional[str] = legacy_output_option(),
 ) -> None:
     """List all variables for an environment."""
-    validate_output_format(output, console)
+    output = resolve_output_format(as_json, output, console)
     owner, env_name = _resolve_environment(environment)
 
     try:
@@ -3550,15 +3534,11 @@ def var_create(
         "-d",
         help="Variable description",
     ),
-    output: str = typer.Option(
-        "table",
-        "--output",
-        "-o",
-        help="Output format: table or json",
-    ),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
+    output: Optional[str] = legacy_output_option(),
 ) -> None:
     """Create an environment variable."""
-    validate_output_format(output, console)
+    output = resolve_output_format(as_json, output, console)
     owner, env_name = _resolve_environment(environment)
 
     try:
@@ -3631,15 +3611,11 @@ def var_update(
         "-d",
         help="New variable description",
     ),
-    output: str = typer.Option(
-        "table",
-        "--output",
-        "-o",
-        help="Output format: table or json",
-    ),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
+    output: Optional[str] = legacy_output_option(),
 ) -> None:
     """Update an environment variable."""
-    validate_output_format(output, console)
+    output = resolve_output_format(as_json, output, console)
 
     if not any_provided(name, value, description):
         console.print(

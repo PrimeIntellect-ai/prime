@@ -14,8 +14,9 @@ from prime_cli.utils import (
     build_table,
     get_console,
     json_output_help,
+    legacy_output_option,
     output_data_as_json,
-    validate_output_format,
+    resolve_output_format,
 )
 from prime_cli.utils.formatters import format_usd
 
@@ -86,7 +87,8 @@ def wallet_command(
         max=100,
         help="Number of recent billing rows to fetch (max 100)",
     ),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
+    output: str | None = legacy_output_option(),
 ) -> None:
     """Show wallet balance and most recent billing rows.
 
@@ -99,9 +101,9 @@ def wallet_command(
 
         prime wallet
 
-        prime wallet --limit 50 --output json
+        prime wallet --limit 50 --json
     """
-    validate_output_format(output, console)
+    output = resolve_output_format(as_json, output, console)
 
     config = Config()
     client = WalletClient(APIClient())

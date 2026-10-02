@@ -35,8 +35,9 @@ from ..utils import (
     confirm_or_skip,
     get_console,
     json_output_help,
+    legacy_output_option,
     output_data_as_json,
-    validate_output_format,
+    resolve_output_format,
 )
 from .images_bulk import (
     PACKAGED_DOCKERFILE_PATH,
@@ -612,7 +613,8 @@ app.command("update-bulk")(update_bulk)
 
 @app.command("list", epilog=LIST_IMAGES_JSON_HELP)
 def list_images(
-    output: str = typer.Option("table", "--output", "-o", help="Output format (table or json)"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
+    output: Optional[str] = legacy_output_option(),
     search: Optional[str] = typer.Option(
         None,
         "--search",
@@ -645,10 +647,10 @@ def list_images(
         prime images list -q nvidia
         prime images list --num 100
         prime images list --page 2
-        prime images list --output json
+        prime images list --json
         prime images list --platform-image
     """
-    validate_output_format(output, console)
+    output = resolve_output_format(as_json, output, console)
 
     if num < 1 or page < 1:
         console.print("[red]Error:[/red] --num and --page must be at least 1")

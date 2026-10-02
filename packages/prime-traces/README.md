@@ -82,7 +82,7 @@ for match in page.items:
 ```
 
 ```bash
-prime traces search 'connection refused' --run-id run_9f3k2m --role tool -o json
+prime traces search 'connection refused' --run-id run_9f3k2m --role tool --json
 ```
 
 Async uses the same API. Optional filters: `role`, `run_step`, `has_error`,

@@ -117,7 +117,7 @@ def test_models_table_renders_pricing(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_models_json_includes_pricing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("prime_cli.core.APIClient.get", _mock_get_factory([]))
 
-    result = CliRunner().invoke(app, ["train", "models", "--output", "json"])
+    result = CliRunner().invoke(app, ["train", "models", "--json"])
 
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
@@ -348,7 +348,7 @@ def test_models_json_includes_effective_fields(monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
 
-    result = CliRunner().invoke(app, ["train", "models", "--output", "json"])
+    result = CliRunner().invoke(app, ["train", "models", "--json"])
 
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
@@ -453,7 +453,7 @@ def test_models_json_output_includes_available_fft_models(
         _mock_get_factory([], fft_payload=_fft_models_payload()),
     )
 
-    result = CliRunner().invoke(app, ["train", "models", "--output", "json"])
+    result = CliRunner().invoke(app, ["train", "models", "--json"])
 
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
@@ -478,7 +478,7 @@ def test_models_json_omits_fft_key_when_empty(monkeypatch: pytest.MonkeyPatch) -
     key when the FFT endpoint returns an empty list."""
     monkeypatch.setattr("prime_cli.core.APIClient.get", _mock_get_factory([]))
 
-    result = CliRunner().invoke(app, ["train", "models", "--output", "json"])
+    result = CliRunner().invoke(app, ["train", "models", "--json"])
 
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
@@ -501,7 +501,7 @@ def test_models_json_fft_only_always_includes_fft_key(
 
     monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
 
-    result = CliRunner().invoke(app, ["train", "models", "--fft-only", "--output", "json"])
+    result = CliRunner().invoke(app, ["train", "models", "--fft-only", "--json"])
 
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
@@ -509,7 +509,7 @@ def test_models_json_fft_only_always_includes_fft_key(
 
 
 def test_models_json_fft_only_with_data(monkeypatch: pytest.MonkeyPatch) -> None:
-    """--fft-only --output json with populated data: still no `models`
+    """--fft-only --json with populated data: still no `models`
     key; `available_fft_models` carries the payload."""
 
     def mock_get(self: Any, endpoint: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -519,7 +519,7 @@ def test_models_json_fft_only_with_data(monkeypatch: pytest.MonkeyPatch) -> None
 
     monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
 
-    result = CliRunner().invoke(app, ["train", "models", "--fft-only", "--output", "json"])
+    result = CliRunner().invoke(app, ["train", "models", "--fft-only", "--json"])
 
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)

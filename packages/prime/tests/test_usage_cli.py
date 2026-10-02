@@ -94,7 +94,7 @@ def test_train_usage_json_output(monkeypatch: pytest.MonkeyPatch) -> None:
         _make_get_mock({"/billing/runs/rft_abc/usage": _run_usage_payload()}, []),
     )
 
-    result = CliRunner().invoke(app, ["train", "usage", "rft_abc", "--output", "json"])
+    result = CliRunner().invoke(app, ["train", "usage", "rft_abc", "--json"])
 
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)

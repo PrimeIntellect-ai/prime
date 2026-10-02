@@ -1,7 +1,7 @@
 """Display utilities for table and JSON output."""
 
 import json
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import typer
 from rich.console import Console
@@ -10,13 +10,27 @@ from rich.table import Table
 from prime_cli.core import Config
 
 
-def validate_output_format(output: str, console: Console) -> None:
-    """Validate that output format is supported."""
-    if output not in ["table", "json"]:
+def legacy_output_option(short: bool = True) -> Any:
+    """Hidden `--output` option, kept for one release as an alias for `--json`."""
+    names = ("--output", "-o") if short else ("--output",)
+    return typer.Option(None, *names, hidden=True, help="Deprecated: use --json")
+
+
+def resolve_output_format(
+    as_json: bool, output: Optional[str], console: Console, default: str = "table"
+) -> str:
+    """Return the output format chosen by `--json` or the deprecated `--output`."""
+    if as_json:
+        return "json"
+    if output is None:
+        return default
+    if output not in (default, "json"):
         console.print(
-            f"[red]Error: Invalid output format '{output}'. Supported formats: table, json[/red]"
+            f"[red]Error: Invalid output format '{output}'. "
+            f"Supported formats: {default}, json[/red]"
         )
         raise typer.Exit(1)
+    return output
 
 
 def output_data_as_json(data: Any, console: Console) -> None:

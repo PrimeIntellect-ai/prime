@@ -246,7 +246,7 @@ def test_deployments_list_json_keeps_fallback_warning_off_stdout(monkeypatch) ->
         DummyDeploymentsClient,
     )
 
-    result = runner.invoke(app, ["deployments", "list", "--output", "json"], env=TEST_ENV)
+    result = runner.invoke(app, ["deployments", "list", "--json"], env=TEST_ENV)
 
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout) == {"models": [], "total": 0, "page": 1, "per_page": 20}

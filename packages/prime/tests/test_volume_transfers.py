@@ -268,7 +268,7 @@ def test_transfers_table(monkeypatch):
 
 def test_transfers_output_json_is_a_list(monkeypatch):
     _client(monkeypatch, list_volume_transfers=lambda name, **kw: [_transfer(), _transfer(id="t2")])
-    result = _run("transfers", "list", "data", "--output", "json")
+    result = _run("transfers", "list", "data", "--json")
     assert result.exit_code == 0, _text(result)
     data = json.loads(_text(result))
     assert [t["id"] for t in data] == ["t1", "t2"]
@@ -282,7 +282,7 @@ def test_transfers_id_shows_one_object(monkeypatch):
         get_volume_transfer=lambda name, tid, **kw: calls.append((name, tid, kw))
         or _transfer(id=tid),
     )
-    result = _run("transfers", "list", "data", "--id", "t7", "--output", "json")
+    result = _run("transfers", "list", "data", "--id", "t7", "--json")
     assert result.exit_code == 0, _text(result)
     assert calls == [("data", "t7", {"team_id": "team1"})]
     data = json.loads(_text(result))
@@ -340,7 +340,7 @@ def _raise_or_pop(states):
     "args",
     [
         ["transfers", "list", "data", "--follow"],
-        ["transfers", "list", "data", "--id", "t1", "--follow", "--output", "json"],
+        ["transfers", "list", "data", "--id", "t1", "--follow", "--json"],
     ],
 )
 def test_follow_requires_id_and_human_output(monkeypatch, args):

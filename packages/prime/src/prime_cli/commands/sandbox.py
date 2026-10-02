@@ -43,12 +43,13 @@ from ..utils import (
     human_age,
     iso_timestamp,
     json_output_help,
+    legacy_output_option,
     obfuscate_env_vars,
     obfuscate_secrets,
     output_data_as_json,
+    resolve_output_format,
     sort_by_created,
     status_color,
-    validate_output_format,
 )
 from ..utils.display import SANDBOX_STATUS_COLORS
 from ..utils.plain import _PlainTyperCommand
@@ -251,10 +252,11 @@ def list_sandboxes_cmd(
     page: int = typer.Option(1, "--page", "-p", help="Page number"),
     num: int = typer.Option(50, "--num", "-n", help="Items per page"),
     all: bool = typer.Option(False, "--all", help="Show all sandboxes including terminated ones"),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
+    output: Optional[str] = legacy_output_option(),
 ) -> None:
     """List your sandboxes (shortcut: ls)"""
-    validate_output_format(output, console)
+    output = resolve_output_format(as_json, output, console)
 
     if num < 1 or page < 1:
         console.print("[red]Error:[/red] --num and --page must be at least 1")
@@ -367,10 +369,11 @@ def list_sandboxes_cmd(
 @app.command(no_args_is_help=True, epilog=SANDBOX_DETAIL_JSON_HELP)
 def get(
     sandbox_id: str,
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
+    output: Optional[str] = legacy_output_option(),
 ) -> None:
     """Get detailed information about a specific sandbox"""
-    validate_output_format(output, console)
+    output = resolve_output_format(as_json, output, console)
 
     try:
         base_client = APIClient()

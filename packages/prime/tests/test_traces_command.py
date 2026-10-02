@@ -52,7 +52,7 @@ def test_search_json_preserves_continuation_coverage_and_scope(monkeypatch):
     monkeypatch.setattr(traces_cmd, "_traces_client", Client)
     result = runner.invoke(
         traces_cmd.app,
-        ["search", "connection refused", "--run-id", "run", "--run-step", "0", "-o", "json"],
+        ["search", "connection refused", "--run-id", "run", "--run-step", "0", "--json"],
     )
     assert result.exit_code == 0, result.output
     body = json.loads(result.stdout)
@@ -327,7 +327,7 @@ def test_logout_preserves_active_environment_traces_url(monkeypatch, tmp_path):
 # Command smoke tests: every `prime traces` command exercised through Typer
 # with a stubbed TracesClient, mirroring test_tunnel_cli.py. These catch
 # signature drift between the CLI options and the SDK methods, and pin that
-# `--output json` emits parseable JSON and nothing else.
+# `--json` emits parseable JSON and nothing else.
 # ---------------------------------------------------------------------------
 
 
@@ -473,7 +473,7 @@ def test_upload_command_episodes_json_output(fake_client, tmp_path):
 
     result = runner.invoke(
         main_app,
-        ["traces", "upload", str(traces_file), "--episodes", "--no-compress", "-o", "json"],
+        ["traces", "upload", str(traces_file), "--episodes", "--no-compress", "--json"],
     )
 
     assert result.exit_code == 0, result.output
@@ -629,7 +629,7 @@ def test_list_command_page_json_output_is_the_requested_page(fake_client):
         },
     )
 
-    result = runner.invoke(main_app, ["traces", "list", "--page", "2", "-o", "json"])
+    result = runner.invoke(main_app, ["traces", "list", "--page", "2", "--json"])
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
@@ -667,7 +667,7 @@ def test_list_command_renders_full_trace_id(fake_client):
 
 
 def test_list_command_json_output_is_parseable(fake_client):
-    result = runner.invoke(main_app, ["traces", "list", "-o", "json"])
+    result = runner.invoke(main_app, ["traces", "list", "--json"])
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
@@ -694,7 +694,7 @@ def test_json_error_keeps_stdout_machine_readable(fake_client):
 
     fake_client.list = fail_list
 
-    result = runner.invoke(main_app, ["traces", "list", "-o", "json"])
+    result = runner.invoke(main_app, ["traces", "list", "--json"])
 
     assert result.exit_code == 1
     assert result.stdout == ""
@@ -785,7 +785,7 @@ def test_get_command_raw_to_dest_honors_json_output(fake_client, tmp_path):
     dest = tmp_path / "trace.json"
     result = runner.invoke(
         main_app,
-        ["traces", "get", "8d3f1a2b", "--raw", "--dest", str(dest), "-o", "json"],
+        ["traces", "get", "8d3f1a2b", "--raw", "--dest", str(dest), "--json"],
     )
 
     assert result.exit_code == 0, result.output
@@ -857,7 +857,7 @@ def test_get_shows_fixed_fields_without_dumping_tool_schemas(full_get):
 
 
 def test_get_json_still_returns_every_field(full_get):
-    result = runner.invoke(main_app, ["traces", "get", "8d3f1a2b", "-o", "json"])
+    result = runner.invoke(main_app, ["traces", "get", "8d3f1a2b", "--json"])
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
@@ -936,7 +936,7 @@ def test_search_error_keeps_json_stdout_clean(monkeypatch, code):
             raise NotFoundError("Run [red]missing[/] not found", code=code)
 
     monkeypatch.setattr(traces_cmd, "_traces_client", Client)
-    result = runner.invoke(traces_cmd.app, ["search", "hello", "--run-id", "run", "-o", "json"])
+    result = runner.invoke(traces_cmd.app, ["search", "hello", "--run-id", "run", "--json"])
     assert result.exit_code == 1
     assert result.stdout_bytes == b""
     if code is None:
@@ -1197,7 +1197,7 @@ def test_list_episodes_rejects_page_with_cursor(fake_client):
 
 
 def test_list_episodes_json_output_is_the_page(fake_client):
-    result = runner.invoke(main_app, ["traces", "list", "--episodes", "-o", "json"])
+    result = runner.invoke(main_app, ["traces", "list", "--episodes", "--json"])
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
@@ -1283,7 +1283,7 @@ def test_get_episodes_without_traces_says_so(fake_client):
 
 
 def test_get_episodes_json_is_the_detail_alone(fake_client):
-    result = runner.invoke(main_app, ["traces", "get", "ep_4c1d", "--episodes", "-o", "json"])
+    result = runner.invoke(main_app, ["traces", "get", "ep_4c1d", "--episodes", "--json"])
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
@@ -1308,7 +1308,7 @@ def test_get_episodes_raw_to_dest_writes_the_file(fake_client, tmp_path):
 
     result = runner.invoke(
         main_app,
-        ["traces", "get", "ep_4c1d", "--episodes", "--raw", "--dest", str(dest), "-o", "json"],
+        ["traces", "get", "ep_4c1d", "--episodes", "--raw", "--dest", str(dest), "--json"],
     )
 
     assert result.exit_code == 0, result.output
@@ -1360,7 +1360,7 @@ def _episode_missing(episode_id, **kwargs):
     )
 
 
-@pytest.mark.parametrize("args", [["--raw"], ["-o", "json"], []])
+@pytest.mark.parametrize("args", [["--raw"], ["--json"], []])
 def test_get_episodes_not_found_names_the_account_it_searched(fake_client, monkeypatch, args):
     monkeypatch.setattr(traces_cmd, "Config", _TeamConfig)
     fake_client.get_episode = _episode_missing

@@ -20,8 +20,9 @@ from prime_cli.utils import (
     get_console,
     is_plain_mode,
     json_output_help,
+    legacy_output_option,
     output_data_as_json,
-    validate_output_format,
+    resolve_output_format,
 )
 from prime_cli.utils.formatters import format_price_per_mtok, format_usd
 
@@ -138,7 +139,8 @@ def _build_run_usage_table(usage: RunUsage) -> Table:
 
 def run_usage_command(
     run_id: str = typer.Argument(..., help="RFT run ID (e.g. rft_..."),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
+    output: str | None = legacy_output_option(),
     watch: bool = typer.Option(
         False, "--watch", "-w", help="Poll continuously and update in place"
     ),
@@ -158,9 +160,9 @@ def run_usage_command(
 
         prime train usage <run_id> --watch --interval 15
 
-        prime train usage <run_id> --output json
+        prime train usage <run_id> --json
     """
-    validate_output_format(output, console)
+    output = resolve_output_format(as_json, output, console)
 
     billing = BillingClient(APIClient())
 

@@ -45,7 +45,7 @@ def test_rl_alias_still_works_with_deprecation_warning(tmp_path: Path) -> None:
 
 
 def test_rl_alias_warning_uses_stderr_for_json_output() -> None:
-    result = runner.invoke(app, ["rl", "configs", "--output", "json"], env=TEST_ENV)
+    result = runner.invoke(app, ["rl", "configs", "--json"], env=TEST_ENV)
 
     assert result.exit_code == 0, result.output
     assert (
@@ -121,7 +121,7 @@ def test_train_legacy_json_warning_uses_stderr(monkeypatch, tmp_path: Path) -> N
     )
     monkeypatch.setattr(rl, "Config", lambda: type("Config", (), {"team_id": None})())
     monkeypatch.setattr(rl, "confirm_or_skip", lambda *args, **kwargs: False)
-    result = runner.invoke(app, ["train", str(config), "--output", "json"], env=TEST_ENV)
+    result = runner.invoke(app, ["train", str(config), "--json"], env=TEST_ENV)
     assert result.exit_code == 0, result.output
     assert "stop accepting new runs on October 5, 2026" in result.stderr
     assert "Hosted Training is transitioning to dedicated runs." in result.stderr
@@ -339,11 +339,11 @@ def test_train_volume_flag_and_toml_key_reach_the_fft_payload(monkeypatch, tmp_p
     cfg = tmp_path / "rl.toml"
     cfg.write_text(_FFT_BODY)
     result = runner.invoke(
-        app, ["train", str(cfg), "--volume", "my-ckpts", "-y", "-o", "json"], env=TEST_ENV
+        app, ["train", str(cfg), "--volume", "my-ckpts", "-y", "--json"], env=TEST_ENV
     )
     assert result.exit_code == 0, result.output
     cfg.write_text('volume = "from-toml"\n' + _FFT_BODY)
-    result = runner.invoke(app, ["train", str(cfg), "-y", "-o", "json"], env=TEST_ENV)
+    result = runner.invoke(app, ["train", str(cfg), "-y", "--json"], env=TEST_ENV)
     assert result.exit_code == 0, result.output
 
     assert [p.get("volume") for p in captured] == ["my-ckpts", "from-toml"]
@@ -468,18 +468,18 @@ def test_train_ref_flag_and_toml_key_reach_the_fft_payload(monkeypatch, tmp_path
     cfg = tmp_path / "rl.toml"
     cfg.write_text(_FFT_BODY)
     result = runner.invoke(
-        app, ["train", str(cfg), "--ref", "feat/my-branch", "-y", "-o", "json"], env=TEST_ENV
+        app, ["train", str(cfg), "--ref", "feat/my-branch", "-y", "--json"], env=TEST_ENV
     )
     assert result.exit_code == 0, result.output
     assert json.loads(result.output)["run"]["sourceRef"] == "feat/my-branch"
 
     cfg.write_text('source_ref = "from-toml"\n' + _FFT_BODY)
-    result = runner.invoke(app, ["train", str(cfg), "-y", "-o", "json"], env=TEST_ENV)
+    result = runner.invoke(app, ["train", str(cfg), "-y", "--json"], env=TEST_ENV)
     assert result.exit_code == 0, result.output
 
     # CLI flag wins over the TOML key.
     result = runner.invoke(
-        app, ["train", str(cfg), "--ref", "abc123", "-y", "-o", "json"], env=TEST_ENV
+        app, ["train", str(cfg), "--ref", "abc123", "-y", "--json"], env=TEST_ENV
     )
     assert result.exit_code == 0, result.output
 
@@ -501,11 +501,11 @@ def test_train_pr_flag_resolves_head_sha_and_conflicts_with_ref(
     monkeypatch.setattr("prime_cli.api.training.resolve_pull_request_head", fake_resolve)
     cfg = tmp_path / "rl.toml"
     cfg.write_text(_FFT_BODY)
-    result = runner.invoke(app, ["train", str(cfg), "--pr", "42", "-y", "-o", "json"], env=TEST_ENV)
+    result = runner.invoke(app, ["train", str(cfg), "--pr", "42", "-y", "--json"], env=TEST_ENV)
     assert result.exit_code == 0, result.output
     assert seen == [42]
     assert captured[0]["sourceRef"] == sha
-    # --output json must stay pure JSON: no "Resolved PR" line on stdout.
+    # --json must stay pure JSON: no "Resolved PR" line on stdout.
     assert json.loads(result.output)["run"]["sourceRef"] == sha
 
     # Table mode shows the resolved sha once, in the build banner, with the
@@ -625,11 +625,11 @@ def test_train_source_overlay_reaches_the_sft_payload(monkeypatch, tmp_path: Pat
     sft = '[model]\nname = "Qwen/Qwen3-0.6B"\n\n[data]\nname = "/volume/datasets/x"\n'
     cfg.write_text(sft)
     result = runner.invoke(
-        app, ["train", str(cfg), "--sft", "--ref", "feat/x", "-y", "-o", "json"], env=TEST_ENV
+        app, ["train", str(cfg), "--sft", "--ref", "feat/x", "-y", "--json"], env=TEST_ENV
     )
     assert result.exit_code == 0, result.output
     result = runner.invoke(
-        app, ["train", str(cfg), "--sft", "--pr", "42", "-y", "-o", "json"], env=TEST_ENV
+        app, ["train", str(cfg), "--sft", "--pr", "42", "-y", "--json"], env=TEST_ENV
     )
     assert result.exit_code == 0, result.output
     assert [(p["mode"], p["sourceRef"]) for p in captured] == [("sft", "feat/x"), ("sft", sha)]

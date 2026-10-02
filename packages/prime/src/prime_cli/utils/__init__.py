@@ -6,9 +6,10 @@ from .context import require_persistent_context
 from .display import (
     build_table,
     get_eval_viewer_url,
+    legacy_output_option,
     output_data_as_json,
+    resolve_output_format,
     status_color,
-    validate_output_format,
 )
 from .formatters import (
     format_ip_display,
@@ -33,7 +34,8 @@ from .time_utils import human_age, iso_timestamp, sort_by_created
 
 __all__ = [
     "output_data_as_json",
-    "validate_output_format",
+    "legacy_output_option",
+    "resolve_output_format",
     "build_table",
     "status_color",
     "get_eval_viewer_url",

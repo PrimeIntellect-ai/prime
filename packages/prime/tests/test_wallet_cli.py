@@ -120,7 +120,7 @@ def test_wallet_json_output(monkeypatch: pytest.MonkeyPatch) -> None:
         _make_get_mock({"/billing/wallet": _wallet_payload()}, []),
     )
 
-    result = CliRunner().invoke(app, ["wallet", "--output", "json"])
+    result = CliRunner().invoke(app, ["wallet", "--json"])
 
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
@@ -142,7 +142,7 @@ def test_wallet_passes_limit_and_uses_configured_team(
     )
     monkeypatch.setattr("prime_cli.core.Config.team_id", "team-cfg")
 
-    result = CliRunner().invoke(app, ["wallet", "--limit", "5", "--output", "json"])
+    result = CliRunner().invoke(app, ["wallet", "--limit", "5", "--json"])
 
     assert result.exit_code == 0, result.output
     assert calls == [
@@ -234,7 +234,7 @@ def test_wallet_json_emits_iso_datetimes(monkeypatch: pytest.MonkeyPatch) -> Non
         _make_get_mock({"/billing/wallet": _wallet_payload()}, []),
     )
 
-    result = CliRunner().invoke(app, ["wallet", "--output", "json"])
+    result = CliRunner().invoke(app, ["wallet", "--json"])
 
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)

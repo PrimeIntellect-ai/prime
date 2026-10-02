@@ -478,7 +478,7 @@ def remote_script(config: RemoteConfig) -> str:
             last_error: Exception | None = None
             for attempt in range(6):
                 try:
-                    raw = run(["prime", "eval", "get", eval_id, "--output", "json"], timeout=120)
+                    raw = run(["prime", "eval", "get", eval_id, "--json"], timeout=120)
                     data = extract_json_object(raw)
                     return str(
                         data.get("status") or data.get("data", {}).get("status") or "UNKNOWN"
@@ -645,8 +645,7 @@ def remote_script(config: RemoteConfig) -> str:
                         REMOTE_ENV_SLUG,
                         "--name",
                         f"{ENV_NAME} explicit eval push",
-                        "--output",
-                        "json",
+                        "--json",
                     ],
                     cwd=LAB_ROOT,
                     timeout=600,

@@ -22,9 +22,10 @@ from ..utils import (
     is_plain_mode,
     iso_timestamp,
     json_output_help,
+    legacy_output_option,
     output_data_as_json,
+    resolve_output_format,
     status_color,
-    validate_output_format,
 )
 from ..utils.display import DISK_STATUS_COLORS
 
@@ -108,13 +109,14 @@ def list(
     limit: int = typer.Option(100, help="Maximum number of disks to list"),
     offset: int = typer.Option(0, help="Number of disks to skip"),
     watch: bool = typer.Option(False, "--watch", "-w", help="Watch disks list in real-time"),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
+    output: Optional[str] = legacy_output_option(),
 ) -> None:
     """List your persistent disks"""
-    validate_output_format(output, console)
+    output = resolve_output_format(as_json, output, console)
 
     if watch and output == "json":
-        console.print("[red]Error: --watch mode is not compatible with --output=json[/red]")
+        console.print("[red]Error: --watch mode is not compatible with --json[/red]")
         raise typer.Exit(1)
 
     try:
@@ -254,10 +256,11 @@ def list(
 @app.command(no_args_is_help=True, epilog=DISK_DETAIL_JSON_HELP)
 def get(
     disk_id: str,
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON instead of a table"),
+    output: Optional[str] = legacy_output_option(),
 ) -> None:
     """Get detailed information about a specific disk"""
-    validate_output_format(output, console)
+    output = resolve_output_format(as_json, output, console)
 
     try:
         base_client = APIClient()

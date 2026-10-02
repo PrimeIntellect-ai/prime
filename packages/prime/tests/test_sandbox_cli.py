@@ -361,7 +361,7 @@ def test_sandbox_get_renders_network_as_first_class_configuration(
     assert "generation" not in table_output
     assert "customSetting" in table_output
 
-    json_result = runner.invoke(app, ["sandbox", "get", "sbx-1", "--output", "json"])
+    json_result = runner.invoke(app, ["sandbox", "get", "sbx-1", "--json"])
 
     assert json_result.exit_code == 0, json_result.output
     json_output = json.loads(json_result.output)
@@ -999,7 +999,7 @@ def test_sandbox_list_json_includes_expiry_fields(monkeypatch: pytest.MonkeyPatc
 
     monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.list", mock_list)
 
-    result = runner.invoke(app, ["sandbox", "list", "--output", "json"])
+    result = runner.invoke(app, ["sandbox", "list", "--json"])
 
     assert result.exit_code == 0, f"Failed: {result.output}"
     import json as _json

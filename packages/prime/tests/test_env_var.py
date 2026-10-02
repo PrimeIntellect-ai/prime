@@ -117,7 +117,7 @@ class TestEnvVarList:
 
     def test_list_variables_json_output(self, mock_env_var_api: None) -> None:
         """Test listing variables with JSON output."""
-        result = runner.invoke(app, ["env", "var", "list", "testuser/test-env", "-o", "json"])
+        result = runner.invoke(app, ["env", "var", "list", "testuser/test-env", "--json"])
 
         assert result.exit_code == 0, f"Failed: {result.output}"
         output = json.loads(result.output)
@@ -192,8 +192,7 @@ class TestEnvVarCreate:
                 "NEW_VAR",
                 "-v",
                 "value",
-                "-o",
-                "json",
+                "--json",
             ],
         )
 
@@ -354,8 +353,7 @@ class TestEnvVarUpdate:
                 "testuser/test-env",
                 "-n",
                 "NEW_NAME",
-                "-o",
-                "json",
+                "--json",
             ],
         )
 
@@ -463,7 +461,8 @@ class TestEnvVarHelp:
 
         assert result.exit_code == 0
         output = strip_ansi(result.output)
-        assert "--output" in output
+        assert "--json" in output
+        assert "--output" not in output
 
     def test_env_var_create_help(self) -> None:
         """Test that env var create help works."""

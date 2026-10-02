@@ -30,10 +30,10 @@ def no_api_calls(monkeypatch: pytest.MonkeyPatch) -> None:
     "args",
     [
         ["list", "owner/env"],
-        ["list", "owner/env", "--num", "5", "--output", "json"],
+        ["list", "owner/env", "--num", "5", "--json"],
         ["logs", "owner/env", "job-1", "--tail", "50", "--follow"],
         ["retry", "owner/env"],
-        ["retry", "owner/env", "job-1", "--output", "json"],
+        ["retry", "owner/env", "job-1", "--json"],
     ],
 )
 def test_env_action_commands_explain_the_removal(no_api_calls: None, args: list[str]) -> None:
@@ -78,7 +78,7 @@ def test_env_list_json_output_stays_machine_readable(monkeypatch: pytest.MonkeyP
 
     monkeypatch.setattr(APIClient, "get", _get)
 
-    result = runner.invoke(app, ["env", "list", "--show-actions", "--output", "json"])
+    result = runner.invoke(app, ["env", "list", "--show-actions", "--json"])
 
     assert result.exit_code == 0, result.output
     assert "Environment Actions were removed" not in result.output

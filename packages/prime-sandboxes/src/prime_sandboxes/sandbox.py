@@ -2716,7 +2716,9 @@ class SandboxClient:
             if env_prefix:
                 env_prefix += "; "
 
-        dir_prefix = f"cd {shlex.quote(working_dir)} && " if working_dir else ""
+        # Exit the job's subshell if the cd fails, so no part of a compound command runs
+        # elsewhere and the job records the failure.
+        dir_prefix = f"cd {shlex.quote(working_dir)} || exit 1; " if working_dir else ""
         command_body = f"{env_prefix}{dir_prefix}{command}"
         # The launcher touches only absolute /tmp paths and the job cds into working_dir
         # itself; starting it from / keeps a guest user without a home directory launchable.
@@ -4422,7 +4424,9 @@ class AsyncSandboxClient:
             if env_prefix:
                 env_prefix += "; "
 
-        dir_prefix = f"cd {shlex.quote(working_dir)} && " if working_dir else ""
+        # Exit the job's subshell if the cd fails, so no part of a compound command runs
+        # elsewhere and the job records the failure.
+        dir_prefix = f"cd {shlex.quote(working_dir)} || exit 1; " if working_dir else ""
         command_body = f"{env_prefix}{dir_prefix}{command}"
         # The launcher touches only absolute /tmp paths and the job cds into working_dir
         # itself; starting it from / keeps a guest user without a home directory launchable.

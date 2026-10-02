@@ -41,7 +41,7 @@ class TestSyncLaunchRetry:
         assert users == ["ubuntu", "ubuntu"]
         # The launcher starts from / (a guest user's home may not exist); the job cds itself.
         assert cwds == ["/", "/"]
-        assert "cd /srv/app && rm -rf x" in commands[0]
+        assert "cd /srv/app || exit 1; rm -rf x" in commands[0]
         assert len(commands) == 2
         assert commands[0] == commands[1]
         assert commands[0].startswith(f"{{ mkdir /tmp/job_{job.job_id}.launch && nohup")
@@ -86,7 +86,7 @@ class TestAsyncLaunchRetry:
         assert users == ["ubuntu", "ubuntu"]
         # The launcher starts from / (a guest user's home may not exist); the job cds itself.
         assert cwds == ["/", "/"]
-        assert "cd /srv/app && rm -rf x" in commands[0]
+        assert "cd /srv/app || exit 1; rm -rf x" in commands[0]
         assert len(commands) == 2
         assert commands[0] == commands[1]
         assert commands[0].startswith(f"{{ mkdir /tmp/job_{job.job_id}.launch && nohup")

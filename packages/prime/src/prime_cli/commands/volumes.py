@@ -422,9 +422,26 @@ _SAFE_REMOTE_SEGMENT = re.compile(r"[A-Za-z0-9._@%+=,:-]+")
 
 def _remote_path(path: str) -> str:
     """Path under the volume root (/volume on the pod); a leading "/" means the
-    root. A trailing "/" is kept. Rejects empty and ".." segments, and any
-    character that would need shell quoting (spaces, *, $, quotes, ...)."""
+    root. A trailing "/" is kept. Rejects empty and ".." segments, any
+    character that would need shell quoting (spaces, *, $, quotes, ...),
+    and a leading "volume/" segment (the in-session mount path, not a
+    volume-relative path)."""
     rel = path[1:] if path.startswith("/") else path
+    # Drop "." segments first so "./volume/x" can't slip past the check below.
+    rel = "/".join(p for p in rel.split("/") if p != ".")
+    # "/volume/..." is the mount path inside an SSH session. As a put/get
+    # remote it would name a directory literally called "volume" under the
+    # root — almost never what the user wants (data.name accepts both forms,
+    # the transfer commands do not). Refuse it instead of writing to the
+    # wrong place.
+    if rel == "volume" or rel.startswith("volume/"):
+        fixed = rel[7:] or "/"
+        console.print(
+            f"[red]Invalid remote path {escape(repr(path))}: remote paths are relative "
+            "to the volume root; `prime` prepends /volume/ itself. Did you mean "
+            f"{escape(repr(fixed))}?[/red]"
+        )
+        raise typer.Exit(2)
     parts = rel.removesuffix("/").split("/") if rel else []
     if any(p in ("", "..") for p in parts):
         console.print(
@@ -447,7 +464,11 @@ def _transfer_failed(alias: str, code: int, via_gateway: bool) -> None:
         reach = "that you can reach the gateway (outbound TCP 443)"
     else:
         reach = f"that you are on the tailnet (host {alias} must resolve)"
-    console.print(f"[red]Transfer failed.[/red] Check {reach} and the path exists.")
+    console.print(
+        f"[red]Transfer failed.[/red] Check {reach}, that the path exists, and that "
+        "your SSH key (prime config set-ssh-key-path) matches your primary key on the "
+        "dashboard (Tokens → SSH Keys)."
+    )
     raise typer.Exit(code)
 
 
@@ -613,11 +634,17 @@ def _transfer(
     # (more portable than relying on each tool's "--").
     if not os.path.isabs(local) and (local.startswith("-") or ":" in local):
         local = "./" + local
-    session, alias, _key, config, via_gateway = _open_session(
+    session, alias, key, config, via_gateway = _open_session(
         name,
         read_only=read_only,
         direct=direct,
         allow_writable=read_only,
+    )
+    # Same key announcement as `prime volumes ssh`: a failed transfer is most
+    # often the wrong or missing key, and only `ssh` names it today.
+    console.print(
+        f"[blue]Using SSH key:[/blue] {escape(_shell_path(Path(key), '~'))} "
+        "[dim](change with: prime config set-ssh-key-path)[/dim]"
     )
     if rsync:
         ssh_cmd = shlex.join(["ssh", "-F", str(config)])

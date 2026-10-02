@@ -437,3 +437,62 @@ async def test_client_bulk_delete_status_rejects_tunnel_ids():
 
     with pytest.raises(TunnelError, match="status cannot be combined with tunnel_ids"):
         await client.bulk_delete_tunnels(tunnel_ids=["t-1"], status="disconnected")
+
+
+def _drain(tunnel: Tunnel, stdout_lines: list[str], stderr_lines: list[str] = ()) -> None:
+    import io
+
+    tunnel._process.stdout = io.StringIO("".join(stdout_lines))
+    tunnel._process.stderr = io.StringIO("".join(stderr_lines))
+    tunnel._process.poll.return_value = None
+    tunnel._start_pipe_drain()
+    for t in tunnel._drain_threads:
+        t.join(timeout=2.0)
+
+
+def test_pipe_drain_forwards_frpc_lines_at_their_level(caplog):
+    import logging
+
+    tunnel = _make_started_tunnel()
+    lines = [
+        "\x1b[1;34m2026-09-24 18:09:58.067 [I] [client/service.go:295] "
+        "[2985857c77023140] login to server success, get run id [2985857c77023140]\x1b[0m\n",
+        "2026-09-24 18:09:58.000 [W] [client/control.go:171] "
+        "[2985857c77023140] control writer is closing\n",
+        "2026-09-24 18:09:58.001 [E] [client/service.go:303] connect to server error: EOF\n",
+        "2026-09-24 18:09:58.002 [D] [client/control.go:88] heartbeat\n",
+    ]
+
+    with caplog.at_level(logging.DEBUG, logger="prime_tunnel.frpc"):
+        _drain(tunnel, lines)
+
+    records = [(r.levelno, r.getMessage()) for r in caplog.records if r.name == "prime_tunnel.frpc"]
+    assert records == [
+        (logging.INFO, "frpc t-test123: login to server success, get run id [2985857c77023140]"),
+        (logging.WARNING, "frpc t-test123: control writer is closing"),
+        (logging.ERROR, "frpc t-test123: connect to server error: EOF"),
+        (logging.DEBUG, "frpc t-test123: heartbeat"),
+    ]
+    assert len(tunnel.recent_output) == 4
+
+
+def test_pipe_drain_logs_unparsed_lines_at_info(caplog):
+    import logging
+
+    tunnel = _make_started_tunnel()
+
+    with caplog.at_level(logging.INFO, logger="prime_tunnel.frpc"):
+        _drain(tunnel, [], ["panic: something unexpected\n"])
+
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
+        (logging.INFO, "frpc t-test123: panic: something unexpected"),
+    ]
+
+
+def test_prime_tunnel_logger_has_null_handler():
+    import logging
+
+    import prime_tunnel  # noqa: F401
+
+    handlers = logging.getLogger("prime_tunnel").handlers
+    assert any(isinstance(h, logging.NullHandler) for h in handlers)

@@ -233,6 +233,37 @@ prime switch <team-id>  # fallback for teams without a slug
 prime pods list
 ```
 
+## Copying a training volume
+
+An existing cluster-local volume can be copied into a **new** volume on another
+cluster where the platform enables volume copy:
+
+```bash
+prime volumes copy my-checkpoints my-checkpoints-e2e --cluster e2e-spk
+prime volumes list
+# After my-checkpoints-e2e is RUNNING (it is DEPLOYING while the copy runs):
+prime train config.toml --volume my-checkpoints-e2e
+```
+
+The server copies the volume directly between the clusters over Prime
+Intellect's private network: a Job on the destination cluster pulls it with
+rsync from a read-only Job on the source cluster. The data does not pass through
+your laptop or any third-party storage. The source is retained and is not moved
+or shared. The destination defaults to the source's size; `--size` can override it
+within the usual volume limits.
+
+The destination stays `DEPLOYING` until the pull Job completes and verifies the
+data (48 hour deadline); use it only once it is `RUNNING`. The source must be
+idle (no live runs or SSH sessions) when the copy starts, otherwise the request
+is rejected with 409. An existing destination name or an invalid request is
+rejected with 400. If the server has volume copy disabled, it responds 503.
+
+File data, directories, symlinks, hard links, and mode/uid/gid/mtime are
+preserved. ACLs and extended attributes are not. This feature does not require
+JuiceFS or change the storage backend, and it does not add managed inference's
+local-model support. For inference, use a supported completed model export, not
+raw distributed trainer checkpoints.
+
 ## Configuration
 
 ### API Key

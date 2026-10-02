@@ -30,8 +30,11 @@ try:
     expected = request["schema_commit"]
     if actual != expected:
         raise ValueError(f"schema provenance mismatch: expected {expected}, installed {actual}")
-    from rl_k8s.compiled import compile_config
-    artifact = compile_config(request["config"], mode=request["mode"], schema_commit=expected)
+    if request.get("deployment"):
+        from rl_k8s.compiled import compile_deployment as compile_fn
+    else:
+        from rl_k8s.compiled import compile_config as compile_fn
+    artifact = compile_fn(request["config"], mode=request["mode"], schema_commit=expected)
     print(json.dumps({"artifact": artifact}))
 except Exception as exc:
     try:
@@ -178,6 +181,7 @@ def compile_locally(
     *,
     compiler_path: Path,
     schema_python: Path | None = None,
+    deployment: bool = False,
 ) -> dict[str, Any]:
     if preparation.get("contract_version") != 1:
         raise CompilationError("Unsupported local validation contract version.")
@@ -199,6 +203,7 @@ def compile_locally(
         "config": config,
         "mode": preparation["mode"],
         "schema_commit": preparation["runtime"]["schema_commit"],
+        "deployment": deployment,
     }
     try:
         result = _run_process(

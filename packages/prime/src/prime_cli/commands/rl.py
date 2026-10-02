@@ -944,6 +944,17 @@ def validate_training_config(
     ref: Optional[str] = typer.Option(None, "--ref"),
     pr: Optional[int] = typer.Option(None, "--pr", min=1),
     artifact_out: Optional[Path] = typer.Option(None, "--artifact-out"),
+    values_out: Optional[Path] = typer.Option(
+        None,
+        "--values-out",
+        help="Upload compiled config for preview Helm values; creates no run.",
+    ),
+    release: str = typer.Option(
+        "validation", "--release", help="Release name for preview DNS wiring."
+    ),
+    namespace: Optional[str] = typer.Option(
+        None, "--namespace", help="Preview namespace; defaults to fft-<release>."
+    ),
     output: str = typer.Option("text", "--output", "-o"),
 ) -> None:
     """Validate dedicated RL/SFT config locally against the selected hosted runtime.
@@ -991,15 +1002,32 @@ def validate_training_config(
             payload["imageTag"] = selected_image
         if source_ref is not None:
             payload["sourceRef"] = source_ref
-        preparation = HostedTrainingClient(APIClient()).prepare_local_validation(payload)
+        client = HostedTrainingClient(APIClient())
+        preparation = client.prepare_local_validation(payload)
         if preparation.get("mode") != payload["mode"]:
             raise CompilationError("Preparation returned a different training mode.")
+        compile_options: dict[str, Any] = {}
+        if values_out:
+            compile_options["deployment"] = True
         artifact = compile_locally(
             config,
             preparation,
             compiler_path=compiler_path,
             schema_python=schema_python,
+            **compile_options,
         )
+        if values_out:
+            import yaml
+
+            preview = client.render_compiled_preview(
+                {
+                    "artifact": artifact,
+                    "teamId": payload["teamId"],
+                    "release": release,
+                    "namespace": namespace or f"fft-{release}",
+                }
+            )
+            values_out.write_text(yaml.safe_dump(preview["values"], sort_keys=False))
         if artifact_out:
             artifact_out.write_text(json.dumps(artifact, indent=2) + "\n")
         if output == "json":
@@ -1011,6 +1039,8 @@ def validate_training_config(
             )
             if artifact_out:
                 console.print(f"Artifact written to {artifact_out}.")
+            if values_out:
+                console.print(f"Deployment preview written to {values_out}.")
     except (APIError, CompilationError, OSError, ValueError, TypeError) as exc:
         if output == "json":
             output_data_as_json({"error": str(exc)}, console)

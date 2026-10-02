@@ -985,8 +985,12 @@ def test_put_directory_splits_files_across_parallel_rsyncs(monkeypatch, tmp_path
     assert result.exit_code == 0, result.output
     # One rsync creates the directories first, so the parallel ones never
     # race to mkdir the same path; then the files go over _STREAMS rsyncs.
+    # The tree pass is the transfer's own source and destination filtered to
+    # directories, never a --files-from list with "." (openrsync recurses
+    # into "." and would copy every file single-stream).
     (dirs_pass,) = commands
-    assert dirs_pass[-2:] == [f"{tmp_path}/", "host:/volume/runs/"]
+    assert dirs_pass[-4:] == ["--include=*/", "--exclude=*", str(tree), "host:/volume/runs/"]
+    assert not any(a.startswith("--files-from") for a in dirs_pass)
     assert len(started) == volumes._STREAMS
     for cmd, _ in started:
         # "ckpt" (no trailing slash) copies the directory itself: the lists
@@ -1015,7 +1019,7 @@ def test_get_directory_lists_remote_files_and_splits_them(monkeypatch, tmp_path)
     assert {tuple(cmd[-2:]) for cmd, _ in started} == {("host:/volume/runs/a/", "out")}
     listed = sorted(p for _, paths in started for p in paths)
     assert listed == ["link", "one", "sub/two"]
-    assert commands[1][-2:] == ["host:/volume/runs/a/", "out"]  # the directories pass
+    assert commands[1][-4:] == ["--include=*/", "--exclude=*", "host:/volume/runs/a/", "out"]
 
 
 def test_parallel_failure_reports_the_exit_code(monkeypatch, tmp_path):

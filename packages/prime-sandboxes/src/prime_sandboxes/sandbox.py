@@ -2718,6 +2718,9 @@ class SandboxClient:
 
         dir_prefix = f"cd {shlex.quote(working_dir)} && " if working_dir else ""
         command_body = f"{env_prefix}{dir_prefix}{command}"
+        # The launcher touches only absolute /tmp paths and the job cds into working_dir
+        # itself; starting it from / keeps a guest user without a home directory launchable.
+        launch_cwd = "/" if working_dir else None
         exit_file_quoted = shlex.quote(exit_file)
         stdout_log_file_quoted = shlex.quote(stdout_log_file)
         stderr_log_file_quoted = shlex.quote(stderr_log_file)
@@ -2742,6 +2745,7 @@ class SandboxClient:
                 self.execute_command(
                     sandbox_id,
                     bg_cmd,
+                    working_dir=launch_cwd,
                     timeout=_BACKGROUND_JOB_LAUNCH_TIMEOUT_SECONDS,
                     user=user,
                 )
@@ -4420,6 +4424,9 @@ class AsyncSandboxClient:
 
         dir_prefix = f"cd {shlex.quote(working_dir)} && " if working_dir else ""
         command_body = f"{env_prefix}{dir_prefix}{command}"
+        # The launcher touches only absolute /tmp paths and the job cds into working_dir
+        # itself; starting it from / keeps a guest user without a home directory launchable.
+        launch_cwd = "/" if working_dir else None
         exit_file_quoted = shlex.quote(exit_file)
         stdout_log_file_quoted = shlex.quote(stdout_log_file)
         stderr_log_file_quoted = shlex.quote(stderr_log_file)
@@ -4444,6 +4451,7 @@ class AsyncSandboxClient:
                 await self.execute_command(
                     sandbox_id,
                     bg_cmd,
+                    working_dir=launch_cwd,
                     timeout=_BACKGROUND_JOB_LAUNCH_TIMEOUT_SECONDS,
                     user=user,
                 )

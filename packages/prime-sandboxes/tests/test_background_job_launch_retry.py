@@ -26,17 +26,22 @@ class TestSyncLaunchRetry:
         client = SandboxClient(APIClient(api_key="test-key"))
         commands = []
         users = []
+        cwds = []
 
         def execute(_sandbox_id, command, **_kwargs):
             commands.append(command)
             users.append(_kwargs.get("user"))
+            cwds.append(_kwargs.get("working_dir"))
             if len(commands) == 1:
                 raise _timeout()
             return _OK
 
         cast(Any, client).execute_command = execute
-        job = client.start_background_job("sb", "rm -rf x", user="ubuntu")
+        job = client.start_background_job("sb", "rm -rf x", working_dir="/srv/app", user="ubuntu")
         assert users == ["ubuntu", "ubuntu"]
+        # The launcher starts from / (a guest user's home may not exist); the job cds itself.
+        assert cwds == ["/", "/"]
+        assert "cd /srv/app && rm -rf x" in commands[0]
         assert len(commands) == 2
         assert commands[0] == commands[1]
         assert commands[0].startswith(f"{{ mkdir /tmp/job_{job.job_id}.launch && nohup")
@@ -64,17 +69,24 @@ class TestAsyncLaunchRetry:
         client = AsyncSandboxClient(APIClient(api_key="test-key"))
         commands = []
         users = []
+        cwds = []
 
         async def execute(_sandbox_id, command, **_kwargs):
             commands.append(command)
             users.append(_kwargs.get("user"))
+            cwds.append(_kwargs.get("working_dir"))
             if len(commands) == 1:
                 raise _timeout()
             return _OK
 
         cast(Any, client).execute_command = execute
-        job = await client.start_background_job("sb", "rm -rf x", user="ubuntu")
+        job = await client.start_background_job(
+            "sb", "rm -rf x", working_dir="/srv/app", user="ubuntu"
+        )
         assert users == ["ubuntu", "ubuntu"]
+        # The launcher starts from / (a guest user's home may not exist); the job cds itself.
+        assert cwds == ["/", "/"]
+        assert "cd /srv/app && rm -rf x" in commands[0]
         assert len(commands) == 2
         assert commands[0] == commands[1]
         assert commands[0].startswith(f"{{ mkdir /tmp/job_{job.job_id}.launch && nohup")

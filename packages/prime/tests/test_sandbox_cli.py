@@ -90,6 +90,42 @@ def test_restore_command_creates_from_checkpoint(monkeypatch: pytest.MonkeyPatch
     assert "restored-1" in result.output
 
 
+def test_fork_checkpoints_waits_and_restores(monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_cli(monkeypatch)
+    calls: list[Any] = []
+    source = _fake_sandbox(
+        id="sbx-1", team_id="team-1", region="us", gpu_count=0, gpu_type=None, labels=["a"]
+    )
+    pending = SimpleNamespace(id="checkpoint-1")
+
+    def create(self: Any, request: Any) -> SimpleNamespace:
+        calls.append(request)
+        return SimpleNamespace(id="forked-1")
+
+    def wait(self: Any, checkpoint_id: str, timeout_seconds: float) -> SimpleNamespace:
+        calls.append(("wait", checkpoint_id, timeout_seconds))
+        return pending
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.get", lambda self, sid: source)
+    monkeypatch.setattr(
+        "prime_cli.commands.sandbox.SandboxClient.checkpoint", lambda self, sid: pending
+    )
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.wait_for_checkpoint", wait)
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.create", create)
+
+    result = runner.invoke(app, ["sandbox", "fork", "sbx-1", "--cpu-cores", "4", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert calls[0] == ("wait", "checkpoint-1", 300)
+    request = calls[1]
+    assert request.checkpoint_id == "checkpoint-1"
+    assert request.name == "box-fork"
+    assert request.cpu_cores == 4
+    assert request.memory_gb == source.memory_gb
+    assert request.team_id == "team-1" and request.labels == ["a"]
+    assert "forked-1" in result.output
+
+
 def _fake_sandbox(**overrides: Any) -> SimpleNamespace:
     """A sandbox stand-in with every field the list formatter reads."""
     now = datetime.now(timezone.utc)

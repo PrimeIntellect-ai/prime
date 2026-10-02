@@ -202,6 +202,8 @@ prime sandbox run <sandbox-id> -- python script.py
 prime sandbox checkpoint create <sandbox-id>
 prime sandbox checkpoint list <sandbox-id> [--checkpoint-id <checkpoint-id>]
 prime sandbox checkpoint restore <checkpoint-id> --name restored-sandbox
+# Checkpoint + restore in one step, inheriting the source's resources
+prime sandbox fork <sandbox-id> [--name forked-sandbox]
 
 # Upload/download files
 prime sandbox upload <sandbox-id> local_file.py /remote/path/

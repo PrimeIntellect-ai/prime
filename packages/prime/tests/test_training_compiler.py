@@ -235,3 +235,78 @@ def test_invalid_toml_fails_before_preparation(monkeypatch, tmp_path):
     )
     assert result.exit_code == 1
     assert "error" in json.loads(result.stdout)
+
+
+@pytest.mark.parametrize("render_fails", [False, True])
+def test_validate_can_write_compiled_deployment_preview_without_submitting(
+    monkeypatch, tmp_path, render_fails
+):
+    import yaml
+    from prime_cli.api.training import HostedTrainingClient
+    from prime_cli.commands import rl
+    from prime_cli.core.client import APIError
+
+    config = tmp_path / "rl.toml"
+    config.write_text("[trainer]\nmax_steps = 2\n")
+    artifact_path, values_path = tmp_path / "artifact.json", tmp_path / "values.yaml"
+    monkeypatch.setattr(rl, "Config", lambda: SimpleNamespace(team_id="team"))
+    monkeypatch.setattr(rl, "APIClient", lambda: object())
+    monkeypatch.setattr(
+        HostedTrainingClient,
+        "prepare_local_validation",
+        lambda *a: {
+            "contract_version": 1,
+            "mode": "rl",
+            "runtime": {"schema_commit": "a" * 40},
+        },
+    )
+    artifact = {"contract_version": 2, "schema_commit": "a" * 40, "submission_supported": False}
+
+    def compile(config, preparation, **kwargs):
+        assert kwargs["deployment"] is True
+        return artifact
+
+    def render(self, payload):
+        assert payload == {
+            "artifact": artifact,
+            "teamId": "team",
+            "release": "review",
+            "namespace": "fft-review",
+        }
+        if render_fails:
+            raise APIError("preview unavailable")
+        return {"values": {"configs": {"format": "json"}}, "submission_supported": False}
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("preview must not create a run")
+
+    monkeypatch.setattr(training_compiler, "compile_locally", compile)
+    monkeypatch.setattr(HostedTrainingClient, "render_compiled_preview", render)
+    monkeypatch.setattr(HostedTrainingClient, "create_run", forbidden)
+    result = CliRunner().invoke(
+        app,
+        [
+            "train",
+            "validate",
+            str(config),
+            "--compiler-path",
+            str(tmp_path),
+            "--values-out",
+            str(values_path),
+            "--artifact-out",
+            str(artifact_path),
+            "--release",
+            "review",
+            "-o",
+            "json",
+        ],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+    assert result.exit_code == (1 if render_fails else 0), result.output
+    if render_fails:
+        assert not values_path.exists()
+        assert not artifact_path.exists()
+        assert "preview unavailable" in json.loads(result.stdout)["error"]
+    else:
+        assert yaml.safe_load(values_path.read_text()) == {"configs": {"format": "json"}}
+        assert json.loads(artifact_path.read_text()) == artifact

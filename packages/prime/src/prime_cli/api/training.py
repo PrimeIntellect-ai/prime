@@ -272,6 +272,16 @@ class HostedTrainingClient:
         response = self.client.post("/training/runs/prepare", json=payload)
         return LocalValidationPreparation.model_validate(response).model_dump()
 
+    def render_compiled_preview(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Render review values without creating a training run."""
+        response = self.client.post("/training/runs/render", json=payload)
+        if (
+            not isinstance(response.get("values"), dict)
+            or response.get("submission_supported") is not False
+        ):
+            raise APIError("Backend returned an invalid compiled preview response.")
+        return response
+
     def create_run(self, payload: Dict[str, Any]) -> HostedTrainingRunResponse:
         """POST /v1/training/runs. Backend mints a per-run API token and
         kicks off the helm install asynchronously; returns immediately with

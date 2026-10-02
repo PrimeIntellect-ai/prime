@@ -200,6 +200,13 @@ prime sandbox run <sandbox-id> -- python script.py
 # Run as an existing guest account
 prime sandbox run <sandbox-id> --user ubuntu -- id
 
+# Request a filesystem checkpoint; check again until it is DURABLE
+prime sandbox checkpoint create <sandbox-id>
+prime sandbox checkpoint list <sandbox-id> [--checkpoint-id <checkpoint-id>]
+prime sandbox checkpoint restore <checkpoint-id> --name restored-sandbox
+# Checkpoint + restore in one step, inheriting the source's resources
+prime sandbox fork <sandbox-id> [--name forked-sandbox]
+
 # Upload/download files
 prime sandbox upload <sandbox-id> local_file.py /remote/path/
 prime sandbox download <sandbox-id> /remote/file.txt ./local/
@@ -284,6 +291,13 @@ sandbox_client.wait_for_creation(sandbox.id)
 # Execute commands
 result = sandbox_client.execute_command(sandbox.id, "python --version")
 print(result.stdout)
+
+# Request a filesystem checkpoint and wait until it is durable
+checkpoint = sandbox_client.checkpoint(sandbox.id)
+checkpoint = sandbox_client.wait_for_checkpoint(checkpoint.id, timeout_seconds=300)
+restored = sandbox_client.create(CreateSandboxRequest(
+    name="restored-sandbox", checkpoint_id=checkpoint.id
+))
 
 # Clean up
 sandbox_client.delete(sandbox.id)

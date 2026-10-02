@@ -202,6 +202,38 @@ class SandboxListResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class SandboxCheckpoint(BaseModel):
+    """A filesystem checkpoint; only DURABLE checkpoints can be restored."""
+
+    id: str
+    sandbox_id: str
+    parent_id: Optional[str] = None
+    team_id: Optional[str] = None
+    state: str
+    depth: int
+    docker_image: str
+    disk_size_bytes: Optional[int] = None
+    stored_bytes: Optional[int] = None
+    error: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class CheckpointLookupError(BaseModel):
+    """A missing or inaccessible checkpoint in a batch lookup."""
+
+    checkpoint_id: str
+    code: Literal["NOT_FOUND"]
+    message: str
+
+
+class BatchCheckpointResponse(BaseModel):
+    """Checkpoints and per-ID errors from a cross-sandbox lookup."""
+
+    checkpoints: List[SandboxCheckpoint]
+    errors: List[CheckpointLookupError]
+
+
 class SandboxStatusSnapshot(BaseModel):
     """Lightweight sandbox lifecycle state returned by a batch status lookup."""
 
@@ -231,11 +263,12 @@ class CreateSandboxRequest(BaseModel):
     """Create sandbox request model"""
 
     name: str
-    docker_image: str
+    docker_image: Optional[str] = None
+    checkpoint_id: Optional[str] = Field(None, min_length=1, max_length=64)
     start_command: Optional[StartCommand] = None
     cpu_cores: float = 1.0
     memory_gb: float = 1.0
-    disk_size_gb: float = 5.0
+    disk_size_gb: Optional[float] = None
     gpu_count: int = 0
     gpu_type: Optional[str] = None
     network_allowlist: Optional[List[str]] = None
@@ -249,6 +282,18 @@ class CreateSandboxRequest(BaseModel):
     region: Optional[str] = None
     advanced_configs: Optional[AdvancedConfigs] = None
     idempotency_key: Optional[str] = None
+
+    @model_validator(mode="after")
+    def validate_restore_source(self) -> "CreateSandboxRequest":
+        if self.checkpoint_id:
+            if self.docker_image or self.disk_size_gb is not None:
+                raise ValueError("omit docker_image and disk_size_gb when restoring a checkpoint")
+        else:
+            if not self.docker_image:
+                raise ValueError("docker_image is required unless checkpoint_id is set")
+            if self.disk_size_gb is None:
+                self.disk_size_gb = 5.0
+        return self
 
     @model_validator(mode="after")
     def validate_gpu_fields(self) -> "CreateSandboxRequest":

@@ -32,6 +32,7 @@ def _create_dev_context(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tupl
         ["config", "set-inference-url", "https://inference.example"],
         ["config", "set-traces-url", "https://traces.example"],
         ["config", "set-share-resources-with-team", "true"],
+        ["config", "set-traces-opt-out", "true"],
         ["config", "set-ssh-key-path", "/tmp/id_test"],
         ["config", "reset", "--yes"],
         ["config", "use", "production"],

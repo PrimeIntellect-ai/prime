@@ -13,7 +13,7 @@ import threading
 import time
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Union
 
-from . import _fork
+from . import _fork, projection
 from ._http import DEFAULT_TIMEOUT, UPLOAD_TIMEOUT, PlatformClient
 from .backend import Backend, DisabledBackend, EvalsBackend, RftBackend, disabled_run_id
 from .config import Config
@@ -425,6 +425,7 @@ def init(
     kind: RunKind = "eval",
     id: Optional[str] = None,
     training: Optional[TrainingSpec] = None,
+    traces_opt_out: Optional[bool] = None,
 ) -> Run:
     """Open a run and return its handle. Call it before the first rollout.
 
@@ -433,6 +434,11 @@ def init(
     to the file the run was launched from (stored byte for byte under
     ``config_source``) or a mapping taken as given. ``finish_timeout`` bounds
     the drain in :meth:`Run.finish`.
+
+    ``traces_opt_out=True`` opts the run out of Prime Traces: samples upload to
+    the legacy sample tables and Prime Traces is never contacted. It defaults to
+    ``$PRIME_TRACES_OPT_OUT``, then ``traces_opt_out`` in the config file, then
+    off.
 
     ``kind="train"`` opens an external training run: ``model`` is the base
     model, ``environments`` the hub ids, ``training`` the display fields, and a
@@ -470,6 +476,18 @@ def init(
         training=training,
     )
     resolved_mode = _resolve_mode(mode, api_key=api_key)
+    # Resolved before any platform call: a bad value must fail here, not after
+    # the run has been created with no handle to finish it.
+    opted_out = resolved_mode != "disabled" and (
+        traces_opt_out if traces_opt_out is not None else settings.traces_opt_out
+    )
+    if opted_out and kind == "train" and not projection.parquet_available():
+        # Without it the legacy training sink turns itself off, and with Prime
+        # Traces opted out nothing would store the run's episodes.
+        raise ConfigurationError(
+            "Opting out of Prime Traces sends training samples to the legacy "
+            "table, which needs pyarrow: pip install 'prime-runs[train]'"
+        )
 
     backend: Backend
     sinks: List[Sink]
@@ -506,6 +524,8 @@ def init(
         # The worker visits traces first; an explicit no-access response sends
         # that same batch, and subsequent batches, to the legacy sample table.
         traces = TracesSink(api_key=api_key, team_id=team_id)
+        if opted_out:
+            traces.opt_out()
         if kind == "train":
             sinks = [traces, LegacySamplesFallback(traces, RftSamplesSink(client))]
             metrics_sinks = [RftMetricsSink(client)]

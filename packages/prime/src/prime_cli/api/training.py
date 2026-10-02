@@ -7,7 +7,9 @@ token; admin role is gated server-side.
 """
 
 import os
+from enum import Enum
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
@@ -76,6 +78,19 @@ class AvailableFFTModelsResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class VolumeBackend(str, Enum):
+    CLUSTER = "cluster"
+    JUICEFS = "juicefs"
+
+
+class VolumeAttachment(BaseModel):
+    cluster_id: str = Field(alias="clusterId")
+    cluster: str | None = None
+    status: str
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class Volume(BaseModel):
     """A named volume (GET/POST /v1/training/volumes)."""
 
@@ -86,6 +101,8 @@ class Volume(BaseModel):
     # Cluster name; absent from older backends.
     cluster: Optional[str] = None
     pvc_name: str = Field(..., alias="pvcName")
+    backend: VolumeBackend = VolumeBackend.CLUSTER
+    attachments: list[VolumeAttachment] = Field(default_factory=list)
     created_by: Optional[str] = Field(None, alias="createdBy")
     created_at: Optional[str] = Field(None, alias="createdAt")
 
@@ -152,13 +169,23 @@ class HostedTrainingClient:
         size: str,
         team_id: Optional[str] = None,
         cluster: Optional[str] = None,
+        backend: VolumeBackend | None = None,
     ) -> Volume:
         payload: Dict[str, Any] = {"name": name, "size": size}
         if team_id:
             payload["teamId"] = team_id
         if cluster:
             payload["cluster"] = cluster
-        return Volume.model_validate(self.client.post("/training/volumes", json=payload))
+        if backend is not None:
+            payload["backend"] = backend.value
+        volume = Volume.model_validate(self.client.post("/training/volumes", json=payload))
+        if backend is not None and volume.backend != backend:
+            raise APIError(
+                f"The server returned a {volume.backend.value} volume after {backend.value} was "
+                "requested. The volume may have been created; check `prime volumes list` "
+                "before retrying. This backend requires matching platform support."
+            )
+        return volume
 
     def list_volumes(self, team_id: Optional[str] = None) -> List[Volume]:
         params = {"teamId": team_id} if team_id else None
@@ -174,6 +201,20 @@ class HostedTrainingClient:
     def delete_volume(self, name: str, team_id: Optional[str] = None) -> None:
         params = {"teamId": team_id} if team_id else None
         self.client.delete(f"/training/volumes/{name}", params=params)
+
+    def attach_volume(
+        self, name: str, cluster: str, *, team_id: str | None = None
+    ) -> VolumeAttachment:
+        payload: Dict[str, Any] = {"cluster": cluster}
+        if team_id:
+            payload["teamId"] = team_id
+        path = f"/training/volumes/{quote(name, safe='')}/attachments"
+        return VolumeAttachment.model_validate(self.client.post(path, json=payload))
+
+    def detach_volume(self, name: str, cluster: str, *, team_id: str | None = None) -> None:
+        path = f"/training/volumes/{quote(name, safe='')}/attachments/{quote(cluster, safe='')}"
+        params = {"teamId": team_id} if team_id else None
+        self.client.delete(path, params=params)
 
     def create_volume_session(
         self,

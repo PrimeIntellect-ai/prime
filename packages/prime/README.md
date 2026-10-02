@@ -226,6 +226,37 @@ prime switch <team-id>  # fallback for teams without a slug
 prime pods list
 ```
 
+## Portable training volumes (pilot)
+
+Cluster-native storage remains the default for `prime volumes create`. Where an
+operator has enabled JuiceFS, a portable volume can also be attached to another
+authorized cluster without copying its data:
+
+```bash
+prime volumes create models --size 1Ti --backend juicefs --cluster telus
+prime volumes attach models --cluster e2e-spk
+prime volumes list
+```
+
+Creation and attachment are asynchronous. Wait for the volume and attachment to
+show `RUNNING` before using them. An attachment makes the cluster eligible for
+training; it does not select that cluster or move a running job.
+
+```bash
+prime train config.toml --volume models
+prime volumes detach models --cluster e2e-spk
+```
+
+Detaching removes an unused cluster binding, not the data. The backend rejects a
+detach while consumers still use it, and volume deletion requires the remote
+attachments to be removed first. `prime volumes list -o json` includes the backend
+and each attachment's cluster and status.
+
+This pilot requires the matching platform backend and storage configuration.
+Portable-volume resizing, SSH on a remote attachment, and serving an exported
+model through managed inference are separate backend rollout steps; these CLI
+commands do not enable them.
+
 ## Configuration
 
 ### API Key

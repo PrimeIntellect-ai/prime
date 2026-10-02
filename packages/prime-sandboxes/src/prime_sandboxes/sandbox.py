@@ -2716,13 +2716,9 @@ class SandboxClient:
             if env_prefix:
                 env_prefix += "; "
 
-        # Exit the job's subshell if the cd fails, so no part of a compound command runs
-        # elsewhere and the job records the failure.
         dir_prefix = f"cd {shlex.quote(working_dir)} || exit 1; " if working_dir else ""
         command_body = f"{env_prefix}{dir_prefix}{command}"
-        # The launcher touches only absolute /tmp paths and the job cds into working_dir
-        # itself; starting it from / keeps a guest user without a home directory launchable.
-        # A relative working_dir keeps resolving against the guest's default directory.
+        # Guest users may lack a home dir; the job cds into an absolute working_dir itself.
         launch_cwd = "/" if working_dir and working_dir.startswith("/") else None
         exit_file_quoted = shlex.quote(exit_file)
         stdout_log_file_quoted = shlex.quote(stdout_log_file)
@@ -4425,13 +4421,9 @@ class AsyncSandboxClient:
             if env_prefix:
                 env_prefix += "; "
 
-        # Exit the job's subshell if the cd fails, so no part of a compound command runs
-        # elsewhere and the job records the failure.
         dir_prefix = f"cd {shlex.quote(working_dir)} || exit 1; " if working_dir else ""
         command_body = f"{env_prefix}{dir_prefix}{command}"
-        # The launcher touches only absolute /tmp paths and the job cds into working_dir
-        # itself; starting it from / keeps a guest user without a home directory launchable.
-        # A relative working_dir keeps resolving against the guest's default directory.
+        # Guest users may lack a home dir; the job cds into an absolute working_dir itself.
         launch_cwd = "/" if working_dir and working_dir.startswith("/") else None
         exit_file_quoted = shlex.quote(exit_file)
         stdout_log_file_quoted = shlex.quote(stdout_log_file)

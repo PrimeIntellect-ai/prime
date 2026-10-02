@@ -89,6 +89,9 @@ class _Evals:
     def get_evaluation(self, eval_id: str) -> Dict[str, Any]:
         return {"evaluation_id": eval_id, "status": "COMPLETED"}
 
+    def get_samples(self, eval_id: str, page: int, limit: int) -> Dict[str, Any]:
+        return {"samples": [], "total": 0}
+
 
 @pytest.mark.parametrize("flag", [[], ["--json"], ["--output", "json"], ["-o", "pretty"]])
 def test_eval_get_keeps_output_and_accepts_json(
@@ -103,3 +106,18 @@ def test_eval_get_keeps_output_and_accepts_json(
         "evaluation_id": "eval-1",
         "status": "COMPLETED",
     }
+
+
+@pytest.mark.parametrize("command", ["get", "samples"])
+def test_eval_json_flag_wins_over_an_invalid_output(
+    monkeypatch: pytest.MonkeyPatch, command: str
+) -> None:
+    monkeypatch.setattr("prime_cli.commands.evals.EvalsClient", _Evals)
+
+    result = CliRunner().invoke(app, ["eval", command, "eval-1", "--json", "--output", "yaml"])
+
+    assert result.exit_code == 0, result.output
+    json.loads(result.output)
+
+    rejected = CliRunner().invoke(app, ["eval", command, "eval-1", "--output", "yaml"])
+    assert rejected.exit_code == 1

@@ -900,9 +900,9 @@ def get_eval(
     as_json: bool = typer.Option(False, "--json", help="Output plain JSON (the default)"),
     output: str = typer.Option("json", "--output", "-o", help="json|pretty"),
 ) -> None:
-    _validate_output_format(output, ["json", "pretty"])
     if as_json:
         output = "json"
+    _validate_output_format(output, ["json", "pretty"])
 
     api_client = APIClient()
     client = EvalsClient(api_client)
@@ -919,9 +919,9 @@ def get_samples(
     as_json: bool = typer.Option(False, "--json", help="Output plain JSON (the default)"),
     output: str = typer.Option("json", "--output", "-o", help="json|pretty"),
 ) -> None:
-    _validate_output_format(output, ["json", "pretty"])
     if as_json:
         output = "json"
+    _validate_output_format(output, ["json", "pretty"])
 
     api_client = APIClient()
     client = EvalsClient(api_client)

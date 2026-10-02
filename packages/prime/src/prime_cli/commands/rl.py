@@ -917,6 +917,102 @@ app = PlainTyper(
 )
 
 
+@app.command("validate", rich_help_panel="Commands")
+def validate_training_config(
+    config_path: Path = typer.Argument(..., exists=True, dir_okay=False),
+    compiler_path: Path = typer.Option(
+        ...,
+        "--compiler-path",
+        exists=True,
+        file_okay=False,
+        help="Experimental: path to the matching FFT prime-rl-k8s checkout.",
+    ),
+    schema_python: Optional[Path] = typer.Option(
+        None,
+        "--schema-python",
+        exists=True,
+        dir_okay=False,
+        help="Reuse an existing schema interpreter; its commit must match the hosted runtime.",
+    ),
+    sft: bool = typer.Option(False, "--sft", help="Validate a dedicated SFT config."),
+    image_tag: Optional[str] = typer.Option(None, "--image-tag"),
+    ref: Optional[str] = typer.Option(None, "--ref"),
+    pr: Optional[int] = typer.Option(None, "--pr", min=1),
+    artifact_out: Optional[Path] = typer.Option(None, "--artifact-out"),
+    output: str = typer.Option("text", "--output", "-o"),
+) -> None:
+    """Validate dedicated RL/SFT config locally against the selected hosted runtime.
+
+    Experimental: creates no training run. Environment plugins and platform
+    dispatch policy are not validated. Artifacts cannot yet be submitted.
+    """
+    from ..api.training import HostedTrainingClient
+    from ..utils.training_compiler import CompilationError, compile_locally
+
+    validate_output_format(output, console)
+    try:
+        with config_path.open() as stream:
+            raw = toml.load(stream)
+        source_ref = ref if ref is not None else raw.get("source_ref")
+        if pr is not None:
+            if source_ref is not None:
+                raise ValueError("--pr cannot be combined with --ref or source_ref in the config.")
+            source_ref = _resolve_pr_ref(pr)
+        if source_ref is not None:
+            if not isinstance(source_ref, str):
+                raise ValueError("source_ref must be a string.")
+            if problem := _source_ref_error(source_ref):
+                raise ValueError(problem)
+        selected_image = image_tag if image_tag is not None else raw.get("image_tag")
+        if selected_image is not None and (
+            not isinstance(selected_image, str) or not selected_image.strip()
+        ):
+            raise ValueError("image_tag must be a non-empty string.")
+        metadata = {
+            "name",
+            "type",
+            "env_file",
+            "env_files",
+            "image_tag",
+            "gpu_type",
+            "volume",
+            "volume_size",
+            "source_ref",
+        }
+        config = {key: value for key, value in raw.items() if key not in metadata}
+        payload: dict[str, Any] = {"mode": "sft" if sft else "rl", "teamId": Config().team_id}
+        if selected_image is not None:
+            payload["imageTag"] = selected_image
+        if source_ref is not None:
+            payload["sourceRef"] = source_ref
+        preparation = HostedTrainingClient(APIClient()).prepare_local_validation(payload)
+        if preparation.get("mode") != payload["mode"]:
+            raise CompilationError("Preparation returned a different training mode.")
+        artifact = compile_locally(
+            config,
+            preparation,
+            compiler_path=compiler_path,
+            schema_python=schema_python,
+        )
+        if artifact_out:
+            artifact_out.write_text(json.dumps(artifact, indent=2) + "\n")
+        if output == "json":
+            output_data_as_json(artifact, console)
+        else:
+            console.print(f"Config validated locally against {artifact['schema_commit']}.")
+            console.print(
+                "Environment plugins and deployment policy remain deferred; no run submitted."
+            )
+            if artifact_out:
+                console.print(f"Artifact written to {artifact_out}.")
+    except (APIError, CompilationError, OSError, ValueError, TypeError) as exc:
+        if output == "json":
+            output_data_as_json({"error": str(exc)}, console)
+        else:
+            console.print(f"[red]Error:[/red] {rich_escape(str(exc))}")
+        raise typer.Exit(1) from exc
+
+
 @app.command("run", rich_help_panel="Commands", hidden=True, epilog=RL_DISPATCH_JSON_HELP)
 def create_run(
     config_path: str = typer.Argument(

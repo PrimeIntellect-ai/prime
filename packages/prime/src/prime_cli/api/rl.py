@@ -97,6 +97,10 @@ class RLRun(BaseModel):
     max_inflight_rollouts: Optional[int] = Field(None, alias="maxInflightRollouts")
     oversampling_factor: Optional[float] = Field(None, alias="oversamplingFactor")
     max_async_level: Optional[int] = Field(None, alias="maxAsyncLevel")
+    # User-facing name of the named volume a DEDICATED_FULL_FT run
+    # mounted via --volume (outputs under runs/<runId>/ on it). Only
+    # set on the run-detail read; None for runs without a volume.
+    volume_name: Optional[str] = Field(None, alias="volumeName")
 
     # Monitoring
     wandb_entity: Optional[str] = Field(None, alias="wandbEntity")
@@ -118,6 +122,11 @@ class RLRun(BaseModel):
     # Automated failure classification (only set for terminal FAILED runs).
     # Stored as a dict to stay forward-compatible if the API adds new fields.
     failure_analysis: Optional[Dict[str, Any]] = Field(None, alias="failureAnalysis")
+
+    # Full-FT source overlay: the prime-rl commit the pods run on top of the
+    # image when the run was dispatched with `--ref` / `--pr`. None for runs
+    # that use the image's baked source.
+    source_commit: Optional[str] = Field(None, alias="sourceCommit")
 
     model_config = ConfigDict(populate_by_name=True)
 

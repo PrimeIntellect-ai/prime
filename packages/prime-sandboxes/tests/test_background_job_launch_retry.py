@@ -25,15 +25,18 @@ class TestSyncLaunchRetry:
         monkeypatch.setattr("prime_sandboxes.sandbox.time.sleep", lambda _: None)
         client = SandboxClient(APIClient(api_key="test-key"))
         commands = []
+        users = []
 
         def execute(_sandbox_id, command, **_kwargs):
             commands.append(command)
+            users.append(_kwargs.get("user"))
             if len(commands) == 1:
                 raise _timeout()
             return _OK
 
         cast(Any, client).execute_command = execute
-        job = client.start_background_job("sb", "rm -rf x")
+        job = client.start_background_job("sb", "rm -rf x", user="ubuntu")
+        assert users == ["ubuntu", "ubuntu"]
         assert len(commands) == 2
         assert commands[0] == commands[1]
         assert commands[0].startswith(f"{{ mkdir /tmp/job_{job.job_id}.launch && nohup")
@@ -50,7 +53,7 @@ class TestSyncLaunchRetry:
 
         cast(Any, client).execute_command = execute
         with pytest.raises(CommandTimeoutError):
-            client.start_background_job("sb", "rm -rf x")
+            client.start_background_job("sb", "rm -rf x", user="ubuntu")
         assert calls["n"] == 3
 
 
@@ -60,15 +63,18 @@ class TestAsyncLaunchRetry:
         monkeypatch.setattr("prime_sandboxes.sandbox.asyncio.sleep", _no_sleep)
         client = AsyncSandboxClient(APIClient(api_key="test-key"))
         commands = []
+        users = []
 
         async def execute(_sandbox_id, command, **_kwargs):
             commands.append(command)
+            users.append(_kwargs.get("user"))
             if len(commands) == 1:
                 raise _timeout()
             return _OK
 
         cast(Any, client).execute_command = execute
-        job = await client.start_background_job("sb", "rm -rf x")
+        job = await client.start_background_job("sb", "rm -rf x", user="ubuntu")
+        assert users == ["ubuntu", "ubuntu"]
         assert len(commands) == 2
         assert commands[0] == commands[1]
         assert commands[0].startswith(f"{{ mkdir /tmp/job_{job.job_id}.launch && nohup")
@@ -86,5 +92,5 @@ class TestAsyncLaunchRetry:
 
         cast(Any, client).execute_command = execute
         with pytest.raises(CommandTimeoutError):
-            await client.start_background_job("sb", "rm -rf x")
+            await client.start_background_job("sb", "rm -rf x", user="ubuntu")
         assert calls["n"] == 3

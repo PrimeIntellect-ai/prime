@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -224,3 +225,71 @@ def test_deployments_create_checkpoint_surfaces_conflict_errors(monkeypatch) -> 
     assert result.exit_code == 1
     assert "Error: HTTP 409" in output
     assert "Checkpoint adapter preparation is already in progress" in output
+
+
+def test_deployments_list_json_keeps_fallback_warning_off_stdout(monkeypatch) -> None:
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+
+    class DummyDeploymentsClient:
+        def __init__(self, api_client: Any) -> None:
+            self.api_client = api_client
+
+        def list_adapters(self, **_: Any) -> tuple[list[Any], int]:
+            return [], 0
+
+        def get_deployable_models(self) -> list[str]:
+            raise APIError("deployable models unavailable")
+
+    monkeypatch.setattr("prime_cli.commands.deployments.APIClient", lambda: object())
+    monkeypatch.setattr(
+        "prime_cli.commands.deployments.DeploymentsClient",
+        DummyDeploymentsClient,
+    )
+
+    result = runner.invoke(app, ["deployments", "list", "--output", "json"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == {"models": [], "total": 0, "page": 1, "per_page": 20}
+    assert "Could not fetch deployable models" in result.stderr
+
+
+def test_deployments_create_curl_uses_configured_inference_url(monkeypatch) -> None:
+    monkeypatch.setenv("PRIME_API_KEY", "dummy")
+    monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
+    monkeypatch.setenv("COLUMNS", "200")
+    monkeypatch.setenv("PRIME_INFERENCE_URL", "https://inference.example.com/api/v1/")
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+
+    model = SimpleNamespace(
+        id="adapter-123",
+        display_name="Adapter",
+        base_model="meta-llama/Llama-3.1-8B-Instruct",
+        status="READY",
+        deployment_status="NOT_DEPLOYED",
+    )
+
+    class DummyDeploymentsClient:
+        def __init__(self, api_client: Any) -> None:
+            self.api_client = api_client
+
+        def get_adapter(self, model_id: str) -> Any:
+            return model
+
+        def get_deployable_models(self) -> list[str]:
+            return [model.base_model]
+
+        def deploy_adapter(self, model_id: str) -> Any:
+            return SimpleNamespace(deployment_status="DEPLOYING")
+
+    monkeypatch.setattr("prime_cli.commands.deployments.APIClient", lambda: object())
+    monkeypatch.setattr(
+        "prime_cli.commands.deployments.DeploymentsClient",
+        DummyDeploymentsClient,
+    )
+
+    result = runner.invoke(app, ["deployments", "create", "adapter-123", "--yes"])
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "curl -X POST https://inference.example.com/api/v1/chat/completions" in output
+    assert "api.pinference.ai" not in output

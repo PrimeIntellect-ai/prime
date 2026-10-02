@@ -1,9 +1,11 @@
 """Tests for `prime train logs` (orchestrator + env-server) and components."""
 
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 import pytest
+import typer
 from prime_cli.api.rl import RLClient
 from prime_cli.client import APIError
 from prime_cli.commands import rl as rl_commands
@@ -11,6 +13,14 @@ from prime_cli.main import app
 from typer.testing import CliRunner
 
 RUN_ID = "rl-run-123"
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
+
+
+def _plain(output: str) -> str:
+    """Rich styles each char of an option separately in terminal mode, so a
+    raw '--tail' never appears contiguously under CI's color-forced runs."""
+    return _ANSI_RE.sub("", output)
 
 
 @pytest.fixture(autouse=True)
@@ -81,8 +91,8 @@ def test_logs_default_hits_orchestrator(monkeypatch: pytest.MonkeyPatch) -> None
     result = CliRunner().invoke(app, ["rl", "logs", RUN_ID, "--raw"])
 
     assert result.exit_code == 0, result.output
-    assert "orch-line-1" in result.output
-    assert "orch-line-2" in result.output
+    assert "orch-line-1" in _plain(result.output)
+    assert "orch-line-2" in _plain(result.output)
     assert len(orch) == 1
     assert orch[0]["tail_lines"] == 1000
     assert env == []
@@ -386,10 +396,11 @@ def test_logs_env_server_follow_dedupes(monkeypatch: pytest.MonkeyPatch) -> None
         ],
     )
 
+    plain = _plain(result.output)
     assert result.exit_code == 0, result.output
-    assert result.output.count("line-1") == 1
-    assert result.output.count("line-2") == 1
-    assert result.output.count("line-3") == 1
+    assert plain.count("line-1") == 1
+    assert plain.count("line-2") == 1
+    assert plain.count("line-3") == 1
     assert call_count["n"] >= 2
 
 
@@ -493,3 +504,148 @@ def test_components_empty_env_servers(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result.exit_code == 0, result.output
     assert "orchestrator" in result.output
     assert "QUEUED" in result.output
+
+
+# ---------- --all / --tail / --since volume flags (ENG-6367) ----------
+
+
+def test_logs_all_requests_api_maximum(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--all asks for the API maxima: 5000 lines over the last 24h."""
+    orch: List[Dict[str, Any]] = []
+    env: List[Dict[str, Any]] = []
+    lst: List[Dict[str, Any]] = []
+    mock_get = _make_mock_get({"orchestrator_logs": "orch-line-1"}, orch, env, lst)
+    monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+
+    result = CliRunner().invoke(app, ["rl", "logs", RUN_ID, "--all", "--raw"])
+
+    assert result.exit_code == 0, result.output
+    assert orch[0]["tail_lines"] == 5000
+    assert orch[0]["since_seconds"] == 86400
+
+
+def test_logs_all_with_search_keeps_filters(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--all composes with --search instead of overriding it."""
+    orch: List[Dict[str, Any]] = []
+    env: List[Dict[str, Any]] = []
+    lst: List[Dict[str, Any]] = []
+    mock_get = _make_mock_get({"orchestrator_logs": "line"}, orch, env, lst)
+    monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+
+    result = CliRunner().invoke(
+        app, ["rl", "logs", RUN_ID, "--all", "--search", "backpressure", "--raw"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert orch[0] == {
+        "tail_lines": 5000,
+        "since_seconds": 86400,
+        "search": "backpressure",
+    }
+
+
+def test_logs_all_with_tail_conflicts(monkeypatch: pytest.MonkeyPatch) -> None:
+    def mock_get(self: Any, endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        raise AssertionError(f"Should not be called: {endpoint}")
+
+    monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+
+    result = CliRunner().invoke(app, ["rl", "logs", RUN_ID, "--all", "--tail", "3000"])
+
+    assert result.exit_code != 0
+    assert "--tail" in _plain(result.output)
+
+
+def test_logs_all_with_since_conflicts(monkeypatch: pytest.MonkeyPatch) -> None:
+    def mock_get(self: Any, endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        raise AssertionError(f"Should not be called: {endpoint}")
+
+    monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+
+    result = CliRunner().invoke(app, ["rl", "logs", RUN_ID, "--all", "--since", "2h"])
+
+    assert result.exit_code != 0
+    assert "--since" in _plain(result.output)
+
+
+def test_logs_tail_above_api_cap_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    def mock_get(self: Any, endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        raise AssertionError(f"Should not be called: {endpoint}")
+
+    monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+
+    result = CliRunner().invoke(app, ["rl", "logs", RUN_ID, "--tail", "5001"])
+
+    assert result.exit_code != 0
+    assert "5000" in result.output
+
+
+def test_logs_tail_zero_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    def mock_get(self: Any, endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        raise AssertionError(f"Should not be called: {endpoint}")
+
+    monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+
+    result = CliRunner().invoke(app, ["rl", "logs", RUN_ID, "-n", "0"])
+
+    assert result.exit_code != 0
+
+
+def test_logs_large_tail_with_search_passthrough(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--tail above 1000 must reach the API together with the search filter."""
+    orch: List[Dict[str, Any]] = []
+    env: List[Dict[str, Any]] = []
+    lst: List[Dict[str, Any]] = []
+    mock_get = _make_mock_get({"orchestrator_logs": "line"}, orch, env, lst)
+    monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+
+    result = CliRunner().invoke(
+        app, ["rl", "logs", RUN_ID, "--tail", "3000", "--search", "error", "--raw"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert orch[0] == {"tail_lines": 3000, "search": "error"}
+
+
+def test_logs_since_passthrough_orchestrator(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--since alone widens the window without a search/level filter."""
+    orch: List[Dict[str, Any]] = []
+    env: List[Dict[str, Any]] = []
+    lst: List[Dict[str, Any]] = []
+    mock_get = _make_mock_get({"orchestrator_logs": "line"}, orch, env, lst)
+    monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+
+    result = CliRunner().invoke(app, ["rl", "logs", RUN_ID, "--since", "90m", "--raw"])
+
+    assert result.exit_code == 0, result.output
+    assert orch[0] == {"tail_lines": 1000, "since_seconds": 5400}
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        (None, None),
+        ("", None),
+        ("15m", 900),
+        ("1h", 3600),
+        ("2h", 7200),
+        ("90m", 5400),
+        ("1d", 86_400),
+        ("24h", 86_400),
+        ("86400", 86_400),
+        ("60", 60),
+    ],
+)
+def test_parse_since_accepts_human_durations(value: str | None, expected: int | None) -> None:
+    assert rl_commands._parse_since(value) == expected
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["abc", "1x", "30", "86401", "59s", "25h", "-5m"],
+)
+def test_parse_since_rejects_out_of_window_values(value: str) -> None:
+    with pytest.raises(typer.BadParameter):
+        rl_commands._parse_since(value)

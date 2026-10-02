@@ -22,27 +22,18 @@ dev-dependencies = [
 ]
 
 [tool.uv.exclude-newer-package]
-# Fast-track trusted first-party / partner-published packages past the
-# 7-day cooldown so they can be picked up the day they release. Most
-# entries below are PrimeIntellect-ai OIDC Trusted Publisher packages
-# already in this project's `uv tree` closure. The last two (tasksets,
-# harnesses) are partner/contributor packages anticipated to enter the
-# closure shortly (e.g. via upcoming verifiers releases); they live
-# outside the PrimeIntellect-ai org so listing them here is an explicit
-# trust decision — review when bumping.
+# Fast-track trusted first-party packages past the 7-day cooldown so they can
+# be picked up the day they release. All are PrimeIntellect-ai OIDC Trusted
+# Publisher packages already in this project's `uv tree` closure.
 prime           = false
 prime-sandboxes = false
 prime-tunnel    = false
 prime-evals     = false
 prime-traces    = false
 prime-runs      = false
-verifiers       = false
-tasksets        = false
-harnesses       = false
 
 [tool.uv.sources]
 prime-tunnel = { workspace = true }
-verifiers = { git = "https://github.com/PrimeIntellect-ai/verifiers.git", tag = "v0.2.0" }
 
 [tool.pytest.ini_options]
 pythonpath = [

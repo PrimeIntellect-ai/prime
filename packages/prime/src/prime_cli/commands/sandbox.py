@@ -9,6 +9,7 @@ import sys
 import tempfile
 import time
 from datetime import datetime, timedelta
+from inspect import signature
 from typing import Any, Dict, List, Optional
 
 import typer
@@ -1366,6 +1367,9 @@ def run(
         "--timeout",
         help="Timeout for the command in seconds",
     ),
+    user: Optional[str] = typer.Option(
+        None, "-u", "--user", help="Existing guest username (default: sandbox's configured user)"
+    ),
 ) -> None:
     """Execute a command in a sandbox.
 
@@ -1375,6 +1379,12 @@ def run(
         prime sandbox run <id> -- bash -c "echo hello"
     """
     try:
+        if user is not None and "user" not in signature(SandboxClient.execute_command).parameters:
+            console.print(
+                "[red]The installed prime-sandboxes SDK does not support --user. "
+                "Upgrade prime-sandboxes to use this option.[/red]"
+            )
+            raise typer.Exit(1)
         base_client = APIClient()
         sandbox_client = SandboxClient(base_client)
 
@@ -1399,6 +1409,8 @@ def run(
             command_str = shlex.join(command)
 
         console.print(f"[bold blue]Executing command:[/bold blue] {command_str}")
+        if user is not None:
+            console.print(f"[bold blue]User:[/bold blue] {escape(user)}")
         if working_dir:
             console.print(f"[bold blue]Working directory:[/bold blue] {working_dir}")
         if env_vars:
@@ -1416,6 +1428,7 @@ def run(
                 working_dir,
                 env_vars if env_vars else None,
                 timeout=timeout,
+                **({"user": user} if user is not None else {}),
             )
 
         # End timing

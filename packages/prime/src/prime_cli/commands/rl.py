@@ -985,7 +985,8 @@ def validate_training_config(
             "source_ref",
         }
         config = {key: value for key, value in raw.items() if key not in metadata}
-        payload: dict[str, Any] = {"mode": "sft" if sft else "rl", "teamId": Config().team_id}
+        mode = "sft" if _is_sft(raw, flag=sft) else "rl"
+        payload: dict[str, Any] = {"mode": mode, "teamId": Config().team_id}
         if selected_image is not None:
             payload["imageTag"] = selected_image
         if source_ref is not None:

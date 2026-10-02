@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
@@ -59,15 +60,49 @@ def _worker_environment() -> dict[str, str]:
     } | {"PYTHONDONTWRITEBYTECODE": "1"}
 
 
+def _run_process(
+    command: list[str], *, timeout: float, input: str | None = None
+) -> subprocess.CompletedProcess[str]:
+    # Installers spawn Git and build backends. They must stop before the
+    # caller releases the cache lock and a retry replaces their environment.
+    with subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=_worker_environment(),
+        start_new_session=os.name != "nt",
+        creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+    ) as process:
+        try:
+            stdout, stderr = process.communicate(input=input, timeout=timeout)
+        except BaseException:
+            if os.name == "nt":
+                try:
+                    subprocess.run(
+                        ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=10,
+                        check=False,
+                    )
+                finally:
+                    process.kill()
+            else:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            process.kill()
+            process.communicate()
+            raise
+        return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+
+
 def _run(command: list[str], *, timeout: int = 300) -> None:
     try:
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env=_worker_environment(),
-        )
+        result = _run_process(command, timeout=timeout)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise CompilationError(f"Could not build local schema environment: {exc}") from exc
     if result.returncode:
@@ -166,13 +201,10 @@ def compile_locally(
         "schema_commit": preparation["runtime"]["schema_commit"],
     }
     try:
-        result = subprocess.run(
-            [str(python), "-c", _WORKER],
+        result = _run_process(
+            [str(python), "-I", "-B", "-c", _WORKER],
             input=json.dumps(request),
-            capture_output=True,
-            text=True,
             timeout=60,
-            env=_worker_environment(),
         )
     except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
         raise CompilationError(f"Local schema worker failed: {exc}") from exc

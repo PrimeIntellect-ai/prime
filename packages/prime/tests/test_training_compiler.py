@@ -1,5 +1,8 @@
 import json
+import os
+import signal
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -19,12 +22,19 @@ def test_worker_does_not_inherit_api_credentials_or_schema_path(monkeypatch):
     assert "PYTHONPATH" not in env
 
 
-def test_worker_provenance_mismatch_is_a_hard_error(tmp_path):
+def test_worker_provenance_mismatch_is_a_hard_error(monkeypatch, tmp_path):
+    # Neither the working directory nor PYTHONPATH may execute before the
+    # provenance check, even when they shadow a worker's stdlib imports.
+    untrusted = tmp_path / "untrusted"
+    untrusted.mkdir()
+    (untrusted / "json.py").write_text('raise AssertionError("untrusted import")\n')
+    monkeypatch.chdir(untrusted)
+    monkeypatch.setenv("PYTHONPATH", str(untrusted))
     compiler = tmp_path / "compiler"
     (compiler / "rl_k8s").mkdir(parents=True)
     (compiler / "rl_k8s" / "__init__.py").touch()
     (compiler / "rl_k8s" / "compiled.py").write_text(
-        'def compile_config(*args, **kwargs):\n'
+        "def compile_config(*args, **kwargs):\n"
         '    raise AssertionError("must check provenance first")\n'
     )
     metadata = compiler / "prime_rl_configs-0.1.dist-info"
@@ -45,6 +55,50 @@ def test_worker_provenance_mismatch_is_a_hard_error(tmp_path):
             compiler_path=compiler,
             schema_python=Path(sys.executable),
         )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group cleanup")
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_installer_stops_descendants_before_returning(monkeypatch, tmp_path, interrupted):
+    started = tmp_path / "started"
+    release = tmp_path / "release"
+    marker = tmp_path / "written"
+    child = (
+        "import os, time; from pathlib import Path\n"
+        f"Path({str(started)!r}).write_text(str(os.getpid()))\n"
+        f"while not Path({str(release)!r}).exists(): time.sleep(0.01)\n"
+        f"Path({str(marker)!r}).touch()\n"
+    )
+    parent = (
+        "import subprocess, sys, time\n"
+        f"subprocess.Popen([sys.executable, '-I', '-c', {child!r}])\n"
+        "time.sleep(60)\n"
+    )
+    if interrupted:
+        communicate = training_compiler.subprocess.Popen.communicate
+
+        def interrupt_once(process, *args, **kwargs):
+            monkeypatch.setattr(training_compiler.subprocess.Popen, "communicate", communicate)
+            deadline = time.monotonic() + 5
+            while not started.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(training_compiler.subprocess.Popen, "communicate", interrupt_once)
+    try:
+        expected = KeyboardInterrupt if interrupted else training_compiler.CompilationError
+        with pytest.raises(expected):
+            training_compiler._run([sys.executable, "-I", "-c", parent], timeout=2)
+        assert started.exists(), "descendant must start before testing cleanup"
+        release.touch()
+        time.sleep(0.2)
+        assert not marker.exists(), "descendant survived installer cleanup"
+    finally:
+        if started.exists():
+            try:
+                os.kill(int(started.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
 
 def test_cache_reuses_complete_install_and_retries_failed_install(monkeypatch, tmp_path):
@@ -98,19 +152,30 @@ def test_preparation_client_rejects_unsupported_contract():
         ).prepare_local_validation({})
 
 
-def test_validate_prepares_runtime_without_sending_config_or_creating_run(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("runtime_config", "flags", "mode"),
+    [
+        ({"trainer": {"optim": {"lr": 0.1}}}, [], "rl"),
+        ({"data": {"type": "fake"}}, [], "sft"),
+        ({}, ["--sft"], "sft"),
+    ],
+)
+def test_validate_prepares_runtime_without_sending_config_or_creating_run(
+    monkeypatch, tmp_path, runtime_config, flags, mode
+):
+    import toml
     from prime_cli.api.training import HostedTrainingClient
     from prime_cli.commands import rl
 
     config = tmp_path / "rl.toml"
-    config.write_text('image_tag = "branch"\n[trainer.optim]\nlr = 0.1\n')
+    config.write_text(toml.dumps({"image_tag": "branch", **runtime_config}))
     monkeypatch.setattr(rl, "Config", lambda: SimpleNamespace(team_id="team"))
     monkeypatch.setattr(rl, "APIClient", lambda: object())
     seen = []
 
     def prepare(self, payload):
         seen.append(payload)
-        return {"contract_version": 1, "mode": "rl", "runtime": {"schema_commit": "a" * 40}}
+        return {"contract_version": 1, "mode": mode, "runtime": {"schema_commit": "a" * 40}}
 
     monkeypatch.setattr(HostedTrainingClient, "prepare_local_validation", prepare)
 
@@ -120,7 +185,7 @@ def test_validate_prepares_runtime_without_sending_config_or_creating_run(monkey
     monkeypatch.setattr(HostedTrainingClient, "create_run", no_run)
 
     def compile(config, preparation, **kw):
-        assert config == {"trainer": {"optim": {"lr": 0.1}}}
+        assert config == runtime_config
         return {"schema_commit": "a" * 40, "submission_supported": False}
 
     monkeypatch.setattr(training_compiler, "compile_locally", compile)
@@ -137,11 +202,12 @@ def test_validate_prepares_runtime_without_sending_config_or_creating_run(monkey
             str(artifact),
             "-o",
             "json",
+            *flags,
         ],
         env={"PRIME_DISABLE_VERSION_CHECK": "1"},
     )
     assert result.exit_code == 0, result.output
-    assert seen == [{"mode": "rl", "teamId": "team", "imageTag": "branch"}]
+    assert seen == [{"mode": mode, "teamId": "team", "imageTag": "branch"}]
     assert json.loads(result.stdout) == json.loads(artifact.read_text())
 
 

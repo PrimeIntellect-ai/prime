@@ -534,6 +534,25 @@ def test_sandbox_create_defaults_to_vm_runtime(
     assert captured["request"].start_command is None
 
 
+def test_sandbox_create_arm_alias_sends_arm64(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_cli(monkeypatch)
+    captured: dict[str, Any] = {}
+
+    def mock_create(self: Any, request: Any) -> Any:
+        captured["request"] = request
+        return SimpleNamespace(id="sbx-arm")
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.create", mock_create)
+    result = runner.invoke(
+        app, ["sandbox", "create", "prime/user/app:arm", "--arch", "arm", "--yes"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["request"].arch == "arm64"
+
+
 def test_sandbox_create_gpu_without_docker_image_uses_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

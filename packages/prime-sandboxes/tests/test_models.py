@@ -20,6 +20,7 @@ def test_create_sandbox_request_defaults():
 
     assert request.name == "test-sandbox"
     assert request.docker_image == "python:3.11-slim"
+    assert request.arch == "amd64"
     assert request.cpu_cores == 1
     assert request.memory_gb == 1
     assert request.disk_size_gb == 5
@@ -29,6 +30,13 @@ def test_create_sandbox_request_defaults():
     assert request.region is None
     assert request.labels == []
     assert request.start_command is None
+
+
+def test_create_sandbox_request_serializes_arm_architecture():
+    request = CreateSandboxRequest(
+        name="arm-sandbox", docker_image="prime/user/app:arm", arch="arm64"
+    )
+    assert request.model_dump()["arch"] == "arm64"
 
 
 def test_vm_is_not_a_model_field():

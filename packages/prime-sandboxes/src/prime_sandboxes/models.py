@@ -232,6 +232,7 @@ class CreateSandboxRequest(BaseModel):
 
     name: str
     docker_image: str
+    arch: Literal["amd64", "arm64"] = "amd64"
     start_command: Optional[StartCommand] = None
     cpu_cores: float = 1.0
     memory_gb: float = 1.0
@@ -399,7 +400,7 @@ class ImageListResponse(BaseModel):
 
 
 class BuildImageRequest(BaseModel):
-    """Request a linux/amd64 Dockerfile or public-registry source build.
+    """Request a linux/amd64 or linux/arm64 VM image build.
 
     Docker Hub sources become public, org-less platform images automatically.
     They cannot use a custom destination, team, or private visibility.
@@ -409,7 +410,7 @@ class BuildImageRequest(BaseModel):
     image_tag: Optional[str] = None
     dockerfile_path: str = "Dockerfile"
     source_image: Optional[str] = Field(default=None, alias="sourceImage")
-    platform: str = "linux/amd64"
+    platform: Literal["linux/amd64", "linux/arm64"] = "linux/amd64"
     team_id: Optional[str] = Field(default=None, alias="teamId")
     visibility: Optional[ImageVisibility] = None
     owner_scope: Optional[Literal["platform"]] = Field(default=None, alias="ownerScope")
@@ -418,9 +419,6 @@ class BuildImageRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_build(self) -> "BuildImageRequest":
-        if self.platform != "linux/amd64":
-            raise ValueError("platform must be linux/amd64")
-
         sources = [source.strip() for source in (self.source_image or "").split(",")]
         docker_hub_sources = [
             source for source in sources if source and is_docker_hub_reference(source)

@@ -72,7 +72,7 @@ class ImageClient:
     def initiate_build(
         self, request: BuildImageRequest
     ) -> BuildImageResponse | BulkBuildImageResponse:
-        """Queue a linux/amd64 Dockerfile build or public-registry VM build.
+        """Queue a Dockerfile build or public-registry VM build.
 
         Docker Hub source requests are public, org-less platform builds. They
         cannot set a custom destination, team, or private visibility.
@@ -95,10 +95,11 @@ class ImageClient:
         team_id: Optional[str] = None,
         visibility: Optional[ImageVisibility] = None,
         owner_scope: Optional[Literal["platform"]] = None,
+        platform: Literal["linux/amd64", "linux/arm64"] = "linux/amd64",
     ) -> BuildImageResponse | BulkBuildImageResponse:
         """Build VM images directly from allowed public registry references.
 
-        Only ``linux/amd64`` is supported. Docker Hub sources always build as
+        Docker Hub sources always build as
         public, org-less platform images. They do not accept a custom
         destination, team, or private visibility.
         """
@@ -109,6 +110,7 @@ class ImageClient:
             team_id=team_id,
             visibility=visibility,
             owner_scope=owner_scope,
+            platform=platform,
         )
         return self.initiate_build(request)
 
@@ -187,10 +189,11 @@ class AsyncImageClient:
         team_id: Optional[str] = None,
         visibility: Optional[ImageVisibility] = None,
         owner_scope: Optional[Literal["platform"]] = None,
+        platform: Literal["linux/amd64", "linux/arm64"] = "linux/amd64",
     ) -> BuildImageResponse | BulkBuildImageResponse:
         """Build VM images directly from allowed public registry references.
 
-        Only ``linux/amd64`` is supported. Docker Hub sources always build as
+        Docker Hub sources always build as
         public, org-less platform images. They do not accept a custom
         destination, team, or private visibility.
         """
@@ -201,6 +204,7 @@ class AsyncImageClient:
             team_id=team_id,
             visibility=visibility,
             owner_scope=owner_scope,
+            platform=platform,
         )
         return await self.initiate_build(request)
 

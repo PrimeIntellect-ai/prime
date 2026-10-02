@@ -2716,8 +2716,10 @@ class SandboxClient:
             if env_prefix:
                 env_prefix += "; "
 
-        dir_prefix = f"cd {shlex.quote(working_dir)} && " if working_dir else ""
+        dir_prefix = f"cd {shlex.quote(working_dir)} || exit 1; " if working_dir else ""
         command_body = f"{env_prefix}{dir_prefix}{command}"
+        # Guest users may lack a home dir; the job cds into an absolute working_dir itself.
+        launch_cwd = "/" if working_dir and working_dir.startswith("/") else None
         exit_file_quoted = shlex.quote(exit_file)
         stdout_log_file_quoted = shlex.quote(stdout_log_file)
         stderr_log_file_quoted = shlex.quote(stderr_log_file)
@@ -2742,6 +2744,7 @@ class SandboxClient:
                 self.execute_command(
                     sandbox_id,
                     bg_cmd,
+                    working_dir=launch_cwd,
                     timeout=_BACKGROUND_JOB_LAUNCH_TIMEOUT_SECONDS,
                     user=user,
                 )
@@ -4418,8 +4421,10 @@ class AsyncSandboxClient:
             if env_prefix:
                 env_prefix += "; "
 
-        dir_prefix = f"cd {shlex.quote(working_dir)} && " if working_dir else ""
+        dir_prefix = f"cd {shlex.quote(working_dir)} || exit 1; " if working_dir else ""
         command_body = f"{env_prefix}{dir_prefix}{command}"
+        # Guest users may lack a home dir; the job cds into an absolute working_dir itself.
+        launch_cwd = "/" if working_dir and working_dir.startswith("/") else None
         exit_file_quoted = shlex.quote(exit_file)
         stdout_log_file_quoted = shlex.quote(stdout_log_file)
         stderr_log_file_quoted = shlex.quote(stderr_log_file)
@@ -4444,6 +4449,7 @@ class AsyncSandboxClient:
                 await self.execute_command(
                     sandbox_id,
                     bg_cmd,
+                    working_dir=launch_cwd,
                     timeout=_BACKGROUND_JOB_LAUNCH_TIMEOUT_SECONDS,
                     user=user,
                 )

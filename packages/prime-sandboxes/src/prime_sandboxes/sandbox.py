@@ -2722,7 +2722,8 @@ class SandboxClient:
         command_body = f"{env_prefix}{dir_prefix}{command}"
         # The launcher touches only absolute /tmp paths and the job cds into working_dir
         # itself; starting it from / keeps a guest user without a home directory launchable.
-        launch_cwd = "/" if working_dir else None
+        # A relative working_dir keeps resolving against the guest's default directory.
+        launch_cwd = "/" if working_dir and working_dir.startswith("/") else None
         exit_file_quoted = shlex.quote(exit_file)
         stdout_log_file_quoted = shlex.quote(stdout_log_file)
         stderr_log_file_quoted = shlex.quote(stderr_log_file)
@@ -4430,7 +4431,8 @@ class AsyncSandboxClient:
         command_body = f"{env_prefix}{dir_prefix}{command}"
         # The launcher touches only absolute /tmp paths and the job cds into working_dir
         # itself; starting it from / keeps a guest user without a home directory launchable.
-        launch_cwd = "/" if working_dir else None
+        # A relative working_dir keeps resolving against the guest's default directory.
+        launch_cwd = "/" if working_dir and working_dir.startswith("/") else None
         exit_file_quoted = shlex.quote(exit_file)
         stdout_log_file_quoted = shlex.quote(stdout_log_file)
         stderr_log_file_quoted = shlex.quote(stderr_log_file)

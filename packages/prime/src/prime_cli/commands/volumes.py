@@ -22,6 +22,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -481,6 +482,121 @@ def _remote_tree_has_symlink(alias: str, config: Path, remote: str, via_gateway:
     return bool(check.stdout.strip())
 
 
+# One TCP stream tops out well below the path's capacity (~14 MB/s single vs
+# ~33 MB/s over 4 streams on rft-telus, ENG-6450), so a directory's files are
+# split across this many concurrent rsyncs.
+# ponytail: files are the unit of split, so one huge file stays single-stream;
+# chunk large files if that ever matters.
+_STREAMS = 4
+
+
+def _split(entries: list[tuple[int, str]], n: int) -> list[list[str]]:
+    """Largest first onto the least-loaded bucket, so buckets end up about
+    the same size in bytes. Empty buckets are dropped."""
+    buckets: list[list[str]] = [[] for _ in range(n)]
+    loads = [0] * n
+    for size, path in sorted(entries, reverse=True):
+        i = loads.index(min(loads))
+        buckets[i].append(path)
+        loads[i] += size
+    return [b for b in buckets if b]
+
+
+def _base_and_prefix(path: str) -> tuple[str, str]:
+    """rsync's source layout as (directory the list is relative to, prefix of
+    every listed path): "dir/" copies the contents of dir, "dir" copies dir
+    itself, so its entries are listed as "dir/..." under dir's parent."""
+    if path.endswith("/"):
+        return path, ""
+    parent, leaf = os.path.split(path)
+    return (parent or ".") + "/", leaf + "/"
+
+
+def _local_entries(path: str) -> tuple[list[str], list[tuple[int, str]]] | None:
+    """(directories, (size, file)) under a local directory, relative to its
+    rsync base. Symlinks are listed as files (rsync -a copies them as links).
+    None when `path` is not a directory or a name has a newline, which a
+    --files-from list cannot carry."""
+    if os.path.islink(path) or not os.path.isdir(path):
+        return None
+    base, prefix = _base_and_prefix(path)
+    dirs, files = [prefix.rstrip("/")] if prefix else [], []
+    for root, subdirs, names in os.walk(path, followlinks=False):
+        for entry in subdirs + names:
+            full = os.path.join(root, entry)
+            rel = os.path.relpath(full, base)
+            if "\n" in rel:
+                return None
+            if os.path.isdir(full) and not os.path.islink(full):
+                dirs.append(rel)
+            else:
+                files.append((os.lstat(full).st_size, rel))
+    return dirs, files
+
+
+def _remote_entries(
+    alias: str, config: Path, remote: str
+) -> tuple[list[str], list[tuple[int, str]]] | None:
+    """Like _local_entries, for a directory on the session pod. One ssh call:
+    BusyBox find + stat (stat does not follow links). None if the listing
+    fails or `remote` is not a directory; the caller then falls back to one
+    rsync, which reports the error itself. `remote` is shell-safe
+    (_remote_path)."""
+    listing = subprocess.run(
+        [
+            "ssh",
+            "-F",
+            str(config),
+            alias,
+            f"find {remote} -mindepth 1 -exec stat -c '%s|%F|%n' {{}} +",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if listing.returncode or not listing.stdout:
+        return None
+    base, prefix = _base_and_prefix(remote)
+    root = remote.rstrip("/") + "/"
+    dirs, files = [prefix.rstrip("/")] if prefix else [], []
+    for line in listing.stdout.splitlines():
+        size, kind, full = line.split("|", 2)
+        if not full.startswith(root):
+            return None  # a name with a newline split across lines
+        rel = os.path.relpath(full, base)
+        if kind == "directory":
+            dirs.append(rel)
+        else:
+            files.append((int(size), rel))
+    return dirs, files
+
+
+def _parallel_rsync(cmd: list[str], src: str, dst: str, dirs, files) -> int | None:
+    """Run the transfer as up to _STREAMS rsyncs, each given its share of the
+    files with --files-from (on macOS openrsync and GNU rsync alike). First,
+    one rsync creates the destination and every directory ("." plus `dirs`),
+    so the parallel ones never race to mkdir the same path (GNU rsync fails
+    one of them with code 11), and empty directories are kept. None when
+    there are too few files to split. Returns the first non-zero exit code,
+    else 0."""
+    buckets = _split(files, _STREAMS)
+    if len(buckets) < 2:
+        return None
+    console.print(f"Transferring {len(files)} files over {len(buckets)} parallel streams")
+    with tempfile.TemporaryDirectory() as tmp:
+
+        def listed(i: int, paths: list[str]) -> list[str]:
+            listfile = Path(tmp) / f"files-{i}"
+            listfile.write_text("".join(f"{p}\n" for p in paths))
+            return [*cmd, f"--files-from={listfile}", src, dst]
+
+        if code := subprocess.run(listed(0, [".", *dirs]), check=False).returncode:
+            return code
+        procs = [subprocess.Popen(listed(i, b)) for i, b in enumerate(buckets, 1)]
+        codes = [p.wait() for p in procs]
+    return next((c for c in codes if c), 0)
+
+
 def _transfer(
     name: str, read_only: bool, remote: str, local: str, upload: bool, direct: bool
 ) -> None:
@@ -537,8 +653,20 @@ def _transfer(
         elif not upload and remote.endswith("/"):
             remote += "."
     remote_arg = f"{alias}:{remote}"
-    cmd += [local, remote_arg] if upload else [remote_arg, local]
     try:
+        if rsync:
+            if upload:
+                entries = _local_entries(local)
+                src, dst = _base_and_prefix(local)[0], remote_arg
+            else:
+                entries = _remote_entries(alias, config, remote)
+                src, dst = f"{alias}:{_base_and_prefix(remote)[0]}", local
+            code = _parallel_rsync(cmd, src, dst, *entries) if entries else None
+            if code is not None:
+                if code:
+                    _transfer_failed(alias, code, via_gateway)
+                return
+        cmd += [local, remote_arg] if upload else [remote_arg, local]
         code = subprocess.run(cmd, check=False).returncode
     except OSError as exc:
         console.print(f"[red]Could not start transfer:[/red] {exc}")

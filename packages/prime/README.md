@@ -233,6 +233,34 @@ prime switch <team-id>  # fallback for teams without a slug
 prime pods list
 ```
 
+### Per-Directory Team and Account
+
+Pin a team or saved context to a directory (e.g. one repo per customer):
+
+```bash
+prime switch edison --local          # this repository uses team "edison"
+prime config use customer --local    # or a saved context (own login, team, URLs)
+prime config unpin                   # back to global
+```
+
+`--local` writes `.prime/context.json` at the repository root (the nearest git or Lab
+workspace root, else the current directory). The CLI and SDKs use the nearest one at
+or above the working directory. It holds no credentials. Inside a pinned directory,
+`prime switch` and `prime config use` update the pin (`--global` to bypass it), and
+`prime login` logs in to the pinned context.
+
+In a git repository the pin is added to `.git/info/exclude`, so it stays local. A team pin
+can be shared with `git add -f .prime/context.json`. Don't commit a context pin: it names a
+saved context from your `~/.prime`, and clones or CI jobs without it fail. A git worktree
+outside the repository directory doesn't see an uncommitted pin; pin it there too.
+
+A pin can come with a cloned repository, so when it changes your team or context the
+CLI says so on stderr (`Using team 'Edison' (...), pinned by ...`); set
+`PRIME_DISABLE_CONTEXT_NOTICE=1` to hide it. The SDKs log the pin once per process at
+INFO level.
+
+Precedence: `PRIME_*` env vars > `--context` > `.prime/context.json` > `~/.prime/config.json`.
+
 ## Configuration
 
 ### API Key

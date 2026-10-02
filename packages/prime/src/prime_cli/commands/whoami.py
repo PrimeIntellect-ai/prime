@@ -45,12 +45,19 @@ def whoami() -> None:
         if config.team_id:
             table.add_row("Type", "Team")
             table.add_section()
-            table.add_row("Team ID", config.team_id)
-            table.add_row("Team Name", config.team_name or Text("Unknown", style="dim"))
+            # Text(): these values may come from a directory's .prime/context.json,
+            # so they must not be interpreted as Rich markup.
+            table.add_row("Team ID", Text(config.team_id))
+            table.add_row(
+                "Team Name",
+                Text(config.team_name) if config.team_name else Text("Unknown", style="dim"),
+            )
             if config.team_role:
-                table.add_row("Role", config.team_role)
+                table.add_row("Role", Text(config.team_role))
         else:
             table.add_row("Type", "Personal")
+        if config.local_context_file is not None:
+            table.add_row("Pinned By", Text(str(config.local_context_file)))
 
         # Add section divider between account and user details
         table.add_section()

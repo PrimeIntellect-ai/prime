@@ -1,3 +1,4 @@
+import os
 import sys
 from typing import Optional
 
@@ -32,6 +33,7 @@ from .commands.wallet import WALLET_JSON_HELP, wallet_command
 from .commands.whoami import app as whoami_app
 from .core import Config
 from .utils import PlainTyper, get_console
+from .utils.context import require_loadable_config
 from .utils.version_check import check_for_update
 
 app = PlainTyper(
@@ -102,8 +104,6 @@ def callback(
         raise typer.Exit()
 
     if context:
-        import os
-
         # Ignore any inherited PRIME_CONTEXT while validating the explicit
         # selector, then fully load it before any command can construct a
         # client. A filename alone is not proof that a context is usable.
@@ -134,6 +134,10 @@ def callback(
                 os.environ["PRIME_CONTEXT"] = previous_context
 
         ctx.call_on_close(restore_context)
+    elif ctx.invoked_subcommand != "config":
+        # `prime config` runs this itself so that `config unpin` can remove a
+        # broken directory context.
+        require_loadable_config(notice=ctx.invoked_subcommand is not None)
 
     # Check for updates (only when a subcommand is being executed)
     if ctx.invoked_subcommand is not None:

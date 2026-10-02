@@ -34,13 +34,14 @@ def _no_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("prime_cli.commands.rl.time.sleep", lambda _: None)
 
 
-def _run_payload(status: str = "RUNNING") -> Dict[str, Any]:
+def _run_payload(status: str = "RUNNING", loss: str = "rl") -> Dict[str, Any]:
     now = datetime.now(timezone.utc).isoformat()
     return {
         "id": RUN_ID,
         "name": "demo",
         "userId": "u1",
         "status": status,
+        "loss": loss,
         "rolloutsPerExample": 8,
         "seqLen": 4096,
         "maxSteps": 100,
@@ -60,7 +61,12 @@ def _make_mock_get(
 ):
     def mock_get(self: Any, endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
         if endpoint == f"/rft/runs/{RUN_ID}":
-            return {"run": _run_payload(responses.get("run_status", "RUNNING"))}
+            return {
+                "run": _run_payload(
+                    responses.get("run_status", "RUNNING"),
+                    responses.get("run_loss", "rl"),
+                )
+            }
         if endpoint == f"/rft/runs/{RUN_ID}/logs":
             call_params = params or {}
             orch_calls.append(call_params)
@@ -504,6 +510,46 @@ def test_components_empty_env_servers(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result.exit_code == 0, result.output
     assert "orchestrator" in result.output
     assert "QUEUED" in result.output
+
+
+def test_components_lists_trainer_for_sft(monkeypatch: pytest.MonkeyPatch) -> None:
+    """SFT runs are trainer-only: no orchestrator pod, so show the trainer."""
+    orch: List[Dict[str, Any]] = []
+    env: List[Dict[str, Any]] = []
+    lst: List[Dict[str, Any]] = []
+    mock_get = _make_mock_get(
+        {"run_status": "RUNNING", "run_loss": "sft", "env_servers": []},
+        orch,
+        env,
+        lst,
+    )
+    monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+
+    result = CliRunner().invoke(app, ["rl", "components", RUN_ID])
+
+    assert result.exit_code == 0, result.output
+    out = " ".join(result.output.split())
+    assert "trainer" in out
+    assert "orchestrator" not in out
+
+
+def test_components_rl_run_lists_orchestrator(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An RL (loss != 'sft') run keeps the orchestrator row."""
+    orch: List[Dict[str, Any]] = []
+    env: List[Dict[str, Any]] = []
+    lst: List[Dict[str, Any]] = []
+    mock_get = _make_mock_get(
+        {"run_status": "RUNNING", "run_loss": "rl", "env_servers": []},
+        orch,
+        env,
+        lst,
+    )
+    monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+
+    result = CliRunner().invoke(app, ["rl", "components", RUN_ID])
+
+    assert result.exit_code == 0, result.output
+    assert "orchestrator" in result.output
 
 
 # ---------- --all / --tail / --since volume flags (ENG-6367) ----------

@@ -117,6 +117,43 @@ class VolumeSession(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class VolumeTransferProgress(BaseModel):
+    """The latest rclone stats line of a running volume transfer.
+
+    Values are rclone's own human strings ("412.345 GiB", "182.400 MiB/s",
+    "1h48m0s"); only present once the transfer is running.
+    """
+
+    transferred: Optional[str] = None
+    total: Optional[str] = None
+    percentage: Optional[int] = None
+    rate: Optional[str] = None
+    eta: Optional[str] = None
+    errors: Optional[int] = None
+
+
+class VolumeTransfer(BaseModel):
+    """An S3 import/export of a named volume (…/volumes/{name}/transfers).
+
+    Credentials are never part of this model: the API accepts them in the
+    create request body only, and no response or log ever carries them.
+    """
+
+    id: str
+    volume_name: str = Field(..., alias="volumeName")
+    direction: str
+    path: str
+    url: str
+    status: str
+    progress: Optional[VolumeTransferProgress] = None
+    created_at: Optional[str] = Field(None, alias="createdAt")
+    started_at: Optional[str] = Field(None, alias="startedAt")
+    completed_at: Optional[str] = Field(None, alias="completedAt")
+    error_message: Optional[str] = Field(None, alias="errorMessage")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class HostedTrainingClient:
     """Client for the hosted full-FT training endpoint."""
 
@@ -205,6 +242,67 @@ class HostedTrainingClient:
     ) -> None:
         params = {"teamId": team_id} if team_id else None
         self.client.delete(f"/training/volumes/{name}/sessions/{session_id}", params=params)
+
+    def create_volume_transfer(
+        self,
+        name: str,
+        *,
+        direction: str,
+        path: str,
+        url: str,
+        credentials: Dict[str, Any],
+        region: Optional[str] = None,
+        endpoint_url: Optional[str] = None,
+        team_id: Optional[str] = None,
+    ) -> VolumeTransfer:
+        """POST …/volumes/{name}/transfers. Queues an rclone job on the
+        volume's cluster and returns at once with a transfer id.
+
+        `credentials` is the `{accessKeyId, secretAccessKey, sessionToken}`
+        mapping built from the caller's AWS environment; it travels in this
+        request body only and is never persisted or returned.
+        """
+        payload: Dict[str, Any] = {
+            "direction": direction,
+            "path": path,
+            "url": url,
+            "credentials": credentials,
+        }
+        if region:
+            payload["region"] = region
+        if endpoint_url:
+            payload["endpointUrl"] = endpoint_url
+        if team_id:
+            payload["teamId"] = team_id
+        return VolumeTransfer.model_validate(
+            self.client.post(f"/training/volumes/{name}/transfers", json=payload)
+        )
+
+    def list_volume_transfers(
+        self, name: str, *, team_id: Optional[str] = None
+    ) -> List[VolumeTransfer]:
+        """GET …/volumes/{name}/transfers. The caller's transfers on this
+        volume, newest first, finished ones included."""
+        params = {"teamId": team_id} if team_id else None
+        response = self.client.get(f"/training/volumes/{name}/transfers", params=params)
+        return [VolumeTransfer.model_validate(t) for t in response.get("transfers", [])]
+
+    def get_volume_transfer(
+        self, name: str, transfer_id: str, *, team_id: Optional[str] = None
+    ) -> VolumeTransfer:
+        """GET …/volumes/{name}/transfers/{id}."""
+        params = {"teamId": team_id} if team_id else None
+        return VolumeTransfer.model_validate(
+            self.client.get(f"/training/volumes/{name}/transfers/{transfer_id}", params=params)
+        )
+
+    def cancel_volume_transfer(
+        self, name: str, transfer_id: str, *, team_id: Optional[str] = None
+    ) -> None:
+        """DELETE …/volumes/{name}/transfers/{id}. Tears down the job and its
+        Secret; the row stays as `cancelled`. Idempotent."""
+        params = {"teamId": team_id} if team_id else None
+        self.client.delete(f"/training/volumes/{name}/transfers/{transfer_id}", params=params)
 
     def list_available_gpu_types(self, team_id: Optional[str] = None) -> AvailableGpuTypesResponse:
         """GET /v1/training/available-gpu-types. Distinct GPU types the

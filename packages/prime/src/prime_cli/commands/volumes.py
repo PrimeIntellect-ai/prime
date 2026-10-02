@@ -24,13 +24,14 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import datetime
 from pathlib import Path
 
 import typer
 from rich.markup import escape
 from rich.table import Table
 
-from prime_cli.api.training import HostedTrainingClient
+from prime_cli.api.training import HostedTrainingClient, VolumeTransfer
 from prime_cli.core import APIClient, APIError, Config
 from prime_cli.volume_gateway import GatewayError, relay
 
@@ -693,6 +694,266 @@ def put(
 ) -> None:
     """Upload to a volume over a read-write session (rsync, else scp)."""
     _transfer(name, False, remote_path, local_path, upload=True, direct=direct)
+
+
+# --- S3 import/export (ENG-6450) ------------------------------------------
+# rclone runs on the volume's cluster, so the S3 leg uses the cluster's
+# egress instead of the caller's laptop. Commands are async: create returns
+# a transfer id at once, and `transfers list --follow` polls it to the end.
+
+_TRANSFER_TERMINAL = ("succeeded", "failed", "cancelled")
+_TRANSFER_POLL_SECONDS = 5
+
+
+def _aws_credentials() -> dict:
+    """S3 credentials from the standard AWS environment variables.
+
+    Prime never takes credentials as flags: they travel in the create
+    request body only and are stored in a per-transfer k8s Secret that is
+    deleted when the transfer ends.
+    """
+    access_key = os.environ.get("AWS_ACCESS_KEY_ID")
+    secret_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
+    if not access_key or not secret_key:
+        missing = "AWS_ACCESS_KEY_ID" if not access_key else "AWS_SECRET_ACCESS_KEY"
+        console.print(
+            f"[red]Error:[/red] {missing} is not set. S3 credentials are read from the "
+            "AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN environment "
+            "variables."
+        )
+        raise typer.Exit(1)
+    return {
+        "accessKeyId": access_key,
+        "secretAccessKey": secret_key,
+        "sessionToken": os.environ.get("AWS_SESSION_TOKEN"),
+    }
+
+
+def _short_number(value: str) -> str:
+    """`412.345 GiB` -> `412.3 GiB`: rclone's third decimal is noise here."""
+    number, _, unit = value.partition(" ")
+    try:
+        rounded = f"{float(number):.1f}"
+    except ValueError:
+        return value
+    return f"{rounded} {unit}".strip()
+
+
+def _short_eta(eta: str) -> str:
+    """`1h48m0s` -> `1h48m`; rclone always writes the seconds."""
+    return eta[:-2] if eta.endswith("m0s") else eta
+
+
+def _duration(started_at: str | None, completed_at: str | None) -> str | None:
+    """`2h21m` between two ISO timestamps, or None if either is unusable."""
+    if not started_at or not completed_at:
+        return None
+    try:
+        start = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+        end = datetime.fromisoformat(completed_at.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    seconds = int((end - start).total_seconds())
+    if seconds < 0:
+        return None
+    hours, rem = divmod(seconds, 3600)
+    minutes = rem // 60
+    if hours:
+        return f"{hours}h{minutes}m"
+    if minutes:
+        return f"{minutes}m"
+    return f"{seconds}s"
+
+
+def _progress_cell(transfer: VolumeTransfer) -> str:
+    """The transfer's PROGRESS cell / follow line: rclone stats while
+    running, the total (with duration) when done, the error when failed."""
+    if transfer.status == "succeeded":
+        progress = transfer.progress
+        size = _short_number(progress.total) if progress and progress.total else "done"
+        took = _duration(transfer.started_at, transfer.completed_at)
+        return f"{size} in {took}" if took else size
+    if transfer.status in ("failed", "cancelled"):
+        return transfer.error_message or "-"
+    progress = transfer.progress
+    if progress is None:
+        return "-"
+    bits = []
+    if progress.transferred or progress.total:
+        size = _short_number(progress.transferred) if progress.transferred else "?"
+        if progress.total:
+            size += f" / {_short_number(progress.total)}"
+        if progress.percentage is not None:
+            size += f" ({progress.percentage}%)"
+        bits.append(size)
+    if progress.rate:
+        bits.append(_short_number(progress.rate))
+    if progress.eta:
+        bits.append(f"ETA {_short_eta(progress.eta)}")
+    return ", ".join(bits) if bits else "-"
+
+
+def _transfers_table(transfers: list[VolumeTransfer]) -> Table:
+    table = Table("ID", "DIRECTION", "PATH", "URL", "STATUS", "PROGRESS")
+    for transfer in transfers:
+        table.add_row(
+            transfer.id,
+            transfer.direction,
+            escape(transfer.path or "/"),
+            escape(transfer.url),
+            transfer.status,
+            escape(_progress_cell(transfer)),
+        )
+    return table
+
+
+def _follow_transfer(client, name: str, transfer_id: str, team_id: str | None) -> None:
+    """Poll one transfer and print each new state line until it is terminal.
+    One failed poll (network blip, 5xx) is retried, like `volumes ssh`."""
+    errors = 0
+    shown = None
+    while True:
+        try:
+            transfer = client.get_volume_transfer(name, transfer_id, team_id=team_id)
+            errors = 0
+        except APIError as exc:
+            errors += 1
+            if errors >= _MAX_POLL_ERRORS:
+                console.print(f"[red]Error:[/red] {escape(str(exc))}")
+                raise typer.Exit(1) from exc
+            time.sleep(_TRANSFER_POLL_SECONDS)
+            continue
+        line = f"{transfer.status:<11}{_progress_cell(transfer)}"
+        if line != shown:
+            console.print(escape(line))
+            shown = line
+        if transfer.status in _TRANSFER_TERMINAL:
+            return
+        time.sleep(_TRANSFER_POLL_SECONDS)
+
+
+def _start_transfer(
+    name: str,
+    direction: str,
+    path: str,
+    url: str,
+    region: str | None,
+    endpoint_url: str | None,
+) -> None:
+    credentials = _aws_credentials()
+    client, team_id = _client()
+    try:
+        transfer = client.create_volume_transfer(
+            name,
+            direction=direction,
+            path=path,
+            url=url,
+            credentials=credentials,
+            region=region,
+            endpoint_url=endpoint_url,
+            team_id=team_id,
+        )
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+    where = f"{escape(name)}:{escape(path or '/')}"
+    if direction == "export":
+        summary = f"Started export of {where} to {escape(url)}"
+    else:
+        summary = f"Started import of {where} from {escape(url)}"
+    console.print(f"[green]{summary}[/green]")
+    check = f"prime volumes transfers list {escape(name)} --id {transfer.id}"
+    console.print(f"Transfer id: {transfer.id}")
+    console.print(f"Check status: {check}")
+    console.print(f"Follow:       {check} --follow")
+
+
+@app.command(no_args_is_help=True)
+def export(
+    name: str = typer.Argument(..., help="Volume name"),
+    path: str = typer.Argument(..., help="Volume-relative directory to copy (its contents)"),
+    url: str = typer.Argument(..., help="Destination s3://bucket/prefix"),
+    region: str | None = typer.Option(None, "--region", help="S3 region (default: us-east-1)"),
+    endpoint_url: str | None = typer.Option(
+        None, "--endpoint-url", help="Endpoint for S3-compatible stores (MinIO, R2, ...)"
+    ),
+) -> None:
+    """Copy a volume directory to S3, with rclone on the volume's cluster."""
+    _start_transfer(name, "export", path, url, region, endpoint_url)
+
+
+@app.command("import", no_args_is_help=True)
+def import_(
+    name: str = typer.Argument(..., help="Volume name"),
+    url: str = typer.Argument(..., help="Source s3://bucket/prefix"),
+    path: str = typer.Argument(..., help="Volume-relative directory to copy into"),
+    region: str | None = typer.Option(None, "--region", help="S3 region (default: us-east-1)"),
+    endpoint_url: str | None = typer.Option(
+        None, "--endpoint-url", help="Endpoint for S3-compatible stores (MinIO, R2, ...)"
+    ),
+) -> None:
+    """Copy an S3 prefix onto a volume, with rclone on the volume's cluster."""
+    _start_transfer(name, "import", path, url, region, endpoint_url)
+
+
+transfers_app = PlainTyper(help="List or cancel a volume's S3 transfers", no_args_is_help=True)
+
+
+@transfers_app.command("list")
+def transfers_list(
+    name: str = typer.Argument(..., help="Volume name"),
+    transfer_id: str | None = typer.Option(None, "--id", help="Show one transfer by id"),
+    follow: bool = typer.Option(False, "--follow", help="Poll one transfer until it finishes"),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """List a volume's transfers, newest first, or one with --id."""
+    validate_output_format(output, console)
+    if follow:
+        if not transfer_id:
+            console.print("[red]Error:[/red] --follow needs --id (one transfer).")
+            raise typer.Exit(2)
+        if output == "json":
+            console.print("[red]Error:[/red] --follow cannot be combined with --output json.")
+            raise typer.Exit(2)
+        client, team_id = _client()
+        _follow_transfer(client, name, transfer_id, team_id)
+        return
+    client, team_id = _client()
+    try:
+        if transfer_id:
+            transfers = [client.get_volume_transfer(name, transfer_id, team_id=team_id)]
+        else:
+            transfers = client.list_volume_transfers(name, team_id=team_id)
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+    if output == "json":
+        data = (
+            transfers[0].model_dump(by_alias=True)
+            if transfer_id
+            else [t.model_dump(by_alias=True) for t in transfers]
+        )
+        output_data_as_json(data, console)
+        return
+    console.print(_transfers_table(transfers))
+
+
+@transfers_app.command("cancel")
+def transfers_cancel(
+    name: str = typer.Argument(..., help="Volume name"),
+    transfer_id: str = typer.Argument(..., help="Transfer ID"),
+) -> None:
+    """Cancel a transfer; the volume and the files already moved stay."""
+    client, team_id = _client()
+    try:
+        client.cancel_volume_transfer(name, transfer_id, team_id=team_id)
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+    console.print(f"Cancelling transfer {transfer_id}.")
+
+
+app.add_typer(transfers_app, name="transfers")
 
 
 @app.command(hidden=True)

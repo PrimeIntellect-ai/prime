@@ -592,12 +592,10 @@ def fork(
     timeout_minutes: Optional[int] = typer.Option(
         None, help="Timeout in minutes (default: source's)"
     ),
-    wait_timeout: float = typer.Option(
-        300, help="Seconds to wait for the checkpoint to become durable"
-    ),
+    wait_timeout: float = typer.Option(300, help="Seconds to wait for the fork to be ready"),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ) -> None:
-    """Fork a running sandbox: checkpoint it, then restore into a new sandbox."""
+    """Fork a running sandbox into a new sandbox with the same filesystem."""
     client = SandboxClient(APIClient())
     try:
         source = client.get(sandbox_id)
@@ -605,10 +603,16 @@ def fork(
         prompt = f"Fork sandbox {sandbox_id} into {sandbox_name}?"
         if not confirm_or_skip(prompt, yes, default=True):
             return
-        with console.status("[bold blue]Checkpointing sandbox...", spinner="dots"):
+        with console.status("[bold blue]Forking sandbox...", spinner="dots"):
             checkpoint = client.checkpoint(sandbox_id)
-            checkpoint = client.wait_for_checkpoint(checkpoint.id, timeout_seconds=wait_timeout)
-        console.print(f"Checkpoint ID: [cyan]{escape(checkpoint.id)}[/cyan]")
+            try:
+                checkpoint = client.wait_for_checkpoint(checkpoint.id, timeout_seconds=wait_timeout)
+            except TimeoutError as exc:
+                raise TimeoutError(
+                    f"Fork of {sandbox_id} was not ready within {wait_timeout:g}s"
+                ) from exc
+            except RuntimeError as exc:
+                raise RuntimeError(f"Fork of {sandbox_id} failed") from exc
         request = CreateSandboxRequest(
             name=sandbox_name,
             checkpoint_id=checkpoint.id,
@@ -623,7 +627,7 @@ def fork(
             ),
             labels=source.labels,
         )
-        with console.status("[bold blue]Restoring sandbox...", spinner="dots"):
+        with console.status("[bold blue]Forking sandbox...", spinner="dots"):
             sandbox = client.create(request)
         console.print(f"[green]Successfully forked into sandbox {escape(sandbox.id)}[/green]")
         console.print(f"Use 'prime sandbox get {escape(sandbox.id)}' to check its status")

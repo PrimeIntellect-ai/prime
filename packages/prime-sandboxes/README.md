@@ -56,6 +56,13 @@ vm = sandbox_client.create(CreateSandboxRequest(
 
 sandbox_client.wait_for_creation(sandbox.id)
 
+# Wait for checkpoint durability before restoring.
+checkpoint = sandbox_client.checkpoint(sandbox.id)
+checkpoint = sandbox_client.wait_for_checkpoint(checkpoint.id, timeout_seconds=300)
+restored = sandbox_client.create(CreateSandboxRequest(
+    name="restored-sandbox", checkpoint_id=checkpoint.id
+))
+
 # Execute commands
 result = sandbox_client.execute_command(sandbox.id, "python --version")
 print(result.stdout)
@@ -83,11 +90,28 @@ async def main():
         result = await client.execute_command(sandbox.id, "echo 'Hello from async!'")
         print(result.stdout)
 
+        # Wait for checkpoint durability
+        checkpoint = await client.checkpoint(sandbox.id)
+        durable = await client.wait_for_checkpoint(checkpoint.id, timeout_seconds=300)
+        print(durable.state)
+
         # Clean up
         await client.delete(sandbox.id)
 
 asyncio.run(main())
 ```
+
+Concurrent waits on the same client automatically share cross-sandbox status
+requests, with up to 100 checkpoint IDs per request:
+
+```python
+checkpoints = await asyncio.gather(*(client.checkpoint(s.id) for s in sandboxes))
+durable = await asyncio.gather(*(client.wait_for_checkpoint(c.id) for c in checkpoints))
+```
+
+Sync waits from concurrent threads share requests too. `get_checkpoints(ids)`
+provides an explicit batch lookup with `checkpoints` and per-ID `errors`. Waits
+fall back to individual lookups on platforms without the batch endpoint.
 
 ## List Platform Images
 
@@ -174,6 +198,26 @@ sandbox = sandbox_client.create(request)
 ```
 
 **Note:** Secrets are never displayed in logs or outputs. When retrieving sandbox details, only the secret keys are shown with values masked as `***`.
+
+### Run Commands as a Guest User
+
+Commands use the sandbox's configured user (normally root) when `user` is omitted.
+Select an existing account in the guest image per command:
+
+```python
+result = sandbox_client.execute_command(sandbox.id, "id", user="ubuntu")
+# Async execute_command, open_process, and sync/async start_background_job also accept user.
+```
+
+Empty or unknown usernames fail; accounts are not created automatically. Commands
+use the account's UID, GID, and supplementary groups. `HOME`, `USER`, and `LOGNAME`
+follow that account unless explicitly overridden through `env`. Working-directory
+selection stays unchanged; pass `working_dir` if the image default is inaccessible.
+
+Requires a sandboxd version supporting command-level users. Roll out sandboxd to
+all reachable guests before releasing this SDK: older servers can ignore the
+protobuf field and execute as their default user. Existing guests must be upgraded
+or recreated before using this option.
 
 ### File Operations
 

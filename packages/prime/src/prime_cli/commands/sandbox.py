@@ -9,6 +9,7 @@ import sys
 import tempfile
 import time
 from datetime import datetime, timedelta
+from inspect import signature
 from typing import Any, Dict, List, Optional
 
 import typer
@@ -24,6 +25,7 @@ from prime_sandboxes import (
     EgressPolicyStatus,
     PaymentRequiredError,
     Sandbox,
+    SandboxCheckpoint,
     SandboxClient,
     SandboxNotRunningError,
     StartCommand,
@@ -463,6 +465,176 @@ def get(
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         console.print_exception(show_locals=True)
         raise typer.Exit(1)
+
+
+checkpoint_app = PlainTyper(help="Manage filesystem checkpoints", no_args_is_help=True)
+app.add_typer(checkpoint_app, name="checkpoint")
+
+
+def _print_checkpoint(checkpoint: SandboxCheckpoint, output: str) -> None:
+    if output == "json":
+        output_data_as_json(checkpoint.model_dump(mode="json"), console)
+        return
+    console.print(f"Checkpoint ID: [cyan]{escape(checkpoint.id)}[/cyan]")
+    console.print(f"State: {escape(checkpoint.state)}")
+    if checkpoint.error:
+        console.print(f"Error: {escape(checkpoint.error)}")
+    elif checkpoint.state != "DURABLE":
+        console.print(
+            "Restorable once DURABLE. Check with "
+            f"'prime sandbox checkpoint list {escape(checkpoint.sandbox_id)}'."
+        )
+
+
+@checkpoint_app.command("create")
+def checkpoint_create(
+    sandbox_id: str,
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """Request a filesystem checkpoint of a running sandbox."""
+    validate_output_format(output, console)
+    try:
+        result = SandboxClient(APIClient()).checkpoint(sandbox_id)
+        _print_checkpoint(result, output)
+    except APIError as exc:
+        console.print(f"[red]Error:[/red] {escape(str(exc))}")
+        raise typer.Exit(1) from exc
+
+
+@checkpoint_app.command("list")
+def checkpoint_list(
+    sandbox_id: str,
+    checkpoint_id: Optional[str] = typer.Option(
+        None, "--checkpoint-id", help="Show only this checkpoint"
+    ),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """List a sandbox's filesystem checkpoints and their state."""
+    validate_output_format(output, console)
+    try:
+        results = SandboxClient(APIClient()).list_checkpoints(sandbox_id, checkpoint_id)
+    except APIError as exc:
+        console.print(f"[red]Error:[/red] {escape(str(exc))}")
+        raise typer.Exit(1) from exc
+    if output == "json":
+        output_data_as_json({"checkpoints": [c.model_dump(mode="json") for c in results]}, console)
+        return
+    if not results:
+        console.print("No checkpoints found.")
+        return
+    table = build_table(
+        f"Checkpoints: {escape(sandbox_id)}",
+        [
+            ("ID", "cyan"),
+            ("Parent", "white"),
+            ("State", "white"),
+            ("Depth", "white"),
+            ("Stored", "white"),
+            ("Age", "white"),
+            ("Error", "red"),
+        ],
+    )
+    for c in results:
+        table.add_row(
+            escape(c.id),
+            escape(c.parent_id or "-"),
+            escape(c.state),
+            str(c.depth),
+            f"{c.stored_bytes / 1024**2:.1f} MiB" if c.stored_bytes is not None else "-",
+            human_age(c.created_at),
+            escape(c.error or ""),
+        )
+    console.print(table)
+
+
+@checkpoint_app.command("restore")
+def checkpoint_restore(
+    checkpoint_id: str,
+    name: Optional[str] = typer.Option(None, help="Name for the new sandbox"),
+    team_id: Optional[str] = typer.Option(None, help="Team ID (uses config team_id if omitted)"),
+    cpu_cores: float = typer.Option(1.0, help="Number of CPU cores"),
+    memory_gb: float = typer.Option(1.0, help="Memory in GB"),
+    timeout_minutes: int = typer.Option(60, help="Timeout in minutes"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
+) -> None:
+    """Create a new sandbox from a durable filesystem checkpoint."""
+    sandbox_name = name or f"restore-{checkpoint_id[:8]}"
+    try:
+        request = CreateSandboxRequest(
+            name=sandbox_name,
+            checkpoint_id=checkpoint_id,
+            team_id=team_id,
+            cpu_cores=cpu_cores,
+            memory_gb=memory_gb,
+            timeout_minutes=timeout_minutes,
+        )
+        if not confirm_or_skip(
+            f"Create sandbox {sandbox_name} from checkpoint {checkpoint_id}?", yes, default=True
+        ):
+            return
+        with console.status("[bold blue]Restoring sandbox...", spinner="dots"):
+            sandbox = SandboxClient(APIClient()).create(request)
+        console.print(f"[green]Successfully created sandbox {escape(sandbox.id)}[/green]")
+        console.print(f"Use 'prime sandbox get {escape(sandbox.id)}' to check its status")
+    except APIError as exc:
+        console.print(f"[red]Error:[/red] {escape(str(exc))}")
+        raise typer.Exit(1) from exc
+    except ValueError as exc:
+        console.print(f"[red]Error:[/red] {escape(str(exc))}")
+        raise typer.Exit(1) from exc
+
+
+@app.command("fork")
+def fork(
+    sandbox_id: str,
+    name: Optional[str] = typer.Option(None, help="Name for the new sandbox"),
+    cpu_cores: Optional[float] = typer.Option(None, help="CPU cores (default: source's)"),
+    memory_gb: Optional[float] = typer.Option(None, help="Memory in GB (default: source's)"),
+    timeout_minutes: Optional[int] = typer.Option(
+        None, help="Timeout in minutes (default: source's)"
+    ),
+    wait_timeout: float = typer.Option(300, help="Seconds to wait for the fork to be ready"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
+) -> None:
+    """Fork a running sandbox into a new sandbox with the same filesystem."""
+    client = SandboxClient(APIClient())
+    try:
+        source = client.get(sandbox_id)
+        sandbox_name = name or f"{source.name}-fork"
+        prompt = f"Fork sandbox {sandbox_id} into {sandbox_name}?"
+        if not confirm_or_skip(prompt, yes, default=True):
+            return
+        with console.status("[bold blue]Forking sandbox...", spinner="dots"):
+            checkpoint = client.checkpoint(sandbox_id)
+            try:
+                checkpoint = client.wait_for_checkpoint(checkpoint.id, timeout_seconds=wait_timeout)
+            except TimeoutError as exc:
+                raise TimeoutError(
+                    f"Fork of {sandbox_id} was not ready within {wait_timeout:g}s"
+                ) from exc
+            except RuntimeError as exc:
+                raise RuntimeError(f"Fork of {sandbox_id} failed") from exc
+        request = CreateSandboxRequest(
+            name=sandbox_name,
+            checkpoint_id=checkpoint.id,
+            team_id=source.team_id,
+            region=source.region,
+            cpu_cores=cpu_cores if cpu_cores is not None else source.cpu_cores,
+            memory_gb=memory_gb if memory_gb is not None else source.memory_gb,
+            gpu_count=source.gpu_count,
+            gpu_type=source.gpu_type,
+            timeout_minutes=(
+                timeout_minutes if timeout_minutes is not None else source.timeout_minutes
+            ),
+            labels=source.labels,
+        )
+        with console.status("[bold blue]Forking sandbox...", spinner="dots"):
+            sandbox = client.create(request)
+        console.print(f"[green]Successfully forked into sandbox {escape(sandbox.id)}[/green]")
+        console.print(f"Use 'prime sandbox get {escape(sandbox.id)}' to check its status")
+    except (APIError, ValueError, RuntimeError, TimeoutError) as exc:
+        console.print(f"[red]Error:[/red] {escape(str(exc))}")
+        raise typer.Exit(1) from exc
 
 
 @app.command(cls=_SandboxCreateCommand)
@@ -1195,6 +1367,9 @@ def run(
         "--timeout",
         help="Timeout for the command in seconds",
     ),
+    user: Optional[str] = typer.Option(
+        None, "-u", "--user", help="Existing guest username (default: sandbox's configured user)"
+    ),
 ) -> None:
     """Execute a command in a sandbox.
 
@@ -1204,6 +1379,12 @@ def run(
         prime sandbox run <id> -- bash -c "echo hello"
     """
     try:
+        if user is not None and "user" not in signature(SandboxClient.execute_command).parameters:
+            console.print(
+                "[red]The installed prime-sandboxes SDK does not support --user. "
+                "Upgrade prime-sandboxes to use this option.[/red]"
+            )
+            raise typer.Exit(1)
         base_client = APIClient()
         sandbox_client = SandboxClient(base_client)
 
@@ -1228,6 +1409,8 @@ def run(
             command_str = shlex.join(command)
 
         console.print(f"[bold blue]Executing command:[/bold blue] {command_str}")
+        if user is not None:
+            console.print(f"[bold blue]User:[/bold blue] {escape(user)}")
         if working_dir:
             console.print(f"[bold blue]Working directory:[/bold blue] {working_dir}")
         if env_vars:
@@ -1245,6 +1428,7 @@ def run(
                 working_dir,
                 env_vars if env_vars else None,
                 timeout=timeout,
+                **({"user": user} if user is not None else {}),
             )
 
         # End timing

@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -429,7 +430,7 @@ def _setup(monkeypatch, tmp_path, which, run_code=0, stuck=False, find_stdout=""
 
     def run(cmd, **kw):
         commands.append(cmd)
-        # _transfer's only "ssh" argv is the scp fallback's symlink check.
+        # _transfer's "ssh" argvs: the scp fallback's symlink check and get's listing.
         return SimpleNamespace(returncode=run_code, stdout=find_stdout if cmd[0] == "ssh" else "")
 
     monkeypatch.setattr(volumes.subprocess, "run", run)
@@ -446,7 +447,9 @@ def test_get_rsync(monkeypatch, tmp_path, _session_dir):
     assert result.exit_code == 0, result.output
     assert created == [{"read_only": True, "allow_writable": True, "team_id": "t1"}]
     ssh_e = shlex.join(["ssh", "-F", str(_session_dir / "config")])
-    assert commands == [
+    # The remote listing comes back empty (not a directory), so one rsync runs.
+    assert commands[0][:4] == ["ssh", "-F", str(_session_dir / "config"), "host"]
+    assert commands[1:] == [
         [
             "/bin/rsync",
             "-a",
@@ -594,14 +597,15 @@ def test_scp_get_failed_symlink_check_hints_tailnet(monkeypatch, tmp_path):
 
 
 def test_rsync_unaffected_by_the_symlink_refusal(monkeypatch, tmp_path):
-    """rsync -a copies links as links: no refusal, and no ssh find check."""
+    """rsync -a copies links as links: no refusal. (The only ssh call is
+    get's remote listing for the parallel split.)"""
     _, _, commands = _setup(monkeypatch, tmp_path, {"ssh", "rsync"})
     tree = tmp_path / "tree"
     tree.mkdir()
     (tree / "link").symlink_to(tmp_path / "key")
     assert _run("put", "data", str(tree), "/").exit_code == 0
     assert _run("get", "data", "x", "out").exit_code == 0
-    assert [c[0] for c in commands] == ["/bin/rsync", "/bin/rsync"]
+    assert [c[0] for c in commands] == ["/bin/rsync", "ssh", "/bin/rsync"]
 
 
 def test_no_ssh_tools(monkeypatch, tmp_path):
@@ -748,9 +752,9 @@ def test_transfers_inherit_the_proxy_through_the_config(
     config = _session_dir / "config"
     assert "ProxyCommand" in config.read_text()
     # argv is the same as without a gateway: no -o ProxyCommand on the command line.
-    assert commands[0][:5] == ["/bin/rsync", "-a", "-v", "--partial-dir=.rsync-partial", "-e"]
-    assert commands[0][5] == shlex.join(["ssh", "-F", str(config)])
-    assert "ProxyCommand" not in " ".join(commands[0])
+    assert commands[-1][:5] == ["/bin/rsync", "-a", "-v", "--partial-dir=.rsync-partial", "-e"]
+    assert commands[-1][5] == shlex.join(["ssh", "-F", str(config)])
+    assert "ProxyCommand" not in " ".join(commands[-1])
 
 
 def test_failed_transfer_hint_names_the_gateway_or_the_tailnet(monkeypatch, tmp_path):
@@ -946,3 +950,85 @@ def test_proxy_reports_an_unreachable_gateway():
 def test_proxy_command_is_hidden():
     result = CliRunner().invoke(app, ["volumes", "--help"])
     assert "proxy" not in result.output
+
+
+def test_split_balances_bytes_and_drops_empty_buckets():
+    buckets = volumes._split([(100, "big"), (60, "a"), (50, "b"), (10, "c")], 2)
+    assert sorted(map(sorted, buckets)) == [["a", "b"], ["big", "c"]]
+    assert volumes._split([(1, "only")], 4) == [["only"]]
+
+
+def _fake_popen(monkeypatch, code=0):
+    """Records each parallel rsync's argv and its --files-from list."""
+    started = []
+
+    class Popen:
+        def __init__(self, cmd):
+            listfile = next(a for a in cmd if a.startswith("--files-from="))
+            started.append((cmd, Path(listfile.split("=", 1)[1]).read_text().splitlines()))
+
+        def wait(self):
+            return code
+
+    monkeypatch.setattr(volumes.subprocess, "Popen", Popen)
+    return started
+
+
+def test_put_directory_splits_files_across_parallel_rsyncs(monkeypatch, tmp_path):
+    _, _, commands = _setup(monkeypatch, tmp_path, {"ssh", "rsync"})
+    started = _fake_popen(monkeypatch)
+    tree = tmp_path / "ckpt"
+    (tree / "empty").mkdir(parents=True)
+    for i in range(6):
+        (tree / f"shard-{i}").write_bytes(b"x" * (i + 1))
+    result = _run("put", "data", str(tree), "runs/")
+    assert result.exit_code == 0, result.output
+    # One rsync creates the directories first, so the parallel ones never
+    # race to mkdir the same path; then the files go over _STREAMS rsyncs.
+    # The tree pass is the transfer's own source and destination filtered to
+    # directories, never a --files-from list with "." (openrsync recurses
+    # into "." and would copy every file single-stream).
+    (dirs_pass,) = commands
+    assert dirs_pass[-4:] == ["--include=*/", "--exclude=*", str(tree), "host:/volume/runs/"]
+    assert not any(a.startswith("--files-from") for a in dirs_pass)
+    assert len(started) == volumes._STREAMS
+    for cmd, _ in started:
+        # "ckpt" (no trailing slash) copies the directory itself: the lists
+        # are relative to its parent and every entry starts with "ckpt/".
+        assert cmd[-2:] == [f"{tmp_path}/", "host:/volume/runs/"]
+        assert cmd[:4] == ["/bin/rsync", "-a", "-v", "--partial-dir=.rsync-partial"]
+    listed = [p for _, paths in started for p in paths]
+    assert sorted(listed) == [f"ckpt/shard-{i}" for i in range(6)]
+
+
+def test_get_directory_lists_remote_files_and_splits_them(monkeypatch, tmp_path):
+    listing = "\n".join(
+        [
+            "0|directory|/volume/runs/a/sub",
+            "5|regular file|/volume/runs/a/one",
+            "7|regular file|/volume/runs/a/sub/two",
+            "3|symbolic link|/volume/runs/a/link",
+        ]
+    )
+    _, _, commands = _setup(monkeypatch, tmp_path, {"ssh", "rsync"}, find_stdout=listing)
+    started = _fake_popen(monkeypatch)
+    result = _run("get", "data", "runs/a/", "out")
+    assert result.exit_code == 0, result.output
+    assert commands[0][-1] == "find /volume/runs/a/ -mindepth 1 -exec stat -c '%s|%F|%n' {} +"
+    assert len(started) == 3
+    assert {tuple(cmd[-2:]) for cmd, _ in started} == {("host:/volume/runs/a/", "out")}
+    listed = sorted(p for _, paths in started for p in paths)
+    assert listed == ["link", "one", "sub/two"]
+    assert commands[1][-4:] == ["--include=*/", "--exclude=*", "host:/volume/runs/a/", "out"]
+
+
+def test_parallel_failure_reports_the_exit_code(monkeypatch, tmp_path):
+    _setup(monkeypatch, tmp_path, {"ssh", "rsync"})
+    _fake_popen(monkeypatch, code=23)
+    tree = tmp_path / "t"
+    tree.mkdir()
+    (tree / "a").write_text("a")
+    (tree / "b").write_text("b")
+    result = _run("put", "data", f"{tree}/", "/")
+    assert result.exit_code == 23
+    assert "Transfer failed" in result.output

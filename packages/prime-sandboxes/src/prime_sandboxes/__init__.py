@@ -31,12 +31,14 @@ from .models import (
     BackgroundJob,
     BackgroundJobStatus,
     BackgroundJobStatusSnapshot,
+    BatchCheckpointResponse,
     BatchSandboxStatusResponse,
     BuildImageRequest,
     BuildImageResponse,
     BulkBuildImageResponse,
     BulkDeleteSandboxRequest,
     BulkDeleteSandboxResponse,
+    CheckpointLookupError,
     CommandResponse,
     CreateSandboxRequest,
     EgressPolicyStatus,
@@ -58,6 +60,7 @@ from .models import (
     PlatformImageOwner,
     ReadFileResponse,
     Sandbox,
+    SandboxCheckpoint,
     SandboxEgressPolicy,
     SandboxListResponse,
     SandboxStatus,
@@ -73,7 +76,7 @@ from .models import (
 from .process import AsyncSandboxProcess
 from .sandbox import AsyncSandboxClient, SandboxClient
 
-__version__ = "0.4.0"
+__version__ = "0.4.2"
 
 # Deprecated alias for backward compatibility
 TimeoutError = APITimeoutError
@@ -91,6 +94,7 @@ __all__ = [
     "AsyncImageClient",
     # Models
     "Sandbox",
+    "SandboxCheckpoint",
     "SandboxEgressPolicy",
     "SandboxStatus",
     "SandboxListResponse",
@@ -106,6 +110,8 @@ __all__ = [
     "BackgroundJob",
     "BackgroundJobStatus",
     "BackgroundJobStatusSnapshot",
+    "BatchCheckpointResponse",
+    "CheckpointLookupError",
     "BatchSandboxStatusResponse",
     "SandboxStatusSnapshot",
     "SandboxStatusLookupError",

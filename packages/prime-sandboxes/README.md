@@ -56,6 +56,13 @@ vm = sandbox_client.create(CreateSandboxRequest(
 
 sandbox_client.wait_for_creation(sandbox.id)
 
+# Wait for checkpoint durability before restoring.
+checkpoint = sandbox_client.checkpoint(sandbox.id)
+checkpoint = sandbox_client.wait_for_checkpoint(checkpoint.id, timeout_seconds=300)
+restored = sandbox_client.create(CreateSandboxRequest(
+    name="restored-sandbox", checkpoint_id=checkpoint.id
+))
+
 # Execute commands
 result = sandbox_client.execute_command(sandbox.id, "python --version")
 print(result.stdout)
@@ -83,11 +90,28 @@ async def main():
         result = await client.execute_command(sandbox.id, "echo 'Hello from async!'")
         print(result.stdout)
 
+        # Wait for checkpoint durability
+        checkpoint = await client.checkpoint(sandbox.id)
+        durable = await client.wait_for_checkpoint(checkpoint.id, timeout_seconds=300)
+        print(durable.state)
+
         # Clean up
         await client.delete(sandbox.id)
 
 asyncio.run(main())
 ```
+
+Concurrent waits on the same client automatically share cross-sandbox status
+requests, with up to 100 checkpoint IDs per request:
+
+```python
+checkpoints = await asyncio.gather(*(client.checkpoint(s.id) for s in sandboxes))
+durable = await asyncio.gather(*(client.wait_for_checkpoint(c.id) for c in checkpoints))
+```
+
+Sync waits from concurrent threads share requests too. `get_checkpoints(ids)`
+provides an explicit batch lookup with `checkpoints` and per-ID `errors`. Waits
+fall back to individual lookups on platforms without the batch endpoint.
 
 ## List Platform Images
 

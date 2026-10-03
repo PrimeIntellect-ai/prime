@@ -69,6 +69,7 @@ from .models import (
     BackgroundJobStatus,
     BackgroundJobStatusSnapshot,
     BatchBackgroundJobStatusResponse,
+    BatchCheckpointResponse,
     BatchSandboxStatusResponse,
     BulkDeleteSandboxRequest,
     BulkDeleteSandboxResponse,
@@ -78,6 +79,7 @@ from .models import (
     FileUploadResponse,
     ReadFileResponse,
     Sandbox,
+    SandboxCheckpoint,
     SandboxListResponse,
     SandboxLogsResponse,
     SandboxStatusSnapshot,
@@ -2117,6 +2119,13 @@ class SandboxClient:
         # Retained as an internal compatibility alias for integrations that
         # inspected the poll registry before it grew to cover output work.
         self._poll_leases = self._operation_leases
+        # Checkpoints outlive their sandboxes; leases use checkpoint scopes.
+        self._checkpoint_batcher = _SyncRequestBatcher(
+            self._fetch_checkpoints,
+            lambda checkpoint_id: f"checkpoint:{checkpoint_id}",
+            self._operation_leases,
+        )
+        self._checkpoint_batch_supported: Optional[bool] = None
         self._sandbox_status_batcher = _SyncRequestBatcher(
             self._fetch_sandbox_statuses,
             lambda sandbox_id: sandbox_id,
@@ -2309,6 +2318,107 @@ class SandboxClient:
         """Get a specific sandbox"""
         response = self.client.request("GET", f"/sandbox/{sandbox_id}")
         return Sandbox.model_validate(response)
+
+    def checkpoint(self, sandbox_id: str) -> SandboxCheckpoint:
+        """Request a filesystem checkpoint; use wait_for_checkpoint before restoring."""
+        response = self.client.request("POST", f"/sandbox/{sandbox_id}/checkpoints")
+        return SandboxCheckpoint.model_validate(response)
+
+    def get_checkpoint(self, checkpoint_id: str) -> SandboxCheckpoint:
+        """Get the latest state of a filesystem checkpoint."""
+        response = self.client.request("GET", f"/sandbox/checkpoints/{checkpoint_id}")
+        return SandboxCheckpoint.model_validate(response)
+
+    def get_checkpoints(self, checkpoint_ids: List[str]) -> BatchCheckpointResponse:
+        """Get up to 100 checkpoints across sandboxes, with per-ID lookup errors."""
+        _validate_unique_batch_values(checkpoint_ids, "checkpoint_ids")
+        if any(not checkpoint_id or len(checkpoint_id) > 64 for checkpoint_id in checkpoint_ids):
+            raise ValueError("checkpoint_ids must contain IDs between 1 and 64 characters")
+        if self._checkpoint_batch_supported is False:
+            raise BatchStatusUnsupportedError("The platform does not support checkpoint batches.")
+        try:
+            response = self.client.request(
+                "POST",
+                "/sandbox/checkpoints:batchGet",
+                json={"checkpoint_ids": checkpoint_ids},
+                idempotent_post=True,
+            )
+        except APIError as exc:
+            if "HTTP 404" in str(exc) or "HTTP 405" in str(exc):
+                self._checkpoint_batch_supported = False
+                raise BatchStatusUnsupportedError(
+                    "The platform does not support checkpoint batches."
+                ) from exc
+            raise
+        self._checkpoint_batch_supported = True
+        return BatchCheckpointResponse.model_validate(response)
+
+    def _fetch_checkpoints(
+        self, checkpoint_ids: List[str]
+    ) -> Dict[str, SandboxCheckpoint | _BatchItemError]:
+        try:
+            response = self.get_checkpoints(checkpoint_ids)
+        except BatchStatusUnsupportedError:
+            results: Dict[str, SandboxCheckpoint | _BatchItemError] = {}
+            for checkpoint_id in checkpoint_ids:
+                try:
+                    results[checkpoint_id] = self.get_checkpoint(checkpoint_id)
+                except Exception as exc:
+                    results[checkpoint_id] = _BatchItemError(exc)
+            return results
+
+        results: Dict[str, SandboxCheckpoint | _BatchItemError] = {
+            checkpoint.id: checkpoint for checkpoint in response.checkpoints
+        }
+        for error in response.errors:
+            results[error.checkpoint_id] = _BatchItemError(
+                APIError(
+                    f"Checkpoint lookup failed for {error.checkpoint_id}: "
+                    f"{error.code}: {error.message}"
+                )
+            )
+        return results
+
+    def wait_for_checkpoint(
+        self, checkpoint_id: str, timeout_seconds: float = 300
+    ) -> SandboxCheckpoint:
+        """Wait for a filesystem checkpoint to become DURABLE.
+
+        Concurrent waits share cross-sandbox batches of up to 100 checkpoints.
+        Polls with backoff until timeout_seconds elapse, returning the durable
+        checkpoint. Raises RuntimeError on FAILED or DELETING and TimeoutError
+        on expiry.
+        In-flight requests follow the API client's timeout and retry policy.
+        """
+        if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be finite and greater than zero")
+        deadline = time.monotonic() + timeout_seconds
+        poll_index = 0
+        while time.monotonic() < deadline:
+            checkpoint = self._checkpoint_batcher.get(checkpoint_id)
+            if checkpoint.state == "DURABLE":
+                return checkpoint
+            if checkpoint.state in ("FAILED", "DELETING"):
+                raise RuntimeError(
+                    f"Checkpoint {checkpoint_id} cannot become durable (state={checkpoint.state}): "
+                    f"{checkpoint.error or 'no error details'}"
+                )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(_creation_poll_delay(poll_index), remaining))
+            poll_index += 1
+        raise TimeoutError(
+            f"Checkpoint {checkpoint_id} did not become DURABLE within {timeout_seconds:g}s"
+        )
+
+    def list_checkpoints(
+        self, sandbox_id: str, checkpoint_id: Optional[str] = None
+    ) -> List[SandboxCheckpoint]:
+        """List a sandbox's checkpoints oldest first, optionally only one ID."""
+        params = {"checkpoint_id": checkpoint_id} if checkpoint_id else None
+        response = self.client.request("GET", f"/sandbox/{sandbox_id}/checkpoints", params=params)
+        return [SandboxCheckpoint.model_validate(c) for c in response["checkpoints"]]
 
     def get_sandbox_statuses(self, sandbox_ids: List[str]) -> BatchSandboxStatusResponse:
         """Get lightweight lifecycle state for up to 100 sandboxes."""
@@ -2606,8 +2716,10 @@ class SandboxClient:
             if env_prefix:
                 env_prefix += "; "
 
-        dir_prefix = f"cd {shlex.quote(working_dir)} && " if working_dir else ""
+        dir_prefix = f"cd {shlex.quote(working_dir)} || exit 1; " if working_dir else ""
         command_body = f"{env_prefix}{dir_prefix}{command}"
+        # Guest users may lack a home dir; the job cds into an absolute working_dir itself.
+        launch_cwd = "/" if working_dir and working_dir.startswith("/") else None
         exit_file_quoted = shlex.quote(exit_file)
         stdout_log_file_quoted = shlex.quote(stdout_log_file)
         stderr_log_file_quoted = shlex.quote(stderr_log_file)
@@ -2632,6 +2744,7 @@ class SandboxClient:
                 self.execute_command(
                     sandbox_id,
                     bg_cmd,
+                    working_dir=launch_cwd,
                     timeout=_BACKGROUND_JOB_LAUNCH_TIMEOUT_SECONDS,
                     user=user,
                 )
@@ -3492,6 +3605,13 @@ class AsyncSandboxClient:
         self._gateway_client: Optional[httpx.AsyncClient] = None
         self._operation_leases = _AsyncPollLeaseRegistry()
         self._poll_leases = self._operation_leases
+        # Checkpoints outlive their sandboxes; leases use checkpoint scopes.
+        self._checkpoint_batcher = _AsyncRequestBatcher(
+            self._fetch_checkpoints,
+            lambda checkpoint_id: f"checkpoint:{checkpoint_id}",
+            self._operation_leases,
+        )
+        self._checkpoint_batch_supported: Optional[bool] = None
         self._sandbox_status_batcher = _AsyncRequestBatcher(
             self._fetch_sandbox_statuses,
             lambda sandbox_id: sandbox_id,
@@ -3700,6 +3820,112 @@ class AsyncSandboxClient:
         """Get a specific sandbox"""
         response = await self.client.request("GET", f"/sandbox/{sandbox_id}")
         return Sandbox.model_validate(response)
+
+    async def checkpoint(self, sandbox_id: str) -> SandboxCheckpoint:
+        """Request a filesystem checkpoint; use wait_for_checkpoint before restoring."""
+        response = await self.client.request("POST", f"/sandbox/{sandbox_id}/checkpoints")
+        return SandboxCheckpoint.model_validate(response)
+
+    async def get_checkpoint(self, checkpoint_id: str) -> SandboxCheckpoint:
+        """Get the latest state of a filesystem checkpoint."""
+        response = await self.client.request("GET", f"/sandbox/checkpoints/{checkpoint_id}")
+        return SandboxCheckpoint.model_validate(response)
+
+    async def get_checkpoints(self, checkpoint_ids: List[str]) -> BatchCheckpointResponse:
+        """Get up to 100 checkpoints across sandboxes, with per-ID lookup errors."""
+        _validate_unique_batch_values(checkpoint_ids, "checkpoint_ids")
+        if any(not checkpoint_id or len(checkpoint_id) > 64 for checkpoint_id in checkpoint_ids):
+            raise ValueError("checkpoint_ids must contain IDs between 1 and 64 characters")
+        if self._checkpoint_batch_supported is False:
+            raise BatchStatusUnsupportedError("The platform does not support checkpoint batches.")
+        try:
+            response = await self.client.request(
+                "POST",
+                "/sandbox/checkpoints:batchGet",
+                json={"checkpoint_ids": checkpoint_ids},
+                idempotent_post=True,
+            )
+        except APIError as exc:
+            if "HTTP 404" in str(exc) or "HTTP 405" in str(exc):
+                self._checkpoint_batch_supported = False
+                raise BatchStatusUnsupportedError(
+                    "The platform does not support checkpoint batches."
+                ) from exc
+            raise
+        self._checkpoint_batch_supported = True
+        return BatchCheckpointResponse.model_validate(response)
+
+    async def _fetch_checkpoints(
+        self, checkpoint_ids: List[str]
+    ) -> Dict[str, SandboxCheckpoint | _BatchItemError]:
+        try:
+            response = await self.get_checkpoints(checkpoint_ids)
+        except BatchStatusUnsupportedError:
+            checkpoints = await asyncio.gather(
+                *(self.get_checkpoint(checkpoint_id) for checkpoint_id in checkpoint_ids),
+                return_exceptions=True,
+            )
+            return {
+                checkpoint_id: _BatchItemError(checkpoint)
+                if isinstance(checkpoint, Exception)
+                else checkpoint
+                for checkpoint_id, checkpoint in zip(checkpoint_ids, checkpoints)
+            }
+
+        results: Dict[str, SandboxCheckpoint | _BatchItemError] = {
+            checkpoint.id: checkpoint for checkpoint in response.checkpoints
+        }
+        for error in response.errors:
+            results[error.checkpoint_id] = _BatchItemError(
+                APIError(
+                    f"Checkpoint lookup failed for {error.checkpoint_id}: "
+                    f"{error.code}: {error.message}"
+                )
+            )
+        return results
+
+    async def wait_for_checkpoint(
+        self, checkpoint_id: str, timeout_seconds: float = 300
+    ) -> SandboxCheckpoint:
+        """Wait for a filesystem checkpoint to become DURABLE.
+
+        Concurrent waits share cross-sandbox batches of up to 100 checkpoints.
+        Polls with backoff until timeout_seconds elapse, returning the durable
+        checkpoint. Raises RuntimeError on FAILED or DELETING and TimeoutError
+        on expiry.
+        In-flight requests follow the API client's timeout and retry policy.
+        """
+        if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be finite and greater than zero")
+        deadline = time.monotonic() + timeout_seconds
+        poll_index = 0
+        while time.monotonic() < deadline:
+            checkpoint = await self._checkpoint_batcher.get(checkpoint_id)
+            if checkpoint.state == "DURABLE":
+                return checkpoint
+            if checkpoint.state in ("FAILED", "DELETING"):
+                raise RuntimeError(
+                    f"Checkpoint {checkpoint_id} cannot become durable (state={checkpoint.state}): "
+                    f"{checkpoint.error or 'no error details'}"
+                )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(_creation_poll_delay(poll_index), remaining))
+            poll_index += 1
+        raise TimeoutError(
+            f"Checkpoint {checkpoint_id} did not become DURABLE within {timeout_seconds:g}s"
+        )
+
+    async def list_checkpoints(
+        self, sandbox_id: str, checkpoint_id: Optional[str] = None
+    ) -> List[SandboxCheckpoint]:
+        """List a sandbox's checkpoints oldest first, optionally only one ID."""
+        params = {"checkpoint_id": checkpoint_id} if checkpoint_id else None
+        response = await self.client.request(
+            "GET", f"/sandbox/{sandbox_id}/checkpoints", params=params
+        )
+        return [SandboxCheckpoint.model_validate(c) for c in response["checkpoints"]]
 
     async def get_sandbox_statuses(self, sandbox_ids: List[str]) -> BatchSandboxStatusResponse:
         """Get lightweight lifecycle state for up to 100 sandboxes."""
@@ -4195,8 +4421,10 @@ class AsyncSandboxClient:
             if env_prefix:
                 env_prefix += "; "
 
-        dir_prefix = f"cd {shlex.quote(working_dir)} && " if working_dir else ""
+        dir_prefix = f"cd {shlex.quote(working_dir)} || exit 1; " if working_dir else ""
         command_body = f"{env_prefix}{dir_prefix}{command}"
+        # Guest users may lack a home dir; the job cds into an absolute working_dir itself.
+        launch_cwd = "/" if working_dir and working_dir.startswith("/") else None
         exit_file_quoted = shlex.quote(exit_file)
         stdout_log_file_quoted = shlex.quote(stdout_log_file)
         stderr_log_file_quoted = shlex.quote(stderr_log_file)
@@ -4221,6 +4449,7 @@ class AsyncSandboxClient:
                 await self.execute_command(
                     sandbox_id,
                     bg_cmd,
+                    working_dir=launch_cwd,
                     timeout=_BACKGROUND_JOB_LAUNCH_TIMEOUT_SECONDS,
                     user=user,
                 )
@@ -5078,6 +5307,7 @@ class AsyncSandboxClient:
     async def _close(self) -> None:
         self._operation_leases.begin_close()
         batchers = (
+            self._checkpoint_batcher,
             self._sandbox_status_batcher,
             self._background_job_status_batcher,
         )

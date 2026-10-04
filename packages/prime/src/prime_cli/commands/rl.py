@@ -3067,9 +3067,10 @@ def get_logs(
     List available pods first with ``prime train components <run_id>``.
 
     Per-rank narrowing on multi-replica trainer/inference is not yet
-    surfaced here — `--local-ranks-filter=0` in the chart's torchrun
-    invocation already dedupes the in-pod rank fan-out, and per-pod
-    inspection on multi-node runs requires kubectl + the PVC log files.
+    surfaced here: the chart's default torchrun passes
+    `--local-ranks-filter=0` (ENG-6449), so each node's logs collapse to
+    its local rank 0, but a multi-node run still merges one line per
+    node. Per-node inspection needs kubectl + the PVC log files.
 
     The API imposes hard ceilings: at most 5000 lines per request and a
     24h lookback window. Plain, unfiltered fetches are served from a
@@ -3226,7 +3227,10 @@ def get_logs(
 def list_components(
     run_id: str = typer.Argument(..., help="Run ID to list components for"),
 ) -> None:
-    """List pods (orchestrator + env-servers) for a run.
+    """List pods (trainer/orchestrator + env-servers) for a run.
+
+    SFT runs are trainer-only (no orchestrator pod), so they list the
+    trainer; RL runs list the orchestrator.
 
     Use the env name shown here with
     ``prime train logs <run_id> -c env-server --env <name>``. When multiple
@@ -3251,7 +3255,10 @@ def list_components(
     table.add_column("Env", style="green")
     table.add_column("Status")
 
-    table.add_row("orchestrator", "-", run.status)
+    # SFT runs are trainer-only — the release has no orchestrator pod.
+    # Mirrors the platform's dedicated_primary_component choice.
+    primary_component = "trainer" if run.loss == "sft" else "orchestrator"
+    table.add_row(primary_component, "-", run.status)
 
     name_counts: Dict[str, int] = {}
     for es in env_servers:
@@ -3263,7 +3270,9 @@ def list_components(
             env_label = f"{es.env_name}/{es.env_index}"
         else:
             env_label = es.env_name or "?"
-        table.add_row("env-server", env_label, es.status)
+        # Dedicated env-servers are discovered from Loki, which has no
+        # pod status — show "-" instead of an empty cell.
+        table.add_row("env-server", env_label, es.status or "-")
 
     console.print(table)
     if env_servers:

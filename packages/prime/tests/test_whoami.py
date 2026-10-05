@@ -77,6 +77,7 @@ def _mock_whoami_with_limits(
 
 ACCOUNT_LIMITS = {
     "sandbox_total_cpu_limit": 4096,
+    "vm_sandbox_creation_burst_limit": 192,
     "vm_sandbox_limit": 1024,
     "vm_sandbox_gpu_limit": 0,
     "tunnel_limit": 32,
@@ -104,6 +105,7 @@ def test_limits_table_shows_account_key_and_effective(monkeypatch):
     assert _limit_row(result.output, "Concurrent sandboxes") == ["-", "10", "10"]
     assert _limit_row(result.output, "Tunnel TTL (hours)") == ["168", "-", "168"]
     assert _limit_row(result.output, "Sandbox creations / hour") == ["-", "-", "-"]
+    assert _limit_row(result.output, "Sandbox creations / 10 sec") == ["192", "-", "192"]
 
 
 def test_limits_table_requests_the_active_teams_limits(monkeypatch):

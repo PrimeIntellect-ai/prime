@@ -18,6 +18,9 @@ console = get_console()
 LIMIT_ROWS = [
     ("Concurrent sandboxes", None, "max_concurrent_sandboxes"),
     ("Sandbox creations / hour", None, "max_sandbox_creations_per_hour"),
+    # The account's creation-rate cap is a rolling 10-second window, so it
+    # cannot share a row with the API key's hourly cap.
+    ("Sandbox creations / 10 sec", "vm_sandbox_creation_burst_limit", None),
     ("Sandbox CPU cores", "sandbox_total_cpu_limit", "max_sandbox_cpu_cores"),
     ("Concurrent VM sandboxes", "vm_sandbox_limit", None),
     ("Sandbox GPUs", "vm_sandbox_gpu_limit", "max_sandbox_gpu_count"),

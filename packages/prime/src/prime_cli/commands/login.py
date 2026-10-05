@@ -229,22 +229,6 @@ def login(
 
         challenge_response = response.json()
 
-        # A backend that predates key limits ignores the field and would mint
-        # an uncapped key, so only continue once it echoes them back.
-        if key_limits:
-            accepted = {
-                field: value
-                for field, value in (challenge_response.get("limits") or {}).items()
-                if value is not None
-            }
-            if accepted != key_limits:
-                console.print(
-                    "[red]This server does not support API key limits on login.[/red] "
-                    "Set them from the dashboard instead: "
-                    f"{settings['frontend_url']}/dashboard/tokens"
-                )
-                raise typer.Exit(1)
-
         challenge_code = challenge_response["challenge"]
         challenge_url = (
             f"{settings['frontend_url']}/dashboard/tokens/challenge?code={challenge_code}"

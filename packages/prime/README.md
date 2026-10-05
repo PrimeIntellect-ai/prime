@@ -69,6 +69,9 @@ pip install prime
 # Interactive login (recommended)
 prime login
 
+# Cap what the key minted by this login can do (see `prime login --help`)
+prime login --max-concurrent-sandboxes 10 --max-concurrent-tunnels 2
+
 # Or set API key directly
 prime config set-api-key
 

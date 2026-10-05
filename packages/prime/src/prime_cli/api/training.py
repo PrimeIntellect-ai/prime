@@ -78,6 +78,11 @@ class TrainingClusterInfo(BaseModel):
     name: str
     # Human-facing name; the backend falls back to `name` when unset.
     display_name: str = Field(..., alias="displayName")
+    # The team the Model Factory link dedicates this cluster to: the
+    # teamId a member without a personal allocation must submit to
+    # `volumes create` to use it. Always set by the backend; kept so the
+    # JSON output stays the endpoint's wire shape verbatim.
+    team_id: Optional[str] = Field(None, alias="teamId")
     gpu_type: Optional[str] = Field(None, alias="gpuType")
     total_gpus: Optional[int] = Field(None, alias="totalGpus")
     free_gpus: Optional[int] = Field(None, alias="freeGpus")

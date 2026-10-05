@@ -25,6 +25,13 @@ from typer.testing import CliRunner
 runner = CliRunner()
 
 
+def test_traces_is_listed_in_top_level_help():
+    result = runner.invoke(main_app, ["--help"], env={"PRIME_DISABLE_VERSION_CHECK": "1"})
+
+    assert result.exit_code == 0, result.output
+    assert "Upload and query traces" in result.output
+
+
 def test_search_json_preserves_continuation_coverage_and_scope(monkeypatch):
     from prime_traces import TraceSearchCoverage, TraceSearchPage
 

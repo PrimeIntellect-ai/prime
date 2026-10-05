@@ -125,12 +125,10 @@ def whoami() -> None:
 
             console.print(perms_table)
 
-        # Older servers return neither field.
-        if account_limits or key_limits:
-            console.print()
-            console.print(build_limits_table(account_limits, key_limits))
-            if not account_limits:
-                console.print("[dim]Account limits are unavailable for this account.[/dim]")
+        console.print()
+        console.print(build_limits_table(account_limits, key_limits))
+        if not account_limits:
+            console.print("[dim]Account limits are unavailable for this account.[/dim]")
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")

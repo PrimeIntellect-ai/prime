@@ -117,12 +117,3 @@ def test_limits_table_requests_the_active_teams_limits(monkeypatch):
     assert calls == [{"teamId": "team-1"}]
     assert "Account limits are unavailable for this account." in result.output
     assert _limit_row(result.output, "Concurrent tunnels") == ["-", "2", "2"]
-
-
-def test_no_limits_table_against_an_older_server(monkeypatch):
-    _mock_whoami(monkeypatch)
-
-    result = runner.invoke(app, ["whoami"])
-
-    assert result.exit_code == 0, result.output
-    assert "Limits" not in result.output

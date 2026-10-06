@@ -16,41 +16,7 @@ class CompilationError(Exception):
     pass
 
 
-_WORKER = r"""
-import json
-import sys
-from importlib import metadata
-
-try:
-    request = json.load(sys.stdin)
-    sys.path.insert(0, request["compiler_path"])
-    dist = metadata.distribution("prime-rl-configs")
-    install = json.loads(dist.read_text("direct_url.json") or "{}")
-    actual = install.get("vcs_info", {}).get("commit_id")
-    expected = request["schema_commit"]
-    if actual != expected:
-        raise ValueError(f"schema provenance mismatch: expected {expected}, installed {actual}")
-    if request.get("deployment"):
-        from rl_k8s.compiled import compile_deployment as compile_fn
-    else:
-        from rl_k8s.compiled import compile_config as compile_fn
-    artifact = compile_fn(request["config"], mode=request["mode"], schema_commit=expected)
-    print(json.dumps({"artifact": artifact}))
-except Exception as exc:
-    try:
-        from pydantic import ValidationError
-    except ImportError:
-        ValidationError = ()
-    if isinstance(exc, ValidationError):
-        error = "\n".join(
-            f"{'.'.join(map(str, item['loc']))}: {item['msg']}"
-            for item in exc.errors(include_input=False)
-        )
-    else:
-        error = str(exc)
-    print(json.dumps({"error": error}))
-    sys.exit(1)
-"""
+_WORKER = Path(__file__).with_name("training_schema_worker.py").read_text()
 
 
 def _worker_environment() -> dict[str, str]:
@@ -114,18 +80,11 @@ def _run(command: list[str], *, timeout: int = 300) -> None:
         )
 
 
-def _schema_python(preparation: dict[str, Any], compiler_path: Path) -> Path:
+def _schema_python(preparation: dict[str, Any]) -> Path:
     if not shutil.which("uv"):
         raise CompilationError("Local config validation requires uv on PATH.")
     inputs = preparation["schema_install"]
-    identity = json.dumps(
-        {
-            "install": inputs,
-            "compiler_path": str(compiler_path),
-            "pyproject": (compiler_path / "pyproject.toml").read_text(),
-        },
-        sort_keys=True,
-    ).encode()
+    identity = json.dumps({"install": inputs, "cache_version": 2}, sort_keys=True).encode()
     key = hashlib.sha256(identity).hexdigest()
     cache = (
         Path(os.getenv("XDG_CACHE_HOME", str(Path.home() / ".cache")))
@@ -166,7 +125,6 @@ def _schema_python(preparation: dict[str, Any], compiler_path: Path) -> Path:
                         "--constraints",
                         str(constraints),
                         *inputs["requirements"],
-                        str(compiler_path),
                     ]
                 )
             (target / ".ready").touch()
@@ -175,41 +133,19 @@ def _schema_python(preparation: dict[str, Any], compiler_path: Path) -> Path:
         lock.rmdir()
 
 
-def compile_locally(
-    config: dict[str, Any],
-    preparation: dict[str, Any],
-    *,
-    compiler_path: Path,
-    schema_python: Path | None = None,
-    deployment: bool = False,
+def _schema_request(
+    request: dict[str, Any], preparation: dict[str, Any], schema_python: Path | None
 ) -> dict[str, Any]:
     if preparation.get("contract_version") != 1:
         raise CompilationError("Unsupported local validation contract version.")
     runtime = preparation["runtime"]
     if runtime["schema_commit"] != (runtime.get("source_commit") or runtime["image_commit"]):
         raise CompilationError("Preparation schema commit does not match the selected runtime.")
-    compiler_path = compiler_path.resolve()
-    if not (compiler_path / "rl_k8s" / "compiled.py").is_file():
-        raise CompilationError(
-            "--compiler-path must point to this branch's FFT prime-rl-k8s directory."
-        )
-    # Resolve relative paths, but preserve venv executable symlinks: resolving
-    # one to the base interpreter silently loses the selected environment.
-    python = (
-        schema_python.absolute() if schema_python else _schema_python(preparation, compiler_path)
-    )
-    request = {
-        "compiler_path": str(compiler_path),
-        "config": config,
-        "mode": preparation["mode"],
-        "schema_commit": preparation["runtime"]["schema_commit"],
-        "deployment": deployment,
-    }
+    python = schema_python.absolute() if schema_python else _schema_python(preparation)
+    request = {**request, "mode": preparation["mode"], "schema_commit": runtime["schema_commit"]}
     try:
         result = _run_process(
-            [str(python), "-I", "-B", "-c", _WORKER],
-            input=json.dumps(request),
-            timeout=60,
+            [str(python), "-I", "-B", "-c", _WORKER], input=json.dumps(request), timeout=60
         )
     except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
         raise CompilationError(f"Local schema worker failed: {exc}") from exc
@@ -221,4 +157,22 @@ def compile_locally(
         ) from exc
     if result.returncode or "error" in response:
         raise CompilationError(response.get("error", "Local schema worker failed."))
+    return response
+
+
+def compile_locally(
+    config: dict[str, Any], preparation: dict[str, Any], *, schema_python: Path | None = None
+) -> dict[str, Any]:
+    response = _schema_request({"config": config}, preparation, schema_python)
     return {**response["artifact"], "runtime": preparation["runtime"]}
+
+
+def validate_rendered_locally(
+    values: dict[str, Any], preparation: dict[str, Any], *, schema_python: Path | None = None
+) -> None:
+    """Recheck hosted runtime patches with the same selected schema before writing files."""
+    response = _schema_request(
+        {"action": "validate_rendered", "values": values}, preparation, schema_python
+    )
+    if response.get("validated") is not True:
+        raise CompilationError("Local schema worker did not validate the hosted preview.")

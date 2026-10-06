@@ -234,6 +234,21 @@ class BatchCheckpointResponse(BaseModel):
     errors: List[CheckpointLookupError]
 
 
+class CheckpointDeleteError(BaseModel):
+    """A checkpoint that a sandbox-wide delete could not delete."""
+
+    checkpoint_id: str
+    code: Literal["NOT_FOUND", "CONFLICT"]
+    message: str
+
+
+class DeleteSandboxCheckpointsResponse(BaseModel):
+    """Deleted checkpoint IDs and per-checkpoint errors for one sandbox."""
+
+    deleted: List[str]
+    errors: List[CheckpointDeleteError]
+
+
 class SandboxStatusSnapshot(BaseModel):
     """Lightweight sandbox lifecycle state returned by a batch status lookup."""
 

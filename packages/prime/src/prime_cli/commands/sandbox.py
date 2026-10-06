@@ -547,6 +547,66 @@ def checkpoint_list(
     console.print(table)
 
 
+@checkpoint_app.command("delete", no_args_is_help=True)
+def checkpoint_delete(
+    checkpoint_ids: Optional[List[str]] = typer.Argument(
+        None, help="Checkpoint ID(s) to delete (space or comma-separated)"
+    ),
+    sandbox_id: Optional[str] = typer.Option(
+        None, "--sandbox", "-s", help="Delete every checkpoint of this sandbox"
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """Delete checkpoints by ID, or all of a sandbox's with --sandbox.
+
+    Deleting stops storage billing. Data is kept while descendant checkpoints
+    still need it, without charges.
+    """
+    validate_output_format(output, console)
+    if bool(checkpoint_ids) == bool(sandbox_id):
+        console.print("[red]Error:[/red] Pass checkpoint IDs or --sandbox, not both.")
+        raise typer.Exit(1)
+    parts = (s.strip() for arg in checkpoint_ids or [] for s in arg.split(","))
+    ids = [i for i in dict.fromkeys(parts) if i]
+    target = (
+        f"all checkpoints of sandbox {sandbox_id}" if sandbox_id else f"{len(ids)} checkpoint(s)"
+    )
+    if not confirm_or_skip(f"Delete {target}?", yes):
+        return
+    client = SandboxClient(APIClient())
+    deleted: List[str] = []
+    errors: List[Dict[str, str]] = []
+    try:
+        if sandbox_id:
+            result = client.delete_sandbox_checkpoints(sandbox_id)
+            deleted = result.deleted
+            errors = [e.model_dump() for e in result.errors]
+    except APIError as exc:
+        console.print(f"[red]Error:[/red] {escape(str(exc))}")
+        raise typer.Exit(1) from exc
+    for checkpoint_id in ids:
+        try:
+            client.delete_checkpoint(checkpoint_id)
+            deleted.append(checkpoint_id)
+        except APIError as exc:
+            errors.append({"checkpoint_id": checkpoint_id, "message": str(exc)})
+    if output == "json":
+        output_data_as_json({"deleted": deleted, "errors": errors}, console)
+    else:
+        for checkpoint_id in deleted:
+            console.print(f"[green]Deleted checkpoint {escape(checkpoint_id)}[/green]")
+        for error in errors:
+            console.print(
+                f"[red]Failed to delete {escape(error['checkpoint_id'])}:[/red] "
+                f"{escape(error['message'])}"
+            )
+        if not deleted and not errors:
+            console.print("No checkpoints to delete.")
+    if errors:
+        raise typer.Exit(1)
+
+
 @checkpoint_app.command("restore")
 def checkpoint_restore(
     checkpoint_id: str,

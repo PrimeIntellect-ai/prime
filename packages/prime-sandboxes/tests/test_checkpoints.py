@@ -494,3 +494,55 @@ async def test_cancelling_one_checkpoint_waiter_keeps_shared_batch(monkeypatch):
         assert (await second).state == "DURABLE"
         assert calls == [["checkpoint-1"]]
         assert client._operation_leases._active == {}
+
+
+def test_delete_checkpoints_sync(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = SandboxClient(APIClient(api_key="test-key"))
+    calls = []
+
+    def request(method: str, path: str) -> dict:
+        calls.append((method, path))
+        return {} if "checkpoints/" in path else {"deleted": ["c1"], "errors": []}
+
+    monkeypatch.setattr(client.client, "request", request)
+    assert client.delete_checkpoint("c1") is None
+    assert client.delete_sandbox_checkpoints("sbx-1").deleted == ["c1"]
+    assert calls == [
+        ("DELETE", "/sandbox/checkpoints/c1"),
+        ("DELETE", "/sandbox/sbx-1/checkpoints"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_delete_checkpoints_async(monkeypatch: pytest.MonkeyPatch) -> None:
+    async with AsyncSandboxClient(api_key="test-key") as client:
+        calls = []
+
+        async def request(method: str, path: str) -> dict:
+            calls.append((method, path))
+            if "checkpoints/" in path:
+                return {}
+            return {
+                "deleted": [],
+                "errors": [{"checkpoint_id": "c2", "code": "CONFLICT", "message": "busy"}],
+            }
+
+        monkeypatch.setattr(client.client, "request", request)
+        await client.delete_checkpoint("c1")
+        result = await client.delete_sandbox_checkpoints("sbx-1")
+    assert result.errors[0].code == "CONFLICT"
+    assert calls == [
+        ("DELETE", "/sandbox/checkpoints/c1"),
+        ("DELETE", "/sandbox/sbx-1/checkpoints"),
+    ]
+
+
+def test_sync_client_returns_empty_dict_on_204() -> None:
+    import httpx
+
+    client = APIClient(api_key="test-key")
+    client.client = httpx.Client(
+        base_url=client.client.base_url,
+        transport=httpx.MockTransport(lambda request: httpx.Response(204)),
+    )
+    assert client.request("DELETE", "/sandbox/checkpoints/c1") == {}

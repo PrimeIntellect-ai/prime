@@ -172,14 +172,3 @@ def compile_locally(
 ) -> dict[str, Any]:
     response = _schema_request({"config": config}, preparation, schema_python)
     return {**response["artifact"], "runtime": preparation["runtime"]}
-
-
-def validate_rendered_locally(
-    values: dict[str, Any], preparation: dict[str, Any], *, schema_python: Path | None = None
-) -> None:
-    """Recheck hosted runtime patches with the same selected schema before writing files."""
-    response = _schema_request(
-        {"action": "validate_rendered", "values": values}, preparation, schema_python
-    )
-    if response.get("validated") is not True:
-        raise CompilationError("Local schema worker did not validate the hosted preview.")

@@ -382,7 +382,7 @@ by Platform, including its default image:
 
 ```bash
 prime train validate rl.toml
-prime train validate rl.toml --ref your-branch --values-out review-values.yaml
+prime train validate rl.toml --ref your-branch
 prime train validate sft.toml --sft --artifact-out normalized.json
 ```
 
@@ -391,12 +391,10 @@ interpreter can be supplied with `--schema-python`. No FFT checkout is required.
 Platform supplies the pinned image digest and schema commit before local parsing;
 `--image-tag`, `--ref`, and `--pr` override runtime selection when needed.
 
-`--values-out` sends the normalized config to Platform, which applies hosted
-topology, transport, recovery, persistent storage and environment-server wiring.
-The CLI checks the resulting runtime JSON against the same selected schema before
-writing values. Use `--release` and `--namespace` to set preview DNS names.
-Environment plugins and dispatch policy remain deferred. Validation and preview
-create no run, and these artifacts cannot yet be submitted as training jobs.
+Validation checks and normalizes the config locally. Platform owns deployment
+adaptation and rendering. Environment plugins and dispatch policy remain deferred.
+Validation creates no run. `--artifact-out` can save the normalized config for
+inspection; these artifacts cannot yet be submitted as training jobs.
 
 ## License
 

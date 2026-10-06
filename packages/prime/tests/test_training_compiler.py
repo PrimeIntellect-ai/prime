@@ -178,6 +178,7 @@ def test_cache_reuses_complete_install_and_retries_failed_install(monkeypatch, t
 
     def run(command, **kwargs):
         commands.append(command)
+        assert "--no-config" in command, "schema setup must ignore ambient uv settings"
         if command[1] == "venv":
             target = Path(command[-1])
             (target / "bin").mkdir(parents=True)

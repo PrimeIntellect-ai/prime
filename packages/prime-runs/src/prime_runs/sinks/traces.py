@@ -124,7 +124,8 @@ class TracesSink(Sink):
             # Nothing at runtime fixes a 403, so the sink retires either way;
             # what differs is whether the batch counts as lost.
             if exc.code == ErrorCode.SERVICE_NOT_ENABLED.value and self.receipts_received == 0:
-                # Outside the beta: there was never anywhere for these records to go.
+                # Not enabled for the account: there was never anywhere for these
+                # records to go.
                 self.service_not_enabled = True
                 self._retire_quietly(
                     f"Prime Traces is not enabled for this account ({exc}); "

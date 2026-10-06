@@ -74,9 +74,9 @@ class ForbiddenError(APIError):
       key. Mint one that carries it. An expected path, not an edge case:
       hosted-eval worker tokens are minted write-only, so any read they
       attempt lands here.
-    - ``service_not_enabled`` — the account is not in the private beta. No
-      token fixes this; ask to be let in. While the owner allowlist is
-      enabled this is the more likely of the two.
+    - ``service_not_enabled`` — Prime Traces is turned off for the account,
+      for example because it opted out. No token fixes this; turn Prime
+      Traces back on for the account.
 
     Distinct from 401 by design: re-authenticating never helps for either.
     """

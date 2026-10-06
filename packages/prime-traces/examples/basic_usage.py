@@ -98,8 +98,8 @@ def main():
             # error.code (see prime_traces.ErrorCode), fix the file, rerun.
             print(f"✗ rejected: {error.code}: {error}")
         except ForbiddenError as error:
-            # `service_not_enabled` means the account is not in the private
-            # beta; `forbidden` means the token lacks traces:read/traces:write.
+            # `service_not_enabled` means Prime Traces is turned off for the
+            # account; `forbidden` means the token lacks traces:read/traces:write.
             print(f"✗ not permitted: {error.code}: {error}")
         except APIError as error:
             print(f"✗ API error: {error}")

@@ -564,7 +564,7 @@ class _ForbiddenClient:
         pass
 
 
-def test_an_account_outside_the_beta_is_not_a_failed_run():
+def test_an_account_without_prime_traces_is_not_a_failed_run():
     sink = TracesSink(client=_ForbiddenClient("service_not_enabled"))
     run = make_run(sinks=[sink], on_error="raise")
     run.log_traces([{"id": "t1"}])

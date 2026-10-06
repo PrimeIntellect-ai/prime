@@ -1,9 +1,9 @@
 import json
 from types import SimpleNamespace
-from unittest.mock import Mock, call
+from unittest.mock import Mock
 
 import pytest
-from prime_cli.api.training import HostedTrainingClient, Volume, VolumeAttachment, VolumeBackend
+from prime_cli.api.training import HostedTrainingClient, Volume, VolumeAttachment
 from prime_cli.commands import volumes
 from prime_cli.core import APIError
 from prime_cli.main import app
@@ -12,50 +12,7 @@ from typer.testing import CliRunner
 ENV = {"PRIME_DISABLE_VERSION_CHECK": "1", "COLUMNS": "200"}
 
 
-def test_create_backend_wire_contract_keeps_default_payload():
-    body = {"name": "models", "status": "PENDING", "clusterId": "a", "pvcName": "vol-models"}
-    api = Mock()
-    api.post.return_value = body
-    client = HostedTrainingClient(api)
-    default = client.create_volume("models", "1Ti")
-    api.post.return_value = {**body, "backend": "juicefs"}
-    portable = client.create_volume(
-        "models", "1Ti", team_id="team", cluster="telus", backend=VolumeBackend.JUICEFS
-    )
-    assert api.post.call_args_list == [
-        call("/training/volumes", json={"name": "models", "size": "1Ti"}),
-        call(
-            "/training/volumes",
-            json={
-                "name": "models",
-                "size": "1Ti",
-                "teamId": "team",
-                "cluster": "telus",
-                "backend": "juicefs",
-            },
-        ),
-    ]
-    assert default == Volume.model_validate(body)
-    assert portable == Volume.model_validate({**body, "backend": "juicefs"})
-
-
-def test_explicit_backend_requires_server_confirmation():
-    api = Mock()
-    # An older API may ignore the request's backend field.
-    api.post.return_value = {
-        "name": "models",
-        "status": "PENDING",
-        "clusterId": "a",
-        "pvcName": "vol-models",
-    }
-    client = HostedTrainingClient(api)
-    with pytest.raises(APIError, match="may have been created"):
-        client.create_volume("models", "1Ti", backend=VolumeBackend.JUICEFS)
-    api.delete.assert_not_called()
-    assert api.post.call_count == 1
-
-
-def test_create_juicefs_cli_passes_backend_and_cluster(monkeypatch):
+def test_create_cli_passes_the_cluster_and_shows_the_server_backend(monkeypatch):
     body = {
         "name": "models",
         "size": "1Ti",
@@ -70,7 +27,7 @@ def test_create_juicefs_cli_passes_backend_and_cluster(monkeypatch):
     monkeypatch.setattr(volumes, "_client", lambda: (HostedTrainingClient(api), "team"))
     result = CliRunner().invoke(
         app,
-        ["volumes", "create", "models", "--backend", "juicefs", "--cluster", "telus", "-o", "json"],
+        ["volumes", "create", "models", "--cluster", "telus", "-o", "json"],
         env=ENV,
     )
     assert result.exit_code == 0, result.output
@@ -84,7 +41,6 @@ def test_create_juicefs_cli_passes_backend_and_cluster(monkeypatch):
             "size": "1Ti",
             "teamId": "team",
             "cluster": "telus",
-            "backend": "juicefs",
         },
     )
 
@@ -108,16 +64,6 @@ def test_create_leaves_the_default_backend_to_the_server(monkeypatch, server_bac
     api.post.assert_called_once_with("/training/volumes", json={"name": "models", "size": "1Ti"})
     attach_hint = "prime volumes attach models --cluster <name>" in result.output
     assert attach_hint == (server_backend == "juicefs")
-
-
-def test_create_rejects_unknown_backend_before_calling_api(monkeypatch):
-    client_factory = Mock()
-    monkeypatch.setattr(volumes, "_client", client_factory)
-    result = CliRunner().invoke(
-        app, ["volumes", "create", "models", "--backend", "arbitrary-sc"], env=ENV
-    )
-    assert result.exit_code == 2, result.output
-    client_factory.assert_not_called()
 
 
 @pytest.mark.parametrize("as_json", [False, True])

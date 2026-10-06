@@ -1,8 +1,9 @@
 """`prime volumes`: named volumes for dedicated training runs (full-FT and SFT).
 
-A volume is a PVC owned by your team (or you). Where JuiceFS is enabled for
-you, new volumes are JuiceFS volumes that can attach to other clusters;
-cluster volumes (`--backend cluster`) stay on their creation cluster.
+A volume is a PVC owned by your team (or you). Its home cluster decides
+its storage: on a JuiceFS cluster it is a JuiceFS volume that can attach to
+other JuiceFS clusters; elsewhere it uses the cluster's own storage and stays
+on that cluster.
 `prime train config.toml --volume <name>` writes under `runs/<runId>/` on the
 volume, and the volume outlives every run.
 
@@ -66,17 +67,9 @@ def create(
         None,
         "--cluster",
         help=(
-            "Cluster to create the volume on (default: chosen for you). A JuiceFS volume "
-            "is first mounted there and its SSH sessions run there; attach it to other "
-            "clusters with `prime volumes attach`."
-        ),
-    ),
-    backend: VolumeBackend | None = typer.Option(
-        None,
-        "--backend",
-        help=(
-            "Storage backend (default: juicefs where it is enabled for you, else cluster; "
-            "use `cluster` to keep the volume on the cluster's own storage)"
+            "Home cluster (default: your default cluster): where the volume is first "
+            "mounted and where `prime volumes ssh` runs. On a JuiceFS cluster it is a "
+            "JuiceFS volume; use `prime volumes attach` for other clusters."
         ),
     ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
@@ -85,7 +78,7 @@ def create(
     validate_output_format(output, console)
     client, team_id = _client()
     try:
-        volume = client.create_volume(name, size, team_id=team_id, cluster=cluster, backend=backend)
+        volume = client.create_volume(name, size, team_id=team_id, cluster=cluster)
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)

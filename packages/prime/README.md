@@ -238,10 +238,10 @@ prime pods list
 
 ## Portable training volumes (pilot)
 
-Where JuiceFS is enabled for your team (or you), `prime volumes create` makes a
-portable JuiceFS volume by default. It can be attached to other JuiceFS clusters
-without copying its data. Elsewhere, and with `--backend cluster`, the volume uses
-the cluster's own storage and stays on that cluster.
+The cluster a volume is created on decides its storage. On a cluster with
+JuiceFS, `prime volumes create` makes a portable JuiceFS volume that can be
+attached to other JuiceFS clusters without copying its data. On any other cluster
+the volume uses the cluster's own storage and stays on that cluster.
 
 ```bash
 prime volumes create models --size 1Ti
@@ -249,10 +249,9 @@ prime volumes attach models --cluster e2e-spk
 prime volumes list
 ```
 
-`--cluster` is optional. For a JuiceFS volume it only picks the cluster where the
-volume is first mounted and where `prime volumes ssh` sessions run; other clusters
-use it through `prime volumes attach`. A `--cluster` without JuiceFS gets a cluster
-volume there.
+`--cluster` is optional and picks the home cluster (default: your default
+cluster). A JuiceFS volume is first mounted there and its `prime volumes ssh`
+sessions run there; other clusters use it through `prime volumes attach`.
 
 Creation and attachment are asynchronous. Wait for the volume and attachment to
 show `RUNNING` before using them. An attachment makes the cluster eligible for

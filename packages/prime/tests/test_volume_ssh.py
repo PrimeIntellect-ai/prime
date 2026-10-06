@@ -371,8 +371,8 @@ def test_create_passes_the_cluster_through(monkeypatch):
 
     calls = []
 
-    def create_volume(name, size, team_id=None, cluster=None, backend=None):
-        calls.append((name, size, team_id, cluster, backend))
+    def create_volume(name, size, team_id=None, cluster=None):
+        calls.append((name, size, team_id, cluster))
         return Volume(
             name=name, size=size, status="PENDING", clusterId="c1", cluster="gpu-east", pvcName="v"
         )
@@ -389,10 +389,7 @@ def test_create_passes_the_cluster_through(monkeypatch):
     assert "on gpu-east" in result.output
     as_json = CliRunner().invoke(app, ["volumes", "create", "ckpts", "-o", "json"], env=env)
     assert json.loads(as_json.output)["cluster"] == "gpu-east"
-    assert calls == [
-        ("ckpts", "1Ti", "t1", "gpu-east", None),
-        ("ckpts", "1Ti", "t1", None, None),
-    ]
+    assert calls == [("ckpts", "1Ti", "t1", "gpu-east"), ("ckpts", "1Ti", "t1", None)]
 
 
 def test_client_sends_cluster_only_when_set():

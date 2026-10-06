@@ -26,6 +26,9 @@ def test_normalization_preserves_selected_schema_fields_without_fft(monkeypatch,
         resume: dict | None = None
         new_option: dict = Field(default_factory=lambda: {"disabled": None})
 
+    class Run(BaseModel):
+        name: str | None = None
+
     class FakeRL(BaseModel):
         deployment: Deployment = Field(default_factory=Deployment)
         trainer: Component = Field(default_factory=Component)
@@ -33,10 +36,11 @@ def test_normalization_preserves_selected_schema_fields_without_fft(monkeypatch,
         inference: Component = Field(default_factory=Component)
         output_dir: str = "/data/outputs"
         clean: bool = False
+        run: Run = Field(default_factory=Run)
 
         @property
         def run_dir(self):
-            return self.output_dir
+            return str(Path(self.output_dir) / self.run.name)
 
     modules = {
         name: ModuleType(name)
@@ -75,6 +79,12 @@ def test_normalization_preserves_selected_schema_fields_without_fft(monkeypatch,
         assert len(calls) == 1
     else:
         assert artifact["components"]["inference"]["router"] is None
+    another = worker.normalize({"config": {}, "mode": "rl", "schema_commit": "a" * 40})
+    assert artifact["run_dir"] != another["run_dir"]
+    named = worker.normalize(
+        {"config": {"run": {"name": "experiment"}}, "mode": "rl", "schema_commit": "a" * 40}
+    )
+    assert named["run_dir"] == "/data/outputs/experiment"
 
 
 def test_worker_does_not_inherit_api_credentials_or_schema_path(monkeypatch):
@@ -85,6 +95,19 @@ def test_worker_does_not_inherit_api_credentials_or_schema_path(monkeypatch):
     assert "PRIME_API_KEY" not in env
     assert "HF_TOKEN" not in env
     assert "PYTHONPATH" not in env
+
+
+@pytest.mark.parametrize("supported", [False, True])
+def test_artifact_submission_capability_comes_from_platform(monkeypatch, supported):
+    monkeypatch.setattr(
+        training_compiler,
+        "_schema_request",
+        lambda *args: {"artifact": {"submission_supported": not supported}},
+    )
+    result = training_compiler.compile_locally(
+        {}, {"runtime": {}, "submission_supported": supported}
+    )
+    assert result["submission_supported"] is supported
 
 
 def test_worker_provenance_mismatch_is_a_hard_error(monkeypatch, tmp_path):
@@ -211,6 +234,105 @@ def test_preparation_client_rejects_unsupported_contract():
         HostedTrainingClient(
             SimpleNamespace(post=lambda *a, **kw: {"contract_version": 2})
         ).prepare_local_validation({})
+
+
+@pytest.mark.parametrize("mode", ["rl", "sft"])
+@pytest.mark.parametrize("failure", [None, "prepare", "schema", "unsupported"])
+@pytest.mark.parametrize("output", ["table", "json"])
+def test_run_validates_before_volume_creation_and_submits_normalized_config(
+    monkeypatch, tmp_path, mode, failure, output
+):
+    import toml
+    from prime_cli.api.training import HostedTrainingClient, HostedTrainingRunResponse
+    from prime_cli.commands import rl
+    from prime_cli.core.client import APIError
+
+    runtime = {"data": {"type": "fake"}} if mode == "sft" else {"trainer": {}, "orchestrator": {}}
+    runtime["deployment"] = {"type": "single_node", "num_train_gpus": 1, "num_infer_gpus": 1}
+    path = tmp_path / "run.toml"
+    path.write_text(
+        toml.dumps(
+            {
+                "name": "review",
+                "image_tag": "from-config",
+                "source_ref": "from-config",
+                "volume": "research",
+                "gpu_type": "H100",
+                **runtime,
+            }
+        )
+    )
+    monkeypatch.setattr(
+        rl, "Config", lambda: SimpleNamespace(team_id="team", frontend_url="http://dashboard")
+    )
+    monkeypatch.setattr(rl, "APIClient", lambda: object())
+    calls = []
+    preparation = {"mode": mode, "submission_supported": failure != "unsupported"}
+    artifact = {
+        "contract_version": 3,
+        "mode": mode,
+        "schema_commit": "a" * 40,
+        "submission_supported": True,
+    }
+
+    def prepare(self, payload):
+        calls.append("prepare")
+        assert payload == {
+            "mode": mode,
+            "teamId": "team",
+            "imageTag": "selected",
+            "sourceRef": "branch",
+        }
+        if failure == "prepare":
+            raise APIError("runtime unavailable")
+        return preparation
+
+    def compile(config, prepared):
+        calls.append("schema")
+        assert config == runtime
+        assert prepared == preparation
+        if failure == "schema":
+            raise training_compiler.CompilationError("invalid schema config")
+        return artifact
+
+    def create(self, payload):
+        calls.append("create")
+        assert payload["normalizedConfig"] == artifact
+        assert payload["imageTag"] == "selected"
+        assert payload["sourceRef"] == "branch"
+        assert payload["volume"] == "research"
+        assert payload["gpuType"] == "H100"
+        assert payload["name"] == "review"
+        return HostedTrainingRunResponse(run_id="run", token_value="secret")
+
+    monkeypatch.setattr(HostedTrainingClient, "prepare_local_validation", prepare)
+    monkeypatch.setattr(training_compiler, "compile_locally", compile)
+    monkeypatch.setattr(HostedTrainingClient, "create_run", create)
+    monkeypatch.setattr(rl, "_ensure_volume", lambda *a, **kw: calls.append("volume"))
+    result = CliRunner().invoke(
+        app,
+        [
+            "train",
+            str(path),
+            "--sft" if mode == "sft" else "--fft",
+            "--image-tag",
+            "selected",
+            "--ref",
+            "branch",
+            "--yes",
+            "-o",
+            output,
+        ],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+    assert result.exit_code == (1 if failure else 0), result.output
+    if failure:
+        assert calls == (["prepare", "schema"] if failure == "schema" else ["prepare"])
+    else:
+        assert calls == ["prepare", "schema", "volume", "create"]
+        if output == "json":
+            assert json.loads(result.stdout) == {"run": {"runId": "run", "sourceRef": "branch"}}
+            assert "secret" not in result.stdout
 
 
 @pytest.mark.parametrize(

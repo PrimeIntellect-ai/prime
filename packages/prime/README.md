@@ -394,7 +394,15 @@ Platform supplies the pinned image digest and schema commit before local parsing
 Validation checks and normalizes the config locally. Platform owns deployment
 adaptation and rendering. Environment plugins and dispatch policy remain deferred.
 Validation creates no run. `--artifact-out` can save the normalized config for
-inspection; these artifacts cannot yet be submitted as training jobs.
+inspection.
+
+Dedicated submissions (`prime train rl.toml` or `prime train sft.toml --sft`)
+perform local validation automatically before creating a run or volume. Platform
+checks the runtime pins and deployment policy, applies hosted settings, and
+renders the deployment internally. Queued runs keep the same pinned runtime and
+resolved configs. A changed image tag or source branch requires a fresh retry.
+This requires a Platform deployment with JSON-config chart support enabled;
+unsupported deployments return an error before submission.
 
 ## License
 

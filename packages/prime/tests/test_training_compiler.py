@@ -294,63 +294,49 @@ def test_invalid_toml_fails_before_preparation(monkeypatch, tmp_path):
     assert "error" in json.loads(result.stdout)
 
 
-@pytest.mark.parametrize(
-    "render_fails,validation_fails", [(False, False), (True, False), (False, True)]
-)
+@pytest.mark.parametrize("failure", [None, "prepare", "schema"])
 @pytest.mark.parametrize("output", [None, "table", "json"])
 @pytest.mark.parametrize("plain", [False, True])
-def test_validate_can_write_compiled_deployment_preview_without_submitting(
-    monkeypatch, tmp_path, render_fails, validation_fails, output, plain
+def test_validate_writes_normalized_config_without_rendering_or_submitting(
+    monkeypatch, tmp_path, failure, output, plain
 ):
-    import yaml
     from prime_cli.api.training import HostedTrainingClient
     from prime_cli.commands import rl
     from prime_cli.core.client import APIError
 
     config = tmp_path / "rl.toml"
     config.write_text("[trainer]\nmax_steps = 2\n")
-    artifact_path, values_path = tmp_path / "artifact.json", tmp_path / "values.yaml"
+    artifact_path = tmp_path / "artifact.json"
     monkeypatch.setattr(rl, "Config", lambda: SimpleNamespace(team_id="team"))
-    monkeypatch.setattr(rl, "APIClient", lambda: object())
-    monkeypatch.setattr(
-        HostedTrainingClient,
-        "prepare_local_validation",
-        lambda *a: {
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("validation must not render deployment values or create a run")
+
+    monkeypatch.setattr(rl, "APIClient", lambda: SimpleNamespace(post=forbidden))
+
+    def prepare(self, payload):
+        assert payload == {"mode": "rl", "teamId": "team"}
+        if failure == "prepare":
+            raise APIError("runtime unavailable")
+        return {
             "contract_version": 1,
             "mode": "rl",
             "runtime": {"schema_commit": "a" * 40},
-        },
-    )
+        }
+
+    monkeypatch.setattr(HostedTrainingClient, "prepare_local_validation", prepare)
     artifact = {"contract_version": 3, "schema_commit": "a" * 40, "submission_supported": False}
+    compilations = []
 
     def compile(config, preparation, **kwargs):
         assert "compiler_path" not in kwargs
+        assert config == {"trainer": {"max_steps": 2}}
+        compilations.append(config)
+        if failure == "schema":
+            raise training_compiler.CompilationError("trainer: invalid config")
         return artifact
 
-    def render(self, payload):
-        assert payload == {
-            "artifact": artifact,
-            "teamId": "team",
-            "release": "review",
-            "namespace": "fft-review",
-        }
-        if render_fails:
-            raise APIError("preview unavailable")
-        return {"values": {"configs": {"format": "json"}}, "submission_supported": False}
-
-    def forbidden(*args, **kwargs):
-        raise AssertionError("preview must not create a run")
-
     monkeypatch.setattr(training_compiler, "compile_locally", compile)
-    validations = []
-
-    def validate(values, preparation, **kw):
-        if validation_fails:
-            raise training_compiler.CompilationError("hosted patch rejected by selected schema")
-        validations.append(values)
-
-    monkeypatch.setattr(training_compiler, "validate_rendered_locally", validate)
-    monkeypatch.setattr(HostedTrainingClient, "render_compiled_preview", render)
     monkeypatch.setattr(HostedTrainingClient, "create_run", forbidden)
     result = CliRunner().invoke(
         app,
@@ -359,32 +345,27 @@ def test_validate_can_write_compiled_deployment_preview_without_submitting(
             "train",
             "validate",
             str(config),
-            "--values-out",
-            str(values_path),
             "--artifact-out",
             str(artifact_path),
-            "--release",
-            "review",
             *(["-o", output] if output else []),
         ],
         env={"PRIME_DISABLE_VERSION_CHECK": "1"},
     )
-    assert result.exit_code == (1 if render_fails or validation_fails else 0), result.output
+    assert result.exit_code == (1 if failure else 0), result.output
+    assert len(compilations) == (0 if failure == "prepare" else 1)
     if output == "json":
         assert "Validating training config" not in result.stdout
         json.loads(result.stdout)
     elif plain:
         assert "Validating training config" in result.stdout
-    if render_fails or validation_fails:
-        assert validations == []
-        assert not values_path.exists()
+    if failure:
         assert not artifact_path.exists()
-        expected = "preview unavailable" if render_fails else "hosted patch rejected"
+        expected = "runtime unavailable" if failure == "prepare" else "trainer: invalid config"
         if output == "json":
             assert expected in json.loads(result.stdout)["error"]
         else:
             assert expected in result.stdout
     else:
-        assert len(validations) == 1
-        assert yaml.safe_load(values_path.read_text()) == {"configs": {"format": "json"}}
         assert json.loads(artifact_path.read_text()) == artifact
+        if output == "json":
+            assert json.loads(result.stdout) == artifact

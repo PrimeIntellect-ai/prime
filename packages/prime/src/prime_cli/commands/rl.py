@@ -937,17 +937,6 @@ def validate_training_config(
     ref: Optional[str] = typer.Option(None, "--ref"),
     pr: Optional[int] = typer.Option(None, "--pr", min=1),
     artifact_out: Optional[Path] = typer.Option(None, "--artifact-out"),
-    values_out: Optional[Path] = typer.Option(
-        None,
-        "--values-out",
-        help="Send normalized config to Platform for hosted preview values; creates no run.",
-    ),
-    release: str = typer.Option(
-        "validation", "--release", help="Release name for preview DNS wiring."
-    ),
-    namespace: Optional[str] = typer.Option(
-        None, "--namespace", help="Preview namespace; defaults to fft-<release>."
-    ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
     """Validate dedicated RL/SFT config locally against the selected hosted runtime.
@@ -956,11 +945,7 @@ def validate_training_config(
     dispatch policy are not validated. Artifacts cannot yet be submitted.
     """
     from ..api.training import HostedTrainingClient
-    from ..utils.training_compiler import (
-        CompilationError,
-        compile_locally,
-        validate_rendered_locally,
-    )
+    from ..utils.training_compiler import CompilationError, compile_locally
 
     validate_output_format(output, console)
     try:
@@ -1010,23 +995,6 @@ def validate_training_config(
             if preparation.get("mode") != payload["mode"]:
                 raise CompilationError("Preparation returned a different training mode.")
             artifact = compile_locally(config, preparation, schema_python=schema_python)
-            preview_warnings: list[str] = []
-            if values_out:
-                import yaml
-
-                preview = client.render_compiled_preview(
-                    {
-                        "artifact": artifact,
-                        "teamId": payload["teamId"],
-                        "release": release,
-                        "namespace": namespace or f"fft-{release}",
-                    }
-                )
-                validate_rendered_locally(
-                    preview["values"], preparation, schema_python=schema_python
-                )
-                preview_warnings = preview.get("warnings", [])
-                values_out.write_text(yaml.safe_dump(preview["values"], sort_keys=False))
             if artifact_out:
                 artifact_out.write_text(json.dumps(artifact, indent=2) + "\n")
         if output == "json":
@@ -1038,10 +1006,6 @@ def validate_training_config(
             )
             if artifact_out:
                 console.print(f"Artifact written to {artifact_out}.")
-            if values_out:
-                console.print(f"Deployment preview written to {values_out}.")
-            for warning in preview_warnings:
-                console.print(f"[yellow]Warning:[/yellow] {rich_escape(warning)}")
     except (APIError, CompilationError, OSError, ValueError, TypeError) as exc:
         if output == "json":
             output_data_as_json({"error": str(exc)}, console)

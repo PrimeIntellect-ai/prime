@@ -106,30 +106,6 @@ def normalize(request):
     }
 
 
-def validate_rendered(request):
-    from prime_rl.configs.inference import InferenceConfig
-    from prime_rl.configs.orchestrator import OrchestratorConfig
-    from prime_rl.configs.sft import SFTConfig
-    from prime_rl.configs.trainer import TrainerConfig
-
-    models = {"trainer": SFTConfig if request["mode"] == "sft" else TrainerConfig}
-    if request["mode"] == "rl":
-        models.update(orchestrator=OrchestratorConfig, inference=InferenceConfig)
-    configs = request["values"]["configs"]
-    if configs.get("format") != "json":
-        raise ValueError("Platform preview must contain JSON runtime configs")
-    required = {"trainer"} if request["mode"] == "sft" else {"trainer", "orchestrator"}
-    if not required.issubset(configs):
-        raise ValueError("Platform preview is missing runtime components")
-    for role, model in models.items():
-        if role in configs:
-            data = json.loads(configs[role])
-            if role == "orchestrator":
-                defer_environments(data)
-            model.model_validate(data)
-    return {"validated": True}
-
-
 def main():
     try:
         request = json.load(sys.stdin)
@@ -139,10 +115,7 @@ def main():
         expected = request["schema_commit"]
         if actual != expected:
             raise ValueError(f"schema provenance mismatch: expected {expected}, installed {actual}")
-        if request.get("action") == "validate_rendered":
-            result = validate_rendered(request)
-        else:
-            result = {"artifact": normalize(request)}
+        result = {"artifact": normalize(request)}
         print(json.dumps(result, allow_nan=False))
     except Exception as exc:
         from pydantic import ValidationError

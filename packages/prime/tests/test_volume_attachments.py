@@ -89,6 +89,27 @@ def test_create_juicefs_cli_passes_backend_and_cluster(monkeypatch):
     )
 
 
+@pytest.mark.parametrize("server_backend", ["juicefs", "cluster"])
+def test_create_leaves_the_default_backend_to_the_server(monkeypatch, server_backend):
+    body = {
+        "name": "models",
+        "size": "1Ti",
+        "status": "PENDING",
+        "clusterId": "a",
+        "cluster": "telus",
+        "pvcName": "vol-models",
+        "backend": server_backend,
+    }
+    api = Mock()
+    api.post.return_value = body
+    monkeypatch.setattr(volumes, "_client", lambda: (HostedTrainingClient(api), None))
+    result = CliRunner().invoke(app, ["volumes", "create", "models"], env=ENV)
+    assert result.exit_code == 0, result.output
+    api.post.assert_called_once_with("/training/volumes", json={"name": "models", "size": "1Ti"})
+    attach_hint = "prime volumes attach models --cluster <name>" in result.output
+    assert attach_hint == (server_backend == "juicefs")
+
+
 def test_create_rejects_unknown_backend_before_calling_api(monkeypatch):
     client_factory = Mock()
     monkeypatch.setattr(volumes, "_client", client_factory)

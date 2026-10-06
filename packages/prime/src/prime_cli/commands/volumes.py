@@ -1,7 +1,8 @@
 """`prime volumes`: named volumes for dedicated training runs (full-FT and SFT).
 
-A volume is a PVC owned by your team (or you). Cluster-native volumes stay
-on their creation cluster; enabled JuiceFS volumes can attach to other clusters.
+A volume is a PVC owned by your team (or you). Where JuiceFS is enabled for
+you, new volumes are JuiceFS volumes that can attach to other clusters;
+cluster volumes (`--backend cluster`) stay on their creation cluster.
 `prime train config.toml --volume <name>` writes under `runs/<runId>/` on the
 volume, and the volume outlives every run.
 
@@ -58,20 +59,29 @@ def _client() -> tuple[HostedTrainingClient, str | None]:
 @app.command()
 def create(
     name: str = typer.Argument(..., help="Volume name (lowercase letters, digits, '-')"),
-    size: str = typer.Option("1Ti", "--size", help="Size, e.g. 500Gi or 2Ti. Can grow later."),
+    size: str = typer.Option(
+        "1Ti", "--size", help="Size, e.g. 500Gi or 2Ti. Cluster volumes can grow later."
+    ),
     cluster: str | None = typer.Option(
         None,
         "--cluster",
-        help="Cluster name to create the volume on (default: your first available cluster)",
+        help=(
+            "Cluster to create the volume on (default: chosen for you). A JuiceFS volume "
+            "is first mounted there and its SSH sessions run there; attach it to other "
+            "clusters with `prime volumes attach`."
+        ),
     ),
     backend: VolumeBackend | None = typer.Option(
         None,
         "--backend",
-        help="Storage backend (default: cluster-native; juicefs requires enablement)",
+        help=(
+            "Storage backend (default: juicefs where it is enabled for you, else cluster; "
+            "use `cluster` to keep the volume on the cluster's own storage)"
+        ),
     ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """Create a volume on your team's (or personal) cluster."""
+    """Create a volume for your team (or yourself)."""
     validate_output_format(output, console)
     client, team_id = _client()
     try:
@@ -83,8 +93,13 @@ def create(
         output_data_as_json(volume.model_dump(by_alias=True), console)
         return
     on = f" on {escape(volume.cluster)}" if volume.cluster else ""
-    console.print(f"[green]Creating volume {volume.name} ({volume.size}){on}.[/green]")
+    kind = "JuiceFS volume" if volume.backend == VolumeBackend.JUICEFS else "volume"
+    console.print(f"[green]Creating {kind} {volume.name} ({volume.size}){on}.[/green]")
     console.print(f"Use it with: prime train config.toml --volume {volume.name}")
+    if volume.backend == VolumeBackend.JUICEFS:
+        console.print(
+            f"Use it on another cluster with: prime volumes attach {volume.name} --cluster <name>"
+        )
 
 
 @app.command("list")

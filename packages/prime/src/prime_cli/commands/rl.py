@@ -948,7 +948,7 @@ def validate_training_config(
     namespace: Optional[str] = typer.Option(
         None, "--namespace", help="Preview namespace; defaults to fft-<release>."
     ),
-    output: str = typer.Option("text", "--output", "-o"),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
     """Validate dedicated RL/SFT config locally against the selected hosted runtime.
 
@@ -1000,27 +1000,35 @@ def validate_training_config(
         if source_ref is not None:
             payload["sourceRef"] = source_ref
         client = HostedTrainingClient(APIClient())
-        preparation = client.prepare_local_validation(payload)
-        if preparation.get("mode") != payload["mode"]:
-            raise CompilationError("Preparation returned a different training mode.")
-        artifact = compile_locally(config, preparation, schema_python=schema_python)
-        preview_warnings: list[str] = []
-        if values_out:
-            import yaml
+        status_ctx = (
+            console.status("[bold blue]Validating training config...", spinner="dots")
+            if output != "json"
+            else nullcontext()
+        )
+        with status_ctx:
+            preparation = client.prepare_local_validation(payload)
+            if preparation.get("mode") != payload["mode"]:
+                raise CompilationError("Preparation returned a different training mode.")
+            artifact = compile_locally(config, preparation, schema_python=schema_python)
+            preview_warnings: list[str] = []
+            if values_out:
+                import yaml
 
-            preview = client.render_compiled_preview(
-                {
-                    "artifact": artifact,
-                    "teamId": payload["teamId"],
-                    "release": release,
-                    "namespace": namespace or f"fft-{release}",
-                }
-            )
-            validate_rendered_locally(preview["values"], preparation, schema_python=schema_python)
-            preview_warnings = preview.get("warnings", [])
-            values_out.write_text(yaml.safe_dump(preview["values"], sort_keys=False))
-        if artifact_out:
-            artifact_out.write_text(json.dumps(artifact, indent=2) + "\n")
+                preview = client.render_compiled_preview(
+                    {
+                        "artifact": artifact,
+                        "teamId": payload["teamId"],
+                        "release": release,
+                        "namespace": namespace or f"fft-{release}",
+                    }
+                )
+                validate_rendered_locally(
+                    preview["values"], preparation, schema_python=schema_python
+                )
+                preview_warnings = preview.get("warnings", [])
+                values_out.write_text(yaml.safe_dump(preview["values"], sort_keys=False))
+            if artifact_out:
+                artifact_out.write_text(json.dumps(artifact, indent=2) + "\n")
         if output == "json":
             output_data_as_json(artifact, console)
         else:

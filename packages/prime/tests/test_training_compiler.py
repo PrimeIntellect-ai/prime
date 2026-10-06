@@ -296,8 +296,10 @@ def test_invalid_toml_fails_before_preparation(monkeypatch, tmp_path):
 @pytest.mark.parametrize(
     "render_fails,validation_fails", [(False, False), (True, False), (False, True)]
 )
+@pytest.mark.parametrize("output", [None, "table", "json"])
+@pytest.mark.parametrize("plain", [False, True])
 def test_validate_can_write_compiled_deployment_preview_without_submitting(
-    monkeypatch, tmp_path, render_fails, validation_fails
+    monkeypatch, tmp_path, render_fails, validation_fails, output, plain
 ):
     import yaml
     from prime_cli.api.training import HostedTrainingClient
@@ -352,6 +354,7 @@ def test_validate_can_write_compiled_deployment_preview_without_submitting(
     result = CliRunner().invoke(
         app,
         [
+            *(["--plain"] if plain else []),
             "train",
             "validate",
             str(config),
@@ -361,18 +364,25 @@ def test_validate_can_write_compiled_deployment_preview_without_submitting(
             str(artifact_path),
             "--release",
             "review",
-            "-o",
-            "json",
+            *(["-o", output] if output else []),
         ],
         env={"PRIME_DISABLE_VERSION_CHECK": "1"},
     )
     assert result.exit_code == (1 if render_fails or validation_fails else 0), result.output
+    if output == "json":
+        assert "Validating training config" not in result.stdout
+        json.loads(result.stdout)
+    elif plain:
+        assert "Validating training config" in result.stdout
     if render_fails or validation_fails:
         assert validations == []
         assert not values_path.exists()
         assert not artifact_path.exists()
         expected = "preview unavailable" if render_fails else "hosted patch rejected"
-        assert expected in json.loads(result.stdout)["error"]
+        if output == "json":
+            assert expected in json.loads(result.stdout)["error"]
+        else:
+            assert expected in result.stdout
     else:
         assert len(validations) == 1
         assert yaml.safe_load(values_path.read_text()) == {"configs": {"format": "json"}}

@@ -213,10 +213,9 @@ class TestPointReads:
         assert "traces:read" in str(exc_info.value)
 
     def test_service_not_enabled_is_a_nameable_403(self, make_client):
-        """The owner allowlist gates every public route while the beta runs, so
-        this is the 403 a new account is most likely to see — and the code has
-        to be nameable, because it is the one a caller cannot fix by minting a
-        better token."""
+        """An account with Prime Traces turned off gets this 403 on every
+        public route — and the code has to be nameable, because it is the one
+        a caller cannot fix by minting a better token."""
 
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(

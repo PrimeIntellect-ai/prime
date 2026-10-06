@@ -1,4 +1,4 @@
-"""Legacy samples are used only when Prime Traces explicitly denies beta access."""
+"""Legacy samples are used only when Prime Traces is not enabled for the account."""
 
 from typing import Any, Dict, Mapping, Optional, Sequence
 
@@ -9,7 +9,8 @@ from .traces import TracesSink
 class LegacySamplesFallback(Sink):
     """Run after the traces sink, so its first denial routes the same batch here.
 
-    Initialization is lazy: beta users do not need the legacy Parquet encoder.
+    Initialization is lazy: accounts on Prime Traces do not need the legacy
+    Parquet encoder.
     The wrapped sink keeps its own name, retirement policy, and loss accounting.
     """
 

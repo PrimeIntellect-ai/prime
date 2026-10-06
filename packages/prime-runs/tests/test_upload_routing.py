@@ -58,7 +58,9 @@ def denial(code="service_not_enabled", status=403):
 
 
 @pytest.mark.parametrize("kind", ["eval", "train"])
-def test_beta_uploads_only_to_traces_but_keeps_run_lifecycle_and_metrics(open_run, uploads, kind):
+def test_enabled_account_uploads_only_to_traces_but_keeps_run_lifecycle_and_metrics(
+    open_run, uploads, kind
+):
     calls, _ = uploads
     run, platform, legacy = open_run(kind)
     episode = make_episode() if kind == "eval" else make_train_episode(step=10)
@@ -85,7 +87,9 @@ def test_beta_uploads_only_to_traces_but_keeps_run_lifecycle_and_metrics(open_ru
 
 
 @pytest.mark.parametrize("kind", ["eval", "train"])
-def test_no_beta_access_routes_first_and_later_batches_to_legacy(open_run, uploads, kind):
+def test_account_without_prime_traces_routes_first_and_later_batches_to_legacy(
+    open_run, uploads, kind
+):
     calls, replies = uploads
     replies.append(denial())
     run, platform, legacy = open_run(kind)

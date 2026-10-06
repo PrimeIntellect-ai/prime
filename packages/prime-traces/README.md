@@ -3,9 +3,6 @@
 Upload and query training, evaluation and inference traces through the Prime
 Traces service.
 
-> **⚠️ Prime Traces is in closed beta.** Access is granted per account, and the
-> service is not yet on a public URL.
-
 ## Install
 
 ```bash

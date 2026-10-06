@@ -108,7 +108,13 @@ def _schema_python(preparation: dict[str, Any]) -> Path:
         if not (target / ".ready").exists() or not python.is_file():
             # Install in the final location: venv scripts contain absolute paths.
             shutil.rmtree(target, ignore_errors=True)
-            _run(["uv", "venv", "--python", inputs["python"], str(target)], timeout=60)
+            # The selected runtime supplies the install inputs. Ambient uv
+            # settings (for example, a project's package cooldown or indexes)
+            # must not change how this separate schema environment is built.
+            _run(
+                ["uv", "venv", "--no-config", "--python", inputs["python"], str(target)],
+                timeout=60,
+            )
             with tempfile.TemporaryDirectory(prefix="prime-schema-") as temp:
                 constraints = Path(temp) / "constraints.txt"
                 constraints.write_text("\n".join(inputs["constraints"]) + "\n")
@@ -117,6 +123,7 @@ def _schema_python(preparation: dict[str, Any]) -> Path:
                         "uv",
                         "pip",
                         "install",
+                        "--no-config",
                         "--python",
                         str(python),
                         "--no-sources",

@@ -171,4 +171,8 @@ def compile_locally(
     config: dict[str, Any], preparation: dict[str, Any], *, schema_python: Path | None = None
 ) -> dict[str, Any]:
     response = _schema_request({"config": config}, preparation, schema_python)
-    return {**response["artifact"], "runtime": preparation["runtime"]}
+    return {
+        **response["artifact"],
+        "runtime": preparation["runtime"],
+        "submission_supported": preparation.get("submission_supported", False),
+    }

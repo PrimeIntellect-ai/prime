@@ -433,11 +433,14 @@ def _dispatch_dedicated_run(
     """Hand off to /api/v1/training/runs (prime-rl on a registered
     PrimeCluster). Serves both dedicated run kinds: full-FT RL mega-TOMLs
     (mode=None/"rl") and SFT mega-TOMLs (mode="sft" — same endpoint, same
-    raw-TOML handoff; only the backend/validator schema dispatch differs).
+    schema selection differs). The CLI normalizes the selected schema
+    locally; Platform admits and renders that config for deployment.
 
     Backend always auto-picks the first uncordoned PrimeCluster — the
     CLI never threads a cluster id, so a config that targets the wrong
     cluster can't be a footgun."""
+    from ..utils.training_compiler import CompilationError, compile_locally
+
     name = raw_cfg.get("name")
 
     # Link the dispatched run to the user's active team. Without this, the
@@ -638,6 +641,34 @@ def _dispatch_dedicated_run(
         resume_from=resume_from,
     )
 
+    api_client = APIClient()
+    client = HostedTrainingClient(api_client)
+    validation_ctx = (
+        console.status("[bold blue]Validating training config...", spinner="dots")
+        if output != "json"
+        else nullcontext()
+    )
+    try:
+        with validation_ctx:
+            selection: dict[str, Any] = {"mode": mode or "rl", "teamId": team_id}
+            if resolved_image_tag:
+                selection["imageTag"] = resolved_image_tag
+            if resolved_source_ref:
+                selection["sourceRef"] = resolved_source_ref
+            preparation = client.prepare_local_validation(selection)
+            if preparation.get("submission_supported") is not True:
+                raise CompilationError(
+                    "This Platform deployment does not support locally validated submissions."
+                )
+            if preparation.get("mode") != selection["mode"]:
+                raise CompilationError("Preparation returned a different training mode.")
+            payload["normalizedConfig"] = compile_locally(
+                {k: v for k, v in config_payload.items() if k != "name"}, preparation
+            )
+    except (APIError, CompilationError) as exc:
+        console.print(f"[red]Error:[/red] {rich_escape(str(exc))}")
+        raise typer.Exit(1) from exc
+
     # Surface the image + source pins before the confirmation so a typo'd
     # ref is caught at the prompt, not by a failed dispatch. Skipped for
     # --output json, which must emit nothing but the JSON payload.
@@ -670,8 +701,6 @@ def _dispatch_dedicated_run(
         console.print("\nRun cancelled")
         raise typer.Exit(0)
 
-    api_client = APIClient()
-    client = HostedTrainingClient(api_client)
     # Skip the spinner for --output json: PrimeConsole.status() falls back
     # to a plain print in --plain mode, which would emit "Creating Hosted
     # Training run..." on stdout ahead of the JSON payload and break
@@ -937,7 +966,7 @@ def validate_training_config(
     """Validate dedicated RL/SFT config locally against the selected hosted runtime.
 
     Experimental: creates no training run. Environment plugins and platform
-    dispatch policy are not validated. Artifacts cannot yet be submitted.
+    dispatch policy are checked when submitting a run.
     """
     from ..api.training import HostedTrainingClient
     from ..utils.training_compiler import CompilationError, compile_locally

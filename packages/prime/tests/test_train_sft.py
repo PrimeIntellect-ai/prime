@@ -14,6 +14,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
 import toml
 from prime_cli.api.training import build_payload_from_toml
 from prime_cli.commands.rl import _is_sft, _looks_like_sft
@@ -23,6 +24,19 @@ from typer.testing import CliRunner
 runner = CliRunner()
 
 TEST_ENV = {"PRIME_DISABLE_VERSION_CHECK": "1", "PRIME_API_KEY": "test-key"}
+
+
+@pytest.fixture(autouse=True)
+def _local_schema_validation(monkeypatch):
+    """Keep dispatch-routing tests independent of schema downloads."""
+    monkeypatch.setattr(
+        "prime_cli.api.training.HostedTrainingClient.prepare_local_validation",
+        lambda self, payload: {"mode": payload["mode"], "submission_supported": True},
+    )
+    monkeypatch.setattr(
+        "prime_cli.utils.training_compiler.compile_locally",
+        lambda config, preparation: {"mode": preparation["mode"], "schema_commit": "a" * 40},
+    )
 
 
 def _sft_config(**overrides: Any) -> str:
@@ -144,7 +158,7 @@ def test_train_rejects_fft_flag_on_sft_config(tmp_path: Path, monkeypatch) -> No
     result = runner.invoke(app, ["train", config_path, "--fft", "--yes"], env=TEST_ENV)
 
     assert result.exit_code == 1
-    assert "Use --sft instead" in result.output
+    assert "Use --sft instead" in " ".join(result.output.split())
 
 
 def test_train_rejects_sft_and_fft_flags_together(tmp_path: Path) -> None:

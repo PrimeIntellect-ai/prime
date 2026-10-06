@@ -47,7 +47,7 @@ class LocalValidationPreparation(BaseModel):
     mode: Literal["rl", "sft"]
     runtime: PreparedTrainingRuntime
     schema_install: SchemaInstallInputs
-    submission_supported: Literal[False]
+    submission_supported: bool
 
 
 class HostedTrainingRunResponse(BaseModel):

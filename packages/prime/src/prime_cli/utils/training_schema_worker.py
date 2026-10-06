@@ -4,6 +4,7 @@ import json
 import sys
 from copy import deepcopy
 from importlib import metadata
+from uuid import uuid4
 
 
 def defer_environments(orch):
@@ -48,9 +49,9 @@ def normalize(request):
         data["slurm"] = {}
     if "run" in model.model_fields:
         if "run" not in data:
-            data["run"] = {"name": "local-validation"}
+            data["run"] = {"name": uuid4().hex}
         elif isinstance(data["run"], dict) and data["run"].get("name") is None:
-            data["run"]["name"] = "local-validation"
+            data["run"]["name"] = uuid4().hex
     config = model.model_validate(data)
     resolved = config.model_dump(mode="json")
     if request["mode"] == "sft":

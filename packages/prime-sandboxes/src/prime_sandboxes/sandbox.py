@@ -75,6 +75,7 @@ from .models import (
     BulkDeleteSandboxResponse,
     CommandResponse,
     CreateSandboxRequest,
+    DeleteSandboxCheckpointsResponse,
     EgressPolicyStatus,
     FileUploadResponse,
     ReadFileResponse,
@@ -2329,6 +2330,23 @@ class SandboxClient:
         response = self.client.request("GET", f"/sandbox/checkpoints/{checkpoint_id}")
         return SandboxCheckpoint.model_validate(response)
 
+    def delete_checkpoint(self, checkpoint_id: str) -> None:
+        """Delete a durable or failed checkpoint and stop its storage billing.
+
+        Its data is kept while descendants still need it. Raises APIError (HTTP 409)
+        while the checkpoint is pending or the active tip of a running sandbox.
+        """
+        self.client.request("DELETE", f"/sandbox/checkpoints/{checkpoint_id}")
+
+    def delete_sandbox_checkpoints(self, sandbox_id: str) -> DeleteSandboxCheckpointsResponse:
+        """Delete every checkpoint of a sandbox, with per-checkpoint errors.
+
+        Each deletion is independent and behaves like delete_checkpoint: pending
+        checkpoints and the active tip of a running sandbox are kept as CONFLICT.
+        """
+        response = self.client.request("DELETE", f"/sandbox/{sandbox_id}/checkpoints")
+        return DeleteSandboxCheckpointsResponse.model_validate(response)
+
     def get_checkpoints(self, checkpoint_ids: List[str]) -> BatchCheckpointResponse:
         """Get up to 100 checkpoints across sandboxes, with per-ID lookup errors."""
         _validate_unique_batch_values(checkpoint_ids, "checkpoint_ids")
@@ -3830,6 +3848,23 @@ class AsyncSandboxClient:
         """Get the latest state of a filesystem checkpoint."""
         response = await self.client.request("GET", f"/sandbox/checkpoints/{checkpoint_id}")
         return SandboxCheckpoint.model_validate(response)
+
+    async def delete_checkpoint(self, checkpoint_id: str) -> None:
+        """Delete a durable or failed checkpoint and stop its storage billing.
+
+        Its data is kept while descendants still need it. Raises APIError (HTTP 409)
+        while the checkpoint is pending or the active tip of a running sandbox.
+        """
+        await self.client.request("DELETE", f"/sandbox/checkpoints/{checkpoint_id}")
+
+    async def delete_sandbox_checkpoints(self, sandbox_id: str) -> DeleteSandboxCheckpointsResponse:
+        """Delete every checkpoint of a sandbox, with per-checkpoint errors.
+
+        Each deletion is independent and behaves like delete_checkpoint: pending
+        checkpoints and the active tip of a running sandbox are kept as CONFLICT.
+        """
+        response = await self.client.request("DELETE", f"/sandbox/{sandbox_id}/checkpoints")
+        return DeleteSandboxCheckpointsResponse.model_validate(response)
 
     async def get_checkpoints(self, checkpoint_ids: List[str]) -> BatchCheckpointResponse:
         """Get up to 100 checkpoints across sandboxes, with per-ID lookup errors."""

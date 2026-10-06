@@ -1188,3 +1188,46 @@ def test_sandbox_run_with_old_sdk(monkeypatch, user_option):
     else:
         assert result.exit_code == 0, result.output
         assert calls == [("sbx-1", "id")]
+
+
+def test_checkpoint_delete_by_ids_and_sandbox(monkeypatch: pytest.MonkeyPatch) -> None:
+    from prime_sandboxes import APIError, DeleteSandboxCheckpointsResponse
+
+    _configure_cli(monkeypatch)
+    calls: list[Any] = []
+
+    def delete(self: Any, checkpoint_id: str) -> None:
+        calls.append(checkpoint_id)
+        if checkpoint_id == "c3":
+            raise APIError("HTTP 409: busy")
+
+    def delete_all(self: Any, sandbox_id: str) -> DeleteSandboxCheckpointsResponse:
+        calls.append(("sandbox", sandbox_id))
+        return DeleteSandboxCheckpointsResponse.model_validate(
+            {
+                "deleted": ["c1"],
+                "errors": [{"checkpoint_id": "c2", "code": "CONFLICT", "message": "busy"}],
+            }
+        )
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.delete_checkpoint", delete)
+    monkeypatch.setattr(
+        "prime_cli.commands.sandbox.SandboxClient.delete_sandbox_checkpoints", delete_all
+    )
+
+    by_ids = runner.invoke(
+        app, ["sandbox", "checkpoint", "delete", "c1,c2", "c3", "c1", "-y", "-o", "json"]
+    )
+    assert by_ids.exit_code == 1
+    result = json.loads(by_ids.output)
+    assert result["deleted"] == ["c1", "c2"]
+    assert result["errors"][0]["checkpoint_id"] == "c3"
+
+    by_sandbox = runner.invoke(app, ["sandbox", "checkpoint", "delete", "--sandbox", "sbx-1", "-y"])
+    assert by_sandbox.exit_code == 1
+    assert "Deleted checkpoint c1" in by_sandbox.output
+    assert "Failed to delete c2" in by_sandbox.output
+
+    both = runner.invoke(app, ["sandbox", "checkpoint", "delete", "c1", "--sandbox", "sbx-1"])
+    assert both.exit_code == 1
+    assert calls == ["c1", "c2", "c3", ("sandbox", "sbx-1")]

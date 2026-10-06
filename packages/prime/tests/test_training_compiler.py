@@ -12,6 +12,71 @@ from prime_cli.utils import training_compiler
 from typer.testing import CliRunner
 
 
+@pytest.mark.parametrize("shared_serializer", [False, True])
+def test_normalization_preserves_selected_schema_fields_without_fft(monkeypatch, shared_serializer):
+    from types import ModuleType
+
+    from prime_cli.utils import training_schema_worker as worker
+    from pydantic import BaseModel, Field
+
+    class Deployment(BaseModel):
+        type: str = "multi_node"
+
+    class Component(BaseModel):
+        resume: dict | None = None
+        new_option: dict = Field(default_factory=lambda: {"disabled": None})
+
+    class FakeRL(BaseModel):
+        deployment: Deployment = Field(default_factory=Deployment)
+        trainer: Component = Field(default_factory=Component)
+        orchestrator: Component = Field(default_factory=Component)
+        inference: Component = Field(default_factory=Component)
+        output_dir: str = "/data/outputs"
+        clean: bool = False
+
+        @property
+        def run_dir(self):
+            return self.output_dir
+
+    modules = {
+        name: ModuleType(name)
+        for name in (
+            "prime_rl",
+            "prime_rl.configs",
+            "prime_rl.configs.rl",
+            "prime_rl.configs.sft",
+            "prime_rl.utils",
+            "prime_rl.utils.config",
+        )
+    }
+    modules["prime_rl.configs.rl"].RLConfig = FakeRL
+    modules["prime_rl.configs.sft"].SFTConfig = FakeRL
+    modules["prime_rl.utils"].config = modules["prime_rl.utils.config"]
+    calls = []
+    if shared_serializer:
+
+        def dump(config):
+            calls.append(config)
+            return {
+                role: getattr(config, role).model_dump(mode="json")
+                for role in ("trainer", "orchestrator", "inference")
+            }
+
+        modules["prime_rl.utils.config"].dump_rl_components = dump
+    for name, module in modules.items():
+        monkeypatch.setitem(sys.modules, name, module)
+    artifact = worker.normalize({"config": {}, "mode": "rl", "schema_commit": "a" * 40})
+    assert artifact["contract_version"] == 3
+    assert artifact["components"]["trainer"]["new_option"] == {"disabled": None}
+    assert artifact["components"]["trainer"]["resume"] is None
+    assert "trainer" not in artifact["resolved"]
+    assert "deployment" not in artifact["components"]["inference"]
+    if shared_serializer:
+        assert len(calls) == 1
+    else:
+        assert artifact["components"]["inference"]["router"] is None
+
+
 def test_worker_does_not_inherit_api_credentials_or_schema_path(monkeypatch):
     monkeypatch.setenv("PRIME_API_KEY", "secret")
     monkeypatch.setenv("HF_TOKEN", "secret")
@@ -30,17 +95,15 @@ def test_worker_provenance_mismatch_is_a_hard_error(monkeypatch, tmp_path):
     (untrusted / "json.py").write_text('raise AssertionError("untrusted import")\n')
     monkeypatch.chdir(untrusted)
     monkeypatch.setenv("PYTHONPATH", str(untrusted))
-    compiler = tmp_path / "compiler"
-    (compiler / "rl_k8s").mkdir(parents=True)
-    (compiler / "rl_k8s" / "__init__.py").touch()
-    (compiler / "rl_k8s" / "compiled.py").write_text(
-        "def compile_config(*args, **kwargs):\n"
-        '    raise AssertionError("must check provenance first")\n'
+    monkeypatch.setattr(
+        training_compiler,
+        "_WORKER",
+        "from importlib import metadata; from types import SimpleNamespace\n"
+        "metadata.distribution = lambda _: SimpleNamespace(read_text=lambda _: "
+        + repr(json.dumps({"vcs_info": {"commit_id": "b" * 40}}))
+        + ")\n"
+        + training_compiler._WORKER,
     )
-    metadata = compiler / "prime_rl_configs-0.1.dist-info"
-    metadata.mkdir()
-    (metadata / "METADATA").write_text("Name: prime-rl-configs\nVersion: 0.1\n")
-    (metadata / "direct_url.json").write_text(json.dumps({"vcs_info": {"commit_id": "b" * 40}}))
     with pytest.raises(training_compiler.CompilationError, match="schema provenance mismatch"):
         training_compiler.compile_locally(
             {},
@@ -52,7 +115,6 @@ def test_worker_provenance_mismatch_is_a_hard_error(monkeypatch, tmp_path):
                     "image_commit": "a" * 40,
                 },
             },
-            compiler_path=compiler,
             schema_python=Path(sys.executable),
         )
 
@@ -102,9 +164,6 @@ def test_installer_stops_descendants_before_returning(monkeypatch, tmp_path, int
 
 
 def test_cache_reuses_complete_install_and_retries_failed_install(monkeypatch, tmp_path):
-    compiler = tmp_path / "compiler"
-    compiler.mkdir()
-    (compiler / "pyproject.toml").write_text('[project]\nname = "test-compiler"\n')
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
     monkeypatch.setattr(training_compiler.shutil, "which", lambda _: "/test/uv")
     preparation = {
@@ -127,18 +186,19 @@ def test_cache_reuses_complete_install_and_retries_failed_install(monkeypatch, t
             assert (
                 Path(command[command.index("--constraints") + 1]).read_text() == "pydantic==2.9.2\n"
             )
+            assert command[-1] == "schema@commit"
             if fail:
                 raise training_compiler.CompilationError("install failed")
 
     monkeypatch.setattr(training_compiler, "_run", run)
     with pytest.raises(training_compiler.CompilationError, match="install failed"):
-        training_compiler._schema_python(preparation, compiler)
+        training_compiler._schema_python(preparation)
     assert not list((tmp_path / "cache").rglob(".ready"))
     fail = False
-    python = training_compiler._schema_python(preparation, compiler)
+    python = training_compiler._schema_python(preparation)
     assert python.exists()
     assert len(commands) == 4
-    assert training_compiler._schema_python(preparation, compiler) == python
+    assert training_compiler._schema_python(preparation) == python
     assert len(commands) == 4
 
 
@@ -196,8 +256,6 @@ def test_validate_prepares_runtime_without_sending_config_or_creating_run(
             "train",
             "validate",
             str(config),
-            "--compiler-path",
-            str(tmp_path),
             "--artifact-out",
             str(artifact),
             "-o",
@@ -226,8 +284,6 @@ def test_invalid_toml_fails_before_preparation(monkeypatch, tmp_path):
             "train",
             "validate",
             str(config),
-            "--compiler-path",
-            str(tmp_path),
             "-o",
             "json",
         ],
@@ -237,9 +293,11 @@ def test_invalid_toml_fails_before_preparation(monkeypatch, tmp_path):
     assert "error" in json.loads(result.stdout)
 
 
-@pytest.mark.parametrize("render_fails", [False, True])
+@pytest.mark.parametrize(
+    "render_fails,validation_fails", [(False, False), (True, False), (False, True)]
+)
 def test_validate_can_write_compiled_deployment_preview_without_submitting(
-    monkeypatch, tmp_path, render_fails
+    monkeypatch, tmp_path, render_fails, validation_fails
 ):
     import yaml
     from prime_cli.api.training import HostedTrainingClient
@@ -260,10 +318,10 @@ def test_validate_can_write_compiled_deployment_preview_without_submitting(
             "runtime": {"schema_commit": "a" * 40},
         },
     )
-    artifact = {"contract_version": 2, "schema_commit": "a" * 40, "submission_supported": False}
+    artifact = {"contract_version": 3, "schema_commit": "a" * 40, "submission_supported": False}
 
     def compile(config, preparation, **kwargs):
-        assert kwargs["deployment"] is True
+        assert "compiler_path" not in kwargs
         return artifact
 
     def render(self, payload):
@@ -281,6 +339,14 @@ def test_validate_can_write_compiled_deployment_preview_without_submitting(
         raise AssertionError("preview must not create a run")
 
     monkeypatch.setattr(training_compiler, "compile_locally", compile)
+    validations = []
+
+    def validate(values, preparation, **kw):
+        if validation_fails:
+            raise training_compiler.CompilationError("hosted patch rejected by selected schema")
+        validations.append(values)
+
+    monkeypatch.setattr(training_compiler, "validate_rendered_locally", validate)
     monkeypatch.setattr(HostedTrainingClient, "render_compiled_preview", render)
     monkeypatch.setattr(HostedTrainingClient, "create_run", forbidden)
     result = CliRunner().invoke(
@@ -289,8 +355,6 @@ def test_validate_can_write_compiled_deployment_preview_without_submitting(
             "train",
             "validate",
             str(config),
-            "--compiler-path",
-            str(tmp_path),
             "--values-out",
             str(values_path),
             "--artifact-out",
@@ -302,11 +366,14 @@ def test_validate_can_write_compiled_deployment_preview_without_submitting(
         ],
         env={"PRIME_DISABLE_VERSION_CHECK": "1"},
     )
-    assert result.exit_code == (1 if render_fails else 0), result.output
-    if render_fails:
+    assert result.exit_code == (1 if render_fails or validation_fails else 0), result.output
+    if render_fails or validation_fails:
+        assert validations == []
         assert not values_path.exists()
         assert not artifact_path.exists()
-        assert "preview unavailable" in json.loads(result.stdout)["error"]
+        expected = "preview unavailable" if render_fails else "hosted patch rejected"
+        assert expected in json.loads(result.stdout)["error"]
     else:
+        assert len(validations) == 1
         assert yaml.safe_load(values_path.read_text()) == {"configs": {"format": "json"}}
         assert json.loads(artifact_path.read_text()) == artifact

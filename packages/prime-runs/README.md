@@ -111,6 +111,27 @@ receipt-backed upload counts used by hosted evaluation completion checks.
 `log_*()` are queue puts, safe inside a coroutine; `init()` and `finish()` do
 network I/O.
 
+### Opting out of Prime Traces
+
+Runs upload to Prime Traces by default. To opt a run out, set one of the
+following before it starts. Its samples then upload to the legacy sample tables,
+and the run never contacts Prime Traces, exactly as for an account without
+access:
+
+```python
+run = prime_runs.init(..., traces_opt_out=True)  # one run
+```
+
+```bash
+export PRIME_TRACES_OPT_OUT=true       # one shell or job
+prime config set-traces-opt-out true   # this machine
+```
+
+An account can also opt out for every client and SDK version from the billing
+page of the dashboard. Runs already in Prime Traces stay readable in the
+dashboard either way; an account-level opt-out also turns off trace reads from
+the SDK and CLI.
+
 ## Configuration
 
 | Source                 | Meaning                                                                |
@@ -121,7 +142,8 @@ network I/O.
 | `PRIME_FRONTEND_URL`   | Dashboard; defaults to `https://app.primeintellect.ai`                 |
 | `PRIME_TRACES_URL`     | Prime Traces service, resolved by `prime-traces`                       |
 | `PRIME_RUNS_MODE`      | `online` or `disabled`; unset means online when there is an API key    |
-| `~/.prime/config.json` | Shared prime CLI config (`api_key`, `team_id`, `base_url`)             |
+| `PRIME_TRACES_OPT_OUT` | `true` opts out of Prime Traces; samples go to the legacy tables        |
+| `~/.prime/config.json` | Shared prime CLI config (`api_key`, `team_id`, `base_url`, `traces_opt_out`) |
 
 Precedence is `init()` argument → environment variable → config file. A missing
 API key disables the run with a warning. `base_url` is normally the platform

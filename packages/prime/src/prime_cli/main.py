@@ -56,11 +56,7 @@ app.add_typer(
     hidden=True,
     rich_help_panel="Model Factory",
 )
-# Hidden while Prime Traces is in private beta: production is deployed and the
-# default traces URL reaches it, but the service allowlists owners, so an
-# advertised command group would answer "service not enabled" for most users.
-# Unhide when the allowlist is lifted.
-app.add_typer(traces_app, name="traces", rich_help_panel="Model Factory", hidden=True)
+app.add_typer(traces_app, name="traces", rich_help_panel="Model Factory")
 
 # Compute commands
 app.add_typer(availability_app, name="availability", rich_help_panel="Compute")

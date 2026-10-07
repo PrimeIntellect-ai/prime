@@ -2616,6 +2616,11 @@ def get_run(
         if run.status == "QUEUED" and run.runs_ahead is not None:
             status_text += f" (~{run.runs_ahead} runs ahead)"
         console.print(f"  Status: [{status_color}]{status_text}[/{status_color}]")
+        # Dedicated runs carry their cluster as primeClusterId
+        # (rftClusterId is NULL there); shared runs use cluster_id.
+        cluster = run.prime_cluster_id or run.cluster_id
+        if cluster:
+            console.print(f"  Cluster: {cluster}")
         console.print(f"  Model: [magenta]{formatted['model']}[/magenta]")
         console.print(f"  Environments: [green]{formatted['environments']}[/green]")
         console.print(f"  Max Steps: {formatted['steps']}")

@@ -771,3 +771,54 @@ def test_resolve_pull_request_head_rejects_forks(monkeypatch) -> None:
 
     _gh_pull(monkeypatch, body=_pull_body())
     assert resolve_pull_request_head(7) == "a" * 40
+
+
+def test_train_get_prints_the_dedicated_runs_cluster(monkeypatch) -> None:
+    """Dedicated runs carry their cluster as primeClusterId (rftClusterId
+    is NULL on those rows); the get table must show it, not stay silent."""
+    from prime_cli.api.rl import RLRun
+
+    run = RLRun.model_validate(
+        {
+            "id": "kuvz6ncuc5qzezo3uk3afrur",
+            "userId": "user-1",
+            "status": "RUNNING",
+            "kind": "DEDICATED_FULL_FT",
+            "primeClusterId": "ccl9wyl7n0002f2dn0g0x3p0q",
+            "rftClusterId": "",
+            "createdAt": "2026-05-17T00:00:00Z",
+            "updatedAt": "2026-05-17T00:00:00Z",
+        }
+    )
+    monkeypatch.setattr(
+        "prime_cli.commands.rl.RLClient.get_run", lambda self, run_id, timeout=None: run
+    )
+
+    result = runner.invoke(app, ["train", "get", "kuvz6ncuc5qzezo3uk3afrur"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    assert "Cluster: ccl9wyl7n0002f2dn0g0x3p0q" in result.output
+
+
+def test_train_get_prints_a_shared_runs_cluster(monkeypatch) -> None:
+    from prime_cli.api.rl import RLRun
+
+    run = RLRun.model_validate(
+        {
+            "id": "shared-run",
+            "userId": "user-1",
+            "status": "RUNNING",
+            "kind": "SHARED_RFT_HOSTED",
+            "rftClusterId": "oes1yd0lubfsku6iekofnoau",
+            "createdAt": "2026-05-17T00:00:00Z",
+            "updatedAt": "2026-05-17T00:00:00Z",
+        }
+    )
+    monkeypatch.setattr(
+        "prime_cli.commands.rl.RLClient.get_run", lambda self, run_id, timeout=None: run
+    )
+
+    result = runner.invoke(app, ["train", "get", "shared-run"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    assert "Cluster: oes1yd0lubfsku6iekofnoau" in result.output

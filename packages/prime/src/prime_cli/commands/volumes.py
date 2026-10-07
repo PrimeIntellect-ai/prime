@@ -39,6 +39,7 @@ from ..utils import (
     PlainTyper,
     confirm_or_skip,
     get_console,
+    human_age,
     output_data_as_json,
     validate_output_format,
 )
@@ -970,6 +971,46 @@ def proxy(
     except GatewayError as exc:
         typer.echo(f"prime volumes proxy: {exc}", err=True)
         raise typer.Exit(1) from exc
+
+
+def _session_age(created_at: str | None) -> str:
+    """The CREATED cell: kubectl-style age, "-" without a parsable createdAt."""
+    if not created_at:
+        return "-"
+    try:
+        return human_age(datetime.fromisoformat(created_at.replace("Z", "+00:00")))
+    except ValueError:
+        return "-"
+
+
+@app.command("sessions")
+def sessions(
+    name: str | None = typer.Argument(None, help="Volume name (default: all your volumes)"),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """List your volume SSH sessions (stop them with `prime volumes stop`)."""
+    validate_output_format(output, console)
+    client, team_id = _client()
+    try:
+        if name:
+            per_volume = [(name, client.list_volume_sessions(name, team_id=team_id))]
+        else:
+            per_volume = [
+                (v.name, client.list_volume_sessions(v.name, team_id=team_id))
+                for v in client.list_volumes(team_id=team_id)
+            ]
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+    rows = [(volume, s) for volume, found in per_volume for s in found]
+    if output == "json":
+        output_data_as_json([s.model_dump(by_alias=True) for _, s in rows], console)
+        return
+    table = Table("VOLUME", "SESSION ID", "STATUS", "MODE", "CREATED")
+    for volume, s in rows:
+        mode = "ro" if s.read_only else "rw"
+        table.add_row(volume, s.id, s.status, mode, _session_age(s.created_at))
+    console.print(table)
 
 
 @app.command()

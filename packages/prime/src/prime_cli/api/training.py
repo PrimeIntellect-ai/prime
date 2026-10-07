@@ -113,6 +113,8 @@ class VolumeSession(BaseModel):
     host_public_key: Optional[str] = Field(None, alias="hostPublicKey")
     # Why the session failed (FAILED/TOMBSTONED only).
     error_message: Optional[str] = Field(None, alias="errorMessage")
+    # Absent from older backends.
+    created_at: Optional[str] = Field(None, alias="createdAt")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -242,6 +244,15 @@ class HostedTrainingClient:
     ) -> None:
         params = {"teamId": team_id} if team_id else None
         self.client.delete(f"/training/volumes/{name}/sessions/{session_id}", params=params)
+
+    def list_volume_sessions(
+        self, name: str, *, team_id: Optional[str] = None
+    ) -> List[VolumeSession]:
+        """GET …/volumes/{name}/sessions. The caller's own sessions on the
+        volume, newest first (what `prime volumes sessions` shows)."""
+        params = {"teamId": team_id} if team_id else None
+        response = self.client.get(f"/training/volumes/{name}/sessions", params=params)
+        return [VolumeSession.model_validate(s) for s in response.get("sessions", [])]
 
     def create_volume_transfer(
         self,

@@ -836,7 +836,7 @@ def test_train_get_prints_a_shared_runs_cluster(monkeypatch) -> None:
 def _write_ckpt_cfg(tmp_path: Path) -> Path:
     cfg = tmp_path / "rl.toml"
     cfg.write_text(
-        '[model]\nname = "Qwen/Qwen3-0.6B"\n\n[ckpt]\n\n'
+        '[model]\nname = "Qwen/Qwen3-0.6B"\n\n[ckpt]\ninterval = 50\n\n'
         "[deployment]\nnum_train_gpus = 1\nnum_infer_gpus = 1\n"
     )
     return cfg

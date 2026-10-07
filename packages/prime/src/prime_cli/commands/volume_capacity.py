@@ -85,14 +85,18 @@ def warn_volume_usage(
 
 
 def warn_checkpoint_retention(cfg: Dict[str, Any], volume: str, out: Console) -> None:
-    """Warn when trainer checkpoints are on (`[ckpt]` or `[trainer.ckpt]`)
-    without a bound on how many stay on the volume."""
+    """Warn when trainer checkpoints are saved mid-run (`[ckpt]` or
+    `[trainer.ckpt]` with an `interval`) without a bound on how many stay on
+    the volume."""
     trainer = cfg.get("trainer")
     sub = trainer.get("ckpt") if isinstance(trainer, dict) else None
     tables = [t for t in (cfg.get("ckpt"), sub) if isinstance(t, dict)]
     if sub == "None" or not tables:
         return
     ckpt = {k: v for t in tables for k, v in t.items()}
+    # Without `interval` the trainer saves only once, at the end of training.
+    if ckpt.get("interval") is None:
+        return
     name = escape(volume)
     if ckpt.get("keep_last") is None:
         out.print(

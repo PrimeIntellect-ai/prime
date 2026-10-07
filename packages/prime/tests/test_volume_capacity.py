@@ -71,11 +71,15 @@ def _retention_output(cfg: dict) -> str:
 
 
 def test_checkpoints_without_keep_last_get_an_advisory() -> None:
-    for cfg in ({"ckpt": {}}, {"trainer": {"ckpt": {"interval": 50}}}):
+    for cfg in (
+        {"ckpt": {"interval": 50}},
+        {"trainer": {"ckpt": {"interval": 50}}},
+        {"ckpt": {"interval": 50}, "trainer": {"ckpt": {}}},
+    ):
         text = _retention_output(cfg)
         assert "`keep_last` is not set" in text and DOCS_URL in text
     assert "keep_interval = 100" in _retention_output(
-        {"ckpt": {"keep_last": 2, "keep_interval": 100}}
+        {"ckpt": {"interval": 50, "keep_last": 2, "keep_interval": 100}}
     )
 
 
@@ -83,8 +87,11 @@ def test_bounded_or_disabled_checkpoints_are_silent() -> None:
     for cfg in (
         {},
         {"ckpt": "None"},
-        {"ckpt": {}, "trainer": {"ckpt": "None"}},
-        {"ckpt": {"keep_last": 2}},
-        {"ckpt": {}, "trainer": {"ckpt": {"keep_last": 2}}},
+        {"ckpt": {"interval": 50}, "trainer": {"ckpt": "None"}},
+        {"ckpt": {"interval": 50, "keep_last": 2}},
+        {"ckpt": {"interval": 50}, "trainer": {"ckpt": {"keep_last": 2}}},
+        # No interval: only the final checkpoint is saved.
+        {"ckpt": {}},
+        {"trainer": {"ckpt": {"keep_interval": 100}}},
     ):
         assert _retention_output(cfg) == "", cfg

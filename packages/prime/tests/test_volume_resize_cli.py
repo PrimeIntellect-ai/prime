@@ -11,10 +11,18 @@ TEST_ENV = {"PRIME_DISABLE_VERSION_CHECK": "1"}
 
 
 def _volume(size="1Ti", pending=None, error=None):
-    return Volume.model_validate({
-        "name": "data", "size": size, "resizePending": pending, "resizeError": error,
-        "status": "RUNNING", "clusterId": "cluster", "namespace": "ns", "pvcName": "pvc",
-    })
+    return Volume.model_validate(
+        {
+            "name": "data",
+            "size": size,
+            "resizePending": pending,
+            "resizeError": error,
+            "status": "RUNNING",
+            "clusterId": "cluster",
+            "namespace": "ns",
+            "pvcName": "pvc",
+        }
+    )
 
 
 def test_resize_waits_until_committed(monkeypatch):
@@ -51,6 +59,32 @@ def test_resize_timeout_reports_pending_not_failure(monkeypatch):
     assert "prime volumes list" in result.output
 
 
+def test_list_escapes_backend_resize_error(monkeypatch):
+    client = SimpleNamespace(
+        list_volumes=lambda team_id: [_volume(pending="2Ti", error="[red]quota[/red]")]
+    )
+    monkeypatch.setattr(volumes, "_client", lambda: (client, None))
+
+    result = runner.invoke(app, ["volumes", "list"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    assert "[red]quota[/red]" in result.output
+
+
+def test_resize_interrupt_before_patch_response_is_uncertain(monkeypatch):
+    def interrupted_patch(name, size, team_id):
+        raise KeyboardInterrupt()
+
+    client = SimpleNamespace(resize_volume=interrupted_patch)
+    monkeypatch.setattr(volumes, "_client", lambda: (client, None))
+
+    result = runner.invoke(app, ["volumes", "resize", "data", "--size", "2Ti"], env=TEST_ENV)
+
+    assert result.exit_code == 130
+    assert "may be running" in result.output
+    assert "continues in the background" not in result.output
+
+
 def test_resize_native_success_without_pending(monkeypatch):
     client = SimpleNamespace(resize_volume=lambda name, size, team_id: _volume(size="2Ti"))
     monkeypatch.setattr(volumes, "_client", lambda: (client, None))
@@ -84,9 +118,8 @@ def test_resize_exposes_persistent_backend_error(monkeypatch):
     calls = []
     client = SimpleNamespace(
         resize_volume=lambda name, size, team_id: _volume(pending="2Ti"),
-        list_volumes=lambda team_id, timeout: calls.append(1) or [
-            _volume(pending="2Ti", error="ControllerResizeError: bad <quota>")
-        ],
+        list_volumes=lambda team_id, timeout: calls.append(1)
+        or [_volume(pending="2Ti", error="ControllerResizeError: bad <quota>")],
     )
     monkeypatch.setattr(volumes, "_client", lambda: (client, None))
     monkeypatch.setattr(volumes.time, "sleep", lambda seconds: None)
@@ -102,9 +135,7 @@ def test_resize_exposes_persistent_backend_error(monkeypatch):
 
 def test_resize_replay_exposes_existing_error_without_poll(monkeypatch):
     client = SimpleNamespace(
-        resize_volume=lambda name, size, team_id: _volume(
-            pending="2Ti", error="PVC missing"
-        ),
+        resize_volume=lambda name, size, team_id: _volume(pending="2Ti", error="PVC missing"),
     )
     monkeypatch.setattr(volumes, "_client", lambda: (client, None))
 

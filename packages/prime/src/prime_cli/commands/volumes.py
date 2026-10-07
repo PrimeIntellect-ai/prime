@@ -99,8 +99,10 @@ def list_volumes(
         return
     table = Table("Name", "Size", "Cluster", "Status", "Created")
     for v in volumes:
-        status = f"Resize error: {v.resize_error}" if v.resize_error else (
-            f"Resizing to {v.resize_pending}" if v.resize_pending else v.status
+        status = (
+            f"Resize error: {escape(v.resize_error)}"
+            if v.resize_error
+            else (f"Resizing to {v.resize_pending}" if v.resize_pending else v.status)
         )
         table.add_row(v.name, v.size or "-", v.cluster or "-", status, v.created_at or "-")
     console.print(table)
@@ -143,8 +145,7 @@ def resize(
                     break
             else:
                 console.print(
-                    f"Volume {name} is still resizing to {size}. "
-                    "Check with: prime volumes list"
+                    f"Volume {name} is still resizing to {size}. Check with: prime volumes list"
                 )
                 raise typer.Exit(1)
     except APIError as e:
@@ -153,12 +154,14 @@ def resize(
             console.print("Resize may still be running. Check with: prime volumes list")
         raise typer.Exit(1)
     except KeyboardInterrupt:
-        console.print("Resize continues in the background. Check with: prime volumes list")
+        if pending:
+            console.print("Resize continues in the background. Check with: prime volumes list")
+        else:
+            console.print("Resize may be running. Check with: prime volumes list")
         raise typer.Exit(130)
     if pending and volume.size != size:
         console.print(
-            f"[red]Volume {name} has not reached {size}.[/red] "
-            "Check with: prime volumes list"
+            f"[red]Volume {name} has not reached {size}.[/red] Check with: prime volumes list"
         )
         raise typer.Exit(1)
     console.print(f"[green]Volume {volume.name} is now {volume.size}.[/green]")

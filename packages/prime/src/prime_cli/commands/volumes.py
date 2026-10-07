@@ -99,7 +99,10 @@ def list_volumes(
         return
     table = Table("Name", "Size", "Cluster", "Status", "Created")
     for v in volumes:
-        table.add_row(v.name, v.size or "-", v.cluster or "-", v.status, v.created_at or "-")
+        status = f"Resize error: {v.resize_error}" if v.resize_error else (
+            f"Resizing to {v.resize_pending}" if v.resize_pending else v.status
+        )
+        table.add_row(v.name, v.size or "-", v.cluster or "-", status, v.created_at or "-")
     console.print(table)
 
 
@@ -110,10 +113,53 @@ def resize(
 ) -> None:
     """Grow a volume in place. Running pods see the new size; volumes can't shrink."""
     client, team_id = _client()
+    pending = False
     try:
         volume = client.resize_volume(name, size, team_id=team_id)
+        pending = bool(volume.resize_pending)
+        if pending:
+            console.print(f"Resizing volume {name} to {size}. Waiting for confirmation...")
+            if volume.resize_error:
+                console.print(f"[red]Resize error:[/red] {escape(volume.resize_error)}")
+                console.print("Resize remains pending. Check with: prime volumes list.")
+                console.print("Contact support if the error persists.")
+                raise typer.Exit(1)
+            deadline = time.monotonic() + 180
+            while time.monotonic() < deadline:
+                time.sleep(min(2, max(0, deadline - time.monotonic())))
+                volume = next(
+                    (v for v in client.list_volumes(team_id=team_id, timeout=10) if v.name == name),
+                    None,
+                )
+                if volume is None:
+                    console.print(f"[red]Volume {name} is no longer listed.[/red]")
+                    raise typer.Exit(1)
+                if volume.resize_error:
+                    console.print(f"[red]Resize error:[/red] {escape(volume.resize_error)}")
+                    console.print("Resize remains pending. Check with: prime volumes list.")
+                    console.print("Contact support if the error persists.")
+                    raise typer.Exit(1)
+                if not volume.resize_pending:
+                    break
+            else:
+                console.print(
+                    f"Volume {name} is still resizing to {size}. "
+                    "Check with: prime volumes list"
+                )
+                raise typer.Exit(1)
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
+        if pending:
+            console.print("Resize may still be running. Check with: prime volumes list")
+        raise typer.Exit(1)
+    except KeyboardInterrupt:
+        console.print("Resize continues in the background. Check with: prime volumes list")
+        raise typer.Exit(130)
+    if pending and volume.size != size:
+        console.print(
+            f"[red]Volume {name} has not reached {size}.[/red] "
+            "Check with: prime volumes list"
+        )
         raise typer.Exit(1)
     console.print(f"[green]Volume {volume.name} is now {volume.size}.[/green]")
 

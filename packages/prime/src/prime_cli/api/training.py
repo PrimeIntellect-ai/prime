@@ -81,6 +81,8 @@ class Volume(BaseModel):
 
     name: str
     size: Optional[str] = None
+    resize_pending: Optional[str] = Field(None, alias="resizePending")
+    resize_error: Optional[str] = Field(None, alias="resizeError")
     status: str
     cluster_id: str = Field(..., alias="clusterId")
     # Cluster name; absent from older backends.
@@ -199,9 +201,11 @@ class HostedTrainingClient:
             payload["cluster"] = cluster
         return Volume.model_validate(self.client.post("/training/volumes", json=payload))
 
-    def list_volumes(self, team_id: Optional[str] = None) -> List[Volume]:
+    def list_volumes(
+        self, team_id: Optional[str] = None, timeout: Optional[int] = None
+    ) -> List[Volume]:
         params = {"teamId": team_id} if team_id else None
-        response = self.client.get("/training/volumes", params=params)
+        response = self.client.get("/training/volumes", params=params, timeout=timeout)
         return [Volume.model_validate(v) for v in response.get("volumes", [])]
 
     def resize_volume(self, name: str, size: str, team_id: Optional[str] = None) -> Volume:

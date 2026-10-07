@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import toml
-from prime_cli.api.training import build_payload_from_toml
+from prime_cli.api.training import VolumeUsage, build_payload_from_toml
 from prime_cli.commands.rl import _is_sft, _looks_like_sft
 from prime_cli.main import app
 from typer.testing import CliRunner
@@ -193,6 +193,10 @@ def _existing_volume(monkeypatch, name: str) -> None:
     monkeypatch.setattr(
         "prime_cli.api.training.HostedTrainingClient.list_volumes",
         lambda self, team_id=None: [v],
+    )
+    monkeypatch.setattr(
+        "prime_cli.api.training.HostedTrainingClient.get_volume_usage",
+        lambda self, name, team_id=None, timeout=None: VolumeUsage(),
     )
 
 

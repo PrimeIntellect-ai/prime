@@ -92,6 +92,19 @@ class Volume(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class VolumeUsage(BaseModel):
+    """GET /v1/training/volumes/{name}/usage. Every field may be null: a
+    volume's usage is only known while something mounts it."""
+
+    name: Optional[str] = None
+    size: Optional[str] = None
+    used_bytes: Optional[int] = Field(None, alias="usedBytes")
+    observed_at: Optional[str] = Field(None, alias="observedAt")
+    unavailable_reason: Optional[str] = Field(None, alias="unavailableReason")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class VolumeSessionGateway(BaseModel):
     host: str
     port: int
@@ -203,6 +216,15 @@ class HostedTrainingClient:
         params = {"teamId": team_id} if team_id else None
         response = self.client.get("/training/volumes", params=params)
         return [Volume.model_validate(v) for v in response.get("volumes", [])]
+
+    def get_volume_usage(
+        self, name: str, team_id: Optional[str] = None, timeout: Optional[int] = None
+    ) -> VolumeUsage:
+        params = {"teamId": team_id} if team_id else None
+        response = self.client.get(
+            f"/training/volumes/{name}/usage", params=params, timeout=timeout
+        )
+        return VolumeUsage.model_validate(response)
 
     def resize_volume(self, name: str, size: str, team_id: Optional[str] = None) -> Volume:
         payload: Dict[str, Any] = {"size": size}

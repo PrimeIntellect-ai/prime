@@ -40,6 +40,7 @@ from ..utils.formatters import (
 from ..utils.prompt import confirm_or_skip
 from .feedback import submit_feedback
 from .usage import RUN_USAGE_JSON_HELP, run_usage_command
+from .volume_capacity import warn_checkpoint_retention, warn_volume_usage
 
 console = get_console()
 
@@ -1269,6 +1270,12 @@ def _dispatch_full_finetune_run(
             )
         console.print()
 
+    # Capacity warnings never block the launch. Like _ensure_volume's
+    # progress, they go to stderr for --output json.
+    warn_out = get_console(stderr=True) if output == "json" else console
+    if resolved_volume:
+        warn_checkpoint_retention(raw_cfg, resolved_volume, warn_out)
+
     # `--output json` is a formatting switch: still dispatch the run,
     # then print the result as JSON. Same contract as the LoRA path
     # ("create then format"), which automation relies on to parse back
@@ -1287,7 +1294,12 @@ def _dispatch_full_finetune_run(
     # Training run..." on stdout ahead of the JSON payload and break
     # automation parsing of run_id.
     if resolved_volume:
-        _ensure_volume(client, resolved_volume, team_id, output, size=resolved_volume_size)
+        existing_volume = _ensure_volume(
+            client, resolved_volume, team_id, output, size=resolved_volume_size
+        )
+        # A volume this command just created is empty: nothing to check.
+        if existing_volume:
+            warn_volume_usage(client, existing_volume, team_id, warn_out)
     status_ctx = (
         console.status("[bold blue]Creating Hosted Training run...", spinner="dots")
         if output != "json"
@@ -1323,9 +1335,10 @@ def _dispatch_full_finetune_run(
 
 def _ensure_volume(
     client: Any, name: str, team_id: Optional[str], output: str, size: Optional[str] = None
-) -> None:
+) -> Any:
     """Create `name` (with `size`, default VOLUME_DEFAULT_SIZE) if it doesn't
-    exist and wait until it is RUNNING.
+    exist and wait until it is RUNNING. Returns the volume if it already
+    existed, None if this call created it.
 
     An existing volume in any state is left alone (the backend reports
     "not ready" at dispatch); a `size` for it is ignored with a note (resizing
@@ -1345,7 +1358,7 @@ def _ensure_volume(
                 f"Volume '{name}' already exists ({existing[0].size or 'unknown size'}); "
                 f"--volume-size {size} is ignored. Resize with: prime volumes resize"
             )
-        return
+        return existing[0]
 
     size = size or VOLUME_DEFAULT_SIZE
     out.print(f"Volume '{name}' doesn't exist, creating it ({size})...")
@@ -1380,6 +1393,7 @@ def _ensure_volume(
                 continue
             if match:
                 status = match[0].status
+    return None
 
 
 def load_config(path: str) -> RLConfig:

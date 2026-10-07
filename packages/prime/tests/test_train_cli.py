@@ -356,9 +356,9 @@ def _vol(name: str, status: str = "RUNNING"):
     return Volume(name=name, size="1Ti", status=status, clusterId="c", namespace="n", pvcName="p")
 
 
-def _mock_volumes(monkeypatch, existing, created_status="RUNNING", create_error=None):
+def _mock_volumes(monkeypatch, existing, created_status="RUNNING", create_error=None, used_bytes=0):
     """Patch volume + dispatch calls. Returns (creates, dispatched)."""
-    from prime_cli.api.training import HostedTrainingRunResponse
+    from prime_cli.api.training import HostedTrainingRunResponse, VolumeUsage
     from prime_cli.client import APIError
 
     state = {"vols": list(existing)}
@@ -381,6 +381,12 @@ def _mock_volumes(monkeypatch, existing, created_status="RUNNING", create_error=
     monkeypatch.setattr(p + "list_volumes", lambda self, team_id=None: list(state["vols"]))
     monkeypatch.setattr(p + "create_volume", create_volume)
     monkeypatch.setattr(p + "create_run", create_run)
+    monkeypatch.setattr(
+        p + "get_volume_usage",
+        lambda self, name, team_id=None, timeout=None: VolumeUsage(
+            name=name, size="1Ti", usedBytes=used_bytes, observedAt="2026-10-07T00:00:00Z"
+        ),
+    )
     monkeypatch.setattr("prime_cli.commands.rl.time.sleep", lambda s: None)
     return creates, dispatched
 
@@ -822,3 +828,54 @@ def test_train_get_prints_a_shared_runs_cluster(monkeypatch) -> None:
 
     assert result.exit_code == 0, result.output
     assert "Cluster: oes1yd0lubfsku6iekofnoau" in result.output
+
+
+# --- volume capacity warnings (ENG-6561) ------------------------------------
+
+
+def _write_ckpt_cfg(tmp_path: Path) -> Path:
+    cfg = tmp_path / "rl.toml"
+    cfg.write_text(
+        '[model]\nname = "Qwen/Qwen3-0.6B"\n\n[ckpt]\n\n'
+        "[deployment]\nnum_train_gpus = 1\nnum_infer_gpus = 1\n"
+    )
+    return cfg
+
+
+def test_train_warns_about_a_full_existing_volume_and_still_dispatches(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _, dispatched = _mock_volumes(monkeypatch, [_vol("ckpts")], used_bytes=2**40 - 2**30)
+    cfg = _write_ckpt_cfg(tmp_path)
+    result = runner.invoke(
+        app, ["train", str(cfg), "--volume", "ckpts", "-y"], env={**TEST_ENV, "COLUMNS": "200"}
+    )
+    assert result.exit_code == 0, result.output
+    assert "volume 'ckpts' is 100% full" in result.output
+    assert "`keep_last` is not set" in result.output
+    assert len(dispatched) == 1
+
+    # --output json keeps stdout pure JSON; the warnings go to stderr.
+    result = runner.invoke(
+        app,
+        ["train", str(cfg), "--volume", "ckpts", "-y", "-o", "json"],
+        env={**TEST_ENV, "COLUMNS": "200"},
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["run"]["runId"] == "r1"
+    assert "100% full" in result.stderr
+
+
+def test_train_skips_usage_for_a_volume_it_just_created(monkeypatch, tmp_path: Path) -> None:
+    _mock_volumes(monkeypatch, [])
+
+    def never(*args, **kwargs):
+        raise AssertionError("checked usage of a volume this command created")
+
+    monkeypatch.setattr("prime_cli.api.training.HostedTrainingClient.get_volume_usage", never)
+    result = runner.invoke(
+        app,
+        ["train", str(_write_ckpt_cfg(tmp_path)), "--volume", "ckpts", "-y"],
+        env={**TEST_ENV, "COLUMNS": "200"},
+    )
+    assert result.exit_code == 0, result.output

@@ -67,6 +67,10 @@ class RLRun(BaseModel):
     user_id: str = Field(..., alias="userId")
     team_id: Optional[str] = Field(None, alias="teamId")
     cluster_id: Optional[str] = Field(None, alias="rftClusterId")
+    # DEDICATED_FULL_FT: the PrimeCluster hosting the run's helm release.
+    # The backend writes rftClusterId NULL for dedicated runs, so this is
+    # the only cluster field they carry (shared runs use cluster_id).
+    prime_cluster_id: Optional[str] = Field(None, alias="primeClusterId")
     status: str = Field(..., description="Run status")
     # Discriminator: SHARED_RFT_HOSTED (LoRA) | DEDICATED_FULL_FT (own
     # helm release on a PrimeCluster) | EXTERNAL (CLI-side prime-rl).

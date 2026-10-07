@@ -113,6 +113,7 @@ class VolumeSession(BaseModel):
     host_public_key: Optional[str] = Field(None, alias="hostPublicKey")
     # Why the session failed (FAILED/TOMBSTONED only).
     error_message: Optional[str] = Field(None, alias="errorMessage")
+    created_at: Optional[str] = Field(None, alias="createdAt")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -228,6 +229,14 @@ class HostedTrainingClient:
         return VolumeSession.model_validate(
             self.client.post(f"/training/volumes/{name}/sessions", json=payload)
         )
+
+    def list_volume_sessions(
+        self, name: str, *, team_id: Optional[str] = None
+    ) -> List[VolumeSession]:
+        """The caller's sessions that still block deleting the volume."""
+        params = {"teamId": team_id} if team_id else None
+        response = self.client.get(f"/training/volumes/{name}/sessions", params=params)
+        return [VolumeSession.model_validate(s) for s in response.get("sessions", [])]
 
     def get_volume_session(
         self, name: str, session_id: str, *, team_id: Optional[str] = None

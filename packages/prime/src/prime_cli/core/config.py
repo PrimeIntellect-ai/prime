@@ -217,8 +217,8 @@ class Config:
     def traces_url(self) -> str:
         """Get Prime Traces service URL with precedence: env > file > DEFAULT_TRACES_URL.
 
-        base_url is never consulted: a platform override says nothing about
-        where the traces service lives, and the platform API 404s /api/v1/traces.
+        base_url is never consulted: only the production API domain routes
+        /api/v1/traces, so a platform override would 404 every request.
         """
         return self._configured_traces_url() or self.DEFAULT_TRACES_URL
 

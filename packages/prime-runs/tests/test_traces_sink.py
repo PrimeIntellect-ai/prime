@@ -131,9 +131,9 @@ def test_every_member_trace_is_rekeyed_too():
     assert theirs == {"id": "other-run", "type": "eval", "name": "other"}
 
 
-def test_an_account_outside_the_beta_retires_the_sink_without_a_failure(caplog):
+def test_an_account_without_prime_traces_retires_the_sink_without_a_failure(caplog):
     client = FakeTracesClient(
-        raises=ForbiddenError("not in beta", status_code=403, code="service_not_enabled")
+        raises=ForbiddenError("not enabled", status_code=403, code="service_not_enabled")
     )
     sink = make_sink(client)
 

@@ -3,9 +3,6 @@
 Upload and query training, evaluation and inference traces through the Prime
 Traces service.
 
-> **⚠️ Prime Traces is in closed beta.** Access is granted per account, and the
-> service is not yet on a public URL.
-
 ## Install
 
 ```bash
@@ -131,7 +128,7 @@ asyncio.run(main())
 | Source                 | Meaning                                                                |
 | ---------------------- | ---------------------------------------------------------------------- |
 | `PRIME_API_KEY`        | Platform API token, needs `traces:read` / `traces:write` scopes        |
-| `PRIME_TRACES_URL`     | Base URL of the Prime Traces service; defaults to `https://prime-traces.pintel.dev` |
+| `PRIME_TRACES_URL`     | Base URL of the Prime Traces service; defaults to `https://api.primeintellect.ai` |
 | `PRIME_TEAM_ID`        | Optional team context, sent as `X-Prime-Team-ID`                       |
 | `~/.prime/config.json` | Shared prime CLI config (`api_key`, `team_id`, `traces_url`)           |
 

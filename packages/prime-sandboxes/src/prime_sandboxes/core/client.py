@@ -228,6 +228,8 @@ class APIClient:
             response = request_fn(method, url, params=params, json=json, timeout=timeout)
             if not is_idempotent_post:
                 response.raise_for_status()
+            if response.status_code == 204:
+                return {}
 
             result = response.json()
             if not isinstance(result, dict):
@@ -392,6 +394,8 @@ class AsyncAPIClient:
             response = await request_fn(method, url, params=params, json=json, timeout=timeout)
             if not is_idempotent_post:
                 response.raise_for_status()
+            if response.status_code == 204:
+                return {}
 
             result = response.json()
             if not isinstance(result, dict):

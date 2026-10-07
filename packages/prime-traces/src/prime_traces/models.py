@@ -118,11 +118,10 @@ class ErrorCode(str, Enum):
     # Auth (401/403/503)
     UNAUTHENTICATED = "unauthenticated"
     FORBIDDEN = "forbidden"
-    # Distinct from `forbidden`, which is about the token: this account is not
-    # in the private beta at all. The two need different codes because they
-    # need different actions — mint a token with the right scope, versus ask to
-    # be let in. Neither is fixed by retrying. Expect this one to dominate 403s
-    # while the owner allowlist is enabled.
+    # Distinct from `forbidden`, which is about the token: Prime Traces is
+    # turned off for this account. The two need different codes because they
+    # need different actions — mint a token with the right scope, versus turn
+    # Prime Traces back on for the account. Neither is fixed by retrying.
     SERVICE_NOT_ENABLED = "service_not_enabled"
     AUTH_UNAVAILABLE = "auth_unavailable"
 

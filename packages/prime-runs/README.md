@@ -105,7 +105,7 @@ has access. An explicit `service_not_enabled` response before any committed
 upload switches the run to the legacy sample table, including the first batch.
 Other errors remain upload failures; they do not switch storage systems.
 Run metadata, finalization, and training metrics still use the Platform API.
-View beta uploads in the Prime Traces viewer; legacy sample views no longer
+View uploads in the Prime Traces viewer; legacy sample views no longer
 receive a copy. Eval summaries reserve `prime_runs.traces_episodes_written` for
 receipt-backed upload counts used by hosted evaluation completion checks.
 `log_*()` are queue puts, safe inside a coroutine; `init()` and `finish()` do

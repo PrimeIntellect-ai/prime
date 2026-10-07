@@ -54,11 +54,12 @@ def test_config_values_read_from_file():
 
 
 def test_traces_url_defaults_to_the_traces_service(monkeypatch):
-    """No override anywhere: the traces service's own domain, never the platform
-    API — ``/api/v1/traces`` is not routed there, so that fallback 404s."""
+    """No override anywhere: the production API domain, which serves
+    ``/api/v1/traces``."""
+    assert Config().traces_url == "https://api.primeintellect.ai"
     assert Config().traces_url == Config.DEFAULT_TRACES_URL
-    assert Config().traces_url != Config().base_url
-    # A platform override says nothing about where traces lives.
+    # A platform override says nothing about where traces lives: only the
+    # production domain routes it, so the fallback never follows base_url.
     monkeypatch.setenv("PRIME_API_BASE_URL", "https://api.dev.example/api/v1")
     config = Config()
     assert config.base_url == "https://api.dev.example"

@@ -122,8 +122,7 @@ class Tunnel:
         self._config_file: Optional[Path] = None
         self._started = False
         self._stopping = False
-        # Held while frpc is being started, so start() and restart() never
-        # launch or wait on a process at the same time.
+        # Serializes start() and restart().
         self._process_lock = asyncio.Lock()
         self._output_lines: list[str] = []
 
@@ -187,7 +186,6 @@ class Tunnel:
         if self._started:
             raise TunnelError("Tunnel is already started")
 
-        # A restart() still unwinding from an earlier stop() finishes first.
         async with self._process_lock:
             if self._started:
                 raise TunnelError("Tunnel is already started")
@@ -259,25 +257,17 @@ class Tunnel:
 
     async def restart(self) -> str:
         """
-        Restart frpc for a started tunnel, keeping its registration.
+        Restart frpc, keeping the tunnel's registration and URL.
 
-        The current frpc process is killed if it is still alive, and a new
-        one is started with the same config. It logs in under the same tunnel
-        ID, so the URL does not change. Use this when the tunnel has stopped
-        serving but should stay at its URL, for example after frpc exits or
-        hangs.
-
-        If the restart fails the tunnel stays registered with no frpc
-        running, so the caller can call restart() again or stop().
+        If the restart fails, the tunnel stays registered with no frpc
+        running: call restart() again or stop().
 
         Returns:
             The tunnel URL
 
         Raises:
-            TunnelError: If the tunnel is not started, or is stopped while
-                it restarts
-            TunnelConnectionError: If frpc fails to start or connect, for
-                example because the registration no longer exists
+            TunnelError: If the tunnel is not started or is stopped meanwhile
+            TunnelConnectionError: If frpc fails to start or connect
             TunnelTimeoutError: If connection times out
         """
         if not self._started or self._stopping:
@@ -290,8 +280,6 @@ class Tunnel:
             url = self.url
             frpc_path = await asyncio.to_thread(get_frpc_path)
 
-            # The old frpc is being replaced because it stopped working, so it
-            # is killed without waiting for a clean exit.
             old_process, self._process = self._process, None
             if old_process is not None:
                 await asyncio.to_thread(self._end_process, old_process, kill=True)
@@ -312,8 +300,7 @@ class Tunnel:
 
             stopped = TunnelError("Tunnel was stopped during restart")
             try:
-                # A stop that ran while frpc was being launched saw no process
-                # to end, so this one has to be ended here.
+                # A stop during launch saw no process to end.
                 if self._stopping:
                     raise stopped
                 await self._wait_for_connection(process)
@@ -322,7 +309,7 @@ class Tunnel:
                 self._start_pipe_drain(process)
             except BaseException as e:
                 await asyncio.to_thread(self._end_process, process, kill=True)
-                # recent_output should show the frpc that failed, not the old one.
+                # Show the failed frpc's output, not the old one's.
                 if hasattr(self, "_output_lock"):
                     with self._output_lock:
                         self._recent_output = list(self._output_lines[-50:])
@@ -337,8 +324,7 @@ class Tunnel:
 
     @staticmethod
     def _end_process(process: subprocess.Popen, kill: bool = False) -> None:
-        """End a frpc process: terminate it and kill it if it does not exit,
-        or kill it at once when `kill` is set."""
+        """Terminate frpc, or kill it at once if `kill` is set."""
         try:
             if kill:
                 process.kill()
@@ -536,8 +522,7 @@ subdomain = "{self._tunnel_info.tunnel_id}"
         return config_file
 
     async def _wait_for_connection(self, process: Optional[subprocess.Popen] = None) -> None:
-        """Wait for frpc to establish connection. Watches `process`, or the
-        tunnel's current process when none is given."""
+        """Wait for frpc to establish connection."""
         start_time = time.time()
         self._output_lines = []
 

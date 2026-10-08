@@ -287,6 +287,7 @@ class Tunnel:
             if not self._started or self._stopping:
                 raise TunnelError("Tunnel is not started")
 
+            url = self.url
             frpc_path = await asyncio.to_thread(get_frpc_path)
 
             # The old frpc is being replaced because it stopped working, so it
@@ -321,6 +322,10 @@ class Tunnel:
                 self._start_pipe_drain(process)
             except BaseException as e:
                 await asyncio.to_thread(self._end_process, process, kill=True)
+                # recent_output should show the frpc that failed, not the old one.
+                if hasattr(self, "_output_lock"):
+                    with self._output_lock:
+                        self._recent_output = list(self._output_lines[-50:])
                 if not self._stopping or not isinstance(e, Exception):
                     raise
                 self._process = None
@@ -328,7 +333,7 @@ class Tunnel:
                     raise
                 raise stopped from e
 
-            return self.url
+            return url
 
     @staticmethod
     def _end_process(process: subprocess.Popen, kill: bool = False) -> None:

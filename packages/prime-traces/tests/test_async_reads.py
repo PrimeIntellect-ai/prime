@@ -38,6 +38,7 @@ class TestList:
 
         page = await make_async_client(handler).list(
             run_id="run_9f3k2m",
+            upload_id="a" * 64,
             environment_id="terminal-bench-2",
             reward_min=0.5,
             has_error=False,
@@ -47,6 +48,7 @@ class TestList:
 
         assert captured["params"] == {
             "run_id": "run_9f3k2m",
+            "upload_id": "a" * 64,
             "environment_id": "terminal-bench-2",
             "reward_min": "0.5",
             "has_error": "false",

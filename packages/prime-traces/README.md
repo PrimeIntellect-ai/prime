@@ -42,6 +42,9 @@ for summary in page.items:
 for summary in client.iter(task_id="tb2-0187"):   # paginates for you
     ...
 
+# Everything one upload batch stored (works for list_episodes too)
+page = client.list(upload_id=receipts[0].upload_id)
+
 summary = client.get(trace_id)
 raw     = client.get_raw(trace_id)                 # exact stored document
 client.download_raw(trace_id, "trace.json")        # streamed, for large traces

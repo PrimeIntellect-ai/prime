@@ -360,6 +360,7 @@ class AsyncTracesClient:
         self,
         *,
         run_id: Optional[str] = None,
+        upload_id: Optional[str] = None,
         environment_id: Optional[str] = None,
         model_id: Optional[str] = None,
         model_provider: Optional[str] = None,
@@ -380,11 +381,13 @@ class AsyncTracesClient:
 
         ``created_after``/``created_before`` also prune storage partitions, so
         they are the cheapest filters available. ``context`` filters are
-        equality-only against the batch-supplied map.
+        equality-only against the batch-supplied map. ``upload_id`` is the ID
+        in an ``UploadReceipt``, so it selects the traces one batch stored.
         """
         params = _build_params(
             (
                 ("run_id", run_id),
+                ("upload_id", upload_id),
                 ("environment_id", environment_id),
                 ("model_id", model_id),
                 ("model_provider", model_provider),
@@ -578,6 +581,7 @@ class AsyncTracesClient:
         self,
         *,
         run_id: Optional[str] = None,
+        upload_id: Optional[str] = None,
         environment_id: Optional[str] = None,
         outcome: Optional[str] = None,
         has_error: Optional[bool] = None,
@@ -595,10 +599,13 @@ class AsyncTracesClient:
         ``env.id``. Episodes carry no upload ``context`` map. Episodes have no
         step of their own: ``run_step``, ``step_min`` and ``step_max`` match an
         episode when one of its member traces has a matching ``run_step``.
+        ``upload_id`` is the ID in an ``UploadReceipt``, so it selects the
+        episodes one batch stored.
         """
         params = _build_params(
             (
                 ("run_id", run_id),
+                ("upload_id", upload_id),
                 ("environment_id", environment_id),
                 ("outcome", outcome),
                 ("has_error", has_error),

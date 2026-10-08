@@ -1107,6 +1107,7 @@ def test_list_episodes_forwards_filters_and_names_them_in_the_title(fake_client)
     assert result.exit_code == 0, result.output
     assert fake_client.calls["list_episodes"] == {
         "run_id": "run_9f3k2m",
+        "upload_id": None,
         "environment_id": "tb2",
         "outcome": "failed",
         "has_error": True,
@@ -1686,6 +1687,27 @@ def test_list_forwards_the_environment_filter_in_both_modes(fake_client):
     assert episodes.exit_code == 0, episodes.output
     assert fake_client.calls["list"]["environment_id"] == "tb2"
     assert fake_client.calls["list_episodes"]["environment_id"] == "tb2"
+
+
+def test_list_forwards_the_upload_filter_in_both_modes(fake_client):
+    upload_id = "a" * 64
+    traces = runner.invoke(main_app, ["traces", "list", "--upload-id", upload_id])
+    episodes = runner.invoke(main_app, ["traces", "list", "--episodes", "--upload-id", upload_id])
+
+    assert traces.exit_code == 0, traces.output
+    assert episodes.exit_code == 0, episodes.output
+    assert fake_client.calls["list"]["upload_id"] == upload_id
+    assert fake_client.calls["list_episodes"]["upload_id"] == upload_id
+
+
+def test_list_rejects_the_upload_filter_with_an_episode_id(fake_client):
+    result = runner.invoke(
+        main_app, ["traces", "list", "--episode-id", "ep_1", "--upload-id", "a" * 64]
+    )
+
+    assert result.exit_code == 1
+    assert "--upload-id" in result.output and "--episode-id" in result.output
+    assert "list_episode_traces" not in fake_client.calls
 
 
 def test_plain_list_marks_failed_traces_in_words(fake_client):

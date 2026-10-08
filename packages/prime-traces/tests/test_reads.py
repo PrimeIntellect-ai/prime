@@ -35,6 +35,7 @@ class TestList:
         client = make_client(handler)
         page = client.list(
             run_id="run_9f3k2m",
+            upload_id="a" * 64,
             environment_id="terminal-bench-2",
             reward_min=0.5,
             has_error=False,
@@ -44,6 +45,7 @@ class TestList:
 
         assert captured["params"] == {
             "run_id": "run_9f3k2m",
+            "upload_id": "a" * 64,
             "environment_id": "terminal-bench-2",
             "reward_min": "0.5",
             "has_error": "false",
@@ -552,12 +554,14 @@ class TestEpisodes:
 
         page = make_client(handler).list_episodes(
             run_id="run_9f3k2m",
+            upload_id="a" * 64,
             environment_id="terminal-bench-2",
             outcome="done",
             has_error=False,
         )
         assert captured["params"] == {
             "run_id": "run_9f3k2m",
+            "upload_id": "a" * 64,
             "environment_id": "terminal-bench-2",
             "outcome": "done",
             "has_error": "false",

@@ -2164,11 +2164,17 @@ def list_models(
                 # counts here: a caller with no reserved clusters used to
                 # get the empty banner even when there was capacity they
                 # could buy, which read as "nothing is running".
-                _render_empty_lora_message()
-                if not on_demand_beta_access:
-                    # Distinguish "not enrolled" from "no capacity": the
-                    # fallback above blames cluster health, which is wrong
-                    # and unactionable when the real answer is access.
+                if on_demand_beta_access:
+                    _render_empty_lora_message()
+                else:
+                    # Don't print the cluster-health fallback here: it is
+                    # false when clusters are healthy and the account
+                    # simply is not enrolled. State the actual reason
+                    # instead of a guess followed by a correction.
+                    console.print(
+                        "[yellow]No models available for Hosted Training."
+                        "[/yellow]"
+                    )
                     console.print(
                         "[dim]On-demand training is in beta. Contact Prime "
                         "support to request access.[/dim]"

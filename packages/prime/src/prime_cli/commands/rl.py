@@ -1307,6 +1307,14 @@ def _dispatch_full_finetune_run(
         run_json: Dict[str, Any] = {"runId": result.run_id}
         if resolved_source_ref:
             run_json["sourceRef"] = resolved_source_ref
+        if result.on_demand:
+            # Only on the billed path: a reserved run has no hourly rate,
+            # and emitting nulls would read as "cost unknown".
+            run_json["onDemand"] = True
+            run_json["gpuType"] = result.gpu_type
+            run_json["pricePerGpuHour"] = result.price_per_gpu_hour
+            run_json["estimatedCostPerHour"] = result.estimated_cost_per_hour
+            run_json["isBeta"] = result.is_beta
         output_data_as_json({"run": run_json}, console)
         return
 
@@ -1315,6 +1323,21 @@ def _dispatch_full_finetune_run(
     # via secretKeyRef). Surfacing it on stdout makes it easy to leak into
     # shared shell history/CI logs without buying anything for the user.
     console.print(f"[green]Dispatched[/green] hosted run [bold]{result.run_id}[/bold]")
+
+    # Placement is derived server-side, so state what it resolved to and
+    # what it costs. Without this the first time anyone sees the rate is
+    # the invoice.
+    if result.on_demand and result.price_per_gpu_hour is not None:
+        label = "On-demand (beta)" if result.is_beta else "On-demand"
+        line = f"[yellow]{label}[/yellow] {result.gpu_type or ''}".rstrip()
+        line += f" · ${result.price_per_gpu_hour:.2f}/GPU-hr"
+        if result.estimated_cost_per_hour is not None:
+            line += f" · ~${result.estimated_cost_per_hour:.2f}/hr"
+        console.print(line)
+        console.print(
+            "[dim]Billing starts when the pods are ready, not now, and stops "
+            "when the run ends.[/dim]"
+        )
 
     dashboard_url = f"{app_config.frontend_url}/dashboard/training/{result.run_id}"
     console.print("\n[cyan]Monitor run at:[/cyan]")
@@ -2097,7 +2120,9 @@ def list_models(
 
         fft_models: list[AvailableFFTModel] = []
         try:
-            fft_models = training_client.list_available_fft_models(team_id=config.team_id)
+            fft_response = training_client.get_available_fft(team_id=config.team_id)
+            fft_models = fft_response.models
+            on_demand = fft_response.on_demand
         except APIError:
             # Never let an FFT fetch failure break the LoRA output — the
             # endpoint is younger and may still be rolling out. When the
@@ -2106,6 +2131,7 @@ def list_models(
             if fft_only:
                 raise
             fft_models = []
+            on_demand = []
 
         if output == "json":
             if fft_only:
@@ -2120,17 +2146,22 @@ def list_models(
                 payload = {"models": [m.model_dump() for m in models]}
                 if fft_models:
                     payload["available_fft_models"] = [m.model_dump() for m in fft_models]
+            if on_demand:
+                payload["on_demand"] = [o.model_dump() for o in on_demand]
             output_data_as_json(payload, console)
             return
 
         if not fft_only:
             if models:
                 _render_lora_models_table(models)
-            elif not fft_models:
-                # Both sections empty — surface the LoRA fallback so
-                # the user sees *something*. When FFT has data we
-                # skip this so the FFT table isn't preceded by a
-                # misleading "no models available" banner.
+            elif not fft_models and not on_demand:
+                # Every section empty — surface the LoRA fallback so the
+                # user sees *something*. Skipped when FFT or on-demand
+                # has data, so a populated table is never preceded by a
+                # misleading "no models available" banner. On-demand
+                # counts here: a caller with no reserved clusters used to
+                # get the empty banner even when there was capacity they
+                # could buy, which read as "nothing is running".
                 _render_empty_lora_message()
 
         if fft_models:
@@ -2139,12 +2170,17 @@ def list_models(
                 # rendered — otherwise we'd print a stray blank line.
                 console.print()
             _render_fft_models_table(fft_models)
-        elif fft_only:
+        elif fft_only and not on_demand:
             console.print("[yellow]No FFT models available.[/yellow]")
             console.print(
                 "[dim]No dispatchable clusters have a warm model cache yet, or the "
                 "endpoint isn't deployed on this backend.[/dim]"
             )
+
+        if on_demand:
+            if models or fft_models:
+                console.print()
+            _render_on_demand_table(on_demand)
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
@@ -2213,7 +2249,7 @@ def _render_fft_models_table(fft_models: list) -> None:
     scannable when a large model is warm everywhere.
     """
     table = Table(
-        title="Hosted Training — Full Finetuning",
+        title="Models",
         title_justify="left",
         caption_justify="left",
     )
@@ -2228,6 +2264,47 @@ def _render_fft_models_table(fft_models: list) -> None:
         )
 
     table.caption = "[dim]Models pre-cached on clusters you can dispatch FFT runs to.[/dim]"
+    console.print(table)
+
+
+def _render_on_demand_table(on_demand: list) -> None:
+    """Render purchasable on-demand capacity.
+
+    Keyed by GPU type rather than by model, because an on-demand run
+    downloads a model that is not cached instead of being rejected — the
+    model table above covers what is warm.
+
+    "Starts" is whether a run would begin immediately or queue. No GPU
+    counts: the API does not publish fleet capacity.
+    """
+    beta = any(entry.is_beta for entry in on_demand)
+    table = Table(
+        title="On-Demand Capacity" + (" [yellow](beta)[/yellow]" if beta else ""),
+        title_justify="left",
+        caption_justify="left",
+    )
+    table.add_column("GPU Type", style="magenta")
+    table.add_column("$/GPU-hr", style="green", justify="right")
+    table.add_column("Starts")
+
+    promos = []
+    for entry in on_demand:
+        table.add_row(
+            entry.gpu_type,
+            f"${entry.price_per_gpu_hour:.2f}",
+            "[green]now[/green]" if entry.available_now else "[yellow]queued[/yellow]",
+        )
+        if entry.discount_label:
+            promos.append(entry.discount_label)
+
+    caption = [
+        "[dim]Billed per GPU-hour, prorated to the second, from the rate "
+        "fixed when the run starts.[/dim]",
+    ]
+    if promos:
+        joined = ", ".join(rich_escape(label) for label in sorted(set(promos)))
+        caption.append(f"[bold yellow]{joined}[/bold yellow]")
+    table.caption = "\n".join(caption)
     console.print(table)
 
 

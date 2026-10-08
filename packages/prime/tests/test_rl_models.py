@@ -431,7 +431,7 @@ def test_models_command_renders_fft_section_when_available(
     assert "LoRA" in plain
     assert "qwen/qwen3-8b" in plain
     # FFT table shows up too.
-    assert "Full Finetuning" in plain
+    assert "pre-cached" in plain
     assert "meta-llama/Llama-3.1-8B-Instruct" in plain
     # Model cached on two clusters → two GPU types collapse into the row.
     assert "H100_80GB" in plain
@@ -550,7 +550,7 @@ def test_models_command_survives_fft_endpoint_404(
     assert result.exit_code == 0, result.output
     plain = strip_ansi(result.output)
     assert "qwen/qwen3-8b" in plain
-    assert "Full Finetuning" not in plain
+    assert "pre-cached" not in plain
 
 
 def test_models_fft_only_suppresses_lora_section(
@@ -570,7 +570,7 @@ def test_models_fft_only_suppresses_lora_section(
 
     assert result.exit_code == 0, result.output
     plain = strip_ansi(result.output)
-    assert "Full Finetuning" in plain
+    assert "pre-cached" in plain
     assert "meta-llama/Llama-3.1-8B-Instruct" in plain
     # LoRA table title should not appear when --fft-only is set.
     assert "LoRA" not in plain
@@ -657,7 +657,7 @@ def test_models_default_hides_fft_auth_error_after_lora_succeeds(
     assert result.exit_code == 0, result.output
     plain = strip_ansi(result.output)
     assert "qwen/qwen3-8b" in plain
-    assert "Full Finetuning" not in plain
+    assert "pre-cached" not in plain
 
 
 def test_list_available_fft_models_converts_pydantic_error_to_apierror(
@@ -701,7 +701,7 @@ def test_models_command_survives_fft_schema_drift(
     assert result.exit_code == 0, result.output
     plain = strip_ansi(result.output)
     assert "qwen/qwen3-8b" in plain
-    assert "Full Finetuning" not in plain
+    assert "pre-cached" not in plain
 
 
 def test_models_command_suppresses_lora_empty_banner_when_fft_populated(
@@ -727,7 +727,7 @@ def test_models_command_suppresses_lora_empty_banner_when_fft_populated(
     # The misleading empty-LoRA banner must NOT appear.
     assert "No models available for Hosted Training" not in plain
     # FFT section still renders.
-    assert "Full Finetuning" in plain
+    assert "pre-cached" in plain
     assert "meta-llama/Llama-3.1-8B-Instruct" in plain
 
 
@@ -751,4 +751,4 @@ def test_models_command_shows_lora_empty_banner_when_both_empty(
     assert result.exit_code == 0, result.output
     plain = strip_ansi(result.output)
     assert "No models available for Hosted Training" in plain
-    assert "Full Finetuning" not in plain
+    assert "pre-cached" not in plain

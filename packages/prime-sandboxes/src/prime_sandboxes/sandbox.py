@@ -1712,6 +1712,23 @@ def _validate_unique_batch_values(values: List[str], field_name: str) -> None:
         raise ValueError(f"{field_name} must be unique")
 
 
+def _background_job_status_command(job: BackgroundJob) -> str:
+    """Print the job's exit code, nothing while it runs, or "lost" if it died without one.
+
+    An exit file only counts once it has content: on a full disk its write can leave it empty.
+    The job is alive while its PID's cmdline still names its exit file; this also rules out
+    zombies (empty cmdline) and reused PIDs. The exit file is re-read after the liveness check
+    because the job writes it just before exiting.
+    """
+    exit_file = shlex.quote(job.exit_file)
+    pid_file = shlex.quote(f"/tmp/job_{job.job_id}.launch/pid")
+    return (
+        f"grep -s . {exit_file} && exit; "
+        f"grep -qF {exit_file} /proc/$(cat {pid_file} 2>/dev/null)/cmdline 2>/dev/null && exit; "
+        f"grep -s . {exit_file} || echo lost"
+    )
+
+
 def _canonical_background_job(sandbox_id: str, job_id: str) -> BackgroundJob:
     """Build the canonical SDK background-job handle for a VM batch lookup."""
     return BackgroundJob(
@@ -2723,6 +2740,7 @@ class SandboxClient:
         stderr_log_file = f"/tmp/job_{job_id}.stderr.log"
         exit_file = f"/tmp/job_{job_id}.exit"
         launch_dir = f"/tmp/job_{job_id}.launch"
+        pid_file = f"{launch_dir}/pid"
 
         env_prefix = ""
         if env:
@@ -2741,25 +2759,28 @@ class SandboxClient:
         exit_file_quoted = shlex.quote(exit_file)
         stdout_log_file_quoted = shlex.quote(stdout_log_file)
         stderr_log_file_quoted = shlex.quote(stderr_log_file)
-        # Wrap command in subshell so 'exit' terminates the subshell, not the outer shell.
-        # This ensures 'echo $?' always runs to capture the exit code.
+        launch_dir_quoted = shlex.quote(launch_dir)
+        # The job records its PID (for liveness checks while it has no exit file), acknowledges
+        # the launch, then releases the launch output streams. Wrap command in subshell so 'exit'
+        # terminates the subshell, not the outer shell, and 'echo $?' always runs.
         sh_command = (
+            f"echo $$ > {shlex.quote(pid_file)} || exit 1; echo started; exec > /dev/null 2>&1; "
             f"({command_body}) > {stdout_log_file_quoted} 2> {stderr_log_file_quoted}; "
             f"echo $? > {exit_file_quoted}"
         )
         quoted_sh_command = shlex.quote(sh_command)
 
         # mkdir is the launch's idempotency guard: after an ambiguous timeout, only one attempt
-        # can create it and run the user command.
-        # Redirect the entire group so its shell cannot keep the launch output streams open.
+        # can create it and run the user command. The command substitution returns once the job
+        # acknowledges or dies, so a job that cannot start (e.g. on a full disk) fails the launch.
         bg_cmd = (
-            f"{{ mkdir {shlex.quote(launch_dir)} && "
-            f"nohup sh -c {quoted_sh_command}; "
-            "} < /dev/null > /dev/null 2>&1 &"
+            f"mkdir {launch_dir_quoted} || {{ test -d {launch_dir_quoted}; exit; }}; "
+            f"ack=$(nohup sh -c {quoted_sh_command} < /dev/null 2>&1 &); "
+            'test "$ack" = started || { echo "job did not start${ack:+: $ack}" >&2; exit 1; }'
         )
         for attempt in range(_BACKGROUND_JOB_LAUNCH_ATTEMPTS):
             try:
-                self.execute_command(
+                launch = self.execute_command(
                     sandbox_id,
                     bg_cmd,
                     working_dir=launch_cwd,
@@ -2771,6 +2792,8 @@ class SandboxClient:
                 if attempt == _BACKGROUND_JOB_LAUNCH_ATTEMPTS - 1:
                     raise
                 time.sleep(_BACKGROUND_JOB_LAUNCH_BACKOFF_SECONDS * 2**attempt)
+        if launch.exit_code != 0:
+            raise APIError(f"Failed to launch background job {job_id}: {launch.stderr.strip()}")
 
         return BackgroundJob(
             job_id=job_id,
@@ -2812,16 +2835,13 @@ class SandboxClient:
         job: BackgroundJob,
         timeout: Optional[int],
     ) -> BackgroundJobStatusSnapshot:
-        try:
-            exit_content = self.read_file(sandbox_id, job.exit_file, timeout=timeout).content
-        except SandboxFileNotFoundError:
-            exit_content = ""
-
-        exit_code: Optional[int] = None
-        try:
-            exit_code = int(exit_content.strip())
-        except ValueError:
-            pass
+        response = self.execute_command(
+            sandbox_id, _background_job_status_command(job), timeout=timeout
+        )
+        status = response.stdout.strip()
+        if status == "lost":
+            raise APIError(f"Background job {job.job_id} exited without recording an exit code")
+        exit_code = int(status) if status else None
         return BackgroundJobStatusSnapshot(
             sandbox_id=sandbox_id,
             job_id=job.job_id,
@@ -4445,6 +4465,7 @@ class AsyncSandboxClient:
         stderr_log_file = f"/tmp/job_{job_id}.stderr.log"
         exit_file = f"/tmp/job_{job_id}.exit"
         launch_dir = f"/tmp/job_{job_id}.launch"
+        pid_file = f"{launch_dir}/pid"
 
         env_prefix = ""
         if env:
@@ -4463,25 +4484,28 @@ class AsyncSandboxClient:
         exit_file_quoted = shlex.quote(exit_file)
         stdout_log_file_quoted = shlex.quote(stdout_log_file)
         stderr_log_file_quoted = shlex.quote(stderr_log_file)
-        # Wrap command in subshell so 'exit' terminates the subshell, not the outer shell.
-        # This ensures 'echo $?' always runs to capture the exit code.
+        launch_dir_quoted = shlex.quote(launch_dir)
+        # The job records its PID (for liveness checks while it has no exit file), acknowledges
+        # the launch, then releases the launch output streams. Wrap command in subshell so 'exit'
+        # terminates the subshell, not the outer shell, and 'echo $?' always runs.
         sh_command = (
+            f"echo $$ > {shlex.quote(pid_file)} || exit 1; echo started; exec > /dev/null 2>&1; "
             f"({command_body}) > {stdout_log_file_quoted} 2> {stderr_log_file_quoted}; "
             f"echo $? > {exit_file_quoted}"
         )
         quoted_sh_command = shlex.quote(sh_command)
 
         # mkdir is the launch's idempotency guard: after an ambiguous timeout, only one attempt
-        # can create it and run the user command.
-        # Redirect the entire group so its shell cannot keep the launch output streams open.
+        # can create it and run the user command. The command substitution returns once the job
+        # acknowledges or dies, so a job that cannot start (e.g. on a full disk) fails the launch.
         bg_cmd = (
-            f"{{ mkdir {shlex.quote(launch_dir)} && "
-            f"nohup sh -c {quoted_sh_command}; "
-            "} < /dev/null > /dev/null 2>&1 &"
+            f"mkdir {launch_dir_quoted} || {{ test -d {launch_dir_quoted}; exit; }}; "
+            f"ack=$(nohup sh -c {quoted_sh_command} < /dev/null 2>&1 &); "
+            'test "$ack" = started || { echo "job did not start${ack:+: $ack}" >&2; exit 1; }'
         )
         for attempt in range(_BACKGROUND_JOB_LAUNCH_ATTEMPTS):
             try:
-                await self.execute_command(
+                launch = await self.execute_command(
                     sandbox_id,
                     bg_cmd,
                     working_dir=launch_cwd,
@@ -4493,6 +4517,8 @@ class AsyncSandboxClient:
                 if attempt == _BACKGROUND_JOB_LAUNCH_ATTEMPTS - 1:
                     raise
                 await asyncio.sleep(_BACKGROUND_JOB_LAUNCH_BACKOFF_SECONDS * 2**attempt)
+        if launch.exit_code != 0:
+            raise APIError(f"Failed to launch background job {job_id}: {launch.stderr.strip()}")
 
         return BackgroundJob(
             job_id=job_id,
@@ -4534,17 +4560,13 @@ class AsyncSandboxClient:
         job: BackgroundJob,
         timeout: Optional[int],
     ) -> BackgroundJobStatusSnapshot:
-        try:
-            response = await self.read_file(sandbox_id, job.exit_file, timeout=timeout)
-            exit_content = response.content
-        except SandboxFileNotFoundError:
-            exit_content = ""
-
-        exit_code: Optional[int] = None
-        try:
-            exit_code = int(exit_content.strip())
-        except ValueError:
-            pass
+        response = await self.execute_command(
+            sandbox_id, _background_job_status_command(job), timeout=timeout
+        )
+        status = response.stdout.strip()
+        if status == "lost":
+            raise APIError(f"Background job {job.job_id} exited without recording an exit code")
+        exit_code = int(status) if status else None
         return BackgroundJobStatusSnapshot(
             sandbox_id=sandbox_id,
             job_id=job.job_id,

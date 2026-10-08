@@ -121,6 +121,7 @@ class Tunnel:
         self._tunnel_info: Optional[TunnelInfo] = None
         self._config_file: Optional[Path] = None
         self._started = False
+        self._stopping = False
         self._restart_lock = asyncio.Lock()
         self._output_lines: list[str] = []
 
@@ -183,6 +184,7 @@ class Tunnel:
         """
         if self._started:
             raise TunnelError("Tunnel is already started")
+        self._stopping = False
 
         # 1. Get frpc binary
         frpc_path = await asyncio.to_thread(get_frpc_path)
@@ -269,7 +271,7 @@ class Tunnel:
             TunnelTimeoutError: If connection times out
         """
         async with self._restart_lock:
-            if not self._started or self._config_file is None:
+            if not self._started or self._stopping:
                 raise TunnelError("Tunnel is not started")
 
             frpc_path = await asyncio.to_thread(get_frpc_path)
@@ -278,7 +280,7 @@ class Tunnel:
             if old_process is not None:
                 await asyncio.to_thread(self._terminate_process, old_process)
 
-            if not self._started or self._config_file is None:
+            if self._stopping:
                 raise TunnelError("Tunnel was stopped during restart")
 
             try:
@@ -293,12 +295,18 @@ class Tunnel:
             self._process = process
 
             try:
+                # A stop that ran while frpc was being launched saw no process
+                # to end, so this one has to be ended here.
+                if self._stopping:
+                    raise TunnelError("Tunnel was stopped during restart")
                 await self._wait_for_connection()
-                if self._process is not process:
+                if self._stopping or self._process is not process:
                     raise TunnelError("Tunnel was stopped during restart")
                 self._start_pipe_drain()
             except BaseException:
                 await asyncio.to_thread(self._terminate_process, process)
+                if self._stopping and self._process is process:
+                    self._process = None
                 raise
 
             return self.url
@@ -321,6 +329,7 @@ class Tunnel:
         if not self._started:
             return
 
+        self._stopping = True
         await self._cleanup()
         self._started = False
 
@@ -329,6 +338,7 @@ class Tunnel:
         if not self._started:
             return
 
+        self._stopping = True
         if self._process is not None:
             try:
                 self._process.terminate()

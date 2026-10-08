@@ -356,6 +356,72 @@ async def test_restart_stops_new_frpc_when_stopped_while_connecting():
     assert tunnel._process is None
 
 
+@pytest.mark.asyncio
+async def test_restart_stops_new_frpc_when_stopped_while_launching():
+    tunnel = _make_started_tunnel()
+    new_process = MagicMock()
+
+    def stop_while_launching(*args, **kwargs):
+        with patch("prime_tunnel.tunnel.httpx.delete"):
+            tunnel.sync_stop()
+        return new_process
+
+    frpc_path, _, wait, drain = _patch_restart(tunnel, new_process)
+    launching = patch("prime_tunnel.tunnel.subprocess.Popen", side_effect=stop_while_launching)
+
+    with frpc_path, launching, wait as mock_wait, drain as mock_drain:
+        with pytest.raises(TunnelError, match="stopped during restart"):
+            await tunnel.restart()
+
+    new_process.terminate.assert_called_once()
+    mock_wait.assert_not_awaited()
+    mock_drain.assert_not_called()
+    assert tunnel._process is None
+
+
+@pytest.mark.asyncio
+async def test_restart_does_not_start_frpc_while_stop_is_deleting_the_registration():
+    import asyncio
+
+    tunnel = _make_started_tunnel()
+    deleting = asyncio.Event()
+    finish_delete = asyncio.Event()
+
+    async def slow_delete(tunnel_id):
+        deleting.set()
+        await finish_delete.wait()
+
+    tunnel._client = AsyncMock()
+    tunnel._client.delete_tunnel.side_effect = slow_delete
+    frpc_path, popen, wait, drain = _patch_restart(tunnel, MagicMock())
+
+    with frpc_path, popen as mock_popen, wait, drain:
+        stop = asyncio.create_task(tunnel.stop())
+        await deleting.wait()
+        with pytest.raises(TunnelError, match="not started"):
+            await tunnel.restart()
+        finish_delete.set()
+        await stop
+
+    mock_popen.assert_not_called()
+    assert tunnel._process is None
+    assert tunnel._started is False
+
+
+@pytest.mark.asyncio
+async def test_start_after_stop_clears_the_stopping_state():
+    tunnel = _make_started_tunnel()
+    with patch("prime_tunnel.tunnel.httpx.delete"):
+        tunnel.sync_stop()
+    assert tunnel._stopping is True
+
+    with patch("prime_tunnel.tunnel.get_frpc_path", side_effect=RuntimeError("no frpc")):
+        with pytest.raises(RuntimeError):
+            await tunnel.start()
+
+    assert tunnel._stopping is False
+
+
 # -- check_registered tests --
 
 

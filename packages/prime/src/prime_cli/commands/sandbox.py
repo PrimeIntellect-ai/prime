@@ -1468,14 +1468,14 @@ def run(
         else:
             command_str = shlex.join(command)
 
-        console.print(f"[bold blue]Executing command:[/bold blue] {command_str}")
+        console.print(f"[bold blue]Executing command:[/bold blue] {escape(command_str)}")
         if user is not None:
             console.print(f"[bold blue]User:[/bold blue] {escape(user)}")
         if working_dir:
-            console.print(f"[bold blue]Working directory:[/bold blue] {working_dir}")
+            console.print(f"[bold blue]Working directory:[/bold blue] {escape(working_dir)}")
         if env_vars:
             obfuscated_env = obfuscate_env_vars(env_vars)
-            console.print(f"[bold blue]Environment:[/bold blue] {obfuscated_env}")
+            console.print(f"[bold blue]Environment:[/bold blue] {escape(str(obfuscated_env))}")
         if timeout is not None:
             console.print(f"[bold blue]Timeout:[/bold blue] {timeout}s")
 
@@ -1498,11 +1498,11 @@ def run(
         # Display output
         if result.stdout:
             console.print("\n[bold green]stdout:[/bold green]")
-            console.print(result.stdout)
+            console.print(result.stdout, markup=False)
 
         if result.stderr:
             console.print("\n[bold red]stderr:[/bold red]")
-            console.print(result.stderr)
+            console.print(result.stderr, markup=False)
 
         console.print(f"\n[dim]Execution time: {execution_time_ms:.1f}ms[/dim]")
 
@@ -1513,22 +1513,23 @@ def run(
     except typer.Exit:
         raise
     except SandboxNotRunningError as e:
-        console.print(f"[red]Sandbox Not Running:[/red] {str(e)}")
+        console.print(f"[red]Sandbox Not Running:[/red] {escape(str(e))}")
         console.print(
-            f"[yellow]Tip:[/yellow] Check sandbox status with: prime sandbox get {sandbox_id}"
+            f"[yellow]Tip:[/yellow] Check sandbox status with: prime sandbox get "
+            f"{escape(sandbox_id)}"
         )
         raise typer.Exit(1)
     except CommandTimeoutError as e:
-        console.print(f"[red]Command Timeout:[/red] {str(e)}")
+        console.print(f"[red]Command Timeout:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except UnauthorizedError as e:
-        console.print(f"[red]Unauthorized:[/red] {str(e)}")
+        console.print(f"[red]Unauthorized:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except PaymentRequiredError as e:
-        console.print(f"[red]Payment Required:[/red] {str(e)}")
+        console.print(f"[red]Payment Required:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except APIError as e:
-        console.print(f"[red]Error:[/red] {str(e)}")
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")

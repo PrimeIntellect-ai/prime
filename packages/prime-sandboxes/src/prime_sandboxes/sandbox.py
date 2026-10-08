@@ -1,6 +1,7 @@
 """Sandbox client implementations."""
 
 import asyncio
+import contextlib
 import functools
 import json
 import math
@@ -389,6 +390,11 @@ RETRYABLE_5XX_STATUSES = frozenset({500, 502, 503, 504, 524})
 MAX_409_RETRIES = 4
 RETRY_409_BASE_DELAY = 0.25  # 250ms, 500ms, 1000ms, 2000ms with exponential backoff
 MAX_GATEWAY_ATTEMPTS = MAX_409_RETRIES + 1
+
+# Streamed transfers move the body in fixed-size chunks so client memory stays
+# flat instead of scaling with the file size. httpx uses the same size when it
+# reads a multipart file object.
+TRANSFER_CHUNK_BYTES = 1024 * 1024
 
 # Refresh cached gateway auth this many seconds before its reported expiry.
 AUTH_REFRESH_MARGIN_SECONDS = 60
@@ -1518,6 +1524,18 @@ def _creation_timeout_seconds(max_attempts: int) -> float:
     return float(_LEGACY_FAST_POLLS + (max_attempts - _LEGACY_FAST_POLLS) * 2)
 
 
+def _download_temp_path(local_file_path: str) -> str:
+    """A unique sibling path an in-flight download writes to.
+
+    Landing in the destination's own directory keeps the final rename on one
+    filesystem, so it is atomic. A failed attempt leaves the destination
+    untouched, and two downloads of the same path cannot interleave.
+    """
+    directory = os.path.dirname(local_file_path)
+    name = f".{os.path.basename(local_file_path)}.{uuid.uuid4().hex}.part"
+    return os.path.join(directory, name) if directory else name
+
+
 def _is_retryable_gateway_error(exc: BaseException) -> bool:
     """Check if an exception is retryable for idempotent gateway requests."""
     if isinstance(exc, GATEWAY_IDEMPOTENT_RETRYABLE_EXCEPTIONS):
@@ -2166,19 +2184,53 @@ class SandboxClient:
         return response
 
     @staticmethod
-    @_gateway_retry
-    def _gateway_get(
+    @_gateway_post_retry
+    def _gateway_upload_file(
         url: str,
         headers: Dict[str, str],
         params: Dict[str, Any],
         timeout: float,
+        local_file_path: str,
     ) -> httpx.Response:
-        """Make a GET request to the gateway with retry on transient errors."""
-        with httpx.Client(timeout=timeout) as client:
-            response = client.get(url, params=params, headers=headers)
-        if response.status_code == 429 or response.status_code in RETRYABLE_5XX_STATUSES:
+        """Stream a local file to the gateway as a multipart upload.
+
+        The file is opened inside the retried call, so a retry resends the body
+        from byte zero instead of from wherever the failed attempt stopped.
+        """
+        with open(local_file_path, "rb") as file_handle:
+            files = {"file": (os.path.basename(local_file_path), file_handle)}
+            with httpx.Client(timeout=timeout) as client:
+                response = client.post(url, files=files, params=params, headers=headers)
+        if response.status_code == 429:
             response.raise_for_status()
         return response
+
+    @staticmethod
+    @_gateway_retry
+    def _gateway_download_to_file(
+        url: str,
+        headers: Dict[str, str],
+        params: Dict[str, Any],
+        timeout: float,
+        local_file_path: str,
+    ) -> None:
+        """Stream a gateway download to disk instead of buffering the body."""
+        temp_file_path = _download_temp_path(local_file_path)
+        try:
+            with httpx.Client(timeout=timeout) as client:
+                with client.stream("GET", url, params=params, headers=headers) as response:
+                    if response.status_code >= 400:
+                        # Load the (small) error body before raising so callers
+                        # can still read response.text from the exception.
+                        response.read()
+                        response.raise_for_status()
+                    with open(temp_file_path, "wb") as file_handle:
+                        for chunk in response.iter_bytes(TRANSFER_CHUNK_BYTES):
+                            file_handle.write(chunk)
+            os.replace(temp_file_path, local_file_path)
+        finally:
+            with contextlib.suppress(OSError):
+                os.unlink(temp_file_path)
 
     @staticmethod
     @_read_file_retry
@@ -3325,14 +3377,11 @@ class SandboxClient:
         local_file_path: str,
         timeout: Optional[int] = None,
     ) -> FileUploadResponse:
-        """Upload file directly via gateway"""
+        """Upload file directly via gateway, streaming it from disk."""
         if not os.path.exists(local_file_path):
             raise FileNotFoundError(f"Local file not found: {local_file_path}")
 
         effective_timeout = timeout if timeout is not None else 300
-
-        with open(local_file_path, "rb") as f:
-            file_content = f.read()
 
         reauthed = False
         attempt = 0
@@ -3341,10 +3390,13 @@ class SandboxClient:
             url = f"{auth['gateway_url']}/{auth['user_ns']}/{auth['job_id']}/upload"
             headers = {"Authorization": f"Bearer {auth['token']}"}
             try:
-                files = {"file": (os.path.basename(local_file_path), file_content)}
                 params = {"path": file_path, "sandbox_id": sandbox_id}
-                response = self._gateway_post(
-                    url, headers=headers, timeout=effective_timeout, files=files, params=params
+                response = self._gateway_upload_file(
+                    url,
+                    headers=headers,
+                    params=params,
+                    timeout=effective_timeout,
+                    local_file_path=local_file_path,
                 )
                 response.raise_for_status()
                 return FileUploadResponse.model_validate(response.json())
@@ -3447,7 +3499,7 @@ class SandboxClient:
         local_file_path: str,
         timeout: Optional[int] = None,
     ) -> None:
-        """Download file directly via gateway"""
+        """Download file directly via gateway, streaming it to disk."""
         params = {"path": file_path, "sandbox_id": sandbox_id}
 
         effective_timeout = timeout if timeout is not None else 300
@@ -3459,17 +3511,17 @@ class SandboxClient:
             url = f"{auth['gateway_url']}/{auth['user_ns']}/{auth['job_id']}/download"
             headers = {"Authorization": f"Bearer {auth['token']}"}
             try:
-                response = self._gateway_get(
-                    url, headers=headers, params=params, timeout=effective_timeout
-                )
-                response.raise_for_status()
-
                 dir_path = os.path.dirname(local_file_path)
                 if dir_path:
                     os.makedirs(dir_path, exist_ok=True)
 
-                with open(local_file_path, "wb") as f:
-                    f.write(response.content)
+                self._gateway_download_to_file(
+                    url,
+                    headers=headers,
+                    params=params,
+                    timeout=effective_timeout,
+                    local_file_path=local_file_path,
+                )
                 return
             except httpx.TimeoutException as e:
                 raise DownloadTimeoutError(sandbox_id, file_path, effective_timeout) from e
@@ -3686,20 +3738,58 @@ class AsyncSandboxClient:
             response.raise_for_status()
         return response
 
-    @_gateway_retry
-    async def _gateway_get(
+    @_gateway_post_retry
+    async def _gateway_upload_file(
         self,
         url: str,
         headers: Dict[str, str],
         params: Dict[str, Any],
         timeout: float,
+        local_file_path: str,
     ) -> httpx.Response:
-        """Make a GET request to the gateway with retry on transient errors."""
+        """Stream a local file to the gateway as a multipart upload (async).
+
+        The file is opened inside the retried call, so a retry resends the body
+        from byte zero instead of from wherever the failed attempt stopped.
+        """
         gateway_client = self._get_gateway_client()
-        response = await gateway_client.get(url, params=params, headers=headers, timeout=timeout)
-        if response.status_code == 429 or response.status_code in RETRYABLE_5XX_STATUSES:
+        with open(local_file_path, "rb") as file_handle:
+            files = {"file": (os.path.basename(local_file_path), file_handle)}
+            response = await gateway_client.post(
+                url, files=files, params=params, headers=headers, timeout=timeout
+            )
+        if response.status_code == 429:
             response.raise_for_status()
         return response
+
+    @_gateway_retry
+    async def _gateway_download_to_file(
+        self,
+        url: str,
+        headers: Dict[str, str],
+        params: Dict[str, Any],
+        timeout: float,
+        local_file_path: str,
+    ) -> None:
+        """Stream a gateway download to disk instead of buffering the body (async)."""
+        gateway_client = self._get_gateway_client()
+        temp_file_path = _download_temp_path(local_file_path)
+        try:
+            async with gateway_client.stream(
+                "GET", url, params=params, headers=headers, timeout=timeout
+            ) as response:
+                if response.status_code >= 400:
+                    # Load the (small) error body before raising so callers
+                    # can still read response.text from the exception.
+                    await response.aread()
+                    response.raise_for_status()
+                async with aiofiles.open(temp_file_path, "wb") as file_handle:
+                    async for chunk in response.aiter_bytes(TRANSFER_CHUNK_BYTES):
+                        await file_handle.write(chunk)
+            await asyncio.to_thread(os.replace, temp_file_path, local_file_path)
+        finally:
+            with contextlib.suppress(OSError):
+                await asyncio.to_thread(os.unlink, temp_file_path)
 
     @_read_file_retry
     async def _gateway_read_file_get(
@@ -5063,10 +5153,10 @@ class AsyncSandboxClient:
         local_file_path: str,
         timeout: Optional[int] = None,
     ) -> FileUploadResponse:
-        """Upload a file to a sandbox via gateway (async)
+        """Upload a file to a sandbox via gateway (async), streaming it from disk.
 
-        Uses aiofiles for non-blocking file I/O, then passes content to httpx.
-        File content is loaded into memory, suitable for typical sandbox files.
+        The file is streamed from the local path, so client memory stays flat
+        regardless of file size.
 
         Args:
             sandbox_id: The sandbox ID
@@ -5081,10 +5171,6 @@ class AsyncSandboxClient:
 
         effective_timeout = timeout if timeout is not None else 300
 
-        # Read file asynchronously (non-blocking I/O)
-        async with aiofiles.open(local_file_path, "rb") as f:
-            file_content = await f.read()
-
         reauthed = False
         attempt = 0
         for _ in range(MAX_GATEWAY_ATTEMPTS):
@@ -5093,9 +5179,12 @@ class AsyncSandboxClient:
             url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/upload"
             headers = {"Authorization": f"Bearer {auth['token']}"}
             try:
-                files = {"file": (os.path.basename(local_file_path), file_content)}
-                response = await self._gateway_post(
-                    url, headers=headers, timeout=effective_timeout, files=files, params=params
+                response = await self._gateway_upload_file(
+                    url,
+                    headers=headers,
+                    params=params,
+                    timeout=effective_timeout,
+                    local_file_path=local_file_path,
                 )
                 response.raise_for_status()
                 return FileUploadResponse.model_validate(response.json())
@@ -5201,7 +5290,7 @@ class AsyncSandboxClient:
         local_file_path: str,
         timeout: Optional[int] = None,
     ) -> None:
-        """Download a file from a sandbox via gateway (async)"""
+        """Download a file from a sandbox via gateway (async), streaming it to disk."""
         params = {"path": file_path, "sandbox_id": sandbox_id}
 
         effective_timeout = timeout if timeout is not None else 300
@@ -5214,19 +5303,17 @@ class AsyncSandboxClient:
             url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/download"
             headers = {"Authorization": f"Bearer {auth['token']}"}
             try:
-                response = await self._gateway_get(
-                    url, headers=headers, params=params, timeout=effective_timeout
-                )
-                response.raise_for_status()
-                content = response.content
-
                 dir_path = os.path.dirname(local_file_path)
                 if dir_path:
                     await asyncio.to_thread(os.makedirs, dir_path, exist_ok=True)
 
-                # Write file asynchronously (non-blocking I/O)
-                async with aiofiles.open(local_file_path, "wb") as f:
-                    await f.write(content)
+                await self._gateway_download_to_file(
+                    url,
+                    headers=headers,
+                    params=params,
+                    timeout=effective_timeout,
+                    local_file_path=local_file_path,
+                )
                 return
             except httpx.TimeoutException as e:
                 raise DownloadTimeoutError(sandbox_id, file_path, effective_timeout) from e

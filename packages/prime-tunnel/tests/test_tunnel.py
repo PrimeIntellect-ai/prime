@@ -220,6 +220,288 @@ def test_sync_stop_survives_delete_failure():
     assert tunnel._tunnel_info is None
 
 
+# -- restart tests --
+
+
+def _patch_restart(tunnel, new_process):
+    """Patch what restart() launches so no real frpc runs."""
+    return (
+        patch("prime_tunnel.tunnel.get_frpc_path", return_value="/bin/frpc"),
+        patch("prime_tunnel.tunnel.subprocess.Popen", return_value=new_process),
+        patch.object(tunnel, "_wait_for_connection", new=AsyncMock()),
+        patch.object(tunnel, "_start_pipe_drain"),
+    )
+
+
+@pytest.mark.asyncio
+async def test_restart_requires_started_tunnel():
+    tunnel = Tunnel(local_port=8080)
+
+    with pytest.raises(TunnelError, match="not started"):
+        await tunnel.restart()
+
+
+@pytest.mark.asyncio
+async def test_restart_replaces_frpc_and_keeps_registration():
+    tunnel = _make_started_tunnel()
+    tunnel._client = AsyncMock()
+    old_process = tunnel._process
+    config_file = tunnel._config_file
+    new_process = MagicMock()
+    frpc_path, popen, wait, drain = _patch_restart(tunnel, new_process)
+
+    with frpc_path, popen as mock_popen, wait as mock_wait, drain as mock_drain:
+        url = await tunnel.restart()
+
+    old_process.kill.assert_called_once()
+    old_process.terminate.assert_not_called()
+    assert mock_popen.call_args[0][0] == ["/bin/frpc", "-c", str(config_file)]
+    mock_wait.assert_awaited_once_with(new_process)
+    mock_drain.assert_called_once_with(new_process)
+    assert url == "https://t-test123.tunnel.example.com"
+    assert tunnel._process is new_process
+    assert tunnel._config_file is config_file
+    assert tunnel._started is True
+    tunnel._client.create_tunnel.assert_not_called()
+    tunnel._client.delete_tunnel.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_restart_starts_frpc_when_it_already_exited():
+    tunnel = _make_started_tunnel()
+    tunnel._process = None
+    new_process = MagicMock()
+    frpc_path, popen, wait, drain = _patch_restart(tunnel, new_process)
+
+    with frpc_path, popen, wait, drain:
+        await tunnel.restart()
+
+    assert tunnel._process is new_process
+
+
+@pytest.mark.asyncio
+async def test_failed_restart_stops_new_frpc_and_keeps_registration():
+    tunnel = _make_started_tunnel()
+    tunnel._client = AsyncMock()
+    new_process = MagicMock()
+    frpc_path, popen, _, drain = _patch_restart(tunnel, new_process)
+    failing_wait = patch.object(
+        tunnel, "_wait_for_connection", new=AsyncMock(side_effect=TunnelTimeoutError("timed out"))
+    )
+
+    with frpc_path, popen, failing_wait, drain as mock_drain:
+        with pytest.raises(TunnelTimeoutError):
+            await tunnel.restart()
+
+    new_process.kill.assert_called_once()
+    mock_drain.assert_not_called()
+    assert tunnel._process is new_process
+    assert tunnel._started is True
+    assert tunnel._tunnel_info is not None
+    tunnel._client.delete_tunnel.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_restart_does_not_start_frpc_after_stop():
+    tunnel = _make_started_tunnel()
+
+    def stop_while_terminating(process, kill=False):
+        with patch("prime_tunnel.tunnel.httpx.delete"):
+            tunnel.sync_stop()
+
+    frpc_path, popen, wait, drain = _patch_restart(tunnel, MagicMock())
+
+    with frpc_path, popen as mock_popen, wait, drain:
+        with patch.object(Tunnel, "_end_process", side_effect=stop_while_terminating):
+            with pytest.raises(TunnelError, match="stopped during restart"):
+                await tunnel.restart()
+
+    mock_popen.assert_not_called()
+    assert tunnel._process is None
+
+
+@pytest.mark.asyncio
+async def test_restart_stops_new_frpc_when_stopped_while_connecting():
+    tunnel = _make_started_tunnel()
+    new_process = MagicMock()
+
+    async def stop_while_connecting(process):
+        with patch("prime_tunnel.tunnel.httpx.delete"):
+            tunnel.sync_stop()
+
+    frpc_path, popen, _, drain = _patch_restart(tunnel, new_process)
+    stopping_wait = patch.object(
+        tunnel, "_wait_for_connection", new=AsyncMock(side_effect=stop_while_connecting)
+    )
+
+    with frpc_path, popen, stopping_wait, drain as mock_drain:
+        with pytest.raises(TunnelError, match="stopped during restart"):
+            await tunnel.restart()
+
+    mock_drain.assert_not_called()
+    new_process.kill.assert_called_once()
+    assert tunnel._process is None
+
+
+@pytest.mark.asyncio
+async def test_restart_stops_new_frpc_when_stopped_while_launching():
+    tunnel = _make_started_tunnel()
+    new_process = MagicMock()
+
+    def stop_while_launching(*args, **kwargs):
+        with patch("prime_tunnel.tunnel.httpx.delete"):
+            tunnel.sync_stop()
+        return new_process
+
+    frpc_path, _, wait, drain = _patch_restart(tunnel, new_process)
+    launching = patch("prime_tunnel.tunnel.subprocess.Popen", side_effect=stop_while_launching)
+
+    with frpc_path, launching, wait as mock_wait, drain as mock_drain:
+        with pytest.raises(TunnelError, match="stopped during restart"):
+            await tunnel.restart()
+
+    new_process.kill.assert_called_once()
+    mock_wait.assert_not_awaited()
+    mock_drain.assert_not_called()
+    assert tunnel._process is None
+
+
+@pytest.mark.asyncio
+async def test_restart_does_not_start_frpc_while_stop_is_deleting_the_registration():
+    import asyncio
+
+    tunnel = _make_started_tunnel()
+    deleting = asyncio.Event()
+    finish_delete = asyncio.Event()
+
+    async def slow_delete(tunnel_id):
+        deleting.set()
+        await finish_delete.wait()
+
+    tunnel._client = AsyncMock()
+    tunnel._client.delete_tunnel.side_effect = slow_delete
+    frpc_path, popen, wait, drain = _patch_restart(tunnel, MagicMock())
+
+    with frpc_path, popen as mock_popen, wait, drain:
+        stop = asyncio.create_task(tunnel.stop())
+        await deleting.wait()
+        with pytest.raises(TunnelError, match="not started"):
+            await tunnel.restart()
+        finish_delete.set()
+        await stop
+
+    mock_popen.assert_not_called()
+    assert tunnel._process is None
+    assert tunnel._started is False
+
+
+@pytest.mark.asyncio
+async def test_start_waits_for_a_restart_that_was_stopped():
+    import asyncio
+    import threading
+
+    tunnel = _make_started_tunnel()
+    terminating = threading.Event()
+    finish_terminate = threading.Event()
+
+    def slow_terminate(process, kill=False):
+        terminating.set()
+        finish_terminate.wait(timeout=5)
+
+    frpc_path, popen, wait, drain = _patch_restart(tunnel, MagicMock())
+    connect = patch.object(tunnel, "_register_and_connect", new=AsyncMock(return_value="url"))
+
+    with frpc_path, popen as mock_popen, wait, drain, connect as mock_connect:
+        with patch.object(Tunnel, "_end_process", side_effect=slow_terminate):
+            restart = asyncio.create_task(tunnel.restart())
+            await asyncio.to_thread(terminating.wait, 5)
+            with patch("prime_tunnel.tunnel.httpx.delete"):
+                tunnel.sync_stop()
+            start = asyncio.create_task(tunnel.start())
+            await asyncio.sleep(0.05)
+            mock_connect.assert_not_awaited()
+
+            finish_terminate.set()
+            with pytest.raises(TunnelError, match="stopped during restart"):
+                await restart
+            assert await start == "url"
+
+    mock_popen.assert_not_called()
+    mock_connect.assert_awaited_once()
+    assert tunnel._stopping is False
+
+
+@pytest.mark.asyncio
+async def test_start_after_stop_clears_the_stopping_state():
+    tunnel = _make_started_tunnel()
+    with patch("prime_tunnel.tunnel.httpx.delete"):
+        tunnel.sync_stop()
+    assert tunnel._stopping is True
+
+    with patch("prime_tunnel.tunnel.get_frpc_path", side_effect=RuntimeError("no frpc")):
+        with pytest.raises(RuntimeError):
+            await tunnel.start()
+
+    assert tunnel._stopping is False
+
+
+@pytest.mark.asyncio
+async def test_restart_returns_the_url_when_stopped_as_it_finishes():
+    tunnel = _make_started_tunnel()
+
+    def stop_while_draining(process):
+        with patch("prime_tunnel.tunnel.httpx.delete"):
+            tunnel.sync_stop()
+
+    frpc_path, popen, wait, _ = _patch_restart(tunnel, MagicMock())
+    draining = patch.object(tunnel, "_start_pipe_drain", side_effect=stop_while_draining)
+
+    with frpc_path, popen, wait, draining:
+        url = await tunnel.restart()
+
+    assert url == "https://t-test123.tunnel.example.com"
+    assert tunnel._process is None
+
+
+@pytest.mark.asyncio
+async def test_failed_restart_shows_the_new_frpc_in_recent_output():
+    tunnel = _make_started_tunnel()
+    _drain(tunnel, ["old frpc line\n"])
+    assert tunnel.recent_output == ["old frpc line"]
+
+    async def fail_to_connect(process):
+        tunnel._output_lines = ["login to the server failed: tunnel is inactive"]
+        raise TunnelTimeoutError("timed out")
+
+    frpc_path, popen, _, drain = _patch_restart(tunnel, MagicMock())
+    failing_wait = patch.object(
+        tunnel, "_wait_for_connection", new=AsyncMock(side_effect=fail_to_connect)
+    )
+
+    with frpc_path, popen, failing_wait, drain:
+        with pytest.raises(TunnelTimeoutError):
+            await tunnel.restart()
+
+    assert tunnel.recent_output == ["login to the server failed: tunnel is inactive"]
+
+
+@pytest.mark.asyncio
+async def test_wait_for_connection_watches_the_process_it_is_given():
+    from prime_tunnel.exceptions import TunnelConnectionError
+
+    tunnel = _make_started_tunnel()
+    tunnel._process.poll.return_value = None
+    exited = MagicMock()
+    exited.poll.return_value = 1
+    exited.stdout.readlines.return_value = ["login to the server failed: tunnel is inactive\n"]
+    exited.stderr.readlines.return_value = []
+
+    with pytest.raises(TunnelConnectionError):
+        await tunnel._wait_for_connection(exited)
+
+    tunnel._process.poll.assert_not_called()
+
+
 # -- check_registered tests --
 
 
@@ -474,6 +756,34 @@ def test_pipe_drain_forwards_frpc_lines_at_their_level(caplog):
         (logging.DEBUG, "frpc t-test123: heartbeat"),
     ]
     assert len(tunnel.recent_output) == 4
+
+
+def test_pipe_drain_keeps_a_replaced_process_out_of_the_new_buffer():
+    import io
+    import os
+
+    tunnel = _make_started_tunnel()
+    read_fd, write_fd = os.pipe()
+    old_process = MagicMock()
+    old_process.stdout = os.fdopen(read_fd, "r")
+    old_process.stderr = io.StringIO("")
+    tunnel._start_pipe_drain(old_process)
+    old_threads = tunnel._drain_threads
+
+    new_process = MagicMock()
+    new_process.stdout = io.StringIO("new frpc line\n")
+    new_process.stderr = io.StringIO("")
+    tunnel._process = new_process
+    tunnel._start_pipe_drain(new_process)
+    for t in tunnel._drain_threads:
+        t.join(timeout=2.0)
+
+    with os.fdopen(write_fd, "w") as old_stdout:
+        old_stdout.write("late line from the old frpc\n")
+    for t in old_threads:
+        t.join(timeout=2.0)
+
+    assert tunnel.recent_output == ["new frpc line"]
 
 
 def test_pipe_drain_logs_unparsed_lines_at_info(caplog):

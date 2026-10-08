@@ -409,6 +409,42 @@ async def test_restart_does_not_start_frpc_while_stop_is_deleting_the_registrati
 
 
 @pytest.mark.asyncio
+async def test_start_waits_for_a_restart_that_was_stopped():
+    import asyncio
+    import threading
+
+    tunnel = _make_started_tunnel()
+    terminating = threading.Event()
+    finish_terminate = threading.Event()
+
+    def slow_terminate(process):
+        terminating.set()
+        finish_terminate.wait(timeout=5)
+
+    frpc_path, popen, wait, drain = _patch_restart(tunnel, MagicMock())
+    connect = patch.object(tunnel, "_register_and_connect", new=AsyncMock(return_value="url"))
+
+    with frpc_path, popen as mock_popen, wait, drain, connect as mock_connect:
+        with patch.object(Tunnel, "_terminate_process", side_effect=slow_terminate):
+            restart = asyncio.create_task(tunnel.restart())
+            await asyncio.to_thread(terminating.wait, 5)
+            with patch("prime_tunnel.tunnel.httpx.delete"):
+                tunnel.sync_stop()
+            start = asyncio.create_task(tunnel.start())
+            await asyncio.sleep(0.05)
+            mock_connect.assert_not_awaited()
+
+            finish_terminate.set()
+            with pytest.raises(TunnelError, match="stopped during restart"):
+                await restart
+            assert await start == "url"
+
+    mock_popen.assert_not_called()
+    mock_connect.assert_awaited_once()
+    assert tunnel._stopping is False
+
+
+@pytest.mark.asyncio
 async def test_start_after_stop_clears_the_stopping_state():
     tunnel = _make_started_tunnel()
     with patch("prime_tunnel.tunnel.httpx.delete"):

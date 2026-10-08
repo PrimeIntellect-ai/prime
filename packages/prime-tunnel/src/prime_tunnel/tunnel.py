@@ -122,7 +122,9 @@ class Tunnel:
         self._config_file: Optional[Path] = None
         self._started = False
         self._stopping = False
-        self._restart_lock = asyncio.Lock()
+        # Held while frpc is being started, so start() and restart() never
+        # launch or wait on a process at the same time.
+        self._process_lock = asyncio.Lock()
         self._output_lines: list[str] = []
 
     @property
@@ -184,8 +186,16 @@ class Tunnel:
         """
         if self._started:
             raise TunnelError("Tunnel is already started")
-        self._stopping = False
 
+        # A restart() still unwinding from an earlier stop() finishes first.
+        async with self._process_lock:
+            if self._started:
+                raise TunnelError("Tunnel is already started")
+            self._stopping = False
+            return await self._register_and_connect()
+
+    async def _register_and_connect(self) -> str:
+        """Register the tunnel, start frpc and wait for it to connect."""
         # 1. Get frpc binary
         frpc_path = await asyncio.to_thread(get_frpc_path)
 
@@ -270,7 +280,10 @@ class Tunnel:
                 example because the registration no longer exists
             TunnelTimeoutError: If connection times out
         """
-        async with self._restart_lock:
+        if not self._started or self._stopping:
+            raise TunnelError("Tunnel is not started")
+
+        async with self._process_lock:
             if not self._started or self._stopping:
                 raise TunnelError("Tunnel is not started")
 

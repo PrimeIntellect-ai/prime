@@ -43,12 +43,14 @@ from ..utils import (
     output_data_as_json,
     validate_output_format,
 )
+from .rl import VOLUME_DEFAULT_SIZE
 
 app = PlainTyper(
     help="Manage volumes for dedicated run outputs and SFT datasets (closed beta)",
     no_args_is_help=True,
 )
 console = get_console()
+err_console = get_console(stderr=True)
 
 
 def _client() -> tuple[HostedTrainingClient, str | None]:
@@ -58,7 +60,9 @@ def _client() -> tuple[HostedTrainingClient, str | None]:
 @app.command()
 def create(
     name: str = typer.Argument(..., help="Volume name (lowercase letters, digits, '-')"),
-    size: str = typer.Option("5Ti", "--size", help="Size cap, e.g. 500Gi or 5Ti. Can grow later."),
+    size: str = typer.Option(
+        VOLUME_DEFAULT_SIZE, "--size", help="Size cap, e.g. 500Gi or 5Ti. Can grow later."
+    ),
     cluster: str | None = typer.Option(
         None,
         "--cluster",
@@ -69,7 +73,7 @@ def create(
     """Create a volume for your team (or yourself if you have no team)."""
     validate_output_format(output, console)
     if cluster:
-        console.print(
+        err_console.print(
             "[yellow]Warning:[/yellow] --cluster is deprecated: "
             "volumes are no longer tied to a cluster."
         )

@@ -390,7 +390,13 @@ def test_create_passes_the_cluster_through(monkeypatch):
     assert "--cluster is deprecated" in result.output
     as_json = CliRunner().invoke(app, ["volumes", "create", "ckpts", "-o", "json"], env=env)
     assert json.loads(as_json.output)["cluster"] == "gpu-east"
-    assert calls == [("ckpts", "5Ti", "t1", "gpu-east"), ("ckpts", "5Ti", "t1", None)]
+    # the deprecation warning goes to stderr so --output json stays parseable
+    warned = CliRunner().invoke(
+        app, ["volumes", "create", "ckpts", "--cluster", "gpu-east", "-o", "json"], env=env
+    )
+    assert json.loads(warned.stdout)["cluster"] == "gpu-east"
+    assert "--cluster is deprecated" not in warned.stdout
+    assert calls[:2] == [("ckpts", "5Ti", "t1", "gpu-east"), ("ckpts", "5Ti", "t1", None)]
 
 
 def test_client_sends_cluster_only_when_set():

@@ -120,7 +120,7 @@ HOSTED_TRAINING_STOP_POLL_SECONDS = 3
 HOSTED_TRAINING_STOP_MAX_POLLS = 60
 VOLUME_READY_POLL_SECONDS = 3
 VOLUME_READY_MAX_SECONDS = 180
-VOLUME_DEFAULT_SIZE = "1Ti"  # same default as `prime volumes create`
+VOLUME_DEFAULT_SIZE = "5Ti"  # same default as `prime volumes create`
 
 TERMINAL_RUN_STATUSES = {"STOPPED", "FAILED", "COMPLETED"}
 
@@ -1583,7 +1583,7 @@ def create_run(
             "volume, SFT only works with fake datasets. Full-FT and SFT "
             "only; closed beta, see `prime volumes`. Falls back to a "
             'top-level `volume = "..."` in the TOML. Created on the fly '
-            "(default 1Ti) if it doesn't exist."
+            "(default 5Ti) if it doesn't exist."
         ),
     ),
     volume_size: Optional[str] = typer.Option(
@@ -1591,7 +1591,7 @@ def create_run(
         "--volume-size",
         help=(
             "Size for the --volume if this command creates it, e.g. 500Gi or 2Ti "
-            "(default 1Ti). Ignored when the volume already exists. Falls back "
+            "(default 5Ti). Ignored when the volume already exists. Falls back "
             'to a top-level `volume_size = "..."` in the TOML.'
         ),
     ),

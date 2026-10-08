@@ -461,6 +461,7 @@ def test_upload_command_table_output(fake_client, tmp_path):
 
     assert result.exit_code == 0, result.output
     assert "Uploaded 1 batch(es)" in result.output
+    assert "prime traces list --upload-id" in result.output
     call = fake_client.calls["upload_file"]
     assert call["context"] == {"source": "hosted_eval", "suite": "s1"}
     assert call["compress"] is True
@@ -483,6 +484,16 @@ def test_upload_command_episodes_json_output(fake_client, tmp_path):
     call = fake_client.calls["upload_file"]
     assert call["line_format"].value == "episode"
     assert call["compress"] is False
+
+
+def test_upload_command_episode_hint_lists_episodes(fake_client, tmp_path):
+    episodes_file = tmp_path / "episodes.jsonl"
+    episodes_file.write_bytes(b'{"id":"ep"}\n')
+
+    result = runner.invoke(main_app, ["traces", "upload", str(episodes_file), "--episodes"])
+
+    assert result.exit_code == 0, result.output
+    assert "prime traces list --episodes --upload-id" in result.output
 
 
 def test_upload_command_rejects_malformed_context(fake_client, tmp_path):
@@ -1107,12 +1118,14 @@ def test_list_episodes_forwards_filters_and_names_them_in_the_title(fake_client)
     assert result.exit_code == 0, result.output
     assert fake_client.calls["list_episodes"] == {
         "run_id": "run_9f3k2m",
+        "upload_id": None,
         "environment_id": "tb2",
         "outcome": "failed",
         "has_error": True,
         "run_step": None,
         "created_after": None,
         "created_before": None,
+        "context": None,
         "limit": 10,
         "cursor": None,
     }
@@ -1686,6 +1699,67 @@ def test_list_forwards_the_environment_filter_in_both_modes(fake_client):
     assert episodes.exit_code == 0, episodes.output
     assert fake_client.calls["list"]["environment_id"] == "tb2"
     assert fake_client.calls["list_episodes"]["environment_id"] == "tb2"
+
+
+def test_list_forwards_the_upload_filter_in_both_modes(fake_client):
+    upload_id = "a" * 64
+    traces = runner.invoke(main_app, ["traces", "list", "--upload-id", upload_id])
+    episodes = runner.invoke(main_app, ["traces", "list", "--episodes", "--upload-id", upload_id])
+
+    assert traces.exit_code == 0, traces.output
+    assert episodes.exit_code == 0, episodes.output
+    assert fake_client.calls["list"]["upload_id"] == [upload_id]
+    assert fake_client.calls["list_episodes"]["upload_id"] == [upload_id]
+
+
+def test_list_accepts_several_upload_ids(fake_client):
+    first, second = "a" * 64, "b" * 64
+    result = runner.invoke(
+        main_app, ["traces", "list", "--episodes", "--upload-id", first, "--upload-id", second]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert fake_client.calls["list_episodes"]["upload_id"] == [first, second]
+
+
+def test_list_forwards_context_filters_in_every_mode(fake_client):
+    args = ["-c", "bundle=b-1", "--context", "source=external"]
+    expected = {"bundle": "b-1", "source": "external"}
+    traces = runner.invoke(main_app, ["traces", "list", *args])
+    episodes = runner.invoke(main_app, ["traces", "list", "--episodes", *args])
+    members = runner.invoke(main_app, ["traces", "list", "--episode-id", "ep_1", *args])
+
+    for result in (traces, episodes, members):
+        assert result.exit_code == 0, result.output
+    assert fake_client.calls["list"]["context"] == expected
+    assert fake_client.calls["list_episodes"]["context"] == expected
+    assert fake_client.calls["list_episode_traces"]["context"] == expected
+
+
+def test_list_without_context_sends_none(fake_client):
+    result = runner.invoke(main_app, ["traces", "list"])
+
+    assert result.exit_code == 0, result.output
+    assert fake_client.calls["list"]["context"] is None
+    assert fake_client.calls["list"]["upload_id"] is None
+
+
+def test_list_rejects_malformed_context(fake_client):
+    result = runner.invoke(main_app, ["traces", "list", "-c", "bundle"])
+
+    assert result.exit_code == 1
+    assert "expected key=value" in result.output
+    assert "list" not in fake_client.calls
+
+
+def test_list_rejects_the_upload_filter_with_an_episode_id(fake_client):
+    result = runner.invoke(
+        main_app, ["traces", "list", "--episode-id", "ep_1", "--upload-id", "a" * 64]
+    )
+
+    assert result.exit_code == 1
+    assert "--upload-id" in result.output and "--episode-id" in result.output
+    assert "list_episode_traces" not in fake_client.calls
 
 
 def test_plain_list_marks_failed_traces_in_words(fake_client):

@@ -287,7 +287,7 @@ def upload_traces(
     def on_batch(batch: Batch, receipt: UploadReceipt) -> None:
         if output != "json":
             console.print(
-                f"  batch {escape(receipt.upload_id[:12])}… "
+                f"  batch {escape(receipt.upload_id)} "
                 f"({batch.num_lines} lines, {batch.size / (1024 * 1024):.1f} MiB) "
                 f"[green]{escape(receipt.status)}[/green]"
             )
@@ -327,6 +327,8 @@ def upload_traces(
         )
     else:
         console.print(f"[green]Uploaded {len(receipts)} batch(es) from {escape(str(file))}[/green]")
+        list_command = "prime traces list --episodes" if episodes else "prime traces list"
+        console.print(Text(f"List a batch: {list_command} --upload-id <batch id>", style="dim"))
 
 
 PageT = TypeVar("PageT", TraceListPage, EpisodeListPage)
@@ -467,6 +469,17 @@ def _reject_options(mode: str, given: Dict[str, bool]) -> None:
 def list_traces(
     episodes: bool = typer.Option(False, "--episodes", help="List episodes instead of traces"),
     run_id: Optional[str] = typer.Option(None, "--run-id", help="Filter by run ID"),
+    upload_id: List[str] = typer.Option(
+        [],
+        "--upload-id",
+        help="Only what one upload batch stored (ID from the upload receipt); repeatable",
+    ),
+    context: List[str] = typer.Option(
+        [],
+        "--context",
+        "-c",
+        help="Filter by upload context as key=value, repeatable (e.g. -c source=hosted_eval)",
+    ),
     episode_id: Optional[str] = typer.Option(
         None, "--episode-id", help="Only this episode's traces (newest first; no --sort)"
     ),
@@ -539,24 +552,29 @@ def list_traces(
         )
     else:
         _reject_options("a trace listing (add --episodes)", {"--run-step": run_step is not None})
+    if episode_id is not None:
+        _reject_options("--episode-id", {"--upload-id": bool(upload_id)})
     if episode_id is not None and sort is not None:
         error_console.print(
             "[red]Error:[/red] --sort cannot be combined with --episode-id;"
             " an episode's traces are listed newest first"
         )
         raise typer.Exit(1)
+    context_filter = _parse_context(context)
     try:
         client = _traces_client()
 
         def fetch_episodes(page_cursor: Optional[str]) -> EpisodeListPage:
             return client.list_episodes(
                 run_id=run_id,
+                upload_id=upload_id or None,
                 environment_id=environment_id,
                 outcome=outcome,
                 has_error=has_error,
                 run_step=run_step,
                 created_after=created_after,
                 created_before=created_before,
+                context=context_filter,
                 limit=limit,
                 cursor=page_cursor,
             )
@@ -575,11 +593,13 @@ def list_traces(
                     reward_max=reward_max,
                     created_after=created_after,
                     created_before=created_before,
+                    context=context_filter,
                     limit=limit,
                     cursor=page_cursor,
                 )
             return client.list(
                 run_id=run_id,
+                upload_id=upload_id or None,
                 environment_id=environment_id,
                 task_id=task_id,
                 model_id=model_id,
@@ -589,6 +609,7 @@ def list_traces(
                 reward_max=reward_max,
                 created_after=created_after,
                 created_before=created_before,
+                context=context_filter,
                 sort=sort,
                 limit=limit,
                 cursor=page_cursor,

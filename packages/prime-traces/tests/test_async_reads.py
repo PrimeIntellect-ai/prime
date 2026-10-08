@@ -456,6 +456,23 @@ class TestEpisodes:
         assert await make_async_client(handler).get_episode_raw("ep-1") == raw
 
     @pytest.mark.asyncio
+    async def test_list_episodes_sends_several_upload_ids_and_context(self, make_async_client):
+        captured = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["params"] = request.url.params.multi_items()
+            return httpx.Response(200, json={"items": [EPISODE], "next_cursor": None})
+
+        await make_async_client(handler).list_episodes(
+            upload_id=["a" * 64, "b" * 64], context={"bundle": "b-1"}
+        )
+        assert captured["params"] == [
+            ("upload_id", "a" * 64),
+            ("upload_id", "b" * 64),
+            ("context.bundle", "b-1"),
+        ]
+
+    @pytest.mark.asyncio
     async def test_list_episodes_forwards_step_filters(self, make_async_client):
         captured = {}
 

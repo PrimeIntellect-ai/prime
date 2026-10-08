@@ -42,8 +42,13 @@ for summary in page.items:
 for summary in client.iter(task_id="tb2-0187"):   # paginates for you
     ...
 
-# Everything one upload batch stored (works for list_episodes too)
-page = client.list(upload_id=receipts[0].upload_id)
+# Everything one upload stored (works for list_episodes too); a large upload
+# returns one receipt per batch, so pass them all
+page = client.list(upload_id=[receipt.upload_id for receipt in receipts])
+
+# Or label uploads yourself and filter on the label, across batches and files
+client.upload_file("episodes.jsonl", line_format=LineFormat.EPISODE, context={"bundle": "v4"})
+page = client.list_episodes(context={"bundle": "v4"})
 
 summary = client.get(trace_id)
 raw     = client.get_raw(trace_id)                 # exact stored document

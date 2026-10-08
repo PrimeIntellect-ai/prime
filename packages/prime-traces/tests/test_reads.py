@@ -571,6 +571,32 @@ class TestEpisodes:
         assert episode.environment_id == "terminal-bench-2"
         assert episode.error.type is None
 
+    def test_list_episodes_sends_several_upload_ids_and_context(self, make_client):
+        captured = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["params"] = request.url.params.multi_items()
+            return httpx.Response(200, json={"items": [EPISODE], "next_cursor": None})
+
+        make_client(handler).list_episodes(
+            upload_id=["a" * 64, "b" * 64], context={"bundle": "b-1"}
+        )
+        assert captured["params"] == [
+            ("upload_id", "a" * 64),
+            ("upload_id", "b" * 64),
+            ("context.bundle", "b-1"),
+        ]
+
+    def test_list_treats_an_empty_upload_id_list_as_unset(self, make_client):
+        captured = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["params"] = request.url.params.multi_items()
+            return httpx.Response(200, json={"items": [], "next_cursor": None})
+
+        make_client(handler).list(upload_id=[])
+        assert captured["params"] == []
+
     def test_list_episodes_forwards_step_filters(self, make_client):
         # Episodes have no step of their own; the service matches them
         # through their member traces' run_step.

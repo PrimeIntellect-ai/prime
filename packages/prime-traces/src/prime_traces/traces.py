@@ -22,7 +22,19 @@ import json
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Protocol, Union
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Mapping,
+    Optional,
+    Protocol,
+    Sequence,
+    Union,
+)
 from urllib.parse import quote
 
 from .batching import (
@@ -108,6 +120,16 @@ def _build_params(
         for key, value in context.items():
             params[f"context.{key}"] = value
     return params
+
+
+UploadIds = Union[str, Sequence[str]]
+
+
+def _upload_ids(upload_id: Optional[UploadIds]) -> Optional[Union[str, List[str]]]:
+    """One ID, or several sent as a repeated parameter; an empty list is unset."""
+    if upload_id is None or isinstance(upload_id, str):
+        return upload_id
+    return list(upload_id) or None
 
 
 def _encoded_id_segment(identifier: str, *, parameter_name: str) -> str:
@@ -329,7 +351,7 @@ class TracesClient:
         self,
         *,
         run_id: Optional[str] = None,
-        upload_id: Optional[str] = None,
+        upload_id: Optional[UploadIds] = None,
         environment_id: Optional[str] = None,
         model_id: Optional[str] = None,
         model_provider: Optional[str] = None,
@@ -351,12 +373,13 @@ class TracesClient:
         ``created_after``/``created_before`` also prune storage partitions, so
         they are the cheapest filters available. ``context`` filters are
         equality-only against the batch-supplied map. ``upload_id`` is the ID
-        in an ``UploadReceipt``, so it selects the traces one batch stored.
+        in an ``UploadReceipt``, so it selects the traces one batch stored;
+        pass every receipt's ID to select an upload that spanned batches.
         """
         params = _build_params(
             (
                 ("run_id", run_id),
-                ("upload_id", upload_id),
+                ("upload_id", _upload_ids(upload_id)),
                 ("environment_id", environment_id),
                 ("model_id", model_id),
                 ("model_provider", model_provider),
@@ -541,7 +564,7 @@ class TracesClient:
         self,
         *,
         run_id: Optional[str] = None,
-        upload_id: Optional[str] = None,
+        upload_id: Optional[UploadIds] = None,
         environment_id: Optional[str] = None,
         outcome: Optional[str] = None,
         has_error: Optional[bool] = None,
@@ -550,22 +573,24 @@ class TracesClient:
         step_max: Optional[int] = None,
         created_after: Optional[str] = None,
         created_before: Optional[str] = None,
+        context: Optional[Dict[str, str]] = None,
         limit: Optional[int] = None,
         cursor: Optional[str] = None,
     ) -> EpisodeListPage:
         """List episode summaries using the server's complete filter set.
 
         ``environment_id`` is extracted from the canonical episode
-        ``env.id``. Episodes carry no upload ``context`` map. Episodes have no
-        step of their own: ``run_step``, ``step_min`` and ``step_max`` match an
-        episode when one of its member traces has a matching ``run_step``.
-        ``upload_id`` is the ID in an ``UploadReceipt``, so it selects the
-        episodes one batch stored.
+        ``env.id``. Episodes have no step or upload ``context`` of their own:
+        ``run_step``, ``step_min``, ``step_max`` and ``context`` match an
+        episode when one of its member traces matches, so an episode with no
+        traces never matches them. ``upload_id`` is the ID in an
+        ``UploadReceipt``, so it selects the episodes one batch stored; pass
+        every receipt's ID to select an upload that spanned batches.
         """
         params = _build_params(
             (
                 ("run_id", run_id),
-                ("upload_id", upload_id),
+                ("upload_id", _upload_ids(upload_id)),
                 ("environment_id", environment_id),
                 ("outcome", outcome),
                 ("has_error", has_error),
@@ -576,7 +601,8 @@ class TracesClient:
                 ("created_before", created_before),
                 ("limit", limit),
                 ("cursor", cursor),
-            )
+            ),
+            context,
         )
         return EpisodeListPage.model_validate(self.client.get_json("/episodes", params=params))
 

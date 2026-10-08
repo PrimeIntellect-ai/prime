@@ -43,12 +43,14 @@ from .models import (
 from .traces import (
     DEFAULT_MAX_ATTEMPTS,
     TraceRecord,
+    UploadIds,
     _build_params,
     _encode_record,
     _episode_endpoint,
     _record_lines,
     _run_search_endpoint,
     _trace_endpoint,
+    _upload_ids,
 )
 
 #: An ``on_batch`` hook may be a plain callable or a coroutine function; the
@@ -360,7 +362,7 @@ class AsyncTracesClient:
         self,
         *,
         run_id: Optional[str] = None,
-        upload_id: Optional[str] = None,
+        upload_id: Optional[UploadIds] = None,
         environment_id: Optional[str] = None,
         model_id: Optional[str] = None,
         model_provider: Optional[str] = None,
@@ -382,12 +384,13 @@ class AsyncTracesClient:
         ``created_after``/``created_before`` also prune storage partitions, so
         they are the cheapest filters available. ``context`` filters are
         equality-only against the batch-supplied map. ``upload_id`` is the ID
-        in an ``UploadReceipt``, so it selects the traces one batch stored.
+        in an ``UploadReceipt``, so it selects the traces one batch stored;
+        pass every receipt's ID to select an upload that spanned batches.
         """
         params = _build_params(
             (
                 ("run_id", run_id),
-                ("upload_id", upload_id),
+                ("upload_id", _upload_ids(upload_id)),
                 ("environment_id", environment_id),
                 ("model_id", model_id),
                 ("model_provider", model_provider),
@@ -581,7 +584,7 @@ class AsyncTracesClient:
         self,
         *,
         run_id: Optional[str] = None,
-        upload_id: Optional[str] = None,
+        upload_id: Optional[UploadIds] = None,
         environment_id: Optional[str] = None,
         outcome: Optional[str] = None,
         has_error: Optional[bool] = None,
@@ -590,22 +593,24 @@ class AsyncTracesClient:
         step_max: Optional[int] = None,
         created_after: Optional[str] = None,
         created_before: Optional[str] = None,
+        context: Optional[Dict[str, str]] = None,
         limit: Optional[int] = None,
         cursor: Optional[str] = None,
     ) -> EpisodeListPage:
         """List episode summaries using the server's complete filter set.
 
         ``environment_id`` is extracted from the canonical episode
-        ``env.id``. Episodes carry no upload ``context`` map. Episodes have no
-        step of their own: ``run_step``, ``step_min`` and ``step_max`` match an
-        episode when one of its member traces has a matching ``run_step``.
-        ``upload_id`` is the ID in an ``UploadReceipt``, so it selects the
-        episodes one batch stored.
+        ``env.id``. Episodes have no step or upload ``context`` of their own:
+        ``run_step``, ``step_min``, ``step_max`` and ``context`` match an
+        episode when one of its member traces matches, so an episode with no
+        traces never matches them. ``upload_id`` is the ID in an
+        ``UploadReceipt``, so it selects the episodes one batch stored; pass
+        every receipt's ID to select an upload that spanned batches.
         """
         params = _build_params(
             (
                 ("run_id", run_id),
-                ("upload_id", upload_id),
+                ("upload_id", _upload_ids(upload_id)),
                 ("environment_id", environment_id),
                 ("outcome", outcome),
                 ("has_error", has_error),
@@ -616,7 +621,8 @@ class AsyncTracesClient:
                 ("created_before", created_before),
                 ("limit", limit),
                 ("cursor", cursor),
-            )
+            ),
+            context,
         )
         return EpisodeListPage.model_validate(
             await self.client.get_json("/episodes", params=params)

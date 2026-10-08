@@ -758,6 +758,34 @@ def test_pipe_drain_forwards_frpc_lines_at_their_level(caplog):
     assert len(tunnel.recent_output) == 4
 
 
+def test_pipe_drain_keeps_a_replaced_process_out_of_the_new_buffer():
+    import io
+    import os
+
+    tunnel = _make_started_tunnel()
+    read_fd, write_fd = os.pipe()
+    old_process = MagicMock()
+    old_process.stdout = os.fdopen(read_fd, "r")
+    old_process.stderr = io.StringIO("")
+    tunnel._start_pipe_drain(old_process)
+    old_threads = tunnel._drain_threads
+
+    new_process = MagicMock()
+    new_process.stdout = io.StringIO("new frpc line\n")
+    new_process.stderr = io.StringIO("")
+    tunnel._process = new_process
+    tunnel._start_pipe_drain(new_process)
+    for t in tunnel._drain_threads:
+        t.join(timeout=2.0)
+
+    with os.fdopen(write_fd, "w") as old_stdout:
+        old_stdout.write("late line from the old frpc\n")
+    for t in old_threads:
+        t.join(timeout=2.0)
+
+    assert tunnel.recent_output == ["new frpc line"]
+
+
 def test_pipe_drain_logs_unparsed_lines_at_info(caplog):
     import logging
 

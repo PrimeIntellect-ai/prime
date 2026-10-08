@@ -437,9 +437,13 @@ class Tunnel:
         if process is None:
             return
 
-        self._output_lock = threading.Lock()
+        # Each process gets its own lock and buffer, so a drain thread left
+        # over from a replaced frpc cannot write into the new one's output.
         max_lines = 50
-        self._recent_output: list[str] = list(self._output_lines[-max_lines:])
+        lock = threading.Lock()
+        recent: list[str] = list(self._output_lines[-max_lines:])
+        self._output_lock = lock
+        self._recent_output = recent
         tunnel_id = self.tunnel_id
 
         def drain_pipe(pipe):
@@ -450,10 +454,10 @@ class Tunnel:
                 for line in pipe:
                     line = line.rstrip("\n")
                     if line:
-                        with self._output_lock:
-                            self._recent_output.append(line)
-                            if len(self._recent_output) > max_lines:
-                                self._recent_output.pop(0)
+                        with lock:
+                            recent.append(line)
+                            if len(recent) > max_lines:
+                                recent.pop(0)
                         _log_frpc_line(line, tunnel_id)
             except (OSError, ValueError):
                 pass  # Pipe closed

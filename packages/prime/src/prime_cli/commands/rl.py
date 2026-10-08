@@ -3234,8 +3234,9 @@ def list_components(
 ) -> None:
     """List pods (trainer/orchestrator + env-servers) for a run.
 
-    SFT runs are trainer-only (no orchestrator pod), so they list the
-    trainer; RL runs list the orchestrator.
+    RL runs list the orchestrator; SFT runs list the trainer, since the
+    release has no orchestrator pod. An SFT run WITH online evals lists the
+    eval pod (shown as ``orchestrator``) and its inference pool too.
 
     Use the env name shown here with
     ``prime train logs <run_id> -c env-server --env <name>``. When multiple
@@ -3260,10 +3261,23 @@ def list_components(
     table.add_column("Env", style="green")
     table.add_column("Status")
 
-    # SFT runs are trainer-only — the release has no orchestrator pod.
-    # Mirrors the platform's dedicated_primary_component choice.
-    primary_component = "trainer" if run.loss == "sft" else "orchestrator"
-    table.add_row(primary_component, "-", run.status)
+    # SFT runs are trainer-only — the release has no orchestrator pod —
+    # UNLESS they carry online evals (ENG-6565), which add an inference pool
+    # and an eval pod that the chart renders under the `orchestrator` role.
+    # Mirrors the platform's dedicated_primary_component choice, plus the
+    # same `[eval]` probe the dashboard's log tabs use.
+    is_sft = run.loss == "sft"
+    run_config = run.run_config if isinstance(run.run_config, dict) else {}
+    sft_online_eval = is_sft and isinstance(run_config.get("eval"), dict)
+
+    # Only the primary carries the run's status; the platform exposes no
+    # per-pod status for the others, so they show "-" like env-servers.
+    table.add_row("trainer" if is_sft else "orchestrator", "-", run.status)
+    if sft_online_eval:
+        # Readable with `-c orchestrator` / `-c inference`; without these rows
+        # the eval pod and its inference pool are invisible from the CLI.
+        table.add_row("orchestrator", "-", "-")
+        table.add_row("inference", "-", "-")
 
     name_counts: Dict[str, int] = {}
     for es in env_servers:

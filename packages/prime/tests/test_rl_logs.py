@@ -34,9 +34,14 @@ def _no_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("prime_cli.commands.rl.time.sleep", lambda _: None)
 
 
-def _run_payload(status: str = "RUNNING", loss: str = "rl") -> Dict[str, Any]:
+def _run_payload(
+    status: str = "RUNNING",
+    loss: str = "rl",
+    run_config: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
     now = datetime.now(timezone.utc).isoformat()
     return {
+        "runConfig": run_config,
         "id": RUN_ID,
         "name": "demo",
         "userId": "u1",
@@ -65,6 +70,7 @@ def _make_mock_get(
                 "run": _run_payload(
                     responses.get("run_status", "RUNNING"),
                     responses.get("run_loss", "rl"),
+                    responses.get("run_config"),
                 )
             }
         if endpoint == f"/rft/runs/{RUN_ID}/logs":
@@ -695,3 +701,70 @@ def test_parse_since_accepts_human_durations(value: str | None, expected: int | 
 def test_parse_since_rejects_out_of_window_values(value: str) -> None:
     with pytest.raises(typer.BadParameter):
         rl_commands._parse_since(value)
+
+
+def test_components_lists_eval_pod_and_inference_for_sft_online_evals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SFT WITH online evals (ENG-6565) is no longer trainer-only: the chart
+    renders an eval pod under the `orchestrator` role plus an inference pool.
+    Hiding them leaves `-c orchestrator` / `-c inference` undiscoverable even
+    though both have logs."""
+    orch: List[Dict[str, Any]] = []
+    env: List[Dict[str, Any]] = []
+    lst: List[Dict[str, Any]] = []
+    mock_get = _make_mock_get(
+        {
+            "run_status": "RUNNING",
+            "run_loss": "sft",
+            "run_config": {"eval": {"interval": 5}},
+            "env_servers": [
+                {
+                    "env_name": "eval-reverse-text",
+                    "env_index": 0,
+                    "pod_name": "fft-sft-eval-smoke-env-0-0",
+                    "status": "Running",
+                }
+            ],
+        },
+        orch,
+        env,
+        lst,
+    )
+    monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+
+    result = CliRunner().invoke(app, ["rl", "components", RUN_ID])
+
+    assert result.exit_code == 0, result.output
+    out = " ".join(result.output.split())
+    for expected in ("trainer", "orchestrator", "inference", "eval-reverse-text"):
+        assert expected in out, f"{expected!r} missing from: {out}"
+
+
+def test_components_trainer_only_sft_still_hides_the_rollout_side(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A runConfig without [eval] keeps the pre-ENG-6565 behaviour."""
+    orch: List[Dict[str, Any]] = []
+    env: List[Dict[str, Any]] = []
+    lst: List[Dict[str, Any]] = []
+    mock_get = _make_mock_get(
+        {
+            "run_status": "RUNNING",
+            "run_loss": "sft",
+            "run_config": {"max_steps": 10},
+            "env_servers": [],
+        },
+        orch,
+        env,
+        lst,
+    )
+    monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+
+    result = CliRunner().invoke(app, ["rl", "components", RUN_ID])
+
+    assert result.exit_code == 0, result.output
+    out = " ".join(result.output.split())
+    assert "trainer" in out
+    assert "orchestrator" not in out
+    assert "inference" not in out

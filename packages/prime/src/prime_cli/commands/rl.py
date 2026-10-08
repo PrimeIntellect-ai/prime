@@ -77,6 +77,7 @@ RL_MODELS_JSON_HELP = json_output_help(
     "effective_inference_input_price_per_mtok?, "
     "effective_inference_output_price_per_mtok?, promo_label?}",
     ".available_fft_models[]? = {name, clusters[{cluster_id, cluster_name, gpu_type?}]}",
+    ".on_demand[]? = {gpu_type, price_per_gpu_hour, available_now, discount_label?, is_beta}",
 )
 
 RL_LIST_JSON_HELP = json_output_help(
@@ -2171,10 +2172,7 @@ def list_models(
                     # false when clusters are healthy and the account
                     # simply is not enrolled. State the actual reason
                     # instead of a guess followed by a correction.
-                    console.print(
-                        "[yellow]No models available for Hosted Training."
-                        "[/yellow]"
-                    )
+                    console.print("[yellow]No models available for Hosted Training.[/yellow]")
                     console.print(
                         "[dim]On-demand training is in beta. Contact Prime "
                         "support to request access.[/dim]"

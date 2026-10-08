@@ -89,9 +89,13 @@ class OnDemandGpuTypeAvailability(BaseModel):
     rather than being rejected, so the models table is a speed hint here
     rather than a list of what you may train.
 
-    `available_now` is a boolean rather than a GPU count on purpose: the
-    API does not expose fleet capacity, only whether your run starts or
-    queues.
+    `available_now` is a coarse capacity hint, not an admission decision:
+    it says the backend currently reports some free pool headroom for the
+    GPU type, never that this run will start now — actual placement also
+    needs headroom for the run's GPU count and topology, which the
+    discovery endpoint knows nothing about (and the backend's physical
+    free capacity can even be unknown). Rendered as available/busy with a
+    queue caveat, never a start-time promise.
     """
 
     gpu_type: str = Field(..., alias="gpuType")
@@ -108,13 +112,15 @@ class AvailableFFTModelsResponse(BaseModel):
     """Response from GET /v1/training/available-fft-models."""
 
     models: list[AvailableFFTModel] = Field(default_factory=list)
-    on_demand: list[OnDemandGpuTypeAvailability] = Field(
-        default_factory=list, alias="onDemand"
-    )
-    # False means `on_demand` is empty because the account is not enrolled,
-    # not because capacity is missing — lets the empty state say "ask for
-    # access" instead of "nothing is running".
-    on_demand_beta_access: bool = Field(False, alias="onDemandBetaAccess")
+    on_demand: list[OnDemandGpuTypeAvailability] = Field(default_factory=list, alias="onDemand")
+    # Three states. Explicit False: the account is not enrolled in the
+    # on-demand beta, so an empty `on_demand` list is an access denial —
+    # the only case where "contact support to request access" is the right
+    # message. Explicit True: enrolled, an empty list just means no
+    # capacity is currently listed. None: no enrollment signal reached us
+    # (older backend that omits the field, a swallowed 404/discovery
+    # error) — must never be rendered as a denial.
+    on_demand_beta_access: bool | None = Field(None, alias="onDemandBetaAccess")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -370,9 +376,7 @@ class HostedTrainingClient:
         response = self.client.get("/training/available-gpu-types", params=params)
         return AvailableGpuTypesResponse.model_validate(response)
 
-    def get_available_fft(
-        self, team_id: str | None = None
-    ) -> AvailableFFTModelsResponse:
+    def get_available_fft(self, team_id: str | None = None) -> AvailableFFTModelsResponse:
         """GET /v1/training/available-fft-models, whole response.
 
         Carries both capacity paths: `models` is reserved capacity (repos
@@ -381,8 +385,9 @@ class HostedTrainingClient:
         this rather than `list_available_fft_models` when you need both,
         so the two sections come from one request and cannot disagree.
 
-        404 is swallowed to an empty response so the CLI still renders on
-        older backends that haven't shipped the endpoint. Every other
+        404 is swallowed to an empty response (whose beta-enrollment flag
+        is unknown, not denied) so the CLI still renders on older
+        backends that haven't shipped the endpoint. Every other
         error (auth failure, forbidden, server errors) propagates — the
         caller decides whether to surface or hide it based on whether the
         LoRA section already ran.

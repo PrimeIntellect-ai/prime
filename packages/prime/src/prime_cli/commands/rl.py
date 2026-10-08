@@ -78,6 +78,10 @@ RL_MODELS_JSON_HELP = json_output_help(
     "effective_inference_output_price_per_mtok?, promo_label?}",
     ".available_fft_models[]? = {name, clusters[{cluster_id, cluster_name, gpu_type?}]}",
     ".on_demand[]? = {gpu_type, price_per_gpu_hour, available_now, discount_label?, is_beta}",
+    # available_now = the backend reports some free pool headroom for the
+    # GPU type; a run can still queue on GPU count/topology.
+    ".on_demand_beta_access? = true | false — known on-demand beta enrollment; "
+    "false means 'not enrolled', absent means the backend did not report it",
 )
 
 RL_LIST_JSON_HELP = json_output_help(
@@ -2101,9 +2105,13 @@ def list_models(
 
     Renders two sections when both are populated: the shared-cluster LoRA
     models (pricing per 1M tokens) and the models pre-cached on FFT
-    dispatch clusters. The FFT section is silent when the API returns
-    nothing so users on backends without the endpoint see the pre-4782
-    output.
+    dispatch clusters, plus purchasable on-demand capacity as a third
+    section when the backend reports it. The FFT section is silent when
+    the API returns nothing so users on backends without the endpoint see
+    the pre-4782 output. The on-demand beta-enrollment flag is tri-state:
+    explicit false/true are reported as backend data; unknown (field
+    absent, 404, or a failed fetch) is treated as no signal, never as a
+    denial.
     """
     from ..api.training import AvailableFFTModel, HostedTrainingClient
 
@@ -2134,7 +2142,9 @@ def list_models(
                 raise
             fft_models = []
             on_demand = []
-            on_demand_beta_access = False
+            # Unknown, not denied: a failed fetch is no evidence that the
+            # account lacks beta access, so never fall back to False here.
+            on_demand_beta_access = None
 
         if output == "json":
             if fft_only:
@@ -2151,32 +2161,16 @@ def list_models(
                     payload["available_fft_models"] = [m.model_dump() for m in fft_models]
             if on_demand:
                 payload["on_demand"] = [o.model_dump() for o in on_demand]
+            if on_demand_beta_access is not None:
+                # `is not None` so an explicit false survives (a denial is
+                # data); unknown — older backend, 404, swallowed error —
+                # is omitted so old-backend JSON stays byte-compatible.
+                payload["on_demand_beta_access"] = on_demand_beta_access
             output_data_as_json(payload, console)
             return
 
-        if not fft_only:
-            if models:
-                _render_lora_models_table(models)
-            elif not fft_models and not on_demand:
-                # Every section empty — surface the LoRA fallback so the
-                # user sees *something*. Skipped when FFT or on-demand
-                # has data, so a populated table is never preceded by a
-                # misleading "no models available" banner. On-demand
-                # counts here: a caller with no reserved clusters used to
-                # get the empty banner even when there was capacity they
-                # could buy, which read as "nothing is running".
-                if on_demand_beta_access:
-                    _render_empty_lora_message()
-                else:
-                    # Don't print the cluster-health fallback here: it is
-                    # false when clusters are healthy and the account
-                    # simply is not enrolled. State the actual reason
-                    # instead of a guess followed by a correction.
-                    console.print("[yellow]No models available for Hosted Training.[/yellow]")
-                    console.print(
-                        "[dim]On-demand training is in beta. Contact Prime "
-                        "support to request access.[/dim]"
-                    )
+        if not fft_only and models:
+            _render_lora_models_table(models)
 
         if fft_models:
             if not fft_only and models:
@@ -2184,11 +2178,14 @@ def list_models(
                 # rendered — otherwise we'd print a stray blank line.
                 console.print()
             _render_fft_models_table(fft_models)
-        elif fft_only and not on_demand:
-            console.print("[yellow]No FFT models available.[/yellow]")
-            console.print(
-                "[dim]No dispatchable clusters have a warm model cache yet, or the "
-                "endpoint isn't deployed on this backend.[/dim]"
+        elif not fft_models and not on_demand:
+            # Both discovery sections came back empty: explain why from
+            # the enrollment flag the backend actually reported, in either
+            # table mode — never from the mere absence of data. The reason
+            # is shared so the default and --fft-only views cannot
+            # disagree about the enrollment contract.
+            _render_discovery_empty_state(
+                on_demand_beta_access, fft_only=fft_only, lora_rendered=bool(models)
             )
 
         if on_demand:
@@ -2201,17 +2198,54 @@ def list_models(
         raise typer.Exit(1)
 
 
-def _render_empty_lora_message() -> None:
-    """Print the LoRA-empty fallback used when neither section has data."""
-    console.print("[yellow]No models available for Hosted Training.[/yellow]")
-    console.print("[dim]This could mean no healthy Hosted Training clusters are running.[/dim]")
+def _render_discovery_empty_state(
+    on_demand_beta_access: bool | None, *, fft_only: bool, lora_rendered: bool
+) -> None:
+    """Explain an empty FFT/on-demand discovery without guessing the cause.
+
+    Shared by the default and `--fft-only` table modes so the enrollment
+    contract reads the same in both. Three states:
+
+    - Explicit false is the backend saying the account is not enrolled in
+      the on-demand beta — the only state where asking for access is the
+      right next step.
+    - Explicit true means enrollment is fine and no on-demand capacity is
+      currently listed; that must not be blamed on enrollment or a
+      missing endpoint.
+    - None means no enrollment signal reached us (older backend that
+      omits the field, a swallowed 404, or a failed fetch). Stay neutral
+      — an unavailable or empty endpoint is not evidence of missing
+      access — and keep the wording each mode had before on-demand
+      existed.
+    """
+    if fft_only:
+        console.print("[yellow]No FFT models available.[/yellow]")
+    elif not lora_rendered:
+        # Default mode with nothing rendered at all: keep the "you saw
+        # something" banner so the command never exits silently blank.
+        console.print("[yellow]No models available for Hosted Training.[/yellow]")
+    if on_demand_beta_access is False:
+        console.print(
+            "[dim]On-demand training is in beta. Contact Prime support to request access.[/dim]"
+        )
+    elif on_demand_beta_access is True:
+        console.print("[dim]No on-demand capacity is currently listed.[/dim]")
+    elif fft_only:
+        console.print(
+            "[dim]No dispatchable clusters have a warm model cache yet, or the "
+            "endpoint isn't deployed on this backend.[/dim]"
+        )
+    elif not lora_rendered:
+        # Unknown enrollment in default mode: the legacy neutral fallback,
+        # not a guessed beta denial.
+        console.print("[dim]This could mean no healthy Hosted Training clusters are running.[/dim]")
 
 
 def _render_lora_models_table(models: list) -> None:
     """Render the classic LoRA Hosted Training model listing.
 
     Caller is responsible for handling the empty-list case (via
-    `_render_empty_lora_message`) — this helper assumes at least one
+    `_render_discovery_empty_state`) — this helper assumes at least one
     row to render.
     """
     table = Table(
@@ -2288,8 +2322,12 @@ def _render_on_demand_table(on_demand: list) -> None:
     downloads a model that is not cached instead of being rejected — the
     model table above covers what is warm.
 
-    "Starts" is whether a run would begin immediately or queue. No GPU
-    counts: the API does not publish fleet capacity.
+    `available_now` reports that the backend currently sees some free
+    pool headroom for the GPU type — a coarse capacity hint, not an
+    admission decision: whether a run starts or queues also depends on
+    its GPU count and topology, which the discovery endpoint knows
+    nothing about. Hence a `Capacity` column (available/busy) plus a
+    queue caveat, never a start-time promise.
     """
     beta = any(entry.is_beta for entry in on_demand)
     table = Table(
@@ -2299,21 +2337,25 @@ def _render_on_demand_table(on_demand: list) -> None:
     )
     table.add_column("GPU Type", style="magenta")
     table.add_column("$/GPU-hr", style="green", justify="right")
-    table.add_column("Starts")
+    table.add_column("Capacity")
 
     promos = []
     for entry in on_demand:
         table.add_row(
             entry.gpu_type,
             f"${entry.price_per_gpu_hour:.2f}",
-            "[green]now[/green]" if entry.available_now else "[yellow]queued[/yellow]",
+            "[green]available[/green]" if entry.available_now else "[yellow]busy[/yellow]",
         )
         if entry.discount_label:
             promos.append(entry.discount_label)
 
+    # The rate is snapshotted at dispatch (queue promotion reuses it),
+    # while billable time only starts once pods are ready — two different
+    # events the old caption conflated into "when the run starts".
     caption = [
-        "[dim]Billed per GPU-hour, prorated to the second, from the rate "
-        "fixed when the run starts.[/dim]",
+        "[dim]Rate fixed at dispatch; billed per GPU-hour from when pods "
+        "are ready, prorated to the second.[/dim]",
+        "[dim]Runs may queue depending on GPU count and topology.[/dim]",
     ]
     if promos:
         joined = ", ".join(rich_escape(label) for label in sorted(set(promos)))

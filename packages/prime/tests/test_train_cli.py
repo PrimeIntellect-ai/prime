@@ -3,6 +3,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+import pytest
 from prime_cli.main import app
 from typer.testing import CliRunner
 
@@ -822,3 +823,153 @@ def test_train_get_prints_a_shared_runs_cluster(monkeypatch) -> None:
 
     assert result.exit_code == 0, result.output
     assert "Cluster: oes1yd0lubfsku6iekofnoau" in result.output
+
+
+# --- on-demand billed launch output -----------------------------------------
+#
+# The backend derives placement server-side, so the CLI echoes what the
+# run costs from the create-response wire fields. These tests mock
+# APIClient.post for /training/runs (the wire layer) rather than
+# HostedTrainingClient.create_run, so the camelCase aliases are parsed by
+# the real response model.
+
+_BILLED_RESPONSE = {
+    "runId": "run-priced",
+    "tokenValue": "SECRET",
+    "onDemand": True,
+    "gpuType": "H100_80GB",
+    "pricePerGpuHour": 1.5,
+    "estimatedCostPerHour": 12.0,
+    "isBeta": True,
+}
+
+
+def _mock_run_post(monkeypatch, response: dict[str, Any]) -> dict[str, Any]:
+    captured: dict[str, Any] = {}
+
+    def mock_post(self: Any, endpoint: str, json: dict[str, Any] | None = None) -> dict:
+        captured["endpoint"] = endpoint
+        captured["json"] = json
+        return response
+
+    monkeypatch.setattr("prime_cli.core.APIClient.post", mock_post)
+    return captured
+
+
+@pytest.mark.parametrize("is_beta", [True, False], ids=["beta", "stable"])
+def test_train_fft_billed_dispatch_prints_price_and_beta_label(
+    monkeypatch, tmp_path: Path, is_beta: bool
+) -> None:
+    _mock_run_post(monkeypatch, dict(_BILLED_RESPONSE, isBeta=is_beta))
+    cfg = tmp_path / "fft.toml"
+    cfg.write_text(_FFT_BODY)
+
+    result = runner.invoke(
+        app, ["train", str(cfg), "--yes"], env={**TEST_ENV, "PRIME_API_KEY": "test-key"}
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Dispatched" in result.output
+    assert "run-priced" in result.output
+    assert "H100_80GB" in result.output
+    assert "$1.50/GPU-hr" in result.output
+    assert "~$12.00/hr" in result.output
+    # Readiness wording: billable time starts at pod readiness.
+    assert "Billing starts when the pods are ready" in result.output
+    # The (beta) badge is server-driven and retires without a CLI release.
+    if is_beta:
+        assert "On-demand (beta)" in result.output
+    else:
+        assert "On-demand" in result.output
+        assert "(beta)" not in result.output
+    # The per-run token is bound into a k8s Secret server-side and must
+    # never reach stdout.
+    assert "SECRET" not in result.output
+
+
+def test_train_fft_billed_json_keeps_cost_facts_and_hides_token(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _mock_run_post(monkeypatch, _BILLED_RESPONSE)
+    cfg = tmp_path / "fft.toml"
+    cfg.write_text(_FFT_BODY)
+
+    result = runner.invoke(
+        app,
+        ["train", str(cfg), "--yes", "--output", "json"],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key"},
+    )
+
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.stdout)
+    assert data["run"] == {
+        "runId": "run-priced",
+        "onDemand": True,
+        "gpuType": "H100_80GB",
+        "pricePerGpuHour": 1.5,
+        "estimatedCostPerHour": 12.0,
+        "isBeta": True,
+    }
+    assert "tokenValue" not in data["run"]
+    assert "SECRET" not in result.stdout
+
+
+def test_train_fft_reserved_response_prints_no_billing_line(monkeypatch, tmp_path: Path) -> None:
+    """A reserved run has no hourly rate — no billing line may be
+    fabricated for it."""
+    captured = _mock_run_post(monkeypatch, {"runId": "r1", "tokenValue": "t"})
+    cfg = tmp_path / "fft.toml"
+    cfg.write_text(_FFT_BODY)
+
+    result = runner.invoke(
+        app, ["train", str(cfg), "--yes"], env={**TEST_ENV, "PRIME_API_KEY": "test-key"}
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["endpoint"] == "/training/runs"
+    assert "On-demand" not in result.output
+    assert "GPU-hr" not in result.output
+
+
+def test_train_fft_on_demand_false_with_null_costs_prints_no_billing_line(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """`onDemand: false` may carry null cost fields (older backends omit
+    them entirely): must parse, exit 0, and print no billing line."""
+    response = {
+        "runId": "r1",
+        "tokenValue": "t",
+        "onDemand": False,
+        "gpuType": None,
+        "pricePerGpuHour": None,
+        "estimatedCostPerHour": None,
+        "isBeta": False,
+    }
+    _mock_run_post(monkeypatch, response)
+    cfg = tmp_path / "fft.toml"
+    cfg.write_text(_FFT_BODY)
+
+    result = runner.invoke(
+        app, ["train", str(cfg), "--yes"], env={**TEST_ENV, "PRIME_API_KEY": "test-key"}
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "On-demand" not in result.output
+
+
+def test_train_fft_billed_zero_rate_is_visible(monkeypatch, tmp_path: Path) -> None:
+    """A billed run at $0 is a real fact, not an unknown — it must render
+    as $0.00 rather than being swallowed."""
+    _mock_run_post(
+        monkeypatch, dict(_BILLED_RESPONSE, pricePerGpuHour=0.0, estimatedCostPerHour=0.0)
+    )
+    cfg = tmp_path / "fft.toml"
+    cfg.write_text(_FFT_BODY)
+
+    result = runner.invoke(
+        app, ["train", str(cfg), "--yes"], env={**TEST_ENV, "PRIME_API_KEY": "test-key"}
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "$0.00/GPU-hr" in result.output
+    assert "~$0.00/hr" in result.output

@@ -10,6 +10,7 @@ lives server-side: the admission check returns a 400 synchronously, so the
 CLI doesn't duplicate it.
 """
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -324,3 +325,96 @@ def test_train_sft_missing_volume_created_with_requested_size(tmp_path: Path, mo
     payload = captured["json"]
     assert payload["mode"] == "sft"
     assert payload["volume"] == "research"
+
+
+# --- billed on-demand launch output -----------------------------------------
+#
+# Same contract as the FFT launch tests in test_train_cli.py: mock
+# APIClient.post for /training/runs so the camelCase wire aliases go
+# through the real response model, and assert the echoed placement/cost
+# facts (and only those — never the run token).
+
+
+def _mock_run_post(monkeypatch, response: dict[str, Any]) -> dict[str, Any]:
+    captured: dict[str, Any] = {}
+
+    def mock_post(self: Any, endpoint: str, json: dict[str, Any] | None = None) -> dict:
+        captured["endpoint"] = endpoint
+        captured["json"] = json
+        return response
+
+    monkeypatch.setattr("prime_cli.core.APIClient.post", mock_post)
+    return captured
+
+
+_SFT_BILLED_RESPONSE = {
+    "runId": "run-priced",
+    "tokenValue": "SECRET",
+    "onDemand": True,
+    "gpuType": "H100_80GB",
+    "pricePerGpuHour": 1.5,
+    "estimatedCostPerHour": 12.0,
+    "isBeta": True,
+}
+
+
+def test_train_sft_billed_dispatch_prints_price_and_beta_label(tmp_path: Path, monkeypatch) -> None:
+    _mock_run_post(monkeypatch, _SFT_BILLED_RESPONSE)
+    config_path = _write_config(tmp_path, _sft_config())
+
+    result = runner.invoke(app, ["train", config_path, "--yes"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    assert "run-priced" in result.output
+    assert "On-demand (beta)" in result.output
+    assert "H100_80GB" in result.output
+    assert "$1.50/GPU-hr" in result.output
+    assert "~$12.00/hr" in result.output
+    assert "Billing starts when the pods are ready" in result.output
+    assert "SECRET" not in result.output
+
+
+def test_train_sft_billed_dispatch_beta_false_retires_label(tmp_path: Path, monkeypatch) -> None:
+    _mock_run_post(monkeypatch, dict(_SFT_BILLED_RESPONSE, isBeta=False))
+    config_path = _write_config(tmp_path, _sft_config())
+
+    result = runner.invoke(app, ["train", config_path, "--yes"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    assert "On-demand" in result.output
+    assert "(beta)" not in result.output
+
+
+def test_train_sft_billed_json_keeps_cost_facts_and_hides_token(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _mock_run_post(monkeypatch, _SFT_BILLED_RESPONSE)
+    config_path = _write_config(tmp_path, _sft_config())
+
+    result = runner.invoke(app, ["train", config_path, "--yes", "--output", "json"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.stdout)
+    assert data["run"] == {
+        "runId": "run-priced",
+        "onDemand": True,
+        "gpuType": "H100_80GB",
+        "pricePerGpuHour": 1.5,
+        "estimatedCostPerHour": 12.0,
+        "isBeta": True,
+    }
+    assert "tokenValue" not in data["run"]
+    assert "SECRET" not in result.stdout
+
+
+def test_train_sft_reserved_response_prints_no_billing_line(tmp_path: Path, monkeypatch) -> None:
+    """A reserved SFT run has no hourly rate — no billing line may be
+    fabricated for it."""
+    _mock_run_post(monkeypatch, {"runId": "r1", "tokenValue": "t"})
+    config_path = _write_config(tmp_path, _sft_config())
+
+    result = runner.invoke(app, ["train", config_path, "--yes"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    assert "On-demand" not in result.output
+    assert "GPU-hr" not in result.output

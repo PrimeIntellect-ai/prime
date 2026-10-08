@@ -58,16 +58,21 @@ def _client() -> tuple[HostedTrainingClient, str | None]:
 @app.command()
 def create(
     name: str = typer.Argument(..., help="Volume name (lowercase letters, digits, '-')"),
-    size: str = typer.Option("1Ti", "--size", help="Size, e.g. 500Gi or 2Ti. Can grow later."),
+    size: str = typer.Option("5Ti", "--size", help="Size cap, e.g. 500Gi or 5Ti. Can grow later."),
     cluster: str | None = typer.Option(
         None,
         "--cluster",
-        help="Cluster name to create the volume on (default: your first available cluster)",
+        help="(deprecated) Volumes are no longer tied to a cluster",
     ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """Create a volume on your team's (or personal) cluster."""
+    """Create a volume for your team (or yourself if you have no team)."""
     validate_output_format(output, console)
+    if cluster:
+        console.print(
+            "[yellow]Warning:[/yellow] --cluster is deprecated: "
+            "volumes are no longer tied to a cluster."
+        )
     client, team_id = _client()
     try:
         volume = client.create_volume(name, size, team_id=team_id, cluster=cluster)

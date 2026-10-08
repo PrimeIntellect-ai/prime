@@ -121,6 +121,7 @@ class Tunnel:
         self._tunnel_info: Optional[TunnelInfo] = None
         self._config_file: Optional[Path] = None
         self._started = False
+        self._restart_lock = asyncio.Lock()
         self._output_lines: list[str] = []
 
     @property
@@ -243,6 +244,77 @@ class Tunnel:
         self._started = True
 
         return self.url
+
+    async def restart(self) -> str:
+        """
+        Restart frpc for a started tunnel, keeping its registration.
+
+        The current frpc process is stopped if it is still alive, and a new
+        one is started with the same config. It logs in under the same tunnel
+        ID, so the URL does not change. Use this when the tunnel has stopped
+        serving but should stay at its URL, for example after frpc exits or
+        hangs.
+
+        If the restart fails the tunnel stays registered with no frpc
+        running, so the caller can call restart() again or stop().
+
+        Returns:
+            The tunnel URL
+
+        Raises:
+            TunnelError: If the tunnel is not started, or is stopped while
+                it restarts
+            TunnelConnectionError: If frpc fails to start or connect, for
+                example because the registration no longer exists
+            TunnelTimeoutError: If connection times out
+        """
+        async with self._restart_lock:
+            if not self._started or self._config_file is None:
+                raise TunnelError("Tunnel is not started")
+
+            frpc_path = await asyncio.to_thread(get_frpc_path)
+
+            old_process, self._process = self._process, None
+            if old_process is not None:
+                await asyncio.to_thread(self._terminate_process, old_process)
+
+            if not self._started or self._config_file is None:
+                raise TunnelError("Tunnel was stopped during restart")
+
+            try:
+                process = subprocess.Popen(
+                    [str(frpc_path), "-c", str(self._config_file)],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+            except Exception as e:
+                raise TunnelConnectionError(message=f"Failed to start frpc: {e}") from e
+            self._process = process
+
+            try:
+                await self._wait_for_connection()
+                if self._process is not process:
+                    raise TunnelError("Tunnel was stopped during restart")
+                self._start_pipe_drain()
+            except BaseException:
+                await asyncio.to_thread(self._terminate_process, process)
+                raise
+
+            return self.url
+
+    @staticmethod
+    def _terminate_process(process: subprocess.Popen) -> None:
+        """Terminate a frpc process, killing it if it does not exit."""
+        try:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=2)
+        except Exception:
+            pass
 
     async def stop(self) -> None:
         """Stop the tunnel and cleanup resources."""

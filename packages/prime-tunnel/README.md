@@ -25,6 +25,13 @@ async with Tunnel(local_port=8765) as tunnel:
     # Your local service on port 8765 is now accessible at tunnel.url
 ```
 
+If a tunnel stops serving while it should stay at the same URL, restart its
+client. The registration is kept, so `tunnel.url` does not change:
+
+```python
+await tunnel.restart()
+```
+
 ## CLI Usage
 
 ```bash

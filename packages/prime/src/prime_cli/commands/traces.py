@@ -327,7 +327,8 @@ def upload_traces(
         )
     else:
         console.print(f"[green]Uploaded {len(receipts)} batch(es) from {escape(str(file))}[/green]")
-        console.print(Text("List a batch: prime traces list --upload-id <batch id>", style="dim"))
+        list_command = "prime traces list --episodes" if episodes else "prime traces list"
+        console.print(Text(f"List a batch: {list_command} --upload-id <batch id>", style="dim"))
 
 
 PageT = TypeVar("PageT", TraceListPage, EpisodeListPage)

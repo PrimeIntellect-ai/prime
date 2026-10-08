@@ -461,6 +461,7 @@ def test_upload_command_table_output(fake_client, tmp_path):
 
     assert result.exit_code == 0, result.output
     assert "Uploaded 1 batch(es)" in result.output
+    assert "prime traces list --upload-id" in result.output
     call = fake_client.calls["upload_file"]
     assert call["context"] == {"source": "hosted_eval", "suite": "s1"}
     assert call["compress"] is True
@@ -483,6 +484,16 @@ def test_upload_command_episodes_json_output(fake_client, tmp_path):
     call = fake_client.calls["upload_file"]
     assert call["line_format"].value == "episode"
     assert call["compress"] is False
+
+
+def test_upload_command_episode_hint_lists_episodes(fake_client, tmp_path):
+    episodes_file = tmp_path / "episodes.jsonl"
+    episodes_file.write_bytes(b'{"id":"ep"}\n')
+
+    result = runner.invoke(main_app, ["traces", "upload", str(episodes_file), "--episodes"])
+
+    assert result.exit_code == 0, result.output
+    assert "prime traces list --episodes --upload-id" in result.output
 
 
 def test_upload_command_rejects_malformed_context(fake_client, tmp_path):

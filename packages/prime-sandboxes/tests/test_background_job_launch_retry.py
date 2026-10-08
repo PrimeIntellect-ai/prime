@@ -63,6 +63,19 @@ class TestSyncLaunchRetry:
             client.start_background_job("sb", "rm -rf x", user="ubuntu")
         assert calls["n"] == 3
 
+    def test_forwards_working_dir(self, monkeypatch):
+        monkeypatch.setattr("prime_sandboxes.sandbox.time.sleep", lambda _: None)
+        client = SandboxClient(APIClient(api_key="test-key"))
+        working_dirs = []
+
+        def execute(_sandbox_id, _command, **kwargs):
+            working_dirs.append(kwargs.get("working_dir"))
+            return _OK
+
+        cast(Any, client).execute_command = execute
+        client.start_background_job("sb", "pwd", working_dir="/custom/dir", user="ubuntu")
+        assert working_dirs == ["/custom/dir"]
+
 
 class TestAsyncLaunchRetry:
     @pytest.mark.asyncio
@@ -107,3 +120,17 @@ class TestAsyncLaunchRetry:
         with pytest.raises(CommandTimeoutError):
             await client.start_background_job("sb", "rm -rf x", user="ubuntu")
         assert calls["n"] == 3
+
+    @pytest.mark.asyncio
+    async def test_forwards_working_dir(self, monkeypatch):
+        monkeypatch.setattr("prime_sandboxes.sandbox.asyncio.sleep", _no_sleep)
+        client = AsyncSandboxClient(APIClient(api_key="test-key"))
+        working_dirs = []
+
+        async def execute(_sandbox_id, _command, **kwargs):
+            working_dirs.append(kwargs.get("working_dir"))
+            return _OK
+
+        cast(Any, client).execute_command = execute
+        await client.start_background_job("sb", "pwd", working_dir="/custom/dir", user="ubuntu")
+        assert working_dirs == ["/custom/dir"]

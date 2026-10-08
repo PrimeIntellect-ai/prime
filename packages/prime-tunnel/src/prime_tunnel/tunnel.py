@@ -261,7 +261,7 @@ class Tunnel:
         """
         Restart frpc for a started tunnel, keeping its registration.
 
-        The current frpc process is stopped if it is still alive, and a new
+        The current frpc process is killed if it is still alive, and a new
         one is started with the same config. It logs in under the same tunnel
         ID, so the URL does not change. Use this when the tunnel has stopped
         serving but should stay at its URL, for example after frpc exits or
@@ -289,9 +289,11 @@ class Tunnel:
 
             frpc_path = await asyncio.to_thread(get_frpc_path)
 
+            # The old frpc is being replaced because it stopped working, so it
+            # is killed without waiting for a clean exit.
             old_process, self._process = self._process, None
             if old_process is not None:
-                await asyncio.to_thread(self._terminate_process, old_process)
+                await asyncio.to_thread(self._end_process, old_process, kill=True)
 
             if self._stopping:
                 raise TunnelError("Tunnel was stopped during restart")
@@ -307,27 +309,36 @@ class Tunnel:
                 raise TunnelConnectionError(message=f"Failed to start frpc: {e}") from e
             self._process = process
 
+            stopped = TunnelError("Tunnel was stopped during restart")
             try:
                 # A stop that ran while frpc was being launched saw no process
                 # to end, so this one has to be ended here.
                 if self._stopping:
-                    raise TunnelError("Tunnel was stopped during restart")
-                await self._wait_for_connection()
-                if self._stopping or self._process is not process:
-                    raise TunnelError("Tunnel was stopped during restart")
-                self._start_pipe_drain()
-            except BaseException:
-                await asyncio.to_thread(self._terminate_process, process)
-                if self._stopping and self._process is process:
-                    self._process = None
-                raise
+                    raise stopped
+                await self._wait_for_connection(process)
+                if self._stopping:
+                    raise stopped
+                self._start_pipe_drain(process)
+            except BaseException as e:
+                await asyncio.to_thread(self._end_process, process, kill=True)
+                if not self._stopping or not isinstance(e, Exception):
+                    raise
+                self._process = None
+                if e is stopped:
+                    raise
+                raise stopped from e
 
             return self.url
 
     @staticmethod
-    def _terminate_process(process: subprocess.Popen) -> None:
-        """Terminate a frpc process, killing it if it does not exit."""
+    def _end_process(process: subprocess.Popen, kill: bool = False) -> None:
+        """End a frpc process: terminate it and kill it if it does not exit,
+        or kill it at once when `kill` is set."""
         try:
+            if kill:
+                process.kill()
+                process.wait(timeout=2)
+                return
             process.terminate()
             try:
                 process.wait(timeout=5)
@@ -353,17 +364,8 @@ class Tunnel:
 
         self._stopping = True
         if self._process is not None:
-            try:
-                self._process.terminate()
-                try:
-                    self._process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    self._process.kill()
-                    self._process.wait(timeout=2)
-            except Exception:
-                pass
-            finally:
-                self._process = None
+            process, self._process = self._process, None
+            self._end_process(process)
 
         if self._tunnel_info is not None:
             try:
@@ -392,17 +394,8 @@ class Tunnel:
         """Clean up tunnel resources."""
         # Stop frpc process (this will cause drain threads to exit via EOF)
         if self._process is not None:
-            try:
-                self._process.terminate()
-                try:
-                    self._process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    self._process.kill()
-                    self._process.wait(timeout=2)
-            except Exception:
-                pass
-            finally:
-                self._process = None
+            process, self._process = self._process, None
+            self._end_process(process)
 
         # Delete tunnel registration
         if self._tunnel_info is not None:
@@ -440,7 +433,7 @@ class Tunnel:
                 return list(self._recent_output)
         return list(self._output_lines)
 
-    def _start_pipe_drain(self) -> None:
+    def _start_pipe_drain(self, process: Optional[subprocess.Popen] = None) -> None:
         """Start background threads to drain subprocess pipes.
 
         Keeps the last 50 lines in a ring buffer for diagnostics (e.g. crash
@@ -449,7 +442,8 @@ class Tunnel:
         caller's logs. This also prevents the pipe buffer from filling up and
         blocking frpc when it produces output.
         """
-        if self._process is None:
+        process = process or self._process
+        if process is None:
             return
 
         self._output_lock = threading.Lock()
@@ -474,7 +468,7 @@ class Tunnel:
                 pass  # Pipe closed
 
         self._drain_threads: list[threading.Thread] = []
-        for pipe in (self._process.stdout, self._process.stderr):
+        for pipe in (process.stdout, process.stderr):
             t = threading.Thread(target=drain_pipe, args=(pipe,), daemon=True)
             t.start()
             self._drain_threads.append(t)
@@ -536,22 +530,24 @@ subdomain = "{self._tunnel_info.tunnel_id}"
 
         return config_file
 
-    async def _wait_for_connection(self) -> None:
-        """Wait for frpc to establish connection."""
+    async def _wait_for_connection(self, process: Optional[subprocess.Popen] = None) -> None:
+        """Wait for frpc to establish connection. Watches `process`, or the
+        tunnel's current process when none is given."""
         start_time = time.time()
         self._output_lines = []
 
         while time.time() - start_time < self.connection_timeout:
-            if self._process is None:
+            watched = process or self._process
+            if watched is None:
                 raise TunnelConnectionError(message="frpc process not running")
 
-            return_code = self._process.poll()
+            return_code = watched.poll()
             if return_code is not None:
                 remaining_output = []
-                if self._process.stdout:
-                    remaining_output.extend(self._process.stdout.readlines())
-                if self._process.stderr:
-                    remaining_output.extend(self._process.stderr.readlines())
+                if watched.stdout:
+                    remaining_output.extend(watched.stdout.readlines())
+                if watched.stderr:
+                    remaining_output.extend(watched.stderr.readlines())
                 self._output_lines.extend(line.strip() for line in remaining_output if line.strip())
 
                 raise _parse_frpc_error(self._output_lines, self.tunnel_id, return_code)
@@ -561,7 +557,7 @@ subdomain = "{self._tunnel_info.tunnel_id}"
                 pipes_to_drain = []
                 original_flags = {}
 
-                for pipe in (self._process.stdout, self._process.stderr):
+                for pipe in (watched.stdout, watched.stderr):
                     if pipe:
                         fd = pipe.fileno()
                         fl = fcntl.fcntl(fd, fcntl.F_GETFL)

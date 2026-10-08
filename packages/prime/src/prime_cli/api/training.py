@@ -111,6 +111,10 @@ class AvailableFFTModelsResponse(BaseModel):
     on_demand: list[OnDemandGpuTypeAvailability] = Field(
         default_factory=list, alias="onDemand"
     )
+    # False means `on_demand` is empty because the account is not enrolled,
+    # not because capacity is missing — lets the empty state say "ask for
+    # access" instead of "nothing is running".
+    on_demand_beta_access: bool = Field(False, alias="onDemandBetaAccess")
 
     model_config = ConfigDict(populate_by_name=True)
 

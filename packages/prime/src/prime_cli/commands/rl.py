@@ -2123,6 +2123,7 @@ def list_models(
             fft_response = training_client.get_available_fft(team_id=config.team_id)
             fft_models = fft_response.models
             on_demand = fft_response.on_demand
+            on_demand_beta_access = fft_response.on_demand_beta_access
         except APIError:
             # Never let an FFT fetch failure break the LoRA output — the
             # endpoint is younger and may still be rolling out. When the
@@ -2132,6 +2133,7 @@ def list_models(
                 raise
             fft_models = []
             on_demand = []
+            on_demand_beta_access = False
 
         if output == "json":
             if fft_only:
@@ -2163,6 +2165,14 @@ def list_models(
                 # get the empty banner even when there was capacity they
                 # could buy, which read as "nothing is running".
                 _render_empty_lora_message()
+                if not on_demand_beta_access:
+                    # Distinguish "not enrolled" from "no capacity": the
+                    # fallback above blames cluster health, which is wrong
+                    # and unactionable when the real answer is access.
+                    console.print(
+                        "[dim]On-demand training is in beta. Contact Prime "
+                        "support to request access.[/dim]"
+                    )
 
         if fft_models:
             if not fft_only and models:

@@ -122,7 +122,7 @@ def main():
         from pydantic import ValidationError
 
         if isinstance(exc, ValidationError):
-            error = "\n".join(
+            error = "Config validation failed:\n" + "\n".join(
                 f"{'.'.join(map(str, item['loc']))}: {item['msg']}"
                 for item in exc.errors(include_input=False)
             )

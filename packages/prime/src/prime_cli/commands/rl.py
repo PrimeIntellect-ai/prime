@@ -669,6 +669,9 @@ def _dispatch_dedicated_run(
         console.print(f"[red]Error:[/red] {rich_escape(str(exc))}")
         raise typer.Exit(1) from exc
 
+    if output != "json":
+        console.print("[green]✓ Local config validation succeeded[/green]")
+
     # Surface the image + source pins before the confirmation so a typo'd
     # ref is caught at the prompt, not by a failed dispatch. Skipped for
     # --output json, which must emit nothing but the JSON payload.

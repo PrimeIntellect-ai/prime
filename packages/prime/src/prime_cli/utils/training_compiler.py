@@ -17,6 +17,14 @@ class CompilationError(Exception):
 
 
 _WORKER = Path(__file__).with_name("training_schema_worker.py").read_text()
+_BYTECODE_COMPILER = """
+import compileall
+import sysconfig
+
+for path in sorted({sysconfig.get_path("purelib"), sysconfig.get_path("platlib")}):
+    # Match uv: an invalid, unused source file must not prevent validation.
+    compileall.compile_dir(path, quiet=2)
+"""
 
 
 def _worker_environment() -> dict[str, str]:
@@ -94,6 +102,7 @@ def _schema_python(preparation: dict[str, Any]) -> Path:
     cache.mkdir(parents=True, exist_ok=True)
     target = cache / key
     python = target / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    bytecode_ready = target / ".bytecode-v1.ready"
     lock = cache / (key + ".lock")
     deadline = time.monotonic() + 300
     while True:
@@ -124,6 +133,7 @@ def _schema_python(preparation: dict[str, Any]) -> Path:
                         "pip",
                         "install",
                         "--no-config",
+                        "--compile-bytecode",
                         "--python",
                         str(python),
                         "--no-sources",
@@ -134,7 +144,13 @@ def _schema_python(preparation: dict[str, Any]) -> Path:
                         *inputs["requirements"],
                     ]
                 )
+            bytecode_ready.touch()
             (target / ".ready").touch()
+        elif not bytecode_ready.is_file():
+            # Upgrade existing schema caches without resolving or reinstalling
+            # dependencies. The cache lock also covers this one-time step.
+            _run([str(python), "-I", "-B", "-c", _BYTECODE_COMPILER], timeout=120)
+            bytecode_ready.touch()
         return python
     finally:
         lock.rmdir()

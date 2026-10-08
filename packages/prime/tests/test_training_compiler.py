@@ -207,6 +207,7 @@ def test_cache_reuses_complete_install_and_retries_failed_install(monkeypatch, t
             (target / "bin").mkdir(parents=True)
             (target / "bin/python").touch()
         else:
+            assert "--compile-bytecode" in command
             assert (
                 Path(command[command.index("--constraints") + 1]).read_text() == "pydantic==2.9.2\n"
             )
@@ -224,6 +225,73 @@ def test_cache_reuses_complete_install_and_retries_failed_install(monkeypatch, t
     assert len(commands) == 4
     assert training_compiler._schema_python(preparation) == python
     assert len(commands) == 4
+
+
+@pytest.mark.parametrize("failure", [None, "error", "interrupt"])
+def test_existing_cache_bytecode_upgrade_retries_without_reinstalling(
+    monkeypatch, tmp_path, failure
+):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    monkeypatch.setattr(training_compiler.shutil, "which", lambda _: "/test/uv")
+    preparation = {
+        "schema_install": {"python": "3.12", "requirements": ["schema"], "constraints": []}
+    }
+    commands = []
+
+    def run(command, **kwargs):
+        commands.append(command)
+        if command[:2] == ["uv", "venv"]:
+            target = Path(command[-1])
+            executable = target / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+            executable.parent.mkdir(parents=True)
+            executable.touch()
+        elif command[0] != "uv":
+            assert command[1:4] == ["-I", "-B", "-c"]
+            if failure == "error":
+                raise training_compiler.CompilationError("bytecode failed")
+            if failure == "interrupt":
+                raise KeyboardInterrupt
+
+    monkeypatch.setattr(training_compiler, "_run", run)
+    python = training_compiler._schema_python(preparation)
+    target = python.parent.parent
+    ready = target / ".ready"
+    marker = target / ".bytecode-v1.ready"
+    assert marker.is_file()
+    marker.unlink()  # Simulate an environment created before bytecode support.
+    commands.clear()
+    if failure:
+        error = KeyboardInterrupt if failure == "interrupt" else training_compiler.CompilationError
+        with pytest.raises(error):
+            training_compiler._schema_python(preparation)
+        assert ready.is_file() and python.is_file()
+        assert not marker.exists()
+        assert not list(target.parent.glob("*.lock"))
+        failure = None
+    assert training_compiler._schema_python(preparation) == python
+    assert marker.is_file()
+    assert all(command[0] == str(python) for command in commands)
+    count = len(commands)
+    assert training_compiler._schema_python(preparation) == python
+    assert len(commands) == count
+
+
+def test_bytecode_upgrade_compiles_without_importing_or_rejecting_unused_sources(tmp_path):
+    import subprocess
+
+    source = tmp_path / "module.py"
+    source.write_text('raise AssertionError("must not import during bytecode upgrade")\n')
+    (tmp_path / "unused.py").write_text("invalid Python!\n")
+    script = (
+        "import sysconfig\n"
+        f"sysconfig.get_path = lambda _: {str(tmp_path)!r}\n" + training_compiler._BYTECODE_COMPILER
+    )
+    result = subprocess.run(
+        [sys.executable, "-I", "-B", "-c", script], capture_output=True, text=True, check=True
+    )
+    assert list((tmp_path / "__pycache__").glob("module.*.pyc"))
+    assert not result.stdout
+    assert not result.stderr
 
 
 def test_preparation_client_rejects_unsupported_contract():

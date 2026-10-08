@@ -1,0 +1,238 @@
+"""Training samples sink: the step-keyed Parquet table the training viewer reads.
+
+Every Nth training step (prime-rl's cadence), the step's episodes are encoded to
+one Parquet object and sent through presign -> PUT -> confirm. The step is read
+off each episode's ``run.work.step`` (verifiers ``TrainRunInfo``); eval work,
+bare traces and JSON episodes have no row here and reach Prime Traces only.
+
+Objects are additive per step: every upload mints its own key and the viewer
+unions every object under a step, so a step logged across several calls (an
+off-policy episode landing in a later batch) becomes several objects. Each
+numbers its ``sample_id``s in its own range, since the viewer looks samples up
+by (step, sample_id).
+"""
+
+import functools
+import logging
+import secrets
+import time
+from typing import Any, Dict, List, Mapping, Optional, Protocol, Sequence, Tuple
+
+import httpx
+from prime_traces.core.client import retry_delay
+
+from .. import _fork
+from .._http import UPLOAD_TIMEOUT, PlatformClient
+from ..exceptions import APIError, RetryableAPIError, TransportError
+from .base import Sink, is_episode, send_each
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_STEP_INTERVAL = 10
+#: Attempts for the object-storage PUT, which is idempotent.
+UPLOAD_ATTEMPTS = 3
+#: ``sample_id = range * SAMPLE_ID_STRIDE + row``. The range is the step's upload
+#: index, so a single-object step still numbers from 0. A forked child inherits
+#: the parent's counters and would reuse its ranges, so it draws ranges at random
+#: from the upper half of the space instead. Ids stay below 2**53 for the viewer.
+SAMPLE_ID_STRIDE = 1 << 32
+SAMPLE_ID_RANGES = 1 << 21
+
+
+class Encoder(Protocol):
+    """``(episodes, run_id, step, sample_id_offset=...) -> parquet bytes``, or
+    ``None`` when there is nothing to upload for the step."""
+
+    def __call__(
+        self, episodes: Sequence[Any], run_id: str, step: int, *, sample_id_offset: int = 0
+    ) -> Optional[bytes]: ...
+
+
+def _field(obj: Any, name: str) -> Any:
+    return obj.get(name) if isinstance(obj, Mapping) else getattr(obj, name, None)
+
+
+def training_step(record: Any) -> Optional[int]:
+    """The step a training-work episode was dispatched at, else ``None``."""
+    run = _field(record, "run")
+    work = _field(run, "work") if run is not None else None
+    if _field(run, "type") != "train" or _field(work, "type") != "train":
+        return None
+    step = _field(work, "step")
+    return step if isinstance(step, int) and not isinstance(step, bool) else None
+
+
+class RftSamplesSink(Sink):
+    name = "rft_samples"
+
+    def __init__(
+        self,
+        client: PlatformClient,
+        *,
+        encoder: Optional[Encoder] = None,
+        step_interval: int = DEFAULT_STEP_INTERVAL,
+        upload_client: Optional[httpx.Client] = None,
+    ) -> None:
+        if step_interval < 1:
+            raise ValueError("step_interval must be at least 1")
+        self.enabled = True
+        self._client = client
+        self._encoder = encoder
+        self._step_interval = step_interval
+        self._upload_client = upload_client
+        self._owns_upload_client = upload_client is None
+        self._forked_with_injected_client = False
+        self._forked = False
+        self._run_id: Optional[str] = None
+        self._uploads_per_step: Dict[int, int] = {}
+        self.steps_written = 0
+        #: Records with no row in this table (eval work, bare traces, JSON).
+        self.skipped = 0
+        #: Training episodes left out by the step cadence. Not a loss.
+        self.sampled_out = 0
+        _fork.register(self)
+
+    def reset_after_fork(self) -> None:
+        """Drop (not close) the inherited storage client, and stop sharing the
+        parent's upload counters: from here on ranges are drawn at random."""
+        if self._owns_upload_client:
+            self._upload_client = None
+        else:
+            self._forked_with_injected_client = True
+        self._forked = True
+
+    def start(self, run_id: str, context: Mapping[str, str]) -> None:
+        self._run_id = run_id
+        if self._encoder is None:
+            from ..projection import episodes_to_parquet_bytes, parquet_available
+
+            if not parquet_available():
+                logger.warning(
+                    "Training samples sink off: pyarrow is not installed "
+                    "(pip install 'prime-runs[train]'); episodes reach Prime Traces only"
+                )
+                self.enabled = False
+                return
+            self._encoder = episodes_to_parquet_bytes
+
+    def write(self, records: Sequence[Any]) -> None:
+        if not self.enabled or not records:
+            return
+        if self._run_id is None:
+            raise RuntimeError("RftSamplesSink.write called before start()")
+        send_each(
+            [
+                (len(episodes), functools.partial(self._upload_step, step, episodes))
+                for step, episodes in self._group(records)
+            ]
+        )
+
+    def _group(self, records: Sequence[Any]) -> List[Tuple[int, List[Any]]]:
+        """Training episodes by step, on the upload cadence, in step order."""
+        by_step: Dict[int, List[Any]] = {}
+        skipped = 0
+        for record in records:
+            step = training_step(record)
+            # The encoder projects attributes, so a JSON episode has no row either.
+            if step is None or isinstance(record, Mapping) or not is_episode(record):
+                skipped += 1
+                continue
+            if step % self._step_interval:
+                self.sampled_out += 1
+                continue
+            by_step.setdefault(step, []).append(record)
+        if skipped:
+            if not self.skipped:
+                logger.info(
+                    "The training sample table holds training-work episodes only; %d "
+                    "record(s) in this batch have no row there and reach Prime Traces only.",
+                    skipped,
+                )
+            self.skipped += skipped
+        return sorted(by_step.items())
+
+    def _upload_step(self, step: int, episodes: List[Any]) -> None:
+        assert self._encoder is not None and self._run_id is not None
+        payload = self._encoder(
+            episodes, self._run_id, step, sample_id_offset=self._next_range(step) * SAMPLE_ID_STRIDE
+        )
+        if payload is None:  # nothing with a trajectory
+            return
+
+        # Replayable: a presign only mints a URL.
+        presign = self._client.post(
+            "/rft/samples/presign",
+            json_body={"run_id": self._run_id, "step": step},
+            idempotent=True,
+        )
+        data = presign.get("data") or presign
+        url = data.get("presignedUrl") or data.get("presigned_url")
+        key = data.get("s3Key") or data.get("s3_key")
+        if not url or not key:
+            raise APIError(
+                f"POST /rft/samples/presign returned no upload URL/key (keys: {sorted(data)})"
+            )
+        self._put_object(url, payload)
+        # Replayable: confirm validates the key and refreshes the run's progress.
+        self._client.post(
+            "/rft/samples/confirm",
+            json_body={"run_id": self._run_id, "step": step, "s3_key": key},
+            idempotent=True,
+        )
+        self.steps_written += 1
+
+    def _next_range(self, step: int) -> int:
+        """The ``sample_id`` range for the next upload of ``step``. Counted per
+        attempt: an upload whose confirm was lost may still have landed."""
+        if self._forked:
+            half = SAMPLE_ID_RANGES // 2
+            return half + secrets.randbelow(half)
+        upload_index = self._uploads_per_step.get(step, 0)
+        self._uploads_per_step[step] = upload_index + 1
+        return upload_index
+
+    def _put_object(self, url: str, payload: bytes) -> None:
+        """PUT to storage with a bare client: the presigned URL carries its own
+        credentials and rejects the platform's auth headers."""
+        client = self._upload()
+        for attempt in range(UPLOAD_ATTEMPTS):
+            error: APIError
+            try:
+                response = client.put(
+                    url,
+                    content=payload,
+                    headers={"Content-Type": "application/parquet"},
+                    timeout=UPLOAD_TIMEOUT,
+                )
+            except httpx.RequestError as exc:
+                error = TransportError(f"uploading samples failed: {type(exc).__name__}: {exc}")
+            else:
+                if response.is_success:
+                    return
+                message = f"uploading samples failed: HTTP {response.status_code}"
+                if response.status_code >= 500 or response.status_code == 429:
+                    error = RetryableAPIError(message, status_code=response.status_code)
+                else:
+                    raise APIError(message, status_code=response.status_code)
+            if attempt == UPLOAD_ATTEMPTS - 1:
+                raise error
+            time.sleep(retry_delay(error, attempt))
+
+    def _upload(self) -> httpx.Client:
+        if self._forked_with_injected_client:
+            raise RuntimeError("an injected upload client cannot be reused after a fork")
+        if self._upload_client is None:
+            self._upload_client = httpx.Client(follow_redirects=False)
+        return self._upload_client
+
+    def flush(self) -> None:
+        """Uploads are synchronous."""
+
+    def close(self) -> None:
+        client = self._upload_client
+        self._upload_client = None
+        if client is not None and self._owns_upload_client:
+            try:
+                client.close()
+            except Exception as exc:  # noqa: BLE001 - teardown must not raise
+                logger.debug("Error closing the upload client: %s", exc)

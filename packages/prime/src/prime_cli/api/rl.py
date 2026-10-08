@@ -67,6 +67,10 @@ class RLRun(BaseModel):
     user_id: str = Field(..., alias="userId")
     team_id: Optional[str] = Field(None, alias="teamId")
     cluster_id: Optional[str] = Field(None, alias="rftClusterId")
+    # DEDICATED_FULL_FT: the PrimeCluster hosting the run's helm release.
+    # The backend writes rftClusterId NULL for dedicated runs, so this is
+    # the only cluster field they carry (shared runs use cluster_id).
+    prime_cluster_id: Optional[str] = Field(None, alias="primeClusterId")
     status: str = Field(..., description="Run status")
     # Discriminator: SHARED_RFT_HOSTED (LoRA) | DEDICATED_FULL_FT (own
     # helm release on a PrimeCluster) | EXTERNAL (CLI-side prime-rl).
@@ -97,6 +101,10 @@ class RLRun(BaseModel):
     max_inflight_rollouts: Optional[int] = Field(None, alias="maxInflightRollouts")
     oversampling_factor: Optional[float] = Field(None, alias="oversamplingFactor")
     max_async_level: Optional[int] = Field(None, alias="maxAsyncLevel")
+    # User-facing name of the named volume a DEDICATED_FULL_FT run
+    # mounted via --volume (outputs under runs/<runId>/ on it). Only
+    # set on the run-detail read; None for runs without a volume.
+    volume_name: Optional[str] = Field(None, alias="volumeName")
 
     # Monitoring
     wandb_entity: Optional[str] = Field(None, alias="wandbEntity")
@@ -118,6 +126,11 @@ class RLRun(BaseModel):
     # Automated failure classification (only set for terminal FAILED runs).
     # Stored as a dict to stay forward-compatible if the API adds new fields.
     failure_analysis: Optional[Dict[str, Any]] = Field(None, alias="failureAnalysis")
+
+    # Full-FT source overlay: the prime-rl commit the pods run on top of the
+    # image when the run was dispatched with `--ref` / `--pr`. None for runs
+    # that use the image's baked source.
+    source_commit: Optional[str] = Field(None, alias="sourceCommit")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -148,6 +161,26 @@ class EnvServerInfo(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class RLRunPage(BaseModel):
+    """One page of GET /rft/runs, as returned by the backend.
+
+    The pagination metadata fields are Optional: a backend that hasn't
+    deployed pagination support yet silently ignores the page/limit/mine
+    query params (FastAPI drops undeclared query params rather than
+    erroring) and returns the old `{"runs": [...]}` shape - the caller
+    must detect that (via `total is None`) and fall back to client-side
+    filtering/pagination over the full list it got back.
+    """
+
+    runs: List[RLRun] = Field(default_factory=list)
+    total: Optional[int] = Field(None, description="Total number of matching runs")
+    page: Optional[int] = Field(None, description="Current page number")
+    limit: Optional[int] = Field(None, description="Runs per page")
+    total_pages: Optional[int] = Field(None, alias="total_pages")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class RLClient:
     """Client for the Hosted Training API."""
 
@@ -168,15 +201,26 @@ class RLClient:
                 raise APIError(f"Failed to list Hosted Training models: {e.response.text}")
             raise APIError(f"Failed to list Hosted Training models: {str(e)}")
 
-    def list_runs(self, team_id: Optional[str] = None) -> List[RLRun]:
-        """List Hosted Training runs for the authenticated user."""
+    def list_runs(
+        self,
+        team_id: Optional[str] = None,
+        *,
+        mine: bool = False,
+        page: int = 1,
+        limit: int = 20,
+    ) -> RLRunPage:
+        """List Hosted Training runs for the authenticated user, one page
+        at a time - pagination and the `mine` filter are applied
+        server-side rather than fetched-in-full-then-sliced locally.
+        """
         try:
-            params = {}
+            params: Dict[str, Any] = {"page": page, "limit": limit}
             if team_id:
                 params["team_id"] = team_id
-            response = self.client.get("/rft/runs", params=params if params else None)
-            runs_data = response.get("runs", [])
-            return [RLRun.model_validate(run) for run in runs_data]
+            if mine:
+                params["mine"] = "true"
+            response = self.client.get("/rft/runs", params=params)
+            return RLRunPage.model_validate(response)
         except Exception as e:
             if hasattr(e, "response") and hasattr(e.response, "text"):
                 raise APIError(f"Failed to list Hosted Training runs: {e.response.text}")
@@ -395,10 +439,19 @@ class RLClient:
                 raise APIError(f"Failed to list checkpoints: {e.response.text}")
             raise APIError(f"Failed to list checkpoints: {str(e)}")
 
-    def get_run(self, run_id: str) -> RLRun:
-        """Get details of a specific Hosted Training run."""
+    def get_run(self, run_id: str, timeout: Optional[int] = None) -> RLRun:
+        """Get details of a specific Hosted Training run.
+
+        `timeout` bounds this specific request (e.g. so a caller polling
+        against a wall-clock deadline can't have a single stalled request
+        blow past it) - the client-wide default applies when omitted.
+        """
         try:
-            response = self.client.get(f"/rft/runs/{run_id}")
+            # Only forward `timeout` when a caller actually set it, so
+            # existing callers/mocks that don't expect the kwarg at all
+            # see the exact same call shape as before.
+            kwargs = {"timeout": timeout} if timeout is not None else {}
+            response = self.client.get(f"/rft/runs/{run_id}", **kwargs)
             return RLRun.model_validate(response.get("run"))
         except APIError:
             # Preserve typed subclasses (NotFoundError, UnauthorizedError, …)
@@ -606,13 +659,3 @@ class RLClient:
                     f"Failed to get Hosted Training run distributions: {e.response.text}"
                 )
             raise APIError(f"Failed to get Hosted Training run distributions: {str(e)}")
-
-    def get_environment_status(self, owner: str, name: str) -> Dict[str, Any]:
-        """Get status for an environment including latest version and action info."""
-        try:
-            response = self.client.get(f"/environmentshub/{owner}/{name}/status")
-            return response.get("data") or {}
-        except Exception as e:
-            if hasattr(e, "response") and hasattr(e.response, "text"):
-                raise APIError(f"Failed to get status for {owner}/{name}: {e.response.text}")
-            raise APIError(f"Failed to get status for {owner}/{name}: {str(e)}")

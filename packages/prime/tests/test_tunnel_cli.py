@@ -22,8 +22,10 @@ def test_prime_requires_runtime_sdks_with_cli_feature_support() -> None:
     pyproject_path = Path(__file__).resolve().parents[1] / "pyproject.toml"
     pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
 
-    assert "prime-evals>=0.2.3" in pyproject["project"]["dependencies"]
-    assert "prime-tunnel>=0.1.9" in pyproject["project"]["dependencies"]
+    assert "prime-sandboxes>=0.4.3" in pyproject["project"]["dependencies"]
+    assert "prime-evals>=0.2.4" in pyproject["project"]["dependencies"]
+    assert "prime-traces>=0.0.7" in pyproject["project"]["dependencies"]
+    assert "prime-tunnel>=0.1.11" in pyproject["project"]["dependencies"]
 
 
 def test_tunnel_start_cli_passes_labels_to_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -223,6 +225,79 @@ def test_tunnel_list_passes_label_filters(monkeypatch: pytest.MonkeyPatch) -> No
     assert result.exit_code == 0, result.output
     assert captured["labels"] == ["dev"]
     assert captured["sort_by"] == "name"
+
+
+def test_tunnel_list_uses_temporary_context_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config_dir = tmp_path / ".prime"
+    environments_dir = config_dir / "environments"
+    environments_dir.mkdir(parents=True)
+    (config_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "api_key": "production-key",
+                "base_url": "https://api.production.example",
+                "team_id": "production-team",
+                "user_id": "production-user",
+            }
+        )
+    )
+    (environments_dir / "dev.json").write_text(
+        json.dumps(
+            {
+                "api_key": "dev-key",
+                "base_url": "https://api.dev.example",
+                "team_id": "dev-team",
+                "user_id": "dev-user",
+            }
+        )
+    )
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
+    for name in (
+        "PRIME_CONTEXT",
+        "PRIME_API_KEY",
+        "PRIME_API_BASE_URL",
+        "PRIME_BASE_URL",
+        "PRIME_TEAM_ID",
+        "PRIME_USER_ID",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    captured: dict[str, Any] = {}
+
+    class FakeTunnelClient:
+        def __init__(self) -> None:
+            from prime_tunnel import Config
+
+            config = Config()
+            captured.update(
+                {
+                    "api_key": config.api_key,
+                    "base_url": config.base_url,
+                    "team_id": config.team_id,
+                    "user_id": config.user_id,
+                }
+            )
+
+        async def list_tunnels_page(self, **kwargs: Any) -> Any:
+            return SimpleNamespace(tunnels=[], total=0, page=1, per_page=50, has_next=False)
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr("prime_tunnel.core.client.TunnelClient", FakeTunnelClient)
+
+    result = runner.invoke(app, ["-c", "dev", "tunnel", "list", "--output", "json"])
+
+    assert result.exit_code == 0, result.output
+    assert captured == {
+        "api_key": "dev-key",
+        "base_url": "https://api.dev.example",
+        "team_id": "dev-team",
+        "user_id": "dev-user",
+    }
 
 
 def test_tunnel_list_json_outputs_empty_envelope(

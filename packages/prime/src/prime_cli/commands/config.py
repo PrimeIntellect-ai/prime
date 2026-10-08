@@ -3,12 +3,14 @@ import re
 from typing import Optional
 
 import typer
+from rich.markup import escape
 from rich.table import Table
+from rich.text import Text
 
 from prime_cli.core import Config
 
 from ..client import APIClient, APIError
-from ..utils import PlainTyper, get_console
+from ..utils import PlainTyper, get_console, require_persistent_context
 from .teams import fetch_teams
 
 app = PlainTyper(help="Configure the CLI", no_args_is_help=True)
@@ -68,14 +70,19 @@ def view() -> None:
             team_label = f"{team_name} ({team_id})" if team_name else team_id
     else:
         team_label = "Personal Account"
-    table.add_row("Team", team_label)
+    table.add_row("Team", Text(team_label))
 
-    # Show User ID
+    # Show User
     user_id = settings.get("user_id")
-    user_label = user_id or "Not set"
-    if user_id and _env_set("PRIME_USER_ID"):
-        user_label += " (from env var)"
-    table.add_row("User ID", user_label)
+    if user_id:
+        if _env_set("PRIME_USER_ID"):
+            user_label = f"{user_id} (from env var)"
+        else:
+            user_name = settings.get("user_name")
+            user_label = f"{user_name} ({user_id})" if user_name else user_id
+    else:
+        user_label = "Not set"
+    table.add_row("User", Text(user_label))
 
     # Show base URL
     base_label = settings["base_url"]
@@ -95,6 +102,12 @@ def view() -> None:
         inf_label += " (from env var)"
     table.add_row("Inference URL", inf_label)
 
+    # Show traces URL (effective value: falls back to the traces service default)
+    traces_label = settings["traces_url"]
+    if _env_set("PRIME_TRACES_URL"):
+        traces_label += " (from env var)"
+    table.add_row("Traces URL", Text(traces_label))
+
     # Show SSH key path
     ssh_label = settings["ssh_key_path"]
     if _env_set("PRIME_SSH_KEY_PATH"):
@@ -104,6 +117,12 @@ def view() -> None:
     # Show share resources with team
     share_label = str(settings.get("share_resources_with_team", False))
     table.add_row("Share Resources With Team", share_label)
+
+    # Show whether runs opt out of Prime Traces (samples go to the legacy tables)
+    opt_out_label = str(settings.get("traces_opt_out", False))
+    if _env_set("PRIME_TRACES_OPT_OUT"):
+        opt_out_label = f"{os.environ['PRIME_TRACES_OPT_OUT']} (from env var)"
+    table.add_row("Traces Opt Out", opt_out_label)
 
     console.print(table)
 
@@ -116,6 +135,8 @@ def set_api_key(
     ),
 ) -> None:
     """Set your API key (prompts securely if not provided)"""
+    require_persistent_context()
+
     if api_key is None:
         # Interactive mode with secure prompt
         api_key = typer.prompt(
@@ -139,7 +160,7 @@ def set_api_key(
             if isinstance(data, dict):
                 user_id = data.get("id")
                 if user_id:
-                    config.set_user_id(user_id)
+                    config.set_user_id(user_id, user_name=data.get("name"))
                     config.update_current_environment_file()
         except (APIError, Exception):
             pass
@@ -161,6 +182,7 @@ def set_team_id(
     ),
 ) -> None:
     """Set your team ID."""
+    require_persistent_context()
     config = Config()
 
     # Validate team ID format
@@ -199,6 +221,7 @@ def set_team_id(
 @app.command()
 def remove_team_id() -> None:
     """Remove team ID to use personal account"""
+    require_persistent_context()
     config = Config()
     config.set_team(None)
     console.print("[green]Team ID removed. Using personal account.[/green]")
@@ -212,6 +235,8 @@ def set_base_url(
     ),
 ) -> None:
     """Set the API base URL (prompts if not provided)"""
+    require_persistent_context()
+
     if not url:
         config = Config()
         url = typer.prompt(
@@ -235,6 +260,8 @@ def set_frontend_url(
     ),
 ) -> None:
     """Set the frontend URL (prompts if not provided)"""
+    require_persistent_context()
+
     if not url:
         config = Config()
         url = typer.prompt(
@@ -258,6 +285,8 @@ def set_inference_url(
     ),
 ) -> None:
     """Set the inference URL (prompts if not provided)"""
+    require_persistent_context()
+
     if not url:
         config = Config()
         url = typer.prompt(
@@ -273,11 +302,47 @@ def set_inference_url(
     console.print(f"[green]Inference URL set to: {url}[/green]")
 
 
+@app.command()
+def set_traces_url(
+    url: Optional[str] = typer.Argument(
+        None,
+        help=(
+            "URL of the Prime Traces service. Pass '' or - to clear the override "
+            "and follow the base URL. If not provided, you'll be prompted."
+        ),
+    ),
+) -> None:
+    """Set the Prime Traces service URL (prompts if not provided)"""
+    require_persistent_context()
+
+    if url is None:
+        config = Config()
+        url = typer.prompt(
+            "Enter the URL of the Prime Traces service ('-' follows the base URL)",
+            default=config._configured_traces_url() or "",
+        )
+
+    if url == "-":
+        url = ""
+
+    config = Config()
+    try:
+        config.set_traces_url_for_active_environment(url)
+    except ValueError as e:
+        console.print(f"[red]Error: {escape(str(e))}[/red]")
+        raise typer.Exit(1)
+    if url:
+        console.print(f"[green]Traces URL set to: {escape(url)}[/green]")
+    else:
+        console.print("[green]Traces URL override cleared; following the base URL[/green]")
+
+
 # Helper functions (not commands)
 def _set_environment(
     env: str,
 ) -> None:
     """Set URLs for a specific environment"""
+    require_persistent_context()
     config = Config()
 
     # Try to load the environment (handles both built-in and custom)
@@ -301,6 +366,7 @@ def _save_environment(
     name: str,
 ) -> None:
     """Save current configuration as a named environment (including API key)"""
+    require_persistent_context()
     try:
         config = Config()
         config.save_environment(name)
@@ -332,6 +398,7 @@ def _delete_environment(
     name: str,
 ) -> None:
     """Delete a named saved environment."""
+    require_persistent_context()
     try:
         config = Config()
         config.delete_environment(name)
@@ -349,6 +416,7 @@ def set_share_resources_with_team(
     ),
 ) -> None:
     """Set whether to automatically share new resources with all team members"""
+    require_persistent_context()
     value = enabled.lower()
     if value not in ("true", "false"):
         console.print("[red]Error: Value must be 'true' or 'false'[/red]")
@@ -360,6 +428,25 @@ def set_share_resources_with_team(
 
 
 @app.command(no_args_is_help=True)
+def set_traces_opt_out(
+    enabled: str = typer.Argument(
+        ...,
+        help="Opt out of Prime Traces (run samples go to the legacy tables): true or false",
+    ),
+) -> None:
+    """Opt runs out of Prime Traces; their samples upload to the legacy tables instead"""
+    require_persistent_context()
+    value = enabled.lower()
+    if value not in ("true", "false"):
+        console.print("[red]Error: Value must be 'true' or 'false'[/red]")
+        raise typer.Exit(1)
+
+    config = Config()
+    config.set_traces_opt_out(value == "true")
+    console.print(f"[green]Traces opt-out set to: {value}[/green]")
+
+
+@app.command(no_args_is_help=True)
 def set_ssh_key_path(
     path: str = typer.Argument(
         ...,
@@ -367,6 +454,7 @@ def set_ssh_key_path(
     ),
 ) -> None:
     """Set the SSH private key path"""
+    require_persistent_context()
     config = Config()
     config.set_ssh_key_path(path)
     console.print("[green]SSH key path configured successfully![/green]")
@@ -377,14 +465,18 @@ def reset(
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ) -> None:
     """Reset configuration to defaults"""
+    require_persistent_context()
     if yes or typer.confirm("Are you sure you want to reset all settings?"):
         config = Config()
         config.set_api_key("")
         config.set_team(None)
+        config.set_user_id(None)
         config.set_base_url(Config.DEFAULT_BASE_URL)
         config.set_frontend_url(Config.DEFAULT_FRONTEND_URL)
         config.set_inference_url(Config.DEFAULT_INFERENCE_URL)
+        config.set_traces_url("")
         config.set_ssh_key_path(Config.DEFAULT_SSH_KEY_PATH)
+        config.set_traces_opt_out(False)
         config.set_current_environment("production")
         console.print("[green]Configuration reset to defaults![/green]")
 

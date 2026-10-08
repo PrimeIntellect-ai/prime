@@ -9,6 +9,7 @@ from .client import (
     PaymentRequiredError,
     UnauthorizedError,
     ValidationError,
+    default_user_agent,
 )
 from .config import Config
 
@@ -22,4 +23,5 @@ __all__ = [
     "PaymentRequiredError",
     "UnauthorizedError",
     "ValidationError",
+    "default_user_agent",
 ]

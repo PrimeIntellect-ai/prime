@@ -15,7 +15,41 @@ on:
         type: string
 
 jobs:
+  await-sdk-releases:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The CLI image installs the wheel with its dependencies resolved from PyPI, and
+      # SDK release workflows run independently. Publishing before a required SDK is
+      # installable would strand the release: reruns skip the existing CLI tag while
+      # every image build continues to fail dependency resolution.
+      - name: Wait for required SDK versions on PyPI
+        run: |
+          for PACKAGE in prime-sandboxes prime-tunnel prime-traces; do
+            FLOOR=$(sed -nE "s/.*\"${PACKAGE}>=([^\"]+)\".*/\1/p" packages/prime/pyproject.toml | head -n1)
+            if [ -z "$FLOOR" ]; then
+              echo "::error::Unable to parse the $PACKAGE floor from packages/prime/pyproject.toml"
+              exit 1
+            fi
+            echo "Waiting for $PACKAGE==$FLOOR to become installable"
+            AVAILABLE=false
+            for _ in $(seq 1 40); do
+              if python3 -m pip download --quiet --no-deps --no-cache-dir --dest /tmp/floor-check "$PACKAGE==$FLOOR"; then
+                echo "$PACKAGE $FLOOR is installable"
+                AVAILABLE=true
+                break
+              fi
+              sleep 15
+            done
+            if [ "$AVAILABLE" != true ]; then
+              echo "::error::$PACKAGE $FLOOR is still not on PyPI after 10 minutes; check its release workflow"
+              exit 1
+            fi
+          done
+
   tag-and-release:
+    needs: await-sdk-releases
     runs-on: ubuntu-latest
     environment: pypi-prod
     permissions:
@@ -124,7 +158,7 @@ jobs:
       # Publish to PyPI via Trusted Publishing (OIDC)
       - name: Publish to PyPI
         if: steps.check_tag.outputs.exists != 'true'
-        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           packages-dir: packages/prime/dist
 
@@ -186,6 +220,8 @@ jobs:
       contents: read
       packages: write
     strategy:
+      # One matrix leg hitting a transient PyPI error must not cancel the others.
+      fail-fast: false
       matrix:
         python-version: ['3.11', '3.12', '3.13']
     steps:
@@ -214,11 +250,26 @@ jobs:
           IMAGE_PATH=$(echo "$REPOSITORY" | tr '[:upper:]' '[:lower:]')
           IMAGE="ghcr.io/$IMAGE_PATH"
           PY_TAG="py${PYTHON_VERSION}"
-          docker build --build-arg PRIME_VERSION="$VERSION" \
-            --build-arg PYTHON_VERSION="$PYTHON_VERSION" \
-            -t "$IMAGE:$VERSION-$PY_TAG" \
-            -t "$IMAGE:v$VERSION-$PY_TAG" \
-            -t "$IMAGE:$PY_TAG" .
+          # pip resolves the wheel's dependencies from PyPI inside the build. Even after
+          # await-sdk-releases has seen a freshly published SDK, a later request can still be
+          # served a stale index by the PyPI CDN, so retry the build before giving up. Layers
+          # before the pip install stay cached, so each retry only repeats the install step.
+          MAX_ATTEMPTS=6
+          for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
+            if docker build --build-arg PRIME_VERSION="$VERSION" \
+              --build-arg PYTHON_VERSION="$PYTHON_VERSION" \
+              -t "$IMAGE:$VERSION-$PY_TAG" \
+              -t "$IMAGE:v$VERSION-$PY_TAG" \
+              -t "$IMAGE:$PY_TAG" .; then
+              break
+            fi
+            if [ "$attempt" -eq "$MAX_ATTEMPTS" ]; then
+              echo "::error::docker build failed after $MAX_ATTEMPTS attempts"
+              exit 1
+            fi
+            echo "docker build failed (attempt $attempt/$MAX_ATTEMPTS); retrying in 30s"
+            sleep 30
+          done
           docker push "$IMAGE:$VERSION-$PY_TAG"
           docker push "$IMAGE:v$VERSION-$PY_TAG"
           docker push "$IMAGE:$PY_TAG"

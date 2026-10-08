@@ -1,32 +1,59 @@
 """Sandbox client implementations."""
 
 import asyncio
+import functools
 import json
+import math
 import os
+import random
 import re
 import shlex
 import sys
 import threading
 import time
 import uuid
+from collections import OrderedDict, deque
+from collections.abc import AsyncIterator
+from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, NoReturn, Optional
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    Dict,
+    Generic,
+    Hashable,
+    List,
+    Literal,
+    NoReturn,
+    Optional,
+    TypeVar,
+)
 
 import aiofiles
+import certifi
 import httpx
 from connectrpc.client import ConnectClient, ConnectClientSync
 from connectrpc.code import Code
 from connectrpc.errors import ConnectError
+from connectrpc.method import MethodInfo
+from google.protobuf.message import Message
+from pyqwest import Client as HTTPClient
+from pyqwest import HTTPTransport
 from tenacity import (
     retry,
     retry_if_exception,
-    retry_if_exception_type,
     stop_after_attempt,
     wait_exponential,
+    wait_random_exponential,
 )
 
+from ._connectrpc import GOOGLE_PROTOBUF_BINARY_CODEC
 from .core import APIClient, APIError, AsyncAPIClient
+from .core.client import _RateLimitAwareWait
 from .exceptions import (
+    BatchStatusUnsupportedError,
     CommandTimeoutError,
     DownloadTimeoutError,
     SandboxFileNotFoundError,
@@ -40,28 +67,38 @@ from .exceptions import (
 from .models import (
     BackgroundJob,
     BackgroundJobStatus,
+    BackgroundJobStatusSnapshot,
+    BatchBackgroundJobStatusResponse,
+    BatchCheckpointResponse,
+    BatchSandboxStatusResponse,
     BulkDeleteSandboxRequest,
     BulkDeleteSandboxResponse,
     CommandResponse,
     CreateSandboxRequest,
-    DockerImageCheckResponse,
+    DeleteSandboxCheckpointsResponse,
     EgressPolicyStatus,
-    ExposedPort,
-    ExposePortRequest,
     FileUploadResponse,
-    ListExposedPortsResponse,
     ReadFileResponse,
-    RegistryCredentialSummary,
     Sandbox,
+    SandboxCheckpoint,
     SandboxListResponse,
     SandboxLogsResponse,
+    SandboxStatusSnapshot,
     SSHSession,
     validate_egress_lists,
 )
+from .process import AsyncSandboxProcess
 from .rpc_command_session import (
+    COMMAND_SESSION_CONNECT_RPC_METHOD,
+    COMMAND_SESSION_SEND_INPUT_RPC_METHOD,
+    COMMAND_SESSION_SEND_SIGNAL_RPC_METHOD,
     COMMAND_SESSION_START_RPC_METHOD,
+    build_command_session_connect_request,
+    build_command_session_send_input_request,
+    build_command_session_send_signal_request,
     build_command_session_start_request,
     collect_command_session_start_event,
+    is_transient_control_fault,
 )
 
 # Connection-level errors: request never reached the server, so retry is safe
@@ -74,6 +111,234 @@ GATEWAY_CONNECTION_RETRYABLE_EXCEPTIONS = (
     httpx.ConnectError,  # Connection refused/failed
     httpx.PoolTimeout,  # No connection available in pool
 )
+
+# connectrpc-python cancels a server stream before its first event when no
+# timeout is supplied. A live process cannot outlast the sandbox's 24-hour
+# maximum lifetime, so use that lifetime as the transport bound.
+_LIVE_PROCESS_TIMEOUT_MS = 24 * 60 * 60 * 1000
+_PROCESS_INPUT_TIMEOUT_MS = 30_000
+_PROCESS_SIGNAL_TIMEOUT_MS = 10_000
+_LIVE_PROCESS_TCP_KEEPALIVE_SECONDS = 15.0
+_LIVE_PROCESS_POOL_IDLE_TIMEOUT_SECONDS = 300.0
+
+# Live-process control RPC retry budget (see _execute_process_control_rpc).
+# Worst-case retry horizon: 3 attempts x the 30s stdin RPC timeout plus
+# 0.5s + 1s backoff ~= 91.5s. sandboxd's idempotency window must exceed it
+# (invariant 4 in the platform's sandboxd-idempotency context doc).
+_PROCESS_CONTROL_RPC_ATTEMPTS = 3
+_PROCESS_CONTROL_RETRY_INITIAL_DELAY = 0.5
+_BACKGROUND_JOB_LAUNCH_ATTEMPTS = 3
+_BACKGROUND_JOB_LAUNCH_BACKOFF_SECONDS = 0.5
+_BACKGROUND_JOB_LAUNCH_TIMEOUT_SECONDS = 30
+_SANDBOX_ERROR_CONTEXT_TIMEOUT_SECONDS = 10.0
+
+_RequestMessage = TypeVar("_RequestMessage", bound=Message)
+_ResponseMessage = TypeVar("_ResponseMessage", bound=Message)
+_BatchKey = TypeVar("_BatchKey", bound=Hashable)
+_BatchValue = TypeVar("_BatchValue")
+
+
+@dataclass(frozen=True)
+class _BatchItemError:
+    """An error for one key in an otherwise successful transport batch."""
+
+    error: Exception
+
+
+class _BatcherClosedError(RuntimeError):
+    """Raised when a lookup is interrupted by client shutdown."""
+
+
+class _SyncPollLease:
+    def __init__(self, registry: "_SyncPollLeaseRegistry", sandbox_id: str) -> None:
+        self._registry = registry
+        self.sandbox_id = sandbox_id
+        self._released = False
+
+    def release(self) -> None:
+        if not self._released:
+            self._released = True
+            self._registry._release(self.sandbox_id)
+
+
+class _SyncPollLeaseRegistry:
+    """Coordinate sandbox-scoped sync operations with deletion."""
+
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self._active: Dict[str, int] = {}
+        self._draining: set[str] = set()
+
+    def acquire(self, sandbox_id: str) -> _SyncPollLease:
+        return self.acquire_many([sandbox_id])[0]
+
+    def check_admission(self, sandbox_id: str) -> None:
+        with self._condition:
+            if sandbox_id in self._draining:
+                raise APIError(f"Sandbox {sandbox_id} is being deleted")
+
+    def acquire_many(self, sandbox_ids: List[str]) -> List[_SyncPollLease]:
+        scopes = list(dict.fromkeys(sandbox_ids))
+        with self._condition:
+            blocked = next((scope for scope in scopes if scope in self._draining), None)
+            if blocked is not None:
+                raise APIError(f"Sandbox {blocked} is being deleted")
+            for scope in scopes:
+                self._active[scope] = self._active.get(scope, 0) + 1
+        return [_SyncPollLease(self, scope) for scope in scopes]
+
+    def _release(self, sandbox_id: str) -> None:
+        with self._condition:
+            remaining = self._active[sandbox_id] - 1
+            if remaining:
+                self._active[sandbox_id] = remaining
+            else:
+                del self._active[sandbox_id]
+            self._condition.notify_all()
+
+    def start_drain(self, sandbox_ids: List[str]) -> List[str]:
+        scopes = list(dict.fromkeys(sandbox_ids))
+        with self._condition:
+            while any(scope in self._draining for scope in scopes):
+                self._condition.wait()
+            self._draining.update(scopes)
+            self._condition.notify_all()
+        return scopes
+
+    def wait_for_drain(self, sandbox_ids: List[str]) -> None:
+        with self._condition:
+            while any(self._active.get(scope, 0) for scope in sandbox_ids):
+                self._condition.wait()
+
+    def begin_drain(self, sandbox_ids: List[str]) -> List[str]:
+        scopes = self.start_drain(sandbox_ids)
+        try:
+            self.wait_for_drain(scopes)
+        except BaseException:
+            self.end_drain(scopes)
+            raise
+        return scopes
+
+    def end_drain(self, sandbox_ids: List[str]) -> None:
+        with self._condition:
+            self._draining.difference_update(sandbox_ids)
+            self._condition.notify_all()
+
+
+class _AsyncPollLease:
+    def __init__(self, registry: "_AsyncPollLeaseRegistry", sandbox_id: str) -> None:
+        self._registry = registry
+        self.sandbox_id = sandbox_id
+        self._released = False
+
+    def release(self) -> None:
+        if not self._released:
+            self._released = True
+            self._registry._release(self.sandbox_id)
+
+
+class _AsyncPollLeaseRegistry:
+    """Coordinate sandbox-scoped async operations, deletion, and shutdown."""
+
+    def __init__(self) -> None:
+        self._active: Dict[str, int] = {}
+        self._draining: set[str] = set()
+        self._closing = False
+        self._changed = asyncio.Event()
+
+    def acquire(self, sandbox_id: str) -> _AsyncPollLease:
+        return self.acquire_many([sandbox_id])[0]
+
+    def check_admission(self, sandbox_id: str) -> None:
+        if self._closing:
+            raise _BatcherClosedError("Sandbox client is closing")
+        if sandbox_id in self._draining:
+            raise APIError(f"Sandbox {sandbox_id} is being deleted")
+
+    def acquire_many(self, sandbox_ids: List[str]) -> List[_AsyncPollLease]:
+        scopes = list(dict.fromkeys(sandbox_ids))
+        if self._closing:
+            raise _BatcherClosedError("Sandbox client is closing")
+        blocked = next((scope for scope in scopes if scope in self._draining), None)
+        if blocked is not None:
+            raise APIError(f"Sandbox {blocked} is being deleted")
+        for scope in scopes:
+            self._active[scope] = self._active.get(scope, 0) + 1
+        return [_AsyncPollLease(self, scope) for scope in scopes]
+
+    def _notify_changed(self) -> None:
+        changed = self._changed
+        self._changed = asyncio.Event()
+        changed.set()
+
+    def _release(self, sandbox_id: str) -> None:
+        remaining = self._active[sandbox_id] - 1
+        if remaining:
+            self._active[sandbox_id] = remaining
+        else:
+            del self._active[sandbox_id]
+        self._notify_changed()
+
+    async def start_drain(self, sandbox_ids: List[str]) -> List[str]:
+        scopes = list(dict.fromkeys(sandbox_ids))
+        if self._closing:
+            raise _BatcherClosedError("Sandbox client is closing")
+        while any(scope in self._draining for scope in scopes):
+            changed = self._changed
+            await changed.wait()
+            if self._closing:
+                raise _BatcherClosedError("Sandbox client is closing")
+        self._draining.update(scopes)
+        self._notify_changed()
+        return scopes
+
+    async def wait_for_drain(self, sandbox_ids: List[str]) -> None:
+        while any(self._active.get(scope, 0) for scope in sandbox_ids):
+            changed = self._changed
+            await changed.wait()
+
+    async def begin_drain(self, sandbox_ids: List[str]) -> List[str]:
+        scopes = await self.start_drain(sandbox_ids)
+        try:
+            await self.wait_for_drain(scopes)
+        except BaseException:
+            self.end_drain(scopes)
+            raise
+        return scopes
+
+    def end_drain(self, sandbox_ids: List[str]) -> None:
+        self._draining.difference_update(sandbox_ids)
+        self._notify_changed()
+
+    def begin_close(self) -> None:
+        self._closing = True
+        self._notify_changed()
+
+    async def wait_for_idle(self) -> None:
+        while self._active:
+            changed = self._changed
+            await changed.wait()
+
+
+@functools.lru_cache(maxsize=1)
+def _ca_bundle() -> bytes:
+    with open(certifi.where(), "rb") as ca_file:
+        return ca_file.read()
+
+
+def _canonical_uuid_key() -> str:
+    """Mint one idempotency key; sandboxd rejects non-canonical UUID spellings."""
+    return str(uuid.uuid4())
+
+
+def _live_process_transport() -> HTTPTransport:
+    # A bare HTTPTransport carries no trust roots on some pyqwest versions
+    # (only the default singleton does), so pass certifi's bundle explicitly.
+    return HTTPTransport(
+        tls_ca_cert=_ca_bundle(),
+        tcp_keepalive_interval=_LIVE_PROCESS_TCP_KEEPALIVE_SECONDS,
+        pool_idle_timeout=_LIVE_PROCESS_POOL_IDLE_TIMEOUT_SECONDS,
+    )
 
 
 def _network_update_payload(
@@ -131,10 +396,1133 @@ AUTH_REFRESH_MARGIN_SECONDS = 60
 # Max bytes of stdout/stderr returned per background-job status check
 JOB_OUTPUT_TAIL_BYTES = 10 * 1024 * 1024
 
+# Keep a batch of simultaneously completed jobs from turning into a burst of
+# gateway connections. Output reads share this client-wide limit and each job
+# gets one deadline for its sequential stdout/stderr retrieval.
+MAX_CONCURRENT_BACKGROUND_JOB_OUTPUT_READS = 20
+BACKGROUND_JOB_OUTPUT_FETCH_TIMEOUT_SECONDS = 45.0
+MAX_PENDING_BACKGROUND_JOB_OUTPUTS = 200
+BACKGROUND_JOB_OUTPUT_CACHE_BYTES = 64 * 1024 * 1024
+
+# Platform batch-status contracts cap one request at 100 identifiers. Concurrent
+# single-item waits are collected briefly so callers share a request without
+# adding a persistent worker to the client lifecycle.
+MAX_STATUS_BATCH_SIZE = 100
+STATUS_BATCH_WINDOW_SECONDS = 0.025
+
+# Background-job completion polling starts with the caller-selected interval,
+# then backs off after each non-terminal status to reduce load from older jobs.
+BACKGROUND_JOB_POLL_MAX_DELAY = 20.0
+BACKGROUND_JOB_POLL_BACKOFF_FACTOR = 1.5
+
+# Creation status-poll pacing. Sandbox creation is polled with exponential
+# backoff plus jitter rather than at a fixed interval
+CREATION_POLL_INITIAL_DELAY = 1.0
+CREATION_POLL_MAX_DELAY = 10.0
+CREATION_POLL_BACKOFF_FACTOR = 1.5
+# Fraction of the computed delay applied as +/- jitter.
+CREATION_POLL_JITTER = 0.25
+# Legacy fixed schedule (1s for the first 5 polls, then 2s) that `max_attempts`
+# used to describe. Retained only to derive the same wall-clock budget.
+_LEGACY_FAST_POLLS = 5
+
+
+@dataclass
+class _SyncBatchEntry(Generic[_BatchKey, _BatchValue]):
+    key: _BatchKey
+    lease: _SyncPollLease
+    waiters: List[Future[_BatchValue]]
+
+
+class _SyncRequestBatcher(Generic[_BatchKey, _BatchValue]):
+    """Coalesce concurrent sync lookups into bounded calls."""
+
+    def __init__(
+        self,
+        fetch: Callable[[List[_BatchKey]], Dict[_BatchKey, _BatchValue | _BatchItemError]],
+        sandbox_id_for_key: Callable[[_BatchKey], str],
+        leases: _SyncPollLeaseRegistry,
+    ) -> None:
+        self._fetch = fetch
+        self._sandbox_id_for_key = sandbox_id_for_key
+        self._leases = leases
+        self._lock = threading.Lock()
+        self._pending: Dict[_BatchKey, _SyncBatchEntry[_BatchKey, _BatchValue]] = {}
+        self._dispatching = False
+
+    def get(self, key: _BatchKey) -> _BatchValue:
+        """Return one result, sharing a batch with concurrent callers."""
+        future: Future[_BatchValue] = Future()
+        lease = self._leases.acquire(self._sandbox_id_for_key(key))
+        redundant_lease: Optional[_SyncPollLease] = None
+        with self._lock:
+            entry = self._pending.get(key)
+            if entry is None:
+                self._pending[key] = _SyncBatchEntry(key, lease, [future])
+            else:
+                entry.waiters.append(future)
+                redundant_lease = lease
+            leader = not self._dispatching
+            if leader:
+                self._dispatching = True
+
+        if redundant_lease is not None:
+            redundant_lease.release()
+        if leader:
+            time.sleep(STATUS_BATCH_WINDOW_SECONDS)
+            self._dispatch()
+
+        return future.result()
+
+    def _dispatch(self) -> None:
+        """Drain all currently pending lookups in bounded chunks."""
+        while True:
+            with self._lock:
+                keys = list(self._pending)[:MAX_STATUS_BATCH_SIZE]
+                if not keys:
+                    self._dispatching = False
+                    return
+                entries = {key: self._pending.pop(key) for key in keys}
+
+            try:
+                results = self._fetch(keys)
+            except BaseException as exc:
+                for entry in entries.values():
+                    for waiter in entry.waiters:
+                        if not waiter.done():
+                            waiter.set_exception(exc)
+                    entry.lease.release()
+                if not isinstance(exc, Exception):
+                    raise
+                continue
+
+            for key, entry in entries.items():
+                if key not in results:
+                    exc = APIError(f"Batch status response omitted {key!r}")
+                    for waiter in entry.waiters:
+                        if not waiter.done():
+                            waiter.set_exception(exc)
+                    entry.lease.release()
+                    continue
+                result = results[key]
+                if isinstance(result, _BatchItemError):
+                    for waiter in entry.waiters:
+                        if not waiter.done():
+                            waiter.set_exception(result.error)
+                    entry.lease.release()
+                    continue
+                for waiter in entry.waiters:
+                    if not waiter.done():
+                        waiter.set_result(result)
+                entry.lease.release()
+
+
+class _AsyncBatchEntry(Generic[_BatchKey, _BatchValue]):
+    def __init__(
+        self,
+        key: _BatchKey,
+        lease: _AsyncPollLease,
+        waiter: asyncio.Future[_BatchValue],
+    ) -> None:
+        self.key = key
+        self.lease = lease
+        self.waiters = [waiter]
+        self.batch: Optional[_AsyncBatch[_BatchKey, _BatchValue]] = None
+
+
+class _AsyncBatch(Generic[_BatchKey, _BatchValue]):
+    def __init__(self, entries: List[_AsyncBatchEntry[_BatchKey, _BatchValue]]) -> None:
+        self.entries = entries
+        self.fetch_task: Optional[asyncio.Task[Dict[_BatchKey, _BatchValue | _BatchItemError]]] = (
+            None
+        )
+        self.done = asyncio.Event()
+
+    def has_waiters(self) -> bool:
+        return any(entry.waiters for entry in self.entries)
+
+
+class _AsyncRequestBatcher(Generic[_BatchKey, _BatchValue]):
+    """Coalesce concurrent async lookups into bounded calls."""
+
+    def __init__(
+        self,
+        fetch: Callable[
+            [List[_BatchKey]],
+            Awaitable[Dict[_BatchKey, _BatchValue | _BatchItemError]],
+        ],
+        sandbox_id_for_key: Callable[[_BatchKey], str],
+        leases: _AsyncPollLeaseRegistry,
+    ) -> None:
+        self._fetch = fetch
+        self._sandbox_id_for_key = sandbox_id_for_key
+        self._leases = leases
+        self._pending: Dict[_BatchKey, _AsyncBatchEntry[_BatchKey, _BatchValue]] = {}
+        self._dispatch_task: Optional[asyncio.Task[None]] = None
+        self._active_batch: Optional[_AsyncBatch[_BatchKey, _BatchValue]] = None
+        self._closed = False
+        self._close_task: Optional[asyncio.Task[None]] = None
+
+    def _fail_pending(self, error: Exception) -> None:
+        pending = list(self._pending.values())
+        self._pending.clear()
+        for entry in pending:
+            for waiter in entry.waiters:
+                if not waiter.done():
+                    waiter.set_exception(error)
+            entry.waiters.clear()
+            entry.lease.release()
+
+    def _start_dispatch(self) -> None:
+        task = asyncio.create_task(self._dispatch())
+        self._dispatch_task = task
+        task.add_done_callback(self._dispatch_done)
+
+    def _dispatch_done(self, task: asyncio.Task[None]) -> None:
+        # A task cancelled before its coroutine starts never executes its
+        # ``finally`` block, so settle pending work from the completion hook.
+        if self._dispatch_task is not task:
+            return
+        self._dispatch_task = None
+        if task.cancelled():
+            self._fail_pending(
+                _BatcherClosedError("Request batcher is closed")
+                if self._closed
+                else RuntimeError("Request batch dispatch cancelled")
+            )
+            return
+        error = task.exception()
+        if error is not None:
+            self._fail_pending(
+                error if isinstance(error, Exception) else RuntimeError("Request batch aborted")
+            )
+            return
+        if self._pending and not self._closed:
+            self._start_dispatch()
+
+    async def get(self, key: _BatchKey) -> _BatchValue:
+        """Return one result, sharing a batch with concurrent callers."""
+        if self._closed:
+            raise _BatcherClosedError("Request batcher is closed")
+        future = asyncio.get_running_loop().create_future()
+        lease = self._leases.acquire(self._sandbox_id_for_key(key))
+        entry = self._pending.get(key)
+        if entry is None:
+            entry = _AsyncBatchEntry(key, lease, future)
+            self._pending[key] = entry
+        else:
+            entry.waiters.append(future)
+            lease.release()
+        if self._dispatch_task is None:
+            self._start_dispatch()
+        try:
+            return await asyncio.shield(future)
+        except asyncio.CancelledError:
+            await self._cancel_waiter(entry, future)
+            raise
+
+    async def _cancel_waiter(
+        self,
+        entry: _AsyncBatchEntry[_BatchKey, _BatchValue],
+        future: asyncio.Future[_BatchValue],
+    ) -> None:
+        if future in entry.waiters:
+            entry.waiters.remove(future)
+        if not future.done():
+            future.cancel()
+
+        if entry.batch is None:
+            if not entry.waiters and self._pending.get(entry.key) is entry:
+                del self._pending[entry.key]
+                entry.lease.release()
+            return
+
+        batch = entry.batch
+        fetch_task = batch.fetch_task
+        if batch.has_waiters() or fetch_task is None or fetch_task.done():
+            return
+
+        fetch_task.cancel()
+        completion = asyncio.create_task(batch.done.wait())
+        while not completion.done():
+            try:
+                await asyncio.shield(completion)
+            except asyncio.CancelledError:
+                pass
+
+    def _finish_batch(
+        self,
+        batch: _AsyncBatch[_BatchKey, _BatchValue],
+        results: Optional[Dict[_BatchKey, _BatchValue | _BatchItemError]],
+        error: Optional[BaseException],
+    ) -> None:
+        for entry in batch.entries:
+            if error is not None:
+                for waiter in entry.waiters:
+                    if waiter.done():
+                        continue
+                    if isinstance(error, asyncio.CancelledError):
+                        if self._closed:
+                            waiter.set_exception(_BatcherClosedError("Request batcher is closed"))
+                        else:
+                            waiter.cancel()
+                    elif isinstance(error, Exception):
+                        waiter.set_exception(error)
+                    else:
+                        waiter.set_exception(RuntimeError("Request batch dispatch aborted"))
+            elif results is not None and entry.key not in results:
+                exc = APIError(f"Batch status response omitted {entry.key!r}")
+                for waiter in entry.waiters:
+                    if not waiter.done():
+                        waiter.set_exception(exc)
+            elif results is not None:
+                result = results[entry.key]
+                for waiter in entry.waiters:
+                    if waiter.done():
+                        continue
+                    if isinstance(result, _BatchItemError):
+                        waiter.set_exception(result.error)
+                    else:
+                        waiter.set_result(result)
+            entry.waiters.clear()
+            entry.lease.release()
+        batch.done.set()
+
+    async def _dispatch(self) -> None:
+        """Drain all currently pending lookups in bounded chunks."""
+        try:
+            await asyncio.sleep(STATUS_BATCH_WINDOW_SECONDS)
+            while self._pending and not self._closed:
+                keys = list(self._pending)[:MAX_STATUS_BATCH_SIZE]
+                entries = [self._pending.pop(key) for key in keys]
+                batch = _AsyncBatch(entries)
+                self._active_batch = batch
+                for entry in entries:
+                    entry.batch = batch
+                batch.fetch_task = asyncio.create_task(self._fetch(keys))
+                results: Optional[Dict[_BatchKey, _BatchValue | _BatchItemError]] = None
+                error: Optional[BaseException] = None
+                dispatch_cancelled = False
+                try:
+                    results = await batch.fetch_task
+                except BaseException as exc:
+                    error = exc
+                    task = asyncio.current_task()
+                    dispatch_cancelled = bool(task is not None and task.cancelling())
+                finally:
+                    self._finish_batch(batch, results, error)
+                    self._active_batch = None
+
+                if dispatch_cancelled:
+                    raise asyncio.CancelledError
+                if error is not None and not isinstance(error, (Exception, asyncio.CancelledError)):
+                    raise error
+        finally:
+            task = asyncio.current_task()
+            dispatch_cancelled = bool(task is not None and task.cancelling())
+            if dispatch_cancelled:
+                self._fail_pending(
+                    _BatcherClosedError("Request batcher is closed")
+                    if self._closed
+                    else RuntimeError("Request batch dispatch cancelled")
+                )
+            self._dispatch_task = None
+            if self._pending and not self._closed and not dispatch_cancelled:
+                self._start_dispatch()
+
+    async def _close(self) -> None:
+        self._closed = True
+        pending = list(self._pending.values())
+        self._pending.clear()
+        for entry in pending:
+            for waiter in entry.waiters:
+                if not waiter.done():
+                    waiter.set_exception(_BatcherClosedError("Request batcher is closed"))
+            entry.waiters.clear()
+            entry.lease.release()
+
+        batch = self._active_batch
+        if batch is not None:
+            for entry in batch.entries:
+                for waiter in entry.waiters:
+                    if not waiter.done():
+                        waiter.set_exception(_BatcherClosedError("Request batcher is closed"))
+
+        dispatch_task = self._dispatch_task
+        if dispatch_task is not None and not dispatch_task.done():
+            dispatch_task.cancel()
+            try:
+                await dispatch_task
+            except asyncio.CancelledError:
+                pass
+            finally:
+                self._dispatch_done(dispatch_task)
+
+    async def aclose(self) -> None:
+        """Cancel and join all work owned by this batcher."""
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._close())
+        try:
+            await asyncio.shield(self._close_task)
+        except asyncio.CancelledError:
+            while not self._close_task.done():
+                try:
+                    await asyncio.shield(self._close_task)
+                except asyncio.CancelledError:
+                    pass
+            if not self._close_task.cancelled():
+                self._close_task.exception()
+            raise
+
+
+@dataclass(frozen=True)
+class _BackgroundJobOutputStream:
+    content: str
+    truncated: bool
+
+
+class _BackgroundJobOutputCache:
+    """Byte-bounded LRU of immutable, successfully read output streams."""
+
+    def __init__(self, max_bytes: int) -> None:
+        self._max_bytes = max_bytes
+        self._size = 0
+        self._entries: OrderedDict[tuple[str, str, str], tuple[_BackgroundJobOutputStream, int]] = (
+            OrderedDict()
+        )
+
+    def get(self, key: tuple[str, str, str]) -> Optional[_BackgroundJobOutputStream]:
+        entry = self._entries.get(key)
+        if entry is None:
+            return None
+        self._entries.move_to_end(key)
+        return entry[0]
+
+    def put(self, key: tuple[str, str, str], value: _BackgroundJobOutputStream) -> None:
+        if self._max_bytes == 0:
+            return
+        # Account for a small fixed amount of per-entry metadata so empty
+        # streams cannot make an otherwise byte-bounded cache unbounded.
+        size = len(value.content.encode("utf-8")) + 128
+        if size > self._max_bytes:
+            return
+        previous = self._entries.pop(key, None)
+        if previous is not None:
+            self._size -= previous[1]
+        self._entries[key] = (value, size)
+        self._size += size
+        while self._size > self._max_bytes:
+            _, (_, evicted_size) = self._entries.popitem(last=False)
+            self._size -= evicted_size
+
+    def purge_sandboxes(self, sandbox_ids: List[str]) -> None:
+        scopes = set(sandbox_ids)
+        for key in [key for key in self._entries if key[0] in scopes]:
+            _, size = self._entries.pop(key)
+            self._size -= size
+
+    def clear(self) -> None:
+        self._entries.clear()
+        self._size = 0
+
+
+def _completed_background_job_status(
+    job: BackgroundJob,
+    exit_code: int,
+    stdout: Optional[_BackgroundJobOutputStream],
+    stderr: Optional[_BackgroundJobOutputStream],
+    stdout_error: Optional[str] = None,
+    stderr_error: Optional[str] = None,
+) -> BackgroundJobStatus:
+    return BackgroundJobStatus(
+        job_id=job.job_id,
+        completed=True,
+        exit_code=exit_code,
+        stdout=stdout.content if stdout is not None else None,
+        stderr=stderr.content if stderr is not None else None,
+        stdout_error=stdout_error,
+        stderr_error=stderr_error,
+        stdout_truncated=stdout.truncated if stdout is not None else False,
+        stderr_truncated=stderr.truncated if stderr is not None else False,
+    )
+
+
+def _output_unavailable_status(
+    job: BackgroundJob,
+    exit_code: int,
+    message: str,
+) -> BackgroundJobStatus:
+    return _completed_background_job_status(
+        job,
+        exit_code,
+        None,
+        None,
+        message,
+        message,
+    )
+
+
+@dataclass
+class _SyncOutputOperation:
+    key: tuple[str, str, float]
+    job: BackgroundJob
+    exit_code: int
+    deadline: float
+    lease: _SyncPollLease
+    waiters: int = 1
+    active: bool = False
+    runner_claimed: bool = False
+    done: bool = False
+    result: Optional[BackgroundJobStatus] = None
+    error: Optional[BaseException] = None
+
+
+class _SyncBackgroundJobOutputCoordinator:
+    """Fair, bounded, caller-driven output work for the sync client."""
+
+    def __init__(
+        self,
+        leases: _SyncPollLeaseRegistry,
+        read_stream: Callable[
+            [str, str, float, Optional[int]],
+            tuple[Optional[_BackgroundJobOutputStream], Optional[str]],
+        ],
+        concurrency: int,
+        queue_size: int,
+        cache_bytes: int,
+    ) -> None:
+        self._leases = leases
+        self._read_stream = read_stream
+        self._concurrency = concurrency
+        self._queue_size = queue_size
+        self._condition = threading.Condition()
+        self._cache = _BackgroundJobOutputCache(cache_bytes)
+        self._inflight: Dict[tuple[str, str, float], _SyncOutputOperation] = {}
+        self._pending: Dict[str, deque[_SyncOutputOperation]] = {}
+        self._round_robin: deque[str] = deque()
+        self._pending_count = 0
+        self._active_count = 0
+
+    @staticmethod
+    def _stream_key(job: BackgroundJob, stream: str) -> tuple[str, str, str]:
+        return (job.sandbox_id, job.job_id, stream)
+
+    def _cached_status(self, job: BackgroundJob, exit_code: int) -> Optional[BackgroundJobStatus]:
+        stdout = self._cache.get(self._stream_key(job, "stdout"))
+        stderr = self._cache.get(self._stream_key(job, "stderr"))
+        if stdout is None or stderr is None:
+            return None
+        return _completed_background_job_status(job, exit_code, stdout, stderr)
+
+    def _remove_pending_locked(self, operation: _SyncOutputOperation) -> None:
+        queue = self._pending.get(operation.job.sandbox_id)
+        if queue is None:
+            return
+        try:
+            queue.remove(operation)
+        except ValueError:
+            return
+        self._pending_count -= 1
+        if not queue:
+            del self._pending[operation.job.sandbox_id]
+            self._round_robin = deque(
+                scope for scope in self._round_robin if scope != operation.job.sandbox_id
+            )
+
+    def _promote_locked(self) -> None:
+        while self._active_count < self._concurrency and self._round_robin:
+            sandbox_id = self._round_robin.popleft()
+            queue = self._pending[sandbox_id]
+            operation = queue.popleft()
+            self._pending_count -= 1
+            if queue:
+                self._round_robin.append(sandbox_id)
+            else:
+                del self._pending[sandbox_id]
+            operation.active = True
+            self._active_count += 1
+        self._condition.notify_all()
+
+    def _detach_waiter_locked(self, operation: _SyncOutputOperation) -> Optional[_SyncPollLease]:
+        operation.waiters -= 1
+        if operation.waiters or operation.active or operation.done:
+            return None
+        self._remove_pending_locked(operation)
+        self._inflight.pop(operation.key, None)
+        operation.done = True
+        self._promote_locked()
+        return operation.lease
+
+    def _run(self, operation: _SyncOutputOperation, timeout: Optional[int]) -> BackgroundJobStatus:
+        result: Optional[BackgroundJobStatus] = None
+        error: Optional[BaseException] = None
+        try:
+            with self._condition:
+                stdout = self._cache.get(self._stream_key(operation.job, "stdout"))
+                stderr = self._cache.get(self._stream_key(operation.job, "stderr"))
+
+            stdout_error = None
+            stderr_error = None
+            if stdout is None:
+                stdout, stdout_error = self._read_stream(
+                    operation.job.sandbox_id,
+                    operation.job.stdout_log_file,
+                    operation.deadline,
+                    timeout,
+                )
+                if stdout is not None:
+                    with self._condition:
+                        self._cache.put(self._stream_key(operation.job, "stdout"), stdout)
+            if stderr is None:
+                stderr, stderr_error = self._read_stream(
+                    operation.job.sandbox_id,
+                    operation.job.stderr_log_file,
+                    operation.deadline,
+                    timeout,
+                )
+                if stderr is not None:
+                    with self._condition:
+                        self._cache.put(self._stream_key(operation.job, "stderr"), stderr)
+            result = _completed_background_job_status(
+                operation.job,
+                operation.exit_code,
+                stdout,
+                stderr,
+                stdout_error,
+                stderr_error,
+            )
+            return result
+        except BaseException as exc:
+            error = exc
+            raise
+        finally:
+            with self._condition:
+                operation.result = result
+                operation.error = error
+                operation.done = True
+                if self._inflight.get(operation.key) is operation:
+                    self._inflight.pop(operation.key)
+                self._active_count -= 1
+                self._promote_locked()
+            operation.lease.release()
+
+    def get(
+        self,
+        job: BackgroundJob,
+        exit_code: int,
+        timeout: Optional[int],
+        started_at: Optional[float] = None,
+    ) -> BackgroundJobStatus:
+        output_timeout = (
+            float(timeout) if timeout is not None else BACKGROUND_JOB_OUTPUT_FETCH_TIMEOUT_SECONDS
+        )
+        deadline = (started_at if started_at is not None else time.monotonic()) + max(
+            0.0, output_timeout
+        )
+        key = (job.sandbox_id, job.job_id, output_timeout)
+        operation: Optional[_SyncOutputOperation] = None
+        release: Optional[_SyncPollLease] = None
+        try:
+            with self._condition:
+                try:
+                    self._leases.check_admission(job.sandbox_id)
+                except APIError as exc:
+                    return _output_unavailable_status(
+                        job, exit_code, _format_exception_diagnostic(exc)
+                    )
+                cached = self._cached_status(job, exit_code)
+                if cached is not None:
+                    return cached
+                operation = self._inflight.get(key)
+                if operation is not None:
+                    operation.waiters += 1
+                    operation.deadline = max(operation.deadline, deadline)
+                else:
+                    while self._pending_count >= self._queue_size:
+                        try:
+                            self._leases.check_admission(job.sandbox_id)
+                        except APIError as exc:
+                            return _output_unavailable_status(
+                                job, exit_code, _format_exception_diagnostic(exc)
+                            )
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            message = (
+                                f"Output retrieval deadline exceeded after {output_timeout:g}s"
+                            )
+                            return _output_unavailable_status(job, exit_code, message)
+                        self._condition.wait(timeout=remaining)
+                        cached = self._cached_status(job, exit_code)
+                        if cached is not None:
+                            return cached
+                        operation = self._inflight.get(key)
+                        if operation is not None:
+                            break
+                    if operation is not None:
+                        operation.waiters += 1
+                        operation.deadline = max(operation.deadline, deadline)
+                    else:
+                        # Condition waits invalidate all prior observations.
+                        # Recheck immediately before insertion even when the
+                        # wakeup also made queue capacity available.
+                        cached = self._cached_status(job, exit_code)
+                        if cached is not None:
+                            return cached
+                        operation = self._inflight.get(key)
+                        if operation is not None:
+                            operation.waiters += 1
+                            operation.deadline = max(operation.deadline, deadline)
+                        else:
+                            try:
+                                lease = self._leases.acquire(job.sandbox_id)
+                            except APIError as exc:
+                                return _output_unavailable_status(
+                                    job, exit_code, _format_exception_diagnostic(exc)
+                                )
+                            operation = _SyncOutputOperation(key, job, exit_code, deadline, lease)
+                            self._inflight[key] = operation
+                            queue = self._pending.setdefault(job.sandbox_id, deque())
+                            if not queue:
+                                self._round_robin.append(job.sandbox_id)
+                            queue.append(operation)
+                            self._pending_count += 1
+                            self._promote_locked()
+
+                while not operation.done:
+                    if operation.active and not operation.runner_claimed:
+                        operation.runner_claimed = True
+                        break
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        release = self._detach_waiter_locked(operation)
+                        message = f"Output retrieval deadline exceeded after {output_timeout:g}s"
+                        return _output_unavailable_status(job, exit_code, message)
+                    self._condition.wait(timeout=remaining)
+                else:
+                    if operation.error is not None:
+                        raise operation.error
+                    assert operation.result is not None
+                    return operation.result.model_copy(deep=True)
+
+            return self._run(operation, timeout)
+        except BaseException:
+            if operation is not None and not operation.runner_claimed:
+                with self._condition:
+                    if not operation.done:
+                        release = self._detach_waiter_locked(operation)
+            raise
+        finally:
+            if release is not None:
+                release.release()
+
+    def cancel_sandboxes(self, sandbox_ids: List[str], message: str) -> None:
+        scopes = set(sandbox_ids)
+        releases: List[_SyncPollLease] = []
+        with self._condition:
+            for operation in list(self._inflight.values()):
+                if operation.job.sandbox_id not in scopes or operation.active:
+                    continue
+                self._remove_pending_locked(operation)
+                self._inflight.pop(operation.key, None)
+                operation.result = _output_unavailable_status(
+                    operation.job, operation.exit_code, message
+                )
+                operation.done = True
+                releases.append(operation.lease)
+            self._cache.purge_sandboxes(sandbox_ids)
+            self._promote_locked()
+        for lease in releases:
+            lease.release()
+
+
+class _AsyncOutputOperation:
+    def __init__(
+        self,
+        key: tuple[str, str, float],
+        job: BackgroundJob,
+        exit_code: int,
+        deadline: float,
+        lease: _AsyncPollLease,
+        timeout: Optional[int],
+    ) -> None:
+        self.key = key
+        self.job = job
+        self.exit_code = exit_code
+        self.deadline = deadline
+        self.lease = lease
+        self.timeout = timeout
+        self.waiters = 1
+        self.active = False
+        self.done = asyncio.Event()
+        self.fetch_task: Optional[asyncio.Task[BackgroundJobStatus]] = None
+        self.result: Optional[BackgroundJobStatus] = None
+        self.error: Optional[BaseException] = None
+
+
+class _AsyncBackgroundJobOutputCoordinator:
+    """Fair, bounded, deduplicated output workers for the async client."""
+
+    def __init__(
+        self,
+        leases: _AsyncPollLeaseRegistry,
+        read_stream: Callable[
+            [str, str, float, Optional[int]],
+            Awaitable[tuple[Optional[_BackgroundJobOutputStream], Optional[str]]],
+        ],
+        concurrency: int,
+        queue_size: int,
+        cache_bytes: int,
+    ) -> None:
+        self._leases = leases
+        self._read_stream = read_stream
+        self._concurrency = concurrency
+        self._queue_size = queue_size
+        self._condition = asyncio.Condition()
+        self._cache = _BackgroundJobOutputCache(cache_bytes)
+        self._inflight: Dict[tuple[str, str, float], _AsyncOutputOperation] = {}
+        self._pending: Dict[str, deque[_AsyncOutputOperation]] = {}
+        self._round_robin: deque[str] = deque()
+        self._pending_count = 0
+        self._workers: List[asyncio.Task[None]] = []
+        self._closed = False
+        self._close_task: Optional[asyncio.Task[None]] = None
+
+    @staticmethod
+    def _stream_key(job: BackgroundJob, stream: str) -> tuple[str, str, str]:
+        return (job.sandbox_id, job.job_id, stream)
+
+    def _cached_status(self, job: BackgroundJob, exit_code: int) -> Optional[BackgroundJobStatus]:
+        stdout = self._cache.get(self._stream_key(job, "stdout"))
+        stderr = self._cache.get(self._stream_key(job, "stderr"))
+        if stdout is None or stderr is None:
+            return None
+        return _completed_background_job_status(job, exit_code, stdout, stderr)
+
+    def _ensure_workers_locked(self) -> None:
+        if self._workers:
+            return
+        self._workers = [asyncio.create_task(self._worker()) for _ in range(self._concurrency)]
+
+    def _remove_pending_locked(self, operation: _AsyncOutputOperation) -> None:
+        queue = self._pending.get(operation.job.sandbox_id)
+        if queue is None:
+            return
+        try:
+            queue.remove(operation)
+        except ValueError:
+            return
+        self._pending_count -= 1
+        if not queue:
+            del self._pending[operation.job.sandbox_id]
+            self._round_robin = deque(
+                scope for scope in self._round_robin if scope != operation.job.sandbox_id
+            )
+
+    def _pop_pending_locked(self) -> _AsyncOutputOperation:
+        sandbox_id = self._round_robin.popleft()
+        queue = self._pending[sandbox_id]
+        operation = queue.popleft()
+        self._pending_count -= 1
+        if queue:
+            self._round_robin.append(sandbox_id)
+        else:
+            del self._pending[sandbox_id]
+        operation.active = True
+        self._condition.notify_all()
+        return operation
+
+    async def _fetch(
+        self,
+        operation: _AsyncOutputOperation,
+        timeout: Optional[int],
+    ) -> BackgroundJobStatus:
+        async with self._condition:
+            stdout = self._cache.get(self._stream_key(operation.job, "stdout"))
+            stderr = self._cache.get(self._stream_key(operation.job, "stderr"))
+
+        stdout_error = None
+        stderr_error = None
+        if stdout is None:
+            stdout, stdout_error = await self._read_stream(
+                operation.job.sandbox_id,
+                operation.job.stdout_log_file,
+                operation.deadline,
+                timeout,
+            )
+            if stdout is not None:
+                async with self._condition:
+                    self._cache.put(self._stream_key(operation.job, "stdout"), stdout)
+        if stderr is None:
+            stderr, stderr_error = await self._read_stream(
+                operation.job.sandbox_id,
+                operation.job.stderr_log_file,
+                operation.deadline,
+                timeout,
+            )
+            if stderr is not None:
+                async with self._condition:
+                    self._cache.put(self._stream_key(operation.job, "stderr"), stderr)
+        return _completed_background_job_status(
+            operation.job,
+            operation.exit_code,
+            stdout,
+            stderr,
+            stdout_error,
+            stderr_error,
+        )
+
+    async def _worker(self) -> None:
+        while True:
+            async with self._condition:
+                while not self._round_robin and not self._closed:
+                    await self._condition.wait()
+                if self._closed and not self._round_robin:
+                    return
+                operation = self._pop_pending_locked()
+                operation.fetch_task = asyncio.create_task(
+                    self._fetch(operation, operation.timeout)
+                )
+
+            try:
+                result = await operation.fetch_task
+                error: Optional[BaseException] = None
+            except BaseException as exc:
+                result = None
+                error = exc
+
+            if self._closed and isinstance(error, asyncio.CancelledError):
+                error = _BatcherClosedError("Background job output coordinator is closed")
+
+            async with self._condition:
+                operation.result = result
+                operation.error = error
+                if self._inflight.get(operation.key) is operation:
+                    self._inflight.pop(operation.key)
+                operation.done.set()
+                operation.lease.release()
+                self._condition.notify_all()
+
+    async def _detach_waiter(self, operation: _AsyncOutputOperation) -> None:
+        release: Optional[_AsyncPollLease] = None
+        wait_for_completion = False
+        async with self._condition:
+            operation.waiters -= 1
+            if operation.waiters or operation.done.is_set():
+                return
+            if not operation.active:
+                self._remove_pending_locked(operation)
+                self._inflight.pop(operation.key, None)
+                operation.done.set()
+                release = operation.lease
+                self._condition.notify_all()
+            elif operation.fetch_task is not None:
+                # Retire this operation before cancelling it. New callers must
+                # start or join replacement work, never attach to a fetch that
+                # has already lost its final waiter.
+                if self._inflight.get(operation.key) is operation:
+                    self._inflight.pop(operation.key)
+                if not operation.fetch_task.done():
+                    operation.fetch_task.cancel()
+                wait_for_completion = True
+                self._condition.notify_all()
+        if release is not None:
+            release.release()
+        if wait_for_completion:
+            completion = asyncio.create_task(operation.done.wait())
+            while not completion.done():
+                try:
+                    await asyncio.shield(completion)
+                except asyncio.CancelledError:
+                    pass
+
+    async def get(
+        self,
+        job: BackgroundJob,
+        exit_code: int,
+        timeout: Optional[int],
+    ) -> BackgroundJobStatus:
+        output_timeout = (
+            float(timeout) if timeout is not None else BACKGROUND_JOB_OUTPUT_FETCH_TIMEOUT_SECONDS
+        )
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(0.0, output_timeout)
+        key = (job.sandbox_id, job.job_id, output_timeout)
+        operation: Optional[_AsyncOutputOperation] = None
+        async with self._condition:
+            if self._closed:
+                raise _BatcherClosedError("Background job output coordinator is closed")
+            try:
+                self._leases.check_admission(job.sandbox_id)
+            except APIError as exc:
+                return _output_unavailable_status(job, exit_code, _format_exception_diagnostic(exc))
+            cached = self._cached_status(job, exit_code)
+            if cached is not None:
+                return cached
+            operation = self._inflight.get(key)
+            if operation is not None:
+                operation.waiters += 1
+                operation.deadline = max(operation.deadline, deadline)
+            else:
+                while self._pending_count >= self._queue_size:
+                    try:
+                        self._leases.check_admission(job.sandbox_id)
+                    except APIError as exc:
+                        return _output_unavailable_status(
+                            job, exit_code, _format_exception_diagnostic(exc)
+                        )
+                    remaining = deadline - loop.time()
+                    if remaining <= 0:
+                        message = f"Output retrieval deadline exceeded after {output_timeout:g}s"
+                        return _output_unavailable_status(job, exit_code, message)
+                    try:
+                        await asyncio.wait_for(self._condition.wait(), timeout=remaining)
+                    except asyncio.TimeoutError:
+                        message = f"Output retrieval deadline exceeded after {output_timeout:g}s"
+                        return _output_unavailable_status(job, exit_code, message)
+                    if self._closed:
+                        raise _BatcherClosedError("Background job output coordinator is closed")
+                    cached = self._cached_status(job, exit_code)
+                    if cached is not None:
+                        return cached
+                    operation = self._inflight.get(key)
+                    if operation is not None:
+                        break
+                if operation is not None:
+                    operation.waiters += 1
+                    operation.deadline = max(operation.deadline, deadline)
+                else:
+                    # Condition waits invalidate all prior observations.
+                    # Recheck immediately before insertion even when the
+                    # wakeup also made queue capacity available.
+                    cached = self._cached_status(job, exit_code)
+                    if cached is not None:
+                        return cached
+                    operation = self._inflight.get(key)
+                    if operation is not None:
+                        operation.waiters += 1
+                        operation.deadline = max(operation.deadline, deadline)
+                    else:
+                        try:
+                            lease = self._leases.acquire(job.sandbox_id)
+                        except APIError as exc:
+                            return _output_unavailable_status(
+                                job, exit_code, _format_exception_diagnostic(exc)
+                            )
+                        operation = _AsyncOutputOperation(
+                            key, job, exit_code, deadline, lease, timeout
+                        )
+                        self._inflight[key] = operation
+                        queue = self._pending.setdefault(job.sandbox_id, deque())
+                        if not queue:
+                            self._round_robin.append(job.sandbox_id)
+                        queue.append(operation)
+                        self._pending_count += 1
+                        self._ensure_workers_locked()
+                        self._condition.notify_all()
+
+        try:
+            remaining = max(0.0, deadline - loop.time())
+            await asyncio.wait_for(asyncio.shield(operation.done.wait()), timeout=remaining)
+        except asyncio.TimeoutError:
+            await self._detach_waiter(operation)
+            message = f"Output retrieval deadline exceeded after {output_timeout:g}s"
+            return _output_unavailable_status(job, exit_code, message)
+        except asyncio.CancelledError:
+            await self._detach_waiter(operation)
+            raise
+        if operation.error is not None:
+            raise operation.error
+        assert operation.result is not None
+        return operation.result.model_copy(deep=True)
+
+    async def cancel_sandboxes(self, sandbox_ids: List[str], message: str) -> None:
+        scopes = set(sandbox_ids)
+        releases: List[_AsyncPollLease] = []
+        async with self._condition:
+            for operation in list(self._inflight.values()):
+                if operation.job.sandbox_id not in scopes or operation.active:
+                    continue
+                self._remove_pending_locked(operation)
+                self._inflight.pop(operation.key, None)
+                operation.result = _output_unavailable_status(
+                    operation.job, operation.exit_code, message
+                )
+                operation.done.set()
+                releases.append(operation.lease)
+            self._cache.purge_sandboxes(sandbox_ids)
+            self._condition.notify_all()
+        for lease in releases:
+            lease.release()
+
+    async def _close(self) -> None:
+        releases: List[_AsyncPollLease] = []
+        active_tasks: List[asyncio.Task[BackgroundJobStatus]] = []
+        async with self._condition:
+            self._closed = True
+            error = _BatcherClosedError("Background job output coordinator is closed")
+            for operation in list(self._inflight.values()):
+                if operation.active:
+                    if operation.fetch_task is not None and not operation.fetch_task.done():
+                        operation.fetch_task.cancel()
+                        active_tasks.append(operation.fetch_task)
+                    continue
+                self._remove_pending_locked(operation)
+                self._inflight.pop(operation.key, None)
+                operation.error = error
+                operation.done.set()
+                releases.append(operation.lease)
+            self._cache.clear()
+            self._condition.notify_all()
+        for lease in releases:
+            lease.release()
+        if active_tasks:
+            await asyncio.gather(*active_tasks, return_exceptions=True)
+        if self._workers:
+            await asyncio.gather(*self._workers, return_exceptions=True)
+
+    async def aclose(self) -> None:
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._close())
+        try:
+            await asyncio.shield(self._close_task)
+        except asyncio.CancelledError:
+            while not self._close_task.done():
+                try:
+                    await asyncio.shield(self._close_task)
+                except asyncio.CancelledError:
+                    pass
+            if not self._close_task.cancelled():
+                self._close_task.exception()
+            raise
+
+
+def _creation_poll_delay(poll_index: int) -> float:
+    """Jittered exponential backoff delay for the Nth creation status poll."""
+    delay = min(
+        CREATION_POLL_INITIAL_DELAY * (CREATION_POLL_BACKOFF_FACTOR**poll_index),
+        CREATION_POLL_MAX_DELAY,
+    )
+    jitter = delay * CREATION_POLL_JITTER
+    return max(0.0, delay + random.uniform(-jitter, jitter))
+
+
+def _creation_timeout_seconds(max_attempts: int) -> float:
+    """Wall-clock budget the legacy fixed-interval schedule gave `max_attempts`.
+
+    Backoff means attempts no longer map 1:1 to elapsed time, so the budget is
+    derived once here and enforced as a deadline. This keeps the effective
+    timeout of every existing caller unchanged.
+    """
+    if max_attempts <= _LEGACY_FAST_POLLS:
+        return float(max_attempts)
+    return float(_LEGACY_FAST_POLLS + (max_attempts - _LEGACY_FAST_POLLS) * 2)
+
 
 def _is_retryable_gateway_error(exc: BaseException) -> bool:
     """Check if an exception is retryable for idempotent gateway requests."""
     if isinstance(exc, GATEWAY_IDEMPOTENT_RETRYABLE_EXCEPTIONS):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 429:
         return True
     if (
         isinstance(exc, httpx.HTTPStatusError)
@@ -146,12 +1534,107 @@ def _is_retryable_gateway_error(exc: BaseException) -> bool:
     return False
 
 
+def _exception_chain(exc: BaseException) -> List[BaseException]:
+    """Return an exception and its explicit causes without looping."""
+    chain: List[BaseException] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        chain.append(current)
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return chain
+
+
+def _format_exception_diagnostic(exc: BaseException) -> str:
+    """Include nested OS errno details that transport wrappers otherwise hide."""
+    diagnostic = f"{exc.__class__.__name__}: {exc}"
+    os_causes: List[str] = []
+    seen: set[int] = set()
+    pending: List[BaseException] = [exc]
+    while pending:
+        error = pending.pop()
+        if id(error) in seen:
+            continue
+        seen.add(id(error))
+        if isinstance(error, OSError) and error.errno is not None:
+            detail = f"{error.__class__.__name__}(errno={error.errno}): {error}"
+            if detail not in os_causes:
+                os_causes.append(detail)
+        cause = error.__cause__ or error.__context__
+        if cause is not None:
+            pending.append(cause)
+        grouped = getattr(error, "exceptions", ())
+        pending.extend(child for child in reversed(grouped) if isinstance(child, BaseException))
+    if os_causes:
+        diagnostic += f"; OS cause: {'; '.join(os_causes)}"
+    return diagnostic
+
+
+def _is_retryable_reachability_error(exc: BaseException) -> bool:
+    """Retry transport readiness failures, but surface local SDK defects."""
+    chain = _exception_chain(exc)
+    if any(
+        isinstance(error, (AttributeError, ImportError, ModuleNotFoundError, TypeError))
+        for error in chain
+    ):
+        return False
+    if any(isinstance(error, SandboxNotRunningError) for error in chain):
+        # A RUNNING control-plane status can briefly lead gateway registration.
+        # Command execution maps that gateway miss to SandboxNotRunningError for
+        # normal operations, but creation reachability checks must keep polling.
+        return any(
+            (isinstance(error, ConnectError) and error.code == Code.NOT_FOUND)
+            or (
+                isinstance(error, httpx.HTTPStatusError)
+                and _is_gateway_sandbox_not_found(error.response)
+            )
+            for error in chain
+        )
+
+    for error in chain:
+        if isinstance(error, CommandTimeoutError):
+            return True
+        if isinstance(error, ConnectError):
+            return error.code in {Code.ABORTED, Code.DEADLINE_EXCEEDED, Code.UNAVAILABLE}
+        if isinstance(error, httpx.HTTPStatusError):
+            status = error.response.status_code
+            return status in {408, 409} or status in RETRYABLE_5XX_STATUSES
+        if isinstance(
+            error,
+            GATEWAY_IDEMPOTENT_RETRYABLE_EXCEPTIONS + (httpx.ConnectTimeout, httpx.ReadTimeout),
+        ):
+            return True
+    return False
+
+
+def _reachability_timeout_error(
+    sandbox_id: str,
+    timeout_seconds: float,
+    last_error: BaseException | None,
+) -> SandboxNotRunningError:
+    message = (
+        f"Sandbox {sandbox_id} reached RUNNING but did not become reachable through the "
+        f"gateway within {timeout_seconds:g}s"
+    )
+    if last_error is not None:
+        message += f". Last error: {last_error.__class__.__name__}: {last_error}"
+    return SandboxNotRunningError(
+        sandbox_id,
+        status="RUNNING",
+        error_type="GATEWAY_REACHABILITY_TIMEOUT",
+        message=message,
+    )
+
+
 def _is_retryable_read_file_error(exc: BaseException) -> bool:
     """Check if an exception is retryable for read-file gateway requests."""
     if isinstance(exc, READ_FILE_RETRYABLE_EXCEPTIONS):
         return True
     if isinstance(exc, httpx.HTTPStatusError):
         status = exc.response.status_code
+        if status == 429:
+            return True
         if status == 408 or status in RETRYABLE_5XX_STATUSES:
             if _is_gateway_sandbox_not_found(exc.response):
                 return False
@@ -159,22 +1642,34 @@ def _is_retryable_read_file_error(exc: BaseException) -> bool:
     return False
 
 
+def _is_retryable_gateway_post_error(exc: BaseException) -> bool:
+    return isinstance(exc, GATEWAY_CONNECTION_RETRYABLE_EXCEPTIONS) or (
+        isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 429
+    )
+
+
+_GATEWAY_RATE_LIMIT_DELAYS = (10.0, 30.0, 40.0)
+
+
 # Retry decorator for idempotent gateway requests (connection errors, ReadError,
-# and 5xx responses). Safe for GET/HEAD/PUT/DELETE since duplicate requests are no-ops.
+# and retryable HTTP responses). Safe for GET/HEAD/PUT/DELETE since duplicates are no-ops.
 _gateway_retry = retry(
     retry=retry_if_exception(_is_retryable_gateway_error),
     stop=stop_after_attempt(4),
-    wait=wait_exponential(multiplier=1, min=1, max=30),
+    wait=_RateLimitAwareWait(
+        wait_exponential(multiplier=1, min=1, max=30), _GATEWAY_RATE_LIMIT_DELAYS
+    ),
     reraise=True,
 )
 
-# Retry decorator for non-idempotent gateway requests (connection errors only —
-# ReadError and 5xx both imply the server received/processed the request, so
-# retrying POSTs on those risks duplicate side effects).
+# Retry decorator for non-idempotent gateway requests. ReadError and 5xx imply
+# the server may have processed the request, so retrying risks duplicate side effects.
 _gateway_post_retry = retry(
-    retry=retry_if_exception_type(GATEWAY_CONNECTION_RETRYABLE_EXCEPTIONS),
+    retry=retry_if_exception(_is_retryable_gateway_post_error),
     stop=stop_after_attempt(4),
-    wait=wait_exponential(multiplier=1, min=1, max=30),
+    wait=_RateLimitAwareWait(
+        wait_exponential(multiplier=1, min=1, max=30), _GATEWAY_RATE_LIMIT_DELAYS
+    ),
     reraise=True,
 )
 
@@ -184,7 +1679,9 @@ _gateway_post_retry = retry(
 _read_file_retry = retry(
     retry=retry_if_exception(_is_retryable_read_file_error),
     stop=stop_after_attempt(4),
-    wait=wait_exponential(multiplier=1, min=1, max=30),
+    wait=_RateLimitAwareWait(
+        wait_random_exponential(multiplier=1, min=1, max=30), _GATEWAY_RATE_LIMIT_DELAYS
+    ),
     reraise=True,
 )
 
@@ -205,6 +1702,85 @@ def _validate_env_key(key: str) -> str:
     if not _ENV_VAR_PATTERN.fullmatch(key):
         raise ValueError(f"Invalid environment variable name: {key!r}")
     return key
+
+
+def _validate_unique_batch_values(values: List[str], field_name: str) -> None:
+    """Validate the shared bounded, non-empty, unique batch contract."""
+    if not values or len(values) > MAX_STATUS_BATCH_SIZE:
+        raise ValueError(f"{field_name} must contain between 1 and {MAX_STATUS_BATCH_SIZE} entries")
+    if len(values) != len(set(values)):
+        raise ValueError(f"{field_name} must be unique")
+
+
+def _background_job_status_command(job: BackgroundJob) -> str:
+    """Print the job's exit code, nothing while it runs, or "lost" if it died without one.
+
+    An exit file only counts once it has content: on a full disk its write can leave it empty.
+    The job is alive while its PID's cmdline still names its exit file; this also rules out
+    zombies (empty cmdline) and reused PIDs. The exit file is re-read after the liveness check
+    because the job writes it just before exiting.
+    """
+    exit_file = shlex.quote(job.exit_file)
+    pid_file = shlex.quote(f"/tmp/job_{job.job_id}.launch/pid")
+    return (
+        f"grep -s . {exit_file} && exit; "
+        f"grep -qF {exit_file} /proc/$(cat {pid_file} 2>/dev/null)/cmdline 2>/dev/null && exit; "
+        f"grep -s . {exit_file} || echo lost"
+    )
+
+
+def _canonical_background_job(sandbox_id: str, job_id: str) -> BackgroundJob:
+    """Build the canonical SDK background-job handle for a VM batch lookup."""
+    return BackgroundJob(
+        job_id=job_id,
+        sandbox_id=sandbox_id,
+        stdout_log_file=f"/tmp/job_{job_id}.stdout.log",
+        stderr_log_file=f"/tmp/job_{job_id}.stderr.log",
+        exit_file=f"/tmp/job_{job_id}.exit",
+    )
+
+
+def _validate_background_job_batch(jobs: List[BackgroundJob]) -> None:
+    """Validate VM batching is limited to canonical SDK job handles."""
+    if not jobs or len(jobs) > MAX_STATUS_BATCH_SIZE:
+        raise ValueError(f"jobs must contain between 1 and {MAX_STATUS_BATCH_SIZE} entries")
+
+    keys = []
+    for job in jobs:
+        if not re.fullmatch(r"[0-9A-Fa-f]{8}", job.job_id):
+            raise ValueError(f"Invalid background job ID: {job.job_id}")
+        if job != _canonical_background_job(job.sandbox_id, job.job_id):
+            raise ValueError(
+                "Batch status requires an unmodified BackgroundJob returned by "
+                "start_background_job()."
+            )
+        keys.append((job.sandbox_id, job.job_id))
+    if len(keys) != len(set(keys)):
+        raise ValueError("jobs must be unique")
+
+
+def _validate_background_job_output_limits(
+    concurrency: int,
+    queue_size: int,
+    cache_bytes: int,
+) -> None:
+    if concurrency <= 0:
+        raise ValueError("background_job_output_concurrency must be positive")
+    if queue_size <= 0:
+        raise ValueError("background_job_output_queue_size must be positive")
+    if cache_bytes < 0:
+        raise ValueError("background_job_output_cache_bytes must be non-negative")
+
+
+def _sandbox_to_status_snapshot(sandbox: Sandbox) -> SandboxStatusSnapshot:
+    """Convert a legacy full-sandbox lookup into the lightweight batch shape."""
+    return SandboxStatusSnapshot(
+        sandbox_id=sandbox.id,
+        status=sandbox.status,
+        error_type=sandbox.error_type,
+        error_message=sandbox.error_message,
+        pending_image_build_id=sandbox.pending_image_build_id,
+    )
 
 
 def _build_terminated_message(command: str, ctx: dict) -> str:
@@ -246,6 +1822,34 @@ def _is_gateway_sandbox_not_found(response: Optional[httpx.Response]) -> bool:
         return False
 
     return body.get("error") == "sandbox_not_found"
+
+
+def _is_gateway_sandbox_terminated(response: httpx.Response) -> bool:
+    """Return True when gateway reports the sandbox was deleted (HTTP 410)."""
+    if response.status_code != 410:
+        return False
+    try:
+        body = response.json()
+    except Exception:
+        return False
+    return isinstance(body, dict) and body.get("error") == "sandbox_terminated"
+
+
+def _raise_sandbox_gone(
+    sandbox_id: str,
+    ctx: dict,
+    cause: BaseException,
+    command: Optional[str] = None,
+) -> NoReturn:
+    """Raise SandboxNotRunningError for a sandbox that is terminated or gone from its node."""
+    ctx["status"] = "TERMINATED"
+    if not ctx.get("error_type"):
+        ctx["error_type"] = "SANDBOX_NOT_FOUND"
+    if not ctx.get("error_message"):
+        ctx["error_message"] = (
+            "Sandbox is terminated or no longer present on its node. Please create a new sandbox."
+        )
+    _raise_not_running_error(sandbox_id, ctx, command=command, cause=cause)
 
 
 def _raise_not_running_error(
@@ -383,24 +1987,6 @@ class SandboxAuthCache:
                 if ev is not None:
                     ev.set()
 
-    def is_vm(self, sandbox_id: str) -> bool:
-        """Return True if sandbox is VM-backed, cached alongside auth token data."""
-        with self._lock:
-            cached = _check_cached_auth(self._auth_cache, sandbox_id)
-            if cached and isinstance(cached.get("is_vm"), bool):
-                return bool(cached["is_vm"])
-
-        sandbox_data = self.client.request("GET", f"/sandbox/{sandbox_id}")
-        sandbox = Sandbox.model_validate(sandbox_data)
-        is_vm = sandbox.vm
-
-        with self._lock:
-            if sandbox_id in self._auth_cache:
-                self._auth_cache[sandbox_id]["is_vm"] = is_vm
-                self._save_cache()
-
-        return is_vm
-
     def set(self, sandbox_id: str, auth_info: Dict[str, Any]) -> None:
         with self._lock:
             self._auth_cache[sandbox_id] = auth_info
@@ -494,25 +2080,6 @@ class AsyncSandboxAuthCache:
                 if ev is not None:
                     ev.set()
 
-    async def is_vm(self, sandbox_id: str) -> bool:
-        """Return True if sandbox is VM-backed, cached alongside auth token data."""
-        async with self._lock:
-            await self._ensure_loaded()
-            cached = _check_cached_auth(self._auth_cache, sandbox_id)
-            if cached and isinstance(cached.get("is_vm"), bool):
-                return bool(cached["is_vm"])
-
-        sandbox_data = await self.client.request("GET", f"/sandbox/{sandbox_id}")
-        sandbox = Sandbox.model_validate(sandbox_data)
-        is_vm = sandbox.vm
-
-        async with self._lock:
-            if sandbox_id in self._auth_cache:
-                self._auth_cache[sandbox_id]["is_vm"] = is_vm
-                await self._save_cache()
-
-        return is_vm
-
     async def set(self, sandbox_id: str, auth_info: Dict[str, Any]) -> None:
         async with self._lock:
             await self._ensure_loaded()
@@ -533,47 +2100,70 @@ class AsyncSandboxAuthCache:
             await self._save_cache()
 
 
-def _is_waiting_for_image_build(sandbox: Sandbox) -> bool:
+def _is_waiting_for_image_build(sandbox: Sandbox | SandboxStatusSnapshot) -> bool:
     return sandbox.status == "PENDING" and bool(getattr(sandbox, "pending_image_build_id", None))
 
 
-def _check_sandbox_statuses(
-    sandboxes: List[Sandbox], target_ids: set
-) -> tuple[int, List[tuple], Dict[str, str], int]:
-    """Helper function to check sandbox statuses
-
-    Returns:
-        tuple of (running_count, failed_sandboxes, final_statuses,
-        image_build_waiting_count)
-    """
-    running_count = 0
-    failed_sandboxes = []
-    final_statuses = {}
-    image_build_waiting = 0
-
-    for sandbox in sandboxes:
-        if sandbox.id in target_ids:
-            if sandbox.status == "RUNNING":
-                running_count += 1
-                final_statuses[sandbox.id] = sandbox.status
-            elif sandbox.status in ["ERROR", "TERMINATED", "TIMEOUT"]:
-                failed_sandboxes.append((sandbox.id, sandbox.status))
-                final_statuses[sandbox.id] = sandbox.status
-            elif _is_waiting_for_image_build(sandbox):
-                image_build_waiting += 1
-
-    return running_count, failed_sandboxes, final_statuses, image_build_waiting
+def _next_background_job_poll_delay(current_interval: float) -> float:
+    """Increase a background-job poll delay without exponentiating its age."""
+    return min(
+        current_interval * BACKGROUND_JOB_POLL_BACKOFF_FACTOR,
+        BACKGROUND_JOB_POLL_MAX_DELAY,
+    )
 
 
 class SandboxClient:
     """Client for sandbox API operations"""
 
-    def __init__(self, api_client: APIClient):
+    def __init__(
+        self,
+        api_client: APIClient,
+        *,
+        background_job_output_concurrency: int = MAX_CONCURRENT_BACKGROUND_JOB_OUTPUT_READS,
+        background_job_output_queue_size: int = MAX_PENDING_BACKGROUND_JOB_OUTPUTS,
+        background_job_output_cache_bytes: int = BACKGROUND_JOB_OUTPUT_CACHE_BYTES,
+    ):
+        _validate_background_job_output_limits(
+            background_job_output_concurrency,
+            background_job_output_queue_size,
+            background_job_output_cache_bytes,
+        )
         self.client = api_client
         self._auth_cache = SandboxAuthCache(
             self.client.config.config_dir / "sandbox_auth_cache.json",
             self.client,
         )
+        self._operation_leases = _SyncPollLeaseRegistry()
+        # Retained as an internal compatibility alias for integrations that
+        # inspected the poll registry before it grew to cover output work.
+        self._poll_leases = self._operation_leases
+        # Checkpoints outlive their sandboxes; leases use checkpoint scopes.
+        self._checkpoint_batcher = _SyncRequestBatcher(
+            self._fetch_checkpoints,
+            lambda checkpoint_id: f"checkpoint:{checkpoint_id}",
+            self._operation_leases,
+        )
+        self._checkpoint_batch_supported: Optional[bool] = None
+        self._sandbox_status_batcher = _SyncRequestBatcher(
+            self._fetch_sandbox_statuses,
+            lambda sandbox_id: sandbox_id,
+            self._operation_leases,
+        )
+        self._background_job_status_batcher = _SyncRequestBatcher(
+            self._fetch_background_job_statuses,
+            lambda key: key[0],
+            self._operation_leases,
+        )
+        self._background_job_output_coordinator = _SyncBackgroundJobOutputCoordinator(
+            self._operation_leases,
+            self._read_background_job_output_stream,
+            background_job_output_concurrency,
+            background_job_output_queue_size,
+            background_job_output_cache_bytes,
+        )
+        self._background_job_output_concurrency = background_job_output_concurrency
+        self._sandbox_status_batch_supported: Optional[bool] = None
+        self._background_job_status_batch_supported: Optional[bool] = None
 
     @staticmethod
     @_gateway_post_retry
@@ -585,9 +2175,12 @@ class SandboxClient:
         files: Optional[Dict[str, Any]] = None,
         params: Optional[Dict[str, Any]] = None,
     ) -> httpx.Response:
-        """Make a POST request to the gateway with retry on connection errors only."""
+        """Make a POST request to the gateway with safe pre-processing retries."""
         with httpx.Client(timeout=timeout) as client:
-            return client.post(url, json=json, files=files, params=params, headers=headers)
+            response = client.post(url, json=json, files=files, params=params, headers=headers)
+        if response.status_code == 429:
+            response.raise_for_status()
+        return response
 
     @staticmethod
     @_gateway_retry
@@ -600,7 +2193,7 @@ class SandboxClient:
         """Make a GET request to the gateway with retry on transient errors."""
         with httpx.Client(timeout=timeout) as client:
             response = client.get(url, params=params, headers=headers)
-        if response.status_code in RETRYABLE_5XX_STATUSES:
+        if response.status_code == 429 or response.status_code in RETRYABLE_5XX_STATUSES:
             response.raise_for_status()
         return response
 
@@ -615,22 +2208,27 @@ class SandboxClient:
         """Make a read-file GET request to the gateway with read-timeout retries."""
         with httpx.Client(timeout=timeout) as client:
             response = client.get(url, params=params, headers=headers)
-        if response.status_code == 408 or response.status_code in RETRYABLE_5XX_STATUSES:
+        if response.status_code in {408, 429} or response.status_code in RETRYABLE_5XX_STATUSES:
             response.raise_for_status()
         return response
 
     def _is_sandbox_reachable(self, sandbox_id: str, timeout: int = 10) -> bool:
         """Test if a sandbox is reachable by executing a simple echo command"""
-        try:
-            self.execute_command(sandbox_id, "echo 'sandbox ready'", timeout=timeout)
-            return True
-        except Exception:
-            return False
+        self.execute_command(sandbox_id, "echo 'sandbox ready'", timeout=timeout)
+        return True
 
-    def _get_sandbox_error_context(self, sandbox_id: str) -> dict:
+    def _get_sandbox_error_context(
+        self,
+        sandbox_id: str,
+        timeout: float = _SANDBOX_ERROR_CONTEXT_TIMEOUT_SECONDS,
+    ) -> dict:
         """Fetch sandbox error context from the lightweight server endpoint."""
         try:
-            response = self.client.request("GET", f"/sandbox/{sandbox_id}/error-context")
+            response = self.client.request(
+                "GET",
+                f"/sandbox/{sandbox_id}/error-context",
+                timeout=timeout,
+            )
             return {
                 "status": response.get("status"),
                 "error_type": response.get("errorType") or response.get("error_type"),
@@ -685,28 +2283,12 @@ class SandboxClient:
         """Clear all cached auth tokens"""
         self._auth_cache.clear()
 
-    def is_vm(self, sandbox_id: str) -> bool:
-        """Return True if the sandbox is VM-backed.
-
-        Uses the internal auth cache when available and falls back to a
-        ``GET /sandbox/<id>`` lookup on a cold cache. The result is cached
-        alongside the auth token so subsequent calls are essentially free.
-        """
-        return self._auth_cache.is_vm(sandbox_id)
-
-    def _guard_vm_unsupported(self, sandbox_id: str, feature_name: str) -> None:
-        """Raise APIError if the operation is not supported on VM sandboxes.
-
-        Mirrors the CLI behavior of short-circuiting operations the backend
-        does not currently support for VM-backed sandboxes, so callers fail
-        fast with a clear message instead of an opaque gateway error.
-        """
-        if self._auth_cache.is_vm(sandbox_id):
-            raise APIError(f"{feature_name} is not yet supported for VM sandboxes.")
-
     def create(self, request: CreateSandboxRequest) -> Sandbox:
         """Create a new sandbox"""
         payload = request.model_dump(by_alias=False, exclude_none=True)
+        # VM is the only runtime; send it explicitly so the created runtime
+        # never depends on server-side defaults changing underneath the SDK.
+        payload["vm"] = True
         # Auto-populate team_id from config if not specified
         if request.team_id is None and self.client.config.team_id is not None:
             payload["team_id"] = self.client.config.team_id
@@ -755,15 +2337,209 @@ class SandboxClient:
         response = self.client.request("GET", f"/sandbox/{sandbox_id}")
         return Sandbox.model_validate(response)
 
+    def checkpoint(self, sandbox_id: str) -> SandboxCheckpoint:
+        """Request a filesystem checkpoint; use wait_for_checkpoint before restoring."""
+        response = self.client.request("POST", f"/sandbox/{sandbox_id}/checkpoints")
+        return SandboxCheckpoint.model_validate(response)
+
+    def get_checkpoint(self, checkpoint_id: str) -> SandboxCheckpoint:
+        """Get the latest state of a filesystem checkpoint."""
+        response = self.client.request("GET", f"/sandbox/checkpoints/{checkpoint_id}")
+        return SandboxCheckpoint.model_validate(response)
+
+    def delete_checkpoint(self, checkpoint_id: str) -> None:
+        """Delete a durable or failed checkpoint and stop its storage billing.
+
+        Its data is kept while descendants still need it. Raises APIError (HTTP 409)
+        while the checkpoint is pending or the active tip of a running sandbox.
+        """
+        self.client.request("DELETE", f"/sandbox/checkpoints/{checkpoint_id}")
+
+    def delete_sandbox_checkpoints(self, sandbox_id: str) -> DeleteSandboxCheckpointsResponse:
+        """Delete every checkpoint of a sandbox, with per-checkpoint errors.
+
+        Each deletion is independent and behaves like delete_checkpoint: pending
+        checkpoints and the active tip of a running sandbox are kept as CONFLICT.
+        """
+        response = self.client.request("DELETE", f"/sandbox/{sandbox_id}/checkpoints")
+        return DeleteSandboxCheckpointsResponse.model_validate(response)
+
+    def get_checkpoints(self, checkpoint_ids: List[str]) -> BatchCheckpointResponse:
+        """Get up to 100 checkpoints across sandboxes, with per-ID lookup errors."""
+        _validate_unique_batch_values(checkpoint_ids, "checkpoint_ids")
+        if any(not checkpoint_id or len(checkpoint_id) > 64 for checkpoint_id in checkpoint_ids):
+            raise ValueError("checkpoint_ids must contain IDs between 1 and 64 characters")
+        if self._checkpoint_batch_supported is False:
+            raise BatchStatusUnsupportedError("The platform does not support checkpoint batches.")
+        try:
+            response = self.client.request(
+                "POST",
+                "/sandbox/checkpoints:batchGet",
+                json={"checkpoint_ids": checkpoint_ids},
+                idempotent_post=True,
+            )
+        except APIError as exc:
+            if "HTTP 404" in str(exc) or "HTTP 405" in str(exc):
+                self._checkpoint_batch_supported = False
+                raise BatchStatusUnsupportedError(
+                    "The platform does not support checkpoint batches."
+                ) from exc
+            raise
+        self._checkpoint_batch_supported = True
+        return BatchCheckpointResponse.model_validate(response)
+
+    def _fetch_checkpoints(
+        self, checkpoint_ids: List[str]
+    ) -> Dict[str, SandboxCheckpoint | _BatchItemError]:
+        try:
+            response = self.get_checkpoints(checkpoint_ids)
+        except BatchStatusUnsupportedError:
+            results: Dict[str, SandboxCheckpoint | _BatchItemError] = {}
+            for checkpoint_id in checkpoint_ids:
+                try:
+                    results[checkpoint_id] = self.get_checkpoint(checkpoint_id)
+                except Exception as exc:
+                    results[checkpoint_id] = _BatchItemError(exc)
+            return results
+
+        results: Dict[str, SandboxCheckpoint | _BatchItemError] = {
+            checkpoint.id: checkpoint for checkpoint in response.checkpoints
+        }
+        for error in response.errors:
+            results[error.checkpoint_id] = _BatchItemError(
+                APIError(
+                    f"Checkpoint lookup failed for {error.checkpoint_id}: "
+                    f"{error.code}: {error.message}"
+                )
+            )
+        return results
+
+    def wait_for_checkpoint(
+        self, checkpoint_id: str, timeout_seconds: float = 300
+    ) -> SandboxCheckpoint:
+        """Wait for a filesystem checkpoint to become DURABLE.
+
+        Concurrent waits share cross-sandbox batches of up to 100 checkpoints.
+        Polls with backoff until timeout_seconds elapse, returning the durable
+        checkpoint. Raises RuntimeError on FAILED or DELETING and TimeoutError
+        on expiry.
+        In-flight requests follow the API client's timeout and retry policy.
+        """
+        if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be finite and greater than zero")
+        deadline = time.monotonic() + timeout_seconds
+        poll_index = 0
+        while time.monotonic() < deadline:
+            checkpoint = self._checkpoint_batcher.get(checkpoint_id)
+            if checkpoint.state == "DURABLE":
+                return checkpoint
+            if checkpoint.state in ("FAILED", "DELETING"):
+                raise RuntimeError(
+                    f"Checkpoint {checkpoint_id} cannot become durable (state={checkpoint.state}): "
+                    f"{checkpoint.error or 'no error details'}"
+                )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(_creation_poll_delay(poll_index), remaining))
+            poll_index += 1
+        raise TimeoutError(
+            f"Checkpoint {checkpoint_id} did not become DURABLE within {timeout_seconds:g}s"
+        )
+
+    def list_checkpoints(
+        self, sandbox_id: str, checkpoint_id: Optional[str] = None
+    ) -> List[SandboxCheckpoint]:
+        """List a sandbox's checkpoints oldest first, optionally only one ID."""
+        params = {"checkpoint_id": checkpoint_id} if checkpoint_id else None
+        response = self.client.request("GET", f"/sandbox/{sandbox_id}/checkpoints", params=params)
+        return [SandboxCheckpoint.model_validate(c) for c in response["checkpoints"]]
+
+    def get_sandbox_statuses(self, sandbox_ids: List[str]) -> BatchSandboxStatusResponse:
+        """Get lightweight lifecycle state for up to 100 sandboxes."""
+        _validate_unique_batch_values(sandbox_ids, "sandbox_ids")
+        if self._sandbox_status_batch_supported is False:
+            raise BatchStatusUnsupportedError(
+                "The platform does not support batch sandbox status lookups."
+            )
+        try:
+            response = self.client.request(
+                "POST",
+                "/sandbox/status:batchGet",
+                json={"sandbox_ids": sandbox_ids},
+                idempotent_post=True,
+            )
+        except APIError as exc:
+            if "HTTP 404" in str(exc) or "HTTP 405" in str(exc):
+                self._sandbox_status_batch_supported = False
+                raise BatchStatusUnsupportedError(
+                    "The platform does not support batch sandbox status lookups."
+                ) from exc
+            raise
+        self._sandbox_status_batch_supported = True
+        return BatchSandboxStatusResponse.model_validate(response)
+
+    def _fetch_sandbox_statuses(
+        self, sandbox_ids: List[str]
+    ) -> Dict[str, SandboxStatusSnapshot | _BatchItemError]:
+        """Fetch one coalesced lifecycle batch for concurrent waiters."""
+        try:
+            response = self.get_sandbox_statuses(sandbox_ids)
+        except BatchStatusUnsupportedError:
+            results: Dict[str, SandboxStatusSnapshot | _BatchItemError] = {}
+            for sandbox_id in sandbox_ids:
+                try:
+                    results[sandbox_id] = _sandbox_to_status_snapshot(self.get(sandbox_id))
+                except Exception as exc:
+                    results[sandbox_id] = _BatchItemError(exc)
+            return results
+
+        results: Dict[str, SandboxStatusSnapshot | _BatchItemError] = {
+            snapshot.sandbox_id: snapshot for snapshot in response.statuses
+        }
+        for error in response.errors:
+            results[error.sandbox_id] = _BatchItemError(
+                APIError(
+                    f"Sandbox status lookup failed for {error.sandbox_id}: "
+                    f"{error.code}: {error.message}"
+                )
+            )
+        return results
+
     def delete(self, sandbox_id: str) -> Dict[str, Any]:
         """Delete a sandbox"""
-        response = self.client.request("DELETE", f"/sandbox/{sandbox_id}")
-        return response
+        scopes = self._operation_leases.start_drain([sandbox_id])
+        try:
+            self._background_job_output_coordinator.cancel_sandboxes(
+                scopes, f"APIError: Sandbox {sandbox_id} is being deleted"
+            )
+            self._operation_leases.wait_for_drain(scopes)
+            self._background_job_output_coordinator.cancel_sandboxes(
+                scopes, f"APIError: Sandbox {sandbox_id} is being deleted"
+            )
+            response = self.client.request("DELETE", f"/sandbox/{sandbox_id}")
+            return response
+        finally:
+            self._operation_leases.end_drain(scopes)
 
     def get_network(self, sandbox_id: str) -> EgressPolicyStatus:
         """Get the desired and applied network rules of a VM sandbox."""
         response = self.client.request("GET", f"/sandbox/{sandbox_id}/egress-policy")
         return EgressPolicyStatus.model_validate(response)
+
+    def create_ssh_session(
+        self, sandbox_id: str, public_key: str, ttl_seconds: Optional[int] = None
+    ) -> SSHSession:
+        """Authorize an ephemeral SSH key for a VM sandbox."""
+        payload: Dict[str, Any] = {"public_key": public_key}
+        if ttl_seconds is not None:
+            payload["ttl_seconds"] = ttl_seconds
+        response = self.client.request("POST", f"/sandbox/{sandbox_id}/ssh-session", json=payload)
+        return SSHSession.model_validate(response)
+
+    def close_ssh_session(self, sandbox_id: str, session_id: str) -> None:
+        """Revoke an SSH session."""
+        self.client.request("DELETE", f"/sandbox/{sandbox_id}/ssh-session/{session_id}")
 
     def set_network(
         self,
@@ -805,12 +2581,23 @@ class SandboxClient:
             all_users=all_users,
         )
         payload = request.model_dump(by_alias=False, exclude_none=True)
-        response = self.client.request(
-            "DELETE",
-            "/sandbox",
-            json=payload,
-        )
-        return BulkDeleteSandboxResponse.model_validate(response)
+        scopes = self._operation_leases.start_drain(sandbox_ids or [])
+        try:
+            self._background_job_output_coordinator.cancel_sandboxes(
+                scopes, "APIError: Sandbox is being deleted"
+            )
+            self._operation_leases.wait_for_drain(scopes)
+            self._background_job_output_coordinator.cancel_sandboxes(
+                scopes, "APIError: Sandbox is being deleted"
+            )
+            response = self.client.request(
+                "DELETE",
+                "/sandbox",
+                json=payload,
+            )
+            return BulkDeleteSandboxResponse.model_validate(response)
+        finally:
+            self._operation_leases.end_drain(scopes)
 
     def get_logs(self, sandbox_id: str) -> str:
         """Get sandbox logs via backend"""
@@ -827,24 +2614,9 @@ class SandboxClient:
         timeout: Optional[int] = None,
         user: Optional[str] = None,
     ) -> CommandResponse:
-        """Execute command directly via gateway."""
+        """Execute via gateway, optionally as an existing guest username."""
         self._auth_cache.get_or_refresh(sandbox_id)
-
-        if self._auth_cache.is_vm(sandbox_id):
-            if user is not None:
-                raise ValueError(
-                    "The 'user' parameter is only supported for container sandboxes, "
-                    "not VM sandboxes."
-                )
-            return self._execute_command_connect_rpc(
-                sandbox_id=sandbox_id,
-                command=command,
-                working_dir=working_dir,
-                env=env,
-                timeout=timeout,
-            )
-
-        return self._execute_command_rest(
+        return self._execute_command_connect_rpc(
             sandbox_id=sandbox_id,
             command=command,
             working_dir=working_dir,
@@ -860,9 +2632,12 @@ class SandboxClient:
         working_dir: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
         timeout: Optional[int] = None,
+        user: Optional[str] = None,
     ) -> CommandResponse:
         effective_timeout = timeout if timeout is not None else 300
-        request = build_command_session_start_request(command, working_dir, env)
+        request = build_command_session_start_request(
+            command=command, working_dir=working_dir, env=env, user=user
+        )
 
         reauthed = False
         while True:
@@ -875,7 +2650,11 @@ class SandboxClient:
             exit_code: Optional[int] = None
             stream_started = False
 
-            rpc_client = ConnectClientSync(base_url)
+            rpc_client = ConnectClientSync(
+                base_url,
+                codec=GOOGLE_PROTOBUF_BINARY_CODEC,
+                send_compression=None,
+            )
             try:
                 stream = rpc_client.execute_server_stream(
                     request=request,
@@ -918,16 +2697,12 @@ class SandboxClient:
                     raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
 
                 if e.code == Code.NOT_FOUND:
-                    ctx = self._get_sandbox_error_context(sandbox_id)
-                    ctx["status"] = "TERMINATED"
-                    if not ctx.get("error_type"):
-                        ctx["error_type"] = "SANDBOX_NOT_FOUND"
-                    if not ctx.get("error_message"):
-                        ctx["error_message"] = (
-                            "Sandbox is no longer present on the runtime node. "
-                            "Please create a new sandbox."
-                        )
-                    _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
+                    _raise_sandbox_gone(
+                        sandbox_id,
+                        self._get_sandbox_error_context(sandbox_id),
+                        cause=e,
+                        command=command,
+                    )
 
                 raise APIError(f"Connect RPC failed ({e.code.value}): {e.message}") from e
             except APIError:
@@ -936,96 +2711,6 @@ class SandboxClient:
                 raise APIError(f"Request failed: {e.__class__.__name__}: {e}") from e
             finally:
                 rpc_client.close()
-
-    def _execute_command_rest(
-        self,
-        sandbox_id: str,
-        command: str,
-        working_dir: Optional[str] = None,
-        env: Optional[Dict[str, str]] = None,
-        timeout: Optional[int] = None,
-        user: Optional[str] = None,
-    ) -> CommandResponse:
-        effective_timeout = timeout if timeout is not None else 300
-
-        payload = {
-            "command": command,
-            "working_dir": working_dir,
-            "env": env or {},
-            "sandbox_id": sandbox_id,
-            "timeout": effective_timeout,
-        }
-        if user is not None:
-            payload["user"] = user
-
-        reauthed = False
-        attempt = 0
-        for _ in range(MAX_GATEWAY_ATTEMPTS):
-            auth = self._auth_cache.get_or_refresh(sandbox_id)
-            gateway_url = auth["gateway_url"].rstrip("/")
-            url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/exec"
-            headers = {"Authorization": f"Bearer {auth['token']}"}
-            try:
-                # The + 5 accounts for connection creation and closing. Prevents any command
-                # running close to its `effective_timeout` from being killed prematurely
-                client_timeout = effective_timeout + 5
-                response = self._gateway_post(
-                    url, headers=headers, timeout=client_timeout, json=payload
-                )
-                response.raise_for_status()
-                return CommandResponse.model_validate(response.json())
-            except httpx.TimeoutException as e:
-                ctx = self._get_sandbox_error_context(sandbox_id)
-                if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
-                    _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
-                raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
-            except httpx.HTTPStatusError as e:
-                resp = getattr(e, "response", None)
-                status = getattr(resp, "status_code", "?")
-
-                if status == 401 and self._should_retry_401(sandbox_id, reauthed):
-                    reauthed = True
-                    continue
-
-                if status == 502 and _is_gateway_sandbox_not_found(resp):
-                    ctx = self._get_sandbox_error_context(sandbox_id)
-                    ctx["status"] = "TERMINATED"
-                    if not ctx.get("error_type"):
-                        ctx["error_type"] = "SANDBOX_NOT_FOUND"
-                    if not ctx.get("error_message"):
-                        ctx["error_message"] = (
-                            "Sandbox is no longer present on the runtime node. "
-                            "Please create a new sandbox."
-                        )
-                    _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
-
-                if status == 409:
-                    if self._should_retry_409(sandbox_id, e, attempt, command=command):
-                        attempt += 1
-                        continue
-
-                if status == 408:
-                    ctx = self._get_sandbox_error_context(sandbox_id)
-                    if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
-                        _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
-                    raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
-
-                req = getattr(e, "request", None)
-                method = getattr(req, "method", "?")
-                u = getattr(req, "url", "?")
-                text = getattr(resp, "text", "")
-                raise APIError(f"HTTP {status} {method} {u}: {text}") from e
-            except httpx.RequestError as e:
-                req = getattr(e, "request", None)
-                method = getattr(req, "method", "?")
-                u = getattr(req, "url", "?")
-                raise APIError(
-                    f"Request failed: {e.__class__.__name__} at {method} {u}: {e}"
-                ) from e
-            except Exception as e:
-                raise APIError(f"Request failed: {e.__class__.__name__}: {e}") from e
-
-        raise APIError("Command execution failed after retries")
 
     def start_background_job(
         self,
@@ -1045,8 +2730,7 @@ class SandboxClient:
             command: Command to execute
             working_dir: Working directory for command execution
             env: Environment variables
-            user: Run the job as this user, like ``docker exec -u`` (username or
-                numeric UID, optionally USER:GROUP). Container sandboxes only.
+            user: Existing guest username; omitted preserves the sandbox default.
 
         Returns:
             BackgroundJob with job_id and file paths for polling
@@ -1055,6 +2739,8 @@ class SandboxClient:
         stdout_log_file = f"/tmp/job_{job_id}.stdout.log"
         stderr_log_file = f"/tmp/job_{job_id}.stderr.log"
         exit_file = f"/tmp/job_{job_id}.exit"
+        launch_dir = f"/tmp/job_{job_id}.launch"
+        pid_file = f"{launch_dir}/pid"
 
         env_prefix = ""
         if env:
@@ -1066,22 +2752,48 @@ class SandboxClient:
             if env_prefix:
                 env_prefix += "; "
 
-        dir_prefix = f"cd {shlex.quote(working_dir)} && " if working_dir else ""
+        dir_prefix = f"cd {shlex.quote(working_dir)} || exit 1; " if working_dir else ""
         command_body = f"{env_prefix}{dir_prefix}{command}"
+        # Guest users may lack a home dir; the job cds into an absolute working_dir itself.
+        launch_cwd = "/" if working_dir and working_dir.startswith("/") else None
         exit_file_quoted = shlex.quote(exit_file)
         stdout_log_file_quoted = shlex.quote(stdout_log_file)
         stderr_log_file_quoted = shlex.quote(stderr_log_file)
-        # Wrap command in subshell so 'exit' terminates the subshell, not the outer shell.
-        # This ensures 'echo $?' always runs to capture the exit code.
+        launch_dir_quoted = shlex.quote(launch_dir)
+        # The job records its PID (for liveness checks while it has no exit file), acknowledges
+        # the launch, then releases the launch output streams. Wrap command in subshell so 'exit'
+        # terminates the subshell, not the outer shell, and 'echo $?' always runs.
         sh_command = (
+            f"echo $$ > {shlex.quote(pid_file)} || exit 1; echo started; exec > /dev/null 2>&1; "
             f"({command_body}) > {stdout_log_file_quoted} 2> {stderr_log_file_quoted}; "
             f"echo $? > {exit_file_quoted}"
         )
         quoted_sh_command = shlex.quote(sh_command)
 
-        # Outer nohup redirects to /dev/null since output goes to log files inside sh -c
-        bg_cmd = f"nohup sh -c {quoted_sh_command} < /dev/null > /dev/null 2>&1 &"
-        self.execute_command(sandbox_id, bg_cmd, timeout=30, user=user)
+        # mkdir is the launch's idempotency guard: after an ambiguous timeout, only one attempt
+        # can create it and run the user command. The command substitution returns once the job
+        # acknowledges or dies, so a job that cannot start (e.g. on a full disk) fails the launch.
+        bg_cmd = (
+            f"mkdir {launch_dir_quoted} || {{ test -d {launch_dir_quoted}; exit; }}; "
+            f"ack=$(nohup sh -c {quoted_sh_command} < /dev/null 2>&1 &); "
+            'test "$ack" = started || { echo "job did not start${ack:+: $ack}" >&2; exit 1; }'
+        )
+        for attempt in range(_BACKGROUND_JOB_LAUNCH_ATTEMPTS):
+            try:
+                launch = self.execute_command(
+                    sandbox_id,
+                    bg_cmd,
+                    working_dir=launch_cwd,
+                    timeout=_BACKGROUND_JOB_LAUNCH_TIMEOUT_SECONDS,
+                    user=user,
+                )
+                break
+            except CommandTimeoutError:
+                if attempt == _BACKGROUND_JOB_LAUNCH_ATTEMPTS - 1:
+                    raise
+                time.sleep(_BACKGROUND_JOB_LAUNCH_BACKOFF_SECONDS * 2**attempt)
+        if launch.exit_code != 0:
+            raise APIError(f"Failed to launch background job {job_id}: {launch.stderr.strip()}")
 
         return BackgroundJob(
             job_id=job_id,
@@ -1102,9 +2814,8 @@ class SandboxClient:
         Args:
             sandbox_id: The sandbox ID
             job: The BackgroundJob handle from start_background_job()
-            timeout: Optional per-call timeout (in seconds) forwarded to the
-                underlying read_file calls. When None, the APIClient default
-                applies.
+            timeout: Optional output-retrieval deadline in seconds after the
+                exit file is observed. When None, a bounded SDK default applies.
 
         Returns:
             BackgroundJobStatus with completed flag, and exit_code/stdout if
@@ -1112,46 +2823,241 @@ class SandboxClient:
             of each stream; the *_truncated flags report dropped output.
         """
 
-        def read_or_empty(path: str) -> str:
-            try:
-                return self.read_file(sandbox_id, path, timeout=timeout).content
-            except SandboxFileNotFoundError:
-                return ""
-
-        def read_output_tail(path: str) -> "tuple[str, bool]":
-            try:
-                response = self.read_file(
-                    sandbox_id,
-                    path,
-                    timeout=timeout,
-                    offset=-JOB_OUTPUT_TAIL_BYTES,
-                    length=JOB_OUTPUT_TAIL_BYTES,
-                )
-                # Servers without windowed-read support omit `truncated`.
-                return response.content, bool(response.truncated)
-            except SandboxFileNotFoundError:
-                return "", False
-
-        exit_content = read_or_empty(job.exit_file)
-        if not exit_content.strip():
+        snapshot = self.get_background_job_status(sandbox_id, job, timeout=timeout)
+        if not snapshot.completed:
             return BackgroundJobStatus(job_id=job.job_id, completed=False)
+        assert snapshot.exit_code is not None
+        return self._background_job_output_coordinator.get(job, snapshot.exit_code, timeout)
 
-        try:
-            exit_code = int(exit_content.strip())
-        except ValueError:
-            return BackgroundJobStatus(job_id=job.job_id, completed=False)
-
-        stdout, stdout_truncated = read_output_tail(job.stdout_log_file)
-        stderr, stderr_truncated = read_output_tail(job.stderr_log_file)
-        return BackgroundJobStatus(
-            job_id=job.job_id,
-            completed=True,
-            exit_code=exit_code,
-            stdout=stdout,
-            stderr=stderr,
-            stdout_truncated=stdout_truncated,
-            stderr_truncated=stderr_truncated,
+    def _get_background_job_status_unleased(
+        self,
+        sandbox_id: str,
+        job: BackgroundJob,
+        timeout: Optional[int],
+    ) -> BackgroundJobStatusSnapshot:
+        response = self.execute_command(
+            sandbox_id, _background_job_status_command(job), timeout=timeout
         )
+        status = response.stdout.strip()
+        if status == "lost":
+            raise APIError(f"Background job {job.job_id} exited without recording an exit code")
+        exit_code = int(status) if status else None
+        return BackgroundJobStatusSnapshot(
+            sandbox_id=sandbox_id,
+            job_id=job.job_id,
+            completed=exit_code is not None,
+            exit_code=exit_code,
+        )
+
+    def get_background_job_status(
+        self,
+        sandbox_id: str,
+        job: BackgroundJob,
+        timeout: Optional[int] = None,
+    ) -> BackgroundJobStatusSnapshot:
+        """Return completion metadata without downloading stdout or stderr."""
+        lease = self._operation_leases.acquire(sandbox_id)
+        try:
+            return self._get_background_job_status_unleased(sandbox_id, job, timeout)
+        finally:
+            lease.release()
+
+    def _request_background_job_status_batch(
+        self,
+        jobs: List[BackgroundJob],
+        timeout: Optional[int] = None,
+    ) -> Optional[BatchBackgroundJobStatusResponse]:
+        """Return one raw platform batch, or None when the endpoint is unavailable."""
+        if self._background_job_status_batch_supported is False:
+            return None
+        try:
+            response = self.client.request(
+                "POST",
+                "/sandbox/background-jobs/status:batchGet",
+                json={
+                    "jobs": [{"sandbox_id": job.sandbox_id, "job_id": job.job_id} for job in jobs]
+                },
+                timeout=timeout if timeout is not None else 30,
+                idempotent_post=True,
+            )
+        except APIError as exc:
+            if "HTTP 404" in str(exc) or "HTTP 405" in str(exc):
+                self._background_job_status_batch_supported = False
+                return None
+            raise
+        self._background_job_status_batch_supported = True
+        return BatchBackgroundJobStatusResponse.model_validate(response)
+
+    def _get_background_job_statuses_legacy_unleased(
+        self,
+        jobs: List[BackgroundJob],
+        timeout: Optional[int],
+    ) -> List[BackgroundJobStatusSnapshot]:
+        return [
+            self._get_background_job_status_unleased(job.sandbox_id, job, timeout) for job in jobs
+        ]
+
+    def _get_background_job_statuses_unleased(
+        self,
+        jobs: List[BackgroundJob],
+        timeout: Optional[int],
+    ) -> List[BackgroundJobStatusSnapshot]:
+        body = self._request_background_job_status_batch(jobs, timeout)
+        if body is None:
+            return self._get_background_job_statuses_legacy_unleased(jobs, timeout)
+        if body.errors:
+            details = "; ".join(
+                f"{error.sandbox_id}/{error.job_id}: {error.message}" for error in body.errors
+            )
+            if any(error.code == "NOT_VM" for error in body.errors):
+                raise BatchStatusUnsupportedError(details)
+            raise APIError(f"Background job batch status failed: {details}")
+        runtime_statuses = {(status.sandbox_id, status.job_id): status for status in body.statuses}
+        results: List[BackgroundJobStatusSnapshot] = []
+        for job in jobs:
+            runtime_status = runtime_statuses.get((job.sandbox_id, job.job_id))
+            if runtime_status is None:
+                raise APIError(f"VM batch status response omitted job {job.job_id}")
+            if runtime_status.completed and runtime_status.exit_code is None:
+                raise APIError(f"Completed VM background job {job.job_id} omitted exit_code")
+            results.append(runtime_status)
+        return results
+
+    def get_background_job_statuses(
+        self,
+        jobs: List[BackgroundJob],
+        timeout: Optional[int] = None,
+    ) -> List[BackgroundJobStatusSnapshot]:
+        """Return ordered VM completion metadata without downloading output."""
+        _validate_background_job_batch(jobs)
+        leases = self._operation_leases.acquire_many([job.sandbox_id for job in jobs])
+        try:
+            return self._get_background_job_statuses_unleased(jobs, timeout)
+        finally:
+            for lease in leases:
+                lease.release()
+
+    def get_background_jobs(
+        self,
+        jobs: List[BackgroundJob],
+        timeout: Optional[int] = None,
+    ) -> List[BackgroundJobStatus]:
+        """Get ordered VM status and hydrate output for completed jobs."""
+        snapshots = self.get_background_job_statuses(jobs, timeout=timeout)
+        results: List[Optional[BackgroundJobStatus]] = [None] * len(jobs)
+        completed: List[tuple[int, BackgroundJob, int]] = []
+        for index, (job, snapshot) in enumerate(zip(jobs, snapshots)):
+            if not snapshot.completed:
+                results[index] = BackgroundJobStatus(job_id=job.job_id, completed=False)
+            else:
+                assert snapshot.exit_code is not None
+                completed.append((index, job, snapshot.exit_code))
+
+        if completed:
+            output_phase_started = time.monotonic()
+            executor = ThreadPoolExecutor(
+                max_workers=min(self._background_job_output_concurrency, len(completed)),
+                thread_name_prefix="prime-job-output",
+            )
+            try:
+                futures = {
+                    executor.submit(
+                        self._background_job_output_coordinator.get,
+                        job,
+                        exit_code,
+                        timeout,
+                        output_phase_started,
+                    ): index
+                    for index, job, exit_code in completed
+                }
+                for future, index in futures.items():
+                    results[index] = future.result()
+            finally:
+                executor.shutdown(wait=True, cancel_futures=True)
+        if any(result is None for result in results):
+            raise RuntimeError("Background job output hydration omitted a result")
+        return [result for result in results if result is not None]
+
+    def _read_background_job_output_stream(
+        self,
+        sandbox_id: str,
+        path: str,
+        deadline: float,
+        timeout: Optional[int],
+    ) -> tuple[Optional[_BackgroundJobOutputStream], Optional[str]]:
+        output_timeout = (
+            float(timeout) if timeout is not None else BACKGROUND_JOB_OUTPUT_FETCH_TIMEOUT_SECONDS
+        )
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None, f"Output retrieval deadline exceeded after {output_timeout:g}s"
+        request_timeout = max(1, min(timeout if timeout is not None else 30, math.ceil(remaining)))
+        try:
+            response = self.read_file(
+                sandbox_id,
+                path,
+                timeout=request_timeout,
+                offset=-JOB_OUTPUT_TAIL_BYTES,
+                length=JOB_OUTPUT_TAIL_BYTES,
+            )
+            return _BackgroundJobOutputStream(response.content, bool(response.truncated)), None
+        except SandboxFileNotFoundError:
+            return _BackgroundJobOutputStream("", False), None
+        except APIError as exc:
+            return None, _format_exception_diagnostic(exc)
+
+    def _get_completed_background_job_output(
+        self,
+        sandbox_id: str,
+        job: BackgroundJob,
+        exit_code: int,
+        timeout: Optional[int],
+    ) -> BackgroundJobStatus:
+        """Compatibility wrapper for coordinated output hydration."""
+        return self._background_job_output_coordinator.get(job, exit_code, timeout)
+
+    def _fetch_background_job_statuses(
+        self, keys: List[tuple[str, str]]
+    ) -> Dict[tuple[str, str], BackgroundJobStatusSnapshot | _BatchItemError]:
+        """Fetch one coalesced VM job batch for concurrent run waiters."""
+        jobs = [_canonical_background_job(sandbox_id, job_id) for sandbox_id, job_id in keys]
+        body = self._request_background_job_status_batch(jobs)
+        if body is None:
+            results: Dict[tuple[str, str], BackgroundJobStatusSnapshot | _BatchItemError] = {}
+            for job in jobs:
+                key = (job.sandbox_id, job.job_id)
+                try:
+                    results[key] = self._get_background_job_statuses_legacy_unleased([job], None)[0]
+                except Exception as exc:
+                    results[key] = _BatchItemError(exc)
+            return results
+
+        results: Dict[tuple[str, str], BackgroundJobStatusSnapshot | _BatchItemError] = {}
+        for error in body.errors:
+            key = (error.sandbox_id, error.job_id)
+            details = f"{error.sandbox_id}/{error.job_id}: {error.message}"
+            exc = (
+                BatchStatusUnsupportedError(details)
+                if error.code == "NOT_VM"
+                else APIError(f"Background job batch status failed: {details}")
+            )
+            results[key] = _BatchItemError(exc)
+
+        runtime_statuses = {(status.sandbox_id, status.job_id): status for status in body.statuses}
+        for job in jobs:
+            key = (job.sandbox_id, job.job_id)
+            if key in results:
+                continue
+            runtime_status = runtime_statuses.get(key)
+            if runtime_status is None:
+                continue
+            if runtime_status.completed and runtime_status.exit_code is None:
+                results[key] = _BatchItemError(
+                    APIError(f"Completed VM background job {job.job_id} omitted exit_code")
+                )
+                continue
+            results[key] = runtime_status
+        return results
 
     def run_background_job(
         self,
@@ -1174,21 +3080,41 @@ class SandboxClient:
             timeout: Maximum seconds to wait for completion
             working_dir: Working directory for command execution
             env: Environment variables
-            poll_interval: Seconds between status polls
+            poll_interval: Initial seconds between status polls. The interval
+                backs off to a maximum of 20 seconds as the job ages.
 
         Returns:
             BackgroundJobStatus with exit_code, stdout, stderr
 
         Raises:
             CommandTimeoutError: If command doesn't complete within timeout
+            SandboxNotRunningError: If the sandbox terminates while the command is running
         """
         job = self.start_background_job(sandbox_id, command, working_dir=working_dir, env=env)
         deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            status = self.get_background_job(sandbox_id, job)
-            if status.completed:
-                return status
-            time.sleep(poll_interval)
+        poll_delay = min(float(poll_interval), BACKGROUND_JOB_POLL_MAX_DELAY)
+        while True:
+            try:
+                snapshot = self._background_job_status_batcher.get((sandbox_id, job.job_id))
+            except APIError as error:
+                # Error classification gets a separate bounded grace period so a
+                # status poll that overruns the job deadline can still report that
+                # the sandbox terminated.
+                ctx = self._get_sandbox_error_context(
+                    sandbox_id,
+                    timeout=_SANDBOX_ERROR_CONTEXT_TIMEOUT_SECONDS,
+                )
+                if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
+                    _raise_not_running_error(sandbox_id, ctx, command=command, cause=error)
+                raise
+            if snapshot.completed:
+                assert snapshot.exit_code is not None
+                return self._background_job_output_coordinator.get(job, snapshot.exit_code, None)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(poll_delay, remaining))
+            poll_delay = _next_background_job_poll_delay(poll_delay)
         raise CommandTimeoutError(sandbox_id, command, timeout)
 
     def wait_for_creation(
@@ -1202,26 +3128,50 @@ class SandboxClient:
 
         Args:
             sandbox_id: The sandbox ID to wait for
-            max_attempts: Maximum polling attempts
+            max_attempts: Defines the wall-clock budget for the wait, expressed
+                in polls of the legacy fixed-interval schedule (see
+                `_creation_timeout_seconds`). Status polls now back off, so this
+                bounds elapsed time rather than the literal number of requests.
+                Reaching RUNNING starts a fresh budget of the same size for the
+                reachability phase, so a wait that gets that far can take up to
+                twice this long.
             stability_checks: Number of consecutive successful reachability checks required
             image_build_timeout_seconds: Separate wall-clock budget while the
                 platform auto-builds the VM image for a first-use image (the
                 sandbox stays PENDING with pending_image_build_id set). That
-                phase polls slowly and does not consume max_attempts.
+                phase polls slowly and does not consume the creation budget.
         """
         consecutive_successes = 0
         image_build_deadline: Optional[float] = None
-        attempt = 0
-        while attempt < max_attempts:
-            sandbox = self.get(sandbox_id)
+        timeout_seconds = _creation_timeout_seconds(max_attempts)
+        deadline = time.monotonic() + timeout_seconds
+        poll_index = 0
+        reachability_phase = False
+        last_reachability_error: BaseException | None = None
+        while time.monotonic() < deadline:
+            sandbox = self._sandbox_status_batcher.get(sandbox_id)
             if sandbox.status == "RUNNING":
-                if self._is_sandbox_reachable(sandbox_id):
+                if not reachability_phase:
+                    reachability_phase = True
+                    deadline = time.monotonic() + timeout_seconds
+                    poll_index = 0
+                lease = self._poll_leases.acquire(sandbox_id)
+                try:
+                    try:
+                        reachable = self._is_sandbox_reachable(sandbox_id)
+                    finally:
+                        lease.release()
+                except Exception as error:
+                    if not _is_retryable_reachability_error(error):
+                        raise
+                    last_reachability_error = error
+                    reachable = False
+                if reachable:
                     consecutive_successes += 1
                     if consecutive_successes >= stability_checks:
                         return
                     # Small delay between stability checks
                     time.sleep(0.5)
-                    attempt += 1
                     continue
                 else:
                     # Reset counter if check fails
@@ -1232,24 +3182,43 @@ class SandboxClient:
                     "error_type": sandbox.error_type,
                     "error_message": sandbox.error_message,
                 }
-                _raise_not_running_error(sandbox.id, ctx)
+                _raise_not_running_error(sandbox.sandbox_id, ctx)
             elif _is_waiting_for_image_build(sandbox):
                 # The platform is building the VM image for this sandbox; it
-                # starts on its own once the build completes.
+                # starts on its own once the build completes. This phase runs on
+                # its own budget, so hold the creation deadline back while it
+                # lasts and reset the backoff for when the sandbox starts.
                 if image_build_deadline is None:
                     image_build_deadline = time.monotonic() + image_build_timeout_seconds
                 if time.monotonic() >= image_build_deadline:
                     raise SandboxNotRunningError(
-                        sandbox_id, "Timeout waiting for the VM image build"
+                        sandbox_id,
+                        message="Timeout waiting for the VM image build",
                     )
                 time.sleep(10)
+                deadline = time.monotonic() + timeout_seconds
+                poll_index = 0
                 continue
 
-            attempt += 1
-            # Aggressive polling for first 5 attempts (5 seconds), then back off
-            sleep_time = 1 if attempt <= 5 else 2
-            time.sleep(sleep_time)
-        raise SandboxNotRunningError(sandbox_id, "Timeout during sandbox creation")
+            # Never sleep past the deadline. The loop only re-checks it on the
+            # next iteration, so an uncapped backoff delay would let the wait
+            # run up to CREATION_POLL_MAX_DELAY (plus jitter) beyond the budget.
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(_creation_poll_delay(poll_index), remaining))
+            poll_index += 1
+        if reachability_phase:
+            error = _reachability_timeout_error(
+                sandbox_id,
+                timeout_seconds,
+                last_reachability_error,
+            )
+            raise error from last_reachability_error
+        raise SandboxNotRunningError(
+            sandbox_id,
+            message=f"Sandbox did not reach RUNNING within {timeout_seconds:g}s",
+        )
 
     def bulk_wait_for_creation(
         self,
@@ -1257,46 +3226,62 @@ class SandboxClient:
         max_attempts: int = 60,
         image_build_timeout_seconds: int = 3000,
     ) -> Dict[str, str]:
-        """Wait for multiple sandboxes to be running using list endpoint to avoid rate limits.
+        """Wait for up to 100 sandboxes using the batch lifecycle endpoint.
 
         Sandboxes PENDING on an automatic VM image build (first use of an
         image) are waited on a separate slower budget bounded by
         image_build_timeout_seconds instead of consuming max_attempts.
         """
-        sandbox_id_set = set(sandbox_ids)
-        final_statuses = {}
+        _validate_unique_batch_values(sandbox_ids, "sandbox_ids")
+        final_statuses: Dict[str, str] = {}
+        last_reachability_errors: Dict[str, BaseException] = {}
         image_build_deadline: Optional[float] = None
 
         attempt = 0
         while attempt < max_attempts:
+            try:
+                leases = self._poll_leases.acquire_many(sandbox_ids)
+                try:
+                    try:
+                        response = self.get_sandbox_statuses(sandbox_ids)
+                    except BatchStatusUnsupportedError:
+                        outcomes = self._fetch_sandbox_statuses(sandbox_ids)
+                        snapshots = []
+                        for sandbox_id in sandbox_ids:
+                            outcome = outcomes[sandbox_id]
+                            if isinstance(outcome, _BatchItemError):
+                                raise outcome.error
+                            snapshots.append(outcome)
+                        response = BatchSandboxStatusResponse(
+                            statuses=snapshots,
+                            errors=[],
+                        )
+                finally:
+                    for lease in leases:
+                        lease.release()
+            except Exception as exc:
+                if "429" in str(exc) or "Too Many Requests" in str(exc):
+                    time.sleep(min(2**attempt, 60))
+                    continue
+                raise
+
+            if response.errors:
+                failures = [(error.sandbox_id, error.code) for error in response.errors]
+                raise RuntimeError(f"Sandboxes unavailable: {failures}")
+
             total_running = 0
             all_failed = []
             total_image_build_waiting = 0
-            page = 1
-
-            while True:
-                try:
-                    list_response = self.list(per_page=100, page=page)
-                except Exception as e:
-                    if "429" in str(e) or "Too Many Requests" in str(e):
-                        wait_time = min(2**attempt, 60)
-                        time.sleep(wait_time)
-                        continue
-                    raise
-
-                running_count, failed_sandboxes, page_statuses, image_build_waiting = (
-                    _check_sandbox_statuses(list_response.sandboxes, sandbox_id_set)
-                )
-
-                total_running += running_count
-                all_failed.extend(failed_sandboxes)
-                final_statuses.update(page_statuses)
-                total_image_build_waiting += image_build_waiting
-
-                if len(final_statuses) == len(sandbox_ids) or not list_response.has_next:
-                    break
-
-                page += 1
+            for snapshot in response.statuses:
+                status_value = snapshot.status.value
+                if status_value == "RUNNING":
+                    total_running += 1
+                    final_statuses[snapshot.sandbox_id] = status_value
+                elif status_value in ["ERROR", "TERMINATED", "TIMEOUT"]:
+                    all_failed.append((snapshot.sandbox_id, status_value))
+                    final_statuses[snapshot.sandbox_id] = status_value
+                elif _is_waiting_for_image_build(snapshot):
+                    total_image_build_waiting += 1
 
             if all_failed:
                 raise RuntimeError(f"Sandboxes failed: {all_failed}")
@@ -1305,7 +3290,18 @@ class SandboxClient:
                 all_reachable = True
                 for sandbox_id in sandbox_ids:
                     if final_statuses.get(sandbox_id) == "RUNNING":
-                        if not self._is_sandbox_reachable(sandbox_id):
+                        lease = self._poll_leases.acquire(sandbox_id)
+                        try:
+                            try:
+                                reachable = self._is_sandbox_reachable(sandbox_id)
+                            finally:
+                                lease.release()
+                        except Exception as error:
+                            if not _is_retryable_reachability_error(error):
+                                raise
+                            last_reachability_errors[sandbox_id] = error
+                            reachable = False
+                        if not reachable:
                             all_reachable = False
                             final_statuses.pop(sandbox_id, None)
 
@@ -1327,11 +3323,20 @@ class SandboxClient:
             sleep_time = 1 if attempt <= 5 else 2
             time.sleep(sleep_time)
 
-        for sandbox_id in sandbox_id_set:
+        for sandbox_id in sandbox_ids:
             if sandbox_id not in final_statuses:
                 final_statuses[sandbox_id] = "TIMEOUT"
 
-        raise RuntimeError(f"Timeout waiting for sandboxes to be ready. Status: {final_statuses}")
+        detail = ""
+        if last_reachability_errors:
+            errors = {
+                sandbox_id: f"{error.__class__.__name__}: {error}"
+                for sandbox_id, error in last_reachability_errors.items()
+            }
+            detail = f" Last reachability errors: {errors}"
+        raise RuntimeError(
+            f"Timeout waiting for sandboxes to be ready. Status: {final_statuses}.{detail}"
+        )
 
     def upload_file(
         self,
@@ -1366,6 +3371,10 @@ class SandboxClient:
             except httpx.TimeoutException as e:
                 raise UploadTimeoutError(sandbox_id, file_path, effective_timeout) from e
             except httpx.HTTPStatusError as e:
+                if _is_gateway_sandbox_terminated(e.response):
+                    _raise_sandbox_gone(
+                        sandbox_id, self._get_sandbox_error_context(sandbox_id), cause=e
+                    )
                 if e.response.status_code == 401 and self._should_retry_401(sandbox_id, reauthed):
                     reauthed = True
                     continue
@@ -1430,6 +3439,10 @@ class SandboxClient:
             except httpx.TimeoutException:
                 raise UploadTimeoutError(sandbox_id, file_path, effective_timeout)
             except httpx.HTTPStatusError as e:
+                if _is_gateway_sandbox_terminated(e.response):
+                    _raise_sandbox_gone(
+                        sandbox_id, self._get_sandbox_error_context(sandbox_id), cause=e
+                    )
                 if e.response.status_code == 401 and self._should_retry_401(sandbox_id, reauthed):
                     reauthed = True
                     continue
@@ -1481,6 +3494,10 @@ class SandboxClient:
             except httpx.TimeoutException as e:
                 raise DownloadTimeoutError(sandbox_id, file_path, effective_timeout) from e
             except httpx.HTTPStatusError as e:
+                if _is_gateway_sandbox_terminated(e.response):
+                    _raise_sandbox_gone(
+                        sandbox_id, self._get_sandbox_error_context(sandbox_id), cause=e
+                    )
                 if e.response.status_code == 401 and self._should_retry_401(sandbox_id, reauthed):
                     reauthed = True
                     continue
@@ -1550,6 +3567,10 @@ class SandboxClient:
                     f"({e.__class__.__name__}): {file_path}"
                 ) from e
             except httpx.HTTPStatusError as e:
+                if _is_gateway_sandbox_terminated(e.response):
+                    _raise_sandbox_gone(
+                        sandbox_id, self._get_sandbox_error_context(sandbox_id), cause=e
+                    )
                 if e.response.status_code == 401 and self._should_retry_401(sandbox_id, reauthed):
                     reauthed = True
                     continue
@@ -1573,67 +3594,12 @@ class SandboxClient:
                 method = getattr(req, "method", "?")
                 u = getattr(req, "url", "?")
                 raise APIError(
-                    f"Read file failed: {e.__class__.__name__} at {method} {u}: {e}"
+                    f"Read file failed at {method} {u}: {_format_exception_diagnostic(e)}"
                 ) from e
             except Exception as e:
                 raise APIError(f"Read file failed: {e.__class__.__name__}: {e}") from e
 
         raise APIError("Read file failed after retries")
-
-    def expose(
-        self,
-        sandbox_id: str,
-        port: int,
-        name: Optional[str] = None,
-        protocol: str = "HTTP",
-    ) -> ExposedPort:
-        """Expose a port from a sandbox."""
-        self._guard_vm_unsupported(sandbox_id, "Port exposure")
-        request = ExposePortRequest(port=port, name=name, protocol=protocol)
-        response = self.client.request(
-            "POST",
-            f"/sandbox/{sandbox_id}/expose",
-            json=request.model_dump(by_alias=False, exclude_none=True),
-        )
-        return ExposedPort.model_validate(response)
-
-    def unexpose(self, sandbox_id: str, exposure_id: str) -> None:
-        """Unexpose a port from a sandbox."""
-        self._guard_vm_unsupported(sandbox_id, "Port unexpose")
-        self.client.request("DELETE", f"/sandbox/{sandbox_id}/expose/{exposure_id}")
-
-    def list_exposed_ports(self, sandbox_id: str) -> ListExposedPortsResponse:
-        """List all exposed ports for a sandbox"""
-        self._guard_vm_unsupported(sandbox_id, "Port listing")
-        response = self.client.request("GET", f"/sandbox/{sandbox_id}/expose")
-        return ListExposedPortsResponse.model_validate(response)
-
-    def list_all_exposed_ports(self) -> ListExposedPortsResponse:
-        """List all exposed ports across all sandboxes for the current user"""
-        response = self.client.request("GET", "/sandbox/expose/all")
-        return ListExposedPortsResponse.model_validate(response)
-
-    def create_ssh_session(
-        self,
-        sandbox_id: str,
-        ttl_seconds: Optional[int] = None,
-    ) -> SSHSession:
-        """Create an SSH session"""
-        self._guard_vm_unsupported(sandbox_id, "SSH")
-        payload: Dict[str, Any] = {}
-        if ttl_seconds is not None:
-            payload["ttl_seconds"] = ttl_seconds
-        response = self.client.request(
-            "POST",
-            f"/sandbox/{sandbox_id}/ssh-session",
-            json=payload,
-        )
-        return SSHSession.model_validate(response)
-
-    def close_ssh_session(self, sandbox_id: str, session_id: str) -> None:
-        """Close an SSH session and remove its exposure"""
-        self._guard_vm_unsupported(sandbox_id, "SSH")
-        self.client.request("DELETE", f"/sandbox/{sandbox_id}/ssh-session/{session_id}")
 
 
 class AsyncSandboxClient:
@@ -1644,6 +3610,10 @@ class AsyncSandboxClient:
         api_key: Optional[str] = None,
         max_connections: int = 1000,
         max_keepalive_connections: int = 200,
+        *,
+        background_job_output_concurrency: int = MAX_CONCURRENT_BACKGROUND_JOB_OUTPUT_READS,
+        background_job_output_queue_size: int = MAX_PENDING_BACKGROUND_JOB_OUTPUTS,
+        background_job_output_cache_bytes: int = BACKGROUND_JOB_OUTPUT_CACHE_BYTES,
     ):
         """Initialize async sandbox client
 
@@ -1651,7 +3621,15 @@ class AsyncSandboxClient:
             api_key: Optional API key (reads from config if not provided)
             max_connections: Maximum number of concurrent connections (default: 1000)
             max_keepalive_connections: Maximum keep-alive connections (default: 200)
+            background_job_output_concurrency: Maximum completed jobs downloading output at once
+            background_job_output_queue_size: Maximum unique completed jobs waiting for output
+            background_job_output_cache_bytes: Maximum client-local successful output cache size
         """
+        _validate_background_job_output_limits(
+            background_job_output_concurrency,
+            background_job_output_queue_size,
+            background_job_output_cache_bytes,
+        )
         self.client = AsyncAPIClient(api_key=api_key, user_agent=_build_user_agent())
         self._auth_cache = AsyncSandboxAuthCache(
             self.client.config.config_dir / "sandbox_auth_cache.json",
@@ -1663,6 +3641,35 @@ class AsyncSandboxClient:
         # Shared httpx client for gateway operations (upload/download/execute)
         # Initialized lazily to allow connection pooling and reuse
         self._gateway_client: Optional[httpx.AsyncClient] = None
+        self._operation_leases = _AsyncPollLeaseRegistry()
+        self._poll_leases = self._operation_leases
+        # Checkpoints outlive their sandboxes; leases use checkpoint scopes.
+        self._checkpoint_batcher = _AsyncRequestBatcher(
+            self._fetch_checkpoints,
+            lambda checkpoint_id: f"checkpoint:{checkpoint_id}",
+            self._operation_leases,
+        )
+        self._checkpoint_batch_supported: Optional[bool] = None
+        self._sandbox_status_batcher = _AsyncRequestBatcher(
+            self._fetch_sandbox_statuses,
+            lambda sandbox_id: sandbox_id,
+            self._operation_leases,
+        )
+        self._background_job_status_batcher = _AsyncRequestBatcher(
+            self._fetch_background_job_statuses,
+            lambda key: key[0],
+            self._operation_leases,
+        )
+        self._background_job_output_coordinator = _AsyncBackgroundJobOutputCoordinator(
+            self._operation_leases,
+            self._read_background_job_output_stream,
+            background_job_output_concurrency,
+            background_job_output_queue_size,
+            background_job_output_cache_bytes,
+        )
+        self._sandbox_status_batch_supported: Optional[bool] = None
+        self._background_job_status_batch_supported: Optional[bool] = None
+        self._close_task: Optional[asyncio.Task[None]] = None
 
     def _get_gateway_client(self) -> httpx.AsyncClient:
         """Get or create the shared gateway client for connection pooling
@@ -1690,11 +3697,14 @@ class AsyncSandboxClient:
         files: Optional[Dict[str, Any]] = None,
         params: Optional[Dict[str, Any]] = None,
     ) -> httpx.Response:
-        """Make a POST request to the gateway with retry on connection errors only."""
+        """Make a POST request to the gateway with safe pre-processing retries."""
         gateway_client = self._get_gateway_client()
-        return await gateway_client.post(
+        response = await gateway_client.post(
             url, json=json, files=files, params=params, headers=headers, timeout=timeout
         )
+        if response.status_code == 429:
+            response.raise_for_status()
+        return response
 
     @_gateway_retry
     async def _gateway_get(
@@ -1707,7 +3717,7 @@ class AsyncSandboxClient:
         """Make a GET request to the gateway with retry on transient errors."""
         gateway_client = self._get_gateway_client()
         response = await gateway_client.get(url, params=params, headers=headers, timeout=timeout)
-        if response.status_code in RETRYABLE_5XX_STATUSES:
+        if response.status_code == 429 or response.status_code in RETRYABLE_5XX_STATUSES:
             response.raise_for_status()
         return response
 
@@ -1722,22 +3732,27 @@ class AsyncSandboxClient:
         """Make a read-file GET request to the gateway with read-timeout retries."""
         gateway_client = self._get_gateway_client()
         response = await gateway_client.get(url, params=params, headers=headers, timeout=timeout)
-        if response.status_code == 408 or response.status_code in RETRYABLE_5XX_STATUSES:
+        if response.status_code in {408, 429} or response.status_code in RETRYABLE_5XX_STATUSES:
             response.raise_for_status()
         return response
 
     async def _is_sandbox_reachable(self, sandbox_id: str, timeout: int = 10) -> bool:
         """Test if a sandbox is reachable by executing a simple echo command"""
-        try:
-            await self.execute_command(sandbox_id, "echo 'sandbox ready'", timeout=timeout)
-            return True
-        except Exception:
-            return False
+        await self.execute_command(sandbox_id, "echo 'sandbox ready'", timeout=timeout)
+        return True
 
-    async def _get_sandbox_error_context(self, sandbox_id: str) -> dict:
+    async def _get_sandbox_error_context(
+        self,
+        sandbox_id: str,
+        timeout: float = _SANDBOX_ERROR_CONTEXT_TIMEOUT_SECONDS,
+    ) -> dict:
         """Fetch sandbox error context from the lightweight server endpoint."""
         try:
-            response = await self.client.request("GET", f"/sandbox/{sandbox_id}/error-context")
+            response = await self.client.request(
+                "GET",
+                f"/sandbox/{sandbox_id}/error-context",
+                timeout=timeout,
+            )
             return {
                 "status": response.get("status"),
                 "error_type": response.get("errorType") or response.get("error_type"),
@@ -1792,28 +3807,12 @@ class AsyncSandboxClient:
         """Clear all cached auth tokens."""
         await self._auth_cache.clear()
 
-    async def is_vm(self, sandbox_id: str) -> bool:
-        """Return True if the sandbox is VM-backed.
-
-        Uses the internal auth cache when available and falls back to a
-        ``GET /sandbox/<id>`` lookup on a cold cache. The result is cached
-        alongside the auth token so subsequent calls are essentially free.
-        """
-        return await self._auth_cache.is_vm(sandbox_id)
-
-    async def _guard_vm_unsupported(self, sandbox_id: str, feature_name: str) -> None:
-        """Raise APIError if the operation is not supported on VM sandboxes.
-
-        Mirrors the CLI behavior of short-circuiting operations the backend
-        does not currently support for VM-backed sandboxes, so callers fail
-        fast with a clear message instead of an opaque gateway error.
-        """
-        if await self._auth_cache.is_vm(sandbox_id):
-            raise APIError(f"{feature_name} is not yet supported for VM sandboxes.")
-
     async def create(self, request: CreateSandboxRequest) -> Sandbox:
         """Create a new sandbox"""
         payload = request.model_dump(by_alias=False, exclude_none=True)
+        # VM is the only runtime; send it explicitly so the created runtime
+        # never depends on server-side defaults changing underneath the SDK.
+        payload["vm"] = True
         if request.team_id is None and self.client.config.team_id is not None:
             payload["team_id"] = self.client.config.team_id
         payload["idempotency_key"] = request.idempotency_key or uuid.uuid4().hex
@@ -1860,15 +3859,220 @@ class AsyncSandboxClient:
         response = await self.client.request("GET", f"/sandbox/{sandbox_id}")
         return Sandbox.model_validate(response)
 
+    async def checkpoint(self, sandbox_id: str) -> SandboxCheckpoint:
+        """Request a filesystem checkpoint; use wait_for_checkpoint before restoring."""
+        response = await self.client.request("POST", f"/sandbox/{sandbox_id}/checkpoints")
+        return SandboxCheckpoint.model_validate(response)
+
+    async def get_checkpoint(self, checkpoint_id: str) -> SandboxCheckpoint:
+        """Get the latest state of a filesystem checkpoint."""
+        response = await self.client.request("GET", f"/sandbox/checkpoints/{checkpoint_id}")
+        return SandboxCheckpoint.model_validate(response)
+
+    async def delete_checkpoint(self, checkpoint_id: str) -> None:
+        """Delete a durable or failed checkpoint and stop its storage billing.
+
+        Its data is kept while descendants still need it. Raises APIError (HTTP 409)
+        while the checkpoint is pending or the active tip of a running sandbox.
+        """
+        await self.client.request("DELETE", f"/sandbox/checkpoints/{checkpoint_id}")
+
+    async def delete_sandbox_checkpoints(self, sandbox_id: str) -> DeleteSandboxCheckpointsResponse:
+        """Delete every checkpoint of a sandbox, with per-checkpoint errors.
+
+        Each deletion is independent and behaves like delete_checkpoint: pending
+        checkpoints and the active tip of a running sandbox are kept as CONFLICT.
+        """
+        response = await self.client.request("DELETE", f"/sandbox/{sandbox_id}/checkpoints")
+        return DeleteSandboxCheckpointsResponse.model_validate(response)
+
+    async def get_checkpoints(self, checkpoint_ids: List[str]) -> BatchCheckpointResponse:
+        """Get up to 100 checkpoints across sandboxes, with per-ID lookup errors."""
+        _validate_unique_batch_values(checkpoint_ids, "checkpoint_ids")
+        if any(not checkpoint_id or len(checkpoint_id) > 64 for checkpoint_id in checkpoint_ids):
+            raise ValueError("checkpoint_ids must contain IDs between 1 and 64 characters")
+        if self._checkpoint_batch_supported is False:
+            raise BatchStatusUnsupportedError("The platform does not support checkpoint batches.")
+        try:
+            response = await self.client.request(
+                "POST",
+                "/sandbox/checkpoints:batchGet",
+                json={"checkpoint_ids": checkpoint_ids},
+                idempotent_post=True,
+            )
+        except APIError as exc:
+            if "HTTP 404" in str(exc) or "HTTP 405" in str(exc):
+                self._checkpoint_batch_supported = False
+                raise BatchStatusUnsupportedError(
+                    "The platform does not support checkpoint batches."
+                ) from exc
+            raise
+        self._checkpoint_batch_supported = True
+        return BatchCheckpointResponse.model_validate(response)
+
+    async def _fetch_checkpoints(
+        self, checkpoint_ids: List[str]
+    ) -> Dict[str, SandboxCheckpoint | _BatchItemError]:
+        try:
+            response = await self.get_checkpoints(checkpoint_ids)
+        except BatchStatusUnsupportedError:
+            checkpoints = await asyncio.gather(
+                *(self.get_checkpoint(checkpoint_id) for checkpoint_id in checkpoint_ids),
+                return_exceptions=True,
+            )
+            return {
+                checkpoint_id: _BatchItemError(checkpoint)
+                if isinstance(checkpoint, Exception)
+                else checkpoint
+                for checkpoint_id, checkpoint in zip(checkpoint_ids, checkpoints)
+            }
+
+        results: Dict[str, SandboxCheckpoint | _BatchItemError] = {
+            checkpoint.id: checkpoint for checkpoint in response.checkpoints
+        }
+        for error in response.errors:
+            results[error.checkpoint_id] = _BatchItemError(
+                APIError(
+                    f"Checkpoint lookup failed for {error.checkpoint_id}: "
+                    f"{error.code}: {error.message}"
+                )
+            )
+        return results
+
+    async def wait_for_checkpoint(
+        self, checkpoint_id: str, timeout_seconds: float = 300
+    ) -> SandboxCheckpoint:
+        """Wait for a filesystem checkpoint to become DURABLE.
+
+        Concurrent waits share cross-sandbox batches of up to 100 checkpoints.
+        Polls with backoff until timeout_seconds elapse, returning the durable
+        checkpoint. Raises RuntimeError on FAILED or DELETING and TimeoutError
+        on expiry.
+        In-flight requests follow the API client's timeout and retry policy.
+        """
+        if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be finite and greater than zero")
+        deadline = time.monotonic() + timeout_seconds
+        poll_index = 0
+        while time.monotonic() < deadline:
+            checkpoint = await self._checkpoint_batcher.get(checkpoint_id)
+            if checkpoint.state == "DURABLE":
+                return checkpoint
+            if checkpoint.state in ("FAILED", "DELETING"):
+                raise RuntimeError(
+                    f"Checkpoint {checkpoint_id} cannot become durable (state={checkpoint.state}): "
+                    f"{checkpoint.error or 'no error details'}"
+                )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(_creation_poll_delay(poll_index), remaining))
+            poll_index += 1
+        raise TimeoutError(
+            f"Checkpoint {checkpoint_id} did not become DURABLE within {timeout_seconds:g}s"
+        )
+
+    async def list_checkpoints(
+        self, sandbox_id: str, checkpoint_id: Optional[str] = None
+    ) -> List[SandboxCheckpoint]:
+        """List a sandbox's checkpoints oldest first, optionally only one ID."""
+        params = {"checkpoint_id": checkpoint_id} if checkpoint_id else None
+        response = await self.client.request(
+            "GET", f"/sandbox/{sandbox_id}/checkpoints", params=params
+        )
+        return [SandboxCheckpoint.model_validate(c) for c in response["checkpoints"]]
+
+    async def get_sandbox_statuses(self, sandbox_ids: List[str]) -> BatchSandboxStatusResponse:
+        """Get lightweight lifecycle state for up to 100 sandboxes."""
+        _validate_unique_batch_values(sandbox_ids, "sandbox_ids")
+        if self._sandbox_status_batch_supported is False:
+            raise BatchStatusUnsupportedError(
+                "The platform does not support batch sandbox status lookups."
+            )
+        try:
+            response = await self.client.request(
+                "POST",
+                "/sandbox/status:batchGet",
+                json={"sandbox_ids": sandbox_ids},
+                idempotent_post=True,
+            )
+        except APIError as exc:
+            if "HTTP 404" in str(exc) or "HTTP 405" in str(exc):
+                self._sandbox_status_batch_supported = False
+                raise BatchStatusUnsupportedError(
+                    "The platform does not support batch sandbox status lookups."
+                ) from exc
+            raise
+        self._sandbox_status_batch_supported = True
+        return BatchSandboxStatusResponse.model_validate(response)
+
+    async def _fetch_sandbox_statuses(
+        self, sandbox_ids: List[str]
+    ) -> Dict[str, SandboxStatusSnapshot | _BatchItemError]:
+        """Fetch one coalesced lifecycle batch for concurrent waiters."""
+        try:
+            response = await self.get_sandbox_statuses(sandbox_ids)
+        except BatchStatusUnsupportedError:
+            sandboxes = await asyncio.gather(
+                *(self.get(sandbox_id) for sandbox_id in sandbox_ids),
+                return_exceptions=True,
+            )
+            results: Dict[str, SandboxStatusSnapshot | _BatchItemError] = {}
+            for sandbox_id, sandbox in zip(sandbox_ids, sandboxes):
+                if isinstance(sandbox, Exception):
+                    results[sandbox_id] = _BatchItemError(sandbox)
+                else:
+                    results[sandbox_id] = _sandbox_to_status_snapshot(sandbox)
+            return results
+
+        results: Dict[str, SandboxStatusSnapshot | _BatchItemError] = {
+            snapshot.sandbox_id: snapshot for snapshot in response.statuses
+        }
+        for error in response.errors:
+            results[error.sandbox_id] = _BatchItemError(
+                APIError(
+                    f"Sandbox status lookup failed for {error.sandbox_id}: "
+                    f"{error.code}: {error.message}"
+                )
+            )
+        return results
+
     async def delete(self, sandbox_id: str) -> Dict[str, Any]:
         """Delete a sandbox"""
-        response = await self.client.request("DELETE", f"/sandbox/{sandbox_id}")
-        return response
+        scopes = await self._operation_leases.start_drain([sandbox_id])
+        try:
+            await self._background_job_output_coordinator.cancel_sandboxes(
+                scopes, f"APIError: Sandbox {sandbox_id} is being deleted"
+            )
+            await self._operation_leases.wait_for_drain(scopes)
+            await self._background_job_output_coordinator.cancel_sandboxes(
+                scopes, f"APIError: Sandbox {sandbox_id} is being deleted"
+            )
+            response = await self.client.request("DELETE", f"/sandbox/{sandbox_id}")
+            return response
+        finally:
+            self._operation_leases.end_drain(scopes)
 
     async def get_network(self, sandbox_id: str) -> EgressPolicyStatus:
         """Get the desired and applied network rules of a VM sandbox."""
         response = await self.client.request("GET", f"/sandbox/{sandbox_id}/egress-policy")
         return EgressPolicyStatus.model_validate(response)
+
+    async def create_ssh_session(
+        self, sandbox_id: str, public_key: str, ttl_seconds: Optional[int] = None
+    ) -> SSHSession:
+        """Authorize an ephemeral SSH key for a VM sandbox."""
+        payload: Dict[str, Any] = {"public_key": public_key}
+        if ttl_seconds is not None:
+            payload["ttl_seconds"] = ttl_seconds
+        response = await self.client.request(
+            "POST", f"/sandbox/{sandbox_id}/ssh-session", json=payload
+        )
+        return SSHSession.model_validate(response)
+
+    async def close_ssh_session(self, sandbox_id: str, session_id: str) -> None:
+        """Revoke an SSH session."""
+        await self.client.request("DELETE", f"/sandbox/{sandbox_id}/ssh-session/{session_id}")
 
     async def set_network(
         self,
@@ -1910,12 +4114,23 @@ class AsyncSandboxClient:
             all_users=all_users,
         )
         payload = request.model_dump(by_alias=False, exclude_none=True)
-        response = await self.client.request(
-            "DELETE",
-            "/sandbox",
-            json=payload,
-        )
-        return BulkDeleteSandboxResponse.model_validate(response)
+        scopes = await self._operation_leases.start_drain(sandbox_ids or [])
+        try:
+            await self._background_job_output_coordinator.cancel_sandboxes(
+                scopes, "APIError: Sandbox is being deleted"
+            )
+            await self._operation_leases.wait_for_drain(scopes)
+            await self._background_job_output_coordinator.cancel_sandboxes(
+                scopes, "APIError: Sandbox is being deleted"
+            )
+            response = await self.client.request(
+                "DELETE",
+                "/sandbox",
+                json=payload,
+            )
+            return BulkDeleteSandboxResponse.model_validate(response)
+        finally:
+            self._operation_leases.end_drain(scopes)
 
     async def get_logs(self, sandbox_id: str) -> str:
         """Get sandbox logs"""
@@ -1932,24 +4147,9 @@ class AsyncSandboxClient:
         timeout: Optional[int] = None,
         user: Optional[str] = None,
     ) -> CommandResponse:
-        """Execute command directly via gateway (async)."""
+        """Execute via gateway, optionally as an existing guest username (async)."""
         await self._auth_cache.get_or_refresh(sandbox_id)
-
-        if await self._auth_cache.is_vm(sandbox_id):
-            if user is not None:
-                raise ValueError(
-                    "The 'user' parameter is only supported for container sandboxes, "
-                    "not VM sandboxes."
-                )
-            return await self._execute_command_connect_rpc(
-                sandbox_id=sandbox_id,
-                command=command,
-                working_dir=working_dir,
-                env=env,
-                timeout=timeout,
-            )
-
-        return await self._execute_command_rest(
+        return await self._execute_command_connect_rpc(
             sandbox_id=sandbox_id,
             command=command,
             working_dir=working_dir,
@@ -1958,6 +4158,198 @@ class AsyncSandboxClient:
             user=user,
         )
 
+    async def open_process(
+        self,
+        sandbox_id: str,
+        command: str,
+        working_dir: Optional[str] = None,
+        env: Optional[Dict[str, str]] = None,
+        user: Optional[str] = None,
+    ) -> AsyncSandboxProcess:
+        """Start a live process in a VM sandbox.
+
+        The returned handle streams stdout and stderr, accepts stdin writes,
+        waits for the exit code, and can signal the process. If the stream drops before
+        the first StartEvent, the SDK retries Start with the same session_uuid
+        (create-or-attach); after it, the SDK re-attaches with Connect by
+        session selector. Either way sandboxd re-announces the StartEvent and,
+        for a session that exited within its retention window, replays the
+        retained EndEvent — an exit missed while detached is still observed.
+        Output emitted while detached is not replayed.
+        """
+        await self._auth_cache.get_or_refresh(sandbox_id)
+
+        auth = await self._auth_cache.get_or_refresh(sandbox_id)
+        gateway_url = auth["gateway_url"].rstrip("/")
+        base_url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}"
+        headers = {"Authorization": f"Bearer {auth['token']}"}
+        # session_uuid is the Start idempotency key: re-issuing the same request
+        # attaches to (or replays) the session instead of spawning a second
+        # process.
+        session_uuid = _canonical_uuid_key()
+        request = build_command_session_start_request(
+            command=command,
+            working_dir=working_dir,
+            env=env,
+            stdin=True,
+            session_uuid=session_uuid,
+            user=user,
+        )
+        # Each live process gets its own transport: the session stream occupies one
+        # HTTP/2 stream for the process's whole lifetime, and the gateway caps
+        # concurrent streams per connection. On the shared default transport, enough
+        # concurrent live processes exhaust that cap and every later gateway RPC
+        # (stdin, signals, new sessions) queues until its deadline. The process's
+        # control RPCs reuse the same transport so they cannot starve either.
+        transport = _live_process_transport()
+        http_client = HTTPClient(transport=transport)
+        rpc_client = ConnectClient(
+            base_url,
+            codec=GOOGLE_PROTOBUF_BINARY_CODEC,
+            send_compression=None,
+            http_client=http_client,
+        )
+        stream = rpc_client.execute_server_stream(
+            request=request,
+            method=COMMAND_SESSION_START_RPC_METHOD,
+            headers=headers,
+            timeout_ms=_LIVE_PROCESS_TIMEOUT_MS,
+        )
+
+        async def write_stdin(data: bytes) -> None:
+            input_uuid = _canonical_uuid_key()
+            await self._execute_process_control_rpc(
+                sandbox_id,
+                build_command_session_send_input_request(
+                    session_uuid=session_uuid, data=data, input_uuid=input_uuid
+                ),
+                COMMAND_SESSION_SEND_INPUT_RPC_METHOD,
+                _PROCESS_INPUT_TIMEOUT_MS,
+                "stdin",
+                http_client=http_client,
+            )
+
+        async def send_signal(signal: Literal["terminate", "kill"]) -> None:
+            signal_uuid = _canonical_uuid_key()
+            await self._execute_process_control_rpc(
+                sandbox_id,
+                build_command_session_send_signal_request(
+                    session_uuid=session_uuid, signal=signal, signal_uuid=signal_uuid
+                ),
+                COMMAND_SESSION_SEND_SIGNAL_RPC_METHOD,
+                _PROCESS_SIGNAL_TIMEOUT_MS,
+                "signal",
+                http_client=http_client,
+            )
+
+        async def reconnect(started: bool) -> AsyncIterator[Message]:
+            # Before a StartEvent it is unknown whether the process was ever
+            # spawned, so retry Start (create-or-attach); afterwards Connect
+            # re-attaches, replaying the EndEvent if the process has exited.
+            # `started` is fixed for this invocation, so pick once.
+            if started:
+                method = COMMAND_SESSION_CONNECT_RPC_METHOD
+                reattach_request = build_command_session_connect_request(session_uuid=session_uuid)
+            else:
+                method = COMMAND_SESSION_START_RPC_METHOD
+                reattach_request = request
+            reauthed = False
+            while True:
+                auth = await self._auth_cache.get_or_refresh(sandbox_id)
+                base_url = f"{auth['gateway_url'].rstrip('/')}/{auth['user_ns']}/{auth['job_id']}"
+                client = ConnectClient(
+                    base_url,
+                    codec=GOOGLE_PROTOBUF_BINARY_CODEC,
+                    send_compression=None,
+                    http_client=http_client,
+                )
+                try:
+                    stream = client.execute_server_stream(
+                        request=reattach_request,
+                        method=method,
+                        headers={"Authorization": f"Bearer {auth['token']}"},
+                        timeout_ms=_LIVE_PROCESS_TIMEOUT_MS,
+                    )
+                    async for response in stream:
+                        yield response
+                    return
+                except ConnectError as error:
+                    if error.code == Code.UNAUTHENTICATED and await self._should_retry_401(
+                        sandbox_id, reauthed
+                    ):
+                        reauthed = True
+                        continue
+                    raise
+                finally:
+                    await client.close()
+
+        return await AsyncSandboxProcess._create(
+            rpc_client,
+            stream,
+            write_stdin,
+            send_signal,
+            transport=transport,
+            reconnect=reconnect,
+        )
+
+    async def _execute_process_control_rpc(
+        self,
+        sandbox_id: str,
+        request: _RequestMessage,
+        method: MethodInfo[_RequestMessage, _ResponseMessage],
+        timeout_ms: int,
+        operation: str,
+        http_client: Optional[HTTPClient] = None,
+    ) -> None:
+        """Run one live-process control RPC with current sandbox auth.
+
+        Transient faults are retried with backoff. Retries are safe because the
+        caller's request carries the operation's idempotency key (input_uuid or
+        signal_uuid) and is sent byte-identically on every attempt — do not
+        rebuild it here: sandboxd acknowledges a duplicated apply of the same
+        key without repeating it.
+        """
+        reauthed = False
+        failures = 0
+        # Not a tenacity policy like _gateway_retry: the one-shot 401 reauth
+        # must retry without consuming a transient attempt, which a decorator's
+        # single stop counter cannot express.
+        while True:
+            auth = await self._auth_cache.get_or_refresh(sandbox_id)
+            gateway_url = auth["gateway_url"].rstrip("/")
+            base_url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}"
+            headers = {"Authorization": f"Bearer {auth['token']}"}
+            rpc_client = ConnectClient(
+                base_url,
+                codec=GOOGLE_PROTOBUF_BINARY_CODEC,
+                send_compression=None,
+                http_client=http_client,
+            )
+            try:
+                # Every attempt resends `request` unchanged; only auth refreshes.
+                await rpc_client.execute_unary(
+                    request=request,
+                    method=method,
+                    headers=headers,
+                    timeout_ms=timeout_ms,
+                )
+                return
+            except ConnectError as error:
+                if error.code == Code.UNAUTHENTICATED and await self._should_retry_401(
+                    sandbox_id, reauthed
+                ):
+                    reauthed = True
+                    continue
+                failures += 1
+                if failures < _PROCESS_CONTROL_RPC_ATTEMPTS and is_transient_control_fault(error):
+                    await asyncio.sleep(_PROCESS_CONTROL_RETRY_INITIAL_DELAY * 2 ** (failures - 1))
+                    continue
+                raise APIError(
+                    f"process {operation} RPC failed ({error.code.value}): {error.message}"
+                ) from error
+            finally:
+                await rpc_client.close()
+
     async def _execute_command_connect_rpc(
         self,
         sandbox_id: str,
@@ -1965,9 +4357,12 @@ class AsyncSandboxClient:
         working_dir: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
         timeout: Optional[int] = None,
+        user: Optional[str] = None,
     ) -> CommandResponse:
         effective_timeout = timeout if timeout is not None else 300
-        request = build_command_session_start_request(command, working_dir, env)
+        request = build_command_session_start_request(
+            command=command, working_dir=working_dir, env=env, user=user
+        )
 
         reauthed = False
         while True:
@@ -1980,7 +4375,11 @@ class AsyncSandboxClient:
             exit_code: Optional[int] = None
             stream_started = False
 
-            rpc_client = ConnectClient(base_url)
+            rpc_client = ConnectClient(
+                base_url,
+                codec=GOOGLE_PROTOBUF_BINARY_CODEC,
+                send_compression=None,
+            )
             try:
                 stream = rpc_client.execute_server_stream(
                     request=request,
@@ -2023,16 +4422,12 @@ class AsyncSandboxClient:
                     raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
 
                 if e.code == Code.NOT_FOUND:
-                    ctx = await self._get_sandbox_error_context(sandbox_id)
-                    ctx["status"] = "TERMINATED"
-                    if not ctx.get("error_type"):
-                        ctx["error_type"] = "SANDBOX_NOT_FOUND"
-                    if not ctx.get("error_message"):
-                        ctx["error_message"] = (
-                            "Sandbox is no longer present on the runtime node. "
-                            "Please create a new sandbox."
-                        )
-                    _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
+                    _raise_sandbox_gone(
+                        sandbox_id,
+                        await self._get_sandbox_error_context(sandbox_id),
+                        cause=e,
+                        command=command,
+                    )
 
                 raise APIError(f"Connect RPC failed ({e.code.value}): {e.message}") from e
             except APIError:
@@ -2041,96 +4436,6 @@ class AsyncSandboxClient:
                 raise APIError(f"Request failed: {e.__class__.__name__}: {e}") from e
             finally:
                 await rpc_client.close()
-
-    async def _execute_command_rest(
-        self,
-        sandbox_id: str,
-        command: str,
-        working_dir: Optional[str] = None,
-        env: Optional[Dict[str, str]] = None,
-        timeout: Optional[int] = None,
-        user: Optional[str] = None,
-    ) -> CommandResponse:
-        effective_timeout = timeout if timeout is not None else 300
-
-        payload = {
-            "command": command,
-            "working_dir": working_dir,
-            "env": env or {},
-            "sandbox_id": sandbox_id,
-            "timeout": effective_timeout,
-        }
-        if user is not None:
-            payload["user"] = user
-
-        reauthed = False
-        attempt = 0
-        for _ in range(MAX_GATEWAY_ATTEMPTS):
-            auth = await self._auth_cache.get_or_refresh(sandbox_id)
-            gateway_url = auth["gateway_url"].rstrip("/")
-            url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/exec"
-            headers = {"Authorization": f"Bearer {auth['token']}"}
-            try:
-                # The + 5 accounts for connection creation and closing. Prevents any command
-                # running close to its `effective_timeout` from being killed prematurely
-                client_timeout = effective_timeout + 5
-                response = await self._gateway_post(
-                    url, headers=headers, timeout=client_timeout, json=payload
-                )
-                response.raise_for_status()
-                return CommandResponse.model_validate(response.json())
-            except httpx.TimeoutException as e:
-                ctx = await self._get_sandbox_error_context(sandbox_id)
-                if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
-                    _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
-                raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
-            except httpx.HTTPStatusError as e:
-                resp = getattr(e, "response", None)
-                status = getattr(resp, "status_code", "?")
-
-                if status == 401 and await self._should_retry_401(sandbox_id, reauthed):
-                    reauthed = True
-                    continue
-
-                if status == 502 and _is_gateway_sandbox_not_found(resp):
-                    ctx = await self._get_sandbox_error_context(sandbox_id)
-                    ctx["status"] = "TERMINATED"
-                    if not ctx.get("error_type"):
-                        ctx["error_type"] = "SANDBOX_NOT_FOUND"
-                    if not ctx.get("error_message"):
-                        ctx["error_message"] = (
-                            "Sandbox is no longer present on the runtime node. "
-                            "Please create a new sandbox."
-                        )
-                    _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
-
-                if status == 409:
-                    if await self._should_retry_409(sandbox_id, e, attempt, command=command):
-                        attempt += 1
-                        continue
-
-                if status == 408:
-                    ctx = await self._get_sandbox_error_context(sandbox_id)
-                    if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
-                        _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
-                    raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
-
-                req = getattr(e, "request", None)
-                method = getattr(req, "method", "?")
-                u = getattr(req, "url", "?")
-                text = getattr(resp, "text", "")
-                raise APIError(f"HTTP {status} {method} {u}: {text}") from e
-            except httpx.RequestError as e:
-                req = getattr(e, "request", None)
-                method = getattr(req, "method", "?")
-                u = getattr(req, "url", "?")
-                raise APIError(
-                    f"Request failed: {e.__class__.__name__} at {method} {u}: {e}"
-                ) from e
-            except Exception as e:
-                raise APIError(f"Request failed: {e.__class__.__name__}: {e}") from e
-
-        raise APIError("Command execution failed after retries")
 
     async def start_background_job(
         self,
@@ -2150,8 +4455,7 @@ class AsyncSandboxClient:
             command: Command to execute
             working_dir: Working directory for command execution
             env: Environment variables
-            user: Run the job as this user, like ``docker exec -u`` (username or
-                numeric UID, optionally USER:GROUP). Container sandboxes only.
+            user: Existing guest username; omitted preserves the sandbox default.
 
         Returns:
             BackgroundJob with job_id and file paths for polling
@@ -2160,6 +4464,8 @@ class AsyncSandboxClient:
         stdout_log_file = f"/tmp/job_{job_id}.stdout.log"
         stderr_log_file = f"/tmp/job_{job_id}.stderr.log"
         exit_file = f"/tmp/job_{job_id}.exit"
+        launch_dir = f"/tmp/job_{job_id}.launch"
+        pid_file = f"{launch_dir}/pid"
 
         env_prefix = ""
         if env:
@@ -2171,22 +4477,48 @@ class AsyncSandboxClient:
             if env_prefix:
                 env_prefix += "; "
 
-        dir_prefix = f"cd {shlex.quote(working_dir)} && " if working_dir else ""
+        dir_prefix = f"cd {shlex.quote(working_dir)} || exit 1; " if working_dir else ""
         command_body = f"{env_prefix}{dir_prefix}{command}"
+        # Guest users may lack a home dir; the job cds into an absolute working_dir itself.
+        launch_cwd = "/" if working_dir and working_dir.startswith("/") else None
         exit_file_quoted = shlex.quote(exit_file)
         stdout_log_file_quoted = shlex.quote(stdout_log_file)
         stderr_log_file_quoted = shlex.quote(stderr_log_file)
-        # Wrap command in subshell so 'exit' terminates the subshell, not the outer shell.
-        # This ensures 'echo $?' always runs to capture the exit code.
+        launch_dir_quoted = shlex.quote(launch_dir)
+        # The job records its PID (for liveness checks while it has no exit file), acknowledges
+        # the launch, then releases the launch output streams. Wrap command in subshell so 'exit'
+        # terminates the subshell, not the outer shell, and 'echo $?' always runs.
         sh_command = (
+            f"echo $$ > {shlex.quote(pid_file)} || exit 1; echo started; exec > /dev/null 2>&1; "
             f"({command_body}) > {stdout_log_file_quoted} 2> {stderr_log_file_quoted}; "
             f"echo $? > {exit_file_quoted}"
         )
         quoted_sh_command = shlex.quote(sh_command)
 
-        # Outer nohup redirects to /dev/null since output goes to log files inside sh -c
-        bg_cmd = f"nohup sh -c {quoted_sh_command} < /dev/null > /dev/null 2>&1 &"
-        await self.execute_command(sandbox_id, bg_cmd, timeout=30, user=user)
+        # mkdir is the launch's idempotency guard: after an ambiguous timeout, only one attempt
+        # can create it and run the user command. The command substitution returns once the job
+        # acknowledges or dies, so a job that cannot start (e.g. on a full disk) fails the launch.
+        bg_cmd = (
+            f"mkdir {launch_dir_quoted} || {{ test -d {launch_dir_quoted}; exit; }}; "
+            f"ack=$(nohup sh -c {quoted_sh_command} < /dev/null 2>&1 &); "
+            'test "$ack" = started || { echo "job did not start${ack:+: $ack}" >&2; exit 1; }'
+        )
+        for attempt in range(_BACKGROUND_JOB_LAUNCH_ATTEMPTS):
+            try:
+                launch = await self.execute_command(
+                    sandbox_id,
+                    bg_cmd,
+                    working_dir=launch_cwd,
+                    timeout=_BACKGROUND_JOB_LAUNCH_TIMEOUT_SECONDS,
+                    user=user,
+                )
+                break
+            except CommandTimeoutError:
+                if attempt == _BACKGROUND_JOB_LAUNCH_ATTEMPTS - 1:
+                    raise
+                await asyncio.sleep(_BACKGROUND_JOB_LAUNCH_BACKOFF_SECONDS * 2**attempt)
+        if launch.exit_code != 0:
+            raise APIError(f"Failed to launch background job {job_id}: {launch.stderr.strip()}")
 
         return BackgroundJob(
             job_id=job_id,
@@ -2207,9 +4539,8 @@ class AsyncSandboxClient:
         Args:
             sandbox_id: The sandbox ID
             job: The BackgroundJob handle from start_background_job()
-            timeout: Optional per-call timeout (in seconds) forwarded to the
-                underlying read_file calls. When None, the APIClient default
-                applies.
+            timeout: Optional output-retrieval deadline in seconds after the
+                exit file is observed. When None, a bounded SDK default applies.
 
         Returns:
             BackgroundJobStatus with completed flag, and exit_code/stdout if
@@ -2217,46 +4548,246 @@ class AsyncSandboxClient:
             of each stream; the *_truncated flags report dropped output.
         """
 
-        async def read_or_empty(path: str) -> str:
-            try:
-                return (await self.read_file(sandbox_id, path, timeout=timeout)).content
-            except SandboxFileNotFoundError:
-                return ""
-
-        async def read_output_tail(path: str) -> "tuple[str, bool]":
-            try:
-                response = await self.read_file(
-                    sandbox_id,
-                    path,
-                    timeout=timeout,
-                    offset=-JOB_OUTPUT_TAIL_BYTES,
-                    length=JOB_OUTPUT_TAIL_BYTES,
-                )
-                # Servers without windowed-read support omit `truncated`.
-                return response.content, bool(response.truncated)
-            except SandboxFileNotFoundError:
-                return "", False
-
-        exit_content = await read_or_empty(job.exit_file)
-        if not exit_content.strip():
+        snapshot = await self.get_background_job_status(sandbox_id, job, timeout=timeout)
+        if not snapshot.completed:
             return BackgroundJobStatus(job_id=job.job_id, completed=False)
+        assert snapshot.exit_code is not None
+        return await self._background_job_output_coordinator.get(job, snapshot.exit_code, timeout)
+
+    async def _get_background_job_status_unleased(
+        self,
+        sandbox_id: str,
+        job: BackgroundJob,
+        timeout: Optional[int],
+    ) -> BackgroundJobStatusSnapshot:
+        response = await self.execute_command(
+            sandbox_id, _background_job_status_command(job), timeout=timeout
+        )
+        status = response.stdout.strip()
+        if status == "lost":
+            raise APIError(f"Background job {job.job_id} exited without recording an exit code")
+        exit_code = int(status) if status else None
+        return BackgroundJobStatusSnapshot(
+            sandbox_id=sandbox_id,
+            job_id=job.job_id,
+            completed=exit_code is not None,
+            exit_code=exit_code,
+        )
+
+    async def get_background_job_status(
+        self,
+        sandbox_id: str,
+        job: BackgroundJob,
+        timeout: Optional[int] = None,
+    ) -> BackgroundJobStatusSnapshot:
+        """Return completion metadata without downloading stdout or stderr."""
+        lease = self._operation_leases.acquire(sandbox_id)
+        try:
+            return await self._get_background_job_status_unleased(sandbox_id, job, timeout)
+        finally:
+            lease.release()
+
+    async def _request_background_job_status_batch(
+        self,
+        jobs: List[BackgroundJob],
+        timeout: Optional[int] = None,
+    ) -> Optional[BatchBackgroundJobStatusResponse]:
+        """Return one raw platform batch, or None when the endpoint is unavailable."""
+        if self._background_job_status_batch_supported is False:
+            return None
+        try:
+            response = await self.client.request(
+                "POST",
+                "/sandbox/background-jobs/status:batchGet",
+                json={
+                    "jobs": [{"sandbox_id": job.sandbox_id, "job_id": job.job_id} for job in jobs]
+                },
+                timeout=timeout if timeout is not None else 30,
+                idempotent_post=True,
+            )
+        except APIError as exc:
+            if "HTTP 404" in str(exc) or "HTTP 405" in str(exc):
+                self._background_job_status_batch_supported = False
+                return None
+            raise
+        self._background_job_status_batch_supported = True
+        return BatchBackgroundJobStatusResponse.model_validate(response)
+
+    async def _get_background_job_statuses_legacy_unleased(
+        self,
+        jobs: List[BackgroundJob],
+        timeout: Optional[int],
+    ) -> List[BackgroundJobStatusSnapshot]:
+        return list(
+            await asyncio.gather(
+                *(
+                    self._get_background_job_status_unleased(job.sandbox_id, job, timeout)
+                    for job in jobs
+                )
+            )
+        )
+
+    async def _get_background_job_statuses_unleased(
+        self,
+        jobs: List[BackgroundJob],
+        timeout: Optional[int],
+    ) -> List[BackgroundJobStatusSnapshot]:
+        body = await self._request_background_job_status_batch(jobs, timeout)
+        if body is None:
+            return await self._get_background_job_statuses_legacy_unleased(jobs, timeout)
+        if body.errors:
+            details = "; ".join(
+                f"{error.sandbox_id}/{error.job_id}: {error.message}" for error in body.errors
+            )
+            if any(error.code == "NOT_VM" for error in body.errors):
+                raise BatchStatusUnsupportedError(details)
+            raise APIError(f"Background job batch status failed: {details}")
+        runtime_statuses = {(status.sandbox_id, status.job_id): status for status in body.statuses}
+        results: List[BackgroundJobStatusSnapshot] = []
+        for job in jobs:
+            runtime_status = runtime_statuses.get((job.sandbox_id, job.job_id))
+            if runtime_status is None:
+                raise APIError(f"VM batch status response omitted job {job.job_id}")
+            if runtime_status.completed and runtime_status.exit_code is None:
+                raise APIError(f"Completed VM background job {job.job_id} omitted exit_code")
+            results.append(runtime_status)
+        return results
+
+    async def get_background_job_statuses(
+        self,
+        jobs: List[BackgroundJob],
+        timeout: Optional[int] = None,
+    ) -> List[BackgroundJobStatusSnapshot]:
+        """Return ordered VM completion metadata without downloading output."""
+        _validate_background_job_batch(jobs)
+        leases = self._operation_leases.acquire_many([job.sandbox_id for job in jobs])
+        try:
+            return await self._get_background_job_statuses_unleased(jobs, timeout)
+        finally:
+            for lease in leases:
+                lease.release()
+
+    async def get_background_jobs(
+        self,
+        jobs: List[BackgroundJob],
+        timeout: Optional[int] = None,
+    ) -> List[BackgroundJobStatus]:
+        """Get ordered VM status and hydrate output for completed jobs."""
+        snapshots = await self.get_background_job_statuses(jobs, timeout=timeout)
+
+        async def hydrate(
+            job: BackgroundJob, snapshot: BackgroundJobStatusSnapshot
+        ) -> BackgroundJobStatus:
+            if not snapshot.completed:
+                return BackgroundJobStatus(job_id=job.job_id, completed=False)
+            assert snapshot.exit_code is not None
+            return await self._background_job_output_coordinator.get(
+                job, snapshot.exit_code, timeout
+            )
+
+        return list(
+            await asyncio.gather(
+                *(hydrate(job, snapshot) for job, snapshot in zip(jobs, snapshots))
+            )
+        )
+
+    async def _read_background_job_output_stream(
+        self,
+        sandbox_id: str,
+        path: str,
+        deadline: float,
+        timeout: Optional[int],
+    ) -> tuple[Optional[_BackgroundJobOutputStream], Optional[str]]:
+        output_timeout = (
+            float(timeout) if timeout is not None else BACKGROUND_JOB_OUTPUT_FETCH_TIMEOUT_SECONDS
+        )
+        loop = asyncio.get_running_loop()
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return None, f"Output retrieval deadline exceeded after {output_timeout:g}s"
+        request_timeout = max(1, min(timeout if timeout is not None else 30, math.ceil(remaining)))
+
+        async def fetch() -> ReadFileResponse:
+            return await self.read_file(
+                sandbox_id,
+                path,
+                timeout=request_timeout,
+                offset=-JOB_OUTPUT_TAIL_BYTES,
+                length=JOB_OUTPUT_TAIL_BYTES,
+            )
 
         try:
-            exit_code = int(exit_content.strip())
-        except ValueError:
-            return BackgroundJobStatus(job_id=job.job_id, completed=False)
+            response = await asyncio.wait_for(fetch(), timeout=remaining)
+            return _BackgroundJobOutputStream(response.content, bool(response.truncated)), None
+        except SandboxFileNotFoundError:
+            return _BackgroundJobOutputStream("", False), None
+        except asyncio.TimeoutError:
+            return None, f"Output retrieval deadline exceeded after {output_timeout:g}s"
+        except APIError as exc:
+            return None, _format_exception_diagnostic(exc)
 
-        stdout, stdout_truncated = await read_output_tail(job.stdout_log_file)
-        stderr, stderr_truncated = await read_output_tail(job.stderr_log_file)
-        return BackgroundJobStatus(
-            job_id=job.job_id,
-            completed=True,
-            exit_code=exit_code,
-            stdout=stdout,
-            stderr=stderr,
-            stdout_truncated=stdout_truncated,
-            stderr_truncated=stderr_truncated,
-        )
+    async def _get_completed_background_job_output(
+        self,
+        sandbox_id: str,
+        job: BackgroundJob,
+        exit_code: int,
+        timeout: Optional[int],
+    ) -> BackgroundJobStatus:
+        """Compatibility wrapper for coordinated output hydration."""
+        return await self._background_job_output_coordinator.get(job, exit_code, timeout)
+
+    async def _fetch_background_job_statuses(
+        self, keys: List[tuple[str, str]]
+    ) -> Dict[tuple[str, str], BackgroundJobStatusSnapshot | _BatchItemError]:
+        """Fetch one coalesced VM job batch for concurrent run waiters."""
+        jobs = [_canonical_background_job(sandbox_id, job_id) for sandbox_id, job_id in keys]
+        body = await self._request_background_job_status_batch(jobs)
+        if body is None:
+
+            async def get_legacy_status(
+                job: BackgroundJob,
+            ) -> BackgroundJobStatusSnapshot | _BatchItemError:
+                try:
+                    return (await self._get_background_job_statuses_legacy_unleased([job], None))[0]
+                except Exception as exc:
+                    return _BatchItemError(exc)
+
+            statuses = await asyncio.gather(*(get_legacy_status(job) for job in jobs))
+            return {(job.sandbox_id, job.job_id): status for job, status in zip(jobs, statuses)}
+
+        results: Dict[tuple[str, str], BackgroundJobStatusSnapshot | _BatchItemError] = {}
+        for error in body.errors:
+            key = (error.sandbox_id, error.job_id)
+            details = f"{error.sandbox_id}/{error.job_id}: {error.message}"
+            exc = (
+                BatchStatusUnsupportedError(details)
+                if error.code == "NOT_VM"
+                else APIError(f"Background job batch status failed: {details}")
+            )
+            results[key] = _BatchItemError(exc)
+
+        runtime_statuses = {(status.sandbox_id, status.job_id): status for status in body.statuses}
+
+        def build_status(
+            job: BackgroundJob,
+        ) -> BackgroundJobStatusSnapshot | _BatchItemError | None:
+            key = (job.sandbox_id, job.job_id)
+            if key in results:
+                return None
+            runtime_status = runtime_statuses.get(key)
+            if runtime_status is None:
+                return None
+            if runtime_status.completed and runtime_status.exit_code is None:
+                return _BatchItemError(
+                    APIError(f"Completed VM background job {job.job_id} omitted exit_code")
+                )
+            return runtime_status
+
+        statuses = [build_status(job) for job in jobs]
+        for job, status in zip(jobs, statuses):
+            if status is not None:
+                results[(job.sandbox_id, job.job_id)] = status
+        return results
 
     async def run_background_job(
         self,
@@ -2279,21 +4810,50 @@ class AsyncSandboxClient:
             timeout: Maximum seconds to wait for completion
             working_dir: Working directory for command execution
             env: Environment variables
-            poll_interval: Seconds between status polls
+            poll_interval: Initial seconds between status polls. The interval
+                backs off to a maximum of 20 seconds as the job ages.
 
         Returns:
             BackgroundJobStatus with exit_code, stdout, stderr
 
         Raises:
             CommandTimeoutError: If command doesn't complete within timeout
+            SandboxNotRunningError: If the sandbox terminates while the command is running
         """
         job = await self.start_background_job(sandbox_id, command, working_dir=working_dir, env=env)
         deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            status = await self.get_background_job(sandbox_id, job)
-            if status.completed:
-                return status
-            await asyncio.sleep(poll_interval)
+        poll_delay = min(float(poll_interval), BACKGROUND_JOB_POLL_MAX_DELAY)
+        while True:
+            try:
+                snapshot = await self._background_job_status_batcher.get((sandbox_id, job.job_id))
+            except APIError as error:
+                # Error classification gets a separate bounded grace period so a
+                # status poll that overruns the job deadline can still report that
+                # the sandbox terminated.
+                context_timeout = _SANDBOX_ERROR_CONTEXT_TIMEOUT_SECONDS
+                try:
+                    ctx = await asyncio.wait_for(
+                        self._get_sandbox_error_context(
+                            sandbox_id,
+                            timeout=context_timeout,
+                        ),
+                        timeout=context_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    raise error from None
+                if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
+                    _raise_not_running_error(sandbox_id, ctx, command=command, cause=error)
+                raise
+            if snapshot.completed:
+                assert snapshot.exit_code is not None
+                return await self._background_job_output_coordinator.get(
+                    job, snapshot.exit_code, None
+                )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(poll_delay, remaining))
+            poll_delay = _next_background_job_poll_delay(poll_delay)
         raise CommandTimeoutError(sandbox_id, command, timeout)
 
     async def wait_for_creation(
@@ -2307,26 +4867,50 @@ class AsyncSandboxClient:
 
         Args:
             sandbox_id: The sandbox ID to wait for
-            max_attempts: Maximum polling attempts
+            max_attempts: Defines the wall-clock budget for the wait, expressed
+                in polls of the legacy fixed-interval schedule (see
+                `_creation_timeout_seconds`). Status polls now back off, so this
+                bounds elapsed time rather than the literal number of requests.
+                Reaching RUNNING starts a fresh budget of the same size for the
+                reachability phase, so a wait that gets that far can take up to
+                twice this long.
             stability_checks: Number of consecutive successful reachability checks required
             image_build_timeout_seconds: Separate wall-clock budget while the
                 platform auto-builds the VM image for a first-use image (the
                 sandbox stays PENDING with pending_image_build_id set). That
-                phase polls slowly and does not consume max_attempts.
+                phase polls slowly and does not consume the creation budget.
         """
         consecutive_successes = 0
         image_build_deadline: Optional[float] = None
-        attempt = 0
-        while attempt < max_attempts:
-            sandbox = await self.get(sandbox_id)
+        timeout_seconds = _creation_timeout_seconds(max_attempts)
+        deadline = time.monotonic() + timeout_seconds
+        poll_index = 0
+        reachability_phase = False
+        last_reachability_error: BaseException | None = None
+        while time.monotonic() < deadline:
+            sandbox = await self._sandbox_status_batcher.get(sandbox_id)
             if sandbox.status == "RUNNING":
-                if await self._is_sandbox_reachable(sandbox_id):
+                if not reachability_phase:
+                    reachability_phase = True
+                    deadline = time.monotonic() + timeout_seconds
+                    poll_index = 0
+                lease = self._poll_leases.acquire(sandbox_id)
+                try:
+                    try:
+                        reachable = await self._is_sandbox_reachable(sandbox_id)
+                    finally:
+                        lease.release()
+                except Exception as error:
+                    if not _is_retryable_reachability_error(error):
+                        raise
+                    last_reachability_error = error
+                    reachable = False
+                if reachable:
                     consecutive_successes += 1
                     if consecutive_successes >= stability_checks:
                         return
                     # Small delay between stability checks
                     await asyncio.sleep(0.5)
-                    attempt += 1
                     continue
                 else:
                     # Reset counter if check fails
@@ -2337,23 +4921,43 @@ class AsyncSandboxClient:
                     "error_type": sandbox.error_type,
                     "error_message": sandbox.error_message,
                 }
-                _raise_not_running_error(sandbox.id, ctx)
+                _raise_not_running_error(sandbox.sandbox_id, ctx)
             elif _is_waiting_for_image_build(sandbox):
                 # The platform is building the VM image for this sandbox; it
-                # starts on its own once the build completes.
+                # starts on its own once the build completes. This phase runs on
+                # its own budget, so hold the creation deadline back while it
+                # lasts and reset the backoff for when the sandbox starts.
                 if image_build_deadline is None:
                     image_build_deadline = time.monotonic() + image_build_timeout_seconds
                 if time.monotonic() >= image_build_deadline:
                     raise SandboxNotRunningError(
-                        sandbox_id, "Timeout waiting for the VM image build"
+                        sandbox_id,
+                        message="Timeout waiting for the VM image build",
                     )
                 await asyncio.sleep(10)
+                deadline = time.monotonic() + timeout_seconds
+                poll_index = 0
                 continue
 
-            attempt += 1
-            sleep_time = 1 if attempt <= 5 else 2
-            await asyncio.sleep(sleep_time)
-        raise SandboxNotRunningError(sandbox_id, "Timeout during sandbox creation")
+            # Never sleep past the deadline. The loop only re-checks it on the
+            # next iteration, so an uncapped backoff delay would let the wait
+            # run up to CREATION_POLL_MAX_DELAY (plus jitter) beyond the budget.
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(_creation_poll_delay(poll_index), remaining))
+            poll_index += 1
+        if reachability_phase:
+            error = _reachability_timeout_error(
+                sandbox_id,
+                timeout_seconds,
+                last_reachability_error,
+            )
+            raise error from last_reachability_error
+        raise SandboxNotRunningError(
+            sandbox_id,
+            message=f"Sandbox did not reach RUNNING within {timeout_seconds:g}s",
+        )
 
     async def bulk_wait_for_creation(
         self,
@@ -2361,47 +4965,63 @@ class AsyncSandboxClient:
         max_attempts: int = 60,
         image_build_timeout_seconds: int = 3000,
     ) -> Dict[str, str]:
-        """Wait for multiple sandboxes to be running using list endpoint.
+        """Wait for up to 100 sandboxes using the batch lifecycle endpoint.
 
         Sandboxes PENDING on an automatic VM image build (first use of an
         image) are waited on a separate slower budget bounded by
         image_build_timeout_seconds instead of consuming max_attempts.
         """
 
-        sandbox_id_set = set(sandbox_ids)
-        final_statuses = {}
+        _validate_unique_batch_values(sandbox_ids, "sandbox_ids")
+        final_statuses: Dict[str, str] = {}
+        last_reachability_errors: Dict[str, BaseException] = {}
         image_build_deadline: Optional[float] = None
 
         attempt = 0
         while attempt < max_attempts:
+            try:
+                leases = self._poll_leases.acquire_many(sandbox_ids)
+                try:
+                    try:
+                        response = await self.get_sandbox_statuses(sandbox_ids)
+                    except BatchStatusUnsupportedError:
+                        outcomes = await self._fetch_sandbox_statuses(sandbox_ids)
+                        snapshots = []
+                        for sandbox_id in sandbox_ids:
+                            outcome = outcomes[sandbox_id]
+                            if isinstance(outcome, _BatchItemError):
+                                raise outcome.error
+                            snapshots.append(outcome)
+                        response = BatchSandboxStatusResponse(
+                            statuses=snapshots,
+                            errors=[],
+                        )
+                finally:
+                    for lease in leases:
+                        lease.release()
+            except Exception as exc:
+                if "429" in str(exc) or "Too Many Requests" in str(exc):
+                    await asyncio.sleep(min(2**attempt, 60))
+                    continue
+                raise
+
+            if response.errors:
+                failures = [(error.sandbox_id, error.code) for error in response.errors]
+                raise RuntimeError(f"Sandboxes unavailable: {failures}")
+
             total_running = 0
             all_failed = []
             total_image_build_waiting = 0
-            page = 1
-
-            while True:
-                try:
-                    list_response = await self.list(per_page=100, page=page)
-                except Exception as e:
-                    if "429" in str(e) or "Too Many Requests" in str(e):
-                        wait_time = min(2**attempt, 60)
-                        await asyncio.sleep(wait_time)
-                        continue
-                    raise
-
-                running_count, failed_sandboxes, page_statuses, image_build_waiting = (
-                    _check_sandbox_statuses(list_response.sandboxes, sandbox_id_set)
-                )
-
-                total_running += running_count
-                all_failed.extend(failed_sandboxes)
-                final_statuses.update(page_statuses)
-                total_image_build_waiting += image_build_waiting
-
-                if len(final_statuses) == len(sandbox_ids) or not list_response.has_next:
-                    break
-
-                page += 1
+            for snapshot in response.statuses:
+                status_value = snapshot.status.value
+                if status_value == "RUNNING":
+                    total_running += 1
+                    final_statuses[snapshot.sandbox_id] = status_value
+                elif status_value in ["ERROR", "TERMINATED", "TIMEOUT"]:
+                    all_failed.append((snapshot.sandbox_id, status_value))
+                    final_statuses[snapshot.sandbox_id] = status_value
+                elif _is_waiting_for_image_build(snapshot):
+                    total_image_build_waiting += 1
 
             if all_failed:
                 raise RuntimeError(f"Sandboxes failed: {all_failed}")
@@ -2410,7 +5030,18 @@ class AsyncSandboxClient:
                 all_reachable = True
                 for sandbox_id in sandbox_ids:
                     if final_statuses.get(sandbox_id) == "RUNNING":
-                        if not await self._is_sandbox_reachable(sandbox_id):
+                        lease = self._poll_leases.acquire(sandbox_id)
+                        try:
+                            try:
+                                reachable = await self._is_sandbox_reachable(sandbox_id)
+                            finally:
+                                lease.release()
+                        except Exception as error:
+                            if not _is_retryable_reachability_error(error):
+                                raise
+                            last_reachability_errors[sandbox_id] = error
+                            reachable = False
+                        if not reachable:
                             all_reachable = False
                             final_statuses.pop(sandbox_id, None)
 
@@ -2432,11 +5063,20 @@ class AsyncSandboxClient:
             sleep_time = 1 if attempt <= 5 else 2
             await asyncio.sleep(sleep_time)
 
-        for sandbox_id in sandbox_id_set:
+        for sandbox_id in sandbox_ids:
             if sandbox_id not in final_statuses:
                 final_statuses[sandbox_id] = "TIMEOUT"
 
-        raise RuntimeError(f"Timeout waiting for sandboxes to be ready. Status: {final_statuses}")
+        detail = ""
+        if last_reachability_errors:
+            errors = {
+                sandbox_id: f"{error.__class__.__name__}: {error}"
+                for sandbox_id, error in last_reachability_errors.items()
+            }
+            detail = f" Last reachability errors: {errors}"
+        raise RuntimeError(
+            f"Timeout waiting for sandboxes to be ready. Status: {final_statuses}.{detail}"
+        )
 
     async def upload_file(
         self,
@@ -2484,6 +5124,10 @@ class AsyncSandboxClient:
             except httpx.TimeoutException as e:
                 raise UploadTimeoutError(sandbox_id, file_path, effective_timeout) from e
             except httpx.HTTPStatusError as e:
+                if _is_gateway_sandbox_terminated(e.response):
+                    _raise_sandbox_gone(
+                        sandbox_id, await self._get_sandbox_error_context(sandbox_id), cause=e
+                    )
                 if e.response.status_code == 401 and await self._should_retry_401(
                     sandbox_id, reauthed
                 ):
@@ -2549,6 +5193,10 @@ class AsyncSandboxClient:
             except httpx.TimeoutException:
                 raise UploadTimeoutError(sandbox_id, file_path, effective_timeout)
             except httpx.HTTPStatusError as e:
+                if _is_gateway_sandbox_terminated(e.response):
+                    _raise_sandbox_gone(
+                        sandbox_id, await self._get_sandbox_error_context(sandbox_id), cause=e
+                    )
                 if e.response.status_code == 401 and await self._should_retry_401(
                     sandbox_id, reauthed
                 ):
@@ -2605,6 +5253,10 @@ class AsyncSandboxClient:
             except httpx.TimeoutException as e:
                 raise DownloadTimeoutError(sandbox_id, file_path, effective_timeout) from e
             except httpx.HTTPStatusError as e:
+                if _is_gateway_sandbox_terminated(e.response):
+                    _raise_sandbox_gone(
+                        sandbox_id, await self._get_sandbox_error_context(sandbox_id), cause=e
+                    )
                 if e.response.status_code == 401 and await self._should_retry_401(
                     sandbox_id, reauthed
                 ):
@@ -2673,6 +5325,10 @@ class AsyncSandboxClient:
                     f"({e.__class__.__name__}): {file_path}"
                 ) from e
             except httpx.HTTPStatusError as e:
+                if _is_gateway_sandbox_terminated(e.response):
+                    _raise_sandbox_gone(
+                        sandbox_id, await self._get_sandbox_error_context(sandbox_id), cause=e
+                    )
                 if e.response.status_code == 401 and await self._should_retry_401(
                     sandbox_id, reauthed
                 ):
@@ -2698,137 +5354,52 @@ class AsyncSandboxClient:
                 method = getattr(req, "method", "?")
                 u = getattr(req, "url", "?")
                 raise APIError(
-                    f"Read file failed: {e.__class__.__name__} at {method} {u}: {e}"
+                    f"Read file failed at {method} {u}: {_format_exception_diagnostic(e)}"
                 ) from e
             except Exception as e:
                 raise APIError(f"Read file failed: {e.__class__.__name__}: {e}") from e
 
         raise APIError("Read file failed after retries")
 
+    async def _close(self) -> None:
+        self._operation_leases.begin_close()
+        batchers = (
+            self._checkpoint_batcher,
+            self._sandbox_status_batcher,
+            self._background_job_status_batcher,
+        )
+        await asyncio.gather(
+            *(
+                batcher.aclose()
+                for batcher in batchers
+                if isinstance(batcher, _AsyncRequestBatcher)
+            ),
+            self._background_job_output_coordinator.aclose(),
+        )
+        await self._operation_leases.wait_for_idle()
+        try:
+            if self._gateway_client is not None:
+                await self._gateway_client.aclose()
+        finally:
+            await self.client.aclose()
+
     async def aclose(self) -> None:
-        """Close the async client and gateway client"""
-        if self._gateway_client is not None:
-            await self._gateway_client.aclose()
-        await self.client.aclose()
+        """Cancel owned status and output tasks before closing async transports."""
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._close())
+        try:
+            await asyncio.shield(self._close_task)
+        except asyncio.CancelledError:
+            while not self._close_task.done():
+                try:
+                    await asyncio.shield(self._close_task)
+                except asyncio.CancelledError:
+                    pass
+            if not self._close_task.cancelled():
+                self._close_task.exception()
+            raise
 
     async def __aenter__(self) -> "AsyncSandboxClient":
-        """Async context manager entry"""
-        return self
-
-    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        """Async context manager exit"""
-        await self.aclose()
-
-    async def expose(
-        self,
-        sandbox_id: str,
-        port: int,
-        name: Optional[str] = None,
-        protocol: str = "HTTP",
-    ) -> ExposedPort:
-        """Expose a port from a sandbox."""
-        await self._guard_vm_unsupported(sandbox_id, "Port exposure")
-        request = ExposePortRequest(port=port, name=name, protocol=protocol)
-        response = await self.client.request(
-            "POST",
-            f"/sandbox/{sandbox_id}/expose",
-            json=request.model_dump(by_alias=False, exclude_none=True),
-        )
-        return ExposedPort.model_validate(response)
-
-    async def unexpose(self, sandbox_id: str, exposure_id: str) -> None:
-        """Unexpose a port from a sandbox."""
-        await self._guard_vm_unsupported(sandbox_id, "Port unexpose")
-        await self.client.request("DELETE", f"/sandbox/{sandbox_id}/expose/{exposure_id}")
-
-    async def list_exposed_ports(self, sandbox_id: str) -> ListExposedPortsResponse:
-        """List all exposed ports for a sandbox"""
-        await self._guard_vm_unsupported(sandbox_id, "Port listing")
-        response = await self.client.request("GET", f"/sandbox/{sandbox_id}/expose")
-        return ListExposedPortsResponse.model_validate(response)
-
-    async def list_all_exposed_ports(self) -> ListExposedPortsResponse:
-        """List all exposed ports across all sandboxes for the current user"""
-        response = await self.client.request("GET", "/sandbox/expose/all")
-        return ListExposedPortsResponse.model_validate(response)
-
-    async def create_ssh_session(
-        self,
-        sandbox_id: str,
-        ttl_seconds: Optional[int] = None,
-    ) -> SSHSession:
-        """Create an SSH session"""
-        await self._guard_vm_unsupported(sandbox_id, "SSH")
-        payload: Dict[str, Any] = {}
-        if ttl_seconds is not None:
-            payload["ttl_seconds"] = ttl_seconds
-        response = await self.client.request(
-            "POST",
-            f"/sandbox/{sandbox_id}/ssh-session",
-            json=payload,
-        )
-        return SSHSession.model_validate(response)
-
-    async def close_ssh_session(self, sandbox_id: str, session_id: str) -> None:
-        """Close an SSH session and remove its exposure"""
-        await self._guard_vm_unsupported(sandbox_id, "SSH")
-        await self.client.request("DELETE", f"/sandbox/{sandbox_id}/ssh-session/{session_id}")
-
-
-class TemplateClient:
-    """Client for template/registry helper APIs."""
-
-    def __init__(self, api_client: Optional[APIClient] = None):
-        self.client = api_client or APIClient()
-
-    def list_registry_credentials(self) -> List[RegistryCredentialSummary]:
-        response = self.client.request("GET", "/template/registry-credentials")
-        credentials = response.get("credentials", [])
-        return [RegistryCredentialSummary.model_validate(item) for item in credentials]
-
-    def check_docker_image(
-        self, image: str, registry_credentials_id: Optional[str] = None
-    ) -> DockerImageCheckResponse:
-        payload: Dict[str, Any] = {"image": image}
-        if registry_credentials_id:
-            payload["registry_credentials_id"] = registry_credentials_id
-        response = self.client.request(
-            "POST",
-            "/template/check-docker-image",
-            json=payload,
-        )
-        return DockerImageCheckResponse.model_validate(response)
-
-
-class AsyncTemplateClient:
-    """Async client for template/registry helper APIs."""
-
-    def __init__(self, api_client: Optional[AsyncAPIClient] = None):
-        self.client = api_client or AsyncAPIClient()
-
-    async def list_registry_credentials(self) -> List[RegistryCredentialSummary]:
-        response = await self.client.request("GET", "/template/registry-credentials")
-        credentials = response.get("credentials", [])
-        return [RegistryCredentialSummary.model_validate(item) for item in credentials]
-
-    async def check_docker_image(
-        self, image: str, registry_credentials_id: Optional[str] = None
-    ) -> DockerImageCheckResponse:
-        payload: Dict[str, Any] = {"image": image}
-        if registry_credentials_id:
-            payload["registry_credentials_id"] = registry_credentials_id
-        response = await self.client.request(
-            "POST",
-            "/template/check-docker-image",
-            json=payload,
-        )
-        return DockerImageCheckResponse.model_validate(response)
-
-    async def aclose(self) -> None:
-        """Close the async client"""
-        await self.client.aclose()
-
-    async def __aenter__(self) -> "AsyncTemplateClient":
         """Async context manager entry"""
         return self
 

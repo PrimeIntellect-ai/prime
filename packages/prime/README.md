@@ -20,13 +20,13 @@ Prime Intellect CLI & SDKs
 [![Python versions](https://img.shields.io/pypi/pyversions/prime?cacheSeconds=60)](https://pypi.org/project/prime/)
 [![Downloads](https://img.shields.io/pypi/dm/prime)](https://pypi.org/project/prime/)
 
-Command line interface and SDKs for Prime Lab, Hosted Training, GPU resources, sandboxes, and environments.
+Command line interface and SDKs for Hosted Training, hosted evaluations, GPU resources, sandboxes, and environments.
 
 </div>
 
 ## Overview
 
-Prime is the official CLI and Python SDK for [Prime Intellect](https://primeintellect.ai), providing seamless access to Prime Lab workflows, Hosted Training, GPU compute infrastructure, remote code execution environments (sandboxes), and AI inference capabilities.
+Prime is the official CLI and Python SDK for [Prime Intellect](https://primeintellect.ai), providing seamless access to Hosted Training, hosted evaluations, GPU compute infrastructure, remote code execution environments (sandboxes), and AI inference capabilities.
 
 **What can you do with Prime?**
 
@@ -69,6 +69,9 @@ pip install prime
 # Interactive login (recommended)
 prime login
 
+# Cap what the key minted by this login can do (see `prime login --help`)
+prime login --max-concurrent-sandboxes 10 --max-concurrent-tunnels 2
+
 # Or set API key directly
 prime config set-api-key
 
@@ -84,7 +87,7 @@ Get your API key from the [Prime Intellect Dashboard](https://app.primeintellect
 # Browse environments on the hub
 prime env list
 
-# Set up a Lab workspace
+# Set up a Lab workspace for environments, evals, GEPA, and Hosted Training
 prime lab setup
 
 # See available Hosted Training models, capacity, and pricing
@@ -111,7 +114,7 @@ prime sandbox create python:3.11
 
 ### Lab and Hosted Training
 
-Prime Lab connects verifiers environments to evaluations, GEPA prompt optimization, and Hosted Training. Start with `prime lab setup` to create a local workspace with starter configs, then use `prime train models` to choose a Hosted Training model with current capacity and pricing.
+Start with `prime lab setup` to create a local workspace with starter configs, coding-agent skills and a verifiers install; build and evaluate environments there with verifiers' `vf-init` and `vf-eval`. Then use `prime train models` to choose a Hosted Training model with current capacity and pricing.
 
 ```bash
 # Set up a Lab workspace
@@ -150,8 +153,7 @@ prime env inspect <environment-name>
 # Install an environment locally
 prime env install <environment-name>
 
-# Create and push your own environment
-prime env init my-environment
+# Push your own environment (scaffold one with verifiers' `vf-init`)
 prime env push my-environment
 ```
 
@@ -183,20 +185,30 @@ prime pods terminate <pod-id>
 Isolated environments for running code remotely:
 
 ```bash
-# Create a sandbox
+# Create a sandbox (VM-backed)
 prime sandbox create python:3.11
 
-# Create a VM sandbox with GPUs
-prime sandbox create user-1/vm-image:latest --vm --gpu-count 1 --gpu-type H100_80GB
+# Create a sandbox with GPUs
+prime sandbox create user-1/vm-image:latest --gpu-count 1 --gpu-type RTX_PRO_6000
 
-# Create a CPU-only VM sandbox
-prime sandbox create user-1/vm-image:latest --vm
+# Create a one-shot workload (arguments after -- are preserved exactly)
+prime sandbox create user-1/vm-image:latest -- /worker --platform linux/amd64
 
 # List sandboxes
 prime sandbox list
 
 # Execute commands
 prime sandbox run <sandbox-id> -- python script.py
+
+# Run as an existing guest account
+prime sandbox run <sandbox-id> --user ubuntu -- id
+
+# Request a filesystem checkpoint; check again until it is DURABLE
+prime sandbox checkpoint create <sandbox-id>
+prime sandbox checkpoint list <sandbox-id> [--checkpoint-id <checkpoint-id>]
+prime sandbox checkpoint restore <checkpoint-id> --name restored-sandbox
+# Checkpoint + restore in one step, inheriting the source's resources
+prime sandbox fork <sandbox-id> [--name forked-sandbox]
 
 # Upload/download files
 prime sandbox upload <sandbox-id> local_file.py /remote/path/
@@ -282,6 +294,13 @@ sandbox_client.wait_for_creation(sandbox.id)
 # Execute commands
 result = sandbox_client.execute_command(sandbox.id, "python --version")
 print(result.stdout)
+
+# Request a filesystem checkpoint and wait until it is durable
+checkpoint = sandbox_client.checkpoint(sandbox.id)
+checkpoint = sandbox_client.wait_for_checkpoint(checkpoint.id, timeout_seconds=300)
+restored = sandbox_client.create(CreateSandboxRequest(
+    name="restored-sandbox", checkpoint_id=checkpoint.id
+))
 
 # Clean up
 sandbox_client.delete(sandbox.id)

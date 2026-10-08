@@ -8,18 +8,22 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+LAB_AGENT_SKILL_DIRS = (
+    ".agents/skills",
+    ".claude/skills",
+    ".cursor/skills",
+    ".factory/skills",
+    ".grok/skills",
+    ".opencode/skills",
+    ".pi/skills",
+)
 LAB_GITIGNORE_PATTERNS = (
     ".env",
     "/AGENTS.md",
     "/CLAUDE.md",
     "/CLAUDE.local.md",
     "/.prime/",
-    "/.agents/skills/",
-    "/.claude/skills/",
-    "/.cursor/skills/",
-    "/.factory/skills/",
-    "/.opencode/skills/",
-    "/.pi/skills/",
+    *(f"/{skill_dir}/" for skill_dir in LAB_AGENT_SKILL_DIRS),
     "/outputs/",
     "/prime-rl/",
     "/environments/AGENTS.md",
@@ -60,12 +64,7 @@ LAB_TRACKED_EXACT_PATHS = {
 }
 LAB_TRACKED_PREFIXES = (
     ".prime/",
-    ".agents/skills/",
-    ".claude/skills/",
-    ".cursor/skills/",
-    ".factory/skills/",
-    ".opencode/skills/",
-    ".pi/skills/",
+    *(f"{skill_dir}/" for skill_dir in LAB_AGENT_SKILL_DIRS),
     "outputs/",
     "prime-rl/",
     ".pytest_cache/",

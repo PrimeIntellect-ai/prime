@@ -18,6 +18,7 @@ uv pip install prime-sandboxes
 ```
 
 Or with pip:
+
 ```bash
 pip install prime-sandboxes
 ```
@@ -25,13 +26,13 @@ pip install prime-sandboxes
 ## Quick Start
 
 ```python
-from prime_sandboxes import APIClient, SandboxClient, CreateSandboxRequest
+from prime_sandboxes import APIClient, SandboxClient, CreateSandboxRequest, StartCommand
 
 # Initialize
 client = APIClient(api_key="your-api-key")
 sandbox_client = SandboxClient(client)
 
-# Create a sandbox
+# Create a VM-backed sandbox.
 request = CreateSandboxRequest(
     name="my-sandbox",
     docker_image="python:3.11-slim",
@@ -42,8 +43,25 @@ request = CreateSandboxRequest(
 sandbox = sandbox_client.create(request)
 print(f"Created: {sandbox.id}")
 
-# Wait for it to be ready
+# Boot commands use a structured argv contract; no shell is implied.
+vm = sandbox_client.create(CreateSandboxRequest(
+    name="vm-workload",
+    docker_image="user-1/vm-image:latest",
+    start_command=StartCommand(
+        executable="/worker",
+        args=["--platform", "linux/amd64"],
+    ),
+))
+
+
 sandbox_client.wait_for_creation(sandbox.id)
+
+# Wait for checkpoint durability before restoring.
+checkpoint = sandbox_client.checkpoint(sandbox.id)
+checkpoint = sandbox_client.wait_for_checkpoint(checkpoint.id, timeout_seconds=300)
+restored = sandbox_client.create(CreateSandboxRequest(
+    name="restored-sandbox", checkpoint_id=checkpoint.id
+))
 
 # Execute commands
 result = sandbox_client.execute_command(sandbox.id, "python --version")
@@ -72,11 +90,82 @@ async def main():
         result = await client.execute_command(sandbox.id, "echo 'Hello from async!'")
         print(result.stdout)
 
+        # Wait for checkpoint durability
+        checkpoint = await client.checkpoint(sandbox.id)
+        durable = await client.wait_for_checkpoint(checkpoint.id, timeout_seconds=300)
+        print(durable.state)
+
         # Clean up
         await client.delete(sandbox.id)
 
 asyncio.run(main())
 ```
+
+Concurrent waits on the same client automatically share cross-sandbox status
+requests, with up to 100 checkpoint IDs per request:
+
+```python
+checkpoints = await asyncio.gather(*(client.checkpoint(s.id) for s in sandboxes))
+durable = await asyncio.gather(*(client.wait_for_checkpoint(c.id) for c in checkpoints))
+```
+
+Sync waits from concurrent threads share requests too. `get_checkpoints(ids)`
+provides an explicit batch lookup with `checkpoints` and per-ID `errors`. Waits
+fall back to individual lookups on platforms without the batch endpoint.
+
+## List Platform Images
+
+Use a platform admin or manager key with sandbox-read access to list platform images:
+
+```python
+from prime_sandboxes import ImageBuildStatus, ImageClient
+
+page = ImageClient().list(platform=True)
+completed_images = [
+    image.display_ref
+    for image in page.data
+    if image.status == ImageBuildStatus.COMPLETED
+]
+```
+
+## Image Builds
+
+Dockerfile builds create VM artifacts on `linux/amd64`. The
+initial response includes `upload_url` and `expires_in`; upload the build context
+before calling `start_build`.
+
+Source-image requests build VM artifacts directly from allowed public registry
+images. They do not return upload metadata. A single source returns `build_id`
+and `build_ids`. Comma-separated sources return `BulkBuildImageResponse` with
+ordered `results`: each entry has `source_image`, `build` (a `BuildImageResponse`
+or `None`), `error`, and `retryable`. There are no `success` or `failed` fields.
+
+The server uses mixed wire casing: `build_id`, `upload_url`, and `expires_in`,
+but `buildIds`, `fullImagePath`, and `sourceImage`. SDK attributes use snake_case.
+The `transfer_image` method remains a compatibility name for `POST /images/build`:
+
+```python
+from prime_sandboxes import ImageClient
+
+images = ImageClient()
+response = images.transfer_image("ubuntu:22.04")
+print(response.build_ids)
+```
+
+All image builds support only `linux/amd64`. Docker Hub sources become public,
+org-less platform images automatically. Docker Hub source builds do not accept a
+custom destination, team, or private visibility. One comma-separated request
+cannot mix Docker Hub with other registries. Explicit non-Docker-Hub public
+registries can still use personal or team ownership, custom destinations, and
+public or private visibility. Allowed registries are Docker Hub, `ghcr.io`,
+`quay.io`, `public.ecr.aws`, `registry.k8s.io`, and `mcr.microsoft.com`.
+Google-hosted registries are rejected. Docker-Hub-only multi-source requests
+preserve source names and tags and force PUBLIC platform scope.
+
+Use `prime images push --source-image <reference>` for one or comma-separated
+sources, or `prime images push-bulk` for manifests. Dockerfile platform
+publishing uses `prime images push <name>:<tag> --platform-image`; the primary
+build creates its VM artifact without a second publishing step.
 
 ## Authentication
 
@@ -110,6 +199,26 @@ sandbox = sandbox_client.create(request)
 
 **Note:** Secrets are never displayed in logs or outputs. When retrieving sandbox details, only the secret keys are shown with values masked as `***`.
 
+### Run Commands as a Guest User
+
+Commands use the sandbox's configured user (normally root) when `user` is omitted.
+Select an existing account in the guest image per command:
+
+```python
+result = sandbox_client.execute_command(sandbox.id, "id", user="ubuntu")
+# Async execute_command, open_process, and sync/async start_background_job also accept user.
+```
+
+Empty or unknown usernames fail; accounts are not created automatically. Commands
+use the account's UID, GID, and supplementary groups. `HOME`, `USER`, and `LOGNAME`
+follow that account unless explicitly overridden through `env`. Working-directory
+selection stays unchanged; pass `working_dir` if the image default is inaccessible.
+
+Requires a sandboxd version supporting command-level users. Roll out sandboxd to
+all reachable guests before releasing this SDK: older servers can ignore the
+protobuf field and execute as their default user. Existing guests must be upgraded
+or recreated before using this option.
+
 ### File Operations
 
 ```python
@@ -140,7 +249,7 @@ for i in range(5):
     ))
     sandbox_ids.append(sandbox.id)
 
-# Wait for all to be ready
+# Wait for up to 100 sandboxes with one batched lifecycle-status request per poll
 statuses = sandbox_client.bulk_wait_for_creation(sandbox_ids)
 
 # Delete by IDs or labels
@@ -176,9 +285,9 @@ for s in sandboxes.sandboxes:
 Use `start_background_job` to run long-running tasks that continue after the API call returns. Poll for completion with `get_background_job`.
 
 ```python
-from prime_sandboxes import SandboxClient, CreateSandboxRequest
+from prime_sandboxes import APIClient, SandboxClient, CreateSandboxRequest
 
-sandbox_client = SandboxClient()
+sandbox_client = SandboxClient(APIClient())
 
 # Create sandbox with extended timeout
 sandbox = sandbox_client.create(CreateSandboxRequest(
@@ -197,6 +306,15 @@ job = sandbox_client.start_background_job(
 )
 print(f"Job started: {job.job_id}")
 
+# VM sandboxes can check up to 100 SDK-started jobs across sandboxes with one
+# platform request. Results preserve input order; completed jobs include the
+# same bounded stdout/stderr tails as get_background_job().
+statuses = sandbox_client.get_background_jobs([job])
+
+# For latency-sensitive polling, status-only methods never download output.
+# Fetch the hydrated result with get_background_job() after completion.
+snapshots = sandbox_client.get_background_job_statuses([job])
+
 # Poll for completion
 import time
 while True:
@@ -211,6 +329,18 @@ while True:
 # Download results
 sandbox_client.download_file(sandbox.id, "/app/model.pt", "./model.pt")
 ```
+
+Status lookups are batched; gateways without the batch endpoint fall back to
+per-job polling. Once an exit code is observed, completion
+remains authoritative even if output retrieval exhausts its bounded retry
+deadline: the unavailable stream is `None` and its `stdout_error` or
+`stderr_error` field describes the retrieval failure.
+
+Output downloads are deduplicated, cached within a bounded client-local LRU,
+and scheduled separately from completion polling. Advanced callers can tune the
+client-wide limits with `background_job_output_concurrency`,
+`background_job_output_queue_size`, and `background_job_output_cache_bytes`;
+the defaults are 20 active jobs, 200 queued jobs, and 64 MiB of cached streams.
 
 #### Async version
 

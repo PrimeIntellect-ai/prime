@@ -5,7 +5,7 @@ import typer
 
 from prime_cli.core import Config
 
-from ..utils import PlainTyper, get_console
+from ..utils import PlainTyper, get_console, require_persistent_context
 
 app = PlainTyper(help="Log out of Prime Intellect", no_args_is_help=False)
 console = get_console()
@@ -38,9 +38,11 @@ def _clear_env_file(config: Config) -> None:
                 "team_name": raw.get("team_name"),
                 "team_role": raw.get("team_role"),
                 "user_id": raw.get("user_id"),
+                "user_name": raw.get("user_name"),
                 "base_url": raw.get("base_url", Config.DEFAULT_BASE_URL),
                 "frontend_url": raw.get("frontend_url", Config.DEFAULT_FRONTEND_URL),
                 "inference_url": raw.get("inference_url", Config.DEFAULT_INFERENCE_URL),
+                "traces_url": raw.get("traces_url"),
             },
             indent=2,
         )
@@ -52,6 +54,7 @@ def logout(
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ) -> None:
     """Clear the stored API key, team selection, and user id."""
+    require_persistent_context()
     config = Config()
 
     raw = config.config

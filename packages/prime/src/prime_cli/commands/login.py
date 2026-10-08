@@ -13,7 +13,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from prime_cli.core import Config
 
 from ..client import APIClient, APIError
-from ..utils import PlainTyper, get_console
+from ..utils import PlainTyper, get_console, require_persistent_context
 from .teams import fetch_teams
 
 app = PlainTyper(help="Login to Prime Intellect")
@@ -85,6 +85,20 @@ def fetch_and_select_team(client: APIClient, config: Config) -> None:
         config.update_current_environment_file()
 
 
+# Flag value -> field on the challenge request. The minted key carries these
+# as per-key caps, enforced on top of the account's own limits.
+KEY_LIMIT_FIELDS = {
+    "max_concurrent_sandboxes": "maxConcurrentSandboxes",
+    "max_sandbox_creations_per_hour": "maxSandboxCreationsPerHour",
+    "max_sandbox_cpu_cores": "maxSandboxCpuCores",
+    "max_sandbox_gpu_count": "maxSandboxGpuCount",
+    "max_concurrent_tunnels": "maxConcurrentTunnels",
+    "max_tunnel_creations_per_hour": "maxTunnelCreationsPerHour",
+    "max_tunnel_ttl_hours": "maxTunnelTtlHours",
+}
+KEY_LIMITS_PANEL = "API Key Limits"
+
+
 def generate_ephemeral_keypair() -> tuple[rsa.RSAPrivateKey, str]:
     """Generate a temporary RSA key pair for secure communication"""
     try:
@@ -125,8 +139,64 @@ def decrypt_challenge_response(
 @app.callback(invoke_without_command=True)
 def login(
     headless: bool = typer.Option(False, "--headless", help="Don't attempt to open browser"),
+    max_concurrent_sandboxes: Optional[int] = typer.Option(
+        None,
+        "--max-concurrent-sandboxes",
+        min=0,
+        help="Cap sandboxes running at once on the new key",
+        rich_help_panel=KEY_LIMITS_PANEL,
+    ),
+    max_sandbox_creations_per_hour: Optional[int] = typer.Option(
+        None,
+        "--max-sandbox-creations-per-hour",
+        min=0,
+        help="Cap sandbox creations per hour on the new key",
+        rich_help_panel=KEY_LIMITS_PANEL,
+    ),
+    max_sandbox_cpu_cores: Optional[int] = typer.Option(
+        None,
+        "--max-sandbox-cpu-cores",
+        min=0,
+        help="Cap total sandbox CPU cores on the new key",
+        rich_help_panel=KEY_LIMITS_PANEL,
+    ),
+    max_sandbox_gpu_count: Optional[int] = typer.Option(
+        None,
+        "--max-sandbox-gpu-count",
+        min=0,
+        help="Cap total sandbox GPUs on the new key",
+        rich_help_panel=KEY_LIMITS_PANEL,
+    ),
+    max_concurrent_tunnels: Optional[int] = typer.Option(
+        None,
+        "--max-concurrent-tunnels",
+        min=0,
+        help="Cap tunnels open at once on the new key",
+        rich_help_panel=KEY_LIMITS_PANEL,
+    ),
+    max_tunnel_creations_per_hour: Optional[int] = typer.Option(
+        None,
+        "--max-tunnel-creations-per-hour",
+        min=0,
+        help="Cap tunnel creations per hour on the new key",
+        rich_help_panel=KEY_LIMITS_PANEL,
+    ),
+    max_tunnel_ttl_hours: Optional[int] = typer.Option(
+        None,
+        "--max-tunnel-ttl-hours",
+        min=1,
+        help="Cap tunnel lifetime in hours on the new key",
+        rich_help_panel=KEY_LIMITS_PANEL,
+    ),
 ) -> None:
     """Login to Prime Intellect"""
+    require_persistent_context()
+    flag_values = locals()
+    key_limits = {
+        field: flag_values[flag]
+        for flag, field in KEY_LIMIT_FIELDS.items()
+        if flag_values[flag] is not None
+    }
     config = Config()
     settings = config.view()
 
@@ -146,6 +216,7 @@ def login(
             f"{settings['base_url']}/api/v1/auth_challenge/generate",
             json={
                 "encryptionPublicKey": public_pem,
+                **({"limits": key_limits} if key_limits else {}),
             },
         )
 
@@ -218,12 +289,15 @@ def login(
                             if isinstance(data, dict):
                                 user_id = data.get("id")
                                 if user_id:
-                                    config.set_user_id(user_id)
+                                    config.set_user_id(user_id, user_name=data.get("name"))
                                     config.update_current_environment_file()
                         except (APIError, Exception):
                             console.print("[yellow]Logged in, but failed to fetch user id[/yellow]")
 
                         console.print("[green]Successfully logged in![/green]")
+                        if key_limits:
+                            summary = ", ".join(f"{k}={v}" for k, v in key_limits.items())
+                            console.print(f"[dim]API key limits: {summary}[/dim]")
                         fetch_and_select_team(client, config)
                     else:
                         console.print("[red]Failed to decrypt authentication token[/red]")

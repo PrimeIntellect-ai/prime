@@ -13,21 +13,21 @@ from .commands.evals import app as evals_app
 from .commands.feedback import app as feedback_app
 from .commands.fork import FORK_JSON_HELP
 from .commands.fork import fork as fork_command
-from .commands.gepa import app as gepa_app
 from .commands.images import app as images_app
 from .commands.inference import app as inference_app
 from .commands.lab import app as lab_app
 from .commands.login import app as login_app
 from .commands.logout import app as logout_app
 from .commands.pods import app as pods_app
-from .commands.registry import app as registry_app
 from .commands.rl import app as train_app
 from .commands.sandbox import app as sandbox_app
 from .commands.secrets import app as secret_app
 from .commands.switch import app as switch_app
 from .commands.teams import app as teams_app
+from .commands.traces import app as traces_app
 from .commands.tunnel import app as tunnel_app
 from .commands.upgrade import app as upgrade_app
+from .commands.volumes import app as volumes_app
 from .commands.wallet import WALLET_JSON_HELP, wallet_command
 from .commands.whoami import app as whoami_app
 from .core import Config
@@ -42,20 +42,21 @@ app = PlainTyper(
 )
 
 # Lab commands
-app.add_typer(lab_app, name="lab", rich_help_panel="Lab")
-app.add_typer(env_app, name="env", rich_help_panel="Lab")
-app.command("fork", rich_help_panel="Lab", epilog=FORK_JSON_HELP)(fork_command)
-app.add_typer(evals_app, name="eval", rich_help_panel="Lab")
-app.add_typer(gepa_app, name="gepa", rich_help_panel="Lab")
-app.add_typer(train_app, name="train", rich_help_panel="Lab")
+app.add_typer(lab_app, name="lab", rich_help_panel="Model Factory")
+app.add_typer(env_app, name="env", rich_help_panel="Model Factory")
+app.command("fork", rich_help_panel="Model Factory", epilog=FORK_JSON_HELP)(fork_command)
+app.add_typer(evals_app, name="eval", rich_help_panel="Model Factory")
+app.add_typer(train_app, name="train", rich_help_panel="Model Factory")
+app.add_typer(volumes_app, name="volumes", rich_help_panel="Model Factory")
+app.add_typer(deployments_app, name="deployments", rich_help_panel="Model Factory")
 app.add_typer(
     train_app,
     name="rl",
     help="Deprecated alias for `prime train`.",
     hidden=True,
-    rich_help_panel="Lab",
+    rich_help_panel="Model Factory",
 )
-app.add_typer(deployments_app, name="deployments", rich_help_panel="Lab")
+app.add_typer(traces_app, name="traces", rich_help_panel="Model Factory")
 
 # Compute commands
 app.add_typer(availability_app, name="availability", rich_help_panel="Compute")
@@ -63,7 +64,6 @@ app.add_typer(disks_app, name="disks", rich_help_panel="Compute")
 app.add_typer(pods_app, name="pods", rich_help_panel="Compute")
 app.add_typer(sandbox_app, name="sandbox", rich_help_panel="Compute")
 app.add_typer(images_app, name="images", rich_help_panel="Compute")
-app.add_typer(registry_app, name="registry", rich_help_panel="Compute")
 app.add_typer(tunnel_app, name="tunnel", rich_help_panel="Compute")
 app.add_typer(inference_app, name="inference", rich_help_panel="Compute")
 
@@ -100,17 +100,36 @@ def callback(
     if context:
         import os
 
-        config = Config()
-        # Check if the context exists
-        if context.lower() != "production" and context not in config.list_environments():
+        # Ignore any inherited PRIME_CONTEXT while validating the explicit
+        # selector, then fully load it before any command can construct a
+        # client. A filename alone is not proof that a context is usable.
+        config = Config(use_context=False)
+        try:
+            context_loaded = config.load_environment(context, persist=False)
+        except (ValueError, TypeError, AttributeError) as e:
+            typer.echo(f"Error: Failed to load context '{context}': {e}", err=True)
+            raise typer.Exit(1)
+
+        if not context_loaded:
             typer.echo(f"Error: Unknown context '{context}'", err=True)
             typer.echo("Available contexts:", err=True)
             for env_name in config.list_environments():
                 typer.echo(f"  - {env_name}", err=True)
             raise typer.Exit(1)
 
-        # Set environment variable so Config instances in subcommands pick it up
+        # Set the environment variable so Config instances in subcommands and
+        # SDK packages pick it up. Restore it when Click closes the context so
+        # embedded/CliRunner invocations in the same process do not leak state.
+        previous_context = os.environ.get("PRIME_CONTEXT")
         os.environ["PRIME_CONTEXT"] = context
+
+        def restore_context() -> None:
+            if previous_context is None:
+                os.environ.pop("PRIME_CONTEXT", None)
+            else:
+                os.environ["PRIME_CONTEXT"] = previous_context
+
+        ctx.call_on_close(restore_context)
 
     # Check for updates (only when a subcommand is being executed)
     if ctx.invoked_subcommand is not None:
@@ -132,3 +151,7 @@ def run() -> None:
     except typer.Abort:
         typer.echo("\nOperation cancelled")
         raise typer.Exit(0)
+
+
+if __name__ == "__main__":
+    run()

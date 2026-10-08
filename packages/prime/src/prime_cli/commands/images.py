@@ -1,19 +1,20 @@
-"""Commands for managing Docker images in Prime Intellect registry."""
+"""Commands for managing image artifacts in the Prime Intellect registry."""
 
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, List, Optional
 
-import click
 import httpx
 import typer
 from prime_sandboxes import (
     APIClient,
     APIError,
-    BulkImageTransferResponse,
+    BulkBuildImageResponse,
     Config,
+    ImageBuildStatus,
     ImageClient,
+    ImageListItem,
+    ImageOwnerType,
     ImageUpdateItem,
     ImageUpdatePatch,
     ImageUpdateResult,
@@ -25,7 +26,9 @@ from prime_sandboxes import (
     UnauthorizedError,
     UpdateImagesRequest,
 )
+from prime_sandboxes.image_references import is_docker_hub_reference
 from rich.table import Table
+from rich.text import Text
 
 from ..utils import (
     PlainTyper,
@@ -37,21 +40,32 @@ from ..utils import (
 )
 from .images_bulk import (
     PACKAGED_DOCKERFILE_PATH,
+    derive_source_destination,
     package_build_context,
     push_bulk,
 )
-from .images_transfer_bulk import transfer_bulk
 from .images_update_bulk import update_bulk
 from .images_update_helpers import format_image_coordinate
 
-app = PlainTyper(help="Manage Docker images in Prime Intellect registry", no_args_is_help=True)
+app = PlainTyper(
+    help="Manage image artifacts in the Prime Intellect registry", no_args_is_help=True
+)
 console = get_console()
 
-config = Config()
+
+class _ConfigProxy:
+    """Resolve configuration lazily after the root callback selects a context."""
+
+    @property
+    def team_id(self) -> Optional[str]:
+        return Config().team_id
+
+
+config = _ConfigProxy()
 
 
 LIST_IMAGES_JSON_HELP = json_output_help(
-    "Raw API response is printed unchanged.",
+    "The typed API response is printed with camelCase field aliases.",
     ".data[] = {displayRef?, fullImagePath?, imageName, imageTag, status, "
     "artifactType, ownerType, visibility, sizeBytes?, createdAt, pushedAt?}",
 )
@@ -60,213 +74,57 @@ LIST_IMAGES_JSON_HELP = json_output_help(
 # Helpers for rendering `prime images list`
 # ---------------------------------------------------------------------------
 
-# Raw artifact row as returned by ``GET /v1/images``. The backend schema is
-# documented in ``LIST_IMAGES_JSON_HELP`` above; we keep the dict shape loose
-# here because the server may add new optional fields over time.
-ImageRow = dict[str, Any]
+ImageRow = ImageListItem
 
 
-@dataclass
-class ArtifactPartition:
-    """Per-artifact-type view of a grouped image.
+def _aware_utc(value: datetime) -> datetime:
+    """Return a timezone-aware timestamp for stable comparisons."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
 
-    Holds the single most recently updated row for this artifact type. The
-    status of that row is what gets rendered — we intentionally ignore older
-    rows (including stale ``BUILDING`` / ``PENDING`` entries the backend may
-    have orphaned) so the display reflects the current truth rather than a
+
+def _row_timestamp(row: ImageRow) -> datetime:
+    """Return the first available timestamp in display-priority order."""
+    value = row.pushed_at or row.completed_at or row.started_at or row.created_at
+    return _aware_utc(value)
+
+
+def _latest(artifacts: list[ImageRow]) -> ImageRow:
+    """Return the most recently updated row of one name:tag group.
+
+    The status of that row is what gets rendered — we intentionally ignore
+    older rows (including stale ``BUILDING`` / ``PENDING`` entries the backend
+    may have orphaned) so the display reflects the current truth rather than a
     composite derived from history.
     """
-
-    latest: Optional[ImageRow] = None
-
-    def is_empty(self) -> bool:
-        """True when no row exists for this artifact type."""
-        return self.latest is None
+    return max(artifacts, key=_row_timestamp)
 
 
-# Mapping of artifact type (e.g. ``CONTAINER_IMAGE``) to its partition bucket.
-PartitionMap = dict[str, ArtifactPartition]
-
-# Timestamp priority used when picking the single latest row per artifact
-# type. ``pushedAt`` wins for completed uploads; ``completedAt`` covers
-# failed/cancelled terminal states; ``startedAt`` and ``createdAt`` are
-# ultimate fallbacks for rows that never finished.
-_LATEST_ROW_KEYS: tuple[str, ...] = ("pushedAt", "completedAt", "startedAt", "createdAt")
-
-
-def _parse_ts(value: Any) -> Optional[datetime]:
-    """Parse an ISO8601 timestamp (possibly ``Z`` suffixed) as a tz-aware UTC datetime.
-
-    Naive timestamps (the backend emits ``createdAt`` as naive UTC, e.g. from
-    ``datetime.utcnow()``) are treated as UTC so comparisons across the dataset
-    are consistent. Returns ``None`` on failure.
-    """
-    if not value:
-        return None
-    try:
-        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except Exception:
-        return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt
-
-
-def _latest(rows: list[ImageRow], *keys: str) -> Optional[tuple[ImageRow, Optional[datetime]]]:
-    """Return the row whose first parseable timestamp (across ``keys``) is newest.
-
-    Each row is evaluated by walking ``keys`` in order and taking the first
-    value that ``_parse_ts`` accepts. This means an unparseable-but-truthy
-    value (e.g. a malformed date string) is skipped rather than short-circuiting
-    selection — and the *same* parsed timestamp is returned alongside the row
-    so callers don't re-read a potentially different field.
-
-    The returned ``datetime`` is ``None`` only in the fallback case where no
-    row had any parseable timestamp; we still return the first row so Size /
-    Reference fields can be derived, but callers should treat "no timestamp"
-    as a signal to fall through to a lower-priority tier.
-
-    Returns ``None`` if ``rows`` is empty.
-    """
-    if not rows:
-        return None
-    best: Optional[ImageRow] = None
-    best_ts: Optional[datetime] = None
-    for row in rows:
-        ts: Optional[datetime] = None
-        for k in keys:
-            ts = _parse_ts(row.get(k))
-            if ts is not None:
-                break
-        if ts is None:
-            continue
-        if best_ts is None or ts > best_ts:
-            best = row
-            best_ts = ts
-    if best is None:
-        return rows[0], None
-    return best, best_ts
-
-
-def _coerce_artifact_type(value: Any) -> str:
-    """Normalise an ``artifactType`` value into a usable string key.
-
-    Defensive against a malformed backend payload (``null``, missing, or a
-    non-string value) so that downstream ``sorted(partition)`` and label
-    rendering never blow up on mixed key types.
-    """
-    if isinstance(value, str) and value:
-        return value
-    return "CONTAINER_IMAGE"
-
-
-def _pick_row(rows: list[ImageRow], *keys: str) -> Optional[ImageRow]:
-    """Return just the row component from ``_latest`` (drops the timestamp)."""
-    result = _latest(rows, *keys)
-    return result[0] if result is not None else None
-
-
-def _partition_group(artifacts: list[ImageRow]) -> PartitionMap:
-    """Group artifact rows by type, keeping only the most recent row per type.
-
-    For a single ``imageName:imageTag`` the backend returns one row per
-    (build, artifact type) plus any completed artifacts from the user images
-    table. We pick the single newest row per artifact type (ordered by
-    ``pushedAt → completedAt → startedAt → createdAt``) and render its raw
-    ``status`` verbatim. Older rows — including stuck ``BUILDING`` zombies
-    and stale failures — are simply not considered.
-    """
-    by_type: dict[str, list[ImageRow]] = {}
-    for art in artifacts:
-        t = _coerce_artifact_type(art.get("artifactType"))
-        by_type.setdefault(t, []).append(art)
-
-    result: PartitionMap = {}
-    for art_type, rows in by_type.items():
-        latest_row = _pick_row(rows, *_LATEST_ROW_KEYS)
-        result[art_type] = ArtifactPartition(latest=latest_row)
-    return result
-
-
-_TYPE_LABELS: tuple[tuple[str, str], ...] = (
-    ("CONTAINER_IMAGE", "[cyan]Container[/cyan]"),
-    ("VM_SANDBOX", "[magenta]VM[/magenta]"),
-)
-
-
-def _ordered_present_types(partition: PartitionMap) -> list[tuple[str, str]]:
-    """Return artifact types present in ``partition`` in display order.
-
-    Container first, then VM, then any future types in sorted order. Types
-    whose per-artifact partition bucket is completely empty (no completed,
-    no active, no failed_only, no other) are skipped so we don't render
-    dead slots.
-    """
-    ordered: list[tuple[str, str]] = []
-    for art_type, label in _TYPE_LABELS:
-        part = partition.get(art_type)
-        if part is not None and not part.is_empty():
-            ordered.append((art_type, label))
-    for art_type in sorted(partition):
-        if art_type in {"CONTAINER_IMAGE", "VM_SANDBOX"}:
-            continue
-        if not partition[art_type].is_empty():
-            label = f"[white]{str(art_type).replace('_', ' ').title()}[/white]"
-            ordered.append((art_type, label))
-    return ordered
-
-
-def _render_type_column(partition: PartitionMap) -> str:
-    """Build the Type cell: ``Container / VM`` with color, only for types present."""
-    parts = [label for _art_type, label in _ordered_present_types(partition)]
-    return " / ".join(parts) if parts else "[dim]—[/dim]"
-
-
-_STATUS_LABELS: dict[str, str] = {
-    "COMPLETED": "[green]Ready[/green]",
-    "BUILDING": "[yellow]Building[/yellow]",
-    "UPLOADING": "[yellow]Uploading[/yellow]",
-    "PENDING": "[blue]Pending[/blue]",
-    "FAILED": "[red]Failed[/red]",
-    "CANCELLED": "[dim]Cancelled[/dim]",
+_STATUS_LABELS: dict[ImageBuildStatus, tuple[str, str]] = {
+    ImageBuildStatus.COMPLETED: ("Ready", "green"),
+    ImageBuildStatus.BUILDING: ("Building", "yellow"),
+    ImageBuildStatus.UPLOADING: ("Uploading", "yellow"),
+    ImageBuildStatus.PENDING: ("Pending", "blue"),
+    ImageBuildStatus.FAILED: ("Failed", "red"),
+    ImageBuildStatus.CANCELLED: ("Cancelled", "dim"),
 }
 
 
-def _render_visibility(value: Any) -> str:
-    try:
-        visibility = ImageVisibility(str(value or ImageVisibility.PRIVATE.value).upper())
-    except ValueError:
-        visibility = ImageVisibility.PRIVATE
+def _empty_dash() -> Text:
+    return Text("—", style="dim")
 
+
+def _render_visibility(visibility: ImageVisibility) -> Text:
     if visibility == ImageVisibility.PUBLIC:
-        return "[green]Public[/green]"
-    return "[dim]Private[/dim]"
+        return Text("Public", style="green")
+    return Text("Private", style="dim")
 
 
-def _render_status_slot(part: Optional[ArtifactPartition]) -> str:
-    """Render the raw status of the latest row for this artifact type.
-
-    Unknown statuses (e.g. a future backend addition) are rendered as a
-    dim title-cased label rather than being dropped.
-    """
-    if part is None or part.latest is None:
-        return "[dim]—[/dim]"
-    status = str(part.latest.get("status") or "UNKNOWN")
-    return _STATUS_LABELS.get(status, f"[dim]{status.title()}[/dim]")
-
-
-def _render_status_column(partition: PartitionMap) -> str:
-    """Build the Status cell as positional slots aligned with the Type column.
-
-    Example: if Type is ``Container / VM``, Status for ``rehl:latest`` with a
-    container that's Ready and a VM that's Failed becomes ``Ready / Failed``.
-    When an artifact has an active rebuild on top of a completed image, its
-    slot is ``(rebuilding)``.
-    """
-    ordered = _ordered_present_types(partition)
-    if not ordered:
-        return "[dim]—[/dim]"
-    return " / ".join(_render_status_slot(partition.get(art_type)) for art_type, _ in ordered)
+def _render_status(row: ImageRow) -> Text:
+    """Render the status of a group's latest row."""
+    label, style = _STATUS_LABELS[row.status]
+    return Text(label, style=style)
 
 
 def _render_image_reference(img: ImageRow, *, is_team_listing: bool) -> str:
@@ -283,11 +141,7 @@ def _render_image_reference(img: ImageRow, *, is_team_listing: bool) -> str:
     *owner prefix* is what gets clipped, not the image ``name:tag``.
     """
     del is_team_listing
-    return (
-        img.get("displayRef")
-        or img.get("fullImagePath")
-        or f"{img.get('imageName', 'unknown')}:{img.get('imageTag', 'latest')}"
-    )
+    return img.display_ref or img.full_image_path or f"{img.image_name}:{img.image_tag}"
 
 
 def _truncate_ref_left(ref: str, max_width: Optional[int]) -> str:
@@ -314,8 +168,7 @@ def _image_ref_column_width(console_width: int, is_team_listing: bool) -> int:
 
     The remaining columns have roughly fixed widths (worst-case labels):
 
-        Type     ~14 chars ("Container / VM")
-        Status   ~20 chars ("Uploading / Uploading")
+        Status   ~9 chars ("Cancelled")
         Visibility ~9 chars
         Size     ~10 chars
         Created  ~17 chars ("YYYY-MM-DD HH:MM ")
@@ -326,54 +179,30 @@ def _image_ref_column_width(console_width: int, is_team_listing: bool) -> int:
     so the column is neither absurdly wide on large terminals nor unusable on
     tiny ones.
     """
-    reserved = 14 + 20 + 9 + 10 + 17 + (10 if is_team_listing else 0)
-    num_cols = 6 + (1 if is_team_listing else 0)
+    reserved = 9 + 9 + 10 + 17 + (10 if is_team_listing else 0)
+    num_cols = 5 + (1 if is_team_listing else 0)
     reserved += 3 * num_cols
     budget = console_width - reserved
     return max(30, min(80, budget))
 
 
-def _completed_size_mb(partition: PartitionMap) -> str:
-    """Sum sizes of the latest COMPLETED rows per artifact type.
+def _completed_size_mb(row: ImageRow) -> str | Text:
+    """Render the size of a group's latest row when it is COMPLETED.
 
     Only completed artifacts carry a meaningful ``sizeBytes``; in-flight and
-    failed rows contribute nothing, so summing across the latest-per-type
-    gives the current on-disk footprint of the image.
+    failed rows contribute nothing.
     """
-    total = 0
-    for part in partition.values():
-        row = part.latest
-        if row is None or row.get("status") != "COMPLETED":
-            continue
-        total += row.get("sizeBytes") or 0
+    if row.status != ImageBuildStatus.COMPLETED:
+        return _empty_dash()
+    total = row.size_bytes or 0
     if total <= 0:
-        return "[dim]—[/dim]"
+        return _empty_dash()
     return f"{total / 1024 / 1024:.1f} MB"
 
 
-def _pick_display_datetime(partition: PartitionMap) -> Optional[datetime]:
-    """Return the newest timestamp across the latest row of each artifact type."""
-    latest_rows: list[ImageRow] = [
-        part.latest for part in partition.values() if part.latest is not None
-    ]
-    if not latest_rows:
-        return None
-    result = _latest(latest_rows, *_LATEST_ROW_KEYS)
-    if result is None:
-        return None
-    return result[1]
-
-
-def _display_created(partition: PartitionMap) -> str:
-    """Format the Created column value for a grouped image row."""
-    ts = _pick_display_datetime(partition)
-    return ts.strftime("%Y-%m-%d %H:%M") if ts is not None else ""
-
-
-def _group_sort_key(partition: PartitionMap) -> datetime:
-    """Key function to sort groups newest-first by their display timestamp."""
-    ts = _pick_display_datetime(partition)
-    return ts if ts is not None else datetime.min.replace(tzinfo=timezone.utc)
+def _display_created(row: ImageRow) -> str:
+    """Format the Created column value from a group's latest row."""
+    return _row_timestamp(row).strftime("%Y-%m-%d %H:%M")
 
 
 @app.command("push")
@@ -389,12 +218,6 @@ def push_image(
         help="Path to Dockerfile",
         show_default="<context>/Dockerfile",
     ),
-    platform: str = typer.Option(
-        "linux/amd64",
-        "--platform",
-        click_type=click.Choice(["linux/amd64", "linux/arm64"]),
-        help="Target platform (defaults to linux/amd64 for Kubernetes compatibility)",
-    ),
     public: bool = typer.Option(
         False,
         "--public",
@@ -408,56 +231,77 @@ def push_image(
     source_image: Optional[str] = typer.Option(
         None,
         "--source-image",
-        help="Copy an existing public image into Prime instead of uploading a build context",
+        help=(
+            "Build a linux/amd64 VM image from an allowed public registry source; "
+            "Docker Hub sources become public platform images automatically"
+        ),
     ),
     platform_image: bool = typer.Option(
         False,
         "--platform-image",
-        help="Build an org-less platform image (admins only)",
+        help="Build Dockerfiles or non-Docker-Hub sources as platform VM images (admins only)",
     ),
 ):
     """
-    Build and push a Docker image to Prime Intellect registry.
+    Build VM image artifacts on Prime Intellect.
 
     New image tags are private by default. Re-pushing an existing tag keeps
-    its current visibility unless --public or --private is provided.
+    its current visibility unless --public or --private is provided. Docker Hub
+    sources always become public, org-less platform images. They do not accept
+    a destination override or --private. Configured team context is ignored.
+
+    Allowed registries: Docker Hub, ghcr.io, quay.io, public.ecr.aws,
+    registry.k8s.io, and mcr.microsoft.com. Google-hosted registries are rejected.
 
     \b
     Examples:
         prime images push myapp:v1.0.0
         prime images push myapp:latest --context ./app --dockerfile ../docker/Dockerfile.prod
-        prime images push myapp:v1 --platform linux/arm64
         prime images push myapp:v1 --public
         prime images push --source-image ubuntu:22.04
-        prime images push myubuntu:22.04 --source-image ubuntu:22.04
+        prime images push myapp:v1 --source-image ghcr.io/org/app:v1
     """
     try:
         if public and private:
             console.print("[red]Error: --public and --private cannot be used together[/red]")
             raise typer.Exit(1)
 
-        is_transfer = source_image is not None
+        is_source_build = source_image is not None
         if platform_image and private:
             console.print("[red]Error: Platform images must be public[/red]")
             raise typer.Exit(1)
-        if not is_transfer and image_reference is None:
+        if not is_source_build and image_reference is None:
             console.print(
                 "[red]Error: Image reference is required unless --source-image is used[/red]"
             )
             raise typer.Exit(1)
 
-        transfer_sources = [
+        source_refs = [
             source.strip() for source in (source_image or "").split(",") if source.strip()
         ]
-        if is_transfer and not transfer_sources:
+        if is_source_build and not source_refs:
             console.print(
                 "[red]Error: --source-image must include at least one image reference[/red]"
             )
             raise typer.Exit(1)
-        if is_transfer and image_reference is not None and len(transfer_sources) > 1:
+        docker_hub_sources = [source for source in source_refs if is_docker_hub_reference(source)]
+        if is_source_build and docker_hub_sources and image_reference is not None:
+            console.print(
+                "[red]Error: Docker Hub source builds do not accept a custom destination[/red]"
+            )
+            raise typer.Exit(1)
+        if is_source_build and docker_hub_sources and private:
+            console.print("[red]Error: Docker Hub source builds must be public[/red]")
+            raise typer.Exit(1)
+        if is_source_build and docker_hub_sources and len(docker_hub_sources) != len(source_refs):
+            console.print(
+                "[red]Error: Docker Hub and non-Docker Hub sources cannot share one request[/red]"
+            )
+            raise typer.Exit(1)
+        if is_source_build and image_reference is not None and len(source_refs) > 1:
             console.print(
                 "[red]Error: Destination image reference can only be provided for "
-                "single-image transfers[/red]"
+                "single-source VM image builds[/red]"
             )
             raise typer.Exit(1)
 
@@ -479,43 +323,51 @@ def push_image(
             )
             raise typer.Exit(1)
 
-        if is_transfer:
-            source_display = ", ".join(transfer_sources)
-            destination_display = (
-                f"{image_name}:{image_tag}" if image_name and image_tag else "derived"
-            )
-            if platform_image:
-                console.print("[bold blue]Transferring platform image into Prime:[/bold blue]")
+        if is_source_build:
+            automatic_docker_hub_build = bool(docker_hub_sources)
+            platform_source_build = platform_image or automatic_docker_hub_build
+            source_display = ", ".join(source_refs)
+            if image_name and image_tag:
+                destination_display = f"{image_name}:{image_tag}"
             else:
-                console.print("[bold blue]Transferring image into Prime:[/bold blue]")
+                destination_display = ", ".join(
+                    ":".join(
+                        derive_source_destination(source, keep_namespace=platform_source_build)
+                    )
+                    for source in source_refs
+                )
+            if platform_source_build:
+                console.print("[bold blue]Building platform VM image in Prime:[/bold blue]")
+            else:
+                console.print("[bold blue]Building VM image in Prime:[/bold blue]")
             console.print(f"[bold]Source:[/bold] {source_display}")
             console.print(f"[bold]Destination:[/bold] {destination_display}")
-            if platform_image:
+            if platform_source_build:
                 console.print("[bold]Owner:[/bold] Platform")
                 if config.team_id:
                     console.print("[dim]Team context ignored: platform images are org-less[/dim]")
             elif config.team_id:
                 console.print(f"[dim]Team: {config.team_id}[/dim]")
-            console.print()
 
-            client = ImageClient(APIClient())
             visibility = None
             if public:
                 visibility = ImageVisibility.PUBLIC
             elif private:
                 visibility = ImageVisibility.PRIVATE
-            if platform_image:
+            if platform_source_build:
                 visibility = ImageVisibility.PUBLIC
+            console.print()
+
+            client = ImageClient(APIClient())
 
             try:
                 response = client.transfer_image(
-                    ",".join(transfer_sources),
+                    ",".join(source_refs),
                     image_name=image_name,
                     image_tag=image_tag,
-                    platform=platform,
-                    team_id=None if platform_image else (config.team_id or None),
+                    team_id=None if platform_source_build else (config.team_id or None),
                     visibility=visibility,
-                    owner_scope="platform" if platform_image else None,
+                    owner_scope="platform" if platform_source_build else None,
                 )
             except UnauthorizedError:
                 console.print(
@@ -523,47 +375,45 @@ def push_image(
                 )
                 raise typer.Exit(1)
             except APIError as e:
-                console.print(f"[red]Error: Failed to initiate transfer: {e}[/red]")
+                console.print(f"[red]Error: Failed to initiate VM image build: {e}[/red]")
                 raise typer.Exit(1)
 
-            if isinstance(response, BulkImageTransferResponse):
-                successful_results = [result for result in response.results if result.build_id]
-                build_ids = [result.build_id for result in successful_results if result.build_id]
-                failed_results = response.failed
-                image_path = (
-                    successful_results[0].full_image_path if len(successful_results) == 1 else None
-                )
+            if isinstance(response, BulkBuildImageResponse):
+                builds = [result.build for result in response.results if result.build is not None]
+                build_ids = [build_id for build in builds for build_id in build.build_ids]
+                failed_results = [result for result in response.results if result.build is None]
+                image_path = builds[0].full_image_path if len(builds) == 1 else None
             else:
-                build_ids = response.build_ids or [response.build_id]
+                build_ids = list(response.build_ids)
                 failed_results = []
                 image_path = response.full_image_path
 
             if not build_ids:
-                console.print("[red]Error: Failed to initiate image transfer[/red]")
+                console.print("[red]Error: Failed to initiate VM image build[/red]")
                 for result in failed_results:
                     console.print(f"[red]- {result.source_image}: {result.error}[/red]")
                 raise typer.Exit(1)
 
-            console.print("[green]✓[/green] Transfer queued")
+            console.print("[green]✓[/green] VM image build queued")
             console.print()
             if len(build_ids) == 1:
-                console.print("[bold green]Image transfer queued successfully![/bold green]")
+                console.print("[bold green]VM image build queued successfully![/bold green]")
                 console.print()
                 console.print(f"[bold]Build ID:[/bold] {build_ids[0]}")
                 console.print(f"[bold]Image:[/bold] {image_path}")
             else:
-                console.print("[bold green]Image transfers queued successfully![/bold green]")
+                console.print("[bold green]VM image builds queued successfully![/bold green]")
                 console.print()
                 console.print(f"[bold]Builds:[/bold] {len(build_ids)}")
                 console.print(f"[bold]Build IDs:[/bold] {', '.join(build_ids)}")
             if failed_results:
                 console.print()
                 console.print(
-                    f"[yellow]Warning: {len(failed_results)} image transfer(s) failed:[/yellow]"
+                    f"[yellow]Warning: {len(failed_results)} VM image build(s) failed:[/yellow]"
                 )
                 for result in failed_results:
                     console.print(f"[yellow]- {result.source_image}: {result.error}[/yellow]")
-            if platform_image:
+            if platform_source_build:
                 console.print(f"[bold]Visibility:[/bold] {ImageVisibility.PUBLIC.value}")
             elif public or private:
                 requested_visibility = ImageVisibility.PUBLIC if public else ImageVisibility.PRIVATE
@@ -574,9 +424,9 @@ def push_image(
                     "(existing tags keep their current visibility)"
                 )
             console.print()
-            console.print("[cyan]Your image transfer is running.[/cyan]")
+            console.print("[cyan]Your VM image build is running.[/cyan]")
             console.print()
-            console.print("[bold]Check transfer status:[/bold]")
+            console.print("[bold]Check build status:[/bold]")
             console.print("  prime images list")
             console.print()
             if failed_results:
@@ -585,12 +435,12 @@ def push_image(
 
         if platform_image:
             console.print(
-                f"[bold blue]Building and pushing platform image:[/bold blue] "
+                f"[bold blue]Building platform VM image artifacts:[/bold blue] "
                 f"{image_name}:{image_tag}"
             )
         else:
             console.print(
-                f"[bold blue]Building and pushing image:[/bold blue] {image_name}:{image_tag}"
+                f"[bold blue]Building VM image artifacts:[/bold blue] {image_name}:{image_tag}"
             )
         if platform_image:
             if config.team_id:
@@ -637,7 +487,7 @@ def push_image(
                     "image_name": image_name,
                     "image_tag": image_tag,
                     "dockerfile_path": PACKAGED_DOCKERFILE_PATH,
-                    "platform": platform,
+                    "platform": "linux/amd64",
                 }
                 if config.team_id and not platform_image:
                     build_payload["team_id"] = config.team_id
@@ -665,10 +515,11 @@ def push_image(
 
             build_id = build_response.get("build_id")
             upload_url = build_response.get("upload_url")
-            if not build_id or not upload_url:
+            expires_in = build_response.get("expires_in")
+            if not build_id or not upload_url or expires_in is None:
                 console.print(
                     "[red]Error: Invalid response from server "
-                    "(missing build_id or upload_url)[/red]"
+                    "(missing build_id, upload_url, or expires_in)[/red]"
                 )
                 raise typer.Exit(1)
             full_image_path = build_response.get("fullImagePath") or f"{image_name}:{image_tag}"
@@ -754,83 +605,9 @@ def push_image(
 # Bulk push (JSONL manifest / Harbor task dirs) lives in images_bulk.py.
 app.command("push-bulk")(push_bulk)
 
-# Bulk transfer (JSONL manifest / Harbor task dirs / Hugging Face datasets)
-# lives in images_transfer_bulk.py.
-app.command("transfer-bulk")(transfer_bulk)
-
 # Bulk logical-image updates (rename / owner move / visibility) from a JSONL
 # manifest live in images_update_bulk.py.
 app.command("update-bulk")(update_bulk)
-
-
-@app.command("build-vm")
-def build_vm_image(
-    image_reference: str = typer.Argument(
-        ...,
-        help=(
-            "Existing image to build a VM image for "
-            "(e.g., 'myapp:v1.0.0', 'prime/<ownerSlug>/myapp:v1.0.0', or "
-            "'prime/team-{teamId}/myapp:v1.0.0')"
-        ),
-    ),
-    platform_image: bool = typer.Option(
-        False,
-        "--platform-image",
-        help="Build the VM artifact for an org-less platform image (admins only)",
-    ),
-):
-    """
-    Build a VM image from an existing container image.
-
-    Requires a linux/amd64 image. Personal and team builds require VM
-    sandboxes to be enabled for the owning account. For team images, only
-    the image creator or team admins can trigger this. Platform images
-    require a platform admin with sandboxes:update permission.
-
-    \b
-    Examples:
-        prime images build-vm myapp:v1.0.0
-        prime images build-vm prime/alice/myapp:v1.0.0
-        prime images build-vm prime/team-abc123/myapp:v1.0.0
-        prime images build-vm ubuntu:22.04 --platform-image
-    """
-    try:
-        if platform_image:
-            image_name, image_tag = _parse_platform_image_reference(image_reference)
-            team_id = None
-        else:
-            image_name, image_tag, team_id = _parse_mutable_image_reference(image_reference)
-        payload: dict[str, str] = {"teamId": team_id} if team_id else {}
-        if platform_image:
-            payload["ownerScope"] = "platform"
-
-        client = APIClient()
-        response = client.request(
-            "POST",
-            f"/images/{image_name}/{image_tag}/vm-build",
-            json=payload,
-        )
-
-        if platform_image:
-            context = " (platform)"
-        else:
-            context = f" (team: {team_id})" if team_id else ""
-        console.print(
-            f"[green]✓[/green] VM image build queued for {image_name}:{image_tag}{context}"
-        )
-        build_id = response.get("buildId") if isinstance(response, dict) else None
-        if build_id:
-            console.print(f"[bold]Build ID:[/bold] {build_id}")
-        list_command = (
-            "prime images list --platform-image" if platform_image else "prime images list"
-        )
-        console.print(f"Track progress with: {list_command}")
-    except UnauthorizedError:
-        console.print("[red]Error: Not authenticated. Please run 'prime login' first.[/red]")
-        raise typer.Exit(1)
-    except APIError as e:
-        console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1)
 
 
 @app.command("list", epilog=LIST_IMAGES_JSON_HELP)
@@ -889,26 +666,24 @@ def list_images(
         )
         console.print()
     try:
-        client = APIClient()
-
         offset = (page - 1) * num
-
-        # Build query params
-        params: dict[str, str] = {"limit": str(num), "offset": str(offset)}
-        if platform_image:
-            params["ownerScope"] = "platform"
-        elif config.team_id:
-            params["teamId"] = config.team_id
-        if search:
-            params["search"] = search
-
-        response = client.request("GET", "/images", params=params)
-        images: list[ImageRow] = response.get("data", [])
-        has_total_count: bool = "totalCount" in response
-        total_count: int = int(response.get("totalCount", offset + len(images)))
+        response = ImageClient(APIClient()).list(
+            search=search,
+            platform=platform_image,
+            offset=offset,
+            limit=num,
+        )
+        images = response.data
+        has_total_count = response.total_count is not None
+        total_count = (
+            response.total_count if response.total_count is not None else offset + len(images)
+        )
 
         if output == "json":
-            output_data_as_json(response, console)
+            output_data_as_json(
+                response.model_dump(by_alias=True, mode="json", exclude_unset=True),
+                console,
+            )
             return
 
         push_hint: str = (
@@ -947,17 +722,17 @@ def list_images(
         is_team_listing: bool = bool(config.team_id) and not platform_image
         title: str
         if platform_image:
-            title = "Platform Docker Images"
+            title = "Platform Images"
         elif is_team_listing:
-            title = f"Team Docker Images (team: {config.team_id})"
+            title = f"Team Images (team: {config.team_id})"
         else:
-            title = "Personal Docker Images"
+            title = "Personal Images"
 
         grouped: dict[str, list[ImageRow]] = {}
-        for img in images:
-            owner_scope = img.get("teamId") or img.get("ownerType", "personal")
-            key = f"{owner_scope}/{img.get('imageName', '')}:{img.get('imageTag', 'latest')}"
-            grouped.setdefault(key, []).append(img)
+        for image in images:
+            owner_scope = image.team_id or image.owner_type.value
+            key = f"{owner_scope}/{image.image_name}:{image.image_tag}"
+            grouped.setdefault(key, []).append(image)
 
         ref_max_width: int = _image_ref_column_width(
             console.size.width, is_team_listing=is_team_listing
@@ -972,48 +747,36 @@ def list_images(
             min_width=ref_max_width,
             max_width=ref_max_width,
         )
-        table.add_column("Type", justify="center", no_wrap=True)
         if is_team_listing:
             table.add_column("Owner", justify="center")
-        # Worst-case label is ``Cancelled / Cancelled`` (21 chars); pin to 21
-        # so Rich never wraps the status text across two lines.
-        table.add_column("Status", justify="center", no_wrap=True, min_width=21)
+        table.add_column("Status", justify="center", no_wrap=True)
         table.add_column("Visibility", justify="center", no_wrap=True)
         table.add_column("Size", justify="right", no_wrap=True)
         table.add_column("Created", style="dim", no_wrap=True, min_width=16)
 
-        sortable: list[tuple[datetime, list[ImageRow], PartitionMap]] = []
+        # One group per owner/name:tag; each group renders its latest row.
+        sortable: list[tuple[datetime, ImageRow]] = []
         for _key, artifacts in grouped.items():
-            partition = _partition_group(artifacts)
-            sortable.append((_group_sort_key(partition), artifacts, partition))
+            latest = _latest(artifacts)
+            sortable.append((_row_timestamp(latest), latest))
         sortable.sort(key=lambda item: item[0], reverse=True)
 
-        for _ts, artifacts, partition in sortable:
-            # Pick a representative row for the Image Reference / Owner
-            # columns. Prefer the latest container artifact row so the
-            # reference always resolves to something the user can copy-paste,
-            # then fall back to the latest VM row, then to any raw artifact.
-            container_latest = (partition.get("CONTAINER_IMAGE") or ArtifactPartition()).latest
-            vm_latest = (partition.get("VM_SANDBOX") or ArtifactPartition()).latest
-            preferred: ImageRow = container_latest or vm_latest or next(iter(artifacts), {})
-
+        for _ts, preferred in sortable:
             image_ref: str = _truncate_ref_left(
                 _render_image_reference(preferred, is_team_listing=is_team_listing),
                 ref_max_width,
             )
-            type_display: str = _render_type_column(partition)
-            status_display: str = _render_status_column(partition)
-            visibility_display: str = _render_visibility(preferred.get("visibility"))
-            size_mb: str = _completed_size_mb(partition)
-            date_str: str = _display_created(partition)
+            status_display: Text = _render_status(preferred)
+            visibility_display: Text = _render_visibility(preferred.visibility)
+            size_mb: str | Text = _completed_size_mb(preferred)
+            date_str: str = _display_created(preferred)
 
-            row: list[str] = [image_ref, type_display]
+            row: list[str | Text] = [image_ref]
             if is_team_listing:
-                owner_type = preferred.get(
-                    "ownerType", "team" if preferred.get("teamId") else "personal"
-                )
-                owner_display: str = (
-                    "[blue]Team[/blue]" if owner_type == "team" else "[dim]Personal[/dim]"
+                owner_display = (
+                    Text("Team", style="blue")
+                    if preferred.owner_type == ImageOwnerType.TEAM
+                    else Text("Personal", style="dim")
                 )
                 row.append(owner_display)
             row.extend([status_display, visibility_display, size_mb, date_str])
@@ -1055,19 +818,6 @@ def list_images(
 def _looks_like_registry_host(value: str) -> bool:
     # Docker treats localhost as a registry host even without a dot or port.
     return "." in value or ":" in value or value == "localhost"
-
-
-def _parse_platform_image_reference(image_reference: str) -> tuple[str, str]:
-    """Parse an org-less platform image reference, preserving name namespaces."""
-    if ":" not in image_reference:
-        console.print("[red]Error: Image reference must include a tag (e.g., ubuntu:22.04)[/red]")
-        raise typer.Exit(1)
-
-    image_name, image_tag = image_reference.rsplit(":", 1)
-    if not image_name or not image_tag:
-        console.print("[red]Error: Platform image reference must use image:tag[/red]")
-        raise typer.Exit(1)
-    return image_name, image_tag
 
 
 def _parse_mutable_image_reference(image_reference: str) -> tuple[str, str, Optional[str]]:
@@ -1146,8 +896,9 @@ def _update_source_for_parsed_reference(
 
 def _current_scope_owner() -> Any:
     """Owner object for the configured personal/team context."""
-    if config.team_id:
-        return TeamImageOwner(team_id=config.team_id)
+    team_id = config.team_id
+    if team_id:
+        return TeamImageOwner(team_id=team_id)
     return PersonalImageOwner()
 
 

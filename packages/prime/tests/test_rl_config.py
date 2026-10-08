@@ -8,6 +8,8 @@ from prime_cli.commands.rl import (
     RLConfig,
     _flatten_config_schema,
     _is_full_finetune,
+    _validate_full_finetune_deployment,
+    _warn_legacy_full_finetune_type,
     generate_rl_config_template,
     load_config,
 )
@@ -654,16 +656,12 @@ def test_tailscale_no_auth_key_anywhere_rejected(tmp_path: Path, monkeypatch) ->
         load_config(str(config_path))
 
 
-def test_is_full_finetune_top_level_discriminator() -> None:
-    assert _is_full_finetune({"type": "full_finetune"}) is True
-
-
-def test_is_full_finetune_single_node_gpu_sizing() -> None:
+def test_validate_full_finetune_deployment_single_node_gpu_sizing() -> None:
     cfg = {"deployment": {"num_train_gpus": 4, "num_infer_gpus": 4}}
-    assert _is_full_finetune(cfg) is True
+    _validate_full_finetune_deployment(cfg, "rl.toml")  # does not raise
 
 
-def test_is_full_finetune_multi_node_node_sizing() -> None:
+def test_validate_full_finetune_deployment_multi_node_node_sizing() -> None:
     # Mirrors prime-rl's qwen30b_math/rl.toml — multi-node configs use
     # num_train_nodes/num_infer_nodes instead of the *_gpus variants.
     cfg = {
@@ -673,24 +671,79 @@ def test_is_full_finetune_multi_node_node_sizing() -> None:
             "num_infer_nodes": 2,
         }
     }
-    assert _is_full_finetune(cfg) is True
+    _validate_full_finetune_deployment(cfg, "rl.toml")  # does not raise
 
 
-def test_is_full_finetune_deployment_type_alone() -> None:
-    assert _is_full_finetune({"deployment": {"type": "single_node"}}) is True
-    assert _is_full_finetune({"deployment": {"type": "multi_node"}}) is True
+def test_validate_full_finetune_deployment_type_alone() -> None:
+    _validate_full_finetune_deployment({"deployment": {"type": "single_node"}}, "rl.toml")
+    _validate_full_finetune_deployment({"deployment": {"type": "multi_node"}}, "rl.toml")
 
 
-def test_is_full_finetune_lora_config_rejected() -> None:
+def test_validate_full_finetune_deployment_missing_block_rejected() -> None:
+    lora_shaped_cfg = {
+        "model": "Qwen/Qwen3.5-4B",
+        "max_steps": 50,
+        "batch_size": 128,
+        "rollouts_per_example": 8,
+    }
+    with pytest.raises(typer.Exit):
+        _validate_full_finetune_deployment(lora_shaped_cfg, "rl.toml")
+
+
+def test_validate_full_finetune_deployment_empty_deployment_rejected() -> None:
+    # `[deployment]` with no recognised sizing fields isn't enough.
+    with pytest.raises(typer.Exit):
+        _validate_full_finetune_deployment({"deployment": {}}, "rl.toml")
+
+
+def test_is_full_finetune_auto_detects_deployment_without_flag() -> None:
+    cfg = {"deployment": {"num_train_gpus": 1, "num_infer_gpus": 1}}
+    assert _is_full_finetune(cfg, flag=False) is True
+
+
+def test_is_full_finetune_flag_routes_without_deployment() -> None:
+    lora_shaped_cfg = {"model": "Qwen/Qwen3.5-4B"}
+    assert _is_full_finetune(lora_shaped_cfg, flag=True) is True
+
+
+def test_is_full_finetune_lora_config_without_flag_rejected() -> None:
     lora_cfg = {
         "model": "Qwen/Qwen3.5-4B",
         "max_steps": 50,
         "batch_size": 128,
         "rollouts_per_example": 8,
     }
-    assert _is_full_finetune(lora_cfg) is False
+    assert _is_full_finetune(lora_cfg, flag=False) is False
 
 
-def test_is_full_finetune_empty_deployment_rejected() -> None:
-    # `[deployment]` with no recognised fields shouldn't flip dispatch.
-    assert _is_full_finetune({"deployment": {}}) is False
+def test_is_full_finetune_empty_deployment_without_flag_rejected() -> None:
+    # `[deployment]` with no recognised sizing fields isn't a signal on its own.
+    assert _is_full_finetune({"deployment": {}}, flag=False) is False
+
+
+def test_warn_legacy_full_finetune_type_warns_on_leftover_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    printed: list[str] = []
+    monkeypatch.setattr(
+        "prime_cli.commands.rl.console.print",
+        lambda *args, **_: printed.append(" ".join(str(a) for a in args)),
+    )
+
+    _warn_legacy_full_finetune_type({"type": "full_finetune"}, "rl.toml")
+
+    assert any("type" in line and "no longer used" in line for line in printed)
+
+
+def test_warn_legacy_full_finetune_type_silent_without_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    printed: list[str] = []
+    monkeypatch.setattr(
+        "prime_cli.commands.rl.console.print",
+        lambda *args, **_: printed.append(" ".join(str(a) for a in args)),
+    )
+
+    _warn_legacy_full_finetune_type({"deployment": {"num_train_gpus": 1}}, "rl.toml")
+
+    assert printed == []

@@ -22,6 +22,18 @@ HELP_NOTE = (
 )
 
 
+def _plain_text_console() -> Console:
+    """Recording console that renders markup-free, style-free text."""
+    return Console(
+        record=True,
+        file=io.StringIO(),
+        no_color=True,
+        markup=False,
+        highlight=False,
+        emoji=False,
+    )
+
+
 def is_plain_mode(args: list[str] | None = None) -> bool:
     ctx = click.get_current_context(silent=True)
     while ctx is not None:
@@ -72,14 +84,7 @@ class PrimeConsole(Console):
                 table.row_styles = []
                 table.pad_edge = False
                 table.padding = (0, 1)
-                console = Console(
-                    record=True,
-                    file=io.StringIO(),
-                    no_color=True,
-                    markup=False,
-                    highlight=False,
-                    emoji=False,
-                )
+                console = _plain_text_console()
                 console.print(table)
                 plain_objects.append(console.export_text().rstrip())
                 continue
@@ -90,6 +95,12 @@ class PrimeConsole(Console):
                     text = obj.code
                 elif isinstance(obj, Text):
                     text = obj.plain
+                elif hasattr(obj, "__rich_console__"):
+                    # Rich renderables (NewLine from Progress, Rule, Control)
+                    # render to plain text instead of printing their repr.
+                    console = _plain_text_console()
+                    console.print(obj)
+                    text = console.export_text().rstrip("\n")
                 else:
                     text = str(obj)
 
@@ -158,6 +169,14 @@ def _plain_option(params):
 class _PlainMixin:
     def __init__(self, *args, params=None, **kwargs):
         super().__init__(*args, params=_plain_option(params), **kwargs)
+
+    def parse_args(self, ctx, args):
+        # Click only shows no-args help for an empty argument list, so a lone
+        # `--plain` would otherwise parse into a silent no-op.
+        if self.no_args_is_help and args and all(arg == "--plain" for arg in args):
+            ctx.meta["plain"] = True
+            args = []
+        return super().parse_args(ctx, args)
 
     def main(
         self,

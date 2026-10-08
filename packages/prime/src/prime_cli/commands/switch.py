@@ -6,7 +6,7 @@ from click.exceptions import Abort
 from prime_cli.core import Config
 
 from ..client import APIClient, APIError
-from ..utils import PlainTyper, get_console
+from ..utils import PlainTyper, get_console, require_persistent_context
 from .teams import fetch_teams
 
 app = PlainTyper(
@@ -67,6 +67,7 @@ def switch(
     ),
 ) -> None:
     """Switch the active account context."""
+    require_persistent_context()
     config = Config()
 
     if config.team_id_from_env:

@@ -43,6 +43,12 @@ from .usage import RUN_USAGE_JSON_HELP, run_usage_command
 
 console = get_console()
 
+LEGACY_TRAINING_NOTICE = (
+    "Shared Hosted Training for LoRA runs will stop accepting new runs on October 5, 2026. "
+    "Hosted Training is transitioning to dedicated runs. "
+    "Existing LoRA adapters will remain downloadable and deployable until further notice."
+)
+
 V1_ENV_CONFIG_FIELDS = (
     "taskset",
     "harness",
@@ -109,6 +115,14 @@ PROGRESS_BAR = re.compile(r".*\|[█▏▎▍▌▋▊▉ ]{10,}\|.*")
 HOSTED_TRAINING_LOG_STARTUP_POLL_SECONDS = 10
 HOSTED_TRAINING_LOG_STARTUP_POLLS = 18
 HOSTED_TRAINING_LOG_FOLLOW_POLL_SECONDS = 5
+
+HOSTED_TRAINING_STOP_POLL_SECONDS = 3
+HOSTED_TRAINING_STOP_MAX_POLLS = 60
+VOLUME_READY_POLL_SECONDS = 3
+VOLUME_READY_MAX_SECONDS = 180
+VOLUME_DEFAULT_SIZE = "1Ti"  # same default as `prime volumes create`
+
+TERMINAL_RUN_STATUSES = {"STOPPED", "FAILED", "COMPLETED"}
 
 # Log level colors for rich console
 LEVEL_STYLES = {
@@ -232,6 +246,9 @@ def generate_rl_config_template(environment: str | None = None) -> str:
     env_value = environment or "primeintellect/reverse-text"
 
     return f'''\
+# Shared Hosted Training for LoRA runs will stop accepting new runs on October 5, 2026.
+# Hosted Training is transitioning to dedicated runs.
+# Existing LoRA adapters will remain downloadable and deployable until further notice.
 model = "Qwen/Qwen3.5-0.8B"
 loss = "rl" # "rl" | "sft"; OPD is not yet supported on hosted runtimes
 max_steps = 100
@@ -346,10 +363,6 @@ def _dict_id(config: Dict[str, Any] | None) -> Any:
 
 def _is_hub_env_id(value: Any) -> bool:
     return isinstance(value, str) and "/" in value
-
-
-def _split_hub_env_id(env_id: str) -> str:
-    return env_id.rsplit("@", 1)[0]
 
 
 def _env_display_name(env: Dict[str, Any], index: int | None = None) -> str:
@@ -880,35 +893,128 @@ def _peek_toml(config_path: str) -> Dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def _is_full_finetune(cfg: Dict[str, Any]) -> bool:
-    """A config is full-FT iff it carries one of:
+def _has_full_finetune_deployment(cfg: Dict[str, Any]) -> bool:
+    """True iff `cfg` carries a `[deployment]` table sizing the run — either
+    single-node (`num_train_gpus` / `num_infer_gpus`), multi-node
+    (`num_train_nodes` / `num_infer_nodes`), or an explicit
+    `[deployment].type` of `single_node` / `multi_node`.
 
-    - top-level `type = "full_finetune"` (mirrors prime-rl's discriminator)
-    - a `[deployment]` table with a sizing field — either single-node
-      (`num_train_gpus` / `num_infer_gpus`) or multi-node
-      (`num_train_nodes` / `num_infer_nodes`) — or an explicit
-      `[deployment].type` of `single_node` / `multi_node`.
-
-    Previously only the single-node sizing fields triggered detection, so
-    canonical multi-node prime-rl shapes (e.g. `qwen30b_math/rl.toml`,
-    which uses `num_train_nodes` / `num_infer_nodes`) silently fell
-    through to the LoRA dispatch path.
+    `[deployment]` is a full-FT-only prime-rl concept: RLConfig (the LoRA
+    schema) has no such field and forbids extras, so its presence is
+    unambiguous full-FT intent even without `--full-finetune` on the
+    command line.
     """
-    if cfg.get("type") == "full_finetune":
-        return True
     deploy = cfg.get("deployment")
-    if isinstance(deploy, dict):
-        if deploy.get("type") in ("single_node", "multi_node"):
-            return True
-        sizing_keys = (
-            "num_train_gpus",
-            "num_infer_gpus",
-            "num_train_nodes",
-            "num_infer_nodes",
+    if not isinstance(deploy, dict):
+        return False
+    if deploy.get("type") in ("single_node", "multi_node"):
+        return True
+    sizing_keys = (
+        "num_train_gpus",
+        "num_infer_gpus",
+        "num_train_nodes",
+        "num_infer_nodes",
+    )
+    return any(k in deploy for k in sizing_keys)
+
+
+def _is_full_finetune(cfg: Dict[str, Any], *, flag: bool) -> bool:
+    """Dispatch as full-FT if `--full-finetune`/`--fft` was passed, or if
+    the config's `[deployment]` block already sizes the run. Either is
+    sufficient on its own — the flag lets a config without `[deployment]`
+    yet still be routed (and get `_validate_full_finetune_deployment`'s
+    clear error instead of silently landing on the LoRA path).
+    """
+    return flag or _has_full_finetune_deployment(cfg)
+
+
+def _looks_like_sft(cfg: Dict[str, Any]) -> bool:
+    """True iff the mega-TOML carries the prime-rl SFT schema shape: a
+    `[data]` block (required by SFTConfig, absent from the RL schema) and
+    no `[trainer]`/`[orchestrator]` blocks (required by the RL schema,
+    absent from SFTConfig). The two prime-rl TOML schemas are disjoint on
+    these keys, so the sniff is unambiguous without parsing the file with
+    either schema.
+    """
+    return "data" in cfg and "trainer" not in cfg and "orchestrator" not in cfg
+
+
+def _is_sft(cfg: Dict[str, Any], *, flag: bool) -> bool:
+    """Dispatch as SFT if `--sft` was passed, or if the config carries the
+    SFT schema shape (see `_looks_like_sft`)."""
+    return flag or _looks_like_sft(cfg)
+
+
+def _validate_full_finetune_deployment(cfg: Dict[str, Any], config_path: str) -> None:
+    """Full-FT dispatch requires an explicit `[deployment]` table sizing the
+    run. Guards the `--full-finetune`-without-`[deployment]` case — the
+    auto-detect path in `_has_full_finetune_deployment` never reaches here
+    without sizing already present.
+    """
+    if not _has_full_finetune_deployment(cfg):
+        console.print(
+            f"[red]Error:[/red] --full-finetune requires an explicit [deployment] "
+            f"block in {config_path} (num_train_gpus/num_infer_gpus for "
+            "single-node, or num_train_nodes/num_infer_nodes for multi-node)."
         )
-        if any(k in deploy for k in sizing_keys):
-            return True
-    return False
+        raise typer.Exit(1)
+
+
+def _warn_legacy_full_finetune_type(cfg: Dict[str, Any], config_path: str) -> None:
+    """`type = "full_finetune"` used to be how dispatch routing was decided;
+    --full-finetune/--fft now owns that decision entirely, so a leftover
+    `type` key in a full-FT config is dead weight. Warn so configs get
+    cleaned up instead of silently accumulating a field nothing reads."""
+    if "type" in cfg:
+        console.print(
+            f'[yellow]Warning:[/yellow] `type = "{cfg["type"]}"` in {config_path} '
+            "is no longer used — dispatch routing is decided by "
+            "--full-finetune/--fft on the command line. Remove it from the config."
+        )
+
+
+# Mirrors the platform's `sourceRef` rules (branch / tag / sha charset, 200
+# chars, no `..`, `//` or `/.`, no trailing `/`) and rl-validator's refusal of
+# pull-request namespaces, so a typo fails at the prompt instead of as a 422.
+# Also applies the two git-check-ref-format rules the platform doesn't yet
+# check (no trailing `.`, no `/`-separated component ending in `.lock`): a
+# name breaking either can't resolve, so it would only fail later, at the
+# validator's fetch, after the user has already confirmed.
+_SOURCE_REF_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._/-]{0,199}\Z")
+
+
+def _source_ref_error(ref: str) -> Optional[str]:
+    """Why `ref` can't be a prime-rl source ref, or None when it can."""
+    if (
+        not _SOURCE_REF_RE.match(ref)
+        or ".." in ref
+        or "//" in ref
+        or "/." in ref
+        or ref.endswith(("/", "."))
+        or any(part.endswith(".lock") for part in ref.split("/"))
+    ):
+        return f"{ref!r} is not a valid git ref (branches, tags and commit shas only)."
+    if ref.startswith(("refs/", "pull/")):
+        return (
+            f"{ref!r}: pull-request and refs/ names are not accepted; "
+            "use --pr N for a pull request."
+        )
+    return None
+
+
+def _resolve_pr_ref(pr_number: int) -> str:
+    """`--pr N` -> the PR's head commit sha, via the public GitHub API.
+
+    Resolved client-side so the run is pinned to the exact commit the user
+    saw, and so a fork or merged PR fails here with an actionable message.
+    The caller shows the sha in its pre-confirmation banner."""
+    from ..api.training import resolve_pull_request_head
+
+    try:
+        return resolve_pull_request_head(pr_number)
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
 
 
 def _dispatch_full_finetune_run(
@@ -921,10 +1027,18 @@ def _dispatch_full_finetune_run(
     yes: bool,
     image_tag: Optional[str] = None,
     gpu_type: Optional[str] = None,
+    volume: Optional[str] = None,
+    volume_size: Optional[str] = None,
+    mode: Optional[str] = None,
+    source_ref: Optional[str] = None,
+    source_pr: Optional[int] = None,
 ) -> None:
-    """Hand off to /api/v1/training/runs (full-FT prime-rl on a registered
-    PrimeCluster). Reuses the shared env-file plumbing for WANDB / HF
-    secrets so the user experience matches the LoRA path.
+    """Hand off to /api/v1/training/runs (prime-rl on a registered
+    PrimeCluster). Serves both dedicated run kinds: full-FT RL mega-TOMLs
+    (mode=None/"rl") and SFT mega-TOMLs (mode="sft" — same endpoint, same
+    raw-TOML handoff; only the backend/validator schema dispatch differs).
+    Reuses the shared env-file plumbing for WANDB / HF secrets so the
+    user experience matches the LoRA path.
 
     Backend always auto-picks the first uncordoned PrimeCluster — the
     CLI never threads a cluster id, so a config that targets the wrong
@@ -1028,6 +1142,62 @@ def _dispatch_full_finetune_run(
         raise typer.Exit(1)
     resolved_gpu_type = gpu_type or config_gpu_type
 
+    # `volume` is request-level too: `--volume` or top-level `volume = "..."`.
+    config_volume = raw_cfg.get("volume")
+    if config_volume is not None and not isinstance(config_volume, str):
+        console.print(
+            f"[red]Error:[/red] volume in {config_path} must be a string, "
+            f"got {type(config_volume).__name__}."
+        )
+        raise typer.Exit(1)
+    resolved_volume = volume or config_volume
+    # Size for a volume this command creates: `--volume-size` or top-level
+    # `volume_size = "..."`. Only used when the volume doesn't exist yet.
+    config_volume_size = raw_cfg.get("volume_size")
+    if config_volume_size is not None and not isinstance(config_volume_size, str):
+        console.print(
+            f"[red]Error:[/red] volume_size in {config_path} must be a string like "
+            f'"500Gi" or "2Ti", got {type(config_volume_size).__name__}.'
+        )
+        raise typer.Exit(1)
+    resolved_volume_size = volume_size or config_volume_size
+    if resolved_volume_size and not resolved_volume:
+        console.print(
+            "[red]Error:[/red] --volume-size (and top-level `volume_size`) needs "
+            "--volume (or top-level `volume`)."
+        )
+        raise typer.Exit(1)
+
+    # `source_ref` is request-level too: a prime-rl git ref (branch / tag /
+    # sha) the pods overlay onto the image at startup so unmerged code can
+    # be tested without an image build. `--ref` / `--pr` on the CLI, or
+    # top-level `source_ref = "..."` in the TOML. CLI flag wins. The
+    # platform resolves the ref to a commit at dispatch and pins that sha
+    # on the run, so a branch name here never drifts mid-run.
+    config_source_ref = raw_cfg.get("source_ref")
+    if config_source_ref is not None and not isinstance(config_source_ref, str):
+        console.print(
+            f"[red]Error:[/red] source_ref in {config_path} must be a string, "
+            f"got {type(config_source_ref).__name__}."
+        )
+        raise typer.Exit(1)
+    # Each source is checked where it was given (so `--ref ""` is an error,
+    # not a silent fall-through to the TOML) before the CLI flag wins.
+    for label, candidate in (
+        ("--ref", source_ref),
+        (f"source_ref in {config_path}", config_source_ref),
+    ):
+        problem = _source_ref_error(candidate) if candidate is not None else None
+        if problem:
+            console.print(f"[red]Error:[/red] {label}: {problem}")
+            raise typer.Exit(1)
+    resolved_source_ref = source_ref or config_source_ref
+    if source_pr is not None:
+        # Resolved here, after the local checks above, so a run that would
+        # fail on a bad secret, image tag or volume never pays the GitHub
+        # round trip (and never burns anonymous API quota).
+        resolved_source_ref = _resolve_pr_ref(source_pr)
+
     # Same deprecation pass as the LoRA path. In the prime-rl-native shape
     # the deprecated keys live one level down, under `[orchestrator]` — and
     # this config ships verbatim to the dedicated training endpoint, where
@@ -1035,6 +1205,8 @@ def _dispatch_full_finetune_run(
     orch_section = raw_cfg.get("orchestrator")
     if isinstance(orch_section, dict):
         _remove_deprecated_config_keys(orch_section)
+
+    _warn_legacy_full_finetune_type(raw_cfg, config_path)
 
     # Strip CLI-only secret-loading keys before shipping the TOML to the
     # backend. `env_file` / `env_files` only meaningfully exist on the
@@ -1044,10 +1216,22 @@ def _dispatch_full_finetune_run(
     # confuses prime-rl (unknown field) or silently sends it chasing
     # phantom paths. `image_tag` is similarly chart-level — the backend
     # parses it off the request body, not the embedded prime-rl config.
+    # `type` is stripped here too rather than left for the backend's
+    # legacy CLI-metadata cleanup to silently absorb.
     config_payload = {
         k: v
         for k, v in raw_cfg.items()
-        if k not in ("env_file", "env_files", "image_tag", "gpu_type")
+        if k
+        not in (
+            "env_file",
+            "env_files",
+            "image_tag",
+            "gpu_type",
+            "volume",
+            "volume_size",
+            "source_ref",
+            "type",
+        )
     }
 
     payload = build_payload_from_toml(
@@ -1058,7 +1242,32 @@ def _dispatch_full_finetune_run(
         wandb_api_key=secrets.get("WANDB_API_KEY"),
         hf_token=secrets.get("HF_TOKEN"),
         gpu_type=resolved_gpu_type,
+        volume=resolved_volume,
+        mode=mode,
+        source_ref=resolved_source_ref,
     )
+
+    # Surface the image + source pins before the confirmation so a typo'd
+    # ref is caught at the prompt, not by a failed dispatch. Skipped for
+    # --output json, which must emit nothing but the JSON payload.
+    if output != "json" and (resolved_image_tag or resolved_source_ref):
+        console.print("[cyan]prime-rl build[/cyan]")
+        image_display = (
+            f"[green]{rich_escape(resolved_image_tag)}[/green]"
+            if resolved_image_tag
+            else "[dim](platform default)[/dim]"
+        )
+        # highlight=False: Rich's auto-highlighter would otherwise recolour
+        # the digits inside the tag / sha / PR number on top of these styles.
+        console.print(f"  Image tag:  {image_display}", highlight=False)
+        if resolved_source_ref:
+            via_pr = f" [dim](PR #{source_pr})[/dim]" if source_pr is not None else ""
+            console.print(
+                f"  Source ref: [bold magenta]{rich_escape(resolved_source_ref)}[/bold magenta]"
+                f"{via_pr}",
+                highlight=False,
+            )
+        console.print()
 
     # `--output json` is a formatting switch: still dispatch the run,
     # then print the result as JSON. Same contract as the LoRA path
@@ -1077,6 +1286,8 @@ def _dispatch_full_finetune_run(
     # to a plain print in --plain mode, which would emit "Creating Hosted
     # Training run..." on stdout ahead of the JSON payload and break
     # automation parsing of run_id.
+    if resolved_volume:
+        _ensure_volume(client, resolved_volume, team_id, output, size=resolved_volume_size)
     status_ctx = (
         console.status("[bold blue]Creating Hosted Training run...", spinner="dots")
         if output != "json"
@@ -1093,10 +1304,10 @@ def _dispatch_full_finetune_run(
         # Don't expose token_value in JSON output either — the chart
         # binds it via secretKeyRef and printing it leaks credentials
         # into automation logs.
-        output_data_as_json(
-            {"run": {"runId": result.run_id}},
-            console,
-        )
+        run_json: Dict[str, Any] = {"runId": result.run_id}
+        if resolved_source_ref:
+            run_json["sourceRef"] = resolved_source_ref
+        output_data_as_json({"run": run_json}, console)
         return
 
     # Don't print result.token_value: the platform wires it into the
@@ -1104,6 +1315,71 @@ def _dispatch_full_finetune_run(
     # via secretKeyRef). Surfacing it on stdout makes it easy to leak into
     # shared shell history/CI logs without buying anything for the user.
     console.print(f"[green]Dispatched[/green] hosted run [bold]{result.run_id}[/bold]")
+
+    dashboard_url = f"{app_config.frontend_url}/dashboard/training/{result.run_id}"
+    console.print("\n[cyan]Monitor run at:[/cyan]")
+    console.print(f"  [link={dashboard_url}]{dashboard_url}[/link]")
+
+
+def _ensure_volume(
+    client: Any, name: str, team_id: Optional[str], output: str, size: Optional[str] = None
+) -> None:
+    """Create `name` (with `size`, default VOLUME_DEFAULT_SIZE) if it doesn't
+    exist and wait until it is RUNNING.
+
+    An existing volume in any state is left alone (the backend reports
+    "not ready" at dispatch); a `size` for it is ignored with a note (resizing
+    is `prime volumes resize`). Exits 1 on create failure, FAILED/TOMBSTONED,
+    or timeout. Progress goes to stderr for `--output json`. The backend
+    validates the size (e.g. 500Gi, 2Ti) and returns its error on create.
+    """
+    out = get_console(stderr=True) if output == "json" else console
+    try:
+        existing = [v for v in client.list_volumes(team_id=team_id) if v.name == name]
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+    if existing:
+        if size and size != existing[0].size:
+            out.print(
+                f"Volume '{name}' already exists ({existing[0].size or 'unknown size'}); "
+                f"--volume-size {size} is ignored. Resize with: prime volumes resize"
+            )
+        return
+
+    size = size or VOLUME_DEFAULT_SIZE
+    out.print(f"Volume '{name}' doesn't exist, creating it ({size})...")
+    try:
+        volume = client.create_volume(name, size, team_id=team_id)
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+    status_ctx = (
+        console.status(f"[bold blue]Waiting for volume '{name}' to be ready...", spinner="dots")
+        if output != "json"
+        else nullcontext()
+    )
+    deadline = time.monotonic() + VOLUME_READY_MAX_SECONDS
+    status = volume.status
+    with status_ctx:
+        while status != "RUNNING":
+            if status in ("FAILED", "TOMBSTONED"):
+                console.print(f"[red]Error:[/red] Volume '{name}' is {status}; not dispatching.")
+                raise typer.Exit(1)
+            if time.monotonic() >= deadline:
+                console.print(
+                    f"[red]Error:[/red] Timed out waiting for volume '{name}' "
+                    f"(last status {status}). Check `prime volumes list`."
+                )
+                raise typer.Exit(1)
+            time.sleep(VOLUME_READY_POLL_SECONDS)
+            try:  # a single failed poll is retried on the next loop
+                match = [v for v in client.list_volumes(team_id=team_id) if v.name == name]
+            except APIError:
+                continue
+            if match:
+                status = match[0].status
 
 
 def load_config(path: str) -> RLConfig:
@@ -1269,7 +1545,8 @@ def create_run(
     skip_action_check: bool = typer.Option(
         False,
         "--skip-action-check",
-        help="Skip action status check and run even if environment action failed.",
+        hidden=True,
+        help="Deprecated: Environment Actions were removed and no check runs.",
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
     image_tag: Optional[str] = typer.Option(
@@ -1292,23 +1569,131 @@ def create_run(
             "default (no preference, auto-pick)."
         ),
     ),
+    volume: Optional[str] = typer.Option(
+        None,
+        "--volume",
+        help=(
+            "Named volume for the run: outputs go under runs/<runId>/, and "
+            "for SFT the volume is mounted read-only at /volume, so "
+            "data.name must point at a path on the volume (e.g. "
+            '/volume/datasets/<name> or the relative "datasets/<name>" — '
+            "the platform resolves it). Get a dataset there yourself with "
+            "`prime volumes ssh <volume> --read-write` and the huggingface "
+            "CLI inside that session (see `prime volumes`); without a "
+            "volume, SFT only works with fake datasets. Full-FT and SFT "
+            "only; closed beta, see `prime volumes`. Falls back to a "
+            'top-level `volume = "..."` in the TOML. Created on the fly '
+            "(default 1Ti) if it doesn't exist."
+        ),
+    ),
+    volume_size: Optional[str] = typer.Option(
+        None,
+        "--volume-size",
+        help=(
+            "Size for the --volume if this command creates it, e.g. 500Gi or 2Ti "
+            "(default 1Ti). Ignored when the volume already exists. Falls back "
+            'to a top-level `volume_size = "..."` in the TOML.'
+        ),
+    ),
+    ref: Optional[str] = typer.Option(
+        None,
+        "--ref",
+        hidden=True,
+        help=(
+            "Restricted: prime-rl git ref (branch, tag, or sha) to run on top "
+            "of the image (full-FT / SFT only). The dispatch must be a team run and "
+            "the team needs sourceRef access granted by Prime (contact "
+            "support), on a deployment with source overlays enabled; other "
+            "callers get a 403. The pods overlay that source onto the image at "
+            "startup, so unmerged code runs without an image build; the "
+            "platform pins the resolved commit for the run. Falls back to a "
+            'top-level `source_ref = "..."` in the TOML.'
+        ),
+    ),
+    pr: Optional[int] = typer.Option(
+        None,
+        "--pr",
+        hidden=True,
+        help=(
+            "Restricted: prime-rl pull request number to run (full-FT / SFT "
+            "only; same access as --ref). Shorthand for --ref <PR head sha>; fork "
+            "and already-merged PRs are not supported."
+        ),
+    ),
+    full_finetune: bool = typer.Option(
+        False,
+        "--full-finetune",
+        "--fft",
+        help=(
+            "Dispatch this config as a full fine-tune on a dedicated cluster "
+            "(every parameter updated) instead of a shared-deployment LoRA "
+            "run. Usually unnecessary — a config with a [deployment] block "
+            "is auto-detected as full-FT. Requires an explicit [deployment] "
+            "block in the TOML either way."
+        ),
+    ),
+    sft: bool = typer.Option(
+        False,
+        "--sft",
+        help=(
+            "Dispatch this config as a supervised fine-tune on the dedicated "
+            "training path. Usually unnecessary — an SFT config (a [data] "
+            "block and no [trainer]/[orchestrator]) is auto-detected. "
+            "Hosted SFT is trainer-only: [eval], [inference], and "
+            "[weight_broadcast] blocks are rejected. Datasets are local "
+            "files on a named volume (pass --volume): the run mounts that "
+            "volume read-only at /volume, so data.name points at a path "
+            "on it (e.g. /volume/datasets/<name> or the relative "
+            '"datasets/<name>" — the platform resolves it); outputs land '
+            "under runs/<runId>/ on the same volume. Get datasets there "
+            "yourself with `prime volumes ssh <volume> --read-write` and "
+            "the huggingface CLI inside that session (hf download <repo> "
+            "--repo-type dataset --local-dir datasets/<name>): materialize "
+            "HF load_dataset-readable files (Parquet/JSON, not "
+            "save_to_disk) into the volume's datasets/ directory, then "
+            "verify with a fresh-process load_dataset check. Without "
+            "--volume, only fake datasets work."
+        ),
+    ),
 ) -> None:
     """Launch a Hosted Training run from a config file.
 
     Example:
 
         prime train config.toml
+        prime train config.toml --full-finetune
+        prime train sft.toml --sft
+        prime train sft.toml --sft --volume research
     """
     validate_output_format(output, console)
 
-    # Peek at the raw TOML BEFORE the strict-schema RLConfig parse so a
-    # full-FT config (`type = "full_finetune"` or a `[deployment]` block
-    # with num_train_gpus/num_infer_gpus) can bypass the LoRA-shared
-    # validators and dispatch on the hosted full-FT endpoint instead.
-    # Backwards-compatible: configs without these markers take the LoRA
-    # path exactly as before.
+    # Mutually exclusive run kinds: accepting both would silently resolve
+    # to whichever branch is checked first.
+    if sft and full_finetune:
+        console.print(
+            "[red]Error:[/red] --sft and --full-finetune/--fft are mutually "
+            "exclusive — pick the run kind matching the config."
+        )
+        raise typer.Exit(1)
+
+    # Dispatch routing: SFT first — a [data] block with no [trainer]/
+    # [orchestrator] is unambiguously the prime-rl SFT schema (the two
+    # mega-TOML schemas are disjoint). Then --full-finetune/--fft, or an
+    # unambiguous `[deployment]` block (full-FT-only — the RL/LoRA schema
+    # has no such field).
     raw_cfg = _peek_toml(config_path)
-    if _is_full_finetune(raw_cfg):
+    if ref is not None and pr is not None:
+        console.print("[red]Error:[/red] --ref and --pr are mutually exclusive.")
+        raise typer.Exit(1)
+
+    if _is_sft(raw_cfg, flag=sft):
+        if full_finetune:
+            console.print(
+                f"[red]Error:[/red] {config_path} looks like an SFT config "
+                "(a \\[data] block, no \\[trainer]/\\[orchestrator]) but "
+                "--full-finetune/--fft was passed. Use --sft instead."
+            )
+            raise typer.Exit(1)
         _dispatch_full_finetune_run(
             raw_cfg=raw_cfg,
             config_path=config_path,
@@ -1318,8 +1703,59 @@ def create_run(
             yes=yes,
             image_tag=image_tag,
             gpu_type=gpu_type,
+            # On SFT the volume is also the dataset contract: it is
+            # mounted read-only at /volume, so `data.name` must point at
+            # a path on the volume (e.g. /volume/datasets/<name> or the
+            # relative datasets/<name> — the platform resolves it; users
+            # stage it via `prime volumes ssh --read-write` + the HF CLI).
+            # Forward --volume instead of dropping it.
+            volume=volume,
+            volume_size=volume_size,
+            mode="sft",
+            # Same dedicated-pod dispatch as full-FT, so the source overlay
+            # applies here too. Forwarded rather than dropped: the helper
+            # already honours a TOML `source_ref` for SFT, and a silently
+            # ignored --ref / --pr would launch without the requested code.
+            source_ref=ref,
+            source_pr=pr,
         )
         return
+    if _is_full_finetune(raw_cfg, flag=full_finetune):
+        _validate_full_finetune_deployment(raw_cfg, config_path)
+        _dispatch_full_finetune_run(
+            raw_cfg=raw_cfg,
+            config_path=config_path,
+            env=env,
+            env_file=env_file,
+            output=output,
+            yes=yes,
+            image_tag=image_tag,
+            gpu_type=gpu_type,
+            volume=volume,
+            volume_size=volume_size,
+            source_ref=ref,
+            source_pr=pr,
+        )
+        return
+
+    # --ref / --pr are for the dedicated (full-FT / SFT) dispatch only: the
+    # LoRA path runs on shared deployments and has no per-run source to
+    # overlay. Reject rather than silently launching without the requested
+    # code.
+    if ref is not None or pr is not None or raw_cfg.get("source_ref") is not None:
+        console.print(
+            "[red]Error:[/red] --ref / --pr (and top-level `source_ref` in the "
+            "TOML) are only supported for full-FT and SFT runs."
+        )
+        raise typer.Exit(1)
+
+    if volume or volume_size or any(raw_cfg.get(k) is not None for k in ("volume", "volume_size")):
+        console.print(
+            "[red]Error:[/red] --volume / --volume-size (and top-level `volume` / "
+            "`volume_size` in the TOML) are only supported for full-FT and "
+            "SFT runs."
+        )
+        raise typer.Exit(1)
 
     # --gpu-type is full-FT only. The LoRA path below never reads it, so
     # silently letting the flag through would launch a run with the GPU
@@ -1335,6 +1771,10 @@ def create_run(
 
     console.print(f"[dim]Loading config from {config_path}[/dim]\n")
     cfg = load_config(config_path)
+    if output == "json":
+        typer.echo(f"Warning: {LEGACY_TRAINING_NOTICE}", err=True)
+    else:
+        console.print(f"[yellow]Warning:[/yellow] {LEGACY_TRAINING_NOTICE}\n")
 
     # Collect secrets from all sources
     def warn(msg: str) -> None:
@@ -1521,58 +1961,11 @@ def create_run(
 
         console.print()
 
-        # Check action status for Hub-backed environment refs. Bare v1 ids
-        # like taskset.id="alphabet-sort-v1" are runtime-importable names and
-        # intentionally do not resolve through the Hub.
-        hub_env_ids: list[str] = []
-        for env_config in cfg.env:
-            for env_id in env_config.hub_env_ids():
-                if env_id not in hub_env_ids:
-                    hub_env_ids.append(env_id)
-
-        if hub_env_ids and not skip_action_check:
-            console.print("[dim]Checking Environment Actions...[/dim]")
-            failed_envs = []
-
-            for env_id in hub_env_ids:
-                env_id_base = _split_hub_env_id(env_id)
-                owner, name = env_id_base.split("/", 1)
-                try:
-                    status_resp = rl_client.get_environment_status(owner, name)
-                    action = status_resp.get("action") or {}
-                    action_status = action.get("status")
-
-                    if action_status == "FAILED":
-                        console.print(f"  [red]✗[/red] {env_id} [dim](failed)[/dim]")
-                        failed_envs.append(env_id)
-                    elif action_status == "SUCCESS":
-                        console.print(f"  [green]✓[/green] {env_id} [dim](success)[/dim]")
-                    elif action_status in ("RUNNING", "PENDING"):
-                        console.print(f"  [yellow]○[/yellow] {env_id} [dim](in progress)[/dim]")
-                    else:
-                        console.print(f"  [dim]-[/dim] {env_id} [dim](no action)[/dim]")
-                except APIError:
-                    console.print(f"  [dim]-[/dim] {env_id} [dim](could not check)[/dim]")
-
-            if failed_envs:
-                console.print("\n[red]Error: Action failed for environments:[/red]\n")
-                for env_id in failed_envs:
-                    env_id_base = _split_hub_env_id(env_id)
-                    owner, name = env_id_base.split("/", 1)
-                    url = f"{app_config.frontend_url}/dashboard/environments/{owner}/{name}/actions"
-                    console.print(f"  [red]✗[/red] {env_id}")
-                    console.print(f"    [dim]Details: prime env action list {env_id_base}[/dim]")
-                    console.print(f"    [dim]View at: [link={url}]{url}[/link][/dim]\n")
-
-                console.print(
-                    "[yellow]This usually means the environment doesn't compile or run, "
-                    "or is using an unsupported version of verifiers, so the Hosted Training run "
-                    "will fail.[/yellow]"
-                )
-                console.print("[dim]To proceed anyway, use --skip-action-check[/dim]")
-                raise typer.Exit(1)
-
-            console.print()
+        if skip_action_check:
+            console.print(
+                "[dim]--skip-action-check is deprecated: Environment Actions were removed "
+                "and no check runs.[/dim]"
+            )
 
         if not confirm_or_skip("Launch this Hosted Training run?", yes, default=True):
             console.print("\nRun cancelled")
@@ -2093,24 +2486,33 @@ def _list_runs_impl(
 
         team_id = team or config.team_id
 
-        all_runs = rl_client.list_runs(team_id=team_id)
+        # Pagination and the `mine` filter are applied server-side when the
+        # backend supports it, so this normally fetches exactly the
+        # requested page instead of the caller's whole run history sorted/
+        # sliced locally.
+        run_page = rl_client.list_runs(team_id=team_id, mine=mine, page=page, limit=num)
+        runs = run_page.runs
 
-        if mine:
-            current_user_id = config.user_id
-            if not current_user_id:
-                console.print(
-                    "[red]Error:[/red] Cannot filter by user - no user_id configured. "
-                    "Run [bold]prime whoami[/bold] to refresh your config."
-                )
-                raise typer.Exit(1)
-            all_runs = [r for r in all_runs if r.user_id == current_user_id]
+        if run_page.total is None:
+            # Backend predates pagination support: it silently ignored
+            # page/limit/mine and returned the full history. Fall back to
+            # the old client-side filter/sort/slice behavior.
+            if mine:
+                current_user_id = config.user_id
+                if not current_user_id:
+                    console.print(
+                        "[red]Error:[/red] Cannot filter by user - no user_id configured. "
+                        "Run [bold]prime whoami[/bold] to refresh your config."
+                    )
+                    raise typer.Exit(1)
+                runs = [r for r in runs if r.user_id == current_user_id]
 
-        total_count = len(all_runs)
-
-        # Sort by created_at descending and paginate
-        all_runs.sort(key=lambda r: r.created_at, reverse=True)
-        start = (page - 1) * num
-        runs = all_runs[start : start + num]
+            total_count = len(runs)
+            runs = sorted(runs, key=lambda r: r.created_at, reverse=True)
+            start = (page - 1) * num
+            runs = runs[start : start + num]
+        else:
+            total_count = run_page.total
 
         if output == "json":
             output_data_as_json(
@@ -2214,6 +2616,11 @@ def get_run(
         if run.status == "QUEUED" and run.runs_ahead is not None:
             status_text += f" (~{run.runs_ahead} runs ahead)"
         console.print(f"  Status: [{status_color}]{status_text}[/{status_color}]")
+        # Dedicated runs carry their cluster as primeClusterId
+        # (rftClusterId is NULL there); shared runs use cluster_id.
+        cluster = run.prime_cluster_id or run.cluster_id
+        if cluster:
+            console.print(f"  Cluster: {cluster}")
         console.print(f"  Model: [magenta]{formatted['model']}[/magenta]")
         console.print(f"  Environments: [green]{formatted['environments']}[/green]")
         console.print(f"  Max Steps: {formatted['steps']}")
@@ -2222,10 +2629,14 @@ def get_run(
         console.print(f"  Rollouts per Example: {formatted['rollouts']}")
         if run.max_tokens:
             console.print(f"  Max Tokens: {run.max_tokens}")
+        if run.volume_name:
+            console.print(f"  Volume: [cyan]{run.volume_name}[/cyan]")
         if run.wandb_project:
             console.print(f"  W&B: {run.wandb_entity or ''}/{run.wandb_project}")
         if run.team_id:
             console.print(f"  Team: {run.team_id}")
+        if run.source_commit:
+            console.print(f"  Source Commit: {run.source_commit}")
         console.print(f"  Created: [dim]{formatted['created_at']}[/dim]")
         if run.started_at:
             console.print(f"  Started: [dim]{run.started_at.strftime('%Y-%m-%d %H:%M')}[/dim]")
@@ -2258,10 +2669,53 @@ def stop_run(
         api_client = APIClient()
         rl_client = RLClient(api_client)
 
-        run = rl_client.stop_run(run_id)
+        with console.status("[bold blue]Stopping run...", spinner="dots"):
+            run = rl_client.stop_run(run_id)
 
-        console.print(f"[green]✓ Run {run_id} stopped successfully[/green]")
-        console.print(f"Status: {run.status}")
+            # Monotonic deadline (not an attempt counter) so a slow or
+            # stalled get_run call can't push the total wait past the
+            # advertised cap - the per-request timeout below is capped to
+            # whatever's left on the deadline too.
+            stop_budget_seconds = HOSTED_TRAINING_STOP_MAX_POLLS * HOSTED_TRAINING_STOP_POLL_SECONDS
+            deadline = time.monotonic() + stop_budget_seconds
+            while run.status.upper() not in TERMINAL_RUN_STATUSES:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(HOSTED_TRAINING_STOP_POLL_SECONDS, remaining))
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                try:
+                    run = rl_client.get_run(run_id, timeout=max(1, int(remaining)))
+                except APIError:
+                    # The stop itself already succeeded (rl_client.stop_run
+                    # returned above) - a timeout, transient connection
+                    # failure, or 5xx on a *follow-up status poll* is
+                    # inconclusive about the stop, not a failed stop. Fall
+                    # through to the same give-up messaging as running out
+                    # of poll budget, instead of a hard error.
+                    break
+
+        status_upper = run.status.upper()
+        if status_upper not in TERMINAL_RUN_STATUSES:
+            console.print(
+                f"[yellow]Run {run_id} did not reach a terminal state after "
+                f"{stop_budget_seconds:.0f}s - it's still being torn down in the "
+                f"background.[/yellow]"
+            )
+            console.print(f"Check status with: prime train get {run_id}")
+            raise typer.Exit(0)
+
+        color = _get_status_color(run.status)
+        if status_upper == "STOPPED":
+            console.print(f"[green]✓ Run {run_id} stopped successfully[/green]")
+        else:
+            console.print(
+                f"[yellow]Run {run_id} reached a terminal state before the stop "
+                f"completed - it was not actively stopped.[/yellow]"
+            )
+        console.print(f"Status: [{color}]{run.status}[/{color}]")
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
@@ -2458,6 +2912,15 @@ def _handle_logs_api_error(e: APIError) -> None:
     raise typer.Exit(1)
 
 
+# API ceilings for /rft/runs/{run_id}/logs: the search backend caps each
+# query at 5000 entries and the lookback window at 24h. Plain,
+# unfiltered orchestrator fetches are served from a 200-line snapshot;
+# --all / --since / --search / --level route through the search backend,
+# which honours --tail up to 5000.
+_MAX_LOG_TAIL_LINES = 5_000
+_MAX_LOG_WINDOW_SECONDS = 86_400
+_DEFAULT_LOG_TAIL_LINES = 1_000
+
 _SINCE_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86_400}
 
 
@@ -2486,6 +2949,38 @@ def _parse_since(since: Optional[str]) -> Optional[int]:
             param_hint="--since",
         )
     return seconds
+
+
+def _resolve_log_query(
+    tail: Optional[int], since: Optional[str], all_logs: bool
+) -> tuple[int, Optional[int]]:
+    """Resolve --tail / --since / --all into (tail_lines, since_seconds).
+
+    ``--all`` is shorthand for the API maxima: 5000 lines over the last
+    24h. Without it, --tail defaults to 1000 and is capped at the API
+    maximum with a clear error instead of a silent truncation.
+    """
+    if all_logs:
+        if tail is not None:
+            raise typer.BadParameter(
+                "--all already fetches the API maximum "
+                f"({_MAX_LOG_TAIL_LINES} lines); drop --tail.",
+                param_hint="--tail",
+            )
+        if since is not None:
+            raise typer.BadParameter(
+                "--all already uses the widest window (24h); drop --since.",
+                param_hint="--since",
+            )
+        return _MAX_LOG_TAIL_LINES, _MAX_LOG_WINDOW_SECONDS
+    if tail is None:
+        tail = _DEFAULT_LOG_TAIL_LINES
+    elif not 1 <= tail <= _MAX_LOG_TAIL_LINES:
+        raise typer.BadParameter(
+            f"--tail must be between 1 and {_MAX_LOG_TAIL_LINES} (API hard cap).",
+            param_hint="--tail",
+        )
+    return tail, _parse_since(since)
 
 
 def _parse_env_qualifier_with_index(env: str) -> tuple[str, int, bool]:
@@ -2518,7 +3013,25 @@ def get_logs(
             "List with 'prime train components <run_id>'."
         ),
     ),
-    tail: int = typer.Option(1000, "--tail", "-n", help="Number of lines to show"),
+    tail: Optional[int] = typer.Option(
+        None,
+        "--tail",
+        "-n",
+        help=(
+            f"Number of lines to show (default {_DEFAULT_LOG_TAIL_LINES}, "
+            f"max {_MAX_LOG_TAIL_LINES})"
+        ),
+    ),
+    all_logs: bool = typer.Option(
+        False,
+        "--all",
+        help=(
+            "Fetch everything the API serves: the last 24h, up to "
+            f"{_MAX_LOG_TAIL_LINES} lines. Shorthand for "
+            f"--tail {_MAX_LOG_TAIL_LINES} --since 24h. "
+            "Mutually exclusive with --tail and --since."
+        ),
+    ),
     follow: bool = typer.Option(False, "--follow", "-f", help="Follow log output"),
     raw: bool = typer.Option(False, "--raw", "-r", help="Show raw logs without formatting"),
     search: Optional[str] = typer.Option(
@@ -2543,9 +3056,9 @@ def get_logs(
         None,
         "--since",
         help=(
-            "Time window for filtered queries. Accepts e.g. '15m', '1h', '6h', "
-            "'24h', or a raw integer seconds value. Default 15m. "
-            "Applies when --search or --level is set."
+            "How far back to look. Accepts e.g. '15m', '1h', '6h', "
+            "'24h', or a raw integer seconds value (60-86400). "
+            "Default 15m."
         ),
     ),
 ) -> None:
@@ -2559,9 +3072,16 @@ def get_logs(
     List available pods first with ``prime train components <run_id>``.
 
     Per-rank narrowing on multi-replica trainer/inference is not yet
-    surfaced here — `--local-ranks-filter=0` in the chart's torchrun
-    invocation already dedupes the in-pod rank fan-out, and per-pod
-    inspection on multi-node runs requires kubectl + the PVC log files.
+    surfaced here: the chart's default torchrun passes
+    `--local-ranks-filter=0` (ENG-6449), so each node's logs collapse to
+    its local rank 0, but a multi-node run still merges one line per
+    node. Per-node inspection needs kubectl + the PVC log files.
+
+    The API imposes hard ceilings: at most 5000 lines per request and a
+    24h lookback window. Plain, unfiltered fetches are served from a
+    200-line window; ``--all`` / ``--since`` / ``--search`` / ``--level``
+    route through the search backend, which honours ``--tail`` up to
+    5000 lines.
 
     Examples:
 
@@ -2570,6 +3090,7 @@ def get_logs(
         prime train logs <run_id> --search Backpressure
         prime train logs <run_id> --level ERROR --since 1h
         prime train logs <run_id> --search 'Step \\d+' --regex
+        prime train logs <run_id> --all
         prime train logs <run_id> -c trainer
         prime train logs <run_id> -c inference
         prime train logs <run_id> --env reverse-text
@@ -2610,7 +3131,7 @@ def get_logs(
             param_hint="--regex",
         )
 
-    since_seconds = _parse_since(since)
+    tail, since_seconds = _resolve_log_query(tail, since, all_logs)
 
     try:
         api_client = APIClient()
@@ -2711,7 +3232,11 @@ def get_logs(
 def list_components(
     run_id: str = typer.Argument(..., help="Run ID to list components for"),
 ) -> None:
-    """List pods (orchestrator + env-servers) for a run.
+    """List pods (trainer/orchestrator + env-servers) for a run.
+
+    RL runs list the orchestrator; SFT runs list the trainer, since the
+    release has no orchestrator pod. An SFT run WITH online evals lists the
+    eval pod (shown as ``orchestrator``) and its inference pool too.
 
     Use the env name shown here with
     ``prime train logs <run_id> -c env-server --env <name>``. When multiple
@@ -2736,7 +3261,23 @@ def list_components(
     table.add_column("Env", style="green")
     table.add_column("Status")
 
-    table.add_row("orchestrator", "-", run.status)
+    # SFT runs are trainer-only — the release has no orchestrator pod —
+    # UNLESS they carry online evals (ENG-6565), which add an inference pool
+    # and an eval pod that the chart renders under the `orchestrator` role.
+    # Mirrors the platform's dedicated_primary_component choice, plus the
+    # same `[eval]` probe the dashboard's log tabs use.
+    is_sft = run.loss == "sft"
+    run_config = run.run_config if isinstance(run.run_config, dict) else {}
+    sft_online_eval = is_sft and isinstance(run_config.get("eval"), dict)
+
+    # Only the primary carries the run's status; the platform exposes no
+    # per-pod status for the others, so they show "-" like env-servers.
+    table.add_row("trainer" if is_sft else "orchestrator", "-", run.status)
+    if sft_online_eval:
+        # Readable with `-c orchestrator` / `-c inference`; without these rows
+        # the eval pod and its inference pool are invisible from the CLI.
+        table.add_row("orchestrator", "-", "-")
+        table.add_row("inference", "-", "-")
 
     name_counts: Dict[str, int] = {}
     for es in env_servers:
@@ -2748,7 +3289,9 @@ def list_components(
             env_label = f"{es.env_name}/{es.env_index}"
         else:
             env_label = es.env_name or "?"
-        table.add_row("env-server", env_label, es.status)
+        # Dedicated env-servers are discovered from Loki, which has no
+        # pod status — show "-" instead of an empty cell.
+        table.add_row("env-server", env_label, es.status or "-")
 
     console.print(table)
     if env_servers:
@@ -2796,6 +3339,7 @@ def init_config(
     path.write_text(template)
 
     console.print(f"[green]✓[/green] Created {output_path}")
+    console.print(f"[yellow]Warning:[/yellow] {LEGACY_TRAINING_NOTICE}")
     console.print(f"\n[dim]Run with:[/dim] prime train {output_path}")
 
 

@@ -4,7 +4,9 @@ from datetime import datetime
 from enum import Enum
 from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, model_validator
+
+from .image_references import is_docker_hub_reference
 
 
 class SandboxStatus(str, Enum):
@@ -113,6 +115,17 @@ class EgressPolicyStatus(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class SSHSession(BaseModel):
+    """Ephemeral SSH access to a VM sandbox."""
+
+    session_id: str
+    sandbox_id: str
+    host: str
+    port: int
+    expires_at: datetime
+    ttl_seconds: int
+
+
 class AdvancedConfigs(BaseModel):
     """Advanced configuration options for sandbox"""
 
@@ -121,13 +134,30 @@ class AdvancedConfigs(BaseModel):
     model_config = ConfigDict(extra="allow")
 
 
+class StartCommand(BaseModel):
+    """A process to start without invoking a shell."""
+
+    executable: str = Field(min_length=1)
+    args: List[str] = Field(default_factory=list)
+
+    model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="after")
+    def validate_no_nul_bytes(self) -> "StartCommand":
+        if "\x00" in self.executable:
+            raise ValueError("executable must not contain NUL bytes")
+        if any("\x00" in arg for arg in self.args):
+            raise ValueError("args must not contain NUL bytes")
+        return self
+
+
 class Sandbox(BaseModel):
     """Sandbox model"""
 
     id: str
     name: str
     docker_image: str = Field(..., alias="dockerImage")
-    start_command: Optional[str] = Field(None, alias="startCommand")
+    start_command: Optional[StartCommand] = Field(None, alias="startCommand")
     cpu_cores: float = Field(..., alias="cpuCores")
     memory_gb: float = Field(..., alias="memoryGB")
     disk_size_gb: float = Field(..., alias="diskSizeGB")
@@ -154,9 +184,7 @@ class Sandbox(BaseModel):
     error_message: Optional[str] = Field(None, alias="errorMessage")
     user_id: Optional[str] = Field(None, alias="userId")
     team_id: Optional[str] = Field(None, alias="teamId")
-    kubernetes_job_id: Optional[str] = Field(None, alias="kubernetesJobId")
     region: Optional[str] = None
-    registry_credentials_id: Optional[str] = Field(default=None, alias="registryCredentialsId")
     pending_image_build_id: Optional[str] = Field(default=None, alias="pendingImageBuildId")
 
     model_config = ConfigDict(populate_by_name=True)
@@ -174,18 +202,90 @@ class SandboxListResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class SandboxCheckpoint(BaseModel):
+    """A filesystem checkpoint; only DURABLE checkpoints can be restored."""
+
+    id: str
+    sandbox_id: str
+    parent_id: Optional[str] = None
+    team_id: Optional[str] = None
+    state: str
+    depth: int
+    docker_image: str
+    disk_size_bytes: Optional[int] = None
+    stored_bytes: Optional[int] = None
+    error: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class CheckpointLookupError(BaseModel):
+    """A missing or inaccessible checkpoint in a batch lookup."""
+
+    checkpoint_id: str
+    code: Literal["NOT_FOUND"]
+    message: str
+
+
+class BatchCheckpointResponse(BaseModel):
+    """Checkpoints and per-ID errors from a cross-sandbox lookup."""
+
+    checkpoints: List[SandboxCheckpoint]
+    errors: List[CheckpointLookupError]
+
+
+class CheckpointDeleteError(BaseModel):
+    """A checkpoint that a sandbox-wide delete could not delete."""
+
+    checkpoint_id: str
+    code: Literal["NOT_FOUND", "CONFLICT"]
+    message: str
+
+
+class DeleteSandboxCheckpointsResponse(BaseModel):
+    """Deleted checkpoint IDs and per-checkpoint errors for one sandbox."""
+
+    deleted: List[str]
+    errors: List[CheckpointDeleteError]
+
+
+class SandboxStatusSnapshot(BaseModel):
+    """Lightweight sandbox lifecycle state returned by a batch status lookup."""
+
+    sandbox_id: str
+    status: SandboxStatus
+    error_type: Optional[str] = None
+    error_message: Optional[str] = None
+    pending_image_build_id: Optional[str] = None
+
+
+class SandboxStatusLookupError(BaseModel):
+    """Per-sandbox error returned by a batch status lookup."""
+
+    sandbox_id: str
+    code: Literal["NOT_FOUND", "FORBIDDEN", "MANAGED"]
+    message: str
+
+
+class BatchSandboxStatusResponse(BaseModel):
+    """Ordered results from a batch sandbox lifecycle status lookup."""
+
+    statuses: List[SandboxStatusSnapshot]
+    errors: List[SandboxStatusLookupError]
+
+
 class CreateSandboxRequest(BaseModel):
     """Create sandbox request model"""
 
     name: str
-    docker_image: str
-    start_command: Optional[str] = "tail -f /dev/null"
+    docker_image: Optional[str] = None
+    checkpoint_id: Optional[str] = Field(None, min_length=1, max_length=64)
+    start_command: Optional[StartCommand] = None
     cpu_cores: float = 1.0
     memory_gb: float = 1.0
-    disk_size_gb: float = 5.0
+    disk_size_gb: Optional[float] = None
     gpu_count: int = 0
     gpu_type: Optional[str] = None
-    vm: bool = False
     network_allowlist: Optional[List[str]] = None
     network_denylist: Optional[List[str]] = None
     timeout_minutes: int = 60
@@ -196,35 +296,30 @@ class CreateSandboxRequest(BaseModel):
     team_id: Optional[str] = None
     region: Optional[str] = None
     advanced_configs: Optional[AdvancedConfigs] = None
-    registry_credentials_id: Optional[str] = None
-    guaranteed: bool = False
     idempotency_key: Optional[str] = None
+
+    @model_validator(mode="after")
+    def validate_restore_source(self) -> "CreateSandboxRequest":
+        if self.checkpoint_id:
+            if self.docker_image or self.disk_size_gb is not None:
+                raise ValueError("omit docker_image and disk_size_gb when restoring a checkpoint")
+        else:
+            if not self.docker_image:
+                raise ValueError("docker_image is required unless checkpoint_id is set")
+            if self.disk_size_gb is None:
+                self.disk_size_gb = 5.0
+        return self
 
     @model_validator(mode="after")
     def validate_gpu_fields(self) -> "CreateSandboxRequest":
         if self.gpu_count > 0 and not self.gpu_type:
             raise ValueError("gpu_type is required when gpu_count is greater than 0")
-        if self.gpu_count > 0 and not self.vm:
-            raise ValueError("gpu_count is only supported when vm is true")
         if self.gpu_count == 0 and self.gpu_type is not None:
             raise ValueError("gpu_type requires gpu_count greater than 0")
         return self
 
     @model_validator(mode="after")
-    def validate_guaranteed(self) -> "CreateSandboxRequest":
-        if self.guaranteed and self.vm:
-            raise ValueError("guaranteed is not supported for VM sandboxes")
-        return self
-
-    @model_validator(mode="after")
     def validate_network_lists(self) -> "CreateSandboxRequest":
-        if not self.vm and (
-            self.network_allowlist is not None or self.network_denylist is not None
-        ):
-            raise ValueError(
-                "network_allowlist and network_denylist are only supported for "
-                "VM sandboxes (vm=True)"
-            )
         validate_egress_lists(self.network_allowlist, self.network_denylist)
         return self
 
@@ -240,50 +335,6 @@ class CreateSandboxRequest(BaseModel):
                 f"(got idle={self.idle_timeout_minutes}, lifetime={self.timeout_minutes})"
             )
         return self
-
-
-class UpdateSandboxRequest(BaseModel):
-    """Update sandbox request model"""
-
-    name: Optional[str] = None
-    docker_image: Optional[str] = None
-    start_command: Optional[str] = None
-    cpu_cores: Optional[float] = None
-    memory_gb: Optional[float] = None
-    disk_size_gb: Optional[float] = None
-    gpu_count: Optional[int] = None
-    gpu_type: Optional[str] = None
-    timeout_minutes: Optional[int] = None
-    idle_timeout_minutes: Optional[int] = None
-    environment_vars: Optional[Dict[str, str]] = None
-    registry_credentials_id: Optional[str] = None
-    secrets: Optional[Dict[str, str]] = None
-
-    @model_validator(mode="after")
-    def validate_idle_timeout(self) -> "UpdateSandboxRequest":
-        if self.idle_timeout_minutes is None:
-            return self
-        if self.idle_timeout_minutes < 1:
-            raise ValueError("idle_timeout_minutes must be >= 1")
-        if (
-            self.timeout_minutes is not None
-            and self.timeout_minutes > 0
-            and self.idle_timeout_minutes > self.timeout_minutes
-        ):
-            raise ValueError(
-                "idle_timeout_minutes must be <= timeout_minutes "
-                f"(got idle={self.idle_timeout_minutes}, lifetime={self.timeout_minutes})"
-            )
-        return self
-
-
-class CommandRequest(BaseModel):
-    """Execute command request model"""
-
-    command: str
-    working_dir: Optional[str] = None
-    env: Optional[Dict[str, str]] = None
-    user: Optional[str] = None
 
 
 class CommandResponse(BaseModel):
@@ -338,31 +389,82 @@ class BulkDeleteSandboxResponse(BaseModel):
     message: str
 
 
-class RegistryCredentialSummary(BaseModel):
-    """Summary of registry credential data (no secrets)."""
-
-    id: str
-    name: str
-    server: str
-    created_at: datetime = Field(..., alias="createdAt")
-    updated_at: datetime = Field(..., alias="updatedAt")
-    user_id: Optional[str] = Field(default=None, alias="userId")
-    team_id: Optional[str] = Field(default=None, alias="teamId")
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class DockerImageCheckResponse(BaseModel):
-    accessible: bool
-    details: str
-
-
 class ImageVisibility(str, Enum):
     PRIVATE = "PRIVATE"
     PUBLIC = "PUBLIC"
 
 
+class ImageBuildStatus(str, Enum):
+    """Status of an image artifact build."""
+
+    PENDING = "PENDING"
+    UPLOADING = "UPLOADING"
+    BUILDING = "BUILDING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+
+
+class ImageArtifactType(str, Enum):
+    """Artifact produced for an image."""
+
+    VM_SANDBOX = "VM_SANDBOX"
+
+
+class ImageOwnerType(str, Enum):
+    """Scope that owns an image."""
+
+    PERSONAL = "personal"
+    TEAM = "team"
+    PLATFORM = "platform"
+
+
+class ImageListItem(BaseModel):
+    """One artifact row returned by the image-list endpoint."""
+
+    id: str
+    artifact_type: ImageArtifactType = Field(..., alias="artifactType")
+    image_name: str = Field(..., alias="imageName")
+    image_tag: str = Field(..., alias="imageTag")
+    status: ImageBuildStatus
+    full_image_path: Optional[str] = Field(default=None, alias="fullImagePath")
+    error_message: Optional[str] = Field(default=None, alias="errorMessage")
+    size_bytes: Optional[int] = Field(default=None, alias="sizeBytes")
+    visibility: ImageVisibility = ImageVisibility.PRIVATE
+    created_at: datetime = Field(..., alias="createdAt")
+    started_at: Optional[datetime] = Field(default=None, alias="startedAt")
+    completed_at: Optional[datetime] = Field(default=None, alias="completedAt")
+    pushed_at: Optional[datetime] = Field(default=None, alias="pushedAt")
+    team_id: Optional[str] = Field(default=None, alias="teamId")
+    owner_type: ImageOwnerType = Field(default=ImageOwnerType.PERSONAL, alias="ownerType")
+    display_ref: Optional[str] = Field(default=None, alias="displayRef")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class ImageListResponse(BaseModel):
+    """A logical-image page and its artifact rows.
+
+    When present, ``total_count`` counts logical images. ``data`` can contain
+    more rows than ``limit`` when a logical image has multiple artifact types.
+    """
+
+    data: List[ImageListItem]
+    total_count: Optional[int] = Field(default=None, alias="totalCount")
+    offset: int
+    limit: int
+    status: Optional[str] = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class BuildImageRequest(BaseModel):
+    """Request a linux/amd64 Dockerfile or public-registry source build.
+
+    Docker Hub sources become public, org-less platform images automatically.
+    They cannot use a custom destination, team, or private visibility.
+    """
+
     image_name: Optional[str] = None
     image_tag: Optional[str] = None
     dockerfile_path: str = "Dockerfile"
@@ -374,13 +476,36 @@ class BuildImageRequest(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
+    @model_validator(mode="after")
+    def validate_build(self) -> "BuildImageRequest":
+        if self.platform != "linux/amd64":
+            raise ValueError("platform must be linux/amd64")
+
+        sources = [source.strip() for source in (self.source_image or "").split(",")]
+        docker_hub_sources = [
+            source for source in sources if source and is_docker_hub_reference(source)
+        ]
+        if not docker_hub_sources:
+            return self
+
+        if self.image_name is not None or self.image_tag is not None:
+            raise ValueError("Docker Hub source builds do not accept a custom destination")
+        if self.team_id is not None:
+            raise ValueError("Docker Hub source builds do not accept team_id")
+        if self.visibility == ImageVisibility.PRIVATE:
+            raise ValueError("Docker Hub source builds must be public")
+        if len(docker_hub_sources) != len([source for source in sources if source]):
+            raise ValueError("Docker Hub and non-Docker Hub sources cannot share one request")
+
+        self.visibility = ImageVisibility.PUBLIC
+        self.owner_scope = "platform"
+        return self
+
 
 class BuildImageResponse(BaseModel):
-    build_id: str = Field(
-        ...,
-        alias="build_id",
-        validation_alias=AliasChoices("build_id", "buildId"),
-    )
+    # Server quirk: build_id/upload_url/expires_in stay snake_case on the wire;
+    # buildIds/fullImagePath use camelCase.
+    build_id: str
     build_ids: List[str] = Field(default_factory=list, alias="buildIds")
     upload_url: Optional[str] = None
     expires_in: Optional[int] = None
@@ -389,28 +514,30 @@ class BuildImageResponse(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
+    @model_validator(mode="after")
+    def require_dockerfile_upload(self, info: ValidationInfo) -> "BuildImageResponse":
+        """Require upload metadata when the caller identifies a Dockerfile build."""
+        if info.context and info.context.get("requires_upload"):
+            if not self.upload_url or self.expires_in is None:
+                raise ValueError("Dockerfile build response requires upload_url and expires_in")
+        return self
 
-class TransferImageResult(BaseModel):
-    """Per-source result returned by bulk image transfer requests."""
+
+class SourceImageBuildResult(BaseModel):
+    """Build result or error for one requested source image."""
 
     source_image: str = Field(..., alias="sourceImage")
-    success: bool
-    build_id: Optional[str] = Field(default=None, alias="buildId")
-    full_image_path: Optional[str] = Field(default=None, alias="fullImagePath")
-    visibility: Optional[ImageVisibility] = None
+    build: Optional[BuildImageResponse] = None
     error: Optional[str] = None
     retryable: bool = False
 
     model_config = ConfigDict(populate_by_name=True)
 
 
-class BulkImageTransferResponse(BaseModel):
-    """Response returned for comma-separated image transfer requests."""
+class BulkBuildImageResponse(BaseModel):
+    """Ordered, best-effort results for comma-separated source images."""
 
-    results: List[TransferImageResult] = Field(default_factory=list)
-    failed: List[TransferImageResult] = Field(default_factory=list)
-
-    model_config = ConfigDict(populate_by_name=True)
+    results: List[SourceImageBuildResult]
 
 
 MAX_IMAGE_UPDATES = 100
@@ -569,52 +696,6 @@ class UpdateImagesResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
-class ExposePortRequest(BaseModel):
-    """Request to expose a port"""
-
-    port: int
-    name: Optional[str] = None
-    protocol: str = "HTTP"  # HTTP or TCP
-
-
-class ExposedPort(BaseModel):
-    """Information about an exposed port"""
-
-    exposure_id: str
-    sandbox_id: str
-    port: int
-    name: Optional[str]
-    url: str
-    tls_socket: str
-    protocol: Optional[str] = None
-    external_port: Optional[int] = None  # For TCP exposures
-    external_endpoint: Optional[str] = None  # For TCP: host:port endpoint
-    created_at: Optional[str] = None
-
-
-class ListExposedPortsResponse(BaseModel):
-    """Response for listing exposed ports"""
-
-    exposures: List[ExposedPort]
-
-
-class SSHSession(BaseModel):
-    """SSH session details"""
-
-    session_id: str
-    exposure_id: str
-    sandbox_id: str
-    host: str
-    port: int
-    external_endpoint: str
-    expires_at: datetime
-    ttl_seconds: int
-    gateway_url: str
-    user_ns: str
-    job_id: str
-    token: str
-
-
 class BackgroundJob(BaseModel):
     """Background job handle returned when starting a background job"""
 
@@ -633,5 +714,39 @@ class BackgroundJobStatus(BaseModel):
     exit_code: Optional[int] = None
     stdout: Optional[str] = None
     stderr: Optional[str] = None
+    stdout_error: Optional[str] = None
+    stderr_error: Optional[str] = None
     stdout_truncated: bool = False
     stderr_truncated: bool = False
+
+
+class BackgroundJobStatusSnapshot(BaseModel):
+    """Completion state returned by a platform VM background-job lookup."""
+
+    sandbox_id: str
+    job_id: str
+    completed: bool
+    exit_code: Optional[int] = None
+
+
+class BackgroundJobStatusLookupError(BaseModel):
+    """Per-job error returned by a platform VM background-job lookup."""
+
+    sandbox_id: str
+    job_id: str
+    code: Literal[
+        "NOT_FOUND",
+        "FORBIDDEN",
+        "MANAGED",
+        "NOT_VM",
+        "NOT_RUNNING",
+        "RUNTIME_ERROR",
+    ]
+    message: str
+
+
+class BatchBackgroundJobStatusResponse(BaseModel):
+    """Ordered results from a platform VM background-job lookup."""
+
+    statuses: List[BackgroundJobStatusSnapshot]
+    errors: List[BackgroundJobStatusLookupError]

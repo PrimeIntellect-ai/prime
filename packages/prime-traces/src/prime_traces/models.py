@@ -1,0 +1,351 @@
+"""Pydantic models for the Prime Traces API.
+
+Shapes mirror the service's response models (``prime-traces/src/traces/models.py``
+and ``src/episodes/models.py`` in the platform repo), including their
+required/nullable split: a field the service always sends is required here —
+so contract drift fails loudly in tests instead of propagating ``None`` — and
+a field the service sends as ``null`` for "not recorded" is ``Optional``.
+``extra="allow"`` covers the one documented evolution path, additive growth:
+new summary columns must not break an older SDK.
+"""
+
+from datetime import datetime
+from enum import Enum
+from typing import Any, Dict, List, Literal, Optional
+
+from pydantic import BaseModel, ConfigDict
+
+SearchField = Literal["content", "reasoning_content", "tool_calls"]
+
+
+class TraceSearchMatch(BaseModel):
+    """First match; zero-based Unicode code-point offsets, end exclusive."""
+
+    model_config = ConfigDict(extra="allow")
+
+    trace_id: str
+    upload_id: str
+    generation: int
+    episode_id: Optional[str]
+    node_idx: int
+    role: str
+    field: SearchField
+    representation: Literal["text", "json"]
+    match_start: int
+    match_end: int
+    excerpt: str
+    excerpt_start: int
+
+
+class TraceSearchCoverage(BaseModel):
+    """What the search could not see when it started."""
+
+    model_config = ConfigDict(extra="allow")
+
+    examined_traces: int
+    # A sample of at most 256 traces whose current copy is not indexed yet.
+    unindexed_trace_ids: List[str]
+    # A searched trace reached the node indexing cap; its later nodes are excluded.
+    partial_index: bool
+
+
+class TraceSearchPage(BaseModel):
+    """Search page; coverage is reported on the first page only.
+
+    A first page with ``coverage=None`` means coverage is unknown, not complete.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    items: List[TraceSearchMatch]
+    next_cursor: Optional[str]
+    coverage: Optional[TraceSearchCoverage] = None
+
+
+class LineFormat(str, Enum):
+    """Declared shape of each JSONL line in an upload request."""
+
+    TRACE = "trace"  # default; the header is omitted on the wire
+    EPISODE = "episode"  # X-Prime-Line-Format: episode
+
+
+class ErrorCode(str, Enum):
+    """Error codes returned by the service.
+
+    Kept in lockstep with the service's ``ErrorCode``
+    (``prime-traces/src/errors.py`` in the platform repo).
+    Producers branch on the rejection codes — correct the file and
+    resubmit, retry unchanged, or stop; 429/503 codes are retryable, as are
+    codeless gateway 502/504 responses.
+    """
+
+    # Upload rejections (400): nothing stored. Validation is deterministic, so
+    # resubmitting the same bytes yields the same verdict; corrected content
+    # hashes to a new upload ID.
+    UPLOAD_TOO_LARGE = "upload_too_large"
+    TRACE_TOO_LARGE = "trace_too_large"
+    TOO_MANY_TRACES_IN_EPISODE = "too_many_traces_in_episode"
+    # Every nested trace carries a copy of its episode's ID, so the service
+    # caps the ID's length rather than letting one legal line replay it
+    # hundreds of times against the row-staging budget.
+    EPISODE_ID_TOO_LONG = "episode_id_too_long"
+    ENVIRONMENT_ID_TOO_LONG = "environment_id_too_long"
+    # Distinct from `upload_too_large`, which is about bytes: the service also
+    # caps rows per upload, because staging is charged per row and millions of
+    # tiny lines fit every byte cap.
+    TOO_MANY_TRACES_IN_UPLOAD = "too_many_traces_in_upload"
+    DUPLICATE_TRACE_ID = "duplicate_trace_id"
+    DUPLICATE_EPISODE_ID = "duplicate_episode_id"
+    DIGEST_MISMATCH = "digest_mismatch"
+    LINE_FORMAT_MISMATCH = "line_format_mismatch"
+    MALFORMED_ENCODING = "malformed_encoding"
+    INVALID_TRACE = "invalid_trace"
+    # The `metadata` part itself: absent, duplicated, oversized, or the wrong
+    # shape. Separate from `invalid_trace` because the producer fixes its
+    # uploader, not its trace file.
+    INVALID_METADATA = "invalid_metadata"
+    CREATED_AT_OUT_OF_WINDOW = "created_at_out_of_window"
+    UNSUPPORTED_SCHEMA_VERSION = "unsupported_schema_version"
+    UNKNOWN_EPISODE_REFERENCE = "unknown_episode_reference"
+    # 409 — the one header not covered by the content digest
+    LINE_FORMAT_CONFLICT = "line_format_conflict"
+
+    # Malformed requests (400)
+    INVALID_IDEMPOTENCY_KEY = "invalid_idempotency_key"
+    INVALID_CURSOR = "invalid_cursor"
+    INVALID_FILTER = "invalid_filter"
+
+    # Auth (401/403/503)
+    UNAUTHENTICATED = "unauthenticated"
+    FORBIDDEN = "forbidden"
+    # Distinct from `forbidden`, which is about the token: Prime Traces is
+    # turned off for this account. The two need different codes because they
+    # need different actions — mint a token with the right scope, versus turn
+    # Prime Traces back on for the account. Neither is fixed by retrying.
+    SERVICE_NOT_ENABLED = "service_not_enabled"
+    AUTH_UNAVAILABLE = "auth_unavailable"
+
+    # Not found (404)
+    TRACE_NOT_FOUND = "trace_not_found"
+    # 409, and distinct from `trace_not_found`: the trace exists, but its
+    # node/call index is still being built or is being rebuilt after a
+    # re-upload. Retry later, or read the raw document instead.
+    TRACE_NOT_INDEXED = "trace_not_indexed"
+    # A run holding no traces for this owner. The store records no run entity,
+    # so "no such run" and "run already emptied" are the same observation.
+    RUN_NOT_FOUND = "run_not_found"
+    EPISODE_NOT_FOUND = "episode_not_found"
+    EXPORT_JOB_NOT_FOUND = "export_job_not_found"
+
+    # Retryable (429/503) and service state
+    RATE_LIMITED = "rate_limited"
+    WRITER_POOL_SATURATED = "writer_pool_saturated"
+    INGEST_CAPACITY_EXCEEDED = "ingest_capacity_exceeded"
+    INGEST_UNAVAILABLE = "ingest_unavailable"
+    STORAGE_UNAVAILABLE = "storage_unavailable"
+
+
+class UploadReceipt(BaseModel):
+    """Acknowledgment for one committed upload request.
+
+    ``status == "committed"`` means every line in the request is durably
+    stored — there is no partial success to interpret.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    # The upload ID *is* the content digest (64 lowercase hex, no prefix), so
+    # the service does not restate it in a separate field.
+    upload_id: str
+    status: str
+
+
+class ModelInfo(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    provider: Optional[str]
+    id: Optional[str]
+
+
+class Score(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    # None means unscored, which is distinct from a scored 0.0.
+    reward: Optional[float]
+    outcome: Optional[str]
+
+
+class Execution(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    has_error: bool
+    is_truncated: bool
+
+
+class TraceSummary(BaseModel):
+    """The extracted column set for one trace — deliberately nothing more.
+
+    Node/call counts, per-phase timing, and the token input/output split are
+    absent because the v0 extractor does not write them; fetch the raw
+    document for those. ``total_tokens`` is the one extracted usage figure
+    (it counts re-sent context once, so it is not the sum of per-call usage).
+
+    Every field is present on every service response; the ``Optional`` ones
+    are those the service nulls for "not recorded".
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    trace_id: str
+    upload_id: str
+    episode_id: Optional[str]
+    created_at: datetime
+    ingested_at: datetime
+    run_id: Optional[str]
+    environment_id: Optional[str]
+    model: ModelInfo
+    task_id: Optional[str]
+    agent_name: Optional[str]
+    score: Score
+    execution: Execution
+    duration_ms: int
+    total_tokens: int
+    size_bytes: int
+    context: Dict[str, str]
+
+
+class EpisodeError(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    type: Optional[str]
+    message: Optional[str]
+
+
+class EpisodeSummary(BaseModel):
+    """One episode's extracted columns and episode-owned fields.
+
+    ``has_error`` and ``error`` are the episode row's own — an
+    environment-hook failure with every member trace green lives here, not in
+    the member-trace aggregate.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    episode_id: str
+    upload_id: str
+    schema_version: int
+    created_at: datetime
+    ingested_at: datetime
+    run_id: Optional[str]
+    environment_id: Optional[str]
+    outcome: Optional[str]
+    has_error: bool
+    error: EpisodeError
+
+
+class EpisodeTraceAggregate(BaseModel):
+    """Read-time rollup over deduplicated member traces.
+
+    A zero-trace episode is a legitimate terminal state (a failure before any
+    trace was minted still leaves its errors on the episode), so an empty
+    aggregate is not an error.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    trace_count: int
+    total_tokens: int
+    total_duration_ms: int
+    any_trace_error: bool
+    agent_names: List[str]
+
+
+class EpisodeDetail(EpisodeSummary):
+    """Point-lookup response: the summary plus the member-trace aggregate."""
+
+    traces: EpisodeTraceAggregate
+
+
+class TraceListPage(BaseModel):
+    """One page of trace summaries. ``next_cursor`` is opaque and only valid
+    with the exact filters that produced it; ``None`` marks the last page."""
+
+    model_config = ConfigDict(extra="allow")
+
+    items: List[TraceSummary]
+    next_cursor: Optional[str]
+
+
+class EpisodeListPage(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    items: List[EpisodeSummary]
+    next_cursor: Optional[str]
+
+
+class NodeMessage(BaseModel):
+    """One node's message as the producer wrote it.
+
+    ``content`` and ``tool_calls`` are whatever JSON the producer stored (a
+    string, a list of content parts, ...); the index never interprets them.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    role: Optional[str]
+    content: Any = None
+    reasoning_content: Optional[str] = None
+    tool_calls: Any = None
+    tool_call_id: Optional[str] = None
+    name: Optional[str] = None
+    tool_name: Optional[str] = None
+
+
+class TraceNode(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    node_idx: int
+    parent_idx: Optional[int]
+    timestamp: Optional[float]
+    sampled: bool
+    message: NodeMessage
+
+
+class TraceNodePage(BaseModel):
+    """One page of message nodes in step order.
+
+    ``partial_index`` is true when the trace reached the per-trace indexing
+    cap: pages end at the cap rather than at the document, and the rest is
+    only available from the raw document.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    items: List[TraceNode]
+    next_cursor: Optional[str]
+    partial_index: bool
+
+
+class TraceCall(BaseModel):
+    """One model call. Token usage is not indexed; read the raw document for it."""
+
+    model_config = ConfigDict(extra="allow")
+
+    call_idx: int
+    node_idx: Optional[int]
+    time_start: Optional[float]
+    time_end: Optional[float]
+    model: Optional[str]
+    endpoint: Optional[str]
+    finish_reason: Optional[str]
+
+
+class TraceCallPage(BaseModel):
+    """One page of model calls. Same cursor and ``partial_index`` rules as
+    ``TraceNodePage``."""
+
+    model_config = ConfigDict(extra="allow")
+
+    items: List[TraceCall]
+    next_cursor: Optional[str]
+    partial_index: bool

@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -18,7 +19,9 @@ class Config:
     def __init__(self) -> None:
         self.config_dir = Path.home() / ".prime"
         self.config_file = self.config_dir / "config.json"
+        self.environments_dir = self.config_dir / "environments"
         self._load_config()
+        self._load_context()
 
     def _load_config(self) -> None:
         """Load configuration from file"""
@@ -31,6 +34,37 @@ class Config:
         else:
             self.config = {}
 
+    def _load_context(self) -> None:
+        """Overlay the profile selected by the Prime CLI for this process."""
+        context = os.getenv("PRIME_CONTEXT")
+        if not context:
+            return
+
+        if context.casefold() == "production":
+            self.config.update(
+                {
+                    "base_url": self.DEFAULT_BASE_URL,
+                    "team_id": None,
+                    "team_name": None,
+                    "team_role": None,
+                }
+            )
+            return
+
+        if re.fullmatch(r"[a-zA-Z0-9_-]+", context) is None:
+            raise ValueError(f"Invalid context name: {context!r}")
+
+        environment_file = self.environments_dir / f"{context}.json"
+        if not environment_file.exists():
+            raise ValueError(f"Context file not found: {environment_file}")
+        try:
+            environment_config = json.loads(environment_file.read_text())
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
+            raise ValueError(f"Failed to load context '{context}': {e}") from e
+        if not isinstance(environment_config, dict):
+            raise ValueError(f"Invalid context '{context}': expected a JSON object")
+        self.config.update(environment_config)
+
     @staticmethod
     def _strip_api_v1(url: str) -> str:
         return url.rstrip("/").removesuffix("/api/v1")
@@ -42,10 +76,15 @@ class Config:
 
     @property
     def team_id(self) -> Optional[str]:
-        """Get team ID with precedence: env > file > None."""
+        """Get team ID with precedence: env > file > None.
+
+        An explicitly empty PRIME_TEAM_ID means personal scope: it must not
+        fall back to the file's team, and must never leak onto the wire as
+        ``teamId: ""``.
+        """
         team_id = os.getenv("PRIME_TEAM_ID")
         if team_id is not None:
-            return team_id
+            return team_id or None
         return self.config.get("team_id") or None
 
     @property

@@ -1,5 +1,4 @@
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 import typer
@@ -11,13 +10,13 @@ from prime_cli.commands.evals import (
     _resolve_hosted_environment,
 )
 from prime_cli.main import app
+from prime_cli.utils.eval_environment import ResolvedEnvironment
 from prime_cli.utils.hosted_eval import (
     HostedEvalConfig,
     clean_logs,
     filter_progress_bars,
     strip_ansi,
 )
-from prime_cli.verifiers_bridge import ResolvedEnvironment
 from typer.testing import CliRunner
 
 runner = CliRunner()
@@ -341,7 +340,8 @@ def test_create_hosted_evaluation_adds_team_id_to_payload(monkeypatch):
         def __init__(self):
             self.config = DummyConfig()
 
-        def post(self, endpoint, json=None):
+        def request(self, method, endpoint, params=None, json=None, timeout=None):
+            captured["method"] = method
             captured["endpoint"] = endpoint
             captured["json"] = json
             return {"evaluation_id": "eval-123"}
@@ -375,7 +375,8 @@ def test_create_hosted_evaluation_includes_sampling_args_in_payload(monkeypatch)
         def __init__(self):
             self.config = DummyConfig()
 
-        def post(self, endpoint, json=None):
+        def request(self, method, endpoint, params=None, json=None, timeout=None):
+            captured["method"] = method
             captured["endpoint"] = endpoint
             captured["json"] = json
             return {"evaluation_id": "eval-123"}
@@ -424,7 +425,8 @@ def test_create_hosted_evaluation_includes_extra_env_kwargs_in_payload(monkeypat
         def __init__(self):
             self.config = DummyConfig()
 
-        def post(self, endpoint, json=None):
+        def request(self, method, endpoint, params=None, json=None, timeout=None):
+            captured["method"] = method
             captured["endpoint"] = endpoint
             captured["json"] = json
             return {"evaluation_id": "eval-123"}
@@ -461,7 +463,8 @@ def test_create_hosted_evaluation_includes_hosted_runtime_args_in_payload(monkey
         def __init__(self):
             self.config = DummyConfig()
 
-        def post(self, endpoint, json=None):
+        def request(self, method, endpoint, params=None, json=None, timeout=None):
+            captured["method"] = method
             captured["endpoint"] = endpoint
             captured["json"] = json
             return {"evaluation_id": "eval-123"}
@@ -505,7 +508,8 @@ def test_create_hosted_evaluation_includes_api_base_url_and_key_var_in_payload(m
         def __init__(self):
             self.config = DummyConfig()
 
-        def post(self, endpoint, json=None):
+        def request(self, method, endpoint, params=None, json=None, timeout=None):
+            captured["method"] = method
             captured["endpoint"] = endpoint
             captured["json"] = json
             return {"evaluation_id": "eval-123"}
@@ -538,7 +542,8 @@ def test_create_hosted_evaluation_includes_tunnel_access_in_payload(monkeypatch)
         def __init__(self):
             self.config = DummyConfig()
 
-        def post(self, endpoint, json=None):
+        def request(self, method, endpoint, params=None, json=None, timeout=None):
+            captured["method"] = method
             captured["endpoint"] = endpoint
             captured["json"] = json
             return {"evaluation_id": "eval-123"}
@@ -567,7 +572,7 @@ def test_create_hosted_evaluation_accepts_plural_ids_response(monkeypatch):
         def __init__(self):
             self.config = DummyConfig()
 
-        def post(self, endpoint, json=None):
+        def request(self, method, endpoint, params=None, json=None, timeout=None):
             return {"evaluation_ids": ["eval-123", "eval-456"]}
 
     monkeypatch.setattr("prime_cli.commands.evals.APIClient", DummyAPIClient)
@@ -1214,18 +1219,14 @@ env_id = "gsm8k"
         captured["endpoints_path"] = path
         return Path(path)
 
-    def fake_load_endpoints(path):
-        return {
-            "test-endpoint": [
-                SimpleNamespace(model="openai/gpt-4.1-mini"),
-            ]
-        }
+    def fake_load_endpoint_models(path):
+        return {"test-endpoint": ["openai/gpt-4.1-mini"]}
 
     monkeypatch.setattr(
-        "verifiers.utils.eval_utils.resolve_endpoints_file",
+        "prime_cli.commands.evals.resolve_endpoints_file",
         fake_resolve_endpoints_file,
     )
-    monkeypatch.setattr("verifiers.utils.eval_utils.load_endpoints", fake_load_endpoints)
+    monkeypatch.setattr("prime_cli.commands.evals.load_endpoint_models", fake_load_endpoint_models)
 
     loaded = _load_hosted_eval_configs(str(config_path))[0]
 
@@ -1248,16 +1249,12 @@ endpoint_id = "test-endpoint"
     )
 
     monkeypatch.setattr(
-        "verifiers.utils.eval_utils.resolve_endpoints_file",
+        "prime_cli.commands.evals.resolve_endpoints_file",
         lambda path: Path(path),
     )
     monkeypatch.setattr(
-        "verifiers.utils.eval_utils.load_endpoints",
-        lambda path: {
-            "test-endpoint": [
-                SimpleNamespace(model="anthropic/claude-sonnet-4"),
-            ]
-        },
+        "prime_cli.commands.evals.load_endpoint_models",
+        lambda path: {"test-endpoint": ["anthropic/claude-sonnet-4"]},
     )
 
     loaded = _load_hosted_eval_configs(str(config_path))[0]
@@ -1280,78 +1277,17 @@ model = "anthropic/claude-sonnet-4"
     )
 
     monkeypatch.setattr(
-        "verifiers.utils.eval_utils.resolve_endpoints_file",
+        "prime_cli.commands.evals.resolve_endpoints_file",
         lambda path: (_ for _ in ()).throw(AssertionError("should not resolve endpoint_id")),
     )
     monkeypatch.setattr(
-        "verifiers.utils.eval_utils.load_endpoints",
+        "prime_cli.commands.evals.load_endpoint_models",
         lambda path: (_ for _ in ()).throw(AssertionError("should not load endpoints")),
     )
 
     loaded = _load_hosted_eval_configs(str(config_path))[0]
 
     assert loaded["model"] == "anthropic/claude-sonnet-4"
-
-
-def test_eval_run_local_toml_passthrough(monkeypatch, tmp_path):
-    captured = {}
-    config_path = tmp_path / "eval.toml"
-    config_path.write_text(
-        """
-model = "openai/gpt-4.1-mini"
-
-[[eval]]
-env_id = "gsm8k"
-""".strip()
-    )
-
-    def fake_run_eval_passthrough(environment, passthrough_args, skip_upload, env_path):
-        captured["environment"] = environment
-        captured["passthrough_args"] = passthrough_args
-        captured["skip_upload"] = skip_upload
-        captured["env_path"] = env_path
-
-    monkeypatch.setattr("prime_cli.commands.evals.run_eval_passthrough", fake_run_eval_passthrough)
-
-    result = runner.invoke(
-        app,
-        ["eval", "run", str(config_path), "--skip-upload"],
-        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
-    )
-
-    assert result.exit_code == 0, result.output
-    assert captured == {
-        "environment": str(config_path),
-        "passthrough_args": [],
-        "skip_upload": True,
-        "env_path": None,
-    }
-
-
-def test_eval_run_local_sampling_args_passthrough(monkeypatch):
-    captured = {}
-
-    def fake_run_eval_passthrough(environment, passthrough_args, skip_upload, env_path):
-        captured["environment"] = environment
-        captured["passthrough_args"] = passthrough_args
-        captured["skip_upload"] = skip_upload
-        captured["env_path"] = env_path
-
-    monkeypatch.setattr("prime_cli.commands.evals.run_eval_passthrough", fake_run_eval_passthrough)
-
-    result = runner.invoke(
-        app,
-        ["eval", "run", "gsm8k", "--sampling-args", '{"temperature":0.2}'],
-        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
-    )
-
-    assert result.exit_code == 0, result.output
-    assert captured == {
-        "environment": "gsm8k",
-        "passthrough_args": ["--sampling-args", '{"temperature":0.2}'],
-        "skip_upload": False,
-        "env_path": None,
-    }
 
 
 @pytest.mark.parametrize(
@@ -1383,6 +1319,21 @@ def test_eval_run_hosted_rejects_unsupported_passthrough_flags(extra_args, expec
     assert result.exit_code == 1
     assert "hosted eval CLI does not support" in result.output
     assert f"`{expected_flag}`" in result.output
+
+
+@pytest.mark.parametrize(
+    "extra_args",
+    [["owner/b"], ["owner/b", "-n", "2"], ["-n", "2", "owner/b"]],
+)
+def test_eval_run_hosted_rejects_extra_positional_arguments(extra_args):
+    result = runner.invoke(
+        app,
+        ["eval", "run", "owner/a", "--hosted", *extra_args],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 2
+    assert "unrecognized arguments: owner/b" in result.output
 
 
 def test_eval_run_hosted_accepts_negative_num_examples_value(monkeypatch):
@@ -1631,11 +1582,12 @@ def test_eval_run_hosted_reports_resolve_api_errors(monkeypatch):
 def test_eval_stop_command_calls_cancel_endpoint(monkeypatch):
     captured = {}
 
-    def fake_patch(self, endpoint, json=None, params=None):
+    def fake_request(self, method, endpoint, params=None, json=None, timeout=None):
+        captured["method"] = method
         captured["endpoint"] = endpoint
         return {"message": "Evaluation cancelled", "evaluation_id": "eval-123"}
 
-    monkeypatch.setattr("prime_cli.commands.evals.APIClient.patch", fake_patch)
+    monkeypatch.setattr("prime_cli.commands.evals.APIClient.request", fake_request)
 
     result = runner.invoke(
         app,
@@ -1644,9 +1596,87 @@ def test_eval_stop_command_calls_cancel_endpoint(monkeypatch):
     )
 
     assert result.exit_code == 0, result.output
-    assert captured == {"endpoint": "/hosted-evaluations/eval-123/cancel"}
+    assert captured == {
+        "method": "PATCH",
+        "endpoint": "/hosted-evaluations/eval-123/cancel",
+    }
     assert "Evaluation cancelled" in result.output
     assert "dashboard/evaluations/eval-123" in result.output
+
+
+def test_create_hosted_evaluations_uses_public_sdk_method(monkeypatch):
+    calls = {}
+
+    class DummyConfig:
+        team_id = "team-123"
+
+    class DummyAPIClient:
+        def __init__(self):
+            self.config = DummyConfig()
+
+    class FakeEvalsClient:
+        def __init__(self, api_client):
+            calls["init_client_type"] = type(api_client).__name__
+
+        def create_hosted_evaluation(
+            self, environment_ids, inference_model, eval_config, *, name=None, team_id=None
+        ):
+            calls["environment_ids"] = environment_ids
+            calls["inference_model"] = inference_model
+            calls["eval_config"] = eval_config
+            calls["name"] = name
+            calls["team_id"] = team_id
+            return {"evaluation_id": "eval-123"}
+
+    monkeypatch.setattr("prime_cli.commands.evals.APIClient", DummyAPIClient)
+    monkeypatch.setattr("prime_cli.commands.evals.EvalsClient", FakeEvalsClient)
+
+    result = _create_hosted_evaluations(
+        HostedEvalConfig(
+            environment_id="env-123",
+            inference_model="openai/gpt-4.1-mini",
+            num_examples=5,
+            rollouts_per_example=3,
+        ),
+        environment_ids=["env-123", "env-456"],
+    )
+
+    assert result == {"evaluation_id": "eval-123"}
+    assert calls["init_client_type"] == "DummyAPIClient"
+    assert calls["environment_ids"] == ["env-123", "env-456"]
+    assert calls["inference_model"] == "openai/gpt-4.1-mini"
+    assert calls["eval_config"]["num_examples"] == 5
+    assert calls["name"] is None
+    # team_id is omitted so the SDK falls back to the injected client's config.
+    assert calls["team_id"] is None
+
+
+def test_eval_stop_command_uses_public_sdk_method(monkeypatch):
+    calls = {}
+
+    class DummyAPIClient:
+        pass
+
+    class FakeEvalsClient:
+        def __init__(self, api_client):
+            calls["init_client_type"] = type(api_client).__name__
+
+        def cancel_hosted_evaluation(self, evaluation_id):
+            calls["evaluation_id"] = evaluation_id
+            return {"message": "Evaluation cancelled"}
+
+    monkeypatch.setattr("prime_cli.commands.evals.APIClient", DummyAPIClient)
+    monkeypatch.setattr("prime_cli.commands.evals.EvalsClient", FakeEvalsClient)
+
+    result = runner.invoke(
+        app,
+        ["eval", "stop", "eval-123"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls == {"init_client_type": "DummyAPIClient", "evaluation_id": "eval-123"}
+    assert "Evaluation cancelled" in result.output
 
 
 def test_print_eval_status_prefers_returned_viewer_url(monkeypatch, capsys):

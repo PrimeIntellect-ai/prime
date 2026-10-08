@@ -1,0 +1,680 @@
+"""High-level client for Prime Traces.
+
+Wraps the wire client with upload batching/retry and typed read paths.
+
+The read surface matches the service's pinned response models
+(``prime-traces/src/traces/models.py`` and ``src/episodes/models.py`` in the
+platform repo): pages are ``{items, next_cursor}``, trace summaries nest
+``model``/``score``/``execution``, episodes nest ``error`` and the member
+aggregate.
+
+Deliberately not implemented (open v0 contract decisions — do not freeze
+them here): exports in any form — the service publishes ``GET /traces/export``
+and the job routes, but all three handlers raise ``NotImplementedError``,
+which FastAPI answers as 500, and the streaming route declares no query
+parameters, so there is no filter vocabulary to bind to; episode
+writes (episodes are read-only, written only as a side effect of
+episode-grouped uploads); and the dot-path query compiler (needs the server-side
+field registry).
+"""
+
+import json
+import tempfile
+import time
+from pathlib import Path
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Mapping,
+    Optional,
+    Protocol,
+    Sequence,
+    Union,
+)
+from urllib.parse import quote
+
+from .batching import (
+    DEFAULT_TARGET_BATCH_BYTES,
+    Batch,
+    iter_batches,
+    read_jsonl_lines,
+)
+from .core.client import TracesAPIClient, retry_delay
+from .exceptions import RetryableAPIError, TransportError
+from .models import (
+    EpisodeDetail,
+    EpisodeListPage,
+    LineFormat,
+    SearchField,
+    TraceCallPage,
+    TraceListPage,
+    TraceNodePage,
+    TraceSearchPage,
+    TraceSummary,
+    UploadReceipt,
+)
+
+DEFAULT_MAX_ATTEMPTS = 5
+
+
+class SupportsToRecord(Protocol):
+    """An in-memory trace or episode that can produce its JSON record.
+
+    Verifiers ``Trace`` / ``Episode`` and prime-rl ``Rollout`` objects satisfy
+    this protocol without prime-traces importing either producer package.
+    """
+
+    def to_record(self) -> Mapping[str, Any]: ...
+
+
+TraceRecord = Union[Mapping[str, Any], SupportsToRecord]
+
+
+def _encode_record(record: TraceRecord, record_number: int) -> bytes:
+    """Serialize one in-memory record as a compact UTF-8 JSONL line.
+
+    Shared with the async client so both surfaces produce byte-identical
+    lines — and therefore the same content-addressed upload IDs — for the
+    same records.
+    """
+    if isinstance(record, Mapping):
+        value = record
+    else:
+        to_record = getattr(record, "to_record", None)
+        if not callable(to_record):
+            raise TypeError(f"Record {record_number} must be a mapping or implement to_record()")
+        value = to_record()
+        if not isinstance(value, Mapping):
+            raise TypeError(f"Record {record_number} to_record() must return a mapping")
+
+    # Compact separators match common JSONL writers, ensure_ascii=False
+    # keeps the wire representation UTF-8, and allow_nan=False prevents
+    # emitting JavaScript-only NaN/Infinity values that strict JSON rejects.
+    return (
+        json.dumps(
+            dict(value),
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        + b"\n"
+    )
+
+
+def _record_lines(records: Iterable[TraceRecord]) -> Iterator[bytes]:
+    """Serialize in-memory records lazily as compact UTF-8 JSONL lines."""
+    for record_number, record in enumerate(records, start=1):
+        yield _encode_record(record, record_number)
+
+
+def _build_params(
+    pairs: Iterable[tuple], context: Optional[Dict[str, str]] = None
+) -> Dict[str, object]:
+    """Drop unset filters and expand the context map to ``context.<key>``."""
+    params: Dict[str, object] = {key: value for key, value in pairs if value is not None}
+    if context:
+        for key, value in context.items():
+            params[f"context.{key}"] = value
+    return params
+
+
+UploadIds = Union[str, Sequence[str]]
+
+
+def _upload_ids(upload_id: Optional[UploadIds]) -> Optional[Union[str, List[str]]]:
+    """One ID, or several sent as a repeated parameter; an empty list is unset."""
+    if upload_id is None or isinstance(upload_id, str):
+        return upload_id
+    return list(upload_id) or None
+
+
+def _encoded_id_segment(identifier: str, *, parameter_name: str) -> str:
+    """Encode a resource ID as one URL path segment."""
+    if "/" in identifier:
+        # ASGI decodes %2F before Starlette route matching, so the service's
+        # /{resource}/{id} routes see an extra path segment and return 404.
+        # Fail locally until that route accepts a path-valued parameter rather
+        # than issuing a request that cannot address the uploaded resource.
+        raise ValueError(
+            f"{parameter_name} cannot contain '/' until the service supports path-valued IDs"
+        )
+    encoded = quote(identifier, safe="")
+    # RFC 3986 leaves periods unescaped even with ``safe=""``. A segment that
+    # is exactly "." or ".." is special, though: HTTP clients normalize it
+    # away before sending the request, which would target the collection or API
+    # root instead of the requested trace. Percent-encode those two IDs
+    # explicitly so they remain ordinary path-segment values on the wire.
+    if encoded in {".", ".."}:
+        encoded = encoded.replace(".", "%2E")
+    return encoded
+
+
+def _trace_endpoint(trace_id: str) -> str:
+    """Build a trace endpoint with the ID encoded as one path segment."""
+    return f"/traces/{_encoded_id_segment(trace_id, parameter_name='trace_id')}"
+
+
+def _run_search_endpoint(run_id: str) -> str:
+    """Build a run's search endpoint with the ID encoded as one path segment."""
+    return f"/runs/{_encoded_id_segment(run_id, parameter_name='run_id')}/search"
+
+
+def _episode_endpoint(episode_id: str) -> str:
+    """Build an episode endpoint with the ID encoded as one path segment."""
+    return f"/episodes/{_encoded_id_segment(episode_id, parameter_name='episode_id')}"
+
+
+class TracesClient:
+    """Client for the Prime Traces API."""
+
+    def __init__(self, api_client: Optional[TracesAPIClient] = None, **client_kwargs):
+        self.client = api_client or TracesAPIClient(**client_kwargs)
+
+    # -- upload -------------------------------------------------------------
+
+    def upload_records(
+        self,
+        records: Iterable[TraceRecord],
+        *,
+        line_format: LineFormat = LineFormat.TRACE,
+        context: Optional[Dict[str, str]] = None,
+        schema_version: int = 1,
+        compress: bool = True,
+        target_batch_bytes: int = DEFAULT_TARGET_BATCH_BYTES,
+        max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+        on_batch: Optional[Callable[[Batch, UploadReceipt], None]] = None,
+    ) -> List[UploadReceipt]:
+        """Upload trace or episode records directly from memory.
+
+        Each input may be a JSON-compatible mapping or an object implementing
+        ``to_record()``, including verifiers ``Trace`` / ``Episode`` and
+        prime-rl ``Rollout`` objects. Records are serialized lazily and passed
+        through the same bounded batching path as JSONL files, so the complete
+        input is never buffered or written to disk.
+        """
+        return self.upload_lines(
+            _record_lines(records),
+            line_format=line_format,
+            context=context,
+            schema_version=schema_version,
+            compress=compress,
+            target_batch_bytes=target_batch_bytes,
+            max_attempts=max_attempts,
+            on_batch=on_batch,
+        )
+
+    def upload_file(
+        self,
+        path: Union[str, Path],
+        *,
+        line_format: LineFormat = LineFormat.TRACE,
+        context: Optional[Dict[str, str]] = None,
+        schema_version: int = 1,
+        compress: bool = True,
+        target_batch_bytes: int = DEFAULT_TARGET_BATCH_BYTES,
+        max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+        on_batch: Optional[Callable[[Batch, UploadReceipt], None]] = None,
+    ) -> List[UploadReceipt]:
+        """Upload a completed JSONL file of traces (or episodes).
+
+        Batches are content-addressed, so rerunning after a crash is safe:
+        chunks whose bytes are reproduced resolve to the same idempotency key
+        and the service replays the committed receipt without re-storing.
+
+        A durable rejection (400) stops the upload and raises
+        ``ValidationRejectedError`` — correct the file and rerun; already
+        committed chunks replay for free. 429/503 retry the same bytes,
+        honoring Retry-After. Transport failures (connection drops, timeouts,
+        resets) also retry the same bytes: content addressing makes even an
+        ambiguous failure safe, because a request that did land replays its
+        receipt instead of storing twice.
+
+        Batches are sent sequentially in v0. The contract allows 2–8 requests
+        in flight per producer; add bounded concurrency here once the service
+        is up and throughput is measured.
+        """
+        return self.upload_lines(
+            read_jsonl_lines(path),
+            line_format=line_format,
+            context=context,
+            schema_version=schema_version,
+            compress=compress,
+            target_batch_bytes=target_batch_bytes,
+            max_attempts=max_attempts,
+            on_batch=on_batch,
+        )
+
+    def upload_lines(
+        self,
+        lines: Iterable[bytes],
+        *,
+        line_format: LineFormat = LineFormat.TRACE,
+        context: Optional[Dict[str, str]] = None,
+        schema_version: int = 1,
+        compress: bool = True,
+        target_batch_bytes: int = DEFAULT_TARGET_BATCH_BYTES,
+        max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+        on_batch: Optional[Callable[[Batch, UploadReceipt], None]] = None,
+    ) -> List[UploadReceipt]:
+        """Upload an iterable of raw JSONL lines. See ``upload_file``."""
+        receipts: List[UploadReceipt] = []
+        for batch in iter_batches(lines, target_bytes=target_batch_bytes):
+            result = self._send_with_retry(
+                batch,
+                line_format=line_format,
+                context=context,
+                schema_version=schema_version,
+                compress=compress,
+                max_attempts=max_attempts,
+            )
+            receipt = UploadReceipt.model_validate(result)
+            receipts.append(receipt)
+            if on_batch is not None:
+                on_batch(batch, receipt)
+        return receipts
+
+    def _send_with_retry(
+        self,
+        batch: Batch,
+        *,
+        line_format: LineFormat,
+        context: Optional[Dict[str, str]],
+        schema_version: int,
+        compress: bool,
+        max_attempts: int,
+    ) -> dict:
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be at least 1")
+        last_error: Optional[Exception] = None
+        for attempt in range(max_attempts):
+            try:
+                return self.client.upload_batch(
+                    batch.data,
+                    batch.idempotency_key,
+                    line_format=line_format,
+                    schema_version=schema_version,
+                    context=context,
+                    compress=compress,
+                )
+            except (RetryableAPIError, TransportError) as exc:
+                last_error = exc
+                if attempt == max_attempts - 1:
+                    break
+                time.sleep(retry_delay(exc, attempt))
+        assert last_error is not None
+        raise last_error
+
+    # -- traces: read -------------------------------------------------------
+
+    def search(
+        self,
+        query: str,
+        *,
+        run_id: str,
+        field: SearchField = "content",
+        role: Optional[str] = None,
+        run_step: Optional[int] = None,
+        has_error: Optional[bool] = None,
+        reward_min: Optional[float] = None,
+        reward_max: Optional[float] = None,
+        limit: int = 50,
+        cursor: Optional[str] = None,
+    ) -> TraceSearchPage:
+        """Return one page of case-sensitive literal matches in indexed nodes.
+
+        ``query`` needs at least three characters. Follow next_cursor with
+        unchanged filters. The first page's ``coverage`` reports traces that
+        were not searchable yet.
+        """
+        params = _build_params(
+            (
+                ("query", query),
+                ("field", field),
+                ("role", role),
+                ("run_step", run_step),
+                ("has_error", has_error),
+                ("reward_min", reward_min),
+                ("reward_max", reward_max),
+                ("limit", limit),
+                ("cursor", cursor),
+            )
+        )
+        return TraceSearchPage.model_validate(
+            self.client.get_json(_run_search_endpoint(run_id), params=params)
+        )
+
+    def list(
+        self,
+        *,
+        run_id: Optional[str] = None,
+        upload_id: Optional[UploadIds] = None,
+        environment_id: Optional[str] = None,
+        model_id: Optional[str] = None,
+        model_provider: Optional[str] = None,
+        task_id: Optional[str] = None,
+        reward_min: Optional[float] = None,
+        reward_max: Optional[float] = None,
+        outcome: Optional[str] = None,
+        has_error: Optional[bool] = None,
+        is_truncated: Optional[bool] = None,
+        created_after: Optional[str] = None,
+        created_before: Optional[str] = None,
+        context: Optional[Dict[str, str]] = None,
+        sort: Optional[str] = None,
+        limit: Optional[int] = None,
+        cursor: Optional[str] = None,
+    ) -> TraceListPage:
+        """List trace summaries, newest first (max 100 per page).
+
+        ``created_after``/``created_before`` also prune storage partitions, so
+        they are the cheapest filters available. ``context`` filters are
+        equality-only against the batch-supplied map. ``upload_id`` is the ID
+        in an ``UploadReceipt``, so it selects the traces one batch stored;
+        pass every receipt's ID to select an upload that spanned batches.
+        """
+        params = _build_params(
+            (
+                ("run_id", run_id),
+                ("upload_id", _upload_ids(upload_id)),
+                ("environment_id", environment_id),
+                ("model_id", model_id),
+                ("model_provider", model_provider),
+                ("task_id", task_id),
+                ("reward_min", reward_min),
+                ("reward_max", reward_max),
+                ("outcome", outcome),
+                ("has_error", has_error),
+                ("is_truncated", is_truncated),
+                ("created_after", created_after),
+                ("created_before", created_before),
+                ("sort", sort),
+                ("limit", limit),
+                ("cursor", cursor),
+            ),
+            context,
+        )
+        return TraceListPage.model_validate(self.client.get_json("/traces", params=params))
+
+    def iter(self, **filters) -> Iterator[TraceSummary]:
+        """Iterate all matching trace summaries across pages.
+
+        Transient failures are retried inside the API client with a bounded
+        budget; one that survives retries raises to the caller, who can
+        resume from the last completed page by passing ``cursor=``.
+        """
+        cursor = filters.pop("cursor", None)
+        while True:
+            page = self.list(cursor=cursor, **filters)
+            yield from page.items
+            if not page.next_cursor:
+                return
+            cursor = page.next_cursor
+
+    def get(self, trace_id: str) -> TraceSummary:
+        """Get one trace summary."""
+        return TraceSummary.model_validate(self.client.get_json(_trace_endpoint(trace_id)))
+
+    def get_raw(self, trace_id: str) -> bytes:
+        """Get the stored raw trace document, buffered in memory.
+
+        A trace can be tens of MiB; prefer ``download_raw`` for large traces.
+        """
+        return b"".join(self.client.stream_bytes(_trace_endpoint(trace_id), params={"raw": "true"}))
+
+    def download_raw(self, trace_id: str, dest: Union[str, Path]) -> int:
+        """Stream the raw trace document to ``dest``. Returns bytes written."""
+        return self._stream_to_file(_trace_endpoint(trace_id), {"raw": "true"}, dest)
+
+    def _stream_to_file(
+        self, endpoint: str, params: Optional[Dict[str, object]], dest: Union[str, Path]
+    ) -> int:
+        """Stream a response body to ``dest`` without clobbering it on failure.
+
+        Bytes land in a uniquely named sibling temporary file that replaces
+        ``dest`` only after the stream ends cleanly, so a failed request — or a
+        connection cut mid-stream — never truncates an existing file at
+        ``dest`` or another download's temporary file.
+        """
+        dest = Path(dest)
+        partial: Optional[Path] = None
+        written = 0
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                dir=dest.parent,
+                prefix=".prime-traces-",
+                suffix=".partial",
+                delete=False,
+            ) as f:
+                partial = Path(f.name)
+                for chunk in self.client.stream_bytes(endpoint, params=params):
+                    f.write(chunk)
+                    written += len(chunk)
+            partial.replace(dest)
+        except BaseException:
+            if partial is not None:
+                partial.unlink(missing_ok=True)
+            raise
+        return written
+
+    # -- traces: delete -----------------------------------------------------
+
+    def list_nodes(
+        self,
+        trace_id: str,
+        *,
+        role: Optional[List[str]] = None,
+        sampled: Optional[bool] = None,
+        after: Optional[int] = None,
+        limit: Optional[int] = None,
+        cursor: Optional[str] = None,
+    ) -> TraceNodePage:
+        """List a trace's message nodes in step order (max 100 per page).
+
+        Reads the async node index, so the full document is never downloaded.
+        Raises ``TraceNotIndexedError`` while the index is still being built;
+        when a page has ``partial_index``, nodes past the indexing cap are only
+        in the raw document. ``after`` starts after that node index and cannot
+        be combined with ``cursor``.
+        """
+        params = _build_params(
+            (
+                ("role", role),
+                ("sampled", sampled),
+                ("after", after),
+                ("limit", limit),
+                ("cursor", cursor),
+            )
+        )
+        return TraceNodePage.model_validate(
+            self.client.get_json(f"{_trace_endpoint(trace_id)}/nodes", params=params)
+        )
+
+    def list_calls(
+        self,
+        trace_id: str,
+        *,
+        model: Optional[List[str]] = None,
+        finish_reason: Optional[List[str]] = None,
+        limit: Optional[int] = None,
+        cursor: Optional[str] = None,
+    ) -> TraceCallPage:
+        """List a trace's model calls in order (max 100 per page).
+
+        Same index, errors and ``partial_index`` rule as ``list_nodes``. Token
+        usage is not indexed; read the raw document for it.
+        """
+        params = _build_params(
+            (
+                ("model", model),
+                ("finish_reason", finish_reason),
+                ("limit", limit),
+                ("cursor", cursor),
+            )
+        )
+        return TraceCallPage.model_validate(
+            self.client.get_json(f"{_trace_endpoint(trace_id)}/calls", params=params)
+        )
+
+    def delete(self, trace_id: str, *, created_at: Optional[str] = None) -> None:
+        """Delete every stored copy of one trace (202 Accepted).
+
+        ``created_at`` is an optional performance hint that lets the service
+        prune on its ordering-key prefix; correctness does not depend on it,
+        but a hint matching no stored copy is a 404 even when the trace exists
+        under another timestamp.
+
+        Ambiguous transport and gateway failures raise
+        ``AmbiguousDeleteError`` without retrying: the first request may
+        already have deleted this trace, and replaying it could delete a new
+        copy uploaded between attempts.
+
+        Raises ``NotFoundError`` when the owner has no such trace — including
+        on a repeat of a delete that already succeeded. The design docs
+        specify deletion as idempotent at the API level; the service checks
+        existence first and answers 404 instead. Callers treating deletion as
+        "make sure this is gone" should catch ``NotFoundError``.
+        """
+        params = {"created_at": created_at} if created_at else None
+        self.client.delete(_trace_endpoint(trace_id), params=params)
+
+    def delete_run(self, run_id: str) -> None:
+        """Delete every trace in a run (202 Accepted).
+
+        One mutation over the ``run_id`` predicate, not N per-trace calls, and
+        synchronous: the service answers 202 with an empty body, so there is
+        no job to poll. (The design docs specify ``202 { job_id }``; nothing
+        server-side issues one, so no job handle is returned here rather than
+        a permanent ``None``.)
+
+        Episode rows are not touched. Raises ``NotFoundError`` when the run
+        holds no traces for this owner — see ``delete`` on repeats. An
+        ``AmbiguousDeleteError`` is not retried because a replay could delete
+        traces added to the run after the first request.
+        """
+        self.client.delete("/traces", params={"run_id": run_id})
+
+    # -- episodes (read-only in v0) -----------------------------------------
+
+    def list_episodes(
+        self,
+        *,
+        run_id: Optional[str] = None,
+        upload_id: Optional[UploadIds] = None,
+        environment_id: Optional[str] = None,
+        outcome: Optional[str] = None,
+        has_error: Optional[bool] = None,
+        run_step: Optional[int] = None,
+        step_min: Optional[int] = None,
+        step_max: Optional[int] = None,
+        created_after: Optional[str] = None,
+        created_before: Optional[str] = None,
+        context: Optional[Dict[str, str]] = None,
+        limit: Optional[int] = None,
+        cursor: Optional[str] = None,
+    ) -> EpisodeListPage:
+        """List episode summaries using the server's complete filter set.
+
+        ``environment_id`` is extracted from the canonical episode
+        ``env.id``. Episodes have no step or upload ``context`` of their own:
+        ``run_step``, ``step_min``, ``step_max`` and ``context`` match an
+        episode when one of its member traces matches, so an episode with no
+        traces never matches them. ``upload_id`` is the ID in an
+        ``UploadReceipt``, so it selects the episodes one batch stored; pass
+        every receipt's ID to select an upload that spanned batches.
+        """
+        params = _build_params(
+            (
+                ("run_id", run_id),
+                ("upload_id", _upload_ids(upload_id)),
+                ("environment_id", environment_id),
+                ("outcome", outcome),
+                ("has_error", has_error),
+                ("run_step", run_step),
+                ("step_min", step_min),
+                ("step_max", step_max),
+                ("created_after", created_after),
+                ("created_before", created_before),
+                ("limit", limit),
+                ("cursor", cursor),
+            ),
+            context,
+        )
+        return EpisodeListPage.model_validate(self.client.get_json("/episodes", params=params))
+
+    def get_episode(self, episode_id: str) -> EpisodeDetail:
+        """Episode-owned fields plus the read-time member-trace aggregate.
+
+        The response carries the episode row's own ``has_error``/``error``
+        alongside ``traces.any_trace_error``, so an environment-hook failure
+        stays visible even when every individual trace succeeded.
+        """
+        return EpisodeDetail.model_validate(self.client.get_json(_episode_endpoint(episode_id)))
+
+    def get_episode_raw(self, episode_id: str) -> bytes:
+        """Get the stored episode envelope; ``traces`` holds the member trace IDs."""
+        return b"".join(
+            self.client.stream_bytes(_episode_endpoint(episode_id), params={"raw": "true"})
+        )
+
+    def list_episode_traces(
+        self,
+        episode_id: str,
+        *,
+        run_id: Optional[str] = None,
+        environment_id: Optional[str] = None,
+        model_id: Optional[str] = None,
+        model_provider: Optional[str] = None,
+        task_id: Optional[str] = None,
+        reward_min: Optional[float] = None,
+        reward_max: Optional[float] = None,
+        outcome: Optional[str] = None,
+        has_error: Optional[bool] = None,
+        is_truncated: Optional[bool] = None,
+        created_after: Optional[str] = None,
+        created_before: Optional[str] = None,
+        context: Optional[Dict[str, str]] = None,
+        limit: Optional[int] = None,
+        cursor: Optional[str] = None,
+    ) -> TraceListPage:
+        """List an episode's member traces, newest first (by ``created_at``).
+
+        The filter vocabulary matches the backend member-trace route and the
+        top-level trace listing, except that member traces have no ``sort``
+        option.
+        """
+        params = _build_params(
+            (
+                ("run_id", run_id),
+                ("environment_id", environment_id),
+                ("model_id", model_id),
+                ("model_provider", model_provider),
+                ("task_id", task_id),
+                ("reward_min", reward_min),
+                ("reward_max", reward_max),
+                ("outcome", outcome),
+                ("has_error", has_error),
+                ("is_truncated", is_truncated),
+                ("created_after", created_after),
+                ("created_before", created_before),
+                ("limit", limit),
+                ("cursor", cursor),
+            ),
+            context,
+        )
+        return TraceListPage.model_validate(
+            self.client.get_json(f"{_episode_endpoint(episode_id)}/traces", params=params)
+        )
+
+    def close(self) -> None:
+        self.client.close()
+
+    def __enter__(self) -> "TracesClient":
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self.close()

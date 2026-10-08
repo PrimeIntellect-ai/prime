@@ -7,9 +7,123 @@ import pytest
 from prime_cli.commands.sandbox import _format_sandbox_expiry
 from prime_cli.main import app
 from prime_cli.utils import strip_ansi
+from prime_sandboxes import SandboxCheckpoint, StartCommand
 from typer.testing import CliRunner
 
 runner = CliRunner()
+
+
+def test_checkpoint_command_and_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_cli(monkeypatch)
+    checkpoint = SandboxCheckpoint(
+        id="checkpoint-1",
+        sandbox_id="sandbox-1",
+        state="PENDING",
+        depth=1,
+        docker_image="python:3.11-slim",
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+
+    def create(self: Any, sandbox_id: str) -> SandboxCheckpoint:
+        assert sandbox_id == "sandbox-1"
+        return checkpoint
+
+    listed: list[tuple[str, Any]] = []
+
+    def list_checkpoints(
+        self: Any, sandbox_id: str, checkpoint_id: Any = None
+    ) -> list[SandboxCheckpoint]:
+        listed.append((sandbox_id, checkpoint_id))
+        return [checkpoint.model_copy(update={"state": "DURABLE"})]
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.checkpoint", create)
+    monkeypatch.setattr(
+        "prime_cli.commands.sandbox.SandboxClient.list_checkpoints", list_checkpoints
+    )
+
+    created = runner.invoke(app, ["sandbox", "checkpoint", "create", "sandbox-1"])
+    assert created.exit_code == 0, created.output
+    assert "checkpoint-1" in created.output
+    assert "prime sandbox checkpoint list sandbox-1" in created.output
+
+    table = runner.invoke(app, ["sandbox", "checkpoint", "list", "sandbox-1"])
+    assert table.exit_code == 0, table.output
+    assert "checkpoint-1" in table.output and "DURABLE" in table.output
+
+    durable = runner.invoke(
+        app,
+        [
+            "sandbox",
+            "checkpoint",
+            "list",
+            "sandbox-1",
+            "--checkpoint-id",
+            "checkpoint-1",
+            "--output",
+            "json",
+        ],
+    )
+    assert durable.exit_code == 0, durable.output
+    assert json.loads(durable.output)["checkpoints"][0]["state"] == "DURABLE"
+    assert listed == [("sandbox-1", None), ("sandbox-1", "checkpoint-1")]
+
+
+def test_restore_command_creates_from_checkpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_cli(monkeypatch)
+    captured: dict[str, Any] = {}
+
+    def create(self: Any, request: Any) -> SimpleNamespace:
+        captured["request"] = request
+        return SimpleNamespace(id="restored-1")
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.create", create)
+    result = runner.invoke(
+        app, ["sandbox", "checkpoint", "restore", "checkpoint-1", "--name", "fork", "--yes"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["request"].checkpoint_id == "checkpoint-1"
+    assert captured["request"].name == "fork"
+    assert captured["request"].docker_image is None
+    assert captured["request"].disk_size_gb is None
+    assert "restored-1" in result.output
+
+
+def test_fork_checkpoints_waits_and_restores(monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_cli(monkeypatch)
+    calls: list[Any] = []
+    source = _fake_sandbox(
+        id="sbx-1", team_id="team-1", region="us", gpu_count=0, gpu_type=None, labels=["a"]
+    )
+    pending = SimpleNamespace(id="checkpoint-1")
+
+    def create(self: Any, request: Any) -> SimpleNamespace:
+        calls.append(request)
+        return SimpleNamespace(id="forked-1")
+
+    def wait(self: Any, checkpoint_id: str, timeout_seconds: float) -> SimpleNamespace:
+        calls.append(("wait", checkpoint_id, timeout_seconds))
+        return pending
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.get", lambda self, sid: source)
+    monkeypatch.setattr(
+        "prime_cli.commands.sandbox.SandboxClient.checkpoint", lambda self, sid: pending
+    )
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.wait_for_checkpoint", wait)
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.create", create)
+
+    result = runner.invoke(app, ["sandbox", "fork", "sbx-1", "--cpu-cores", "4", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert calls[0] == ("wait", "checkpoint-1", 300)
+    request = calls[1]
+    assert request.checkpoint_id == "checkpoint-1"
+    assert request.name == "box-fork"
+    assert request.cpu_cores == 4
+    assert request.memory_gb == source.memory_gb
+    assert request.team_id == "team-1" and request.labels == ["a"]
+    assert "forked-1" in result.output
 
 
 def _fake_sandbox(**overrides: Any) -> SimpleNamespace:
@@ -46,7 +160,7 @@ def _fake_detailed_sandbox(**overrides: Any) -> SimpleNamespace:
         }
     )
     return _fake_sandbox(
-        start_command="tail -f /dev/null",
+        start_command=StartCommand(executable="tail", args=["-f", "/dev/null"]),
         disk_size_gb=10.0,
         disk_mount_path="/sandbox-workspace",
         vm=True,
@@ -61,7 +175,6 @@ def _fake_detailed_sandbox(**overrides: Any) -> SimpleNamespace:
         advanced_configs=advanced_configs,
         user_id="user-1",
         team_id=None,
-        registry_credentials_id=None,
         **overrides,
     )
 
@@ -83,6 +196,68 @@ def _network_status(
 def _configure_cli(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PRIME_API_KEY", "dummy")
     monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
+
+
+def test_list_uses_temporary_context_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    config_dir = tmp_path / ".prime"
+    environments_dir = config_dir / "environments"
+    environments_dir.mkdir(parents=True)
+    (config_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "api_key": "production-key",
+                "base_url": "https://api.production.example",
+                "team_id": "production-team",
+                "user_id": "production-user",
+            }
+        )
+    )
+    (environments_dir / "dev.json").write_text(
+        json.dumps(
+            {
+                "api_key": "dev-key",
+                "base_url": "https://api.dev.example",
+                "team_id": "dev-team",
+                "user_id": "dev-user",
+            }
+        )
+    )
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
+    for name in (
+        "PRIME_CONTEXT",
+        "PRIME_API_KEY",
+        "PRIME_API_BASE_URL",
+        "PRIME_BASE_URL",
+        "PRIME_TEAM_ID",
+        "PRIME_USER_ID",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    captured: dict[str, Any] = {}
+
+    def mock_list(self: Any, **kwargs: Any) -> SimpleNamespace:
+        captured.update(
+            {
+                "api_key": self.client.api_key,
+                "base_url": self.client.base_url,
+                "team_id": self.client.config.team_id,
+                "user_id": self.client.config.user_id,
+            }
+        )
+        return SimpleNamespace(sandboxes=[], total=0, page=1, per_page=50, has_next=False)
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.list", mock_list)
+
+    result = runner.invoke(app, ["-c", "dev", "sandbox", "list"])
+
+    assert result.exit_code == 0, result.output
+    assert captured == {
+        "api_key": "dev-key",
+        "base_url": "https://api.dev.example",
+        "team_id": "dev-team",
+        "user_id": "dev-user",
+    }
 
 
 def test_sandbox_network_without_flags_shows_current_rules(
@@ -338,16 +513,143 @@ def test_sandbox_create_with_gpu_options(monkeypatch: pytest.MonkeyPatch) -> Non
     output = strip_ansi(result.output)
     assert result.exit_code == 0, f"Failed: {result.output}"
     assert "Successfully created sandbox sbx-gpu-123" in output
-    assert "VM: Enabled" in output
+    assert "Runtime: VM" in output
     assert "GPUs: H100_80GB x1" in output
     assert "Docker Image: team-1/gpu-runtime:v1" in output
     assert captured["request"].docker_image == "team-1/gpu-runtime:v1"
     assert captured["request"].gpu_count == 1
     assert captured["request"].gpu_type == "H100_80GB"
-    assert captured["request"].vm is True
 
 
-def test_sandbox_create_gpu_without_docker_image(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_sandbox_create_vm_accepts_fractional_disk_size_gb(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_cli(monkeypatch)
+    captured: dict[str, Any] = {}
+
+    def mock_create(self: Any, request: Any) -> Any:
+        captured["request"] = request
+        return SimpleNamespace(id="sbx-vm-disk")
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.create", mock_create)
+
+    result = runner.invoke(
+        app,
+        [
+            "sandbox",
+            "create",
+            "team-1/vm:v1",
+            "--vm",
+            "--disk-size-gb",
+            "10.0009765625",
+            "--yes",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["request"].disk_size_gb == 10241 / 1024
+    assert "10.0009765625GB disk" in strip_ansi(result.output)
+
+
+def test_sandbox_create_vm_start_command_preserves_argv(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_cli(monkeypatch)
+    captured: dict[str, Any] = {}
+
+    def mock_create(self: Any, request: Any) -> Any:
+        captured["request"] = request
+        return SimpleNamespace(id="sbx-vm-command")
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.create", mock_create)
+
+    result = runner.invoke(
+        app,
+        [
+            "sandbox",
+            "create",
+            "team-1/worker:v1",
+            "--vm",
+            "--yes",
+            "--",
+            "/worker",
+            "--platform",
+            "linux/amd64",
+            "value with spaces",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    command = captured["request"].start_command
+    assert command.executable == "/worker"
+    assert command.args == ["--platform", "linux/amd64", "value with spaces"]
+    assert '["/worker", "--platform", "linux/amd64", "value with spaces"]' in strip_ansi(
+        result.output
+    )
+
+
+def test_sandbox_create_omitted_image_preserves_command_argv(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_cli(monkeypatch)
+    captured: dict[str, Any] = {}
+
+    def mock_create(self: Any, request: Any) -> Any:
+        captured["request"] = request
+        return SimpleNamespace(id="sbx-default-image-command")
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.create", mock_create)
+
+    result = runner.invoke(
+        app,
+        [
+            "sandbox",
+            "create",
+            "--cpu-cores",
+            "2",
+            "--yes",
+            "--",
+            "python",
+            "script.py",
+            "--verbose",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    request = captured["request"]
+    assert request.docker_image == "python:3.11-slim"
+    assert request.cpu_cores == 2
+    assert request.start_command.executable == "python"
+    assert request.start_command.args == ["script.py", "--verbose"]
+
+
+def test_sandbox_create_defaults_to_vm_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without --vm the CLI resolves the runtime to VM."""
+    _configure_cli(monkeypatch)
+    captured: dict[str, Any] = {}
+
+    def mock_create(self: Any, request: Any) -> Any:
+        captured["request"] = request
+        return SimpleNamespace(id="sbx-default-vm")
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.create", mock_create)
+
+    result = runner.invoke(
+        app,
+        ["sandbox", "create", "python:3.12", "--yes"],
+    )
+
+    output = strip_ansi(result.output)
+    assert result.exit_code == 0, result.output
+    assert "Runtime: VM (default)" in output
+    assert captured["request"].start_command is None
+
+
+def test_sandbox_create_gpu_without_docker_image_uses_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("PRIME_API_KEY", "dummy")
     monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
 
@@ -373,10 +675,9 @@ def test_sandbox_create_gpu_without_docker_image(monkeypatch: pytest.MonkeyPatch
     )
 
     output = strip_ansi(result.output)
-    assert result.exit_code == 1
-    assert "GPUs require VM sandboxes." in output
-    assert "Successfully created sandbox" not in output
-    assert "request" not in captured
+    assert result.exit_code == 0, result.output
+    assert "Successfully created sandbox sbx-gpu-default-image" in output
+    assert captured["request"].docker_image == "python:3.11-slim"
 
 
 def test_sandbox_create_accepts_docker_image_for_gpu(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -412,7 +713,6 @@ def test_sandbox_create_accepts_docker_image_for_gpu(monkeypatch: pytest.MonkeyP
     assert captured["request"].docker_image == "python:3.11-slim"
     assert captured["request"].gpu_count == 1
     assert captured["request"].gpu_type == "H100_80GB"
-    assert captured["request"].vm is True
 
 
 def test_sandbox_create_accepts_region(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -470,16 +770,18 @@ def test_sandbox_create_requires_gpu_type(monkeypatch: pytest.MonkeyPatch) -> No
     assert called is False
 
 
-def test_sandbox_create_requires_vm_for_gpu(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_sandbox_create_gpu_with_defaulted_vm_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GPU requests work without an explicit --vm now that VM is the default."""
     monkeypatch.setenv("PRIME_API_KEY", "dummy")
     monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
 
-    called = False
+    captured: dict[str, Any] = {}
 
     def mock_create(self: Any, request: Any) -> Any:
-        nonlocal called
-        called = True
-        return SimpleNamespace(id="sbx-should-not-create")
+        captured["request"] = request
+        return SimpleNamespace(id="sbx-gpu-default-vm")
 
     monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.create", mock_create)
 
@@ -498,9 +800,9 @@ def test_sandbox_create_requires_vm_for_gpu(monkeypatch: pytest.MonkeyPatch) -> 
     )
 
     output = strip_ansi(result.output)
-    assert result.exit_code == 1
-    assert "GPUs require VM sandboxes." in output
-    assert called is False
+    assert result.exit_code == 0, f"Failed: {result.output}"
+    assert "Successfully created sandbox sbx-gpu-default-vm" in output
+    assert captured["request"].gpu_count == 1
 
 
 def test_sandbox_create_rejects_gpu_type_without_count(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -527,25 +829,27 @@ def test_sandbox_create_rejects_gpu_type_without_count(monkeypatch: pytest.Monke
     assert called is False
 
 
-def test_sandbox_create_requires_docker_image_for_cpu(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_sandbox_create_without_arguments_uses_default_image(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("PRIME_API_KEY", "dummy")
     monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
 
-    called = False
+    captured: dict[str, Any] = {}
 
     def mock_create(self: Any, request: Any) -> Any:
-        nonlocal called
-        called = True
-        return SimpleNamespace(id="sbx-should-not-create")
+        captured["request"] = request
+        return SimpleNamespace(id="sbx-default-image")
 
     monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.create", mock_create)
 
-    result = runner.invoke(app, ["sandbox", "create", "--yes"])
+    result = runner.invoke(app, ["sandbox", "create"], input="\n")
 
     output = strip_ansi(result.output)
-    assert result.exit_code == 1
-    assert "Docker image is required." in output
-    assert called is False
+    assert result.exit_code == 0, result.output
+    assert "Docker Image: python:3.11-slim" in output
+    assert "Successfully created sandbox sbx-default-image" in output
+    assert captured["request"].docker_image == "python:3.11-slim"
 
 
 def test_sandbox_create_vm_without_gpu(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -568,10 +872,43 @@ def test_sandbox_create_vm_without_gpu(monkeypatch: pytest.MonkeyPatch) -> None:
     output = strip_ansi(result.output)
     assert result.exit_code == 0, f"Failed: {result.output}"
     assert "Successfully created sandbox sbx-vm-123" in output
-    assert captured["request"].vm is True
     assert captured["request"].gpu_count == 0
     assert captured["request"].cpu_cores == 1.0
     assert captured["request"].memory_gb == 1.0
+
+
+def test_sandbox_create_vm_supports_idle_timeout_with_unlimited_lifetime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_cli(monkeypatch)
+    captured: dict[str, Any] = {}
+
+    def mock_create(self: Any, request: Any) -> Any:
+        captured["request"] = request
+        return SimpleNamespace(id="sbx-vm-idle")
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.create", mock_create)
+
+    result = runner.invoke(
+        app,
+        [
+            "sandbox",
+            "create",
+            "python:3.12",
+            "--vm",
+            "--timeout-minutes",
+            "-1",
+            "--idle-timeout-minutes",
+            "10",
+            "--yes",
+        ],
+    )
+
+    output = strip_ansi(result.output)
+    assert result.exit_code == 0, result.output
+    assert "Idle Timeout: 10 minutes" in output
+    assert captured["request"].timeout_minutes == -1
+    assert captured["request"].idle_timeout_minutes == 10
 
 
 def test_sandbox_delete_by_label_scopes_to_caller(
@@ -681,203 +1018,6 @@ def test_sandbox_delete_by_label_all_users_passes_admin_scope(
     assert "Processed 1 sandbox(es)" in output
 
 
-def test_sandbox_ssh_no_id_picks_running_sandbox(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`prime sandbox ssh` with no ID lists running, non-VM sandboxes to pick from.
-
-    Selecting one feeds its ID into the rest of the flow; we stop the flow right
-    after by returning a non-RUNNING sandbox from ``get``.
-    """
-    monkeypatch.setenv("PRIME_API_KEY", "dummy")
-    monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
-    monkeypatch.setattr("prime_cli.commands.sandbox.shutil.which", lambda _: "/usr/bin/ssh")
-
-    captured: dict[str, Any] = {}
-
-    def mock_list(self: Any, **kwargs: Any) -> Any:
-        captured["list_kwargs"] = kwargs
-        return SimpleNamespace(
-            sandboxes=[
-                SimpleNamespace(
-                    id="sbx-container",
-                    name="builder",
-                    docker_image="python:3.12",
-                    vm=False,
-                    created_at="2026-05-01T00:00:00Z",
-                ),
-                SimpleNamespace(
-                    id="sbx-vm",
-                    name="gpu-box",
-                    docker_image="cuda:12",
-                    vm=True,
-                    created_at="2026-05-02T00:00:00Z",
-                ),
-            ],
-            total=2,
-            page=1,
-            per_page=100,
-            has_next=False,
-        )
-
-    def mock_get(self: Any, sandbox_id: str) -> Any:
-        captured["get_id"] = sandbox_id
-        return SimpleNamespace(id=sandbox_id, vm=False, status="STOPPED")
-
-    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.list", mock_list)
-    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.get", mock_get)
-
-    result = runner.invoke(app, ["sandbox", "ssh"], input="1\n")
-
-    output = strip_ansi(result.output)
-    # Only RUNNING sandboxes are requested, and the VM one is filtered out of the picker.
-    assert captured["list_kwargs"]["status"] == "RUNNING"
-    assert "sbx-container" in output
-    assert "sbx-vm" not in output
-    # The chosen sandbox flows into the rest of the SSH flow.
-    assert captured["get_id"] == "sbx-container"
-    assert "not running" in output
-    assert result.exit_code == 1
-
-
-def test_sandbox_ssh_no_id_no_running_sandboxes(monkeypatch: pytest.MonkeyPatch) -> None:
-    """With no SSH-able sandboxes, the picker reports it and exits cleanly."""
-    monkeypatch.setenv("PRIME_API_KEY", "dummy")
-    monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
-    monkeypatch.setattr("prime_cli.commands.sandbox.shutil.which", lambda _: "/usr/bin/ssh")
-
-    def mock_list(self: Any, **kwargs: Any) -> Any:
-        # Only a VM sandbox exists; it is not SSH-able, so the picker is empty.
-        return SimpleNamespace(
-            sandboxes=[
-                SimpleNamespace(
-                    id="sbx-vm",
-                    name="gpu-box",
-                    docker_image="cuda:12",
-                    vm=True,
-                    created_at="2026-05-02T00:00:00Z",
-                ),
-            ],
-            total=1,
-            page=1,
-            per_page=100,
-            has_next=False,
-        )
-
-    def mock_get(self: Any, sandbox_id: str) -> Any:
-        raise AssertionError("get should not be called when the picker is empty")
-
-    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.list", mock_list)
-    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.get", mock_get)
-
-    result = runner.invoke(app, ["sandbox", "ssh"])
-
-    output = strip_ansi(result.output)
-    assert "No running sandboxes available to SSH into." in output
-    assert result.exit_code == 0
-
-
-def test_sandbox_ssh_no_id_pages_through_results(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The picker pages past page 1, even when page 1 holds only VMs.
-
-    Guards against reporting "no running sandboxes" when the only SSH-able
-    container lives on a later page.
-    """
-    monkeypatch.setenv("PRIME_API_KEY", "dummy")
-    monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
-    monkeypatch.setattr("prime_cli.commands.sandbox.shutil.which", lambda _: "/usr/bin/ssh")
-
-    captured: dict[str, Any] = {}
-    pages = {
-        1: SimpleNamespace(
-            sandboxes=[
-                SimpleNamespace(
-                    id="sbx-vm",
-                    name="gpu-box",
-                    docker_image="cuda:12",
-                    vm=True,
-                    created_at="2026-05-01T00:00:00Z",
-                )
-            ],
-            total=2,
-            page=1,
-            per_page=100,
-            has_next=True,
-        ),
-        2: SimpleNamespace(
-            sandboxes=[
-                SimpleNamespace(
-                    id="sbx-container",
-                    name="builder",
-                    docker_image="python:3.12",
-                    vm=False,
-                    created_at="2026-05-02T00:00:00Z",
-                )
-            ],
-            total=2,
-            page=2,
-            per_page=100,
-            has_next=False,
-        ),
-    }
-
-    def mock_list(self: Any, **kwargs: Any) -> Any:
-        captured.setdefault("pages_requested", []).append(kwargs["page"])
-        return pages[kwargs["page"]]
-
-    def mock_get(self: Any, sandbox_id: str) -> Any:
-        captured["get_id"] = sandbox_id
-        return SimpleNamespace(id=sandbox_id, vm=False, status="STOPPED")
-
-    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.list", mock_list)
-    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.get", mock_get)
-
-    result = runner.invoke(app, ["sandbox", "ssh"], input="1\n")
-
-    output = strip_ansi(result.output)
-    assert captured["pages_requested"] == [1, 2]
-    assert "sbx-container" in output
-    assert captured["get_id"] == "sbx-container"
-    assert result.exit_code == 1
-
-
-def test_sandbox_ssh_no_id_picker_paginates_display(monkeypatch: pytest.MonkeyPatch) -> None:
-    """With >50 SSH-able sandboxes the picker shows 50 per page with next/prev nav."""
-    monkeypatch.setenv("PRIME_API_KEY", "dummy")
-    monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
-    monkeypatch.setattr("prime_cli.commands.sandbox.shutil.which", lambda _: "/usr/bin/ssh")
-
-    captured: dict[str, Any] = {}
-
-    def mock_list(self: Any, **kwargs: Any) -> Any:
-        # 60 running containers on a single API page; display pages them 50 at a time.
-        sandboxes = [
-            SimpleNamespace(
-                id=f"sbx-{i:03d}",
-                name=f"box-{i:03d}",
-                docker_image="python:3.12",
-                vm=False,
-                created_at=f"2026-05-01T00:{i:02d}:00Z",
-            )
-            for i in range(60)
-        ]
-        return SimpleNamespace(sandboxes=sandboxes, total=60, page=1, per_page=100, has_next=False)
-
-    def mock_get(self: Any, sandbox_id: str) -> Any:
-        captured["get_id"] = sandbox_id
-        return SimpleNamespace(id=sandbox_id, vm=False, status="STOPPED")
-
-    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.list", mock_list)
-    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.get", mock_get)
-
-    # Advance to page 2, then select item 51 (global numbering -> sbx-050).
-    result = runner.invoke(app, ["sandbox", "ssh"], input="n\n51\n")
-
-    output = strip_ansi(result.output)
-    assert "page 1/2" in output
-    assert "page 2/2" in output
-    assert captured["get_id"] == "sbx-050"
-    assert result.exit_code == 1
-
-
 def test_format_sandbox_expiry_running_shows_time_left() -> None:
     now = datetime.now(timezone.utc)
     sb = _fake_sandbox(status="RUNNING", started_at=now - timedelta(minutes=10), timeout_minutes=60)
@@ -984,3 +1124,110 @@ def test_sandbox_list_json_includes_expiry_fields(monkeypatch: pytest.MonkeyPatc
     assert by_id["sbx-run"]["expires_at"] is not None
     assert by_id["sbx-pending"]["timeout_minutes"] == 45
     assert by_id["sbx-pending"]["expires_at"] is None
+
+
+def test_sandbox_create_defaults_disk_size_gb_to_5(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_cli(monkeypatch)
+    captured: dict[str, Any] = {}
+
+    def mock_create(self: Any, request: Any) -> Any:
+        captured["request"] = request
+        return SimpleNamespace(id="sbx-default-disk")
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.create", mock_create)
+
+    result = runner.invoke(app, ["sandbox", "create", "team-1/vm:v1", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert captured["request"].disk_size_gb == 5.0
+    assert "5.0GB disk" in strip_ansi(result.output)
+
+
+@pytest.mark.parametrize("user_option", [[], ["--user", "ubuntu"], ["-u", "ubuntu"]])
+def test_sandbox_run_forwards_guest_user(monkeypatch, user_option):
+    calls = []
+
+    class FakeSandboxClient:
+        def __init__(self, _client):
+            pass
+
+        def execute_command(self, *args, user=None, **kwargs):
+            calls.append((args, {**kwargs, "user": user}))
+            return SimpleNamespace(stdout="", stderr="", exit_code=0)
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.APIClient", lambda: object())
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient", FakeSandboxClient)
+    result = runner.invoke(app, ["sandbox", "run", "sbx-1", *user_option, "--", "id"])
+    assert result.exit_code == 0, result.output
+    assert calls[0][0][:2] == ("sbx-1", "id")
+    assert calls[0][1].get("user") == ("ubuntu" if user_option else None)
+
+
+@pytest.mark.parametrize("user_option", [[], ["--user", "ubuntu"]])
+def test_sandbox_run_with_old_sdk(monkeypatch, user_option):
+    calls = []
+
+    class OldSandboxClient:
+        def __init__(self, _client):
+            pass
+
+        def execute_command(self, sandbox_id, command, working_dir, env, timeout=None):
+            calls.append((sandbox_id, command))
+            return SimpleNamespace(stdout="", stderr="", exit_code=0)
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.APIClient", lambda: object())
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient", OldSandboxClient)
+    result = runner.invoke(app, ["sandbox", "run", "sbx-1", *user_option, "--", "id"])
+    if user_option:
+        assert result.exit_code == 1
+        assert "does not support --user" in result.output
+        assert "Upgrade prime-sandboxes" in " ".join(result.output.split())
+        assert calls == []
+    else:
+        assert result.exit_code == 0, result.output
+        assert calls == [("sbx-1", "id")]
+
+
+def test_checkpoint_delete_by_ids_and_sandbox(monkeypatch: pytest.MonkeyPatch) -> None:
+    from prime_sandboxes import APIError, DeleteSandboxCheckpointsResponse
+
+    _configure_cli(monkeypatch)
+    calls: list[Any] = []
+
+    def delete(self: Any, checkpoint_id: str) -> None:
+        calls.append(checkpoint_id)
+        if checkpoint_id == "c3":
+            raise APIError("HTTP 409: busy")
+
+    def delete_all(self: Any, sandbox_id: str) -> DeleteSandboxCheckpointsResponse:
+        calls.append(("sandbox", sandbox_id))
+        return DeleteSandboxCheckpointsResponse.model_validate(
+            {
+                "deleted": ["c1"],
+                "errors": [{"checkpoint_id": "c2", "code": "CONFLICT", "message": "busy"}],
+            }
+        )
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.delete_checkpoint", delete)
+    monkeypatch.setattr(
+        "prime_cli.commands.sandbox.SandboxClient.delete_sandbox_checkpoints", delete_all
+    )
+
+    by_ids = runner.invoke(
+        app, ["sandbox", "checkpoint", "delete", "c1,c2", "c3", "c1", "-y", "-o", "json"]
+    )
+    assert by_ids.exit_code == 1
+    result = json.loads(by_ids.output)
+    assert result["deleted"] == ["c1", "c2"]
+    assert result["errors"][0]["checkpoint_id"] == "c3"
+
+    by_sandbox = runner.invoke(app, ["sandbox", "checkpoint", "delete", "--sandbox", "sbx-1", "-y"])
+    assert by_sandbox.exit_code == 1
+    assert "Deleted checkpoint c1" in by_sandbox.output
+    assert "Failed to delete c2" in by_sandbox.output
+
+    both = runner.invoke(app, ["sandbox", "checkpoint", "delete", "c1", "--sandbox", "sbx-1"])
+    assert both.exit_code == 1
+    assert calls == ["c1", "c2", "c3", ("sandbox", "sbx-1")]

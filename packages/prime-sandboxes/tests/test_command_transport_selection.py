@@ -1,5 +1,6 @@
-"""Tests for container/VM command transport selection."""
+"""Tests for command transport selection: every exec goes over Connect RPC."""
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Any, cast
 
@@ -7,10 +8,11 @@ import pytest
 from connectrpc.code import Code
 from connectrpc.errors import ConnectError
 
+from prime_sandboxes._connectrpc import GOOGLE_PROTOBUF_BINARY_CODEC
 from prime_sandboxes._proto.command_session import command_session_pb2
 from prime_sandboxes.core.client import APIClient
 from prime_sandboxes.models import CommandResponse
-from prime_sandboxes.sandbox import AsyncSandboxClient, SandboxAuthCache, SandboxClient
+from prime_sandboxes.sandbox import AsyncSandboxClient, SandboxClient
 
 
 def _auth_payload():
@@ -24,93 +26,54 @@ def _auth_payload():
 
 
 class _FakeCache:
-    def __init__(self, is_vm: bool):
-        self._is_vm = is_vm
-
     def get_or_refresh(self, _sandbox_id: str):
         return _auth_payload()
 
-    def is_vm(self, _sandbox_id: str) -> bool:
-        return self._is_vm
-
 
 class _AsyncFakeCache:
-    def __init__(self, is_vm: bool):
-        self._is_vm = is_vm
-
     async def get_or_refresh(self, _sandbox_id: str):
         return _auth_payload()
 
-    async def is_vm(self, _sandbox_id: str) -> bool:
-        return self._is_vm
 
-
-def test_sync_execute_command_uses_connect_for_vm():
+@pytest.mark.parametrize("user", [None, "ubuntu"])
+def test_sync_execute_command_uses_connect(user):
     client = SandboxClient(APIClient(api_key="test-key"))
-    cast(Any, client)._auth_cache = _FakeCache(is_vm=True)
+    cast(Any, client)._auth_cache = _FakeCache()
 
     called = {"connect": False}
 
     def _connect(*_args, **_kwargs):
         called["connect"] = True
+        assert _kwargs["user"] == user
         return CommandResponse(stdout="ok", stderr="", exit_code=0)
-
-    def _rest(*_args, **_kwargs):
-        raise AssertionError("REST path should not be used for VM sandboxes")
 
     client_any = cast(Any, client)
     client_any._execute_command_connect_rpc = _connect
-    client_any._execute_command_rest = _rest
 
-    result = client.execute_command("sbx-gpu", "echo hi")
+    result = client.execute_command("sbx-gpu", "echo hi", user=user)
 
     assert called["connect"]
     assert result.exit_code == 0
 
 
-def test_sync_execute_command_uses_rest_for_cpu():
-    client = SandboxClient(APIClient(api_key="test-key"))
-    cast(Any, client)._auth_cache = _FakeCache(is_vm=False)
-
-    called = {"rest": False}
-
-    def _connect(*_args, **_kwargs):
-        raise AssertionError("Connect path should not be used for CPU sandboxes")
-
-    def _rest(*_args, **_kwargs):
-        called["rest"] = True
-        return CommandResponse(stdout="ok", stderr="", exit_code=0)
-
-    client_any = cast(Any, client)
-    client_any._execute_command_connect_rpc = _connect
-    client_any._execute_command_rest = _rest
-
-    result = client.execute_command("sbx-cpu", "echo hi")
-
-    assert called["rest"]
-    assert result.exit_code == 0
-
-
 @pytest.mark.asyncio
-async def test_async_execute_command_uses_connect_for_vm():
+@pytest.mark.parametrize("user", [None, "ubuntu"])
+async def test_async_execute_command_uses_connect(user):
     client = AsyncSandboxClient(api_key="test-key")
-    cast(Any, client)._auth_cache = _AsyncFakeCache(is_vm=True)
+    cast(Any, client)._auth_cache = _AsyncFakeCache()
 
     called = {"connect": False}
 
     async def _connect(*_args, **_kwargs):
         called["connect"] = True
+        assert _kwargs["user"] == user
         return CommandResponse(stdout="ok", stderr="", exit_code=0)
-
-    async def _rest(*_args, **_kwargs):
-        raise AssertionError("REST path should not be used for VM sandboxes")
 
     client_any = cast(Any, client)
     client_any._execute_command_connect_rpc = _connect
-    client_any._execute_command_rest = _rest
 
     try:
-        result = await client.execute_command("sbx-gpu", "echo hi")
+        result = await client.execute_command("sbx-gpu", "echo hi", user=user)
 
         assert called["connect"]
         assert result.exit_code == 0
@@ -119,84 +82,185 @@ async def test_async_execute_command_uses_connect_for_vm():
 
 
 @pytest.mark.asyncio
-async def test_async_execute_command_uses_rest_for_cpu():
+async def test_async_open_process_streams_vm_command_session(monkeypatch):
+    calls = []
+    client_init_kwargs = {}
+    start_kwargs = {}
+    input_written = asyncio.Event()
+    terminated = asyncio.Event()
+
+    class _FakeConnectClient:
+        def __init__(self, address: str, **kwargs):
+            self.address = address
+            client_init_kwargs.update(kwargs)
+
+        def execute_server_stream(self, **kwargs):
+            start_kwargs.update(kwargs)
+            calls.append((kwargs["method"].name, kwargs["request"]))
+            start_response = getattr(command_session_pb2, "StartResponse")
+            command_session_event = getattr(command_session_pb2, "CommandSessionEvent")
+
+            async def events():
+                yield start_response(
+                    event=command_session_event(start=command_session_event.StartEvent(pid=42))
+                )
+                yield start_response(
+                    event=command_session_event(
+                        data=command_session_event.DataEvent(stdout=b"hello\n")
+                    )
+                )
+                yield start_response(
+                    event=command_session_event(
+                        data=command_session_event.DataEvent(stderr=b"warn\n")
+                    )
+                )
+                await input_written.wait()
+                await terminated.wait()
+                yield start_response(
+                    event=command_session_event(
+                        end=command_session_event.EndEvent(
+                            exit_code=7,
+                            exited=True,
+                            status="exit",
+                        )
+                    )
+                )
+
+            return events()
+
+        async def execute_unary(self, **kwargs):
+            calls.append((kwargs["method"].name, kwargs["request"]))
+            if kwargs["method"].name == "SendInput":
+                input_written.set()
+            elif kwargs["method"].name == "SendSignal":
+                terminated.set()
+            response_type = getattr(command_session_pb2, f"{kwargs['method'].name}Response")
+            return response_type()
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr("prime_sandboxes.sandbox.ConnectClient", _FakeConnectClient)
+
     client = AsyncSandboxClient(api_key="test-key")
-    cast(Any, client)._auth_cache = _AsyncFakeCache(is_vm=False)
-
-    called = {"rest": False}
-
-    async def _connect(*_args, **_kwargs):
-        raise AssertionError("Connect path should not be used for CPU sandboxes")
-
-    async def _rest(*_args, **_kwargs):
-        called["rest"] = True
-        return CommandResponse(stdout="ok", stderr="", exit_code=0)
-
-    client_any = cast(Any, client)
-    client_any._execute_command_connect_rpc = _connect
-    client_any._execute_command_rest = _rest
-
+    cast(Any, client)._auth_cache = _AsyncFakeCache()
     try:
-        result = await client.execute_command("sbx-cpu", "echo hi")
+        process = await client.open_process(
+            "sbx-vm",
+            "cat",
+            working_dir="/workspace",
+            env={"KEY": "value"},
+            user="ubuntu",
+        )
+        await process.write_stdin(b"input\n")
+        await process.terminate()
+        stdout = [chunk async for chunk in process.stdout]
+        stderr = [chunk async for chunk in process.stderr]
 
-        assert called["rest"]
-        assert result.exit_code == 0
+        assert process.pid == 42
+        assert await process.wait() == 7
+        assert process.returncode == 7
+        assert stdout == [b"hello\n"]
+        assert stderr == [b"warn\n"]
+        assert [name for name, _ in calls] == ["Start", "SendInput", "SendSignal"]
+        assert calls[0][1].stdin is True
+        assert start_kwargs["timeout_ms"] == 24 * 60 * 60 * 1000
+        assert client_init_kwargs["codec"] is GOOGLE_PROTOBUF_BINARY_CODEC
+        assert client_init_kwargs["send_compression"] is None
+        assert calls[0][1].command.user == "ubuntu"
+        assert calls[0][1].command.cwd == "/workspace"
+        assert calls[0][1].command.envs == {"KEY": "value"}
+        session_uuid = calls[0][1].session_uuid
+        assert session_uuid  # Start carries the client-generated idempotency key
+        assert calls[1][1].session.session_uuid == session_uuid
+        assert calls[1][1].input.stdin == b"input\n"
+        assert calls[1][1].input_uuid  # each stdin write carries its own idempotency key
+        assert calls[2][1].session.session_uuid == session_uuid
+        assert calls[2][1].signal == command_session_pb2.SIGNAL_SIGTERM
     finally:
         await client.aclose()
 
 
-def test_auth_cache_stores_vm_flag_for_reuse(tmp_path):
-    class _FakeAPIClient:
+@pytest.mark.asyncio
+async def test_process_recovery_retries_start_and_refreshes_rejected_auth(monkeypatch):
+    start_requests = []
+    retry_tokens = []
+
+    class _RejectedTokenCache:
         def __init__(self):
-            self.calls = 0
+            self.invalidations = 0
 
-        def request(self, method: str, path: str):
-            if method == "GET" and path == "/sandbox/sbx-1":
-                self.calls += 1
-                return {
-                    "id": "sbx-1",
-                    "name": "vm-box",
-                    "dockerImage": "img",
-                    "startCommand": None,
-                    "cpuCores": 1.0,
-                    "memoryGB": 2.0,
-                    "diskSizeGB": 10.0,
-                    "diskMountPath": "/sandbox-workspace",
-                    "gpuCount": 0,
-                    "gpuType": None,
-                    "vm": True,
-                    "status": "RUNNING",
-                    "timeoutMinutes": 60,
-                    "environmentVars": None,
-                    "secrets": None,
-                    "advancedConfigs": None,
-                    "labels": [],
-                    "createdAt": datetime.now(timezone.utc).isoformat(),
-                    "updatedAt": datetime.now(timezone.utc).isoformat(),
-                    "startedAt": None,
-                    "terminatedAt": None,
-                    "exitCode": None,
-                    "errorType": None,
-                    "errorMessage": None,
-                    "userId": "user",
-                    "teamId": "team",
-                    "kubernetesJobId": None,
-                    "registryCredentialsId": None,
-                }
-            raise AssertionError(f"Unexpected request: {method} {path}")
+        async def get_or_refresh(self, _sandbox_id: str):
+            auth = _auth_payload()
+            auth["token"] = "stale" if self.invalidations == 0 else "fresh"
+            return auth
 
-    cache = SandboxAuthCache(tmp_path / "auth_cache.json", _FakeAPIClient())
-    cache.set("sbx-1", _auth_payload())
+        async def invalidate(self, _sandbox_id: str):
+            self.invalidations += 1
 
-    assert cache.is_vm("sbx-1")
-    assert cache.is_vm("sbx-1")
-    assert cache.client.calls == 1
+    class _FakeConnectClient:
+        def __init__(self, _address: str, **_kwargs):
+            pass
+
+        def execute_server_stream(self, **kwargs):
+            assert kwargs["method"].name == "Start"
+            start_requests.append(kwargs["request"])
+            attempt = len(start_requests)
+            token = kwargs["headers"]["Authorization"]
+            if attempt > 1:
+                retry_tokens.append(token)
+
+            async def events():
+                if attempt == 1:
+                    raise ConnectError(Code.UNAVAILABLE, "stream dropped")
+                if token == "Bearer stale":
+                    raise ConnectError(Code.UNAUTHENTICATED, "expired token")
+                yield command_session_pb2.StartResponse(
+                    event=command_session_pb2.CommandSessionEvent(
+                        start=command_session_pb2.CommandSessionEvent.StartEvent(pid=42)
+                    )
+                )
+                yield command_session_pb2.StartResponse(
+                    event=command_session_pb2.CommandSessionEvent(
+                        end=command_session_pb2.CommandSessionEvent.EndEvent(exit_code=0)
+                    )
+                )
+
+            return events()
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr("prime_sandboxes.sandbox.ConnectClient", _FakeConnectClient)
+    monkeypatch.setattr("prime_sandboxes.process._STREAM_RECONNECT_BACKOFF_SECONDS", 0)
+
+    client = AsyncSandboxClient(api_key="test-key")
+    cache = _RejectedTokenCache()
+    cast(Any, client)._auth_cache = cache
+    try:
+        process = await client.open_process("sbx-vm", "sleep 1", user="ubuntu")
+
+        assert await process.wait() == 0
+        # The PID was never observed, so recovery re-issues Start; the shared
+        # session_uuid turns the retries into create-or-attach instead of respawns.
+        assert len(start_requests) == 3
+        assert len({request.session_uuid for request in start_requests}) == 1
+        assert all(request.command.user == "ubuntu" for request in start_requests)
+        assert start_requests[0].session_uuid
+        assert retry_tokens == ["Bearer stale", "Bearer fresh"]
+        assert cache.invalidations == 1
+        await process.aclose()
+    finally:
+        await client.aclose()
 
 
 def test_sync_connect_execution_collects_stdout_stderr(monkeypatch):
+    client_init_kwargs = {}
+
     class _FakeConnectClient:
-        def __init__(self, address: str):
+        def __init__(self, address: str, **kwargs):
             self.address = address
+            client_init_kwargs.update(kwargs)
 
         def execute_server_stream(self, **_kwargs):
             start_response = getattr(command_session_pb2, "StartResponse")
@@ -224,7 +288,7 @@ def test_sync_connect_execution_collects_stdout_stderr(monkeypatch):
     monkeypatch.setattr("prime_sandboxes.sandbox.ConnectClientSync", _FakeConnectClient)
 
     client = SandboxClient(APIClient(api_key="test-key"))
-    cast(Any, client)._auth_cache = _FakeCache(is_vm=True)
+    cast(Any, client)._auth_cache = _FakeCache()
     result = client._execute_command_connect_rpc(
         sandbox_id="sbx-gpu",
         command="echo hi",
@@ -233,11 +297,13 @@ def test_sync_connect_execution_collects_stdout_stderr(monkeypatch):
     assert result.stdout == "hello\n"
     assert result.stderr == "warn\n"
     assert result.exit_code == 7
+    assert client_init_kwargs["codec"] is GOOGLE_PROTOBUF_BINARY_CODEC
+    assert client_init_kwargs["send_compression"] is None
 
 
 def test_sync_connect_execution_maps_deadline_to_timeout(monkeypatch):
     class _FakeConnectClient:
-        def __init__(self, _address: str):
+        def __init__(self, _address: str, **_kwargs):
             pass
 
         def execute_server_stream(self, **_kwargs):
@@ -249,7 +315,7 @@ def test_sync_connect_execution_maps_deadline_to_timeout(monkeypatch):
     monkeypatch.setattr("prime_sandboxes.sandbox.ConnectClientSync", _FakeConnectClient)
 
     client = SandboxClient(APIClient(api_key="test-key"))
-    cast(Any, client)._auth_cache = _FakeCache(is_vm=True)
+    cast(Any, client)._auth_cache = _FakeCache()
     cast(Any, client)._get_sandbox_error_context = lambda sandbox_id: {
         "status": "RUNNING",
         "error_type": None,

@@ -10,7 +10,7 @@ from urllib.error import URLError
 import pytest
 from prime_cli import lab_setup
 from prime_cli.commands.lab import app as lab_cli_app
-from prime_cli.lab_agents import AgentCapability, known_agent_names
+from prime_cli.lab_agents import known_agent_names
 from prime_cli.lab_setup import (
     LabDoctorOptions,
     LabSetupOptions,
@@ -23,9 +23,10 @@ from prime_cli.lab_setup import (
     run_lab_sync_service,
 )
 from rich.console import Console
+from rich.text import Text
 from typer.testing import CliRunner
 
-AGENT_WHICH = "prime_lab_app.agent_capabilities.shutil.which"
+AGENT_WHICH = "prime_cli.lab_agents.shutil.which"
 REAL_DOWNLOAD_FILE = lab_setup._download_file
 
 
@@ -182,6 +183,30 @@ def test_lab_setup_rejects_prime_rl_flag() -> None:
     assert exc_info.value.code == 2
 
 
+def test_lab_commands_accept_plain_flag(tmp_path: Path, monkeypatch: Any) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    setup = CliRunner().invoke(lab_cli_app, ["setup", "--plain", "--no-such-flag"])
+    doctor = CliRunner().invoke(lab_cli_app, ["doctor", "--plain"])
+
+    assert "unrecognized arguments: --no-such-flag" in setup.output
+    assert "--plain" not in setup.output
+    assert "unrecognized arguments" not in doctor.output
+    assert "FAIL" in doctor.output
+    assert "[red]" not in doctor.output
+    assert "\u2503" not in doctor.output
+
+
+def test_lab_setup_call_to_action_is_plain_text_in_plain_mode(monkeypatch: Any) -> None:
+    monkeypatch.setattr(lab_setup, "is_plain_mode", lambda: True)
+
+    cta = lab_setup._post_setup_call_to_action(LabSetupOptions(agents=("codex",)))
+
+    assert isinstance(cta, Text)
+    assert "ask codex: I want to train a model" in cta.plain
+    assert "  $ uv run vf-eval my-env -m openai/gpt-5.4-nano -n 5" in cta.plain
+
+
 def test_lab_register_github_writes_hygiene_workflow(
     tmp_path: Path,
     monkeypatch: Any,
@@ -294,7 +319,7 @@ def test_lab_setup_service_downloads_upstream_assets_without_agent_installs(
     assert "/CLAUDE.md" in gitignore.splitlines()
     assert "/CLAUDE.local.md" in gitignore.splitlines()
     assert "/.prime/" in gitignore.splitlines()
-    assert (tmp_path / ".pi" / "extensions" / "prime-lab" / "index.ts").is_file()
+    assert not (tmp_path / ".pi" / "extensions").exists()
     output = _render_emitted(emitted)
     assert "pi-acp" not in output
     assert "Pi Coding Agent requires pi" in output
@@ -346,10 +371,11 @@ def test_lab_setup_service_emits_post_setup_call_to_action(
     assert "idea -> environment -> eval -> training" in output
     assert "ask codex" in output
     assert "I want to train a model for <my task domain>" in output
-    assert "prime env init my-env" in output
-    assert "prime eval run my-env -m openai/gpt-5.4-nano -n 5" in output
-    assert "prime rl run configs/rl/qwen-3-5.toml" in output
-    assert "prime gepa run my-env -m openai/gpt-5.4-nano" in output
+    assert "uv run vf-init my-env" in output
+    assert "uv run vf-eval my-env -m openai/gpt-5.4-nano -n 5" in output
+    assert "prime train configs/rl/" in output
+    assert "uv run vf-gepa my-env -m openai/gpt-5.4-nano" in output
+    assert "prime eval view" not in output
 
 
 def test_lab_setup_ignores_managed_guidance_and_skips_claude_local_for_codex(
@@ -616,7 +642,7 @@ def test_lab_setup_uses_existing_verifiers_sources(
 
     assert result.exit_code == 0
     assert _is_pinned_ref(lab_setup.VERIFIERS_REF)
-    assert lab_setup.VERIFIERS_CONFIG_REF == "main"
+    assert lab_setup.VERIFIERS_CONFIG_REF == lab_setup.VERIFIERS_REF
     assert any(
         url.endswith(
             f"/primeintellect-ai/verifiers/{lab_setup.VERIFIERS_REF}/skills/create-environments/SKILL.md"
@@ -862,8 +888,7 @@ def test_lab_sync_all_scaffolds_amp_and_factory_skills(
     assert not (tmp_path / "home" / ".factory" / "skills").exists()
     assert not (tmp_path / "home" / ".config" / "agents" / "skills").exists()
     assert not (tmp_path / ".amp" / "skills").exists()
-    assert (tmp_path / ".prime" / "lab" / "agent-mcp" / "amp.json").is_file()
-    assert not (tmp_path / ".prime" / "lab" / "agent-mcp" / "droid.json").exists()
+    assert not (tmp_path / ".prime" / "lab" / "agent-mcp").exists()
     assert (tmp_path / ".prime" / "lab" / "templates" / "configs" / "rl" / "gsm8k.toml").is_file()
 
 
@@ -934,34 +959,37 @@ def test_lab_doctor_reports_missing_selected_agent_guidance(
     result = run_lab_doctor_service(LabDoctorOptions(), workspace=tmp_path)
     checks = {check.name: check for check in result.checks}
 
-    assert checks["Amp Code native tools"].status == "WARN"
-    assert "npm install -g @sourcegraph/amp@latest" in checks["Amp Code native tools"].remediation
+    assert checks["Amp Code CLI"].status == "WARN"
+    assert "npm install -g @sourcegraph/amp@latest" in checks["Amp Code CLI"].remediation
 
 
-def test_lab_doctor_warns_when_native_surface_has_no_paths(
-    tmp_path: Path,
-    monkeypatch: Any,
-) -> None:
+def test_lab_doctor_warns_for_unsupported_agent(tmp_path: Path) -> None:
     (tmp_path / ".prime").mkdir()
     (tmp_path / ".prime" / "lab.json").write_text(
         json.dumps({"choices": {"agents": ["future"], "primary_agent": "future"}}),
         encoding="utf-8",
     )
-    monkeypatch.setattr(
-        lab_setup,
-        "agent_capability",
-        lambda agent: AgentCapability(
-            name=agent,
-            label="Future Agent",
-            native_surface="mcp_config",
-        ),
+
+    result = run_lab_doctor_service(LabDoctorOptions(), workspace=tmp_path)
+    checks = {check.name: check for check in result.checks}
+
+    assert checks["future CLI"].status == "WARN"
+    assert "not yet supported" in checks["future CLI"].message
+
+
+def test_lab_doctor_passes_installed_agent(tmp_path: Path, monkeypatch: Any) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(AGENT_WHICH, lambda _command: "/bin/tool")
+    run_lab_setup_service(
+        LabSetupOptions(skip_install=True, skip_agents_md=True, agents=("codex",)),
+        workspace=tmp_path,
+        emit=lambda _text: None,
     )
 
     result = run_lab_doctor_service(LabDoctorOptions(), workspace=tmp_path)
     checks = {check.name: check for check in result.checks}
 
-    assert checks["Future Agent native tools"].status == "WARN"
-    assert "declares mcp_config but no path" in checks["Future Agent native tools"].message
+    assert checks["Codex CLI"].status == "PASS"
 
 
 def test_lab_doctor_fix_writes_standard_gitignore_patterns(tmp_path: Path) -> None:

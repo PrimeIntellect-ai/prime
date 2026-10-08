@@ -2,6 +2,7 @@
 
 # Re-export the most commonly used functions
 from .config import BaseConfig, load_toml
+from .context import require_persistent_context
 from .display import (
     build_table,
     get_eval_viewer_url,
@@ -56,6 +57,7 @@ __all__ = [
     "load_toml",
     "BaseConfig",
     "optional_team_params",
+    "require_persistent_context",
     "DefaultCommandGroup",
     "PlainAwareTyperGroup",
     "PlainTyper",

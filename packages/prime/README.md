@@ -388,6 +388,8 @@ prime train validate sft.toml --sft --artifact-out normalized.json
 
 The CLI needs `uv` to cache a CPU-only schema environment. An existing matching
 interpreter can be supplied with `--schema-python`. No FFT checkout is required.
+Schema setup precompiles Python bytecode to speed up later validations. Existing
+CLI-managed caches receive a one-time bytecode upgrade without reinstalling packages.
 Platform supplies the pinned image digest and schema commit before local parsing;
 `--image-tag`, `--ref`, and `--pr` override runtime selection when needed.
 

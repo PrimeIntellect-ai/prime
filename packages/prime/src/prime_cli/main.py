@@ -10,6 +10,7 @@ from .commands.deployments import app as deployments_app
 from .commands.disks import app as disks_app
 from .commands.env import app as env_app
 from .commands.evals import app as evals_app
+from .commands.factory import app as factory_app
 from .commands.feedback import app as feedback_app
 from .commands.fork import FORK_JSON_HELP
 from .commands.fork import fork as fork_command
@@ -46,6 +47,7 @@ app.add_typer(lab_app, name="lab", rich_help_panel="Model Factory")
 app.add_typer(env_app, name="env", rich_help_panel="Model Factory")
 app.command("fork", rich_help_panel="Model Factory", epilog=FORK_JSON_HELP)(fork_command)
 app.add_typer(evals_app, name="eval", rich_help_panel="Model Factory")
+app.add_typer(factory_app, name="factory", rich_help_panel="Model Factory")
 app.add_typer(train_app, name="train", rich_help_panel="Model Factory")
 app.add_typer(volumes_app, name="volumes", rich_help_panel="Model Factory")
 app.add_typer(deployments_app, name="deployments", rich_help_panel="Model Factory")

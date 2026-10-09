@@ -76,6 +76,31 @@ class AvailableFFTModelsResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class TrainingClusterInfo(BaseModel):
+    """A cluster the caller can create volumes on (GET /v1/training/clusters).
+
+    `name` (or `cluster_id`) is what `volumes create --cluster` accepts;
+    `cordoned` and `status` say whether it can be picked right now.
+    """
+
+    cluster_id: str = Field(..., alias="clusterId")
+    name: str
+    # Human-facing name; the backend falls back to `name` when unset.
+    display_name: str = Field(..., alias="displayName")
+    # The team the Model Factory link dedicates this cluster to: the
+    # teamId a member without a personal allocation must submit to
+    # `volumes create` to use it. Always set by the backend; kept so the
+    # JSON output stays the endpoint's wire shape verbatim.
+    team_id: Optional[str] = Field(None, alias="teamId")
+    gpu_type: Optional[str] = Field(None, alias="gpuType")
+    total_gpus: Optional[int] = Field(None, alias="totalGpus")
+    free_gpus: Optional[int] = Field(None, alias="freeGpus")
+    cordoned: bool
+    status: str
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class Volume(BaseModel):
     """A named volume (GET/POST /v1/training/volumes)."""
 
@@ -203,6 +228,11 @@ class HostedTrainingClient:
         params = {"teamId": team_id} if team_id else None
         response = self.client.get("/training/volumes", params=params)
         return [Volume.model_validate(v) for v in response.get("volumes", [])]
+
+    def list_clusters(self, team_id: Optional[str] = None) -> List[TrainingClusterInfo]:
+        params = {"teamId": team_id} if team_id else None
+        response = self.client.get("/training/clusters", params=params)
+        return [TrainingClusterInfo.model_validate(c) for c in response.get("clusters", [])]
 
     def resize_volume(self, name: str, size: str, team_id: Optional[str] = None) -> Volume:
         payload: Dict[str, Any] = {"size": size}

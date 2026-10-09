@@ -2,7 +2,7 @@
 
 import logging
 
-__version__ = "0.1.12"
+__version__ = "0.1.14"
 
 from prime_tunnel.core import Config, TunnelClient
 from prime_tunnel.exceptions import (
@@ -10,10 +10,11 @@ from prime_tunnel.exceptions import (
     TunnelAuthError,
     TunnelConnectionError,
     TunnelError,
+    TunnelGoneError,
     TunnelLimitReachedError,
     TunnelTimeoutError,
 )
-from prime_tunnel.models import TunnelInfo, TunnelListPage
+from prime_tunnel.models import TunnelInfo, TunnelListPage, TunnelStatus
 
 logging.getLogger("prime_tunnel").addHandler(logging.NullHandler())
 
@@ -27,10 +28,12 @@ __all__ = [
     # Models
     "TunnelInfo",
     "TunnelListPage",
+    "TunnelStatus",
     # Exceptions
     "BinaryDownloadError",
     "TunnelAuthError",
     "TunnelError",
+    "TunnelGoneError",
     "TunnelLimitReachedError",
     "TunnelConnectionError",
     "TunnelTimeoutError",

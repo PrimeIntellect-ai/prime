@@ -17,6 +17,7 @@ from prime_sandboxes.models import (
     BackgroundJob,
     BackgroundJobStatus,
     BackgroundJobStatusSnapshot,
+    CommandResponse,
     ReadFileResponse,
 )
 from prime_sandboxes.sandbox import AsyncSandboxClient, SandboxClient
@@ -842,15 +843,15 @@ async def test_async_background_job_cancellation_settles_poll_before_teardown() 
     async def start_background_job(*_args: Any, **_kwargs: Any) -> BackgroundJob:
         return _job("sandbox-a", "deadbeef")
 
-    async def read_file(*_args: Any, **_kwargs: Any) -> ReadFileResponse:
+    async def execute_command(*_args: Any, **_kwargs: Any) -> CommandResponse:
         nonlocal polled_after_delete
         poll_started.set()
         await release_poll.wait()
         polled_after_delete = sandbox_deleted
-        return ReadFileResponse(content="", size=0)
+        return CommandResponse(stdout="", stderr="", exit_code=0)
 
     cast(Any, client).start_background_job = start_background_job
-    cast(Any, client).read_file = read_file
+    cast(Any, client).execute_command = execute_command
 
     run = asyncio.create_task(client.run_background_job("sandbox-a", "sleep 30"))
     await poll_started.wait()

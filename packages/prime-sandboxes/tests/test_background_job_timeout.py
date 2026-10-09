@@ -5,7 +5,7 @@ from typing import Any, List, Optional, cast
 import pytest
 
 from prime_sandboxes.core.client import APIClient, APIError
-from prime_sandboxes.models import BackgroundJob, ReadFileResponse
+from prime_sandboxes.models import BackgroundJob, CommandResponse, ReadFileResponse
 from prime_sandboxes.sandbox import AsyncSandboxClient, SandboxClient
 
 
@@ -29,24 +29,33 @@ def _legacy_whole_file(content: str) -> ReadFileResponse:
     return ReadFileResponse.model_validate({"content": content, "size": len(content.encode())})
 
 
-def test_sync_get_background_job_forwards_timeout_to_read_file():
+def _probe(stdout: str, seen_timeouts: Optional[List[Optional[int]]] = None):
+    """Fake execute_command answering the background-job status probe."""
+
+    def execute_command(_sandbox_id: str, _command: str, timeout: Optional[int] = None, **_kw):
+        if seen_timeouts is not None:
+            seen_timeouts.append(timeout)
+        return CommandResponse(stdout=stdout, stderr="", exit_code=0)
+
+    return execute_command
+
+
+def _async_probe(stdout: str, seen_timeouts: Optional[List[Optional[int]]] = None):
+    probe = _probe(stdout, seen_timeouts)
+
+    async def execute_command(*args: Any, **kwargs: Any) -> CommandResponse:
+        return probe(*args, **kwargs)
+
+    return execute_command
+
+
+def test_sync_get_background_job_forwards_timeout_to_status_probe():
     client = SandboxClient(APIClient(api_key="test-key"))
     client_any = cast(Any, client)
 
     seen_timeouts: List[Optional[int]] = []
 
-    def fake_read_file(
-        sandbox_id: str,
-        file_path: str,
-        timeout: Optional[int] = None,
-        offset: Optional[int] = None,
-        length: Optional[int] = None,
-    ) -> ReadFileResponse:
-        seen_timeouts.append(timeout)
-        # Empty content => job not completed; single read_file invocation is enough.
-        return _whole_file("")
-
-    client_any.read_file = fake_read_file
+    client_any.execute_command = _probe("", seen_timeouts)
 
     job = _make_job()
     status = client.get_background_job("sbx-123", job, timeout=60)
@@ -61,17 +70,7 @@ def test_sync_get_background_job_defaults_timeout_to_none():
 
     seen_timeouts: List[Optional[int]] = []
 
-    def fake_read_file(
-        sandbox_id: str,
-        file_path: str,
-        timeout: Optional[int] = None,
-        offset: Optional[int] = None,
-        length: Optional[int] = None,
-    ) -> ReadFileResponse:
-        seen_timeouts.append(timeout)
-        return _whole_file("")
-
-    client_any.read_file = fake_read_file
+    client_any.execute_command = _probe("", seen_timeouts)
 
     job = _make_job()
     client.get_background_job("sbx-123", job)
@@ -96,18 +95,17 @@ def test_sync_get_background_job_forwards_timeout_on_completed_reads():
         length: Optional[int] = None,
     ) -> ReadFileResponse:
         seen_timeouts.append(timeout)
-        if file_path.endswith(".exit"):
-            return _whole_file("0\n")
         return _whole_file("out")
 
     client_any.read_file = fake_read_file
+    client_any.execute_command = _probe("0\n", seen_timeouts)
 
     job = _make_job()
     status = client.get_background_job("sbx-123", job, timeout=45)
 
     assert status.completed
     assert status.exit_code == 0
-    # Exit file read, then stdout, then stderr.
+    # Status probe, then stdout, then stderr.
     assert seen_timeouts == [45, 45, 45]
 
 
@@ -125,11 +123,10 @@ def test_sync_get_background_job_handles_legacy_read_file_response():
         offset: Optional[int] = None,
         length: Optional[int] = None,
     ) -> ReadFileResponse:
-        if file_path.endswith(".exit"):
-            return _legacy_whole_file("0\n")
         return _legacy_whole_file("out")
 
     client_any.read_file = fake_read_file
+    client_any.execute_command = _probe("0\n")
 
     status = client.get_background_job("sbx-123", _make_job())
 
@@ -152,13 +149,12 @@ def test_sync_output_error_preserves_completed_exit_code():
         offset: Optional[int] = None,
         length: Optional[int] = None,
     ) -> ReadFileResponse:
-        if file_path.endswith(".exit"):
-            return _whole_file("7\n")
         if file_path.endswith(".stdout"):
             raise APIError("Read file failed: ConnectError")
         return _whole_file("stderr")
 
     client_any.read_file = fake_read_file
+    client_any.execute_command = _probe("7\n")
 
     status = client.get_background_job("sbx-123", _make_job())
 
@@ -182,11 +178,10 @@ async def test_async_get_background_job_handles_legacy_read_file_response():
         offset: Optional[int] = None,
         length: Optional[int] = None,
     ) -> ReadFileResponse:
-        if file_path.endswith(".exit"):
-            return _legacy_whole_file("0\n")
         return _legacy_whole_file("out")
 
     client_any.read_file = fake_read_file
+    client_any.execute_command = _async_probe("0\n")
 
     status = await client.get_background_job("sbx-123", _make_job())
 
@@ -198,23 +193,13 @@ async def test_async_get_background_job_handles_legacy_read_file_response():
 
 
 @pytest.mark.asyncio
-async def test_async_get_background_job_forwards_timeout_to_read_file():
+async def test_async_get_background_job_forwards_timeout_to_status_probe():
     client = AsyncSandboxClient(api_key="test-key")
     client_any = cast(Any, client)
 
     seen_timeouts: List[Optional[int]] = []
 
-    async def fake_read_file(
-        sandbox_id: str,
-        file_path: str,
-        timeout: Optional[int] = None,
-        offset: Optional[int] = None,
-        length: Optional[int] = None,
-    ) -> ReadFileResponse:
-        seen_timeouts.append(timeout)
-        return _whole_file("")
-
-    client_any.read_file = fake_read_file
+    client_any.execute_command = _async_probe("", seen_timeouts)
 
     job = _make_job()
     status = await client.get_background_job("sbx-123", job, timeout=60)
@@ -230,19 +215,26 @@ async def test_async_get_background_job_defaults_timeout_to_none():
 
     seen_timeouts: List[Optional[int]] = []
 
-    async def fake_read_file(
-        sandbox_id: str,
-        file_path: str,
-        timeout: Optional[int] = None,
-        offset: Optional[int] = None,
-        length: Optional[int] = None,
-    ) -> ReadFileResponse:
-        seen_timeouts.append(timeout)
-        return _whole_file("")
-
-    client_any.read_file = fake_read_file
+    client_any.execute_command = _async_probe("", seen_timeouts)
 
     job = _make_job()
     await client.get_background_job("sbx-123", job)
 
     assert seen_timeouts == [None]
+
+
+def test_sync_get_background_job_raises_when_job_died_without_exit_code():
+    client = SandboxClient(APIClient(api_key="test-key"))
+    cast(Any, client).execute_command = _probe("lost\n")
+
+    with pytest.raises(APIError, match="exited without recording an exit code"):
+        client.get_background_job("sbx-123", _make_job())
+
+
+@pytest.mark.asyncio
+async def test_async_get_background_job_raises_when_job_died_without_exit_code():
+    client = AsyncSandboxClient(api_key="test-key")
+    cast(Any, client).execute_command = _async_probe("lost\n")
+
+    with pytest.raises(APIError, match="exited without recording an exit code"):
+        await client.get_background_job("sbx-123", _make_job())

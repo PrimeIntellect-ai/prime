@@ -4,12 +4,15 @@ from typing import Any, cast
 
 import pytest
 
-from prime_sandboxes.core.client import APIClient
+from prime_sandboxes.core.client import APIClient, APIError
 from prime_sandboxes.exceptions import CommandTimeoutError
 from prime_sandboxes.models import CommandResponse
 from prime_sandboxes.sandbox import AsyncSandboxClient, SandboxClient
 
 _OK = CommandResponse(stdout="", stderr="", exit_code=0)
+_DISK_FULL = CommandResponse(
+    stdout="", stderr="sh: can't create /tmp/job_x.launch/pid: No space left on device", exit_code=1
+)
 
 
 def _timeout():
@@ -43,7 +46,7 @@ class TestSyncLaunchRetry:
         assert "cd /srv/app || exit 1; rm -rf x" in commands[0]
         assert len(commands) == 2
         assert commands[0] == commands[1]
-        assert commands[0].startswith(f"{{ mkdir /tmp/job_{job.job_id}.launch && nohup")
+        assert commands[0].startswith(f"mkdir /tmp/job_{job.job_id}.launch || ")
         assert job.job_id
         client.start_background_job("sb", "ls", working_dir="app", user="ubuntu")
         assert cwds[-1] is None
@@ -62,6 +65,12 @@ class TestSyncLaunchRetry:
         with pytest.raises(CommandTimeoutError):
             client.start_background_job("sb", "rm -rf x", user="ubuntu")
         assert calls["n"] == 3
+
+    def test_raises_when_job_does_not_start(self):
+        client = SandboxClient(APIClient(api_key="test-key"))
+        cast(Any, client).execute_command = lambda *_a, **_k: _DISK_FULL
+        with pytest.raises(APIError, match="No space left on device"):
+            client.start_background_job("sb", "ls")
 
 
 class TestAsyncLaunchRetry:
@@ -90,7 +99,7 @@ class TestAsyncLaunchRetry:
         assert "cd /srv/app || exit 1; rm -rf x" in commands[0]
         assert len(commands) == 2
         assert commands[0] == commands[1]
-        assert commands[0].startswith(f"{{ mkdir /tmp/job_{job.job_id}.launch && nohup")
+        assert commands[0].startswith(f"mkdir /tmp/job_{job.job_id}.launch || ")
         assert job.job_id
 
     @pytest.mark.asyncio
@@ -107,3 +116,14 @@ class TestAsyncLaunchRetry:
         with pytest.raises(CommandTimeoutError):
             await client.start_background_job("sb", "rm -rf x", user="ubuntu")
         assert calls["n"] == 3
+
+    @pytest.mark.asyncio
+    async def test_raises_when_job_does_not_start(self):
+        client = AsyncSandboxClient(APIClient(api_key="test-key"))
+
+        async def execute(*_a, **_k):
+            return _DISK_FULL
+
+        cast(Any, client).execute_command = execute
+        with pytest.raises(APIError, match="No space left on device"):
+            await client.start_background_job("sb", "ls")

@@ -1498,17 +1498,26 @@ def test_put_refuses_a_symlink_source(monkeypatch, tmp_path, kind, route):
     assert routes == [] and not created and not commands
 
 
-def test_put_conflict_is_reported_not_routed_through_a_session(monkeypatch, tmp_path):
-    """409 (someone else's read-write session is live): the route's detail,
-    exit 1, and no fallback to a session (only a 404 falls back)."""
+@pytest.mark.parametrize(
+    "detail",
+    [
+        "volume 'data' has an active read-write session (s9, alice); "
+        "use --read-only, or end that session first",
+        "an upload to volume 'data' is in progress until 12:34:56Z; retry after it finishes",
+        "your read-write session s9 uses a previous SSH key; end it "
+        "(prime volumes stop data s9) first",
+    ],
+)
+@pytest.mark.parametrize("args", [["put", "data", "f.txt", "/"], ["get", "data", "f.txt", "."]])
+def test_transfer_conflict_is_reported_not_routed_through_a_session(
+    monkeypatch, tmp_path, detail, args
+):
+    """409 (single writer): the route's detail, exit 1, and no fallback to
+    a session (only a 404 falls back)."""
     from prime_cli.core import APIError
 
     monkeypatch.chdir(tmp_path)
     Path("f.txt").write_text("f")
-    detail = (
-        "volume 'data' has a live read-write SSH session (s9, alice); "
-        "put through that session or end it first"
-    )
 
     def route(*a, **kw):
         raise APIError(f"HTTP 409: {detail}")
@@ -1521,9 +1530,70 @@ def test_put_conflict_is_reported_not_routed_through_a_session(monkeypatch, tmp_
     monkeypatch.setattr(
         volumes.subprocess, "run", lambda *a, **kw: pytest.fail("no transfer on a 409")
     )
-    result = _run("put", "data", "f.txt", "/")
+    result = _run(*args)
     assert result.exit_code == 1
-    assert f"Error: {detail}" in " ".join(result.output.split())
+    out = " ".join(result.output.split())
+    assert f"Error: {detail}" in out and "HTTP 409" not in out and "Tip:" not in out
+
+
+@pytest.mark.parametrize("args", [["ssh", "data"], ["put", "data", "f.txt", "/"]])
+def test_session_create_conflict_is_reported_once(monkeypatch, tmp_path, args):
+    """A 409 creating a read-write session: the detail without the HTTP
+    prefix, exit 1, one create call (no retry); only ssh gets the hint."""
+    from prime_cli.core import APIError
+
+    monkeypatch.chdir(tmp_path)
+    Path("f.txt").write_text("f")
+    key = tmp_path / "key"
+    key.write_text("test")
+    monkeypatch.setattr(volumes.Config, "ssh_key_path", property(lambda self: str(key)))
+    monkeypatch.setattr(volumes.shutil, "which", lambda tool: f"/usr/bin/{tool}")
+    detail = (
+        "volume 'data' has an active read-write session (s9, alice); "
+        "use --read-only, or end that session first"
+    )
+    creates = []
+
+    def create(*a, **kw):
+        creates.append(kw)
+        raise APIError(f"HTTP 409: {detail}")
+
+    client = SimpleNamespace(route_volume_transfer=_no_route, create_volume_session=create)
+    monkeypatch.setattr(volumes, "_client", lambda: (client, None))
+    monkeypatch.setattr(volumes.subprocess, "run", lambda *a, **kw: pytest.fail("no ssh on a 409"))
+    result = _run(*args)
+    assert result.exit_code == 1
+    assert len(creates) == 1 and creates[0]["read_only"] is False
+    out = " ".join(result.output.split())
+    assert f"Error: {detail}" in out and "HTTP 409" not in out
+    tip = "Tip: prime volumes ssh data --read-only opens a read-only session"
+    assert (tip in out) == (args[0] == "ssh")
+
+
+class _FailingS3(FakeS3):
+    def upload_file(self, *a, **kw):
+        from boto3.exceptions import S3UploadFailedError
+
+        raise S3UploadFailedError("Failed to upload f.txt to b/vol1/f.txt: AccessDenied")
+
+    def download_file(self, *a, **kw):
+        from boto3.exceptions import S3UploadFailedError
+
+        raise S3UploadFailedError("Failed to download vol1/f.txt: AccessDenied")
+
+
+@pytest.mark.parametrize("args", [["put", "data", "f.txt", "/"], ["get", "data", "f.txt", "out"]])
+def test_direct_transfer_boto3_error_is_reported(monkeypatch, tmp_path, args):
+    """boto3 wraps a ClientError from upload_file/download_file in
+    S3UploadFailedError: reported as "Transfer failed", exit 1, no traceback."""
+    monkeypatch.chdir(tmp_path)
+    Path("f.txt").write_text("f")
+    _direct(monkeypatch, _FailingS3({"vol1/f.txt": b"f"}))
+    result = _run(*args)
+    assert result.exit_code == 1, result.output
+    assert isinstance(result.exception, SystemExit)  # not a traceback
+    out = " ".join(result.output.split())
+    assert "Transfer failed: Failed to" in out and "AccessDenied" in out
 
 
 def test_r2_credentials_refresh_near_expiry_only(monkeypatch):

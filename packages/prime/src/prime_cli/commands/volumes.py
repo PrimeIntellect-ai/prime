@@ -377,13 +377,15 @@ def _open_session(
     direct: bool = False,
     allow_writable: bool = False,
     existing=None,
+    from_ssh: bool = False,
 ):
     """Create or reuse a session, wait for its endpoint and write the ssh
     config block. Returns (session, alias, key, config, via_gateway).
 
     `allow_writable` lets a read-only request reuse the caller's live
     read-write session. `existing` is a session the server already chose
-    (the transfer route): it is used as is, and never stopped here."""
+    (the transfer route): it is used as is, and never stopped here.
+    `from_ssh` adds the --read-only hint to a single-writer 409."""
     key = Config().ssh_key_path
     if not key or not os.path.isfile(os.path.expanduser(key)):
         console.print("[red]SSH key not found; use prime config set-ssh-key-path.[/red]")
@@ -398,7 +400,15 @@ def _open_session(
                 name, read_only=read_only, allow_writable=allow_writable, team_id=team_id
             )
         except APIError as exc:
-            console.print(f"[red]Error:[/red] {exc}")
+            # 409: one read-write session per volume (someone else's is live,
+            # or an upload is in progress). Reported as is, never retried.
+            detail = str(exc).removeprefix("HTTP 409: ")
+            console.print(f"[red]Error:[/red] {escape(detail)}")
+            if from_ssh and not read_only and "active read-write session" in detail:
+                console.print(
+                    f"Tip: prime volumes ssh {name} --read-only opens a read-only session",
+                    markup=False,
+                )
             raise typer.Exit(1) from exc
     mode = "read-only" if session.read_only else "read-write"
     reused = existing is not None or (allow_writable and not session.read_only)
@@ -443,7 +453,9 @@ def ssh(
     if read_only and read_write:
         console.print("[red]Choose either --read-only or --read-write.[/red]")
         raise typer.Exit(2)
-    session, alias, key, config, _ = _open_session(name, read_only=read_only, direct=direct)
+    session, alias, key, config, _ = _open_session(
+        name, read_only=read_only, direct=direct, from_ssh=True
+    )
     base = ["ssh", "-F", str(config), alias]
     console.print(
         f"[blue]Using SSH key:[/blue] {escape(_shell_path(Path(key), '~'))} "
@@ -716,7 +728,8 @@ def _transfer(
     except NotFoundError:
         route = None  # an older backend: always through a session
     except APIError as exc:
-        # e.g. 409: a put while someone else's read-write session is live.
+        # 409 (single writer: another read-write session or an upload is
+        # live, or yours uses an old key): report it; only a 404 falls back.
         console.print(f"[red]Error:[/red] {escape(str(exc).removeprefix('HTTP 409: '))}")
         raise typer.Exit(1) from exc
     if route is not None and route.via == "r2":
@@ -992,6 +1005,7 @@ def _run_r2_jobs(jobs, verb: str) -> None:
 
 
 def _r2_transfer(client, name: str, team_id, route, rel: str, local: str, upload: bool) -> None:
+    from boto3.exceptions import Boto3Error
     from boto3.s3.transfer import TransferConfig
     from botocore.exceptions import BotoCoreError, ClientError
 
@@ -1030,7 +1044,9 @@ def _r2_transfer(client, name: str, team_id, route, rel: str, local: str, upload
             return
         verb = f"Uploading to {escape(name)}:" if upload else f"Downloading from {escape(name)}:"
         _run_r2_jobs(jobs, verb)
-    except (BotoCoreError, ClientError, OSError, RuntimeError) as exc:
+    # upload_file/download_file wrap a ClientError in S3UploadFailedError
+    # (a Boto3Error), so catch that family too.
+    except (Boto3Error, BotoCoreError, ClientError, OSError, RuntimeError) as exc:
         console.print(f"[red]Transfer failed:[/red] {escape(str(exc))}")
         raise typer.Exit(1) from exc
 

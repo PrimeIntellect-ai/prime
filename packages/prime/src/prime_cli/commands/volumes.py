@@ -529,8 +529,32 @@ def _remote_path(path: str) -> str:
             "`prime volumes ssh`.[/red]"
         )
         raise typer.Exit(2)
+    _refuse_long("/".join(parts), shown=path)
     into = path.endswith("/") or path.rsplit("/", 1)[-1] in (".", "..")
     return "/volume/" + "/".join(parts) + ("/" if parts and into else "")
+
+
+# Bytes, UTF-8: a segment over NAME_MAX fails mkdir (ENAMETOOLONG) when a
+# session stages the volume onto its PVC, partway through; R2 caps a key at
+# 1024. The platform refuses the same (platform#6358).
+_MAX_SEGMENT, _MAX_KEY = 255, 1024
+
+
+def _refuse_long(rel: str, prefix: str = "", shown: str = "") -> None:
+    """Exit if a "/"-segment of `rel` is over _MAX_SEGMENT bytes, or the
+    object key `prefix + rel` over _MAX_KEY. `shown` names the path in the
+    message (default `rel`). surrogateescape counts an undecodable local
+    name's raw bytes."""
+    seg = max(len(s.encode("utf-8", "surrogateescape")) for s in rel.split("/"))
+    key = len((prefix + rel).encode("utf-8", "surrogateescape"))
+    if seg > _MAX_SEGMENT:
+        why = f"a name is {seg} bytes (at most {_MAX_SEGMENT})"
+    elif key > _MAX_KEY:
+        why = f"the full path is {key} bytes (at most {_MAX_KEY})"
+    else:
+        return
+    console.print(f"[red]Path too long: {escape(shown or rel)}: {why}. Nothing was copied.[/red]")
+    raise typer.Exit(2)
 
 
 def _transfer_failed(alias: str, code: int, via_gateway: bool) -> None:
@@ -725,6 +749,8 @@ def _refuse_runs(local: str, rel: str) -> list[str] | None:
         raise typer.Exit(2)
     if rel:
         return None
+    for name in top:
+        _refuse_long(name)
     if len(top) > _ROOT_PUT_MAX_ENTRIES:
         console.print(
             f"[red]A put to the volume root writes at most {_ROOT_PUT_MAX_ENTRIES} top-level "
@@ -1232,6 +1258,9 @@ def _r2_run(client, name: str, team_id, s3, route, rel: str, local: str, upload:
                 lambda: _read_route(client, name, team_id), _read_route(client, name, team_id)
             )
             plan, skipped = _put_plan(reads, bucket, prefix, local, rel)
+            for path, key, _ in plan:  # all of it, before any upload
+                rel_key = key.removeprefix(prefix)
+                _refuse_long(rel_key, prefix, path or rel_key)
             _refuse_file_dir_clash(reads, bucket, prefix, [key for _, key, _ in plan])
 
             def up(path, key):

@@ -2139,3 +2139,92 @@ def test_direct_get_restores_mtimes(monkeypatch, tmp_path, remote):
     if remote == "d":
         for name in ("g", "h"):
             assert os.stat(base / name).st_mtime == FakeS3.modified.timestamp()
+
+
+# --- Path-length bounds: 255 bytes a segment, 1024 a key (platform#6358) ---
+
+
+@pytest.mark.parametrize("route", ["direct", "session"])
+@pytest.mark.parametrize("n,code", [(255, 0), (256, 2)])
+def test_remote_segment_is_bounded_at_255_bytes(
+    monkeypatch, tmp_path, _session_dir, route, n, code
+):
+    if route == "direct":
+        monkeypatch.chdir(tmp_path)
+        Path("f.txt").write_text("f")
+        s3 = FakeS3()
+        routes = _direct(monkeypatch, s3)
+    else:
+        created, _, commands = _setup(monkeypatch, tmp_path, {"ssh", "rsync"})
+    result = _run("put", "data", "f.txt", f"d/{'a' * n}")
+    assert result.exit_code == code, result.output
+    if code:
+        assert "Path too long" in result.output and "256 bytes (at most 255)" in result.output
+        if route == "direct":
+            assert routes == [] and s3.objects == {}
+        else:
+            assert not created and not commands
+
+
+def test_segment_bound_counts_utf8_bytes(monkeypatch):
+    volumes._refuse_long("é" * 127 + "a")  # 255 bytes, 128 characters
+    with pytest.raises(volumes.typer.Exit) as exc:
+        volumes._refuse_long("d/" + "é" * 128)  # 256 bytes, 128 characters
+    assert exc.value.exit_code == 2
+
+
+@pytest.mark.parametrize("extra,code", [("", 0), ("b", 2)])
+def test_direct_put_key_is_bounded_at_1024_bytes(monkeypatch, tmp_path, extra, code):
+    monkeypatch.chdir(tmp_path)
+    Path("f.txt").write_text("f")
+    rel = "/".join(["a" * 200] * 5) + "/" + "b" * 14 + extra  # "vol1/" + rel: 1024 (+1)
+    s3 = FakeS3()
+    _direct(monkeypatch, s3)
+    result = _run("put", "data", "f.txt", rel)
+    assert result.exit_code == code, result.output
+    if code:
+        assert "1025 bytes (at most 1024)" in " ".join(result.output.split())
+        assert s3.objects == {}
+    else:
+        assert list(s3.objects) == [f"vol1/{rel}"]
+
+
+def _long_name(monkeypatch, tmp_path) -> str:
+    """A file name over the segment bound that the local filesystem takes:
+    256 bytes of "é" (APFS counts characters), else a lowered bound (ext4
+    caps names at 255 bytes, so the real bound can't be crossed there)."""
+    name = "é" * 128
+    try:
+        (tmp_path / name).touch()
+        (tmp_path / name).unlink()
+    except OSError:
+        monkeypatch.setattr(volumes, "_MAX_SEGMENT", 100)
+        name = "é" * 51
+    return name
+
+
+def test_direct_put_refuses_a_long_name_deep_in_the_tree_before_any_upload(monkeypatch, tmp_path):
+    name = _long_name(monkeypatch, tmp_path)
+    deep = tmp_path / "tree" / "a" / "b"
+    deep.mkdir(parents=True)
+    (tmp_path / "tree" / "first").write_text("x")  # would upload first, if anything did
+    (deep / name).write_text("x")
+    s3 = FakeS3()
+    _direct(monkeypatch, s3)
+    result = _run("put", "data", str(tmp_path / "tree"), "dst/")
+    assert result.exit_code == 2, result.output
+    out = "".join(result.output.split())
+    assert "Pathtoolong" in out and name in out and "Nothingwascopied" in out
+    assert s3.objects == {}
+
+
+def test_root_put_entries_are_bounded_before_the_route(monkeypatch, tmp_path):
+    name = _long_name(monkeypatch, tmp_path)
+    (tmp_path / "tree").mkdir()
+    (tmp_path / "tree" / name).write_text("x")
+    s3 = FakeS3()
+    routes = _direct(monkeypatch, s3)
+    result = _run("put", "data", f"{tmp_path / 'tree'}/", "/")
+    assert result.exit_code == 2, result.output
+    assert "Path too long" in result.output
+    assert routes == [] and s3.objects == {}

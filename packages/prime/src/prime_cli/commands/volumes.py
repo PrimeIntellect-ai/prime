@@ -1215,7 +1215,10 @@ def _r2_transfer(
         verb = f"Uploading to {escape(name)}:" if upload else f"Downloading from {escape(name)}:"
         _run_r2_jobs(jobs, verb)
     # upload_file/download_file wrap a ClientError in S3UploadFailedError
-    # (a Boto3Error), so catch that family too.
+    # (a Boto3Error), so catch that family too. typer.Exit is a
+    # RuntimeError: a refusal has already printed its reason.
+    except typer.Exit:
+        raise
     except (Boto3Error, BotoCoreError, ClientError, OSError, RuntimeError) as exc:
         console.print(f"[red]Transfer failed:[/red] {escape(str(exc))}")
         raise typer.Exit(1) from exc

@@ -1779,6 +1779,7 @@ def test_direct_put_refuses_a_file_directory_clash(
     result = _run("put", "data", local, remote)
     assert result.exit_code == 1, result.output
     assert clash in result.output.replace("\n", "")
+    assert "Transfer failed" not in result.output  # typer.Exit is a RuntimeError
     assert s3.objects == existing  # nothing uploaded
 
 

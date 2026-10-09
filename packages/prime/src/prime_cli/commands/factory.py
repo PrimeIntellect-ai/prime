@@ -43,9 +43,11 @@ def _fmt_count(value: Optional[int]) -> str:
 def _describe_source(source: FactorySource) -> str:
     """Render one source's freshness label: `<kind> Ns ago`, or its coarse status."""
     age = f" {human_age(source.observed_at)} ago" if source.observed_at else ""
+    kind = rich_escape(source.kind)
+    status = rich_escape(source.status)
     if source.status == "ok":
-        return f"{source.kind}{age}" if age else source.kind
-    return f"{source.kind} {source.status}{age}"
+        return f"{kind}{age}" if age else kind
+    return f"{kind} {status}{age}"
 
 
 def _styled_status(status: Optional[str]) -> str:
@@ -65,7 +67,7 @@ def _cluster_header(cluster: FactoryCluster, index: int, multi: bool) -> str:
 
     gpu_bits = [str(cluster.total_gpus)] if cluster.total_gpus is not None else []
     if cluster.gpu_type:
-        gpu_bits.append(cluster.gpu_type)
+        gpu_bits.append(rich_escape(cluster.gpu_type))
     if gpu_bits:
         parts.append(" ".join(gpu_bits) + " GPUs")
     parts.append(_styled_status(cluster.status))

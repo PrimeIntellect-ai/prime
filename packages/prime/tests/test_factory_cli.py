@@ -484,3 +484,24 @@ def test_factory_status_ambiguous_selector_with_markup_does_not_crash(
     # Exit must come from the command (SystemExit), not an escaped MarkupError.
     assert isinstance(result.exception, SystemExit)
     assert "matches multiple clusters" in strip_ansi(result.output)
+
+
+def test_factory_status_markup_in_backend_values_does_not_crash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # API-supplied gpu_type / source kind / source status containing Rich
+    # markup must render as literal text, not raise MarkupError.
+    payload = _status_payload(
+        gpu_type="[/bold]B300",
+        sources=[_source("[/bold]capacity", status="[/bold]stale", age_seconds=30)],
+    )
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    assert isinstance(result.exception, (type(None), SystemExit))
+    output = strip_ansi(result.output)
+    assert "research-b300" in output
+    assert "stale" in output
+    assert "Warning" in output

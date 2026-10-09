@@ -4,7 +4,9 @@
 
 ARG PYTHON_VERSION=3.11
 
-FROM python:${PYTHON_VERSION}-slim AS runtime
+# Pull the official image through Google's Docker Hub mirror. Anonymous pulls from Docker Hub
+# are rate limited per IP, and shared CI runners regularly exhaust that limit.
+FROM mirror.gcr.io/library/python:${PYTHON_VERSION}-slim AS runtime
 
 ARG PRIME_VERSION
 ENV PRIME_VERSION=${PRIME_VERSION}

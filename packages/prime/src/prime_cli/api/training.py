@@ -115,6 +115,29 @@ class VolumeSession(BaseModel):
     error_message: Optional[str] = Field(None, alias="errorMessage")
     # Absent from older backends.
     created_at: Optional[str] = Field(None, alias="createdAt")
+    # creating | staging | ready | syncing | finalizing | stopped | failed;
+    # absent from older backends.
+    phase: Optional[str] = None
+    # The latest rclone stats line while the session copies data in (staging).
+    progress: Optional[str] = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class VolumeTransferRoute(BaseModel):
+    """POST …/volumes/{name}/transfer: where a get/put should go. `via` is
+    "session" (the caller's live read-write session, in `session`) or "r2"
+    (scoped credentials for the volume's `prefix` in `bucket`)."""
+
+    via: str
+    session: Optional[VolumeSession] = None
+    endpoint: Optional[str] = None
+    bucket: Optional[str] = None
+    prefix: Optional[str] = None
+    access_key_id: Optional[str] = Field(None, alias="accessKeyId")
+    secret_access_key: Optional[str] = Field(None, alias="secretAccessKey")
+    session_token: Optional[str] = Field(None, alias="sessionToken")
+    expires_at: Optional[str] = Field(None, alias="expiresAt")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -191,8 +214,9 @@ class HostedTrainingClient:
         size: str,
         team_id: Optional[str] = None,
         cluster: Optional[str] = None,
+        warm: bool = True,
     ) -> Volume:
-        payload: Dict[str, Any] = {"name": name, "size": size}
+        payload: Dict[str, Any] = {"name": name, "size": size, "warm": warm}
         if team_id:
             payload["teamId"] = team_id
         if cluster:
@@ -253,6 +277,18 @@ class HostedTrainingClient:
         params = {"teamId": team_id} if team_id else None
         response = self.client.get(f"/training/volumes/{name}/sessions", params=params)
         return [VolumeSession.model_validate(s) for s in response.get("sessions", [])]
+
+    def route_volume_transfer(
+        self, name: str, mode: str, *, team_id: Optional[str] = None
+    ) -> VolumeTransferRoute:
+        """POST …/volumes/{name}/transfer with mode "get" or "put". Raises
+        NotFoundError on backends without the route."""
+        payload: Dict[str, Any] = {"mode": mode}
+        if team_id:
+            payload["teamId"] = team_id
+        return VolumeTransferRoute.model_validate(
+            self.client.post(f"/training/volumes/{name}/transfer", json=payload)
+        )
 
     def create_volume_transfer(
         self,

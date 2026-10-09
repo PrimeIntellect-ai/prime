@@ -15,9 +15,15 @@ from types import SimpleNamespace
 import pytest
 from prime_cli.api.training import HostedTrainingClient
 from prime_cli.commands import volumes
+from prime_cli.core import NotFoundError
 from prime_cli.main import app
 from prime_cli.volume_gateway import GatewayError, relay
 from typer.testing import CliRunner
+
+
+def _no_route(*a, **kw):
+    """An older backend: no POST …/transfer route, so get/put use a session."""
+    raise NotFoundError("HTTP 404: Not Found")
 
 
 @pytest.fixture(autouse=True)
@@ -400,7 +406,7 @@ def test_create_passes_the_cluster_through(monkeypatch):
 
     calls = []
 
-    def create_volume(name, size, team_id=None, cluster=None):
+    def create_volume(name, size, team_id=None, cluster=None, warm=True):
         calls.append((name, size, team_id, cluster))
         return Volume(
             name=name, size=size, status="PENDING", clusterId="c1", cluster="gpu-east", pvcName="v"
@@ -460,6 +466,7 @@ def _setup(monkeypatch, tmp_path, which, run_code=0, stuck=False, find_stdout=""
     client = SimpleNamespace(
         create_volume_session=create,
         stop_volume_session=lambda *a, **kw: stopped.append(a),
+        route_volume_transfer=_no_route,
     )
     monkeypatch.setattr(volumes, "_client", lambda: (client, "t1"))
     monkeypatch.setattr(volumes.shutil, "which", lambda n: f"/bin/{n}" if n in which else None)
@@ -521,7 +528,12 @@ def test_get_says_when_it_reuses_a_read_write_session(monkeypatch, tmp_path):
     monkeypatch.setattr(
         volumes,
         "_client",
-        lambda: (SimpleNamespace(create_volume_session=lambda *a, **kw: reused), "t1"),
+        lambda: (
+            SimpleNamespace(
+                create_volume_session=lambda *a, **kw: reused, route_volume_transfer=_no_route
+            ),
+            "t1",
+        ),
     )
     result = _run("get", "data", "x")
     assert result.exit_code == 0, result.output
@@ -678,7 +690,7 @@ def test_failed_transfer_exit_code(monkeypatch, tmp_path):
 def test_wait_failure_stops_session(monkeypatch, tmp_path):
     _, stopped, commands = _setup(monkeypatch, tmp_path, {"ssh", "rsync"}, stuck=True)
     monkeypatch.setattr(volumes.time, "sleep", lambda s: None)
-    monkeypatch.setattr(volumes.time, "monotonic", iter([0, 1000]).__next__)
+    monkeypatch.setattr(volumes.time, "monotonic", iter([0, 4000]).__next__)
     result = _run("get", "data", "x")
     assert result.exit_code == 1
     assert stopped == [("data", "s1")] and not commands
@@ -705,7 +717,9 @@ def _gateway_ssh(monkeypatch, tmp_path, gateway=GATEWAY):
         ssh_connection="u@vol-ssh-0123.tailnet.ts.net",
         gateway=gateway,
     )
-    client = SimpleNamespace(create_volume_session=lambda *a, **kw: session)
+    client = SimpleNamespace(
+        create_volume_session=lambda *a, **kw: session, route_volume_transfer=_no_route
+    )
     monkeypatch.setattr(volumes, "_client", lambda: (client, "t1"))
     commands = []
     monkeypatch.setattr(
@@ -1017,7 +1031,7 @@ def test_put_directory_splits_files_across_parallel_rsyncs(monkeypatch, tmp_path
     (tree / "empty").mkdir(parents=True)
     for i in range(6):
         (tree / f"shard-{i}").write_bytes(b"x" * (i + 1))
-    result = _run("put", "data", str(tree), "runs/")
+    result = _run("put", "data", str(tree), "ckpts/")
     assert result.exit_code == 0, result.output
     # One rsync creates the directories first, so the parallel ones never
     # race to mkdir the same path; then the files go over _STREAMS rsyncs.
@@ -1025,13 +1039,13 @@ def test_put_directory_splits_files_across_parallel_rsyncs(monkeypatch, tmp_path
     # directories, never a --files-from list with "." (openrsync recurses
     # into "." and would copy every file single-stream).
     (dirs_pass,) = commands
-    assert dirs_pass[-4:] == ["--include=*/", "--exclude=*", str(tree), "host:/volume/runs/"]
+    assert dirs_pass[-4:] == ["--include=*/", "--exclude=*", str(tree), "host:/volume/ckpts/"]
     assert not any(a.startswith("--files-from") for a in dirs_pass)
     assert len(started) == volumes._STREAMS
     for cmd, _ in started:
         # "ckpt" (no trailing slash) copies the directory itself: the lists
         # are relative to its parent and every entry starts with "ckpt/".
-        assert cmd[-2:] == [f"{tmp_path}/", "host:/volume/runs/"]
+        assert cmd[-2:] == [f"{tmp_path}/", "host:/volume/ckpts/"]
         assert cmd[:4] == ["/bin/rsync", "-a", "-v", "--partial-dir=.rsync-partial"]
     listed = [p for _, paths in started for p in paths]
     assert sorted(listed) == [f"ckpt/shard-{i}" for i in range(6)]
@@ -1068,3 +1082,306 @@ def test_parallel_failure_reports_the_exit_code(monkeypatch, tmp_path):
     result = _run("put", "data", f"{tree}/", "/")
     assert result.exit_code == 23
     assert "Transfer failed" in result.output
+
+
+# --- warm create, phase-driven wait, routed get/put (ENG-6585) -------------
+
+
+def test_client_sends_warm_and_routes_transfers():
+    posted = []
+    volume = {"name": "v", "status": "PENDING", "clusterId": "", "pvcName": ""}
+    route = {
+        "via": "r2",
+        "endpoint": "https://acct.r2.cloudflarestorage.com",
+        "bucket": "b",
+        "prefix": "vol1/",
+        "accessKeyId": "AK",
+        "secretAccessKey": "SK",
+        "sessionToken": "ST",
+        "expiresAt": "2026-10-09T12:00:00Z",
+    }
+
+    def post(path, json=None):
+        posted.append((path, json))
+        return route if path.endswith("/transfer") else volume
+
+    client = HostedTrainingClient(SimpleNamespace(post=post))
+    client.create_volume("v", "1Ti")
+    client.create_volume("v", "1Ti", warm=False)
+    got = client.route_volume_transfer("v", "put", team_id="t1")
+    assert posted[0][1]["warm"] is True and posted[1][1]["warm"] is False
+    assert posted[2] == ("/training/volumes/v/transfer", {"mode": "put", "teamId": "t1"})
+    assert (got.via, got.prefix, got.access_key_id) == ("r2", "vol1/", "AK")
+    assert got.session_token == "ST"
+
+
+@pytest.mark.parametrize("flags,warm", [([], True), (["--no-warm"], False)])
+def test_create_warm_by_default(monkeypatch, flags, warm):
+    from prime_cli.api.training import Volume
+
+    sent = []
+
+    def create_volume(name, size, team_id=None, cluster=None, warm=True):
+        sent.append(warm)
+        return Volume(name=name, size=size, status="PENDING", clusterId="", pvcName="")
+
+    monkeypatch.setattr(
+        volumes, "_client", lambda: (SimpleNamespace(create_volume=create_volume), None)
+    )
+    result = _run("create", "ckpts", *flags)
+    assert result.exit_code == 0, result.output
+    assert sent == [warm]
+    assert ("Starting a session in the background" in result.output) is warm
+    as_json = _run("create", "ckpts", "-o", "json", *flags)
+    assert json.loads(as_json.output)["name"] == "ckpts"
+
+
+def test_ssh_shows_the_phase_and_how_the_session_ends(monkeypatch, tmp_path):
+    def poll(**over):
+        fields = dict(
+            id="s1",
+            status="DEPLOYING",
+            read_only=False,
+            ssh_connection=None,
+            host_public_key=None,
+            error_message=None,
+            phase="creating",
+            progress=None,
+        )
+        return SimpleNamespace(**{**fields, **over})
+
+    polls = [
+        poll(phase="staging", progress="1.2 GiB / 4 GiB, 30%"),
+        poll(status="RUNNING", phase="ready", ssh_connection="prime@h.corp.ts.net"),
+    ]
+    _poll_client(monkeypatch, tmp_path, polls, [])
+    first = poll()
+    monkeypatch.setattr(
+        volumes,
+        "_client",
+        lambda: (
+            SimpleNamespace(
+                create_volume_session=lambda *a, **kw: first,
+                get_volume_session=lambda *a, **kw: polls.pop(0),
+            ),
+            None,
+        ),
+    )
+    result = CliRunner().invoke(
+        app, ["volumes", "ssh", "data"], env={"PRIME_DISABLE_VERSION_CHECK": "1", "COLUMNS": "200"}
+    )
+    assert result.exit_code == 0, result.output
+    assert "Copying data from bucket... 1.2 GiB / 4 GiB, 30%" in result.output
+    assert "Changes sync to the volume every minute." in result.output
+    assert "stops after 30 minutes idle" in result.output
+    assert "prime volumes stop data s1" in result.output
+
+
+def test_ssh_wait_ends_on_a_failed_phase(monkeypatch, tmp_path):
+    session = SimpleNamespace(
+        id="s1",
+        status="DEPLOYING",
+        read_only=True,
+        ssh_connection=None,
+        host_public_key=None,
+        error_message="staging failed",
+        phase="failed",
+    )
+    stopped = []
+    _poll_client(monkeypatch, tmp_path, [], stopped)
+    monkeypatch.setattr(
+        volumes,
+        "_client",
+        lambda: (
+            SimpleNamespace(
+                create_volume_session=lambda *a, **kw: session,
+                stop_volume_session=lambda name, sid, **kw: stopped.append(sid),
+            ),
+            None,
+        ),
+    )
+    result = CliRunner().invoke(
+        app, ["volumes", "ssh", "data"], env={"PRIME_DISABLE_VERSION_CHECK": "1", "COLUMNS": "200"}
+    )
+    assert result.exit_code == 1
+    assert "Session is FAILED: staging failed" in result.output
+    assert stopped == ["s1"]
+
+
+def test_route_via_session_reuses_it(monkeypatch, tmp_path, _session_dir):
+    from prime_cli.api.training import VolumeSession, VolumeTransferRoute
+
+    created, stopped, commands = _setup(monkeypatch, tmp_path, {"ssh", "rsync"})
+    live = VolumeSession.model_validate(
+        {
+            "id": "s7",
+            "volumeName": "data",
+            "status": "RUNNING",
+            "readOnly": False,
+            "sshConnection": "u@host.tailnet.ts.net",
+        }
+    )
+    client, _ = volumes._client()
+    client.route_volume_transfer = lambda *a, **kw: VolumeTransferRoute(via="session", session=live)
+    result = _run("put", "data", "f.txt", "dir/")
+    assert result.exit_code == 0, result.output
+    assert created == [] and stopped == []
+    assert "Reusing session s7 (read-write)" in result.output
+    assert commands[0][-2:] == ["f.txt", "host:/volume/dir/"]
+
+
+class FakeS3:
+    """The few boto3 S3 client calls the direct path makes, over a dict."""
+
+    def __init__(self, objects=None):
+        self.objects = dict(objects or {})
+
+    def upload_file(self, path, bucket, key, Config=None, Callback=None):
+        assert bucket == "b" and Config.max_concurrency == volumes._R2_PART_WORKERS
+        self.objects[key] = Path(path).read_bytes()
+        Callback(len(self.objects[key]))
+
+    def download_file(self, bucket, key, path, Config=None, Callback=None):
+        Path(path).write_bytes(self.objects[key])
+        Callback(len(self.objects[key]))
+
+    def list_objects_v2(self, Bucket, Prefix, MaxKeys=1000):
+        keys = sorted(k for k in self.objects if k.startswith(Prefix))[:MaxKeys]
+        return {"Contents": [{"Key": k, "Size": len(self.objects[k])} for k in keys]}
+
+    def get_paginator(self, name):
+        return SimpleNamespace(paginate=lambda **kw: [self.list_objects_v2(**kw)])
+
+    def head_object(self, Bucket, Key):
+        from botocore.exceptions import ClientError
+
+        if Key not in self.objects:
+            raise ClientError({"Error": {"Code": "404"}}, "HeadObject")
+        return {"ContentLength": len(self.objects[Key])}
+
+
+R2_ROUTE = dict(
+    via="r2",
+    endpoint="https://acct.r2.cloudflarestorage.com",
+    bucket="b",
+    prefix="vol1/",
+    accessKeyId="AK",
+    secretAccessKey="SK",
+    sessionToken="ST",
+    expiresAt="2099-01-01T00:00:00Z",
+)
+
+
+def _direct(monkeypatch, s3):
+    """A backend that routes to R2; returns the route calls made."""
+    from prime_cli.api.training import VolumeTransferRoute
+
+    routes = []
+
+    def route(name, mode, team_id=None):
+        routes.append(mode)
+        return VolumeTransferRoute.model_validate(R2_ROUTE)
+
+    client = SimpleNamespace(
+        route_volume_transfer=route,
+        create_volume_session=lambda *a, **kw: pytest.fail("no session on the direct path"),
+    )
+    monkeypatch.setattr(volumes, "_client", lambda: (client, "t1"))
+    monkeypatch.setattr(volumes, "_r2_client", lambda refresh, r: s3)
+    return routes
+
+
+def test_r2_client_is_scoped_to_the_route():
+    from prime_cli.api.training import VolumeTransferRoute
+
+    route = VolumeTransferRoute.model_validate(R2_ROUTE)
+    s3 = volumes._r2_client(lambda: route, route)
+    assert s3.meta.endpoint_url == R2_ROUTE["endpoint"]
+    assert s3.meta.region_name == "auto"
+    assert s3.meta.config.signature_version == "s3v4"
+    creds = s3._request_signer._credentials.get_frozen_credentials()
+    assert (creds.access_key, creds.secret_key, creds.token) == ("AK", "SK", "ST")
+
+
+@pytest.mark.parametrize(
+    "local,remote,existing,keys",
+    [
+        ("f.txt", "/", {}, ["f.txt"]),
+        ("f.txt", "dir/", {}, ["dir/f.txt"]),
+        ("f.txt", "dir", {}, ["dir"]),  # no such directory: rsync names the file "dir"
+        ("f.txt", "dir", {"vol1/dir/x": b""}, ["dir/f.txt", "dir/x"]),
+        ("tree", "/", {}, ["tree/a", "tree/sub/b"]),
+        ("tree", "x", {}, ["x/tree/a", "x/tree/sub/b"]),
+        ("tree/", "x/", {}, ["x/a", "x/sub/b"]),
+        ("tree/", "/", {}, ["a", "sub/b"]),
+    ],
+)
+def test_direct_put_mirrors_rsync_layout(monkeypatch, tmp_path, local, remote, existing, keys):
+    monkeypatch.chdir(tmp_path)
+    Path("f.txt").write_text("f")
+    (tmp_path / "tree" / "sub").mkdir(parents=True)
+    Path("tree/a").write_text("a")
+    Path("tree/sub/b").write_text("bb")
+    Path("tree/link").symlink_to(tmp_path / "f.txt")
+    s3 = FakeS3(existing)
+    routes = _direct(monkeypatch, s3)
+    result = _run("put", "data", local, remote)
+    assert result.exit_code == 0, result.output
+    assert routes == ["put"]
+    assert sorted(k.removeprefix("vol1/") for k in s3.objects) == keys
+    if local.startswith("tree"):
+        assert "Skipping 1 symbolic links" in result.output
+
+
+@pytest.mark.parametrize(
+    "remote,local,files",
+    [
+        ("f.txt", "out", ["out"]),  # no such local dir: the file is named "out"
+        ("f.txt", "out/", ["out/f.txt"]),
+        ("d", "out", ["out/d/a", "out/d/sub/b"]),
+        ("d/", "out", ["out/a", "out/sub/b"]),
+        ("/", "out", ["out/d/a", "out/d/sub/b", "out/f.txt", "out/runs/r1/m"]),
+        ("runs/r1", ".", ["r1/m"]),
+    ],
+)
+def test_direct_get_mirrors_rsync_layout(monkeypatch, tmp_path, remote, local, files):
+    monkeypatch.chdir(tmp_path)
+    s3 = FakeS3(
+        {
+            "vol1/f.txt": b"f",
+            "vol1/d/a": b"a",
+            "vol1/d/sub/b": b"bb",
+            "vol1/runs/r1/m": b"m",
+            "vol1/runs/.sessions/s1/synced-at": b"t",
+            "vol1/d/../escape": b"x",
+        }
+    )
+    routes = _direct(monkeypatch, s3)
+    result = _run("get", "data", remote, local)
+    assert result.exit_code == 0, result.output
+    assert routes == ["get"]
+    got = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*") if p.is_file())
+    assert got == files
+    assert not (tmp_path / "escape").exists()
+
+
+def test_direct_get_missing_path_fails(monkeypatch, tmp_path):
+    _direct(monkeypatch, FakeS3({"vol1/a": b"a"}))
+    result = _run("get", "data", "nope", str(tmp_path))
+    assert result.exit_code == 1
+    assert "No such file or directory on the volume: /nope" in result.output
+
+
+@pytest.mark.parametrize(
+    "local,remote", [("f.txt", "runs/"), ("f.txt", "/runs/x"), ("runs", "/"), ("top/", "/")]
+)
+def test_put_never_writes_under_runs(monkeypatch, tmp_path, local, remote):
+    monkeypatch.chdir(tmp_path)
+    Path("f.txt").write_text("f")
+    Path("runs").write_text("r")
+    (tmp_path / "top" / "runs").mkdir(parents=True)
+    routes = _direct(monkeypatch, FakeS3())
+    result = _run("put", "data", local, remote)
+    assert result.exit_code == 2
+    assert "runs/ holds run outputs" in result.output
+    assert routes == []

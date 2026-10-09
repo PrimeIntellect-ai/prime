@@ -32,7 +32,7 @@ from rich.markup import escape
 from rich.table import Table
 
 from prime_cli.api.training import HostedTrainingClient, VolumeTransfer
-from prime_cli.core import APIClient, APIError, Config
+from prime_cli.core import APIClient, APIError, Config, NotFoundError
 from prime_cli.volume_gateway import GatewayError, relay
 
 from ..utils import (
@@ -81,6 +81,11 @@ def create(
         "--cluster",
         help="(deprecated) Volumes are no longer tied to a cluster",
     ),
+    warm: bool = typer.Option(
+        True,
+        "--warm/--no-warm",
+        help="Start a read-write session in the background (stops after 30 min idle)",
+    ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
     """Create a volume for your team (or yourself if you have no team)."""
@@ -92,7 +97,7 @@ def create(
         )
     client, team_id = _client()
     try:
-        volume = client.create_volume(name, size, team_id=team_id, cluster=cluster)
+        volume = client.create_volume(name, size, team_id=team_id, cluster=cluster, warm=warm)
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
@@ -103,6 +108,8 @@ def create(
         f"[green]Volume {volume.name} ({volume.size}) is {status_label(volume.status)}.[/green]"
     )
     console.print(f"Use it with: prime train config.toml --volume {volume.name}")
+    if warm:
+        console.print("Starting a session in the background so the volume is ready for put/ssh.")
 
 
 @app.command("list")
@@ -289,8 +296,24 @@ _DEAD_SESSION_STATES = (
     "TERMINATING",
     "TOMBSTONED",
 )
+# Session phases (newer backends) that will never publish an endpoint.
+_DEAD_SESSION_PHASES = ("finalizing", "stopped", "failed")
 # Consecutive failed status polls tolerated before giving up (5s apart).
 _MAX_POLL_ERRORS = 6
+# The platform allows a session up to 60m to come up: staging copies the
+# volume's data from the bucket onto the session's disk first.
+_SESSION_WAIT_SECONDS = 3600
+
+
+def _waiting_text(session) -> str:
+    """The spinner text for the session's phase (absent on older backends)."""
+    phase = getattr(session, "phase", None)
+    if phase == "creating":
+        return "Creating SSH container..."
+    if phase == "staging":
+        progress = getattr(session, "progress", None)
+        return "Copying data from bucket..." + (f" {escape(progress)}" if progress else "")
+    return "Waiting for SSH connection to become available..."
 
 
 def _wait_for_connection(client, name: str, session, team_id):
@@ -298,18 +321,21 @@ def _wait_for_connection(client, name: str, session, team_id):
     on a dead session, a timeout, or a status API that keeps failing; a
     single failed poll (network blip, 5xx) is retried.
 
-    Match `prime pods ssh`: poll, then invoke local ssh. The platform fails
-    a session deploy at 5m plus a 2m helm buffer (7m, measured 7m12s); 8
-    minutes leaves margin so a failed deploy surfaces as FAILED, not a
-    timeout.
+    Match `prime pods ssh`: poll, then invoke local ssh. The spinner follows
+    the session's phase (creating, then staging with rclone's progress).
     """
     errors = 0
-    with console.status("Waiting for SSH connection to become available...", spinner="dots"):
-        deadline = time.monotonic() + 480
+    shown = _waiting_text(session)
+    # No spinner off a terminal (console.status gives None): print each
+    # phase change as a line instead.
+    with console.status(shown, spinner="dots") as spinner:
+        deadline = time.monotonic() + _SESSION_WAIT_SECONDS
         while not session.ssh_connection and time.monotonic() < deadline:
-            if session.status in _DEAD_SESSION_STATES:
+            phase = getattr(session, "phase", None)
+            if session.status in _DEAD_SESSION_STATES or phase in _DEAD_SESSION_PHASES:
+                state = session.status if session.status in _DEAD_SESSION_STATES else str(phase)
                 detail = f": {session.error_message}" if session.error_message else "."
-                console.print(f"[red]Session is {session.status}{escape(detail)}[/red]")
+                console.print(f"[red]Session is {state.upper()}{escape(detail)}[/red]")
                 raise typer.Exit(1)
             time.sleep(5)
             try:
@@ -320,6 +346,13 @@ def _wait_for_connection(client, name: str, session, team_id):
                 if errors >= _MAX_POLL_ERRORS:
                     console.print(f"[red]Error:[/red] {escape(str(exc))}")
                     raise typer.Exit(1) from exc
+            text = _waiting_text(session)
+            if text != shown:
+                shown = text
+                if spinner:
+                    spinner.update(text)
+                else:
+                    console.print(text)
     if not session.ssh_connection:
         console.print("[red]Timed out waiting for SSH.[/red]")
         raise typer.Exit(1)
@@ -343,27 +376,33 @@ def _open_session(
     read_only: bool,
     direct: bool = False,
     allow_writable: bool = False,
+    existing=None,
 ):
     """Create or reuse a session, wait for its endpoint and write the ssh
     config block. Returns (session, alias, key, config, via_gateway).
 
     `allow_writable` lets a read-only request reuse the caller's live
-    read-write session."""
+    read-write session. `existing` is a session the server already chose
+    (the transfer route): it is used as is, and never stopped here."""
     key = Config().ssh_key_path
     if not key or not os.path.isfile(os.path.expanduser(key)):
         console.print("[red]SSH key not found; use prime config set-ssh-key-path.[/red]")
         raise typer.Exit(1)
     key = os.path.expanduser(key)
     client, team_id = _client()
-    try:
-        session = client.create_volume_session(
-            name, read_only=read_only, allow_writable=allow_writable, team_id=team_id
-        )
-    except APIError as exc:
-        console.print(f"[red]Error:[/red] {exc}")
-        raise typer.Exit(1) from exc
+    if existing is not None:
+        session = existing
+    else:
+        try:
+            session = client.create_volume_session(
+                name, read_only=read_only, allow_writable=allow_writable, team_id=team_id
+            )
+        except APIError as exc:
+            console.print(f"[red]Error:[/red] {exc}")
+            raise typer.Exit(1) from exc
     mode = "read-only" if session.read_only else "read-write"
-    label = "Reusing session" if allow_writable and not session.read_only else "Session"
+    reused = existing is not None or (allow_writable and not session.read_only)
+    label = "Reusing session" if reused else "Session"
     console.print(
         f"{label} {session.id} ({mode}). Stop with: prime volumes stop {escape(name)} {session.id}"
     )
@@ -376,7 +415,7 @@ def _open_session(
         # connected to (a poll that kept failing, a timeout, Ctrl-C). The
         # platform's idle watchdog would reap it after 30 minutes anyway;
         # stopping it here is immediate. Best-effort.
-        if not connected:
+        if not connected and existing is None:
             _stop_quietly(client, name, session.id, team_id)
     match = _CONNECTION.fullmatch(session.ssh_connection)
     if not match or not 1 <= int(match.group("port") or 22) <= 65535:
@@ -434,6 +473,12 @@ def ssh(
     except OSError as exc:
         console.print(f"[red]Could not start SSH:[/red] {exc}")
         raise typer.Exit(1) from exc
+    if not session.read_only:
+        console.print("Changes sync to the volume every minute.")
+    console.print(
+        "The session stops after 30 minutes idle. Stop it now with: "
+        f"prime volumes stop {escape(name)} {session.id}"
+    )
     if code:
         raise typer.Exit(code)
 
@@ -620,10 +665,49 @@ def _parallel_rsync(
     return next((c for c in codes if c), 0)
 
 
+def _refuse_runs(local: str, rel: str) -> None:
+    """Exit if a put would write under runs/: run outputs live there, and a
+    session's sync and staging leave runs/ alone, so such a put would be lost
+    or clobber a run. `rel` is the volume-relative destination."""
+    if rel:
+        top = {rel.split("/", 1)[0]}
+    elif os.path.isdir(local) and _copies_contents(local):
+        top = set(os.listdir(local))
+    else:
+        top = {os.path.basename(os.path.normpath(local))}
+    if "runs" in top:
+        console.print("[red]runs/ holds run outputs and is read-only; put elsewhere.[/red]")
+        raise typer.Exit(2)
+
+
+def _copies_contents(local: str) -> bool:
+    """rsync's rule: "dir/" (and "." or "..") copies a directory's contents,
+    "dir" copies the directory itself."""
+    return local.endswith(("/", os.sep)) or os.path.basename(os.path.normpath(local)) in (
+        ".",
+        "..",
+    )
+
+
 def _transfer(
     name: str, read_only: bool, remote: str, local: str, upload: bool, direct: bool
 ) -> None:
     remote = _remote_path(remote)
+    rel = remote.removeprefix("/volume/")
+    if upload:
+        _refuse_runs(local, rel)
+    client, team_id = _client()
+    try:
+        route = client.route_volume_transfer(name, "put" if upload else "get", team_id=team_id)
+    except NotFoundError:
+        route = None  # an older backend: always through a session
+    except APIError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(1) from exc
+    if route is not None and route.via == "r2":
+        _r2_transfer(client, name, team_id, route, rel, local, upload)
+        return
+    existing = route.session if route is not None else None
     rsync = shutil.which("rsync")
     if not (shutil.which("ssh") and (rsync or shutil.which("scp"))):
         console.print("[red]ssh and scp (or rsync) are required; install the OpenSSH client.[/red]")
@@ -643,6 +727,7 @@ def _transfer(
         read_only=read_only,
         direct=direct,
         allow_writable=read_only,
+        existing=existing,
     )
     if rsync:
         ssh_cmd = shlex.join(["ssh", "-F", str(config)])
@@ -699,6 +784,231 @@ def _transfer(
         _transfer_failed(alias, code, via_gateway)
 
 
+# --- Direct get/put against the volume's R2 prefix (ENG-6585) --------------
+# With no live session of the caller's on the volume, the platform hands out
+# credentials scoped to the volume's prefix and the CLI talks to R2 itself:
+# no pod to wait for. Path layout mirrors the rsync commands above.
+
+# Files in flight at once, and parts in flight per file (multipart).
+_R2_FILE_WORKERS = 8
+_R2_PART_WORKERS = 4
+_R2_PART_SIZE = 64 * 1024 * 1024
+
+
+def _r2_client(refresh, route):
+    """An S3 client for R2 with the route's credentials. botocore refreshes
+    them through `refresh` (a new route call) before `expiresAt`, so a
+    transfer longer than the credential TTL keeps going."""
+    import boto3
+    from botocore.config import Config as BotoConfig
+    from botocore.credentials import RefreshableCredentials
+    from botocore.session import get_session
+
+    def metadata(r) -> dict:
+        return {
+            "access_key": r.access_key_id,
+            "secret_key": r.secret_access_key,
+            "token": r.session_token,
+            "expiry_time": r.expires_at,
+        }
+
+    def fetch() -> dict:
+        r = refresh()
+        if r.via != "r2":
+            raise RuntimeError("a session started on the volume; rerun the command")
+        return metadata(r)
+
+    core = get_session()
+    if route.expires_at:
+        core._credentials = RefreshableCredentials.create_from_metadata(
+            metadata(route), fetch, "prime-volumes-transfer"
+        )
+    else:
+        core.set_credentials(route.access_key_id, route.secret_access_key, route.session_token)
+    return boto3.Session(botocore_session=core).client(
+        "s3",
+        endpoint_url=route.endpoint,
+        region_name="auto",
+        config=BotoConfig(
+            signature_version="s3v4",
+            max_pool_connections=_R2_FILE_WORKERS * _R2_PART_WORKERS,
+        ),
+    )
+
+
+def _r2_keys(s3, bucket: str, prefix: str):
+    """(key, size) of every object under `prefix`."""
+    for page in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            yield obj["Key"], obj["Size"]
+
+
+def _r2_is_dir(s3, bucket: str, prefix: str) -> bool:
+    page = s3.list_objects_v2(Bucket=bucket, Prefix=prefix, MaxKeys=1)
+    return bool(page.get("Contents"))
+
+
+def _r2_head(s3, bucket: str, key: str) -> int | None:
+    """The object's size, or None if there is no such object."""
+    from botocore.exceptions import ClientError
+
+    try:
+        return s3.head_object(Bucket=bucket, Key=key)["ContentLength"]
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") in ("404", "NoSuchKey", "NotFound"):
+            return None
+        raise
+
+
+def _put_plan(s3, bucket: str, prefix: str, local: str, rel: str):
+    """(local file, key, size) for `put LOCAL REL`, laid out like
+    `rsync -a LOCAL host:/volume/REL`: a file lands at REL, or inside it when
+    REL is the root, ends in "/" or is an existing directory; a directory
+    lands inside REL as itself ("dir") or as its contents ("dir/").
+    Symlinks inside a directory are skipped (R2 has no links, and following
+    them could upload files from outside the tree). Returns (plan, skipped)."""
+    if not os.path.isdir(local):
+        if not os.path.isfile(local):
+            console.print(f"[red]No such file or directory: {escape(local)}[/red]")
+            raise typer.Exit(1)
+        base = rel.rstrip("/")
+        into = not base or rel.endswith("/") or _r2_is_dir(s3, bucket, f"{prefix}{base}/")
+        key = f"{base}/{os.path.basename(local)}".lstrip("/") if into else base
+        return [(local, prefix + key, os.path.getsize(local))], 0
+    dest = rel.rstrip("/") + "/" if rel.rstrip("/") else ""
+    if not _copies_contents(local):
+        dest += os.path.basename(os.path.normpath(local)) + "/"
+    plan, skipped = [], 0
+    for root, dirs, files in os.walk(local, followlinks=False):
+        for entry in dirs + files:
+            full = os.path.join(root, entry)
+            if os.path.islink(full):
+                skipped += 1
+            elif os.path.isfile(full):
+                key = dest + Path(os.path.relpath(full, local)).as_posix()
+                plan.append((full, prefix + key, os.path.getsize(full)))
+    return plan, skipped
+
+
+def _get_plan(s3, bucket: str, prefix: str, rel: str, local: str):
+    """(key, local file, size) for `get REL LOCAL`, laid out like
+    `rsync -a host:/volume/REL LOCAL`: a file lands at LOCAL, or inside it
+    when LOCAL is a directory or ends in "/"; a directory lands inside LOCAL
+    as itself ("dir") or as its contents ("dir/", or the root). Keys that
+    would escape LOCAL ("..", empty segments) and the sessions' sync markers
+    are skipped. Returns (plan, skipped)."""
+    base = rel.rstrip("/")
+    if base and not rel.endswith("/"):
+        size = _r2_head(s3, bucket, prefix + base)
+        if size is not None:
+            if os.path.isdir(local) or local.endswith(("/", os.sep)):
+                local = os.path.join(local, base.rsplit("/", 1)[-1])
+            return [(prefix + base, local, size)], 0
+    folder = f"{prefix}{base}/" if base else prefix
+    into = local if not base or rel.endswith("/") else os.path.join(local, base.rsplit("/", 1)[-1])
+    plan, skipped = [], 0
+    for key, size in _r2_keys(s3, bucket, folder):
+        sub = key[len(folder) :]
+        if key.endswith("/"):
+            continue  # a "directory" marker object
+        if f"{base}/{sub}".lstrip("/").startswith("runs/.sessions/"):
+            continue
+        parts = sub.split("/")
+        if any(p in ("", ".", "..") for p in parts) or any("\\" in p for p in parts):
+            skipped += 1
+            continue
+        plan.append((key, os.path.join(into, *parts), size))
+    if not plan and not skipped:
+        console.print(f"[red]No such file or directory on the volume: /{escape(base)}[/red]")
+        raise typer.Exit(1)
+    return plan, skipped
+
+
+def _run_r2_jobs(jobs, verb: str) -> None:
+    """Run `jobs` ((size, fn(callback)) pairs) on a thread pool with one
+    progress line: files done, bytes, rate, ETA. The first failure cancels
+    what has not started and is re-raised."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    from rich.filesize import decimal
+    from rich.progress import (
+        BarColumn,
+        DownloadColumn,
+        Progress,
+        TextColumn,
+        TimeRemainingColumn,
+        TransferSpeedColumn,
+    )
+
+    total = sum(size for size, _ in jobs)
+    console.print(f"{verb} {len(jobs)} files ({decimal(total)})")
+    columns = (
+        TextColumn("{task.fields[files]}"),
+        BarColumn(),
+        DownloadColumn(),
+        TransferSpeedColumn(),
+        TimeRemainingColumn(),
+    )
+    with Progress(*columns, console=console) as progress:
+        task = progress.add_task("", total=total, files=f"0/{len(jobs)} files")
+
+        def advance(n: int) -> None:
+            progress.advance(task, n)
+
+        pool = ThreadPoolExecutor(_R2_FILE_WORKERS)
+        try:
+            futures = [pool.submit(fn, advance) for _, fn in jobs]
+            for done, future in enumerate(as_completed(futures), 1):
+                future.result()
+                progress.update(task, files=f"{done}/{len(jobs)} files")
+        finally:
+            pool.shutdown(wait=True, cancel_futures=True)
+
+
+def _r2_transfer(client, name: str, team_id, route, rel: str, local: str, upload: bool) -> None:
+    from boto3.s3.transfer import TransferConfig
+    from botocore.exceptions import BotoCoreError, ClientError
+
+    mode = "put" if upload else "get"
+    s3 = _r2_client(lambda: client.route_volume_transfer(name, mode, team_id=team_id), route)
+    config = TransferConfig(
+        multipart_threshold=_R2_PART_SIZE,
+        multipart_chunksize=_R2_PART_SIZE,
+        max_concurrency=_R2_PART_WORKERS,
+    )
+    bucket, prefix = route.bucket, route.prefix
+    try:
+        if upload:
+            plan, skipped = _put_plan(s3, bucket, prefix, local, rel)
+
+            def up(path, key):
+                return lambda cb: s3.upload_file(path, bucket, key, Config=config, Callback=cb)
+
+            jobs = [(size, up(path, key)) for path, key, size in plan]
+        else:
+            plan, skipped = _get_plan(s3, bucket, prefix, rel, local)
+
+            def down(key, path):
+                def run(cb):
+                    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+                    s3.download_file(bucket, key, path, Config=config, Callback=cb)
+
+                return run
+
+            jobs = [(size, down(key, path)) for key, path, size in plan]
+        if skipped:
+            what = "symbolic links" if upload else "objects with unsafe names"
+            console.print(f"[yellow]Skipping {skipped} {what}.[/yellow]")
+        if not jobs:
+            console.print("Nothing to transfer.")
+            return
+        verb = f"Uploading to {escape(name)}:" if upload else f"Downloading from {escape(name)}:"
+        _run_r2_jobs(jobs, verb)
+    except (BotoCoreError, ClientError, OSError, RuntimeError) as exc:
+        console.print(f"[red]Transfer failed:[/red] {escape(str(exc))}")
+        raise typer.Exit(1) from exc
+
+
 @app.command(no_args_is_help=True)
 def get(
     name: str = typer.Argument(..., help="Volume name"),
@@ -706,7 +1016,8 @@ def get(
     local_dest: str = typer.Argument(".", help="Local destination"),
     direct: bool = typer.Option(False, "--direct", help=_DIRECT_HELP),
 ) -> None:
-    """Download from a volume over a read-only session (rsync, else scp)."""
+    """Download from a volume: straight from storage, or through your live
+    read-write session if you have one (rsync, else scp)."""
     _transfer(name, True, remote_path, local_dest, upload=False, direct=direct)
 
 
@@ -717,7 +1028,8 @@ def put(
     remote_path: str = typer.Argument("/", help="Path in the volume; trailing / = into directory"),
     direct: bool = typer.Option(False, "--direct", help=_DIRECT_HELP),
 ) -> None:
-    """Upload to a volume over a read-write session (rsync, else scp)."""
+    """Upload to a volume (not under runs/): straight to storage, or through
+    your live read-write session if you have one (rsync, else scp)."""
     _transfer(name, False, remote_path, local_path, upload=True, direct=direct)
 
 

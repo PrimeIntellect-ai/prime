@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 from datetime import datetime, timezone
@@ -1085,6 +1086,53 @@ async def test_successful_restart_clears_gone():
         await tunnel.restart()
 
     assert tunnel.is_gone is False
+
+
+@pytest.mark.asyncio
+async def test_restart_keeps_a_rejection_that_follows_the_connect():
+    tunnel = _make_started_tunnel()
+    tunnel._gone = True
+    tunnel.connection_timeout = 5.0
+    process, write_fd = _make_fake_frpc(
+        [
+            _frpc_line("I", "[t-test123] start proxy success"),
+            _frpc_line("W", "connect to server error: Tunnel is inactive"),
+        ]
+    )
+    real_wait = tunnel._wait_for_connection
+
+    async def wait_after_both_lines(process):
+        while len(tunnel._output.lines()) < 2:
+            await asyncio.sleep(0.01)
+        await real_wait(process)
+
+    try:
+        with (
+            patch("prime_tunnel.tunnel.get_frpc_path", return_value="/bin/frpc"),
+            patch("prime_tunnel.tunnel.subprocess.Popen", return_value=process),
+            patch.object(tunnel, "_wait_for_connection", new=wait_after_both_lines),
+        ):
+            await tunnel.restart()
+    finally:
+        _close_fake_frpc(tunnel, process, write_fd)
+
+    assert tunnel.is_gone is True
+
+
+@pytest.mark.asyncio
+async def test_failed_restart_keeps_gone():
+    tunnel = _make_started_tunnel()
+    tunnel._gone = True
+    frpc_path, popen, _, reader = _patch_restart(tunnel, MagicMock())
+    failing_wait = patch.object(
+        tunnel, "_wait_for_connection", new=AsyncMock(side_effect=TunnelTimeoutError("timed out"))
+    )
+
+    with frpc_path, popen, failing_wait, reader:
+        with pytest.raises(TunnelTimeoutError):
+            await tunnel.restart()
+
+    assert tunnel.is_gone is True
 
 
 def test_output_reader_marks_the_tunnel_gone_when_a_reconnect_is_rejected():

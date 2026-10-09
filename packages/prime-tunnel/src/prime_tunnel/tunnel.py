@@ -281,16 +281,21 @@ class Tunnel:
             self._process = process
 
             stopped = TunnelError("Tunnel was stopped during restart")
+            was_gone = self._gone
             try:
                 # A stop during launch saw no process to end.
                 if self._stopping:
                     raise stopped
+                # Cleared before the new frpc can report, so that a rejection
+                # arriving right after it connects is not wiped out.
+                self._gone = False
                 self._start_output_reader(process)
                 await self._wait_for_connection(process)
                 if self._stopping:
                     raise stopped
-                self._gone = False
             except BaseException as e:
+                # A restart that failed for another reason proves nothing.
+                self._gone = self._gone or was_gone
                 await asyncio.to_thread(self._end_process, process, kill=True)
                 if not self._stopping or not isinstance(e, Exception):
                     raise

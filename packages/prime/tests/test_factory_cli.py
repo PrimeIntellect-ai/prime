@@ -505,3 +505,32 @@ def test_factory_status_markup_in_backend_values_does_not_crash(
     assert "research-b300" in output
     assert "stale" in output
     assert "Warning" in output
+
+
+@pytest.mark.parametrize("digit", ["\u00b2", "\u2460"])
+def test_factory_status_unicode_digit_selector_misses_cleanly(
+    monkeypatch: pytest.MonkeyPatch, digit: str
+) -> None:
+    # Unicode digits pass str.isdigit() but int() cannot parse them; they
+    # must be treated as display-name selectors and miss cleanly.
+    _install(monkeypatch, _status_payload())
+
+    result = runner.invoke(app, ["factory", "status", "--cluster", digit], env=TEST_ENV)
+
+    assert result.exit_code == 1
+    assert isinstance(result.exception, SystemExit)
+    assert "No cluster matched" in strip_ansi(result.output)
+
+
+def test_factory_status_ascii_index_still_selects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = _status_payload()
+    payload["clusters"].append(dict(payload["clusters"][0], display_name="research-h200"))
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(app, ["factory", "status", "--cluster", "2"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    assert "research-h200" in strip_ansi(result.output)
+    assert "research-b300" not in strip_ansi(result.output)

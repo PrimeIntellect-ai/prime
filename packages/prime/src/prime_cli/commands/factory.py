@@ -116,7 +116,10 @@ def _select_cluster_indices(
     if matches:
         return matches
 
-    if selector.isdigit():
+    # Index path: ASCII digits only. str.isdigit() is True for Unicode
+    # digits (e.g. '²', '①') that int() cannot parse, so a plain isdigit()
+    # guard would raise ValueError instead of the clean miss error below.
+    if selector.isascii() and selector.isdigit():
         index = int(selector)
         if 1 <= index <= len(clusters):
             return [index - 1]

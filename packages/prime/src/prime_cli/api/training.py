@@ -138,6 +138,9 @@ class VolumeTransferRoute(BaseModel):
     secret_access_key: Optional[str] = Field(None, alias="secretAccessKey")
     session_token: Optional[str] = Field(None, alias="sessionToken")
     expires_at: Optional[str] = Field(None, alias="expiresAt")
+    # A put's upload lease (platform#6358): sent back on refresh, released
+    # when the put ends. Absent on gets and from older backends.
+    lease_id: Optional[str] = Field(None, alias="leaseId")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -286,19 +289,33 @@ class HostedTrainingClient:
         entries: Optional[List[str]] = None,
         *,
         team_id: Optional[str] = None,
+        lease_id: Optional[str] = None,
     ) -> VolumeTransferRoute:
         """POST …/volumes/{name}/transfer with mode "get" or "put" and the
         volume-relative path ("" = root): the get source or the put
         destination. A root put also sends `entries`, the top-level names it
-        writes. Raises NotFoundError on backends without the route."""
+        writes; a put's credential refresh sends its `lease_id` to extend
+        that lease. Raises NotFoundError on backends without the route."""
         payload: Dict[str, Any] = {"mode": mode, "path": path}
         if entries is not None:
             payload["entries"] = entries
+        if lease_id:
+            payload["leaseId"] = lease_id
         if team_id:
             payload["teamId"] = team_id
         return VolumeTransferRoute.model_validate(
             self.client.post(f"/training/volumes/{name}/transfer", json=payload)
         )
+
+    def release_volume_transfer(
+        self, name: str, lease_id: str, *, team_id: Optional[str] = None
+    ) -> None:
+        """POST …/volumes/{name}/transfer/release: end a direct put's upload
+        lease (204, idempotent). Unreleased, it expires on its own."""
+        payload: Dict[str, Any] = {"leaseId": lease_id}
+        if team_id:
+            payload["teamId"] = team_id
+        self.client.post(f"/training/volumes/{name}/transfer/release", json=payload)
 
     def create_volume_transfer(
         self,

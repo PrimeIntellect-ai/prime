@@ -951,12 +951,12 @@ def _r2_is_dir(s3, bucket: str, prefix: str) -> bool:
     return bool(page.get("Contents"))
 
 
-def _r2_head(s3, bucket: str, key: str) -> int | None:
-    """The object's size, or None if there is no such object."""
+def _r2_head(s3, bucket: str, key: str) -> dict | None:
+    """The object's HEAD response, or None if there is no such object."""
     from botocore.exceptions import ClientError
 
     try:
-        return s3.head_object(Bucket=bucket, Key=key)["ContentLength"]
+        return s3.head_object(Bucket=bucket, Key=key)
     except ClientError as exc:
         if exc.response.get("Error", {}).get("Code") in ("404", "NoSuchKey", "NotFound"):
             return None
@@ -969,7 +969,9 @@ def _put_plan(s3, bucket: str, prefix: str, local: str, rel: str):
     REL is the root, ends in "/" or is an existing directory; a directory
     lands inside REL as itself ("dir") or as its contents ("dir/").
     Symlinks inside a directory are skipped (R2 has no links, and following
-    them could upload files from outside the tree). Returns (plan, skipped)."""
+    them could upload files from outside the tree). An empty directory is a
+    zero-byte "name/" marker object (local None), as rclone's s3 backend
+    reads one. Returns (plan, skipped)."""
     if not os.path.isdir(local):  # a file: _refuse_bad_local checked it exists
         base = rel.rstrip("/")
         into = not base or rel.endswith("/") or _r2_is_dir(s3, bucket, f"{prefix}{base}/")
@@ -980,13 +982,21 @@ def _put_plan(s3, bucket: str, prefix: str, local: str, rel: str):
         dest += os.path.basename(os.path.normpath(local)) + "/"
     plan, skipped = [], 0
     for root, dirs, files in os.walk(local, followlinks=False, onerror=_raise):
+        empty = True
         for entry in dirs + files:
             full = os.path.join(root, entry)
             if os.path.islink(full):
                 skipped += 1
+            elif os.path.isdir(full):
+                empty = False
             elif os.path.isfile(full):
+                empty = False
                 key = dest + Path(os.path.relpath(full, local)).as_posix()
                 plan.append((full, prefix + key, os.path.getsize(full)))
+        sub = Path(os.path.relpath(root, local)).as_posix()
+        key = dest if sub == "." else f"{dest}{sub}/"
+        if empty and key:  # not the root itself: it always exists
+            plan.append((None, prefix + key, 0))
     return plan, skipped
 
 
@@ -1002,8 +1012,9 @@ def _refuse_file_dir_clash(s3, bucket: str, prefix: str, keys: list[str]) -> Non
         return
     root = posixpath.commonpath(rels)
     parts = root.split("/") if root else []
-    # With one key the root is that file; with several it is a directory.
-    for i in range(1, len(parts) + (len(rels) > 1)):
+    # With one key the root is that file (or, for a marker, that directory);
+    # with several it is a directory.
+    for i in range(1, len(parts) + (len(rels) > 1 or rels[0].endswith("/"))):
         if _r2_head(s3, bucket, prefix + "/".join(parts[:i])) is not None:
             _clash("/".join(parts[:i]), "a file", "a directory")
     planned = set(rels)
@@ -1029,33 +1040,32 @@ def _clash(rel: str, is_: str, would_be: str) -> None:
 
 
 def _get_plan(s3, bucket: str, prefix: str, rel: str, local: str):
-    """(key, local file, size) for `get REL LOCAL`, laid out like
+    """(key, local file, size, HEAD or None) for `get REL LOCAL`, laid out like
     `rsync -a host:/volume/REL LOCAL`: a file lands at LOCAL, or inside it
     when LOCAL is a directory or ends in "/"; a directory lands inside LOCAL
-    as itself ("dir") or as its contents ("dir/", or the root). Keys that
+    as itself ("dir") or as its contents ("dir/", or the root). A "name/"
+    marker object is an (empty) directory: its key ends in "/". Keys that
     would escape LOCAL ("..", empty segments) and the sessions' sync markers
     are skipped. Returns (plan, skipped)."""
     base = rel.rstrip("/")
     if base and not rel.endswith("/"):
-        size = _r2_head(s3, bucket, prefix + base)
-        if size is not None:
+        head = _r2_head(s3, bucket, prefix + base)
+        if head is not None:
             if os.path.isdir(local) or local.endswith(("/", os.sep)):
                 local = os.path.join(local, base.rsplit("/", 1)[-1])
-            return [(prefix + base, local, size)], 0
+            return [(prefix + base, local, head["ContentLength"], head)], 0
     folder = f"{prefix}{base}/" if base else prefix
     into = local if not base or rel.endswith("/") else os.path.join(local, base.rsplit("/", 1)[-1])
     plan, skipped = [], 0
     for key, size in _r2_keys(s3, bucket, folder):
         sub = key[len(folder) :]
-        if key.endswith("/"):
-            continue  # a "directory" marker object
         if f"{base}/{sub}".lstrip("/").startswith("runs/.sessions/"):
             continue
-        parts = sub.split("/")
+        parts = sub.removesuffix("/").split("/") if sub else []  # []: the folder's marker
         if any(p in ("", ".", "..") for p in parts) or any("\\" in p for p in parts):
             skipped += 1
             continue
-        plan.append((key, os.path.join(into, *parts), size))
+        plan.append((key, os.path.join(into, *parts), size, None))
     if not plan and not skipped:
         console.print(f"[red]No such file or directory on the volume: /{escape(base)}[/red]")
         raise typer.Exit(1)
@@ -1102,6 +1112,32 @@ def _rclone_metadata(path: str) -> dict:
         digest = hashlib.file_digest(f, "md5").digest()
     mtime = f"{ns // 10**9}.{ns % 10**9:09d}".rstrip("0").rstrip(".")
     return {"md5chksum": base64.b64encode(digest).decode(), "mtime": mtime}
+
+
+def _restore_mtime(path: str, head: dict) -> None:
+    """Give a downloaded file the mtime (and atime, as rclone does) in its
+    rclone "mtime" metadata, else its LastModified, like `rsync -a`."""
+    from decimal import Decimal
+
+    try:
+        ns = int(Decimal((head.get("Metadata") or {}).get("mtime")) * 10**9)
+        os.utime(path, ns=(ns, ns))
+        return
+    except (TypeError, ArithmeticError, ValueError):  # missing or unparseable
+        pass
+    if modified := head.get("LastModified"):
+        os.utime(path, (modified.timestamp(), modified.timestamp()))
+
+
+def _release_lease(client, name: str, lease: str, team_id) -> None:
+    """End a direct put's upload lease. Best-effort: an unreleased lease
+    expires on its own (15 minutes), so a failure only gets a dim note."""
+    try:
+        client.release_volume_transfer(name, lease, team_id=team_id)
+    except NotFoundError:
+        pass  # a backend without the release route
+    except Exception as exc:  # noqa: BLE001 - never fail the put over this
+        console.print(f"[dim]Upload lease not released ({escape(str(exc))}); it expires.[/dim]")
 
 
 def _run_r2_jobs(jobs, verb: str) -> None:
@@ -1159,14 +1195,28 @@ def _read_route(client, name: str, team_id):
 def _r2_transfer(
     client, name: str, team_id, route, rel: str, local: str, upload: bool, entries=None
 ) -> None:
+    mode = "put" if upload else "get"
+    # Only put credentials carry a lease: refreshes extend it, and it is
+    # released however the put ends (success, failure, Ctrl-C).
+    lease = route.lease_id if upload else None
+    s3 = _r2_client(
+        lambda: client.route_volume_transfer(
+            name, mode, rel, entries, team_id=team_id, lease_id=lease
+        ),
+        route,
+    )
+    try:
+        _r2_run(client, name, team_id, s3, route, rel, local, upload)
+    finally:
+        if lease:
+            _release_lease(client, name, lease, team_id)
+
+
+def _r2_run(client, name: str, team_id, s3, route, rel: str, local: str, upload: bool) -> None:
     from boto3.exceptions import Boto3Error
     from boto3.s3.transfer import TransferConfig
     from botocore.exceptions import BotoCoreError, ClientError
 
-    mode = "put" if upload else "get"
-    s3 = _r2_client(
-        lambda: client.route_volume_transfer(name, mode, rel, entries, team_id=team_id), route
-    )
     config = TransferConfig(
         multipart_threshold=_R2_PART_SIZE,
         multipart_chunksize=_R2_PART_SIZE,
@@ -1188,6 +1238,9 @@ def _r2_transfer(
                 # ponytail: a second read of the file for the MD5 (the
                 # metadata goes on CreateMultipartUpload, before any part).
                 def run(cb):
+                    if path is None:  # an empty directory's marker
+                        s3.put_object(Bucket=bucket, Key=key, Body=b"")
+                        return
                     extra = {"Metadata": _rclone_metadata(path)}
                     s3.upload_file(path, bucket, key, ExtraArgs=extra, Config=config, Callback=cb)
 
@@ -1196,16 +1249,22 @@ def _r2_transfer(
             jobs = [(size, up(path, key)) for path, key, size in plan]
         else:
             plan, skipped = _get_plan(s3, bucket, prefix, rel, local)
-            _refuse_linked_dest(local, [path for _, path, _ in plan])
+            _refuse_linked_dest(local, [path for _, path, _, _ in plan])
 
-            def down(key, path):
+            def down(key, path, head):
                 def run(cb):
+                    if key.endswith("/"):  # an empty directory's marker
+                        os.makedirs(path, exist_ok=True)
+                        return
                     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
                     s3.download_file(bucket, key, path, Config=config, Callback=cb)
+                    # ponytail: a HEAD per listed file for its metadata
+                    # (listings carry none); download_file HEADs internally too.
+                    _restore_mtime(path, head or s3.head_object(Bucket=bucket, Key=key))
 
                 return run
 
-            jobs = [(size, down(key, path)) for key, path, size in plan]
+            jobs = [(size, down(key, path, head)) for key, path, size, head in plan]
         if skipped:
             what = "symbolic links" if upload else "objects with unsafe names"
             console.print(f"[yellow]Skipping {skipped} {what}.[/yellow]")

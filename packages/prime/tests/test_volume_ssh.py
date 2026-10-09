@@ -445,7 +445,17 @@ def test_client_sends_cluster_only_when_set():
     assert "cluster" not in posted[1]
 
 
+def _local_sources(monkeypatch, tmp_path):
+    """Run in tmp_path, with the local sources the session-route tests put
+    (a put checks its source exists before asking for a route)."""
+    monkeypatch.chdir(tmp_path)
+    for name in ("f", "f.txt", "-f.txt", "checkpoint:final"):
+        (tmp_path / name).write_text("x")
+    (tmp_path / "dir").mkdir(exist_ok=True)
+
+
 def _setup(monkeypatch, tmp_path, which, run_code=0, stuck=False, find_stdout=""):
+    _local_sources(monkeypatch, tmp_path)
     key = tmp_path / "key"
     key.write_text("test")
     monkeypatch.setattr(volumes.Config, "ssh_key_path", property(lambda self: str(key)))
@@ -557,11 +567,11 @@ def test_local_path_with_colon_is_not_a_remote_operand(monkeypatch, tmp_path, to
     _, _, commands = _setup(monkeypatch, tmp_path, tools)
     assert _run("put", "data", "checkpoint:final", "/").exit_code == 0
     assert _run("get", "data", "x", "out:1").exit_code == 0
-    assert _run("get", "data", "x", "/abs/out:1").exit_code == 0
+    assert _run("get", "data", "x", f"{tmp_path}/out:1").exit_code == 0
     transfers = [c for c in commands if c[0] != "ssh"]  # scp's symlink check
     assert transfers[0][-2] == "./checkpoint:final"
     assert transfers[1][-1] == "./out:1"
-    assert transfers[2][-1] == "/abs/out:1"
+    assert transfers[2][-1] == f"{tmp_path}/out:1"
 
 
 def test_scp_keeps_rsync_trailing_slash_layout(monkeypatch, tmp_path):
@@ -715,6 +725,7 @@ def _proxy_argv(config_text):
 
 
 def _gateway_ssh(monkeypatch, tmp_path, gateway=GATEWAY):
+    _local_sources(monkeypatch, tmp_path)
     key = tmp_path / "key"
     key.write_text("test")
     monkeypatch.setattr(volumes.Config, "ssh_key_path", property(lambda self: str(key)))
@@ -1326,6 +1337,8 @@ def test_r2_client_is_scoped_to_the_route():
         ("tree", "x", {}, ["x/tree/a", "x/tree/sub/b"]),
         ("tree/", "x/", {}, ["x/a", "x/sub/b"]),
         ("tree/", "/", {}, ["a", "sub/b"]),
+        ("tree/.", "x/", {}, ["x/a", "x/sub/b"]),  # rsync: "dir/." is "dir/"
+        ("tree/./", "x", {}, ["x/a", "x/sub/b"]),
     ],
 )
 def test_direct_put_mirrors_rsync_layout(monkeypatch, tmp_path, local, remote, existing, keys):
@@ -1352,6 +1365,7 @@ def test_direct_put_mirrors_rsync_layout(monkeypatch, tmp_path, local, remote, e
         ("f.txt", "out/", ["out/f.txt"]),
         ("d", "out", ["out/d/a", "out/d/sub/b"]),
         ("d/", "out", ["out/a", "out/sub/b"]),
+        ("d/.", "out", ["out/a", "out/sub/b"]),
         ("/", "out", ["out/d/a", "out/d/sub/b", "out/f.txt", "out/runs/r1/m"]),
         ("runs/r1", ".", ["r1/m"]),
     ],
@@ -1394,6 +1408,7 @@ def test_direct_get_missing_path_fails(monkeypatch, tmp_path):
         ("runs", "/"),
         ("runs", "."),
         ("top/", "/"),
+        ("top/.", "/"),
     ],
 )
 def test_put_never_writes_under_runs(monkeypatch, tmp_path, local, remote):
@@ -1645,3 +1660,85 @@ def test_refused_credential_refresh_fails_the_transfer_cleanly(monkeypatch, tmp_
     creds = volumes._r2_client(refresh, route)._request_signer._credentials
     with pytest.raises(RuntimeError, match="^volume 'data' has a live read-write"):
         creds.get_frozen_credentials()
+
+
+def test_dot_source_copies_contents_on_the_session_route(monkeypatch, tmp_path):
+    created, _, commands = _setup(monkeypatch, tmp_path, {"ssh", "rsync"})
+    (tmp_path / "dir" / "runs").mkdir()
+    result = _run("put", "data", "dir/.", "/")
+    assert result.exit_code == 2  # dir/. puts dir's runs/ at the root
+    assert "runs/ holds run outputs" in result.output
+    assert not created and not commands
+    assert _run("get", "data", "d/.", "out").exit_code == 0
+    assert commands[-1][-2:] == ["host:/volume/d/", "out"]
+
+
+@pytest.mark.parametrize("route", ["r2", "session"])
+@pytest.mark.parametrize("problem", ["missing", "unreadable", "unwritable"])
+def test_bad_local_path_fails_before_the_route_call(monkeypatch, tmp_path, route, problem):
+    """A put route reserves the volume's upload window, so a local typo
+    must fail before it is asked for."""
+    if route == "r2":
+        routes = _direct(monkeypatch, FakeS3({"vol1/f.txt": b"f"}))
+        created = commands = []
+    else:
+        created, _, commands = _setup(monkeypatch, tmp_path, {"ssh", "rsync"})
+        routes = []
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    (locked / "f").write_text("f")
+    if problem == "missing":
+        args, error = ["put", "data", str(tmp_path / "nope"), "/"], "No such file or directory"
+    elif problem == "unreadable":
+        args, error = ["put", "data", str(locked / "f"), "/"], "Permission denied"
+        (locked / "f").chmod(0)
+    else:
+        args, error = ["get", "data", "f.txt", str(locked / "sub" / "out")], "Cannot write to"
+        locked.chmod(0o500)
+    try:
+        result = _run(*args)
+    finally:
+        (locked / "f").chmod(0o600) if problem == "unreadable" else locked.chmod(0o700)
+    assert result.exit_code == 1
+    assert error in result.output
+    assert routes == [] and not created and not commands
+
+
+@pytest.mark.parametrize(
+    "existing,local,remote,clash",
+    [
+        ({"vol1/a": b"f"}, "f.txt", "a/x", "/a is a file"),  # put f a; put g a/x
+        ({"vol1/a": b"f"}, "f.txt", "a/b/", "/a is a file"),
+        ({"vol1/x/tree": b"f"}, "tree", "x/", "/x/tree is a file"),
+        ({"vol1/x/tree/sub": b"f"}, "tree", "x/", "/x/tree/sub is a file"),
+        ({"vol1/x/a/old": b"o"}, "tree/", "x", "/x/a is a directory"),
+        ({"vol1/d/f.txt/old": b"o"}, "f.txt", "d/", "/d/f.txt is a directory"),
+    ],
+)
+def test_direct_put_refuses_a_file_directory_clash(
+    monkeypatch, tmp_path, existing, local, remote, clash
+):
+    monkeypatch.chdir(tmp_path)
+    Path("f.txt").write_text("f")
+    (tmp_path / "tree" / "sub").mkdir(parents=True)
+    Path("tree/a").write_text("a")
+    Path("tree/sub/b").write_text("b")
+    s3 = FakeS3(existing)
+    _direct(monkeypatch, s3)
+    result = _run("put", "data", local, remote)
+    assert result.exit_code == 1, result.output
+    assert clash in result.output.replace("\n", "")
+    assert s3.objects == existing  # nothing uploaded
+
+
+def test_direct_put_into_a_directory_and_marker_objects_are_fine(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    Path("f.txt").write_text("f")
+    (tmp_path / "tree" / "sub").mkdir(parents=True)
+    Path("tree/sub/b").write_text("b")
+    s3 = FakeS3({"vol1/a/old": b"o", "vol1/x/tree/sub/": b"", "vol1/x/tree/sub/b": b"o"})
+    _direct(monkeypatch, s3)
+    assert _run("put", "data", "f.txt", "a").exit_code == 0  # into a/, like rsync
+    result = _run("put", "data", "tree", "x/")  # overwrites x/tree/sub/b
+    assert result.exit_code == 0, result.output
+    assert s3.objects["vol1/a/f.txt"] == b"f" and s3.objects["vol1/x/tree/sub/b"] == b"b"

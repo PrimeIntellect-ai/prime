@@ -17,6 +17,7 @@ datasets/<name>`) — the trainer never downloads.
 """
 
 import os
+import posixpath
 import re
 import shlex
 import shutil
@@ -702,12 +703,41 @@ def _refuse_runs(local: str, rel: str) -> None:
 
 
 def _copies_contents(local: str) -> bool:
-    """rsync's rule: "dir/" (and "." or "..") copies a directory's contents,
-    "dir" copies the directory itself."""
-    return local.endswith(("/", os.sep)) or os.path.basename(os.path.normpath(local)) in (
-        ".",
-        "..",
-    )
+    """rsync's rule: "dir/" and "dir/." (and "." or "..") copy a directory's
+    contents, "dir" copies the directory itself. The raw basename, not the
+    normpath one, which would turn "dir/." into "dir"."""
+    return local.endswith(("/", os.sep)) or os.path.basename(local) in (".", "..")
+
+
+def _refuse_bad_local(local: str, upload: bool) -> None:
+    """Exit before the route call (a put route reserves the volume's upload
+    window for the credential lease) when the transfer is bound to fail
+    locally: a put source that is missing, a symlink or unreadable, or a get
+    destination that cannot be written."""
+    if upload:
+        # A top-level link would be followed by the direct upload (and by
+        # scp), but copied as a link by rsync; refuse it on both routes.
+        if os.path.islink(local):
+            console.print(f"[red]{escape(local)} is a symlink; pass the path it points to.[/red]")
+            raise typer.Exit(1)
+        if not (os.path.isfile(local) or os.path.isdir(local)):
+            console.print(f"[red]No such file or directory: {escape(local)}[/red]")
+            raise typer.Exit(1)
+        mode = os.R_OK | (os.X_OK if os.path.isdir(local) else 0)
+        if not os.access(local, mode):
+            console.print(f"[red]Permission denied: {escape(local)}[/red]")
+            raise typer.Exit(1)
+        return
+    # The nearest existing path must be a directory we can create in (or
+    # `local` itself, an existing file that gets overwritten).
+    probe = os.path.abspath(local)
+    while not os.path.lexists(probe):
+        probe = os.path.dirname(probe)
+    if probe == os.path.abspath(local) and not os.path.isdir(probe):
+        probe = os.path.dirname(probe)
+    if not (os.path.isdir(probe) and os.access(probe, os.W_OK | os.X_OK)):
+        console.print(f"[red]Cannot write to {escape(local)}[/red]")
+        raise typer.Exit(1)
 
 
 def _transfer(
@@ -715,12 +745,8 @@ def _transfer(
 ) -> None:
     remote = _remote_path(remote)
     rel = remote.removeprefix("/volume/")
+    _refuse_bad_local(local, upload)
     if upload:
-        # A top-level link would be followed by the direct upload (and by
-        # scp), but copied as a link by rsync; refuse it on both routes.
-        if os.path.islink(local):
-            console.print(f"[red]{escape(local)} is a symlink; pass the path it points to.[/red]")
-            raise typer.Exit(1)
         _refuse_runs(local, rel)
     client, team_id = _client()
     try:
@@ -906,10 +932,7 @@ def _put_plan(s3, bucket: str, prefix: str, local: str, rel: str):
     lands inside REL as itself ("dir") or as its contents ("dir/").
     Symlinks inside a directory are skipped (R2 has no links, and following
     them could upload files from outside the tree). Returns (plan, skipped)."""
-    if not os.path.isdir(local):
-        if not os.path.isfile(local):
-            console.print(f"[red]No such file or directory: {escape(local)}[/red]")
-            raise typer.Exit(1)
+    if not os.path.isdir(local):  # a file: _refuse_bad_local checked it exists
         base = rel.rstrip("/")
         into = not base or rel.endswith("/") or _r2_is_dir(s3, bucket, f"{prefix}{base}/")
         key = f"{base}/{os.path.basename(local)}".lstrip("/") if into else base
@@ -927,6 +950,44 @@ def _put_plan(s3, bucket: str, prefix: str, local: str, rel: str):
                 key = dest + Path(os.path.relpath(full, local)).as_posix()
                 plan.append((full, prefix + key, os.path.getsize(full)))
     return plan, skipped
+
+
+def _refuse_file_dir_clash(s3, bucket: str, prefix: str, keys: list[str]) -> None:
+    """Exit if the upload would leave an object and objects under it as a
+    "directory" (R2 allows both, a filesystem can't hold them, so a get or a
+    session's staging would fail or drop one): a planned key's ancestor that
+    is an object, or a planned key that already has objects under it. The
+    ancestors above the plan's common root are HEADed (a few: its depth);
+    everything under that root is checked against one listing."""
+    rels = [k[len(prefix) :] for k in keys]
+    if not rels:
+        return
+    root = posixpath.commonpath(rels)
+    parts = root.split("/") if root else []
+    # With one key the root is that file; with several it is a directory.
+    for i in range(1, len(parts) + (len(rels) > 1)):
+        if _r2_head(s3, bucket, prefix + "/".join(parts[:i])) is not None:
+            _clash("/".join(parts[:i]), "a file", "a directory")
+    planned = set(rels)
+    planned_dirs = {r.rsplit("/", i)[0] for r in rels for i in range(1, r.count("/") + 1)}
+    # ponytail: lists everything under the common root (the whole volume for
+    # `put dir/ /`); HEAD per planned directory if that gets slow.
+    for key, _ in _r2_keys(s3, bucket, prefix + root + "/" if root else prefix):
+        rel = key[len(prefix) :]
+        if not rel.endswith("/") and rel in planned_dirs:
+            _clash(rel, "a file", "a directory")
+        segs = rel.split("/")
+        for i in range(1, len(segs)):
+            if "/".join(segs[:i]) in planned:
+                _clash("/".join(segs[:i]), "a directory", "a file")
+
+
+def _clash(rel: str, is_: str, would_be: str) -> None:
+    console.print(
+        f"[red]/{escape(rel)} is {is_} on the volume; this upload would also make it "
+        f"{would_be}. Remove it or put elsewhere.[/red]"
+    )
+    raise typer.Exit(1)
 
 
 def _get_plan(s3, bucket: str, prefix: str, rel: str, local: str):
@@ -1020,6 +1081,7 @@ def _r2_transfer(client, name: str, team_id, route, rel: str, local: str, upload
     try:
         if upload:
             plan, skipped = _put_plan(s3, bucket, prefix, local, rel)
+            _refuse_file_dir_clash(s3, bucket, prefix, [key for _, key, _ in plan])
 
             def up(path, key):
                 return lambda cb: s3.upload_file(path, bucket, key, Config=config, Callback=cb)

@@ -346,12 +346,13 @@ def test_list_never_shows_the_namespace(monkeypatch, output):
     assert "amespace" not in result.output
 
 
-def test_list_shows_the_cluster_name(monkeypatch):
+def test_list_says_what_a_volume_status_means(monkeypatch):
     from prime_cli.api.training import Volume
 
     vols = [
-        Volume(name="a", status="RUNNING", clusterId="c1", cluster="gpu-east", pvcName="vol-a"),
-        Volume(name="b", status="RUNNING", clusterId="c2", pvcName="vol-b"),  # older backend
+        Volume(name="a", status="PENDING", clusterId="", pvcName=""),
+        Volume(name="b", status="RUNNING", clusterId="", pvcName=""),
+        Volume(name="c", status="TERMINATING", clusterId="", pvcName=""),
     ]
     monkeypatch.setattr(
         volumes, "_client", lambda: (SimpleNamespace(list_volumes=lambda **kw: vols), None)
@@ -360,10 +361,38 @@ def test_list_shows_the_cluster_name(monkeypatch):
 
     table = CliRunner().invoke(app, ["volumes", "list"], env=env)
     assert table.exit_code == 0, table.output
-    assert "Cluster" in table.output and "gpu-east" in table.output
+    assert "Cluster" not in table.output, "volumes aren't tied to a cluster"
+    for label in ("PENDING", "CREATED", "DELETING"):
+        assert label in table.output
+    assert "RUNNING" not in table.output
 
+    # JSON keeps the API's values for scripts.
     as_json = CliRunner().invoke(app, ["volumes", "list", "-o", "json"], env=env)
-    assert [v["cluster"] for v in json.loads(as_json.output)] == ["gpu-east", None]
+    assert [v["status"] for v in json.loads(as_json.output)] == [
+        "PENDING",
+        "RUNNING",
+        "TERMINATING",
+    ]
+
+
+def test_expand_raises_the_cap(monkeypatch):
+    from prime_cli.api.training import Volume
+
+    calls = []
+
+    def expand_volume(name, size, team_id=None):
+        calls.append((name, size))
+        return Volume(name=name, size=size, status="RUNNING", clusterId="", pvcName="")
+
+    monkeypatch.setattr(
+        volumes, "_client", lambda: (SimpleNamespace(expand_volume=expand_volume), None)
+    )
+    env = {"PRIME_DISABLE_VERSION_CHECK": "1"}
+    result = CliRunner().invoke(app, ["volumes", "expand", "ckpts", "--size", "10Ti"], env=env)
+    assert result.exit_code == 0, result.output
+    assert calls == [("ckpts", "10Ti")] and "10Ti" in result.output
+    gone = CliRunner().invoke(app, ["volumes", "resize", "ckpts", "--size", "10Ti"], env=env)
+    assert gone.exit_code != 0, "resize is gone in favor of expand"
 
 
 def test_create_passes_the_cluster_through(monkeypatch):
@@ -386,10 +415,17 @@ def test_create_passes_the_cluster_through(monkeypatch):
         app, ["volumes", "create", "ckpts", "--cluster", "gpu-east"], env=env
     )
     assert result.exit_code == 0, result.output
-    assert "on gpu-east" in result.output
+    assert "Volume ckpts (5Ti) is PENDING" in result.output
+    assert "--cluster is deprecated" in result.output
     as_json = CliRunner().invoke(app, ["volumes", "create", "ckpts", "-o", "json"], env=env)
     assert json.loads(as_json.output)["cluster"] == "gpu-east"
-    assert calls == [("ckpts", "1Ti", "t1", "gpu-east"), ("ckpts", "1Ti", "t1", None)]
+    # the deprecation warning goes to stderr so --output json stays parseable
+    warned = CliRunner().invoke(
+        app, ["volumes", "create", "ckpts", "--cluster", "gpu-east", "-o", "json"], env=env
+    )
+    assert json.loads(warned.stdout)["cluster"] == "gpu-east"
+    assert "--cluster is deprecated" not in warned.stdout
+    assert calls[:2] == [("ckpts", "5Ti", "t1", "gpu-east"), ("ckpts", "5Ti", "t1", None)]
 
 
 def test_client_sends_cluster_only_when_set():

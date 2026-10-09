@@ -120,7 +120,7 @@ HOSTED_TRAINING_STOP_POLL_SECONDS = 3
 HOSTED_TRAINING_STOP_MAX_POLLS = 60
 VOLUME_READY_POLL_SECONDS = 3
 VOLUME_READY_MAX_SECONDS = 180
-VOLUME_DEFAULT_SIZE = "1Ti"  # same default as `prime volumes create`
+VOLUME_DEFAULT_SIZE = "5Ti"  # same default as `prime volumes create`
 
 TERMINAL_RUN_STATUSES = {"STOPPED", "FAILED", "COMPLETED"}
 
@@ -1325,11 +1325,11 @@ def _ensure_volume(
     client: Any, name: str, team_id: Optional[str], output: str, size: Optional[str] = None
 ) -> None:
     """Create `name` (with `size`, default VOLUME_DEFAULT_SIZE) if it doesn't
-    exist and wait until it is RUNNING.
+    exist and wait until it is created (the API reports RUNNING).
 
     An existing volume in any state is left alone (the backend reports
-    "not ready" at dispatch); a `size` for it is ignored with a note (resizing
-    is `prime volumes resize`). Exits 1 on create failure, FAILED/TOMBSTONED,
+    "not ready" at dispatch); a `size` for it is ignored with a note (growing it
+    is `prime volumes expand`). Exits 1 on create failure, FAILED/TOMBSTONED,
     or timeout. Progress goes to stderr for `--output json`. The backend
     validates the size (e.g. 500Gi, 2Ti) and returns its error on create.
     """
@@ -1343,7 +1343,7 @@ def _ensure_volume(
         if size and size != existing[0].size:
             out.print(
                 f"Volume '{name}' already exists ({existing[0].size or 'unknown size'}); "
-                f"--volume-size {size} is ignored. Resize with: prime volumes resize"
+                f"--volume-size {size} is ignored. Expand it with: prime volumes expand"
             )
         return
 
@@ -1583,7 +1583,7 @@ def create_run(
             "volume, SFT only works with fake datasets. Full-FT and SFT "
             "only; closed beta, see `prime volumes`. Falls back to a "
             'top-level `volume = "..."` in the TOML. Created on the fly '
-            "(default 1Ti) if it doesn't exist."
+            "(default 5Ti) if it doesn't exist."
         ),
     ),
     volume_size: Optional[str] = typer.Option(
@@ -1591,7 +1591,7 @@ def create_run(
         "--volume-size",
         help=(
             "Size for the --volume if this command creates it, e.g. 500Gi or 2Ti "
-            "(default 1Ti). Ignored when the volume already exists. Falls back "
+            "(default 5Ti). Ignored when the volume already exists. Falls back "
             'to a top-level `volume_size = "..."` in the TOML.'
         ),
     ),

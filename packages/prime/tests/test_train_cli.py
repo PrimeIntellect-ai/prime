@@ -404,8 +404,8 @@ def test_train_missing_volume_is_created_then_dispatched(monkeypatch, tmp_path: 
     creates, dispatched = _mock_volumes(monkeypatch, [])
     result = _run_volume(tmp_path)
     assert result.exit_code == 0, result.output
-    assert "Volume 'ckpts' doesn't exist, creating it (1Ti)" in result.output
-    assert creates == [("ckpts", "1Ti")] and len(dispatched) == 1
+    assert "Volume 'ckpts' doesn't exist, creating it (5Ti)" in result.output
+    assert creates == [("ckpts", "5Ti")] and len(dispatched) == 1
 
 
 def test_train_volume_create_failure_exits_without_dispatch(monkeypatch, tmp_path: Path) -> None:

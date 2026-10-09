@@ -613,15 +613,26 @@ def _local_entries(path: str) -> list[tuple[int, str]] | None:
         return None
     base = _rsync_base(path)
     files = []
-    for root, subdirs, names in os.walk(path, followlinks=False):
-        for entry in subdirs + names:
-            full = os.path.join(root, entry)
-            rel = os.path.relpath(full, base)
-            if "\n" in rel:
-                return None
-            if os.path.islink(full) or not os.path.isdir(full):
-                files.append((os.lstat(full).st_size, rel))
+    try:
+        # An unreadable directory: None, and the one plain rsync reports it
+        # (os.walk would silently leave its files out of the lists).
+        for root, subdirs, names in os.walk(path, followlinks=False, onerror=_raise):
+            for entry in subdirs + names:
+                full = os.path.join(root, entry)
+                rel = os.path.relpath(full, base)
+                if "\n" in rel:
+                    return None
+                if os.path.islink(full) or not os.path.isdir(full):
+                    files.append((os.lstat(full).st_size, rel))
+    except OSError:
+        return None
     return files
+
+
+def _raise(exc: OSError) -> None:
+    """os.walk's onerror: fail on an unreadable directory instead of
+    skipping it."""
+    raise exc
 
 
 def _remote_entries(alias: str, config: Path, remote: str) -> list[tuple[int, str]] | None:
@@ -687,19 +698,40 @@ def _parallel_rsync(
     return next((c for c in codes if c), 0)
 
 
-def _refuse_runs(local: str, rel: str) -> None:
+# The most top-level names a root put may write (the route refuses more).
+_ROOT_PUT_MAX_ENTRIES = 256
+
+
+def _top_names(local: str, rel: str) -> list[str]:
+    """The sorted top-level volume names `put LOCAL REL` writes: REL's first
+    segment, or for a root put the source's basename, or its children for
+    "dir/" contents semantics."""
+    if rel:
+        return [rel.split("/", 1)[0]]
+    if os.path.isdir(local) and _copies_contents(local):
+        return sorted(os.listdir(local))
+    return [os.path.basename(os.path.normpath(local))]
+
+
+def _refuse_runs(local: str, rel: str) -> list[str] | None:
     """Exit if a put would write under runs/: run outputs live there, and a
     session's sync and staging leave runs/ alone, so such a put would be lost
-    or clobber a run. `rel` is the volume-relative destination."""
-    if rel:
-        top = {rel.split("/", 1)[0]}
-    elif os.path.isdir(local) and _copies_contents(local):
-        top = set(os.listdir(local))
-    else:
-        top = {os.path.basename(os.path.normpath(local))}
+    or clobber a run. `rel` is the volume-relative destination. Also exit if
+    a root put would write more top-level names than the route takes.
+    Returns the `entries` a root put sends the route (None otherwise)."""
+    top = _top_names(local, rel)
     if "runs" in top:
         console.print("[red]runs/ holds run outputs and is read-only; put elsewhere.[/red]")
         raise typer.Exit(2)
+    if rel:
+        return None
+    if len(top) > _ROOT_PUT_MAX_ENTRIES:
+        console.print(
+            f"[red]A put to the volume root writes at most {_ROOT_PUT_MAX_ENTRIES} top-level "
+            f"names; this one writes {len(top)}. Put into a subdirectory instead.[/red]"
+        )
+        raise typer.Exit(2)
+    return top
 
 
 def _copies_contents(local: str) -> bool:
@@ -740,26 +772,32 @@ def _refuse_bad_local(local: str, upload: bool) -> None:
         raise typer.Exit(1)
 
 
+def _api_detail(exc: APIError) -> str:
+    """The route's detail without the "HTTP 400: " / "HTTP 409: " prefix."""
+    return re.sub(r"^HTTP (400|409): ", "", str(exc))
+
+
 def _transfer(
     name: str, read_only: bool, remote: str, local: str, upload: bool, direct: bool
 ) -> None:
     remote = _remote_path(remote)
     rel = remote.removeprefix("/volume/")
     _refuse_bad_local(local, upload)
-    if upload:
-        _refuse_runs(local, rel)
+    entries = _refuse_runs(local, rel) if upload else None
     client, team_id = _client()
+    mode = "put" if upload else "get"
     try:
-        route = client.route_volume_transfer(name, "put" if upload else "get", rel, team_id=team_id)
+        route = client.route_volume_transfer(name, mode, rel, entries, team_id=team_id)
     except NotFoundError:
         route = None  # an older backend: always through a session
     except APIError as exc:
         # 409 (single writer: another read-write session or an upload is
-        # live, or yours uses an old key): report it; only a 404 falls back.
-        console.print(f"[red]Error:[/red] {escape(str(exc).removeprefix('HTTP 409: '))}")
+        # live, or yours uses an old key) or 400 (e.g. a root put's
+        # entries refused): report it; only a 404 falls back.
+        console.print(f"[red]Error:[/red] {escape(_api_detail(exc))}")
         raise typer.Exit(1) from exc
     if route is not None and route.via == "r2":
-        _r2_transfer(client, name, team_id, route, rel, local, upload)
+        _r2_transfer(client, name, team_id, route, rel, local, upload, entries)
         return
     existing = route.session if route is not None else None
     rsync = shutil.which("rsync")
@@ -872,7 +910,7 @@ def _r2_client(refresh, route):
         try:
             r = refresh()
         except APIError as exc:
-            raise RuntimeError(str(exc).removeprefix("HTTP 409: ")) from exc
+            raise RuntimeError(_api_detail(exc)) from exc
         if r.via != "r2":
             raise RuntimeError("a session started on the volume; rerun the command")
         return metadata(r)
@@ -941,7 +979,7 @@ def _put_plan(s3, bucket: str, prefix: str, local: str, rel: str):
     if not _copies_contents(local):
         dest += os.path.basename(os.path.normpath(local)) + "/"
     plan, skipped = [], 0
-    for root, dirs, files in os.walk(local, followlinks=False):
+    for root, dirs, files in os.walk(local, followlinks=False, onerror=_raise):
         for entry in dirs + files:
             full = os.path.join(root, entry)
             if os.path.islink(full):
@@ -1024,6 +1062,48 @@ def _get_plan(s3, bucket: str, prefix: str, rel: str, local: str):
     return plan, skipped
 
 
+def _refuse_linked_dest(local: str, paths) -> None:
+    """Exit before a get writes anything if an existing component below the
+    destination LOCAL on a planned path is a symlink (e.g. out/sub ->
+    /elsewhere, or the file itself): the download would follow it and write
+    outside LOCAL. LOCAL itself may be a link the user chose."""
+    seen = set()
+    for path in paths:
+        rel = os.path.relpath(path, local)
+        if rel == ".":
+            continue
+        cur = local
+        for part in Path(rel).parts:
+            cur = os.path.join(cur, part)
+            if cur in seen:
+                continue
+            seen.add(cur)
+            if os.path.islink(cur):
+                console.print(
+                    f"[red]{escape(cur)} is a symlink inside the destination; the get would "
+                    "write through it. Remove it or get elsewhere.[/red]"
+                )
+                raise typer.Exit(1)
+            if not os.path.lexists(cur):
+                break
+
+
+def _rclone_metadata(path: str) -> dict:
+    """User metadata rclone's s3 backend reads for an object whose ETag is
+    not an MD5 (a multipart upload): "md5chksum" (base64 of the raw MD5) and
+    "mtime" (unix seconds, up to 9 decimals, trailing zeros dropped, as
+    swift.TimeToFloatString writes it). Without them `rclone sync
+    --checksum` / `rclone check` see no hash and treat the file as equal."""
+    import base64
+    import hashlib
+
+    ns = os.stat(path).st_mtime_ns
+    with open(path, "rb") as f:
+        digest = hashlib.file_digest(f, "md5").digest()
+    mtime = f"{ns // 10**9}.{ns % 10**9:09d}".rstrip("0").rstrip(".")
+    return {"md5chksum": base64.b64encode(digest).decode(), "mtime": mtime}
+
+
 def _run_r2_jobs(jobs, verb: str) -> None:
     """Run `jobs` ((size, fn(callback)) pairs) on a thread pool with one
     progress line: files done, bytes, rate, ETA. The first failure cancels
@@ -1065,13 +1145,17 @@ def _run_r2_jobs(jobs, verb: str) -> None:
             pool.shutdown(wait=True, cancel_futures=True)
 
 
-def _r2_transfer(client, name: str, team_id, route, rel: str, local: str, upload: bool) -> None:
+def _r2_transfer(
+    client, name: str, team_id, route, rel: str, local: str, upload: bool, entries=None
+) -> None:
     from boto3.exceptions import Boto3Error
     from boto3.s3.transfer import TransferConfig
     from botocore.exceptions import BotoCoreError, ClientError
 
     mode = "put" if upload else "get"
-    s3 = _r2_client(lambda: client.route_volume_transfer(name, mode, rel, team_id=team_id), route)
+    s3 = _r2_client(
+        lambda: client.route_volume_transfer(name, mode, rel, entries, team_id=team_id), route
+    )
     config = TransferConfig(
         multipart_threshold=_R2_PART_SIZE,
         multipart_chunksize=_R2_PART_SIZE,
@@ -1084,11 +1168,18 @@ def _r2_transfer(client, name: str, team_id, route, rel: str, local: str, upload
             _refuse_file_dir_clash(s3, bucket, prefix, [key for _, key, _ in plan])
 
             def up(path, key):
-                return lambda cb: s3.upload_file(path, bucket, key, Config=config, Callback=cb)
+                # ponytail: a second read of the file for the MD5 (the
+                # metadata goes on CreateMultipartUpload, before any part).
+                def run(cb):
+                    extra = {"Metadata": _rclone_metadata(path)}
+                    s3.upload_file(path, bucket, key, ExtraArgs=extra, Config=config, Callback=cb)
+
+                return run
 
             jobs = [(size, up(path, key)) for path, key, size in plan]
         else:
             plan, skipped = _get_plan(s3, bucket, prefix, rel, local)
+            _refuse_linked_dest(local, [path for _, path, _ in plan])
 
             def down(key, path):
                 def run(cb):

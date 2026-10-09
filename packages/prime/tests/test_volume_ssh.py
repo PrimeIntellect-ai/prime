@@ -1129,11 +1129,13 @@ def test_client_sends_warm_and_routes_transfers():
     client.create_volume("v", "1Ti")
     client.create_volume("v", "1Ti", warm=False)
     got = client.route_volume_transfer("v", "put", "data/x/", team_id="t1")
+    client.route_volume_transfer("v", "put", "", ["a", "b"])
     assert posted[0][1]["warm"] is True and posted[1][1]["warm"] is False
     assert posted[2] == (
         "/training/volumes/v/transfer",
         {"mode": "put", "path": "data/x/", "teamId": "t1"},
     )
+    assert posted[3][1] == {"mode": "put", "path": "", "entries": ["a", "b"]}
     assert (got.via, got.prefix, got.access_key_id) == ("r2", "vol1/", "AK")
     assert got.session_token == "ST"
 
@@ -1258,10 +1260,13 @@ class FakeS3:
 
     def __init__(self, objects=None):
         self.objects = dict(objects or {})
+        self.metadata = {}
+        self.entries = []  # `entries` of each route call
 
-    def upload_file(self, path, bucket, key, Config=None, Callback=None):
+    def upload_file(self, path, bucket, key, ExtraArgs=None, Config=None, Callback=None):
         assert bucket == "b" and Config.max_concurrency == volumes._R2_PART_WORKERS
         self.objects[key] = Path(path).read_bytes()
+        self.metadata[key] = ExtraArgs["Metadata"]
         Callback(len(self.objects[key]))
 
     def download_file(self, bucket, key, path, Config=None, Callback=None):
@@ -1301,8 +1306,9 @@ def _direct(monkeypatch, s3):
 
     routes = []
 
-    def route(name, mode, path, team_id=None):
+    def route(name, mode, path, entries=None, team_id=None):
         routes.append((mode, path))
+        s3.entries.append(entries)
         return VolumeTransferRoute.model_validate(R2_ROUTE)
 
     client = SimpleNamespace(
@@ -1432,7 +1438,7 @@ def test_get_of_runs_with_a_live_session_goes_direct(monkeypatch, tmp_path):
     s3 = FakeS3({"vol1/runs/r1/m": b"m"})
     asked = []
 
-    def route(name, mode, path, team_id=None):
+    def route(name, mode, path, entries=None, team_id=None):
         asked.append((mode, path))
         live = {
             "via": "session",
@@ -1742,3 +1748,127 @@ def test_direct_put_into_a_directory_and_marker_objects_are_fine(monkeypatch, tm
     result = _run("put", "data", "tree", "x/")  # overwrites x/tree/sub/b
     assert result.exit_code == 0, result.output
     assert s3.objects["vol1/a/f.txt"] == b"f" and s3.objects["vol1/x/tree/sub/b"] == b"b"
+
+
+def test_direct_get_refuses_a_symlinked_parent_in_the_destination(monkeypatch, tmp_path):
+    """out/sub -> elsewhere: the get would write outside out/. Refused before
+    anything is written; out/ itself being a link is the user's choice."""
+    monkeypatch.chdir(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    real = tmp_path / "real"
+    (real / "d").mkdir(parents=True)
+    Path("out").symlink_to(real)  # the destination root may be a link
+    s3 = FakeS3({"vol1/d/a": b"a", "vol1/d/sub/b": b"b"})
+    _direct(monkeypatch, s3)
+    (real / "d" / "sub").symlink_to(elsewhere)
+    result = _run("get", "data", "d", "out")
+    assert result.exit_code == 1, result.output
+    assert "out/d/sub is a symlink inside the destination" in result.output.replace("\n", "")
+    assert list(elsewhere.iterdir()) == [] and not (real / "d" / "a").exists()
+    # A link at the file path itself is refused too.
+    (real / "d" / "sub").unlink()
+    (real / "d" / "a").symlink_to(elsewhere / "a")
+    result = _run("get", "data", "d", "out")
+    assert result.exit_code == 1, result.output
+    assert "out/d/a is a symlink" in result.output.replace("\n", "")
+    assert list(elsewhere.iterdir()) == []
+    (real / "d" / "a").unlink()
+    assert _run("get", "data", "d", "out").exit_code == 0
+    assert (real / "d" / "sub" / "b").read_bytes() == b"b"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads unreadable directories")
+def test_direct_put_fails_on_an_unreadable_directory(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "tree" / "locked").mkdir(parents=True)
+    Path("tree/a").write_text("a")
+    Path("tree/locked/b").write_text("b")
+    s3 = FakeS3()
+    _direct(monkeypatch, s3)
+    (tmp_path / "tree" / "locked").chmod(0)
+    try:
+        result = _run("put", "data", "tree", "x/")
+    finally:
+        (tmp_path / "tree" / "locked").chmod(0o700)
+    assert result.exit_code == 1, result.output
+    out = result.output.replace("\n", "")
+    assert "Transfer failed" in out and "tree/locked" in out
+    assert s3.objects == {}
+
+
+def test_direct_put_sets_rclone_md5_and_mtime_metadata(monkeypatch, tmp_path):
+    """Multipart objects have no MD5 ETag; rclone reads these instead."""
+    import base64
+
+    monkeypatch.chdir(tmp_path)
+    Path("f.txt").write_bytes(b"hello")
+    os.utime("f.txt", ns=(0, 1_700_000_000_120_000_000))
+    Path("g.txt").write_bytes(b"")
+    os.utime("g.txt", ns=(0, 1_700_000_000_000_000_000))
+    s3 = FakeS3()
+    _direct(monkeypatch, s3)
+    assert _run("put", "data", "f.txt", "d/").exit_code == 0
+    assert _run("put", "data", "g.txt", "d/").exit_code == 0
+    md5 = base64.b64encode(hashlib.md5(b"hello").digest()).decode()
+    assert s3.metadata["vol1/d/f.txt"] == {"md5chksum": md5, "mtime": "1700000000.12"}
+    empty = base64.b64encode(hashlib.md5(b"").digest()).decode()
+    assert s3.metadata["vol1/d/g.txt"] == {"md5chksum": empty, "mtime": "1700000000"}
+
+
+@pytest.mark.parametrize(
+    "local,remote,entries",
+    [
+        ("f.txt", "/", ["f.txt"]),
+        ("tree", "/", ["tree"]),
+        ("tree/", "/", ["a", "link", "sub"]),
+        ("tree/.", ".", ["a", "link", "sub"]),
+        ("tree", "x/", None),  # not a root put
+    ],
+)
+def test_root_put_sends_its_top_level_entries(monkeypatch, tmp_path, local, remote, entries):
+    monkeypatch.chdir(tmp_path)
+    Path("f.txt").write_text("f")
+    (tmp_path / "tree" / "sub").mkdir(parents=True)
+    Path("tree/a").write_text("a")
+    Path("tree/sub/b").write_text("b")
+    Path("tree/link").symlink_to(tmp_path / "f.txt")
+    s3 = FakeS3()
+    _direct(monkeypatch, s3)
+    result = _run("put", "data", local, remote)
+    assert result.exit_code == 0, result.output
+    assert s3.entries == [entries]
+    tops = {k.removeprefix("vol1/").split("/", 1)[0] for k in s3.objects}
+    assert entries is None or tops <= set(entries)
+
+
+def test_root_put_of_too_many_names_fails_before_the_route(monkeypatch, tmp_path):
+    many = tmp_path / "many"
+    many.mkdir()
+    for i in range(volumes._ROOT_PUT_MAX_ENTRIES + 1):
+        (many / f"f{i}").write_text("x")
+    s3 = FakeS3()
+    routes = _direct(monkeypatch, s3)
+    result = _run("put", "data", f"{many}/.", "/")
+    assert result.exit_code == 2
+    out = " ".join(result.output.split())
+    assert "at most 256 top-level names; this one writes 257" in out
+    assert "subdirectory" in out and routes == []
+    assert _run("put", "data", str(many), "/").exit_code == 0  # one name: many
+
+
+def test_refused_root_put_is_reported(monkeypatch, tmp_path):
+    from prime_cli.core import APIError
+
+    monkeypatch.chdir(tmp_path)
+    Path("f.txt").write_text("f")
+
+    def route(*a, **kw):
+        raise APIError("HTTP 400: a root put must list its entries")
+
+    client = SimpleNamespace(route_volume_transfer=route)
+    monkeypatch.setattr(volumes, "_client", lambda: (client, "t1"))
+    result = _run("put", "data", "f.txt", "/")
+    assert result.exit_code == 1
+    out = " ".join(result.output.split())
+    assert "Error: a root put must list its entries" in out and "HTTP 400" not in out

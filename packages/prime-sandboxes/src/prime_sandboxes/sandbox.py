@@ -408,6 +408,7 @@ BACKGROUND_JOB_OUTPUT_CACHE_BYTES = 64 * 1024 * 1024
 # single-item waits are collected briefly so callers share a request without
 # adding a persistent worker to the client lifecycle.
 MAX_STATUS_BATCH_SIZE = 100
+MAX_CONCURRENT_BACKGROUND_JOB_PROBES = 20
 STATUS_BATCH_WINDOW_SECONDS = 0.025
 
 # Background-job completion polling starts with the caller-selected interval,
@@ -1740,6 +1741,76 @@ def _canonical_background_job(sandbox_id: str, job_id: str) -> BackgroundJob:
     )
 
 
+def _background_job_probe_groups(
+    jobs: list[BackgroundJob],
+    results: dict[tuple[str, str], BackgroundJobStatusSnapshot | _BatchItemError],
+) -> list[list[BackgroundJob]]:
+    """Group unfinished jobs by guest; completed/error items need no extra RPC."""
+    _validate_background_job_batch(jobs)
+    groups: dict[str, list[BackgroundJob]] = {}
+    for job in jobs:
+        status = results.get((job.sandbox_id, job.job_id))
+        if isinstance(status, BackgroundJobStatusSnapshot) and not status.completed:
+            groups.setdefault(job.sandbox_id, []).append(job)
+    return list(groups.values())
+
+
+def _background_job_probe_command(jobs: list[BackgroundJob]) -> str:
+    # Command substitution isolates the status command's early `exit`. Canonical
+    # handles are validated before building this command, including the job IDs.
+    commands = []
+    for job in jobs:
+        exit_file = shlex.quote(job.exit_file)
+        pid_file = shlex.quote(f"/tmp/job_{job.job_id}.launch/pid")
+        # Older SDKs did not record a PID. Missing provenance cannot distinguish
+        # those live jobs from a guest that lost all temporary files. Preserve
+        # pending in that case; callers still own their execution deadline.
+        status_command = (
+            f"grep -s . {exit_file} && exit; "
+            f"test -r {pid_file} && test -s {pid_file} || exit 0; "
+            f"{_background_job_status_command(job)}"
+        )
+        commands.append(
+            f"status=$({status_command}) || exit; "
+            f"printf '%s %s\\n' {shlex.quote(job.job_id)} \"$status\""
+        )
+    return "\n".join(commands)
+
+
+def _parse_background_job_probe(
+    jobs: list[BackgroundJob], response: CommandResponse
+) -> dict[tuple[str, str], BackgroundJobStatusSnapshot | _BatchItemError]:
+    if response.exit_code != 0:
+        raise APIError(f"Background job liveness probe failed: {response.stderr.strip()}")
+    rows: dict[str, str] = {}
+    expected = {job.job_id for job in jobs}
+    for line in response.stdout.splitlines():
+        job_id, separator, status = line.partition(" ")
+        if not separator or job_id not in expected or job_id in rows:
+            raise APIError("Malformed background job liveness probe response")
+        if status != "lost" and status and not re.fullmatch(r"-?\d+", status):
+            raise APIError("Invalid background job liveness probe status")
+        rows[job_id] = status
+    if rows.keys() != expected:
+        raise APIError("Background job liveness probe omitted jobs")
+    results: dict[tuple[str, str], BackgroundJobStatusSnapshot | _BatchItemError] = {}
+    for job in jobs:
+        status = rows[job.job_id]
+        key = (job.sandbox_id, job.job_id)
+        if status == "lost":
+            results[key] = _BatchItemError(
+                APIError(f"Background job {job.job_id} exited without recording an exit code")
+            )
+        else:
+            results[key] = BackgroundJobStatusSnapshot(
+                sandbox_id=job.sandbox_id,
+                job_id=job.job_id,
+                completed=bool(status),
+                exit_code=int(status) if status else None,
+            )
+    return results
+
+
 def _validate_background_job_batch(jobs: List[BackgroundJob]) -> None:
     """Validate VM batching is limited to canonical SDK job handles."""
     if not jobs or len(jobs) > MAX_STATUS_BATCH_SIZE:
@@ -2134,6 +2205,8 @@ class SandboxClient:
             self.client,
         )
         self._operation_leases = _SyncPollLeaseRegistry()
+        # One temporary pool per client bounds threads as well as active RPCs.
+        self._background_job_probe_lock = threading.Lock()
         # Retained as an internal compatibility alias for integrations that
         # inspected the poll registry before it grew to cover output work.
         self._poll_leases = self._operation_leases
@@ -2888,6 +2961,47 @@ class SandboxClient:
         self._background_job_status_batch_supported = True
         return BatchBackgroundJobStatusResponse.model_validate(response)
 
+    def _reconcile_background_job_liveness(
+        self,
+        jobs: List[BackgroundJob],
+        results: dict[tuple[str, str], BackgroundJobStatusSnapshot | _BatchItemError],
+        timeout: int | None,
+    ) -> None:
+        # The platform batch only checks exit files. Probe pending jobs using the
+        # same guest-side identity check as direct polling, once per sandbox.
+        groups = _background_job_probe_groups(jobs, results)
+        if not groups:
+            return
+        deadline = time.monotonic() + (30 if timeout is None else timeout)
+
+        def probe(group: list[BackgroundJob]):
+            try:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise APIError("Background job liveness probe deadline exceeded")
+                response = self.execute_command(
+                    group[0].sandbox_id,
+                    _background_job_probe_command(group),
+                    timeout=max(1, math.ceil(remaining)),
+                )
+                return _parse_background_job_probe(group, response)
+            except Exception as exc:
+                return {(job.sandbox_id, job.job_id): _BatchItemError(exc) for job in group}
+
+        if not self._background_job_probe_lock.acquire(timeout=max(0, deadline - time.monotonic())):
+            error = APIError("Background job liveness probe deadline exceeded")
+            for group in groups:
+                results.update({(j.sandbox_id, j.job_id): _BatchItemError(error) for j in group})
+            return
+        try:
+            with ThreadPoolExecutor(
+                max_workers=min(len(groups), MAX_CONCURRENT_BACKGROUND_JOB_PROBES)
+            ) as executor:
+                for group_results in executor.map(probe, groups):
+                    results.update(group_results)
+        finally:
+            self._background_job_probe_lock.release()
+
     def _get_background_job_statuses_legacy_unleased(
         self,
         jobs: List[BackgroundJob],
@@ -2900,7 +3014,7 @@ class SandboxClient:
     def _get_background_job_statuses_unleased(
         self,
         jobs: List[BackgroundJob],
-        timeout: Optional[int],
+        timeout: int | None,
     ) -> List[BackgroundJobStatusSnapshot]:
         body = self._request_background_job_status_batch(jobs, timeout)
         if body is None:
@@ -2913,7 +3027,7 @@ class SandboxClient:
                 raise BatchStatusUnsupportedError(details)
             raise APIError(f"Background job batch status failed: {details}")
         runtime_statuses = {(status.sandbox_id, status.job_id): status for status in body.statuses}
-        results: List[BackgroundJobStatusSnapshot] = []
+        results: list[BackgroundJobStatusSnapshot] = []
         for job in jobs:
             runtime_status = runtime_statuses.get((job.sandbox_id, job.job_id))
             if runtime_status is None:
@@ -2921,7 +3035,15 @@ class SandboxClient:
             if runtime_status.completed and runtime_status.exit_code is None:
                 raise APIError(f"Completed VM background job {job.job_id} omitted exit_code")
             results.append(runtime_status)
-        return results
+        reconciled = {(status.sandbox_id, status.job_id): status for status in results}
+        self._reconcile_background_job_liveness(jobs, reconciled, timeout)
+        ordered = []
+        for job in jobs:
+            status = reconciled[(job.sandbox_id, job.job_id)]
+            if isinstance(status, _BatchItemError):
+                raise status.error
+            ordered.append(status)
+        return ordered
 
     def get_background_job_statuses(
         self,
@@ -3057,6 +3179,7 @@ class SandboxClient:
                 )
                 continue
             results[key] = runtime_status
+        self._reconcile_background_job_liveness(jobs, results, None)
         return results
 
     def run_background_job(
@@ -3642,6 +3765,7 @@ class AsyncSandboxClient:
         # Initialized lazily to allow connection pooling and reuse
         self._gateway_client: Optional[httpx.AsyncClient] = None
         self._operation_leases = _AsyncPollLeaseRegistry()
+        self._background_job_probe_slots = asyncio.Semaphore(MAX_CONCURRENT_BACKGROUND_JOB_PROBES)
         self._poll_leases = self._operation_leases
         # Checkpoints outlive their sandboxes; leases use checkpoint scopes.
         self._checkpoint_batcher = _AsyncRequestBatcher(
@@ -4613,6 +4737,45 @@ class AsyncSandboxClient:
         self._background_job_status_batch_supported = True
         return BatchBackgroundJobStatusResponse.model_validate(response)
 
+    async def _reconcile_background_job_liveness(
+        self,
+        jobs: List[BackgroundJob],
+        results: dict[tuple[str, str], BackgroundJobStatusSnapshot | _BatchItemError],
+        timeout: int | None,
+    ) -> None:
+        groups = _background_job_probe_groups(jobs, results)
+        if not groups:
+            return
+        deadline = time.monotonic() + (30 if timeout is None else timeout)
+
+        async def probe(group: list[BackgroundJob]):
+            try:
+                remaining = max(0, deadline - time.monotonic())
+
+                async def execute():
+                    async with self._background_job_probe_slots:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise asyncio.TimeoutError
+                        return await self.execute_command(
+                            group[0].sandbox_id,
+                            _background_job_probe_command(group),
+                            timeout=max(1, math.ceil(remaining)),
+                        )
+
+                response = await asyncio.wait_for(execute(), timeout=remaining)
+                return _parse_background_job_probe(group, response)
+            except asyncio.TimeoutError:
+                error = APIError("Background job liveness probe deadline exceeded")
+                return {(job.sandbox_id, job.job_id): _BatchItemError(error) for job in group}
+            except Exception as exc:
+                return {(job.sandbox_id, job.job_id): _BatchItemError(exc) for job in group}
+
+        # Cancellation propagates through gather, draining every child probe before
+        # the caller's operation lease is released. One guest failure stays local.
+        for group_results in await asyncio.gather(*(probe(group) for group in groups)):
+            results.update(group_results)
+
     async def _get_background_job_statuses_legacy_unleased(
         self,
         jobs: List[BackgroundJob],
@@ -4630,7 +4793,7 @@ class AsyncSandboxClient:
     async def _get_background_job_statuses_unleased(
         self,
         jobs: List[BackgroundJob],
-        timeout: Optional[int],
+        timeout: int | None,
     ) -> List[BackgroundJobStatusSnapshot]:
         body = await self._request_background_job_status_batch(jobs, timeout)
         if body is None:
@@ -4643,7 +4806,7 @@ class AsyncSandboxClient:
                 raise BatchStatusUnsupportedError(details)
             raise APIError(f"Background job batch status failed: {details}")
         runtime_statuses = {(status.sandbox_id, status.job_id): status for status in body.statuses}
-        results: List[BackgroundJobStatusSnapshot] = []
+        results: list[BackgroundJobStatusSnapshot] = []
         for job in jobs:
             runtime_status = runtime_statuses.get((job.sandbox_id, job.job_id))
             if runtime_status is None:
@@ -4651,7 +4814,15 @@ class AsyncSandboxClient:
             if runtime_status.completed and runtime_status.exit_code is None:
                 raise APIError(f"Completed VM background job {job.job_id} omitted exit_code")
             results.append(runtime_status)
-        return results
+        reconciled = {(status.sandbox_id, status.job_id): status for status in results}
+        await self._reconcile_background_job_liveness(jobs, reconciled, timeout)
+        ordered = []
+        for job in jobs:
+            status = reconciled[(job.sandbox_id, job.job_id)]
+            if isinstance(status, _BatchItemError):
+                raise status.error
+            ordered.append(status)
+        return ordered
 
     async def get_background_job_statuses(
         self,
@@ -4787,6 +4958,7 @@ class AsyncSandboxClient:
         for job, status in zip(jobs, statuses):
             if status is not None:
                 results[(job.sandbox_id, job.job_id)] = status
+        await self._reconcile_background_job_liveness(jobs, results, None)
         return results
 
     async def run_background_job(

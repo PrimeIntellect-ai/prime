@@ -269,7 +269,7 @@ def test_factory_status_unknown_cluster_selector_fails(
     assert "No cluster matched 'nope'" in strip_ansi(result.output)
 
 
-def test_factory_status_json_with_cluster_filter_keeps_envelope(
+def test_factory_status_json_with_cluster_filter_keeps_exact_envelope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     payload = _status_payload()
@@ -283,9 +283,52 @@ def test_factory_status_json_with_cluster_filter_keeps_envelope(
     )
 
     assert result.exit_code == 0, result.output
-    data = json.loads(result.stdout)
-    assert data["schema_version"] == 1
-    assert [c["display_name"] for c in data["clusters"]] == ["research-h200"]
+    # The filtered view passes through the raw API cluster object byte-exact,
+    # not a re-serialization of the parsed model.
+    assert json.loads(result.stdout) == {
+        **payload,
+        "clusters": [payload["clusters"][1]],
+    }
+
+
+def test_factory_status_json_no_team_keeps_stdout_clean(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install(monkeypatch, _status_payload(), team_id=None)
+
+    result = runner.invoke(app, ["factory", "status", "--json"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == ""
+    assert "prime switch" in strip_ansi(result.stderr)
+
+
+def test_factory_status_json_cluster_miss_keeps_stdout_clean(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install(monkeypatch, _status_payload())
+
+    result = runner.invoke(app, ["factory", "status", "--json", "--cluster", "nope"], env=TEST_ENV)
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert "No cluster matched 'nope'" in strip_ansi(result.stderr)
+
+
+def test_factory_status_json_ambiguous_cluster_keeps_stdout_clean(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = _status_payload()
+    payload["clusters"].append(dict(payload["clusters"][0], gpu_type="H200"))
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(
+        app, ["factory", "status", "--json", "--cluster", "research-b300"], env=TEST_ENV
+    )
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert "matches multiple clusters" in strip_ansi(result.stderr)
 
 
 def test_factory_status_reports_api_errors(monkeypatch: pytest.MonkeyPatch) -> None:

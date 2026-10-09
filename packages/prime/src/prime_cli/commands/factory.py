@@ -1,6 +1,6 @@
 """`prime factory` — Model Factory fleet status."""
 
-from typing import List, Optional
+from typing import Any, List, Optional
 
 import typer
 from rich.markup import escape as rich_escape
@@ -95,11 +95,18 @@ def _render_pool_table(cluster: FactoryCluster) -> Table:
     return table
 
 
-def _select_cluster(clusters: List[FactoryCluster], selector: str) -> List[FactoryCluster]:
-    """Filter by display name (exact) or 1-based index, without exposing internal IDs."""
-    matches = [c for c in clusters if c.display_name == selector]
+def _select_cluster_indices(
+    clusters: List[FactoryCluster], selector: str, err_console: Any
+) -> List[int]:
+    """Select clusters by display name (exact) or 1-based index.
+
+    Returns the selected indices so both the parsed models (table mode) and
+    the raw API response clusters (JSON mode) can be filtered consistently.
+    Errors go to ``err_console`` so the JSON stream on stdout stays clean.
+    """
+    matches = [i for i, c in enumerate(clusters) if c.display_name == selector]
     if len(matches) > 1:
-        console.print(
+        err_console.print(
             f"[red]Error:[/red] '{selector}' matches multiple clusters. "
             "Use its 1-based index from `prime factory status` instead."
         )
@@ -110,12 +117,12 @@ def _select_cluster(clusters: List[FactoryCluster], selector: str) -> List[Facto
     if selector.isdigit():
         index = int(selector)
         if 1 <= index <= len(clusters):
-            return [clusters[index - 1]]
+            return [index - 1]
 
-    console.print(f"[red]Error:[/red] No cluster matched '{selector}'.")
+    err_console.print(f"[red]Error:[/red] No cluster matched '{selector}'.")
     if clusters:
         names = ", ".join(f"[{i + 1}] {c.display_name}" for i, c in enumerate(clusters))
-        console.print(f"[dim]Available clusters: {names}[/dim]")
+        err_console.print(f"[dim]Available clusters: {names}[/dim]")
     raise typer.Exit(1)
 
 
@@ -148,32 +155,40 @@ def factory_status(
         output = "json"
     validate_output_format(output, console)
 
+    # JSON mode keeps stdout strictly data: every diagnostic goes to stderr.
+    err_console = get_console(stderr=True) if output == "json" else console
+
     team_id = team or Config().team_id
     if not team_id:
-        console.print(
+        err_console.print(
             "No team selected in the current account context. "
             "`prime factory status` shows your team's dedicated clusters."
         )
-        console.print("[dim]Run `prime switch` to select a team, or pass --team <team_id>.[/dim]")
+        err_console.print(
+            "[dim]Run `prime switch` to select a team, or pass --team <team_id>.[/dim]"
+        )
         return
 
     try:
         api_client = APIClient()
         status = FactoryClient(api_client).get_status(team_id)
     except APIError as e:
-        err_console = get_console(stderr=True) if output == "json" else console
         err_console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
 
     clusters = status.clusters
+    selected: Optional[List[int]] = None
     if cluster is not None:
-        clusters = _select_cluster(clusters, cluster)
+        selected = _select_cluster_indices(clusters, cluster, err_console)
+        clusters = [clusters[i] for i in selected]
 
     if output == "json":
         payload = status.raw_response
-        if cluster is not None:
-            filtered = [c.model_dump(mode="json") for c in clusters]
-            payload = {**status.raw_response, "clusters": filtered}
+        if selected is not None:
+            # Filter the raw response objects, not re-serialized models, so
+            # --json stays an exact passthrough of the API payload.
+            raw_clusters = status.raw_response.get("clusters", [])
+            payload = {**status.raw_response, "clusters": [raw_clusters[i] for i in selected]}
         output_data_as_json(payload, console)
         return
 

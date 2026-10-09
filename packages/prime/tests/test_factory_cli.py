@@ -361,3 +361,35 @@ def test_factory_client_get_status_calls_frozen_endpoint() -> None:
     assert cluster.display_name == "research-b300"
     assert [p.type for p in cluster.pools] == ["training", "inference", "slurm"]
     assert [s.kind for s in cluster.sources] == ["capacity", "slurm"]
+
+
+def test_factory_status_rejects_response_missing_clusters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A 200 without `clusters` is a malformed payload, not an empty fleet.
+    _install(monkeypatch, {"schema_version": 1, "as_of": _iso(datetime.now(timezone.utc))})
+
+    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+
+    assert result.exit_code == 1
+    assert "Unexpected factory status response shape" in strip_ansi(result.output)
+    assert "No factory clusters allocated." not in result.output
+
+
+def test_factory_status_rejects_malformed_response_without_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install(monkeypatch, {"as_of": _iso(datetime.now(timezone.utc)), "clusters": []})
+
+    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+
+    assert result.exit_code == 1
+    assert "Unexpected factory status response shape" in strip_ansi(result.output)
+    assert "Traceback" not in result.output
+
+
+def test_factory_client_validation_failure_raises_api_error() -> None:
+    dummy = _DummyAPIClient({"schema_version": 1})  # missing required `clusters`
+
+    with pytest.raises(APIError, match="Unexpected factory status response shape"):
+        FactoryClient(dummy).get_status("team-123")  # type: ignore[arg-type]

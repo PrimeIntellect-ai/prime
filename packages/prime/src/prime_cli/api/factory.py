@@ -3,9 +3,9 @@
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field, PrivateAttr
+from pydantic import BaseModel, Field, PrivateAttr, ValidationError
 
-from prime_cli.core import APIClient
+from prime_cli.core import APIClient, APIError
 
 
 class FactoryPool(BaseModel):
@@ -53,7 +53,9 @@ class FactoryStatus(BaseModel):
 
     schema_version: int
     as_of: Optional[datetime] = None
-    clusters: List[FactoryCluster] = Field(default_factory=list)
+    # Required: a 200 response without `clusters` is a malformed payload,
+    # not an empty fleet — keep those distinguishable.
+    clusters: List[FactoryCluster]
 
     # The raw API response is retained so ``--json`` can echo the exact
     # server payload instead of a re-serialization of the parsed model.
@@ -77,6 +79,11 @@ class FactoryClient:
         resolves which team context to ask about.
         """
         response = self.client.get("/factory/status", params={"team_id": team_id})
-        status = FactoryStatus.model_validate(response)
+        try:
+            status = FactoryStatus.model_validate(response)
+        except ValidationError as exc:
+            # Wrap shape drift as APIError so the command's except-APIError
+            # branch surfaces a clean CLI error instead of a traceback.
+            raise APIError(f"Unexpected factory status response shape: {exc}") from exc
         status._raw_response = response
         return status

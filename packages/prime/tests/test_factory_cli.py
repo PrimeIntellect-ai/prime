@@ -453,3 +453,34 @@ def test_factory_client_rejects_future_schema_version() -> None:
 
     with pytest.raises(APIError, match="Unsupported factory status schema version: 3"):
         FactoryClient(dummy).get_status("team-123")  # type: ignore[arg-type]
+
+
+def test_factory_status_markup_in_cluster_selector_does_not_crash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A selector containing Rich closing markup must print a normal error,
+    # not raise rich.errors.MarkupError.
+    _install(monkeypatch, _status_payload())
+
+    result = runner.invoke(app, ["factory", "status", "--cluster", "[/bold]"], env=TEST_ENV)
+
+    assert result.exit_code == 1
+    # Exit must come from the command (SystemExit), not an escaped MarkupError.
+    assert isinstance(result.exception, SystemExit)
+    assert "No cluster matched" in strip_ansi(result.output)
+
+
+def test_factory_status_ambiguous_selector_with_markup_does_not_crash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = _status_payload()
+    payload["clusters"][0]["display_name"] = "[/bold]"
+    payload["clusters"].append(dict(payload["clusters"][0], gpu_type="H200"))
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(app, ["factory", "status", "--cluster", "[/bold]"], env=TEST_ENV)
+
+    assert result.exit_code == 1
+    # Exit must come from the command (SystemExit), not an escaped MarkupError.
+    assert isinstance(result.exception, SystemExit)
+    assert "matches multiple clusters" in strip_ansi(result.output)

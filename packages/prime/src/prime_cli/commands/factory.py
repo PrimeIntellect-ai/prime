@@ -107,7 +107,7 @@ def _select_cluster_indices(
     matches = [i for i, c in enumerate(clusters) if c.display_name == selector]
     if len(matches) > 1:
         err_console.print(
-            f"[red]Error:[/red] '{selector}' matches multiple clusters. "
+            f"[red]Error:[/red] '{rich_escape(selector)}' matches multiple clusters. "
             "Use its 1-based index from `prime factory status` instead."
         )
         raise typer.Exit(1)
@@ -119,9 +119,11 @@ def _select_cluster_indices(
         if 1 <= index <= len(clusters):
             return [index - 1]
 
-    err_console.print(f"[red]Error:[/red] No cluster matched '{selector}'.")
+    err_console.print(f"[red]Error:[/red] No cluster matched '{rich_escape(selector)}'.")
     if clusters:
-        names = ", ".join(f"[{i + 1}] {c.display_name}" for i, c in enumerate(clusters))
+        names = ", ".join(
+            f"[{i + 1}] {rich_escape(c.display_name)}" for i, c in enumerate(clusters)
+        )
         err_console.print(f"[dim]Available clusters: {names}[/dim]")
     raise typer.Exit(1)
 

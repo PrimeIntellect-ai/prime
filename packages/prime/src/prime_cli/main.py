@@ -10,6 +10,7 @@ from .commands.deployments import app as deployments_app
 from .commands.disks import app as disks_app
 from .commands.env import app as env_app
 from .commands.evals import app as evals_app
+from .commands.factory import app as factory_app
 from .commands.feedback import app as feedback_app
 from .commands.fork import FORK_JSON_HELP
 from .commands.fork import fork as fork_command
@@ -59,6 +60,7 @@ app.add_typer(
 app.add_typer(traces_app, name="traces", rich_help_panel="Model Factory")
 
 # Compute commands
+app.add_typer(factory_app, name="factory", rich_help_panel="Compute")
 app.add_typer(availability_app, name="availability", rich_help_panel="Compute")
 app.add_typer(disks_app, name="disks", rich_help_panel="Compute")
 app.add_typer(pods_app, name="pods", rich_help_panel="Compute")

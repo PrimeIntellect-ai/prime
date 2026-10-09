@@ -663,7 +663,7 @@ def test_no_ssh_tools(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize(
-    "bad", ["../x", "a/../b", "a//b", "//a", "my file", "a/*.pt", "x;rm", "$HOME", "it's"]
+    "bad", ["..", "../x", "/..", "a/../../b", "my file", "a/*.pt", "x;rm", "$HOME", "it's"]
 )
 def test_remote_path_rejected(monkeypatch, tmp_path, bad):
     created, _, commands = _setup(monkeypatch, tmp_path, {"ssh", "rsync"})
@@ -678,6 +678,15 @@ def test_remote_path_normalized():
     assert volumes._remote_path("runs/step_100/model-00001.safetensors") == (
         "/volume/runs/step_100/model-00001.safetensors"
     )
+    # posixpath semantics: "." and empty segments collapse, ".." climbs.
+    assert volumes._remote_path(".") == "/volume/"
+    assert volumes._remote_path("./") == "/volume/"
+    assert volumes._remote_path("./runs/x") == "/volume/runs/x"
+    assert volumes._remote_path("a/../runs/x") == "/volume/runs/x"
+    assert volumes._remote_path("a//b/") == "/volume/a/b/"
+    assert volumes._remote_path("//a/./b") == "/volume/a/b"
+    assert volumes._remote_path("a/b/.") == "/volume/a/b/"
+    assert volumes._remote_path("a/b/c/..") == "/volume/a/b/"
 
 
 def test_failed_transfer_exit_code(monkeypatch, tmp_path):
@@ -1376,7 +1385,16 @@ def test_direct_get_missing_path_fails(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize(
-    "local,remote", [("f.txt", "runs/"), ("f.txt", "/runs/x"), ("runs", "/"), ("top/", "/")]
+    "local,remote",
+    [
+        ("f.txt", "runs/"),
+        ("f.txt", "/runs/x"),
+        ("f.txt", "./runs/x"),
+        ("f.txt", "a/../runs/x"),
+        ("runs", "/"),
+        ("runs", "."),
+        ("top/", "/"),
+    ],
 )
 def test_put_never_writes_under_runs(monkeypatch, tmp_path, local, remote):
     monkeypatch.chdir(tmp_path)
@@ -1421,3 +1439,139 @@ def test_get_of_runs_with_a_live_session_goes_direct(monkeypatch, tmp_path):
     # Credential refreshes ask the same question.
     refreshes[0]()
     assert asked[-1] == ("get", "runs/r1/")
+
+
+@pytest.mark.parametrize("remote", ["./runs/x", "a/../runs/x"])
+def test_put_under_runs_refused_on_the_session_route_too(monkeypatch, tmp_path, remote):
+    created, _, commands = _setup(monkeypatch, tmp_path, {"ssh", "rsync"})
+    result = _run("put", "data", "f.txt", remote)
+    assert result.exit_code == 2
+    assert "runs/ holds run outputs" in result.output
+    assert not created and not commands
+
+
+@pytest.mark.parametrize("args", [("get", "data", "."), ("get", "data", "./")])
+def test_direct_get_dot_is_the_root(monkeypatch, tmp_path, args):
+    monkeypatch.chdir(tmp_path)
+    routes = _direct(monkeypatch, FakeS3({"vol1/f.txt": b"f", "vol1/d/a": b"a"}))
+    result = _run(*args, "out")
+    assert result.exit_code == 0, result.output
+    assert routes == [("get", "")]
+    assert (tmp_path / "out" / "f.txt").read_bytes() == b"f"
+    assert (tmp_path / "out" / "d" / "a").read_bytes() == b"a"
+
+
+@pytest.mark.parametrize("remote,key", [(".", "f.txt"), ("./d/", "d/f.txt"), ("d/./", "d/f.txt")])
+def test_direct_put_normalizes_dot_segments(monkeypatch, tmp_path, remote, key):
+    monkeypatch.chdir(tmp_path)
+    Path("f.txt").write_text("f")
+    s3 = FakeS3()
+    routes = _direct(monkeypatch, s3)
+    result = _run("put", "data", "f.txt", remote)
+    assert result.exit_code == 0, result.output
+    assert routes == [("put", key.removesuffix("f.txt"))]
+    assert list(s3.objects) == [f"vol1/{key}"]
+
+
+@pytest.mark.parametrize("kind", ["file", "dir"])
+@pytest.mark.parametrize("route", ["r2", "session"])
+def test_put_refuses_a_symlink_source(monkeypatch, tmp_path, kind, route):
+    """A top-level link would be followed by the direct upload; refuse it
+    before any route call, on both routes."""
+    if route == "r2":
+        routes = _direct(monkeypatch, FakeS3())
+        created = commands = []
+    else:
+        created, _, commands = _setup(monkeypatch, tmp_path, {"ssh", "rsync"})
+        routes = []
+    target = tmp_path / "target"
+    if kind == "dir":
+        target.mkdir()
+        (target / "a").write_text("a")
+    else:
+        target.write_text("a")
+    link = tmp_path / "link"
+    link.symlink_to(target)
+    result = _run("put", "data", str(link), "/")
+    assert result.exit_code == 1
+    assert f"{link} is a symlink; pass the path it points to" in result.output.replace("\n", "")
+    assert routes == [] and not created and not commands
+
+
+def test_put_conflict_is_reported_not_routed_through_a_session(monkeypatch, tmp_path):
+    """409 (someone else's read-write session is live): the route's detail,
+    exit 1, and no fallback to a session (only a 404 falls back)."""
+    from prime_cli.core import APIError
+
+    monkeypatch.chdir(tmp_path)
+    Path("f.txt").write_text("f")
+    detail = (
+        "volume 'data' has a live read-write SSH session (s9, alice); "
+        "put through that session or end it first"
+    )
+
+    def route(*a, **kw):
+        raise APIError(f"HTTP 409: {detail}")
+
+    client = SimpleNamespace(
+        route_volume_transfer=route,
+        create_volume_session=lambda *a, **kw: pytest.fail("no session on a 409"),
+    )
+    monkeypatch.setattr(volumes, "_client", lambda: (client, "t1"))
+    monkeypatch.setattr(
+        volumes.subprocess, "run", lambda *a, **kw: pytest.fail("no transfer on a 409")
+    )
+    result = _run("put", "data", "f.txt", "/")
+    assert result.exit_code == 1
+    assert f"Error: {detail}" in " ".join(result.output.split())
+
+
+def test_r2_credentials_refresh_near_expiry_only(monkeypatch):
+    """Put credentials live 15 minutes: fresh ones are used as-is (botocore's
+    default 15-minute window would refresh on every request), and ones near
+    expiry are refreshed through a new route call."""
+    from datetime import datetime, timedelta, timezone
+
+    from prime_cli.api.training import VolumeTransferRoute
+
+    def route_expiring_in(minutes, key):
+        at = datetime.now(timezone.utc) + timedelta(minutes=minutes)
+        return VolumeTransferRoute.model_validate(
+            {**R2_ROUTE, "accessKeyId": key, "expiresAt": at.isoformat()}
+        )
+
+    calls = []
+
+    def refresh():
+        calls.append(1)
+        return route_expiring_in(15, "AK2")
+
+    s3 = volumes._r2_client(refresh, route_expiring_in(15, "AK1"))
+    creds = s3._request_signer._credentials
+    for _ in range(3):
+        assert creds.get_frozen_credentials().access_key == "AK1"
+    assert calls == []
+
+    s3 = volumes._r2_client(refresh, route_expiring_in(1, "AK1"))
+    creds = s3._request_signer._credentials
+    assert creds.get_frozen_credentials().access_key == "AK2"
+    assert creds.get_frozen_credentials().access_key == "AK2"
+    assert calls == [1]
+
+
+def test_refused_credential_refresh_fails_the_transfer_cleanly(monkeypatch, tmp_path):
+    """A 409 on a mid-transfer refresh is reported as a failed transfer."""
+    from datetime import datetime, timedelta, timezone
+
+    from prime_cli.api.training import VolumeTransferRoute
+    from prime_cli.core import APIError
+
+    at = (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat()
+    route = VolumeTransferRoute.model_validate({**R2_ROUTE, "expiresAt": at})
+
+    def refresh():
+        raise APIError("HTTP 409: volume 'data' has a live read-write SSH session (s9, alice)")
+
+    creds = volumes._r2_client(refresh, route)._request_signer._credentials
+    with pytest.raises(RuntimeError, match="^volume 'data' has a live read-write"):
+        creds.get_frozen_credentials()

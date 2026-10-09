@@ -491,16 +491,24 @@ _SAFE_REMOTE_SEGMENT = re.compile(r"[A-Za-z0-9._@%+=,:-]+")
 
 
 def _remote_path(path: str) -> str:
-    """Path under the volume root (/volume on the pod); a leading "/" means the
-    root. A trailing "/" is kept. Rejects empty and ".." segments, and any
-    character that would need shell quoting (spaces, *, $, quotes, ...)."""
-    rel = path[1:] if path.startswith("/") else path
-    parts = rel.removesuffix("/").split("/") if rel else []
-    if any(p in ("", "..") for p in parts):
-        console.print(
-            f"[red]Invalid remote path {escape(repr(path))}: no '..' or empty segments.[/red]"
-        )
-        raise typer.Exit(2)
+    """Path under the volume root (/volume on the pod), normalized like
+    posixpath: a leading "/" means the root, "." and empty segments are
+    dropped and ".." climbs one level. A trailing "/" (or a final "." or
+    "..") is kept as a trailing "/". Rejects a ".." that would climb out of
+    the root, and any character that would need shell quoting (spaces, *,
+    $, quotes, ...)."""
+    parts: list[str] = []
+    for p in path.split("/"):
+        if p == "..":
+            if not parts:
+                console.print(
+                    f"[red]Invalid remote path {escape(repr(path))}: '..' climbs above "
+                    "the volume root.[/red]"
+                )
+                raise typer.Exit(2)
+            parts.pop()
+        elif p not in ("", "."):
+            parts.append(p)
     if not all(_SAFE_REMOTE_SEGMENT.fullmatch(p) for p in parts):
         console.print(
             f"[red]Invalid remote path {escape(repr(path))}: use letters, digits and "
@@ -508,7 +516,8 @@ def _remote_path(path: str) -> str:
             "`prime volumes ssh`.[/red]"
         )
         raise typer.Exit(2)
-    return "/volume/" + "/".join(parts) + ("/" if parts and rel.endswith("/") else "")
+    into = path.endswith("/") or path.rsplit("/", 1)[-1] in (".", "..")
+    return "/volume/" + "/".join(parts) + ("/" if parts and into else "")
 
 
 def _transfer_failed(alias: str, code: int, via_gateway: bool) -> None:
@@ -695,6 +704,11 @@ def _transfer(
     remote = _remote_path(remote)
     rel = remote.removeprefix("/volume/")
     if upload:
+        # A top-level link would be followed by the direct upload (and by
+        # scp), but copied as a link by rsync; refuse it on both routes.
+        if os.path.islink(local):
+            console.print(f"[red]{escape(local)} is a symlink; pass the path it points to.[/red]")
+            raise typer.Exit(1)
         _refuse_runs(local, rel)
     client, team_id = _client()
     try:
@@ -702,7 +716,8 @@ def _transfer(
     except NotFoundError:
         route = None  # an older backend: always through a session
     except APIError as exc:
-        console.print(f"[red]Error:[/red] {exc}")
+        # e.g. 409: a put while someone else's read-write session is live.
+        console.print(f"[red]Error:[/red] {escape(str(exc).removeprefix('HTTP 409: '))}")
         raise typer.Exit(1) from exc
     if route is not None and route.via == "r2":
         _r2_transfer(client, name, team_id, route, rel, local, upload)
@@ -813,15 +828,26 @@ def _r2_client(refresh, route):
         }
 
     def fetch() -> dict:
-        r = refresh()
+        # A refresh can be refused too (409: a teammate started a read-write
+        # session); RuntimeError is what _r2_transfer reports as a failure.
+        try:
+            r = refresh()
+        except APIError as exc:
+            raise RuntimeError(str(exc).removeprefix("HTTP 409: ")) from exc
         if r.via != "r2":
             raise RuntimeError("a session started on the volume; rerun the command")
         return metadata(r)
 
     core = get_session()
     if route.expires_at:
+        # botocore's default windows (refresh 15 min before expiry) would
+        # refresh 15-minute put credentials on every request.
         core._credentials = RefreshableCredentials.create_from_metadata(
-            metadata(route), fetch, "prime-volumes-transfer"
+            metadata(route),
+            fetch,
+            "prime-volumes-transfer",
+            advisory_timeout=5 * 60,
+            mandatory_timeout=2 * 60,
         )
     else:
         core.set_credentials(route.access_key_id, route.secret_access_key, route.session_token)

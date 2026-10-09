@@ -1,3 +1,4 @@
+import copy
 import hashlib
 import json
 import os
@@ -1256,24 +1257,47 @@ def test_route_via_session_reuses_it(monkeypatch, tmp_path, _session_dir):
 
 
 class FakeS3:
-    """The few boto3 S3 client calls the direct path makes, over a dict."""
+    """The few boto3 S3 client calls the direct path makes, over a dict.
+    `scoped(scope)` is a view of the same objects through credentials that
+    only reach `scope` (see _route_scope), refusing the rest like R2 does."""
+
+    scope = None  # (read_only, prefixPaths, objectPaths); None reaches everything
 
     def __init__(self, objects=None):
         self.objects = dict(objects or {})
         self.metadata = {}
-        self.entries = []  # `entries` of each route call
+        self.entries = []  # `entries` of each put route call
+
+    def scoped(self, scope):
+        view = copy.copy(self)  # shares objects, metadata and entries
+        view.scope = scope
+        return view
+
+    def _check(self, op, key, write=False, listing=False):
+        from botocore.exceptions import ClientError
+
+        if self.scope is None:
+            return
+        read_only, prefixes, objects = self.scope
+        reach = key.startswith(tuple(prefixes)) or (not listing and key in objects)
+        if not reach or (write and read_only):
+            code = "403" if op == "HeadObject" else "AccessDenied"
+            raise ClientError({"Error": {"Code": code, "Message": "Forbidden"}}, op)
 
     def upload_file(self, path, bucket, key, ExtraArgs=None, Config=None, Callback=None):
         assert bucket == "b" and Config.max_concurrency == volumes._R2_PART_WORKERS
+        self._check("PutObject", key, write=True)
         self.objects[key] = Path(path).read_bytes()
         self.metadata[key] = ExtraArgs["Metadata"]
         Callback(len(self.objects[key]))
 
     def download_file(self, bucket, key, path, Config=None, Callback=None):
+        self._check("GetObject", key)
         Path(path).write_bytes(self.objects[key])
         Callback(len(self.objects[key]))
 
     def list_objects_v2(self, Bucket, Prefix, MaxKeys=1000):
+        self._check("ListObjectsV2", Prefix, listing=True)
         keys = sorted(k for k in self.objects if k.startswith(Prefix))[:MaxKeys]
         return {"Contents": [{"Key": k, "Size": len(self.objects[k])} for k in keys]}
 
@@ -1283,9 +1307,24 @@ class FakeS3:
     def head_object(self, Bucket, Key):
         from botocore.exceptions import ClientError
 
+        self._check("HeadObject", Key)
         if Key not in self.objects:
             raise ClientError({"Error": {"Code": "404"}}, "HeadObject")
         return {"ContentLength": len(self.objects[Key])}
+
+
+def _route_scope(mode, path, entries, prefix="vol1/"):
+    """What the platform's transfer route mints (platform#6358): a get reads
+    the whole volume; a put writes its destination directory (r2_volumes.
+    put_scope), or for a root / top-level put only its top-level names."""
+    if mode == "get":
+        return True, [prefix], []
+    segments = [s for s in path.split("/") if s not in ("", ".")]
+    keep = segments if path.endswith("/") else segments[:-1]
+    if keep:
+        return False, [prefix + "".join(f"{s}/" for s in keep)], []
+    names = segments or entries or []
+    return False, [f"{prefix}{n}/" for n in names], [prefix + n for n in names]
 
 
 R2_ROUTE = dict(
@@ -1304,19 +1343,24 @@ def _direct(monkeypatch, s3):
     """A backend that routes to R2; returns the route calls made."""
     from prime_cli.api.training import VolumeTransferRoute
 
-    routes = []
+    routes, scopes = [], {}
 
     def route(name, mode, path, entries=None, team_id=None):
         routes.append((mode, path))
-        s3.entries.append(entries)
-        return VolumeTransferRoute.model_validate(R2_ROUTE)
+        if mode == "put":
+            s3.entries.append(entries)
+        key = f"AK{len(routes)}"
+        scopes[key] = _route_scope(mode, path, entries)
+        return VolumeTransferRoute.model_validate({**R2_ROUTE, "accessKeyId": key})
 
     client = SimpleNamespace(
         route_volume_transfer=route,
         create_volume_session=lambda *a, **kw: pytest.fail("no session on the direct path"),
     )
     monkeypatch.setattr(volumes, "_client", lambda: (client, "t1"))
-    monkeypatch.setattr(volumes, "_r2_client", lambda refresh, r: s3)
+    monkeypatch.setattr(
+        volumes, "_r2_client", lambda refresh, r: s3.scoped(scopes[r.access_key_id])
+    )
     return routes
 
 
@@ -1358,7 +1402,8 @@ def test_direct_put_mirrors_rsync_layout(monkeypatch, tmp_path, local, remote, e
     routes = _direct(monkeypatch, s3)
     result = _run("put", "data", local, remote)
     assert result.exit_code == 0, result.output
-    assert routes == [("put", volumes._remote_path(remote).removeprefix("/volume/"))]
+    put = ("put", volumes._remote_path(remote).removeprefix("/volume/"))
+    assert routes == [put, ("get", "")]  # planning reads use a root get's credentials
     assert sorted(k.removeprefix("vol1/") for k in s3.objects) == keys
     if local.startswith("tree"):
         assert "Skipping 1 symbolic links" in result.output
@@ -1490,7 +1535,7 @@ def test_direct_put_normalizes_dot_segments(monkeypatch, tmp_path, remote, key):
     routes = _direct(monkeypatch, s3)
     result = _run("put", "data", "f.txt", remote)
     assert result.exit_code == 0, result.output
-    assert routes == [("put", key.removesuffix("f.txt"))]
+    assert routes == [("put", key.removesuffix("f.txt")), ("get", "")]
     assert list(s3.objects) == [f"vol1/{key}"]
 
 
@@ -1872,3 +1917,56 @@ def test_refused_root_put_is_reported(monkeypatch, tmp_path):
     assert result.exit_code == 1
     out = " ".join(result.output.split())
     assert "Error: a root put must list its entries" in out and "HTTP 400" not in out
+
+
+@pytest.mark.parametrize(
+    "local,remote,new",
+    [
+        ("top.txt", "datasets/", ["datasets/top.txt"]),  # subdirectory put of a file
+        ("ds", "datasets/", ["datasets/ds/a.txt"]),  # ... of a directory
+        ("ds/a.txt", "newdir/", ["newdir/a.txt"]),  # into a new directory
+        ("ds/.", "/", ["a.txt"]),  # a directory's contents at the root
+    ],
+)
+def test_direct_put_plans_with_read_credentials(monkeypatch, tmp_path, local, remote, new):
+    """Put credentials only reach the destination; the HEADs and listings that
+    plan the put (and refuse clashes) must not need more. Found in e2e
+    against R2: every subdirectory put failed with a 403 on HeadObject."""
+    monkeypatch.chdir(tmp_path)
+    Path("top.txt").write_text("t")
+    Path("ds").mkdir()
+    Path("ds/a.txt").write_text("a")
+    existing = {"vol1/datasets/old": b"o", "vol1/runs/r1/m": b"m"}
+    s3 = FakeS3(existing)
+    _direct(monkeypatch, s3)
+    result = _run("put", "data", local, remote)
+    assert result.exit_code == 0, result.output
+    assert sorted(s3.objects) == sorted([*existing, *(f"vol1/{k}" for k in new)])
+
+
+def test_direct_put_clash_is_refused_with_narrow_credentials(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    Path("f.txt").write_text("f")
+    s3 = FakeS3({"vol1/datasets": b"file"})
+    _direct(monkeypatch, s3)
+    result = _run("put", "data", "f.txt", "datasets/x")
+    assert result.exit_code == 1, result.output
+    assert "/datasets is a file" in result.output.replace("\n", "")
+    assert s3.objects == {"vol1/datasets": b"file"}
+
+
+def test_direct_put_refreshes_each_credential_set_with_its_own_route(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    Path("f.txt").write_text("f")
+    s3 = FakeS3()
+    routes = _direct(monkeypatch, s3)
+    scoped = volumes._r2_client
+    refreshes = []
+    monkeypatch.setattr(
+        volumes, "_r2_client", lambda refresh, r: refreshes.append(refresh) or scoped(refresh, r)
+    )
+    assert _run("put", "data", "f.txt", "d/").exit_code == 0
+    del routes[:]
+    for refresh in refreshes:
+        refresh()
+    assert routes == [("put", "d/"), ("get", "")]

@@ -1145,6 +1145,17 @@ def _run_r2_jobs(jobs, verb: str) -> None:
             pool.shutdown(wait=True, cancel_futures=True)
 
 
+def _read_route(client, name: str, team_id):
+    """A root get's route: read-only credentials on the whole volume."""
+    try:
+        route = client.route_volume_transfer(name, "get", "", None, team_id=team_id)
+    except APIError as exc:
+        raise RuntimeError(_api_detail(exc)) from exc
+    if route.via != "r2":
+        raise RuntimeError("a session started on the volume; rerun the command")
+    return route
+
+
 def _r2_transfer(
     client, name: str, team_id, route, rel: str, local: str, upload: bool, entries=None
 ) -> None:
@@ -1164,8 +1175,14 @@ def _r2_transfer(
     bucket, prefix = route.bucket, route.prefix
     try:
         if upload:
-            plan, skipped = _put_plan(s3, bucket, prefix, local, rel)
-            _refuse_file_dir_clash(s3, bucket, prefix, [key for _, key, _ in plan])
+            # Put credentials only reach the destination (its directory, or
+            # its top-level names), not the ancestors and siblings planning
+            # reads: those use a root get's read-only credentials.
+            reads = _r2_client(
+                lambda: _read_route(client, name, team_id), _read_route(client, name, team_id)
+            )
+            plan, skipped = _put_plan(reads, bucket, prefix, local, rel)
+            _refuse_file_dir_clash(reads, bucket, prefix, [key for _, key, _ in plan])
 
             def up(path, key):
                 # ponytail: a second read of the file for the MD5 (the

@@ -247,6 +247,20 @@ jobs:
           VERSION: ${{ needs.tag-and-release.outputs.version }}
         run: gh release download "v$VERSION" --pattern '*.whl' --dir packages/prime/dist
 
+      # Anonymous Docker Hub pulls are rate limited per IP, and shared runners regularly exhaust
+      # that limit. As a daemon mirror, mirror.gcr.io serves the base image when it has it cached
+      # and Docker falls back to Docker Hub when it does not.
+      - name: Pull Docker Hub images through a mirror
+        run: |
+          CONFIG=/etc/docker/daemon.json
+          if [ ! -f "$CONFIG" ]; then
+            echo '{}' | sudo tee "$CONFIG" > /dev/null
+          fi
+          sudo jq '."registry-mirrors" = ["https://mirror.gcr.io"]' "$CONFIG" | sudo tee "$CONFIG.new" > /dev/null
+          sudo mv "$CONFIG.new" "$CONFIG"
+          sudo systemctl restart docker
+          docker info --format '{{.RegistryConfig.Mirrors}}' | grep mirror.gcr.io
+
       - name: Log in to GitHub Container Registry
         env:
           CR_PAT: ${{ github.token }}

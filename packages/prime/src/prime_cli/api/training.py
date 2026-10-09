@@ -204,7 +204,7 @@ class HostedTrainingClient:
         response = self.client.get("/training/volumes", params=params)
         return [Volume.model_validate(v) for v in response.get("volumes", [])]
 
-    def resize_volume(self, name: str, size: str, team_id: Optional[str] = None) -> Volume:
+    def expand_volume(self, name: str, size: str, team_id: Optional[str] = None) -> Volume:
         payload: Dict[str, Any] = {"size": size}
         if team_id:
             payload["teamId"] = team_id

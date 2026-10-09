@@ -9,7 +9,7 @@ container mounts the volume read-only at `/volume`, so an SFT config's
 `[data] name` must point at a path on the volume (e.g.
 `/volume/datasets/<name>`, or the relative `datasets/<name>` — the
 platform resolves it) before launch. This command manages the
-volume lifecycle (create/list/resize/delete, plus `prime volumes ssh` for
+volume lifecycle (create/list/expand/delete, plus `prime volumes ssh` for
 read-write sessions); put datasets there yourself with
 `prime volumes ssh <name> --read-write` and the huggingface CLI inside
 that session (`hf download <repo> --repo-type dataset --local-dir
@@ -57,6 +57,19 @@ def _client() -> tuple[HostedTrainingClient, str | None]:
     return HostedTrainingClient(APIClient()), Config().team_id
 
 
+# The API reports a volume's lifecycle in job terms (RUNNING etc.); say what
+# it means for a volume. Unknown values pass through.
+_STATUS_LABELS = {
+    "RUNNING": "CREATED",
+    "TERMINATING": "DELETING",
+    "TOMBSTONED": "DELETE FAILED",
+}
+
+
+def status_label(status: str) -> str:
+    return _STATUS_LABELS.get(status, status)
+
+
 @app.command()
 def create(
     name: str = typer.Argument(..., help="Volume name (lowercase letters, digits, '-')"),
@@ -86,8 +99,9 @@ def create(
     if output == "json":
         output_data_as_json(volume.model_dump(by_alias=True), console)
         return
-    on = f" on {escape(volume.cluster)}" if volume.cluster else ""
-    console.print(f"[green]Creating volume {volume.name} ({volume.size}){on}.[/green]")
+    console.print(
+        f"[green]Volume {volume.name} ({volume.size}) is {status_label(volume.status)}.[/green]"
+    )
     console.print(f"Use it with: prime train config.toml --volume {volume.name}")
 
 
@@ -106,21 +120,22 @@ def list_volumes(
     if output == "json":
         output_data_as_json([v.model_dump(by_alias=True) for v in volumes], console)
         return
-    table = Table("Name", "Size", "Cluster", "Status", "Created")
+    table = Table("Name", "Size", "Status", "Created")
     for v in volumes:
-        table.add_row(v.name, v.size or "-", v.cluster or "-", v.status, v.created_at or "-")
+        table.add_row(v.name, v.size or "-", status_label(v.status), v.created_at or "-")
     console.print(table)
 
 
 @app.command()
-def resize(
+def expand(
     name: str = typer.Argument(..., help="Volume name"),
-    size: str = typer.Option(..., "--size", help="New size, larger than the current one"),
+    size: str = typer.Option(..., "--size", help="New size cap, larger than the current one"),
 ) -> None:
-    """Grow a volume in place. Running pods see the new size; volumes can't shrink."""
+    """Raise a volume's size cap. Volumes can't shrink; runs already going
+    keep the size they started with."""
     client, team_id = _client()
     try:
-        volume = client.resize_volume(name, size, team_id=team_id)
+        volume = client.expand_volume(name, size, team_id=team_id)
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)

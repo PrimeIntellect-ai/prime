@@ -1325,11 +1325,11 @@ def _ensure_volume(
     client: Any, name: str, team_id: Optional[str], output: str, size: Optional[str] = None
 ) -> None:
     """Create `name` (with `size`, default VOLUME_DEFAULT_SIZE) if it doesn't
-    exist and wait until it is RUNNING.
+    exist and wait until it is created (the API reports RUNNING).
 
     An existing volume in any state is left alone (the backend reports
-    "not ready" at dispatch); a `size` for it is ignored with a note (resizing
-    is `prime volumes resize`). Exits 1 on create failure, FAILED/TOMBSTONED,
+    "not ready" at dispatch); a `size` for it is ignored with a note (growing it
+    is `prime volumes expand`). Exits 1 on create failure, FAILED/TOMBSTONED,
     or timeout. Progress goes to stderr for `--output json`. The backend
     validates the size (e.g. 500Gi, 2Ti) and returns its error on create.
     """
@@ -1343,7 +1343,7 @@ def _ensure_volume(
         if size and size != existing[0].size:
             out.print(
                 f"Volume '{name}' already exists ({existing[0].size or 'unknown size'}); "
-                f"--volume-size {size} is ignored. Resize with: prime volumes resize"
+                f"--volume-size {size} is ignored. Expand it with: prime volumes expand"
             )
         return
 

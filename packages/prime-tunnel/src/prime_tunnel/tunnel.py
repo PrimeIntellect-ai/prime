@@ -16,9 +16,10 @@ from prime_tunnel.core.client import TunnelClient
 from prime_tunnel.exceptions import (
     TunnelConnectionError,
     TunnelError,
+    TunnelGoneError,
     TunnelTimeoutError,
 )
-from prime_tunnel.models import TunnelInfo
+from prime_tunnel.models import TunnelInfo, TunnelStatus
 
 # timestamp + level + caller prefix + message
 _LOG_RE = re.compile(
@@ -52,6 +53,16 @@ def _log_frpc_line(raw_line: str, tunnel_id: str | None) -> None:
     frpc_logger.log(level, "frpc %s: %s", tunnel_id or "-", msg)
 
 
+# Rejection reasons that mean the registration itself can no longer be used.
+_GONE_ERRORS = (
+    "tunnel is inactive",
+    "tunnel not registered",
+)
+
+# Statuses the tunnel service never leaves.
+_TERMINAL_STATUSES = ("expired", "terminated")
+
+
 def _parse_frpc_error(
     output_lines: list[str],
     tunnel_id: str | None = None,
@@ -75,13 +86,13 @@ def _parse_frpc_error(
         exit_info = f" (exit code {return_code})" if return_code is not None else ""
         message = f"frpc process failed{exit_info}: {output_text}"
 
+    if any(reason in message.lower() for reason in _GONE_ERRORS):
+        return TunnelGoneError(tunnel_id=tunnel_id, message=message)
     return TunnelConnectionError(tunnel_id=tunnel_id, message=message)
 
 
 # Server-side rejection reasons that retrying can never fix.
-_FATAL_LOGIN_ERRORS = (
-    "tunnel is inactive",
-    "tunnel not registered",
+_FATAL_LOGIN_ERRORS = _GONE_ERRORS + (
     "invalid binding secret",
     "invalid authentication token",
     "token in login doesn't match",
@@ -92,8 +103,9 @@ def _scan_startup_line(line: str) -> Optional[str]:
     """Classify an frpc startup log line.
 
     Returns "connected" once the proxy is registered, "fatal" for login
-    failures that cannot succeed on retry, and None for anything else
-    (including transient login/connect failures frpc will retry).
+    failures that cannot succeed on retry and for a proxy the server refused
+    to start, and None for anything else (including transient login/connect
+    failures frpc will retry).
     """
     lowered = line.lower()
     if "start proxy success" in lowered:
@@ -101,7 +113,21 @@ def _scan_startup_line(line: str) -> Optional[str]:
     if "login to the server failed" in lowered or "connect to server error" in lowered:
         if any(reason in lowered for reason in _FATAL_LOGIN_ERRORS):
             return "fatal"
+    # frpc only retries a refused proxy after 30s, so report it now.
+    if "start error" in lowered:
+        return "fatal"
     return None
+
+
+def _reports_gone(line: str) -> bool:
+    """Whether an frpc log line says the server rejected the registration as gone."""
+    lowered = line.lower()
+    if not any(
+        marker in lowered
+        for marker in ("login to the server failed", "connect to server error", "start error")
+    ):
+        return False
+    return any(reason in lowered for reason in _GONE_ERRORS)
 
 
 class Tunnel:
@@ -148,6 +174,7 @@ class Tunnel:
         self._config_file: Optional[Path] = None
         self._started = False
         self._stopping = False
+        self._gone = False
         # Serializes start() and restart().
         self._process_lock = asyncio.Lock()
         self._output_lines: list[str] = []
@@ -183,11 +210,22 @@ class Tunnel:
             return False
         return self._process.poll() is None
 
-    async def check_registered(self) -> bool:
-        """Check if the tunnel is still registered server-side.
+    @property
+    def is_gone(self) -> bool:
+        """Whether the registration is known to be unusable. Makes no API call.
 
-        Calls get_tunnel() on the backend API. Returns True if the
-        registration exists, False if it returns 404 (gone).
+        Set when the tunnel service rejects frpc because the tunnel was
+        deleted, expired, or stayed disconnected for too long, or when
+        status() finds the same. restart() cannot bring such a tunnel back:
+        stop it and start a new one.
+        """
+        return self._gone
+
+    async def check_registered(self) -> bool:
+        """Check if the tunnel's registration can still be used.
+
+        Calls get_tunnel() on the backend API. Returns False if the service
+        has no record of the tunnel or reports it expired or terminated.
 
         Raises TunnelError/TunnelTimeoutError on transient API failures
         so the caller can distinguish "tunnel gone" from "API unreachable".
@@ -195,7 +233,37 @@ class Tunnel:
         if self._tunnel_info is None:
             return False
         info = await self._client.get_tunnel(self._tunnel_info.tunnel_id)
-        return info is not None
+        return info is not None and (info.status or "").lower() not in _TERMINAL_STATUSES
+
+    async def status(self) -> TunnelStatus:
+        """
+        Report the local frpc process and the tunnel service's record.
+
+        A registration the service reports as connected is not proof that
+        the URL is serving; disconnected, expired and terminated are reliable.
+
+        Returns:
+            TunnelStatus for this tunnel
+
+        Raises:
+            TunnelError: If the tunnel is not started or the API call fails
+            TunnelTimeoutError: If the API call times out
+        """
+        if self._tunnel_info is None:
+            raise TunnelError("Tunnel is not started")
+        tunnel_id = self._tunnel_info.tunnel_id
+        info = await self._client.get_tunnel(tunnel_id)
+        registration = None
+        if info is not None and info.status:
+            registration = info.status.lower()
+        if info is None or registration in _TERMINAL_STATUSES:
+            self._gone = True
+        return TunnelStatus(
+            tunnel_id=tunnel_id,
+            running=self.is_running,
+            registration=registration,
+            gone=self._gone,
+        )
 
     async def start(self) -> str:
         """
@@ -220,6 +288,7 @@ class Tunnel:
 
     async def _register_and_connect(self) -> str:
         """Register the tunnel, start frpc and wait for it to connect."""
+        self._gone = False
         # 1. Get frpc binary
         frpc_path = await asyncio.to_thread(get_frpc_path)
 
@@ -286,13 +355,15 @@ class Tunnel:
         Restart frpc, keeping the tunnel's registration and URL.
 
         If the restart fails, the tunnel stays registered with no frpc
-        running: call restart() again or stop().
+        running: call restart() again or stop(). A tunnel that was deleted,
+        expired, or stayed disconnected for too long cannot be restarted.
 
         Returns:
             The tunnel URL
 
         Raises:
             TunnelError: If the tunnel is not started or is stopped meanwhile
+            TunnelGoneError: If the registration can no longer be used
             TunnelConnectionError: If frpc fails to start or connect
             TunnelTimeoutError: If connection times out
         """
@@ -332,8 +403,11 @@ class Tunnel:
                 await self._wait_for_connection(process)
                 if self._stopping:
                     raise stopped
+                self._gone = False
                 self._start_pipe_drain(process)
             except BaseException as e:
+                if isinstance(e, TunnelGoneError):
+                    self._gone = True
                 await asyncio.to_thread(self._end_process, process, kill=True)
                 # Show the failed frpc's output, not the old one's.
                 if hasattr(self, "_output_lock"):
@@ -485,6 +559,9 @@ class Tunnel:
                             if len(recent) > max_lines:
                                 recent.pop(0)
                         _log_frpc_line(line, tunnel_id)
+                        # A replaced frpc's leftover output says nothing about the new one.
+                        if self._process is process and _reports_gone(line):
+                            self._gone = True
             except (OSError, ValueError):
                 pass  # Pipe closed
 

@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from prime_tunnel import Config, Tunnel, TunnelClient
-from prime_tunnel.exceptions import TunnelError, TunnelTimeoutError
+from prime_tunnel.exceptions import TunnelError, TunnelGoneError, TunnelTimeoutError
 from prime_tunnel.models import TunnelInfo
 
 
@@ -981,3 +981,166 @@ def test_prime_tunnel_logger_has_null_handler():
 
     handlers = logging.getLogger("prime_tunnel").handlers
     assert any(isinstance(h, logging.NullHandler) for h in handlers)
+
+
+# -- gone registrations and status --
+
+
+def _registration(tunnel: Tunnel, status: str) -> TunnelInfo:
+    return tunnel._tunnel_info.model_copy(update={"status": status})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["expired", "terminated", "TERMINATED"])
+async def test_check_registered_returns_false_for_a_terminal_registration(status):
+    tunnel = _make_started_tunnel()
+    tunnel._client = AsyncMock()
+    tunnel._client.get_tunnel.return_value = _registration(tunnel, status)
+    assert await tunnel.check_registered() is False
+
+
+@pytest.mark.asyncio
+async def test_status_reports_the_process_and_the_registration():
+    tunnel = _make_started_tunnel()
+    tunnel._process.poll.return_value = None
+    tunnel._client = AsyncMock()
+    tunnel._client.get_tunnel.return_value = _registration(tunnel, "disconnected")
+
+    status = await tunnel.status()
+
+    assert status.tunnel_id == "t-test123"
+    assert status.running is True
+    assert status.registration == "disconnected"
+    assert status.gone is False
+    assert tunnel.is_gone is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["expired", "terminated", None])
+async def test_status_marks_a_terminal_or_missing_registration_gone(status):
+    tunnel = _make_started_tunnel()
+    tunnel._client = AsyncMock()
+    tunnel._client.get_tunnel.return_value = (
+        _registration(tunnel, status) if status is not None else None
+    )
+
+    result = await tunnel.status()
+
+    assert result.registration == status
+    assert result.gone is True
+    assert tunnel.is_gone is True
+
+
+@pytest.mark.asyncio
+async def test_status_requires_started_tunnel():
+    with pytest.raises(TunnelError, match="not started"):
+        await Tunnel(local_port=8080).status()
+
+
+def test_scan_startup_line_reports_a_refused_proxy():
+    from prime_tunnel.tunnel import _scan_startup_line
+
+    line = _frpc_line("W", "[t-test123] start error: proxy [t-test123] already exists")
+    assert _scan_startup_line(line) == "fatal"
+
+
+def test_reports_gone_only_for_rejections_of_the_registration():
+    from prime_tunnel.tunnel import _reports_gone
+
+    assert _reports_gone(_frpc_line("W", "connect to server error: Tunnel is inactive"))
+    assert _reports_gone(_frpc_line("W", "connect to server error: Tunnel not registered"))
+    assert _reports_gone(_frpc_line("W", "[t-test123] start error: Tunnel is inactive"))
+    assert not _reports_gone(_frpc_line("W", "connect to server error: Invalid binding secret"))
+    assert not _reports_gone(_frpc_line("W", "connect to server error: i/o timeout"))
+    assert not _reports_gone(_frpc_line("E", "Tunnel is inactive"))
+
+
+@pytest.mark.asyncio
+async def test_wait_for_connection_fails_fast_when_the_proxy_is_refused():
+    from prime_tunnel.exceptions import TunnelConnectionError
+
+    tunnel = Tunnel(local_port=8080, connection_timeout=5.0)
+    process, write_fd = _make_fake_frpc(
+        [
+            _frpc_line("I", "login to server success, get run id [abc]"),
+            _frpc_line("W", "[t-test123] start error: proxy [t-test123] already exists"),
+        ]
+    )
+    tunnel._process = process
+    try:
+        with pytest.raises(TunnelConnectionError, match="already exists") as exc_info:
+            await tunnel._wait_for_connection()
+    finally:
+        os.close(write_fd)
+        process.stdout.close()
+
+    assert not isinstance(exc_info.value, TunnelGoneError)
+
+
+@pytest.mark.asyncio
+async def test_restart_raises_gone_when_the_registration_is_inactive():
+    tunnel = _make_started_tunnel()
+    tunnel.connection_timeout = 5.0
+    process, write_fd = _make_fake_frpc(
+        [_frpc_line("W", "connect to server error: Tunnel is inactive")]
+    )
+    try:
+        with (
+            patch("prime_tunnel.tunnel.get_frpc_path", return_value="/bin/frpc"),
+            patch("prime_tunnel.tunnel.subprocess.Popen", return_value=process),
+            patch.object(tunnel, "_start_pipe_drain"),
+            pytest.raises(TunnelGoneError, match="Tunnel is inactive"),
+        ):
+            await tunnel.restart()
+    finally:
+        os.close(write_fd)
+        process.stdout.close()
+
+    assert tunnel.is_gone is True
+
+
+@pytest.mark.asyncio
+async def test_successful_restart_clears_gone():
+    tunnel = _make_started_tunnel()
+    tunnel._gone = True
+    frpc_path, popen, wait, drain = _patch_restart(tunnel, MagicMock())
+
+    with frpc_path, popen, wait, drain:
+        await tunnel.restart()
+
+    assert tunnel.is_gone is False
+
+
+def test_pipe_drain_marks_the_tunnel_gone_when_a_reconnect_is_rejected():
+    tunnel = _make_started_tunnel()
+    _drain(
+        tunnel,
+        [
+            _frpc_line("I", "try to connect to server...") + "\n",
+            _frpc_line("W", "connect to server error: Tunnel is inactive") + "\n",
+        ],
+    )
+    assert tunnel.is_gone is True
+
+
+def test_pipe_drain_ignores_transient_reconnect_failures():
+    tunnel = _make_started_tunnel()
+    _drain(tunnel, [_frpc_line("W", "connect to server error: i/o timeout") + "\n"])
+    assert tunnel.is_gone is False
+
+
+def test_pipe_drain_ignores_a_replaced_process_when_marking_gone():
+    import io
+
+    tunnel = _make_started_tunnel()
+    old_process = MagicMock()
+    old_process.stdout = io.StringIO(
+        _frpc_line("W", "connect to server error: Tunnel is inactive") + "\n"
+    )
+    old_process.stderr = io.StringIO("")
+    tunnel._process = MagicMock()
+    tunnel._start_pipe_drain(old_process)
+    for t in tunnel._drain_threads:
+        t.join(timeout=2.0)
+
+    assert tunnel.is_gone is False

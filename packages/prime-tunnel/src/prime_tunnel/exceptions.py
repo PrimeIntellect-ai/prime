@@ -24,6 +24,17 @@ class TunnelConnectionError(TunnelError):
         super().__init__(msg)
 
 
+class TunnelGoneError(TunnelConnectionError):
+    """The tunnel's registration can no longer be used.
+
+    The tunnel was deleted, expired, or stayed disconnected for too long.
+    Restarting cannot bring it back: stop it and start a new tunnel, which
+    gets a new URL.
+    """
+
+    pass
+
+
 class TunnelAuthError(TunnelError):
     """Authentication failed when registering tunnel."""
 

@@ -393,3 +393,63 @@ def test_factory_client_validation_failure_raises_api_error() -> None:
 
     with pytest.raises(APIError, match="Unexpected factory status response shape"):
         FactoryClient(dummy).get_status("team-123")  # type: ignore[arg-type]
+
+
+def test_factory_status_rejects_unsupported_schema_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = _status_payload()
+    payload["schema_version"] = 2
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+
+    assert result.exit_code == 1
+    assert "Unsupported factory status schema version: 2" in strip_ansi(result.output)
+
+
+def test_factory_status_rejects_cluster_missing_pools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = _status_payload()
+    del payload["clusters"][0]["pools"]
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+
+    assert result.exit_code == 1
+    assert "Unexpected factory status response shape" in strip_ansi(result.output)
+    assert "pools" in strip_ansi(result.output)
+
+
+def test_factory_status_rejects_cluster_missing_sources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = _status_payload()
+    del payload["clusters"][0]["sources"]
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+
+    assert result.exit_code == 1
+    assert "Unexpected factory status response shape" in strip_ansi(result.output)
+    assert "sources" in strip_ansi(result.output)
+
+
+def test_factory_client_validation_error_message_has_no_rich_brackets() -> None:
+    # Pydantic messages embed "[type=...]" metadata; those brackets would
+    # crash Rich rendering when printed. The wrapped APIError must not.
+    dummy = _DummyAPIClient({"clusters": [{"display_name": "x"}]})
+
+    with pytest.raises(APIError) as excinfo:
+        FactoryClient(dummy).get_status("team-123")  # type: ignore[arg-type]
+
+    assert "[" not in str(excinfo.value)
+    assert "pools" in str(excinfo.value)
+
+
+def test_factory_client_rejects_future_schema_version() -> None:
+    dummy = _DummyAPIClient({**_status_payload(), "schema_version": 3})
+
+    with pytest.raises(APIError, match="Unsupported factory status schema version: 3"):
+        FactoryClient(dummy).get_status("team-123")  # type: ignore[arg-type]

@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field, PrivateAttr, ValidationError
+from pydantic import BaseModel, PrivateAttr, ValidationError
 
 from prime_cli.core import APIClient, APIError
 
@@ -44,8 +44,10 @@ class FactoryCluster(BaseModel):
     status: Optional[str] = None
     unassigned_gpus: Optional[int] = None
     unknown_gpus: Optional[int] = None
-    pools: List[FactoryPool] = Field(default_factory=list)
-    sources: List[FactorySource] = Field(default_factory=list)
+    # Both contract fields are required: a 200 response without them is a
+    # malformed payload, not an empty allocation summary.
+    pools: List[FactoryPool]
+    sources: List[FactorySource]
 
 
 class FactoryStatus(BaseModel):
@@ -66,6 +68,21 @@ class FactoryStatus(BaseModel):
         return self._raw_response
 
 
+SUPPORTED_SCHEMA_VERSION = 1
+
+
+def _format_validation_error(exc: "ValidationError") -> str:
+    """Summarize pydantic validation errors without bracketed metadata.
+
+    Pydantic messages contain ``[type=..., input_value=...]`` segments; those
+    brackets would crash Rich markup rendering when the CLI prints the error.
+    """
+    details = "; ".join(
+        f"{'.'.join(str(loc) for loc in err['loc'])}: {err['msg']}" for err in exc.errors()
+    )
+    return f"Unexpected factory status response shape: {details}"
+
+
 class FactoryClient:
     """Client for the Model Factory fleet status API."""
 
@@ -84,6 +101,13 @@ class FactoryClient:
         except ValidationError as exc:
             # Wrap shape drift as APIError so the command's except-APIError
             # branch surfaces a clean CLI error instead of a traceback.
-            raise APIError(f"Unexpected factory status response shape: {exc}") from exc
+            raise APIError(_format_validation_error(exc)) from exc
+        if status.schema_version != SUPPORTED_SCHEMA_VERSION:
+            # A newer schema still validating against the v1 model would be
+            # silently misinterpreted; fail loudly instead.
+            raise APIError(
+                f"Unsupported factory status schema version: {status.schema_version} "
+                f"(expected {SUPPORTED_SCHEMA_VERSION})"
+            )
         status._raw_response = response
         return status

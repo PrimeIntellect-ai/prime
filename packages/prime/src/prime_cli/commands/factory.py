@@ -173,7 +173,9 @@ def factory_status(
         api_client = APIClient()
         status = FactoryClient(api_client).get_status(team_id)
     except APIError as e:
-        err_console.print(f"[red]Error:[/red] {e}")
+        # Escape upstream error text: raw brackets (e.g. pydantic
+        # "[type=...]" metadata) would crash Rich markup rendering.
+        err_console.print(f"[red]Error:[/red] {rich_escape(str(e))}")
         raise typer.Exit(1)
 
     clusters = status.clusters

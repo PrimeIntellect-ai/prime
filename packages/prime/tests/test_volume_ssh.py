@@ -1108,9 +1108,12 @@ def test_client_sends_warm_and_routes_transfers():
     client = HostedTrainingClient(SimpleNamespace(post=post))
     client.create_volume("v", "1Ti")
     client.create_volume("v", "1Ti", warm=False)
-    got = client.route_volume_transfer("v", "put", team_id="t1")
+    got = client.route_volume_transfer("v", "put", "data/x/", team_id="t1")
     assert posted[0][1]["warm"] is True and posted[1][1]["warm"] is False
-    assert posted[2] == ("/training/volumes/v/transfer", {"mode": "put", "teamId": "t1"})
+    assert posted[2] == (
+        "/training/volumes/v/transfer",
+        {"mode": "put", "path": "data/x/", "teamId": "t1"},
+    )
     assert (got.via, got.prefix, got.access_key_id) == ("r2", "vol1/", "AK")
     assert got.session_token == "ST"
 
@@ -1278,8 +1281,8 @@ def _direct(monkeypatch, s3):
 
     routes = []
 
-    def route(name, mode, team_id=None):
-        routes.append(mode)
+    def route(name, mode, path, team_id=None):
+        routes.append((mode, path))
         return VolumeTransferRoute.model_validate(R2_ROUTE)
 
     client = SimpleNamespace(
@@ -1327,7 +1330,7 @@ def test_direct_put_mirrors_rsync_layout(monkeypatch, tmp_path, local, remote, e
     routes = _direct(monkeypatch, s3)
     result = _run("put", "data", local, remote)
     assert result.exit_code == 0, result.output
-    assert routes == ["put"]
+    assert routes == [("put", volumes._remote_path(remote).removeprefix("/volume/"))]
     assert sorted(k.removeprefix("vol1/") for k in s3.objects) == keys
     if local.startswith("tree"):
         assert "Skipping 1 symbolic links" in result.output
@@ -1359,7 +1362,7 @@ def test_direct_get_mirrors_rsync_layout(monkeypatch, tmp_path, remote, local, f
     routes = _direct(monkeypatch, s3)
     result = _run("get", "data", remote, local)
     assert result.exit_code == 0, result.output
-    assert routes == ["get"]
+    assert routes == [("get", volumes._remote_path(remote).removeprefix("/volume/"))]
     got = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*") if p.is_file())
     assert got == files
     assert not (tmp_path / "escape").exists()
@@ -1385,3 +1388,36 @@ def test_put_never_writes_under_runs(monkeypatch, tmp_path, local, remote):
     assert result.exit_code == 2
     assert "runs/ holds run outputs" in result.output
     assert routes == []
+
+
+def test_get_of_runs_with_a_live_session_goes_direct(monkeypatch, tmp_path):
+    """The backend answers r2 for a get under runs/ even with a live session
+    (sessions never stage runs/), so the route must be told the path."""
+    from prime_cli.api.training import VolumeTransferRoute
+
+    monkeypatch.chdir(tmp_path)
+    s3 = FakeS3({"vol1/runs/r1/m": b"m"})
+    asked = []
+
+    def route(name, mode, path, team_id=None):
+        asked.append((mode, path))
+        live = {
+            "via": "session",
+            "session": {"id": "s1", "volumeName": "data", "status": "RUNNING", "readOnly": False},
+        }
+        return VolumeTransferRoute.model_validate(R2_ROUTE if path.startswith("runs/") else live)
+
+    client = SimpleNamespace(
+        route_volume_transfer=route,
+        create_volume_session=lambda *a, **kw: pytest.fail("no session for runs/"),
+    )
+    monkeypatch.setattr(volumes, "_client", lambda: (client, "t1"))
+    refreshes = []
+    monkeypatch.setattr(volumes, "_r2_client", lambda refresh, r: refreshes.append(refresh) or s3)
+    result = _run("get", "data", "/runs/r1/", "out")
+    assert result.exit_code == 0, result.output
+    assert asked == [("get", "runs/r1/")]
+    assert (tmp_path / "out" / "m").read_bytes() == b"m"
+    # Credential refreshes ask the same question.
+    refreshes[0]()
+    assert asked[-1] == ("get", "runs/r1/")

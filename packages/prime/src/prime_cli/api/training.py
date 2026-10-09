@@ -279,11 +279,12 @@ class HostedTrainingClient:
         return [VolumeSession.model_validate(s) for s in response.get("sessions", [])]
 
     def route_volume_transfer(
-        self, name: str, mode: str, *, team_id: Optional[str] = None
+        self, name: str, mode: str, path: str = "", *, team_id: Optional[str] = None
     ) -> VolumeTransferRoute:
-        """POST …/volumes/{name}/transfer with mode "get" or "put". Raises
-        NotFoundError on backends without the route."""
-        payload: Dict[str, Any] = {"mode": mode}
+        """POST …/volumes/{name}/transfer with mode "get" or "put" and the
+        volume-relative path ("" = root): the get source or the put
+        destination. Raises NotFoundError on backends without the route."""
+        payload: Dict[str, Any] = {"mode": mode, "path": path}
         if team_id:
             payload["teamId"] = team_id
         return VolumeTransferRoute.model_validate(

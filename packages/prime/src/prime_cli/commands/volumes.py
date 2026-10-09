@@ -698,7 +698,7 @@ def _transfer(
         _refuse_runs(local, rel)
     client, team_id = _client()
     try:
-        route = client.route_volume_transfer(name, "put" if upload else "get", team_id=team_id)
+        route = client.route_volume_transfer(name, "put" if upload else "get", rel, team_id=team_id)
     except NotFoundError:
         route = None  # an older backend: always through a session
     except APIError as exc:
@@ -970,7 +970,7 @@ def _r2_transfer(client, name: str, team_id, route, rel: str, local: str, upload
     from botocore.exceptions import BotoCoreError, ClientError
 
     mode = "put" if upload else "get"
-    s3 = _r2_client(lambda: client.route_volume_transfer(name, mode, team_id=team_id), route)
+    s3 = _r2_client(lambda: client.route_volume_transfer(name, mode, rel, team_id=team_id), route)
     config = TransferConfig(
         multipart_threshold=_R2_PART_SIZE,
         multipart_chunksize=_R2_PART_SIZE,

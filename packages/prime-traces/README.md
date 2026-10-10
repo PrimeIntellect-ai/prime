@@ -139,6 +139,7 @@ asyncio.run(main())
 | `PRIME_TRACES_URL`     | Base URL of the Prime Traces service; defaults to `https://api.primeintellect.ai` |
 | `PRIME_TEAM_ID`        | Optional team context, sent as `X-Prime-Team-ID`                       |
 | `~/.prime/config.json` | Shared prime CLI config (`api_key`, `team_id`, `traces_url`)           |
+| `.prime/context.json`  | Team/context pinned for the working directory (`prime switch --local`) |
 
 Precedence is constructor argument → environment variable → config file.
 

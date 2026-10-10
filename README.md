@@ -234,6 +234,9 @@ prime teams list
 prime switch
 prime switch personal
 prime switch <team-slug>
+
+# Pin a team (or saved context) to the current directory
+prime switch <team-slug> --local
 ```
 
 ## Development

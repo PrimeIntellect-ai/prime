@@ -7,6 +7,73 @@ from typing import Optional
 from prime_traces.core.config import Config as _TracesSdkConfig
 from pydantic import BaseModel, ConfigDict
 
+LOCAL_CONTEXT_FILE = Path(".prime") / "context.json"
+_CONTEXT_NAME = re.compile(r"[a-zA-Z0-9_-]+")
+# Keys a saved environment file holds; other keys are always written globally.
+_ENVIRONMENT_KEYS = frozenset(
+    "api_key team_id team_name team_role user_id user_name "
+    "base_url frontend_url inference_url traces_url".split()
+)
+
+
+def find_local_context_file() -> Optional[Path]:
+    """Nearest ``.prime/context.json`` at or above the cwd, stopping at ``$HOME``.
+
+    Symlinks (which could redirect writes, e.g. to ~/.prime/config.json) and
+    files owned by another user are skipped.
+    """
+    try:
+        current = Path.cwd().resolve()
+        home = Path.home().resolve()
+    except (OSError, RuntimeError):
+        return None
+    getuid = getattr(os, "getuid", None)
+    for directory in (current, *current.parents):
+        if directory == home:
+            return None
+        candidate = directory / LOCAL_CONTEXT_FILE
+        try:
+            if candidate.parent.is_symlink() or candidate.is_symlink():
+                continue
+            if candidate.is_file() and (getuid is None or candidate.stat().st_uid == getuid()):
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
+def read_local_context(path: Path) -> dict:
+    """Parse a directory context file: an optional ``context`` name and/or
+    ``team_id`` (null: personal). It never holds credentials or URLs."""
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
+        raise ValueError(f"Cannot read {path}: {e}") from e
+    if not isinstance(data, dict):
+        raise ValueError(f"Invalid {path}: expected a JSON object")
+    context = data.get("context")
+    if context is not None and not (isinstance(context, str) and _CONTEXT_NAME.fullmatch(context)):
+        raise ValueError(f"Invalid {path}: bad context name {context!r}")
+    for key in ("team_id", "team_name"):
+        if data.get(key) is not None and not isinstance(data[key], str):
+            raise ValueError(f"Invalid {path}: {key} must be a string or null")
+    return data
+
+
+def write_local_context(path: Path, data: dict) -> None:
+    """Write a directory context file; empty data removes it (and an empty ``.prime``)."""
+    if path.is_symlink() or path.parent.is_symlink():
+        raise ValueError(f"Refusing to write {path}: it or its directory is a symlink")
+    if data:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=2) + "\n")
+        return
+    path.unlink(missing_ok=True)
+    try:
+        path.parent.rmdir()
+    except OSError:
+        pass
+
 
 class ConfigModel(BaseModel):
     api_key: str = ""
@@ -35,16 +102,53 @@ class Config:
     DEFAULT_SSH_KEY_PATH: str = str(Path.home() / ".ssh" / "id_rsa")
 
     def __init__(self, use_context: bool = True) -> None:
+        """Precedence: PRIME_* env vars > --context/PRIME_CONTEXT > .prime/context.json
+        > ~/.prime/config.json. ``use_context=False`` loads (and writes) only the last."""
         self.config_dir = Path.home() / ".prime"
         self.config_file = self.config_dir / "config.json"
         self.environments_dir = self.config_dir / "environments"
+        self.local_context_file: Optional[Path] = None
+        self.local_context: dict = {}
+        # Saved environment a directory context selects; credential writes go there.
+        self._profile_name: Optional[str] = None
+        self._profile_overlay: dict = {}
+        self._team_overlay: dict = {}
         self._ensure_config_dir()
         self._load_config()
 
+        if not use_context:
+            return
+
         # Check for PRIME_CONTEXT env var to temporarily override config
-        context = os.getenv("PRIME_CONTEXT") if use_context else None
+        context = os.getenv("PRIME_CONTEXT")
         if context:
             self.load_environment(context, persist=False)
+            return
+
+        local_file = find_local_context_file()
+        if local_file is None:
+            return
+        local = read_local_context(local_file)
+        self.local_context_file = local_file
+        self.local_context = local
+        pinned = local.get("context")
+        if pinned:
+            try:
+                loaded = self.load_environment(pinned, persist=False)
+            except (TypeError, AttributeError):  # e.g. "frontend_url": null in its file
+                loaded = False
+            if not loaded:
+                raise ValueError(
+                    f"Context '{pinned}' selected by {local_file} is missing or invalid; "
+                    "fix it with 'prime config save' or run 'prime config unpin'."
+                )
+            if pinned.casefold() != "production":
+                self._profile_name = pinned
+        if "team_id" in local:
+            team_id = local.get("team_id") or None
+            team_name = local.get("team_name") if team_id else None
+            self._team_overlay = {"team_id": team_id, "team_name": team_name, "team_role": None}
+            self._refresh()
 
     @property
     def context_override(self) -> str | None:
@@ -79,14 +183,66 @@ class Config:
         """Load configuration from file"""
         if self.config_file.exists():
             config_data = json.loads(self.config_file.read_text())
-            self.config = ConfigModel(**config_data).model_dump()
+            self._stored = ConfigModel(**config_data).model_dump()
         else:
-            self.config = {}
+            self._stored = {}
+        self._refresh()
+
+    def _refresh(self) -> None:
+        self.config = {**self._stored, **self._profile_overlay, **self._team_overlay}
 
     def _save_config(self, config: dict) -> None:
         """Save configuration to file"""
         self.config_file.write_text(json.dumps(config, indent=2))
-        self.config = config
+        self._stored = dict(config)
+        self._refresh()
+
+    def _update(self, **fields: object) -> None:
+        """Persist fields to the selected context's file, or else the global config."""
+        if self._profile_name is not None and _ENVIRONMENT_KEYS.issuperset(fields):
+            env_file = self._environment_file(self._profile_name)
+            env_config = json.loads(env_file.read_text())
+            if not isinstance(env_config, dict):
+                raise ValueError(f"Invalid configuration in {env_file}")
+            env_config.update(fields)
+            env_file.write_text(json.dumps(env_config, indent=2))
+            self._profile_overlay.update(fields)
+            self._refresh()
+            return
+        self._save_config({**self._stored, **fields})
+
+    def _environment_file(self, name: str) -> Path:
+        return self.environments_dir / f"{self._sanitize_environment_name(name)}.json"
+
+    @property
+    def writes_context(self) -> Optional[str]:
+        """Saved context that credential writes go to, when a directory selects one."""
+        return self._profile_name
+
+    @property
+    def team_pinned(self) -> bool:
+        """Whether the directory context file pins the team."""
+        return bool(self._team_overlay)
+
+    def local_context_notice(self) -> Optional[str]:
+        """What the directory context selects, or None if it matches the global config."""
+        if self.local_context_file is None:
+            return None
+        environment = self.current_environment
+        global_environment = str(self._stored.get("current_environment", "production"))
+        team_id = self.config.get("team_id") or None
+        if environment.casefold() == global_environment.casefold() and team_id == (
+            self._stored.get("team_id") or None
+        ):
+            return None
+        if team_id:
+            name = self.config.get("team_name")
+            account = f"team '{name}' ({team_id})" if name else f"team {team_id}"
+        else:
+            account = "the personal account"
+        if self.local_context.get("context"):
+            account += f" in context '{environment}'"
+        return f"Using {account}, pinned by {self.local_context_file}"
 
     @property
     def api_key(self) -> str:
@@ -95,8 +251,7 @@ class Config:
 
     def set_api_key(self, value: str) -> None:
         """Set API key in config file"""
-        self.config["api_key"] = value
-        self._save_config(self.config)
+        self._update(api_key=value)
 
     @property
     def team_id(self) -> Optional[str]:
@@ -126,10 +281,11 @@ class Config:
         self, value: str | None, team_name: str | None = None, team_role: str | None = None
     ) -> None:
         """Set team ID, name, and role in config file."""
-        self.config["team_id"] = value or None
-        self.config["team_name"] = team_name if value else None
-        self.config["team_role"] = team_role if value else None
-        self._save_config(self.config)
+        self._update(
+            team_id=value or None,
+            team_name=team_name if value else None,
+            team_role=team_role if value else None,
+        )
 
     @property
     def user_id(self) -> Optional[str]:
@@ -151,9 +307,7 @@ class Config:
 
     def set_user_id(self, value: str | None, user_name: str | None = None) -> None:
         """Set user ID and display name in config file."""
-        self.config["user_id"] = value if value else None
-        self.config["user_name"] = user_name if value else None
-        self._save_config(self.config)
+        self._update(user_id=value if value else None, user_name=user_name if value else None)
 
     @property
     def base_url(self) -> str:
@@ -165,11 +319,7 @@ class Config:
 
     def set_base_url(self, value: str) -> None:
         """Set API base URL in config file"""
-        value = value.rstrip("/")
-        if value.endswith("/api/v1"):
-            value = value[:-7]
-        self.config["base_url"] = value
-        self._save_config(self.config)
+        self._update(base_url=self._strip_api_v1(value))
 
     @property
     def frontend_url(self) -> str:
@@ -181,9 +331,7 @@ class Config:
 
     def set_frontend_url(self, value: str) -> None:
         """Set frontend URL in config file"""
-        value = value.rstrip("/")
-        self.config["frontend_url"] = value
-        self._save_config(self.config)
+        self._update(frontend_url=value.rstrip("/"))
 
     @property
     def inference_url(self) -> str:
@@ -195,9 +343,7 @@ class Config:
 
     def set_inference_url(self, value: str) -> None:
         """Set inference URL in config file"""
-        value = value.rstrip("/")
-        self.config["inference_url"] = value
-        self._save_config(self.config)
+        self._update(inference_url=value.rstrip("/"))
 
     def _configured_traces_url(self) -> str | None:
         """The explicitly configured traces URL (env > file), or None when unset."""
@@ -224,12 +370,14 @@ class Config:
 
     def set_traces_url(self, value: str) -> None:
         """Set Prime Traces service URL in config file; empty clears the override."""
-        self.config["traces_url"] = self._strip_api_v1(value) if value else None
-        self._save_config(self.config)
+        self._update(traces_url=self._strip_api_v1(value) if value else None)
 
     def set_traces_url_for_active_environment(self, value: str) -> None:
         """Persist only the traces URL for the command's selected environment."""
         traces_url = self._strip_api_v1(value) if value else None
+        if self._profile_name is not None:
+            self._update(traces_url=traces_url)
+            return
         selected_environment = self.current_environment
         context_override = os.getenv("PRIME_CONTEXT")
 
@@ -255,6 +403,7 @@ class Config:
         if update_root:
             root_config["traces_url"] = traces_url
             self.config_file.write_text(json.dumps(root_config, indent=2))
+            self._stored["traces_url"] = traces_url
 
         if selected_environment != "production":
             sanitized = self._sanitize_environment_name(selected_environment)
@@ -266,7 +415,9 @@ class Config:
                 env_config["traces_url"] = traces_url
                 env_file.write_text(json.dumps(env_config, indent=2))
 
-        self.config["traces_url"] = traces_url
+        if self._profile_overlay:
+            self._profile_overlay["traces_url"] = traces_url
+        self._refresh()
 
     @property
     def ssh_key_path(self) -> str:
@@ -278,8 +429,7 @@ class Config:
 
     def set_ssh_key_path(self, value: str) -> None:
         """Set SSH private key path in config file"""
-        self.config["ssh_key_path"] = str(Path(value).expanduser().resolve())
-        self._save_config(self.config)
+        self._update(ssh_key_path=str(Path(value).expanduser().resolve()))
 
     @property
     def share_resources_with_team(self) -> bool:
@@ -291,8 +441,7 @@ class Config:
 
     def set_share_resources_with_team(self, value: bool) -> None:
         """Set share_resources_with_team in config file"""
-        self.config["share_resources_with_team"] = value
-        self._save_config(self.config)
+        self._update(share_resources_with_team=value)
 
     @property
     def traces_opt_out(self) -> bool:
@@ -319,8 +468,7 @@ class Config:
 
     def set_current_environment(self, value: str) -> None:
         """Set current environment name"""
-        self.config["current_environment"] = value
-        self._save_config(self.config)
+        self._update(current_environment=value)
 
     def _sanitize_environment_name(self, name: str) -> str:
         """Sanitize environment name to prevent path traversal"""
@@ -379,7 +527,11 @@ class Config:
             raise ValueError("Cannot delete built-in environment 'production'")
 
         sanitized_name = self._sanitize_environment_name(name)
-        if self.current_environment.casefold() == sanitized_name.casefold():
+        active = {
+            self.current_environment.casefold(),
+            str(self._stored.get("current_environment", "production")).casefold(),
+        }
+        if sanitized_name.casefold() in active:
             raise ValueError(
                 f"Cannot delete currently active environment '{name}'. "
                 "Use 'prime config use production' or another saved environment first."
@@ -401,6 +553,9 @@ class Config:
         Returns:
             True if the environment was loaded successfully, False otherwise.
         """
+        if persist and self._profile_name is not None:
+            # Its setters would write into the pinned context's file.
+            raise ValueError(f"{self.local_context_file} selects '{self._profile_name}'")
         if name.lower() == "production":
             # Built-in production environment
             if persist:
@@ -411,14 +566,17 @@ class Config:
                 self.set_team(None)  # Production defaults to personal account
                 self.set_current_environment("production")
             else:
-                self.config["base_url"] = self.DEFAULT_BASE_URL
-                self.config["frontend_url"] = self.DEFAULT_FRONTEND_URL
-                self.config["inference_url"] = self.DEFAULT_INFERENCE_URL
-                self.config["traces_url"] = None
-                self.config["team_id"] = None
-                self.config["team_name"] = None
-                self.config["team_role"] = None
-                self.config["current_environment"] = "production"
+                self._profile_overlay = {
+                    "base_url": self.DEFAULT_BASE_URL,
+                    "frontend_url": self.DEFAULT_FRONTEND_URL,
+                    "inference_url": self.DEFAULT_INFERENCE_URL,
+                    "traces_url": None,
+                    "team_id": None,
+                    "team_name": None,
+                    "team_role": None,
+                    "current_environment": "production",
+                }
+                self._refresh()
             return True
 
         try:
@@ -462,25 +620,26 @@ class Config:
                     self.set_current_environment(name)
                 else:
                     # In-memory only - don't persist to disk
+                    overlay: dict = {}
                     if "api_key" in env_config:
-                        self.config["api_key"] = env_config["api_key"]
-                    self.config["team_id"] = env_config.get("team_id", None)
-                    self.config["team_name"] = env_config.get("team_name", None)
-                    self.config["team_role"] = env_config.get("team_role", None)
-                    self.config["user_id"] = env_config.get("user_id", None)
-                    self.config["user_name"] = env_config.get("user_name", None)
+                        overlay["api_key"] = env_config["api_key"]
+                    overlay["team_id"] = env_config.get("team_id", None)
+                    overlay["team_name"] = env_config.get("team_name", None)
+                    overlay["team_role"] = env_config.get("team_role", None)
+                    overlay["user_id"] = env_config.get("user_id", None)
+                    overlay["user_name"] = env_config.get("user_name", None)
                     # Normalize URLs the same way set_* methods do
                     base_url = env_config.get("base_url", self.DEFAULT_BASE_URL)
-                    self.config["base_url"] = self._strip_api_v1(base_url)
+                    overlay["base_url"] = self._strip_api_v1(base_url)
                     frontend_url = env_config.get("frontend_url", self.DEFAULT_FRONTEND_URL)
-                    self.config["frontend_url"] = frontend_url.rstrip("/")
+                    overlay["frontend_url"] = frontend_url.rstrip("/")
                     inference_url = env_config.get("inference_url", self.DEFAULT_INFERENCE_URL)
-                    self.config["inference_url"] = inference_url.rstrip("/")
+                    overlay["inference_url"] = inference_url.rstrip("/")
                     traces_url = env_config.get("traces_url")
-                    self.config["traces_url"] = (
-                        self._strip_api_v1(traces_url) if traces_url else None
-                    )
-                    self.config["current_environment"] = name
+                    overlay["traces_url"] = self._strip_api_v1(traces_url) if traces_url else None
+                    overlay["current_environment"] = name
+                    self._profile_overlay = overlay
+                    self._refresh()
                 return True
         except ValueError:
             # Re-raise sanitization errors
@@ -488,29 +647,37 @@ class Config:
         return False
 
     def update_current_environment_file(self) -> None:
-        """Update the current environment's saved file with current config"""
-        if self.current_environment != "production":
+        """Mirror the stored global config (never env or context overrides) into its
+        current environment's file. No-op when a directory context selects one."""
+        if self._profile_name is not None:
+            return
+        stored = self._stored
+        current = str(stored.get("current_environment", "production"))
+        if current == "production":
             # Only update custom environments, not the built-in production
-            try:
-                sanitized_name = self._sanitize_environment_name(self.current_environment)
-                env_file = self.environments_dir / f"{sanitized_name}.json"
-                if env_file.exists():
-                    env_config = {
-                        "api_key": self.api_key,
-                        "team_id": self.team_id,
-                        "team_name": None if self.team_id_from_env else self.team_name,
-                        "team_role": None if self.team_id_from_env else self.team_role,
-                        "user_id": self.user_id,
-                        "user_name": None if self.user_id_from_env else self.user_name,
-                        "base_url": self.base_url,
-                        "frontend_url": self.frontend_url,
-                        "inference_url": self.inference_url,
-                        "traces_url": self._stored_traces_url(),
-                    }
-                    env_file.write_text(json.dumps(env_config, indent=2))
-            except ValueError:
-                # Skip updating if environment name is invalid
-                pass
+            return
+        try:
+            env_file = self._environment_file(current)
+        except ValueError:
+            # Skip updating if environment name is invalid
+            return
+        if env_file.exists():
+            traces_url = stored.get("traces_url")
+            env_config = {
+                "api_key": stored.get("api_key", ""),
+                "team_id": stored.get("team_id"),
+                "team_name": stored.get("team_name"),
+                "team_role": stored.get("team_role"),
+                "user_id": stored.get("user_id"),
+                "user_name": stored.get("user_name"),
+                "base_url": self._strip_api_v1(stored.get("base_url", self.DEFAULT_BASE_URL)),
+                "frontend_url": stored.get("frontend_url", self.DEFAULT_FRONTEND_URL).rstrip("/"),
+                "inference_url": stored.get("inference_url", self.DEFAULT_INFERENCE_URL).rstrip(
+                    "/"
+                ),
+                "traces_url": self._strip_api_v1(traces_url) if traces_url else None,
+            }
+            env_file.write_text(json.dumps(env_config, indent=2))
 
     def list_environments(self) -> list[str]:
         """List all saved environment names"""

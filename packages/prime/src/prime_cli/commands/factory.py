@@ -312,8 +312,9 @@ def _compact_nodes_cell(
     cell = f"{healthy}/{total}"
     cordoned = sum(1 for n in nodes_cluster.nodes if n.state == "cordoned")
     if cordoned:
-        # Plain language beats shorthand: "38/40 (2 cordoned)".
-        cell += f" ({cordoned} cordoned)"
+        # Customer-facing phrase (frontierCluster precedent); "cordoned" is
+        # infra-speak and never renders.
+        cell += f" ({cordoned} {UNDER_INSPECTION_DISPLAY})"
     return cell
 
 
@@ -1003,6 +1004,10 @@ def factory_workloads(
 # Coarse public node states from the frozen nodes contract; the labels are
 # the only node vocabulary shown to users.
 NODE_STATES = ("ready", "cordoned", "offline", "unknown")
+# Customer-facing phrase for cordoned nodes (frontierCluster precedent);
+# the contract enum value never renders.
+UNDER_INSPECTION_DISPLAY = "under inspection"
+UNDER_INSPECTION_LEGEND = "under inspection = pulled from scheduling by Prime"
 # The backend only ever populates slurm claims in v1.5; per-node
 # training/inference placement is NOT observed and must not be filterable
 # until it exists.
@@ -1036,9 +1041,14 @@ def _node_state_cell(node: FactoryNode) -> str:
         "unknown": "dim",
     }
     state = node.state or "unknown"
+    # Customer-facing display: "cordoned" is infra-speak — the public phrase
+    # is "under inspection" (frontierCluster precedent). The contract enum
+    # value never renders.
+    display = "under inspection" if state == "cordoned" else state
     if state in state_styles:
-        return f"[{state_styles[state]}]{rich_escape(state)}[/{state_styles[state]}]"
-    return rich_escape(state)
+        style = state_styles[state]
+        return f"[{style}]{rich_escape(display)}[/{style}]"
+    return rich_escape(display)
 
 
 def _node_gpu_cell(node: FactoryNode) -> str:
@@ -1256,6 +1266,9 @@ def factory_nodes(
         rows = _filter_nodes(c.nodes, state, assigned_to)
         if rows:
             console.print(_render_nodes_table(rows))
+            if any(n.state == "cordoned" for n in rows):
+                # Footnotes only under a table, and only when the term shows.
+                console.print(f"[dim]{UNDER_INSPECTION_LEGEND}[/dim]")
         elif state is not None or assigned_to is not None:
             # Distinguish an honestly node-less cluster from filters that
             # matched nothing.

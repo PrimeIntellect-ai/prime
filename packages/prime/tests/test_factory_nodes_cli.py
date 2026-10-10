@@ -152,15 +152,18 @@ def test_nodes_states_and_assignment_render_honestly(
     output = strip_ansi(result.output)
 
     assert result.exit_code == 0, result.output
-    assert "cordoned" in output and "slurm" in output
+    # "cordoned" is infra-speak: the public phrase renders instead.
+    assert "under inspection" in output and "cordoned" not in output
+    assert "slurm" in output
     assert "offline" in output
+    # The legend explains the phrase only when such nodes render.
+    assert "under inspection = pulled from scheduling by Prime" in output
     # Unobserved counts stay dashes, never fabricated zeros.
     assert "-/8" in output
     assert "unknown" in output
     # Null assignment means placement is NOT observed — rendered as a
     # lowercase dim "unknown", never as unassigned.
     assert "null" not in output
-    assert "unknown" in output
 
 
 def test_nodes_json_prints_exact_api_response(monkeypatch: pytest.MonkeyPatch) -> None:

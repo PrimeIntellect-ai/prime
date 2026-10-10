@@ -1091,7 +1091,7 @@ def test_factory_status_compact_nodes_column_counts_cordoned(
     output = strip_ansi(result.output)
 
     assert result.exit_code == 0, result.output
-    assert "1/3 (1 cordoned)" in output
+    assert "1/3 (1 under inspection)" in output
 
 
 def test_factory_status_compact_nodes_fetch_failure_degrades_to_dash(
@@ -1335,14 +1335,14 @@ def test_factory_status_compact_duplicate_names_pair_positionally(
     # Duplicate display names make the equal-name identity check blind to
     # replacement between the two requests: NODES degrades to an em-dash
     # for both rows instead of risking cross-wired counts.
-    assert "2/2" not in output and "0/1 (1 cordoned)" not in output
+    assert "2/2" not in output and "0/1 (1 under inspection)" not in output
     assert "—" in output
 
     # index selection over duplicates degrades the same way
     selected = runner.invoke(app, ["factory", "status", "--cluster", "2"], env=TEST_ENV)
     selected_output = strip_ansi(selected.output)
     assert selected.exit_code == 0, selected.output
-    assert "0/1 (1 cordoned)" not in selected_output
+    assert "0/1 (1 under inspection)" not in selected_output
     assert "—" in selected_output
 
 

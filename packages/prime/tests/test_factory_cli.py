@@ -1097,8 +1097,10 @@ def test_factory_status_compact_nodes_fetch_failure_degrades_to_dash(
 
     assert result.exit_code == 0, result.output
     assert "—" in output  # NODES column degraded, status row still renders
-    assert "fresh" in output  # DATA comes from the status envelope
-    assert "degraded sources" not in output  # no false degradation
+    # DATA describes the whole row: a missing node view is not "fresh".
+    assert "fresh" not in output
+    assert "node view unavailable" in output
+    assert "degraded sources" in output  # the dim line shows
 
 
 def test_factory_status_compact_partial_degradation_shows_only_that_source(
@@ -1125,10 +1127,11 @@ def test_factory_status_compact_partial_degradation_shows_only_that_source(
     assert result.exit_code == 0, result.output
     assert "scheduler data 2h ago" in output
     assert "fresh" not in output
-    # Fresh groups still contribute their real sums; the stale slurm group
-    # contributes nothing and must not poison any aggregate.
-    assert "64" in output
-    assert "48" not in output  # stale reserved never renders
+    # An active stale contributor makes every aggregate unknowable: em-dash
+    # totals, never a partial sum presented as complete (and never the
+    # stale 48 reserved either).
+    assert "—" in output
+    assert "64" not in output and "48" not in output
 
 
 def test_factory_status_json_makes_no_nodes_call(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1206,9 +1209,11 @@ def test_factory_status_compact_stale_source_numbers_never_render(
     output = strip_ansi(result.output)
 
     assert result.exit_code == 0, result.output
-    # Fresh groups only: HELD 64, IN USE 64, IDLE 0; stale 48/8/40 never render.
-    assert "64" in output
-    assert "48" not in output and "40" not in output
+    # An active stale contributor makes every aggregate unknowable: em-dash
+    # totals — never the stale 48/8/40, and never a partial sum presented
+    # as complete.
+    assert "—" in output
+    assert "64" not in output and "48" not in output and "40" not in output
     assert "scheduler data 2h ago" in output
 
 
@@ -1299,15 +1304,18 @@ def test_factory_status_compact_duplicate_names_pair_positionally(
     result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
     output = strip_ansi(result.output)
     assert result.exit_code == 0, result.output
-    # row 1 -> first node pair (2 ready of 2); row 2 -> second pair
-    assert "2/2" in output and "0/1, 1 cgdn" in output
+    # Duplicate display names make the equal-name identity check blind to
+    # replacement between the two requests: NODES degrades to an em-dash
+    # for both rows instead of risking cross-wired counts.
+    assert "2/2" not in output and "0/1, 1 cgdn" not in output
+    assert "—" in output
 
-    # index selection over duplicates keeps the positionally correct pair
+    # index selection over duplicates degrades the same way
     selected = runner.invoke(app, ["factory", "status", "--cluster", "2"], env=TEST_ENV)
     selected_output = strip_ansi(selected.output)
     assert selected.exit_code == 0, selected.output
-    assert "0/1, 1 cgdn" in selected_output
-    assert "2/2" not in selected_output
+    assert "0/1, 1 cgdn" not in selected_output
+    assert "—" in selected_output
 
 
 def test_factory_status_compact_nodes_fetch_uses_short_timeout(
@@ -1369,8 +1377,10 @@ def test_factory_status_compact_malformed_nodes_json_degrades_to_dash(
     assert result.exit_code == 0, result.output
     assert "research-b300" in output  # the status row renders
     assert "—" in output  # NODES degrades to an em-dash
-    assert "fresh" in output  # DATA comes from the status envelope
-    assert "degraded sources" not in output  # no false degradation
+    # DATA describes the whole row: a missing node view is not "fresh".
+    assert "fresh" not in output
+    assert "node view unavailable" in output
+    assert "degraded sources" in output
 
 
 def test_factory_status_compact_node_join_verifies_cluster_identity(
@@ -1468,3 +1478,68 @@ def test_factory_status_malformed_success_body_is_clean_error(
     assert "malformed response body" in output
     assert "Traceback" not in result.output
     assert "ValueError" not in result.output
+
+
+def test_factory_status_compact_stale_slurm_plus_inactive_zeros(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Backend-produced shape: inactive training/inference are all-zero
+    # allocation rows WITHOUT source entries (the backend only emits
+    # per-kind sources when active); slurm is stale holding 16/8.
+    # Incomplete evidence must never render as complete totals: all three
+    # aggregates em-dash, never "0".
+    payload = _status_payload(
+        sources=[
+            _source("capacity", age_seconds=12),
+            _source("slurm", status="stale", age_seconds=2 * 3600),
+        ],
+        pools=[
+            _pool("training", 0, 0, 0, 0),  # inactive: zeros, no source entry
+            _pool("inference", 0, 0, 0, 0),  # inactive: zeros, no source entry
+            _pool("slurm", 16, 8, 8, 0),  # active, stale: 16/8 last-known
+        ],
+    )
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    # No aggregate renders a number: the stale 16/8 never shows, and the
+    # inactive zeros never masquerade as a complete "0" total.
+    assert "16" not in output and "8" not in output
+    # a bare zero in a right-justified metric cell would render " 0 │"
+    assert " 0 │" not in output
+    assert "    — " in output
+    assert "scheduler data 2h ago" in output
+
+
+def test_factory_status_compact_missing_training_plus_healthy_slurm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Backend-produced shape: the training source entry is missing while
+    # the allocation claims GPUs (unprovable evidence); slurm is healthy.
+    # The aggregates cannot be known, and DATA must describe the whole row.
+    payload = _status_payload(
+        sources=[
+            _source("capacity", age_seconds=12),
+            _source("slurm", age_seconds=3),
+        ],
+        pools=[
+            _pool("training", 32, 32, 0, 0),  # claims GPUs, no source entry
+            _pool("inference", 0, 0, 0, 0),  # inactive: zeros, no source entry
+            _pool("slurm", 48, 16, 32, 0),  # healthy
+        ],
+    )
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    # An active unprovable contributor makes every aggregate unknowable.
+    assert "—" in output
+    assert "48" not in output and "32" not in output and "16" not in output
+    # DATA describes the whole row, not just the listed sources.
+    assert "training data unavailable" in output
+    assert "fresh" not in output

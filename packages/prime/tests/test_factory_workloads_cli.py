@@ -519,8 +519,11 @@ def test_workloads_cluster_miss_with_degraded_source_shows_warnings(
     output = strip_ansi(result.output)
 
     assert result.exit_code == 1, result.output
-    assert "slurm jobs unavailable" in output
-    assert "scheduler data last seen 2h ago" in output
+    # The payload has a fresh slurm row: mixed coverage, partial wording,
+    # and no age (the aggregate timestamp describes the healthy read).
+    assert "some slurm job data is unavailable" in output
+    assert "results may be incomplete" in output
+    assert "scheduler data last seen 2h ago" not in output
     assert "No cluster matched" in output
 
 
@@ -614,8 +617,11 @@ def test_workloads_fresh_row_renders_despite_global_worst_source(
     assert result.exit_code == 0, result.output
     assert "training:run-1" in output  # fresh row survives the stale aggregate
     assert "training:run-2" not in output  # the stale row itself is suppressed
-    assert "training jobs unavailable" in output  # aggregate stays a warning
-    assert "training data last seen 2h ago" in output
+    # Mixed coverage (fresh training rows render alongside the degraded
+    # aggregate): partial-data wording, no age.
+    assert "some training job data is unavailable" in output
+    assert "results may be incomplete" in output
+    assert "training data last seen 2h ago" not in output
 
 
 def test_workloads_unobserved_allocation_row_renders_with_dash(
@@ -707,8 +713,10 @@ def test_workloads_degraded_aggregate_with_only_fresh_rows_still_warns(
 
     assert result.exit_code == 0, result.output
     assert "training:run-7" in output  # fresh rows still render
-    assert "training jobs unavailable" in output  # the aggregate warns
-    assert "training data last seen 2h ago" in output
+    # Mixed coverage: partial-data wording above healthy rows, no age.
+    assert "some training job data is unavailable" in output
+    assert "results may be incomplete" in output
+    assert "training data last seen 2h ago" not in output
 
 
 def test_workloads_type_filter_excludes_other_kinds_from_zero_row_warnings(

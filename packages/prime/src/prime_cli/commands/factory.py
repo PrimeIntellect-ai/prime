@@ -255,6 +255,24 @@ def _render_workloads_section(
         console.print("[dim]drill down: prime factory nodes[/dim]")
 
 
+def _cluster_aggregates_known(cluster: FactoryCluster, source_status: dict) -> bool:
+    """False when any ACTIVE contributor's numbers are unknowable.
+
+    An allocation whose source entry is stale/errored — or missing while the
+    row claims GPUs — can never be summed honestly: the surviving groups'
+    totals would present incomplete evidence as a complete number. The
+    backend's designed inactive signal (an all-zero row without a source
+    entry) is complete evidence of nothing and keeps the sums knowable.
+    """
+    for pool in cluster.pools:
+        if pool.type not in source_status:
+            if not _pool_is_all_zero(pool):
+                return False
+        elif source_status[pool.type] != "ok":
+            return False
+    return True
+
+
 def _fresh_groups(cluster: FactoryCluster, source_status: dict) -> List[FactoryPool]:
     """Workload groups whose numbers may render.
 
@@ -316,6 +334,14 @@ def _compact_nodes_cell(
     return cell
 
 
+def _join_data_phrases(data_cell: str, phrase: str) -> str:
+    if data_cell == "fresh":
+        return phrase
+    if phrase in data_cell:
+        return data_cell
+    return f"{data_cell}, {phrase}"
+
+
 def _compact_data_cell(cluster: FactoryCluster) -> str:
     """Freshness of the cluster's sources, plain words, internal kinds invisible."""
     source_status = {s.kind: s.status for s in cluster.sources}
@@ -328,6 +354,15 @@ def _compact_data_cell(cluster: FactoryCluster) -> str:
                 )
             else:
                 phrases.append(f"{_friendly_data_name(source.kind)} unavailable")
+    mentioned: set = set()
+    for pool in cluster.pools:
+        # Fail closed: an allocation claiming GPUs without a source entry
+        # is unknown evidence — the DATA cell must describe the whole row.
+        if pool.type not in source_status and not _pool_is_all_zero(pool):
+            name = _friendly_data_name(pool.type)
+            if name not in mentioned:
+                mentioned.add(name)
+                phrases.append(f"{name} unavailable")
     if "capacity" not in source_status:
         # Fail closed: a missing capacity entry is unknown evidence.
         phrases.append("node data unavailable")
@@ -373,12 +408,17 @@ def _render_status_table(
     clusters: List[FactoryCluster],
     node_pairs: List[Tuple[FactoryNodesCluster, Optional[FactorySource]]],
     selected: Optional[List[int]] = None,
+    nodes_fetch_ok: bool = True,
+    ambiguous_names: Optional[set] = None,
 ) -> None:
     """The default sinfo-style glance: one row per cluster, no prose.
 
     ``clusters`` may be a --cluster-selected subset; ``selected`` holds the
     original payload indices, so node summaries pair positionally with the
-    full payload even under index selection over duplicate display names.
+    full payload. ``nodes_fetch_ok`` marks whether the best-effort node view
+    arrived at all; ``ambiguous_names`` are display names that appear more
+    than once — equal-name replacement between the two requests is
+    undetectable, so those rows render an em-dash NODES cell.
     """
     any_degraded = False
     table = Table(show_header=True, header_style="bold", show_lines=False)
@@ -387,17 +427,23 @@ def _render_status_table(
     table.add_column("STATUS")
     table.add_column("HELD", justify="right")
     table.add_column("IN USE", justify="right")
-    table.add_column("IDLE", justify="right")
+    # Idle inside the reservation — never readable as free-to-start capacity.
+    table.add_column("IDLE INSIDE", justify="right")
     table.add_column("NODES", justify="right")
     table.add_column("DATA")
 
     for position, cluster in enumerate(clusters):
         source_status = {s.kind: s.status for s in cluster.sources}
         data_cell = _compact_data_cell(cluster)
+        if not nodes_fetch_ok:
+            # DATA describes the whole row: a missing node view is not
+            # "fresh".
+            data_cell = _join_data_phrases(data_cell, "node view unavailable")
         if data_cell != "fresh":
             any_degraded = True
         capacity_ok = source_status.get("capacity") == "ok"
-        groups = _fresh_groups(cluster, source_status) if capacity_ok else []
+        aggregates_known = capacity_ok and _cluster_aggregates_known(cluster, source_status)
+        groups = _fresh_groups(cluster, source_status) if aggregates_known else []
         original_index = selected[position] if selected is not None else position
         nodes_cluster, nodes_source = (
             node_pairs[original_index] if original_index < len(node_pairs) else (None, None)
@@ -407,6 +453,14 @@ def _render_status_table(
             # fleet moved between them, positional identity no longer
             # holds. Never display one cluster's node counts on another
             # cluster's row — degrade the NODES cell instead.
+            nodes_cluster, nodes_source = None, None
+        if (
+            nodes_cluster is not None
+            and ambiguous_names
+            and cluster.display_name in ambiguous_names
+        ):
+            # Duplicate display names make the equal-name identity check
+            # blind to replacement; never risk cross-wired counts.
             nodes_cluster, nodes_source = None, None
         table.add_row(
             rich_escape(cluster.display_name),
@@ -542,8 +596,20 @@ def factory_status(
     if not verbose:
         # The default is the compact sinfo-style glance: one row per
         # cluster, at most one dim line under the table, no prose.
+        all_clusters = status.clusters
+        name_counts: Dict[str, int] = {}
+        for status_cluster in all_clusters:
+            name = status_cluster.display_name
+            name_counts[name] = name_counts.get(name, 0) + 1
+        ambiguous = {name for name, count in name_counts.items() if count > 1}
         node_pairs = _fetch_node_pairs(api_client, team_id)
-        _render_status_table(clusters, node_pairs, selected)
+        _render_status_table(
+            clusters,
+            node_pairs,
+            selected,
+            nodes_fetch_ok=bool(node_pairs),
+            ambiguous_names=ambiguous,
+        )
         return
 
     states = [_ClusterState(c) for c in clusters]
@@ -652,8 +718,19 @@ def _is_newer_observed_at(candidate: FactorySource, current: FactorySource) -> b
     return candidate.observed_at > current.observed_at
 
 
-def _jobs_unavailable_line(kind: str, source: Optional[FactorySource]) -> str:
-    """`<jobs> unavailable — <data> last seen <age> ago`, plain words only."""
+def _jobs_unavailable_line(
+    kind: str, source: Optional[FactorySource], mixed_coverage: bool = False
+) -> str:
+    """Plain-language degraded-aggregate warning.
+
+    Fresh rows of the same kind render alongside ("mixed coverage"): say
+    the data is partial without claiming all jobs are gone, and omit the
+    age — the aggregate's observed_at then describes the healthy read and
+    cannot be attributed to the degraded evidence honestly. Without fresh
+    peers, the wording keeps the degraded evidence's last-seen age.
+    """
+    if mixed_coverage:
+        return f"some {rich_escape(kind)} job data is unavailable — results may be incomplete"
     jobs = FRIENDLY_JOB_NAMES.get(kind, f"{rich_escape(kind)} jobs")
     return f"{jobs} unavailable — {_last_seen_phrase([source] if source else [])}"
 
@@ -834,9 +911,11 @@ def factory_workloads(
     # degraded source omitted a cluster's rows entirely. Surface the
     # degraded-source warnings instead of exiting with a clean miss.
     if cluster is not None and not any(row.cluster_display_name == cluster for row in rows):
+        fresh_kinds = {row.source.kind for row in rows if row.source.status == "ok"}
         for source in workloads.sources:
             if source.status != "ok":
-                err_console.print(f"[yellow]{_jobs_unavailable_line(source.kind, source)}[/yellow]")
+                warning = _jobs_unavailable_line(source.kind, source, source.kind in fresh_kinds)
+                err_console.print(f"[yellow]{warning}[/yellow]")
         err_console.print(f"[red]Error:[/red] No cluster matched '{rich_escape(cluster)}'.")
         names = _distinct_workload_clusters(rows)
         if names:
@@ -867,9 +946,12 @@ def factory_workloads(
     degraded = _view_degraded_sources(workloads, rows, suppressed, requested_type=type)
 
     # Degraded sources say so before anything else: a failed read must never
-    # masquerade as an empty fleet or silently vanish.
+    # masquerade as an empty fleet or silently vanish. Fresh rows of the
+    # same kind mark mixed coverage — partial data, not "all unavailable".
+    fresh_kinds = {row.source.kind for row in rows if row.source.status == "ok"}
     for source in degraded:
-        console.print(f"[yellow]{_jobs_unavailable_line(source.kind, source)}[/yellow]")
+        warning = _jobs_unavailable_line(source.kind, source, source.kind in fresh_kinds)
+        console.print(f"[yellow]{warning}[/yellow]")
 
     if available:
         console.print(_render_workloads_table(available))

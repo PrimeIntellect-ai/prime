@@ -1160,14 +1160,16 @@ def test_factory_status_verbose_keeps_detailed_sections(
     assert "in-use = GPUs held by running jobs" in output
 
 
-def test_factory_status_compact_null_allocation_does_not_poison_aggregate(
+def test_factory_status_compact_null_metric_makes_that_total_unknown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # A running training row with null in_use must not erase the healthy
-    # peers' contribution from the used-GPUs aggregate.
+    # A fresh group with a null metric value makes THAT metric's cluster
+    # total unknowable: the metric renders an em-dash, never the sum of the
+    # remaining groups presented as a complete number. Other metrics keep
+    # their real sums.
     payload = _status_payload(
         pools=[
-            _pool("training", 32, None, None, 32),
+            _pool("training", 32, None, None, 32),  # unobserved in_use/idle
             _pool("inference", 32, 32, 0, 0),
             _pool("slurm", 48, 16, 32, 0),
         ],
@@ -1178,10 +1180,12 @@ def test_factory_status_compact_null_allocation_does_not_poison_aggregate(
     output = strip_ansi(result.output)
 
     assert result.exit_code == 0, result.output
-    # HELD: 32+32+48; IN USE: 32 (inference) + 16 (slurm); null training adds 0
-    # IDLE: inference 0 + slurm 32; null training idle adds nothing.
-    assert "112" in output and "48" in output and "32" in output
-    assert "—" not in output
+    # HELD is complete: 32+32+48.
+    assert "112" in output
+    # IN USE and IDLE are unknowable (training unobserved): em-dashes, never
+    # the partial 48 or 32 dressed as totals.
+    assert "—" in output
+    assert " 48 │" not in output and " 32 │" not in output
 
 
 def test_factory_status_compact_stale_source_numbers_never_render(
@@ -1453,9 +1457,12 @@ def test_factory_status_compact_node_join_verifies_cluster_identity(
     assert result.exit_code == 0, result.output
     assert "research-b300" in output and "office-a100" in output
     # Position 1 pairs with office-a100's node data on research-b300's row:
-    # identity mismatch -> em-dash NODES, never the cross-wired count.
+    # identity mismatch -> em-dash NODES, never the cross-wired count, and
+    # DATA records the unjoinable node view instead of claiming "fresh".
     assert "—" in output
     assert "1/1" not in output
+    assert "node view unavailable" in output
+    assert "fresh" not in output
 
 
 def test_factory_status_malformed_success_body_is_clean_error(
@@ -1543,3 +1550,78 @@ def test_factory_status_compact_missing_training_plus_healthy_slurm(
     # DATA describes the whole row, not just the listed sources.
     assert "training data unavailable" in output
     assert "fresh" not in output
+
+
+def test_factory_status_compact_per_cluster_node_degradation_reaches_data(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The nodes fetch succeeds, but one cluster's own paired capacity
+    # source is stale: that row's NODES renders an em-dash AND its DATA
+    # must record the degraded node view (never a bare "fresh").
+    now = datetime.now(timezone.utc)
+    status_payload = {
+        "schema_version": 1,
+        "as_of": _iso(now),
+        "clusters": [
+            {
+                **_status_payload()["clusters"][0],
+                "display_name": "fresh-b300",
+                "sources": [_source("capacity"), _source("training")],
+                "pools": [_pool("training", 32, 32, 0, 0)],
+            },
+            {
+                **_status_payload()["clusters"][0],
+                "display_name": "stale-nodes-h200",
+                "sources": [_source("capacity"), _source("training")],
+                "pools": [_pool("training", 8, 8, 0, 0)],
+            },
+        ],
+    }
+    nodes_payload = {
+        "schema_version": 1,
+        "as_of": _iso(now),
+        "sources": [
+            _source("capacity"),
+            _source("capacity", status="stale", age_seconds=7200),
+        ],
+        "clusters": [
+            {
+                "display_name": "fresh-b300",
+                "status": "online",
+                "nodes": [
+                    {
+                        "name": "gpu-1",
+                        "state": "ready",
+                        "gpu_type": "B300",
+                        "gpus_total": 8,
+                        "gpus_used": 8,
+                        "assigned_to": "slurm",
+                    }
+                ],
+            },
+            {
+                "display_name": "stale-nodes-h200",
+                "status": "online",
+                "nodes": [
+                    {
+                        "name": "h200-1",
+                        "state": "ready",
+                        "gpu_type": "H200",
+                        "gpus_total": 8,
+                        "gpus_used": 4,
+                        "assigned_to": None,
+                    }
+                ],
+            },
+        ],
+    }
+    _install(monkeypatch, status_payload, nodes_payload=nodes_payload)
+
+    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "1/1" in output  # fresh row keeps its node summary
+    # the stale-nodes row: NODES em-dash, DATA records the node view
+    assert "node view unavailable" in output
+    assert "degraded sources" in output  # the dim footer fires

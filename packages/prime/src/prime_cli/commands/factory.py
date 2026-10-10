@@ -295,19 +295,18 @@ def _fresh_groups(cluster: FactoryCluster, source_status: dict) -> List[FactoryP
 def _sum_group_metric(groups: List[FactoryPool], attr: str) -> Optional[int]:
     """Sum one GPU metric over fresh groups.
 
-    Unobserved values contribute nothing — a null must not poison the
-    healthy peers' aggregate. No observed values at all renders as None
-    (the caller turns it into an em-dash, never a zero).
+    A null value on any group makes the cluster's total for that metric
+    unknowable — the sum of the remaining groups would present incomplete
+    evidence as a complete number. Return None (the caller renders an
+    em-dash) instead.
     """
     total = 0
-    observed = False
     for pool in groups:
         value = getattr(pool, attr)
         if value is None:
-            continue
+            return None
         total += value
-        observed = True
-    return total if observed else None
+    return total if groups else None
 
 
 def _compact_metric_cell(value: Optional[int]) -> str:
@@ -434,13 +433,6 @@ def _render_status_table(
 
     for position, cluster in enumerate(clusters):
         source_status = {s.kind: s.status for s in cluster.sources}
-        data_cell = _compact_data_cell(cluster)
-        if not nodes_fetch_ok:
-            # DATA describes the whole row: a missing node view is not
-            # "fresh".
-            data_cell = _join_data_phrases(data_cell, "node view unavailable")
-        if data_cell != "fresh":
-            any_degraded = True
         capacity_ok = source_status.get("capacity") == "ok"
         aggregates_known = capacity_ok and _cluster_aggregates_known(cluster, source_status)
         groups = _fresh_groups(cluster, source_status) if aggregates_known else []
@@ -462,6 +454,14 @@ def _render_status_table(
             # Duplicate display names make the equal-name identity check
             # blind to replacement; never risk cross-wired counts.
             nodes_cluster, nodes_source = None, None
+        data_cell = _compact_data_cell(cluster)
+        nodes_cell = _compact_nodes_cell(nodes_cluster, nodes_source)
+        if not nodes_fetch_ok or nodes_cell == "—":
+            # DATA describes the whole row: a missing, degraded, or
+            # unjoinable node view is not "fresh".
+            data_cell = _join_data_phrases(data_cell, "node view unavailable")
+        if data_cell != "fresh":
+            any_degraded = True
         table.add_row(
             rich_escape(cluster.display_name),
             rich_escape(cluster.gpu_type) if cluster.gpu_type else "—",
@@ -469,7 +469,7 @@ def _render_status_table(
             _compact_metric_cell(_sum_group_metric(groups, "reserved_gpus")),
             _compact_metric_cell(_sum_group_metric(groups, "in_use_gpus")),
             _compact_metric_cell(_sum_group_metric(groups, "idle_inside_gpus")),
-            _compact_nodes_cell(nodes_cluster, nodes_source),
+            nodes_cell,
             data_cell,
         )
     console.print(table)

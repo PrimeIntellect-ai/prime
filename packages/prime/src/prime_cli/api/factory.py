@@ -120,6 +120,8 @@ class FactoryWorkload(BaseModel):
     allocated_gpus: Optional[int] = None
     created_at: AwareUTCDatetime = None
     started_at: AwareUTCDatetime = None
+    # Terminal rows carry a nullable end timestamp.
+    ended_at: AwareUTCDatetime = None
     reason: Optional[str] = None
     source: FactorySource
 
@@ -272,11 +274,14 @@ class FactoryClient:
         team_id: str,
         workload_type: Optional[str] = None,
         state: Optional[str] = None,
+        since: Optional[datetime] = None,
+        limit: Optional[int] = None,
     ) -> FactoryWorkloads:
         """Fetch the leaf workloads for a team.
 
-        ``workload_type`` (training/inference/slurm) and ``state``
-        (running/queued) are server-side filters; other narrowing happens
+        ``workload_type`` (training/inference/slurm), ``state``
+        (running/queued/completed/failed/all), ``since`` (ISO 8601) and
+        ``limit`` are server-side filters; other narrowing happens
         client-side. The backend validates team membership of the caller.
         The query parameter is named ``workload_type`` exactly as the
         FastAPI route declares it — sending ``type`` would be ignored.
@@ -286,6 +291,12 @@ class FactoryClient:
             params["workload_type"] = workload_type
         if state is not None:
             params["state"] = state
+        if since is not None:
+            normalized_since = _aware_utc(since)
+            if normalized_since is not None:
+                params["since"] = normalized_since.isoformat()
+        if limit is not None:
+            params["limit"] = limit
         response = self._get_json("/factory/workloads", params)
         try:
             workloads = FactoryWorkloads.model_validate(response)

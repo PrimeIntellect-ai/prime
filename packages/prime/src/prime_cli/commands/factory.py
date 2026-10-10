@@ -1,6 +1,7 @@
 """`prime factory` — Model Factory fleet status and workloads."""
 
-from datetime import datetime
+import re
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Protocol, Sequence, Tuple
 
 import typer
@@ -651,7 +652,14 @@ FACTORY_WORKLOADS_JSON_HELP = json_output_help(
 
 # Server-side filter values, mirrored from the public contract.
 WORKLOAD_TYPE_FILTERS = ("training", "inference", "slurm")
-WORKLOAD_STATE_FILTERS = ("running", "queued")
+WORKLOAD_STATE_FILTERS = ("running", "queued", "completed", "failed", "all")
+# Terminal (or mixed-history) queries: larger result sets — the DURATION
+# column appears and a default --limit applies.
+TERMINAL_QUERY_STATES = ("completed", "failed", "all")
+WORKLOAD_TERMINAL_STATES = ("completed", "failed")
+# History queries can be large; the server caps at 200 rows.
+WORKLOAD_LIMIT_MAX = 200
+WORKLOAD_TERMINAL_DEFAULT_LIMIT = 50
 
 # Plain-language row-group names for degraded sources; the internal source
 # enum values never appear in their own right.
@@ -754,8 +762,64 @@ def _workload_owner_cell(workload: FactoryWorkload) -> str:
     return rich_escape(owner.display_name)
 
 
+def _parse_since(value: str) -> datetime:
+    """Parse --since: Nd (days ago), Nh (hours ago), or an ISO 8601 stamp."""
+    text = value.strip()
+    days = re.fullmatch(r"(\d+)d", text)
+    if days:
+        return datetime.now(timezone.utc) - timedelta(days=int(days.group(1)))
+    hours = re.fullmatch(r"(\d+)h", text)
+    if hours:
+        return datetime.now(timezone.utc) - timedelta(hours=int(hours.group(1)))
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        raise ValueError(f"Invalid --since '{text}'.") from None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _format_duration(started: datetime, ended: datetime) -> str:
+    """Compact span humanization for the DURATION column."""
+    seconds = int((ended - started).total_seconds())
+    if seconds < 0:
+        return "[dim]-[/dim]"
+    days, remainder = divmod(seconds, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes = remainder // 60
+    if days:
+        text = f"{days}d"
+        if hours:
+            text += f" {hours}h"
+        return text
+    if hours:
+        text = f"{hours}h"
+        if minutes:
+            text += f" {minutes}m"
+        return text
+    if minutes:
+        return f"{minutes}m"
+    return f"{seconds}s"
+
+
+def _workload_duration_cell(workload: FactoryWorkload) -> str:
+    """Run duration for terminal rows; dashes when the span is unknown."""
+    if (
+        workload.started_at is None
+        or workload.ended_at is None
+        or workload.state not in WORKLOAD_TERMINAL_STATES
+    ):
+        return "[dim]-[/dim]"
+    return _format_duration(workload.started_at, workload.ended_at)
+
+
 def _workload_age_cell(workload: FactoryWorkload) -> str:
-    """Run age for started work, wait age for queued/never-started work."""
+    """Ended-relative age for terminal rows; run/wait age for live ones."""
+    if workload.state in WORKLOAD_TERMINAL_STATES:
+        if workload.ended_at is None:
+            return "[dim]-[/dim]"
+        return f"{human_age(workload.ended_at)} ago"
     if workload.state == "queued":
         # A requeued row keeps its historical started_at; the documented
         # wait age must come from created_at, not from the old run.
@@ -794,7 +858,7 @@ def _workload_state_cell(workload: FactoryWorkload) -> str:
     return cell
 
 
-def _render_workloads_table(rows: List[FactoryWorkload]) -> Table:
+def _render_workloads_table(rows: List[FactoryWorkload], show_duration: bool = False) -> Table:
     table = Table(show_header=True, header_style="bold", show_lines=False)
     table.add_column("ID", style="cyan")
     table.add_column("TYPE", style="white")
@@ -804,6 +868,10 @@ def _render_workloads_table(rows: List[FactoryWorkload]) -> Table:
     table.add_column("STATE")
     table.add_column("GPU A/R", justify="right")
     table.add_column("AGE", justify="right")
+    # The DURATION column appears only for terminal/history queries; the
+    # live squeue view is unchanged.
+    if show_duration:
+        table.add_column("DURATION", justify="right")
     # The REASON column exists only when the backend supplied coarse
     # blocking/waiting labels; it is never invented client-side.
     show_reason = any(row.reason for row in rows)
@@ -821,6 +889,8 @@ def _render_workloads_table(rows: List[FactoryWorkload]) -> Table:
             _workload_gpu_cell(row),
             _workload_age_cell(row),
         ]
+        if show_duration:
+            cells.append(_workload_duration_cell(row))
         if show_reason:
             cells.append(rich_escape(row.reason) if row.reason else "[dim]-[/dim]")
         table.add_row(*cells)
@@ -868,7 +938,21 @@ def factory_workloads(
     type: Optional[str] = typer.Option(
         None, "--type", help="Filter by workload type: training, inference, or slurm"
     ),
-    state: Optional[str] = typer.Option(None, "--state", help="Filter by state: running or queued"),
+    state: Optional[str] = typer.Option(
+        None,
+        "--state",
+        help="Filter by state: running, queued, completed, failed, or all",
+    ),
+    since: Optional[str] = typer.Option(
+        None,
+        "--since",
+        help="Only workloads after this time: Nd, Nh, or an ISO 8601 timestamp",
+    ),
+    limit: Optional[int] = typer.Option(
+        None,
+        "--limit",
+        help="Maximum rows to fetch (1-200; 50 by default for terminal queries)",
+    ),
     user: Optional[str] = typer.Option(None, "--user", help="Filter by owner display name"),
     cluster: Optional[str] = typer.Option(None, "--cluster", help="Filter by cluster display name"),
     json_output: bool = typer.Option(
@@ -905,6 +989,24 @@ def factory_workloads(
             f"Choose one of: {', '.join(WORKLOAD_STATE_FILTERS)}."
         )
         raise typer.Exit(1)
+    since_at: Optional[datetime] = None
+    if since is not None:
+        try:
+            since_at = _parse_since(since)
+        except ValueError as e:
+            # Render the parse error plainly; never leak internals.
+            err_console.print(f"[red]Error:[/red] {rich_escape(str(e))}")
+            err_console.print("[dim]Use Nd, Nh, or an ISO 8601 timestamp.[/dim]")
+            raise typer.Exit(1)
+    if limit is not None and not 1 <= limit <= WORKLOAD_LIMIT_MAX:
+        err_console.print(
+            f"[red]Error:[/red] Invalid --limit '{limit}'. "
+            f"Choose a value between 1 and {WORKLOAD_LIMIT_MAX}."
+        )
+        raise typer.Exit(1)
+    if limit is None and state in TERMINAL_QUERY_STATES:
+        # History queries can be large; fetch a bounded page by default.
+        limit = WORKLOAD_TERMINAL_DEFAULT_LIMIT
 
     team_id = team or Config().team_id
     if not team_id:
@@ -920,7 +1022,7 @@ def factory_workloads(
     try:
         api_client = APIClient()
         workloads = FactoryClient(api_client).get_workloads(
-            team_id, workload_type=type, state=state
+            team_id, workload_type=type, state=state, since=since_at, limit=limit
         )
     except APIError as e:
         # Escape upstream error text: raw brackets (e.g. pydantic
@@ -985,7 +1087,8 @@ def factory_workloads(
         console.print(f"[yellow]{warning}[/yellow]")
 
     if available:
-        console.print(_render_workloads_table(available))
+        show_duration = state in TERMINAL_QUERY_STATES
+        console.print(_render_workloads_table(available, show_duration=show_duration))
         console.print()
         console.print(f"[dim]{IN_USE_NOTE}[/dim]")
         return

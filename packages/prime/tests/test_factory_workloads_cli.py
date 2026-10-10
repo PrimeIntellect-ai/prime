@@ -41,18 +41,25 @@ def _workload(
     **overrides: Any,
 ) -> Dict[str, Any]:
     now = datetime.now(timezone.utc)
+    native_states = {
+        "running": "RUNNING",
+        "queued": "PENDING",
+        "completed": "COMPLETED",
+        "failed": "FAILED",
+    }
     workload: Dict[str, Any] = {
         "id": id_,
         "type": type_,
         "cluster_display_name": "research-b300",
         "name": f"{type_}-job",
         "state": state,
-        "native_state": "RUNNING" if state == "running" else "PENDING",
+        "native_state": native_states.get(state, state.upper()),
         "owner": {"kind": "slurm" if type_ == "slurm" else "prime", "display_name": "carol"},
         "requested_gpus": 32,
-        "allocated_gpus": 32 if state == "running" else None,
+        "allocated_gpus": 32 if state in ("running", "completed", "failed") else None,
         "created_at": _iso(now - timedelta(hours=2)),
         "started_at": _iso(now - timedelta(minutes=30)) if state == "running" else None,
+        "ended_at": _iso(now - timedelta(minutes=5)) if state in ("completed", "failed") else None,
         "source": _source(type_),
     }
     workload.update(overrides)
@@ -821,3 +828,166 @@ def test_workloads_json_filter_does_not_collapse_duplicate_ids(
     assert result.exit_code == 0, result.output
     assert len(data["workloads"]) == 1
     assert data["workloads"][0]["owner"]["display_name"] == "alice"
+
+
+def test_workloads_terminal_state_renders_duration_and_ended_age(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A completed run 25 minutes ago that ran for 25 minutes: DURATION
+    # column present, AGE ended-relative ("25m ago"), STATE terminal.
+    row = _workload("training:run-1", "training", "completed")
+    row["started_at"] = _iso(datetime.now(timezone.utc) - timedelta(minutes=50))
+    row["ended_at"] = _iso(datetime.now(timezone.utc) - timedelta(minutes=25))
+    _install(monkeypatch, _workloads_payload([row]))
+
+    result = runner.invoke(app, ["factory", "workloads", "--state", "completed"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "DURATION" in output
+    assert "25m ago" in output
+    assert "25m" in output  # duration span
+    assert "completed" in output
+    # the live-view columns are unchanged
+    assert "GPU A/R" in output and "AGE" in output
+
+
+def test_workloads_default_view_has_no_duration_column(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install(monkeypatch, _workloads_payload(_default_rows()))
+
+    result = runner.invoke(app, ["factory", "workloads"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "DURATION" not in output
+    assert "ago" not in output  # live ages stay bare, e.g. "30m"
+
+
+def test_workloads_state_all_shows_duration_and_default_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    row = _workload("training:run-1", "training", "completed")
+    dummy = _install(monkeypatch, _workloads_payload([row]))
+
+    result = runner.invoke(app, ["factory", "workloads", "--state", "all"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "DURATION" in output
+    # terminal queries page by default
+    assert dummy.calls[0]["params"]["limit"] == 50
+
+
+def test_workloads_live_state_sends_no_default_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dummy = _install(monkeypatch, _workloads_payload(_default_rows()))
+
+    result = runner.invoke(app, ["factory", "workloads", "--state", "running"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    assert "limit" not in dummy.calls[0]["params"]
+
+
+def test_workloads_since_parsing_forms(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Nd form
+    dummy = _install(monkeypatch, _workloads_payload(_default_rows()))
+    result = runner.invoke(app, ["factory", "workloads", "--since", "2d"], env=TEST_ENV)
+    assert result.exit_code == 0, result.output
+    since_value = dummy.calls[0]["params"]["since"]
+    parsed = datetime.fromisoformat(since_value.replace("Z", "+00:00"))
+    assert abs((datetime.now(timezone.utc) - parsed).total_seconds() - 2 * 86400) < 60
+
+    # Nh form
+    _install(monkeypatch, _workloads_payload(_default_rows()))
+    result = runner.invoke(app, ["factory", "workloads", "--since", "3h"], env=TEST_ENV)
+    assert result.exit_code == 0, result.output
+
+    # ISO form
+    _install(monkeypatch, _workloads_payload(_default_rows()))
+    iso = "2026-10-09T00:00:00Z"
+    result = runner.invoke(app, ["factory", "workloads", "--since", iso], env=TEST_ENV)
+    assert result.exit_code == 0, result.output
+
+    # bad input: plain error, exit 1
+    _install(monkeypatch, _workloads_payload(_default_rows()))
+    bad = runner.invoke(app, ["factory", "workloads", "--since", "yesterday-ish"], env=TEST_ENV)
+    bad_output = strip_ansi(bad.output)
+    assert bad.exit_code == 1, bad.output
+    assert "Invalid --since" in bad_output
+    assert "Use Nd, Nh, or an ISO 8601 timestamp." in bad_output
+
+
+def test_workloads_limit_bounding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dummy = _install(monkeypatch, _workloads_payload(_default_rows()))
+    ok = runner.invoke(
+        app, ["factory", "workloads", "--state", "completed", "--limit", "200"], env=TEST_ENV
+    )
+    assert ok.exit_code == 0, ok.output
+    assert dummy.calls[0]["params"]["limit"] == 200
+
+    _install(monkeypatch, _workloads_payload(_default_rows()))
+    too_big = runner.invoke(app, ["factory", "workloads", "--limit", "500"], env=TEST_ENV)
+    too_big_output = strip_ansi(too_big.output)
+    assert too_big.exit_code == 1, too_big.output
+    assert "between 1 and 200" in too_big_output
+
+    _install(monkeypatch, _workloads_payload(_default_rows()))
+    zero = runner.invoke(app, ["factory", "workloads", "--limit", "0"], env=TEST_ENV)
+    assert zero.exit_code == 1, zero.output
+
+
+def test_workloads_null_ended_at_renders_dashes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A terminal row without ended_at: AGE and DURATION stay dashes —
+    # never invented times.
+    row = _workload("training:run-1", "training", "failed")
+    row["started_at"] = _iso(datetime.now(timezone.utc) - timedelta(hours=1))
+    row["ended_at"] = None
+    _install(monkeypatch, _workloads_payload([row]))
+
+    result = runner.invoke(app, ["factory", "workloads", "--state", "failed"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "failed" in output
+    assert " ago" not in output  # no invented ended age
+
+
+def test_workloads_user_cluster_filters_work_over_terminal_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = [
+        _workload("training:run-1", "training", "completed"),
+        _workload("training:run-2", "training", "completed"),
+    ]
+    rows[1]["owner"] = {"kind": "prime", "display_name": "alice"}
+    rows[1]["cluster_display_name"] = "office-a100"
+    _install(monkeypatch, _workloads_payload(rows))
+
+    result = runner.invoke(
+        app,
+        [
+            "factory",
+            "workloads",
+            "--state",
+            "completed",
+            "--user",
+            "alice",
+            "--cluster",
+            "office-a100",
+        ],
+        env=TEST_ENV,
+    )
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "training:run-2" in output
+    assert "training:run-1" not in output

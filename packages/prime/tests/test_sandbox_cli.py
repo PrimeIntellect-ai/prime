@@ -1231,3 +1231,74 @@ def test_checkpoint_delete_by_ids_and_sandbox(monkeypatch: pytest.MonkeyPatch) -
     both = runner.invoke(app, ["sandbox", "checkpoint", "delete", "c1", "--sandbox", "sbx-1"])
     assert both.exit_code == 1
     assert calls == ["c1", "c2", "c3", ("sandbox", "sbx-1")]
+
+
+class _RunSandboxClient:
+    """Fake sandbox client that returns canned command output."""
+
+    stdout = ""
+    stderr = ""
+    exit_code = 0
+    error: Exception | None = None
+
+    def __init__(self, _client: Any) -> None:
+        pass
+
+    def execute_command(self, *_args: Any, **_kwargs: Any) -> Any:
+        if self.error is not None:
+            raise self.error
+        return SimpleNamespace(stdout=self.stdout, stderr=self.stderr, exit_code=self.exit_code)
+
+
+def _install_run_client(monkeypatch: pytest.MonkeyPatch, **attrs: Any) -> None:
+    _configure_cli(monkeypatch)
+    monkeypatch.setattr("prime_cli.commands.sandbox.APIClient", lambda: object())
+    monkeypatch.setattr(
+        "prime_cli.commands.sandbox.SandboxClient",
+        type("FakeSandboxClient", (_RunSandboxClient,), attrs),
+    )
+
+
+def test_sandbox_run_prints_bracket_output_verbatim(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Sandbox output is not markup: bracket text must not kill the command."""
+    _install_run_client(
+        monkeypatch, stdout="[/INFO] build finished", stderr="[/ERROR] boom", exit_code=0
+    )
+
+    result = runner.invoke(app, ["sandbox", "run", "sbx-1", "--", "echo", "hi"])
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "[/INFO] build finished" in output
+    assert "[/ERROR] boom" in output
+
+
+def test_sandbox_run_escapes_bracket_text_in_its_own_arguments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Arguments are echoed with markup escaped, so brackets render literally."""
+    _install_run_client(monkeypatch)
+
+    result = runner.invoke(
+        app,
+        ["sandbox", "run", "sbx-1", "-w", "[/INFO]", "--", "echo", "[/INFO]"],
+    )
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "Working directory: [/INFO]" in output
+    assert "Executing command: echo '[/INFO]'" in output
+
+
+def test_sandbox_run_escapes_bracket_text_in_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An API error body with brackets still reports as an error, not a traceback."""
+    from prime_sandboxes import APIError
+
+    _install_run_client(monkeypatch, error=APIError("HTTP 500: [/ERROR] upstream said no"))
+
+    result = runner.invoke(app, ["sandbox", "run", "sbx-1", "--", "echo", "hi"])
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 1
+    assert "[/ERROR] upstream said no" in output
+    assert "Unexpected error" not in output

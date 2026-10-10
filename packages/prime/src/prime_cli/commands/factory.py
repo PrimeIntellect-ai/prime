@@ -438,12 +438,34 @@ def _degraded_kinds(
         if source.status != "ok" and source.kind not in seen:
             seen.add(source.kind)
             degraded.append(source)
+    newest_by_kind: Dict[str, FactorySource] = {}
     for row in rows:
         kind = _workload_kind(row)
-        if kind not in envelope_by_kind and row.source.status != "ok" and kind not in seen:
-            seen.add(kind)
-            degraded.append(row.source)
+        if kind in envelope_by_kind or row.source.status == "ok":
+            continue
+        current = newest_by_kind.get(kind)
+        if current is None or _is_newer_observed_at(row.source, current):
+            # Several degraded rows may carry fallback evidence for the
+            # same kind; the newest observation is the honest last-seen.
+            newest_by_kind[kind] = row.source
+    for source in newest_by_kind.values():
+        if source.kind not in seen:
+            seen.add(source.kind)
+            degraded.append(source)
     return degraded
+
+
+def _is_newer_observed_at(candidate: FactorySource, current: FactorySource) -> bool:
+    """True when candidate's observation is more recent than current's.
+
+    A missing observed_at on the incumbent never beats an observed
+    candidate; two missing observed_ats keep the first (stable order).
+    """
+    if candidate.observed_at is None:
+        return False
+    if current.observed_at is None:
+        return True
+    return candidate.observed_at > current.observed_at
 
 
 def _jobs_unavailable_line(kind: str, source: Optional[FactorySource]) -> str:

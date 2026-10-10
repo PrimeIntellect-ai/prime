@@ -1,11 +1,28 @@
 """Model Factory fleet status API client."""
 
-from datetime import datetime
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timezone
+from typing import Annotated, Any, Dict, List, Optional
 
-from pydantic import AliasChoices, BaseModel, Field, PrivateAttr, ValidationError
+from pydantic import AfterValidator, AliasChoices, BaseModel, Field, PrivateAttr, ValidationError
 
 from prime_cli.core import APIClient, APIError
+
+
+def _aware_utc(value: Optional[datetime]) -> Optional[datetime]:
+    """Normalize a parsed timestamp to offset-aware UTC.
+
+    Pydantic accepts both offset-aware strings (``...Z``) and naive ones;
+    mixing them in later comparisons (oldest-source, ages) raises TypeError
+    or compares across wrong bases. One timezone, always UTC.
+    """
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+AwareUTCDatetime = Annotated[Optional[datetime], AfterValidator(_aware_utc)]
 
 
 class FactoryPool(BaseModel):
@@ -32,7 +49,7 @@ class FactorySource(BaseModel):
 
     kind: str
     status: str
-    observed_at: Optional[datetime] = None
+    observed_at: AwareUTCDatetime = None
 
 
 class FactoryCluster(BaseModel):
@@ -57,7 +74,7 @@ class FactoryStatus(BaseModel):
     """Response envelope for ``GET /api/v1/factory/status``."""
 
     schema_version: int
-    as_of: Optional[datetime] = None
+    as_of: AwareUTCDatetime = None
     # Required: a 200 response without `clusters` is a malformed payload,
     # not an empty fleet — keep those distinguishable.
     clusters: List[FactoryCluster]
@@ -101,8 +118,8 @@ class FactoryWorkload(BaseModel):
     owner: FactoryWorkloadOwner
     requested_gpus: Optional[int] = None
     allocated_gpus: Optional[int] = None
-    created_at: Optional[datetime] = None
-    started_at: Optional[datetime] = None
+    created_at: AwareUTCDatetime = None
+    started_at: AwareUTCDatetime = None
     reason: Optional[str] = None
     source: FactorySource
 
@@ -111,7 +128,7 @@ class FactoryWorkloads(BaseModel):
     """Response envelope for ``GET /api/v1/factory/workloads``."""
 
     schema_version: int
-    as_of: Optional[datetime] = None
+    as_of: AwareUTCDatetime = None
     # Required: a 200 response without `workloads` is a malformed payload,
     # not an empty fleet — keep those distinguishable.
     workloads: List[FactoryWorkload]
@@ -157,7 +174,7 @@ class FactoryNodes(BaseModel):
     """Response envelope for ``GET /api/v1/factory/nodes``."""
 
     schema_version: int
-    as_of: Optional[datetime] = None
+    as_of: AwareUTCDatetime = None
     # Required: a 200 response without `clusters` is a malformed payload,
     # not an empty fleet — keep those distinguishable.
     clusters: List[FactoryNodesCluster]

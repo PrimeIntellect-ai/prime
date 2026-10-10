@@ -892,3 +892,32 @@ def test_factory_status_missing_capacity_entry_fails_closed(
     assert result.exit_code == 0, result.output
     assert "workload breakdown unavailable" in output
     assert "no workloads reported" not in output
+
+
+def test_factory_status_mixed_naive_and_aware_timestamps_compare_correctly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A response mixing naive and offset-aware timestamps must not crash
+    # source comparison, and ages must be computed on one UTC base.
+    now = datetime.now(timezone.utc)
+    naive_two_hours_ago = (now - timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S")
+    aware_one_hour_ago = (
+        (now - timedelta(hours=1)).astimezone(timezone(timedelta(hours=2))).isoformat()
+    )
+    payload = _status_payload(
+        sources=[
+            {"kind": "capacity", "status": "stale", "observed_at": naive_two_hours_ago},
+            {"kind": "slurm", "status": "stale", "observed_at": aware_one_hour_ago},
+            _source("training", age_seconds=10),
+            _source("inference", age_seconds=10),
+        ],
+    )
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    # The oldest observation (naive -2h, read as UTC) drives the phrase.
+    assert "last seen 2h ago" in output
+    assert "last seen 1h ago" not in output

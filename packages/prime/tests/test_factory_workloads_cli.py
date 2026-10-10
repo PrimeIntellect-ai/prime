@@ -545,3 +545,44 @@ def test_workloads_filtered_empty_distinguished_from_genuinely_empty(
     assert plain.exit_code == 0, plain.output
     assert "No factory workloads found." in plain_output
     assert "match the given filters" not in plain_output
+
+
+def test_workloads_newest_degraded_row_source_per_kind(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Envelope omits the slurm entry; several degraded rows provide fallback
+    # evidence. The warning must use the NEWEST observation for the kind,
+    # not the first row's.
+    rows = _default_rows()
+    for row in rows:
+        row["source"] = _source("slurm", status="stale", age_seconds=5 * 3600)
+    rows[2]["source"] = _source("slurm", status="stale", age_seconds=120)  # newest
+    payload = _workloads_payload(rows, sources=[_source("training"), _source("inference")])
+
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(app, ["factory", "workloads"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "slurm jobs unavailable" in output
+    assert "scheduler data last seen 2m ago" in output
+    assert "5h ago" not in output
+
+
+def test_workloads_degraded_fallback_prefers_observed_over_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A first degraded row without observed_at never beats an observed one.
+    rows = _default_rows()
+    for row in rows:
+        row["source"] = {"kind": "slurm", "status": "stale", "observed_at": None}
+    rows[2]["source"] = _source("slurm", status="stale", age_seconds=180)
+    payload = _workloads_payload(rows, sources=[_source("training"), _source("inference")])
+
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(app, ["factory", "workloads"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "scheduler data last seen 3m ago" in output
+    assert "unavailable" in output

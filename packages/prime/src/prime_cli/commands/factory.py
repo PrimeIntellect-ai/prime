@@ -52,6 +52,7 @@ FACTORY_NODES_JSON_HELP = json_output_help(
 )
 
 IN_USE_NOTE = "in-use = GPUs held by running jobs (not GPU-activity measurements)"
+UNUSED_NOTE = "unused = reserved by a workload but not running anything — not free capacity"
 
 # Plain-language names for source kinds shown to users. The internal enum
 # values (e.g. "capacity") never appear in table output.
@@ -190,7 +191,7 @@ def _render_pool_table(pools: List[FactoryPool]) -> Table:
     table.add_column("WORKLOAD", style="cyan")
     table.add_column("RESERVED", style="white", justify="right")
     table.add_column("IN USE", style="green", justify="right")
-    table.add_column("IDLE INSIDE", style="blue", justify="right")
+    table.add_column("UNUSED", style="blue", justify="right")
     table.add_column("UNKNOWN", style="yellow", justify="right")
 
     for pool in pools:
@@ -253,65 +254,46 @@ def _render_workloads_section(
     if footnote:
         console.print()
         console.print(f"[dim]{IN_USE_NOTE}[/dim]")
+        console.print(f"[dim]{UNUSED_NOTE}[/dim]")
         console.print("[dim]drill down: prime factory nodes[/dim]")
 
 
-def _cluster_aggregates_known(cluster: FactoryCluster, source_status: dict) -> bool:
-    """False when any ACTIVE contributor's numbers are unknowable.
+def _pool_evidence_fresh(pool: FactoryPool, source_status: dict) -> bool:
+    """True when this group's numbers may render.
 
-    An allocation whose source entry is stale/errored — or missing while the
-    row claims GPUs — can never be summed honestly: the surviving groups'
-    totals would present incomplete evidence as a complete number. The
-    backend's designed inactive signal (an all-zero row without a source
-    entry) is complete evidence of nothing and keeps the sums knowable.
+    A stale/errored source entry — or a missing one on non-zero claims —
+    is unknown evidence. The all-zero row without a source entry is the
+    backend's designed inactive signal and keeps its honest zeros.
     """
-    for pool in cluster.pools:
-        if pool.type not in source_status:
-            if not _pool_is_all_zero(pool):
-                return False
-        elif source_status[pool.type] != "ok":
-            return False
-    return True
+    if pool.type not in source_status:
+        return _pool_is_all_zero(pool)
+    return source_status[pool.type] == "ok"
 
 
-def _fresh_groups(cluster: FactoryCluster, source_status: dict) -> List[FactoryPool]:
-    """Workload groups whose numbers may render.
+def _aggregate_cell(cluster: FactoryCluster, source_status: dict, attr: str) -> str:
+    """One GPU-metric aggregate cell with honest partial sums.
 
-    A group whose source entry is stale/errored, or missing for non-zero
-    claims, is excluded: numbers from degraded evidence never render. The
-    all-zero row without a source entry is the backend's designed inactive
-    signal and keeps its honest zeros.
-    """
-    fresh: List[FactoryPool] = []
-    for pool in cluster.pools:
-        if pool.type not in source_status:
-            if not _pool_is_all_zero(pool):
-                continue
-        elif source_status[pool.type] != "ok":
-            continue
-        fresh.append(pool)
-    return fresh
-
-
-def _sum_group_metric(groups: List[FactoryPool], attr: str) -> Optional[int]:
-    """Sum one GPU metric over fresh groups.
-
-    A null value on any group makes the cluster's total for that metric
-    unknowable — the sum of the remaining groups would present incomplete
-    evidence as a complete number. Return None (the caller renders an
-    em-dash) instead.
+    Plain number when every group contributes (complete evidence);
+    ``<sum>+`` when at least one group contributes AND at least one is
+    unknown — the total is at least the shown number; an em-dash when
+    every group is unknown. Unobserved values count as unknown for their
+    metric; zeros never masquerade as complete totals.
     """
     total = 0
-    for pool in groups:
+    contributors = 0
+    unknown = 0
+    for pool in cluster.pools:
         value = getattr(pool, attr)
-        if value is None:
-            return None
-        total += value
-    return total if groups else None
-
-
-def _compact_metric_cell(value: Optional[int]) -> str:
-    return str(value) if value is not None else "—"
+        if _pool_evidence_fresh(pool, source_status) and value is not None:
+            total += value
+            contributors += 1
+        else:
+            unknown += 1
+    if contributors and not unknown:
+        return str(total)
+    if contributors:
+        return f"{total}+"
+    return "—"
 
 
 def _compact_nodes_cell(
@@ -334,41 +316,40 @@ def _compact_nodes_cell(
     return cell
 
 
-def _join_data_phrases(data_cell: str, phrase: str) -> str:
-    if data_cell == "fresh":
-        return phrase
-    if phrase in data_cell:
-        return data_cell
-    return f"{data_cell}, {phrase}"
+def _short_gpu_type(gpu_type: Optional[str]) -> str:
+    """Compact GPU model for the glance: 'B300_262GB' -> 'B300'."""
+    if not gpu_type:
+        return "—"
+    return rich_escape(gpu_type.split("_")[0])
 
 
-def _compact_data_cell(cluster: FactoryCluster) -> str:
-    """Freshness of the cluster's sources, plain words, internal kinds invisible."""
-    source_status = {s.kind: s.status for s in cluster.sources}
-    phrases: List[str] = []
-    for source in cluster.sources:
-        if source.status != "ok":
-            if source.observed_at is not None:
-                phrases.append(
-                    f"{_friendly_data_name(source.kind)} {human_age(source.observed_at)} ago"
-                )
-            else:
-                phrases.append(f"{_friendly_data_name(source.kind)} unavailable")
-    mentioned: set = set()
-    for pool in cluster.pools:
-        # Fail closed: an allocation claiming GPUs without a source entry
-        # is unknown evidence — the DATA cell must describe the whole row.
-        if pool.type not in source_status and not _pool_is_all_zero(pool):
-            name = _friendly_data_name(pool.type)
-            if name not in mentioned:
-                mentioned.add(name)
-                phrases.append(f"{name} unavailable")
-    if "capacity" not in source_status:
-        # Fail closed: a missing capacity entry is unknown evidence.
-        phrases.append("node data unavailable")
-    if not phrases:
+def _compact_data_badge(
+    cluster: FactoryCluster,
+    node_source: Optional[FactorySource],
+    nodes_cell_ok: bool,
+) -> str:
+    """The single-token staleness badge: 'fresh' | '<age>' | 'partial'.
+
+    The age form is the worst (oldest) degraded source age. 'partial' marks
+    evidence that cannot be aged honestly: missing entries, unavailable
+    sources, or a node view that could not be joined.
+    """
+    source_kinds = {s.kind for s in cluster.sources}
+    degraded = [s for s in cluster.sources if s.status != "ok"]
+    if nodes_cell_ok and node_source is not None and node_source.status != "ok":
+        degraded.append(node_source)
+    missing = "capacity" not in source_kinds or any(
+        pool.type not in source_kinds and not _pool_is_all_zero(pool) for pool in cluster.pools
+    )
+    unavailable = not nodes_cell_ok or missing or any(s.observed_at is None for s in degraded)
+    if unavailable:
+        return "partial"
+    if not degraded:
         return "fresh"
-    return ", ".join(phrases)
+    return human_age(min(s.observed_at for s in degraded))
+
+
+PARTIAL_LEGEND = "partial = some workload data unavailable — run with --verbose for which"
 
 
 # The best-effort node view must never stall the status glance.
@@ -423,24 +404,31 @@ def _render_status_table(
     one cluster in the original payload, each row is prefixed with its
     original 1-based index — the selector `--cluster` error messages direct
     users to.
+
+    Honesty rules carry into the sums: a plain number only under complete
+    evidence; ``<sum>+`` when some groups are known and others are not;
+    em-dashes when a metric is entirely unknown — never zeros disguised as
+    totals. The DATA badge is one short token; the legend under the table
+    explains 'partial'.
     """
-    any_degraded = False
+    any_partial = False
     table = Table(show_header=True, header_style="bold", show_lines=False)
     table.add_column("CLUSTER", style="cyan")
     table.add_column("GPU")
-    table.add_column("STATUS")
+    table.add_column("TOTAL", justify="right")
     table.add_column("HELD", justify="right")
     table.add_column("IN USE", justify="right")
-    # Idle inside the reservation — never readable as free-to-start capacity.
-    table.add_column("IDLE INSIDE", justify="right")
+    # Unused = reserved by a workload but not running anything — not free
+    # capacity.
+    table.add_column("UNUSED", justify="right")
+    table.add_column("FREE", justify="right")
     table.add_column("NODES", justify="right")
+    table.add_column("STATUS")
     table.add_column("DATA")
 
     for position, cluster in enumerate(clusters):
         source_status = {s.kind: s.status for s in cluster.sources}
         capacity_ok = source_status.get("capacity") == "ok"
-        aggregates_known = capacity_ok and _cluster_aggregates_known(cluster, source_status)
-        groups = _fresh_groups(cluster, source_status) if aggregates_known else []
         original_index = selected[position] if selected is not None else position
         nodes_cluster, nodes_source = (
             node_pairs[original_index] if original_index < len(node_pairs) else (None, None)
@@ -459,34 +447,44 @@ def _render_status_table(
             # Duplicate display names make the equal-name identity check
             # blind to replacement; never risk cross-wired counts.
             nodes_cluster, nodes_source = None, None
-        data_cell = _compact_data_cell(cluster)
         nodes_cell = _compact_nodes_cell(nodes_cluster, nodes_source)
-        if not nodes_fetch_ok or nodes_cell == "—":
-            # DATA describes the whole row: a missing, degraded, or
-            # unjoinable node view is not "fresh".
-            data_cell = _join_data_phrases(data_cell, "node view unavailable")
-        if data_cell != "fresh":
-            any_degraded = True
+        nodes_cell_ok = nodes_fetch_ok and nodes_cell != "—"
+        data_badge = _compact_data_badge(cluster, nodes_source, nodes_cell_ok)
+        if data_badge == "partial":
+            any_partial = True
+        metric_cells = {
+            attr: _aggregate_cell(cluster, source_status, attr) if capacity_ok else "—"
+            for attr in ("reserved_gpus", "in_use_gpus", "idle_inside_gpus")
+        }
+        if any(cell.endswith("+") for cell in metric_cells.values()):
+            any_partial = True
         multi = (original_count if original_count is not None else len(clusters)) > 1
         name_cell = rich_escape(cluster.display_name)
         if multi:
             # 1-based, matching the --cluster selector the error messages
             # direct users to (and the verbose view's numbering).
-            name_cell = f"[cyan]\[{original_index + 1}][/cyan] {name_cell}"
+            name_cell = f"[cyan]\\[{original_index + 1}][/cyan] {name_cell}"
+        free_cell = (
+            str(cluster.unassigned_gpus)
+            if capacity_ok and cluster.unassigned_gpus is not None
+            else "—"
+        )
         table.add_row(
             name_cell,
-            rich_escape(cluster.gpu_type) if cluster.gpu_type else "—",
-            _styled_status(cluster.status),
-            _compact_metric_cell(_sum_group_metric(groups, "reserved_gpus")),
-            _compact_metric_cell(_sum_group_metric(groups, "in_use_gpus")),
-            _compact_metric_cell(_sum_group_metric(groups, "idle_inside_gpus")),
+            _short_gpu_type(cluster.gpu_type),
+            str(cluster.total_gpus) if cluster.total_gpus is not None else "—",
+            metric_cells["reserved_gpus"],
+            metric_cells["in_use_gpus"],
+            metric_cells["idle_inside_gpus"],
+            free_cell,
             nodes_cell,
-            data_cell,
+            _styled_status(cluster.status),
+            data_badge,
         )
     console.print(table)
-    if any_degraded:
-        # At most one dim line under the table, nothing else.
-        console.print("[dim]degraded sources — details: prime factory status --verbose[/dim]")
+    if any_partial:
+        # One dim legend line, nothing else.
+        console.print(f"[dim]{PARTIAL_LEGEND}[/dim]")
 
 
 def _select_cluster_indices(

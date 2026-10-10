@@ -167,7 +167,7 @@ def test_factory_status_table_renders_pools_and_allocations(
     assert "research-b300" in output
     assert "128 B300 GPUs" in output
     assert "online" in output
-    assert "IDLE INSIDE" in output
+    assert "UNUSED" in output
     assert "unassigned" in output and "16" in output
     for pool_type in ("training", "inference", "slurm"):
         assert pool_type in output
@@ -316,7 +316,7 @@ def test_factory_status_mixed_fresh_and_stale_sources_render_only_fresh_pools(
     assert result.exit_code == 0, result.output
     # Fresh pools render.
     assert "training" in output and "inference" in output
-    assert "IDLE INSIDE" in output and "unassigned" in output
+    assert "UNUSED" in output and "unassigned" in output
     assert "in-use = GPUs held by running jobs" in output
     # The stale pool is aggregated into one friendly line naming it.
     assert "slurm breakdown unavailable — scheduler data last seen 2h ago" in output
@@ -990,38 +990,59 @@ def test_factory_status_compact_table_is_the_default(monkeypatch: pytest.MonkeyP
     assert "in-use = GPUs held" not in output
     assert "drill down" not in output
     assert "RESERVED" not in output  # the detailed allocation table is gone
-    for header in ("CLUSTER", "GPU", "STATUS", "HELD", "IN USE", "IDLE", "NODES", "DATA"):
+    for header in (
+        "CLUSTER",
+        "GPU",
+        "TOTAL",
+        "HELD",
+        "IN USE",
+        "UNUSED",
+        "FREE",
+        "NODES",
+        "STATUS",
+        "DATA",
+    ):
         assert header in output
     assert "research-b300" in output
     assert "B300" in output
     assert "online" in output
-    # glance facts: reserved sum 112, observed leaf sum 80, idle 32
-    assert "112" in output and "80" in output and "32" in output
-    # node summary from the nodes endpoint (2 ready of 2)
+    # glance facts with denominators: total 128, held 112, in use 80,
+    # unused 32, free 16, nodes 2/2 — complete evidence, plain numbers
+    assert "128" in output and "112" in output and "80" in output
+    assert " 32 " in output and " 16 " in output
     assert "2/2" in output
     assert "fresh" in output
-    # exactly one row: no dim degraded line under the table
+    # complete rows carry no legend, no footer
     assert "degraded sources" not in output
+    assert "partial" not in output
 
 
 def test_factory_status_compact_degraded_row_renders_dashes_and_data_age(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    payload = _status_payload(sources=[_source("capacity", status="stale", age_seconds=3600)])
+    payload = _status_payload(
+        sources=[
+            _source("capacity", status="stale", age_seconds=3600),
+            _source("training", status="stale", age_seconds=3600),
+            _source("inference", status="stale", age_seconds=3600),
+            _source("slurm", status="stale", age_seconds=3600),
+        ]
+    )
     _install(monkeypatch, payload)
 
     result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
     output = strip_ansi(result.output)
 
     assert result.exit_code == 0, result.output
-    # Stale node evidence: em-dash counts, never zeros, plus a plain age.
-    assert "node data 1h ago" in output
+    # Stale node evidence: every aggregate is unknown (em-dashes, never
+    # zeros), and the DATA badge is the worst source age.
+    assert "1h" in output
     assert "fresh" not in output
-    # no stale group numbers render in HELD/IN USE/IDLE
+    assert "partial" not in output
+    # no stale group numbers render in HELD/IN USE/UNUSED, and the old
+    # footer is gone
     assert "112" not in output and "80" not in output
-    # The single dim line under the table points at --verbose.
-    assert "degraded sources — details: prime factory status --verbose" in output
-    assert output.count("degraded sources") == 1
+    assert "degraded sources" not in output
 
 
 def test_factory_status_compact_nodes_column_counts_cordoned(
@@ -1097,10 +1118,11 @@ def test_factory_status_compact_nodes_fetch_failure_degrades_to_dash(
 
     assert result.exit_code == 0, result.output
     assert "—" in output  # NODES column degraded, status row still renders
-    # DATA describes the whole row: a missing node view is not "fresh".
+    # The DATA badge marks the row partial and the one-line legend fires.
     assert "fresh" not in output
-    assert "node view unavailable" in output
-    assert "degraded sources" in output  # the dim line shows
+    assert "partial" in output
+    assert "run with --verbose for which" in output
+    assert "degraded sources" not in output  # old footer is gone
 
 
 def test_factory_status_compact_partial_degradation_shows_only_that_source(
@@ -1125,13 +1147,15 @@ def test_factory_status_compact_partial_degradation_shows_only_that_source(
     output = strip_ansi(result.output)
 
     assert result.exit_code == 0, result.output
-    assert "scheduler data 2h ago" in output
+    # The worst-source age badge; the phrase dumps are verbose-only now.
+    assert " 2h " in output
+    assert "scheduler data" not in output
     assert "fresh" not in output
-    # An active stale contributor makes every aggregate unknowable: em-dash
-    # totals, never a partial sum presented as complete (and never the
-    # stale 48 reserved either).
-    assert "—" in output
-    assert "64" not in output and "48" not in output
+    # Known pools render their partial sums with "+"; the stale slurm 48
+    # never renders; no aggregate presents a plain partial number.
+    assert "64+" in output
+    assert "48" not in output
+    assert "run with --verbose for which" in output
 
 
 def test_factory_status_json_makes_no_nodes_call(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1213,12 +1237,12 @@ def test_factory_status_compact_stale_source_numbers_never_render(
     output = strip_ansi(result.output)
 
     assert result.exit_code == 0, result.output
-    # An active stale contributor makes every aggregate unknowable: em-dash
-    # totals — never the stale 48/8/40, and never a partial sum presented
-    # as complete.
-    assert "—" in output
-    assert "64" not in output and "48" not in output and "40" not in output
-    assert "scheduler data 2h ago" in output
+    # Known pools render partial sums ("+"); the stale 48/8/40 never render,
+    # and no aggregate presents a plain partial number.
+    assert " 2h " in output
+    assert "64+" in output
+    assert "48" not in output and "40" not in output
+    assert "scheduler data" not in output
 
 
 def test_factory_status_compact_duplicate_names_pair_positionally(
@@ -1384,10 +1408,11 @@ def test_factory_status_compact_malformed_nodes_json_degrades_to_dash(
     assert result.exit_code == 0, result.output
     assert "research-b300" in output  # the status row renders
     assert "—" in output  # NODES degrades to an em-dash
-    # DATA describes the whole row: a missing node view is not "fresh".
+    # The DATA badge marks the row partial and the legend fires.
     assert "fresh" not in output
-    assert "node view unavailable" in output
-    assert "degraded sources" in output
+    assert "partial" in output
+    assert "run with --verbose for which" in output
+    assert "degraded sources" not in output
 
 
 def test_factory_status_compact_node_join_verifies_cluster_identity(
@@ -1464,7 +1489,9 @@ def test_factory_status_compact_node_join_verifies_cluster_identity(
     # DATA records the unjoinable node view instead of claiming "fresh".
     assert "—" in output
     assert "1/1" not in output
-    assert "node view unavailable" in output
+    # Unjoinable node view: partial badge + the one-line legend.
+    assert "partial" in output
+    assert "run with --verbose for which" in output
     assert "fresh" not in output
 
 
@@ -1515,13 +1542,15 @@ def test_factory_status_compact_stale_slurm_plus_inactive_zeros(
     output = strip_ansi(result.output)
 
     assert result.exit_code == 0, result.output
-    # No aggregate renders a number: the stale 16/8 never shows, and the
-    # inactive zeros never masquerade as a complete "0" total.
-    assert "16" not in output and "8" not in output
-    # a bare zero in a right-justified metric cell would render " 0 │"
+    # The inactive zeros contribute their known sums as PARTIAL totals
+    # ("0+" in all three aggregates — never a complete-looking "0"); the
+    # stale slurm reservation never adds in; FREE (16, capacity-derived)
+    # and TOTAL (128) are unaffected; the DATA badge is the stale age.
+    assert output.count("0+") >= 3
     assert " 0 │" not in output
-    assert "    — " in output
-    assert "scheduler data 2h ago" in output
+    assert "128" in output and " 16 " in output
+    assert "2h" in output
+    assert "scheduler data" not in output
 
 
 def test_factory_status_compact_missing_training_plus_healthy_slurm(
@@ -1547,12 +1576,15 @@ def test_factory_status_compact_missing_training_plus_healthy_slurm(
     output = strip_ansi(result.output)
 
     assert result.exit_code == 0, result.output
-    # An active unprovable contributor makes every aggregate unknowable.
-    assert "—" in output
-    assert "48" not in output and "32" not in output and "16" not in output
-    # DATA describes the whole row, not just the listed sources.
-    assert "training data unavailable" in output
+    # Known pools render partial sums with "+"; the unprovable training
+    # numbers (32) never render as contributions.
+    assert "48+" in output and "16+" in output and "32+" in output
     assert "fresh" not in output
+    # Unprovable evidence cannot be aged: the badge is partial, phrases are
+    # verbose-only, and the legend fires.
+    assert "partial" in output
+    assert "training data unavailable" not in output
+    assert "run with --verbose for which" in output
 
 
 def test_factory_status_compact_per_cluster_node_degradation_reaches_data(
@@ -1625,9 +1657,10 @@ def test_factory_status_compact_per_cluster_node_degradation_reaches_data(
 
     assert result.exit_code == 0, result.output
     assert "1/1" in output  # fresh row keeps its node summary
-    # the stale-nodes row: NODES em-dash, DATA records the node view
-    assert "node view unavailable" in output
-    assert "degraded sources" in output  # the dim footer fires
+    # the stale-nodes row: NODES em-dash, partial badge, one-line legend
+    assert "partial" in output
+    assert "run with --verbose for which" in output
+    assert "degraded sources" not in output
 
 
 def test_factory_status_compact_multi_cluster_shows_original_indices(
@@ -1715,3 +1748,18 @@ def test_api_client_omits_unset_timeout_to_preserve_default() -> None:
         assert recorded.get("timeout") == 5.0
     finally:
         monkey.undo()
+
+
+def test_factory_status_compact_gpu_type_strips_memory_suffix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The number after the underscore is noise next to a TOTAL column.
+    payload = _status_payload(gpu_type="B300_262GB")
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "B300" in output
+    assert "B300_262GB" not in output

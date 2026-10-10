@@ -1073,7 +1073,11 @@ def test_workloads_scheduler_column_escaped(monkeypatch: pytest.MonkeyPatch) -> 
     assert "slurm-[bold]team" in output
 
 
-def test_workloads_scheduler_null_renders_dash(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_workloads_scheduler_null_slurm_renders_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A failed Slurm deployment lookup is NOT direct placement: the cell
+    # renders "unknown", never a dash.
     row = _workload("slurm:ac12:8422", "slurm", "completed")
     row["scheduler_display_name"] = None
     _install(monkeypatch, _workloads_payload([row]))
@@ -1083,12 +1087,65 @@ def test_workloads_scheduler_null_renders_dash(monkeypatch: pytest.MonkeyPatch) 
 
     assert result.exit_code == 0, result.output
     assert "SCHEDULER" in output
+    assert "unknown" in output
     assert "None" not in output  # nulls never leak
+    # the legend explains the distinction
+    assert "unknown = deployment not identified" in output
 
 
 def test_workloads_help_documents_scheduler_field() -> None:
     result = runner.invoke(app, ["factory", "workloads", "--help"], env=TEST_ENV)
 
     assert result.exit_code == 0, result.output
+    # wrap-safe fragments of the documented line
     assert "scheduler_display_name" in result.output
-    assert "direct placement" in result.output
+    assert "Slurm cluster" in result.output
+    assert "placement" in result.output
+
+
+def test_workloads_scheduler_filter_table_and_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    # --scheduler narrows client-side (table + JSON); rows without a
+    # matching deployment never pass; the filtered-empty wording applies.
+    slurm_a = _workload("slurm:ac12:1", "slurm", "running")
+    slurm_a["scheduler_display_name"] = "b300-slurm"
+    slurm_b = _workload("slurm:ac12:2", "slurm", "running")
+    slurm_b["scheduler_display_name"] = "h200-slurm"
+    training = _workload("training:run-1", "training", "running")
+    payload = _workloads_payload([slurm_a, slurm_b, training])
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(app, ["factory", "workloads", "--scheduler", "b300-slurm"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+    assert result.exit_code == 0, result.output
+    assert "slurm:ac12:1" in output
+    assert "slurm:ac12:2" not in output and "training:run-1" not in output
+
+    json_result = runner.invoke(
+        app, ["factory", "workloads", "--scheduler", "b300-slurm", "--json"], env=TEST_ENV
+    )
+    data = json.loads(json_result.stdout)
+    assert [w["id"] for w in data["workloads"]] == ["slurm:ac12:1"]
+
+    miss = runner.invoke(app, ["factory", "workloads", "--scheduler", "nope"], env=TEST_ENV)
+    miss_output = strip_ansi(miss.output)
+    assert miss.exit_code == 0, miss.output
+    assert "No factory workloads match the given filters." in miss_output
+
+
+def test_workloads_duplicate_scheduler_labels_render_distinctly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Two rows can share a deployment label; rows are never merged or
+    # deduplicated — IDs stay distinct.
+    row_a = _workload("slurm:ac12:1", "slurm", "running")
+    row_a["scheduler_display_name"] = "b300-slurm"
+    row_b = _workload("slurm:ac12:2", "slurm", "running")
+    row_b["scheduler_display_name"] = "b300-slurm"
+    _install(monkeypatch, _workloads_payload([row_a, row_b]))
+
+    result = runner.invoke(app, ["factory", "workloads"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "slurm:ac12:1" in output and "slurm:ac12:2" in output
+    assert output.count("b300-slurm") >= 2

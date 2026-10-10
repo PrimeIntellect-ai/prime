@@ -54,6 +54,7 @@ FACTORY_NODES_JSON_HELP = json_output_help(
 
 IN_USE_NOTE = "in-use = GPUs held by running jobs (not GPU-activity measurements)"
 UNUSED_NOTE = "unused = reserved by a workload but not running anything — not free capacity"
+SCHEDULER_LEGEND = "Scheduler: — = direct platform placement; unknown = deployment not identified."
 
 # Plain-language names for source kinds shown to users. The internal enum
 # values (e.g. "capacity") never appear in table output.
@@ -667,8 +668,8 @@ def factory_status(
 FACTORY_WORKLOADS_JSON_HELP = json_output_help(
     ". = {schema_version, as_of, workloads[], sources[]}",
     ".workloads[] = {id, type, cluster_display_name, name, state, native_state,",
-    "                 scheduler_display_name — slurm rows name the",
-    "                 deployment; null = direct placement,",
+    "                 scheduler_display_name — the scheduler deployment",
+    "                 (Slurm cluster); null = direct platform placement,",
     "                 owner{kind, display_name}, requested_gpus, allocated_gpus,",
     "                 created_at, started_at, ended_at (terminal rows),",
     "                 reason (when supplied),",
@@ -779,6 +780,21 @@ def _jobs_unavailable_line(
         return f"some {rich_escape(kind)} job data is unavailable — results may be incomplete"
     jobs = FRIENDLY_JOB_NAMES.get(kind, f"{rich_escape(kind)} jobs")
     return f"{jobs} unavailable — {_last_seen_phrase([source] if source else [])}"
+
+
+def _workload_scheduler_cell(workload: FactoryWorkload) -> str:
+    """Scheduler cell: deployment name, 'unknown' for failed Slurm lookups,
+    a dash for direct platform placement (training/inference).
+
+    A dash and 'unknown' mean different things: the first is direct
+    placement by design, the second is a Slurm row whose deployment could
+    not be identified — never render them the same way.
+    """
+    if workload.scheduler_display_name:
+        return rich_escape(workload.scheduler_display_name)
+    if workload.type == "slurm":
+        return "[dim]unknown[/dim]"
+    return "[dim]-[/dim]"
 
 
 def _workload_owner_cell(workload: FactoryWorkload) -> str:
@@ -920,9 +936,7 @@ def _render_workloads_table(rows: List[FactoryWorkload], show_duration: bool = F
             rich_escape(row.type),
             rich_escape(row.name) if row.name else "[dim]-[/dim]",
             rich_escape(row.cluster_display_name) if row.cluster_display_name else "[dim]-[/dim]",
-            rich_escape(row.scheduler_display_name)
-            if row.scheduler_display_name
-            else "[dim]-[/dim]",
+            _workload_scheduler_cell(row),
             _workload_owner_cell(row),
             _workload_state_cell(row),
             _workload_gpu_cell(row),
@@ -937,13 +951,19 @@ def _render_workloads_table(rows: List[FactoryWorkload], show_duration: bool = F
 
 
 def _raw_workload_matches(
-    raw_workload: Dict[str, Any], user: Optional[str], cluster: Optional[str]
+    raw_workload: Dict[str, Any],
+    user: Optional[str],
+    cluster: Optional[str],
+    scheduler: Optional[str] = None,
 ) -> bool:
-    """Raw-payload mirror of the client-side --user/--cluster predicates."""
+    """Raw-payload mirror of the client-side --user/--cluster/--scheduler
+    predicates."""
     owner = raw_workload.get("owner") or {}
     if user is not None and owner.get("display_name") != user:
         return False
     if cluster is not None and raw_workload.get("cluster_display_name") != cluster:
+        return False
+    if scheduler is not None and raw_workload.get("scheduler_display_name") != scheduler:
         return False
     return True
 
@@ -952,12 +972,15 @@ def _filter_workload_rows(
     rows: List[FactoryWorkload],
     user: Optional[str],
     cluster: Optional[str],
+    scheduler: Optional[str] = None,
 ) -> List[FactoryWorkload]:
-    """Client-side narrowing by owner display name and cluster display name."""
+    """Client-side narrowing by owner, cluster, and scheduler deployment."""
     if user is not None:
         rows = [r for r in rows if r.owner.display_name == user]
     if cluster is not None:
         rows = [r for r in rows if r.cluster_display_name == cluster]
+    if scheduler is not None:
+        rows = [r for r in rows if r.scheduler_display_name == scheduler]
     return rows
 
 
@@ -993,6 +1016,9 @@ def factory_workloads(
         help="Maximum rows to fetch (1-200; 50 by default for terminal queries)",
     ),
     user: Optional[str] = typer.Option(None, "--user", help="Filter by owner display name"),
+    scheduler: Optional[str] = typer.Option(
+        None, "--scheduler", help="Filter by scheduler deployment name or slurm label"
+    ),
     cluster: Optional[str] = typer.Option(None, "--cluster", help="Filter by cluster display name"),
     json_output: bool = typer.Option(
         False, "--json", help="Print the API response as JSON (same as --output json)"
@@ -1093,11 +1119,11 @@ def factory_workloads(
             listed = ", ".join(rich_escape(n) for n in names)
             err_console.print(f"[dim]Available clusters: {listed}[/dim]")
         raise typer.Exit(1)
-    rows = _filter_workload_rows(rows, user, cluster)
+    rows = _filter_workload_rows(rows, user, cluster, scheduler=scheduler)
 
     if output == "json":
         payload = workloads.raw_response
-        if user is not None or cluster is not None:
+        if user is not None or cluster is not None or scheduler is not None:
             raw_rows = workloads.raw_response.get("workloads", [])
             # Filter the raw response objects with the same predicates as
             # the parsed models, not re-serialized models, so --json stays
@@ -1105,7 +1131,9 @@ def factory_workloads(
             # owner/cluster) do not let filtered-out twins back in.
             payload = {
                 **workloads.raw_response,
-                "workloads": [w for w in raw_rows if _raw_workload_matches(w, user, cluster)],
+                "workloads": [
+                    w for w in raw_rows if _raw_workload_matches(w, user, cluster, scheduler)
+                ],
             }
         output_data_as_json(payload, console)
         return
@@ -1130,6 +1158,7 @@ def factory_workloads(
         console.print(_render_workloads_table(available, show_duration=show_duration))
         console.print()
         console.print(f"[dim]{IN_USE_NOTE}[/dim]")
+        console.print(f"[dim]{SCHEDULER_LEGEND}[/dim]")
         return
 
     if not degraded:
@@ -1142,6 +1171,7 @@ def factory_workloads(
             or since is not None
             or user is not None
             or cluster is not None
+            or scheduler is not None
         ):
             console.print("No factory workloads match the given filters.")
         else:

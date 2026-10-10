@@ -487,7 +487,7 @@ def test_factory_status_rejects_cluster_missing_pools(
 
     assert result.exit_code == 1
     assert "Unexpected factory status response shape" in strip_ansi(result.output)
-    assert "pools" in strip_ansi(result.output)
+    assert "allocations" in strip_ansi(result.output)
 
 
 def test_factory_status_rejects_cluster_missing_sources(
@@ -513,7 +513,7 @@ def test_factory_client_validation_error_message_has_no_rich_brackets() -> None:
         FactoryClient(dummy).get_status("team-123")  # type: ignore[arg-type]
 
     assert "[" not in str(excinfo.value)
-    assert "pools" in str(excinfo.value)
+    assert "allocations" in str(excinfo.value)
 
 
 def test_factory_client_rejects_future_schema_version() -> None:
@@ -727,14 +727,15 @@ def test_factory_status_empty_cluster_prints_no_pools_reported(
     assert "breakdown unavailable" not in output
 
 
-def test_factory_status_accepts_aligned_workloads_envelope_key(
+def test_factory_status_accepts_allocations_envelope_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The API layer is aligning the envelope key from `pools` to `workloads`;
-    # the CLI parses either shape and --json stays an exact passthrough.
+    # The backend renamed the status envelope key from `pools` to
+    # `allocations` (user vocabulary); the CLI parses the new primary shape
+    # and tolerates the legacy `pools` key, with --json an exact passthrough.
     payload = _status_payload()
     for cluster in payload["clusters"]:
-        cluster["workloads"] = cluster.pop("pools")
+        cluster["allocations"] = cluster.pop("pools")
     _install(monkeypatch, payload)
 
     result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
@@ -747,6 +748,13 @@ def test_factory_status_accepts_aligned_workloads_envelope_key(
 
     json_result = runner.invoke(app, ["factory", "status", "--json"], env=TEST_ENV)
     assert json.loads(json_result.stdout) == payload
+
+    # Legacy `pools` key still parses (tolerated alias, not the primary).
+    legacy_payload = _status_payload()  # fixture still uses the `pools` key
+    _install(monkeypatch, legacy_payload)
+    legacy = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    assert legacy.exit_code == 0, legacy.output
+    assert "slurm" in strip_ansi(legacy.output)
 
 
 def test_factory_status_drill_down_hint_only_when_table_rendered(

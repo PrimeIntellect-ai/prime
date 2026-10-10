@@ -37,8 +37,8 @@ console = get_console()
 FACTORY_STATUS_JSON_HELP = json_output_help(
     ". = {schema_version, as_of, clusters[]}",
     ".clusters[] = {display_name, gpu_type, total_gpus, status,",
-    "                 unassigned_gpus, unknown_gpus, workloads[], sources[]}",
-    ".workloads[] = {type, reserved_gpus, in_use_gpus, idle_inside_gpus, unknown_gpus}",
+    "                 unassigned_gpus, unknown_gpus, allocations[], sources[]}",
+    ".allocations[] = {type, reserved_gpus, in_use_gpus, idle_inside_gpus, unknown_gpus}",
     ".sources[] = {kind, status, observed_at}",
 )
 

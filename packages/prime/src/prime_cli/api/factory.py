@@ -45,10 +45,11 @@ class FactoryCluster(BaseModel):
     unassigned_gpus: Optional[int] = None
     unknown_gpus: Optional[int] = None
     # Both contract fields are required: a 200 response without them is a
-    # malformed payload, not an empty allocation summary. The API layer is
-    # aligning the envelope key from `pools` to `workloads`; accept both so
-    # the CLI works against either deployed shape (passthrough stays exact).
-    pools: List[FactoryPool] = Field(validation_alias=AliasChoices("pools", "workloads"))
+    # malformed payload, not an empty allocation summary. The backend renamed
+    # the envelope key from `pools` to `allocations` (user vocabulary); accept
+    # `allocations` as the primary shape and tolerate the legacy `pools` key
+    # (passthrough stays exact either way).
+    pools: List[FactoryPool] = Field(validation_alias=AliasChoices("allocations", "pools"))
     sources: List[FactorySource]
 
 

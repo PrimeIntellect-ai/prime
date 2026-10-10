@@ -1,12 +1,13 @@
 """`prime factory` — Model Factory fleet status."""
 
+from datetime import datetime
 from typing import Any, List, Optional
 
 import typer
 from rich.markup import escape as rich_escape
 from rich.table import Table
 
-from ..api.factory import FactoryClient, FactoryCluster, FactorySource
+from ..api.factory import FactoryClient, FactoryCluster, FactoryPool, FactorySource
 from ..client import APIClient, APIError
 from ..core import Config
 from ..utils import (
@@ -32,22 +33,47 @@ FACTORY_STATUS_JSON_HELP = json_output_help(
     ".sources[] = {kind, status, observed_at}",
 )
 
-IN_USE_NOTE = "IN USE = allocated to leaf workloads, not measured GPU activity."
+IN_USE_NOTE = "in-use = GPUs held by running jobs (not GPU-activity measurements)"
+
+# Plain-language names for source kinds shown to users. The internal enum
+# values (e.g. "capacity") never appear in table output.
+FRIENDLY_DATA_NAMES = {
+    "capacity": "node data",
+    "training": "training data",
+    "inference": "inference data",
+    "slurm": "scheduler data",
+}
 
 
-def _fmt_count(value: Optional[int]) -> str:
-    """Render a GPU count; unknown values stay '?' instead of a tidy zero."""
-    return "?" if value is None else str(value)
+def _friendly_data_name(kind: str) -> str:
+    return FRIENDLY_DATA_NAMES.get(kind, f"{rich_escape(kind)} data")
 
 
-def _describe_source(source: FactorySource) -> str:
-    """Render one source's freshness label: `<kind> Ns ago`, or its coarse status."""
-    age = f" {human_age(source.observed_at)} ago" if source.observed_at else ""
-    kind = rich_escape(source.kind)
-    status = rich_escape(source.status)
-    if source.status == "ok":
-        return f"{kind}{age}" if age else kind
-    return f"{kind} {status}{age}"
+def _last_seen_phrase(sources: List[FactorySource]) -> str:
+    """Render `<data> last seen <age> ago` for degraded sources, plain words only."""
+    names: List[str] = []
+    oldest: Optional[datetime] = None
+    for source in sources:
+        name = _friendly_data_name(source.kind)
+        if name not in names:
+            names.append(name)
+        if source.observed_at and (oldest is None or source.observed_at < oldest):
+            oldest = source.observed_at
+    phrase = " and ".join(names) if names else "data"
+    if oldest is not None:
+        return f"{phrase} last seen {human_age(oldest)} ago"
+    return f"{phrase} unavailable"
+
+
+def _pool_is_available(pool: FactoryPool, source_status: dict) -> bool:
+    """A pool row renders only with complete evidence behind a fresh source."""
+    if source_status.get(pool.type, "ok") != "ok":
+        return False
+    return (
+        pool.reserved_gpus is not None
+        and pool.in_use_gpus is not None
+        and pool.idle_inside_gpus is not None
+    )
 
 
 def _styled_status(status: Optional[str]) -> str:
@@ -58,7 +84,9 @@ def _styled_status(status: Optional[str]) -> str:
     return rich_escape(status or "unknown")
 
 
-def _cluster_header(cluster: FactoryCluster, index: int, multi: bool) -> str:
+def _cluster_header(
+    cluster: FactoryCluster, index: int, multi: bool, freshness: Optional[str]
+) -> str:
     parts: List[str] = []
     label = rich_escape(cluster.display_name)
     if multi:
@@ -71,12 +99,14 @@ def _cluster_header(cluster: FactoryCluster, index: int, multi: bool) -> str:
     if gpu_bits:
         parts.append(" ".join(gpu_bits) + " GPUs")
     parts.append(_styled_status(cluster.status))
-    if cluster.sources:
-        parts.append(" · ".join(_describe_source(s) for s in cluster.sources))
+    if freshness:
+        parts.append(freshness)
     return " · ".join(parts)
 
 
-def _render_pool_table(cluster: FactoryCluster) -> Table:
+def _render_pool_table(
+    cluster: FactoryCluster, pools: List[FactoryPool], capacity_ok: bool
+) -> Table:
     table = Table(show_header=True, header_style="bold", show_lines=False)
     table.add_column("POOL", style="cyan")
     table.add_column("RESERVED", style="white", justify="right")
@@ -84,17 +114,68 @@ def _render_pool_table(cluster: FactoryCluster) -> Table:
     table.add_column("IDLE INSIDE", style="blue", justify="right")
     table.add_column("UNKNOWN", style="yellow", justify="right")
 
-    for pool in cluster.pools:
+    for pool in pools:
         table.add_row(
             rich_escape(pool.type),
-            _fmt_count(pool.reserved_gpus),
-            _fmt_count(pool.in_use_gpus),
-            _fmt_count(pool.idle_inside_gpus),
-            _fmt_count(pool.unknown_gpus),
+            str(pool.reserved_gpus),
+            str(pool.in_use_gpus),
+            str(pool.idle_inside_gpus),
+            str(pool.unknown_gpus) if pool.unknown_gpus is not None else "-",
         )
-    table.add_row("unassigned", _fmt_count(cluster.unassigned_gpus), "-", "-", "-")
-    table.add_row("unknown", _fmt_count(cluster.unknown_gpus), "-", "-", "-")
+    if capacity_ok and cluster.unassigned_gpus is not None:
+        table.add_row("unassigned", str(cluster.unassigned_gpus), "-", "-", "-")
+    if capacity_ok and cluster.unknown_gpus is not None:
+        table.add_row("unknown", str(cluster.unknown_gpus), "-", "-", "-")
     return table
+
+
+def _render_cluster(cluster: FactoryCluster, index: int, multi: bool) -> None:
+    source_status = {s.kind: s.status for s in cluster.sources}
+    capacity_ok = source_status.get("capacity", "ok") == "ok"
+    degraded = [s for s in cluster.sources if s.status != "ok"]
+
+    renderable = [p for p in cluster.pools if capacity_ok and _pool_is_available(p, source_status)]
+    suppressed = [p for p in cluster.pools if p not in renderable]
+
+    # Sources involved in the suppressed breakdown; anything else degraded
+    # still surfaces as a freshness phrase in the header.
+    involved: set = {p.type for p in suppressed}
+    if not capacity_ok:
+        involved.add("capacity")
+    remaining_degraded = [s for s in degraded if s.kind not in involved]
+
+    console.print(
+        _cluster_header(
+            cluster,
+            index,
+            multi,
+            _last_seen_phrase(remaining_degraded) if remaining_degraded else None,
+        )
+    )
+
+    if suppressed:
+        names = (
+            "pool"
+            if not renderable and len(suppressed) == len(cluster.pools)
+            else (", ".join(rich_escape(p.type) for p in suppressed))
+        )
+        involved_sources = [s for s in degraded if s.kind in involved]
+        line = f"{names} breakdown unavailable"
+        if involved_sources:
+            line += f" — {_last_seen_phrase(involved_sources)}"
+        console.print(f"[yellow]{line}[/yellow]")
+
+    show_table = bool(renderable)
+    if (
+        not cluster.pools
+        and capacity_ok
+        and (cluster.unassigned_gpus is not None or cluster.unknown_gpus is not None)
+    ):
+        show_table = True
+
+    if show_table:
+        console.print(_render_pool_table(cluster, renderable, capacity_ok))
+        console.print(f"[dim]{IN_USE_NOTE}[/dim]")
 
 
 def _select_cluster_indices(
@@ -209,13 +290,4 @@ def factory_status(
     for idx, c in enumerate(clusters, start=1):
         if idx > 1:
             console.print()
-        console.print(_cluster_header(c, idx, multi))
-        console.print(_render_pool_table(c))
-        degraded = [s for s in c.sources if s.status != "ok"]
-        if degraded:
-            console.print(
-                f"[yellow]Warning:[/yellow] "
-                f"{', '.join(_describe_source(s) for s in degraded)} — "
-                "allocation counts may be incomplete."
-            )
-    console.print(f"[dim]{IN_USE_NOTE}[/dim]")
+        _render_cluster(c, idx, multi)

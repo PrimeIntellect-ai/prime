@@ -1,7 +1,6 @@
 """Tests for `prime factory status` (fleet allocation glance)."""
 
 import json
-import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
@@ -122,16 +121,28 @@ def test_factory_status_table_renders_pools_and_allocations(
     assert "research-b300" in output
     assert "128 B300 GPUs" in output
     assert "online" in output
-    assert re.search(r"capacity \d+s ago", output)
-    assert re.search(r"slurm \d+s ago", output)
     assert "IDLE INSIDE" in output
     assert "unassigned" in output and "16" in output
     for pool_type in ("training", "inference", "slurm"):
         assert pool_type in output
     # reserved -> in-use split per pool
     assert "48" in output and "32" in output and "16" in output
-    assert "IN USE = allocated to leaf workloads" in output
+    assert "in-use = GPUs held by running jobs (not GPU-activity measurements)" in output
     assert "Error" not in output
+
+
+def test_factory_status_all_fresh_sources_show_no_unavailable_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install(monkeypatch, _status_payload())
+
+    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "breakdown unavailable" not in output
+    assert "last seen" not in output
+    assert "Warning" not in output
 
 
 def test_factory_status_json_prints_exact_api_response(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -209,16 +220,13 @@ def test_factory_status_team_flag_overrides_missing_team_context(
     assert dummy.calls and dummy.calls[0]["params"] == {"team_id": "team-42"}
 
 
-def test_factory_status_stale_and_error_sources_are_visible(
+def test_factory_status_all_stale_sources_skip_table_with_friendly_line(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Stale node data suppresses every pool row: no table, no '?' cells,
+    # one plain-language line with the age of the last observation.
     payload = _status_payload(
-        sources=[
-            _source("capacity", age_seconds=30),
-            _source("slurm", status="stale", age_seconds=905),
-            _source("training", status="error", age_seconds=4000),
-        ],
-        pools=[_pool("slurm", 48, None, None, 48)],
+        sources=[_source("capacity", status="stale", age_seconds=26 * 3600)],
         unknown_gpus=8,
     )
     _install(monkeypatch, payload)
@@ -227,13 +235,73 @@ def test_factory_status_stale_and_error_sources_are_visible(
     output = strip_ansi(result.output)
 
     assert result.exit_code == 0, result.output
-    assert "stale" in output
-    assert "error" in output
-    assert "Warning" in output
-    # Unknown evidence stays '?' instead of collapsing into a tidy zero.
-    assert "?" in output
-    assert "48" in output
-    assert "unknown" in output
+    assert "pool breakdown unavailable — node data last seen 1d ago" in output
+    # The pool table is skipped entirely.
+    assert "RESERVED" not in output
+    assert "unassigned" not in output
+    # Suppression replaces placeholder cells; unknown values never show '?'.
+    assert "?" not in output
+    assert "Warning" not in output
+    # No footnote without a table.
+    assert "in-use = GPUs held by running jobs" not in output
+
+
+def test_factory_status_mixed_fresh_and_stale_sources_render_only_fresh_pools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = _status_payload(
+        sources=[
+            _source("capacity", age_seconds=12),
+            _source("slurm", status="stale", age_seconds=2 * 3600),
+        ],
+        pools=[
+            _pool("training", 32, 32, 0, 0),
+            _pool("inference", 32, 32, 0, 0),
+            _pool("slurm", 48, None, None, 48),
+        ],
+    )
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    # Fresh pools render.
+    assert "training" in output and "inference" in output
+    assert "IDLE INSIDE" in output and "unassigned" in output
+    assert "in-use = GPUs held by running jobs" in output
+    # The stale pool is aggregated into one friendly line naming it.
+    assert "slurm breakdown unavailable — scheduler data last seen 2h ago" in output
+    # The suppressed row's numbers never render, and no '?' placeholders.
+    assert "?" not in output
+    assert "Warning" not in output
+    assert "48" not in output
+
+
+def test_factory_status_stale_pool_source_visible_with_header_phrase(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A degraded source without a suppressed pool still surfaces in the
+    # header via the last-seen phrase.
+    payload = _status_payload(
+        sources=[
+            _source("capacity", age_seconds=12),
+            _source("training", status="error", age_seconds=4000),
+        ],
+        pools=[
+            _pool("inference", 32, 32, 0, 0),
+            _pool("slurm", 48, 16, 32, 0),
+        ],
+    )
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "training data last seen 1h ago" in output
+    assert "breakdown unavailable" not in output
+    assert "Warning" not in output
 
 
 def test_factory_status_cluster_filter_by_display_name_and_index(
@@ -503,8 +571,10 @@ def test_factory_status_markup_in_backend_values_does_not_crash(
     assert isinstance(result.exception, (type(None), SystemExit))
     output = strip_ansi(result.output)
     assert "research-b300" in output
-    assert "stale" in output
-    assert "Warning" in output
+    # The degraded (markup-named) source surfaces as a last-seen phrase,
+    # with its markup rendered as literal text instead of crashing.
+    assert "last seen" in output
+    assert "[/bold]capacity data last seen" in output
 
 
 @pytest.mark.parametrize("digit", ["\u00b2", "\u2460"])

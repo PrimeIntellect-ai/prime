@@ -189,12 +189,17 @@ def _render_workloads_section(
             console.print()
         console.print(_cluster_label(cluster, index, multi))
 
-        if state.suppressed:
-            names = (
-                "workload"
-                if not state.renderable and len(state.suppressed) == len(cluster.pools)
-                else ", ".join(rich_escape(p.type) for p in state.suppressed)
-            )
+        if state.suppressed or not state.capacity_ok:
+            if state.suppressed:
+                names = (
+                    "workload"
+                    if not state.renderable and len(state.suppressed) == len(cluster.pools)
+                    else ", ".join(rich_escape(p.type) for p in state.suppressed)
+                )
+            else:
+                # Degraded capacity with no allocation rows at all: still a
+                # coverage failure, never a valid empty cluster.
+                names = "workload"
             line = f"{names} breakdown unavailable"
             if state.involved_sources:
                 line += f" — {_last_seen_phrase(state.involved_sources)}"
@@ -210,13 +215,14 @@ def _render_workloads_section(
         if state.capacity_ok and cluster.unknown_gpus is not None:
             console.print(f"unknown: {cluster.unknown_gpus} GPUs")
 
+        # The empty-cluster wording requires fresh evidence: with degraded
+        # capacity the breakdown-unavailable line above already told the
+        # truth about the missing data.
         if (
-            not state.renderable
+            state.capacity_ok
+            and not state.renderable
             and not state.suppressed
-            and not (
-                state.capacity_ok
-                and (cluster.unassigned_gpus is not None or cluster.unknown_gpus is not None)
-            )
+            and not (cluster.unassigned_gpus is not None or cluster.unknown_gpus is not None)
         ):
             console.print("[dim]no workloads reported[/dim]")
 
@@ -433,7 +439,12 @@ def _workload_owner_cell(workload: FactoryWorkload) -> str:
 
 def _workload_age_cell(workload: FactoryWorkload) -> str:
     """Run age for started work, wait age for queued/never-started work."""
-    reference = workload.started_at if workload.started_at is not None else workload.created_at
+    if workload.state == "queued":
+        # A requeued row keeps its historical started_at; the documented
+        # wait age must come from created_at, not from the old run.
+        reference = workload.created_at
+    else:
+        reference = workload.started_at if workload.started_at is not None else workload.created_at
     if reference is None:
         return "[dim]-[/dim]"
     return human_age(reference)
@@ -508,21 +519,6 @@ def _filter_workload_rows(
     if cluster is not None:
         rows = [r for r in rows if r.cluster_display_name == cluster]
     return rows
-
-
-def _select_workload_clusters(
-    rows: List[FactoryWorkload], cluster: str, err_console: Any
-) -> List[str]:
-    """Validate a --cluster selector against the workloads' cluster names."""
-    matches = [name for name in _distinct_workload_clusters(rows) if name == cluster]
-    if not matches:
-        err_console.print(f"[red]Error:[/red] No cluster matched '{rich_escape(cluster)}'.")
-        names = _distinct_workload_clusters(rows)
-        if names:
-            listed = ", ".join(rich_escape(n) for n in names)
-            err_console.print(f"[dim]Available clusters: {listed}[/dim]")
-        raise typer.Exit(1)
-    return matches
 
 
 def _distinct_workload_clusters(rows: List[FactoryWorkload]) -> List[str]:
@@ -600,17 +596,30 @@ def factory_workloads(
         raise typer.Exit(1)
 
     rows = workloads.workloads
-    selected_cluster: Optional[List[str]] = None
-    if cluster is not None:
-        if not rows:
-            err_console.print(f"[red]Error:[/red] No cluster matched '{rich_escape(cluster)}'.")
-            raise typer.Exit(1)
-        selected_cluster = _select_workload_clusters(rows, cluster, err_console)
+    envelope_status = _envelope_source_status(workloads)
+    # Degraded sources are computed from the envelope plus the full row list
+    # (before client-side filtering): filtering by --user must not hide why
+    # the filtered user has no rows from a degraded source.
+    degraded = _degraded_kinds(workloads, rows)
+
+    # Identity resolution: the workloads envelope carries no cluster list,
+    # only row identities, so a --cluster selector can miss because a
+    # degraded source omitted a cluster's rows entirely. Surface the
+    # degraded-source warnings instead of exiting with a clean miss.
+    if cluster is not None and not any(row.cluster_display_name == cluster for row in rows):
+        for source in degraded:
+            err_console.print(f"[yellow]{_jobs_unavailable_line(source.kind, source)}[/yellow]")
+        err_console.print(f"[red]Error:[/red] No cluster matched '{rich_escape(cluster)}'.")
+        names = _distinct_workload_clusters(rows)
+        if names:
+            listed = ", ".join(rich_escape(n) for n in names)
+            err_console.print(f"[dim]Available clusters: {listed}[/dim]")
+        raise typer.Exit(1)
     rows = _filter_workload_rows(rows, user, cluster)
 
     if output == "json":
         payload = workloads.raw_response
-        if user is not None or selected_cluster is not None:
+        if user is not None or cluster is not None:
             keep_ids = {row.id for row in rows}
             raw_rows = workloads.raw_response.get("workloads", [])
             # Filter the raw response objects, not re-serialized models, so
@@ -622,9 +631,7 @@ def factory_workloads(
         output_data_as_json(payload, console)
         return
 
-    envelope_status = _envelope_source_status(workloads)
     available = [row for row in rows if _row_source_status(row, envelope_status) == "ok"]
-    degraded = _degraded_kinds(workloads, rows)
 
     # Degraded sources say so before anything else: a failed read must never
     # masquerade as an empty fleet or silently vanish.
@@ -812,16 +819,20 @@ def factory_nodes(
 
     if output == "json":
         payload = nodes_payload.raw_response
-        if selected is not None or state is not None or assigned_to is not None:
-            keep_names = {c.display_name for c in clusters}
+        raw_clusters = nodes_payload.raw_response.get("clusters", [])
+        if selected is not None:
+            # Index-based selection matches table mode: with duplicate
+            # display names, name-matching would return both clusters.
+            raw_clusters = [raw_clusters[i] for i in selected]
+        if state is not None or assigned_to is not None:
             raw_clusters = [
                 {
                     **raw_cluster,
                     "nodes": _filter_raw_nodes(raw_cluster.get("nodes", []), state, assigned_to),
                 }
-                for raw_cluster in nodes_payload.raw_response.get("clusters", [])
-                if raw_cluster.get("display_name") in keep_names
+                for raw_cluster in raw_clusters
             ]
+        if selected is not None or state is not None or assigned_to is not None:
             # Filter the raw response objects, not re-serialized models, so
             # --json stays an exact passthrough of the API payload.
             payload = {**nodes_payload.raw_response, "clusters": raw_clusters}

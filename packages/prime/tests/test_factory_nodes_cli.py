@@ -380,3 +380,26 @@ def test_factory_client_nodes_endpoint_and_params(
     client.get_nodes("team-9")
 
     assert dummy.calls == [{"endpoint": "/factory/nodes", "params": {"team_id": "team-9"}}]
+
+
+def test_nodes_cluster_index_selector_filters_raw_json_by_index(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Duplicate display names: index selection must pick exactly the
+    # selected cluster in --json, like table mode, not name-match both.
+    payload = {
+        "schema_version": 1,
+        "as_of": _iso(datetime.now(timezone.utc)),
+        "clusters": [
+            _nodes_cluster(display_name="twin"),
+            _nodes_cluster(display_name="twin", nodes=[_node("gpu-99")]),
+        ],
+    }
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(app, ["factory", "nodes", "--cluster", "2", "--json"], env=TEST_ENV)
+    data = json.loads(result.stdout)
+
+    assert result.exit_code == 0, result.output
+    assert len(data["clusters"]) == 1
+    assert [n["name"] for n in data["clusters"][0]["nodes"]] == ["gpu-99"]

@@ -473,3 +473,48 @@ def test_factory_client_workloads_endpoint_and_params(
             "params": {"team_id": "team-9", "type": "slurm", "state": "running"},
         }
     ]
+
+
+def test_workloads_queued_age_uses_wait_age_despite_historical_started_at(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A requeued row keeps its old started_at; the documented wait age
+    # must come from created_at, not from the previous run's start.
+    row = _workload("training:run-9", "training", "queued")
+    _install(monkeypatch, _workloads_payload([row]))
+
+    result = runner.invoke(app, ["factory", "workloads"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    # created 2h ago -> wait age 2h (not the 30m-old historical start)
+    assert "2h" in output
+    assert "30m" not in output
+
+
+def test_workloads_cluster_miss_with_degraded_source_shows_warnings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The workloads envelope has no cluster list, only row identities: a
+    # selector can miss because a degraded source omitted a cluster's rows.
+    # The degraded-source warning must surface instead of a clean miss.
+    rows = _default_rows()
+    for row in rows:
+        row["cluster_display_name"] = "research-b300"
+    sources = [
+        _source("training"),
+        _source("inference"),
+        _source("slurm", status="stale", age_seconds=7200),
+    ]
+    payload = _workloads_payload(rows, sources)
+    # Backend omitted every row of the (valid) cluster "office-a100" whose
+    # slurm source is stale; --cluster office-a100 misses all rows.
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(app, ["factory", "workloads", "--cluster", "office-a100"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 1, result.output
+    assert "slurm jobs unavailable" in output
+    assert "scheduler data last seen 2h ago" in output
+    assert "No cluster matched" in output

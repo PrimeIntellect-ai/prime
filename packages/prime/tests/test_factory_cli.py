@@ -774,3 +774,41 @@ def test_factory_status_drill_down_hint_only_when_table_rendered(
     output = strip_ansi(hidden.output)
     assert "workload breakdown unavailable" in output
     assert "drill down: prime factory nodes" not in output
+
+
+def test_factory_status_stale_capacity_with_no_allocations_not_an_empty_cluster(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Degraded capacity with zero allocation rows is a coverage failure,
+    # not a valid empty cluster: the breakdown-unavailable line with the
+    # last-observed age must show, and the empty-cluster wording must not.
+    payload = _status_payload(
+        pools=[],
+        unassigned_gpus=None,
+        unknown_gpus=None,
+        sources=[_source("capacity", status="stale", age_seconds=86400)],
+    )
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "workload breakdown unavailable" in output
+    assert "node data last seen 1d ago" in output
+    assert "no workloads reported" not in output
+
+
+def test_factory_status_fresh_empty_cluster_still_says_no_workloads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Fresh capacity + zero allocation rows IS a valid empty cluster.
+    payload = _status_payload(pools=[], unassigned_gpus=None, unknown_gpus=None)
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "no workloads reported" in output
+    assert "breakdown unavailable" not in output

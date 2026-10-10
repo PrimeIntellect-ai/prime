@@ -1095,9 +1095,15 @@ def factory_workloads(
 
     if not degraded:
         # Distinguish an honestly empty fleet from filters that matched
-        # nothing: --type/--state are server-side, so a filtered result of
-        # zero rows is not evidence that the team has no workloads.
-        if type is not None or state is not None or user is not None or cluster is not None:
+        # nothing: --type/--state/--since are server-side, so a filtered
+        # result of zero rows is not evidence that the team has no workloads.
+        if (
+            type is not None
+            or state is not None
+            or since is not None
+            or user is not None
+            or cluster is not None
+        ):
             console.print("No factory workloads match the given filters.")
         else:
             # Genuinely nothing running or queued, with fresh evidence.

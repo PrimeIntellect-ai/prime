@@ -991,3 +991,24 @@ def test_workloads_user_cluster_filters_work_over_terminal_rows(
     assert result.exit_code == 0, result.output
     assert "training:run-2" in output
     assert "training:run-1" not in output
+
+
+def test_workloads_since_filtered_empty_uses_filter_wording(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A zero-row --since window is the filter matching nothing, not an
+    # empty fleet.
+    empty = {
+        "schema_version": 1,
+        "as_of": _iso(datetime.now(timezone.utc)),
+        "workloads": [],
+        "sources": [],
+    }
+    _install(monkeypatch, empty)
+
+    result = runner.invoke(app, ["factory", "workloads", "--since", "2d"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "No factory workloads match the given filters." in output
+    assert "No factory workloads found." not in output

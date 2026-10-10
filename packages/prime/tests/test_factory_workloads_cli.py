@@ -1101,6 +1101,10 @@ def test_workloads_help_documents_scheduler_field() -> None:
     assert "scheduler_display_name" in result.output
     assert "Slurm cluster" in result.output
     assert "placement" in result.output
+    # the help describes BOTH meanings of null: direct placement AND
+    # unidentified deployments (rendered unknown)
+    assert "unidentified deployment" in result.output
+    assert "unknown" in result.output
 
 
 def test_workloads_scheduler_filter_table_and_json(monkeypatch: pytest.MonkeyPatch) -> None:

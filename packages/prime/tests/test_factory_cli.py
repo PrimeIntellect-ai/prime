@@ -1371,3 +1371,78 @@ def test_factory_status_compact_malformed_nodes_json_degrades_to_dash(
     assert "—" in output  # NODES degrades to an em-dash
     assert "fresh" in output  # DATA comes from the status envelope
     assert "degraded sources" not in output  # no false degradation
+
+
+def test_factory_status_compact_node_join_verifies_cluster_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The status and nodes responses are separate requests: when their
+    # cluster lists cannot be aligned (drift between the requests), the
+    # positional join must NOT display one cluster's node counts on
+    # another cluster's row — NODES degrades to an em-dash instead.
+    now = datetime.now(timezone.utc)
+    status_payload = {
+        "schema_version": 1,
+        "as_of": _iso(now),
+        "clusters": [
+            {
+                **_status_payload()["clusters"][0],
+                "display_name": "research-b300",
+                "sources": [_source("capacity"), _source("training")],
+                "pools": [_pool("training", 32, 32, 0, 0)],
+            },
+            {
+                **_status_payload()["clusters"][0],
+                "display_name": "office-a100",
+                "sources": [_source("capacity"), _source("training")],
+                "pools": [_pool("training", 8, 8, 0, 0)],
+            },
+        ],
+    }
+    # Nodes response drifted: reversed order vs the status clusters.
+    nodes_payload = {
+        "schema_version": 1,
+        "as_of": _iso(now),
+        "sources": [_source("capacity"), _source("capacity")],
+        "clusters": [
+            {
+                "display_name": "office-a100",
+                "status": "online",
+                "nodes": [
+                    {
+                        "name": "a100-1",
+                        "state": "ready",
+                        "gpu_type": "A100",
+                        "gpus_total": 4,
+                        "gpus_used": 4,
+                        "assigned_to": "slurm",
+                    }
+                ],
+            },
+            {
+                "display_name": "research-b300",
+                "status": "online",
+                "nodes": [
+                    {
+                        "name": "gpu-1",
+                        "state": "ready",
+                        "gpu_type": "B300",
+                        "gpus_total": 8,
+                        "gpus_used": 8,
+                        "assigned_to": "slurm",
+                    }
+                ],
+            },
+        ],
+    }
+    _install(monkeypatch, status_payload, nodes_payload=nodes_payload)
+
+    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "research-b300" in output and "office-a100" in output
+    # Position 1 pairs with office-a100's node data on research-b300's row:
+    # identity mismatch -> em-dash NODES, never the cross-wired count.
+    assert "—" in output
+    assert "1/1" not in output

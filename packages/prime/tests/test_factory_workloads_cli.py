@@ -709,3 +709,34 @@ def test_workloads_degraded_aggregate_with_only_fresh_rows_still_warns(
     assert "training:run-7" in output  # fresh rows still render
     assert "training jobs unavailable" in output  # the aggregate warns
     assert "training data last seen 2h ago" in output
+
+
+def test_workloads_type_filter_excludes_other_kinds_from_zero_row_warnings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # --type is a server-side filter: with --type training, the absence of
+    # slurm rows is expected filtering — a degraded slurm source must NOT
+    # emit a misleading "slurm jobs unavailable" warning.
+    rows = [_workload("training:run-1", "training", "running")]
+    payload = _workloads_payload(
+        rows,
+        sources=[
+            _source("training"),
+            _source("slurm", status="stale", age_seconds=2 * 3600),
+        ],
+    )
+    _install(monkeypatch, payload)
+
+    filtered = runner.invoke(app, ["factory", "workloads", "--type", "training"], env=TEST_ENV)
+    output = strip_ansi(filtered.output)
+    assert filtered.exit_code == 0, filtered.output
+    assert "training:run-1" in output
+    assert "slurm jobs unavailable" not in output
+
+    # Without --type, the degraded slurm source with zero slurm rows is a
+    # failed read and must warn.
+    plain = runner.invoke(app, ["factory", "workloads"], env=TEST_ENV)
+    plain_output = strip_ansi(plain.output)
+    assert plain.exit_code == 0, plain.output
+    assert "training:run-1" in plain_output
+    assert "slurm jobs unavailable" in plain_output

@@ -402,6 +402,12 @@ def _render_status_table(
         nodes_cluster, nodes_source = (
             node_pairs[original_index] if original_index < len(node_pairs) else (None, None)
         )
+        if nodes_cluster is not None and nodes_cluster.display_name != cluster.display_name:
+            # The status and nodes responses are separate requests: if the
+            # fleet moved between them, positional identity no longer
+            # holds. Never display one cluster's node counts on another
+            # cluster's row — degrade the NODES cell instead.
+            nodes_cluster, nodes_source = None, None
         table.add_row(
             rich_escape(cluster.display_name),
             rich_escape(cluster.gpu_type) if cluster.gpu_type else "—",
@@ -587,6 +593,7 @@ def _view_degraded_sources(
     workloads: FactoryWorkloads,
     view_rows: List[FactoryWorkload],
     suppressed: List[FactoryWorkload],
+    requested_type: Optional[str] = None,
 ) -> List[FactorySource]:
     """Warning sources for the workloads view — warnings, never row erasure.
 
@@ -603,13 +610,20 @@ def _view_degraded_sources(
     view_kinds = {row.source.kind for row in view_rows}
     payload_kinds = {row.source.kind for row in workloads.workloads}
     for source in workloads.sources:
-        if (
-            source.status != "ok"
-            and source.kind not in seen
-            and (source.kind in view_kinds or source.kind not in payload_kinds)
-        ):
-            seen.add(source.kind)
-            warnings.append(source)
+        if source.status != "ok" and source.kind not in seen:
+            zero_rows = source.kind not in payload_kinds
+            if (
+                requested_type is not None
+                and source.kind != requested_type
+                and zero_rows
+                and source.kind not in view_kinds
+            ):
+                # Kinds narrowed out server-side by --type: their absence
+                # is expected filtering, not a failed read.
+                continue
+            if source.kind in view_kinds or zero_rows:
+                seen.add(source.kind)
+                warnings.append(source)
     newest_by_kind: Dict[str, FactorySource] = {}
     for row in suppressed:
         kind = row.source.kind
@@ -850,7 +864,7 @@ def factory_workloads(
     # missing sibling group. Degraded aggregates are warnings only.
     available = [row for row in rows if row.source.status == "ok"]
     suppressed = [row for row in rows if row.source.status != "ok"]
-    degraded = _view_degraded_sources(workloads, rows, suppressed)
+    degraded = _view_degraded_sources(workloads, rows, suppressed, requested_type=type)
 
     # Degraded sources say so before anything else: a failed read must never
     # masquerade as an empty fleet or silently vanish.

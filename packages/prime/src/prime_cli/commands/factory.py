@@ -360,6 +360,13 @@ def _fetch_node_pairs(
         ]
     except APIError:
         return []
+    except ValueError:
+        # An HTTP 200 with a non-JSON body escapes the client as a raw
+        # decoding error, not an APIError. The node view is best-effort:
+        # degrade to an em-dash NODES column instead of crashing the
+        # status glance. (The client's error semantics for other commands
+        # stay unchanged.)
+        return []
 
 
 def _render_status_table(
@@ -577,26 +584,29 @@ def _workload_kind(workload: FactoryWorkload) -> str:
 
 
 def _view_degraded_sources(
-    workloads: FactoryWorkloads, suppressed: List[FactoryWorkload]
+    workloads: FactoryWorkloads,
+    view_rows: List[FactoryWorkload],
+    suppressed: List[FactoryWorkload],
 ) -> List[FactorySource]:
     """Warning sources for the workloads view — warnings, never row erasure.
 
     Rows render on their own per-row evidence, so an aggregate degraded
-    source can never erase healthy peers. Two families surface here:
-    row-level degraded evidence among the view's suppressed rows (newest
-    observation per kind), and envelope-degraded kinds that produced no
-    rows at all in the payload — a failed read must not masquerade as an
-    empty fleet, whatever the narrowing.
+    source can never erase healthy peers. Envelope-degraded kinds warn when
+    they have rows in the narrowed view — even when every returned row of
+    the kind is fresh, because the degraded portion produced no rows and
+    must not vanish silently — or when they produced no rows at all in the
+    payload (a failed read must not masquerade as an empty fleet). Kinds
+    narrowed out of the view entirely do not warn.
     """
     warnings: List[FactorySource] = []
     seen: set = set()
-    stale_view_kinds = {row.source.kind for row in suppressed}
+    view_kinds = {row.source.kind for row in view_rows}
     payload_kinds = {row.source.kind for row in workloads.workloads}
     for source in workloads.sources:
         if (
             source.status != "ok"
             and source.kind not in seen
-            and (source.kind in stale_view_kinds or source.kind not in payload_kinds)
+            and (source.kind in view_kinds or source.kind not in payload_kinds)
         ):
             seen.add(source.kind)
             warnings.append(source)
@@ -840,7 +850,7 @@ def factory_workloads(
     # missing sibling group. Degraded aggregates are warnings only.
     available = [row for row in rows if row.source.status == "ok"]
     suppressed = [row for row in rows if row.source.status != "ok"]
-    degraded = _view_degraded_sources(workloads, suppressed)
+    degraded = _view_degraded_sources(workloads, rows, suppressed)
 
     # Degraded sources say so before anything else: a failed read must never
     # masquerade as an empty fleet or silently vanish.

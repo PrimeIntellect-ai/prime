@@ -1345,3 +1345,29 @@ def test_factory_nodes_help_documents_top_level_sources() -> None:
     # clusters[] carries no sources; the envelope documents them explicitly.
     assert "clusters[] = {display_name, status, nodes[]}" in result.output
     assert "clusters[] = {display_name, status, nodes[], sources[]}" not in result.output
+
+
+def test_factory_status_compact_malformed_nodes_json_degrades_to_dash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # HTTP 200 with a non-JSON body escapes the client as a raw ValueError
+    # (not an APIError): the best-effort handler must still degrade the
+    # NODES column instead of crashing the whole status render.
+    class _MalformedNodesClient:
+        def get(self, endpoint, params=None, timeout=None):
+            if endpoint == "/factory/nodes":
+                raise ValueError("Expecting value: line 1 column 1 (char 0)")
+            return _status_payload()
+
+    monkeypatch.setattr("prime_cli.commands.factory.APIClient", lambda: _MalformedNodesClient())
+    monkeypatch.setattr("prime_cli.commands.factory.Config", lambda: _StubConfig("team-123"))
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+
+    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "research-b300" in output  # the status row renders
+    assert "—" in output  # NODES degrades to an em-dash
+    assert "fresh" in output  # DATA comes from the status envelope
+    assert "degraded sources" not in output  # no false degradation

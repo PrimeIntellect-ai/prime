@@ -682,3 +682,30 @@ def test_workloads_table_renders_cluster_column(monkeypatch: pytest.MonkeyPatch)
     assert result.exit_code == 0, result.output
     assert "CLUSTER" in output
     assert "research-b300" in output
+
+
+def test_workloads_degraded_aggregate_with_only_fresh_rows_still_warns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Envelope reports the kind degraded while every RETURNED row of that
+    # kind has fresh row-level evidence: the degraded portion produced no
+    # rows. The aggregate warning must surface — missing workloads would
+    # otherwise vanish silently — while the fresh rows still render.
+    rows = _default_rows()  # training, inference, slurm rows, all fresh
+    payload = _workloads_payload(
+        rows,
+        sources=[
+            _source("training", status="stale", age_seconds=2 * 3600),
+            _source("inference"),
+            _source("slurm"),
+        ],
+    )
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(app, ["factory", "workloads"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "training:run-7" in output  # fresh rows still render
+    assert "training jobs unavailable" in output  # the aggregate warns
+    assert "training data last seen 2h ago" in output

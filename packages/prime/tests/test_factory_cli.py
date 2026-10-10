@@ -64,6 +64,8 @@ def _status_payload(**cluster_overrides: Any) -> Dict[str, Any]:
         ],
         "sources": [
             _source("capacity", age_seconds=12),
+            _source("training", age_seconds=10),
+            _source("inference", age_seconds=10),
             _source("slurm", age_seconds=3),
         ],
     }
@@ -252,6 +254,8 @@ def test_factory_status_mixed_fresh_and_stale_sources_render_only_fresh_pools(
     payload = _status_payload(
         sources=[
             _source("capacity", age_seconds=12),
+            _source("training", age_seconds=10),
+            _source("inference", age_seconds=10),
             _source("slurm", status="stale", age_seconds=2 * 3600),
         ],
         pools=[
@@ -287,6 +291,8 @@ def test_factory_status_stale_pool_source_visible_with_header_phrase(
         sources=[
             _source("capacity", age_seconds=12),
             _source("training", status="error", age_seconds=4000),
+            _source("inference", age_seconds=10),
+            _source("slurm", age_seconds=3),
         ],
         pools=[
             _pool("inference", 32, 32, 0, 0),
@@ -428,7 +434,12 @@ def test_factory_client_get_status_calls_frozen_endpoint() -> None:
     cluster = status.clusters[0]
     assert cluster.display_name == "research-b300"
     assert [p.type for p in cluster.pools] == ["training", "inference", "slurm"]
-    assert [s.kind for s in cluster.sources] == ["capacity", "slurm"]
+    assert [s.kind for s in cluster.sources] == [
+        "capacity",
+        "training",
+        "inference",
+        "slurm",
+    ]
 
 
 def test_factory_status_rejects_response_missing_clusters(
@@ -812,3 +823,72 @@ def test_factory_status_fresh_empty_cluster_still_says_no_workloads(
     assert result.exit_code == 0, result.output
     assert "no workloads reported" in output
     assert "breakdown unavailable" not in output
+
+
+def test_factory_status_present_allocation_without_source_entry_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A present allocation whose source entry is omitted from the envelope
+    # is unknown evidence — never silently fresh.
+    payload = _status_payload(
+        sources=[
+            _source("capacity", age_seconds=12),
+            _source("training", age_seconds=10),
+            _source("inference", age_seconds=10),
+            # slurm source entry omitted although the slurm pool claims GPUs
+        ],
+        pools=[
+            _pool("training", 32, 32, 0, 0),
+            _pool("inference", 32, 32, 0, 0),
+            _pool("slurm", 48, 16, 32, 0),
+        ],
+    )
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "slurm breakdown unavailable" in output
+    # fresh pools still render; the unproven one does not
+    assert "training" in output and "inference" in output
+    assert "48" not in output
+
+
+def test_factory_status_inactive_all_zero_pool_without_source_renders(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The backend's designed inactive-group signal: an all-zero allocation
+    # row with no source entry is complete evidence of nothing.
+    payload = _status_payload(
+        sources=[
+            _source("capacity", age_seconds=12),
+            _source("slurm", age_seconds=3),
+        ],
+        pools=[
+            _pool("training", 0, 0, 0, 0),  # inactive: zeros, no source
+            _pool("slurm", 48, 16, 32, 0),
+        ],
+    )
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "training" in output  # inactive zeros render
+    assert "breakdown unavailable" not in output
+
+
+def test_factory_status_missing_capacity_entry_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = _status_payload(sources=[])
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "workload breakdown unavailable" in output
+    assert "no workloads reported" not in output

@@ -403,3 +403,36 @@ def test_nodes_cluster_index_selector_filters_raw_json_by_index(
     assert result.exit_code == 0, result.output
     assert len(data["clusters"]) == 1
     assert [n["name"] for n in data["clusters"][0]["nodes"]] == ["gpu-99"]
+
+
+def test_nodes_missing_capacity_entry_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A cluster with no source entry at all has unknown evidence: no node
+    # table, one honest degraded line — never a silently fresh rendering.
+    payload = _nodes_payload(sources=[])
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(app, ["factory", "nodes"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "node breakdown unavailable" in output
+    assert "gpu-01" not in output
+    assert "no nodes reported" not in output
+
+
+def test_nodes_filter_match_empty_distinguished_from_no_nodes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install(monkeypatch, _nodes_payload())
+
+    filtered = runner.invoke(app, ["factory", "nodes", "--state", "cordoned"], env=TEST_ENV)
+    output = strip_ansi(filtered.output)
+    assert filtered.exit_code == 0, filtered.output
+    assert "no nodes match the given filters" in output
+    assert "no nodes reported" not in output
+
+    plain = runner.invoke(app, ["factory", "nodes"], env=TEST_ENV)
+    plain_output = strip_ansi(plain.output)
+    assert plain.exit_code == 0, plain.output
+    assert "no nodes reported" not in plain_output  # fixture has nodes
+    assert "no nodes match" not in plain_output

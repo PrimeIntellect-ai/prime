@@ -81,9 +81,29 @@ def _last_seen_phrase(sources: List[FactorySource]) -> str:
     return f"{phrase} unavailable"
 
 
+def _pool_is_all_zero(pool: FactoryPool) -> bool:
+    """The backend's designed inactive-group signal: all-zero counts."""
+    return (
+        pool.reserved_gpus == 0
+        and pool.in_use_gpus == 0
+        and pool.idle_inside_gpus == 0
+        and pool.unknown_gpus == 0
+    )
+
+
 def _pool_is_available(pool: FactoryPool, source_status: dict) -> bool:
-    """A workload-group row renders only with complete evidence behind a fresh source."""
-    if source_status.get(pool.type, "ok") != "ok":
+    """A workload-group row renders only with complete evidence behind a fresh source.
+
+    Fail closed on missing freshness evidence: a present allocation whose
+    source entry is omitted from the envelope is unknown, never silently
+    fresh. The one exception is the backend's designed inactive-group
+    signal — an all-zero row with no source entry is complete evidence
+    of nothing.
+    """
+    if pool.type not in source_status:
+        if not _pool_is_all_zero(pool):
+            return False
+    elif source_status[pool.type] != "ok":
         return False
     return (
         pool.reserved_gpus is not None
@@ -105,7 +125,9 @@ class _ClusterState:
 
     def __init__(self, cluster: FactoryCluster) -> None:
         source_status = {s.kind: s.status for s in cluster.sources}
-        self.capacity_ok = source_status.get("capacity", "ok") == "ok"
+        # Fail closed: a missing capacity source entry is unknown evidence,
+        # never silently fresh.
+        self.capacity_ok = source_status.get("capacity") == "ok"
         degraded = [s for s in cluster.sources if s.status != "ok"]
 
         # Split pools by index so duplicate payload rows cannot be
@@ -645,8 +667,14 @@ def factory_workloads(
         return
 
     if not degraded:
-        # Genuinely nothing running or queued, with fresh evidence.
-        console.print("No factory workloads found.")
+        # Distinguish an honestly empty fleet from filters that matched
+        # nothing: --type/--state are server-side, so a filtered result of
+        # zero rows is not evidence that the team has no workloads.
+        if type is not None or state is not None or user is not None or cluster is not None:
+            console.print("No factory workloads match the given filters.")
+        else:
+            # Genuinely nothing running or queued, with fresh evidence.
+            console.print("No factory workloads found.")
 
 
 # Coarse public node states from the frozen nodes contract; the labels are
@@ -660,7 +688,9 @@ class _NodesState:
 
     def __init__(self, cluster: FactoryNodesCluster) -> None:
         source_status = {s.kind: s.status for s in cluster.sources}
-        self.capacity_ok = source_status.get("capacity", "ok") == "ok"
+        # Fail closed: a missing capacity source entry is unknown evidence,
+        # never silently fresh.
+        self.capacity_ok = source_status.get("capacity") == "ok"
         degraded = [s for s in cluster.sources if s.status != "ok"]
         self.capacity_sources = [s for s in degraded if s.kind == "capacity"]
         self.remaining_degraded = [s for s in degraded if s.kind != "capacity"]
@@ -869,5 +899,9 @@ def factory_nodes(
         rows = _filter_nodes(c.nodes, state, assigned_to)
         if rows:
             console.print(_render_nodes_table(rows))
+        elif state is not None or assigned_to is not None:
+            # Distinguish an honestly node-less cluster from filters that
+            # matched nothing.
+            console.print("[dim]no nodes match the given filters[/dim]")
         else:
             console.print("[dim]no nodes reported[/dim]")

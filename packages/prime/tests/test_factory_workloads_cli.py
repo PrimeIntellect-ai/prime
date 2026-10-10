@@ -518,3 +518,30 @@ def test_workloads_cluster_miss_with_degraded_source_shows_warnings(
     assert "slurm jobs unavailable" in output
     assert "scheduler data last seen 2h ago" in output
     assert "No cluster matched" in output
+
+
+def test_workloads_filtered_empty_distinguished_from_genuinely_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # --type/--state are server-side: a zero-row response under filters is
+    # "filters matched nothing", not "the team has no workloads".
+    empty = {
+        "schema_version": 1,
+        "as_of": _iso(datetime.now(timezone.utc)),
+        "workloads": [],
+        "sources": [],
+    }
+    _install(monkeypatch, empty)
+
+    filtered = runner.invoke(app, ["factory", "workloads", "--type", "slurm"], env=TEST_ENV)
+    output = strip_ansi(filtered.output)
+    assert filtered.exit_code == 0, filtered.output
+    assert "No factory workloads match the given filters." in output
+    assert "No factory workloads found." not in output
+
+    _install(monkeypatch, empty)
+    plain = runner.invoke(app, ["factory", "workloads"], env=TEST_ENV)
+    plain_output = strip_ansi(plain.output)
+    assert plain.exit_code == 0, plain.output
+    assert "No factory workloads found." in plain_output
+    assert "match the given filters" not in plain_output

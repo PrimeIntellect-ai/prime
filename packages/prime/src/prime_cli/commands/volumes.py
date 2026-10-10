@@ -31,6 +31,7 @@ from pathlib import Path
 import typer
 from rich.markup import escape
 from rich.table import Table
+from rich.text import Text
 
 from prime_cli.api.training import HostedTrainingClient, VolumeTransfer
 from prime_cli.core import APIClient, APIError, Config, NotFoundError
@@ -136,7 +137,7 @@ def list_volumes(
             status_label(v.status),
             v.created_at or "-",
             # Older backends send only the user id.
-            escape(v.created_by_name or v.created_by_email or v.created_by or ""),
+            Text(v.created_by_name or v.created_by_email or v.created_by or ""),
         )
     console.print(table)
 

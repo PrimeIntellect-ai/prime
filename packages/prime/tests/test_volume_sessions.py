@@ -302,3 +302,23 @@ def test_volumes_list_plain_shows_creator(monkeypatch):
     result = _run("list", "--plain")
     assert result.exit_code == 0, _text(result)
     assert "Ada Lovelace" in _text(result)
+
+
+@pytest.mark.parametrize("args", [(), ("--plain",)])
+@pytest.mark.parametrize(
+    "over, shown",
+    [
+        ({"createdByName": "[External] Ada"}, "[External] Ada"),
+        ({"createdByName": "[bold]Ada[/bold]"}, "[bold]Ada[/bold]"),
+        (
+            {"createdByName": None, "createdByEmail": "[ada]@example.com"},
+            "[ada]@example.com",
+        ),
+    ],
+)
+def test_volumes_list_preserves_literal_creator_text(monkeypatch, args, over, shown):
+    _client(monkeypatch, list_volumes=lambda **kw: [_volume(**over)])
+    result = _run("list", *args)
+    assert result.exit_code == 0, _text(result)
+    assert shown in _text(result)
+    assert "\\[" not in _text(result)

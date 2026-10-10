@@ -30,6 +30,7 @@ def output_data_as_json(data: Any, console: Console) -> None:
         json.dumps(data, indent=2, default=str),
         markup=False,
         highlight=False,
+        emoji=False,
         soft_wrap=True,
     )
 

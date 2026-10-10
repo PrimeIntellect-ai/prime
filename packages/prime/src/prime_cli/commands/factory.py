@@ -329,22 +329,25 @@ def _short_gpu_type(gpu_type: Optional[str]) -> str:
 def _compact_data_badge(
     cluster: FactoryCluster,
     node_source: Optional[FactorySource],
-    nodes_cell_ok: bool,
+    node_source_joined: bool,
 ) -> str:
     """The single-token staleness badge: 'fresh' | '<age>' | 'partial'.
 
-    The age form is the worst (oldest) degraded source age. 'partial' marks
-    evidence that cannot be aged honestly: missing entries, unavailable
-    sources, or a node view that could not be joined.
+    The age form is the worst (oldest) degraded source age — including the
+    paired node capacity source when the join succeeded. 'partial' marks
+    source evidence that cannot be aged honestly: missing entries or
+    unavailable sources. Node-view FETCH or JOIN failures are NOT workload
+    degradation and never darken this badge — the em-dash NODES cell and
+    its own legend line carry that instead.
     """
     source_kinds = {s.kind for s in cluster.sources}
     degraded = [s for s in cluster.sources if s.status != "ok"]
-    if nodes_cell_ok and node_source is not None and node_source.status != "ok":
+    if node_source_joined and node_source is not None and node_source.status != "ok":
         degraded.append(node_source)
     missing = "capacity" not in source_kinds or any(
         pool.type not in source_kinds and not _pool_is_all_zero(pool) for pool in cluster.pools
     )
-    unavailable = not nodes_cell_ok or missing or any(s.observed_at is None for s in degraded)
+    unavailable = missing or any(s.observed_at is None for s in degraded)
     if unavailable:
         return "partial"
     if not degraded:
@@ -352,7 +355,8 @@ def _compact_data_badge(
     return human_age(min(s.observed_at for s in degraded))
 
 
-PARTIAL_LEGEND = "partial = some workload data unavailable — run with --verbose for which"
+PARTIAL_LEGEND = "partial = some fleet data unavailable — run with --verbose for which"
+NODE_VIEW_LEGEND = "no node summary = node view unavailable — run prime factory nodes"
 
 
 # The best-effort node view must never stall the status glance.
@@ -392,7 +396,6 @@ def _render_status_table(
     clusters: List[FactoryCluster],
     node_pairs: List[Tuple[FactoryNodesCluster, Optional[FactorySource]]],
     selected: Optional[List[int]] = None,
-    nodes_fetch_ok: bool = True,
     ambiguous_names: Optional[set] = None,
     original_count: Optional[int] = None,
 ) -> None:
@@ -400,8 +403,7 @@ def _render_status_table(
 
     ``clusters`` may be a --cluster-selected subset; ``selected`` holds the
     original payload indices, so node summaries pair positionally with the
-    full payload. ``nodes_fetch_ok`` marks whether the best-effort node view
-    arrived at all; ``ambiguous_names`` are display names that appear more
+    full payload. ``ambiguous_names`` are display names that appear more
     than once — equal-name replacement between the two requests is
     undetectable, so those rows render an em-dash NODES cell. With more than
     one cluster in the original payload, each row is prefixed with its
@@ -415,6 +417,7 @@ def _render_status_table(
     explains 'partial'.
     """
     any_partial = False
+    any_nodes_missing = False
     table = Table(show_header=True, header_style="bold", show_lines=False)
     table.add_column("CLUSTER", style="cyan")
     table.add_column("GPU")
@@ -451,8 +454,14 @@ def _render_status_table(
             # blind to replacement; never risk cross-wired counts.
             nodes_cluster, nodes_source = None, None
         nodes_cell = _compact_nodes_cell(nodes_cluster, nodes_source)
-        nodes_cell_ok = nodes_fetch_ok and nodes_cell != "—"
-        data_badge = _compact_data_badge(cluster, nodes_source, nodes_cell_ok)
+        # A discarded or absent pair is a node-VIEW failure (fetch, identity,
+        # or ambiguity) — not workload degradation: the badge ignores it and
+        # the NODES legend carries it. A joined-but-degraded node source IS
+        # evidence the badge ages.
+        node_source_joined = nodes_cluster is not None
+        if nodes_cluster is None:
+            any_nodes_missing = True
+        data_badge = _compact_data_badge(cluster, nodes_source, node_source_joined)
         if data_badge == "partial":
             any_partial = True
         metric_cells = {
@@ -486,8 +495,9 @@ def _render_status_table(
         )
     console.print(table)
     if any_partial:
-        # One dim legend line, nothing else.
         console.print(f"[dim]{PARTIAL_LEGEND}[/dim]")
+    if any_nodes_missing:
+        console.print(f"[dim]{NODE_VIEW_LEGEND}[/dim]")
 
 
 def _select_cluster_indices(
@@ -619,7 +629,6 @@ def factory_status(
             clusters,
             node_pairs,
             selected,
-            nodes_fetch_ok=bool(node_pairs),
             ambiguous_names=ambiguous,
             original_count=len(all_clusters),
         )
@@ -767,10 +776,17 @@ def _parse_since(value: str) -> datetime:
     text = value.strip()
     days = re.fullmatch(r"(\d+)d", text)
     if days:
-        return datetime.now(timezone.utc) - timedelta(days=int(days.group(1)))
+        try:
+            return datetime.now(timezone.utc) - timedelta(days=int(days.group(1)))
+        except (OverflowError, OSError):
+            # Out-of-range relatives are invalid input, never a crash.
+            raise ValueError(f"Invalid --since '{text}'.") from None
     hours = re.fullmatch(r"(\d+)h", text)
     if hours:
-        return datetime.now(timezone.utc) - timedelta(hours=int(hours.group(1)))
+        try:
+            return datetime.now(timezone.utc) - timedelta(hours=int(hours.group(1)))
+        except (OverflowError, OSError):
+            raise ValueError(f"Invalid --since '{text}'.") from None
     try:
         parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:

@@ -1118,11 +1118,13 @@ def test_factory_status_compact_nodes_fetch_failure_degrades_to_dash(
 
     assert result.exit_code == 0, result.output
     assert "—" in output  # NODES column degraded, status row still renders
-    # The DATA badge marks the row partial and the one-line legend fires.
-    assert "fresh" not in output
-    assert "partial" in output
-    assert "run with --verbose for which" in output
-    assert "degraded sources" not in output  # old footer is gone
+    # A node-VIEW failure is not workload degradation: the badge stays
+    # fresh and the NODES legend carries the em-dash.
+    assert "fresh" in output
+    assert "partial" not in output
+    assert "no node summary = node view unavailable" in output
+    assert "run with --verbose for which" not in output
+    assert "degraded sources" not in output
 
 
 def test_factory_status_compact_partial_degradation_shows_only_that_source(
@@ -1408,11 +1410,10 @@ def test_factory_status_compact_malformed_nodes_json_degrades_to_dash(
     assert result.exit_code == 0, result.output
     assert "research-b300" in output  # the status row renders
     assert "—" in output  # NODES degrades to an em-dash
-    # The DATA badge marks the row partial and the legend fires.
-    assert "fresh" not in output
-    assert "partial" in output
-    assert "run with --verbose for which" in output
-    assert "degraded sources" not in output
+    # Node-view failure, not workload degradation: fresh badge + NODES legend.
+    assert "fresh" in output
+    assert "partial" not in output
+    assert "no node summary = node view unavailable" in output
 
 
 def test_factory_status_compact_node_join_verifies_cluster_identity(
@@ -1489,10 +1490,11 @@ def test_factory_status_compact_node_join_verifies_cluster_identity(
     # DATA records the unjoinable node view instead of claiming "fresh".
     assert "—" in output
     assert "1/1" not in output
-    # Unjoinable node view: partial badge + the one-line legend.
-    assert "partial" in output
-    assert "run with --verbose for which" in output
-    assert "fresh" not in output
+    # Unjoinable node view is not workload degradation: fresh badge + the
+    # NODES legend explains the em-dash.
+    assert "fresh" in output
+    assert "partial" not in output
+    assert "no node summary = node view unavailable" in output
 
 
 def test_factory_status_malformed_success_body_is_clean_error(
@@ -1657,10 +1659,12 @@ def test_factory_status_compact_per_cluster_node_degradation_reaches_data(
 
     assert result.exit_code == 0, result.output
     assert "1/1" in output  # fresh row keeps its node summary
-    # the stale-nodes row: NODES em-dash, partial badge, one-line legend
-    assert "partial" in output
-    assert "run with --verbose for which" in output
-    assert "degraded sources" not in output
+    # The stale-nodes row: the joined-but-degraded node source IS evidence —
+    # the badge ages (2h), the NODES cell dashes, and no node-view legend
+    # fires (the join succeeded; only the source is stale).
+    assert "2h" in output
+    assert "partial" not in output
+    assert "no node summary" not in output
 
 
 def test_factory_status_compact_multi_cluster_shows_original_indices(

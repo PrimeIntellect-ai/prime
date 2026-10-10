@@ -1012,3 +1012,18 @@ def test_workloads_since_filtered_empty_uses_filter_wording(
     assert result.exit_code == 0, result.output
     assert "No factory workloads match the given filters." in output
     assert "No factory workloads found." not in output
+
+
+def test_workloads_since_overflow_is_plain_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A syntactically valid but out-of-range relative window must render the
+    # normal invalid---since diagnostic, never an OverflowError traceback.
+    _install(monkeypatch, _workloads_payload(_default_rows()))
+
+    result = runner.invoke(app, ["factory", "workloads", "--since", "1000000000d"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 1, result.output
+    assert "Invalid --since" in output
+    assert "Use Nd, Nh, or an ISO 8601 timestamp." in output
+    assert "OverflowError" not in result.output
+    assert "Traceback" not in result.output

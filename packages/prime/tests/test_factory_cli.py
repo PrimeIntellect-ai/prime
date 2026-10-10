@@ -1767,3 +1767,24 @@ def test_factory_status_compact_gpu_type_strips_memory_suffix(
     assert result.exit_code == 0, result.output
     assert "B300" in output
     assert "B300_262GB" not in output
+
+
+def test_factory_status_compact_empty_allocation_list_renders_zeros(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A fresh capacity source with no allocation rows is complete evidence
+    # of nothing: HELD/IN USE/UNUSED are known zeros, not dashes, and the
+    # DATA badge stays fresh.
+    payload = _status_payload(pools=[], unassigned_gpus=64, unknown_gpus=0)
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "fresh" in output
+    # zeros in the three metric cells, plus the capacity-derived FREE
+    assert " 0 │" in output
+    assert " 64 " in output
+    assert "—" not in output
+    assert "partial" not in output

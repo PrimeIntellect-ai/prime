@@ -280,6 +280,11 @@ def _aggregate_cell(cluster: FactoryCluster, source_status: dict, attr: str) -> 
     every group is unknown. Unobserved values count as unknown for their
     metric; zeros never masquerade as complete totals.
     """
+    if not cluster.pools:
+        # No allocation rows under fresh capacity: complete evidence of
+        # nothing — zeros, never dashes (the verbose view calls this a
+        # valid empty cluster).
+        return "0"
     total = 0
     contributors = 0
     unknown = 0

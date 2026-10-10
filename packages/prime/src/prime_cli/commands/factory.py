@@ -409,6 +409,7 @@ def _render_status_table(
     selected: Optional[List[int]] = None,
     nodes_fetch_ok: bool = True,
     ambiguous_names: Optional[set] = None,
+    original_count: Optional[int] = None,
 ) -> None:
     """The default sinfo-style glance: one row per cluster, no prose.
 
@@ -417,7 +418,10 @@ def _render_status_table(
     full payload. ``nodes_fetch_ok`` marks whether the best-effort node view
     arrived at all; ``ambiguous_names`` are display names that appear more
     than once — equal-name replacement between the two requests is
-    undetectable, so those rows render an em-dash NODES cell.
+    undetectable, so those rows render an em-dash NODES cell. With more than
+    one cluster in the original payload, each row is prefixed with its
+    original 1-based index — the selector `--cluster` error messages direct
+    users to.
     """
     any_degraded = False
     table = Table(show_header=True, header_style="bold", show_lines=False)
@@ -462,8 +466,14 @@ def _render_status_table(
             data_cell = _join_data_phrases(data_cell, "node view unavailable")
         if data_cell != "fresh":
             any_degraded = True
+        multi = (original_count if original_count is not None else len(clusters)) > 1
+        name_cell = rich_escape(cluster.display_name)
+        if multi:
+            # 1-based, matching the --cluster selector the error messages
+            # direct users to (and the verbose view's numbering).
+            name_cell = f"[cyan]\[{original_index + 1}][/cyan] {name_cell}"
         table.add_row(
-            rich_escape(cluster.display_name),
+            name_cell,
             rich_escape(cluster.gpu_type) if cluster.gpu_type else "—",
             _styled_status(cluster.status),
             _compact_metric_cell(_sum_group_metric(groups, "reserved_gpus")),
@@ -609,6 +619,7 @@ def factory_status(
             selected,
             nodes_fetch_ok=bool(node_pairs),
             ambiguous_names=ambiguous,
+            original_count=len(all_clusters),
         )
         return
 

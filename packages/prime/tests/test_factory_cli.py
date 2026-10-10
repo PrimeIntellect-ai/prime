@@ -1625,3 +1625,44 @@ def test_factory_status_compact_per_cluster_node_degradation_reaches_data(
     # the stale-nodes row: NODES em-dash, DATA records the node view
     assert "node view unavailable" in output
     assert "degraded sources" in output  # the dim footer fires
+
+
+def test_factory_status_compact_multi_cluster_shows_original_indices(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # With multiple clusters, each compact row is prefixed with its
+    # original 1-based index — the selector --cluster error messages direct
+    # users to (and duplicate names make name selection impossible).
+    now = datetime.now(timezone.utc)
+    status_payload = {
+        "schema_version": 1,
+        "as_of": _iso(now),
+        "clusters": [
+            {
+                **_status_payload()["clusters"][0],
+                "display_name": "twin",
+                "sources": [_source("capacity"), _source("training")],
+                "pools": [_pool("training", 32, 32, 0, 0)],
+            },
+            {
+                **_status_payload()["clusters"][0],
+                "display_name": "twin",
+                "sources": [_source("capacity"), _source("training")],
+                "pools": [_pool("training", 8, 8, 0, 0)],
+            },
+        ],
+    }
+    _install(monkeypatch, status_payload)
+
+    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "[1] twin" in output and "[2] twin" in output
+
+    # Index selection after filtering keeps the original indices visible.
+    selected = runner.invoke(app, ["factory", "status", "--cluster", "2"], env=TEST_ENV)
+    selected_output = strip_ansi(selected.output)
+    assert selected.exit_code == 0, selected.output
+    assert "[2] twin" in selected_output
+    assert "[1] twin" not in selected_output

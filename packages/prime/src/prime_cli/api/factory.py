@@ -3,15 +3,15 @@
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, PrivateAttr, ValidationError
+from pydantic import AliasChoices, BaseModel, Field, PrivateAttr, ValidationError
 
 from prime_cli.core import APIClient, APIError
 
 
 class FactoryPool(BaseModel):
-    """GPU allocation summary for one workload pool on a cluster.
+    """GPU allocation summary for one workload group on a cluster.
 
-    ``reserved`` is GPUs claimed by the pool, ``in_use`` GPUs actually
+    ``reserved`` is GPUs claimed by the group, ``in_use`` GPUs actually
     allocated to leaf workloads, ``idle_inside`` the difference when the
     evidence is complete. ``None`` means the value could not be observed.
     """
@@ -36,7 +36,7 @@ class FactorySource(BaseModel):
 
 
 class FactoryCluster(BaseModel):
-    """One dedicated cluster with its pool allocation summary."""
+    """One dedicated cluster with its per-workload-group allocation summary."""
 
     display_name: str
     gpu_type: Optional[str] = None
@@ -45,8 +45,10 @@ class FactoryCluster(BaseModel):
     unassigned_gpus: Optional[int] = None
     unknown_gpus: Optional[int] = None
     # Both contract fields are required: a 200 response without them is a
-    # malformed payload, not an empty allocation summary.
-    pools: List[FactoryPool]
+    # malformed payload, not an empty allocation summary. The API layer is
+    # aligning the envelope key from `pools` to `workloads`; accept both so
+    # the CLI works against either deployed shape (passthrough stays exact).
+    pools: List[FactoryPool] = Field(validation_alias=AliasChoices("pools", "workloads"))
     sources: List[FactorySource]
 
 
@@ -113,6 +115,51 @@ class FactoryWorkloads(BaseModel):
     # not an empty fleet — keep those distinguishable.
     workloads: List[FactoryWorkload]
     sources: List[FactorySource]
+
+    # The raw API response is retained so ``--json`` can echo the exact
+    # server payload instead of a re-serialization of the parsed model.
+    _raw_response: Dict[str, Any] = PrivateAttr(default_factory=dict)
+
+    @property
+    def raw_response(self) -> Dict[str, Any]:
+        return self._raw_response
+
+
+class FactoryNode(BaseModel):
+    """One node in a dedicated factory cluster.
+
+    ``state`` is the coarse public state (ready/cordoned/offline/unknown);
+    ``assigned_to`` is the workload group the node is claimed by
+    (training/inference/slurm) or ``None`` when unassigned. ``None`` GPU
+    counts mean unobserved, never zero.
+    """
+
+    name: str
+    state: Optional[str] = None
+    gpu_type: Optional[str] = None
+    gpus_total: Optional[int] = None
+    gpus_used: Optional[int] = None
+    assigned_to: Optional[str] = None
+
+
+class FactoryNodesCluster(BaseModel):
+    """One cluster with its node inventory."""
+
+    display_name: str
+    status: Optional[str] = None
+    # Required: a 200 response without `nodes` is a malformed payload.
+    nodes: List[FactoryNode]
+    sources: List[FactorySource]
+
+
+class FactoryNodes(BaseModel):
+    """Response envelope for ``GET /api/v1/factory/nodes``."""
+
+    schema_version: int
+    as_of: Optional[datetime] = None
+    # Required: a 200 response without `clusters` is a malformed payload,
+    # not an empty fleet — keep those distinguishable.
+    clusters: List[FactoryNodesCluster]
 
     # The raw API response is retained so ``--json`` can echo the exact
     # server payload instead of a re-serialization of the parsed model.
@@ -200,3 +247,26 @@ class FactoryClient:
             )
         workloads._raw_response = response
         return workloads
+
+    def get_nodes(self, team_id: str) -> FactoryNodes:
+        """Fetch the node inventory for a team.
+
+        The backend validates team membership of the caller; the CLI only
+        resolves which team context to ask about.
+        """
+        response = self.client.get("/factory/nodes", params={"team_id": team_id})
+        try:
+            nodes = FactoryNodes.model_validate(response)
+        except ValidationError as exc:
+            # Wrap shape drift as APIError so the command's except-APIError
+            # branch surfaces a clean CLI error instead of a traceback.
+            raise APIError(_format_validation_error(exc, label="nodes")) from exc
+        if nodes.schema_version != SUPPORTED_SCHEMA_VERSION:
+            # A newer schema still validating against the v1 model would be
+            # silently misinterpreted; fail loudly instead.
+            raise APIError(
+                f"Unsupported factory nodes schema version: {nodes.schema_version} "
+                f"(expected {SUPPORTED_SCHEMA_VERSION})"
+            )
+        nodes._raw_response = response
+        return nodes

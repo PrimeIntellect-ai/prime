@@ -1,7 +1,7 @@
 """`prime factory` — Model Factory fleet status and workloads."""
 
 from datetime import datetime
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional, Protocol, Sequence
 
 import typer
 from rich.markup import escape as rich_escape
@@ -10,6 +10,8 @@ from rich.table import Table
 from ..api.factory import (
     FactoryClient,
     FactoryCluster,
+    FactoryNode,
+    FactoryNodesCluster,
     FactoryPool,
     FactorySource,
     FactoryWorkload,
@@ -35,8 +37,15 @@ console = get_console()
 FACTORY_STATUS_JSON_HELP = json_output_help(
     ". = {schema_version, as_of, clusters[]}",
     ".clusters[] = {display_name, gpu_type, total_gpus, status,",
-    "                 unassigned_gpus, unknown_gpus, pools[], sources[]}",
-    ".pools[] = {type, reserved_gpus, in_use_gpus, idle_inside_gpus, unknown_gpus}",
+    "                 unassigned_gpus, unknown_gpus, workloads[], sources[]}",
+    ".workloads[] = {type, reserved_gpus, in_use_gpus, idle_inside_gpus, unknown_gpus}",
+    ".sources[] = {kind, status, observed_at}",
+)
+
+FACTORY_NODES_JSON_HELP = json_output_help(
+    ". = {schema_version, as_of, clusters[]}",
+    ".clusters[] = {display_name, status, nodes[], sources[]}",
+    ".nodes[] = {name, state, gpu_type, gpus_total, gpus_used, assigned_to}",
     ".sources[] = {kind, status, observed_at}",
 )
 
@@ -73,7 +82,7 @@ def _last_seen_phrase(sources: List[FactorySource]) -> str:
 
 
 def _pool_is_available(pool: FactoryPool, source_status: dict) -> bool:
-    """A pool row renders only with complete evidence behind a fresh source."""
+    """A workload-group row renders only with complete evidence behind a fresh source."""
     if source_status.get(pool.type, "ok") != "ok":
         return False
     return (
@@ -119,7 +128,17 @@ class _ClusterState:
         self.involved_sources = [s for s in degraded if s.kind in involved]
 
 
-def _cluster_label(cluster: FactoryCluster, index: int, multi: bool) -> str:
+class _DisplayNamedCluster(Protocol):
+    """Structural type: anything with a public display name.
+
+    The status and nodes payloads are different envelope shapes; cluster
+    selection and labeling only ever read `display_name`.
+    """
+
+    display_name: str
+
+
+def _cluster_label(cluster: _DisplayNamedCluster, index: int, multi: bool) -> str:
     label = rich_escape(cluster.display_name)
     if multi:
         label = f"[cyan]\\[{index}][/cyan] {label}"
@@ -144,7 +163,7 @@ def _cluster_header(
 
 def _render_pool_table(pools: List[FactoryPool]) -> Table:
     table = Table(show_header=True, header_style="bold", show_lines=False)
-    table.add_column("POOL", style="cyan")
+    table.add_column("WORKLOAD", style="cyan")
     table.add_column("RESERVED", style="white", justify="right")
     table.add_column("IN USE", style="green", justify="right")
     table.add_column("IDLE INSIDE", style="blue", justify="right")
@@ -172,7 +191,7 @@ def _render_workloads_section(
 
         if state.suppressed:
             names = (
-                "pool"
+                "workload"
                 if not state.renderable and len(state.suppressed) == len(cluster.pools)
                 else ", ".join(rich_escape(p.type) for p in state.suppressed)
             )
@@ -185,7 +204,7 @@ def _render_workloads_section(
             console.print(_render_pool_table(state.renderable))
             footnote = True
 
-        # Unassigned and unknown GPUs are cluster-level facts, not pool rows.
+        # Unassigned and unknown GPUs are cluster-level facts, not workload-group rows.
         if state.capacity_ok and cluster.unassigned_gpus is not None:
             console.print(f"unassigned: {cluster.unassigned_gpus} GPUs")
         if state.capacity_ok and cluster.unknown_gpus is not None:
@@ -199,15 +218,16 @@ def _render_workloads_section(
                 and (cluster.unassigned_gpus is not None or cluster.unknown_gpus is not None)
             )
         ):
-            console.print("[dim]no pools reported[/dim]")
+            console.print("[dim]no workloads reported[/dim]")
 
     if footnote:
         console.print()
         console.print(f"[dim]{IN_USE_NOTE}[/dim]")
+        console.print("[dim]drill down: prime factory nodes[/dim]")
 
 
 def _select_cluster_indices(
-    clusters: List[FactoryCluster], selector: str, err_console: Any
+    clusters: Sequence[_DisplayNamedCluster], selector: str, err_console: Any
 ) -> List[int]:
     """Select clusters by display name (exact) or 1-based index.
 
@@ -325,7 +345,7 @@ def factory_status(
         )
         console.print(_cluster_header(c, index, multi, freshness))
 
-    # WORKLOADS answers "what is running": pool-level holding view per cluster.
+    # WORKLOADS answers "what is running": workload-group holding view per cluster.
     console.print()
     console.print("[bold]WORKLOADS[/bold]")
     _render_workloads_section(clusters, states, multi)
@@ -620,3 +640,223 @@ def factory_workloads(
     if not degraded:
         # Genuinely nothing running or queued, with fresh evidence.
         console.print("No factory workloads found.")
+
+
+# Coarse public node states from the frozen nodes contract; the labels are
+# the only node vocabulary shown to users.
+NODE_STATES = ("ready", "cordoned", "offline", "unknown")
+NODE_ASSIGNEES = ("training", "inference", "slurm")
+
+
+class _NodesState:
+    """Per-cluster rendering facts for the nodes view."""
+
+    def __init__(self, cluster: FactoryNodesCluster) -> None:
+        source_status = {s.kind: s.status for s in cluster.sources}
+        self.capacity_ok = source_status.get("capacity", "ok") == "ok"
+        degraded = [s for s in cluster.sources if s.status != "ok"]
+        self.capacity_sources = [s for s in degraded if s.kind == "capacity"]
+        self.remaining_degraded = [s for s in degraded if s.kind != "capacity"]
+
+
+def _node_state_cell(node: FactoryNode) -> str:
+    state_styles = {
+        "ready": "green",
+        "cordoned": "yellow",
+        "offline": "red",
+        "unknown": "dim",
+    }
+    state = node.state or "unknown"
+    if state in state_styles:
+        return f"[{state_styles[state]}]{rich_escape(state)}[/{state_styles[state]}]"
+    return rich_escape(state)
+
+
+def _node_gpu_cell(node: FactoryNode) -> str:
+    """Used/total GPUs; unobserved components stay `-`, never 0."""
+
+    def _count(value: Optional[int]) -> str:
+        return str(value) if value is not None else "[dim]-[/dim]"
+
+    return f"{_count(node.gpus_used)}/{_count(node.gpus_total)}"
+
+
+def _nodes_cluster_header(
+    cluster: FactoryNodesCluster, index: int, multi: bool, freshness: Optional[str]
+) -> str:
+    parts: List[str] = [_cluster_label(cluster, index, multi)]
+    parts.append(_styled_status(cluster.status))
+    if freshness:
+        parts.append(freshness)
+    return " · ".join(parts)
+
+
+def _render_nodes_table(nodes: List[FactoryNode]) -> Table:
+    table = Table(show_header=True, header_style="bold", show_lines=False)
+    table.add_column("NODE", style="cyan")
+    table.add_column("STATE", style="white")
+    table.add_column("GPUs", justify="right")
+    table.add_column("ASSIGNED TO")
+
+    for node in nodes:
+        assigned = rich_escape(node.assigned_to) if node.assigned_to else "[dim]-[/dim]"
+        table.add_row(
+            rich_escape(node.name),
+            _node_state_cell(node),
+            _node_gpu_cell(node),
+            assigned,
+        )
+    return table
+
+
+def _filter_nodes(
+    nodes: List[FactoryNode],
+    state: Optional[str],
+    assigned_to: Optional[str],
+) -> List[FactoryNode]:
+    """Client-side narrowing of node rows by state and assignee."""
+    if state is not None:
+        nodes = [n for n in nodes if (n.state or "unknown") == state]
+    if assigned_to is not None:
+        nodes = [n for n in nodes if n.assigned_to == assigned_to]
+    return nodes
+
+
+def _filter_raw_nodes(
+    raw_nodes: List[Dict[str, Any]],
+    state: Optional[str],
+    assigned_to: Optional[str],
+) -> List[Dict[str, Any]]:
+    """Raw-payload mirror of `_filter_nodes` for exact `--json` filtering."""
+    if state is not None:
+        raw_nodes = [n for n in raw_nodes if (n.get("state") or "unknown") == state]
+    if assigned_to is not None:
+        raw_nodes = [n for n in raw_nodes if n.get("assigned_to") == assigned_to]
+    return raw_nodes
+
+
+@app.command(name="nodes", epilog=FACTORY_NODES_JSON_HELP)
+def factory_nodes(
+    team: Optional[str] = typer.Option(
+        None, "--team", "-t", help="Team ID override (defaults to the selected account context)"
+    ),
+    cluster: Optional[str] = typer.Option(
+        None, "--cluster", help="Show only this cluster, by display name or 1-based index"
+    ),
+    state: Optional[str] = typer.Option(
+        None, "--state", help="Filter nodes by state: ready, cordoned, offline, or unknown"
+    ),
+    assigned_to: Optional[str] = typer.Option(
+        None, "--assigned-to", help="Filter nodes by assignee: training, inference, or slurm"
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", help="Print the API response as JSON (same as --output json)"
+    ),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """Show the nodes of your team's dedicated factory clusters (sinfo-like).
+
+    Example:
+
+        prime factory nodes
+
+        prime factory nodes --cluster research-b300 --state cordoned
+
+        prime factory nodes --assigned-to slurm --json
+    """
+    if json_output:
+        output = "json"
+    validate_output_format(output, console)
+
+    # JSON mode keeps stdout strictly data: every diagnostic goes to stderr.
+    err_console = get_console(stderr=True) if output == "json" else console
+
+    if state is not None and state not in NODE_STATES:
+        err_console.print(
+            f"[red]Error:[/red] Invalid --state '{rich_escape(state)}'. "
+            f"Choose one of: {', '.join(NODE_STATES)}."
+        )
+        raise typer.Exit(1)
+    if assigned_to is not None and assigned_to not in NODE_ASSIGNEES:
+        err_console.print(
+            f"[red]Error:[/red] Invalid --assigned-to '{rich_escape(assigned_to)}'. "
+            f"Choose one of: {', '.join(NODE_ASSIGNEES)}."
+        )
+        raise typer.Exit(1)
+
+    team_id = team or Config().team_id
+    if not team_id:
+        err_console.print(
+            "No team selected in the current account context. "
+            "`prime factory nodes` shows your team's factory nodes."
+        )
+        err_console.print(
+            "[dim]Run `prime switch` to select a team, or pass --team <team_id>.[/dim]"
+        )
+        return
+
+    try:
+        api_client = APIClient()
+        nodes_payload = FactoryClient(api_client).get_nodes(team_id)
+    except APIError as e:
+        # Escape upstream error text: raw brackets (e.g. pydantic
+        # "[type=...]" metadata) would crash Rich markup rendering.
+        err_console.print(f"[red]Error:[/red] {rich_escape(str(e))}")
+        raise typer.Exit(1)
+
+    clusters = nodes_payload.clusters
+    selected: Optional[List[int]] = None
+    if cluster is not None:
+        selected = _select_cluster_indices(clusters, cluster, err_console)
+        clusters = [clusters[i] for i in selected]
+
+    if output == "json":
+        payload = nodes_payload.raw_response
+        if selected is not None or state is not None or assigned_to is not None:
+            keep_names = {c.display_name for c in clusters}
+            raw_clusters = [
+                {
+                    **raw_cluster,
+                    "nodes": _filter_raw_nodes(raw_cluster.get("nodes", []), state, assigned_to),
+                }
+                for raw_cluster in nodes_payload.raw_response.get("clusters", [])
+                if raw_cluster.get("display_name") in keep_names
+            ]
+            # Filter the raw response objects, not re-serialized models, so
+            # --json stays an exact passthrough of the API payload.
+            payload = {**nodes_payload.raw_response, "clusters": raw_clusters}
+        output_data_as_json(payload, console)
+        return
+
+    if not clusters:
+        console.print("No factory clusters allocated.")
+        return
+
+    states = [_NodesState(c) for c in clusters]
+    multi = len(clusters) > 1
+
+    console.print("[bold]CLUSTERS[/bold]")
+    for index, (c, state_obj) in enumerate(zip(clusters, states), start=1):
+        if index > 1:
+            console.print()
+        freshness = (
+            _last_seen_phrase(state_obj.remaining_degraded)
+            if state_obj.remaining_degraded
+            else None
+        )
+        console.print(_nodes_cluster_header(c, index, multi, freshness))
+
+        if not state_obj.capacity_ok:
+            # The node inventory itself is degraded: say so instead of a
+            # quiet empty or stale table.
+            line = "node breakdown unavailable"
+            if state_obj.capacity_sources:
+                line += f" — {_last_seen_phrase(state_obj.capacity_sources)}"
+            console.print(f"[yellow]{line}[/yellow]")
+            continue
+
+        rows = _filter_nodes(c.nodes, state, assigned_to)
+        if rows:
+            console.print(_render_nodes_table(rows))
+        else:
+            console.print("[dim]no nodes reported[/dim]")

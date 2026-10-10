@@ -235,7 +235,7 @@ def test_factory_status_all_stale_sources_skip_table_with_friendly_line(
     output = strip_ansi(result.output)
 
     assert result.exit_code == 0, result.output
-    assert "pool breakdown unavailable — node data last seen 1d ago" in output
+    assert "workload breakdown unavailable — node data last seen 1d ago" in output
     # The pool table is skipped entirely.
     assert "RESERVED" not in output
     assert "unassigned" not in output
@@ -708,7 +708,7 @@ def test_factory_status_no_pools_renders_summary_lines_without_table(
     assert "unassigned: 64 GPUs" in output
     # No pool rows exist, so no table and no footnote.
     assert "RESERVED" not in output
-    assert "no pools reported" not in output
+    assert "no workloads reported" not in output
     assert "in-use = GPUs held by running jobs" not in output
 
 
@@ -722,6 +722,47 @@ def test_factory_status_empty_cluster_prints_no_pools_reported(
     output = strip_ansi(result.output)
 
     assert result.exit_code == 0, result.output
-    assert "no pools reported" in output
+    assert "no workloads reported" in output
     assert "RESERVED" not in output
     assert "breakdown unavailable" not in output
+
+
+def test_factory_status_accepts_aligned_workloads_envelope_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The API layer is aligning the envelope key from `pools` to `workloads`;
+    # the CLI parses either shape and --json stays an exact passthrough.
+    payload = _status_payload()
+    for cluster in payload["clusters"]:
+        cluster["workloads"] = cluster.pop("pools")
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "research-b300" in output
+    assert "slurm" in output
+    assert "drill down: prime factory nodes" in output
+
+    json_result = runner.invoke(app, ["factory", "status", "--json"], env=TEST_ENV)
+    assert json.loads(json_result.stdout) == payload
+
+
+def test_factory_status_drill_down_hint_only_when_table_rendered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Fresh data renders the WORKLOADS table -> the dim drill-down hint shows.
+    _install(monkeypatch, _status_payload())
+    shown = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    assert "drill down: prime factory nodes" in strip_ansi(shown.output)
+
+    # All-suppressed (stale) data renders no table -> no hint.
+    stale = _status_payload()
+    for cluster in stale["clusters"]:
+        cluster["sources"] = [_source("capacity", status="stale", age_seconds=86400)]
+    _install(monkeypatch, stale)
+    hidden = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    output = strip_ansi(hidden.output)
+    assert "workload breakdown unavailable" in output
+    assert "drill down: prime factory nodes" not in output

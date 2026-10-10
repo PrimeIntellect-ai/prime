@@ -624,12 +624,20 @@ def factory_status(
         # The default is the compact sinfo-style glance: one row per
         # cluster, at most one dim line under the table, no prose.
         all_clusters = status.clusters
-        name_counts: Dict[str, int] = {}
-        for status_cluster in all_clusters:
-            name = status_cluster.display_name
-            name_counts[name] = name_counts.get(name, 0) + 1
-        ambiguous = {name for name, count in name_counts.items() if count > 1}
         node_pairs = _fetch_node_pairs(api_client, team_id)
+
+        def _duplicated_names(names: List[str]) -> set:
+            counts: Dict[str, int] = {}
+            for name in names:
+                counts[name] = counts.get(name, 0) + 1
+            return {name for name, count in counts.items() if count > 1}
+
+        # Ambiguity can arise in EITHER snapshot: the two requests are
+        # independent, and a name duplicated only in the nodes payload
+        # can still cross-wire counts through a positional name match.
+        ambiguous = _duplicated_names(
+            [cluster.display_name for cluster in all_clusters]
+        ) | _duplicated_names([pair[0].display_name for pair in node_pairs])
         _render_status_table(
             clusters,
             node_pairs,

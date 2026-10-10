@@ -1788,3 +1788,60 @@ def test_factory_status_compact_empty_allocation_list_renders_zeros(
     assert " 64 " in output
     assert "—" not in output
     assert "partial" not in output
+
+
+def test_factory_status_compact_nodes_snapshot_duplicates_disable_join(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The status payload has ONE "twin" cluster, but the independently
+    # fetched nodes snapshot carries TWO same-named clusters: the
+    # positional name match cannot prove which counts belong to the status
+    # row — the join is disabled, NODES dashes, and the node-view legend
+    # explains it.
+    now = datetime.now(timezone.utc)
+    status_payload = _status_payload(display_name="twin")
+    nodes_payload = {
+        "schema_version": 1,
+        "as_of": _iso(now),
+        "sources": [_source("capacity"), _source("capacity")],
+        "clusters": [
+            {
+                "display_name": "twin",
+                "status": "online",
+                "nodes": [
+                    {
+                        "name": "gpu-1",
+                        "state": "ready",
+                        "gpu_type": "B300",
+                        "gpus_total": 8,
+                        "gpus_used": 8,
+                        "assigned_to": "slurm",
+                    }
+                ],
+            },
+            {
+                "display_name": "twin",
+                "status": "online",
+                "nodes": [
+                    {
+                        "name": "gpu-9",
+                        "state": "ready",
+                        "gpu_type": "B300",
+                        "gpus_total": 8,
+                        "gpus_used": 4,
+                        "assigned_to": None,
+                    }
+                ],
+            },
+        ],
+    }
+    _install(monkeypatch, status_payload, nodes_payload=nodes_payload)
+
+    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "1/1" not in output  # never attach either duplicate's counts
+    assert "—" in output
+    assert "no node summary = node view unavailable" in output
+    assert "fresh" in output  # the workload evidence is unaffected

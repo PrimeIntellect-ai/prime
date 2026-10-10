@@ -740,3 +740,22 @@ def test_workloads_type_filter_excludes_other_kinds_from_zero_row_warnings(
     assert plain.exit_code == 0, plain.output
     assert "training:run-1" in plain_output
     assert "slurm jobs unavailable" in plain_output
+
+
+def test_workloads_malformed_success_body_is_clean_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _MalformedClient:
+        def get(self, endpoint, params=None, timeout=None):
+            raise ValueError("Expecting value: line 1 column 1 (char 0)")
+
+    monkeypatch.setattr("prime_cli.commands.factory.APIClient", lambda: _MalformedClient())
+    monkeypatch.setattr("prime_cli.commands.factory.Config", lambda: _StubConfig("team-123"))
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+
+    result = runner.invoke(app, ["factory", "workloads"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 1, result.output
+    assert "malformed response body" in output
+    assert "ValueError" not in result.output

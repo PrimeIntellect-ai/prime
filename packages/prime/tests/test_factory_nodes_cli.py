@@ -514,3 +514,20 @@ def test_nodes_client_parses_real_backend_envelope(monkeypatch: pytest.MonkeyPat
     # stays visible instead of a quiet empty table.
     assert "node breakdown unavailable — node data last seen 1d ago" in output
     assert "office-a100" in output
+
+
+def test_nodes_malformed_success_body_is_clean_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _MalformedClient:
+        def get(self, endpoint, params=None, timeout=None):
+            raise ValueError("Expecting value: line 1 column 1 (char 0)")
+
+    monkeypatch.setattr("prime_cli.commands.factory.APIClient", lambda: _MalformedClient())
+    monkeypatch.setattr("prime_cli.commands.factory.Config", lambda: _StubConfig("team-123"))
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+
+    result = runner.invoke(app, ["factory", "nodes"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 1, result.output
+    assert "malformed response body" in output
+    assert "ValueError" not in result.output

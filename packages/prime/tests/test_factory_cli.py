@@ -1446,3 +1446,25 @@ def test_factory_status_compact_node_join_verifies_cluster_identity(
     # identity mismatch -> em-dash NODES, never the cross-wired count.
     assert "—" in output
     assert "1/1" not in output
+
+
+def test_factory_status_malformed_success_body_is_clean_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A 200 with a non-JSON body on a PRIMARY endpoint must surface as a
+    # coarse APIError (exit 1), never an unhandled ValueError traceback.
+    class _MalformedStatusClient:
+        def get(self, endpoint, params=None, timeout=None):
+            raise ValueError("Expecting value: line 1 column 1 (char 0)")
+
+    monkeypatch.setattr("prime_cli.commands.factory.APIClient", lambda: _MalformedStatusClient())
+    monkeypatch.setattr("prime_cli.commands.factory.Config", lambda: _StubConfig("team-123"))
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+
+    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 1, result.output
+    assert "malformed response body" in output
+    assert "Traceback" not in result.output
+    assert "ValueError" not in result.output

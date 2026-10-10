@@ -219,13 +219,33 @@ class FactoryClient:
     def __init__(self, client: APIClient) -> None:
         self.client = client
 
+    def _get_json(
+        self,
+        endpoint: str,
+        params: Dict[str, Any],
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """GET one factory endpoint and normalize malformed success bodies.
+
+        An HTTP 200 with a non-JSON body (e.g. an HTML proxy error page)
+        escapes the transport client as a raw decoding error, before any
+        validation runs. Normalize it to a coarse APIError so the commands'
+        except-APIError branch surfaces a clean error instead of a
+        traceback — without changing APIClient's semantics for other
+        commands.
+        """
+        try:
+            return self.client.get(endpoint, params=params, timeout=timeout)
+        except ValueError as exc:
+            raise APIError("Factory API returned a malformed response body.") from exc
+
     def get_status(self, team_id: str) -> FactoryStatus:
         """Fetch the fleet status for a team.
 
         The backend validates team membership of the caller; the CLI only
         resolves which team context to ask about.
         """
-        response = self.client.get("/factory/status", params={"team_id": team_id})
+        response = self._get_json("/factory/status", {"team_id": team_id})
         try:
             status = FactoryStatus.model_validate(response)
         except ValidationError as exc:
@@ -261,7 +281,7 @@ class FactoryClient:
             params["workload_type"] = workload_type
         if state is not None:
             params["state"] = state
-        response = self.client.get("/factory/workloads", params=params)
+        response = self._get_json("/factory/workloads", params)
         try:
             workloads = FactoryWorkloads.model_validate(response)
         except ValidationError as exc:
@@ -285,7 +305,7 @@ class FactoryClient:
         resolves which team context to ask about. ``timeout`` caps the
         request for best-effort callers (the compact status glance).
         """
-        response = self.client.get("/factory/nodes", params={"team_id": team_id}, timeout=timeout)
+        response = self._get_json("/factory/nodes", {"team_id": team_id}, timeout=timeout)
         try:
             nodes = FactoryNodes.model_validate(response)
         except ValidationError as exc:

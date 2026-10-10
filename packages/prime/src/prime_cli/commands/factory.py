@@ -667,6 +667,8 @@ def factory_status(
 FACTORY_WORKLOADS_JSON_HELP = json_output_help(
     ". = {schema_version, as_of, workloads[], sources[]}",
     ".workloads[] = {id, type, cluster_display_name, name, state, native_state,",
+    "                 scheduler_display_name — slurm rows name the",
+    "                 deployment; null = direct placement,",
     "                 owner{kind, display_name}, requested_gpus, allocated_gpus,",
     "                 created_at, started_at, ended_at (terminal rows),",
     "                 reason (when supplied),",
@@ -895,6 +897,9 @@ def _render_workloads_table(rows: List[FactoryWorkload], show_duration: bool = F
     table.add_column("TYPE", style="white")
     table.add_column("NAME")
     table.add_column("CLUSTER")
+    # Slurm rows name their deployment; training/inference rows are direct
+    # placement (no scheduler application in between).
+    table.add_column("SCHEDULER")
     table.add_column("OWNER")
     table.add_column("STATE")
     table.add_column("GPU A/R", justify="right")
@@ -915,6 +920,9 @@ def _render_workloads_table(rows: List[FactoryWorkload], show_duration: bool = F
             rich_escape(row.type),
             rich_escape(row.name) if row.name else "[dim]-[/dim]",
             rich_escape(row.cluster_display_name) if row.cluster_display_name else "[dim]-[/dim]",
+            rich_escape(row.scheduler_display_name)
+            if row.scheduler_display_name
+            else "[dim]-[/dim]",
             _workload_owner_cell(row),
             _workload_state_cell(row),
             _workload_gpu_cell(row),

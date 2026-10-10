@@ -1037,3 +1037,58 @@ def test_workloads_json_help_documents_terminal_fields() -> None:
     assert result.exit_code == 0, result.output
     assert "ended_at" in result.output
     assert "reason" in result.output
+
+
+def test_workloads_scheduler_column_mixed_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Slurm rows carry the deployment display name; training/inference rows
+    # are direct placement and render a dash.
+    slurm_row = _workload("slurm:ac12:8421", "slurm", "running")
+    slurm_row["scheduler_display_name"] = "research-b300-slurm"
+    training_row = _workload("training:run-7", "training", "running")
+    inference_row = _workload("inference:job-3", "inference", "queued")
+    payload = _workloads_payload([slurm_row, training_row, inference_row])
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(app, ["factory", "workloads"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "SCHEDULER" in output
+    assert "research-b300-slurm" in output
+    # the direct-placement rows show a dash in the SCHEDULER cell
+    assert output.count("[dim]") == 0  # sanity: raw markup stripped
+    assert "direct placement" not in output  # the dash speaks, no prose
+
+
+def test_workloads_scheduler_column_escaped(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Rich markup in the deployment name must never crash rendering.
+    row = _workload("slurm:ac12:8421", "slurm", "running")
+    row["scheduler_display_name"] = "slurm-[bold]team"
+    _install(monkeypatch, _workloads_payload([row]))
+
+    result = runner.invoke(app, ["factory", "workloads"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "slurm-[bold]team" in output
+
+
+def test_workloads_scheduler_null_renders_dash(monkeypatch: pytest.MonkeyPatch) -> None:
+    row = _workload("slurm:ac12:8422", "slurm", "completed")
+    row["scheduler_display_name"] = None
+    _install(monkeypatch, _workloads_payload([row]))
+
+    result = runner.invoke(app, ["factory", "workloads", "--state", "completed"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "SCHEDULER" in output
+    assert "None" not in output  # nulls never leak
+
+
+def test_workloads_help_documents_scheduler_field() -> None:
+    result = runner.invoke(app, ["factory", "workloads", "--help"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    assert "scheduler_display_name" in result.output
+    assert "direct placement" in result.output

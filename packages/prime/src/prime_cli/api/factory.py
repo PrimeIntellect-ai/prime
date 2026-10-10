@@ -122,6 +122,9 @@ class FactoryWorkload(BaseModel):
     started_at: AwareUTCDatetime = None
     # Terminal rows carry a nullable end timestamp.
     ended_at: AwareUTCDatetime = None
+    # Slurm rows name the deployment that scheduled them; training and
+    # inference rows are direct placement and carry None.
+    scheduler_display_name: Optional[str] = None
     reason: Optional[str] = None
     source: FactorySource
 

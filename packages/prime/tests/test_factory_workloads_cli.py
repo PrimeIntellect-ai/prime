@@ -590,3 +590,95 @@ def test_workloads_degraded_fallback_prefers_observed_over_missing(
     assert result.exit_code == 0, result.output
     assert "scheduler data last seen 3m ago" in output
     assert "unavailable" in output
+
+
+def test_workloads_fresh_row_renders_despite_global_worst_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Roast: per-row freshness, not global-worst-source erasure. The
+    # envelope training source is stale (some other deployment), but this
+    # training row's own evidence is fresh -> it must render.
+    row = _workload("training:run-1", "training", "running")
+    row["source"] = _source("training")  # fresh per-row evidence
+    bob = _workload("training:run-2", "training", "running")
+    bob["source"] = _source("training", status="stale", age_seconds=7200)
+    payload = _workloads_payload(
+        [row, bob],
+        sources=[_source("training", status="stale", age_seconds=7200)],
+    )
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(app, ["factory", "workloads"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "training:run-1" in output  # fresh row survives the stale aggregate
+    assert "training:run-2" not in output  # the stale row itself is suppressed
+    assert "training jobs unavailable" in output  # aggregate stays a warning
+    assert "training data last seen 2h ago" in output
+
+
+def test_workloads_unobserved_allocation_row_renders_with_dash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A running row whose GPU allocation is unobserved still renders:
+    # identity, state, and owner are known facts; the allocation cell is
+    # "-/64" (em-dash requested, GPU count from requested).
+    row = _workload("training:run-5", "training", "running", requested_gpus=64)
+    row["allocated_gpus"] = None
+    _install(monkeypatch, _workloads_payload([row]))
+
+    result = runner.invoke(app, ["factory", "workloads"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "training:run-5" in output
+    assert "running" in output and "carol" in output
+    assert "-/64" in output
+    assert "unavailable" not in output  # unobserved allocation is not degradation
+
+
+def test_workloads_degradation_computed_on_narrowed_view(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # --user narrowing: degradation follows the narrowed view, not the
+    # global fleet. Alice has fresh training rows; bob's stale slurm rows
+    # are outside her view and must not warn on it.
+    alice = _workload("training:run-1", "training", "running")
+    alice["owner"] = {"kind": "prime", "display_name": "alice"}
+    bob = _workload("slurm:ac12:8421", "slurm", "running")
+    bob["owner"] = {"kind": "slurm", "display_name": "bob"}
+    bob["source"] = _source("slurm", status="stale", age_seconds=7200)
+    payload = _workloads_payload(
+        [alice, bob],
+        sources=[_source("training"), _source("slurm", status="stale", age_seconds=7200)],
+    )
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(app, ["factory", "workloads", "--user", "alice"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "training:run-1" in output  # alice's fresh row renders
+    assert "slurm:ac12:8421" not in output
+    # bob's stale slurm evidence is not part of alice's narrowed view
+    assert "slurm jobs unavailable" not in output
+
+    # without narrowing, bob's stale row warns and is suppressed
+    fleet = runner.invoke(app, ["factory", "workloads"], env=TEST_ENV)
+    fleet_output = strip_ansi(fleet.output)
+    assert "slurm jobs unavailable" in fleet_output
+    assert "training:run-1" in fleet_output  # healthy peer still renders
+
+
+def test_workloads_table_renders_cluster_column(monkeypatch: pytest.MonkeyPatch) -> None:
+    row = _workload("slurm:ac12:8421", "slurm", "running")
+    row["cluster_display_name"] = "research-b300"
+    _install(monkeypatch, _workloads_payload([row]))
+
+    result = runner.invoke(app, ["factory", "workloads"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "CLUSTER" in output
+    assert "research-b300" in output

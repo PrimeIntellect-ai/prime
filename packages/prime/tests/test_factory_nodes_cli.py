@@ -41,7 +41,7 @@ def _node(name: str, **overrides: Any) -> Dict[str, Any]:
         "gpu_type": "H200_141GB",
         "gpus_total": 8,
         "gpus_used": 8,
-        "assigned_to": "training",
+        "assigned_to": "slurm",
     }
     node.update(overrides)
     return node
@@ -126,12 +126,12 @@ def test_nodes_table_renders_clusters_and_nodes(
     assert "CLUSTERS" in output
     assert "research-b300" in output
     assert "online" in output
-    for header in ("NODE", "STATE", "GPUs", "ASSIGNED TO"):
+    for header in ("NODE", "STATE", "HELD", "ASSIGNED TO"):
         assert header in output
     assert "gpu-01" in output and "gpu-02" in output
     assert "ready" in output
     assert "8/8" in output
-    assert "training" in output
+    assert "slurm" in output
     assert "Error" not in output
 
 
@@ -156,8 +156,10 @@ def test_nodes_states_and_assignment_render_honestly(
     # Unobserved counts stay dashes, never fabricated zeros.
     assert "-/8" in output
     assert "unknown" in output
-    # Unassigned nodes render a dash in ASSIGNED TO, not a zero or "null".
+    # Null assignment means placement is NOT observed — rendered as a
+    # lowercase dim "unknown", never as unassigned.
     assert "null" not in output
+    assert "unknown" in output
 
 
 def test_nodes_json_prints_exact_api_response(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -292,7 +294,7 @@ def test_nodes_state_filter_and_assigned_to_filter(
     payload = _nodes_payload(
         nodes=[
             _node("gpu-01", state="cordoned", assigned_to="slurm"),
-            _node("gpu-02", state="ready", assigned_to="training"),
+            _node("gpu-02", state="ready", assigned_to=None),
         ]
     )
     _install(monkeypatch, payload)
@@ -303,11 +305,17 @@ def test_nodes_state_filter_and_assigned_to_filter(
     assert "gpu-01" in output
     assert "gpu-02" not in output
 
-    result = runner.invoke(app, ["factory", "nodes", "--assigned-to", "training"], env=TEST_ENV)
+    result = runner.invoke(app, ["factory", "nodes", "--assigned-to", "slurm"], env=TEST_ENV)
     output = strip_ansi(result.output)
     assert result.exit_code == 0, result.output
-    assert "gpu-02" in output
-    assert "gpu-01" not in output
+    assert "gpu-01" in output
+    assert "gpu-02" not in output
+
+    # training/inference placement is not observed: the filter refuses.
+    refused = runner.invoke(app, ["factory", "nodes", "--assigned-to", "training"], env=TEST_ENV)
+    refused_output = strip_ansi(refused.output)
+    assert refused.exit_code == 1, refused.output
+    assert "Only slurm is observable" in refused_output
 
 
 def test_nodes_filters_apply_to_json_envelope(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -16,7 +16,10 @@ runner = CliRunner()
 TEST_ENV = {
     "PRIME_API_KEY": "dummy",
     "PRIME_DISABLE_VERSION_CHECK": "1",
-    "COLUMNS": "200",
+    "COLUMNS": "220",
+    # Rich treats TERM=dumb as a fixed 80-column terminal and then ignores
+    # COLUMNS; force a real terminal so the wide table is not truncated.
+    "TERM": "xterm",
 }
 
 
@@ -103,7 +106,7 @@ def _default_nodes_payload() -> Dict[str, Any]:
                         "gpu_type": "B300",
                         "gpus_total": 8,
                         "gpus_used": 8,
-                        "assigned_to": "training",
+                        "assigned_to": "slurm",
                     },
                     {
                         "name": "gpu-02",
@@ -987,12 +990,13 @@ def test_factory_status_compact_table_is_the_default(monkeypatch: pytest.MonkeyP
     assert "in-use = GPUs held" not in output
     assert "drill down" not in output
     assert "RESERVED" not in output  # the detailed allocation table is gone
-    for header in ("NAME", "STATUS", "GPUS", "NODES", "DATA"):
+    for header in ("CLUSTER", "GPU", "STATUS", "HELD", "IN USE", "IDLE", "NODES", "DATA"):
         assert header in output
     assert "research-b300" in output
+    assert "B300" in output
     assert "online" in output
-    # used = sum of workload-group in_use (32+32+16) over total 128
-    assert "80/128" in output
+    # glance facts: reserved sum 112, observed leaf sum 80, idle 32
+    assert "112" in output and "80" in output and "32" in output
     # node summary from the nodes endpoint (2 ready of 2)
     assert "2/2" in output
     assert "fresh" in output
@@ -1010,10 +1014,11 @@ def test_factory_status_compact_degraded_row_renders_dashes_and_data_age(
     output = strip_ansi(result.output)
 
     assert result.exit_code == 0, result.output
-    # Stale node evidence: em-dashes, never zeros, plus a plain data age.
-    assert "—/128" in output
+    # Stale node evidence: em-dash counts, never zeros, plus a plain age.
     assert "node data 1h ago" in output
     assert "fresh" not in output
+    # no stale group numbers render in HELD/IN USE/IDLE
+    assert "112" not in output and "80" not in output
     # The single dim line under the table points at --verbose.
     assert "degraded sources — details: prime factory status --verbose" in output
     assert output.count("degraded sources") == 1
@@ -1120,10 +1125,10 @@ def test_factory_status_compact_partial_degradation_shows_only_that_source(
     assert result.exit_code == 0, result.output
     assert "scheduler data 2h ago" in output
     assert "fresh" not in output
-    # Fresh groups still contribute their real sum; the unknown slurm group
-    # contributes nothing and must not poison the aggregate.
-    assert "64/128" in output
-    assert "—/128" not in output
+    # Fresh groups still contribute their real sums; the stale slurm group
+    # contributes nothing and must not poison any aggregate.
+    assert "64" in output
+    assert "48" not in output  # stale reserved never renders
 
 
 def test_factory_status_json_makes_no_nodes_call(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1170,8 +1175,10 @@ def test_factory_status_compact_null_allocation_does_not_poison_aggregate(
     output = strip_ansi(result.output)
 
     assert result.exit_code == 0, result.output
-    assert "48/128" in output  # 32 (inference) + 16 (slurm); null training adds 0
-    assert "—/128" not in output
+    # HELD: 32+32+48; IN USE: 32 (inference) + 16 (slurm); null training adds 0
+    # IDLE: inference 0 + slurm 32; null training idle adds nothing.
+    assert "112" in output and "48" in output and "32" in output
+    assert "—" not in output
 
 
 def test_factory_status_compact_stale_source_numbers_never_render(
@@ -1199,7 +1206,7 @@ def test_factory_status_compact_stale_source_numbers_never_render(
     output = strip_ansi(result.output)
 
     assert result.exit_code == 0, result.output
-    assert "64/128" in output  # fresh groups only; stale 8 never renders
-    assert "72/128" not in output
-    assert "8/128" not in output
+    # Fresh groups only: HELD 64, IN USE 64, IDLE 0; stale 48/8/40 never render.
+    assert "64" in output
+    assert "48" not in output and "40" not in output
     assert "scheduler data 2h ago" in output

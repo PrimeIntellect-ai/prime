@@ -254,44 +254,45 @@ def _render_workloads_section(
         console.print("[dim]drill down: prime factory nodes[/dim]")
 
 
-def _sum_in_use(cluster: FactoryCluster, source_status: dict) -> Optional[int]:
-    """Sum of workload-group in_use counts over provably-fresh groups only.
+def _fresh_groups(cluster: FactoryCluster, source_status: dict) -> List[FactoryPool]:
+    """Workload groups whose numbers may render.
 
-    A group with a null in_use count contributes nothing — it must not
-    poison the healthy peers' aggregate. A group whose source entry is
-    stale/errored, or missing for non-zero claims, is excluded the same
-    way: numbers from degraded evidence never render. The all-zero row
-    without a source entry is the backend's designed inactive signal and
-    contributes its honest zeros.
+    A group whose source entry is stale/errored, or missing for non-zero
+    claims, is excluded: numbers from degraded evidence never render. The
+    all-zero row without a source entry is the backend's designed inactive
+    signal and keeps its honest zeros.
     """
-    if not cluster.pools:
-        return None
-    total = 0
+    fresh: List[FactoryPool] = []
     for pool in cluster.pools:
-        if pool.in_use_gpus is None:
-            continue
         if pool.type not in source_status:
             if not _pool_is_all_zero(pool):
                 continue
         elif source_status[pool.type] != "ok":
             continue
-        total += pool.in_use_gpus
-    return total
+        fresh.append(pool)
+    return fresh
 
 
-def _compact_gpu_cell(cluster: FactoryCluster, source_status: dict) -> str:
-    """Used/total GPUs for the compact status row.
+def _sum_group_metric(groups: List[FactoryPool], attr: str) -> Optional[int]:
+    """Sum one GPU metric over fresh groups.
 
-    Used = sum of in_use counts over groups with fresh evidence. Stale or
-    missing node (capacity) evidence renders an em-dash used figure, never
-    a stale or fabricated number; the DATA column carries the age.
+    Unobserved values contribute nothing — a null must not poison the
+    healthy peers' aggregate. No observed values at all renders as None
+    (the caller turns it into an em-dash, never a zero).
     """
-    used: Optional[int] = None
-    if source_status.get("capacity") == "ok":
-        used = _sum_in_use(cluster, source_status)
-    used_text = str(used) if used is not None else "—"
-    total_text = str(cluster.total_gpus) if cluster.total_gpus is not None else "—"
-    return f"{used_text}/{total_text}"
+    total = 0
+    observed = False
+    for pool in groups:
+        value = getattr(pool, attr)
+        if value is None:
+            continue
+        total += value
+        observed = True
+    return total if observed else None
+
+
+def _compact_metric_cell(value: Optional[int]) -> str:
+    return str(value) if value is not None else "—"
 
 
 def _compact_nodes_cell(
@@ -363,9 +364,12 @@ def _render_status_table(
     """The default sinfo-style glance: one row per cluster, no prose."""
     any_degraded = False
     table = Table(show_header=True, header_style="bold", show_lines=False)
-    table.add_column("NAME", style="cyan")
+    table.add_column("CLUSTER", style="cyan")
+    table.add_column("GPU")
     table.add_column("STATUS")
-    table.add_column("GPUS", justify="right")
+    table.add_column("HELD", justify="right")
+    table.add_column("IN USE", justify="right")
+    table.add_column("IDLE", justify="right")
     table.add_column("NODES", justify="right")
     table.add_column("DATA")
 
@@ -374,11 +378,16 @@ def _render_status_table(
         data_cell = _compact_data_cell(cluster)
         if data_cell != "fresh":
             any_degraded = True
+        capacity_ok = source_status.get("capacity") == "ok"
+        groups = _fresh_groups(cluster, source_status) if capacity_ok else []
         nodes_cluster, nodes_source = nodes_by_name.get(cluster.display_name, (None, None))
         table.add_row(
             rich_escape(cluster.display_name),
+            rich_escape(cluster.gpu_type) if cluster.gpu_type else "—",
             _styled_status(cluster.status),
-            _compact_gpu_cell(cluster, source_status),
+            _compact_metric_cell(_sum_group_metric(groups, "reserved_gpus")),
+            _compact_metric_cell(_sum_group_metric(groups, "in_use_gpus")),
+            _compact_metric_cell(_sum_group_metric(groups, "idle_inside_gpus")),
             _compact_nodes_cell(nodes_cluster, nodes_source),
             data_cell,
         )
@@ -553,44 +562,33 @@ def _workload_kind(workload: FactoryWorkload) -> str:
     return workload.source.kind or workload.type
 
 
-def _envelope_source_status(workloads: FactoryWorkloads) -> dict:
-    """kind -> status map from the envelope-level source entries."""
-    return {s.kind: s.status for s in workloads.sources}
-
-
-def _row_source_status(workload: FactoryWorkload, envelope_status: dict) -> Optional[str]:
-    """Effective status of the source behind one row.
-
-    The envelope entries are authoritative; a row whose kind has no envelope
-    entry falls back to its own coarse source status.
-    """
-    kind = _workload_kind(workload)
-    if kind in envelope_status:
-        return envelope_status[kind]
-    return workload.source.status
-
-
-def _degraded_kinds(
-    workloads: FactoryWorkloads, rows: List[FactoryWorkload]
+def _view_degraded_sources(
+    workloads: FactoryWorkloads, suppressed: List[FactoryWorkload]
 ) -> List[FactorySource]:
-    """Deduplicated source entries for every degraded kind, stable by kind.
+    """Warning sources for the workloads view — warnings, never row erasure.
 
-    A degraded kind with zero rows still produces an entry (failure must not
-    masquerade as an empty fleet), taking the envelope source or the newest
-    row-level source as its evidence.
+    Rows render on their own per-row evidence, so an aggregate degraded
+    source can never erase healthy peers. Two families surface here:
+    row-level degraded evidence among the view's suppressed rows (newest
+    observation per kind), and envelope-degraded kinds that produced no
+    rows at all in the payload — a failed read must not masquerade as an
+    empty fleet, whatever the narrowing.
     """
-    envelope_by_kind = {s.kind: s for s in workloads.sources}
-    degraded: List[FactorySource] = []
+    warnings: List[FactorySource] = []
     seen: set = set()
+    stale_view_kinds = {row.source.kind for row in suppressed}
+    payload_kinds = {row.source.kind for row in workloads.workloads}
     for source in workloads.sources:
-        if source.status != "ok" and source.kind not in seen:
+        if (
+            source.status != "ok"
+            and source.kind not in seen
+            and (source.kind in stale_view_kinds or source.kind not in payload_kinds)
+        ):
             seen.add(source.kind)
-            degraded.append(source)
+            warnings.append(source)
     newest_by_kind: Dict[str, FactorySource] = {}
-    for row in rows:
-        kind = _workload_kind(row)
-        if kind in envelope_by_kind or row.source.status == "ok":
-            continue
+    for row in suppressed:
+        kind = row.source.kind
         current = newest_by_kind.get(kind)
         if current is None or _is_newer_observed_at(row.source, current):
             # Several degraded rows may carry fallback evidence for the
@@ -599,8 +597,8 @@ def _degraded_kinds(
     for source in newest_by_kind.values():
         if source.kind not in seen:
             seen.add(source.kind)
-            degraded.append(source)
-    return degraded
+            warnings.append(source)
+    return warnings
 
 
 def _is_newer_observed_at(candidate: FactorySource, current: FactorySource) -> bool:
@@ -674,6 +672,7 @@ def _render_workloads_table(rows: List[FactoryWorkload]) -> Table:
     table.add_column("ID", style="cyan")
     table.add_column("TYPE", style="white")
     table.add_column("NAME")
+    table.add_column("CLUSTER")
     table.add_column("OWNER")
     table.add_column("STATE")
     table.add_column("GPU A/R", justify="right")
@@ -689,6 +688,7 @@ def _render_workloads_table(rows: List[FactoryWorkload]) -> Table:
             rich_escape(row.id),
             rich_escape(row.type),
             rich_escape(row.name) if row.name else "[dim]-[/dim]",
+            rich_escape(row.cluster_display_name) if row.cluster_display_name else "[dim]-[/dim]",
             _workload_owner_cell(row),
             _workload_state_cell(row),
             _workload_gpu_cell(row),
@@ -790,19 +790,15 @@ def factory_workloads(
         raise typer.Exit(1)
 
     rows = workloads.workloads
-    envelope_status = _envelope_source_status(workloads)
-    # Degraded sources are computed from the envelope plus the full row list
-    # (before client-side filtering): filtering by --user must not hide why
-    # the filtered user has no rows from a degraded source.
-    degraded = _degraded_kinds(workloads, rows)
 
     # Identity resolution: the workloads envelope carries no cluster list,
     # only row identities, so a --cluster selector can miss because a
     # degraded source omitted a cluster's rows entirely. Surface the
     # degraded-source warnings instead of exiting with a clean miss.
     if cluster is not None and not any(row.cluster_display_name == cluster for row in rows):
-        for source in degraded:
-            err_console.print(f"[yellow]{_jobs_unavailable_line(source.kind, source)}[/yellow]")
+        for source in workloads.sources:
+            if source.status != "ok":
+                err_console.print(f"[yellow]{_jobs_unavailable_line(source.kind, source)}[/yellow]")
         err_console.print(f"[red]Error:[/red] No cluster matched '{rich_escape(cluster)}'.")
         names = _distinct_workload_clusters(rows)
         if names:
@@ -825,7 +821,12 @@ def factory_workloads(
         output_data_as_json(payload, console)
         return
 
-    available = [row for row in rows if _row_source_status(row, envelope_status) == "ok"]
+    # Per-row freshness governs rendering: a row renders when its OWN
+    # evidence is fresh, never suppressed by an aggregate worst-source or a
+    # missing sibling group. Degraded aggregates are warnings only.
+    available = [row for row in rows if row.source.status == "ok"]
+    suppressed = [row for row in rows if row.source.status != "ok"]
+    degraded = _view_degraded_sources(workloads, suppressed)
 
     # Degraded sources say so before anything else: a failed read must never
     # masquerade as an empty fleet or silently vanish.
@@ -852,7 +853,10 @@ def factory_workloads(
 # Coarse public node states from the frozen nodes contract; the labels are
 # the only node vocabulary shown to users.
 NODE_STATES = ("ready", "cordoned", "offline", "unknown")
-NODE_ASSIGNEES = ("training", "inference", "slurm")
+# The backend only ever populates slurm claims in v1.5; per-node
+# training/inference placement is NOT observed and must not be filterable
+# until it exists.
+NODE_ASSIGNEES = ("slurm",)
 
 
 class _NodesState:
@@ -910,11 +914,16 @@ def _render_nodes_table(nodes: List[FactoryNode]) -> Table:
     table = Table(show_header=True, header_style="bold", show_lines=False)
     table.add_column("NODE", style="cyan")
     table.add_column("STATE", style="white")
-    table.add_column("GPUs", justify="right")
+    table.add_column("HELD", justify="right")
     table.add_column("ASSIGNED TO")
 
     for node in nodes:
-        assigned = rich_escape(node.assigned_to) if node.assigned_to else "[dim]-[/dim]"
+        if node.assigned_to:
+            assigned = rich_escape(node.assigned_to)
+        else:
+            # Null means placement is NOT observed in v1.5 — the node is
+            # not proven unassigned, so never label it that way.
+            assigned = "[dim]unknown[/dim]"
         table.add_row(
             rich_escape(node.name),
             _node_state_cell(node),
@@ -962,7 +971,12 @@ def factory_nodes(
         None, "--state", help="Filter nodes by state: ready, cordoned, offline, or unknown"
     ),
     assigned_to: Optional[str] = typer.Option(
-        None, "--assigned-to", help="Filter nodes by assignee: training, inference, or slurm"
+        None,
+        "--assigned-to",
+        help=(
+            "Filter nodes by assignee: slurm (per-node training/inference "
+            "placement is not observed yet)"
+        ),
     ),
     json_output: bool = typer.Option(
         False, "--json", help="Print the API response as JSON (same as --output json)"
@@ -995,7 +1009,8 @@ def factory_nodes(
     if assigned_to is not None and assigned_to not in NODE_ASSIGNEES:
         err_console.print(
             f"[red]Error:[/red] Invalid --assigned-to '{rich_escape(assigned_to)}'. "
-            f"Choose one of: {', '.join(NODE_ASSIGNEES)}."
+            "Only slurm is observable; per-node training/inference "
+            "placement is not observed yet."
         )
         raise typer.Exit(1)
 

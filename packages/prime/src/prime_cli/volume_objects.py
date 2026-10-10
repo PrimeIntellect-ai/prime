@@ -42,7 +42,7 @@ def _objects(s3, bucket: str, prefix: str):
     for page in _pages(s3, bucket, prefix, recursive=True):
         for obj in page.get("Contents", []):
             path = _relative(obj["Key"], prefix)
-            if path and not is_internal(path):
+            if path:
                 yield path, obj
 
 
@@ -68,15 +68,15 @@ def list_entries(
     for page in _pages(s3, bucket, prefix + directory, recursive=recursive):
         for item in page.get("CommonPrefixes", []):
             rel = _relative(item["Prefix"], prefix)
+            exists = True  # Hidden children still establish that their parent exists.
             if is_internal(rel):
                 continue
-            exists = True
             entries.setdefault(rel, VolumeObject(rel, None, None, True))
         for obj in page.get("Contents", []):
             rel = _relative(obj["Key"], prefix)
+            exists = True
             if is_internal(rel):
                 continue
-            exists = True
             if rel == directory:
                 continue  # The requested directory's own marker isn't a child.
             is_dir = rel.endswith("/")
@@ -108,13 +108,16 @@ def read_usage(s3, bucket: str, prefix: str, path: str) -> dict:
     selected_bytes = selected_objects = total_bytes = total_objects = 0
     exists = not base
     for rel, obj in _objects(s3, bucket, prefix):
+        if rel.startswith(directory):
+            exists = True
+        if is_internal(rel):
+            continue
         size = obj["Size"]
         total_bytes += size
         total_objects += 1
         if base and rel == base and not path.endswith("/"):
             file_size = size
         if rel.startswith(directory):
-            exists = True
             selected_bytes += size
             selected_objects += 1
     if file_size is not None:

@@ -244,6 +244,16 @@ def test_ls_empty_directory(storage):
     assert _json(_run("ls", "data", "empty/", "-o", "json")) == []
 
 
+@pytest.mark.parametrize("key", ["runs/.sessions/", "runs/.sessions/private/state"])
+@pytest.mark.parametrize("operand", ["runs", "runs/"])
+@pytest.mark.parametrize("recursive", [False, True])
+def test_ls_parent_containing_only_internal_metadata(storage, key, operand, recursive):
+    storage.s3.objects = {"vol1/" + key: b"hidden"}
+    assert set(_paths(_run("ls", "data", "-o", "json"))) == {"runs/"}
+    flags = ["-R"] if recursive else []
+    assert _json(_run("ls", "data", operand, *flags, "-o", "json")) == []
+
+
 @pytest.mark.parametrize("flags", [[], ["--plain"], ["-l"], ["--long", "--human-readable"]])
 def test_ls_text_literal_names(storage, flags):
     result = _run("ls", "data", *flags)
@@ -317,6 +327,15 @@ def test_du_human_readable(storage):
     assert result.exit_code == 0, result.output
     assert "Usage:" not in result.stdout
     assert "4" in result.stdout and ("KiB" in result.stdout or "Ki" in result.stdout)
+
+
+@pytest.mark.parametrize("key", ["runs/.sessions/", "runs/.sessions/private/state"])
+@pytest.mark.parametrize("operand", ["runs", "runs/"])
+def test_du_parent_containing_only_internal_metadata(storage, key, operand):
+    storage.s3.objects = {"vol1/" + key: b"hidden"}
+    usage = _json(_run("du", "data", operand, "-o", "json"))
+    assert usage["bytes"] == usage["objects"] == 0
+    assert usage["volumeBytes"] == usage["volumeObjects"] == 0
 
 
 def test_cat_binary_stream_and_cleanup(storage):

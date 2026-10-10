@@ -795,7 +795,9 @@ def _workload_scheduler_cell(workload: FactoryWorkload) -> str:
         return rich_escape(workload.scheduler_display_name)
     if workload.type == "slurm":
         return "[dim]unknown[/dim]"
-    return "[dim]-[/dim]"
+    # The em dash matches SCHEDULER_LEGEND exactly — never the generic
+    # missing-value hyphen, so direct placement stays distinguishable.
+    return "[dim]—[/dim]"
 
 
 def _workload_owner_cell(workload: FactoryWorkload) -> str:

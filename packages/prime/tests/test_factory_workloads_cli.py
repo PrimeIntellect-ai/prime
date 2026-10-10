@@ -1055,9 +1055,10 @@ def test_workloads_scheduler_column_mixed_rows(monkeypatch: pytest.MonkeyPatch) 
     assert result.exit_code == 0, result.output
     assert "SCHEDULER" in output
     assert "research-b300-slurm" in output
-    # the direct-placement rows show a dash in the SCHEDULER cell
-    assert output.count("[dim]") == 0  # sanity: raw markup stripped
-    assert "direct placement" not in output  # the dash speaks, no prose
+    # The direct-placement rows show the legend's em dash — never the
+    # generic missing-value hyphen.
+    assert "—" in output
+    assert "direct platform placement" in output  # the legend defines the glyph
 
 
 def test_workloads_scheduler_column_escaped(monkeypatch: pytest.MonkeyPatch) -> None:

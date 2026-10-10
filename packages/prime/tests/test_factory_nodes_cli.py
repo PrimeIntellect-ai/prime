@@ -426,20 +426,19 @@ def test_nodes_cluster_index_selector_filters_raw_json_by_index(
     assert data["sources"][0]["observed_at"] == payload["sources"][1]["observed_at"]
 
 
-def test_nodes_missing_capacity_entry_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Under the 1:1 sources/clusters contract every cluster has a paired
-    # source entry; fail closed when that entry is not a capacity source:
-    # no node table, one honest degraded line — never a fresh rendering.
+def test_nodes_non_capacity_source_entry_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The nodes contract carries exactly one CAPACITY entry per cluster;
+    # a non-capacity pair would render an unexplained em-dash NODES cell
+    # while the badge claims fresh — reject the whole envelope instead.
     payload = _nodes_payload(sources=[{"kind": "slurm", "status": "ok", "observed_at": None}])
     _install(monkeypatch, payload)
 
     result = runner.invoke(app, ["factory", "nodes"], env=TEST_ENV)
     output = strip_ansi(result.output)
 
-    assert result.exit_code == 0, result.output
-    assert "node breakdown unavailable" in output
+    assert result.exit_code == 1, result.output
+    assert "sources must be capacity entries" in output
     assert "gpu-01" not in output
-    assert "no nodes reported" not in output
 
 
 def test_nodes_client_rejects_mismatched_sources_length() -> None:

@@ -655,7 +655,9 @@ FACTORY_WORKLOADS_JSON_HELP = json_output_help(
     ". = {schema_version, as_of, workloads[], sources[]}",
     ".workloads[] = {id, type, cluster_display_name, name, state, native_state,",
     "                 owner{kind, display_name}, requested_gpus, allocated_gpus,",
-    "                 created_at, started_at, source{kind, status, observed_at}}",
+    "                 created_at, started_at, ended_at (terminal rows),",
+    "                 reason (when supplied),",
+    "                 source{kind, status, observed_at}}",
     ".sources[] = {kind, status, observed_at}",
 )
 

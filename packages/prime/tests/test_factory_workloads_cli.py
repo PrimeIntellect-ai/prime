@@ -1027,3 +1027,13 @@ def test_workloads_since_overflow_is_plain_error(monkeypatch: pytest.MonkeyPatch
     assert "Use Nd, Nh, or an ISO 8601 timestamp." in output
     assert "OverflowError" not in result.output
     assert "Traceback" not in result.output
+
+
+def test_workloads_json_help_documents_terminal_fields() -> None:
+    # Integrations built from --help must not miss the terminal timestamp
+    # and the backend-supplied reason.
+    result = runner.invoke(app, ["factory", "workloads", "--help"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    assert "ended_at" in result.output
+    assert "reason" in result.output

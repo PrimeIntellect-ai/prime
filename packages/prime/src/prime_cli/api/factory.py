@@ -343,5 +343,12 @@ class FactoryClient:
             raise APIError(
                 "Unexpected factory nodes response shape: sources must pair 1:1 with clusters"
             )
+        if any(source.kind != "capacity" for source in nodes.sources):
+            # A non-capacity entry at a paired index is equally out of
+            # contract: the pair would render an unexplained em-dash NODES
+            # cell while the badge claims fresh.
+            raise APIError(
+                "Unexpected factory nodes response shape: sources must be capacity entries"
+            )
         nodes._raw_response = response
         return nodes

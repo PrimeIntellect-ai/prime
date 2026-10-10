@@ -84,14 +84,45 @@ def _styled_status(status: Optional[str]) -> str:
     return rich_escape(status or "unknown")
 
 
-def _cluster_header(
-    cluster: FactoryCluster, index: int, multi: bool, freshness: Optional[str]
-) -> str:
-    parts: List[str] = []
+class _ClusterState:
+    """Per-cluster rendering facts shared by the CLUSTERS and WORKLOADS sections."""
+
+    def __init__(self, cluster: FactoryCluster) -> None:
+        source_status = {s.kind: s.status for s in cluster.sources}
+        self.capacity_ok = source_status.get("capacity", "ok") == "ok"
+        degraded = [s for s in cluster.sources if s.status != "ok"]
+
+        # Split pools by index so duplicate payload rows cannot be
+        # misclassified by model equality.
+        self.renderable: List[FactoryPool] = []
+        suppressed_idx: List[int] = []
+        for i, pool in enumerate(cluster.pools):
+            if self.capacity_ok and _pool_is_available(pool, source_status):
+                self.renderable.append(pool)
+            else:
+                suppressed_idx.append(i)
+        self.suppressed = [cluster.pools[i] for i in suppressed_idx]
+
+        # Sources involved in the suppressed breakdown; anything else
+        # degraded still surfaces as a freshness phrase in the CLUSTERS line.
+        involved: set = {p.type for p in self.suppressed}
+        if not self.capacity_ok:
+            involved.add("capacity")
+        self.remaining_degraded = [s for s in degraded if s.kind not in involved]
+        self.involved_sources = [s for s in degraded if s.kind in involved]
+
+
+def _cluster_label(cluster: FactoryCluster, index: int, multi: bool) -> str:
     label = rich_escape(cluster.display_name)
     if multi:
         label = f"[cyan]\\[{index}][/cyan] {label}"
-    parts.append(f"[bold]{label}[/bold]")
+    return f"[bold]{label}[/bold]"
+
+
+def _cluster_header(
+    cluster: FactoryCluster, index: int, multi: bool, freshness: Optional[str]
+) -> str:
+    parts: List[str] = [_cluster_label(cluster, index, multi)]
 
     gpu_bits = [str(cluster.total_gpus)] if cluster.total_gpus is not None else []
     if cluster.gpu_type:
@@ -104,9 +135,7 @@ def _cluster_header(
     return " · ".join(parts)
 
 
-def _render_pool_table(
-    cluster: FactoryCluster, pools: List[FactoryPool], capacity_ok: bool
-) -> Table:
+def _render_pool_table(pools: List[FactoryPool]) -> Table:
     table = Table(show_header=True, header_style="bold", show_lines=False)
     table.add_column("POOL", style="cyan")
     table.add_column("RESERVED", style="white", justify="right")
@@ -122,59 +151,51 @@ def _render_pool_table(
             str(pool.idle_inside_gpus),
             str(pool.unknown_gpus) if pool.unknown_gpus is not None else "-",
         )
-    if capacity_ok and cluster.unassigned_gpus is not None:
-        table.add_row("unassigned", str(cluster.unassigned_gpus), "-", "-", "-")
-    if capacity_ok and cluster.unknown_gpus is not None:
-        table.add_row("unknown", str(cluster.unknown_gpus), "-", "-", "-")
     return table
 
 
-def _render_cluster(cluster: FactoryCluster, index: int, multi: bool) -> None:
-    source_status = {s.kind: s.status for s in cluster.sources}
-    capacity_ok = source_status.get("capacity", "ok") == "ok"
-    degraded = [s for s in cluster.sources if s.status != "ok"]
+def _render_workloads_section(
+    clusters: List[FactoryCluster], states: List["_ClusterState"], multi: bool
+) -> None:
+    footnote = False
+    for index, (cluster, state) in enumerate(zip(clusters, states), start=1):
+        if index > 1:
+            console.print()
+        console.print(_cluster_label(cluster, index, multi))
 
-    renderable = [p for p in cluster.pools if capacity_ok and _pool_is_available(p, source_status)]
-    suppressed = [p for p in cluster.pools if p not in renderable]
+        if state.suppressed:
+            names = (
+                "pool"
+                if not state.renderable and len(state.suppressed) == len(cluster.pools)
+                else ", ".join(rich_escape(p.type) for p in state.suppressed)
+            )
+            line = f"{names} breakdown unavailable"
+            if state.involved_sources:
+                line += f" — {_last_seen_phrase(state.involved_sources)}"
+            console.print(f"[yellow]{line}[/yellow]")
 
-    # Sources involved in the suppressed breakdown; anything else degraded
-    # still surfaces as a freshness phrase in the header.
-    involved: set = {p.type for p in suppressed}
-    if not capacity_ok:
-        involved.add("capacity")
-    remaining_degraded = [s for s in degraded if s.kind not in involved]
+        if state.renderable:
+            console.print(_render_pool_table(state.renderable))
+            footnote = True
 
-    console.print(
-        _cluster_header(
-            cluster,
-            index,
-            multi,
-            _last_seen_phrase(remaining_degraded) if remaining_degraded else None,
-        )
-    )
+        # Unassigned and unknown GPUs are cluster-level facts, not pool rows.
+        if state.capacity_ok and cluster.unassigned_gpus is not None:
+            console.print(f"unassigned: {cluster.unassigned_gpus} GPUs")
+        if state.capacity_ok and cluster.unknown_gpus is not None:
+            console.print(f"unknown: {cluster.unknown_gpus} GPUs")
 
-    if suppressed:
-        names = (
-            "pool"
-            if not renderable and len(suppressed) == len(cluster.pools)
-            else (", ".join(rich_escape(p.type) for p in suppressed))
-        )
-        involved_sources = [s for s in degraded if s.kind in involved]
-        line = f"{names} breakdown unavailable"
-        if involved_sources:
-            line += f" — {_last_seen_phrase(involved_sources)}"
-        console.print(f"[yellow]{line}[/yellow]")
+        if (
+            not state.renderable
+            and not state.suppressed
+            and not (
+                state.capacity_ok
+                and (cluster.unassigned_gpus is not None or cluster.unknown_gpus is not None)
+            )
+        ):
+            console.print("[dim]no pools reported[/dim]")
 
-    show_table = bool(renderable)
-    if (
-        not cluster.pools
-        and capacity_ok
-        and (cluster.unassigned_gpus is not None or cluster.unknown_gpus is not None)
-    ):
-        show_table = True
-
-    if show_table:
-        console.print(_render_pool_table(cluster, renderable, capacity_ok))
+    if footnote:
+        console.print()
         console.print(f"[dim]{IN_USE_NOTE}[/dim]")
 
 
@@ -286,8 +307,18 @@ def factory_status(
         console.print("No factory clusters allocated.")
         return
 
+    states = [_ClusterState(c) for c in clusters]
     multi = len(clusters) > 1
-    for idx, c in enumerate(clusters, start=1):
-        if idx > 1:
-            console.print()
-        _render_cluster(c, idx, multi)
+
+    # CLUSTERS answers "what do I have": one simple inventory line each.
+    console.print("[bold]CLUSTERS[/bold]")
+    for index, (c, state) in enumerate(zip(clusters, states), start=1):
+        freshness = (
+            _last_seen_phrase(state.remaining_degraded) if state.remaining_degraded else None
+        )
+        console.print(_cluster_header(c, index, multi, freshness))
+
+    # WORKLOADS answers "what is running": pool-level holding view per cluster.
+    console.print()
+    console.print("[bold]WORKLOADS[/bold]")
+    _render_workloads_section(clusters, states, multi)

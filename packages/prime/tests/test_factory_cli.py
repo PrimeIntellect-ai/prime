@@ -604,3 +604,124 @@ def test_factory_status_ascii_index_still_selects(
     assert result.exit_code == 0, result.output
     assert "research-h200" in strip_ansi(result.output)
     assert "research-b300" not in strip_ansi(result.output)
+
+
+def test_factory_status_splits_clusters_and_workloads_sections(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install(monkeypatch, _status_payload())
+
+    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    # Clear section headers answer "what do I have" then "what is running".
+    assert "CLUSTERS" in output
+    assert "WORKLOADS" in output
+    assert output.index("CLUSTERS") < output.index("WORKLOADS")
+    # The inventory line with display name, GPU type + count and status
+    # lives in the CLUSTERS section, above the WORKLOADS header.
+    assert "research-b300 · 128 B300 GPUs · online" in output
+    assert output.index("research-b300 · 128 B300 GPUs · online") < output.index("WORKLOADS")
+
+
+def test_factory_status_unassigned_and_unknown_are_cluster_summary_lines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install(monkeypatch, _status_payload())
+
+    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    # Cluster-level summary lines, not pool table rows with dash placeholders.
+    assert "unassigned: 16 GPUs" in output
+    assert "unknown: 0 GPUs" in output
+    for line in output.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(("unassigned", "unknown")):
+            assert ":" in stripped
+            assert " - " not in stripped
+
+
+def test_factory_status_degraded_note_stays_on_cluster_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A degraded source without a suppressed pool surfaces as a
+    # last-seen phrase on the cluster's CLUSTERS line.
+    payload = _status_payload(
+        sources=[
+            _source("capacity", age_seconds=12),
+            _source("training", status="error", age_seconds=4000),
+        ],
+        pools=[
+            _pool("inference", 32, 32, 0, 0),
+            _pool("slurm", 48, 16, 32, 0),
+        ],
+    )
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    cluster_lines = [
+        line for line in output.splitlines() if line.strip().startswith("research-b300 ·")
+    ]
+    assert cluster_lines, output
+    assert "training data last seen 1h ago" in cluster_lines[0]
+
+
+def test_factory_status_multi_cluster_indices_in_both_sections(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = _status_payload()
+    payload["clusters"].append(
+        dict(payload["clusters"][0], display_name="research-h200", gpu_type="H200")
+    )
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    # Indices shown in CLUSTERS match the WORKLOADS labels and the
+    # --cluster index selector.
+    assert "[1] research-b300" in output
+    assert "[2] research-h200" in output
+    assert output.count("[1] research-b300") == 2
+    assert output.count("[2] research-h200") == 2
+    # The plain-words footnote prints once for the whole section.
+    assert output.count("in-use = GPUs held by running jobs") == 1
+
+
+def test_factory_status_no_pools_renders_summary_lines_without_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = _status_payload(pools=[], unassigned_gpus=64, unknown_gpus=None)
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "unassigned: 64 GPUs" in output
+    # No pool rows exist, so no table and no footnote.
+    assert "RESERVED" not in output
+    assert "no pools reported" not in output
+    assert "in-use = GPUs held by running jobs" not in output
+
+
+def test_factory_status_empty_cluster_prints_no_pools_reported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = _status_payload(pools=[], unassigned_gpus=None, unknown_gpus=None)
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "no pools reported" in output
+    assert "RESERVED" not in output
+    assert "breakdown unavailable" not in output

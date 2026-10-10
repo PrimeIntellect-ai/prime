@@ -123,8 +123,15 @@ class APIClient:
 
         url = f"{self.base_url}{endpoint}"
 
+        # Omit the timeout kwarg when unset: passing timeout=None to httpx
+        # explicitly DISABLES the client's configured default timeout
+        # (30s / 10s connect), letting requests hang indefinitely.
+        request_kwargs: Dict[str, Any] = {"params": params, "json": json}
+        if timeout is not None:
+            request_kwargs["timeout"] = timeout
+
         try:
-            response = self.client.request(method, url, params=params, json=json, timeout=timeout)
+            response = self.client.request(method, url, **request_kwargs)
             response.raise_for_status()
 
             if response.status_code == 204 and not response.content:

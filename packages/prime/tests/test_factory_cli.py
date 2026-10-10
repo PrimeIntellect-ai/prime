@@ -1666,3 +1666,14 @@ def test_factory_status_compact_multi_cluster_shows_original_indices(
     assert selected.exit_code == 0, selected.output
     assert "[2] twin" in selected_output
     assert "[1] twin" not in selected_output
+
+
+def test_factory_status_json_help_documents_legacy_pools_key() -> None:
+    # --json is a byte-exact passthrough: against a legacy server the
+    # envelope still carries `pools`. The advertised shape must mention
+    # both keys so users do not query a missing field.
+    result = runner.invoke(app, ["factory", "status", "--help"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    assert "allocations[]" in result.output
+    assert "pools[]" in result.output

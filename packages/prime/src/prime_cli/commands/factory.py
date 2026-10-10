@@ -40,6 +40,7 @@ FACTORY_STATUS_JSON_HELP = json_output_help(
     "                 unassigned_gpus, unknown_gpus, allocations[], sources[]}",
     ".allocations[] = {type, reserved_gpus, in_use_gpus, idle_inside_gpus, unknown_gpus}",
     ".sources[] = {kind, status, observed_at}",
+    "(legacy servers emit .clusters[].pools[] with the same fields)",
 )
 
 FACTORY_NODES_JSON_HELP = json_output_help(

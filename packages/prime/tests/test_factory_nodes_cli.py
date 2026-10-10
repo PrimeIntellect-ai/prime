@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 
 import pytest
 from prime_cli.api.factory import FactoryClient
+from prime_cli.client import APIError
 from prime_cli.main import app
 from prime_cli.utils.formatters import strip_ansi
 from typer.testing import CliRunner
@@ -423,9 +424,10 @@ def test_nodes_cluster_index_selector_filters_raw_json_by_index(
 
 
 def test_nodes_missing_capacity_entry_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A cluster with no source entry at all has unknown evidence: no node
-    # table, one honest degraded line — never a silently fresh rendering.
-    payload = _nodes_payload(sources=[])
+    # Under the 1:1 sources/clusters contract every cluster has a paired
+    # source entry; fail closed when that entry is not a capacity source:
+    # no node table, one honest degraded line — never a fresh rendering.
+    payload = _nodes_payload(sources=[{"kind": "slurm", "status": "ok", "observed_at": None}])
     _install(monkeypatch, payload)
 
     result = runner.invoke(app, ["factory", "nodes"], env=TEST_ENV)
@@ -435,6 +437,28 @@ def test_nodes_missing_capacity_entry_fails_closed(monkeypatch: pytest.MonkeyPat
     assert "node breakdown unavailable" in output
     assert "gpu-01" not in output
     assert "no nodes reported" not in output
+
+
+def test_nodes_client_rejects_mismatched_sources_length() -> None:
+    # The nodes contract pairs sources with clusters positionally, exactly
+    # one per cluster: any other length mispairs every entry after the
+    # first omission — reject the envelope instead of pairing by index.
+    payload = _nodes_payload(
+        clusters=[_nodes_cluster(display_name="a"), _nodes_cluster(display_name="b")],
+        sources=[_source("capacity")],
+    )
+    dummy = _DummyAPIClient(payload)
+    client = FactoryClient(dummy)  # type: ignore[arg-type]
+
+    with pytest.raises(APIError, match="pair 1:1 with clusters"):
+        client.get_nodes("team-1")
+
+    mismatched = _nodes_payload(
+        clusters=[_nodes_cluster()],
+        sources=[_source("capacity"), _source("capacity")],
+    )
+    with pytest.raises(APIError, match="pair 1:1 with clusters"):
+        FactoryClient(_DummyAPIClient(mismatched)).get_nodes("team-1")  # type: ignore[arg-type]
 
 
 def test_nodes_filter_match_empty_distinguished_from_no_nodes(

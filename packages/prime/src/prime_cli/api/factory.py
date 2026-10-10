@@ -319,5 +319,13 @@ class FactoryClient:
                 f"Unsupported factory nodes schema version: {nodes.schema_version} "
                 f"(expected {SUPPORTED_SCHEMA_VERSION})"
             )
+        if len(nodes.sources) != len(nodes.clusters):
+            # The nodes contract pairs sources with clusters positionally,
+            # exactly one capacity entry per cluster. Any other length
+            # mispairs every entry after the first omission — fail closed
+            # instead of attempting index-based pairing.
+            raise APIError(
+                "Unexpected factory nodes response shape: sources must pair 1:1 with clusters"
+            )
         nodes._raw_response = response
         return nodes

@@ -1,7 +1,7 @@
 """`prime factory` — Model Factory fleet status and workloads."""
 
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Protocol, Sequence
+from typing import Any, Dict, List, Optional, Protocol, Sequence, Tuple
 
 import typer
 from rich.markup import escape as rich_escape
@@ -254,38 +254,56 @@ def _render_workloads_section(
         console.print("[dim]drill down: prime factory nodes[/dim]")
 
 
-def _sum_in_use(cluster: FactoryCluster) -> Optional[int]:
-    """Sum of workload-group in_use counts; None when any group is unknown."""
+def _sum_in_use(cluster: FactoryCluster, source_status: dict) -> Optional[int]:
+    """Sum of workload-group in_use counts over provably-fresh groups only.
+
+    A group with a null in_use count contributes nothing — it must not
+    poison the healthy peers' aggregate. A group whose source entry is
+    stale/errored, or missing for non-zero claims, is excluded the same
+    way: numbers from degraded evidence never render. The all-zero row
+    without a source entry is the backend's designed inactive signal and
+    contributes its honest zeros.
+    """
     if not cluster.pools:
         return None
     total = 0
     for pool in cluster.pools:
         if pool.in_use_gpus is None:
-            return None
+            continue
+        if pool.type not in source_status:
+            if not _pool_is_all_zero(pool):
+                continue
+        elif source_status[pool.type] != "ok":
+            continue
         total += pool.in_use_gpus
     return total
 
 
-def _compact_gpu_cell(cluster: FactoryCluster, capacity_ok: bool) -> str:
+def _compact_gpu_cell(cluster: FactoryCluster, source_status: dict) -> str:
     """Used/total GPUs for the compact status row.
 
-    Used = sum of workload-group in_use counts; stale/missing node evidence
-    or an unobserved group renders an em-dash, never a zero.
+    Used = sum of in_use counts over groups with fresh evidence. Stale or
+    missing node (capacity) evidence renders an em-dash used figure, never
+    a stale or fabricated number; the DATA column carries the age.
     """
     used: Optional[int] = None
-    if capacity_ok:
-        used = _sum_in_use(cluster)
+    if source_status.get("capacity") == "ok":
+        used = _sum_in_use(cluster, source_status)
     used_text = str(used) if used is not None else "—"
     total_text = str(cluster.total_gpus) if cluster.total_gpus is not None else "—"
     return f"{used_text}/{total_text}"
 
 
-def _compact_nodes_cell(nodes_cluster: Optional[FactoryNodesCluster]) -> str:
+def _compact_nodes_cell(
+    nodes_cluster: Optional[FactoryNodesCluster], source: Optional[FactorySource]
+) -> str:
     """Healthy/total nodes (plus cordoned count) for the compact status row."""
     if nodes_cluster is None:
         return "—"
-    source_status = {s.kind: s.status for s in nodes_cluster.sources}
-    if source_status.get("capacity") != "ok":
+    # Fail closed: the envelope-level capacity entry is the freshness
+    # evidence for this cluster's node view.
+    capacity_ok = source is not None and source.kind == "capacity" and source.status == "ok"
+    if not capacity_ok:
         return "—"
     total = len(nodes_cluster.nodes)
     healthy = sum(1 for n in nodes_cluster.nodes if n.state == "ready")
@@ -316,21 +334,31 @@ def _compact_data_cell(cluster: FactoryCluster) -> str:
     return ", ".join(phrases)
 
 
-def _fetch_nodes_by_name(api_client: APIClient, team_id: str) -> Dict[str, FactoryNodesCluster]:
+def _fetch_nodes_by_name(
+    api_client: APIClient, team_id: str
+) -> Dict[str, Tuple[FactoryNodesCluster, Optional[FactorySource]]]:
     """Best-effort node summaries for the compact status table.
 
-    The node view is a display aid, never a hard dependency: on any API
-    error the status table renders with an em-dash NODES column.
+    Returns display name -> (cluster, paired capacity source). The node
+    view is a display aid, never a hard dependency: on any API error the
+    status table renders with an em-dash NODES column.
     """
     try:
         nodes = FactoryClient(api_client).get_nodes(team_id)
-        return {cluster.display_name: cluster for cluster in nodes.clusters}
+        return {
+            cluster.display_name: (
+                cluster,
+                nodes.sources[i] if i < len(nodes.sources) else None,
+            )
+            for i, cluster in enumerate(nodes.clusters)
+        }
     except APIError:
         return {}
 
 
 def _render_status_table(
-    clusters: List[FactoryCluster], nodes_by_name: Dict[str, FactoryNodesCluster]
+    clusters: List[FactoryCluster],
+    nodes_by_name: Dict[str, Tuple[FactoryNodesCluster, Optional[FactorySource]]],
 ) -> None:
     """The default sinfo-style glance: one row per cluster, no prose."""
     any_degraded = False
@@ -343,15 +371,15 @@ def _render_status_table(
 
     for cluster in clusters:
         source_status = {s.kind: s.status for s in cluster.sources}
-        capacity_ok = source_status.get("capacity") == "ok"
         data_cell = _compact_data_cell(cluster)
         if data_cell != "fresh":
             any_degraded = True
+        nodes_cluster, nodes_source = nodes_by_name.get(cluster.display_name, (None, None))
         table.add_row(
             rich_escape(cluster.display_name),
             _styled_status(cluster.status),
-            _compact_gpu_cell(cluster, capacity_ok),
-            _compact_nodes_cell(nodes_by_name.get(cluster.display_name)),
+            _compact_gpu_cell(cluster, source_status),
+            _compact_nodes_cell(nodes_cluster, nodes_source),
             data_cell,
         )
     console.print(table)
@@ -752,7 +780,9 @@ def factory_workloads(
 
     try:
         api_client = APIClient()
-        workloads = FactoryClient(api_client).get_workloads(team_id, type=type, state=state)
+        workloads = FactoryClient(api_client).get_workloads(
+            team_id, workload_type=type, state=state
+        )
     except APIError as e:
         # Escape upstream error text: raw brackets (e.g. pydantic
         # "[type=...]" metadata) would crash Rich markup rendering.
@@ -826,14 +856,20 @@ NODE_ASSIGNEES = ("training", "inference", "slurm")
 
 
 class _NodesState:
-    """Per-cluster rendering facts for the nodes view."""
+    """Per-cluster rendering facts for the nodes view.
 
-    def __init__(self, cluster: FactoryNodesCluster) -> None:
-        source_status = {s.kind: s.status for s in cluster.sources}
+    Freshness comes from the envelope-level `sources` list: the frozen
+    nodes contract pairs one capacity entry with each cluster, in the same
+    order as `clusters` — the cluster objects carry no sources of their own.
+    """
+
+    def __init__(self, cluster: FactoryNodesCluster, source: Optional[FactorySource]) -> None:
         # Fail closed: a missing capacity source entry is unknown evidence,
         # never silently fresh.
+        sources = [source] if source is not None else []
+        source_status = {s.kind: s.status for s in sources}
         self.capacity_ok = source_status.get("capacity") == "ok"
-        degraded = [s for s in cluster.sources if s.status != "ok"]
+        degraded = [s for s in sources if s.status != "ok"]
         self.capacity_sources = [s for s in degraded if s.kind == "capacity"]
         self.remaining_degraded = [s for s in degraded if s.kind != "capacity"]
 
@@ -992,10 +1028,14 @@ def factory_nodes(
     if output == "json":
         payload = nodes_payload.raw_response
         raw_clusters = nodes_payload.raw_response.get("clusters", [])
+        raw_sources = nodes_payload.raw_response.get("sources", [])
         if selected is not None:
             # Index-based selection matches table mode: with duplicate
-            # display names, name-matching would return both clusters.
+            # display names, name-matching would return both clusters. The
+            # envelope-level sources pair with clusters by order, so they
+            # follow the same selection.
             raw_clusters = [raw_clusters[i] for i in selected]
+            raw_sources = [raw_sources[i] for i in selected if i < len(raw_sources)]
         if state is not None or assigned_to is not None:
             raw_clusters = [
                 {
@@ -1007,7 +1047,11 @@ def factory_nodes(
         if selected is not None or state is not None or assigned_to is not None:
             # Filter the raw response objects, not re-serialized models, so
             # --json stays an exact passthrough of the API payload.
-            payload = {**nodes_payload.raw_response, "clusters": raw_clusters}
+            payload = {
+                **nodes_payload.raw_response,
+                "clusters": raw_clusters,
+                "sources": raw_sources,
+            }
         output_data_as_json(payload, console)
         return
 
@@ -1015,7 +1059,13 @@ def factory_nodes(
         console.print("No factory clusters allocated.")
         return
 
-    states = [_NodesState(c) for c in clusters]
+    # Envelope-level sources pair with clusters by order; a missing entry
+    # fails closed inside _NodesState.
+    paired_sources = [
+        nodes_payload.sources[i] if i < len(nodes_payload.sources) else None
+        for i in (selected if selected is not None else range(len(clusters)))
+    ]
+    states = [_NodesState(cluster, source) for cluster, source in zip(clusters, paired_sources)]
     multi = len(clusters) > 1
 
     console.print("[bold]CLUSTERS[/bold]")

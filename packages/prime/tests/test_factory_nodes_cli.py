@@ -50,24 +50,33 @@ def _node(name: str, **overrides: Any) -> Dict[str, Any]:
 def _nodes_cluster(
     display_name: str = "research-b300",
     nodes: Optional[List[Dict[str, Any]]] = None,
-    sources: Optional[List[Dict[str, Any]]] = None,
     status: str = "online",
 ) -> Dict[str, Any]:
+    # The frozen nodes contract: clusters carry no sources; the envelope
+    # carries one capacity entry per cluster, in the same order.
     return {
         "display_name": display_name,
         "status": status,
         "nodes": nodes if nodes is not None else [_node("gpu-01"), _node("gpu-02")],
-        "sources": sources if sources is not None else [_source("capacity")],
     }
 
 
-def _nodes_payload(**cluster_overrides: Any) -> Dict[str, Any]:
-    cluster = _nodes_cluster()
-    cluster.update(cluster_overrides)
+def _nodes_payload(
+    clusters: Optional[List[Dict[str, Any]]] = None,
+    sources: Optional[List[Dict[str, Any]]] = None,
+    **cluster_overrides: Any,
+) -> Dict[str, Any]:
+    if clusters is None:
+        cluster = _nodes_cluster()
+        cluster.update(cluster_overrides)
+        clusters = [cluster]
+    if sources is None:
+        sources = [_source("capacity") for _ in clusters]
     return {
         "schema_version": 1,
         "as_of": _iso(datetime.now(timezone.utc)),
-        "clusters": [cluster],
+        "clusters": clusters,
+        "sources": sources,
     }
 
 
@@ -170,6 +179,7 @@ def test_nodes_empty_fleet_prints_friendly_message(
             "schema_version": 1,
             "as_of": _iso(datetime.now(timezone.utc)),
             "clusters": [],
+            "sources": [],
         },
     )
 
@@ -233,17 +243,16 @@ def test_nodes_stale_source_suppresses_table_with_friendly_line(
 def test_nodes_mixed_fresh_and_stale_clusters(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    payload = {
-        "schema_version": 1,
-        "as_of": _iso(datetime.now(timezone.utc)),
-        "clusters": [
+    payload = _nodes_payload(
+        clusters=[
             _nodes_cluster(display_name="fresh-b300"),
-            _nodes_cluster(
-                display_name="stale-h200",
-                sources=[_source("capacity", status="error", age_seconds=3600)],
-            ),
+            _nodes_cluster(display_name="stale-h200"),
         ],
-    }
+        sources=[
+            _source("capacity"),
+            _source("capacity", status="error", age_seconds=3600),
+        ],
+    )
     _install(monkeypatch, payload)
 
     result = runner.invoke(app, ["factory", "nodes"], env=TEST_ENV)
@@ -257,17 +266,12 @@ def test_nodes_mixed_fresh_and_stale_clusters(
 
 
 def test_nodes_cluster_filter_and_miss(monkeypatch: pytest.MonkeyPatch) -> None:
-    payload = {
-        "schema_version": 1,
-        "as_of": _iso(datetime.now(timezone.utc)),
-        "clusters": [
+    payload = _nodes_payload(
+        clusters=[
             _nodes_cluster(display_name="research-b300"),
-            _nodes_cluster(
-                display_name="office-a100",
-                nodes=[_node("a100-01")],
-            ),
+            _nodes_cluster(display_name="office-a100", nodes=[_node("a100-01")]),
         ],
-    }
+    )
     _install(monkeypatch, payload)
 
     result = runner.invoke(app, ["factory", "nodes", "--cluster", "office-a100"], env=TEST_ENV)
@@ -387,14 +391,16 @@ def test_nodes_cluster_index_selector_filters_raw_json_by_index(
 ) -> None:
     # Duplicate display names: index selection must pick exactly the
     # selected cluster in --json, like table mode, not name-match both.
-    payload = {
-        "schema_version": 1,
-        "as_of": _iso(datetime.now(timezone.utc)),
-        "clusters": [
+    payload = _nodes_payload(
+        clusters=[
             _nodes_cluster(display_name="twin"),
             _nodes_cluster(display_name="twin", nodes=[_node("gpu-99")]),
         ],
-    }
+        sources=[
+            _source("capacity", age_seconds=12),
+            _source("capacity", age_seconds=5),
+        ],
+    )
     _install(monkeypatch, payload)
 
     result = runner.invoke(app, ["factory", "nodes", "--cluster", "2", "--json"], env=TEST_ENV)
@@ -403,6 +409,9 @@ def test_nodes_cluster_index_selector_filters_raw_json_by_index(
     assert result.exit_code == 0, result.output
     assert len(data["clusters"]) == 1
     assert [n["name"] for n in data["clusters"][0]["nodes"]] == ["gpu-99"]
+    # The envelope-level sources follow the same index selection.
+    assert len(data["sources"]) == 1
+    assert data["sources"][0]["observed_at"] == payload["sources"][1]["observed_at"]
 
 
 def test_nodes_missing_capacity_entry_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -436,3 +445,64 @@ def test_nodes_filter_match_empty_distinguished_from_no_nodes(
     assert plain.exit_code == 0, plain.output
     assert "no nodes reported" not in plain_output  # fixture has nodes
     assert "no nodes match" not in plain_output
+
+
+def test_nodes_client_parses_real_backend_envelope(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Realistic served shape (PR #6339): sources at the TOP level, one
+    # capacity entry per cluster in cluster order; clusters carry no
+    # sources field. Validation must succeed against a populated response.
+    realistic = {
+        "schema_version": 1,
+        "as_of": _iso(datetime.now(timezone.utc)),
+        "clusters": [
+            {
+                "display_name": "research-b300",
+                "status": "online",
+                "nodes": [
+                    {
+                        "name": "gpu-01",
+                        "state": "ready",
+                        "gpu_type": "B300",
+                        "gpus_total": 8,
+                        "gpus_used": 8,
+                        "assigned_to": "slurm",
+                    },
+                    {
+                        "name": "gpu-02",
+                        "state": "cordoned",
+                        "gpu_type": "B300",
+                        "gpus_total": 8,
+                        "gpus_used": None,
+                        "assigned_to": None,
+                    },
+                ],
+            },
+            {
+                "display_name": "office-a100",
+                "status": "offline",
+                "nodes": [],
+            },
+        ],
+        "sources": [
+            _source("capacity", age_seconds=10),
+            _source("capacity", status="stale", age_seconds=86400),
+        ],
+    }
+    dummy = _DummyAPIClient(realistic)
+    client = FactoryClient(dummy)  # type: ignore[arg-type]
+
+    nodes = client.get_nodes("team-1")
+
+    assert [c.display_name for c in nodes.clusters] == ["research-b300", "office-a100"]
+    assert [s.status for s in nodes.sources] == ["ok", "stale"]
+    assert nodes.raw_response is realistic
+    # And the CLI renders it: fresh cluster gets its table, stale one its line.
+    _install(monkeypatch, realistic)
+    result = runner.invoke(app, ["factory", "nodes"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+    assert result.exit_code == 0, result.output
+    assert "gpu-01" in output
+    # The second cluster's paired capacity entry is stale: its breakdown
+    # stays visible instead of a quiet empty table.
+    assert "node breakdown unavailable — node data last seen 1d ago" in output
+    assert "office-a100" in output

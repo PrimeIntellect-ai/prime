@@ -161,23 +161,33 @@ class FactoryNode(BaseModel):
 
 
 class FactoryNodesCluster(BaseModel):
-    """One cluster with its node inventory."""
+    """One cluster with its node inventory.
+
+    Freshness lives on the envelope: `FactoryNodes.sources` carries one
+    capacity entry per cluster, in the same order as `clusters` — clusters
+    themselves carry no `sources` field (frozen nodes contract).
+    """
 
     display_name: str
     status: Optional[str] = None
     # Required: a 200 response without `nodes` is a malformed payload.
     nodes: List[FactoryNode]
-    sources: List[FactorySource]
 
 
 class FactoryNodes(BaseModel):
-    """Response envelope for ``GET /api/v1/factory/nodes``."""
+    """Response envelope for ``GET /api/v1/factory/nodes``.
+
+    ``sources`` carries one capacity entry per cluster, in the same order
+    as ``clusters``, so a degraded snapshot stays visible (frozen nodes
+    contract; clusters themselves carry no ``sources`` field).
+    """
 
     schema_version: int
     as_of: AwareUTCDatetime = None
     # Required: a 200 response without `clusters` is a malformed payload,
     # not an empty fleet — keep those distinguishable.
     clusters: List[FactoryNodesCluster]
+    sources: List[FactorySource]
 
     # The raw API response is retained so ``--json`` can echo the exact
     # server payload instead of a re-serialization of the parsed model.
@@ -235,18 +245,20 @@ class FactoryClient:
     def get_workloads(
         self,
         team_id: str,
-        type: Optional[str] = None,
+        workload_type: Optional[str] = None,
         state: Optional[str] = None,
     ) -> FactoryWorkloads:
         """Fetch the leaf workloads for a team.
 
-        ``type`` (training/inference/slurm) and ``state`` (running/queued)
-        are server-side filters; other narrowing happens client-side. The
-        backend validates team membership of the caller.
+        ``workload_type`` (training/inference/slurm) and ``state``
+        (running/queued) are server-side filters; other narrowing happens
+        client-side. The backend validates team membership of the caller.
+        The query parameter is named ``workload_type`` exactly as the
+        FastAPI route declares it — sending ``type`` would be ignored.
         """
         params: Dict[str, Any] = {"team_id": team_id}
-        if type is not None:
-            params["type"] = type
+        if workload_type is not None:
+            params["workload_type"] = workload_type
         if state is not None:
             params["state"] = state
         response = self.client.get("/factory/workloads", params=params)

@@ -91,6 +91,7 @@ def _default_nodes_payload() -> Dict[str, Any]:
     return {
         "schema_version": 1,
         "as_of": _iso(now),
+        "sources": [_source("capacity", age_seconds=12)],
         "clusters": [
             {
                 "display_name": "research-b300",
@@ -113,7 +114,6 @@ def _default_nodes_payload() -> Dict[str, Any]:
                         "assigned_to": "slurm",
                     },
                 ],
-                "sources": [_source("capacity", age_seconds=12)],
             }
         ],
     }
@@ -1025,6 +1025,7 @@ def test_factory_status_compact_nodes_column_counts_cordoned(
     nodes_payload = {
         "schema_version": 1,
         "as_of": _iso(datetime.now(timezone.utc)),
+        "sources": [_source("capacity", age_seconds=12)],
         "clusters": [
             {
                 "display_name": "research-b300",
@@ -1055,7 +1056,6 @@ def test_factory_status_compact_nodes_column_counts_cordoned(
                         "assigned_to": None,
                     },
                 ],
-                "sources": [_source("capacity", age_seconds=12)],
             }
         ],
     }
@@ -1120,9 +1120,10 @@ def test_factory_status_compact_partial_degradation_shows_only_that_source(
     assert result.exit_code == 0, result.output
     assert "scheduler data 2h ago" in output
     assert "fresh" not in output
-    # node evidence is fresh, but one allocation group is unknown: the used
-    # sum cannot be trusted -> em-dash used with known total
-    assert "—/128" in output
+    # Fresh groups still contribute their real sum; the unknown slurm group
+    # contributes nothing and must not poison the aggregate.
+    assert "64/128" in output
+    assert "—/128" not in output
 
 
 def test_factory_status_json_makes_no_nodes_call(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1149,3 +1150,56 @@ def test_factory_status_verbose_keeps_detailed_sections(
     assert "RESERVED" in output  # detailed allocation table
     assert "drill down: prime factory nodes" in output
     assert "in-use = GPUs held by running jobs" in output
+
+
+def test_factory_status_compact_null_allocation_does_not_poison_aggregate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A running training row with null in_use must not erase the healthy
+    # peers' contribution from the used-GPUs aggregate.
+    payload = _status_payload(
+        pools=[
+            _pool("training", 32, None, None, 32),
+            _pool("inference", 32, 32, 0, 0),
+            _pool("slurm", 48, 16, 32, 0),
+        ],
+    )
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "48/128" in output  # 32 (inference) + 16 (slurm); null training adds 0
+    assert "—/128" not in output
+
+
+def test_factory_status_compact_stale_source_numbers_never_render(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Numbers from a stale source must not appear in the GPUS column: the
+    # stale slurm in_use (last-known) is excluded; the DATA column carries
+    # the age instead.
+    payload = _status_payload(
+        sources=[
+            _source("capacity", age_seconds=12),
+            _source("training", age_seconds=10),
+            _source("inference", age_seconds=10),
+            _source("slurm", status="stale", age_seconds=2 * 3600),
+        ],
+        pools=[
+            _pool("training", 32, 32, 0, 0),
+            _pool("inference", 32, 32, 0, 0),
+            _pool("slurm", 48, 8, 40, 0),  # stale last-known numbers
+        ],
+    )
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "64/128" in output  # fresh groups only; stale 8 never renders
+    assert "72/128" not in output
+    assert "8/128" not in output
+    assert "scheduler data 2h ago" in output

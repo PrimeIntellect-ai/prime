@@ -246,7 +246,11 @@ def test_workloads_type_and_state_filters_are_server_side(
     output = strip_ansi(result.output)
 
     assert result.exit_code == 0, result.output
-    assert dummy.calls[0]["params"] == {"team_id": "team-123", "type": "slurm", "state": "queued"}
+    assert dummy.calls[0]["params"] == {
+        "team_id": "team-123",
+        "workload_type": "slurm",
+        "state": "queued",
+    }
     # The (stubbed) response is rendered as-is; the filter itself was the
     # server's job, so the unfiltered stub rows still appear.
     assert "slurm:ac12:8421" in output
@@ -465,12 +469,12 @@ def test_factory_client_workloads_endpoint_and_params(
     dummy = _DummyAPIClient(_workloads_payload(_default_rows()))
     client = FactoryClient(dummy)  # type: ignore[arg-type]
 
-    client.get_workloads("team-9", type="slurm", state="running")
+    client.get_workloads("team-9", workload_type="slurm", state="running")
 
     assert dummy.calls == [
         {
             "endpoint": "/factory/workloads",
-            "params": {"team_id": "team-9", "type": "slurm", "state": "running"},
+            "params": {"team_id": "team-9", "workload_type": "slurm", "state": "running"},
         }
     ]
 

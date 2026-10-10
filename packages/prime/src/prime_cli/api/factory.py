@@ -278,13 +278,14 @@ class FactoryClient:
         workloads._raw_response = response
         return workloads
 
-    def get_nodes(self, team_id: str) -> FactoryNodes:
+    def get_nodes(self, team_id: str, timeout: Optional[float] = None) -> FactoryNodes:
         """Fetch the node inventory for a team.
 
         The backend validates team membership of the caller; the CLI only
-        resolves which team context to ask about.
+        resolves which team context to ask about. ``timeout`` caps the
+        request for best-effort callers (the compact status glance).
         """
-        response = self.client.get("/factory/nodes", params={"team_id": team_id})
+        response = self.client.get("/factory/nodes", params={"team_id": team_id}, timeout=timeout)
         try:
             nodes = FactoryNodes.model_validate(response)
         except ValidationError as exc:

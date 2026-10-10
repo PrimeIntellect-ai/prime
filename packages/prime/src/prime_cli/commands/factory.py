@@ -43,10 +43,11 @@ FACTORY_STATUS_JSON_HELP = json_output_help(
 )
 
 FACTORY_NODES_JSON_HELP = json_output_help(
-    ". = {schema_version, as_of, clusters[]}",
-    ".clusters[] = {display_name, status, nodes[], sources[]}",
+    ". = {schema_version, as_of, clusters[], sources[]}",
+    ".clusters[] = {display_name, status, nodes[]}",
     ".nodes[] = {name, state, gpu_type, gpus_total, gpus_used, assigned_to}",
-    ".sources[] = {kind, status, observed_at}",
+    ".sources[] = {kind, status, observed_at} — one capacity entry per cluster,",
+    "                                     in the same order as clusters[]",
 )
 
 IN_USE_NOTE = "in-use = GPUs held by running jobs (not GPU-activity measurements)"
@@ -335,33 +336,43 @@ def _compact_data_cell(cluster: FactoryCluster) -> str:
     return ", ".join(phrases)
 
 
-def _fetch_nodes_by_name(
+# The best-effort node view must never stall the status glance.
+NODES_FETCH_TIMEOUT_S = 3.0
+
+
+def _fetch_node_pairs(
     api_client: APIClient, team_id: str
-) -> Dict[str, Tuple[FactoryNodesCluster, Optional[FactorySource]]]:
+) -> List[Tuple[FactoryNodesCluster, Optional[FactorySource]]]:
     """Best-effort node summaries for the compact status table.
 
-    Returns display name -> (cluster, paired capacity source). The node
-    view is a display aid, never a hard dependency: on any API error the
-    status table renders with an em-dash NODES column.
+    Returns positionally paired (cluster, capacity source) entries — the
+    same identity the envelope sources use. Keying by display name would
+    let duplicate-named clusters overwrite each other. The node view is a
+    display aid, never a hard dependency: on any API error (including a
+    timeout, which the client raises as APIError) the status table renders
+    with an em-dash NODES column.
     """
     try:
-        nodes = FactoryClient(api_client).get_nodes(team_id)
-        return {
-            cluster.display_name: (
-                cluster,
-                nodes.sources[i] if i < len(nodes.sources) else None,
-            )
+        nodes = FactoryClient(api_client).get_nodes(team_id, timeout=NODES_FETCH_TIMEOUT_S)
+        return [
+            (cluster, nodes.sources[i] if i < len(nodes.sources) else None)
             for i, cluster in enumerate(nodes.clusters)
-        }
+        ]
     except APIError:
-        return {}
+        return []
 
 
 def _render_status_table(
     clusters: List[FactoryCluster],
-    nodes_by_name: Dict[str, Tuple[FactoryNodesCluster, Optional[FactorySource]]],
+    node_pairs: List[Tuple[FactoryNodesCluster, Optional[FactorySource]]],
+    selected: Optional[List[int]] = None,
 ) -> None:
-    """The default sinfo-style glance: one row per cluster, no prose."""
+    """The default sinfo-style glance: one row per cluster, no prose.
+
+    ``clusters`` may be a --cluster-selected subset; ``selected`` holds the
+    original payload indices, so node summaries pair positionally with the
+    full payload even under index selection over duplicate display names.
+    """
     any_degraded = False
     table = Table(show_header=True, header_style="bold", show_lines=False)
     table.add_column("CLUSTER", style="cyan")
@@ -373,14 +384,17 @@ def _render_status_table(
     table.add_column("NODES", justify="right")
     table.add_column("DATA")
 
-    for cluster in clusters:
+    for position, cluster in enumerate(clusters):
         source_status = {s.kind: s.status for s in cluster.sources}
         data_cell = _compact_data_cell(cluster)
         if data_cell != "fresh":
             any_degraded = True
         capacity_ok = source_status.get("capacity") == "ok"
         groups = _fresh_groups(cluster, source_status) if capacity_ok else []
-        nodes_cluster, nodes_source = nodes_by_name.get(cluster.display_name, (None, None))
+        original_index = selected[position] if selected is not None else position
+        nodes_cluster, nodes_source = (
+            node_pairs[original_index] if original_index < len(node_pairs) else (None, None)
+        )
         table.add_row(
             rich_escape(cluster.display_name),
             rich_escape(cluster.gpu_type) if cluster.gpu_type else "—",
@@ -515,8 +529,8 @@ def factory_status(
     if not verbose:
         # The default is the compact sinfo-style glance: one row per
         # cluster, at most one dim line under the table, no prose.
-        nodes_by_name = _fetch_nodes_by_name(api_client, team_id)
-        _render_status_table(clusters, nodes_by_name)
+        node_pairs = _fetch_node_pairs(api_client, team_id)
+        _render_status_table(clusters, node_pairs, selected)
         return
 
     states = [_ClusterState(c) for c in clusters]

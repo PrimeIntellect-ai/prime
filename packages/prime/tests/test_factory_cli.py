@@ -1210,3 +1210,138 @@ def test_factory_status_compact_stale_source_numbers_never_render(
     assert "64" in output
     assert "48" not in output and "40" not in output
     assert "scheduler data 2h ago" in output
+
+
+def test_factory_status_compact_duplicate_names_pair_positionally(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Duplicate display names: node summaries must pair by position, not by
+    # name — a name key would let the later cluster overwrite the earlier
+    # one's counts.
+    now = datetime.now(timezone.utc)
+    status_payload = {
+        "schema_version": 1,
+        "as_of": _iso(now),
+        "clusters": [
+            {
+                **_status_payload()["clusters"][0],
+                "display_name": "twin",
+                "pools": [
+                    _pool("training", 32, 32, 0, 0),
+                    _pool("inference", 32, 32, 0, 0),
+                    _pool("slurm", 48, 16, 32, 0),
+                ],
+                "sources": [
+                    _source("capacity"),
+                    _source("training"),
+                    _source("inference"),
+                    _source("slurm"),
+                ],
+            },
+            {
+                **_status_payload()["clusters"][0],
+                "display_name": "twin",
+                "pools": [
+                    _pool("training", 8, 8, 0, 0),
+                ],
+                "sources": [
+                    _source("capacity"),
+                    _source("training"),
+                ],
+            },
+        ],
+    }
+    nodes_payload = {
+        "schema_version": 1,
+        "as_of": _iso(now),
+        "sources": [_source("capacity"), _source("capacity")],
+        "clusters": [
+            {
+                "display_name": "twin",
+                "status": "online",
+                "nodes": [
+                    {
+                        "name": "gpu-1",
+                        "state": "ready",
+                        "gpu_type": "B300",
+                        "gpus_total": 8,
+                        "gpus_used": 8,
+                        "assigned_to": "slurm",
+                    },
+                    {
+                        "name": "gpu-2",
+                        "state": "ready",
+                        "gpu_type": "B300",
+                        "gpus_total": 8,
+                        "gpus_used": 8,
+                        "assigned_to": None,
+                    },
+                ],
+            },
+            {
+                "display_name": "twin",
+                "status": "online",
+                "nodes": [
+                    {
+                        "name": "gpu-9",
+                        "state": "cordoned",
+                        "gpu_type": "B300",
+                        "gpus_total": 8,
+                        "gpus_used": 8,
+                        "assigned_to": None,
+                    },
+                ],
+            },
+        ],
+    }
+    _install(monkeypatch, status_payload, nodes_payload=nodes_payload)
+
+    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+    assert result.exit_code == 0, result.output
+    # row 1 -> first node pair (2 ready of 2); row 2 -> second pair
+    assert "2/2" in output and "0/1, 1 cgdn" in output
+
+    # index selection over duplicates keeps the positionally correct pair
+    selected = runner.invoke(app, ["factory", "status", "--cluster", "2"], env=TEST_ENV)
+    selected_output = strip_ansi(selected.output)
+    assert selected.exit_code == 0, selected.output
+    assert "0/1, 1 cgdn" in selected_output
+    assert "2/2" not in selected_output
+
+
+def test_factory_status_compact_nodes_fetch_uses_short_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorded: Dict[str, Any] = {}
+
+    class _RecordingClient:
+        def get(self, endpoint, params=None, timeout=None):
+            recorded[endpoint] = timeout
+            if endpoint == "/factory/nodes":
+                return _default_nodes_payload()
+            return _status_payload()
+
+    monkeypatch.setattr("prime_cli.commands.factory.APIClient", lambda: _RecordingClient())
+    monkeypatch.setattr("prime_cli.commands.factory.Config", lambda: _StubConfig("team-123"))
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+
+    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    # The best-effort fetch is capped so a stalling nodes call degrades
+    # to an em-dash instead of hanging the glance.
+    assert recorded.get("/factory/nodes") is not None
+    assert recorded["/factory/nodes"] <= 5.0
+    # the status fetch itself is uncapped
+    assert recorded.get("/factory/status") is None
+
+
+def test_factory_nodes_help_documents_top_level_sources() -> None:
+    # --help makes no API call; no fixture install needed.
+    result = runner.invoke(app, ["factory", "nodes", "--help"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    # clusters[] carries no sources; the envelope documents them explicitly.
+    assert "clusters[] = {display_name, status, nodes[]}" in result.output
+    assert "clusters[] = {display_name, status, nodes[], sources[]}" not in result.output

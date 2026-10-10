@@ -254,6 +254,112 @@ def _render_workloads_section(
         console.print("[dim]drill down: prime factory nodes[/dim]")
 
 
+def _sum_in_use(cluster: FactoryCluster) -> Optional[int]:
+    """Sum of workload-group in_use counts; None when any group is unknown."""
+    if not cluster.pools:
+        return None
+    total = 0
+    for pool in cluster.pools:
+        if pool.in_use_gpus is None:
+            return None
+        total += pool.in_use_gpus
+    return total
+
+
+def _compact_gpu_cell(cluster: FactoryCluster, capacity_ok: bool) -> str:
+    """Used/total GPUs for the compact status row.
+
+    Used = sum of workload-group in_use counts; stale/missing node evidence
+    or an unobserved group renders an em-dash, never a zero.
+    """
+    used: Optional[int] = None
+    if capacity_ok:
+        used = _sum_in_use(cluster)
+    used_text = str(used) if used is not None else "—"
+    total_text = str(cluster.total_gpus) if cluster.total_gpus is not None else "—"
+    return f"{used_text}/{total_text}"
+
+
+def _compact_nodes_cell(nodes_cluster: Optional[FactoryNodesCluster]) -> str:
+    """Healthy/total nodes (plus cordoned count) for the compact status row."""
+    if nodes_cluster is None:
+        return "—"
+    source_status = {s.kind: s.status for s in nodes_cluster.sources}
+    if source_status.get("capacity") != "ok":
+        return "—"
+    total = len(nodes_cluster.nodes)
+    healthy = sum(1 for n in nodes_cluster.nodes if n.state == "ready")
+    cell = f"{healthy}/{total}"
+    cordoned = sum(1 for n in nodes_cluster.nodes if n.state == "cordoned")
+    if cordoned:
+        cell += f", {cordoned} cgdn"
+    return cell
+
+
+def _compact_data_cell(cluster: FactoryCluster) -> str:
+    """Freshness of the cluster's sources, plain words, internal kinds invisible."""
+    source_status = {s.kind: s.status for s in cluster.sources}
+    phrases: List[str] = []
+    for source in cluster.sources:
+        if source.status != "ok":
+            if source.observed_at is not None:
+                phrases.append(
+                    f"{_friendly_data_name(source.kind)} {human_age(source.observed_at)} ago"
+                )
+            else:
+                phrases.append(f"{_friendly_data_name(source.kind)} unavailable")
+    if "capacity" not in source_status:
+        # Fail closed: a missing capacity entry is unknown evidence.
+        phrases.append("node data unavailable")
+    if not phrases:
+        return "fresh"
+    return ", ".join(phrases)
+
+
+def _fetch_nodes_by_name(api_client: APIClient, team_id: str) -> Dict[str, FactoryNodesCluster]:
+    """Best-effort node summaries for the compact status table.
+
+    The node view is a display aid, never a hard dependency: on any API
+    error the status table renders with an em-dash NODES column.
+    """
+    try:
+        nodes = FactoryClient(api_client).get_nodes(team_id)
+        return {cluster.display_name: cluster for cluster in nodes.clusters}
+    except APIError:
+        return {}
+
+
+def _render_status_table(
+    clusters: List[FactoryCluster], nodes_by_name: Dict[str, FactoryNodesCluster]
+) -> None:
+    """The default sinfo-style glance: one row per cluster, no prose."""
+    any_degraded = False
+    table = Table(show_header=True, header_style="bold", show_lines=False)
+    table.add_column("NAME", style="cyan")
+    table.add_column("STATUS")
+    table.add_column("GPUS", justify="right")
+    table.add_column("NODES", justify="right")
+    table.add_column("DATA")
+
+    for cluster in clusters:
+        source_status = {s.kind: s.status for s in cluster.sources}
+        capacity_ok = source_status.get("capacity") == "ok"
+        data_cell = _compact_data_cell(cluster)
+        if data_cell != "fresh":
+            any_degraded = True
+        table.add_row(
+            rich_escape(cluster.display_name),
+            _styled_status(cluster.status),
+            _compact_gpu_cell(cluster, capacity_ok),
+            _compact_nodes_cell(nodes_by_name.get(cluster.display_name)),
+            data_cell,
+        )
+    console.print(table)
+    if any_degraded:
+        # At most one dim line under the table, nothing else.
+        console.print("[dim]degraded sources — details: prime factory status --verbose[/dim]")
+
+
 def _select_cluster_indices(
     clusters: Sequence[_DisplayNamedCluster], selector: str, err_console: Any
 ) -> List[int]:
@@ -300,6 +406,11 @@ def factory_status(
         "--cluster",
         help="Show only this cluster, by display name or 1-based index",
     ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        help="Show the detailed per-cluster allocation sections instead of the compact table",
+    ),
     json_output: bool = typer.Option(
         False, "--json", help="Print the API response as JSON (same as --output json)"
     ),
@@ -312,6 +423,8 @@ def factory_status(
         prime factory status
 
         prime factory status --cluster research-b300
+
+        prime factory status --verbose
 
         prime factory status --json
     """
@@ -360,6 +473,13 @@ def factory_status(
 
     if not clusters:
         console.print("No factory clusters allocated.")
+        return
+
+    if not verbose:
+        # The default is the compact sinfo-style glance: one row per
+        # cluster, at most one dim line under the table, no prose.
+        nodes_by_name = _fetch_nodes_by_name(api_client, team_id)
+        _render_status_table(clusters, nodes_by_name)
         return
 
     states = [_ClusterState(c) for c in clusters]

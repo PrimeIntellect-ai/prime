@@ -86,15 +86,55 @@ class _StubConfig:
         return self._team_id
 
 
+def _default_nodes_payload() -> Dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    return {
+        "schema_version": 1,
+        "as_of": _iso(now),
+        "clusters": [
+            {
+                "display_name": "research-b300",
+                "status": "online",
+                "nodes": [
+                    {
+                        "name": "gpu-01",
+                        "state": "ready",
+                        "gpu_type": "B300",
+                        "gpus_total": 8,
+                        "gpus_used": 8,
+                        "assigned_to": "training",
+                    },
+                    {
+                        "name": "gpu-02",
+                        "state": "ready",
+                        "gpu_type": "B300",
+                        "gpus_total": 8,
+                        "gpus_used": 4,
+                        "assigned_to": "slurm",
+                    },
+                ],
+                "sources": [_source("capacity", age_seconds=12)],
+            }
+        ],
+    }
+
+
 class _DummyAPIClient:
-    def __init__(self, payload: Dict[str, Any]) -> None:
+    def __init__(
+        self, payload: Dict[str, Any], nodes_payload: Optional[Dict[str, Any]] = None
+    ) -> None:
         self._payload = payload
+        self._nodes_payload = (
+            nodes_payload if nodes_payload is not None else _default_nodes_payload()
+        )
         self.calls: list[Dict[str, Any]] = []
 
     def get(
         self, endpoint: str, params: Optional[Dict[str, Any]] = None, timeout: Any = None
     ) -> Dict[str, Any]:
         self.calls.append({"endpoint": endpoint, "params": params})
+        if endpoint == "/factory/nodes":
+            return self._nodes_payload
         return self._payload
 
 
@@ -102,9 +142,10 @@ def _install(
     monkeypatch: pytest.MonkeyPatch,
     payload: Dict[str, Any],
     team_id: Optional[str] = "team-123",
+    nodes_payload: Optional[Dict[str, Any]] = None,
 ) -> _DummyAPIClient:
     monkeypatch.delenv("PRIME_TEAM_ID", raising=False)
-    dummy = _DummyAPIClient(payload)
+    dummy = _DummyAPIClient(payload, nodes_payload=nodes_payload)
     monkeypatch.setattr("prime_cli.commands.factory.APIClient", lambda: dummy)
     monkeypatch.setattr("prime_cli.commands.factory.Config", lambda: _StubConfig(team_id))
     monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
@@ -116,7 +157,7 @@ def test_factory_status_table_renders_pools_and_allocations(
 ) -> None:
     _install(monkeypatch, _status_payload())
 
-    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    result = runner.invoke(app, ["factory", "status", "--verbose"], env=TEST_ENV)
     output = strip_ansi(result.output)
 
     assert result.exit_code == 0, result.output
@@ -233,7 +274,7 @@ def test_factory_status_all_stale_sources_skip_table_with_friendly_line(
     )
     _install(monkeypatch, payload)
 
-    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    result = runner.invoke(app, ["factory", "status", "--verbose"], env=TEST_ENV)
     output = strip_ansi(result.output)
 
     assert result.exit_code == 0, result.output
@@ -266,7 +307,7 @@ def test_factory_status_mixed_fresh_and_stale_sources_render_only_fresh_pools(
     )
     _install(monkeypatch, payload)
 
-    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    result = runner.invoke(app, ["factory", "status", "--verbose"], env=TEST_ENV)
     output = strip_ansi(result.output)
 
     assert result.exit_code == 0, result.output
@@ -301,7 +342,7 @@ def test_factory_status_stale_pool_source_visible_with_header_phrase(
     )
     _install(monkeypatch, payload)
 
-    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    result = runner.invoke(app, ["factory", "status", "--verbose"], env=TEST_ENV)
     output = strip_ansi(result.output)
 
     assert result.exit_code == 0, result.output
@@ -318,18 +359,29 @@ def test_factory_status_cluster_filter_by_display_name_and_index(
     payload["clusters"].append(second)
     _install(monkeypatch, payload)
 
-    by_name = runner.invoke(app, ["factory", "status", "--cluster", "research-h200"], env=TEST_ENV)
+    by_name = runner.invoke(
+        app, ["factory", "status", "--verbose", "--cluster", "research-h200"], env=TEST_ENV
+    )
     assert by_name.exit_code == 0, by_name.output
     out = strip_ansi(by_name.output)
     assert "research-h200" in out
     assert "research-b300" not in out
     assert "H200" in out
 
-    by_index = runner.invoke(app, ["factory", "status", "--cluster", "1"], env=TEST_ENV)
+    by_index = runner.invoke(
+        app, ["factory", "status", "--verbose", "--cluster", "1"], env=TEST_ENV
+    )
     assert by_index.exit_code == 0, by_index.output
     out = strip_ansi(by_index.output)
     assert "research-b300" in out
     assert "research-h200" not in out
+
+    # Compact mode: --cluster selects table rows too.
+    compact = runner.invoke(app, ["factory", "status", "--cluster", "research-h200"], env=TEST_ENV)
+    assert compact.exit_code == 0, compact.output
+    out = strip_ansi(compact.output)
+    assert "research-h200" in out
+    assert "research-b300" not in out
 
 
 def test_factory_status_unknown_cluster_selector_fails(
@@ -576,7 +628,7 @@ def test_factory_status_markup_in_backend_values_does_not_crash(
     )
     _install(monkeypatch, payload)
 
-    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    result = runner.invoke(app, ["factory", "status", "--verbose"], env=TEST_ENV)
 
     assert result.exit_code == 0, result.output
     assert isinstance(result.exception, (type(None), SystemExit))
@@ -622,7 +674,7 @@ def test_factory_status_splits_clusters_and_workloads_sections(
 ) -> None:
     _install(monkeypatch, _status_payload())
 
-    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    result = runner.invoke(app, ["factory", "status", "--verbose"], env=TEST_ENV)
     output = strip_ansi(result.output)
 
     assert result.exit_code == 0, result.output
@@ -641,7 +693,7 @@ def test_factory_status_unassigned_and_unknown_are_cluster_summary_lines(
 ) -> None:
     _install(monkeypatch, _status_payload())
 
-    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    result = runner.invoke(app, ["factory", "status", "--verbose"], env=TEST_ENV)
     output = strip_ansi(result.output)
 
     assert result.exit_code == 0, result.output
@@ -672,7 +724,7 @@ def test_factory_status_degraded_note_stays_on_cluster_line(
     )
     _install(monkeypatch, payload)
 
-    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    result = runner.invoke(app, ["factory", "status", "--verbose"], env=TEST_ENV)
     output = strip_ansi(result.output)
 
     assert result.exit_code == 0, result.output
@@ -692,7 +744,7 @@ def test_factory_status_multi_cluster_indices_in_both_sections(
     )
     _install(monkeypatch, payload)
 
-    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    result = runner.invoke(app, ["factory", "status", "--verbose"], env=TEST_ENV)
     output = strip_ansi(result.output)
 
     assert result.exit_code == 0, result.output
@@ -712,7 +764,7 @@ def test_factory_status_no_pools_renders_summary_lines_without_table(
     payload = _status_payload(pools=[], unassigned_gpus=64, unknown_gpus=None)
     _install(monkeypatch, payload)
 
-    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    result = runner.invoke(app, ["factory", "status", "--verbose"], env=TEST_ENV)
     output = strip_ansi(result.output)
 
     assert result.exit_code == 0, result.output
@@ -729,7 +781,7 @@ def test_factory_status_empty_cluster_prints_no_pools_reported(
     payload = _status_payload(pools=[], unassigned_gpus=None, unknown_gpus=None)
     _install(monkeypatch, payload)
 
-    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    result = runner.invoke(app, ["factory", "status", "--verbose"], env=TEST_ENV)
     output = strip_ansi(result.output)
 
     assert result.exit_code == 0, result.output
@@ -749,7 +801,7 @@ def test_factory_status_accepts_allocations_envelope_key(
         cluster["allocations"] = cluster.pop("pools")
     _install(monkeypatch, payload)
 
-    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    result = runner.invoke(app, ["factory", "status", "--verbose"], env=TEST_ENV)
     output = strip_ansi(result.output)
 
     assert result.exit_code == 0, result.output
@@ -763,7 +815,7 @@ def test_factory_status_accepts_allocations_envelope_key(
     # Legacy `pools` key still parses (tolerated alias, not the primary).
     legacy_payload = _status_payload()  # fixture still uses the `pools` key
     _install(monkeypatch, legacy_payload)
-    legacy = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    legacy = runner.invoke(app, ["factory", "status", "--verbose"], env=TEST_ENV)
     assert legacy.exit_code == 0, legacy.output
     assert "slurm" in strip_ansi(legacy.output)
 
@@ -773,7 +825,7 @@ def test_factory_status_drill_down_hint_only_when_table_rendered(
 ) -> None:
     # Fresh data renders the WORKLOADS table -> the dim drill-down hint shows.
     _install(monkeypatch, _status_payload())
-    shown = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    shown = runner.invoke(app, ["factory", "status", "--verbose"], env=TEST_ENV)
     assert "drill down: prime factory nodes" in strip_ansi(shown.output)
 
     # All-suppressed (stale) data renders no table -> no hint.
@@ -781,7 +833,7 @@ def test_factory_status_drill_down_hint_only_when_table_rendered(
     for cluster in stale["clusters"]:
         cluster["sources"] = [_source("capacity", status="stale", age_seconds=86400)]
     _install(monkeypatch, stale)
-    hidden = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    hidden = runner.invoke(app, ["factory", "status", "--verbose"], env=TEST_ENV)
     output = strip_ansi(hidden.output)
     assert "workload breakdown unavailable" in output
     assert "drill down: prime factory nodes" not in output
@@ -801,7 +853,7 @@ def test_factory_status_stale_capacity_with_no_allocations_not_an_empty_cluster(
     )
     _install(monkeypatch, payload)
 
-    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    result = runner.invoke(app, ["factory", "status", "--verbose"], env=TEST_ENV)
     output = strip_ansi(result.output)
 
     assert result.exit_code == 0, result.output
@@ -817,7 +869,7 @@ def test_factory_status_fresh_empty_cluster_still_says_no_workloads(
     payload = _status_payload(pools=[], unassigned_gpus=None, unknown_gpus=None)
     _install(monkeypatch, payload)
 
-    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    result = runner.invoke(app, ["factory", "status", "--verbose"], env=TEST_ENV)
     output = strip_ansi(result.output)
 
     assert result.exit_code == 0, result.output
@@ -845,7 +897,7 @@ def test_factory_status_present_allocation_without_source_entry_fails_closed(
     )
     _install(monkeypatch, payload)
 
-    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    result = runner.invoke(app, ["factory", "status", "--verbose"], env=TEST_ENV)
     output = strip_ansi(result.output)
 
     assert result.exit_code == 0, result.output
@@ -872,7 +924,7 @@ def test_factory_status_inactive_all_zero_pool_without_source_renders(
     )
     _install(monkeypatch, payload)
 
-    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    result = runner.invoke(app, ["factory", "status", "--verbose"], env=TEST_ENV)
     output = strip_ansi(result.output)
 
     assert result.exit_code == 0, result.output
@@ -886,7 +938,7 @@ def test_factory_status_missing_capacity_entry_fails_closed(
     payload = _status_payload(sources=[])
     _install(monkeypatch, payload)
 
-    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    result = runner.invoke(app, ["factory", "status", "--verbose"], env=TEST_ENV)
     output = strip_ansi(result.output)
 
     assert result.exit_code == 0, result.output
@@ -914,10 +966,186 @@ def test_factory_status_mixed_naive_and_aware_timestamps_compare_correctly(
     )
     _install(monkeypatch, payload)
 
-    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    result = runner.invoke(app, ["factory", "status", "--verbose"], env=TEST_ENV)
     output = strip_ansi(result.output)
 
     assert result.exit_code == 0, result.output
     # The oldest observation (naive -2h, read as UTC) drives the phrase.
     assert "last seen 2h ago" in output
     assert "last seen 1h ago" not in output
+
+
+def test_factory_status_compact_table_is_the_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install(monkeypatch, _status_payload())
+
+    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    # One compact table: no sections, no footnotes, no drill-down hints.
+    assert "CLUSTERS" not in output and "WORKLOADS" not in output
+    assert "in-use = GPUs held" not in output
+    assert "drill down" not in output
+    assert "RESERVED" not in output  # the detailed allocation table is gone
+    for header in ("NAME", "STATUS", "GPUS", "NODES", "DATA"):
+        assert header in output
+    assert "research-b300" in output
+    assert "online" in output
+    # used = sum of workload-group in_use (32+32+16) over total 128
+    assert "80/128" in output
+    # node summary from the nodes endpoint (2 ready of 2)
+    assert "2/2" in output
+    assert "fresh" in output
+    # exactly one row: no dim degraded line under the table
+    assert "degraded sources" not in output
+
+
+def test_factory_status_compact_degraded_row_renders_dashes_and_data_age(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = _status_payload(sources=[_source("capacity", status="stale", age_seconds=3600)])
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    # Stale node evidence: em-dashes, never zeros, plus a plain data age.
+    assert "—/128" in output
+    assert "node data 1h ago" in output
+    assert "fresh" not in output
+    # The single dim line under the table points at --verbose.
+    assert "degraded sources — details: prime factory status --verbose" in output
+    assert output.count("degraded sources") == 1
+
+
+def test_factory_status_compact_nodes_column_counts_cordoned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    nodes_payload = {
+        "schema_version": 1,
+        "as_of": _iso(datetime.now(timezone.utc)),
+        "clusters": [
+            {
+                "display_name": "research-b300",
+                "status": "online",
+                "nodes": [
+                    {
+                        "name": "gpu-01",
+                        "state": "ready",
+                        "gpu_type": "B300",
+                        "gpus_total": 8,
+                        "gpus_used": 8,
+                        "assigned_to": None,
+                    },
+                    {
+                        "name": "gpu-02",
+                        "state": "cordoned",
+                        "gpu_type": "B300",
+                        "gpus_total": 8,
+                        "gpus_used": 8,
+                        "assigned_to": "slurm",
+                    },
+                    {
+                        "name": "gpu-03",
+                        "state": "offline",
+                        "gpu_type": "B300",
+                        "gpus_total": 8,
+                        "gpus_used": None,
+                        "assigned_to": None,
+                    },
+                ],
+                "sources": [_source("capacity", age_seconds=12)],
+            }
+        ],
+    }
+    _install(monkeypatch, _status_payload(), nodes_payload=nodes_payload)
+
+    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "1/3, 1 cgdn" in output
+
+
+def test_factory_status_compact_nodes_fetch_failure_degrades_to_dash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _SelectiveClient:
+        def __init__(self, status_payload):
+            self._status_payload = status_payload
+            self.calls = []
+
+        def get(self, endpoint, params=None, timeout=None):
+            self.calls.append({"endpoint": endpoint, "params": params})
+            if endpoint == "/factory/nodes":
+                raise APIError("node view unavailable")
+            return self._status_payload
+
+    selective = _SelectiveClient(_status_payload())
+    monkeypatch.setattr("prime_cli.commands.factory.APIClient", lambda: selective)
+    monkeypatch.setattr("prime_cli.commands.factory.Config", lambda: _StubConfig("team-123"))
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+
+    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "—" in output  # NODES column degraded, status row still renders
+    assert "fresh" in output  # DATA comes from the status envelope
+    assert "degraded sources" not in output  # no false degradation
+
+
+def test_factory_status_compact_partial_degradation_shows_only_that_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = _status_payload(
+        sources=[
+            _source("capacity", age_seconds=12),
+            _source("training", age_seconds=10),
+            _source("inference", age_seconds=10),
+            _source("slurm", status="stale", age_seconds=2 * 3600),
+        ],
+        pools=[
+            _pool("training", 32, 32, 0, 0),
+            _pool("inference", 32, 32, 0, 0),
+            _pool("slurm", 48, None, None, 48),
+        ],
+    )
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(app, ["factory", "status"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "scheduler data 2h ago" in output
+    assert "fresh" not in output
+    # node evidence is fresh, but one allocation group is unknown: the used
+    # sum cannot be trusted -> em-dash used with known total
+    assert "—/128" in output
+
+
+def test_factory_status_json_makes_no_nodes_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = _status_payload()
+    dummy = _install(monkeypatch, payload)
+
+    result = runner.invoke(app, ["factory", "status", "--json"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    assert [call["endpoint"] for call in dummy.calls] == ["/factory/status"]
+    assert json.loads(result.stdout) == payload
+
+
+def test_factory_status_verbose_keeps_detailed_sections(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install(monkeypatch, _status_payload())
+
+    result = runner.invoke(app, ["factory", "status", "--verbose"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "CLUSTERS" in output and "WORKLOADS" in output
+    assert "RESERVED" in output  # detailed allocation table
+    assert "drill down: prime factory nodes" in output
+    assert "in-use = GPUs held by running jobs" in output

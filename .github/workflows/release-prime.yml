@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag to create release from (e.g. v1.2.3)'
+        description: 'Tag to create release from (e.g. v1.2.3), or an existing tag to rebuild its images'
         required: false
         type: string
 
@@ -214,7 +214,11 @@ jobs:
 
   docker-images:
     needs: tag-and-release
-    if: needs.tag-and-release.outputs.release_created == 'true'
+    # A manual run for a tag that already exists rebuilds its images from the released wheel,
+    # which recovers a release whose image builds failed after the wheel was published.
+    if: >-
+      needs.tag-and-release.outputs.release_created == 'true' ||
+      (github.event_name == 'workflow_dispatch' && inputs.tag != '')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -230,10 +234,32 @@ jobs:
           fetch-depth: 0
 
       - name: Download build artifacts
+        if: needs.tag-and-release.outputs.release_created == 'true'
         uses: actions/download-artifact@v4
         with:
           name: dist
           path: packages/prime/dist
+
+      - name: Download released wheel
+        if: needs.tag-and-release.outputs.release_created != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.tag-and-release.outputs.version }}
+        run: gh release download "v$VERSION" --pattern '*.whl' --dir packages/prime/dist
+
+      # Anonymous Docker Hub pulls are rate limited per IP, and shared runners regularly exhaust
+      # that limit. As a daemon mirror, mirror.gcr.io serves the base image when it has it cached
+      # and Docker falls back to Docker Hub when it does not.
+      - name: Pull Docker Hub images through a mirror
+        run: |
+          CONFIG=/etc/docker/daemon.json
+          if [ ! -f "$CONFIG" ]; then
+            echo '{}' | sudo tee "$CONFIG" > /dev/null
+          fi
+          sudo jq '."registry-mirrors" = ["https://mirror.gcr.io"]' "$CONFIG" | sudo tee "$CONFIG.new" > /dev/null
+          sudo mv "$CONFIG.new" "$CONFIG"
+          sudo systemctl restart docker
+          docker info --format '{{.RegistryConfig.Mirrors}}' | grep mirror.gcr.io
 
       - name: Log in to GitHub Container Registry
         env:

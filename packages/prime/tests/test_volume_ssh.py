@@ -1,3 +1,4 @@
+import copy
 import hashlib
 import json
 import os
@@ -15,9 +16,15 @@ from types import SimpleNamespace
 import pytest
 from prime_cli.api.training import HostedTrainingClient
 from prime_cli.commands import volumes
+from prime_cli.core import NotFoundError
 from prime_cli.main import app
 from prime_cli.volume_gateway import GatewayError, relay
 from typer.testing import CliRunner
+
+
+def _no_route(*a, **kw):
+    """An older backend: no POST …/transfer route, so get/put use a session."""
+    raise NotFoundError("HTTP 404: Not Found")
 
 
 @pytest.fixture(autouse=True)
@@ -400,7 +407,7 @@ def test_create_passes_the_cluster_through(monkeypatch):
 
     calls = []
 
-    def create_volume(name, size, team_id=None, cluster=None):
+    def create_volume(name, size, team_id=None, cluster=None, warm=True):
         calls.append((name, size, team_id, cluster))
         return Volume(
             name=name, size=size, status="PENDING", clusterId="c1", cluster="gpu-east", pvcName="v"
@@ -439,7 +446,17 @@ def test_client_sends_cluster_only_when_set():
     assert "cluster" not in posted[1]
 
 
+def _local_sources(monkeypatch, tmp_path):
+    """Run in tmp_path, with the local sources the session-route tests put
+    (a put checks its source exists before asking for a route)."""
+    monkeypatch.chdir(tmp_path)
+    for name in ("f", "f.txt", "-f.txt", "checkpoint:final"):
+        (tmp_path / name).write_text("x")
+    (tmp_path / "dir").mkdir(exist_ok=True)
+
+
 def _setup(monkeypatch, tmp_path, which, run_code=0, stuck=False, find_stdout=""):
+    _local_sources(monkeypatch, tmp_path)
     key = tmp_path / "key"
     key.write_text("test")
     monkeypatch.setattr(volumes.Config, "ssh_key_path", property(lambda self: str(key)))
@@ -460,6 +477,7 @@ def _setup(monkeypatch, tmp_path, which, run_code=0, stuck=False, find_stdout=""
     client = SimpleNamespace(
         create_volume_session=create,
         stop_volume_session=lambda *a, **kw: stopped.append(a),
+        route_volume_transfer=_no_route,
     )
     monkeypatch.setattr(volumes, "_client", lambda: (client, "t1"))
     monkeypatch.setattr(volumes.shutil, "which", lambda n: f"/bin/{n}" if n in which else None)
@@ -521,7 +539,12 @@ def test_get_says_when_it_reuses_a_read_write_session(monkeypatch, tmp_path):
     monkeypatch.setattr(
         volumes,
         "_client",
-        lambda: (SimpleNamespace(create_volume_session=lambda *a, **kw: reused), "t1"),
+        lambda: (
+            SimpleNamespace(
+                create_volume_session=lambda *a, **kw: reused, route_volume_transfer=_no_route
+            ),
+            "t1",
+        ),
     )
     result = _run("get", "data", "x")
     assert result.exit_code == 0, result.output
@@ -545,11 +568,11 @@ def test_local_path_with_colon_is_not_a_remote_operand(monkeypatch, tmp_path, to
     _, _, commands = _setup(monkeypatch, tmp_path, tools)
     assert _run("put", "data", "checkpoint:final", "/").exit_code == 0
     assert _run("get", "data", "x", "out:1").exit_code == 0
-    assert _run("get", "data", "x", "/abs/out:1").exit_code == 0
+    assert _run("get", "data", "x", f"{tmp_path}/out:1").exit_code == 0
     transfers = [c for c in commands if c[0] != "ssh"]  # scp's symlink check
     assert transfers[0][-2] == "./checkpoint:final"
     assert transfers[1][-1] == "./out:1"
-    assert transfers[2][-1] == "/abs/out:1"
+    assert transfers[2][-1] == f"{tmp_path}/out:1"
 
 
 def test_scp_keeps_rsync_trailing_slash_layout(monkeypatch, tmp_path):
@@ -651,7 +674,7 @@ def test_no_ssh_tools(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize(
-    "bad", ["../x", "a/../b", "a//b", "//a", "my file", "a/*.pt", "x;rm", "$HOME", "it's"]
+    "bad", ["..", "../x", "/..", "a/../../b", "my file", "a/*.pt", "x;rm", "$HOME", "it's"]
 )
 def test_remote_path_rejected(monkeypatch, tmp_path, bad):
     created, _, commands = _setup(monkeypatch, tmp_path, {"ssh", "rsync"})
@@ -666,6 +689,15 @@ def test_remote_path_normalized():
     assert volumes._remote_path("runs/step_100/model-00001.safetensors") == (
         "/volume/runs/step_100/model-00001.safetensors"
     )
+    # posixpath semantics: "." and empty segments collapse, ".." climbs.
+    assert volumes._remote_path(".") == "/volume/"
+    assert volumes._remote_path("./") == "/volume/"
+    assert volumes._remote_path("./runs/x") == "/volume/runs/x"
+    assert volumes._remote_path("a/../runs/x") == "/volume/runs/x"
+    assert volumes._remote_path("a//b/") == "/volume/a/b/"
+    assert volumes._remote_path("//a/./b") == "/volume/a/b"
+    assert volumes._remote_path("a/b/.") == "/volume/a/b/"
+    assert volumes._remote_path("a/b/c/..") == "/volume/a/b/"
 
 
 def test_failed_transfer_exit_code(monkeypatch, tmp_path):
@@ -678,7 +710,7 @@ def test_failed_transfer_exit_code(monkeypatch, tmp_path):
 def test_wait_failure_stops_session(monkeypatch, tmp_path):
     _, stopped, commands = _setup(monkeypatch, tmp_path, {"ssh", "rsync"}, stuck=True)
     monkeypatch.setattr(volumes.time, "sleep", lambda s: None)
-    monkeypatch.setattr(volumes.time, "monotonic", iter([0, 1000]).__next__)
+    monkeypatch.setattr(volumes.time, "monotonic", iter([0, 4000]).__next__)
     result = _run("get", "data", "x")
     assert result.exit_code == 1
     assert stopped == [("data", "s1")] and not commands
@@ -694,6 +726,7 @@ def _proxy_argv(config_text):
 
 
 def _gateway_ssh(monkeypatch, tmp_path, gateway=GATEWAY):
+    _local_sources(monkeypatch, tmp_path)
     key = tmp_path / "key"
     key.write_text("test")
     monkeypatch.setattr(volumes.Config, "ssh_key_path", property(lambda self: str(key)))
@@ -705,7 +738,9 @@ def _gateway_ssh(monkeypatch, tmp_path, gateway=GATEWAY):
         ssh_connection="u@vol-ssh-0123.tailnet.ts.net",
         gateway=gateway,
     )
-    client = SimpleNamespace(create_volume_session=lambda *a, **kw: session)
+    client = SimpleNamespace(
+        create_volume_session=lambda *a, **kw: session, route_volume_transfer=_no_route
+    )
     monkeypatch.setattr(volumes, "_client", lambda: (client, "t1"))
     commands = []
     monkeypatch.setattr(
@@ -1017,7 +1052,7 @@ def test_put_directory_splits_files_across_parallel_rsyncs(monkeypatch, tmp_path
     (tree / "empty").mkdir(parents=True)
     for i in range(6):
         (tree / f"shard-{i}").write_bytes(b"x" * (i + 1))
-    result = _run("put", "data", str(tree), "runs/")
+    result = _run("put", "data", str(tree), "ckpts/")
     assert result.exit_code == 0, result.output
     # One rsync creates the directories first, so the parallel ones never
     # race to mkdir the same path; then the files go over _STREAMS rsyncs.
@@ -1025,13 +1060,13 @@ def test_put_directory_splits_files_across_parallel_rsyncs(monkeypatch, tmp_path
     # directories, never a --files-from list with "." (openrsync recurses
     # into "." and would copy every file single-stream).
     (dirs_pass,) = commands
-    assert dirs_pass[-4:] == ["--include=*/", "--exclude=*", str(tree), "host:/volume/runs/"]
+    assert dirs_pass[-4:] == ["--include=*/", "--exclude=*", str(tree), "host:/volume/ckpts/"]
     assert not any(a.startswith("--files-from") for a in dirs_pass)
     assert len(started) == volumes._STREAMS
     for cmd, _ in started:
         # "ckpt" (no trailing slash) copies the directory itself: the lists
         # are relative to its parent and every entry starts with "ckpt/".
-        assert cmd[-2:] == [f"{tmp_path}/", "host:/volume/runs/"]
+        assert cmd[-2:] == [f"{tmp_path}/", "host:/volume/ckpts/"]
         assert cmd[:4] == ["/bin/rsync", "-a", "-v", "--partial-dir=.rsync-partial"]
     listed = [p for _, paths in started for p in paths]
     assert sorted(listed) == [f"ckpt/shard-{i}" for i in range(6)]
@@ -1068,3 +1103,1128 @@ def test_parallel_failure_reports_the_exit_code(monkeypatch, tmp_path):
     result = _run("put", "data", f"{tree}/", "/")
     assert result.exit_code == 23
     assert "Transfer failed" in result.output
+
+
+# --- warm create, phase-driven wait, routed get/put (ENG-6585) -------------
+
+
+def test_client_sends_warm_and_routes_transfers():
+    posted = []
+    volume = {"name": "v", "status": "PENDING", "clusterId": "", "pvcName": ""}
+    route = {
+        "via": "r2",
+        "endpoint": "https://acct.r2.cloudflarestorage.com",
+        "bucket": "b",
+        "prefix": "vol1/",
+        "accessKeyId": "AK",
+        "secretAccessKey": "SK",
+        "sessionToken": "ST",
+        "expiresAt": "2026-10-09T12:00:00Z",
+    }
+
+    def post(path, json=None):
+        posted.append((path, json))
+        return route if path.endswith("/transfer") else volume
+
+    client = HostedTrainingClient(SimpleNamespace(post=post))
+    client.create_volume("v", "1Ti")
+    client.create_volume("v", "1Ti", warm=False)
+    got = client.route_volume_transfer("v", "put", "data/x/", team_id="t1")
+    client.route_volume_transfer("v", "put", "", ["a", "b"])
+    client.route_volume_transfer("v", "put", "d/", lease_id="L1")
+    client.release_volume_transfer("v", "L1", team_id="t1")
+    client.release_volume_transfer("v", "L1")
+    assert posted[4][1] == {"mode": "put", "path": "d/", "leaseId": "L1"}
+    assert posted[5:] == [
+        ("/training/volumes/v/transfer/release", {"leaseId": "L1", "teamId": "t1"}),
+        ("/training/volumes/v/transfer/release", {"leaseId": "L1"}),
+    ]
+    assert posted[0][1]["warm"] is True and posted[1][1]["warm"] is False
+    assert posted[2] == (
+        "/training/volumes/v/transfer",
+        {"mode": "put", "path": "data/x/", "teamId": "t1"},
+    )
+    assert posted[3][1] == {"mode": "put", "path": "", "entries": ["a", "b"]}
+    assert (got.via, got.prefix, got.access_key_id) == ("r2", "vol1/", "AK")
+    assert got.session_token == "ST"
+
+
+@pytest.mark.parametrize("flags,warm", [([], True), (["--no-warm"], False)])
+def test_create_warm_by_default(monkeypatch, flags, warm):
+    from prime_cli.api.training import Volume
+
+    sent = []
+
+    def create_volume(name, size, team_id=None, cluster=None, warm=True):
+        sent.append(warm)
+        return Volume(name=name, size=size, status="PENDING", clusterId="", pvcName="")
+
+    monkeypatch.setattr(
+        volumes, "_client", lambda: (SimpleNamespace(create_volume=create_volume), None)
+    )
+    result = _run("create", "ckpts", *flags)
+    assert result.exit_code == 0, result.output
+    assert sent == [warm]
+    assert ("Starting a session in the background" in result.output) is warm
+    as_json = _run("create", "ckpts", "-o", "json", *flags)
+    assert json.loads(as_json.output)["name"] == "ckpts"
+
+
+def test_ssh_shows_the_phase_and_how_the_session_ends(monkeypatch, tmp_path):
+    def poll(**over):
+        fields = dict(
+            id="s1",
+            status="DEPLOYING",
+            read_only=False,
+            ssh_connection=None,
+            host_public_key=None,
+            error_message=None,
+            phase="creating",
+            progress=None,
+        )
+        return SimpleNamespace(**{**fields, **over})
+
+    polls = [
+        poll(phase="staging", progress="1.2 GiB / 4 GiB, 30%"),
+        poll(status="RUNNING", phase="ready", ssh_connection="prime@h.corp.ts.net"),
+    ]
+    _poll_client(monkeypatch, tmp_path, polls, [])
+    first = poll()
+    monkeypatch.setattr(
+        volumes,
+        "_client",
+        lambda: (
+            SimpleNamespace(
+                create_volume_session=lambda *a, **kw: first,
+                get_volume_session=lambda *a, **kw: polls.pop(0),
+            ),
+            None,
+        ),
+    )
+    result = CliRunner().invoke(
+        app, ["volumes", "ssh", "data"], env={"PRIME_DISABLE_VERSION_CHECK": "1", "COLUMNS": "200"}
+    )
+    assert result.exit_code == 0, result.output
+    assert "Copying data from bucket... 1.2 GiB / 4 GiB, 30%" in result.output
+    assert "Changes sync to the volume every minute." in result.output
+    assert "stops after 30 minutes idle" in result.output
+    assert "prime volumes stop data s1" in result.output
+
+
+def test_ssh_wait_ends_on_a_failed_phase(monkeypatch, tmp_path):
+    session = SimpleNamespace(
+        id="s1",
+        status="DEPLOYING",
+        read_only=True,
+        ssh_connection=None,
+        host_public_key=None,
+        error_message="staging failed",
+        phase="failed",
+    )
+    stopped = []
+    _poll_client(monkeypatch, tmp_path, [], stopped)
+    monkeypatch.setattr(
+        volumes,
+        "_client",
+        lambda: (
+            SimpleNamespace(
+                create_volume_session=lambda *a, **kw: session,
+                stop_volume_session=lambda name, sid, **kw: stopped.append(sid),
+            ),
+            None,
+        ),
+    )
+    result = CliRunner().invoke(
+        app, ["volumes", "ssh", "data"], env={"PRIME_DISABLE_VERSION_CHECK": "1", "COLUMNS": "200"}
+    )
+    assert result.exit_code == 1
+    assert "Session is FAILED: staging failed" in result.output
+    assert stopped == ["s1"]
+
+
+def test_route_via_session_reuses_it(monkeypatch, tmp_path, _session_dir):
+    from prime_cli.api.training import VolumeSession, VolumeTransferRoute
+
+    created, stopped, commands = _setup(monkeypatch, tmp_path, {"ssh", "rsync"})
+    live = VolumeSession.model_validate(
+        {
+            "id": "s7",
+            "volumeName": "data",
+            "status": "RUNNING",
+            "readOnly": False,
+            "sshConnection": "u@host.tailnet.ts.net",
+        }
+    )
+    client, _ = volumes._client()
+    client.route_volume_transfer = lambda *a, **kw: VolumeTransferRoute(via="session", session=live)
+    result = _run("put", "data", "f.txt", "dir/")
+    assert result.exit_code == 0, result.output
+    assert created == [] and stopped == []
+    assert "Reusing session s7 (read-write)" in result.output
+    assert commands[0][-2:] == ["f.txt", "host:/volume/dir/"]
+
+
+class FakeS3:
+    """The few boto3 S3 client calls the direct path makes, over a dict.
+    `scoped(scope)` is a view of the same objects through credentials that
+    only reach `scope` (see _route_scope), refusing the rest like R2 does."""
+
+    scope = None  # (read_only, prefixPaths, objectPaths); None reaches everything
+
+    modified = datetime(2026, 1, 2, tzinfo=timezone.utc)  # every object's LastModified
+
+    def __init__(self, objects=None, metadata=None):
+        self.objects = dict(objects or {})
+        self.metadata = dict(metadata or {})
+        self.entries = []  # `entries` of each put route call
+        self.leases = []  # `lease_id` of each put route call
+        self.released = []  # (lease, team) of each release call
+
+    def scoped(self, scope):
+        view = copy.copy(self)  # shares objects, metadata and entries
+        view.scope = scope
+        return view
+
+    def _check(self, op, key, write=False, listing=False):
+        from botocore.exceptions import ClientError
+
+        if self.scope is None:
+            return
+        read_only, prefixes, objects = self.scope
+        reach = key.startswith(tuple(prefixes)) or (not listing and key in objects)
+        if not reach or (write and read_only):
+            code = "403" if op == "HeadObject" else "AccessDenied"
+            raise ClientError({"Error": {"Code": code, "Message": "Forbidden"}}, op)
+
+    def upload_file(self, path, bucket, key, ExtraArgs=None, Config=None, Callback=None):
+        assert bucket == "b" and Config.max_concurrency == volumes._R2_PART_WORKERS
+        self._check("PutObject", key, write=True)
+        self.objects[key] = Path(path).read_bytes()
+        self.metadata[key] = ExtraArgs["Metadata"]
+        Callback(len(self.objects[key]))
+
+    def put_object(self, Bucket, Key, Body):
+        self._check("PutObject", Key, write=True)
+        self.objects[Key] = Body
+
+    def download_file(self, bucket, key, path, Config=None, Callback=None):
+        self._check("GetObject", key)
+        Path(path).write_bytes(self.objects[key])
+        Callback(len(self.objects[key]))
+
+    def list_objects_v2(self, Bucket, Prefix, MaxKeys=1000):
+        self._check("ListObjectsV2", Prefix, listing=True)
+        keys = sorted(k for k in self.objects if k.startswith(Prefix))[:MaxKeys]
+        return {"Contents": [{"Key": k, "Size": len(self.objects[k])} for k in keys]}
+
+    def get_paginator(self, name):
+        return SimpleNamespace(paginate=lambda **kw: [self.list_objects_v2(**kw)])
+
+    def head_object(self, Bucket, Key):
+        from botocore.exceptions import ClientError
+
+        self._check("HeadObject", Key)
+        if Key not in self.objects:
+            raise ClientError({"Error": {"Code": "404"}}, "HeadObject")
+        return {
+            "ContentLength": len(self.objects[Key]),
+            "LastModified": self.modified,
+            "Metadata": self.metadata.get(Key, {}),
+        }
+
+
+def _route_scope(mode, path, entries, prefix="vol1/"):
+    """What the platform's transfer route mints (platform#6358): a get reads
+    the whole volume; a put writes its destination directory (r2_volumes.
+    put_scope), or for a root / top-level put only its top-level names."""
+    if mode == "get":
+        return True, [prefix], []
+    segments = [s for s in path.split("/") if s not in ("", ".")]
+    keep = segments if path.endswith("/") else segments[:-1]
+    if keep:
+        return False, [prefix + "".join(f"{s}/" for s in keep)], []
+    names = segments or entries or []
+    return False, [f"{prefix}{n}/" for n in names], [prefix + n for n in names]
+
+
+R2_ROUTE = dict(
+    via="r2",
+    endpoint="https://acct.r2.cloudflarestorage.com",
+    bucket="b",
+    prefix="vol1/",
+    accessKeyId="AK",
+    secretAccessKey="SK",
+    sessionToken="ST",
+    expiresAt="2099-01-01T00:00:00Z",
+)
+
+
+def _direct(monkeypatch, s3):
+    """A backend that routes to R2; returns the route calls made."""
+    from prime_cli.api.training import VolumeTransferRoute
+
+    routes, scopes = [], {}
+
+    def route(name, mode, path, entries=None, team_id=None, lease_id=None):
+        routes.append((mode, path))
+        lease = {}
+        if mode == "put":
+            s3.entries.append(entries)
+            s3.leases.append(lease_id)
+            lease = {"leaseId": "L1"}  # only put credentials carry a lease
+        else:
+            assert lease_id is None
+        key = f"AK{len(routes)}"
+        scopes[key] = _route_scope(mode, path, entries)
+        return VolumeTransferRoute.model_validate({**R2_ROUTE, "accessKeyId": key, **lease})
+
+    client = SimpleNamespace(
+        route_volume_transfer=route,
+        release_volume_transfer=lambda name, lease, team_id=None: s3.released.append(
+            (lease, team_id)
+        ),
+        create_volume_session=lambda *a, **kw: pytest.fail("no session on the direct path"),
+    )
+    monkeypatch.setattr(volumes, "_client", lambda: (client, "t1"))
+    monkeypatch.setattr(
+        volumes, "_r2_client", lambda refresh, r: s3.scoped(scopes[r.access_key_id])
+    )
+    return routes
+
+
+def test_r2_client_is_scoped_to_the_route():
+    from prime_cli.api.training import VolumeTransferRoute
+
+    route = VolumeTransferRoute.model_validate(R2_ROUTE)
+    s3 = volumes._r2_client(lambda: route, route)
+    assert s3.meta.endpoint_url == R2_ROUTE["endpoint"]
+    assert s3.meta.region_name == "auto"
+    assert s3.meta.config.signature_version == "s3v4"
+    creds = s3._request_signer._credentials.get_frozen_credentials()
+    assert (creds.access_key, creds.secret_key, creds.token) == ("AK", "SK", "ST")
+
+
+@pytest.mark.parametrize(
+    "local,remote,existing,keys",
+    [
+        ("f.txt", "/", {}, ["f.txt"]),
+        ("f.txt", "dir/", {}, ["dir/f.txt"]),
+        ("f.txt", "dir", {}, ["dir"]),  # no such directory: rsync names the file "dir"
+        ("f.txt", "dir", {"vol1/dir/x": b""}, ["dir/f.txt", "dir/x"]),
+        ("tree", "/", {}, ["tree/a", "tree/sub/b"]),
+        ("tree", "x", {}, ["x/tree/a", "x/tree/sub/b"]),
+        ("tree/", "x/", {}, ["x/a", "x/sub/b"]),
+        ("tree/", "/", {}, ["a", "sub/b"]),
+        ("tree/.", "x/", {}, ["x/a", "x/sub/b"]),  # rsync: "dir/." is "dir/"
+        ("tree/./", "x", {}, ["x/a", "x/sub/b"]),
+    ],
+)
+def test_direct_put_mirrors_rsync_layout(monkeypatch, tmp_path, local, remote, existing, keys):
+    monkeypatch.chdir(tmp_path)
+    Path("f.txt").write_text("f")
+    (tmp_path / "tree" / "sub").mkdir(parents=True)
+    Path("tree/a").write_text("a")
+    Path("tree/sub/b").write_text("bb")
+    Path("tree/link").symlink_to(tmp_path / "f.txt")
+    s3 = FakeS3(existing)
+    routes = _direct(monkeypatch, s3)
+    result = _run("put", "data", local, remote)
+    assert result.exit_code == 0, result.output
+    put = ("put", volumes._remote_path(remote).removeprefix("/volume/"))
+    assert routes == [put, ("get", "")]  # planning reads use a root get's credentials
+    assert sorted(k.removeprefix("vol1/") for k in s3.objects) == keys
+    if local.startswith("tree"):
+        assert "Skipping 1 symbolic links" in result.output
+
+
+@pytest.mark.parametrize(
+    "remote,local,files",
+    [
+        ("f.txt", "out", ["out"]),  # no such local dir: the file is named "out"
+        ("f.txt", "out/", ["out/f.txt"]),
+        ("d", "out", ["out/d/a", "out/d/sub/b"]),
+        ("d/", "out", ["out/a", "out/sub/b"]),
+        ("d/.", "out", ["out/a", "out/sub/b"]),
+        ("/", "out", ["out/d/a", "out/d/sub/b", "out/f.txt", "out/runs/r1/m"]),
+        ("runs/r1", ".", ["r1/m"]),
+    ],
+)
+def test_direct_get_mirrors_rsync_layout(monkeypatch, tmp_path, remote, local, files):
+    monkeypatch.chdir(tmp_path)
+    s3 = FakeS3(
+        {
+            "vol1/f.txt": b"f",
+            "vol1/d/a": b"a",
+            "vol1/d/sub/b": b"bb",
+            "vol1/runs/r1/m": b"m",
+            "vol1/runs/.sessions/s1/synced-at": b"t",
+            "vol1/d/../escape": b"x",
+        }
+    )
+    routes = _direct(monkeypatch, s3)
+    result = _run("get", "data", remote, local)
+    assert result.exit_code == 0, result.output
+    assert routes == [("get", volumes._remote_path(remote).removeprefix("/volume/"))]
+    got = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*") if p.is_file())
+    assert got == files
+    assert not (tmp_path / "escape").exists()
+
+
+def test_direct_get_missing_path_fails(monkeypatch, tmp_path):
+    _direct(monkeypatch, FakeS3({"vol1/a": b"a"}))
+    result = _run("get", "data", "nope", str(tmp_path))
+    assert result.exit_code == 1
+    assert "No such file or directory on the volume: /nope" in result.output
+
+
+@pytest.mark.parametrize(
+    "local,remote",
+    [
+        ("f.txt", "runs/"),
+        ("f.txt", "/runs/x"),
+        ("f.txt", "./runs/x"),
+        ("f.txt", "a/../runs/x"),
+        ("runs", "/"),
+        ("runs", "."),
+        ("top/", "/"),
+        ("top/.", "/"),
+    ],
+)
+def test_put_never_writes_under_runs(monkeypatch, tmp_path, local, remote):
+    monkeypatch.chdir(tmp_path)
+    Path("f.txt").write_text("f")
+    Path("runs").write_text("r")
+    (tmp_path / "top" / "runs").mkdir(parents=True)
+    routes = _direct(monkeypatch, FakeS3())
+    result = _run("put", "data", local, remote)
+    assert result.exit_code == 2
+    assert "runs/ holds run outputs" in result.output
+    assert routes == []
+
+
+def test_get_of_runs_with_a_live_session_goes_direct(monkeypatch, tmp_path):
+    """The backend answers r2 for a get under runs/ even with a live session
+    (sessions never stage runs/), so the route must be told the path."""
+    from prime_cli.api.training import VolumeTransferRoute
+
+    monkeypatch.chdir(tmp_path)
+    s3 = FakeS3({"vol1/runs/r1/m": b"m"})
+    asked = []
+
+    def route(name, mode, path, entries=None, team_id=None, lease_id=None):
+        asked.append((mode, path))
+        live = {
+            "via": "session",
+            "session": {"id": "s1", "volumeName": "data", "status": "RUNNING", "readOnly": False},
+        }
+        return VolumeTransferRoute.model_validate(R2_ROUTE if path.startswith("runs/") else live)
+
+    client = SimpleNamespace(
+        route_volume_transfer=route,
+        create_volume_session=lambda *a, **kw: pytest.fail("no session for runs/"),
+    )
+    monkeypatch.setattr(volumes, "_client", lambda: (client, "t1"))
+    refreshes = []
+    monkeypatch.setattr(volumes, "_r2_client", lambda refresh, r: refreshes.append(refresh) or s3)
+    result = _run("get", "data", "/runs/r1/", "out")
+    assert result.exit_code == 0, result.output
+    assert asked == [("get", "runs/r1/")]
+    assert (tmp_path / "out" / "m").read_bytes() == b"m"
+    # Credential refreshes ask the same question.
+    refreshes[0]()
+    assert asked[-1] == ("get", "runs/r1/")
+
+
+@pytest.mark.parametrize("remote", ["./runs/x", "a/../runs/x"])
+def test_put_under_runs_refused_on_the_session_route_too(monkeypatch, tmp_path, remote):
+    created, _, commands = _setup(monkeypatch, tmp_path, {"ssh", "rsync"})
+    result = _run("put", "data", "f.txt", remote)
+    assert result.exit_code == 2
+    assert "runs/ holds run outputs" in result.output
+    assert not created and not commands
+
+
+@pytest.mark.parametrize("args", [("get", "data", "."), ("get", "data", "./")])
+def test_direct_get_dot_is_the_root(monkeypatch, tmp_path, args):
+    monkeypatch.chdir(tmp_path)
+    routes = _direct(monkeypatch, FakeS3({"vol1/f.txt": b"f", "vol1/d/a": b"a"}))
+    result = _run(*args, "out")
+    assert result.exit_code == 0, result.output
+    assert routes == [("get", "")]
+    assert (tmp_path / "out" / "f.txt").read_bytes() == b"f"
+    assert (tmp_path / "out" / "d" / "a").read_bytes() == b"a"
+
+
+@pytest.mark.parametrize("remote,key", [(".", "f.txt"), ("./d/", "d/f.txt"), ("d/./", "d/f.txt")])
+def test_direct_put_normalizes_dot_segments(monkeypatch, tmp_path, remote, key):
+    monkeypatch.chdir(tmp_path)
+    Path("f.txt").write_text("f")
+    s3 = FakeS3()
+    routes = _direct(monkeypatch, s3)
+    result = _run("put", "data", "f.txt", remote)
+    assert result.exit_code == 0, result.output
+    assert routes == [("put", key.removesuffix("f.txt")), ("get", "")]
+    assert list(s3.objects) == [f"vol1/{key}"]
+
+
+@pytest.mark.parametrize("kind", ["file", "dir"])
+@pytest.mark.parametrize("route", ["r2", "session"])
+def test_put_refuses_a_symlink_source(monkeypatch, tmp_path, kind, route):
+    """A top-level link would be followed by the direct upload; refuse it
+    before any route call, on both routes."""
+    if route == "r2":
+        routes = _direct(monkeypatch, FakeS3())
+        created = commands = []
+    else:
+        created, _, commands = _setup(monkeypatch, tmp_path, {"ssh", "rsync"})
+        routes = []
+    target = tmp_path / "target"
+    if kind == "dir":
+        target.mkdir()
+        (target / "a").write_text("a")
+    else:
+        target.write_text("a")
+    link = tmp_path / "link"
+    link.symlink_to(target)
+    result = _run("put", "data", str(link), "/")
+    assert result.exit_code == 1
+    assert f"{link} is a symlink; pass the path it points to" in result.output.replace("\n", "")
+    assert routes == [] and not created and not commands
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        "volume 'data' has an active read-write session (s9, alice); "
+        "use --read-only, or end that session first",
+        "an upload to volume 'data' is in progress until 12:34:56Z; retry after it finishes",
+        "your read-write session s9 uses a previous SSH key; end it "
+        "(prime volumes stop data s9) first",
+    ],
+)
+@pytest.mark.parametrize("args", [["put", "data", "f.txt", "/"], ["get", "data", "f.txt", "."]])
+def test_transfer_conflict_is_reported_not_routed_through_a_session(
+    monkeypatch, tmp_path, detail, args
+):
+    """409 (single writer): the route's detail, exit 1, and no fallback to
+    a session (only a 404 falls back)."""
+    from prime_cli.core import APIError
+
+    monkeypatch.chdir(tmp_path)
+    Path("f.txt").write_text("f")
+
+    def route(*a, **kw):
+        raise APIError(f"HTTP 409: {detail}")
+
+    client = SimpleNamespace(
+        route_volume_transfer=route,
+        create_volume_session=lambda *a, **kw: pytest.fail("no session on a 409"),
+    )
+    monkeypatch.setattr(volumes, "_client", lambda: (client, "t1"))
+    monkeypatch.setattr(
+        volumes.subprocess, "run", lambda *a, **kw: pytest.fail("no transfer on a 409")
+    )
+    result = _run(*args)
+    assert result.exit_code == 1
+    out = " ".join(result.output.split())
+    assert f"Error: {detail}" in out and "HTTP 409" not in out and "Tip:" not in out
+
+
+@pytest.mark.parametrize("args", [["ssh", "data"], ["put", "data", "f.txt", "/"]])
+def test_session_create_conflict_is_reported_once(monkeypatch, tmp_path, args):
+    """A 409 creating a read-write session: the detail without the HTTP
+    prefix, exit 1, one create call (no retry); only ssh gets the hint."""
+    from prime_cli.core import APIError
+
+    monkeypatch.chdir(tmp_path)
+    Path("f.txt").write_text("f")
+    key = tmp_path / "key"
+    key.write_text("test")
+    monkeypatch.setattr(volumes.Config, "ssh_key_path", property(lambda self: str(key)))
+    monkeypatch.setattr(volumes.shutil, "which", lambda tool: f"/usr/bin/{tool}")
+    detail = (
+        "volume 'data' has an active read-write session (s9, alice); "
+        "use --read-only, or end that session first"
+    )
+    creates = []
+
+    def create(*a, **kw):
+        creates.append(kw)
+        raise APIError(f"HTTP 409: {detail}")
+
+    client = SimpleNamespace(route_volume_transfer=_no_route, create_volume_session=create)
+    monkeypatch.setattr(volumes, "_client", lambda: (client, None))
+    monkeypatch.setattr(volumes.subprocess, "run", lambda *a, **kw: pytest.fail("no ssh on a 409"))
+    result = _run(*args)
+    assert result.exit_code == 1
+    assert len(creates) == 1 and creates[0]["read_only"] is False
+    out = " ".join(result.output.split())
+    assert f"Error: {detail}" in out and "HTTP 409" not in out
+    tip = "Tip: prime volumes ssh data --read-only opens a read-only session"
+    assert (tip in out) == (args[0] == "ssh")
+
+
+class _FailingS3(FakeS3):
+    def upload_file(self, *a, **kw):
+        from boto3.exceptions import S3UploadFailedError
+
+        raise S3UploadFailedError("Failed to upload f.txt to b/vol1/f.txt: AccessDenied")
+
+    def download_file(self, *a, **kw):
+        from boto3.exceptions import S3UploadFailedError
+
+        raise S3UploadFailedError("Failed to download vol1/f.txt: AccessDenied")
+
+
+@pytest.mark.parametrize("args", [["put", "data", "f.txt", "/"], ["get", "data", "f.txt", "out"]])
+def test_direct_transfer_boto3_error_is_reported(monkeypatch, tmp_path, args):
+    """boto3 wraps a ClientError from upload_file/download_file in
+    S3UploadFailedError: reported as "Transfer failed", exit 1, no traceback."""
+    monkeypatch.chdir(tmp_path)
+    Path("f.txt").write_text("f")
+    _direct(monkeypatch, _FailingS3({"vol1/f.txt": b"f"}))
+    result = _run(*args)
+    assert result.exit_code == 1, result.output
+    assert isinstance(result.exception, SystemExit)  # not a traceback
+    out = " ".join(result.output.split())
+    assert "Transfer failed: Failed to" in out and "AccessDenied" in out
+
+
+def test_r2_credentials_refresh_near_expiry_only(monkeypatch):
+    """Put credentials live 15 minutes: fresh ones are used as-is (botocore's
+    default 15-minute window would refresh on every request), and ones near
+    expiry are refreshed through a new route call."""
+    from datetime import datetime, timedelta, timezone
+
+    from prime_cli.api.training import VolumeTransferRoute
+
+    def route_expiring_in(minutes, key):
+        at = datetime.now(timezone.utc) + timedelta(minutes=minutes)
+        return VolumeTransferRoute.model_validate(
+            {**R2_ROUTE, "accessKeyId": key, "expiresAt": at.isoformat()}
+        )
+
+    calls = []
+
+    def refresh():
+        calls.append(1)
+        return route_expiring_in(15, "AK2")
+
+    s3 = volumes._r2_client(refresh, route_expiring_in(15, "AK1"))
+    creds = s3._request_signer._credentials
+    for _ in range(3):
+        assert creds.get_frozen_credentials().access_key == "AK1"
+    assert calls == []
+
+    s3 = volumes._r2_client(refresh, route_expiring_in(1, "AK1"))
+    creds = s3._request_signer._credentials
+    assert creds.get_frozen_credentials().access_key == "AK2"
+    assert creds.get_frozen_credentials().access_key == "AK2"
+    assert calls == [1]
+
+
+def test_refused_credential_refresh_fails_the_transfer_cleanly(monkeypatch, tmp_path):
+    """A 409 on a mid-transfer refresh is reported as a failed transfer."""
+    from datetime import datetime, timedelta, timezone
+
+    from prime_cli.api.training import VolumeTransferRoute
+    from prime_cli.core import APIError
+
+    at = (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat()
+    route = VolumeTransferRoute.model_validate({**R2_ROUTE, "expiresAt": at})
+
+    def refresh():
+        raise APIError("HTTP 409: volume 'data' has a live read-write SSH session (s9, alice)")
+
+    creds = volumes._r2_client(refresh, route)._request_signer._credentials
+    with pytest.raises(RuntimeError, match="^volume 'data' has a live read-write"):
+        creds.get_frozen_credentials()
+
+
+def test_dot_source_copies_contents_on_the_session_route(monkeypatch, tmp_path):
+    created, _, commands = _setup(monkeypatch, tmp_path, {"ssh", "rsync"})
+    (tmp_path / "dir" / "runs").mkdir()
+    result = _run("put", "data", "dir/.", "/")
+    assert result.exit_code == 2  # dir/. puts dir's runs/ at the root
+    assert "runs/ holds run outputs" in result.output
+    assert not created and not commands
+    assert _run("get", "data", "d/.", "out").exit_code == 0
+    assert commands[-1][-2:] == ["host:/volume/d/", "out"]
+
+
+@pytest.mark.parametrize("route", ["r2", "session"])
+@pytest.mark.parametrize("problem", ["missing", "unreadable", "unwritable"])
+def test_bad_local_path_fails_before_the_route_call(monkeypatch, tmp_path, route, problem):
+    """A put route reserves the volume's upload window, so a local typo
+    must fail before it is asked for."""
+    if route == "r2":
+        routes = _direct(monkeypatch, FakeS3({"vol1/f.txt": b"f"}))
+        created = commands = []
+    else:
+        created, _, commands = _setup(monkeypatch, tmp_path, {"ssh", "rsync"})
+        routes = []
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    (locked / "f").write_text("f")
+    if problem == "missing":
+        args, error = ["put", "data", str(tmp_path / "nope"), "/"], "No such file or directory"
+    elif problem == "unreadable":
+        args, error = ["put", "data", str(locked / "f"), "/"], "Permission denied"
+        (locked / "f").chmod(0)
+    else:
+        args, error = ["get", "data", "f.txt", str(locked / "sub" / "out")], "Cannot write to"
+        locked.chmod(0o500)
+    try:
+        result = _run(*args)
+    finally:
+        (locked / "f").chmod(0o600) if problem == "unreadable" else locked.chmod(0o700)
+    assert result.exit_code == 1
+    assert error in result.output
+    assert routes == [] and not created and not commands
+
+
+@pytest.mark.parametrize(
+    "existing,local,remote,clash",
+    [
+        ({"vol1/a": b"f"}, "f.txt", "a/x", "/a is a file"),  # put f a; put g a/x
+        ({"vol1/a": b"f"}, "f.txt", "a/b/", "/a is a file"),
+        ({"vol1/x/tree": b"f"}, "tree", "x/", "/x/tree is a file"),
+        ({"vol1/x/tree/sub": b"f"}, "tree", "x/", "/x/tree/sub is a file"),
+        ({"vol1/x/a/old": b"o"}, "tree/", "x", "/x/a is a directory"),
+        ({"vol1/d/f.txt/old": b"o"}, "f.txt", "d/", "/d/f.txt is a directory"),
+    ],
+)
+def test_direct_put_refuses_a_file_directory_clash(
+    monkeypatch, tmp_path, existing, local, remote, clash
+):
+    monkeypatch.chdir(tmp_path)
+    Path("f.txt").write_text("f")
+    (tmp_path / "tree" / "sub").mkdir(parents=True)
+    Path("tree/a").write_text("a")
+    Path("tree/sub/b").write_text("b")
+    s3 = FakeS3(existing)
+    _direct(monkeypatch, s3)
+    result = _run("put", "data", local, remote)
+    assert result.exit_code == 1, result.output
+    assert clash in result.output.replace("\n", "")
+    assert "Transfer failed" not in result.output  # typer.Exit is a RuntimeError
+    assert s3.objects == existing  # nothing uploaded
+
+
+def test_direct_put_into_a_directory_and_marker_objects_are_fine(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    Path("f.txt").write_text("f")
+    (tmp_path / "tree" / "sub").mkdir(parents=True)
+    Path("tree/sub/b").write_text("b")
+    s3 = FakeS3({"vol1/a/old": b"o", "vol1/x/tree/sub/": b"", "vol1/x/tree/sub/b": b"o"})
+    _direct(monkeypatch, s3)
+    assert _run("put", "data", "f.txt", "a").exit_code == 0  # into a/, like rsync
+    result = _run("put", "data", "tree", "x/")  # overwrites x/tree/sub/b
+    assert result.exit_code == 0, result.output
+    assert s3.objects["vol1/a/f.txt"] == b"f" and s3.objects["vol1/x/tree/sub/b"] == b"b"
+
+
+def test_direct_get_refuses_a_symlinked_parent_in_the_destination(monkeypatch, tmp_path):
+    """out/sub -> elsewhere: the get would write outside out/. Refused before
+    anything is written; out/ itself being a link is the user's choice."""
+    monkeypatch.chdir(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    real = tmp_path / "real"
+    (real / "d").mkdir(parents=True)
+    Path("out").symlink_to(real)  # the destination root may be a link
+    s3 = FakeS3({"vol1/d/a": b"a", "vol1/d/sub/b": b"b"})
+    _direct(monkeypatch, s3)
+    (real / "d" / "sub").symlink_to(elsewhere)
+    result = _run("get", "data", "d", "out")
+    assert result.exit_code == 1, result.output
+    assert "out/d/sub is a symlink inside the destination" in result.output.replace("\n", "")
+    assert list(elsewhere.iterdir()) == [] and not (real / "d" / "a").exists()
+    # A link at the file path itself is refused too.
+    (real / "d" / "sub").unlink()
+    (real / "d" / "a").symlink_to(elsewhere / "a")
+    result = _run("get", "data", "d", "out")
+    assert result.exit_code == 1, result.output
+    assert "out/d/a is a symlink" in result.output.replace("\n", "")
+    assert list(elsewhere.iterdir()) == []
+    (real / "d" / "a").unlink()
+    assert _run("get", "data", "d", "out").exit_code == 0
+    assert (real / "d" / "sub" / "b").read_bytes() == b"b"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads unreadable directories")
+def test_direct_put_fails_on_an_unreadable_directory(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "tree" / "locked").mkdir(parents=True)
+    Path("tree/a").write_text("a")
+    Path("tree/locked/b").write_text("b")
+    s3 = FakeS3()
+    _direct(monkeypatch, s3)
+    (tmp_path / "tree" / "locked").chmod(0)
+    try:
+        result = _run("put", "data", "tree", "x/")
+    finally:
+        (tmp_path / "tree" / "locked").chmod(0o700)
+    assert result.exit_code == 1, result.output
+    out = result.output.replace("\n", "")
+    assert "Transfer failed" in out and "tree/locked" in out
+    assert s3.objects == {}
+
+
+def test_direct_put_sets_rclone_md5_and_mtime_metadata(monkeypatch, tmp_path):
+    """Multipart objects have no MD5 ETag; rclone reads these instead."""
+    import base64
+
+    monkeypatch.chdir(tmp_path)
+    Path("f.txt").write_bytes(b"hello")
+    os.utime("f.txt", ns=(0, 1_700_000_000_120_000_000))
+    Path("g.txt").write_bytes(b"")
+    os.utime("g.txt", ns=(0, 1_700_000_000_000_000_000))
+    s3 = FakeS3()
+    _direct(monkeypatch, s3)
+    assert _run("put", "data", "f.txt", "d/").exit_code == 0
+    assert _run("put", "data", "g.txt", "d/").exit_code == 0
+    md5 = base64.b64encode(hashlib.md5(b"hello").digest()).decode()
+    assert s3.metadata["vol1/d/f.txt"] == {"md5chksum": md5, "mtime": "1700000000.12"}
+    empty = base64.b64encode(hashlib.md5(b"").digest()).decode()
+    assert s3.metadata["vol1/d/g.txt"] == {"md5chksum": empty, "mtime": "1700000000"}
+
+
+@pytest.mark.parametrize(
+    "local,remote,entries",
+    [
+        ("f.txt", "/", ["f.txt"]),
+        ("tree", "/", ["tree"]),
+        ("tree/", "/", ["a", "link", "sub"]),
+        ("tree/.", ".", ["a", "link", "sub"]),
+        ("tree", "x/", None),  # not a root put
+    ],
+)
+def test_root_put_sends_its_top_level_entries(monkeypatch, tmp_path, local, remote, entries):
+    monkeypatch.chdir(tmp_path)
+    Path("f.txt").write_text("f")
+    (tmp_path / "tree" / "sub").mkdir(parents=True)
+    Path("tree/a").write_text("a")
+    Path("tree/sub/b").write_text("b")
+    Path("tree/link").symlink_to(tmp_path / "f.txt")
+    s3 = FakeS3()
+    _direct(monkeypatch, s3)
+    result = _run("put", "data", local, remote)
+    assert result.exit_code == 0, result.output
+    assert s3.entries == [entries]
+    tops = {k.removeprefix("vol1/").split("/", 1)[0] for k in s3.objects}
+    assert entries is None or tops <= set(entries)
+
+
+def test_root_put_of_too_many_names_fails_before_the_route(monkeypatch, tmp_path):
+    many = tmp_path / "many"
+    many.mkdir()
+    for i in range(volumes._ROOT_PUT_MAX_ENTRIES + 1):
+        (many / f"f{i}").write_text("x")
+    s3 = FakeS3()
+    routes = _direct(monkeypatch, s3)
+    result = _run("put", "data", f"{many}/.", "/")
+    assert result.exit_code == 2
+    out = " ".join(result.output.split())
+    assert "at most 256 top-level names; this one writes 257" in out
+    assert "subdirectory" in out and routes == []
+    assert _run("put", "data", str(many), "/").exit_code == 0  # one name: many
+
+
+def test_refused_root_put_is_reported(monkeypatch, tmp_path):
+    from prime_cli.core import APIError
+
+    monkeypatch.chdir(tmp_path)
+    Path("f.txt").write_text("f")
+
+    def route(*a, **kw):
+        raise APIError("HTTP 400: a root put must list its entries")
+
+    client = SimpleNamespace(route_volume_transfer=route)
+    monkeypatch.setattr(volumes, "_client", lambda: (client, "t1"))
+    result = _run("put", "data", "f.txt", "/")
+    assert result.exit_code == 1
+    out = " ".join(result.output.split())
+    assert "Error: a root put must list its entries" in out and "HTTP 400" not in out
+
+
+@pytest.mark.parametrize(
+    "local,remote,new",
+    [
+        ("top.txt", "datasets/", ["datasets/top.txt"]),  # subdirectory put of a file
+        ("ds", "datasets/", ["datasets/ds/a.txt"]),  # ... of a directory
+        ("ds/a.txt", "newdir/", ["newdir/a.txt"]),  # into a new directory
+        ("ds/.", "/", ["a.txt"]),  # a directory's contents at the root
+    ],
+)
+def test_direct_put_plans_with_read_credentials(monkeypatch, tmp_path, local, remote, new):
+    """Put credentials only reach the destination; the HEADs and listings that
+    plan the put (and refuse clashes) must not need more. Found in e2e
+    against R2: every subdirectory put failed with a 403 on HeadObject."""
+    monkeypatch.chdir(tmp_path)
+    Path("top.txt").write_text("t")
+    Path("ds").mkdir()
+    Path("ds/a.txt").write_text("a")
+    existing = {"vol1/datasets/old": b"o", "vol1/runs/r1/m": b"m"}
+    s3 = FakeS3(existing)
+    _direct(monkeypatch, s3)
+    result = _run("put", "data", local, remote)
+    assert result.exit_code == 0, result.output
+    assert sorted(s3.objects) == sorted([*existing, *(f"vol1/{k}" for k in new)])
+
+
+def test_direct_put_clash_is_refused_with_narrow_credentials(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    Path("f.txt").write_text("f")
+    s3 = FakeS3({"vol1/datasets": b"file"})
+    _direct(monkeypatch, s3)
+    result = _run("put", "data", "f.txt", "datasets/x")
+    assert result.exit_code == 1, result.output
+    assert "/datasets is a file" in result.output.replace("\n", "")
+    assert s3.objects == {"vol1/datasets": b"file"}
+
+
+def test_direct_put_refreshes_each_credential_set_with_its_own_route(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    Path("f.txt").write_text("f")
+    s3 = FakeS3()
+    routes = _direct(monkeypatch, s3)
+    scoped = volumes._r2_client
+    refreshes = []
+    monkeypatch.setattr(
+        volumes, "_r2_client", lambda refresh, r: refreshes.append(refresh) or scoped(refresh, r)
+    )
+    assert _run("put", "data", "f.txt", "d/").exit_code == 0
+    del routes[:]
+    for refresh in refreshes:
+        refresh()
+    assert routes == [("put", "d/"), ("get", "")]
+    # The put's refresh extends its lease (the get's carries none: the fake
+    # route asserts that).
+    assert s3.leases == [None, "L1"]
+
+
+# --- upload lease release, empty directories, mtimes (platform#6358) -------
+
+
+class _InterruptedS3(FakeS3):
+    def upload_file(self, *a, **kw):
+        raise KeyboardInterrupt
+
+
+@pytest.mark.parametrize("s3_cls,code", [(FakeS3, 0), (_FailingS3, 1), (_InterruptedS3, None)])
+def test_direct_put_releases_its_lease_once_however_it_ends(monkeypatch, tmp_path, s3_cls, code):
+    monkeypatch.chdir(tmp_path)
+    Path("f.txt").write_text("f")
+    s3 = s3_cls({"vol1/g": b"g"})
+    _direct(monkeypatch, s3)
+    result = _run("put", "data", "f.txt", "d/")
+    assert s3.released == [("L1", "t1")]
+    if code is None:
+        assert result.exit_code != 0
+    else:
+        assert result.exit_code == code, result.output
+    if code == 0:  # a get holds no lease, so it releases nothing
+        s3.released.clear()
+        assert _run("get", "data", "/", "out").exit_code == 0
+        assert s3.released == []
+
+
+@pytest.mark.parametrize("missing", [True, False])
+def test_failed_lease_release_does_not_fail_the_put(monkeypatch, tmp_path, missing):
+    from prime_cli.core import APIError
+
+    monkeypatch.chdir(tmp_path)
+    Path("f.txt").write_text("f")
+    s3 = FakeS3()
+    _direct(monkeypatch, s3)
+    client, _ = volumes._client()
+
+    def release(*a, **kw):
+        raise NotFoundError("HTTP 404: Not Found") if missing else APIError("HTTP 500: boom")
+
+    client.release_volume_transfer = release
+    result = _run("put", "data", "f.txt", "d/")
+    assert result.exit_code == 0, result.output
+    assert s3.objects == {"vol1/d/f.txt": b"f"}
+    assert ("lease" in result.output) is not missing  # a 404 is silent
+    assert "Error" not in result.output and "failed" not in result.output.lower()
+
+
+@pytest.mark.parametrize(
+    "local,remote,markers",
+    [
+        ("tree", "x/", ["x/tree/e/", "x/tree/sub/e2/"]),
+        ("tree/", "/", ["e/", "sub/e2/"]),  # a root put: "e" is in its entries
+        ("tree/e", "x/", ["x/e/"]),
+        ("tree/e", "/", ["e/"]),
+        ("tree/e/", "y", ["y/"]),
+    ],
+)
+def test_direct_put_writes_a_marker_per_empty_directory(
+    monkeypatch, tmp_path, local, remote, markers
+):
+    """rsync -a creates empty directories; R2 keeps them as "name/" markers,
+    inside the put credentials' scope (FakeS3 refuses anything else)."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "tree" / "sub" / "e2").mkdir(parents=True)
+    (tmp_path / "tree" / "e").mkdir()
+    Path("tree/a").write_text("a")
+    Path("tree/sub/b").write_text("b")
+    s3 = FakeS3()
+    _direct(monkeypatch, s3)
+    result = _run("put", "data", local, remote)
+    assert result.exit_code == 0, result.output
+    got = sorted(k.removeprefix("vol1/") for k, v in s3.objects.items() if k.endswith("/"))
+    assert got == markers
+    assert all(s3.objects[f"vol1/{m}"] == b"" for m in markers)
+
+
+def test_direct_put_refuses_a_marker_over_a_file(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "e").mkdir()
+    s3 = FakeS3({"vol1/x/e": b"file"})
+    _direct(monkeypatch, s3)
+    result = _run("put", "data", "e", "x/")
+    assert result.exit_code == 1, result.output
+    assert "/x/e is a file" in result.output.replace("\n", "")
+
+
+@pytest.mark.parametrize(
+    "remote,local,dirs",
+    [
+        ("d", "out", ["out/d", "out/d/e", "out/d/sub"]),
+        ("d/", "out", ["out/e", "out/sub"]),
+        ("empty", "out", ["out/empty"]),  # only its marker: an empty dir, not missing
+        ("empty/", "out", []),  # its contents: nothing, but no error either
+        ("/", "out", ["out/d", "out/d/e", "out/d/sub", "out/empty"]),
+    ],
+)
+def test_direct_get_recreates_empty_directories(monkeypatch, tmp_path, remote, local, dirs):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "out").mkdir()
+    s3 = FakeS3({"vol1/d/a": b"a", "vol1/d/e/": b"", "vol1/d/sub/b": b"b", "vol1/empty/": b""})
+    _direct(monkeypatch, s3)
+    result = _run("get", "data", remote, local)
+    assert result.exit_code == 0, result.output
+    got = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.glob("out/**/*") if p.is_dir())
+    assert got == sorted(dirs)
+
+
+def test_empty_directory_round_trips(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "tree" / "e").mkdir(parents=True)
+    Path("tree/a").write_text("a")
+    s3 = FakeS3()
+    _direct(monkeypatch, s3)
+    assert _run("put", "data", "tree", "/").exit_code == 0
+    assert _run("get", "data", "tree", "back").exit_code == 0
+    back = tmp_path / "back" / "tree"
+    assert (back / "e").is_dir() and (back / "a").read_text() == "a"
+
+
+@pytest.mark.parametrize("remote", ["d/f.txt", "d"])  # HEADed by the plan / listed
+def test_direct_get_restores_mtimes(monkeypatch, tmp_path, remote):
+    """From the rclone "mtime" metadata (as a direct put writes it), else
+    from LastModified: missing or unparseable metadata."""
+    monkeypatch.chdir(tmp_path)
+    Path("f.txt").write_text("f")
+    os.utime("f.txt", ns=(0, 1_700_000_000_120_000_000))
+    s3 = FakeS3({"vol1/d/g": b"g", "vol1/d/h": b"h"}, {"vol1/d/h": {"mtime": "soon"}})
+    _direct(monkeypatch, s3)
+    assert _run("put", "data", "f.txt", "d/").exit_code == 0
+    assert _run("get", "data", remote, "out/").exit_code == 0
+    base = tmp_path / "out" / ("" if remote == "d/f.txt" else "d")
+    assert os.stat(base / "f.txt").st_mtime_ns == 1_700_000_000_120_000_000
+    if remote == "d":
+        for name in ("g", "h"):
+            assert os.stat(base / name).st_mtime == FakeS3.modified.timestamp()
+
+
+# --- Path-length bounds: 255 bytes a segment, 1024 a key (platform#6358) ---
+
+
+@pytest.mark.parametrize("route", ["direct", "session"])
+@pytest.mark.parametrize("n,code", [(255, 0), (256, 2)])
+def test_remote_segment_is_bounded_at_255_bytes(
+    monkeypatch, tmp_path, _session_dir, route, n, code
+):
+    if route == "direct":
+        monkeypatch.chdir(tmp_path)
+        Path("f.txt").write_text("f")
+        s3 = FakeS3()
+        routes = _direct(monkeypatch, s3)
+    else:
+        created, _, commands = _setup(monkeypatch, tmp_path, {"ssh", "rsync"})
+    result = _run("put", "data", "f.txt", f"d/{'a' * n}")
+    assert result.exit_code == code, result.output
+    if code:
+        assert "Path too long" in result.output and "256 bytes (at most 255)" in result.output
+        if route == "direct":
+            assert routes == [] and s3.objects == {}
+        else:
+            assert not created and not commands
+
+
+def test_segment_bound_counts_utf8_bytes(monkeypatch):
+    volumes._refuse_long("é" * 127 + "a")  # 255 bytes, 128 characters
+    with pytest.raises(volumes.typer.Exit) as exc:
+        volumes._refuse_long("d/" + "é" * 128)  # 256 bytes, 128 characters
+    assert exc.value.exit_code == 2
+
+
+@pytest.mark.parametrize("extra,code", [("", 0), ("b", 2)])
+def test_direct_put_key_is_bounded_at_1024_bytes(monkeypatch, tmp_path, extra, code):
+    monkeypatch.chdir(tmp_path)
+    Path("f.txt").write_text("f")
+    rel = "/".join(["a" * 200] * 5) + "/" + "b" * 14 + extra  # "vol1/" + rel: 1024 (+1)
+    s3 = FakeS3()
+    _direct(monkeypatch, s3)
+    result = _run("put", "data", "f.txt", rel)
+    assert result.exit_code == code, result.output
+    if code:
+        assert "1025 bytes (at most 1024)" in " ".join(result.output.split())
+        assert s3.objects == {}
+    else:
+        assert list(s3.objects) == [f"vol1/{rel}"]
+
+
+def _long_name(monkeypatch, tmp_path) -> str:
+    """A file name over the segment bound that the local filesystem takes:
+    256 bytes of "é" (APFS counts characters), else a lowered bound (ext4
+    caps names at 255 bytes, so the real bound can't be crossed there)."""
+    name = "é" * 128
+    try:
+        (tmp_path / name).touch()
+        (tmp_path / name).unlink()
+    except OSError:
+        monkeypatch.setattr(volumes, "_MAX_SEGMENT", 100)
+        name = "é" * 51
+    return name
+
+
+def test_direct_put_refuses_a_long_name_deep_in_the_tree_before_any_upload(monkeypatch, tmp_path):
+    name = _long_name(monkeypatch, tmp_path)
+    deep = tmp_path / "tree" / "a" / "b"
+    deep.mkdir(parents=True)
+    (tmp_path / "tree" / "first").write_text("x")  # would upload first, if anything did
+    (deep / name).write_text("x")
+    s3 = FakeS3()
+    _direct(monkeypatch, s3)
+    result = _run("put", "data", str(tmp_path / "tree"), "dst/")
+    assert result.exit_code == 2, result.output
+    out = "".join(result.output.split())
+    assert "Pathtoolong" in out and name in out and "Nothingwascopied" in out
+    assert s3.objects == {}
+
+
+def test_root_put_entries_are_bounded_before_the_route(monkeypatch, tmp_path):
+    name = _long_name(monkeypatch, tmp_path)
+    (tmp_path / "tree").mkdir()
+    (tmp_path / "tree" / name).write_text("x")
+    s3 = FakeS3()
+    routes = _direct(monkeypatch, s3)
+    result = _run("put", "data", f"{tmp_path / 'tree'}/", "/")
+    assert result.exit_code == 2, result.output
+    assert "Path too long" in result.output
+    assert routes == [] and s3.objects == {}

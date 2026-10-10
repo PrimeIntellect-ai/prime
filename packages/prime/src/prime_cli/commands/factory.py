@@ -312,7 +312,8 @@ def _compact_nodes_cell(
     cell = f"{healthy}/{total}"
     cordoned = sum(1 for n in nodes_cluster.nodes if n.state == "cordoned")
     if cordoned:
-        cell += f", {cordoned} cgdn"
+        # Plain language beats shorthand: "38/40 (2 cordoned)".
+        cell += f" ({cordoned} cordoned)"
     return cell
 
 

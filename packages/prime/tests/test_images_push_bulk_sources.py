@@ -897,17 +897,28 @@ def test_platform_image_rejects_multi_level_destination_override(tmp_path, fake_
     assert fake_api.post_build_count() == 0
 
 
-def test_namespaced_destination_override_still_rejected_without_platform_image(tmp_path, fake_api):
+def test_nested_destination_override_accepted_for_owned_image(tmp_path, fake_api):
     manifest = tmp_path / "transfers.jsonl"
     _write_manifest(
         manifest,
-        [{"source": "ghcr.io/org/app:v1", "image": "ns/app:v1"}],
+        [{"source": "ghcr.io/org/app:v1", "image": "org/sub/app:v1"}],
+    )
+    result = runner.invoke(app, ["images", "push-bulk", "--manifest", str(manifest)], env=TEST_ENV)
+    assert result.exit_code == 0, result.output
+    assert fake_api.payloads[0]["image_name"] == "org/sub/app"
+    assert fake_api.payloads[0]["image_tag"] == "v1"
+
+
+@pytest.mark.parametrize("image", ["org//app:v1", "prime/x/app:v1", "team-x/app:v1"])
+def test_malformed_nested_destination_override_rejected(tmp_path, fake_api, image):
+    manifest = tmp_path / "transfers.jsonl"
+    _write_manifest(
+        manifest,
+        [{"source": "ghcr.io/org/app:v1", "image": image}],
     )
     result = runner.invoke(app, ["images", "push-bulk", "--manifest", str(manifest)], env=TEST_ENV)
     assert result.exit_code == 1
-    assert "invalid destination 'ns/app:v1'" in result.output
-    assert "simple names" in result.output
-    assert "myapp:v1" in result.output
+    assert f"invalid destination '{image}'" in result.output
     assert fake_api.post_build_count() == 0
 
 

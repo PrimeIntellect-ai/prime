@@ -128,9 +128,16 @@ def list_volumes(
     if output == "json":
         output_data_as_json([v.model_dump(by_alias=True) for v in volumes], console)
         return
-    table = Table("Name", "Size", "Status", "Created")
+    table = Table("Name", "Size", "Status", "Created", "Created by")
     for v in volumes:
-        table.add_row(v.name, v.size or "-", status_label(v.status), v.created_at or "-")
+        table.add_row(
+            v.name,
+            v.size or "-",
+            status_label(v.status),
+            v.created_at or "-",
+            # Older backends send only the user id.
+            escape(v.created_by_name or v.created_by_email or v.created_by or ""),
+        )
     console.print(table)
 
 

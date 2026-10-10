@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
-from prime_cli.api.training import HostedTrainingClient, VolumeSession
+from prime_cli.api.training import HostedTrainingClient, Volume, VolumeSession
 from prime_cli.commands import volumes
 from prime_cli.core import APIError
 from prime_cli.main import app
@@ -244,3 +244,61 @@ def test_session_age_helper():
     assert volumes._session_age(recent) == "30s"
     older = (now - timedelta(days=2, hours=3)).isoformat()
     assert volumes._session_age(older) == "2d"
+
+
+def _volume(**over) -> Volume:
+    fields = {
+        "name": "data",
+        "size": "500Gi",
+        "status": "RUNNING",
+        "clusterId": "c1",
+        "pvcName": "vol-data",
+        "createdBy": "user_123",
+        "createdByName": "Ada Lovelace",
+        "createdByEmail": "ada@example.com",
+        "createdAt": "2026-10-01T07:15:03Z",
+    }
+    fields.update(over)
+    return Volume.model_validate({k: v for k, v in fields.items() if v is not None})
+
+
+@pytest.mark.parametrize(
+    "over, shown",
+    [
+        ({}, "Ada Lovelace"),
+        ({"createdByName": None}, "ada@example.com"),
+        # Older backend: no name/email fields at all.
+        ({"createdByName": None, "createdByEmail": None}, "user_123"),
+    ],
+)
+def test_volumes_list_created_by_column(monkeypatch, over, shown):
+    _client(monkeypatch, list_volumes=lambda **kw: [_volume(**over)])
+    result = _run("list")
+    assert result.exit_code == 0, _text(result)
+    assert "Created by" in _text(result)
+    assert shown in _text(result)
+
+
+def test_volumes_list_created_by_empty_without_any_creator(monkeypatch):
+    v = _volume(createdBy=None, createdByName=None, createdByEmail=None)
+    _client(monkeypatch, list_volumes=lambda **kw: [v])
+    result = _run("list")
+    assert result.exit_code == 0, _text(result)
+    assert "data" in _text(result)
+
+
+def test_volumes_list_json_includes_creator_fields(monkeypatch):
+    _client(monkeypatch, list_volumes=lambda **kw: [_volume()])
+    result = _run("list", "--output", "json")
+    assert result.exit_code == 0, _text(result)
+    [data] = json.loads(_text(result))
+    assert data["createdBy"] == "user_123"
+    assert data["createdByName"] == "Ada Lovelace"
+    assert data["createdByEmail"] == "ada@example.com"
+
+
+def test_volumes_list_plain_shows_creator(monkeypatch):
+    _client(monkeypatch, list_volumes=lambda **kw: [_volume()])
+    result = _run("list", "--plain")
+    assert result.exit_code == 0, _text(result)
+    assert "Ada Lovelace" in _text(result)

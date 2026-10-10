@@ -87,6 +87,9 @@ class Volume(BaseModel):
     cluster: Optional[str] = None
     pvc_name: str = Field(..., alias="pvcName")
     created_by: Optional[str] = Field(None, alias="createdBy")
+    # The creator's display name and email; absent from older backends.
+    created_by_name: Optional[str] = Field(None, alias="createdByName")
+    created_by_email: Optional[str] = Field(None, alias="createdByEmail")
     created_at: Optional[str] = Field(None, alias="createdAt")
 
     model_config = ConfigDict(populate_by_name=True)

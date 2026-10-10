@@ -827,6 +827,18 @@ def _render_workloads_table(rows: List[FactoryWorkload]) -> Table:
     return table
 
 
+def _raw_workload_matches(
+    raw_workload: Dict[str, Any], user: Optional[str], cluster: Optional[str]
+) -> bool:
+    """Raw-payload mirror of the client-side --user/--cluster predicates."""
+    owner = raw_workload.get("owner") or {}
+    if user is not None and owner.get("display_name") != user:
+        return False
+    if cluster is not None and raw_workload.get("cluster_display_name") != cluster:
+        return False
+    return True
+
+
 def _filter_workload_rows(
     rows: List[FactoryWorkload],
     user: Optional[str],
@@ -924,8 +936,14 @@ def factory_workloads(
     # degraded-source warnings instead of exiting with a clean miss.
     if cluster is not None and not any(row.cluster_display_name == cluster for row in rows):
         fresh_kinds = {row.source.kind for row in rows if row.source.status == "ok"}
+        payload_kinds = {row.source.kind for row in rows}
         for source in workloads.sources:
             if source.status != "ok":
+                if type is not None and source.kind != type and source.kind not in payload_kinds:
+                    # Kinds narrowed out server-side by --type: their
+                    # absence is expected filtering, not a failed read —
+                    # do not report unrelated outages on a miss either.
+                    continue
                 warning = _jobs_unavailable_line(source.kind, source, source.kind in fresh_kinds)
                 err_console.print(f"[yellow]{warning}[/yellow]")
         err_console.print(f"[red]Error:[/red] No cluster matched '{rich_escape(cluster)}'.")
@@ -939,13 +957,14 @@ def factory_workloads(
     if output == "json":
         payload = workloads.raw_response
         if user is not None or cluster is not None:
-            keep_ids = {row.id for row in rows}
             raw_rows = workloads.raw_response.get("workloads", [])
-            # Filter the raw response objects, not re-serialized models, so
-            # --json stays an exact passthrough of the API payload.
+            # Filter the raw response objects with the same predicates as
+            # the parsed models, not re-serialized models, so --json stays
+            # an exact passthrough — and duplicate IDs (same id, different
+            # owner/cluster) do not let filtered-out twins back in.
             payload = {
                 **workloads.raw_response,
-                "workloads": [w for w in raw_rows if w.get("id") in keep_ids],
+                "workloads": [w for w in raw_rows if _raw_workload_matches(w, user, cluster)],
             }
         output_data_as_json(payload, console)
         return

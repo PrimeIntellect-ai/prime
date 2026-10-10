@@ -1680,3 +1680,38 @@ def test_factory_status_json_help_documents_legacy_pools_key() -> None:
     assert result.exit_code == 0, result.output
     assert "allocations[]" in result.output
     assert "pools[]" in result.output
+
+
+def test_api_client_omits_unset_timeout_to_preserve_default() -> None:
+    # The client configures httpx.Timeout(30s, 10s connect); explicitly
+    # forwarding timeout=None would disable it. request() must omit the
+    # kwarg when unset and pass it through when provided.
+    from prime_cli.core.client import APIClient
+
+    api = APIClient(api_key="dummy", require_auth=False)
+    recorded: Dict[str, Any] = {}
+
+    class _FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"ok": True}
+
+    def fake_request(method, url, **kwargs):
+        recorded.update(kwargs)
+        recorded["_url"] = url
+        return _FakeResponse()
+
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(api.client, "request", fake_request)
+    try:
+        api.get("/factory/status", params={"team_id": "t"})
+        assert "timeout" not in recorded  # client default stays in force
+
+        api.get("/factory/nodes", params={"team_id": "t"}, timeout=5.0)
+        assert recorded.get("timeout") == 5.0
+    finally:
+        monkey.undo()

@@ -767,3 +767,57 @@ def test_workloads_malformed_success_body_is_clean_error(
     assert result.exit_code == 1, result.output
     assert "malformed response body" in output
     assert "ValueError" not in result.output
+
+
+def test_workloads_cluster_miss_honors_type_filter_in_warnings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # --type training + an unmatched --cluster: the slurm source narrowed
+    # out by --type must NOT warn on the miss; the requested kind still does.
+    rows = _default_rows()
+    for row in rows:
+        row["cluster_display_name"] = "research-b300"
+    sources = [
+        _source("training", status="error"),
+        _source("inference"),
+        _source("slurm", status="stale", age_seconds=7200),
+    ]
+    # server-side --type training would return only training rows
+    training_rows = [r for r in rows if r["type"] == "training"]
+    payload = _workloads_payload(training_rows, sources)
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(
+        app,
+        ["factory", "workloads", "--type", "training", "--cluster", "nope"],
+        env=TEST_ENV,
+    )
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 1, result.output
+    assert "slurm jobs unavailable" not in output  # narrowed out by --type
+    # The requested kind still warns (fresh training rows exist -> mixed
+    # coverage wording, no age).
+    assert "some training job data is unavailable" in output
+    assert "results may be incomplete" in output
+    assert "No cluster matched" in output
+
+
+def test_workloads_json_filter_does_not_collapse_duplicate_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Two rows share an id but have different owners: --user must keep
+    # exactly the matching raw row, not pull the twin in via the shared id.
+    row_a = _workload("shared-id", "slurm", "running")
+    row_a["owner"] = {"kind": "slurm", "display_name": "alice"}
+    row_b = dict(row_a)
+    row_b["owner"] = {"kind": "slurm", "display_name": "bob"}
+    payload = _workloads_payload([row_a, row_b])
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(app, ["factory", "workloads", "--user", "alice", "--json"], env=TEST_ENV)
+    data = json.loads(result.stdout)
+
+    assert result.exit_code == 0, result.output
+    assert len(data["workloads"]) == 1
+    assert data["workloads"][0]["owner"]["display_name"] == "alice"

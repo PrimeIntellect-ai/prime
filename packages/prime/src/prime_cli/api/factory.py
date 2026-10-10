@@ -235,6 +235,11 @@ class FactoryClient:
         commands.
         """
         try:
+            if timeout is None:
+                # Omit the argument entirely: passing timeout=None to httpx
+                # explicitly DISABLES the client's configured default
+                # timeout, letting primary commands hang indefinitely.
+                return self.client.get(endpoint, params=params)
             return self.client.get(endpoint, params=params, timeout=timeout)
         except ValueError as exc:
             raise APIError("Factory API returned a malformed response body.") from exc

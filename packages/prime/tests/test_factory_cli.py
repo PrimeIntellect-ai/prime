@@ -1328,7 +1328,9 @@ def test_factory_status_compact_nodes_fetch_uses_short_timeout(
     recorded: Dict[str, Any] = {}
 
     class _RecordingClient:
-        def get(self, endpoint, params=None, timeout=None):
+        def get(self, endpoint, params=None, timeout="UNSET"):
+            # "UNSET" marks that the caller did not pass a timeout kwarg,
+            # so the client's own default timeout stays in force.
             recorded[endpoint] = timeout
             if endpoint == "/factory/nodes":
                 return _default_nodes_payload()
@@ -1345,8 +1347,9 @@ def test_factory_status_compact_nodes_fetch_uses_short_timeout(
     # to an em-dash instead of hanging the glance.
     assert recorded.get("/factory/nodes") is not None
     assert recorded["/factory/nodes"] <= 5.0
-    # the status fetch itself is uncapped
-    assert recorded.get("/factory/status") is None
+    # The status fetch passes NO timeout kwarg: passing timeout=None to
+    # httpx would disable the client's configured default timeout.
+    assert recorded.get("/factory/status") == "UNSET"
 
 
 def test_factory_nodes_help_documents_top_level_sources() -> None:

@@ -24,10 +24,22 @@ _GITHUB_API = "https://api.github.com"
 
 
 class HostedTrainingRunResponse(BaseModel):
-    """Response from POST /v1/training/runs."""
+    """Response from POST /v1/training/runs.
+
+    The placement fields are informational: the backend derives whether a
+    run lands on reserved or billed capacity (the caller does not ask for
+    either), so echoing the resolved type and rate is the only way the
+    caller learns what the run costs before it starts. All default to
+    None/False so an older backend that omits them still parses.
+    """
 
     run_id: str = Field(..., alias="runId")
     token_value: str = Field(..., alias="tokenValue")
+    on_demand: bool = Field(False, alias="onDemand")
+    gpu_type: str | None = Field(None, alias="gpuType")
+    price_per_gpu_hour: float | None = Field(None, alias="pricePerGpuHour")
+    estimated_cost_per_hour: float | None = Field(None, alias="estimatedCostPerHour")
+    is_beta: bool = Field(False, alias="isBeta")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -68,10 +80,47 @@ class AvailableFFTModel(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class OnDemandGpuTypeAvailability(BaseModel):
+    """A GPU type purchasable on shared on-demand capacity.
+
+    Needs no ClusterAllocation and bills per GPU-hour, so it shows up for
+    callers who have no reserved clusters at all. Unlike the cache-keyed
+    `models` list, an on-demand run downloads a model that is not cached
+    rather than being rejected, so the models table is a speed hint here
+    rather than a list of what you may train.
+
+    `available_now` is a coarse capacity hint, not an admission decision:
+    it says the backend currently reports some free pool headroom for the
+    GPU type, never that this run will start now — actual placement also
+    needs headroom for the run's GPU count and topology, which the
+    discovery endpoint knows nothing about (and the backend's physical
+    free capacity can even be unknown). Rendered as available/busy with a
+    queue caveat, never a start-time promise.
+    """
+
+    gpu_type: str = Field(..., alias="gpuType")
+    price_per_gpu_hour: float = Field(..., alias="pricePerGpuHour")
+    discount_label: str | None = Field(None, alias="discountLabel")
+    available_now: bool = Field(False, alias="availableNow")
+    # Server-driven so the label retires without a CLI release.
+    is_beta: bool = Field(False, alias="isBeta")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class AvailableFFTModelsResponse(BaseModel):
     """Response from GET /v1/training/available-fft-models."""
 
     models: list[AvailableFFTModel] = Field(default_factory=list)
+    on_demand: list[OnDemandGpuTypeAvailability] = Field(default_factory=list, alias="onDemand")
+    # Three states. Explicit False: the account is not enrolled in the
+    # on-demand beta, so an empty `on_demand` list is an access denial —
+    # the only case where "contact support to request access" is the right
+    # message. Explicit True: enrolled, an empty list just means no
+    # capacity is currently listed. None: no enrollment signal reached us
+    # (older backend that omits the field, a swallowed 404/discovery
+    # error) — must never be rendered as a denial.
+    on_demand_beta_access: bool | None = Field(None, alias="onDemandBetaAccess")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -393,21 +442,26 @@ class HostedTrainingClient:
         response = self.client.get("/training/available-gpu-types", params=params)
         return AvailableGpuTypesResponse.model_validate(response)
 
-    def list_available_fft_models(self, team_id: str | None = None) -> list[AvailableFFTModel]:
-        """GET /v1/training/available-fft-models. Models that are already
-        cached on at least one PrimeCluster the caller can dispatch a
-        full-FT run to.
+    def get_available_fft(self, team_id: str | None = None) -> AvailableFFTModelsResponse:
+        """GET /v1/training/available-fft-models, whole response.
 
-        404 is swallowed to an empty list so the CLI still renders on
-        older backends that haven't shipped the endpoint yet. Every
-        other error (auth failure, forbidden, server errors) propagates
-        — the caller decides whether to surface or hide it based on
-        whether the LoRA section already ran.
+        Carries both capacity paths: `models` is reserved capacity (repos
+        cached on clusters the caller has an allocation on) and
+        `on_demand` is the shared pool, which needs no allocation. Use
+        this rather than `list_available_fft_models` when you need both,
+        so the two sections come from one request and cannot disagree.
 
-        A schema-drifted response (pydantic ValidationError) is
-        re-raised as APIError so the command layer's existing
-        `except APIError` fallback catches it — otherwise a
-        non-conforming backend payload would kill the LoRA table too.
+        404 is swallowed to an empty response (whose beta-enrollment flag
+        is unknown, not denied) so the CLI still renders on older
+        backends that haven't shipped the endpoint. Every other
+        error (auth failure, forbidden, server errors) propagates — the
+        caller decides whether to surface or hide it based on whether the
+        LoRA section already ran.
+
+        A schema-drifted response (pydantic ValidationError) is re-raised
+        as APIError so the command layer's existing `except APIError`
+        fallback catches it — otherwise a non-conforming backend payload
+        would kill the LoRA table too.
         """
         params: dict[str, Any] = {}
         if team_id:
@@ -415,11 +469,15 @@ class HostedTrainingClient:
         try:
             response = self.client.get("/training/available-fft-models", params=params)
         except NotFoundError:
-            return []
+            return AvailableFFTModelsResponse()
         try:
-            return AvailableFFTModelsResponse.model_validate(response).models
+            return AvailableFFTModelsResponse.model_validate(response)
         except PydanticValidationError as exc:
             raise APIError(f"Failed to parse available FFT models response: {exc}") from exc
+
+    def list_available_fft_models(self, team_id: str | None = None) -> list[AvailableFFTModel]:
+        """Reserved-capacity models only. See `get_available_fft`."""
+        return self.get_available_fft(team_id=team_id).models
 
 
 def _github_error_body(resp: httpx.Response) -> Dict[str, str]:

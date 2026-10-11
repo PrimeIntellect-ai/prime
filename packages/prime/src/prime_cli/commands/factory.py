@@ -1074,7 +1074,14 @@ def factory_workloads(
         raise typer.Exit(1)
     if limit is None and state in TERMINAL_QUERY_STATES:
         # History queries can be large; fetch a bounded page by default.
-        limit = WORKLOAD_TERMINAL_DEFAULT_LIMIT
+        # A client-side --scheduler narrow happens AFTER the server pages,
+        # so request the widest bounded page there — otherwise matching
+        # history beyond the default page would be filtered into a false
+        # empty result.
+        if scheduler is not None:
+            limit = WORKLOAD_LIMIT_MAX
+        else:
+            limit = WORKLOAD_TERMINAL_DEFAULT_LIMIT
 
     team_id = team or Config().team_id
     if not team_id:
@@ -1146,7 +1153,12 @@ def factory_workloads(
     # missing sibling group. Degraded aggregates are warnings only.
     available = [row for row in rows if row.source.status == "ok"]
     suppressed = [row for row in rows if row.source.status != "ok"]
-    degraded = _view_degraded_sources(workloads, rows, suppressed, requested_type=type)
+    # With a scheduler filter and no explicit --type, only Slurm rows can
+    # match: unrelated kind outages are not this view's concern.
+    warning_type_scope = type if type is not None else ("slurm" if scheduler is not None else None)
+    degraded = _view_degraded_sources(
+        workloads, rows, suppressed, requested_type=warning_type_scope
+    )
 
     # Degraded sources say so before anything else: a failed read must never
     # masquerade as an empty fleet or silently vanish. Fresh rows of the

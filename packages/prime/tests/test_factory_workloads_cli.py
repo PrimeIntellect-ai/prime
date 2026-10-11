@@ -1154,3 +1154,53 @@ def test_workloads_duplicate_scheduler_labels_render_distinctly(
     assert result.exit_code == 0, result.output
     assert "slurm:ac12:1" in output and "slurm:ac12:2" in output
     assert output.count("b300-slurm") >= 2
+
+
+def test_workloads_scheduler_with_terminal_state_uses_widest_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A client-side --scheduler narrow happens AFTER the server pages: the
+    # implicit history limit must be the widest bounded page (200), never
+    # the default 50 that could truncate the deployment's history before
+    # the filter sees it.
+    row = _workload("slurm:ac12:1", "slurm", "completed")
+    row["scheduler_display_name"] = "b300-slurm"
+    dummy = _install(monkeypatch, _workloads_payload([row]))
+
+    result = runner.invoke(
+        app,
+        ["factory", "workloads", "--state", "completed", "--scheduler", "b300-slurm"],
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert dummy.calls[0]["params"]["limit"] == 200
+    # without the scheduler filter, the terminal default stays 50
+    _install(monkeypatch, _workloads_payload([row]))
+    plain = runner.invoke(app, ["factory", "workloads", "--state", "completed"], env=TEST_ENV)
+    assert plain.exit_code == 0, plain.output
+
+
+def test_workloads_scheduler_view_excludes_non_slurm_outages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # --scheduler with no --type: only Slurm rows can match, so an
+    # unrelated degraded training source with zero rows must NOT warn, and
+    # the filtered-empty wording stands.
+    payload = {
+        "schema_version": 1,
+        "as_of": _iso(datetime.now(timezone.utc)),
+        "workloads": [],
+        "sources": [
+            _source("training", status="stale", age_seconds=7200),
+            _source("slurm"),
+        ],
+    }
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(app, ["factory", "workloads", "--scheduler", "nope"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "training jobs unavailable" not in output
+    assert "No factory workloads match the given filters." in output

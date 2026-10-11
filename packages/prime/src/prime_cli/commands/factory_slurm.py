@@ -70,18 +70,26 @@ def _stderr_console_for(output: str):
     return get_console(stderr=True) if output == "json" else console
 
 
-def _cluster_rows(envelope) -> "list[FactorySlurmCluster]":
+def _envelope_rows(envelope, model):
+    """Validate the documented {data: [...]} envelope and parse its rows.
+
+    A missing or non-list `data` field is schema drift, never an
+    authoritative empty roster — fail closed as a malformed response.
+    """
+    if not isinstance(envelope, dict) or not isinstance(envelope.get("data"), list):
+        raise APIError("Slurm cluster API returned a malformed response body.")
     try:
-        return [FactorySlurmCluster.model_validate(c) for c in envelope.get("data", [])]
+        return [model.model_validate(row) for row in envelope["data"]]
     except Exception as e:  # pydantic validation drift
         raise APIError("Slurm cluster API returned a malformed response body.") from e
 
 
+def _cluster_rows(envelope) -> "list[FactorySlurmCluster]":
+    return _envelope_rows(envelope, FactorySlurmCluster)
+
+
 def _member_rows(envelope) -> "list[FactorySlurmMember]":
-    try:
-        return [FactorySlurmMember.model_validate(m) for m in envelope.get("data", [])]
-    except Exception as e:
-        raise APIError("Slurm cluster API returned a malformed response body.") from e
+    return _envelope_rows(envelope, FactorySlurmMember)
 
 
 @app.command(name="list", epilog=LIST_JSON_HELP)

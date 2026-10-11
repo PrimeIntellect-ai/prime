@@ -328,3 +328,23 @@ def test_slurm_add_member_malformed_response_is_clean_error(
     assert result.exit_code == 1, result.output
     assert "Error" in output
     assert "ValidationError" not in result.output
+
+
+def test_slurm_missing_data_field_is_malformed_not_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The documented envelope requires data: an omitted or non-list field is
+    # schema drift, never an authoritative empty roster.
+    _install(monkeypatch, {})
+    result = runner.invoke(app, ["factory", "slurm", "list"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+    assert result.exit_code == 1, result.output
+    assert "malformed response body" in output
+    assert "No Slurm deployments found." not in output
+
+    _install(monkeypatch, {"data": "not-a-list"})
+    members = runner.invoke(app, ["factory", "slurm", "members", "job-123"], env=TEST_ENV)
+    members_output = strip_ansi(members.output)
+    assert members.exit_code == 1, members.output
+    assert "malformed response body" in members_output
+    assert "No members found." not in members_output

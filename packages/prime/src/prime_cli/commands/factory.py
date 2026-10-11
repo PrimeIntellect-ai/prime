@@ -1415,3 +1415,10 @@ def factory_nodes(
             console.print("[dim]no nodes match the given filters[/dim]")
         else:
             console.print("[dim]no nodes reported[/dim]")
+
+
+# The team's Slurm deployments live under the factory namespace: the
+# dedicated top-level surface is superseded by this sub-app.
+from .factory_slurm import app as slurm_app  # noqa: E402
+
+app.add_typer(slurm_app, name="slurm", rich_help_panel="Model Factory")

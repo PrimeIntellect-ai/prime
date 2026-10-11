@@ -1263,7 +1263,9 @@ def _print_empty_workloads_result(
 
 # Coarse public node states from the frozen nodes contract; the labels are
 # the only node vocabulary shown to users.
-NODE_STATES = ("ready", "cordoned", "offline", "unknown")
+# v1.5.2: `draining` = a Slurm-claimed node carrying a drain flag
+# (takes no new work; GPU counts still show what is ON it).
+NODE_STATES = ("ready", "cordoned", "draining", "offline", "unknown")
 # Customer-facing phrase for cordoned nodes (frontierCluster precedent);
 # the contract enum value never renders.
 UNDER_INSPECTION_DISPLAY = "under inspection"
@@ -1297,6 +1299,10 @@ def _node_state_cell(node: FactoryNode) -> str:
     state_styles = {
         "ready": "green",
         "cordoned": "yellow",
+        # Draining renders lowercase dim (user spec): the node takes no
+        # new work but still holds its GPUs/jobs — a caution note, not
+        # the red of a dead node.
+        "draining": "dim",
         "offline": "red",
         "unknown": "dim",
     }
@@ -1388,7 +1394,9 @@ def factory_nodes(
         None, "--cluster", help="Show only this cluster, by display name or 1-based index"
     ),
     state: Optional[str] = typer.Option(
-        None, "--state", help="Filter nodes by state: ready, cordoned, offline, or unknown"
+        None,
+        "--state",
+        help="Filter nodes by state: ready, cordoned, draining, offline, or unknown",
     ),
     assigned_to: Optional[str] = typer.Option(
         None,

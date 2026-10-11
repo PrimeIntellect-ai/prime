@@ -1845,3 +1845,26 @@ def test_factory_status_compact_nodes_snapshot_duplicates_disable_join(
     assert "—" in output
     assert "no node summary = node view unavailable" in output
     assert "fresh" in output  # the workload evidence is unaffected
+
+
+def test_factory_nodes_state_cell_renders_draining_dim() -> None:
+    from prime_cli.api.factory import FactoryNode
+    from prime_cli.commands.factory import _node_state_cell
+
+    node = FactoryNode(
+        name="gpu-01",
+        state="draining",
+        gpu_type="B300",
+        gpus_total=8,
+        gpus_used=8,
+        assigned_to="slurm",
+    )
+    cell = _node_state_cell(node)
+    assert "draining" in strip_ansi(cell)
+    assert "[dim]" in cell  # lowercase dim, per the v1.5.2 user spec
+
+
+def test_factory_nodes_state_filter_accepts_draining() -> None:
+    from prime_cli.commands.factory import NODE_STATES
+
+    assert "draining" in NODE_STATES

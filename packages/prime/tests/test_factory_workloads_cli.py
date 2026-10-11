@@ -1322,3 +1322,40 @@ def test_workloads_scheduler_miss_keeps_degraded_slurm_warning(
     assert result.exit_code == 0, result.output
     assert "slurm jobs unavailable" in output
     assert "No factory workloads match the given filters." in output
+
+
+def test_workloads_matching_but_stale_rows_are_not_a_miss(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A filter that MATCHES rows whose evidence is stale is not a no-match:
+    # the warning carries the unavailability and nothing else prints —
+    # never a contradictory "No factory workloads match the given filters."
+    stale_row = _workload("slurm:ac12:7", "slurm", "running")
+    stale_row["scheduler_display_name"] = "b300-slurm"
+    stale_row["source"] = _source("slurm", status="stale", age_seconds=7200)
+    payload = _workloads_payload(
+        [stale_row],
+        sources=[_source("slurm", status="stale", age_seconds=7200)],
+    )
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(app, ["factory", "workloads", "--scheduler", "b300-slurm"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "slurm jobs unavailable" in output  # or mixed/unavailable wording
+    assert "No factory workloads match" not in output
+
+    # same for --user: a matching stale row is not a miss
+    stale_training = _workload("training:run-9", "training", "running")
+    stale_training["owner"] = {"kind": "prime", "display_name": "alice"}
+    stale_training["source"] = _source("training", status="stale", age_seconds=7200)
+    payload2 = _workloads_payload(
+        [stale_training],
+        sources=[_source("training", status="stale", age_seconds=7200)],
+    )
+    _install(monkeypatch, payload2)
+    result2 = runner.invoke(app, ["factory", "workloads", "--user", "alice"], env=TEST_ENV)
+    output2 = strip_ansi(result2.output)
+    assert result2.exit_code == 0, result2.output
+    assert "No factory workloads match" not in output2

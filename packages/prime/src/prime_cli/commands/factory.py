@@ -1197,6 +1197,24 @@ def factory_workloads(
         console.print(f"[dim]{SCHEDULER_LEGEND}[/dim]")
         return
 
+    if not rows:
+        # Matching-but-suppressed rows are NOT a miss: the filters matched,
+        # the rows are merely unavailable — the warnings above carry that
+        # and nothing else prints.
+        _print_empty_workloads_result(type, state, since, user, cluster, scheduler, limit, degraded)
+    return None
+
+
+def _print_empty_workloads_result(
+    type: Optional[str],
+    state: Optional[str],
+    since: Optional[str],
+    user: Optional[str],
+    cluster: Optional[str],
+    scheduler: Optional[str],
+    limit: Optional[int],
+    degraded: List[FactorySource],
+) -> None:
     # Distinguish an honestly empty fleet from filters that matched
     # nothing: --type/--state/--since are server-side, so a filtered
     # result of zero rows is not evidence that the team has no workloads.

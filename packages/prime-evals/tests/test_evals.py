@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from prime_evals import EvalsAPIError
 from prime_evals.evals import AsyncEvalsClient, EvalsClient
 from prime_evals.models import (
     CreateEvaluationRequest,
@@ -162,6 +163,19 @@ def test_async_lookup_environment_by_slug_uses_owner_aware_detail_endpoint():
 
     assert env_id == "env-123"
     assert calls == [("get", "/environmentshub/d42me/opencode-cp/@latest")]
+
+
+def test_lookup_environment_by_slug_wraps_prime_cli_api_errors():
+    from prime_cli.core import APIError as PrimeCLIAPIError
+
+    class FakeAPIClient:
+        def get(self, _endpoint):
+            raise PrimeCLIAPIError("HTTP 403: You are not a member of this team")
+
+    client = EvalsClient(FakeAPIClient())
+
+    with pytest.raises(EvalsAPIError, match="does not exist"):
+        client._lookup_environment_by_slug("user", "env")
 
 
 def test_push_samples_reports_progress_and_reuses_http_client(monkeypatch):

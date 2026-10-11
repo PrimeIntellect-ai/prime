@@ -42,6 +42,7 @@ FACTORY_STATUS_JSON_HELP = json_output_help(
     ".allocations[] = {type, reserved_gpus, in_use_gpus, idle_inside_gpus, unknown_gpus}",
     ".sources[] = {kind, status, observed_at}",
     "(legacy servers emit .clusters[].pools[] with the same fields)",
+    "--team: use a different team than the selected account context",
 )
 
 FACTORY_NODES_JSON_HELP = json_output_help(
@@ -50,6 +51,7 @@ FACTORY_NODES_JSON_HELP = json_output_help(
     ".nodes[] = {name, state, gpu_type, gpus_total, gpus_used, assigned_to}",
     ".sources[] = {kind, status, observed_at} — one capacity entry per cluster,",
     "                                     in the same order as clusters[]",
+    "--team: use a different team than the selected account context",
 )
 
 IN_USE_NOTE = "in-use = GPUs held by running jobs (not GPU-activity measurements)"
@@ -548,7 +550,11 @@ def _select_cluster_indices(
 @app.command(name="status", epilog=FACTORY_STATUS_JSON_HELP)
 def factory_status(
     team: Optional[str] = typer.Option(
-        None, "--team", "-t", help="Team ID override (defaults to the selected account context)"
+        None,
+        "--team",
+        "-t",
+        hidden=True,
+        help="Team ID override (defaults to the selected account context)",
     ),
     cluster: Optional[str] = typer.Option(
         None,
@@ -565,18 +571,8 @@ def factory_status(
     ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """Show GPU allocation across your team's dedicated factory clusters.
+    """Show GPU allocation across your team's factory clusters."""
 
-    Example:
-
-        prime factory status
-
-        prime factory status --cluster research-b300
-
-        prime factory status --verbose
-
-        prime factory status --json
-    """
     if json_output:
         output = "json"
     validate_output_format(output, console)
@@ -679,6 +675,7 @@ FACTORY_WORKLOADS_JSON_HELP = json_output_help(
     "                 reason (when supplied),",
     "                 source{kind, status, observed_at}}",
     ".sources[] = {kind, status, observed_at}",
+    "--team: use a different team than the selected account context",
 )
 
 # Server-side filter values, mirrored from the public contract.
@@ -1008,7 +1005,11 @@ def _distinct_workload_clusters(rows: List[FactoryWorkload]) -> List[str]:
 @app.command(name="workloads", epilog=FACTORY_WORKLOADS_JSON_HELP)
 def factory_workloads(
     team: Optional[str] = typer.Option(
-        None, "--team", "-t", help="Team ID override (defaults to the selected account context)"
+        None,
+        "--team",
+        "-t",
+        hidden=True,
+        help="Team ID override (defaults to the selected account context)",
     ),
     type: Optional[str] = typer.Option(
         None, "--type", help="Filter by workload type: training, inference, or slurm"
@@ -1049,16 +1050,8 @@ def factory_workloads(
     ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """Show your team's factory workloads (training, inference, Slurm jobs).
+    """Show your team's factory workloads (training, inference, Slurm jobs)."""
 
-    Example:
-
-        prime factory workloads
-
-        prime factory workloads --type slurm --state queued
-
-        prime factory workloads --user carol --json
-    """
     if slurm_cluster is None:
         # --scheduler is the hidden legacy alias of --slurm-cluster.
         slurm_cluster = scheduler
@@ -1388,7 +1381,11 @@ def _filter_raw_nodes(
 @app.command(name="nodes", epilog=FACTORY_NODES_JSON_HELP)
 def factory_nodes(
     team: Optional[str] = typer.Option(
-        None, "--team", "-t", help="Team ID override (defaults to the selected account context)"
+        None,
+        "--team",
+        "-t",
+        hidden=True,
+        help="Team ID override (defaults to the selected account context)",
     ),
     cluster: Optional[str] = typer.Option(
         None, "--cluster", help="Show only this cluster, by display name or 1-based index"
@@ -1411,16 +1408,8 @@ def factory_nodes(
     ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """Show the nodes of your team's dedicated factory clusters (sinfo-like).
+    """Show the nodes of your team's factory clusters (sinfo-like)."""
 
-    Example:
-
-        prime factory nodes
-
-        prime factory nodes --cluster research-b300 --state cordoned
-
-        prime factory nodes --assigned-to slurm --json
-    """
     if json_output:
         output = "json"
     validate_output_format(output, console)

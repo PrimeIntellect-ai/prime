@@ -24,19 +24,21 @@ from ..utils.display import SLURM_CLUSTER_STATUS_COLORS
 app = PlainTyper(help="Manage your team's Slurm cluster deployments", no_args_is_help=True)
 console = get_console()
 
-TEAM_OPTION = typer.Option(
-    None, "--team", "-t", help="Team ID override (defaults to the selected account context)"
-)
+# Hidden: the team resolves automatically from the selected account
+# context; --team is the documented override only.
+TEAM_OPTION = typer.Option(None, "--team", "-t", hidden=True)
 
 LIST_JSON_HELP = json_output_help(
     ". = {data[]}",
     ".data[] = {id, primeClusterId, displayName, status, gpuType,",
     "            gpuCount, createdAt, startedAt?}",
+    "--team: use a different team than the selected account context",
 )
 MEMBERS_JSON_HELP = json_output_help(
     ". = {data[]}",
     ".data[] = {username, uid, sshAuthorizedKeys[], sudo, status,",
     "            linkedUserId?, linkedUserName?, linkedUserEmail?}",
+    "--team: use a different team than the selected account context",
 )
 
 

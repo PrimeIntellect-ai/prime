@@ -262,3 +262,69 @@ def test_slurm_list_malformed_success_body_is_clean_error(
     assert result.exit_code == 1, result.output
     assert "malformed response body" in output
     assert "ValueError" not in result.output
+
+
+def test_slurm_list_schema_drift_is_clean_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A row missing gpuCount: pydantic drift surfaces as the coarse
+    # clean error in BOTH table and json modes — never a traceback.
+    bad_payload = {
+        "data": [
+            {
+                "id": "job-123",
+                "primeClusterId": "pc-1",
+                "displayName": "broken-row",
+                "status": "RUNNING",
+                "gpuType": "B300",
+                # gpuCount missing
+                "createdAt": "2026-10-08T10:00:00Z",
+            }
+        ]
+    }
+    _install(monkeypatch, bad_payload)
+
+    result = runner.invoke(app, ["factory", "slurm", "list"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+    assert result.exit_code == 1, result.output
+    assert "malformed response body" in output
+    assert "ValidationError" not in result.output
+
+    json_result = runner.invoke(app, ["factory", "slurm", "list", "--json"], env=TEST_ENV)
+    json_output = strip_ansi(json_result.output)
+    assert json_result.exit_code == 1, json_result.output
+    assert "malformed response body" in json_output
+    # stdout carries no partial JSON
+
+
+def test_slurm_json_mode_diagnostics_stay_off_stdout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Missing team in --json mode: the hint goes to stderr, stdout stays
+    # parseable (empty) for JSON consumers.
+    _install(monkeypatch, {"data": []}, team_id=None)
+
+    result = runner.invoke(app, ["factory", "slurm", "list", "--json"], env=TEST_ENV)
+    assert result.exit_code == 0, result.output
+    assert "prime switch" not in result.stdout
+    assert "No team" not in result.stdout
+
+
+def test_slurm_add_member_malformed_response_is_clean_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _BadPostClient:
+        def post(self, endpoint, json=None):
+            return {"unexpected": "shape"}
+
+    monkeypatch.setattr("prime_cli.commands.factory_slurm.APIClient", lambda: _BadPostClient())
+    monkeypatch.setattr("prime_cli.commands.factory_slurm.Config", lambda: _StubConfig("team-123"))
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+
+    result = runner.invoke(
+        app,
+        ["factory", "slurm", "add-member", "job-123", "dave", "--ssh-key", "key"],
+        env=TEST_ENV,
+    )
+    output = strip_ansi(result.output)
+    assert result.exit_code == 1, result.output
+    assert "Error" in output
+    assert "ValidationError" not in result.output

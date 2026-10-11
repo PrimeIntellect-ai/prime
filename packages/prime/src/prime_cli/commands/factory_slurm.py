@@ -40,14 +40,17 @@ MEMBERS_JSON_HELP = json_output_help(
 )
 
 
-def _resolve_team_id(team: Optional[str]):
+def _resolve_team_id(team: Optional[str], err_console) -> Optional[str]:
     resolved = team or Config().team_id
     if not resolved:
-        console.print(
+        # Diagnostics never pollute stdout in --json mode.
+        err_console.print(
             "No team selected in the current account context. "
             "`prime factory slurm` manages your team's Slurm deployments."
         )
-        console.print("[dim]Run `prime switch` to select a team, or pass --team <team_id>.[/dim]")
+        err_console.print(
+            "[dim]Run `prime switch` to select a team, or pass --team <team_id>.[/dim]"
+        )
         return None
     return resolved
 
@@ -56,10 +59,15 @@ def _client() -> FactorySlurmClient:
     return FactorySlurmClient(APIClient())
 
 
-def _plain_error(e: APIError) -> None:
+def _plain_error(e: Exception, err_console) -> None:
     # Escape upstream error text: raw brackets would crash Rich markup.
-    console.print(f"[red]Error:[/red] {escape(str(e))}")
+    err_console.print(f"[red]Error:[/red] {escape(str(e))}")
     raise typer.Exit(1)
+
+
+def _stderr_console_for(output: str):
+    # JSON mode keeps stdout strictly data: diagnostics go to stderr.
+    return get_console(stderr=True) if output == "json" else console
 
 
 def _cluster_rows(envelope) -> "list[FactorySlurmCluster]":
@@ -88,20 +96,24 @@ def list_clusters(
     if json_output:
         output = "json"
     validate_output_format(output, console)
-    team_id = _resolve_team_id(team)
+    err_console = _stderr_console_for(output)
+    team_id = _resolve_team_id(team, err_console)
     if not team_id:
         return
 
     try:
         envelope = _client().list_clusters(team_id)
-    except APIError as e:
-        _plain_error(e)
+        clusters = _cluster_rows(envelope)
+    except (APIError, ValueError) as e:
+        # Parsing stays inside the caught path: schema drift surfaces as
+        # the clean error, never an unhandled traceback. (pydantic
+        # ValidationError is a ValueError subclass.)
+        _plain_error(e, err_console)
 
     if output == "json":
         output_data_as_json(envelope, console)
         return
 
-    clusters = _cluster_rows(envelope)
     if not clusters:
         console.print("No Slurm deployments found.")
         return
@@ -138,14 +150,15 @@ def get_cluster(
     team: Optional[str] = TEAM_OPTION,
 ) -> None:
     """Show one Slurm deployment's details."""
-    team_id = _resolve_team_id(team)
+    err_console = _stderr_console_for("table")
+    team_id = _resolve_team_id(team, err_console)
     if not team_id:
         return
 
     try:
         cluster = _find_cluster(team_id, cluster_id)
-    except APIError as e:
-        _plain_error(e)
+    except (APIError, ValueError) as e:
+        _plain_error(e, err_console)
 
     console.print(f"Name: {escape(cluster.display_name)}")
     console.print(f"Status: {escape(cluster.status)}")
@@ -168,20 +181,21 @@ def list_members(
     if json_output:
         output = "json"
     validate_output_format(output, console)
-    team_id = _resolve_team_id(team)
+    err_console = _stderr_console_for(output)
+    team_id = _resolve_team_id(team, err_console)
     if not team_id:
         return
 
     try:
         envelope = _client().list_members(team_id, cluster_id)
-    except APIError as e:
-        _plain_error(e)
+        members = _member_rows(envelope)
+    except (APIError, ValueError) as e:
+        _plain_error(e, err_console)
 
     if output == "json":
         output_data_as_json(envelope, console)
         return
 
-    members = _member_rows(envelope)
     if not members:
         console.print("No members found.")
         return
@@ -234,15 +248,16 @@ def add_member(
     team: Optional[str] = TEAM_OPTION,
 ) -> None:
     """Add a member with SSH access to a Slurm deployment. Requires team admin."""
-    team_id = _resolve_team_id(team)
+    err_console = _stderr_console_for("table")
+    team_id = _resolve_team_id(team, err_console)
     if not team_id:
         return
 
     try:
         member = _client().add_member(team_id, cluster_id, username, ssh_key, link_user)
         parsed = FactorySlurmMember.model_validate(member)
-    except APIError as e:
-        _plain_error(e)
+    except (APIError, ValueError) as e:
+        _plain_error(e, err_console)
 
     console.print(
         f"[green]Successfully added {escape(parsed.username)} to {escape(cluster_id)}[/green]"
@@ -258,7 +273,8 @@ def remove_member(
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ) -> None:
     """Remove a member's SSH access from a Slurm deployment. Requires team admin."""
-    team_id = _resolve_team_id(team)
+    err_console = _stderr_console_for("table")
+    team_id = _resolve_team_id(team, err_console)
     if not team_id:
         return
 
@@ -268,8 +284,8 @@ def remove_member(
 
     try:
         _client().remove_member(team_id, cluster_id, username)
-    except APIError as e:
-        _plain_error(e)
+    except (APIError, ValueError) as e:
+        _plain_error(e, err_console)
 
     console.print(
         f"[green]Successfully removed {escape(username)} from {escape(cluster_id)}[/green]"

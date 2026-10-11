@@ -1175,6 +1175,9 @@ def test_workloads_scheduler_with_terminal_state_uses_widest_page(
 
     assert result.exit_code == 0, result.output
     assert dummy.calls[0]["params"]["limit"] == 200
+    # only slurm rows can match a scheduler deployment: the type is
+    # narrowed server-side so the page fills with matchable rows
+    assert dummy.calls[0]["params"]["workload_type"] == "slurm"
     # without the scheduler filter, the terminal default stays 50
     _install(monkeypatch, _workloads_payload([row]))
     plain = runner.invoke(app, ["factory", "workloads", "--state", "completed"], env=TEST_ENV)
@@ -1204,3 +1207,43 @@ def test_workloads_scheduler_view_excludes_non_slurm_outages(
     assert result.exit_code == 0, result.output
     assert "training jobs unavailable" not in output
     assert "No factory workloads match the given filters." in output
+
+
+def test_workloads_scheduler_terminal_empty_says_bounded_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Beyond one server page a client-side scheduler match cannot be
+    # proven absent — the empty result names the fetched window, never a
+    # bare "no matches".
+    empty = {
+        "schema_version": 1,
+        "as_of": _iso(datetime.now(timezone.utc)),
+        "workloads": [],
+        "sources": [_source("slurm")],
+    }
+    _install(monkeypatch, empty)
+
+    result = runner.invoke(
+        app,
+        ["factory", "workloads", "--state", "completed", "--scheduler", "b300-slurm"],
+        env=TEST_ENV,
+    )
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "in the fetched history window (200 rows)" in output
+    assert "No factory workloads found." not in output
+
+
+def test_workloads_explicit_type_wins_over_scheduler_narrowing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An explicit --type keeps its own server-side scope.
+    dummy = _install(monkeypatch, _workloads_payload(_default_rows()))
+    result = runner.invoke(
+        app,
+        ["factory", "workloads", "--type", "training", "--scheduler", "b300-slurm"],
+        env=TEST_ENV,
+    )
+    assert result.exit_code == 0, result.output
+    assert dummy.calls[0]["params"]["workload_type"] == "training"

@@ -1094,10 +1094,16 @@ def factory_workloads(
         )
         return
 
+    # Scheduler deployments are Slurm: with --scheduler and no explicit
+    # --type, narrow server-side to slurm so the page fills with the only
+    # rows that can match — the client-side predicate then sees all of the
+    # deployment's in-window history instead of a mixed, crowded page.
+    server_type = type if type is not None else ("slurm" if scheduler is not None else None)
+
     try:
         api_client = APIClient()
         workloads = FactoryClient(api_client).get_workloads(
-            team_id, workload_type=type, state=state, since=since_at, limit=limit
+            team_id, workload_type=server_type, state=state, since=since_at, limit=limit
         )
     except APIError as e:
         # Escape upstream error text: raw brackets (e.g. pydantic
@@ -1180,7 +1186,14 @@ def factory_workloads(
         # Distinguish an honestly empty fleet from filters that matched
         # nothing: --type/--state/--since are server-side, so a filtered
         # result of zero rows is not evidence that the team has no workloads.
-        if (
+        if scheduler is not None and state in TERMINAL_QUERY_STATES:
+            # Beyond one server page (200 rows) a client-side scheduler
+            # match cannot be proven absent — say the view is bounded.
+            console.print(
+                "No factory workloads match the given filters in the fetched "
+                f"history window ({limit} rows)."
+            )
+        elif (
             type is not None
             or state is not None
             or since is not None

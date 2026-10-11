@@ -1197,11 +1197,11 @@ def factory_workloads(
         console.print(f"[dim]{SCHEDULER_LEGEND}[/dim]")
         return
 
-    if not rows:
-        # Matching-but-suppressed rows are NOT a miss: the filters matched,
-        # the rows are merely unavailable — the warnings above carry that
-        # and nothing else prints.
-        _print_empty_workloads_result(type, state, since, user, cluster, scheduler, limit, degraded)
+    if not rows and not degraded:
+        # Matching-but-suppressed rows are NOT a miss (the warnings above
+        # carry their unavailability), and a degraded relevant source can
+        # never establish a no-match either — warning-only in both cases.
+        _print_empty_workloads_result(type, state, since, user, cluster, scheduler, limit)
     return None
 
 
@@ -1213,7 +1213,6 @@ def _print_empty_workloads_result(
     cluster: Optional[str],
     scheduler: Optional[str],
     limit: Optional[int],
-    degraded: List[FactorySource],
 ) -> None:
     # Distinguish an honestly empty fleet from filters that matched
     # nothing: --type/--state/--since are server-side, so a filtered
@@ -1238,7 +1237,7 @@ def _print_empty_workloads_result(
         # when a degraded-source warning also printed (both facts are
         # true; the warning already qualified the data).
         console.print("No factory workloads match the given filters.")
-    elif not degraded:
+    else:
         # Genuinely nothing running or queued, with fresh evidence.
         console.print("No factory workloads found.")
 

@@ -1321,7 +1321,9 @@ def test_workloads_scheduler_miss_keeps_degraded_slurm_warning(
 
     assert result.exit_code == 0, result.output
     assert "slurm jobs unavailable" in output
-    assert "No factory workloads match the given filters." in output
+    # A degraded read can never establish a miss: warning-only, no
+    # "no match" claim.
+    assert "No factory workloads match" not in output
 
 
 def test_workloads_matching_but_stale_rows_are_not_a_miss(
@@ -1359,3 +1361,28 @@ def test_workloads_matching_but_stale_rows_are_not_a_miss(
     output2 = strip_ansi(result2.output)
     assert result2.exit_code == 0, result2.output
     assert "No factory workloads match" not in output2
+
+
+def test_workloads_degraded_zero_row_result_is_warning_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A failed or partial read cannot establish that no workload matches:
+    # with the relevant training source stale and zero rows returned, the
+    # unavailability warning stands alone — never a "no match" claim.
+    payload = {
+        "schema_version": 1,
+        "as_of": _iso(datetime.now(timezone.utc)),
+        "workloads": [],
+        "sources": [_source("training", status="stale", age_seconds=7200)],
+    }
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(
+        app, ["factory", "workloads", "--type", "training", "--user", "alice"], env=TEST_ENV
+    )
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "training jobs unavailable" in output
+    assert "No factory workloads match" not in output
+    assert "No factory workloads found." not in output

@@ -1122,10 +1122,15 @@ def factory_workloads(
         payload_kinds = {row.source.kind for row in rows}
         for source in workloads.sources:
             if source.status != "ok":
-                if type is not None and source.kind != type and source.kind not in payload_kinds:
-                    # Kinds narrowed out server-side by --type: their
-                    # absence is expected filtering, not a failed read —
-                    # do not report unrelated outages on a miss either.
+                if (
+                    server_type is not None
+                    and source.kind != server_type
+                    and source.kind not in payload_kinds
+                ):
+                    # Kinds narrowed out server-side (--type, or the
+                    # implicit slurm scope of --scheduler): their absence
+                    # is expected filtering, not a failed read — do not
+                    # report unrelated outages on a miss either.
                     continue
                 warning = _jobs_unavailable_line(source.kind, source, source.kind in fresh_kinds)
                 err_console.print(f"[yellow]{warning}[/yellow]")
@@ -1161,10 +1166,7 @@ def factory_workloads(
     suppressed = [row for row in rows if row.source.status != "ok"]
     # With a scheduler filter and no explicit --type, only Slurm rows can
     # match: unrelated kind outages are not this view's concern.
-    warning_type_scope = type if type is not None else ("slurm" if scheduler is not None else None)
-    degraded = _view_degraded_sources(
-        workloads, rows, suppressed, requested_type=warning_type_scope
-    )
+    degraded = _view_degraded_sources(workloads, rows, suppressed, requested_type=server_type)
 
     # Degraded sources say so before anything else: a failed read must never
     # masquerade as an empty fleet or silently vanish. Fresh rows of the

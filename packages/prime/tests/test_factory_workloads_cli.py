@@ -1247,3 +1247,33 @@ def test_workloads_explicit_type_wins_over_scheduler_narrowing(
     )
     assert result.exit_code == 0, result.output
     assert dummy.calls[0]["params"]["workload_type"] == "training"
+
+
+def test_workloads_scheduler_cluster_miss_excludes_implicit_slurm_scope_kinds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # --scheduler narrows the request to slurm server-side: an unmatched
+    # --cluster must not report degraded zero-row training/inference
+    # sources excluded from that request.
+    rows = _default_rows()
+    for row in rows:
+        row["cluster_display_name"] = "research-b300"
+    sources = [
+        _source("training", status="stale", age_seconds=7200),
+        _source("inference", status="stale", age_seconds=7200),
+        _source("slurm"),
+    ]
+    payload = _workloads_payload(rows, sources)
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(
+        app,
+        ["factory", "workloads", "--scheduler", "b300-slurm", "--cluster", "nope"],
+        env=TEST_ENV,
+    )
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 1, result.output
+    assert "training jobs unavailable" not in output
+    assert "inference jobs unavailable" not in output
+    assert "No cluster matched" in output

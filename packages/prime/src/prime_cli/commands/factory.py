@@ -54,7 +54,9 @@ FACTORY_NODES_JSON_HELP = json_output_help(
 
 IN_USE_NOTE = "in-use = GPUs held by running jobs (not GPU-activity measurements)"
 UNUSED_NOTE = "unused = reserved by a workload but not running anything — not free capacity"
-SCHEDULER_LEGEND = "Scheduler: — = direct platform placement; unknown = deployment not identified."
+SCHEDULER_LEGEND = (
+    "Slurm cluster: — = direct platform placement; unknown = deployment not identified."
+)
 TRUNCATED_NOTE = "Showing first 200 workloads — refine with --cluster/--user/--state"
 
 # Plain-language names for source kinds shown to users. The internal enum
@@ -669,9 +671,9 @@ def factory_status(
 FACTORY_WORKLOADS_JSON_HELP = json_output_help(
     ". = {schema_version, as_of, workloads[], sources[]}",
     ".workloads[] = {id, type, cluster_display_name, name, state, native_state,",
-    "                 scheduler_display_name — the scheduler deployment",
-    "                 (Slurm cluster); null = direct platform placement or",
-    "                 an unidentified deployment (rendered unknown),",
+    "                 scheduler_display_name — the slurm cluster",
+    "                 (deployment) the job runs on; null = direct platform",
+    "                 placement or an unidentified deployment (rendered unknown),",
     "                 owner{kind, display_name}, requested_gpus, allocated_gpus,",
     "                 created_at, started_at, ended_at (terminal rows),",
     "                 reason (when supplied),",
@@ -926,7 +928,7 @@ def _render_workloads_table(rows: List[FactoryWorkload], show_duration: bool = F
     table.add_column("CLUSTER")
     # Slurm rows name their deployment; training/inference rows are direct
     # placement (no scheduler application in between).
-    table.add_column("SCHEDULER")
+    table.add_column("SLURM CLUSTER")
     table.add_column("OWNER")
     table.add_column("STATE")
     table.add_column("GPU A/R", justify="right")
@@ -1030,8 +1032,16 @@ def factory_workloads(
         ),
     ),
     user: Optional[str] = typer.Option(None, "--user", help="Filter by owner display name"),
+    slurm_cluster: Optional[str] = typer.Option(
+        None,
+        "--slurm-cluster",
+        help="Filter by the slurm cluster (deployment) the job runs on",
+    ),
     scheduler: Optional[str] = typer.Option(
-        None, "--scheduler", help="Filter by scheduler deployment name or slurm label"
+        None,
+        "--scheduler",
+        help="Alias of --slurm-cluster",
+        hidden=True,
     ),
     cluster: Optional[str] = typer.Option(None, "--cluster", help="Filter by cluster display name"),
     json_output: bool = typer.Option(
@@ -1049,6 +1059,9 @@ def factory_workloads(
 
         prime factory workloads --user carol --json
     """
+    if slurm_cluster is None:
+        # --scheduler is the hidden legacy alias of --slurm-cluster.
+        slurm_cluster = scheduler
     if json_output:
         output = "json"
     validate_output_format(output, console)
@@ -1089,7 +1102,7 @@ def factory_workloads(
         # so request the widest bounded page there — otherwise matching
         # history beyond the default page would be filtered into a false
         # empty result.
-        if scheduler is not None:
+        if slurm_cluster is not None:
             limit = WORKLOAD_LIMIT_MAX
         else:
             limit = WORKLOAD_TERMINAL_DEFAULT_LIMIT
@@ -1109,7 +1122,7 @@ def factory_workloads(
     # --type, narrow server-side to slurm so the page fills with the only
     # rows that can match — the client-side predicate then sees all of the
     # deployment's in-window history instead of a mixed, crowded page.
-    server_type = type if type is not None else ("slurm" if scheduler is not None else None)
+    server_type = type if type is not None else ("slurm" if slurm_cluster is not None else None)
 
     try:
         api_client = APIClient()
@@ -1151,11 +1164,11 @@ def factory_workloads(
             listed = ", ".join(rich_escape(n) for n in names)
             err_console.print(f"[dim]Available clusters: {listed}[/dim]")
         raise typer.Exit(1)
-    rows = _filter_workload_rows(rows, user, cluster, scheduler=scheduler)
+    rows = _filter_workload_rows(rows, user, cluster, scheduler=slurm_cluster)
 
     if output == "json":
         payload = workloads.raw_response
-        if user is not None or cluster is not None or scheduler is not None:
+        if user is not None or cluster is not None or slurm_cluster is not None:
             raw_rows = workloads.raw_response.get("workloads", [])
             # Filter the raw response objects with the same predicates as
             # the parsed models, not re-serialized models, so --json stays
@@ -1164,7 +1177,7 @@ def factory_workloads(
             payload = {
                 **workloads.raw_response,
                 "workloads": [
-                    w for w in raw_rows if _raw_workload_matches(w, user, cluster, scheduler)
+                    w for w in raw_rows if _raw_workload_matches(w, user, cluster, slurm_cluster)
                 ],
             }
         output_data_as_json(payload, console)
@@ -1182,7 +1195,7 @@ def factory_workloads(
         rows,
         suppressed,
         requested_type=server_type,
-        scheduler_filter_active=scheduler is not None,
+        scheduler_filter_active=slurm_cluster is not None,
     )
 
     # Degraded sources say so before anything else: a failed read must never
@@ -1207,7 +1220,7 @@ def factory_workloads(
         # Matching-but-suppressed rows are NOT a miss (the warnings above
         # carry their unavailability), and a degraded relevant source can
         # never establish a no-match either — warning-only in both cases.
-        _print_empty_workloads_result(type, state, since, user, cluster, scheduler, limit)
+        _print_empty_workloads_result(type, state, since, user, cluster, slurm_cluster, limit)
     return None
 
 
@@ -1217,7 +1230,7 @@ def _print_empty_workloads_result(
     since: Optional[str],
     user: Optional[str],
     cluster: Optional[str],
-    scheduler: Optional[str],
+    slurm_cluster: Optional[str],
     limit: Optional[int],
 ) -> None:
     # Distinguish an honestly empty fleet from filters that matched
@@ -1229,9 +1242,9 @@ def _print_empty_workloads_result(
         or since is not None
         or user is not None
         or cluster is not None
-        or scheduler is not None
+        or slurm_cluster is not None
     )
-    if scheduler is not None and limit is not None:
+    if slurm_cluster is not None and limit is not None:
         # The server applies any limit BEFORE the client-side scheduler
         # predicate — beyond the fetched page a match cannot be proven
         # absent (implicit terminal limits included).

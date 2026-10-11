@@ -1053,7 +1053,7 @@ def test_workloads_scheduler_column_mixed_rows(monkeypatch: pytest.MonkeyPatch) 
     output = strip_ansi(result.output)
 
     assert result.exit_code == 0, result.output
-    assert "SCHEDULER" in output
+    assert "SLURM CLUSTER" in output
     assert "research-b300-slurm" in output
     # The direct-placement rows show the legend's em dash — never the
     # generic missing-value hyphen.
@@ -1087,20 +1087,21 @@ def test_workloads_scheduler_null_slurm_renders_unknown(
     output = strip_ansi(result.output)
 
     assert result.exit_code == 0, result.output
-    assert "SCHEDULER" in output
+    assert "SLURM CLUSTER" in output
     assert "unknown" in output
     assert "None" not in output  # nulls never leak
     # the legend explains the distinction
     assert "unknown = deployment not identified" in output
 
 
-def test_workloads_help_documents_scheduler_field() -> None:
+def test_workloads_help_documents_slurm_cluster_field() -> None:
     result = runner.invoke(app, ["factory", "workloads", "--help"], env=TEST_ENV)
 
     assert result.exit_code == 0, result.output
     # wrap-safe fragments of the documented line
     assert "scheduler_display_name" in result.output
-    assert "Slurm cluster" in result.output
+    assert "slurm cluster" in result.output.lower()
+    assert "deployment" in result.output
     assert "placement" in result.output
     # the help describes BOTH meanings of null: direct placement AND
     # unidentified deployments (rendered unknown)
@@ -1119,19 +1120,21 @@ def test_workloads_scheduler_filter_table_and_json(monkeypatch: pytest.MonkeyPat
     payload = _workloads_payload([slurm_a, slurm_b, training])
     _install(monkeypatch, payload)
 
-    result = runner.invoke(app, ["factory", "workloads", "--scheduler", "b300-slurm"], env=TEST_ENV)
+    result = runner.invoke(
+        app, ["factory", "workloads", "--slurm-cluster", "b300-slurm"], env=TEST_ENV
+    )
     output = strip_ansi(result.output)
     assert result.exit_code == 0, result.output
     assert "slurm:ac12:1" in output
     assert "slurm:ac12:2" not in output and "training:run-1" not in output
 
     json_result = runner.invoke(
-        app, ["factory", "workloads", "--scheduler", "b300-slurm", "--json"], env=TEST_ENV
+        app, ["factory", "workloads", "--slurm-cluster", "b300-slurm", "--json"], env=TEST_ENV
     )
     data = json.loads(json_result.stdout)
     assert [w["id"] for w in data["workloads"]] == ["slurm:ac12:1"]
 
-    miss = runner.invoke(app, ["factory", "workloads", "--scheduler", "nope"], env=TEST_ENV)
+    miss = runner.invoke(app, ["factory", "workloads", "--slurm-cluster", "nope"], env=TEST_ENV)
     miss_output = strip_ansi(miss.output)
     assert miss.exit_code == 0, miss.output
     assert "No factory workloads match the given filters." in miss_output
@@ -1201,7 +1204,7 @@ def test_workloads_scheduler_view_excludes_non_slurm_outages(
     }
     _install(monkeypatch, payload)
 
-    result = runner.invoke(app, ["factory", "workloads", "--scheduler", "nope"], env=TEST_ENV)
+    result = runner.invoke(app, ["factory", "workloads", "--slurm-cluster", "nope"], env=TEST_ENV)
     output = strip_ansi(result.output)
 
     assert result.exit_code == 0, result.output
@@ -1250,7 +1253,7 @@ def test_workloads_scheduler_terminal_empty_says_bounded_window(
     # window is unbounded, so the plain filter wording stands.
     _install(monkeypatch, empty)
     live_plain = runner.invoke(
-        app, ["factory", "workloads", "--scheduler", "b300-slurm"], env=TEST_ENV
+        app, ["factory", "workloads", "--slurm-cluster", "b300-slurm"], env=TEST_ENV
     )
     plain_output = strip_ansi(live_plain.output)
     assert live_plain.exit_code == 0, live_plain.output
@@ -1316,7 +1319,9 @@ def test_workloads_scheduler_miss_keeps_degraded_slurm_warning(
     )
     _install(monkeypatch, payload)
 
-    result = runner.invoke(app, ["factory", "workloads", "--scheduler", "b300-slurm"], env=TEST_ENV)
+    result = runner.invoke(
+        app, ["factory", "workloads", "--slurm-cluster", "b300-slurm"], env=TEST_ENV
+    )
     output = strip_ansi(result.output)
 
     assert result.exit_code == 0, result.output
@@ -1341,7 +1346,9 @@ def test_workloads_matching_but_stale_rows_are_not_a_miss(
     )
     _install(monkeypatch, payload)
 
-    result = runner.invoke(app, ["factory", "workloads", "--scheduler", "b300-slurm"], env=TEST_ENV)
+    result = runner.invoke(
+        app, ["factory", "workloads", "--slurm-cluster", "b300-slurm"], env=TEST_ENV
+    )
     output = strip_ansi(result.output)
 
     assert result.exit_code == 0, result.output

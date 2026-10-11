@@ -708,6 +708,7 @@ def _view_degraded_sources(
     view_rows: List[FactoryWorkload],
     suppressed: List[FactoryWorkload],
     requested_type: Optional[str] = None,
+    scheduler_filter_active: bool = False,
 ) -> List[FactorySource]:
     """Warning sources for the workloads view — warnings, never row erasure.
 
@@ -736,6 +737,12 @@ def _view_degraded_sources(
                 # is expected filtering, not a failed read.
                 continue
             if source.kind in view_kinds or zero_rows:
+                seen.add(source.kind)
+                warnings.append(source)
+            elif scheduler_filter_active and source.kind == requested_type:
+                # The scheduler predicate removed every row of this kind
+                # from the narrowed view; the degraded read may be exactly
+                # the omitted portion — keep the warning.
                 seen.add(source.kind)
                 warnings.append(source)
     newest_by_kind: Dict[str, FactorySource] = {}
@@ -1166,7 +1173,13 @@ def factory_workloads(
     suppressed = [row for row in rows if row.source.status != "ok"]
     # With a scheduler filter and no explicit --type, only Slurm rows can
     # match: unrelated kind outages are not this view's concern.
-    degraded = _view_degraded_sources(workloads, rows, suppressed, requested_type=server_type)
+    degraded = _view_degraded_sources(
+        workloads,
+        rows,
+        suppressed,
+        requested_type=server_type,
+        scheduler_filter_active=scheduler is not None,
+    )
 
     # Degraded sources say so before anything else: a failed read must never
     # masquerade as an empty fleet or silently vanish. Fresh rows of the
@@ -1184,29 +1197,32 @@ def factory_workloads(
         console.print(f"[dim]{SCHEDULER_LEGEND}[/dim]")
         return
 
-    if not degraded:
-        # Distinguish an honestly empty fleet from filters that matched
-        # nothing: --type/--state/--since are server-side, so a filtered
-        # result of zero rows is not evidence that the team has no workloads.
-        if scheduler is not None and state in TERMINAL_QUERY_STATES:
-            # Beyond one server page (200 rows) a client-side scheduler
-            # match cannot be proven absent — say the view is bounded.
-            console.print(
-                "No factory workloads match the given filters in the fetched "
-                f"history window ({limit} rows)."
-            )
-        elif (
-            type is not None
-            or state is not None
-            or since is not None
-            or user is not None
-            or cluster is not None
-            or scheduler is not None
-        ):
-            console.print("No factory workloads match the given filters.")
-        else:
-            # Genuinely nothing running or queued, with fresh evidence.
-            console.print("No factory workloads found.")
+    # Distinguish an honestly empty fleet from filters that matched
+    # nothing: --type/--state/--since are server-side, so a filtered
+    # result of zero rows is not evidence that the team has no workloads.
+    filters_active = (
+        type is not None
+        or state is not None
+        or since is not None
+        or user is not None
+        or cluster is not None
+        or scheduler is not None
+    )
+    if scheduler is not None and limit is not None:
+        # The server applies any limit BEFORE the client-side scheduler
+        # predicate — beyond the fetched page a match cannot be proven
+        # absent (implicit terminal limits included).
+        console.print(
+            f"No factory workloads match the given filters in the fetched window ({limit} rows)."
+        )
+    elif filters_active:
+        # A filtered view matched nothing in the fetched data — say so even
+        # when a degraded-source warning also printed (both facts are
+        # true; the warning already qualified the data).
+        console.print("No factory workloads match the given filters.")
+    elif not degraded:
+        # Genuinely nothing running or queued, with fresh evidence.
+        console.print("No factory workloads found.")
 
 
 # Coarse public node states from the frozen nodes contract; the labels are

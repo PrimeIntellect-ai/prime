@@ -1231,8 +1231,31 @@ def test_workloads_scheduler_terminal_empty_says_bounded_window(
     output = strip_ansi(result.output)
 
     assert result.exit_code == 0, result.output
-    assert "in the fetched history window (200 rows)" in output
+    assert "in the fetched window (200 rows)" in output
     assert "No factory workloads found." not in output
+
+    # An explicit --limit on a LIVE scheduler query is bounded too: the
+    # server pages before the client predicate, so a miss is unprovable.
+    _install(monkeypatch, empty)
+    live_limited = runner.invoke(
+        app,
+        ["factory", "workloads", "--scheduler", "b300-slurm", "--limit", "25"],
+        env=TEST_ENV,
+    )
+    live_output = strip_ansi(live_limited.output)
+    assert live_limited.exit_code == 0, live_limited.output
+    assert "in the fetched window (25 rows)" in live_output
+
+    # A live scheduler query WITHOUT a limit is definitive: the server
+    # window is unbounded, so the plain filter wording stands.
+    _install(monkeypatch, empty)
+    live_plain = runner.invoke(
+        app, ["factory", "workloads", "--scheduler", "b300-slurm"], env=TEST_ENV
+    )
+    plain_output = strip_ansi(live_plain.output)
+    assert live_plain.exit_code == 0, live_plain.output
+    assert "No factory workloads match the given filters." in plain_output
+    assert "fetched window" not in plain_output
 
 
 def test_workloads_explicit_type_wins_over_scheduler_narrowing(
@@ -1277,3 +1300,25 @@ def test_workloads_scheduler_cluster_miss_excludes_implicit_slurm_scope_kinds(
     assert "training jobs unavailable" not in output
     assert "inference jobs unavailable" not in output
     assert "No cluster matched" in output
+
+
+def test_workloads_scheduler_miss_keeps_degraded_slurm_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Slurm source degraded, payload carries only fresh rows of deployment
+    # B: querying deployment A filters every row out — the degraded Slurm
+    # read may be exactly the omitted portion, so the warning must stay.
+    row_b = _workload("slurm:ac12:9", "slurm", "running")
+    row_b["scheduler_display_name"] = "h200-slurm"
+    payload = _workloads_payload(
+        [row_b],
+        sources=[_source("slurm", status="stale", age_seconds=7200)],
+    )
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(app, ["factory", "workloads", "--scheduler", "b300-slurm"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "slurm jobs unavailable" in output
+    assert "No factory workloads match the given filters." in output

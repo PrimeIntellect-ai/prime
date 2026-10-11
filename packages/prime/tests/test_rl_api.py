@@ -2,7 +2,16 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
 from prime_cli.api.rl import RLClient, RLRun
+from prime_cli.core import APIError
+
+RUN_PAYLOAD = {
+    "id": "run-1",
+    "userId": "user-1",
+    "createdAt": "2026-08-25T00:00:00Z",
+    "updatedAt": "2026-08-25T00:00:00Z",
+}
 
 
 class FakeAPIClient:
@@ -44,6 +53,22 @@ class FakeAPIClient:
                 "updatedAt": "2026-05-17T00:00:00Z",
             }
         }
+
+
+class FakeRunActionClient:
+    """Answers every request with ``response`` and records the exact call."""
+
+    def __init__(self, response: dict[str, Any] | Exception) -> None:
+        self.response = response
+        self.calls: list[tuple[str, str, dict[str, Any] | None]] = []
+
+    def request(
+        self, method: str, endpoint: str, json: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        self.calls.append((method, endpoint, json))
+        if isinstance(self.response, Exception):
+            raise self.response
+        return self.response
 
 
 def test_run_model_allows_dedicated_full_ft_without_lora_fields() -> None:
@@ -208,3 +233,58 @@ def test_create_run_omits_default_rl_loss() -> None:
     assert api_client.posts[0][0] == "/rft/runs"
     assert "loss" not in api_client.posts[0][1]
     assert "teacher" not in api_client.posts[0][1]
+
+
+@pytest.mark.parametrize(
+    ("act", "response", "expected_call", "expected_result"),
+    [
+        (
+            lambda client: client.checkpoint_run("run-1"),
+            {"run_id": "run-1", "request_id": "req-1"},
+            ("POST", "/rft/runs/run-1/checkpoint", None),
+            "req-1",
+        ),
+        (
+            lambda client: client.pause_run("run-1"),
+            {"run": {**RUN_PAYLOAD, "status": "PAUSING"}},
+            ("PUT", "/rft/runs/run-1/pause", None),
+            RLRun.model_validate({**RUN_PAYLOAD, "status": "PAUSING"}),
+        ),
+        (
+            lambda client: client.restart_run("run-1"),
+            {"run": {**RUN_PAYLOAD, "status": "PENDING"}},
+            ("PUT", "/rft/runs/run-1/restart", None),
+            RLRun.model_validate({**RUN_PAYLOAD, "status": "PENDING"}),
+        ),
+        (
+            lambda client: client.restart_run(
+                "run-1",
+                secrets={"WANDB_API_KEY": "wk", "HF_TOKEN": "hf", "OPENAI_API_KEY": "ok"},
+            ),
+            {"run": {**RUN_PAYLOAD, "status": "PENDING"}},
+            (
+                "PUT",
+                "/rft/runs/run-1/restart",
+                {"wandbApiKey": "wk", "hfToken": "hf", "secrets": {"OPENAI_API_KEY": "ok"}},
+            ),
+            RLRun.model_validate({**RUN_PAYLOAD, "status": "PENDING"}),
+        ),
+    ],
+    ids=["checkpoint", "pause", "restart", "restart_with_secrets"],
+)
+def test_run_action(act, response, expected_call, expected_result) -> None:
+    api_client = FakeRunActionClient(response)
+
+    result = act(RLClient(api_client))
+
+    assert (result, api_client.calls) == (expected_result, [expected_call])
+
+
+def test_run_action_conflict() -> None:
+    conflict = APIError("HTTP 409: The run changed state; retry")
+    api_client = FakeRunActionClient(conflict)
+
+    with pytest.raises(APIError) as raised:
+        RLClient(api_client).pause_run("run-1")
+
+    assert (type(raised.value), raised.value.__cause__) == (APIError, conflict)

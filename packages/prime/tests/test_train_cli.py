@@ -2,14 +2,38 @@ import json
 import re
 from pathlib import Path
 from typing import Any
+from unittest.mock import call, create_autospec
 
 import pytest
+from prime_cli.api.rl import RLClient, RLRun
+from prime_cli.core import APIError
 from prime_cli.main import app
 from typer.testing import CliRunner
 
 runner = CliRunner()
 
 TEST_ENV = {"PRIME_DISABLE_VERSION_CHECK": "1"}
+
+RUN_FIELDS = {
+    "id": "run-1",
+    "userId": "user-1",
+    "createdAt": "2026-08-25T00:00:00Z",
+    "updatedAt": "2026-08-25T00:00:00Z",
+}
+PAUSING_RUN = RLRun.model_validate({**RUN_FIELDS, "status": "PAUSING"})
+PENDING_RUN = RLRun.model_validate({**RUN_FIELDS, "status": "PENDING"})
+
+# (command args, RLClient method, its result, the exact call the command makes)
+RUN_ACTION_CASES = [
+    (["checkpoint", "run-1"], "checkpoint_run", "req-1", call.checkpoint_run("run-1")),
+    (["pause", "run-1", "--force"], "pause_run", PAUSING_RUN, call.pause_run("run-1")),
+    (
+        ["restart", "run-1", "--force", "-e", "WANDB_API_KEY=wk", "-e", "OPENAI_API_KEY=ok"],
+        "restart_run",
+        PENDING_RUN,
+        call.restart_run("run-1", secrets={"WANDB_API_KEY": "wk", "OPENAI_API_KEY": "ok"}),
+    ),
+]
 
 
 def test_train_help_promotes_config_run_path() -> None:
@@ -314,6 +338,41 @@ def test_train_stop_survives_any_poll_api_error(monkeypatch) -> None:
     assert result.exit_code == 0, result.output
     assert "did not reach a terminal state" in result.output
     assert "Error:" not in result.output
+
+
+@pytest.mark.parametrize(("args", "method", "result", "expected_call"), RUN_ACTION_CASES)
+def test_run_action_command(monkeypatch, args, method, result, expected_call) -> None:
+    rl_client = create_autospec(RLClient, instance=True)
+    getattr(rl_client, method).return_value = result
+    monkeypatch.setattr("prime_cli.commands.rl.RLClient", lambda api_client: rl_client)
+
+    outcome = runner.invoke(app, ["train", *args], env={**TEST_ENV, "PRIME_API_KEY": "test-key"})
+
+    assert (outcome.exit_code, rl_client.method_calls) == (0, [expected_call]), outcome.output
+
+
+@pytest.mark.parametrize(("args", "method", "result", "expected_call"), RUN_ACTION_CASES)
+def test_run_action_command_api_error(monkeypatch, args, method, result, expected_call) -> None:
+    rl_client = create_autospec(RLClient, instance=True)
+    getattr(rl_client, method).side_effect = APIError("HTTP 409: The run changed state; retry")
+    monkeypatch.setattr("prime_cli.commands.rl.RLClient", lambda api_client: rl_client)
+
+    outcome = runner.invoke(app, ["train", *args], env={**TEST_ENV, "PRIME_API_KEY": "test-key"})
+
+    assert (outcome.exit_code, rl_client.method_calls) == (1, [expected_call]), outcome.output
+
+
+def test_restart_invalid_secret(monkeypatch) -> None:
+    rl_client = create_autospec(RLClient, instance=True)
+    monkeypatch.setattr("prime_cli.commands.rl.RLClient", lambda api_client: rl_client)
+
+    outcome = runner.invoke(
+        app,
+        ["train", "restart", "run-1", "--force", "--env-file", "/missing/secrets.env"],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key"},
+    )
+
+    assert (outcome.exit_code, rl_client.method_calls) == (1, []), outcome.output
 
 
 _FFT_BODY = (

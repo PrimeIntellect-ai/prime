@@ -7,6 +7,9 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 from prime_cli.core import APIClient, APIError, ValidationError
 
+# Secrets a restarted run takes in dedicated request fields; the rest go in ``secrets``.
+SECRET_NAME_TO_FIELD = {"HF_TOKEN": "hfToken", "WANDB_API_KEY": "wandbApiKey"}
+
 
 class RLModel(BaseModel):
     """Model available for Hosted Training."""
@@ -397,6 +400,16 @@ class RLClient:
                 raise APIError(f"Failed to stop Hosted Training run: {e.response.text}")
             raise APIError(f"Failed to stop Hosted Training run: {str(e)}")
 
+    def checkpoint_run(self, run_id: str) -> str:
+        """Ask a run to checkpoint its next step. Returns the request id."""
+        response = self._request_run_action("POST", run_id=run_id, action="checkpoint")
+        return response["request_id"]
+
+    def pause_run(self, run_id: str) -> RLRun:
+        """Pause a run: it checkpoints its next step, then releases its GPUs."""
+        response = self._request_run_action("PUT", run_id=run_id, action="pause")
+        return RLRun.model_validate(response.get("run"))
+
     def delete_run(self, run_id: str) -> None:
         """Delete a Hosted Training run."""
         try:
@@ -406,19 +419,17 @@ class RLClient:
                 raise APIError(f"Failed to delete Hosted Training run: {e.response.text}")
             raise APIError(f"Failed to delete Hosted Training run: {str(e)}")
 
-    def restart_run(self, run_id: str) -> RLRun:
-        """Restart a running Hosted Training run from its latest checkpoint.
+    def restart_run(self, run_id: str, secrets: Optional[Dict[str, str]] = None) -> RLRun:
+        """Restart a Hosted Training run from its latest checkpoint.
 
-        Only RUNNING runs can be restarted (checkpoints still on PVC).
-        For STOPPED/FAILED/COMPLETED runs, checkpoints have been cleaned up.
+        A PAUSED run resumes with `secrets` (it kept none): WANDB_API_KEY and
+        HF_TOKEN go to their dedicated fields, the rest as generic secrets.
         """
-        try:
-            response = self.client.request("PUT", f"/rft/runs/{run_id}/restart")
-            return RLRun.model_validate(response.get("run"))
-        except Exception as e:
-            if hasattr(e, "response") and hasattr(e.response, "text"):
-                raise APIError(f"Failed to restart Hosted Training run: {e.response.text}")
-            raise APIError(f"Failed to restart Hosted Training run: {str(e)}")
+        body = _to_restart_body(secrets or {})
+        response = self._request_run_action(
+            "PUT", run_id=run_id, action="restart", json=body or None
+        )
+        return RLRun.model_validate(response.get("run"))
 
     def list_checkpoints(
         self, run_id: str, status_filter: Optional[str] = None
@@ -659,3 +670,27 @@ class RLClient:
                     f"Failed to get Hosted Training run distributions: {e.response.text}"
                 )
             raise APIError(f"Failed to get Hosted Training run distributions: {str(e)}")
+
+    def _request_run_action(
+        self,
+        method: str,
+        run_id: str,
+        action: str,
+        json: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        try:
+            return self.client.request(method, f"/rft/runs/{run_id}/{action}", json=json)
+        except APIError as error:
+            raise APIError(f"Failed to {action} Hosted Training run {run_id}: {error}") from error
+
+
+def _to_restart_body(secrets: Dict[str, str]) -> Dict[str, Any]:
+    body: Dict[str, Any] = {
+        field: secrets[name] for name, field in SECRET_NAME_TO_FIELD.items() if name in secrets
+    }
+    other_secrets = {
+        name: value for name, value in secrets.items() if name not in SECRET_NAME_TO_FIELD
+    }
+    if other_secrets:
+        body["secrets"] = other_secrets
+    return body

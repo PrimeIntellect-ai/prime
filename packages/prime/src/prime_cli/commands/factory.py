@@ -1023,7 +1023,10 @@ def factory_workloads(
     limit: Optional[int] = typer.Option(
         None,
         "--limit",
-        help="Maximum rows to fetch (1-200; 50 by default for terminal queries)",
+        help=(
+            "Maximum rows to fetch (1-200; 50 by default for terminal queries, "
+            "200 when a --scheduler filter narrows them)"
+        ),
     ),
     user: Optional[str] = typer.Option(None, "--user", help="Filter by owner display name"),
     scheduler: Optional[str] = typer.Option(

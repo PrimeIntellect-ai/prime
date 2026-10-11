@@ -127,7 +127,7 @@ VOLUME_READY_POLL_SECONDS = 3
 VOLUME_READY_MAX_SECONDS = 180
 VOLUME_DEFAULT_SIZE = "5Ti"  # same default as `prime volumes create`
 
-TERMINAL_RUN_STATUSES = {"STOPPED", "FAILED", "COMPLETED"}
+TERMINAL_RUN_STATUSES = {"STOPPED", "FAILED", "COMPLETED", "PAUSED"}
 
 # Log level colors for rich console
 LEVEL_STYLES = {
@@ -1443,6 +1443,8 @@ RUN_STATUS_COLORS = {
     "COMPLETED": "cyan",
     "FAILED": "red",
     "STOPPED": "magenta",
+    "PAUSING": "yellow",
+    "PAUSED": "blue",
 }
 
 
@@ -2855,6 +2857,52 @@ def stop_run(
         raise typer.Exit(1)
 
 
+@app.command("pause", rich_help_panel="Commands")
+def pause_run(
+    run_id: str = typer.Argument(..., help="Run ID to pause"),
+    force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation"),
+) -> None:
+    """Pause an RL run: it checkpoints its next step, then releases its GPUs.
+
+    Resume it later with `prime train restart <run_id>`, passing its secrets again.
+    """
+    try:
+        if not force:
+            confirm = typer.confirm(f"Are you sure you want to pause run {run_id}?")
+            if not confirm:
+                console.print("Cancelled.")
+                raise typer.Exit(0)
+
+        run = RLClient(APIClient()).pause_run(run_id)
+        color = _get_status_color(run.status)
+        console.print(
+            f"[green]✓ Run {run_id} is pausing: it checkpoints its next step, "
+            "then releases its GPUs[/green]"
+        )
+        console.print(f"Status: [{color}]{run.status}[/{color}]")
+        console.print(f"Check status with: prime train get {run_id}")
+
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+
+@app.command("checkpoint", rich_help_panel="Commands")
+def checkpoint_run(
+    run_id: str = typer.Argument(..., help="Run ID to checkpoint"),
+) -> None:
+    """Checkpoint an RL run at its next step; it keeps training."""
+    try:
+        request_id = RLClient(APIClient()).checkpoint_run(run_id)
+        console.print(
+            f"[green]✓ Run {run_id} checkpoints its next step[/green] (request {request_id})"
+        )
+
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+
 @app.command("delete", rich_help_panel="Commands")
 def delete_run(
     run_id: str = typer.Argument(..., help="Run ID to delete"),
@@ -2893,15 +2941,24 @@ def delete_run(
 def restart_run(
     run_id: str = typer.Argument(..., help="Run ID to restart"),
     force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation"),
+    env: Optional[List[str]] = typer.Option(
+        None,
+        "-e",
+        "--env-var",
+        help="Secret for a paused run: KEY=VALUE, KEY (reads $KEY), or path/to/file.env.",
+    ),
+    env_file: Optional[List[str]] = typer.Option(
+        None, "--env-file", help="Path to .env file with secrets for a paused run."
+    ),
 ) -> None:
-    """Restart a running run from its latest checkpoint.
+    """Restart a run from its latest checkpoint.
 
-    Only RUNNING runs can be restarted (checkpoints still on PVC).
-    For STOPPED/FAILED/COMPLETED runs, checkpoints have been cleaned up.
+    A PAUSED run resumes on any cluster. It kept no secrets: pass them again
+    with -e/--env-file.
 
     Example:
 
-        prime train restart <run_id>
+        prime train restart <run_id> --env-file secrets.env
     """
     try:
         if not force:
@@ -2912,10 +2969,20 @@ def restart_run(
                 console.print("Cancelled.")
                 raise typer.Exit(0)
 
+        try:
+            secrets = collect_env_vars(
+                env_args=env,
+                env_files=env_file,
+                on_warning=lambda msg: console.print(f"[yellow]Warning:[/yellow] {msg}"),
+            )
+        except EnvParseError as e:
+            console.print(f"[red]Error:[/red] {e}")
+            raise typer.Exit(1)
+
         api_client = APIClient()
         rl_client = RLClient(api_client)
 
-        run = rl_client.restart_run(run_id)
+        run = rl_client.restart_run(run_id, secrets=secrets)
 
         console.print(f"[green]✓ Run {run_id} restarting from checkpoint[/green]")
         console.print(f"Status: {run.status}")

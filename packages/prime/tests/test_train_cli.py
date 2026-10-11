@@ -316,6 +316,130 @@ def test_train_stop_survives_any_poll_api_error(monkeypatch) -> None:
     assert "Error:" not in result.output
 
 
+def test_train_pause(monkeypatch) -> None:
+    calls: list[tuple[str, str]] = []
+
+    def mock_request(self, method, endpoint, params=None, json=None, timeout=None):
+        calls.append((method, endpoint))
+        return {"run": _fake_run_payload("PAUSING")}
+
+    monkeypatch.setattr("prime_cli.core.client.APIClient.request", mock_request)
+
+    result = runner.invoke(
+        app,
+        ["train", "pause", "run-1", "--force"],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "is pausing" in result.output
+    assert "PAUSING" in result.output
+    assert calls == [("PUT", "/rft/runs/run-1/pause")]
+
+
+def test_train_pause_reports_an_sft_run(monkeypatch) -> None:
+    from prime_cli.core import APIError
+
+    def mock_request(self, method, endpoint, params=None, json=None, timeout=None):
+        raise APIError("HTTP 400: Pause and checkpoint are supported for RL runs only")
+
+    monkeypatch.setattr("prime_cli.core.client.APIClient.request", mock_request)
+
+    result = runner.invoke(
+        app,
+        ["train", "pause", "run-1", "--force"],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key"},
+    )
+
+    assert result.exit_code == 1
+    assert "supported for RL runs only" in result.output
+
+
+def test_train_checkpoint(monkeypatch) -> None:
+    calls: list[tuple[str, str]] = []
+
+    def mock_request(self, method, endpoint, params=None, json=None, timeout=None):
+        calls.append((method, endpoint))
+        return {"run_id": "run-1", "request_id": "req-1"}
+
+    monkeypatch.setattr("prime_cli.core.client.APIClient.request", mock_request)
+
+    result = runner.invoke(
+        app,
+        ["train", "checkpoint", "run-1"],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "checkpoints its next step" in result.output
+    assert "req-1" in result.output
+    assert calls == [("POST", "/rft/runs/run-1/checkpoint")]
+
+
+def test_train_restart_passes_secrets_again(monkeypatch, tmp_path) -> None:
+    calls: list[tuple[str, str, Any]] = []
+
+    def mock_request(self, method, endpoint, params=None, json=None, timeout=None):
+        calls.append((method, endpoint, json))
+        return {"run": _fake_run_payload("PENDING")}
+
+    monkeypatch.setattr("prime_cli.core.client.APIClient.request", mock_request)
+    env_file = tmp_path / "secrets.env"
+    env_file.write_text("WANDB_API_KEY=wk\nHF_TOKEN=hf\nOPENAI_API_KEY=ok\n")
+
+    result = runner.invoke(
+        app,
+        ["train", "restart", "run-1", "--force", "--env-file", str(env_file)],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls == [
+        (
+            "PUT",
+            "/rft/runs/run-1/restart",
+            {"wandbApiKey": "wk", "hfToken": "hf", "secrets": {"OPENAI_API_KEY": "ok"}},
+        )
+    ]
+
+
+def test_train_restart_without_secrets_sends_no_body(monkeypatch) -> None:
+    calls: list[Any] = []
+
+    def mock_request(self, method, endpoint, params=None, json=None, timeout=None):
+        calls.append(json)
+        return {"run": _fake_run_payload("RUNNING")}
+
+    monkeypatch.setattr("prime_cli.core.client.APIClient.request", mock_request)
+
+    result = runner.invoke(
+        app,
+        ["train", "restart", "run-1", "--force"],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls == [None]
+
+
+def test_train_restart_warns_about_malformed_env_lines(monkeypatch, tmp_path) -> None:
+    def mock_request(self, method, endpoint, params=None, json=None, timeout=None):
+        return {"run": _fake_run_payload("PENDING")}
+
+    monkeypatch.setattr("prime_cli.core.client.APIClient.request", mock_request)
+    env_file = tmp_path / "secrets.env"
+    env_file.write_text("WANDB_API_KEY=wk\nnot a secret line\n")
+
+    result = runner.invoke(
+        app,
+        ["train", "restart", "run-1", "--force", "--env-file", str(env_file)],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Warning:" in result.output
+
+
 _FFT_BODY = (
     '[model]\nname = "Qwen/Qwen3-0.6B"\n\n[deployment]\nnum_train_gpus = 1\nnum_infer_gpus = 1\n'
 )

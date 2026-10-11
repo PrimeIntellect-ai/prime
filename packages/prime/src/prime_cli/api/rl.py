@@ -397,6 +397,26 @@ class RLClient:
                 raise APIError(f"Failed to stop Hosted Training run: {e.response.text}")
             raise APIError(f"Failed to stop Hosted Training run: {str(e)}")
 
+    def pause_run(self, run_id: str) -> RLRun:
+        """Pause an RL run: it checkpoints its next step, then releases its GPUs."""
+        try:
+            response = self.client.request("PUT", f"/rft/runs/{run_id}/pause")
+            return RLRun.model_validate(response.get("run"))
+        except Exception as e:
+            if hasattr(e, "response") and hasattr(e.response, "text"):
+                raise APIError(f"Failed to pause Hosted Training run: {e.response.text}")
+            raise APIError(f"Failed to pause Hosted Training run: {str(e)}")
+
+    def checkpoint_run(self, run_id: str) -> str:
+        """Ask an RL run to checkpoint its next step. Returns the request id."""
+        try:
+            response = self.client.request("POST", f"/rft/runs/{run_id}/checkpoint")
+            return response["request_id"]
+        except Exception as e:
+            if hasattr(e, "response") and hasattr(e.response, "text"):
+                raise APIError(f"Failed to checkpoint Hosted Training run: {e.response.text}")
+            raise APIError(f"Failed to checkpoint Hosted Training run: {str(e)}")
+
     def delete_run(self, run_id: str) -> None:
         """Delete a Hosted Training run."""
         try:
@@ -406,14 +426,22 @@ class RLClient:
                 raise APIError(f"Failed to delete Hosted Training run: {e.response.text}")
             raise APIError(f"Failed to delete Hosted Training run: {str(e)}")
 
-    def restart_run(self, run_id: str) -> RLRun:
-        """Restart a running Hosted Training run from its latest checkpoint.
+    def restart_run(self, run_id: str, secrets: Optional[Dict[str, str]] = None) -> RLRun:
+        """Restart a Hosted Training run from its latest checkpoint.
 
-        Only RUNNING runs can be restarted (checkpoints still on PVC).
-        For STOPPED/FAILED/COMPLETED runs, checkpoints have been cleaned up.
+        A PAUSED run resumes with `secrets` (it kept none): WANDB_API_KEY and
+        HF_TOKEN go to their dedicated fields, the rest as generic secrets.
         """
+        body: Dict[str, Any] = {}
+        extra = dict(secrets or {})
+        if "WANDB_API_KEY" in extra:
+            body["wandbApiKey"] = extra.pop("WANDB_API_KEY")
+        if "HF_TOKEN" in extra:
+            body["hfToken"] = extra.pop("HF_TOKEN")
+        if extra:
+            body["secrets"] = extra
         try:
-            response = self.client.request("PUT", f"/rft/runs/{run_id}/restart")
+            response = self.client.request("PUT", f"/rft/runs/{run_id}/restart", json=body or None)
             return RLRun.model_validate(response.get("run"))
         except Exception as e:
             if hasattr(e, "response") and hasattr(e.response, "text"):

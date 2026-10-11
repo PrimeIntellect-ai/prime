@@ -140,6 +140,9 @@ class FactoryWorkloads(BaseModel):
     # not an empty fleet — keep those distinguishable.
     workloads: List[FactoryWorkload]
     sources: List[FactorySource]
+    # Optional: the backend caps the default window at 200 rows and sets
+    # this flag when it did — the CLI tells the user their view is cut.
+    truncated: Optional[bool] = None
 
     # The raw API response is retained so ``--json`` can echo the exact
     # server payload instead of a re-serialization of the parsed model.

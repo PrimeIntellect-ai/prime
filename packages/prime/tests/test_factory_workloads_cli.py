@@ -1386,3 +1386,42 @@ def test_workloads_degraded_zero_row_result_is_warning_only(
     assert "training jobs unavailable" in output
     assert "No factory workloads match" not in output
     assert "No factory workloads found." not in output
+
+
+def test_workloads_truncated_envelope_renders_cut_note(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The backend caps the default window at 200 rows and flags it: one dim
+    # line under the table says so and points at the refiners.
+    payload = _workloads_payload(_default_rows())
+    payload["truncated"] = True
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(app, ["factory", "workloads"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+    assert result.exit_code == 0, result.output
+    assert "Showing first 200 workloads — refine with --cluster/--user/--state" in output
+
+    # absent flag (older backends) or False: no cut note
+    _install(monkeypatch, _workloads_payload(_default_rows()))
+    plain = runner.invoke(app, ["factory", "workloads"], env=TEST_ENV)
+    plain_output = strip_ansi(plain.output)
+    assert plain.exit_code == 0, plain.output
+    assert "Showing first 200" not in plain_output
+
+    # --json stays the exact envelope incl. the flag
+    _install(monkeypatch, payload)
+    json_result = runner.invoke(app, ["factory", "workloads", "--json"], env=TEST_ENV)
+    assert json.loads(json_result.stdout)["truncated"] is True
+
+
+def test_workloads_state_cell_native_state_has_space(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The UI once shipped 'queued(PENDING)' — the CLI must always render
+    # the space: 'queued (PENDING)'.
+    row = _workload("slurm:ac12:8421", "slurm", "queued")
+    _install(monkeypatch, _workloads_payload([row]))
+
+    result = runner.invoke(app, ["factory", "workloads"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "queued (PENDING)" in output
+    assert "queued(PENDING)" not in output

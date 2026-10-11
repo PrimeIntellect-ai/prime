@@ -55,6 +55,7 @@ FACTORY_NODES_JSON_HELP = json_output_help(
 IN_USE_NOTE = "in-use = GPUs held by running jobs (not GPU-activity measurements)"
 UNUSED_NOTE = "unused = reserved by a workload but not running anything — not free capacity"
 SCHEDULER_LEGEND = "Scheduler: — = direct platform placement; unknown = deployment not identified."
+TRUNCATED_NOTE = "Showing first 200 workloads — refine with --cluster/--user/--state"
 
 # Plain-language names for source kinds shown to users. The internal enum
 # values (e.g. "capacity") never appear in table output.
@@ -1198,6 +1199,8 @@ def factory_workloads(
         console.print()
         console.print(f"[dim]{IN_USE_NOTE}[/dim]")
         console.print(f"[dim]{SCHEDULER_LEGEND}[/dim]")
+        if workloads.truncated:
+            console.print(f"[dim]{TRUNCATED_NOTE}[/dim]")
         return
 
     if not rows and not degraded:

@@ -4,6 +4,7 @@ import asyncio
 import logging
 import random
 import time
+from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Optional
 
@@ -19,6 +20,18 @@ logger = logging.getLogger(__name__)
 
 # The edge in front of the tunnel service blocks default Python user agents.
 _USER_AGENT = "Mozilla/5.0 (compatible; prime-tunnel-supervisor)"
+
+
+@dataclass(frozen=True)
+class Supervision:
+    """What a supervised tunnel requests through its URL to check that it serves."""
+
+    # Path of the request. It should answer quickly and without side effects.
+    probe_path: str = "/"
+    # Name of a response header the local service sets on every response. If
+    # given, a response without it is taken as not coming from the local
+    # service; otherwise the supervisor goes by the status code.
+    probe_header: Optional[str] = None
 
 
 class _Verdict(Enum):
@@ -65,15 +78,12 @@ class Supervisor:
     backoff_base = 1.0
     backoff_max = 60.0
 
-    def __init__(
-        self,
-        tunnel: "Tunnel",
-        probe_path: str = "/",
-        probe_header: Optional[str] = None,
-    ):
+    def __init__(self, tunnel: "Tunnel", options: Optional[Supervision] = None):
+        options = options or Supervision()
+        path = options.probe_path
         self._tunnel = tunnel
-        self._probe_path = probe_path if probe_path.startswith("/") else f"/{probe_path}"
-        self._probe_header = probe_header
+        self._probe_path = path if path.startswith("/") else f"/{path}"
+        self._probe_header = options.probe_header
         self._task: Optional[asyncio.Task] = None
         self._wake = asyncio.Event()
         self._probe_now = False
@@ -149,7 +159,7 @@ class Supervisor:
         while True:
             self._wake.clear()
             wait = max(0.0, min(self.tick, next_probe - time.monotonic()))
-            if not (self._probe_now or tunnel.is_gone):
+            if not (self._probe_now or tunnel._gone):
                 try:
                     await asyncio.wait_for(self._wake.wait(), timeout=wait)
                 except asyncio.TimeoutError:
@@ -157,7 +167,7 @@ class Supervisor:
 
             if not tunnel._started or tunnel._stopping:
                 return
-            if tunnel.is_gone:
+            if tunnel._gone:
                 await self._give_up()
                 return
             if tunnel._process_lock.locked():
@@ -199,7 +209,7 @@ class Supervisor:
             if delay:
                 process = tunnel._process
                 await asyncio.sleep(delay)
-                if tunnel._stopping or tunnel.is_gone or tunnel._process_lock.locked():
+                if tunnel._stopping or tunnel._gone or tunnel._process_lock.locked():
                     continue
                 if tunnel._process is not process:
                     continue  # Someone else restarted it meanwhile

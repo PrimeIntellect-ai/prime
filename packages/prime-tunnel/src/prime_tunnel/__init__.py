@@ -15,6 +15,7 @@ from prime_tunnel.exceptions import (
     TunnelTimeoutError,
 )
 from prime_tunnel.models import TunnelInfo, TunnelListPage, TunnelState, TunnelStatus
+from prime_tunnel.supervisor import Supervision
 
 logging.getLogger("prime_tunnel").addHandler(logging.NullHandler())
 
@@ -25,6 +26,7 @@ __all__ = [
     "TunnelClient",
     # Main interface
     "Tunnel",
+    "Supervision",
     # Models
     "TunnelInfo",
     "TunnelListPage",

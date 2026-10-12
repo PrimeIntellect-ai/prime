@@ -3,8 +3,9 @@ import logging
 import os
 import subprocess
 import time
+import warnings
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, Union
 
 import httpx
 
@@ -18,7 +19,7 @@ from prime_tunnel.exceptions import (
 )
 from prime_tunnel.frpc import FrpcEvent, FrpcOutput, failure_message
 from prime_tunnel.models import TunnelInfo, TunnelState, TunnelStatus
-from prime_tunnel.supervisor import Supervisor
+from prime_tunnel.supervisor import Supervision, Supervisor
 
 logger = logging.getLogger(__name__)
 
@@ -39,9 +40,7 @@ class Tunnel:
         team_id: Optional[str] = None,
         labels: Optional[list[str]] = None,
         http_user: Optional[str] = None,
-        supervise: bool = False,
-        probe_path: str = "/",
-        probe_header: Optional[str] = None,
+        supervise: Union[bool, Supervision] = False,
         on_state_change: Optional[Callable[[TunnelState], None]] = None,
     ):
         """
@@ -61,12 +60,8 @@ class Tunnel:
             supervise: Keep the tunnel serving after start(): watch frpc and
                 the public URL, restart frpc when the tunnel stops serving,
                 and mark the tunnel dead when its registration is gone.
-            probe_path: Path the supervisor requests through the public URL.
-                It should answer quickly and without side effects.
-            probe_header: Name of a response header the local service sets on
-                every response. If given, the supervisor takes a response
-                without it as not coming from the local service; otherwise it
-                goes by the status code.
+                Pass True for the defaults, or a Supervision to choose what
+                the supervisor requests through the URL.
             on_state_change: Called with the new TunnelState whenever `state`
                 changes, on the event loop that started the tunnel.
         """
@@ -79,8 +74,6 @@ class Tunnel:
         self.log_level = log_level
         self.http_user = http_user
         self.supervise = supervise
-        self.probe_path = probe_path
-        self.probe_header = probe_header
         self.on_state_change = on_state_change
 
         self._client = TunnelClient()
@@ -131,28 +124,41 @@ class Tunnel:
 
     @property
     def is_running(self) -> bool:
-        """Check if the tunnel is running."""
+        """Whether the local frpc process is alive.
+
+        A live frpc is not proof that the tunnel is serving: it may be
+        reconnecting, or rejected by the tunnel service. Use `state` for the
+        tunnel as a whole.
+        """
         if self._process is None:
             return False
         return self._process.poll() is None
 
     @property
     def is_gone(self) -> bool:
-        """Whether the registration is known to be unusable. Makes no API call.
+        """Whether the registration is known to be unusable.
 
-        Set when the tunnel service rejects frpc because the tunnel was
-        deleted, expired, or stayed disconnected for too long, or when
-        status() finds the same. restart() cannot bring such a tunnel back:
-        stop it and start a new one.
+        Deprecated: use `state`, which is TunnelState.DEAD for such a tunnel.
         """
+        warnings.warn(
+            "Tunnel.is_gone is deprecated; use Tunnel.state, which is TunnelState.DEAD "
+            "when the registration is gone",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         return self._gone
 
     @property
     def state(self) -> TunnelState:
         """What is known about the tunnel right now. Makes no API call.
 
-        Without supervise=True nothing checks that the tunnel is serving, so
-        CONNECTED then only means it was started and is not known to be dead.
+        DEAD means the registration can no longer be used: the tunnel service
+        rejected frpc because the tunnel was deleted, expired, or stayed
+        disconnected for too long, or status() found the same. restart()
+        cannot bring such a tunnel back: stop it and start a new one.
+
+        Without a supervisor nothing checks that the tunnel is serving, so UP
+        then only means it was started and is not known to be dead.
         """
         if not self._started:
             return TunnelState.STOPPED
@@ -160,7 +166,7 @@ class Tunnel:
             return TunnelState.DEAD
         if self._recovering:
             return TunnelState.RECOVERING
-        return TunnelState.CONNECTED
+        return TunnelState.UP
 
     async def wait_dead(self) -> bool:
         """Wait until the tunnel is dead or stopped.
@@ -208,12 +214,19 @@ class Tunnel:
     async def check_registered(self) -> bool:
         """Check if the tunnel's registration can still be used.
 
+        Deprecated: use status(), which reports the same and more.
+
         Calls get_tunnel() on the backend API. Returns False if the service
         has no record of the tunnel or reports it expired or terminated.
 
         Raises TunnelError/TunnelTimeoutError on transient API failures
         so the caller can distinguish "tunnel gone" from "API unreachable".
         """
+        warnings.warn(
+            "Tunnel.check_registered() is deprecated; use Tunnel.status()",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         if self._tunnel_info is None:
             return False
         info = await self._client.get_tunnel(self._tunnel_info.tunnel_id)
@@ -271,9 +284,8 @@ class Tunnel:
             self._loop = asyncio.get_running_loop()
             url = await self._register_and_connect()
             if self.supervise:
-                self._supervisor = Supervisor(
-                    self, probe_path=self.probe_path, probe_header=self.probe_header
-                )
+                options = self.supervise if isinstance(self.supervise, Supervision) else None
+                self._supervisor = Supervisor(self, options)
                 self._supervisor.start()
             self._state_changed()
             return url

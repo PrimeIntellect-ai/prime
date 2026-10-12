@@ -47,7 +47,7 @@ class TunnelState(str, Enum):
     # Not started, or stopped.
     STOPPED = "stopped"
     # Started and not known to be down.
-    CONNECTED = "connected"
+    UP = "up"
     # Not serving; the supervisor is restarting frpc under the same URL.
     RECOVERING = "recovering"
     # The registration is gone. Only a new tunnel, with a new URL, helps.

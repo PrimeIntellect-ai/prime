@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from test_tunnel import _client_for, _fake_frpc_binary, _frpc_line, _make_started_tunnel
 
-from prime_tunnel import Tunnel, TunnelState
+from prime_tunnel import Supervision, Tunnel, TunnelState
 from prime_tunnel.exceptions import TunnelConnectionError, TunnelGoneError
 from prime_tunnel.frpc import FrpcEvent
 from prime_tunnel.supervisor import Supervisor, _Response, _Verdict
@@ -33,7 +33,7 @@ def _supervised_tunnel(states: list | None = None) -> Tunnel:
     tunnel = _make_started_tunnel()
     tunnel._process.poll.return_value = None
     tunnel._loop = asyncio.get_running_loop()
-    tunnel._reported_state = TunnelState.CONNECTED
+    tunnel._reported_state = TunnelState.UP
     tunnel._ended.clear()
     tunnel._client = AsyncMock()
     tunnel.restart = AsyncMock(return_value=tunnel.url)
@@ -74,7 +74,7 @@ async def test_supervisor_leaves_a_serving_tunnel_alone():
     await supervisor.stop()
 
     tunnel.restart.assert_not_awaited()
-    assert tunnel.state is TunnelState.CONNECTED
+    assert tunnel.state is TunnelState.UP
     assert states == []
 
 
@@ -91,7 +91,7 @@ async def test_supervisor_restarts_frpc_that_exited():
     tunnel.restart.side_effect = restart
     supervisor = _supervise(tunnel, [_Verdict.SERVING])
 
-    await _until(lambda: states == [TunnelState.RECOVERING, TunnelState.CONNECTED])
+    await _until(lambda: states == [TunnelState.RECOVERING, TunnelState.UP])
     await supervisor.stop()
 
     tunnel.restart.assert_awaited_once()
@@ -110,7 +110,7 @@ async def test_supervisor_restarts_only_after_a_second_failed_probe():
     await supervisor.stop()
 
     tunnel.restart.assert_not_awaited()
-    assert tunnel.state is TunnelState.CONNECTED
+    assert tunnel.state is TunnelState.UP
 
 
 @pytest.mark.asyncio
@@ -119,7 +119,7 @@ async def test_supervisor_restarts_a_tunnel_that_stays_down_and_reports_recovery
     tunnel = _supervised_tunnel(states)
     supervisor = _supervise(tunnel, [_Verdict.NOT_SERVING, _Verdict.NOT_SERVING, _Verdict.SERVING])
 
-    await _until(lambda: states == [TunnelState.RECOVERING, TunnelState.CONNECTED])
+    await _until(lambda: states == [TunnelState.RECOVERING, TunnelState.UP])
     await supervisor.stop()
 
     tunnel.restart.assert_awaited_once()
@@ -134,7 +134,7 @@ async def test_supervisor_does_not_blame_the_tunnel_for_a_local_service_that_is_
     await supervisor.stop()
 
     tunnel.restart.assert_not_awaited()
-    assert tunnel.state is TunnelState.CONNECTED
+    assert tunnel.state is TunnelState.UP
 
 
 @pytest.mark.asyncio
@@ -159,7 +159,7 @@ async def test_supervisor_keeps_restarting_with_backoff_while_restarts_fail():
 
     assert delays[:4] == [0, 1, 2, 3]
     assert tunnel.state is TunnelState.RECOVERING
-    assert not tunnel.is_gone
+    assert not tunnel._gone
 
 
 def test_backoff_doubles_with_jitter_up_to_the_maximum(monkeypatch):
@@ -201,7 +201,7 @@ async def test_supervisor_does_not_restart_a_tunnel_someone_restarted_during_its
     await supervisor.stop()
 
     assert tunnel.restart.await_count == 1
-    assert tunnel.state is TunnelState.CONNECTED
+    assert tunnel.state is TunnelState.UP
 
 
 @pytest.mark.asyncio
@@ -247,7 +247,7 @@ async def test_supervisor_keeps_trying_when_the_service_cannot_be_asked():
     await _until(lambda: tunnel.restart.await_count >= 3)
     await supervisor.stop()
 
-    assert not tunnel.is_gone
+    assert not tunnel._gone
 
 
 @pytest.mark.asyncio
@@ -322,7 +322,7 @@ async def _check(edge, local, probe_header=None):
         update={"url": f"http://127.0.0.1:{edge_port}"}
     )
     tunnel.local_port = local.server_address[1] if local else closed_port
-    supervisor = Supervisor(tunnel, probe_path="health", probe_header=probe_header)
+    supervisor = Supervisor(tunnel, Supervision(probe_path="health", probe_header=probe_header))
     import httpx
 
     try:
@@ -412,7 +412,7 @@ async def test_state_and_wait_dead_without_a_supervisor():
 
     states = []
     tunnel = _supervised_tunnel(states)
-    assert tunnel.state is TunnelState.CONNECTED
+    assert tunnel.state is TunnelState.UP
     waiter = asyncio.create_task(tunnel.wait_dead())
     await asyncio.sleep(0.02)
     assert not waiter.done()
@@ -498,7 +498,7 @@ async def test_supervised_tunnel_restarts_a_real_frpc_that_dies(monkeypatch, tmp
         await tunnel.start()
         first = tunnel._process
         try:
-            expected = [TunnelState.CONNECTED, TunnelState.RECOVERING, TunnelState.CONNECTED]
+            expected = [TunnelState.UP, TunnelState.RECOVERING, TunnelState.UP]
             await _until(lambda: states == expected, timeout=10.0)
             assert tunnel._process is not first
             assert tunnel.is_running
@@ -534,7 +534,7 @@ async def test_supervised_tunnel_dies_and_ends_frpc_when_a_reconnect_is_rejected
         try:
             assert await asyncio.wait_for(tunnel.wait_dead(), timeout=10.0) is True
             await _until(lambda: not tunnel.is_running, timeout=10.0)
-            assert states == [TunnelState.CONNECTED, TunnelState.DEAD]
+            assert states == [TunnelState.UP, TunnelState.DEAD]
         finally:
             await tunnel.stop()
 
@@ -558,3 +558,43 @@ async def test_supervised_tunnel_ends_frpc_that_is_rejected_right_after_connecti
             await _until(lambda: not tunnel.is_running, timeout=10.0)
         finally:
             await tunnel.stop()
+
+
+@pytest.mark.asyncio
+async def test_supervise_takes_a_supervision_with_the_probe_settings(monkeypatch, tmp_path):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    connected = _frpc_line("I", "[t-test123] start proxy success")
+    frpc = _fake_frpc_binary(tmp_path, f"echo '{connected}'\nexec sleep 30\n")
+    tunnel = Tunnel(
+        local_port=8080,
+        connection_timeout=10.0,
+        supervise=Supervision(probe_path="health", probe_header="X-Service"),
+    )
+    _client_for(tunnel)
+
+    with patch("prime_tunnel.tunnel.get_frpc_path", return_value=frpc):
+        await tunnel.start()
+        try:
+            assert tunnel._supervisor._probe_path == "/health"
+            assert tunnel._supervisor._probe_header == "X-Service"
+        finally:
+            await tunnel.stop()
+
+
+def test_is_gone_is_deprecated_in_favour_of_state():
+    tunnel = _make_started_tunnel()
+    tunnel._gone = True
+
+    with pytest.warns(DeprecationWarning, match="Tunnel.state"):
+        assert tunnel.is_gone is True
+    assert tunnel.state is TunnelState.DEAD
+
+
+@pytest.mark.asyncio
+async def test_check_registered_is_deprecated_in_favour_of_status():
+    tunnel = _make_started_tunnel()
+    tunnel._client = AsyncMock()
+    tunnel._client.get_tunnel.return_value = tunnel._tunnel_info
+
+    with pytest.warns(DeprecationWarning, match="Tunnel.status"):
+        assert await tunnel.check_registered() is True

@@ -175,6 +175,9 @@ class Supervisor:
                 await asyncio.sleep(self.tick)
                 continue
 
+            # A frpc that someone else replaces while this round is under way
+            # makes what the round found out of date.
+            process = tunnel._process
             if not tunnel.is_running:
                 reason = "frpc exited"
             else:
@@ -182,6 +185,10 @@ class Supervisor:
                     continue
                 self._probe_now = False
                 verdict, reason = await self._check(public, local)
+                if tunnel._process is not process:
+                    strikes = 0
+                    next_probe = time.monotonic() + self.settle
+                    continue
                 if verdict is not _Verdict.NOT_SERVING:
                     strikes = 0
                     if verdict is _Verdict.SERVING:
@@ -207,7 +214,6 @@ class Supervisor:
                 attempts,
             )
             if delay:
-                process = tunnel._process
                 await asyncio.sleep(delay)
                 if tunnel._stopping or tunnel._gone or tunnel._process_lock.locked():
                     continue

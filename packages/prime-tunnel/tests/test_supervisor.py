@@ -205,6 +205,33 @@ async def test_supervisor_does_not_restart_a_tunnel_someone_restarted_during_its
 
 
 @pytest.mark.asyncio
+async def test_supervisor_drops_a_probe_result_when_someone_restarted_during_the_probe():
+    tunnel = _supervised_tunnel()
+    replacement = MagicMock()
+    replacement.poll.return_value = None
+    probes = 0
+
+    async def check(public, local):
+        nonlocal probes
+        probes += 1
+        if probes == 2:
+            # The probe that would confirm the failure; a manual restart
+            # replaces frpc while it is in flight.
+            tunnel._process = replacement
+        return (_Verdict.NOT_SERVING if probes <= 2 else _Verdict.SERVING), "probe failed"
+
+    supervisor = Supervisor(tunnel)
+    supervisor._check = check
+    supervisor.start()
+
+    await _until(lambda: probes >= 4)
+    await supervisor.stop()
+
+    tunnel.restart.assert_not_awaited()
+    assert tunnel.state is TunnelState.UP
+
+
+@pytest.mark.asyncio
 async def test_supervisor_marks_the_tunnel_dead_when_a_restart_finds_the_registration_gone():
     states = []
     tunnel = _supervised_tunnel(states)

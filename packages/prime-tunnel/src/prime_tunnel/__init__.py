@@ -14,7 +14,7 @@ from prime_tunnel.exceptions import (
     TunnelLimitReachedError,
     TunnelTimeoutError,
 )
-from prime_tunnel.models import TunnelInfo, TunnelListPage, TunnelStatus
+from prime_tunnel.models import TunnelInfo, TunnelListPage, TunnelState, TunnelStatus
 
 logging.getLogger("prime_tunnel").addHandler(logging.NullHandler())
 
@@ -28,6 +28,7 @@ __all__ = [
     # Models
     "TunnelInfo",
     "TunnelListPage",
+    "TunnelState",
     "TunnelStatus",
     # Exceptions
     "BinaryDownloadError",

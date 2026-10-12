@@ -44,6 +44,32 @@ if status.gone:
     await tunnel.stop()
 ```
 
+### Keeping a tunnel up
+
+Pass `supervise=True` to have the tunnel watch and repair itself after
+`start()`. It restarts its client under the same URL when the client exits or
+when requests through the URL stop reaching your service, and it marks the
+tunnel dead when the registration is gone:
+
+```python
+tunnel = Tunnel(local_port=8765, supervise=True, on_state_change=print)
+await tunnel.start()
+
+if await tunnel.wait_dead():  # False if the tunnel was stopped instead
+    await tunnel.stop()
+    # start a new Tunnel; it gets a new URL
+```
+
+`tunnel.state` is `connected`, `recovering`, `dead` or `stopped`, and
+`on_state_change` is called with each new state.
+
+The supervisor sends a GET to `probe_path` (default `/`) through the URL
+every 15 seconds. It blames the tunnel only if the same request sent straight
+to your service succeeds, so a service that is down or returns errors itself
+does not cause restarts. If your service sets a header on every response,
+pass its name as `probe_header`: a response without it is then known not to
+come from your service, whatever its status code.
+
 ## CLI Usage
 
 ```bash

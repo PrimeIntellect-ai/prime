@@ -2382,24 +2382,65 @@ def list_gpus(
         api_client = APIClient()
         client = HostedTrainingClient(api_client)
         config = Config()
-        response = client.list_available_gpu_types(team_id=config.team_id)
+        # BOTH capacity paths, because both are dispatchable and the
+        # command promises "every GPU type you can dispatch on".
+        # `available-gpu-types` only covers RESERVED capacity (a non-zero
+        # ClusterAllocation, or a cluster the team owns), so an
+        # on-demand-only account used to be told it had no GPU types and
+        # should contact support — while `prime train models` was
+        # simultaneously offering it purchasable capacity at an hourly
+        # rate. One request for the on-demand half so the two sections
+        # cannot disagree with each other.
+        reserved = client.list_available_gpu_types(team_id=config.team_id)
+        on_demand = client.get_available_fft(team_id=config.team_id).on_demand
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
 
+    reserved_types = list(reserved.gpu_types)
+    # A type held on reserved capacity is never dispatched on-demand
+    # (reserved wins, that hardware is already paid for), so listing it
+    # twice would imply a choice the caller does not have.
+    on_demand_only = [c for c in on_demand if c.gpu_type not in set(reserved_types)]
+
     if output == "json":
-        output_data_as_json({"gpuTypes": response.gpu_types}, console)
+        output_data_as_json(
+            {
+                "gpuTypes": reserved_types,
+                "onDemand": [
+                    {
+                        "gpuType": c.gpu_type,
+                        "pricePerGpuHour": c.price_per_gpu_hour,
+                        "availableNow": c.available_now,
+                        "discountLabel": c.discount_label,
+                        "isBeta": c.is_beta,
+                    }
+                    for c in on_demand_only
+                ],
+            },
+            console,
+        )
         return
 
-    if not response.gpu_types:
+    if not reserved_types and not on_demand_only:
         console.print(
             "[yellow]No GPU types available.[/yellow] Contact support if you need access."
         )
         return
 
-    console.print("[bold]Available GPU types[/bold] [dim](full-FT dispatch)[/dim]")
-    for gpu_type in response.gpu_types:
-        console.print(f"  [cyan]{gpu_type}[/cyan]")
+    if reserved_types:
+        console.print("[bold]Reserved capacity[/bold] [dim](already paid for)[/dim]")
+        for gpu_type in reserved_types:
+            console.print(f"  [cyan]{gpu_type}[/cyan]")
+
+    if on_demand_only:
+        if reserved_types:
+            console.print()
+        console.print("[bold]On-demand capacity[/bold] [dim](billed per GPU-hour)[/dim]")
+        for capacity in on_demand_only:
+            rate = f"${capacity.price_per_gpu_hour:.2f}/GPU-hr"
+            label = f" · {capacity.discount_label}" if capacity.discount_label else ""
+            console.print(f"  [cyan]{capacity.gpu_type}[/cyan]  [dim]{rate}{label}[/dim]")
 
 
 def _prompt_required_text(label: str, help_text: str, empty_error: str) -> str:

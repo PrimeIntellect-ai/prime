@@ -2392,10 +2392,21 @@ def list_gpus(
         # rate. One request for the on-demand half so the two sections
         # cannot disagree with each other.
         reserved = client.list_available_gpu_types(team_id=config.team_id)
-        on_demand = client.get_available_fft(team_id=config.team_id).on_demand
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
+
+    # The on-demand half degrades instead of failing the command. This
+    # listing worked before on-demand existed, off `available-gpu-types`
+    # alone, so a transient 5xx or a schema-drifted payload from the
+    # newer discovery endpoint must not take the caller's reserved types
+    # away with it. `get_available_fft` already swallows 404 for older
+    # backends; this covers the rest.
+    try:
+        on_demand = client.get_available_fft(team_id=config.team_id).on_demand
+    except APIError as e:
+        on_demand = []
+        console.print(f"[yellow]Could not read on-demand capacity:[/yellow] {e}")
 
     reserved_types = list(reserved.gpu_types)
     # A type held on reserved capacity is never dispatched on-demand
@@ -2439,7 +2450,11 @@ def list_gpus(
         console.print("[bold]On-demand capacity[/bold] [dim](billed per GPU-hour)[/dim]")
         for capacity in on_demand_only:
             rate = f"${capacity.price_per_gpu_hour:.2f}/GPU-hr"
-            label = f" · {capacity.discount_label}" if capacity.discount_label else ""
+            # Escaped: the label is backend-provided free text, and a
+            # bracket in a promo string would either restyle the line or
+            # raise MarkupError and abort an otherwise fine listing.
+            # `_render_on_demand_table` escapes this same field.
+            label = f" · {rich_escape(capacity.discount_label)}" if capacity.discount_label else ""
             console.print(f"  [cyan]{capacity.gpu_type}[/cyan]  [dim]{rate}{label}[/dim]")
 
 

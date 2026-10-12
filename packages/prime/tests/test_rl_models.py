@@ -5,7 +5,7 @@ from typing import Any, Dict, List
 
 import pytest
 from prime_cli.commands.rl import _model_name_sort_key
-from prime_cli.core.client import NotFoundError
+from prime_cli.core.client import APIError, NotFoundError
 from prime_cli.main import app
 from prime_cli.utils.formatters import strip_ansi
 from typer.testing import CliRunner
@@ -1292,3 +1292,46 @@ def test_gpus_json_carries_both_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     assert payload["gpuTypes"] == ["B200_180GB"]
     assert payload["onDemand"][0]["gpuType"] == "H200_141GB"
     assert payload["onDemand"][0]["pricePerGpuHour"] == 4.9
+
+
+def test_gpus_degrades_when_the_on_demand_endpoint_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reserved types must survive a failure of the newer endpoint.
+
+    This listing worked off `available-gpu-types` alone before on-demand
+    existed, so a transient 5xx or schema drift from the discovery
+    endpoint must not take the caller's reserved types away with it.
+    """
+
+    def mock_get(self: Any, endpoint: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        if endpoint == "/training/available-gpu-types":
+            return {"gpuTypes": ["H200_141GB"]}
+        if endpoint == "/training/available-fft-models":
+            raise APIError("500 Internal Server Error")
+        raise AssertionError(f"Unexpected endpoint: {endpoint}")
+
+    monkeypatch.setattr("prime_cli.core.client.APIClient.get", mock_get)
+    result = CliRunner().invoke(app, ["train", "gpus"])
+    assert result.exit_code == 0, result.output
+    out = strip_ansi(result.output)
+    assert "H200_141GB" in out, f"reserved types must still render:\n{out}"
+    assert "Could not read on-demand capacity" in out
+
+
+def test_gpus_escapes_a_discount_label_containing_markup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bracket in a backend promo string must not abort the listing."""
+    monkeypatch.setattr(
+        "prime_cli.core.client.APIClient.get",
+        _gpus_mock_get(
+            gpu_types=[],
+            on_demand=[{**_OD_H200, "discountLabel": "[/dim]launch [bold]50%"}],
+        ),
+    )
+    result = CliRunner().invoke(app, ["train", "gpus"])
+    assert result.exit_code == 0, result.output
+    out = strip_ansi(result.output)
+    assert "H200_141GB" in out
+    assert "launch" in out, f"the label should render as text:\n{out}"

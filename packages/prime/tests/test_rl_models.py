@@ -1317,6 +1317,7 @@ def test_gpus_degrades_when_the_on_demand_endpoint_fails(
     out = strip_ansi(result.output)
     assert "H200_141GB" in out, f"reserved types must still render:\n{out}"
     assert "Could not read on-demand capacity" in out
+    assert "Contact support" not in out
 
 
 def test_gpus_escapes_a_discount_label_containing_markup(
@@ -1335,3 +1336,51 @@ def test_gpus_escapes_a_discount_label_containing_markup(
     out = strip_ansi(result.output)
     assert "H200_141GB" in out
     assert "launch" in out, f"the label should render as text:\n{out}"
+
+
+def test_gpus_does_not_call_a_failed_lookup_an_access_denial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A discovery failure is "we do not know", not "you have no access".
+
+    Collapsing the two reinstates the original bug: an on-demand-only
+    account whose endpoint 5xxs would be told to contact support for
+    access it already has.
+    """
+
+    def mock_get(self: Any, endpoint: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        if endpoint == "/training/available-gpu-types":
+            return {"gpuTypes": []}
+        if endpoint == "/training/available-fft-models":
+            raise APIError("503 Service Unavailable")
+        raise AssertionError(f"Unexpected endpoint: {endpoint}")
+
+    monkeypatch.setattr("prime_cli.core.client.APIClient.get", mock_get)
+    result = CliRunner().invoke(app, ["train", "gpus"])
+    assert result.exit_code == 0, result.output
+    out = strip_ansi(result.output)
+    assert "Contact support" not in out, (
+        f"a failed lookup must not read as an access denial:\n{out}"
+    )
+    assert "could not be read" in out
+
+
+def test_gpus_json_stdout_stays_parseable_when_discovery_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The degrade warning must not prefix human text onto the payload."""
+
+    def mock_get(self: Any, endpoint: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        if endpoint == "/training/available-gpu-types":
+            return {"gpuTypes": ["H200_141GB"]}
+        if endpoint == "/training/available-fft-models":
+            raise APIError("503 Service Unavailable")
+        raise AssertionError(f"Unexpected endpoint: {endpoint}")
+
+    monkeypatch.setattr("prime_cli.core.client.APIClient.get", mock_get)
+    result = CliRunner().invoke(app, ["train", "gpus", "--output", "json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(strip_ansi(result.stdout))
+    assert payload["gpuTypes"] == ["H200_141GB"]
+    assert payload["onDemand"] == []
+    assert "Could not read on-demand capacity" in strip_ansi(result.stderr)

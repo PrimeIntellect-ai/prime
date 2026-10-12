@@ -2402,11 +2402,18 @@ def list_gpus(
     # newer discovery endpoint must not take the caller's reserved types
     # away with it. `get_available_fft` already swallows 404 for older
     # backends; this covers the rest.
+    on_demand_error: str | None = None
     try:
         on_demand = client.get_available_fft(team_id=config.team_id).on_demand
     except APIError as e:
+        # "Could not check" is kept DISTINCT from "there is none".
+        # Collapsing them is what would reinstate the very denial this
+        # command was changed to stop showing: an on-demand-only account
+        # whose discovery endpoint 5xxs would be told it has no access
+        # and should contact support. `AvailableFFTModelsResponse` makes
+        # the same distinction for the 404 case.
         on_demand = []
-        console.print(f"[yellow]Could not read on-demand capacity:[/yellow] {e}")
+        on_demand_error = str(e)
 
     reserved_types = list(reserved.gpu_types)
     # A type held on reserved capacity is never dispatched on-demand
@@ -2431,12 +2438,33 @@ def list_gpus(
             },
             console,
         )
+        if on_demand_error is not None:
+            # stderr, so a discovery failure cannot prefix human text
+            # onto the payload and break `json.loads` on stdout.
+            get_console(stderr=True).print(
+                f"[yellow]Could not read on-demand capacity:[/yellow] "
+                f"{rich_escape(on_demand_error)}"
+            )
         return
 
-    if not reserved_types and not on_demand_only:
+    if on_demand_error is not None:
         console.print(
-            "[yellow]No GPU types available.[/yellow] Contact support if you need access."
+            f"[yellow]Could not read on-demand capacity:[/yellow] {rich_escape(on_demand_error)}"
         )
+
+    if not reserved_types and not on_demand_only:
+        if on_demand_error is not None:
+            # Not a denial — we simply do not know. Saying "contact
+            # support" here would be the original bug wearing a
+            # different hat.
+            console.print(
+                "No reserved GPU types, and on-demand capacity could not be "
+                "read. Retry, or see [cyan]prime train models[/cyan]."
+            )
+        else:
+            console.print(
+                "[yellow]No GPU types available.[/yellow] Contact support if you need access."
+            )
         return
 
     if reserved_types:

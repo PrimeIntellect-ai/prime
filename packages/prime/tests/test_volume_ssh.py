@@ -1166,6 +1166,7 @@ def test_create_warm_by_default(monkeypatch, flags, warm):
     assert result.exit_code == 0, result.output
     assert sent == [warm]
     assert ("cluster allocation" in result.output) is warm
+    assert ("read-only" in result.output) is warm
     assert "Starting a session" not in result.output
     as_json = _run("create", "ckpts", "-o", "json", *flags)
     assert json.loads(as_json.output)["name"] == "ckpts"

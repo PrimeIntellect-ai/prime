@@ -86,7 +86,7 @@ def create(
     warm: bool = typer.Option(
         True,
         "--warm/--no-warm",
-        help="Start a read-write session in the background (stops after 30 min idle)",
+        help="Start a read-only session in the background (stops after 30 min idle)",
     ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
@@ -112,8 +112,9 @@ def create(
     console.print(f"Use it with: prime train config.toml --volume {volume.name}")
     if warm:
         console.print(
-            "If your account has a cluster allocation or your team owns a cluster, a session "
-            "starts in the background for faster put/ssh."
+            "If your account has a cluster allocation or your team owns a cluster, a "
+            "read-only session starts in the background so `prime volumes ssh --read-only` "
+            "is ready faster."
         )
 
 

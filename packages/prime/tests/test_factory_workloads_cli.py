@@ -1465,3 +1465,27 @@ def test_workloads_truncated_empty_filtered_result_is_bounded(
     assert plain.exit_code == 0, plain.output
     assert "No factory workloads match the given filters." in plain_output
     assert "fetched window" not in plain_output
+
+
+def test_workloads_server_filtered_empty_history_is_definitive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Terminal --state queries always send a default limit, but the server
+    # applies --state/--type/--since BEFORE the cap: a zero-row result is
+    # a genuine empty history, not a bounded-window miss.
+    payload = {
+        "schema_version": 1,
+        "as_of": _iso(datetime.now(timezone.utc)),
+        "workloads": [],
+        "sources": [_source("training")],
+    }
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(
+        app, ["factory", "workloads", "--state", "completed", "--since", "7d"], env=TEST_ENV
+    )
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "No factory workloads match the given filters." in output
+    assert "fetched window" not in output

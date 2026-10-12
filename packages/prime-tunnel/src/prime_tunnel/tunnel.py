@@ -1,10 +1,6 @@
 import asyncio
-import fcntl
-import logging
 import os
-import re
 import subprocess
-import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -19,115 +15,11 @@ from prime_tunnel.exceptions import (
     TunnelGoneError,
     TunnelTimeoutError,
 )
+from prime_tunnel.frpc import FrpcEvent, FrpcOutput, failure_message
 from prime_tunnel.models import TunnelInfo, TunnelStatus
-
-# timestamp + level + caller prefix + message
-_LOG_RE = re.compile(
-    r"\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2}\.\d{3}\s"
-    r"\[([EWIDT])\]\s"
-    r"\[.*?\]\s"
-    r"(?:\[.*?\]\s)*"
-    r"(.+)"
-)
-_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
-
-frpc_logger = logging.getLogger("prime_tunnel.frpc")
-
-_FRPC_LEVELS = {
-    "E": logging.ERROR,
-    "W": logging.WARNING,
-    "I": logging.INFO,
-    "D": logging.DEBUG,
-    "T": logging.DEBUG,
-}
-
-
-def _log_frpc_line(raw_line: str, tunnel_id: str | None) -> None:
-    """Forward one frpc output line to the prime_tunnel.frpc logger at its own level."""
-    line = _ANSI_RE.sub("", raw_line)
-    m = _LOG_RE.match(line)
-    if m:
-        level, msg = _FRPC_LEVELS.get(m.group(1), logging.INFO), m.group(2)
-    else:
-        level, msg = logging.INFO, line
-    frpc_logger.log(level, "frpc %s: %s", tunnel_id or "-", msg)
-
-
-# Rejection reasons that mean the registration itself can no longer be used.
-_GONE_ERRORS = (
-    "tunnel is inactive",
-    "tunnel not registered",
-)
 
 # Statuses the tunnel service never leaves.
 _TERMINAL_STATUSES = ("expired", "terminated")
-
-
-def _parse_frpc_error(
-    output_lines: list[str],
-    tunnel_id: str | None = None,
-    return_code: int | None = None,
-) -> TunnelConnectionError:
-    """Parse frpc log output into a structured tunnel exception."""
-    error_messages: list[str] = []
-    for raw_line in output_lines:
-        line = _ANSI_RE.sub("", raw_line)
-        m = _LOG_RE.match(line)
-        if not m:
-            continue
-        level, msg = m.group(1), m.group(2)
-        if level in ("E", "W"):
-            error_messages.append(msg)
-
-    if error_messages:
-        message = error_messages[-1]
-    else:
-        output_text = "\n".join(output_lines) if output_lines else "(no output captured)"
-        exit_info = f" (exit code {return_code})" if return_code is not None else ""
-        message = f"frpc process failed{exit_info}: {output_text}"
-
-    if any(reason in message.lower() for reason in _GONE_ERRORS):
-        return TunnelGoneError(tunnel_id=tunnel_id, message=message)
-    return TunnelConnectionError(tunnel_id=tunnel_id, message=message)
-
-
-# Server-side rejection reasons that retrying can never fix.
-_FATAL_LOGIN_ERRORS = _GONE_ERRORS + (
-    "invalid binding secret",
-    "invalid authentication token",
-    "token in login doesn't match",
-)
-
-
-def _scan_startup_line(line: str) -> Optional[str]:
-    """Classify an frpc startup log line.
-
-    Returns "connected" once the proxy is registered, "fatal" for login
-    failures that cannot succeed on retry and for a proxy the server refused
-    to start, and None for anything else (including transient login/connect
-    failures frpc will retry).
-    """
-    lowered = line.lower()
-    if "start proxy success" in lowered:
-        return "connected"
-    if "login to the server failed" in lowered or "connect to server error" in lowered:
-        if any(reason in lowered for reason in _FATAL_LOGIN_ERRORS):
-            return "fatal"
-    # frpc only retries a refused proxy after 30s, so report it now.
-    if "start error" in lowered:
-        return "fatal"
-    return None
-
-
-def _reports_gone(line: str) -> bool:
-    """Whether an frpc log line says the server rejected the registration as gone."""
-    lowered = line.lower()
-    if not any(
-        marker in lowered
-        for marker in ("login to the server failed", "connect to server error", "start error")
-    ):
-        return False
-    return any(reason in lowered for reason in _GONE_ERRORS)
 
 
 class Tunnel:
@@ -177,7 +69,8 @@ class Tunnel:
         self._gone = False
         # Serializes start() and restart().
         self._process_lock = asyncio.Lock()
-        self._output_lines: list[str] = []
+        # Output of the frpc launched last, kept after it exits.
+        self._output: Optional[FrpcOutput] = None
 
     @property
     def tunnel_id(self) -> Optional[str]:
@@ -316,7 +209,7 @@ class Tunnel:
                 raise
             raise TunnelError(f"Failed to write frpc config: {e}") from e
 
-        # 4. Start frpc process
+        # 4. Start frpc process and read its output
         try:
             self._process = subprocess.Popen(
                 [str(frpc_path), "-c", str(self._config_file)],
@@ -324,6 +217,7 @@ class Tunnel:
                 stderr=subprocess.PIPE,
                 text=True,
             )
+            self._start_output_reader(self._process)
         except BaseException as e:
             await self._cleanup()
             if isinstance(e, asyncio.CancelledError):
@@ -336,15 +230,6 @@ class Tunnel:
         except BaseException:
             await self._cleanup()
             raise
-
-        # 6. Start background thread to drain pipes (prevents buffer exhaustion)
-        try:
-            self._start_pipe_drain()
-        except BaseException as e:
-            await self._cleanup()
-            if isinstance(e, asyncio.CancelledError):
-                raise
-            raise TunnelConnectionError(message=f"Failed to start pipe drain: {e}") from e
 
         self._started = True
 
@@ -396,23 +281,22 @@ class Tunnel:
             self._process = process
 
             stopped = TunnelError("Tunnel was stopped during restart")
+            was_gone = self._gone
             try:
                 # A stop during launch saw no process to end.
                 if self._stopping:
                     raise stopped
+                # Cleared before the new frpc can report, so that a rejection
+                # arriving right after it connects is not wiped out.
+                self._gone = False
+                self._start_output_reader(process)
                 await self._wait_for_connection(process)
                 if self._stopping:
                     raise stopped
-                self._gone = False
-                self._start_pipe_drain(process)
             except BaseException as e:
-                if isinstance(e, TunnelGoneError):
-                    self._gone = True
+                # A restart that failed for another reason proves nothing.
+                self._gone = self._gone or was_gone
                 await asyncio.to_thread(self._end_process, process, kill=True)
-                # Show the failed frpc's output, not the old one's.
-                if hasattr(self, "_output_lock"):
-                    with self._output_lock:
-                        self._recent_output = list(self._output_lines[-50:])
                 if not self._stopping or not isinstance(e, Exception):
                     raise
                 self._process = None
@@ -515,61 +399,23 @@ class Tunnel:
 
     @property
     def recent_output(self) -> list[str]:
-        """Last N lines of frpc output (thread-safe). Falls back to startup output."""
-        if hasattr(self, "_output_lock"):
-            if not self.is_running and hasattr(self, "_drain_threads"):
-                for t in self._drain_threads:
-                    t.join(timeout=2.0)
-            with self._output_lock:
-                return list(self._recent_output)
-        return list(self._output_lines)
+        """Last lines of output from the frpc launched last (thread-safe)."""
+        output = self._output
+        if output is None:
+            return []
+        if not self.is_running:
+            output.join()
+        return output.lines()
 
-    def _start_pipe_drain(self, process: Optional[subprocess.Popen] = None) -> None:
-        """Start background threads to drain subprocess pipes.
+    def _start_output_reader(self, process: subprocess.Popen) -> None:
+        """Read the output of a just-launched frpc in the background."""
 
-        Keeps the last 50 lines in a ring buffer for diagnostics (e.g. crash
-        output) and forwards every line to the ``prime_tunnel.frpc`` logger,
-        so reconnects and dropped control connections show up in the
-        caller's logs. This also prevents the pipe buffer from filling up and
-        blocking frpc when it produces output.
-        """
-        process = process or self._process
-        if process is None:
-            return
+        def on_event(event: FrpcEvent) -> None:
+            # A replaced frpc's leftover output says nothing about the new one.
+            if event is FrpcEvent.GONE and self._process is process:
+                self._gone = True
 
-        # Each process gets its own lock and buffer, so a drain thread left
-        # over from a replaced frpc cannot write into the new one's output.
-        max_lines = 50
-        lock = threading.Lock()
-        recent: list[str] = list(self._output_lines[-max_lines:])
-        self._output_lock = lock
-        self._recent_output = recent
-        tunnel_id = self.tunnel_id
-
-        def drain_pipe(pipe):
-            """Read output from a pipe, retaining recent lines."""
-            if pipe is None:
-                return
-            try:
-                for line in pipe:
-                    line = line.rstrip("\n")
-                    if line:
-                        with lock:
-                            recent.append(line)
-                            if len(recent) > max_lines:
-                                recent.pop(0)
-                        _log_frpc_line(line, tunnel_id)
-                        # A replaced frpc's leftover output says nothing about the new one.
-                        if self._process is process and _reports_gone(line):
-                            self._gone = True
-            except (OSError, ValueError):
-                pass  # Pipe closed
-
-        self._drain_threads: list[threading.Thread] = []
-        for pipe in (process.stdout, process.stderr):
-            t = threading.Thread(target=drain_pipe, args=(pipe,), daemon=True)
-            t.start()
-            self._drain_threads.append(t)
+        self._output = FrpcOutput(process, self.tunnel_id, on_event=on_event)
 
     def _write_frpc_config(self) -> Path:
         """Generate and write frpc configuration file."""
@@ -633,74 +479,42 @@ subdomain = "{self._tunnel_info.tunnel_id}"
 
     async def _wait_for_connection(self, process: Optional[subprocess.Popen] = None) -> None:
         """Wait for frpc to establish connection."""
-        start_time = time.time()
-        self._output_lines = []
+        process = process or self._process
+        output = self._output
+        if process is None or output is None:
+            raise TunnelConnectionError(message="frpc process not running")
 
-        while time.time() - start_time < self.connection_timeout:
-            watched = process or self._process
-            if watched is None:
-                raise TunnelConnectionError(message="frpc process not running")
-
-            return_code = watched.poll()
+        deadline = time.monotonic() + self.connection_timeout
+        while time.monotonic() < deadline:
+            return_code = process.poll()
             if return_code is not None:
-                remaining_output = []
-                if watched.stdout:
-                    remaining_output.extend(watched.stdout.readlines())
-                if watched.stderr:
-                    remaining_output.extend(watched.stderr.readlines())
-                self._output_lines.extend(line.strip() for line in remaining_output if line.strip())
+                output.join()
+                raise self._frpc_error(output, return_code)
 
-                raise _parse_frpc_error(self._output_lines, self.tunnel_id, return_code)
-
-            if os.name == "posix":
-                # Set both pipes to non-blocking mode to drain them without deadlock
-                pipes_to_drain = []
-                original_flags = {}
-
-                for pipe in (watched.stdout, watched.stderr):
-                    if pipe:
-                        fd = pipe.fileno()
-                        fl = fcntl.fcntl(fd, fcntl.F_GETFL)
-                        original_flags[fd] = fl
-                        fcntl.fcntl(fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
-                        pipes_to_drain.append(pipe)
-
-                try:
-                    # Drain both stdout and stderr to prevent buffer exhaustion
-                    for pipe in pipes_to_drain:
-                        try:
-                            while True:
-                                line = pipe.readline()
-                                if not line:
-                                    break
-                                line = line.strip()
-                                if line:
-                                    self._output_lines.append(line)
-                                    verdict = _scan_startup_line(line)
-                                    if verdict == "connected":
-                                        return
-                                    if verdict == "fatal":
-                                        raise _parse_frpc_error(self._output_lines, self.tunnel_id)
-                        except (BlockingIOError, IOError):
-                            pass  # No more data available on this pipe
-                finally:
-                    # Restore original flags
-                    for fd, fl in original_flags.items():
-                        try:
-                            fcntl.fcntl(fd, fcntl.F_SETFL, fl)
-                        except (OSError, ValueError):
-                            pass  # Pipe may have closed
+            event = output.first_event
+            if event is FrpcEvent.CONNECTED:
+                return
+            # Anything else frpc reports is a failure it will not get past
+            # soon enough: it retries a refused proxy only after 30s.
+            if event is not None:
+                raise self._frpc_error(output)
 
             await asyncio.sleep(0.1)
 
-        # Timeout - include any captured output
-        output_text = (
-            "\n".join(self._output_lines) if self._output_lines else "(no output captured)"
-        )
+        output_text = "\n".join(output.lines()) or "(no output captured)"
         raise TunnelTimeoutError(
             f"Tunnel connection timed out after {self.connection_timeout}s\n"
             f"--- frpc output ---\n{output_text}\n-------------------"
         )
+
+    def _frpc_error(
+        self, output: FrpcOutput, return_code: Optional[int] = None
+    ) -> TunnelConnectionError:
+        """Build the exception for an frpc that failed to connect."""
+        message = failure_message(output.lines(), return_code)
+        if output.first_event is FrpcEvent.GONE:
+            return TunnelGoneError(tunnel_id=self.tunnel_id, message=message)
+        return TunnelConnectionError(tunnel_id=self.tunnel_id, message=message)
 
     async def __aenter__(self) -> "Tunnel":
         """Async context manager entry."""

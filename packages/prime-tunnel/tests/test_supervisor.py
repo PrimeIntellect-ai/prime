@@ -2,7 +2,7 @@ import asyncio
 import http.server
 import threading
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from test_tunnel import _client_for, _fake_frpc_binary, _frpc_line, _make_started_tunnel
@@ -171,6 +171,37 @@ def test_backoff_doubles_with_jitter_up_to_the_maximum(monkeypatch):
     for attempt, full in ((1, 1.0), (2, 2.0), (5, 16.0), (7, 60.0), (30, 60.0)):
         for _ in range(20):
             assert full / 2 <= supervisor._backoff(attempt) <= full
+
+
+def test_backoff_survives_a_very_long_outage():
+    supervisor = object.__new__(Supervisor)
+    assert supervisor._backoff(5000) <= Supervisor.backoff_max
+
+
+@pytest.mark.asyncio
+async def test_supervisor_does_not_restart_a_tunnel_someone_restarted_during_its_backoff(
+    monkeypatch,
+):
+    monkeypatch.setattr(Supervisor, "backoff_base", 0.4)
+    monkeypatch.setattr(Supervisor, "backoff_max", 0.4)
+    tunnel = _supervised_tunnel()
+    tunnel._process.poll.return_value = 1
+    tunnel._client.get_tunnel.return_value = tunnel._tunnel_info
+    tunnel.restart.side_effect = TunnelConnectionError("frps unreachable")
+    supervisor = _supervise(tunnel, [_Verdict.SERVING])
+
+    # The first restart fails; the supervisor then waits out its backoff.
+    await _until(lambda: tunnel.restart.await_count == 1)
+    await asyncio.sleep(0.05)
+    replacement = MagicMock()
+    replacement.poll.return_value = None
+    tunnel._process = replacement
+
+    await asyncio.sleep(0.6)
+    await supervisor.stop()
+
+    assert tunnel.restart.await_count == 1
+    assert tunnel.state is TunnelState.CONNECTED
 
 
 @pytest.mark.asyncio
@@ -504,5 +535,26 @@ async def test_supervised_tunnel_dies_and_ends_frpc_when_a_reconnect_is_rejected
             assert await asyncio.wait_for(tunnel.wait_dead(), timeout=10.0) is True
             await _until(lambda: not tunnel.is_running, timeout=10.0)
             assert states == [TunnelState.CONNECTED, TunnelState.DEAD]
+        finally:
+            await tunnel.stop()
+
+
+@pytest.mark.asyncio
+async def test_supervised_tunnel_ends_frpc_that_is_rejected_right_after_connecting(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    connected = _frpc_line("I", "[t-test123] start proxy success")
+    rejected = _frpc_line("W", "connect to server error: Tunnel is inactive")
+    # Both lines arrive before start() returns, so before the supervisor exists.
+    frpc = _fake_frpc_binary(tmp_path, f"echo '{connected}'\necho '{rejected}'\nexec sleep 30\n")
+    tunnel = Tunnel(local_port=8080, connection_timeout=10.0, supervise=True)
+    _client_for(tunnel)
+
+    with patch("prime_tunnel.tunnel.get_frpc_path", return_value=frpc):
+        await tunnel.start()
+        try:
+            assert await asyncio.wait_for(tunnel.wait_dead(), timeout=10.0) is True
+            await _until(lambda: not tunnel.is_running, timeout=10.0)
         finally:
             await tunnel.stop()

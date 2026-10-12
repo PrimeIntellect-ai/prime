@@ -77,8 +77,6 @@ class Supervisor:
         self._task: Optional[asyncio.Task] = None
         self._wake = asyncio.Event()
         self._probe_now = False
-        # frpc itself reported the registration gone, so it is not serving.
-        self._frpc_gone = False
         self._warned_missing_header = False
 
     def start(self) -> None:
@@ -112,10 +110,9 @@ class Supervisor:
         """Take one frpc event. Must be called on the event loop."""
         if event is FrpcEvent.CONNECTED:
             return
-        if event is FrpcEvent.GONE:
-            self._frpc_gone = True
-        else:
-            # frpc gave up on something it retries slowly or never.
+        # GONE is already recorded on the tunnel; anything else means frpc
+        # gave up on something it retries slowly or never.
+        if event is not FrpcEvent.GONE:
             self._probe_now = True
         self._wake.set()
 
@@ -123,7 +120,8 @@ class Supervisor:
         """Seconds to wait before restart number `attempt` in a row (from 0)."""
         if attempt <= 0:
             return 0.0
-        delay = min(self.backoff_max, self.backoff_base * 2 ** (attempt - 1))
+        # The exponent is capped so that a long outage cannot overflow it.
+        delay = min(self.backoff_max, self.backoff_base * 2 ** min(attempt - 1, 32))
         return delay * random.uniform(0.5, 1.0)
 
     async def _run(self) -> None:
@@ -199,9 +197,12 @@ class Supervisor:
                 attempts,
             )
             if delay:
+                process = tunnel._process
                 await asyncio.sleep(delay)
                 if tunnel._stopping or tunnel.is_gone or tunnel._process_lock.locked():
                     continue
+                if tunnel._process is not process:
+                    continue  # Someone else restarted it meanwhile
 
             try:
                 await tunnel.restart()
@@ -223,7 +224,6 @@ class Supervisor:
             logger.info("Restarted frpc of tunnel %s", tunnel.url)
             # Whatever the replaced frpc reported no longer applies.
             self._probe_now = False
-            self._frpc_gone = tunnel.is_gone
             next_probe = time.monotonic() + self.settle
 
     async def _give_up(self) -> None:
@@ -236,7 +236,7 @@ class Supervisor:
         # A frpc the service rejected serves nothing and would retry forever.
         # One that never reported it may still be serving: leave that alone.
         process = tunnel._process
-        if self._frpc_gone and process is not None:
+        if tunnel._frpc_gone and process is not None:
             await asyncio.to_thread(tunnel._end_process, process)
 
     async def _check(

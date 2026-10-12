@@ -90,6 +90,8 @@ class Tunnel:
         self._started = False
         self._stopping = False
         self._gone = False
+        # The running frpc itself reported the registration gone.
+        self._frpc_gone = False
         # Serializes start() and restart().
         self._process_lock = asyncio.Lock()
         # Output of the frpc launched last, kept after it exits.
@@ -279,6 +281,7 @@ class Tunnel:
     async def _register_and_connect(self) -> str:
         """Register the tunnel, start frpc and wait for it to connect."""
         self._gone = False
+        self._frpc_gone = False
         self._recovering = False
         # 1. Get frpc binary
         frpc_path = await asyncio.to_thread(get_frpc_path)
@@ -387,6 +390,7 @@ class Tunnel:
                 # Cleared before the new frpc can report, so that a rejection
                 # arriving right after it connects is not wiped out.
                 self._gone = False
+                self._frpc_gone = False
                 self._start_output_reader(process)
                 await self._wait_for_connection(process)
                 if self._stopping:
@@ -527,6 +531,7 @@ class Tunnel:
             if self._process is not process:
                 return
             if event is FrpcEvent.GONE:
+                self._frpc_gone = True
                 self._mark_gone()
             supervisor, loop = self._supervisor, self._loop
             if supervisor is not None and loop is not None:

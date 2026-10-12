@@ -112,8 +112,8 @@ def create(
     console.print(f"Use it with: prime train config.toml --volume {volume.name}")
     if warm:
         console.print(
-            "If your account has reserved cluster capacity, a session starts in the "
-            "background for faster put/ssh."
+            "If your account has a cluster allocation or your team owns a cluster, a session "
+            "starts in the background for faster put/ssh."
         )
 
 

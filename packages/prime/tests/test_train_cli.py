@@ -999,6 +999,7 @@ def test_dispatch_post_outlasts_the_backend_validator_budget(monkeypatch, tmp_pa
     """The shared 30s client default expires before the backend's 60s
     validator budget, which is what made the timeout routine."""
     from prime_cli.api.training import DISPATCH_HTTP_TIMEOUT_S
+    from prime_cli.core.client import DEFAULT_CONNECT_TIMEOUT_S
 
     captured = _mock_run_post(monkeypatch, dict(_BILLED_RESPONSE))
     cfg = tmp_path / "fft.toml"
@@ -1010,14 +1011,21 @@ def test_dispatch_post_outlasts_the_backend_validator_budget(monkeypatch, tmp_pa
 
     assert result.exit_code == 0, result.output
     assert captured["endpoint"] == "/training/runs"
-    assert captured["timeout"] == DISPATCH_HTTP_TIMEOUT_S
-    assert captured["timeout"] > 60, (
+    # The READ budget must outlast the server's own validator budget,
+    # while the connect budget stays short — a host that never answers
+    # is a plain failure, not an ambiguous outcome, and must not hang
+    # for the full dispatch window.
+    assert captured["timeout"].read == DISPATCH_HTTP_TIMEOUT_S
+    assert captured["timeout"].connect == DEFAULT_CONNECT_TIMEOUT_S
+    assert captured["timeout"].read > 60, (
         "the dispatch POST must outlast the backend's _VALIDATOR_HTTP_TIMEOUT_S "
         "(60s) or a cold validator times out the client while the run is created"
     )
 
 
-def _timeout_dispatch(monkeypatch, tmp_path: Path, *, runs, name=None, extra=()):
+def _timeout_dispatch(
+    monkeypatch, tmp_path: Path, *, runs, name=None, extra=(), legacy_total_none=False
+):
     """Dispatch an FFT config whose POST times out, with `runs` as the
     recovery lookup's answer (an exception class re-raises instead)."""
     from prime_cli.api.rl import RLRun, RLRunPage
@@ -1036,7 +1044,14 @@ def _timeout_dispatch(monkeypatch, tmp_path: Path, *, runs, name=None, extra=())
     def list_runs(self, team_id=None, *, mine=False, page=1, limit=20):
         if isinstance(runs, type) and issubclass(runs, Exception):
             raise runs("boom")
-        return RLRunPage(runs=[RLRun.model_validate(r) for r in runs])
+        # `total` set: a modern backend that honoured `mine`, so recovery
+        # trusts the server-side filter. `legacy_total_none=True` models
+        # the older backend that ignored page/limit/mine and returned the
+        # whole team history, which recovery has to re-filter itself.
+        return RLRunPage(
+            runs=[RLRun.model_validate(r) for r in runs],
+            total=None if legacy_total_none else len(runs),
+        )
 
     monkeypatch.setattr("prime_cli.api.rl.RLClient.list_runs", list_runs)
 
@@ -1082,9 +1097,13 @@ def test_timed_out_dispatch_names_the_run_it_created(monkeypatch, tmp_path: Path
     result = _timeout_dispatch(monkeypatch, tmp_path, runs=[_candidate_run()])
 
     assert result.exit_code == 1, result.output
-    assert "This dispatch did create a run" in result.output
+    # "most likely", never "did": this is a time-window heuristic, not a
+    # correlation id, so claiming certainty could send the user to stop
+    # an unrelated run.
+    assert "most likely" in result.output
+    assert "did create a run" not in result.output
     assert "cyac46dphnrcw0pcbqcdg6od" in result.output
-    assert "Nothing to retry" in result.output
+    assert "before" in result.output and "retrying" in result.output
 
 
 def test_timed_out_dispatch_matches_on_the_config_name(monkeypatch, tmp_path: Path) -> None:
@@ -1097,13 +1116,13 @@ def test_timed_out_dispatch_matches_on_the_config_name(monkeypatch, tmp_path: Pa
         runs=[_candidate_run(name="someone-elses-run")],
     )
 
-    assert "This dispatch did create a run" not in result.output
+    assert "most likely" not in result.output
     assert "No matching run found yet" in result.output
 
     result = _timeout_dispatch(
         monkeypatch, tmp_path, name="my-run", runs=[_candidate_run(name="my-run")]
     )
-    assert "This dispatch did create a run" in result.output
+    assert "most likely" in result.output
 
 
 def test_timed_out_dispatch_ignores_terminal_and_stale_runs(monkeypatch, tmp_path: Path) -> None:
@@ -1141,7 +1160,7 @@ def test_timed_out_dispatch_lists_every_candidate_when_ambiguous(
     assert "could be yours" in result.output
     assert "run-a" in result.output
     assert "run-b" in result.output
-    assert "This dispatch did create a run" not in result.output
+    assert "most likely" not in result.output
 
 
 def test_timed_out_dispatch_says_so_when_the_lookup_itself_fails(
@@ -1181,3 +1200,61 @@ def test_timed_out_dispatch_report_is_plain_mode_clean(monkeypatch, tmp_path: Pa
     assert "cyac46dphnrcw0pcbqcdg6od" in result.output
     assert "[bold red]" not in result.output
     assert "[cyan]" not in result.output
+
+
+def test_dispatch_timeout_keeps_the_connect_budget_short() -> None:
+    """Only the READ budget is extended for dispatch.
+
+    Handing httpx a bare number sets connect/read/write/pool alike,
+    which would stretch the 10s connect limit to the full dispatch
+    budget — so a host that blackholes connections would hang for three
+    minutes before reporting an ambiguous outcome, when it never reached
+    the backend and the outcome is simply "failed".
+    """
+    from prime_cli.api.training import DISPATCH_HTTP_TIMEOUT_S, DISPATCH_TIMEOUT
+    from prime_cli.core.client import DEFAULT_CONNECT_TIMEOUT_S
+
+    assert DISPATCH_TIMEOUT.read == DISPATCH_HTTP_TIMEOUT_S
+    assert DISPATCH_TIMEOUT.connect == DEFAULT_CONNECT_TIMEOUT_S
+    assert DISPATCH_TIMEOUT.connect < DISPATCH_TIMEOUT.read
+
+
+def test_recovery_applies_the_owner_filter_on_a_legacy_backend() -> None:
+    """A backend that ignores `mine` must not let a teammate's run be
+    reported as this dispatch.
+
+    `total is None` means the backend predates pagination and returned
+    the full team history, so `mine=True` bought nothing. The list
+    command applies a client-side owner filter in that case; recovery
+    has to as well, or it could name someone else's run and offer to
+    stop it.
+    """
+    import inspect
+
+    from prime_cli.commands import rl as rl_cmd
+
+    src = inspect.getsource(rl_cmd._find_runs_created_since)
+    assert "total is None" in src, "recovery must detect a legacy backend that ignored `mine`"
+    assert "user_id" in src, "recovery must filter to the caller on a legacy backend"
+
+
+def test_recovery_ignores_a_teammates_run_on_a_legacy_backend(monkeypatch, tmp_path: Path) -> None:
+    """A backend that ignored `mine` must not get a teammate's run named.
+
+    `total is None` means the backend predates pagination and returned
+    the full team history, so `mine=True` bought nothing. Without a
+    client-side owner filter the only candidate left standing could
+    belong to someone else — and recovery would offer to stop it.
+    """
+    result = _timeout_dispatch(
+        monkeypatch,
+        tmp_path,
+        runs=[_candidate_run(userId="someone-else")],
+        legacy_total_none=True,
+    )
+
+    assert result.exit_code == 1, result.output
+    out = result.output
+    assert "cyac46dphnrcw0pcbqcdg6od" not in out, (
+        f"a teammate's run must never be named as this dispatch:\n{out}"
+    )

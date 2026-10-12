@@ -14,6 +14,13 @@ def default_user_agent() -> str:
     return f"prime-cli/{__version__} python/{python_version}"
 
 
+# Named so callers overriding the READ budget can keep this one.
+# A bare number handed to httpx sets connect/read/write/pool alike,
+# which would turn a blackholed host into a long ambiguous hang.
+DEFAULT_CONNECT_TIMEOUT_S = 10.0
+DEFAULT_READ_TIMEOUT_S = 30.0
+
+
 class APIError(Exception):
     """Base API exception"""
 
@@ -95,7 +102,7 @@ class APIClient:
         self.client = httpx.Client(
             headers=headers,
             follow_redirects=True,
-            timeout=httpx.Timeout(30.0, connect=10.0),
+            timeout=httpx.Timeout(DEFAULT_READ_TIMEOUT_S, connect=DEFAULT_CONNECT_TIMEOUT_S),
         )
 
     def _check_auth_required(self) -> None:
@@ -257,7 +264,7 @@ class AsyncAPIClient:
         self.client = httpx.AsyncClient(
             headers=headers,
             follow_redirects=True,
-            timeout=httpx.Timeout(30.0, connect=10.0),
+            timeout=httpx.Timeout(DEFAULT_READ_TIMEOUT_S, connect=DEFAULT_CONNECT_TIMEOUT_S),
         )
 
     def _check_auth_required(self) -> None:

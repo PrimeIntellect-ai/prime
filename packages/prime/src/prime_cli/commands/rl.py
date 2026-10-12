@@ -1421,6 +1421,20 @@ def _find_runs_created_since(
         page = RLClient(APIClient()).list_runs(
             team_id=team_id, mine=True, limit=_DISPATCH_RECOVERY_PAGE_SIZE
         )
+        # `total is None` means the backend predates pagination and
+        # silently ignored page/limit/mine, returning the full team
+        # history — so `mine=True` bought us nothing and a teammate's
+        # recent run could be the only candidate left standing. The list
+        # command applies the same client-side owner filter in this
+        # case; recovery has to as well, or it could name someone
+        # else's run as this dispatch and offer to stop it. Without a
+        # configured user_id there is no way to attribute at all, so
+        # report that we could not check rather than guess.
+        if page.total is None:
+            owner = Config().user_id
+            if not owner:
+                return _LOOKUP_FAILED
+            page.runs = [r for r in page.runs if r.user_id == owner]
     except Exception:
         # Deliberately broad: this runs inside an error handler, so a
         # second failure here must degrade to "we could not check"
@@ -1493,13 +1507,21 @@ def _report_timed_out_dispatch(
         return
     if len(found) == 1:
         run = found[0]
+        # Deliberately "likely", not "did". This is a time-window
+        # heuristic, not a correlation id: another unnamed run of yours
+        # started inside the same window would be the sole candidate
+        # too, and if the request never reached the backend at all then
+        # nothing here belongs to this dispatch. Claiming certainty
+        # would send the user to inspect — or stop — an unrelated run.
         out.print(
-            f"[green]This dispatch did create a run:[/green] [bold]{rich_escape(run.id)}[/bold] "
+            "[green]A run was created in this window and is most likely "
+            f"this dispatch:[/green] [bold]{rich_escape(run.id)}[/bold] "
             f"({rich_escape(run.status)})"
         )
         out.print(
-            f"Nothing to retry. Follow it with [cyan]prime train get {run.id}[/cyan] "
-            f"or stop it with [cyan]prime train stop {run.id}[/cyan]."
+            f"Check it with [cyan]prime train get {run.id}[/cyan] before "
+            "retrying — if it is your dispatch there is nothing to retry, "
+            f"and you can stop it with [cyan]prime train stop {run.id}[/cyan]."
         )
         return
     out.print("Runs created in this window that could be yours:")

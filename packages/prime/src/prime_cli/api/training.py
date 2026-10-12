@@ -15,6 +15,8 @@ from pydantic import ValidationError as PydanticValidationError
 
 from prime_cli.core import APIClient, APIError, NotFoundError, default_user_agent
 
+from ..core.client import DEFAULT_CONNECT_TIMEOUT_S
+
 # The only repo the hosted source overlay runs code from. The platform and
 # validator enforce the same restriction server-side; the CLI just resolves
 # `--pr N` against it so a fork PR fails here with a clear message instead
@@ -39,6 +41,18 @@ _GITHUB_API = "https://api.github.com"
 # residual case: a timeout here is ambiguous by nature, never proof that
 # nothing was created.
 DISPATCH_HTTP_TIMEOUT_S = 180
+
+# Only the READ budget is extended. Handing httpx a bare number sets
+# connect, read, write and pool alike, which would also stretch the
+# client's 10s connect limit to three minutes — so a host that
+# blackholes connections would hang for the full dispatch budget before
+# reporting an ambiguous outcome, when it never reached the backend at
+# all and the outcome is simply "failed". Connect stays short precisely
+# so that case stays unambiguous.
+DISPATCH_TIMEOUT = httpx.Timeout(
+    DISPATCH_HTTP_TIMEOUT_S,
+    connect=DEFAULT_CONNECT_TIMEOUT_S,
+)
 
 
 class HostedTrainingRunResponse(BaseModel):
@@ -269,7 +283,7 @@ class HostedTrainingClient:
         the dispatch command must treat as "outcome unknown" rather than
         "failed" (see DISPATCH_HTTP_TIMEOUT_S).
         """
-        response = self.client.post("/training/runs", json=payload, timeout=DISPATCH_HTTP_TIMEOUT_S)
+        response = self.client.post("/training/runs", json=payload, timeout=DISPATCH_TIMEOUT)
         return HostedTrainingRunResponse.model_validate(response)
 
     def delete_run(self, run_id: str) -> Dict[str, Any]:

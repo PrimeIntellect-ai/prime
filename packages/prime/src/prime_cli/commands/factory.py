@@ -59,7 +59,10 @@ UNUSED_NOTE = "unused = reserved by a workload but not running anything — not 
 SCHEDULER_LEGEND = (
     "Slurm cluster: — = direct platform placement; unknown = deployment not identified."
 )
-TRUNCATED_NOTE = "Showing first 200 workloads — refine with --cluster/--user/--state"
+TRUNCATED_NOTE = (
+    "Showing first 200 workloads — narrow the server query with "
+    "--type/--state/--since, or raise --limit"
+)
 
 # Plain-language names for source kinds shown to users. The internal enum
 # values (e.g. "capacity") never appear in table output.

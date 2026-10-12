@@ -1405,7 +1405,7 @@ def test_workloads_truncated_envelope_renders_cut_note(monkeypatch: pytest.Monke
     result = runner.invoke(app, ["factory", "workloads"], env=TEST_ENV)
     output = strip_ansi(result.output)
     assert result.exit_code == 0, result.output
-    assert "Showing first 200 workloads — refine with --cluster/--user/--state" in output
+    assert "narrow the server query with --type/--state/--since" in output
 
     # absent flag (older backends) or False: no cut note
     _install(monkeypatch, _workloads_payload(_default_rows()))

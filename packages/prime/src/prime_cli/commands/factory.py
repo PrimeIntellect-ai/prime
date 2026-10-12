@@ -1213,7 +1213,9 @@ def factory_workloads(
         # Matching-but-suppressed rows are NOT a miss (the warnings above
         # carry their unavailability), and a degraded relevant source can
         # never establish a no-match either — warning-only in both cases.
-        _print_empty_workloads_result(type, state, since, user, cluster, slurm_cluster, limit)
+        _print_empty_workloads_result(
+            type, state, since, user, cluster, slurm_cluster, limit, bool(workloads.truncated)
+        )
     return None
 
 
@@ -1225,6 +1227,7 @@ def _print_empty_workloads_result(
     cluster: Optional[str],
     slurm_cluster: Optional[str],
     limit: Optional[int],
+    truncated: bool = False,
 ) -> None:
     # Distinguish an honestly empty fleet from filters that matched
     # nothing: --type/--state/--since are server-side, so a filtered
@@ -1237,12 +1240,16 @@ def _print_empty_workloads_result(
         or cluster is not None
         or slurm_cluster is not None
     )
-    if slurm_cluster is not None and limit is not None:
-        # The server applies any limit BEFORE the client-side scheduler
-        # predicate — beyond the fetched page a match cannot be proven
-        # absent (implicit terminal limits included).
+    # The page was cut before any client predicate when a limit was sent
+    # or the backend flagged truncation — a miss beyond it is unprovable.
+    capped_window = limit if limit is not None else (200 if truncated else None)
+    if filters_active and capped_window is not None:
+        # The page was cut server-side (explicit limit or a truncated
+        # envelope) BEFORE any client predicate ran — a miss beyond the
+        # fetched window cannot be proven absent.
         console.print(
-            f"No factory workloads match the given filters in the fetched window ({limit} rows)."
+            "No factory workloads match the given filters in the fetched "
+            f"window ({capped_window} rows)."
         )
     elif filters_active:
         # A filtered view matched nothing in the fetched data — say so even

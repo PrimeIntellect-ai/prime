@@ -1432,3 +1432,36 @@ def test_workloads_state_cell_native_state_has_space(monkeypatch: pytest.MonkeyP
     assert result.exit_code == 0, result.output
     assert "queued (PENDING)" in output
     assert "queued(PENDING)" not in output
+
+
+def test_workloads_truncated_empty_filtered_result_is_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Bugbot: the truncated flag was ignored on empty client-filtered
+    # results — a --user miss inside a backend-capped page claimed a
+    # definitive no-match. With the envelope flagging truncation, the
+    # miss wording names the fetched window.
+    payload = {
+        "schema_version": 1,
+        "as_of": _iso(datetime.now(timezone.utc)),
+        "workloads": [],
+        "sources": [_source("training")],
+        "truncated": True,
+    }
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(app, ["factory", "workloads", "--user", "nobody"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "in the fetched window (200 rows)" in output
+    assert "No factory workloads found." not in output
+
+    # without truncation the same live miss stays definitive
+    payload.pop("truncated")
+    _install(monkeypatch, payload)
+    plain = runner.invoke(app, ["factory", "workloads", "--user", "nobody"], env=TEST_ENV)
+    plain_output = strip_ansi(plain.output)
+    assert plain.exit_code == 0, plain.output
+    assert "No factory workloads match the given filters." in plain_output
+    assert "fetched window" not in plain_output

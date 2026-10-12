@@ -122,6 +122,11 @@ class FactoryWorkload(BaseModel):
     started_at: AwareUTCDatetime = None
     # Terminal rows carry a nullable end timestamp.
     ended_at: AwareUTCDatetime = None
+    # Slurm rows name the deployment that scheduled them — or carry None
+    # when the deployment could not be identified (the CLI renders that as
+    # "unknown", never as direct placement). Training and inference rows
+    # are direct placement and carry None.
+    scheduler_display_name: Optional[str] = None
     reason: Optional[str] = None
     source: FactorySource
 
@@ -135,6 +140,9 @@ class FactoryWorkloads(BaseModel):
     # not an empty fleet — keep those distinguishable.
     workloads: List[FactoryWorkload]
     sources: List[FactorySource]
+    # Optional: the backend caps the default window at 200 rows and sets
+    # this flag when it did — the CLI tells the user their view is cut.
+    truncated: Optional[bool] = None
 
     # The raw API response is retained so ``--json`` can echo the exact
     # server payload instead of a re-serialization of the parsed model.

@@ -1037,3 +1037,492 @@ def test_workloads_json_help_documents_terminal_fields() -> None:
     assert result.exit_code == 0, result.output
     assert "ended_at" in result.output
     assert "reason" in result.output
+
+
+def test_workloads_scheduler_column_mixed_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Slurm rows carry the deployment display name; training/inference rows
+    # are direct placement and render a dash.
+    slurm_row = _workload("slurm:ac12:8421", "slurm", "running")
+    slurm_row["scheduler_display_name"] = "research-b300-slurm"
+    training_row = _workload("training:run-7", "training", "running")
+    inference_row = _workload("inference:job-3", "inference", "queued")
+    payload = _workloads_payload([slurm_row, training_row, inference_row])
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(app, ["factory", "workloads"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "SLURM CLUSTER" in output
+    assert "research-b300-slurm" in output
+    # The direct-placement rows show the legend's em dash — never the
+    # generic missing-value hyphen.
+    assert "—" in output
+    assert "direct platform placement" in output  # the legend defines the glyph
+
+
+def test_workloads_scheduler_column_escaped(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Rich markup in the deployment name must never crash rendering.
+    row = _workload("slurm:ac12:8421", "slurm", "running")
+    row["scheduler_display_name"] = "slurm-[bold]team"
+    _install(monkeypatch, _workloads_payload([row]))
+
+    result = runner.invoke(app, ["factory", "workloads"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "slurm-[bold]team" in output
+
+
+def test_workloads_scheduler_null_slurm_renders_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A failed Slurm deployment lookup is NOT direct placement: the cell
+    # renders "unknown", never a dash.
+    row = _workload("slurm:ac12:8422", "slurm", "completed")
+    row["scheduler_display_name"] = None
+    _install(monkeypatch, _workloads_payload([row]))
+
+    result = runner.invoke(app, ["factory", "workloads", "--state", "completed"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "SLURM CLUSTER" in output
+    assert "unknown" in output
+    assert "None" not in output  # nulls never leak
+    # the legend explains the distinction
+    assert "unknown = deployment not identified" in output
+
+
+def test_workloads_help_documents_slurm_cluster_field() -> None:
+    result = runner.invoke(app, ["factory", "workloads", "--help"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    # wrap-safe fragments of the documented line
+    assert "scheduler_display_name" in result.output
+    assert "slurm cluster" in result.output.lower()
+    assert "deployment" in result.output
+    assert "placement" in result.output
+    # the help describes BOTH meanings of null: direct placement AND
+    # unidentified deployments (rendered unknown)
+    assert "unidentified deployment" in result.output
+    assert "unknown" in result.output
+
+
+def test_workloads_scheduler_filter_table_and_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    # --scheduler narrows client-side (table + JSON); rows without a
+    # matching deployment never pass; the filtered-empty wording applies.
+    slurm_a = _workload("slurm:ac12:1", "slurm", "running")
+    slurm_a["scheduler_display_name"] = "b300-slurm"
+    slurm_b = _workload("slurm:ac12:2", "slurm", "running")
+    slurm_b["scheduler_display_name"] = "h200-slurm"
+    training = _workload("training:run-1", "training", "running")
+    payload = _workloads_payload([slurm_a, slurm_b, training])
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(
+        app, ["factory", "workloads", "--slurm-cluster", "b300-slurm"], env=TEST_ENV
+    )
+    output = strip_ansi(result.output)
+    assert result.exit_code == 0, result.output
+    assert "slurm:ac12:1" in output
+    assert "slurm:ac12:2" not in output and "training:run-1" not in output
+
+    json_result = runner.invoke(
+        app, ["factory", "workloads", "--slurm-cluster", "b300-slurm", "--json"], env=TEST_ENV
+    )
+    data = json.loads(json_result.stdout)
+    assert [w["id"] for w in data["workloads"]] == ["slurm:ac12:1"]
+
+    miss = runner.invoke(app, ["factory", "workloads", "--slurm-cluster", "nope"], env=TEST_ENV)
+    miss_output = strip_ansi(miss.output)
+    assert miss.exit_code == 0, miss.output
+    assert "No factory workloads match the given filters." in miss_output
+
+
+def test_workloads_duplicate_scheduler_labels_render_distinctly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Two rows can share a deployment label; rows are never merged or
+    # deduplicated — IDs stay distinct.
+    row_a = _workload("slurm:ac12:1", "slurm", "running")
+    row_a["scheduler_display_name"] = "b300-slurm"
+    row_b = _workload("slurm:ac12:2", "slurm", "running")
+    row_b["scheduler_display_name"] = "b300-slurm"
+    _install(monkeypatch, _workloads_payload([row_a, row_b]))
+
+    result = runner.invoke(app, ["factory", "workloads"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "slurm:ac12:1" in output and "slurm:ac12:2" in output
+    assert output.count("b300-slurm") >= 2
+
+
+def test_workloads_scheduler_with_terminal_state_uses_widest_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A client-side --scheduler narrow happens AFTER the server pages: the
+    # implicit history limit must be the widest bounded page (200), never
+    # the default 50 that could truncate the deployment's history before
+    # the filter sees it.
+    row = _workload("slurm:ac12:1", "slurm", "completed")
+    row["scheduler_display_name"] = "b300-slurm"
+    dummy = _install(monkeypatch, _workloads_payload([row]))
+
+    result = runner.invoke(
+        app,
+        ["factory", "workloads", "--state", "completed", "--scheduler", "b300-slurm"],
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert dummy.calls[0]["params"]["limit"] == 200
+    # only slurm rows can match a scheduler deployment: the type is
+    # narrowed server-side so the page fills with matchable rows
+    assert dummy.calls[0]["params"]["workload_type"] == "slurm"
+    # without the scheduler filter, the terminal default stays 50
+    _install(monkeypatch, _workloads_payload([row]))
+    plain = runner.invoke(app, ["factory", "workloads", "--state", "completed"], env=TEST_ENV)
+    assert plain.exit_code == 0, plain.output
+
+
+def test_workloads_scheduler_view_excludes_non_slurm_outages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # --scheduler with no --type: only Slurm rows can match, so an
+    # unrelated degraded training source with zero rows must NOT warn, and
+    # the filtered-empty wording stands.
+    payload = {
+        "schema_version": 1,
+        "as_of": _iso(datetime.now(timezone.utc)),
+        "workloads": [],
+        "sources": [
+            _source("training", status="stale", age_seconds=7200),
+            _source("slurm"),
+        ],
+    }
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(app, ["factory", "workloads", "--slurm-cluster", "nope"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "training jobs unavailable" not in output
+    assert "No factory workloads match the given filters." in output
+
+
+def test_workloads_scheduler_terminal_empty_says_bounded_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Beyond one server page a client-side scheduler match cannot be
+    # proven absent — the empty result names the fetched window, never a
+    # bare "no matches".
+    empty = {
+        "schema_version": 1,
+        "as_of": _iso(datetime.now(timezone.utc)),
+        "workloads": [],
+        "sources": [_source("slurm")],
+        "truncated": True,
+    }
+    _install(monkeypatch, empty)
+
+    result = runner.invoke(
+        app,
+        ["factory", "workloads", "--state", "completed", "--scheduler", "b300-slurm"],
+        env=TEST_ENV,
+    )
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "in the fetched window (200 rows)" in output
+    assert "No factory workloads found." not in output
+
+    # merely SUPPLYING the limit proves nothing: an unflagged short
+    # response was not cut, so the miss is definitive
+    unflagged = {
+        "schema_version": 1,
+        "as_of": _iso(datetime.now(timezone.utc)),
+        "workloads": [],
+        "sources": [_source("slurm")],
+    }
+    _install(monkeypatch, unflagged)
+    short = runner.invoke(
+        app,
+        ["factory", "workloads", "--state", "completed", "--scheduler", "b300-slurm"],
+        env=TEST_ENV,
+    )
+    short_output = strip_ansi(short.output)
+    assert short.exit_code == 0, short.output
+    assert "No factory workloads match the given filters." in short_output
+    assert "fetched window" not in short_output
+
+    # An explicit --limit on a LIVE scheduler query is bounded too: the
+    # server pages before the client predicate, so a miss is unprovable.
+    _install(monkeypatch, empty)
+    live_limited = runner.invoke(
+        app,
+        ["factory", "workloads", "--scheduler", "b300-slurm", "--limit", "25"],
+        env=TEST_ENV,
+    )
+    live_output = strip_ansi(live_limited.output)
+    assert live_limited.exit_code == 0, live_limited.output
+    assert "in the fetched window (25 rows)" in live_output
+
+    # An UNFLAGGED live scheduler miss (no truncation, short response) is
+    # definitive: nothing was cut, so the plain filter wording stands.
+    _install(monkeypatch, unflagged)
+    live_plain = runner.invoke(
+        app, ["factory", "workloads", "--slurm-cluster", "b300-slurm"], env=TEST_ENV
+    )
+    plain_output = strip_ansi(live_plain.output)
+    assert live_plain.exit_code == 0, live_plain.output
+    assert "No factory workloads match the given filters." in plain_output
+    assert "fetched window" not in plain_output
+
+
+def test_workloads_explicit_type_wins_over_scheduler_narrowing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An explicit --type keeps its own server-side scope.
+    dummy = _install(monkeypatch, _workloads_payload(_default_rows()))
+    result = runner.invoke(
+        app,
+        ["factory", "workloads", "--type", "training", "--scheduler", "b300-slurm"],
+        env=TEST_ENV,
+    )
+    assert result.exit_code == 0, result.output
+    assert dummy.calls[0]["params"]["workload_type"] == "training"
+
+
+def test_workloads_scheduler_cluster_miss_excludes_implicit_slurm_scope_kinds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # --scheduler narrows the request to slurm server-side: an unmatched
+    # --cluster must not report degraded zero-row training/inference
+    # sources excluded from that request.
+    rows = _default_rows()
+    for row in rows:
+        row["cluster_display_name"] = "research-b300"
+    sources = [
+        _source("training", status="stale", age_seconds=7200),
+        _source("inference", status="stale", age_seconds=7200),
+        _source("slurm"),
+    ]
+    payload = _workloads_payload(rows, sources)
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(
+        app,
+        ["factory", "workloads", "--scheduler", "b300-slurm", "--cluster", "nope"],
+        env=TEST_ENV,
+    )
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 1, result.output
+    assert "training jobs unavailable" not in output
+    assert "inference jobs unavailable" not in output
+    assert "No cluster matched" in output
+
+
+def test_workloads_scheduler_miss_keeps_degraded_slurm_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Slurm source degraded, payload carries only fresh rows of deployment
+    # B: querying deployment A filters every row out — the degraded Slurm
+    # read may be exactly the omitted portion, so the warning must stay.
+    row_b = _workload("slurm:ac12:9", "slurm", "running")
+    row_b["scheduler_display_name"] = "h200-slurm"
+    payload = _workloads_payload(
+        [row_b],
+        sources=[_source("slurm", status="stale", age_seconds=7200)],
+    )
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(
+        app, ["factory", "workloads", "--slurm-cluster", "b300-slurm"], env=TEST_ENV
+    )
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "slurm jobs unavailable" in output
+    # A degraded read can never establish a miss: warning-only, no
+    # "no match" claim.
+    assert "No factory workloads match" not in output
+
+
+def test_workloads_matching_but_stale_rows_are_not_a_miss(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A filter that MATCHES rows whose evidence is stale is not a no-match:
+    # the warning carries the unavailability and nothing else prints —
+    # never a contradictory "No factory workloads match the given filters."
+    stale_row = _workload("slurm:ac12:7", "slurm", "running")
+    stale_row["scheduler_display_name"] = "b300-slurm"
+    stale_row["source"] = _source("slurm", status="stale", age_seconds=7200)
+    payload = _workloads_payload(
+        [stale_row],
+        sources=[_source("slurm", status="stale", age_seconds=7200)],
+    )
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(
+        app, ["factory", "workloads", "--slurm-cluster", "b300-slurm"], env=TEST_ENV
+    )
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "slurm jobs unavailable" in output  # or mixed/unavailable wording
+    assert "No factory workloads match" not in output
+
+    # same for --user: a matching stale row is not a miss
+    stale_training = _workload("training:run-9", "training", "running")
+    stale_training["owner"] = {"kind": "prime", "display_name": "alice"}
+    stale_training["source"] = _source("training", status="stale", age_seconds=7200)
+    payload2 = _workloads_payload(
+        [stale_training],
+        sources=[_source("training", status="stale", age_seconds=7200)],
+    )
+    _install(monkeypatch, payload2)
+    result2 = runner.invoke(app, ["factory", "workloads", "--user", "alice"], env=TEST_ENV)
+    output2 = strip_ansi(result2.output)
+    assert result2.exit_code == 0, result2.output
+    assert "No factory workloads match" not in output2
+
+
+def test_workloads_degraded_zero_row_result_is_warning_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A failed or partial read cannot establish that no workload matches:
+    # with the relevant training source stale and zero rows returned, the
+    # unavailability warning stands alone — never a "no match" claim.
+    payload = {
+        "schema_version": 1,
+        "as_of": _iso(datetime.now(timezone.utc)),
+        "workloads": [],
+        "sources": [_source("training", status="stale", age_seconds=7200)],
+    }
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(
+        app, ["factory", "workloads", "--type", "training", "--user", "alice"], env=TEST_ENV
+    )
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "training jobs unavailable" in output
+    assert "No factory workloads match" not in output
+    assert "No factory workloads found." not in output
+
+
+def test_workloads_truncated_envelope_renders_cut_note(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The backend caps the default window at 200 rows and flags it: one dim
+    # line under the table says so and points at the refiners.
+    payload = _workloads_payload(_default_rows())
+    payload["truncated"] = True
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(app, ["factory", "workloads"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+    assert result.exit_code == 0, result.output
+    assert "narrow the server query with --type/--state/--since" in output
+
+    # derived from the active limit: a small --limit names its own page
+    # and still offers the raise advice
+    _install(monkeypatch, payload)
+    small = runner.invoke(app, ["factory", "workloads", "--limit", "25"], env=TEST_ENV)
+    small_output = strip_ansi(small.output)
+    assert small.exit_code == 0, small.output
+    assert "Showing first 25 workloads" in small_output
+    assert "raise --limit" in small_output
+
+    # at the 200-row maximum the raise advice disappears
+    _install(monkeypatch, payload)
+    capped = runner.invoke(app, ["factory", "workloads", "--limit", "200"], env=TEST_ENV)
+    capped_output = strip_ansi(capped.output)
+    assert capped.exit_code == 0, capped.output
+    assert "Showing first 200 workloads" in capped_output
+    assert "raise --limit" not in capped_output
+
+    # absent flag (older backends) or False: no cut note
+    _install(monkeypatch, _workloads_payload(_default_rows()))
+    plain = runner.invoke(app, ["factory", "workloads"], env=TEST_ENV)
+    plain_output = strip_ansi(plain.output)
+    assert plain.exit_code == 0, plain.output
+    assert "Showing first 200" not in plain_output
+
+    # --json stays the exact envelope incl. the flag
+    _install(monkeypatch, payload)
+    json_result = runner.invoke(app, ["factory", "workloads", "--json"], env=TEST_ENV)
+    assert json.loads(json_result.stdout)["truncated"] is True
+
+
+def test_workloads_state_cell_native_state_has_space(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The UI once shipped 'queued(PENDING)' — the CLI must always render
+    # the space: 'queued (PENDING)'.
+    row = _workload("slurm:ac12:8421", "slurm", "queued")
+    _install(monkeypatch, _workloads_payload([row]))
+
+    result = runner.invoke(app, ["factory", "workloads"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "queued (PENDING)" in output
+    assert "queued(PENDING)" not in output
+
+
+def test_workloads_truncated_empty_filtered_result_is_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Bugbot: the truncated flag was ignored on empty client-filtered
+    # results — a --user miss inside a backend-capped page claimed a
+    # definitive no-match. With the envelope flagging truncation, the
+    # miss wording names the fetched window.
+    payload = {
+        "schema_version": 1,
+        "as_of": _iso(datetime.now(timezone.utc)),
+        "workloads": [],
+        "sources": [_source("training")],
+        "truncated": True,
+    }
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(app, ["factory", "workloads", "--user", "nobody"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "in the fetched window (200 rows)" in output
+    assert "No factory workloads found." not in output
+
+    # without truncation the same live miss stays definitive
+    payload.pop("truncated")
+    _install(monkeypatch, payload)
+    plain = runner.invoke(app, ["factory", "workloads", "--user", "nobody"], env=TEST_ENV)
+    plain_output = strip_ansi(plain.output)
+    assert plain.exit_code == 0, plain.output
+    assert "No factory workloads match the given filters." in plain_output
+    assert "fetched window" not in plain_output
+
+
+def test_workloads_server_filtered_empty_history_is_definitive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Terminal --state queries always send a default limit, but the server
+    # applies --state/--type/--since BEFORE the cap: a zero-row result is
+    # a genuine empty history, not a bounded-window miss.
+    payload = {
+        "schema_version": 1,
+        "as_of": _iso(datetime.now(timezone.utc)),
+        "workloads": [],
+        "sources": [_source("training")],
+    }
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(
+        app, ["factory", "workloads", "--state", "completed", "--since", "7d"], env=TEST_ENV
+    )
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "No factory workloads match the given filters." in output
+    assert "fetched window" not in output

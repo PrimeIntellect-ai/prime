@@ -232,6 +232,36 @@ async def test_supervisor_drops_a_probe_result_when_someone_restarted_during_the
 
 
 @pytest.mark.asyncio
+async def test_supervisor_starts_counting_again_when_someone_restarted_between_probes(
+    monkeypatch,
+):
+    monkeypatch.setattr(Supervisor, "grace", 0.2)
+    tunnel = _supervised_tunnel()
+    replacement = MagicMock()
+    replacement.poll.return_value = None
+    probes = 0
+
+    async def check(public, local):
+        nonlocal probes
+        probes += 1
+        # One failure for the old frpc, one for its replacement, then fine.
+        return (_Verdict.NOT_SERVING if probes <= 2 else _Verdict.SERVING), "probe failed"
+
+    supervisor = Supervisor(tunnel)
+    supervisor._check = check
+    supervisor.start()
+
+    await _until(lambda: probes == 1)
+    # A manual restart replaces frpc while the supervisor waits to recheck.
+    tunnel._process = replacement
+    await _until(lambda: probes >= 4)
+    await supervisor.stop()
+
+    tunnel.restart.assert_not_awaited()
+    assert tunnel.state is TunnelState.UP
+
+
+@pytest.mark.asyncio
 async def test_supervisor_marks_the_tunnel_dead_when_a_restart_finds_the_registration_gone():
     states = []
     tunnel = _supervised_tunnel(states)

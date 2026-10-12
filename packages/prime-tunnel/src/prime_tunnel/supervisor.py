@@ -155,6 +155,8 @@ class Supervisor:
         next_probe = time.monotonic() + self.settle
         strikes = 0
         attempts = 0
+        # The frpc that the strikes count against.
+        watched = tunnel._process
 
         while True:
             self._wake.clear()
@@ -178,6 +180,10 @@ class Supervisor:
             # A frpc that someone else replaces while this round is under way
             # makes what the round found out of date.
             process = tunnel._process
+            if process is not watched:
+                # Failed probes of the frpc before say nothing about this one.
+                watched = process
+                strikes = 0
             if not tunnel.is_running:
                 reason = "frpc exited"
             else:

@@ -79,7 +79,12 @@ class FactorySlurmClient:
         body: Dict[str, Any] = {"username": username, "sshAuthorizedKeys": ssh_authorized_keys}
         if linked_user_id:
             body["linkedUserId"] = linked_user_id
-        return self.client.post(f"/slurm-clusters/{team_id}/{cluster_id}/members", json=body)
+        try:
+            return self.client.post(f"/slurm-clusters/{team_id}/{cluster_id}/members", json=body)
+        except ValueError as exc:
+            # An HTTP 2xx with a non-JSON body: the same coarse
+            # malformed-response normalization the GETs apply.
+            raise APIError("Slurm cluster API returned a malformed response body.") from exc
 
     def remove_member(self, team_id: str, cluster_id: str, username: str) -> None:
         self.client.delete(f"/slurm-clusters/{team_id}/{cluster_id}/members/{username}")

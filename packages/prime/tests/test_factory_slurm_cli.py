@@ -363,3 +363,28 @@ def test_slurm_members_id_only_link_renders(monkeypatch: pytest.MonkeyPatch) -> 
 
     assert result.exit_code == 0, result.output
     assert "user-9" in output
+
+
+def test_slurm_add_member_non_json_success_body_is_clean_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # HTTP 2xx with a non-JSON body on the POST path: the coarse
+    # malformed-response error, never a decoder traceback.
+    class _BadPostClient:
+        def post(self, endpoint, json=None):
+            raise ValueError("Expecting value: line 1 column 1 (char 0)")
+
+    monkeypatch.setattr("prime_cli.commands.factory_slurm.APIClient", lambda: _BadPostClient())
+    monkeypatch.setattr("prime_cli.commands.factory_slurm.Config", lambda: _StubConfig("team-123"))
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+
+    result = runner.invoke(
+        app,
+        ["factory", "slurm", "add-member", "job-123", "dave", "--ssh-key", "key"],
+        env=TEST_ENV,
+    )
+    output = strip_ansi(result.output)
+    assert result.exit_code == 1, result.output
+    assert "malformed response body" in output
+    assert "ValueError" not in result.output
+    assert "Traceback" not in result.output

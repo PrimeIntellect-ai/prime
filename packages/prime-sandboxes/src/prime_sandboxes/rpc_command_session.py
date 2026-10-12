@@ -309,8 +309,8 @@ def parse_command_session_start_event(
 
 def collect_command_session_start_event(
     response: Message,
-    stdout_parts: List[str],
-    stderr_parts: List[str],
+    stdout_parts: bytearray,
+    stderr_parts: bytearray,
 ) -> Optional[int]:
     event = parse_command_session_start_event(response)
     if event is None:
@@ -319,11 +319,11 @@ def collect_command_session_start_event(
     if kind == "stdout":
         assert isinstance(value, bytes)
         if value:
-            stdout_parts.append(value.decode("utf-8", errors="replace"))
+            stdout_parts.extend(value)
     elif kind == "stderr":
         assert isinstance(value, bytes)
         if value:
-            stderr_parts.append(value.decode("utf-8", errors="replace"))
+            stderr_parts.extend(value)
     elif kind == "end":
         assert isinstance(value, int)
         return value

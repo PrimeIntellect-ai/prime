@@ -266,12 +266,14 @@ def test_sync_connect_execution_collects_stdout_stderr(monkeypatch):
             start_response = getattr(command_session_pb2, "StartResponse")
             command_session_event = getattr(command_session_pb2, "CommandSessionEvent")
 
-            yield start_response(
-                event=command_session_event(data=command_session_event.DataEvent(stdout=b"hello\n"))
-            )
-            yield start_response(
-                event=command_session_event(data=command_session_event.DataEvent(stderr=b"warn\n"))
-            )
+            for chunk in [b"hello \xf0\x9f", b"\x92\x80\n"]:
+                yield start_response(
+                    event=command_session_event(data=command_session_event.DataEvent(stdout=chunk))
+                )
+            for chunk in [b"warn \xe2", b"\x82\xac\xff\n"]:
+                yield start_response(
+                    event=command_session_event(data=command_session_event.DataEvent(stderr=chunk))
+                )
             yield start_response(
                 event=command_session_event(
                     end=command_session_event.EndEvent(
@@ -294,11 +296,50 @@ def test_sync_connect_execution_collects_stdout_stderr(monkeypatch):
         command="echo hi",
     )
 
-    assert result.stdout == "hello\n"
-    assert result.stderr == "warn\n"
+    assert result.stdout == "hello 💀\n"
+    assert result.stderr == "warn €�\n"
     assert result.exit_code == 7
     assert client_init_kwargs["codec"] is GOOGLE_PROTOBUF_BINARY_CODEC
     assert client_init_kwargs["send_compression"] is None
+
+
+@pytest.mark.asyncio
+async def test_async_connect_execution_collects_split_utf8(monkeypatch):
+    class _FakeConnectClient:
+        def __init__(self, _address: str, **_kwargs):
+            pass
+
+        def execute_server_stream(self, **_kwargs):
+            event_type = command_session_pb2.CommandSessionEvent
+
+            async def events():
+                for chunk in [b"\xf0\x9f", b"\x92\x80"]:
+                    yield command_session_pb2.StartResponse(
+                        event=event_type(data=event_type.DataEvent(stdout=chunk))
+                    )
+                for chunk in [b"\xe2", b"\x82\xac"]:
+                    yield command_session_pb2.StartResponse(
+                        event=event_type(data=event_type.DataEvent(stderr=chunk))
+                    )
+                yield command_session_pb2.StartResponse(
+                    event=event_type(end=event_type.EndEvent(exit_code=0))
+                )
+
+            return events()
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr("prime_sandboxes.sandbox.ConnectClient", _FakeConnectClient)
+    client = AsyncSandboxClient(api_key="test-key")
+    cast(Any, client)._auth_cache = _AsyncFakeCache()
+    try:
+        result = await client.execute_command("sbx-gpu", "echo hi")
+        assert result.stdout == "💀"
+        assert result.stderr == "€"
+        assert result.exit_code == 0
+    finally:
+        await client.aclose()
 
 
 def test_sync_connect_execution_maps_deadline_to_timeout(monkeypatch):

@@ -1407,6 +1407,23 @@ def test_workloads_truncated_envelope_renders_cut_note(monkeypatch: pytest.Monke
     assert result.exit_code == 0, result.output
     assert "narrow the server query with --type/--state/--since" in output
 
+    # derived from the active limit: a small --limit names its own page
+    # and still offers the raise advice
+    _install(monkeypatch, payload)
+    small = runner.invoke(app, ["factory", "workloads", "--limit", "25"], env=TEST_ENV)
+    small_output = strip_ansi(small.output)
+    assert small.exit_code == 0, small.output
+    assert "Showing first 25 workloads" in small_output
+    assert "raise --limit" in small_output
+
+    # at the 200-row maximum the raise advice disappears
+    _install(monkeypatch, payload)
+    capped = runner.invoke(app, ["factory", "workloads", "--limit", "200"], env=TEST_ENV)
+    capped_output = strip_ansi(capped.output)
+    assert capped.exit_code == 0, capped.output
+    assert "Showing first 200 workloads" in capped_output
+    assert "raise --limit" not in capped_output
+
     # absent flag (older backends) or False: no cut note
     _install(monkeypatch, _workloads_payload(_default_rows()))
     plain = runner.invoke(app, ["factory", "workloads"], env=TEST_ENV)

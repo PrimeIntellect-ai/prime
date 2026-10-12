@@ -59,10 +59,18 @@ UNUSED_NOTE = "unused = reserved by a workload but not running anything — not 
 SCHEDULER_LEGEND = (
     "Slurm cluster: — = direct platform placement; unknown = deployment not identified."
 )
-TRUNCATED_NOTE = (
-    "Showing first 200 workloads — narrow the server query with "
-    "--type/--state/--since, or raise --limit"
-)
+
+
+def _truncated_note(limit: int) -> str:
+    """The dim truncation note, derived from the effective page size.
+
+    Raising --limit is only advice while there is headroom to raise it.
+    """
+    note = f"Showing first {limit} workloads — narrow the server query with --type/--state/--since"
+    if limit < WORKLOAD_LIMIT_MAX:
+        note += ", or raise --limit"
+    return note
+
 
 # Plain-language names for source kinds shown to users. The internal enum
 # values (e.g. "capacity") never appear in table output.
@@ -1209,7 +1217,9 @@ def factory_workloads(
         console.print(f"[dim]{IN_USE_NOTE}[/dim]")
         console.print(f"[dim]{SCHEDULER_LEGEND}[/dim]")
         if workloads.truncated:
-            console.print(f"[dim]{TRUNCATED_NOTE}[/dim]")
+            # The backend caps the unbounded default window at 200.
+            effective = limit if limit is not None else WORKLOAD_LIMIT_MAX
+            console.print(f"[dim]{_truncated_note(effective)}[/dim]")
         return
 
     if not rows and not degraded:

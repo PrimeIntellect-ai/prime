@@ -847,9 +847,18 @@ _BILLED_RESPONSE = {
 def _mock_run_post(monkeypatch, response: dict[str, Any]) -> dict[str, Any]:
     captured: dict[str, Any] = {}
 
-    def mock_post(self: Any, endpoint: str, json: dict[str, Any] | None = None) -> dict:
+    # `timeout` is part of the dispatch POST's signature now: the backend's
+    # validator hop needs more than the client's 30s default, and a mock
+    # that rejected the kwarg would hide a regression in that budget.
+    def mock_post(
+        self: Any,
+        endpoint: str,
+        json: dict[str, Any] | None = None,
+        timeout: int | None = None,
+    ) -> dict:
         captured["endpoint"] = endpoint
         captured["json"] = json
+        captured["timeout"] = timeout
         return response
 
     monkeypatch.setattr("prime_cli.core.APIClient.post", mock_post)
@@ -973,3 +982,202 @@ def test_train_fft_billed_zero_rate_is_visible(monkeypatch, tmp_path: Path) -> N
     assert result.exit_code == 0, result.output
     assert "$0.00/GPU-hr" in result.output
     assert "~$0.00/hr" in result.output
+
+
+# --- ambiguous dispatch: client timeout on a POST that may have committed ----
+#
+# `prime train <config>` returned `Error: Request timed out: The read
+# operation timed out` while the backend had already created
+# cyac46dphnrcw0pcbqcdg6od (observed in PENDING right after). The CLI
+# called that a failure, so the natural reaction - re-run the command -
+# dispatched a SECOND paid run. The POST's own budget has to clear the
+# backend's 60s validator hop, and whatever timeout is left has to be
+# reported as "outcome unknown", never as a plain error.
+
+
+def test_dispatch_post_outlasts_the_backend_validator_budget(monkeypatch, tmp_path: Path) -> None:
+    """The shared 30s client default expires before the backend's 60s
+    validator budget, which is what made the timeout routine."""
+    from prime_cli.api.training import DISPATCH_HTTP_TIMEOUT_S
+
+    captured = _mock_run_post(monkeypatch, dict(_BILLED_RESPONSE))
+    cfg = tmp_path / "fft.toml"
+    cfg.write_text(_FFT_BODY)
+
+    result = runner.invoke(
+        app, ["train", str(cfg), "--yes"], env={**TEST_ENV, "PRIME_API_KEY": "test-key"}
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["endpoint"] == "/training/runs"
+    assert captured["timeout"] == DISPATCH_HTTP_TIMEOUT_S
+    assert captured["timeout"] > 60, (
+        "the dispatch POST must outlast the backend's _VALIDATOR_HTTP_TIMEOUT_S "
+        "(60s) or a cold validator times out the client while the run is created"
+    )
+
+
+def _timeout_dispatch(monkeypatch, tmp_path: Path, *, runs, name=None, extra=()):
+    """Dispatch an FFT config whose POST times out, with `runs` as the
+    recovery lookup's answer (an exception class re-raises instead)."""
+    from prime_cli.api.rl import RLRun, RLRunPage
+    from prime_cli.client import APITimeoutError
+
+    def mock_post(
+        self: Any,
+        endpoint: str,
+        json: dict[str, Any] | None = None,
+        timeout: int | None = None,
+    ) -> dict:
+        raise APITimeoutError("Request timed out: The read operation timed out")
+
+    monkeypatch.setattr("prime_cli.core.APIClient.post", mock_post)
+
+    def list_runs(self, team_id=None, *, mine=False, page=1, limit=20):
+        if isinstance(runs, type) and issubclass(runs, Exception):
+            raise runs("boom")
+        return RLRunPage(runs=[RLRun.model_validate(r) for r in runs])
+
+    monkeypatch.setattr("prime_cli.api.rl.RLClient.list_runs", list_runs)
+
+    cfg = tmp_path / "fft.toml"
+    cfg.write_text((f'name = "{name}"\n' if name else "") + _FFT_BODY)
+    return runner.invoke(
+        app,
+        ["train", str(cfg), "--yes", *extra],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key"},
+    )
+
+
+def _candidate_run(**overrides) -> dict[str, Any]:
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc).isoformat()
+    row = {
+        "id": "cyac46dphnrcw0pcbqcdg6od",
+        "userId": "u1",
+        "status": "PENDING",
+        "kind": "DEDICATED_FULL_FT",
+        "createdAt": now,
+        "updatedAt": now,
+    }
+    row.update(overrides)
+    return row
+
+
+def test_timed_out_dispatch_never_reads_as_a_plain_error(monkeypatch, tmp_path: Path) -> None:
+    """`Error: Request timed out` is the exact output that caused the
+    double dispatch. The outcome is unknown, and the user must be told
+    not to re-run."""
+    result = _timeout_dispatch(monkeypatch, tmp_path, runs=[])
+
+    assert result.exit_code == 1, result.output
+    assert "Error: Request timed out" not in result.output
+    assert "Dispatch outcome unknown" in result.output
+    assert "Do not re-run this command yet" in result.output
+    assert "prime train list" in result.output
+
+
+def test_timed_out_dispatch_names_the_run_it_created(monkeypatch, tmp_path: Path) -> None:
+    result = _timeout_dispatch(monkeypatch, tmp_path, runs=[_candidate_run()])
+
+    assert result.exit_code == 1, result.output
+    assert "This dispatch did create a run" in result.output
+    assert "cyac46dphnrcw0pcbqcdg6od" in result.output
+    assert "Nothing to retry" in result.output
+
+
+def test_timed_out_dispatch_matches_on_the_config_name(monkeypatch, tmp_path: Path) -> None:
+    """With a named config the match is near-certain, so a run carrying a
+    different name must not be claimed as this dispatch's."""
+    result = _timeout_dispatch(
+        monkeypatch,
+        tmp_path,
+        name="my-run",
+        runs=[_candidate_run(name="someone-elses-run")],
+    )
+
+    assert "This dispatch did create a run" not in result.output
+    assert "No matching run found yet" in result.output
+
+    result = _timeout_dispatch(
+        monkeypatch, tmp_path, name="my-run", runs=[_candidate_run(name="my-run")]
+    )
+    assert "This dispatch did create a run" in result.output
+
+
+def test_timed_out_dispatch_ignores_terminal_and_stale_runs(monkeypatch, tmp_path: Path) -> None:
+    """A run that already finished, or one from an hour ago, belongs to an
+    older dispatch - offering it would send the user chasing the wrong id."""
+    from datetime import datetime, timedelta, timezone
+
+    # 30 min back: comfortably outside the clock-skew allowance, yet
+    # recent enough that a loose scan window would have matched it.
+    stale = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
+    result = _timeout_dispatch(
+        monkeypatch,
+        tmp_path,
+        runs=[
+            _candidate_run(id="old-finished", status="COMPLETED"),
+            _candidate_run(id="old-pending", createdAt=stale, updatedAt=stale),
+            _candidate_run(id="lora-run", kind="SHARED_RFT_HOSTED"),
+        ],
+    )
+
+    assert "No matching run found yet" in result.output
+    for rejected in ("old-finished", "old-pending", "lora-run"):
+        assert rejected not in result.output
+
+
+def test_timed_out_dispatch_lists_every_candidate_when_ambiguous(
+    monkeypatch, tmp_path: Path
+) -> None:
+    result = _timeout_dispatch(
+        monkeypatch,
+        tmp_path,
+        runs=[_candidate_run(id="run-a"), _candidate_run(id="run-b")],
+    )
+
+    assert "could be yours" in result.output
+    assert "run-a" in result.output
+    assert "run-b" in result.output
+    assert "This dispatch did create a run" not in result.output
+
+
+def test_timed_out_dispatch_says_so_when_the_lookup_itself_fails(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """ "We could not check" must never render as "nothing was created" -
+    that is the sentence that licenses the duplicate dispatch."""
+    from prime_cli.client import APIError
+
+    result = _timeout_dispatch(monkeypatch, tmp_path, runs=APIError)
+
+    assert result.exit_code == 1, result.output
+    assert "Could not reach the API to check" in result.output
+    assert "No matching run found yet" not in result.output
+    assert "Do not re-run this command yet" in result.output
+
+
+def test_timed_out_dispatch_keeps_json_stdout_clean(monkeypatch, tmp_path: Path) -> None:
+    """Automation parses stdout as the run payload. An ambiguous dispatch
+    emits no payload, so the whole report goes to stderr and the
+    non-zero exit is the only signal on stdout."""
+    result = _timeout_dispatch(monkeypatch, tmp_path, runs=[_candidate_run()], extra=("-o", "json"))
+
+    assert result.exit_code == 1
+    assert "Dispatch outcome unknown" in result.stderr
+    assert "cyac46dphnrcw0pcbqcdg6od" in result.stderr
+    assert "Dispatch outcome unknown" not in result.stdout
+
+
+def test_timed_out_dispatch_report_is_plain_mode_clean(monkeypatch, tmp_path: Path) -> None:
+    """--plain is the AI/non-interactive surface: the guidance has to
+    survive markup stripping, with no rich tags left behind."""
+    result = _timeout_dispatch(monkeypatch, tmp_path, runs=[_candidate_run()], extra=("--plain",))
+
+    assert result.exit_code == 1, result.output
+    assert "Do not re-run this command yet" in result.output
+    assert "cyac46dphnrcw0pcbqcdg6od" in result.output
+    assert "[bold red]" not in result.output
+    assert "[cyan]" not in result.output

@@ -189,9 +189,21 @@ class APIClient:
         """Make a GET request to the API"""
         return self.request("GET", endpoint, params=params, timeout=timeout)
 
-    def post(self, endpoint: str, json: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Make a POST request to the API"""
-        return self.request("POST", endpoint, json=json)
+    def post(
+        self,
+        endpoint: str,
+        json: Optional[Dict[str, Any]] = None,
+        timeout: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Make a POST request to the API
+
+        `timeout` overrides the client default (30s read) for this call
+        only. POSTs need it more than GETs do: a POST that times out
+        client-side may still have been COMMITTED server-side, so an
+        endpoint whose server budget exceeds 30s has to say so here
+        rather than hand the caller an ambiguous failure.
+        """
+        return self.request("POST", endpoint, json=json, timeout=timeout)
 
     def patch(
         self,

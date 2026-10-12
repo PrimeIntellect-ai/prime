@@ -5,6 +5,7 @@ import os
 import re
 import time
 from contextlib import nullcontext
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
@@ -20,7 +21,7 @@ from rich.table import Table
 from prime_cli.core import Config
 
 from ..api.rl import EnvServerInfo, RLClient, RLRun
-from ..client import APIClient, APIError, ValidationError
+from ..client import APIClient, APIError, APITimeoutError, ValidationError
 from ..utils import (
     DefaultCommandGroup,
     PlainTyper,
@@ -1298,9 +1299,25 @@ def _dispatch_full_finetune_run(
         if output != "json"
         else nullcontext()
     )
+    # Wall clock taken BEFORE the POST: a run created by a request we
+    # never saw the response to cannot have been created earlier than
+    # this, which is what makes the recovery lookup below safe to scope
+    # by time.
+    dispatch_started_at = datetime.now(timezone.utc)
     try:
         with status_ctx:
             result = client.create_run(payload)
+    except APITimeoutError as e:
+        # A client-side timeout on a POST is NOT a failed dispatch - the
+        # backend may have committed the run and lost only the response.
+        # Reported separately from the generic error arm so the user is
+        # never told "Error" for a run that is sitting in PENDING,
+        # burning the GPUs of a second paid run when they re-run the
+        # command. See api/training.DISPATCH_HTTP_TIMEOUT_S.
+        _report_timed_out_dispatch(
+            e, team_id=team_id, name=name, since=dispatch_started_at, output=output
+        )
+        raise typer.Exit(1)
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
@@ -1347,6 +1364,152 @@ def _dispatch_full_finetune_run(
     dashboard_url = f"{app_config.frontend_url}/dashboard/training/{result.run_id}"
     console.print("\n[cyan]Monitor run at:[/cyan]")
     console.print(f"  [link={dashboard_url}]{dashboard_url}[/link]")
+
+
+# A run created by the request we lost cannot pre-date the moment we sent
+# it, so the cutoff is that timestamp — minus this allowance, which exists
+# only for clock skew between this machine and the API (`createdAt` is
+# stamped server-side, we compare against a local clock). Deliberately
+# small: every extra minute widens the set of the user's OWN earlier runs
+# that could be mistaken for this dispatch's.
+_DISPATCH_RECOVERY_CLOCK_SKEW = timedelta(minutes=5)
+_DISPATCH_RECOVERY_PAGE_SIZE = 20
+
+# Statuses a run created seconds ago can legitimately be in. Anything
+# terminal belongs to an older dispatch, so it is never a candidate.
+_FRESH_RUN_STATUSES = ("QUEUED", "PENDING", "CREATING", "PULLING_IMAGE", "RUNNING")
+
+# Sentinel distinguishing "the lookup itself failed" from "we looked and
+# found nothing" — only the second makes a retry defensible, so the two
+# must never collapse into the same empty list.
+_LOOKUP_FAILED = object()
+
+
+def _as_utc(value: Any) -> Optional[datetime]:
+    """Coerce an API timestamp to an aware UTC datetime.
+
+    The backend has returned both offset-aware and naive ISO strings over
+    time; a naive value is UTC by convention. Returning None for anything
+    unparseable keeps the recovery lookup from crashing on a shape change
+    in the very code path that exists to make a failure safe.
+    """
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _find_runs_created_since(
+    team_id: Optional[str], *, name: Optional[str], since: datetime
+) -> Any:
+    """Dedicated runs that could have been created by a dispatch whose
+    response we never saw.
+
+    Filtered to `mine` + DEDICATED_FULL_FT + non-terminal + created no
+    earlier than `since` (minus the clock-skew allowance). When the
+    config named the run, the name has to match too — that turns the
+    heuristic into near-certainty, because a name collision inside the
+    window means the user dispatched the same config twice themselves.
+
+    Returns `_LOOKUP_FAILED` if the API call raised: telling the user
+    "no run was created" when we never managed to ask would hand them
+    exactly the double-dispatch this function exists to prevent.
+    """
+    cutoff = since - _DISPATCH_RECOVERY_CLOCK_SKEW
+    try:
+        page = RLClient(APIClient()).list_runs(
+            team_id=team_id, mine=True, limit=_DISPATCH_RECOVERY_PAGE_SIZE
+        )
+    except Exception:
+        # Deliberately broad: this runs inside an error handler, so a
+        # second failure here must degrade to "we could not check"
+        # rather than replace the dispatch message with a traceback.
+        return _LOOKUP_FAILED
+
+    candidates = []
+    for run in page.runs:
+        # kind is Optional for backward-compat with older backends; an
+        # absent discriminator is not grounds to discard a candidate.
+        if run.kind is not None and run.kind != "DEDICATED_FULL_FT":
+            continue
+        if run.status not in _FRESH_RUN_STATUSES:
+            continue
+        created = _as_utc(run.created_at)
+        if created is None or created < cutoff:
+            continue
+        if name and run.name != name:
+            continue
+        candidates.append(run)
+    return candidates
+
+
+def _report_timed_out_dispatch(
+    error: APITimeoutError,
+    *,
+    team_id: Optional[str],
+    name: Optional[str],
+    since: datetime,
+    output: str,
+) -> None:
+    """Explain an ambiguous dispatch and steer the user away from a blind
+    retry, naming the run if we can find it.
+
+    A read timeout on POST /training/runs says only that WE stopped
+    waiting. The backend keeps going, so the run is frequently created —
+    and the natural reaction ("that failed, run it again") spends a
+    second reservation's worth of GPUs on a duplicate. Every branch below
+    therefore ends on "check before re-running", including the one where
+    we found nothing.
+
+    In `--output json` mode the whole report goes to stderr: a json
+    consumer gets an empty stdout plus a non-zero exit, which is
+    unambiguous, instead of prose it would try to parse as the run
+    payload (same split `_ensure_volume` uses for its progress lines).
+    """
+    out = get_console(stderr=True) if output == "json" else console
+    out.print(f"[yellow]Dispatch outcome unknown:[/yellow] {error}")
+    out.print(
+        "The request timed out on this side only. The backend may already have created the run."
+    )
+    out.print(
+        "[bold red]Do not re-run this command yet[/bold red] - a second dispatch "
+        "starts a second paid run."
+    )
+
+    found = _find_runs_created_since(team_id, name=name, since=since)
+    if found is _LOOKUP_FAILED:
+        out.print(
+            "Could not reach the API to check. Run [cyan]prime train list[/cyan] "
+            "and confirm no run was created before trying again."
+        )
+        return
+    if not found:
+        out.print(
+            "No matching run found yet, but a run created right now can take a "
+            "few seconds to appear. Re-check [cyan]prime train list[/cyan] before "
+            "trying again."
+        )
+        return
+    if len(found) == 1:
+        run = found[0]
+        out.print(
+            f"[green]This dispatch did create a run:[/green] [bold]{rich_escape(run.id)}[/bold] "
+            f"({rich_escape(run.status)})"
+        )
+        out.print(
+            f"Nothing to retry. Follow it with [cyan]prime train get {run.id}[/cyan] "
+            f"or stop it with [cyan]prime train stop {run.id}[/cyan]."
+        )
+        return
+    out.print("Runs created in this window that could be yours:")
+    for run in found:
+        label = f" {rich_escape(run.name)}" if run.name else ""
+        out.print(f"  {rich_escape(run.id)} ({rich_escape(run.status)}){label}")
+    out.print(
+        "Confirm with [cyan]prime train list[/cyan] which one belongs to this "
+        "dispatch before trying again."
+    )
 
 
 def _ensure_volume(

@@ -22,6 +22,24 @@ from prime_cli.core import APIClient, APIError, NotFoundError, default_user_agen
 PRIME_RL_GITHUB_REPO = "PrimeIntellect-ai/prime-rl"
 _GITHUB_API = "https://api.github.com"
 
+# Read timeout for the dispatch POST, in seconds.
+#
+# POST /v1/training/runs is not a cheap write: the backend validates the
+# mega-TOML against the prime-rl config validator with a 60s budget of
+# its own (`_VALIDATOR_HTTP_TIMEOUT_S`) BEFORE it writes the RFTRun row,
+# mints the per-run token and enqueues the create Cloud Task. The shared
+# client default (30s read) was therefore guaranteed to expire first
+# whenever the validator was cold — and because the run is created
+# anyway, the user got `Request timed out` for a run that exists.
+# Re-running the command then dispatched a second paid run.
+#
+# 180s leaves headroom over the server's own budget so a client timeout
+# means "the request really did not finish", not "we gave up early".
+# `_report_timed_out_dispatch` in commands/rl.py still has to handle the
+# residual case: a timeout here is ambiguous by nature, never proof that
+# nothing was created.
+DISPATCH_HTTP_TIMEOUT_S = 180
+
 
 class HostedTrainingRunResponse(BaseModel):
     """Response from POST /v1/training/runs.
@@ -247,9 +265,11 @@ class HostedTrainingClient:
 
         Lets typed APIError subclasses (NotFoundError, UnauthorizedError,
         …) propagate so callers can branch by exception class instead of
-        string-matching the message.
+        string-matching the message — including APITimeoutError, which
+        the dispatch command must treat as "outcome unknown" rather than
+        "failed" (see DISPATCH_HTTP_TIMEOUT_S).
         """
-        response = self.client.post("/training/runs", json=payload)
+        response = self.client.post("/training/runs", json=payload, timeout=DISPATCH_HTTP_TIMEOUT_S)
         return HostedTrainingRunResponse.model_validate(response)
 
     def delete_run(self, run_id: str) -> Dict[str, Any]:

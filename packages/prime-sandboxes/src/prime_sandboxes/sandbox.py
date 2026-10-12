@@ -2645,8 +2645,8 @@ class SandboxClient:
             gateway_url = auth["gateway_url"].rstrip("/")
             base_url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}"
             headers = {"Authorization": f"Bearer {auth['token']}"}
-            stdout_parts: List[str] = []
-            stderr_parts: List[str] = []
+            stdout_parts = bytearray()
+            stderr_parts = bytearray()
             exit_code: Optional[int] = None
             stream_started = False
 
@@ -2676,8 +2676,8 @@ class SandboxClient:
                     raise APIError("Command stream ended without exit code")
 
                 return CommandResponse(
-                    stdout="".join(stdout_parts),
-                    stderr="".join(stderr_parts),
+                    stdout=stdout_parts.decode("utf-8", errors="replace"),
+                    stderr=stderr_parts.decode("utf-8", errors="replace"),
                     exit_code=exit_code,
                 )
             except ConnectError as e:
@@ -4370,8 +4370,8 @@ class AsyncSandboxClient:
             gateway_url = auth["gateway_url"].rstrip("/")
             base_url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}"
             headers = {"Authorization": f"Bearer {auth['token']}"}
-            stdout_parts: List[str] = []
-            stderr_parts: List[str] = []
+            stdout_parts = bytearray()
+            stderr_parts = bytearray()
             exit_code: Optional[int] = None
             stream_started = False
 
@@ -4401,8 +4401,8 @@ class AsyncSandboxClient:
                     raise APIError("Command stream ended without exit code")
 
                 return CommandResponse(
-                    stdout="".join(stdout_parts),
-                    stderr="".join(stderr_parts),
+                    stdout=stdout_parts.decode("utf-8", errors="replace"),
+                    stderr=stderr_parts.decode("utf-8", errors="replace"),
                     exit_code=exit_code,
                 )
             except ConnectError as e:

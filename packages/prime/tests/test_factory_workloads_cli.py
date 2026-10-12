@@ -1223,6 +1223,7 @@ def test_workloads_scheduler_terminal_empty_says_bounded_window(
         "as_of": _iso(datetime.now(timezone.utc)),
         "workloads": [],
         "sources": [_source("slurm")],
+        "truncated": True,
     }
     _install(monkeypatch, empty)
 
@@ -1237,6 +1238,25 @@ def test_workloads_scheduler_terminal_empty_says_bounded_window(
     assert "in the fetched window (200 rows)" in output
     assert "No factory workloads found." not in output
 
+    # merely SUPPLYING the limit proves nothing: an unflagged short
+    # response was not cut, so the miss is definitive
+    unflagged = {
+        "schema_version": 1,
+        "as_of": _iso(datetime.now(timezone.utc)),
+        "workloads": [],
+        "sources": [_source("slurm")],
+    }
+    _install(monkeypatch, unflagged)
+    short = runner.invoke(
+        app,
+        ["factory", "workloads", "--state", "completed", "--scheduler", "b300-slurm"],
+        env=TEST_ENV,
+    )
+    short_output = strip_ansi(short.output)
+    assert short.exit_code == 0, short.output
+    assert "No factory workloads match the given filters." in short_output
+    assert "fetched window" not in short_output
+
     # An explicit --limit on a LIVE scheduler query is bounded too: the
     # server pages before the client predicate, so a miss is unprovable.
     _install(monkeypatch, empty)
@@ -1249,9 +1269,9 @@ def test_workloads_scheduler_terminal_empty_says_bounded_window(
     assert live_limited.exit_code == 0, live_limited.output
     assert "in the fetched window (25 rows)" in live_output
 
-    # A live scheduler query WITHOUT a limit is definitive: the server
-    # window is unbounded, so the plain filter wording stands.
-    _install(monkeypatch, empty)
+    # An UNFLAGGED live scheduler miss (no truncation, short response) is
+    # definitive: nothing was cut, so the plain filter wording stands.
+    _install(monkeypatch, unflagged)
     live_plain = runner.invoke(
         app, ["factory", "workloads", "--slurm-cluster", "b300-slurm"], env=TEST_ENV
     )

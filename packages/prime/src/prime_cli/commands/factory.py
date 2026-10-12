@@ -1227,7 +1227,15 @@ def factory_workloads(
         # carry their unavailability), and a degraded relevant source can
         # never establish a no-match either — warning-only in both cases.
         _print_empty_workloads_result(
-            type, state, since, user, cluster, slurm_cluster, limit, bool(workloads.truncated)
+            type,
+            state,
+            since,
+            user,
+            cluster,
+            slurm_cluster,
+            limit,
+            bool(workloads.truncated),
+            pre_filter_row_count=len(workloads.workloads),
         )
     return None
 
@@ -1241,6 +1249,7 @@ def _print_empty_workloads_result(
     slurm_cluster: Optional[str],
     limit: Optional[int],
     truncated: bool = False,
+    pre_filter_row_count: int = 0,
 ) -> None:
     # Distinguish an honestly empty fleet from filters that matched
     # nothing: --type/--state/--since are server-side, so a filtered
@@ -1253,12 +1262,17 @@ def _print_empty_workloads_result(
         or cluster is not None
         or slurm_cluster is not None
     )
-    # The page was cut before any CLIENT predicate when a limit was sent
-    # or the backend flagged truncation — a client-filter miss beyond it
-    # is unprovable. Server-side filters (--type/--state/--since) apply
+    # The page was cut before any CLIENT predicate when the backend
+    # flagged truncation OR the response actually filled the requested
+    # limit — merely SUPPLYING a limit proves nothing (a short response
+    # was not cut). Server-side filters (--type/--state/--since) apply
     # before the cap: their zero-row results are definitive.
     client_filters_active = user is not None or cluster is not None or slurm_cluster is not None
-    capped_window = limit if limit is not None else (200 if truncated else None)
+    capped_window = None
+    if truncated:
+        capped_window = limit if limit is not None else WORKLOAD_LIMIT_MAX
+    elif limit is not None and pre_filter_row_count >= limit:
+        capped_window = limit
     if client_filters_active and capped_window is not None:
         # The page was cut server-side (explicit limit or a truncated
         # envelope) BEFORE any client predicate ran — a miss beyond the

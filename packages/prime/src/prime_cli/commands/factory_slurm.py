@@ -267,8 +267,15 @@ def add_member(
 
     try:
         member = _client().add_member(team_id, cluster_id, username, ssh_key, link_user)
-        parsed = FactorySlurmMember.model_validate(member)
-    except (APIError, ValueError) as e:
+        # Invalid JSON or a mistyped field normalizes to the same coarse
+        # malformed-response error as list/members — never raw
+        # JSON/pydantic diagnostics. Raised INSIDE the try so the
+        # except APIError path renders it cleanly.
+        try:
+            parsed = FactorySlurmMember.model_validate(member)
+        except Exception as exc:
+            raise APIError("Slurm cluster API returned a malformed response body.") from exc
+    except APIError as e:
         _plain_error(e, err_console)
 
     console.print(

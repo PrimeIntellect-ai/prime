@@ -2337,6 +2337,16 @@ class SandboxClient:
         response = self.client.request("GET", f"/sandbox/{sandbox_id}")
         return Sandbox.model_validate(response)
 
+    def pause(self, sandbox_id: str) -> Sandbox:
+        """Request a pause of a running VM sandbox; it reaches PAUSED asynchronously."""
+        response = self.client.request("POST", f"/sandbox/{sandbox_id}/pause")
+        return Sandbox.model_validate(response)
+
+    def resume(self, sandbox_id: str) -> Sandbox:
+        """Request a resume of a paused VM sandbox; it reaches RUNNING asynchronously."""
+        response = self.client.request("POST", f"/sandbox/{sandbox_id}/resume")
+        return Sandbox.model_validate(response)
+
     def checkpoint(self, sandbox_id: str) -> SandboxCheckpoint:
         """Request a filesystem checkpoint; use wait_for_checkpoint before restoring."""
         response = self.client.request("POST", f"/sandbox/{sandbox_id}/checkpoints")
@@ -3857,6 +3867,16 @@ class AsyncSandboxClient:
     async def get(self, sandbox_id: str) -> Sandbox:
         """Get a specific sandbox"""
         response = await self.client.request("GET", f"/sandbox/{sandbox_id}")
+        return Sandbox.model_validate(response)
+
+    async def pause(self, sandbox_id: str) -> Sandbox:
+        """Request a pause of a running VM sandbox; it reaches PAUSED asynchronously."""
+        response = await self.client.request("POST", f"/sandbox/{sandbox_id}/pause")
+        return Sandbox.model_validate(response)
+
+    async def resume(self, sandbox_id: str) -> Sandbox:
+        """Request a resume of a paused VM sandbox; it reaches RUNNING asynchronously."""
+        response = await self.client.request("POST", f"/sandbox/{sandbox_id}/resume")
         return Sandbox.model_validate(response)
 
     async def checkpoint(self, sandbox_id: str) -> SandboxCheckpoint:

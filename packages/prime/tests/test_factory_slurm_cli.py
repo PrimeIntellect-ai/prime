@@ -348,3 +348,18 @@ def test_slurm_missing_data_field_is_malformed_not_empty(
     assert members.exit_code == 1, members.output
     assert "malformed response body" in members_output
     assert "No members found." not in members_output
+
+
+def test_slurm_members_id_only_link_renders(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A member with linkedUserId but no name/email is still linked
+    # (--link-user operates on IDs) — render the ID, never a dash.
+    payload = _members_payload(
+        [_member("carol", linkedUserId="user-9", linkedUserName=None, linkedUserEmail=None)]
+    )
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(app, ["factory", "slurm", "members", "job-123"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "user-9" in output

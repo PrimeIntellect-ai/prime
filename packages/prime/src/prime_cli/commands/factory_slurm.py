@@ -219,7 +219,9 @@ def list_members(
     table.add_column("LINKED USER")
     for m in members:
         keys = Text("\n").join(Text(_truncate_ssh_key(k)) for k in m.ssh_authorized_keys)
-        linked = m.linked_user_name or m.linked_user_email or "—"
+        # --link-user operates on IDs: an ID-only link is a real link,
+        # never render it as absent.
+        linked = m.linked_user_name or m.linked_user_email or m.linked_user_id or "—"
         table.add_row(
             Text(m.username),
             Text(str(m.uid)),

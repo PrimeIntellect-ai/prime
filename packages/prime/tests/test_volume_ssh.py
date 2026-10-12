@@ -1165,7 +1165,7 @@ def test_create_warm_by_default(monkeypatch, flags, warm):
     result = _run("create", "ckpts", *flags)
     assert result.exit_code == 0, result.output
     assert sent == [warm]
-    assert ("a session starts in the background" in result.output) is warm
+    assert ("reserved cluster capacity" in result.output) is warm
     assert "Starting a session" not in result.output
     as_json = _run("create", "ckpts", "-o", "json", *flags)
     assert json.loads(as_json.output)["name"] == "ckpts"

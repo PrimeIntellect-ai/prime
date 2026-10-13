@@ -9,6 +9,9 @@ from click.exceptions import Abort
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
 from cryptography.hazmat.primitives.asymmetric import rsa
+from rich.markup import escape
+from rich.style import Style
+from rich.text import Text
 
 from prime_cli.core import Config
 
@@ -36,11 +39,13 @@ def fetch_and_select_team(client: APIClient, config: Config) -> None:
             role = team.get("role", "member")
             role_display = role.lower()
             role_badge = (
-                f"[yellow](role: {role_display})[/yellow]"
+                f"[yellow](role: {escape(role_display)})[/yellow]"
                 if role == "admin"
-                else f"[dim](role: {role_display})[/dim]"
+                else f"[dim](role: {escape(role_display)})[/dim]"
             )
-            console.print(f"  [cyan]({idx})[/cyan] {team.get('name', 'Unknown')} {role_badge}")
+            console.print(
+                f"  [cyan]({idx})[/cyan] {escape(str(team.get('name', 'Unknown')))} {role_badge}"
+            )
 
         console.print("\n[dim]You can always change this by running 'prime login' again.[/dim]")
 
@@ -68,7 +73,7 @@ def fetch_and_select_team(client: APIClient, config: Config) -> None:
 
                     config.set_team(team_id, team_name=team_name, team_role=team_role)
                     config.update_current_environment_file()
-                    console.print(f"[green]Using team '{team_name}'.[/green]")
+                    console.print(f"[green]Using team '{escape(str(team_name))}'.[/green]")
                     return
 
                 console.print(f"[red]Invalid selection. Enter 1-{len(teams) + 1}.[/red]")
@@ -113,7 +118,7 @@ def generate_ephemeral_keypair() -> tuple[rsa.RSAPrivateKey, str]:
 
         return private_key, public_pem
     except Exception as e:
-        console.print(f"[red]Error generating keypair: {str(e)}[/red]")
+        console.print(f"[red]Error generating keypair: {escape(str(e))}[/red]")
         raise typer.Exit(1)
 
 
@@ -132,7 +137,7 @@ def decrypt_challenge_response(
         )
         return decrypted
     except Exception as e:
-        console.print(f"[red]Error decrypting response: {str(e)}[/red]")
+        console.print(f"[red]Error decrypting response: {escape(str(e))}[/red]")
         return None
 
 
@@ -223,7 +228,7 @@ def login(
         if response.status_code != 200:
             console.print(
                 "[red]Failed to generate challenge:[/red]",
-                f"{response.json().get('detail', 'Unknown error')}",
+                escape(str(response.json().get("detail", "Unknown error"))),
             )
             raise typer.Exit(1)
 
@@ -237,13 +242,16 @@ def login(
         console.print("\n[bold blue]🔐 Login Required[/bold blue]")
         console.print("\n[bold]Follow these steps to authenticate:[/bold]\n")
 
+        challenge_link = Text()
+        challenge_link.append(challenge_url, style=Style(link=challenge_url))
         console.print(
-            f"[bold yellow]1.[/bold yellow] Open the following link in your browser:\n"
-            f"[link={challenge_url}]{challenge_url}[/link]"
+            "[bold yellow]1.[/bold yellow] Open the following link in your browser:\n",
+            challenge_link,
+            sep="",
         )
         console.print(
             f"[bold yellow]2.[/bold yellow] Your code should be pre-filled. Code:\n\n"
-            f"[bold green]{challenge_code}[/bold green]\n"
+            f"[bold green]{escape(str(challenge_code))}[/bold green]\n"
         )
         console.print("[dim]Waiting for authentication...[/dim]")
 
@@ -297,7 +305,7 @@ def login(
                         console.print("[green]Successfully logged in![/green]")
                         if key_limits:
                             summary = ", ".join(f"{k}={v}" for k, v in key_limits.items())
-                            console.print(f"[dim]API key limits: {summary}[/dim]")
+                            console.print(f"[dim]API key limits: {escape(summary)}[/dim]")
                         fetch_and_select_team(client, config)
                     else:
                         console.print("[red]Failed to decrypt authentication token[/red]")

@@ -114,6 +114,26 @@ def test_wallet_renders_balance_and_billings_table(monkeypatch: pytest.MonkeyPat
     assert calls == [{"endpoint": "/billing/wallet", "params": {"limit": 20, "offset": 0}}]
 
 
+def test_wallet_renders_api_values_with_markup_as_literal_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = _wallet_payload()
+    payload["currency"] = "USD[/INFO]"
+    payload["recent_billings"][0]["resource_type"] = "training[/INFO]"
+    payload["recent_billings"][0]["resource_id"] = "run[/INFO]"
+    monkeypatch.setattr(
+        "prime_cli.core.APIClient.get",
+        _make_get_mock({"/billing/wallet": payload}, []),
+    )
+
+    result = CliRunner().invoke(app, ["wallet"], env={"COLUMNS": "200"})
+
+    assert result.exit_code == 0, result.output
+    assert "USD[/INFO]" in result.output
+    assert "training[/INFO]" in result.output
+    assert "run[/INFO]" in result.output
+
+
 def test_wallet_json_output(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "prime_cli.core.APIClient.get",
@@ -266,12 +286,12 @@ def test_wallet_propagates_typed_api_errors(monkeypatch: pytest.MonkeyPatch) -> 
     from prime_cli.core import UnauthorizedError
 
     def raise_unauthorized(*args: Any, **kwargs: Any) -> Dict[str, Any]:
-        raise UnauthorizedError("token expired")
+        raise UnauthorizedError("token expired [/INFO]")
 
     monkeypatch.setattr("prime_cli.core.APIClient.get", raise_unauthorized)
 
     result = CliRunner().invoke(app, ["wallet"])
 
     assert result.exit_code == 1
-    assert "token expired" in result.output
+    assert "token expired [/INFO]" in result.output
     assert "Failed to get wallet" not in result.output

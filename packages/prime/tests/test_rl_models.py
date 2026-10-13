@@ -147,6 +147,26 @@ def test_models_handles_backend_without_pricing_fields(
     assert "qwen/qwen3-8b" in result.output
 
 
+def test_models_table_preserves_markup_like_model_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = {
+        "models": [
+            {
+                "name": "model[/INFO]",
+                "atCapacity": False,
+                "trainingPricePerMtok": 0.5,
+                "inferenceInputPricePerMtok": 1.0,
+                "inferenceOutputPricePerMtok": 3.0,
+            }
+        ]
+    }
+    monkeypatch.setattr("prime_cli.core.APIClient.get", _lora_only_mock(payload))
+
+    result = CliRunner().invoke(app, ["train", "models"], env={"COLUMNS": "200"})
+
+    assert result.exit_code == 0, result.output
+    assert "model[/INFO]" in strip_ansi(result.output)
+
+
 def _promo_payload() -> Dict[str, Any]:
     return {
         "models": [

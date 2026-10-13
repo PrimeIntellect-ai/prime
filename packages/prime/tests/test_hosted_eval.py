@@ -1,3 +1,4 @@
+import sys
 from pathlib import Path
 
 import pytest
@@ -10,7 +11,10 @@ from prime_cli.commands.evals import (
     _resolve_hosted_environment,
 )
 from prime_cli.main import app
-from prime_cli.utils.eval_environment import ResolvedEnvironment
+from prime_cli.utils.eval_environment import (
+    ResolvedEnvironment,
+    _choose_remote_owner,
+)
 from prime_cli.utils.hosted_eval import (
     HostedEvalConfig,
     clean_logs,
@@ -20,6 +24,18 @@ from prime_cli.utils.hosted_eval import (
 from typer.testing import CliRunner
 
 runner = CliRunner()
+
+
+def test_remote_owner_warning_escapes_markup(monkeypatch, capsys):
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+
+    selected = _choose_remote_owner(
+        "[/INFO]",
+        [("personal", "owner/[/INFO]"), ("team", "team/example")],
+    )
+
+    assert selected == ("personal", "owner/[/INFO]")
+    assert "[/INFO]" in capsys.readouterr().out
 
 
 class TestLogCleaning:
@@ -98,6 +114,47 @@ def test_eval_list_shows_hosted_checkbox(monkeypatch):
     assert "Type" in result.output
     assert "HOSTED" in result.output
     assert "LOCAL" in result.output
+
+
+@pytest.mark.parametrize("plain", [False, True])
+def test_eval_list_preserves_markup_like_table_cells(monkeypatch, plain):
+    class DummyConfig:
+        team_id = None
+
+    class DummyClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def list_evaluations(self, **_kwargs):
+            return {
+                "evaluations": [
+                    {
+                        "evaluation_id": "eval[/INFO]",
+                        "environment_names": ["env[/INFO]"],
+                        "model_name": "model[/INFO]",
+                        "status": "RUN[/INFO]",
+                        "is_hosted": True,
+                        "metadata": {},
+                    }
+                ],
+                "total": 1,
+            }
+
+    monkeypatch.setattr("prime_cli.commands.evals.Config", lambda: DummyConfig())
+    monkeypatch.setattr("prime_cli.commands.evals.APIClient", lambda: object())
+    monkeypatch.setattr("prime_cli.commands.evals.EvalsClient", DummyClient)
+
+    result = runner.invoke(
+        app,
+        [*(["--plain"] if plain else []), "eval", "list"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1", "COLUMNS": "200"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "eval[/INFO]" in result.output
+    assert "env[/INFO]" in result.output
+    assert "model[/INFO]" in result.output
+    assert "RUN[/INFO]" in result.output
 
 
 def test_eval_run_hosted_invokes_hosted_runner(monkeypatch):
@@ -1565,7 +1622,7 @@ def test_eval_run_hosted_reports_resolve_api_errors(monkeypatch):
     monkeypatch.setattr(
         "prime_cli.commands.evals._resolve_hosted_environment",
         lambda environment, env_dir_path=None, env_path=None: (_ for _ in ()).throw(
-            APIError("lookup failed")
+            APIError("lookup failed [/INFO]")
         ),
     )
 
@@ -1576,7 +1633,25 @@ def test_eval_run_hosted_reports_resolve_api_errors(monkeypatch):
     )
 
     assert result.exit_code == 1
-    assert "lookup failed" in result.output
+    assert "lookup failed [/INFO]" in result.output
+
+
+@pytest.mark.parametrize("follow", [False, True])
+@pytest.mark.parametrize("plain", [False, True])
+def test_eval_logs_backend_errors_are_literal(monkeypatch, follow, plain):
+    def fail(*args, **kwargs):
+        raise APIError("logs failed [/INFO] [bold]data[/bold]")
+
+    monkeypatch.setattr("prime_cli.commands.evals._fetch_eval_status", fail)
+    args = ["--plain"] if plain else []
+    args += ["eval", "logs", "eval-123"]
+    if follow:
+        args.append("--follow")
+
+    result = runner.invoke(app, args, env={"PRIME_DISABLE_VERSION_CHECK": "1"})
+
+    assert result.exit_code == 1
+    assert "logs failed [/INFO] [bold]data[/bold]" in result.output
 
 
 def test_eval_stop_command_calls_cancel_endpoint(monkeypatch):
@@ -1722,7 +1797,48 @@ def test_print_eval_status_falls_back_to_eval_id_when_viewer_url_missing(monkeyp
     assert "fallback/eval-123" in output
 
 
-def test_eval_logs_command_follows_incremental_output(monkeypatch):
+def test_print_eval_status_escapes_backend_values(capsys):
+    _print_eval_status(
+        {
+            "status": "[/INFO]",
+            "evaluation_id": "eval-[/INFO]",
+            "viewer_url": "https://example.test/evals/[/INFO]",
+            "error_message": "backend failed [/INFO]",
+        }
+    )
+
+    output = capsys.readouterr().out
+    assert "Status: [/INFO]" in output
+    assert "backend failed [/INFO]" in output
+    assert "https://example.test/evals/[/INFO]" in output
+
+
+@pytest.mark.parametrize("plain", [False, True])
+def test_eval_logs_preserve_markup_like_log_lines(monkeypatch, plain):
+    monkeypatch.setattr(
+        "prime_cli.commands.evals._fetch_eval_status",
+        lambda _client, _eval_id: {
+            "status": "COMPLETED",
+            "evaluation_id": "eval-123",
+        },
+    )
+    monkeypatch.setattr(
+        "prime_cli.commands.evals._fetch_logs",
+        lambda _client, _eval_id: "raw [/INFO] [bold]payload[/bold]",
+    )
+
+    result = runner.invoke(
+        app,
+        [*(["--plain"] if plain else []), "eval", "logs", "eval-123"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "raw [/INFO] [bold]payload[/bold]" in result.output
+
+
+@pytest.mark.parametrize("plain", [False, True])
+def test_eval_logs_command_follows_incremental_output(monkeypatch, plain):
     statuses = iter(
         [
             {"status": "RUNNING", "evaluation_id": "eval-123"},
@@ -1731,8 +1847,8 @@ def test_eval_logs_command_follows_incremental_output(monkeypatch):
     )
     logs = iter(
         [
-            "Line 1\nLine 2",
-            "Line 1\nLine 2\nLine 3",
+            "Line 1 [/INFO]\nLine 2 [bold]payload[/bold]",
+            "Line 1 [/INFO]\nLine 2 [bold]payload[/bold]\nLine 3 [/INFO]",
         ]
     )
 
@@ -1749,14 +1865,14 @@ def test_eval_logs_command_follows_incremental_output(monkeypatch):
 
     result = runner.invoke(
         app,
-        ["eval", "logs", "eval-123", "--follow"],
+        [*(["--plain"] if plain else []), "eval", "logs", "eval-123", "--follow"],
         env={"PRIME_DISABLE_VERSION_CHECK": "1"},
     )
 
     assert result.exit_code == 0, result.output
-    assert "Line 1" in result.output
-    assert "Line 2" in result.output
-    assert "Line 3" in result.output
+    assert "Line 1 [/INFO]" in result.output
+    assert "Line 2 [bold]payload[/bold]" in result.output
+    assert "Line 3 [/INFO]" in result.output
     assert result.output.count("Line 1") == 1
     assert "Status: COMPLETED" in result.output
 

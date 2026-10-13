@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Any, Dict, Optional
 
 import typer
+from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
 
@@ -196,16 +197,16 @@ def list(
                         )
 
                         table.add_row(
-                            disk_data["id"],
-                            disk_data["name"] or "N/A",
-                            f"{disk_data['size']}GB",
+                            Text(str(disk_data["id"])),
+                            Text(str(disk_data["name"] or "N/A")),
+                            Text(f"{disk_data['size']}GB"),
                             Text(disk_data["status"], style=disk_status_color),
-                            disk_data["provider"],
-                            disk_data["location"],
-                            disk_data["age"],
-                            price_display,
-                            f"{len(disk_data['pods'])}",
-                            f"{len(disk_data['clusters'])}",
+                            Text(str(disk_data["provider"])),
+                            Text(str(disk_data["location"])),
+                            Text(str(disk_data["age"])),
+                            Text(price_display),
+                            Text(f"{len(disk_data['pods'])}"),
+                            Text(f"{len(disk_data['clusters'])}"),
                         )
 
                     console.print(table)
@@ -241,10 +242,10 @@ def list(
                     break
 
     except APIError as e:
-        console.print(f"[red]Error:[/red] {str(e)}")
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except Exception as e:
-        console.print(f"[red]Unexpected error:[/red] {str(e)}")
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         import traceback
 
         traceback.print_exc()
@@ -273,7 +274,7 @@ def get(
             # Create display table
             disk_data = _format_disk_for_detail(disk)
 
-            table = Table(title=f"Disk Details: {disk_id}")
+            table = Table(title=Text(f"Disk Details: {disk_id}"))
             table.add_column("Property", style="cyan")
             table.add_column("Value", style="white")
 
@@ -286,25 +287,25 @@ def get(
             )
 
             # Basic disk info
-            table.add_row("Name", disk_data["name"] or "N/A")
+            table.add_row("Name", Text(str(disk_data["name"] or "N/A")))
             table.add_row("Size", Text(f"{disk_data['size']}GB", style="magenta"))
-            table.add_row("Provider", disk_data["provider"])
-            table.add_row("Team", disk_data["team_id"] or "Personal")
+            table.add_row("Provider", Text(str(disk_data["provider"])))
+            table.add_row("Team", Text(str(disk_data["team_id"] or "Personal")))
 
             # Pricing info
             if disk_data["price_hr"]:
-                table.add_row("Cost per Hour", f"${disk_data['price_hr']:.3f}")
+                table.add_row("Cost per Hour", Text(f"${disk_data['price_hr']:.3f}"))
 
             # Timestamps
-            table.add_row("Created", disk_data["created_at"])
-            table.add_row("Updated", disk_data["updated_at"])
+            table.add_row("Created", Text(str(disk_data["created_at"])))
+            table.add_row("Updated", Text(str(disk_data["updated_at"])))
             if disk_data["terminated_at"]:
-                table.add_row("Terminated", disk_data["terminated_at"])
+                table.add_row("Terminated", Text(str(disk_data["terminated_at"])))
 
             # Additional info
             if disk_data["info"]:
                 info_str = json.dumps(disk_data["info"], indent=2)
-                table.add_row("Info", info_str)
+                table.add_row("Info", Text(info_str))
 
             console.print(table)
 
@@ -315,19 +316,19 @@ def get(
                 attachment_table.add_column("ID", style="white")
 
                 for pod_id in disk_data["pods"]:
-                    attachment_table.add_row("Pod", pod_id)
+                    attachment_table.add_row("Pod", Text(str(pod_id)))
 
                 for cluster_id in disk_data["clusters"]:
-                    attachment_table.add_row("Cluster", cluster_id)
+                    attachment_table.add_row("Cluster", Text(str(cluster_id)))
 
                 console.print("\n")  # Add spacing between tables
                 console.print(attachment_table)
 
     except APIError as e:
-        console.print(f"[red]Error:[/red] {str(e)}")
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except Exception as e:
-        console.print(f"[red]Unexpected error:[/red] {str(e)}")
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         import traceback
 
         traceback.print_exc()
@@ -401,23 +402,23 @@ def create(
         console.print("\n[bold]Disk Configuration Summary:[/bold]")
         console.print(f"Size: {size}GB")
         if name:
-            console.print(f"Name: {name}")
+            console.print(f"Name: {name}", markup=False)
 
         disk_data = disk_config.get("disk", {})
         if isinstance(disk_data, dict):
             if disk_data.get("country"):
-                console.print(f"Country: {disk_data.get('country')}")
+                console.print(f"Country: {disk_data.get('country')}", markup=False)
             if disk_data.get("cloudId"):
-                console.print(f"Cloud ID: {disk_data.get('cloudId')}")
+                console.print(f"Cloud ID: {disk_data.get('cloudId')}", markup=False)
             if disk_data.get("dataCenterId"):
-                console.print(f"Data Center ID: {disk_data.get('dataCenterId')}")
+                console.print(f"Data Center ID: {disk_data.get('dataCenterId')}", markup=False)
 
         provider_data = disk_config.get("provider", {})
         if isinstance(provider_data, dict) and provider_data.get("type"):
-            console.print(f"Provider: {provider_data.get('type')}")
+            console.print(f"Provider: {provider_data.get('type')}", markup=False)
 
         if team_id:
-            console.print(f"Team: {team_id}")
+            console.print(f"Team: {team_id}", markup=False)
 
         if confirm_or_skip("\nDo you want to create this disk?", yes, default=True):
             try:
@@ -425,9 +426,10 @@ def create(
                 with console.status("[bold blue]Creating disk...", spinner="dots"):
                     disk = disks_client.create(disk_config)
 
-                console.print(f"\n[green]Successfully created disk {disk.id}[/green]")
+                console.print(f"\n[green]Successfully created disk {escape(str(disk.id))}[/green]")
                 console.print(
-                    f"\n[blue]Use 'prime disks get {disk.id}' to check the disk status[/blue]"
+                    f"\n[blue]Use 'prime disks get {escape(str(disk.id))}' "
+                    "to check the disk status[/blue]"
                 )
             except AttributeError:
                 console.print(
@@ -439,10 +441,10 @@ def create(
             raise typer.Exit(0)
 
     except APIError as e:
-        console.print(f"[red]Error:[/red] {str(e)}")
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except Exception as e:
-        console.print(f"[red]Unexpected error:[/red] {str(e)}")
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         import traceback
 
         traceback.print_exc()
@@ -462,14 +464,14 @@ def update(
         with console.status("[bold blue]Updating disk...", spinner="dots"):
             result = disks_client.update(disk_id, name)
 
-        console.print(f"[green]Successfully updated disk {disk_id}[/green]")
-        console.print(f"New name: {result.get('name', name)}")
+        console.print(f"[green]Successfully updated disk {escape(disk_id)}[/green]")
+        console.print(f"New name: {result.get('name', name)}", markup=False)
 
     except APIError as e:
-        console.print(f"[red]Error:[/red] {str(e)}")
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except Exception as e:
-        console.print(f"[red]Unexpected error:[/red] {str(e)}")
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         import traceback
 
         traceback.print_exc()
@@ -494,14 +496,14 @@ def terminate(
         with console.status("[bold blue]Deleting disk...", spinner="dots"):
             response = disks_client.delete(disk_id)
 
-        console.print(f"[green]Successfully deleted disk {disk_id}[/green]")
-        console.print(f"Status: {response.status}")
+        console.print(f"[green]Successfully deleted disk {escape(disk_id)}[/green]")
+        console.print(f"Status: {response.status}", markup=False)
 
     except APIError as e:
-        console.print(f"[red]Error:[/red] {str(e)}")
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except Exception as e:
-        console.print(f"[red]Unexpected error:[/red] {str(e)}")
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         import traceback
 
         traceback.print_exc()

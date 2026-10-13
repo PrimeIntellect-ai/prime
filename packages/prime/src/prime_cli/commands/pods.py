@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 import typer
+from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
 
@@ -228,11 +229,11 @@ def list(
                         pod_status_color = status_color(pod_data["status"], POD_STATUS_COLORS)
 
                         table.add_row(
-                            pod_data["id"],
-                            pod_data["name"] or "N/A",
-                            pod_data["gpu"],
+                            Text(str(pod_data["id"])),
+                            Text(str(pod_data["name"] or "N/A")),
+                            Text(str(pod_data["gpu"])),
                             Text(pod_data["status"], style=pod_status_color),
-                            pod_data["age"],
+                            Text(str(pod_data["age"])),
                         )
 
                     console.print(table)
@@ -270,10 +271,10 @@ def list(
                     break
 
     except APIError as e:
-        console.print(f"[red]Error:[/red] {str(e)}")
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except Exception as e:
-        console.print(f"[red]Unexpected error:[/red] {str(e)}")
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         import traceback
 
         traceback.print_exc()
@@ -298,7 +299,7 @@ def status(
         pod_details = pods_client.get(pod_id)
 
         if not statuses:
-            console.print(f"[red]No status found for pod {pod_id}[/red]")
+            console.print(f"[red]No status found for pod {escape(pod_id)}[/red]")
             raise typer.Exit(1)
 
         status = statuses[0]
@@ -311,7 +312,7 @@ def status(
             # Create display table
             status_data = _format_pod_for_status(status, pod_details)
 
-            table = Table(title=f"Pod Status: {pod_id}")
+            table = Table(title=Text(f"Pod Status: {pod_id}"))
             table.add_column("Property", style="cyan")
             table.add_column("Value", style="white")
 
@@ -324,25 +325,25 @@ def status(
             )
 
             # Basic pod info
-            table.add_row("Name", status_data["name"] or "N/A")
-            table.add_row("Team", status_data["team_id"] or "Personal")
-            table.add_row("Provider", status_data["provider"])
-            table.add_row("GPU", status_data["gpu"])
-            table.add_row("Image", status_data["image"])
+            table.add_row("Name", Text(str(status_data["name"] or "N/A")))
+            table.add_row("Team", Text(str(status_data["team_id"] or "Personal")))
+            table.add_row("Provider", Text(str(status_data["provider"])))
+            table.add_row("GPU", Text(str(status_data["gpu"])))
+            table.add_row("Image", Text(str(status_data["image"])))
 
             # Cost info if available
             if "cost_per_hour" in status_data:
                 table.add_row("Cost per Hour", f"${status_data['cost_per_hour']:.3f}")
 
-            table.add_row("Created", status_data["created_at"])
+            table.add_row("Created", Text(str(status_data["created_at"])))
 
             # Connection details
-            table.add_row("IP", status_data["ip"])
-            table.add_row("SSH", status_data["ssh"])
+            table.add_row("IP", Text(str(status_data["ip"])))
+            table.add_row("SSH", Text(str(status_data["ssh"])))
 
             # Installation status
             if "installation_status" in status_data:
-                table.add_row("Installation Status", status_data["installation_status"])
+                table.add_row("Installation Status", Text(str(status_data["installation_status"])))
             if "installation_progress" in status_data:
                 table.add_row("Installation Progress", f"{status_data['installation_progress']}%")
             if "installation_error" in status_data:
@@ -360,7 +361,7 @@ def status(
                         for port in status_data["port_mappings"]
                     ]
                 )
-                table.add_row("Port Mappings", ports)
+                table.add_row("Port Mappings", Text(ports))
 
             console.print(table)
 
@@ -376,21 +377,21 @@ def status(
                 for resource in status_data["attached_resources"]:
                     status_style = "green" if resource["status"] == "ACTIVE" else "yellow"
                     resource_table.add_row(
-                        resource["id"],
-                        resource["type"] or "N/A",
+                        Text(str(resource["id"])),
+                        Text(str(resource["type"] or "N/A")),
                         Text(resource["status"] or "N/A", style=status_style),
-                        str(resource["size"]) + "GB" if resource["size"] else "N/A",
-                        resource["mount_path"] or "N/A",
+                        Text(str(resource["size"]) + "GB" if resource["size"] else "N/A"),
+                        Text(str(resource["mount_path"] or "N/A")),
                     )
 
                 console.print("\n")  # Add spacing between tables
                 console.print(resource_table)
 
     except APIError as e:
-        console.print(f"[red]Error:[/red] {str(e)}")
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except Exception as e:
-        console.print(f"[red]Unexpected error:[/red] {str(e)}")
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         import traceback
 
         traceback.print_exc()
@@ -526,7 +527,7 @@ def create(
                     [gpu_type for gpu_type, gpus in availabilities.items() if len(gpus) > 0]
                 )
                 for idx, gpu_type_option in enumerate(gpu_types, 1):
-                    console.print(f"{idx}. {gpu_type_option}")
+                    console.print(f"{idx}. {gpu_type_option}", markup=False)
 
                 gpu_type_idx = typer.prompt("Select GPU type number", type=int, default=1)
                 if gpu_type_idx < 1 or gpu_type_idx > len(gpu_types):
@@ -560,7 +561,9 @@ def create(
                             f"${round(float(price), 2)}/hr" if price != float("inf") else "N/A"
                         )
                         spot_display = " (spot)" if gpu.is_spot else ""
-                        console.print(f"{idx}. {gpu.provider}{spot_display} ({price_display})")
+                        console.print(
+                            f"{idx}. {gpu.provider}{spot_display} ({price_display})", markup=False
+                        )
 
                     provider_idx = typer.prompt(
                         "Select provider number",
@@ -582,7 +585,7 @@ def create(
                 return selected_gpu
 
             if not gpu_count:
-                console.print(f"\n[bold]Available {gpu_type} Configurations:[/bold]")
+                console.print(f"\n[bold]Available {escape(str(gpu_type))} Configurations:[/bold]")
                 gpu_configs = availabilities.get(str(gpu_type), [])
 
                 # Get unique GPU counts and find cheapest price for each count
@@ -604,7 +607,7 @@ def create(
                     price_display = (
                         f"${round(float(price), 2)}/hr" if price != float("inf") else "N/A"
                     )
-                    console.print(f"{idx}. {count}x {gpu_type} ({price_display})")
+                    console.print(f"{idx}. {count}x {gpu_type} ({price_display})", markup=False)
 
                 config_idx = typer.prompt(
                     "Select configuration number",
@@ -630,7 +633,10 @@ def create(
                     if gpu.gpu_count == gpu_count
                 ]
                 if not matching_configs:
-                    console.print(f"[red]No configuration found for {gpu_count}x {gpu_type}[/red]")
+                    console.print(
+                        f"[red]No configuration found for {gpu_count}x "
+                        f"{escape(str(gpu_type))}[/red]"
+                    )
                     raise typer.Exit(1)
 
                 selected_gpu = select_provider_from_configs(matching_configs)
@@ -728,7 +734,7 @@ def create(
                 # Show available images
                 console.print("\n[bold]Available Images:[/bold]")
                 for idx, img in enumerate(available_images):
-                    console.print(f"{idx + 1}. {img}")
+                    console.print(f"{idx + 1}. {img}", markup=False)
 
                 # Prompt for image selection
                 image_idx = typer.prompt(
@@ -762,7 +768,7 @@ def create(
                     member_name = m.get("userName") or "N/A"
                     email = m.get("userEmail") or "N/A"
                     role = m.get("role", "")
-                    console.print(f"  {idx}. {member_name} ({email}) - {role}")
+                    console.print(f"  {idx}. {member_name} ({email}) - {role}", markup=False)
 
                 selection = typer.prompt(
                     "\nSelect members (comma-separated numbers, or 'all' for everyone)",
@@ -788,7 +794,7 @@ def create(
                                 )
                                 raise typer.Exit(1)
                         else:
-                            console.print(f"[red]Invalid input: {part}[/red]")
+                            console.print(f"[red]Invalid input: {escape(part)}[/red]")
                             raise typer.Exit(1)
 
                     selected_members = [selectable_members[i] for i in selected_indices]
@@ -848,16 +854,16 @@ def create(
                 if value is not None:
                     if key == "provider":
                         continue
-                    console.print(f"{key}: {value}")
+                    console.print(f"{key}: {value}", markup=False)
         if isinstance(pod_config["provider"], dict) and isinstance(
             pod_config["provider"].get("type"), str
         ):
-            console.print(f"provider: {pod_config['provider']['type']}")
-        console.print(f"team: {resolved_team_id}")
+            console.print(f"provider: {pod_config['provider']['type']}", markup=False)
+        console.print(f"team: {resolved_team_id}", markup=False)
         if disks:
-            console.print(f"disks: {', '.join(disks)}")
+            console.print(f"disks: {', '.join(disks)}", markup=False)
         if sharing_display:
-            console.print(f"sharing: {sharing_display}")
+            console.print(f"sharing: {sharing_display}", markup=False)
 
         if confirm_or_skip("\nDo you want to create this pod?", yes, default=True):
             try:
@@ -865,9 +871,10 @@ def create(
                 with console.status("[bold blue]Creating pod...", spinner="dots"):
                     pod = pods_client.create(pod_config)
 
-                console.print(f"\n[green]Successfully created pod {pod.id}[/green]")
+                console.print(f"\n[green]Successfully created pod {escape(str(pod.id))}[/green]")
                 console.print(
-                    f"\n[blue]Use 'prime pods status {pod.id}' to check the pod status[/blue]"
+                    f"\n[blue]Use 'prime pods status {escape(str(pod.id))}' "
+                    "to check the pod status[/blue]"
                 )
             except AttributeError:
                 console.print(
@@ -882,10 +889,10 @@ def create(
         console.print("\n[yellow]Operation cancelled[/yellow]")
         raise typer.Exit(0)
     except APIError as e:
-        console.print(f"[red]Error:[/red] {str(e)}")
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except Exception as e:
-        console.print(f"[red]Unexpected error:[/red] {str(e)}")
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         import traceback
 
         traceback.print_exc()
@@ -910,13 +917,13 @@ def terminate(
         with console.status("[bold blue]Terminating pod...", spinner="dots"):
             pods_client.delete(pod_id)
 
-        console.print(f"[green]Successfully terminated pod {pod_id}[/green]")
+        console.print(f"[green]Successfully terminated pod {escape(pod_id)}[/green]")
 
     except APIError as e:
-        console.print(f"[red]Error:[/red] {str(e)}")
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except Exception as e:
-        console.print(f"[red]Unexpected error:[/red] {str(e)}")
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         import traceback
 
         traceback.print_exc()
@@ -1012,13 +1019,13 @@ def history(
                 item_data = _format_history_for_display(item)
 
                 table.add_row(
-                    item_data["id"],
-                    item_data["name"] or "N/A",
-                    item_data["team_id"] or "N/A",
-                    item_data["gpu"],
-                    item_data["created_at"],
-                    item_data["terminated_at"] or "N/A",
-                    item_data["duration"] or "N/A",
+                    Text(str(item_data["id"])),
+                    Text(str(item_data["name"] or "N/A")),
+                    Text(str(item_data["team_id"] or "N/A")),
+                    Text(str(item_data["gpu"])),
+                    Text(str(item_data["created_at"])),
+                    Text(str(item_data["terminated_at"] or "N/A")),
+                    Text(str(item_data["duration"] or "N/A")),
                 )
 
             console.print(table)
@@ -1033,10 +1040,10 @@ def history(
                 )
 
     except APIError as e:
-        console.print(f"[red]Error:[/red] {str(e)}")
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except Exception as e:
-        console.print(f"[red]Unexpected error:[/red] {str(e)}")
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         import traceback
 
         traceback.print_exc()
@@ -1058,7 +1065,7 @@ def connect(pod_id: str) -> None:
                 # Get pod status to check SSH connection details
                 statuses = pods_client.get_status([pod_id])
                 if not statuses:
-                    console.print(f"[red]No status found for pod {pod_id}[/red]")
+                    console.print(f"[red]No status found for pod {escape(pod_id)}[/red]")
                     raise typer.Exit(1)
 
                 status = statuses[0]
@@ -1071,10 +1078,10 @@ def connect(pod_id: str) -> None:
         # Get SSH key path from config
         ssh_key_path = Config().ssh_key_path
         if not os.path.exists(ssh_key_path):
-            console.print(f"[red]SSH key not found at {ssh_key_path}[/red]")
+            console.print(f"[red]SSH key not found at {escape(str(ssh_key_path))}[/red]")
             raise typer.Exit(1)
 
-        console.print(f"[blue]Using SSH key:[/blue] {ssh_key_path}")
+        console.print(f"[blue]Using SSH key:[/blue] {escape(str(ssh_key_path))}")
         console.print("[dim]To change SSH key path, use: prime config set-ssh-key-path[/dim]")
 
         ssh_conn = status.ssh_connection
@@ -1095,7 +1102,7 @@ def connect(pod_id: str) -> None:
         if len(connections) > 1:
             console.print("\nMultiple nodes available. Please select one:")
             for idx, conn in enumerate(connections):
-                console.print(f"[blue]{idx + 1}[/blue]) {conn}")
+                console.print(f"[blue]{idx + 1}[/blue]) {escape(conn)}")
 
             choice = typer.prompt("Enter node number", type=int, default=1, show_default=False)
 
@@ -1126,17 +1133,17 @@ def connect(pod_id: str) -> None:
         try:
             subprocess.run(ssh_command)
         except subprocess.CalledProcessError as e:
-            console.print(f"[red]SSH connection failed: {str(e)}[/red]")
+            console.print(f"[red]SSH connection failed: {escape(str(e))}[/red]")
             raise typer.Exit(1)
 
     except typer.Abort:
         console.print("\n[yellow]Operation cancelled[/yellow]")
         raise typer.Exit(0)
     except APIError as e:
-        console.print(f"[red]Error:[/red] {str(e)}")
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except Exception as e:
-        console.print(f"[red]Unexpected error:[/red] {str(e)}")
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         import traceback
 
         traceback.print_exc()

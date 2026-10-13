@@ -20,6 +20,8 @@ import httpx
 import toml
 import typer
 from gitignore_parser import parse_gitignore
+from rich.markup import escape
+from rich.style import Style
 from rich.table import Table
 from rich.text import Text
 
@@ -56,6 +58,17 @@ MAX_FILES_TO_SHOW = 10
 DEFAULT_HASH_LENGTH = 8
 DEFAULT_LIST_LIMIT = 20
 MAX_TARBALL_SIZE_LIMIT = 250 * 1024 * 1024  # 250MB
+
+
+def _safe_text(value: Any) -> Text:
+    """Render a dynamic value as literal text instead of Rich markup."""
+    return Text(str(value))
+
+
+def _safe_markup(value: Any) -> str:
+    """Escape a dynamic value interpolated into a styled Rich message."""
+    return escape(str(value))
+
 
 # Action subcommand app
 action_app = PlainTyper(
@@ -135,13 +148,13 @@ def _parse_environment_slug(environment: str) -> Tuple[str, str]:
         typer.Exit: If the slug is invalid
     """
     if "/" not in environment:
-        console.print(f"[red]Invalid environment format: {environment}[/red]")
+        console.print(f"[red]Invalid environment format: {_safe_markup(environment)}[/red]")
         console.print("[dim]Use format: owner/environment-name[/dim]")
         raise typer.Exit(1)
 
     parts = environment.split("/", 1)
     if len(parts) != 2 or not parts[0] or not parts[1]:
-        console.print(f"[red]Invalid environment format: {environment}[/red]")
+        console.print(f"[red]Invalid environment format: {_safe_markup(environment)}[/red]")
         console.print("[dim]Use format: owner/environment-name[/dim]")
         raise typer.Exit(1)
 
@@ -158,7 +171,9 @@ def _resolve_environment(environment: Optional[str]) -> Tuple[str, str]:
         owner = metadata.get("owner")
         name = metadata.get("name")
         if owner and name:
-            console.print(f"[dim]Using environment: {owner}/{name}[/dim]")
+            console.print(
+                f"[dim]Using environment: {_safe_markup(owner)}/{_safe_markup(name)}[/dim]"
+            )
             return owner, name
 
     console.print(
@@ -239,7 +254,10 @@ def display_upstream_environment_info(
     if env_metadata and env_metadata.get("owner") and env_metadata.get("name"):
         owner = env_metadata.get("owner")
         env_name = env_metadata.get("name")
-        console.print(f"[dim]Using upstream environment {owner}/{env_name}[/dim]\n")
+        console.print(
+            "[dim]Using upstream environment "
+            f"{_safe_markup(owner)}/{_safe_markup(env_name)}[/dim]\n"
+        )
         return True
     else:
         console.print("[dim]No upstream environment found.[/dim]\n")
@@ -503,8 +521,9 @@ def compute_content_hash(env_path: Path) -> str:
 def _print_env_inspect_examples(owner: str, name: str, version: str) -> None:
     """Print inspect commands for an environment version."""
     console.print("[bold yellow]Inspect[/bold yellow]")
-    console.print(f"  [green]$[/green] prime env inspect {owner}/{name}@{version}")
-    console.print(f"  [green]$[/green] prime env inspect {owner}/{name}@{version} README.md")
+    safe_ref = f"{_safe_markup(owner)}/{_safe_markup(name)}@{_safe_markup(version)}"
+    console.print(f"  [green]$[/green] prime env inspect {safe_ref}")
+    console.print(f"  [green]$[/green] prime env inspect {safe_ref} README.md")
 
 
 @app.command("list", rich_help_panel="Explore", epilog=ENV_LIST_JSON_HELP)
@@ -643,7 +662,7 @@ def list_cmd(
             output_data_as_json(output_data, console)
         else:
             # Table output
-            table = Table(title=f"Environments (Total: {total})")
+            table = Table(title=_safe_text(f"Environments (Total: {total})"))
             table.add_column("Environment", style="cyan")
             table.add_column("Description", style="green")
             table.add_column("Version", style="blue")
@@ -666,7 +685,13 @@ def list_cmd(
                     except (ValueError, AttributeError):
                         pass
 
-                table.add_row(env_id, description, version, stars, updated_at)
+                table.add_row(
+                    _safe_text(env_id),
+                    _safe_text(description),
+                    _safe_text(version),
+                    _safe_text(stars),
+                    _safe_text(updated_at),
+                )
 
             console.print(table)
 
@@ -676,13 +701,13 @@ def list_cmd(
                     f"Use --page {page + 1} to see more.[/yellow]"
                 )
             else:
-                console.print(f"\n[dim]Total: {total} environment(s)[/dim]")
+                console.print(f"\n[dim]Total: {_safe_markup(total)} environment(s)[/dim]")
 
     except APIError as e:
-        console.print(f"[red]Error: {e}[/red]")
+        console.print(f"[red]Error: {_safe_markup(e)}[/red]")
         raise typer.Exit(1)
     except Exception as e:
-        console.print(f"[red]Unexpected error: {e}[/red]")
+        console.print(f"[red]Unexpected error: {_safe_markup(e)}[/red]")
         raise typer.Exit(1)
 
 
@@ -717,10 +742,15 @@ def status_cmd(
         else:
             # Header
             env_display_name = data.get("name", env_name)
-            console.print(f"\n[bold cyan]Environment:[/bold cyan] {owner_name}/{env_display_name}")
+            console.print(
+                f"\n[bold cyan]Environment:[/bold cyan] "
+                f"{_safe_markup(owner_name)}/{_safe_markup(env_display_name)}"
+            )
             if data.get("description"):
-                console.print(f"[dim]Description:[/dim] {data['description']}")
-            console.print(f"[dim]Visibility:[/dim] {data.get('visibility', 'UNKNOWN')}")
+                console.print(f"[dim]Description:[/dim] {_safe_markup(data['description'])}")
+            console.print(
+                f"[dim]Visibility:[/dim] {_safe_markup(data.get('visibility', 'UNKNOWN'))}"
+            )
 
             # Latest Version section
             console.print("\n[bold]Latest Version:[/bold]")
@@ -728,20 +758,22 @@ def status_cmd(
             if latest_version:
                 content_hash = latest_version.get("content_hash") or ""
                 version_str = latest_version.get("semantic_version") or content_hash[:8]
-                console.print(f"  Version: {version_str}")
-                console.print(f"  Hash: {(latest_version.get('content_hash') or '-')[:12]}")
+                console.print(f"  Version: {_safe_markup(version_str)}")
+                console.print(
+                    f"  Hash: {_safe_markup((latest_version.get('content_hash') or '-')[:12])}"
+                )
                 created_at = latest_version.get("created_at")
-                console.print(f"  Created: {format_time_ago(created_at)}")
+                console.print(f"  Created: {_safe_markup(format_time_ago(created_at))}")
             else:
                 console.print("  [dim]No versions found[/dim]")
 
             console.print()
 
     except APIError as e:
-        console.print(f"[red]Error: {e}[/red]")
+        console.print(f"[red]Error: {_safe_markup(e)}[/red]")
         raise typer.Exit(1)
     except Exception as e:
-        console.print(f"[red]Unexpected error: {e}[/red]")
+        console.print(f"[red]Unexpected error: {_safe_markup(e)}[/red]")
         raise typer.Exit(1)
 
 
@@ -847,7 +879,7 @@ def push(
     try:
         declared_runtime = parse_runtime_option(runtime)
     except ValueError as e:
-        console.print(f"[red]Error: {e}[/red]")
+        console.print(f"[red]Error: {_safe_markup(e)}[/red]")
         raise typer.Exit(1)
 
     try:
@@ -895,7 +927,10 @@ def push(
                 else:
                     new_version = bump_post_version(current_version)
 
-                console.print(f"Auto-bumping version: {current_version} → {new_version}")
+                console.print(
+                    f"Auto-bumping version: {_safe_markup(current_version)} → "
+                    f"{_safe_markup(new_version)}"
+                )
 
                 try:
                     update_pyproject_version(pyproject_path, new_version)
@@ -904,13 +939,15 @@ def push(
                     project_info = pyproject_data.get("project", {})
                     console.print("[green]✓ Updated version in pyproject.toml[/green]")
                 except Exception as e:
-                    console.print(f"[red]Failed to update version in pyproject.toml: {e}[/red]")
+                    console.print(
+                        f"[red]Failed to update version in pyproject.toml: {_safe_markup(e)}[/red]"
+                    )
                     raise typer.Exit(1)
 
-            console.print(f"Environment name: {env_name}")
+            console.print(f"Environment name: {_safe_markup(env_name)}")
 
         except Exception as e:
-            console.print(f"[red]Failed to parse pyproject.toml: {e}[/red]")
+            console.print(f"[red]Failed to parse pyproject.toml: {_safe_markup(e)}[/red]")
             raise typer.Exit(1)
 
         # Find any Python file in the environment
@@ -932,7 +969,7 @@ def push(
             console.print("[red]Error: No environment Python file found[/red]")
             raise typer.Exit(1)
 
-        console.print(f"Building environment package at {env_path}...")
+        console.print(f"Building environment package at {env_path}...", markup=False)
 
         # Clean dist directory to ensure fresh build
         dist_dir = env_path / "dist"
@@ -960,7 +997,7 @@ def push(
                 )
         except subprocess.CalledProcessError as e:
             console.print("[red]Build failed![/red]")
-            console.print(e.stderr)
+            console.print(e.stderr, markup=False, highlight=False)
             raise typer.Exit(1)
         except FileNotFoundError:
             console.print("[red]Build tool not found. Please install 'uv' or 'build'.[/red]")
@@ -974,7 +1011,9 @@ def push(
 
         wheel_path = wheels[0]
         wheel_size = wheel_path.stat().st_size
-        console.print(f"[green]✓ Built {wheel_path.name} ({wheel_size:,} bytes)[/green]")
+        console.print(
+            f"[green]✓ Built {_safe_markup(wheel_path.name)} ({wheel_size:,} bytes)[/green]"
+        )
 
         console.print("\nUploading to Prime Intellect Hub...")
 
@@ -1003,12 +1042,13 @@ def push(
 
                 if resolve_response["created"]:
                     console.print(
-                        f"[green]✓ Created environment: {owner_info['name']}/{env_name}[/green]"
+                        f"[green]✓ Created environment: "
+                        f"{_safe_markup(owner_info['name'])}/{_safe_markup(env_name)}[/green]"
                     )
                 else:
                     console.print(
                         f"[green]✓ Found existing environment: "
-                        f"{owner_info['name']}/{env_name}[/green]"
+                        f"{_safe_markup(owner_info['name'])}/{_safe_markup(env_name)}[/green]"
                     )
             except APIError as e:
                 # Handle missing username (slug) by prompting user to set it and retrying
@@ -1048,7 +1088,9 @@ def push(
 
                         try:
                             client.patch("/user/slug", json={"slug": chosen})
-                            console.print(f"[green]✓ Username set to {chosen}[/green]")
+                            console.print(
+                                f"[green]✓ Username set to {_safe_markup(chosen)}[/green]"
+                            )
                             break
                         except APIError as se:
                             se_msg = str(se)
@@ -1059,7 +1101,9 @@ def push(
                                 )
                                 continue
                             else:
-                                console.print(f"[red]Failed to set username: {se}[/red]")
+                                console.print(
+                                    f"[red]Failed to set username: {_safe_markup(se)}[/red]"
+                                )
                                 raise typer.Exit(1)
 
                     # Retry resolve after setting username
@@ -1076,21 +1120,22 @@ def push(
 
                         if resolve_response["created"]:
                             console.print(
-                                f"[green]✓ Created environment: {owner_info['name']}/"
-                                f"{env_name}[/green]"
+                                f"[green]✓ Created environment: "
+                                f"{_safe_markup(owner_info['name'])}/{_safe_markup(env_name)}[/green]"
                             )
                         else:
                             console.print(
                                 f"[green]✓ Found existing environment: "
-                                f"{owner_info['name']}/{env_name}[/green]"
+                                f"{_safe_markup(owner_info['name'])}/{_safe_markup(env_name)}[/green]"
                             )
                     except APIError as e2:
                         console.print(
-                            f"[red]Failed to resolve environment after setting username: {e2}[/red]"
+                            "[red]Failed to resolve environment after setting username: "
+                            f"{_safe_markup(e2)}[/red]"
                         )
                         raise typer.Exit(1)
                 else:
-                    console.print(f"[red]Failed to resolve environment: {e}[/red]")
+                    console.print(f"[red]Failed to resolve environment: {_safe_markup(e)}[/red]")
                     raise typer.Exit(1)
 
             console.print("Uploading wheel ...")
@@ -1099,7 +1144,7 @@ def push(
                 with open(wheel_path, "rb") as f:
                     wheel_sha256 = hashlib.sha256(f.read()).hexdigest()
             except IOError as e:
-                console.print(f"[red]Failed to read wheel file: {e}[/red]")
+                console.print(f"[red]Failed to read wheel file: {_safe_markup(e)}[/red]")
                 raise typer.Exit(1)
 
             project_metadata = project_info
@@ -1154,7 +1199,7 @@ def push(
 
             except APIError as e:
                 if "content hash" in str(e).lower() and "already exists" in str(e):
-                    console.print(f"[red]Failed to prepare wheel upload: {e}[/red]")
+                    console.print(f"[red]Failed to prepare wheel upload: {_safe_markup(e)}[/red]")
                     console.print(
                         "[yellow]Tip: If you've made changes to your environment, "
                         "ensure the content has actually changed.[/yellow]"
@@ -1168,7 +1213,7 @@ def push(
                         "a new version without content changes[/dim]"
                     )
                 else:
-                    console.print(f"[red]Failed to prepare wheel upload: {e}[/red]")
+                    console.print(f"[red]Failed to prepare wheel upload: {_safe_markup(e)}[/red]")
                 raise typer.Exit(1)
 
             if wheel_upload_url:
@@ -1182,16 +1227,18 @@ def push(
                         )
                         upload_response.raise_for_status()
                 except httpx.RequestError as e:
-                    console.print(f"[red]Failed to upload wheel: {e}[/red]")
+                    console.print(f"[red]Failed to upload wheel: {_safe_markup(e)}[/red]")
                     raise typer.Exit(1)
                 except IOError as e:
-                    console.print(f"[red]Failed to read wheel file for upload: {e}[/red]")
+                    console.print(
+                        f"[red]Failed to read wheel file for upload: {_safe_markup(e)}[/red]"
+                    )
                     raise typer.Exit(1)
 
                 try:
                     client.post(f"/environmentshub/{env_id}/wheels/{wheel_id}/finalize")
                 except APIError as e:
-                    console.print(f"[red]Failed to finalize wheel upload: {e}[/red]")
+                    console.print(f"[red]Failed to finalize wheel upload: {_safe_markup(e)}[/red]")
                     raise typer.Exit(1)
 
             console.print("Creating source archive...")
@@ -1207,7 +1254,7 @@ def push(
                     # Check tarball size
                     tarball_size = Path(tmp.name).stat().st_size
                     tarball_size_formatted = format_file_size(tarball_size)
-                    console.print(f"Source archive size: {tarball_size_formatted}")
+                    console.print(f"Source archive size: {_safe_markup(tarball_size_formatted)}")
 
                     if tarball_size > MAX_TARBALL_SIZE_LIMIT:
                         max_size_formatted = format_file_size(MAX_TARBALL_SIZE_LIMIT)
@@ -1261,7 +1308,9 @@ def push(
 
                     except APIError as e:
                         if "content hash" in str(e).lower() and "already exists" in str(e):
-                            console.print(f"[red]Failed to prepare source upload: {e}[/red]")
+                            console.print(
+                                f"[red]Failed to prepare source upload: {_safe_markup(e)}[/red]"
+                            )
                             console.print(
                                 "[yellow]Tip: If you've made changes to your environment, "
                                 "ensure the content has actually changed.[/yellow]"
@@ -1275,7 +1324,9 @@ def push(
                                 "a new version without content changes[/dim]"
                             )
                         else:
-                            console.print(f"[red]Failed to prepare source upload: {e}[/red]")
+                            console.print(
+                                f"[red]Failed to prepare source upload: {_safe_markup(e)}[/red]"
+                            )
                         raise typer.Exit(1)
 
                     try:
@@ -1288,10 +1339,15 @@ def push(
                             )
                             upload_response.raise_for_status()
                     except httpx.RequestError as e:
-                        console.print(f"[red]Failed to upload source archive: {e}[/red]")
+                        console.print(
+                            f"[red]Failed to upload source archive: {_safe_markup(e)}[/red]"
+                        )
                         raise typer.Exit(1)
                     except IOError as e:
-                        console.print(f"[red]Failed to read source archive for upload: {e}[/red]")
+                        console.print(
+                            "[red]Failed to read source archive for upload: "
+                            f"{_safe_markup(e)}[/red]"
+                        )
                         raise typer.Exit(1)
 
                     # Finalize
@@ -1303,11 +1359,13 @@ def push(
                         finalize_response = response["data"]
 
                     except APIError as e:
-                        console.print(f"[red]Failed to finalize source upload: {e}[/red]")
+                        console.print(
+                            f"[red]Failed to finalize source upload: {_safe_markup(e)}[/red]"
+                        )
                         raise typer.Exit(1)
 
             except (tarfile.TarError, OSError) as e:
-                console.print(f"[red]Failed to create source archive: {e}[/red]")
+                console.print(f"[red]Failed to create source archive: {_safe_markup(e)}[/red]")
                 raise typer.Exit(1)
             finally:
                 # Clean up temporary file if it was created
@@ -1316,9 +1374,12 @@ def push(
 
             if finalize_response.get("success"):
                 owner_name = owner_info["name"]
-                console.print(f"\n[green]✓ Successfully pushed {owner_name}/{env_name}[/green]")
-                console.print(f"Wheel: {wheel_path.name}")
-                console.print(f"SHA256: {wheel_sha256}")
+                console.print(
+                    f"\n[green]✓ Successfully pushed {_safe_markup(owner_name)}/"
+                    f"{_safe_markup(env_name)}[/green]"
+                )
+                console.print(f"Wheel: {_safe_markup(wheel_path.name)}")
+                console.print(f"SHA256: {_safe_markup(wheel_sha256)}")
 
                 # Save or update environment hub metadata for future reference
                 try:
@@ -1343,7 +1404,7 @@ def push(
                             migration_failed = True
                             console.print(
                                 f"[yellow]Warning: Could not migrate old .env-metadata.json "
-                                f"file to .prime/ subfolder: {e}[/yellow]"
+                                f"file to .prime/ subfolder: {_safe_markup(e)}[/yellow]"
                             )
                     elif old_metadata_path.exists() and metadata_path.exists():
                         # Both exist - prefer the one in .prime/ and remove the old one
@@ -1362,7 +1423,8 @@ def push(
                                 existing_metadata = json.load(f)
                         except (json.JSONDecodeError, IOError) as e:
                             console.print(
-                                f"[yellow]Warning: Could not read existing metadata: {e}[/yellow]"
+                                f"[yellow]Warning: Could not read existing metadata: "
+                                f"{_safe_markup(e)}[/yellow]"
                             )
                             existing_metadata = {}
                     elif migration_failed and old_metadata_path.exists():
@@ -1373,7 +1435,7 @@ def push(
                         except (json.JSONDecodeError, IOError) as e:
                             console.print(
                                 f"[yellow]Warning: Could not read existing metadata from "
-                                f"old location: {e}[/yellow]"
+                                f"old location: {_safe_markup(e)}[/yellow]"
                             )
                             existing_metadata = {}
 
@@ -1406,40 +1468,47 @@ def push(
                         console.print(upstream_message)
                 except Exception as e:
                     console.print(
-                        f"[yellow]Warning: Could not save environment metadata: {e}[/yellow]"
+                        f"[yellow]Warning: Could not save environment metadata: "
+                        f"{_safe_markup(e)}[/yellow]"
                     )
 
                 # Show Hub page link for the environment
                 frontend_url = client.config.frontend_url.rstrip("/")
                 hub_url = f"{frontend_url}/dashboard/environments/{owner_name}/{env_name}"
                 console.print("\n[cyan]View on Environments Hub:[/cyan]")
-                console.print(f"  [link={hub_url}]{hub_url}[/link]")
+                hub_link = Text("  ")
+                hub_link.append(hub_url, style=Style(link=hub_url))
+                console.print(hub_link)
 
                 # Show install command
                 console.print("\n[cyan]Install with:[/cyan]")
-                console.print(f"  prime env install {owner_name}/{env_name}")
+                console.print(
+                    f"  prime env install {_safe_markup(owner_name)}/{_safe_markup(env_name)}"
+                )
             else:
-                console.print(f"[red]Error finalizing: {finalize_response.get('message')}[/red]")
+                console.print(
+                    f"[red]Error finalizing: {_safe_markup(finalize_response.get('message'))}[/red]"
+                )
                 raise typer.Exit(1)
 
         except APIError as e:
-            console.print(f"[red]API Error: {e}[/red]")
+            console.print(f"[red]API Error: {_safe_markup(e)}[/red]")
             raise typer.Exit(1)
         except Exception as e:
-            console.print(f"[red]Upload failed: {e}[/red]")
+            console.print(f"[red]Upload failed: {_safe_markup(e)}[/red]")
             raise typer.Exit(1)
 
     except subprocess.CalledProcessError as e:
-        console.print(f"[red]Build error: {e}[/red]")
+        console.print(f"[red]Build error: {_safe_markup(e)}[/red]")
         raise typer.Exit(1)
     except FileNotFoundError as e:
-        console.print(f"[red]File not found: {e}[/red]")
+        console.print(f"[red]File not found: {_safe_markup(e)}[/red]")
         raise typer.Exit(1)
     except PermissionError as e:
-        console.print(f"[red]Permission error: {e}[/red]")
+        console.print(f"[red]Permission error: {_safe_markup(e)}[/red]")
         raise typer.Exit(1)
     except Exception as e:
-        console.print(f"[red]Unexpected error: {e}[/red]")
+        console.print(f"[red]Unexpected error: {_safe_markup(e)}[/red]")
         raise typer.Exit(1)
 
 
@@ -1467,7 +1536,7 @@ def pull(
 
         owner, name = parts
 
-        console.print(f"Pulling {env_id}@{version}...")
+        console.print(f"Pulling {env_id}@{version}...", markup=False)
 
         try:
             response = client.get(f"/environmentshub/{owner}/{name}/@{version}")
@@ -1478,7 +1547,7 @@ def pull(
                 # Fallback for old format
                 details = response
         except APIError as e:
-            console.print(f"[red]Failed to get environment details: {e}[/red]")
+            console.print(f"[red]Failed to get environment details: {_safe_markup(e)}[/red]")
             raise typer.Exit(1)
 
         download_url = _environment_package_download_url(details)
@@ -1495,19 +1564,21 @@ def pull(
                 target_dir = base_dir.parent / f"{base_dir.name}-{index}"
                 index += 1
             console.print(
-                f"[yellow]Directory {base_dir} already exists. Using {target_dir} instead.[/yellow]"
+                "[yellow]Directory "
+                f"{_safe_markup(base_dir)} already exists. Using {_safe_markup(target_dir)} "
+                "instead.[/yellow]"
             )
 
         try:
             target_dir.mkdir(parents=True, exist_ok=True)
         except PermissionError as e:
-            console.print(f"[red]Permission error creating directory: {e}[/red]")
+            console.print(f"[red]Permission error creating directory: {_safe_markup(e)}[/red]")
             raise typer.Exit(1)
         except OSError as e:
-            console.print(f"[red]Error creating directory: {e}[/red]")
+            console.print(f"[red]Error creating directory: {_safe_markup(e)}[/red]")
             raise typer.Exit(1)
 
-        console.print(f"Downloading to {target_dir}...")
+        console.print(f"Downloading to {target_dir}...", markup=False)
 
         temp_file_path = None
         try:
@@ -1530,13 +1601,15 @@ def pull(
                                 for chunk in resp.iter_bytes(chunk_size=8192):
                                     f.write(chunk)
                     else:
-                        console.print(f"[red]Error: Invalid download URL: {download_url}[/red]")
+                        console.print(
+                            f"[red]Error: Invalid download URL: {_safe_markup(download_url)}[/red]"
+                        )
                         raise typer.Exit(1)
                 except httpx.RequestError as e:
-                    console.print(f"[red]Download failed: {e}[/red]")
+                    console.print(f"[red]Download failed: {_safe_markup(e)}[/red]")
                     raise typer.Exit(1)
                 except IOError as e:
-                    console.print(f"[red]Failed to write downloaded file: {e}[/red]")
+                    console.print(f"[red]Failed to write downloaded file: {_safe_markup(e)}[/red]")
                     raise typer.Exit(1)
 
                 try:
@@ -1544,23 +1617,23 @@ def pull(
                         # Use path-traversal / symlink-safe extract (same as install)
                         _safe_tar_extract(tar, Path(target_dir))
                 except ValueError as e:
-                    console.print(f"[red]Failed to extract archive: {e}[/red]")
+                    console.print(f"[red]Failed to extract archive: {_safe_markup(e)}[/red]")
                     raise typer.Exit(1)
                 except tarfile.TarError as e:
-                    console.print(f"[red]Failed to extract archive: {e}[/red]")
+                    console.print(f"[red]Failed to extract archive: {_safe_markup(e)}[/red]")
                     raise typer.Exit(1)
                 except IOError as e:
-                    console.print(f"[red]Failed to extract files: {e}[/red]")
+                    console.print(f"[red]Failed to extract files: {_safe_markup(e)}[/red]")
                     raise typer.Exit(1)
         except OSError as e:
-            console.print(f"[red]Failed to create temporary file: {e}[/red]")
+            console.print(f"[red]Failed to create temporary file: {_safe_markup(e)}[/red]")
             raise typer.Exit(1)
         finally:
             # Clean up temporary file if it was created
             if temp_file_path and Path(temp_file_path).exists():
                 Path(temp_file_path).unlink()
 
-        console.print(f"[green]✓ Environment pulled to {target_dir}[/green]")
+        console.print(f"[green]✓ Environment pulled to {_safe_markup(target_dir)}[/green]")
 
         # Create .env-metadata.json for proper resolution
         try:
@@ -1598,7 +1671,9 @@ def pull(
             message.append(str(metadata_path), style="dim")
             console.print(message)
         except Exception as e:
-            console.print(f"[yellow]Warning: Could not create metadata file: {e}[/yellow]")
+            console.print(
+                f"[yellow]Warning: Could not create metadata file: {_safe_markup(e)}[/yellow]"
+            )
 
         try:
             all_files = list(target_dir.iterdir())
@@ -1610,18 +1685,20 @@ def pull(
             if extracted_files:
                 console.print("\nExtracted files:")
                 for file in extracted_files[:MAX_FILES_TO_SHOW]:
-                    console.print(f"  - {file.name}")
+                    console.print(Text(f"  - {file.name}"))
                 if len(extracted_files) > MAX_FILES_TO_SHOW:
                     remaining = len(extracted_files) - MAX_FILES_TO_SHOW
                     console.print(f"  ... and {remaining} more files")
         except OSError as e:
-            console.print(f"[yellow]Warning: Could not list extracted files: {e}[/yellow]")
+            console.print(
+                f"[yellow]Warning: Could not list extracted files: {_safe_markup(e)}[/yellow]"
+            )
 
     except APIError as e:
-        console.print(f"[red]Error: {e}[/red]")
+        console.print(f"[red]Error: {_safe_markup(e)}[/red]")
         raise typer.Exit(1)
     except Exception as e:
-        console.print(f"[red]Unexpected error: {e}[/red]")
+        console.print(f"[red]Unexpected error: {_safe_markup(e)}[/red]")
         raise typer.Exit(1)
 
 
@@ -1714,7 +1791,9 @@ def extract_requires_dist_from_wheel(wheel_path: Path) -> List[str]:
             requires_dist = metadata.get_all("Requires-Dist") or []
 
     except (zipfile.BadZipFile, KeyError, UnicodeDecodeError) as e:
-        console.print(f"[yellow]Warning: Could not extract metadata from wheel: {e}[/yellow]")
+        console.print(
+            f"[yellow]Warning: Could not extract metadata from wheel: {_safe_markup(e)}[/yellow]"
+        )
 
     return requires_dist
 
@@ -1848,19 +1927,19 @@ def info(
             else:
                 target_version = version
         except ValueError as e:
-            console.print(f"[red]Error: {e}[/red]")
+            console.print(f"[red]Error: {_safe_markup(e)}[/red]")
             raise typer.Exit(1)
 
         owner, name = env_id.split("/")
 
-        console.print(f"Fetching {env_id}@{target_version}...")
+        console.print(f"Fetching {env_id}@{target_version}...", markup=False)
 
         # Fetch environment details
         try:
             response = client.get(f"/environmentshub/{owner}/{name}/@{target_version}")
             details = response.get("data", response)
         except APIError as e:
-            console.print(f"[red]Failed to get environment details: {e}[/red]")
+            console.print(f"[red]Failed to get environment details: {_safe_markup(e)}[/red]")
             raise typer.Exit(1)
 
         # Process wheel URL
@@ -1868,12 +1947,15 @@ def info(
 
         # Display basic info with nice formatting
         console.print()
-        console.print(f"[bold cyan]{owner}/{name}[/bold cyan][dim]@{target_version}[/dim]")
+        console.print(
+            f"[bold cyan]{_safe_markup(owner)}/{_safe_markup(name)}[/bold cyan]"
+            f"[dim]@{_safe_markup(target_version)}[/dim]"
+        )
 
         # Display metadata if available
         if metadata := details.get("metadata"):
             if desc := metadata.get("description"):
-                console.print(f"[dim]{desc}[/dim]")
+                console.print(f"[dim]{_safe_markup(desc)}[/dim]")
 
         console.print()
 
@@ -1886,48 +1968,60 @@ def info(
             normalized_name = normalize_package_name(name)
 
             console.print("[bold yellow]Install (choose one)[/bold yellow]")
-            console.print(f"  [green]$[/green] prime env install {owner}/{name}@{target_version}")
+            console.print(
+                f"  [green]$[/green] prime env install "
+                f"{_safe_markup(owner)}/{_safe_markup(name)}@{_safe_markup(target_version)}"
+            )
 
             # Use simple index if available, otherwise fall back to wheel URL
             if simple_index_url:
                 # For versioned installs, show package name with version specification
                 if target_version and target_version != "latest":
                     console.print(
-                        f"  [green]$[/green] uv pip install {normalized_name}=={target_version} "
-                        f"--extra-index-url {simple_index_url}"
+                        f"  [green]$[/green] uv pip install {_safe_markup(normalized_name)}=="
+                        f"{_safe_markup(target_version)} "
+                        f"--extra-index-url {_safe_markup(simple_index_url)}"
                     )
                     console.print(
-                        f"  [green]$[/green] uv add {normalized_name}=={target_version} "
-                        f"--index {simple_index_url}"
+                        f"  [green]$[/green] uv add {_safe_markup(normalized_name)}=="
+                        f"{_safe_markup(target_version)} --index {_safe_markup(simple_index_url)}"
                     )
                     console.print(
-                        f"  [green]$[/green] pip install {normalized_name}=={target_version} "
-                        f"--extra-index-url {simple_index_url}"
+                        f"  [green]$[/green] pip install {_safe_markup(normalized_name)}=="
+                        f"{_safe_markup(target_version)} --extra-index-url "
+                        f"{_safe_markup(simple_index_url)}"
                     )
                 else:
                     console.print(
-                        f"  [green]$[/green] uv pip install {normalized_name} "
-                        f"--extra-index-url {simple_index_url}"
+                        f"  [green]$[/green] uv pip install {_safe_markup(normalized_name)} "
+                        f"--extra-index-url {_safe_markup(simple_index_url)}"
                     )
                     console.print(
-                        f"  [green]$[/green] uv add {normalized_name} --index {simple_index_url}"
+                        f"  [green]$[/green] uv add {_safe_markup(normalized_name)} "
+                        f"--index {_safe_markup(simple_index_url)}"
                     )
                     console.print(
-                        f"  [green]$[/green] pip install {normalized_name} "
-                        f"--extra-index-url {simple_index_url}"
+                        f"  [green]$[/green] pip install {_safe_markup(normalized_name)} "
+                        f"--extra-index-url {_safe_markup(simple_index_url)}"
                     )
             elif wheel_url:
-                console.print(f"  [green]$[/green] uv pip install {wheel_url}")
-                console.print(f"  [green]$[/green] uv add {normalized_name}@{wheel_url}")
-                console.print(f"  [green]$[/green] pip install {wheel_url}")
+                console.print(f"  [green]$[/green] uv pip install {_safe_markup(wheel_url)}")
+                console.print(
+                    f"  [green]$[/green] uv add {_safe_markup(normalized_name)}@"
+                    f"{_safe_markup(wheel_url)}"
+                )
+                console.print(f"  [green]$[/green] pip install {_safe_markup(wheel_url)}")
 
             console.print()
             console.print("[bold yellow]Usage[/bold yellow]")
             console.print("  [blue]>>>[/blue] from verifiers import load_environment")
-            console.print(f"  [blue]>>>[/blue] env = load_environment('{name}')")
+            console.print(f"  [blue]>>>[/blue] env = load_environment('{_safe_markup(name)}')")
         elif details.get("visibility") == "PRIVATE":
             console.print("[bold yellow]Install (private environment)[/bold yellow]")
-            console.print(f"  [green]$[/green] prime env pull {owner}/{name}@{target_version}")
+            console.print(
+                f"  [green]$[/green] prime env pull "
+                f"{_safe_markup(owner)}/{_safe_markup(name)}@{_safe_markup(target_version)}"
+            )
             console.print(
                 "  [dim]Note: Direct UV/pip install not available for private environments[/dim]"
             )
@@ -1942,12 +2036,12 @@ def info(
         console.print()
 
     except APIError as e:
-        console.print(f"[red]Error: {e}[/red]")
+        console.print(f"[red]Error: {_safe_markup(e)}[/red]")
         raise typer.Exit(1)
     except typer.Exit:
         raise
     except Exception as e:
-        console.print(f"[red]Unexpected error: {e}[/red]")
+        console.print(f"[red]Unexpected error: {_safe_markup(e)}[/red]")
         raise typer.Exit(1)
 
 
@@ -1978,7 +2072,7 @@ def inspect_cmd(
             env_id, parsed_version = validate_env_id(env_id)
             target_version = parsed_version if parsed_version != "latest" else version
         except ValueError as e:
-            console.print(f"[red]Error: {e}[/red]")
+            console.print(f"[red]Error: {_safe_markup(e)}[/red]")
             raise typer.Exit(1)
 
         owner, name = env_id.split("/")
@@ -2000,8 +2094,11 @@ def inspect_cmd(
         if data.get("kind") == "file":
             inspected_path = data.get("path") or source_path or "/"
             console.print()
-            console.print(f"[bold cyan]{owner}/{name}[/bold cyan][dim]@{target_version}[/dim]")
-            console.print(f"[dim]{inspected_path}[/dim]")
+            console.print(
+                f"[bold cyan]{_safe_markup(owner)}/{_safe_markup(name)}[/bold cyan]"
+                f"[dim]@{_safe_markup(target_version)}[/dim]"
+            )
+            console.print(f"[dim]{_safe_markup(inspected_path)}[/dim]")
             console.print()
 
             content = data.get("content") or ""
@@ -2015,14 +2112,17 @@ def inspect_cmd(
             if data.get("truncated"):
                 total_bytes = data.get("total_bytes") or max_bytes
                 console.print(
-                    f"[yellow]Output truncated from {format_file_size(total_bytes)}. "
-                    f"Re-run with --max-bytes > {max_bytes} to view more.[/yellow]"
+                    f"[yellow]Output truncated from "
+                    f"{_safe_markup(format_file_size(total_bytes))}. "
+                    f"Re-run with --max-bytes > {_safe_markup(max_bytes)} to view more.[/yellow]"
                 )
             return
 
         entries = data.get("entries", [])
         title_path = data.get("path") or "/"
-        table = Table(title=f"Source: {owner}/{name}@{target_version} (path: {title_path})")
+        table = Table(
+            title=_safe_text(f"Source: {owner}/{name}@{target_version} (path: {title_path})")
+        )
         table.add_column("Type", style="blue", no_wrap=True)
         table.add_column("Path", style="cyan")
         table.add_column("Size", style="dim", justify="right")
@@ -2034,7 +2134,11 @@ def inspect_cmd(
             size_display = (
                 "-" if is_directory or size_value is None else format_file_size(size_value)
             )
-            table.add_row(entry_type, entry.get("path", ""), size_display)
+            table.add_row(
+                _safe_text(entry_type),
+                _safe_text(entry.get("path", "")),
+                _safe_text(size_display),
+            )
 
         console.print(table)
         if not entries:
@@ -2046,16 +2150,19 @@ def inspect_cmd(
             entries[0].get("path"),
         )
         if example_path:
-            inspect_example = f"prime env inspect {owner}/{name}@{target_version} {example_path}"
+            inspect_example = (
+                f"prime env inspect {_safe_markup(owner)}/{_safe_markup(name)}@"
+                f"{_safe_markup(target_version)} {_safe_markup(example_path)}"
+            )
             console.print(f"\n[dim]Inspect a file with: {inspect_example}[/dim]")
 
     except APIError as e:
-        console.print(f"[red]Error: {e}[/red]")
+        console.print(f"[red]Error: {_safe_markup(e)}[/red]")
         raise typer.Exit(1)
     except typer.Exit:
         raise
     except Exception as e:
-        console.print(f"[red]Unexpected error: {e}[/red]")
+        console.print(f"[red]Unexpected error: {_safe_markup(e)}[/red]")
         raise typer.Exit(1)
 
 
@@ -2109,9 +2216,12 @@ def execute_install_command(cmd: List[str], env_id: str, version: str, tool: str
     Raises:
         Exception: If installation fails (caller should catch)
     """
-    console.print(f"\n[cyan]Installing {env_id}@{version} with {tool}...[/cyan]")
+    console.print(
+        f"\n[cyan]Installing {_safe_markup(env_id)}@{_safe_markup(version)} "
+        f"with {_safe_markup(tool)}...[/cyan]"
+    )
 
-    console.print(f"[dim]Command: {' '.join(cmd)}[/dim]")
+    console.print(f"[dim]Command: {_safe_markup(' '.join(cmd))}[/dim]")
 
     process = subprocess.Popen(
         cmd,
@@ -2127,13 +2237,15 @@ def execute_install_command(cmd: List[str], env_id: str, version: str, tool: str
         if output == "" and process.poll() is not None:
             break
         if output:
-            console.print(output.rstrip())
+            console.print(output.rstrip(), markup=False, highlight=False)
 
     return_code = process.poll()
     if return_code != 0:
         raise Exception(f"Installation failed with exit code {return_code}")
 
-    console.print(f"\n[green]✓ Successfully installed {env_id}@{version}[/green]")
+    console.print(
+        f"\n[green]✓ Successfully installed {_safe_markup(env_id)}@{_safe_markup(version)}[/green]"
+    )
 
 
 @app.command(no_args_is_help=True, rich_help_panel="Manage")
@@ -2180,13 +2292,14 @@ def install(
         # Validate package manager
         if with_tool not in ["uv", "pip"]:
             console.print(
-                f"[red]Error: Unsupported package manager '{with_tool}'. Use 'uv' or 'pip'.[/red]"
+                f"[red]Error: Unsupported package manager '{_safe_markup(with_tool)}'. "
+                "Use 'uv' or 'pip'.[/red]"
             )
             raise typer.Exit(1)
 
         # Check if tool is installed
         if not shutil.which(with_tool):
-            console.print(f"[red]Error: {with_tool} is not installed.[/red]")
+            console.print(f"[red]Error: {_safe_markup(with_tool)} is not installed.[/red]")
             raise typer.Exit(1)
 
         # De-dup environment IDs just in case
@@ -2217,20 +2330,24 @@ def install(
                     else:
                         cmd_parts = ["pip", "install", "-e", str(env_path)]
                     installable_envs.append((cmd_parts, local_name, "local", local_name))
-                    console.print(f"[green]✓ Found local environment: {env_path}[/green]")
+                    console.print(
+                        f"[green]✓ Found local environment: {_safe_markup(env_path)}[/green]"
+                    )
                 else:
                     failed_envs.append((local_name, f"Local path not found: {env_path}"))
-                    console.print(f"[red]✗ Local environment not found: {env_path}[/red]")
+                    console.print(
+                        f"[red]✗ Local environment not found: {_safe_markup(env_path)}[/red]"
+                    )
                     if "-" in local_name:
                         alt_path = Path(path) / local_name
                         if alt_path.exists():
                             console.print(
-                                f"[yellow]  Hint: Found '{alt_path}' but expected "
-                                f"'{env_path}'[/yellow]"
+                                f"[yellow]  Hint: Found '{_safe_markup(alt_path)}' but expected "
+                                f"'{_safe_markup(env_path)}'[/yellow]"
                             )
                             console.print(
                                 "[yellow]  Python packages use underscores, not dashes. "
-                                f"Rename folder to '{env_folder}'[/yellow]"
+                                f"Rename folder to '{_safe_markup(env_folder)}'[/yellow]"
                             )
                 continue
 
@@ -2239,7 +2356,7 @@ def install(
                 env_id, target_version = validate_env_id(env_id)
             except ValueError as e:
                 skipped_envs.append((env_id, f"Invalid format: {e}"))
-                console.print(f"[yellow]⚠ Skipping {env_id}: Invalid format[/yellow]")
+                console.print(f"[yellow]⚠ Skipping {_safe_markup(env_id)}: Invalid format[/yellow]")
                 continue
 
             owner, name = env_id.split("/")
@@ -2249,7 +2366,10 @@ def install(
                 details = fetch_environment_details(client, owner, name, target_version)
             except APIError as e:
                 failed_envs.append((f"{env_id}@{target_version}", f"{e}"))
-                console.print(f"[red]✗ Failed to resolve {env_id}@{target_version}: {e}[/red]")
+                console.print(
+                    f"[red]✗ Failed to resolve {_safe_markup(env_id)}@"
+                    f"{_safe_markup(target_version)}: {_safe_markup(e)}[/red]"
+                )
                 continue
 
             # Get both simple index URL and wheel URL
@@ -2281,18 +2401,21 @@ def install(
                         if prerelease:
                             cmd_parts.append("--pre")
                     installable_envs.append((cmd_parts, env_id, resolved_version, name))
-                    console.print(f"[green]✓ Built {env_id}@{resolved_version}[/green]")
+                    console.print(
+                        f"[green]✓ Built {_safe_markup(env_id)}@"
+                        f"{_safe_markup(resolved_version)}[/green]"
+                    )
                 except Exception as e:
                     failed_envs.append((f"{env_id}@{target_version}", f"Failed to build: {e}"))
                     console.print(
-                        f"[red]✗ Failed to build private environment {env_id}@{target_version}: "
-                        f"{e}[/red]"
+                        f"[red]✗ Failed to build private environment {_safe_markup(env_id)}@"
+                        f"{_safe_markup(target_version)}: {_safe_markup(e)}[/red]"
                     )
                 continue
             elif not simple_index_url and not wheel_url:
                 skipped_envs.append((f"{env_id}@{target_version}", "No installation method"))
                 console.print(
-                    f"[yellow]⚠ Skipping {env_id}@{target_version}: "
+                    f"[yellow]⚠ Skipping {_safe_markup(env_id)}@{_safe_markup(target_version)}: "
                     f"No installation method available[/yellow]"
                 )
                 console.print(
@@ -2301,7 +2424,9 @@ def install(
                 )
                 continue
 
-            console.print(f"[green]✓ Found {env_id}@{target_version}[/green]")
+            console.print(
+                f"[green]✓ Found {_safe_markup(env_id)}@{_safe_markup(target_version)}[/green]"
+            )
 
             cmd_parts = _build_install_command(
                 name,
@@ -2316,7 +2441,8 @@ def install(
             if not cmd_parts:
                 skipped_envs.append((f"{env_id}@{target_version}", "No installation method"))
                 console.print(
-                    f"[yellow]⚠ Skipping {env_id}@{target_version}: No installation method[/yellow]"
+                    f"[yellow]⚠ Skipping {_safe_markup(env_id)}@"
+                    f"{_safe_markup(target_version)}: No installation method[/yellow]"
                 )
                 continue
 
@@ -2342,14 +2468,14 @@ def install(
                 # Display usage instructions
                 console.print("\n[dim]Use in Python:[/dim]")
                 console.print("  from verifiers import load_environment")
-                console.print(f"  env = load_environment('{name}')")
+                console.print(Text(f"  env = load_environment('{name}')"))
             except FileNotFoundError:
                 error_msg = f"{cmd_parts[0]} command not found"
                 install_failed_envs.append((f"{env_id}@{target_version}", error_msg))
-                console.print(f"[red]✗ Installation failed: {error_msg}[/red]")
+                console.print(f"[red]✗ Installation failed: {_safe_markup(error_msg)}[/red]")
             except Exception as e:
                 install_failed_envs.append((f"{env_id}@{target_version}", str(e)))
-                console.print(f"[red]✗ Installation failed: {e}[/red]")
+                console.print(f"[red]✗ Installation failed: {_safe_markup(e)}[/red]")
 
         # Display final summary of installed/failed environments
         if installed_envs:
@@ -2358,7 +2484,7 @@ def install(
                 f"environment{'s' if len(installed_envs) != 1 else ''}:[/bold]"
             )
             for env_id, version in installed_envs:
-                console.print(f"[green]✓ {env_id}@{version}[/green]")
+                console.print(f"[green]✓ {_safe_markup(env_id)}@{_safe_markup(version)}[/green]")
 
         if install_failed_envs:
             console.print(
@@ -2366,18 +2492,18 @@ def install(
                 f"environment{'s' if len(install_failed_envs) != 1 else ''}:[/bold]"
             )
             for env_id, reason in install_failed_envs:
-                console.print(f"[red]✗ {env_id} - {reason}")
+                console.print(f"[red]✗ {_safe_markup(env_id)} - {_safe_markup(reason)}[/red]")
 
     except typer.Exit:
         raise
     except APIError as e:
-        console.print(f"[red]API Error: {e}[/red]")
+        console.print(f"[red]API Error: {_safe_markup(e)}[/red]")
         raise typer.Exit(1)
     except KeyboardInterrupt:
         console.print("\n[yellow]Installation cancelled by user[/yellow]")
         raise typer.Exit(1)
     except Exception as e:
-        console.print(f"[red]Unexpected error: {e}[/red]")
+        console.print(f"[red]Unexpected error: {_safe_markup(e)}[/red]")
         raise typer.Exit(1)
 
 
@@ -2393,8 +2519,10 @@ def execute_uninstall_command(cmd: List[str], env_name: str, tool: str) -> None:
         typer.Exit: If uninstall fails
     """
 
-    console.print(f"\n[cyan]Uninstalling {env_name} with {tool}...[/cyan]")
-    console.print(f"[dim]Command: {' '.join(cmd)}[/dim]")
+    console.print(
+        f"\n[cyan]Uninstalling {_safe_markup(env_name)} with {_safe_markup(tool)}...[/cyan]"
+    )
+    console.print(f"[dim]Command: {_safe_markup(' '.join(cmd))}[/dim]")
 
     try:
         process = subprocess.Popen(
@@ -2412,20 +2540,20 @@ def execute_uninstall_command(cmd: List[str], env_name: str, tool: str) -> None:
             if output == "" and process.poll() is not None:
                 break
             if output:
-                console.print(output.rstrip())
+                console.print(output.rstrip(), markup=False, highlight=False)
 
         return_code = process.poll()
         if return_code != 0:
             console.print(f"[red]Environment uninstall failed with exit code {return_code}[/red]")
             raise typer.Exit(1)
 
-        console.print(f"\n[green]✓ Successfully uninstalled {env_name}[/green]")
+            console.print(f"\n[green]✓ Successfully uninstalled {_safe_markup(env_name)}[/green]")
 
     except FileNotFoundError:
-        console.print(f"[red]Failed to run command. Is {cmd[0]} installed?[/red]")
+        console.print(f"[red]Failed to run command. Is {_safe_markup(cmd[0])} installed?[/red]")
         raise typer.Exit(1)
     except Exception as e:
-        console.print(f"[red]Uninstall failed: {e}[/red]")
+        console.print(f"[red]Uninstall failed: {_safe_markup(e)}[/red]")
         raise typer.Exit(1)
 
 
@@ -2449,7 +2577,8 @@ def uninstall(
         # Validate package manager
         if with_tool not in ["uv", "pip"]:
             console.print(
-                f"[red]Error: Unsupported package manager '{with_tool}'. Use 'uv' or 'pip'.[/red]"
+                f"[red]Error: Unsupported package manager '{_safe_markup(with_tool)}'. "
+                "Use 'uv' or 'pip'.[/red]"
             )
             raise typer.Exit(1)
 
@@ -2476,7 +2605,7 @@ def uninstall(
 
         # Check if tool is installed
         if not shutil.which(cmd_parts[0]):
-            console.print(f"[red]Error: {cmd_parts[0]} is not installed.[/red]")
+            console.print(f"[red]Error: {_safe_markup(cmd_parts[0])} is not installed.[/red]")
             raise typer.Exit(1)
 
         # Execute uninstall
@@ -2486,7 +2615,7 @@ def uninstall(
         console.print("\n[yellow]Uninstall cancelled by user[/yellow]")
         raise typer.Exit(1)
     except Exception as e:
-        console.print(f"[red]Unexpected error: {e}[/red]")
+        console.print(f"[red]Unexpected error: {_safe_markup(e)}[/red]")
         raise typer.Exit(1)
 
 
@@ -2512,7 +2641,7 @@ def list_versions(
 
         owner, name = parts
 
-        console.print(f"Fetching versions for {env_id}...")
+        console.print(f"Fetching versions for {env_id}...", markup=False)
 
         try:
             response = client.get(f"/environmentshub/{owner}/{name}/versions")
@@ -2523,14 +2652,14 @@ def list_versions(
                 versions_data = response
 
         except APIError as e:
-            console.print(f"[red]Failed to get environment versions: {e}[/red]")
+            console.print(f"[red]Failed to get environment versions: {_safe_markup(e)}[/red]")
             raise typer.Exit(1)
 
         if not versions_data:
             console.print("No versions found.")
             return
 
-        table = Table(title=f"Versions for {env_id}")
+        table = Table(title=_safe_text(f"Versions for {env_id}"))
         table.add_column("Version", style="cyan")
         table.add_column("Created", style="green")
         table.add_column("Content Hash", style="yellow")
@@ -2562,21 +2691,28 @@ def list_versions(
             artifact_count = version.get("size", 0)
             artifacts_str = f"{artifact_count} artifact{'s' if artifact_count != 1 else ''}"
 
-            table.add_row(version_display, created_date, content_hash_display, artifacts_str)
+            table.add_row(
+                _safe_text(version_display),
+                _safe_text(created_date),
+                _safe_text(content_hash_display),
+                _safe_text(artifacts_str),
+            )
 
         console.print(table)
 
         if versions_list:
             latest = versions_list[0]  # Assuming first is latest
-            console.print(f"\n[dim]Latest version: {latest.get('version', 'unknown')}[/dim]")
+            console.print(
+                f"\n[dim]Latest version: {_safe_markup(latest.get('version', 'unknown'))}[/dim]"
+            )
             install_cmd = f"prime env install {env_id}@{latest.get('version', 'latest')}"
-            console.print(f"[dim]Install with: {install_cmd}[/dim]")
+            console.print(f"[dim]Install with: {_safe_markup(install_cmd)}[/dim]")
 
     except APIError as e:
-        console.print(f"[red]Error: {e}[/red]")
+        console.print(f"[red]Error: {_safe_markup(e)}[/red]")
         raise typer.Exit(1)
     except Exception as e:
-        console.print(f"[red]Unexpected error: {e}[/red]")
+        console.print(f"[red]Unexpected error: {_safe_markup(e)}[/red]")
         raise typer.Exit(1)
 
 
@@ -2620,29 +2756,30 @@ def delete_version(
             raise typer.Exit(1)
 
         owner, name = parts
-        console.print(f"Deleting version {content_hash} from {env_id}...")
+        console.print(f"Deleting version {content_hash} from {env_id}...", markup=False)
 
         try:
             url = f"/environmentshub/{owner}/{name}/@{content_hash}"
             client.delete(url)
             console.print(
-                f"[green]✓ Version {content_hash} deleted successfully from {env_id}[/green]"
+                f"[green]✓ Version {_safe_markup(content_hash)} deleted successfully from "
+                f"{_safe_markup(env_id)}[/green]"
             )
         except APIError as e:
             if "404" in str(e):
                 console.print(
-                    f"[red]Version with content hash '{content_hash}' "
-                    f"not found in environment '{env_id}'[/red]"
+                    f"[red]Version with content hash '{_safe_markup(content_hash)}' "
+                    f"not found in environment '{_safe_markup(env_id)}'[/red]"
                 )
             else:
-                console.print(f"[red]Failed to delete version: {e}[/red]")
+                console.print(f"[red]Failed to delete version: {_safe_markup(e)}[/red]")
             raise typer.Exit(1)
 
     except APIError as e:
-        console.print(f"[red]Error: {e}[/red]")
+        console.print(f"[red]Error: {_safe_markup(e)}[/red]")
         raise typer.Exit(1)
     except Exception as e:
-        console.print(f"[red]Unexpected error: {e}[/red]")
+        console.print(f"[red]Unexpected error: {_safe_markup(e)}[/red]")
         raise typer.Exit(1)
 
 
@@ -2668,20 +2805,22 @@ def delete(
                 raise typer.Exit()
 
         client = APIClient()
-        console.print(f"Deleting {env_id} from remote hub...")
+        console.print(f"Deleting {env_id} from remote hub...", markup=False)
 
         try:
             client.delete(f"/environmentshub/{env_id}")
-            console.print(f"[green]✓ Environment {env_id} deleted successfully[/green]")
+            console.print(
+                f"[green]✓ Environment {_safe_markup(env_id)} deleted successfully[/green]"
+            )
         except APIError as e:
-            console.print(f"[red]Failed to delete environment: {e}[/red]")
+            console.print(f"[red]Failed to delete environment: {_safe_markup(e)}[/red]")
             raise typer.Exit(1)
 
     except APIError as e:
-        console.print(f"[red]Error: {e}[/red]")
+        console.print(f"[red]Error: {_safe_markup(e)}[/red]")
         raise typer.Exit(1)
     except Exception as e:
-        console.print(f"[red]Unexpected error: {e}[/red]")
+        console.print(f"[red]Unexpected error: {_safe_markup(e)}[/red]")
         raise typer.Exit(1)
 
 
@@ -2813,7 +2952,9 @@ def _pull_and_build_private_env(
         if wheel_cache_path.exists():
             existing_wheels = list(wheel_cache_path.glob("*.whl"))
             if existing_wheels:
-                console.print(f"[dim]Using cached wheel at {existing_wheels[0]}[/dim]")
+                console.print(
+                    f"[dim]Using cached wheel at {_safe_markup(existing_wheels[0])}[/dim]"
+                )
                 return existing_wheels[0], version
 
     # Download to temp directory first to determine actual version
@@ -2854,7 +2995,9 @@ def _pull_and_build_private_env(
         if wheel_cache_path.exists():
             existing_wheels = list(wheel_cache_path.glob("*.whl"))
             if existing_wheels:
-                console.print(f"[dim]Using cached wheel at {existing_wheels[0]}[/dim]")
+                console.print(
+                    f"[dim]Using cached wheel at {_safe_markup(existing_wheels[0])}[/dim]"
+                )
                 return existing_wheels[0], actual_version
 
         # Move extracted content to final cache location
@@ -3024,7 +3167,7 @@ def _install_single_environment(env_slug: str, tool: str = "uv", prerelease: boo
     try:
         env_id, target_version = validate_env_id(env_slug)
     except ValueError as e:
-        console.print(f"[red]Invalid environment format: {e}[/red]")
+        console.print(f"[red]Invalid environment format: {_safe_markup(e)}[/red]")
         return False
 
     owner, name = env_id.split("/")
@@ -3033,7 +3176,9 @@ def _install_single_environment(env_slug: str, tool: str = "uv", prerelease: boo
         client = APIClient(require_auth=False)
         details = fetch_environment_details(client, owner, name, target_version)
     except APIError as e:
-        console.print(f"[red]Failed to find environment {env_slug}: {e}[/red]")
+        console.print(
+            f"[red]Failed to find environment {_safe_markup(env_slug)}: {_safe_markup(e)}[/red]"
+        )
         return False
 
     simple_index_url = details.get("install_index_url") or details.get("simple_index_url")
@@ -3062,11 +3207,14 @@ def _install_single_environment(env_slug: str, tool: str = "uv", prerelease: boo
             execute_install_command(cmd_parts, env_id, resolved_version, tool)
             return True
         except Exception as e:
-            console.print(f"[red]Failed to install private environment {env_slug}: {e}[/red]")
+            console.print(
+                f"[red]Failed to install private environment {_safe_markup(env_slug)}: "
+                f"{_safe_markup(e)}[/red]"
+            )
             return False
 
     if not simple_index_url and not wheel_url:
-        console.print(f"[red]No installation method available for {env_slug}[/red]")
+        console.print(f"[red]No installation method available for {_safe_markup(env_slug)}[/red]")
         return False
 
     cmd_parts = _build_install_command(
@@ -3079,14 +3227,14 @@ def _install_single_environment(env_slug: str, tool: str = "uv", prerelease: boo
         prerelease=prerelease,
     )
     if not cmd_parts:
-        console.print(f"[red]Failed to build install command for {env_slug}[/red]")
+        console.print(f"[red]Failed to build install command for {_safe_markup(env_slug)}[/red]")
         return False
 
     try:
         execute_install_command(cmd_parts, env_id, target_version, tool)
         return True
     except Exception as e:
-        console.print(f"[red]Installation failed: {e}[/red]")
+        console.print(f"[red]Installation failed: {_safe_markup(e)}[/red]")
         return False
 
 
@@ -3136,7 +3284,7 @@ def env_secret_list(
             console.print("[yellow]No secrets found for this environment.[/yellow]")
             return
 
-        table = Table(title=f"Secrets for {owner}/{env_name}")
+        table = Table(title=_safe_text(f"Secrets for {owner}/{env_name}"))
         table.add_column("ID", style="dim", no_wrap=True)
         table.add_column("Name", style="cyan")
         table.add_column("Source", style="blue")
@@ -3151,12 +3299,18 @@ def env_secret_list(
             created = secret.get("createdAt", "")
             if created:
                 created = format_time_ago(created)
-            table.add_row(secret_id, name, source, description, created)
+            table.add_row(
+                _safe_text(secret_id),
+                _safe_text(name),
+                _safe_text(source),
+                _safe_text(description),
+                _safe_text(created),
+            )
 
         console.print(table)
 
     except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {_safe_markup(e)}")
         raise typer.Exit(1)
 
 
@@ -3226,14 +3380,17 @@ def env_secret_create(
             output_data_as_json(secret, console)
             return
 
-        console.print(f"[green]✓ Created secret '{name}' for {owner}/{env_name}[/green]")
-        console.print(f"[dim]ID: {secret.get('id')}[/dim]")
+        console.print(
+            f"[green]✓ Created secret '{_safe_markup(name)}' for "
+            f"{_safe_markup(owner)}/{_safe_markup(env_name)}[/green]"
+        )
+        console.print(f"[dim]ID: {_safe_markup(secret.get('id'))}[/dim]")
 
     except KeyboardInterrupt:
         console.print("\n[dim]Cancelled.[/dim]")
         raise typer.Exit()
     except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {_safe_markup(e)}")
         raise typer.Exit(1)
 
 
@@ -3317,14 +3474,15 @@ def env_secret_update(
             return
 
         console.print(
-            f"[green]✓ Updated secret '{secret.get('name')}' for {owner}/{env_name}[/green]"
+            f"[green]✓ Updated secret '{_safe_markup(secret.get('name'))}' for "
+            f"{_safe_markup(owner)}/{_safe_markup(env_name)}[/green]"
         )
 
     except KeyboardInterrupt:
         console.print("\n[dim]Cancelled.[/dim]")
         raise typer.Exit()
     except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {_safe_markup(e)}")
         raise typer.Exit(1)
 
 
@@ -3372,13 +3530,16 @@ def env_secret_delete(
                 raise typer.Exit()
 
         client.delete(f"/environmentshub/{env_id}/secrets/{secret_id}")
-        console.print(f"[green]✓ Deleted secret '{secret_name}' from {owner}/{env_name}[/green]")
+        console.print(
+            f"[green]✓ Deleted secret '{_safe_markup(secret_name)}' from "
+            f"{_safe_markup(owner)}/{_safe_markup(env_name)}[/green]"
+        )
 
     except KeyboardInterrupt:
         console.print("\n[dim]Cancelled.[/dim]")
         raise typer.Exit()
     except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {_safe_markup(e)}")
         raise typer.Exit(1)
 
 
@@ -3419,11 +3580,12 @@ def env_secret_link(
 
         secret_name = linked.get("secretName", global_secret_id)
         console.print(
-            f"[green]✓ Linked global secret '{secret_name}' to {owner}/{env_name}[/green]"
+            f"[green]✓ Linked global secret '{_safe_markup(secret_name)}' to "
+            f"{_safe_markup(owner)}/{_safe_markup(env_name)}[/green]"
         )
 
     except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {_safe_markup(e)}")
         raise typer.Exit(1)
 
 
@@ -3459,13 +3621,16 @@ def env_secret_unlink(
         client = APIClient()
         env_id = _get_environment_id(client, owner, env_name)
         client.delete(f"/environmentshub/{env_id}/secrets/link/{global_secret_id}")
-        console.print(f"[green]✓ Unlinked global secret from {owner}/{env_name}[/green]")
+        console.print(
+            f"[green]✓ Unlinked global secret from "
+            f"{_safe_markup(owner)}/{_safe_markup(env_name)}[/green]"
+        )
 
     except KeyboardInterrupt:
         console.print("\n[dim]Cancelled.[/dim]")
         raise typer.Exit()
     except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {_safe_markup(e)}")
         raise typer.Exit(1)
 
 
@@ -3500,7 +3665,7 @@ def var_list(
             console.print("[yellow]No variables found for this environment.[/yellow]")
             return
 
-        table = Table(title=f"Variables for {owner}/{env_name}")
+        table = Table(title=_safe_text(f"Variables for {owner}/{env_name}"))
         table.add_column("ID", style="dim", no_wrap=True)
         table.add_column("Name", style="cyan")
         table.add_column("Value", style="green")
@@ -3517,12 +3682,18 @@ def var_list(
             created = var.get("createdAt", "")
             if created:
                 created = format_time_ago(created)
-            table.add_row(var_id, name, value, description, created)
+            table.add_row(
+                _safe_text(var_id),
+                _safe_text(name),
+                _safe_text(value),
+                _safe_text(description),
+                _safe_text(created),
+            )
 
         console.print(table)
 
     except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {_safe_markup(e)}")
         raise typer.Exit(1)
 
 
@@ -3592,14 +3763,17 @@ def var_create(
             output_data_as_json(var, console)
             return
 
-        console.print(f"[green]✓ Created variable '{name}' for {owner}/{env_name}[/green]")
-        console.print(f"[dim]ID: {var.get('id')}[/dim]")
+        console.print(
+            f"[green]✓ Created variable '{_safe_markup(name)}' for "
+            f"{_safe_markup(owner)}/{_safe_markup(env_name)}[/green]"
+        )
+        console.print(f"[dim]ID: {_safe_markup(var.get('id'))}[/dim]")
 
     except KeyboardInterrupt:
         console.print("\n[dim]Cancelled.[/dim]")
         raise typer.Exit()
     except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {_safe_markup(e)}")
         raise typer.Exit(1)
 
 
@@ -3674,10 +3848,10 @@ def var_update(
             output_data_as_json(var, console)
             return
 
-        console.print(f"[green]✓ Updated variable '{var.get('name')}'[/green]")
+        console.print(f"[green]✓ Updated variable '{_safe_markup(var.get('name'))}'[/green]")
 
     except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {_safe_markup(e)}")
         raise typer.Exit(1)
 
 
@@ -3717,5 +3891,5 @@ def var_delete(
         console.print("\n[dim]Cancelled.[/dim]")
         raise typer.Exit()
     except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {_safe_markup(e)}")
         raise typer.Exit(1)

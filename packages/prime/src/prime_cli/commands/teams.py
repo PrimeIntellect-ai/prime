@@ -1,5 +1,7 @@
 import typer
+from rich.markup import escape
 from rich.table import Table
+from rich.text import Text
 
 from prime_cli.core import Config
 
@@ -86,11 +88,11 @@ def list_teams(
 
         for t in teams:
             table.add_row(
-                str(t["teamId"]),
-                t["name"],
-                t["slug"],
-                t["role"],
-                str(t["createdAt"]),
+                Text(str(t["teamId"])),
+                Text(str(t["name"])),
+                Text(str(t["slug"])),
+                Text(str(t["role"])),
+                Text(str(t["createdAt"])),
             )
 
         console.print(table)
@@ -104,10 +106,10 @@ def list_teams(
             )
 
     except APIError as e:
-        console.print(f"[red]Error:[/red] {str(e)}")
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except Exception as e:
-        console.print(f"[red]Unexpected error:[/red] {str(e)}")
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
 
 
@@ -148,18 +150,18 @@ def list_members(
 
         for m in members:
             table.add_row(
-                str(m.get("userId", "")),
-                m.get("userName") or "N/A",
-                m.get("userEmail") or "N/A",
-                m.get("role", ""),
-                str(m.get("joinedAt", "")),
+                Text(str(m.get("userId", ""))),
+                Text(str(m.get("userName") or "N/A")),
+                Text(str(m.get("userEmail") or "N/A")),
+                Text(str(m.get("role", ""))),
+                Text(str(m.get("joinedAt", ""))),
             )
 
         console.print(table)
 
     except APIError as e:
-        console.print(f"[red]Error:[/red] {str(e)}")
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except Exception as e:
-        console.print(f"[red]Unexpected error:[/red] {str(e)}")
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         raise typer.Exit(1)

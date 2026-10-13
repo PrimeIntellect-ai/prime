@@ -26,8 +26,10 @@ from prime_sandboxes import (
     UnauthorizedError,
 )
 from prime_sandboxes.image_references import is_docker_hub_reference
+from rich.markup import escape
 from rich.progress import BarColumn, Progress, TextColumn, TimeElapsedColumn
 from rich.table import Table
+from rich.text import Text
 
 from ..utils import get_console
 
@@ -904,12 +906,14 @@ def run_bulk_jobs(
             progress.advance(task_id)
             if outcome.status == "COMPLETED":
                 progress.console.print(
-                    f"[green]✓[/green] {outcome.full_image_path or outcome.spec.image_ref}"
+                    f"[green]✓[/green] "
+                    f"{escape(str(outcome.full_image_path or outcome.spec.image_ref))}"
                 )
             elif outcome.status != "SKIPPED":  # skips are summarized once at the end
                 progress.console.print(
-                    f"[red]✗ {outcome.spec.image_ref}[/red] "
-                    f"[dim]({outcome.status.lower()}: {outcome.error})[/dim]"
+                    f"[red]✗ {escape(str(outcome.spec.image_ref))}[/red] "
+                    f"[dim]({escape(str(outcome.status.lower()))}: "
+                    f"{escape(str(outcome.error))})[/dim]"
                 )
 
         try:
@@ -1319,7 +1323,9 @@ def push_bulk(
 
                 source_desc = f"Hugging Face dataset {normalize_hf_dataset_id(hf_dataset)}"
                 if source_column is not None:
-                    console.print(f"[cyan]Reading image references from {source_desc}...[/cyan]")
+                    console.print(
+                        f"[cyan]Reading image references from {escape(source_desc)}...[/cyan]"
+                    )
                     source_specs, notes = load_hf_source_specs(
                         hf_dataset,
                         config=hf_config,
@@ -1333,7 +1339,7 @@ def push_bulk(
                     # Imported here: images_hf imports BuildSpec helpers from this module.
                     from .images_hf import load_hf_build_specs
 
-                    console.print(f"[cyan]Reading Dockerfiles from {source_desc}...[/cyan]")
+                    console.print(f"[cyan]Reading Dockerfiles from {escape(source_desc)}...[/cyan]")
                     hf_context_root = Path(tempfile.mkdtemp(prefix="prime-push-bulk-hf-"))
                     build_specs, notes = load_hf_build_specs(
                         hf_dataset,
@@ -1350,7 +1356,7 @@ def push_bulk(
                 f"[red]Error: cannot start bulk push ({len(e.problems)} problem(s)):[/red]"
             )
             for problem in e.problems:
-                console.print(f"[red]  - {problem}[/red]")
+                console.print(f"[red]  - {escape(problem)}[/red]")
             raise typer.Exit(1)
 
         if platform_image and not source_specs:
@@ -1365,29 +1371,29 @@ def push_bulk(
             raise typer.Exit(1)
 
         for note in notes:
-            console.print(f"[dim]{note}[/dim]")
+            console.print(f"[dim]{escape(note)}[/dim]")
         for task_name, reason in skipped:
-            console.print(f"[yellow]Skipping {task_name}: {reason}[/yellow]")
+            console.print(f"[yellow]Skipping {escape(task_name)}: {escape(reason)}[/yellow]")
 
         if dry_run:
-            table = Table(title=f"Resolved {len(build_specs) + len(source_specs)} build(s)")
+            table = Table(title=Text(f"Resolved {len(build_specs) + len(source_specs)} build(s)"))
             table.add_column("Image", style="cyan", no_wrap=True)
             table.add_column("Kind", no_wrap=True)
             table.add_column("Source", overflow="fold")
             table.add_column("From", style="dim")
             for spec in build_specs:
                 table.add_row(
-                    spec.image_ref,
+                    Text(spec.image_ref),
                     "dockerfile",
-                    str(spec.context),
-                    spec.source,
+                    Text(str(spec.context)),
+                    Text(spec.source),
                 )
             for spec in source_specs:
                 table.add_row(
-                    spec.image_ref,
+                    Text(spec.image_ref),
                     "source",
-                    spec.source_image,
-                    spec.source,
+                    Text(spec.source_image),
+                    Text(spec.source),
                 )
             console.print(table)
             console.print("[dim]Dry run only — re-run without --dry-run to push.[/dim]")
@@ -1402,7 +1408,7 @@ def push_bulk(
 
         console.print(
             f"[bold blue]Bulk pushing {len(build_specs) + len(source_specs)} image(s)[/bold blue] "
-            f"[dim]({source_desc})[/dim]"
+            f"[dim]({escape(source_desc)})[/dim]"
         )
         non_docker_hub_specs = [spec for spec in source_specs if not spec.is_docker_hub]
         if platform_image:
@@ -1414,7 +1420,7 @@ def push_bulk(
             if config.team_id and not non_docker_hub_specs:
                 console.print("[dim]Team context ignored for Docker Hub sources[/dim]")
         if not platform_image and non_docker_hub_specs and config.team_id:
-            console.print(f"[dim]Other sources team: {config.team_id}[/dim]")
+            console.print(f"[dim]Other sources team: {escape(str(config.team_id))}[/dim]")
         if platform_image:
             console.print(f"[dim]Source builds visibility: {ImageVisibility.PUBLIC.value}[/dim]")
         elif non_docker_hub_specs and visibility is not None:
@@ -1426,7 +1432,7 @@ def push_bulk(
             )
         if build_specs:
             if config.team_id:
-                console.print(f"[dim]Dockerfile builds team: {config.team_id}[/dim]")
+                console.print(f"[dim]Dockerfile builds team: {escape(str(config.team_id))}[/dim]")
             if visibility is not None:
                 console.print(f"[dim]Dockerfile builds visibility: {visibility.value}[/dim]")
             else:
@@ -1476,20 +1482,23 @@ def push_bulk(
             console.print("[dim]Use them with: prime sandbox create <image reference>[/dim]")
             return
 
-        failure_table = Table(title=f"{len(failures)} build(s) did not complete")
+        failure_table = Table(title=Text(f"{len(failures)} build(s) did not complete"))
         failure_table.add_column("Image", style="cyan", no_wrap=True)
         failure_table.add_column("Status", no_wrap=True)
         failure_table.add_column("From", style="dim")
         failure_table.add_column("Error")
         for outcome in failures[:FAILURE_TABLE_MAX_ROWS]:
             failure_table.add_row(
-                outcome.spec.image_ref, outcome.status, outcome.spec.source, outcome.error or ""
+                Text(outcome.spec.image_ref),
+                Text(outcome.status),
+                Text(outcome.spec.source),
+                Text(outcome.error or ""),
             )
         console.print(failure_table)
         if len(failures) > FAILURE_TABLE_MAX_ROWS:
             console.print(
                 f"[dim]... and {len(failures) - FAILURE_TABLE_MAX_ROWS} more, "
-                f"all included in {failures_out}[/dim]"
+                f"all included in {escape(str(failures_out))}[/dim]"
             )
         failure_errors = [(o.error or "").lower() for o in failures]
         if any(marker in error for error in failure_errors for marker in _QUOTA_DETAIL_MARKERS):
@@ -1510,13 +1519,17 @@ def push_bulk(
 
         _write_failures_manifest(failures_out, failures)
         console.print()
-        console.print(f"Wrote {len(failures)} failed build(s) to [bold]{failures_out}[/bold]")
-        console.print(f"[dim]Retry with: prime images push-bulk --manifest {failures_out}[/dim]")
+        console.print(
+            f"Wrote {len(failures)} failed build(s) to [bold]{escape(str(failures_out))}[/bold]"
+        )
+        console.print(
+            f"[dim]Retry with: prime images push-bulk --manifest {escape(str(failures_out))}[/dim]"
+        )
         if hf_context_root is not None:
             # The failures manifest points into the generated build contexts.
             keep_hf_context = True
             console.print(
-                f"[dim]Keeping generated Dockerfiles in {hf_context_root} "
+                f"[dim]Keeping generated Dockerfiles in {escape(str(hf_context_root))} "
                 "so the failures manifest can be re-run.[/dim]"
             )
         raise typer.Exit(1)
@@ -1533,15 +1546,17 @@ def push_bulk(
         if unfinished:
             _write_failures_manifest(failures_out, unfinished)
             console.print(
-                f"Wrote {len(unfinished)} unfinished build(s) to [bold]{failures_out}[/bold]"
+                f"Wrote {len(unfinished)} unfinished build(s) to "
+                f"[bold]{escape(str(failures_out))}[/bold]"
             )
             console.print(
-                f"[dim]Resume with: prime images push-bulk --manifest {failures_out}[/dim]"
+                f"[dim]Resume with: prime images push-bulk --manifest "
+                f"{escape(str(failures_out))}[/dim]"
             )
             if hf_context_root is not None:
                 keep_hf_context = True
                 console.print(
-                    f"[dim]Keeping generated Dockerfiles in {hf_context_root} "
+                    f"[dim]Keeping generated Dockerfiles in {escape(str(hf_context_root))} "
                     "so the manifest can be re-run.[/dim]"
                 )
         raise typer.Exit(1)

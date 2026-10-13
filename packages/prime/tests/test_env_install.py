@@ -2,6 +2,7 @@ from unittest.mock import Mock
 
 import pytest
 from prime_cli.commands import env
+from rich.console import Console
 from typer.testing import CliRunner
 
 INDEX_URL = "https://hub.primeintellect.ai/primeintellect/simple/"
@@ -137,3 +138,97 @@ def test_info_displays_scoped_install_index(monkeypatch):
     output = "".join(result.output.split())
     assert SCOPED_INDEX_URL in output
     assert INDEX_URL not in output
+
+
+def test_info_api_environment_name_and_description_with_markup_are_literal(monkeypatch):
+    client = Mock()
+    client.get.return_value = {
+        "data": {
+            "id": "env-1",
+            "name": "name",
+            "owner": {"name": "primeintellect"},
+            "visibility": "PRIVATE",
+            "metadata": {"description": "description [/INFO]"},
+            "wheel_url": None,
+            "simple_index_url": None,
+        }
+    }
+    monkeypatch.setattr(env, "APIClient", lambda **kwargs: client)
+
+    result = CliRunner().invoke(env.app, ["info", "primeintellect/name"])
+
+    assert result.exit_code == 0, result.output
+    assert "description [/INFO]" in result.output
+
+
+def test_list_api_environment_name_with_markup_is_literal(monkeypatch):
+    client = Mock()
+    client.get.return_value = {
+        "data": [
+            {
+                "owner": {"name": "primeintellect"},
+                "name": "name[/INFO]",
+                "description": "description",
+                "latest_version": "0.1.0",
+                "stars": 1,
+                "updated_at": "2026-01-15T10:00:00Z",
+            }
+        ],
+        "total_count": 1,
+    }
+    monkeypatch.setattr(env, "APIClient", lambda **kwargs: client)
+
+    result = CliRunner().invoke(env.app, ["list"])
+
+    assert result.exit_code == 0, result.output
+    assert "primeintellect/name[/INFO]" in result.output
+
+
+@pytest.mark.parametrize("command", ["install", "uninstall"])
+def test_subprocess_output_preserves_rich_markup_literal(monkeypatch, command):
+    class FakeStdout:
+        def __init__(self):
+            self.lines = iter(["progress [bold]step[/bold] [/INFO]\n"])
+
+        def readline(self):
+            return next(self.lines, "")
+
+    class FakeProcess:
+        def __init__(self):
+            self.stdout = FakeStdout()
+            self._finished = False
+
+        def poll(self):
+            return 0 if self._finished else None
+
+        def wait_for_output(self):
+            self._finished = True
+
+    process = FakeProcess()
+
+    def fake_popen(*args, **kwargs):
+        original_readline = process.stdout.readline
+
+        def readline():
+            line = original_readline()
+            if not line:
+                process._finished = True
+            return line
+
+        process.stdout.readline = readline
+        return process
+
+    monkeypatch.setattr(env.subprocess, "Popen", fake_popen)
+    output_console = Console(record=True, width=200)
+    monkeypatch.setattr(env, "console", output_console)
+
+    if command == "install":
+        env.execute_install_command(
+            ["uv", "pip", "install", "owner/[/INFO]"], "owner/[/INFO]", "latest", "uv"
+        )
+    else:
+        env.execute_uninstall_command(["uv", "pip", "uninstall", "owner_info"], "[/INFO]", "uv")
+
+    output = output_console.export_text()
+    assert "progress [bold]step[/bold] [/INFO]" in output
+    assert "[/INFO]" in output

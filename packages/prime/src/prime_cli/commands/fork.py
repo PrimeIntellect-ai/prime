@@ -1,6 +1,7 @@
 from typing import Dict, Optional, Tuple
 
 import typer
+from rich.markup import escape
 
 from ..client import APIClient, APIError
 from ..utils import get_console, json_output_help, output_data_as_json, validate_output_format
@@ -57,7 +58,7 @@ def fork(
     try:
         owner, name = _parse_fork_source(environment)
     except ValueError as e:
-        console.print(f"[red]Error: {e}[/red]")
+        console.print(f"[red]Error: {escape(str(e))}[/red]")
         raise typer.Exit(1)
 
     try:
@@ -74,17 +75,17 @@ def fork(
         environment_id = data.get("environment_id")
         version_id = data.get("version_id")
 
-        console.print(f"[green]✓ Forked {environment} to {slug}[/green]")
-        console.print(f"Environment ID: [dim]{environment_id}[/dim]")
-        console.print(f"Version ID: [dim]{version_id}[/dim]")
+        console.print(f"[green]✓ Forked {escape(environment)} to {escape(str(slug))}[/green]")
+        console.print(f"Environment ID: [dim]{escape(str(environment_id))}[/dim]")
+        console.print(f"Version ID: [dim]{escape(str(version_id))}[/dim]")
         console.print("\nNext steps:")
-        console.print(f"  prime env pull {slug}")
+        console.print(f"  prime env pull {escape(str(slug))}")
         console.print(
             "  # edit the pulled environment, then run `prime env push` from that directory"
         )
     except APIError as e:
-        console.print(f"[red]Error: {e}[/red]")
+        console.print(f"[red]Error: {escape(str(e))}[/red]")
         raise typer.Exit(1)
     except Exception as e:
-        console.print(f"[red]Unexpected error: {e}[/red]")
+        console.print(f"[red]Unexpected error: {escape(str(e))}[/red]")
         raise typer.Exit(1)

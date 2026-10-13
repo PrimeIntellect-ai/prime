@@ -4,11 +4,26 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import typer
 from prime_cli.core import Config
 from prime_cli.main import app
+from prime_cli.utils.context import require_persistent_context
 from typer.testing import CliRunner
 
 runner = CliRunner()
+
+
+def test_temporary_context_error_escapes_markup(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    class FakeConfig:
+        context_override = "[/INFO]"
+
+    monkeypatch.setattr("prime_cli.utils.context.Config", FakeConfig)
+
+    with pytest.raises(typer.Exit):
+        require_persistent_context()
+
+    captured = capsys.readouterr()
+    assert "[/INFO]" in captured.out + captured.err
 
 
 def _create_dev_context(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[Path, Path]:

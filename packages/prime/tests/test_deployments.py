@@ -146,6 +146,37 @@ def test_deployments_create_checkpoint_prints_adapter_result(monkeypatch) -> Non
     assert "prime deployments list" in output
 
 
+def test_deployments_checkpoint_values_render_brackets_literally(monkeypatch) -> None:
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+    adapter = SimpleNamespace(
+        id="adapter[/INFO]",
+        base_model="Qwen[/INFO]",
+        deployment_status="DEPLOYING",
+    )
+
+    class DummyDeploymentsClient:
+        def __init__(self, api_client: Any) -> None:
+            self.api_client = api_client
+
+        def deploy_checkpoint(self, checkpoint_id: str) -> Any:
+            assert checkpoint_id == "ckpt[/INFO]"
+            return adapter
+
+    monkeypatch.setattr("prime_cli.commands.deployments.APIClient", lambda: object())
+    monkeypatch.setattr("prime_cli.commands.deployments.DeploymentsClient", DummyDeploymentsClient)
+
+    result = runner.invoke(
+        app,
+        ["deployments", "create", "--checkpoint-id", "ckpt[/INFO]", "--yes"],
+        env=TEST_ENV,
+    )
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "adapter[/INFO]" in output
+    assert "Qwen[/INFO]" in output
+
+
 def test_deployments_create_checkpoint_reports_already_deployed_status(monkeypatch) -> None:
     monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
 

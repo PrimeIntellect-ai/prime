@@ -27,6 +27,7 @@ from prime_sandboxes import (
     UpdateImagesRequest,
 )
 from prime_sandboxes.image_references import is_docker_hub_reference
+from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
 
@@ -340,14 +341,14 @@ def push_image(
                 console.print("[bold blue]Building platform VM image in Prime:[/bold blue]")
             else:
                 console.print("[bold blue]Building VM image in Prime:[/bold blue]")
-            console.print(f"[bold]Source:[/bold] {source_display}")
-            console.print(f"[bold]Destination:[/bold] {destination_display}")
+            console.print(f"[bold]Source:[/bold] {escape(source_display)}")
+            console.print(f"[bold]Destination:[/bold] {escape(destination_display)}")
             if platform_source_build:
                 console.print("[bold]Owner:[/bold] Platform")
                 if config.team_id:
                     console.print("[dim]Team context ignored: platform images are org-less[/dim]")
             elif config.team_id:
-                console.print(f"[dim]Team: {config.team_id}[/dim]")
+                console.print(f"[dim]Team: {escape(str(config.team_id))}[/dim]")
 
             visibility = None
             if public:
@@ -375,7 +376,9 @@ def push_image(
                 )
                 raise typer.Exit(1)
             except APIError as e:
-                console.print(f"[red]Error: Failed to initiate VM image build: {e}[/red]")
+                console.print(
+                    f"[red]Error: Failed to initiate VM image build: {escape(str(e))}[/red]"
+                )
                 raise typer.Exit(1)
 
             if isinstance(response, BulkBuildImageResponse):
@@ -391,7 +394,10 @@ def push_image(
             if not build_ids:
                 console.print("[red]Error: Failed to initiate VM image build[/red]")
                 for result in failed_results:
-                    console.print(f"[red]- {result.source_image}: {result.error}[/red]")
+                    console.print(
+                        f"[red]- {escape(str(result.source_image))}: "
+                        f"{escape(str(result.error))}[/red]"
+                    )
                 raise typer.Exit(1)
 
             console.print("[green]✓[/green] VM image build queued")
@@ -399,20 +405,23 @@ def push_image(
             if len(build_ids) == 1:
                 console.print("[bold green]VM image build queued successfully![/bold green]")
                 console.print()
-                console.print(f"[bold]Build ID:[/bold] {build_ids[0]}")
-                console.print(f"[bold]Image:[/bold] {image_path}")
+                console.print(f"[bold]Build ID:[/bold] {escape(str(build_ids[0]))}")
+                console.print(f"[bold]Image:[/bold] {escape(str(image_path))}")
             else:
                 console.print("[bold green]VM image builds queued successfully![/bold green]")
                 console.print()
                 console.print(f"[bold]Builds:[/bold] {len(build_ids)}")
-                console.print(f"[bold]Build IDs:[/bold] {', '.join(build_ids)}")
+                console.print(f"[bold]Build IDs:[/bold] {escape(', '.join(build_ids))}")
             if failed_results:
                 console.print()
                 console.print(
                     f"[yellow]Warning: {len(failed_results)} VM image build(s) failed:[/yellow]"
                 )
                 for result in failed_results:
-                    console.print(f"[yellow]- {result.source_image}: {result.error}[/yellow]")
+                    console.print(
+                        f"[yellow]- {escape(str(result.source_image))}: "
+                        f"{escape(str(result.error))}[/yellow]"
+                    )
             if platform_source_build:
                 console.print(f"[bold]Visibility:[/bold] {ImageVisibility.PUBLIC.value}")
             elif public or private:
@@ -433,20 +442,18 @@ def push_image(
                 raise typer.Exit(1)
             return
 
+        image_display = escape(f"{image_name}:{image_tag}")
         if platform_image:
             console.print(
-                f"[bold blue]Building platform VM image artifacts:[/bold blue] "
-                f"{image_name}:{image_tag}"
+                f"[bold blue]Building platform VM image artifacts:[/bold blue] {image_display}"
             )
         else:
-            console.print(
-                f"[bold blue]Building VM image artifacts:[/bold blue] {image_name}:{image_tag}"
-            )
+            console.print(f"[bold blue]Building VM image artifacts:[/bold blue] {image_display}")
         if platform_image:
             if config.team_id:
                 console.print("[dim]Team context ignored: platform images are org-less[/dim]")
         elif config.team_id:
-            console.print(f"[dim]Team: {config.team_id}[/dim]")
+            console.print(f"[dim]Team: {escape(str(config.team_id))}[/dim]")
         console.print()
 
         # Initialize API client
@@ -456,19 +463,27 @@ def push_image(
         dockerfile_path = Path(dockerfile).resolve() if dockerfile else context_path / "Dockerfile"
 
         if not context_path.exists():
-            console.print(f"[red]Error: Build context not found at {context_path}[/red]")
+            console.print(
+                f"[red]Error: Build context not found at {escape(str(context_path))}[/red]"
+            )
             raise typer.Exit(1)
 
         if not context_path.is_dir():
-            console.print(f"[red]Error: Build context must be a directory: {context_path}[/red]")
+            console.print(
+                f"[red]Error: Build context must be a directory: {escape(str(context_path))}[/red]"
+            )
             raise typer.Exit(1)
 
         if not dockerfile_path.exists():
-            console.print(f"[red]Error: Dockerfile not found at {dockerfile_path}[/red]")
+            console.print(
+                f"[red]Error: Dockerfile not found at {escape(str(dockerfile_path))}[/red]"
+            )
             raise typer.Exit(1)
 
         if not dockerfile_path.is_file():
-            console.print(f"[red]Error: Dockerfile must be a file: {dockerfile_path}[/red]")
+            console.print(
+                f"[red]Error: Dockerfile must be a file: {escape(str(dockerfile_path))}[/red]"
+            )
             raise typer.Exit(1)
 
         # Create tar.gz of build context
@@ -510,7 +525,7 @@ def push_image(
                 )
                 raise typer.Exit(1)
             except APIError as e:
-                console.print(f"[red]Error: Failed to initiate build: {e}[/red]")
+                console.print(f"[red]Error: Failed to initiate build: {escape(str(e))}[/red]")
                 raise typer.Exit(1)
 
             build_id = build_response.get("build_id")
@@ -539,7 +554,7 @@ def push_image(
                     )
                     upload_response.raise_for_status()
             except httpx.HTTPError as e:
-                console.print(f"[red]Upload failed: {e}[/red]")
+                console.print(f"[red]Upload failed: {escape(str(e))}[/red]")
                 raise typer.Exit(1)
 
             console.print("[green]✓[/green] Build context uploaded")
@@ -554,7 +569,7 @@ def push_image(
                     json={"context_uploaded": True},
                 )
             except APIError as e:
-                console.print(f"[red]Error: Failed to start build: {e}[/red]")
+                console.print(f"[red]Error: Failed to start build: {escape(str(e))}[/red]")
                 raise typer.Exit(1)
 
             console.print("[green]✓[/green] Build started")
@@ -562,8 +577,8 @@ def push_image(
 
             console.print("[bold green]Build initiated successfully![/bold green]")
             console.print()
-            console.print(f"[bold]Build ID:[/bold] {build_id}")
-            console.print(f"[bold]Image:[/bold] {full_image_path}")
+            console.print(f"[bold]Build ID:[/bold] {escape(str(build_id))}")
+            console.print(f"[bold]Image:[/bold] {escape(str(full_image_path))}")
             if platform_image:
                 console.print("[bold]Owner:[/bold] Platform")
                 console.print(f"[bold]Visibility:[/bold] {ImageVisibility.PUBLIC.value}")
@@ -586,7 +601,7 @@ def push_image(
             )
             console.print(
                 "[dim]Once completed, you can use it with: "
-                f"prime sandbox create {full_image_path}[/dim]"
+                f"prime sandbox create {escape(str(full_image_path))}[/dim]"
             )
             console.print()
 
@@ -694,7 +709,7 @@ def list_images(
         if not images:
             if has_total_count and total_count == 0:
                 if search:
-                    console.print(f"[yellow]No images match '{search}'.[/yellow]")
+                    console.print(f"[yellow]No images match '{escape(search)}'.[/yellow]")
                     console.print(
                         "Try a different search term or run without [bold]--search[/bold]."
                     )
@@ -710,7 +725,7 @@ def list_images(
                 console.print(f"[yellow]No images on page {page}.[/yellow]")
                 console.print("Try [bold]--page 1[/bold] to start from the beginning.")
             elif search:
-                console.print(f"[yellow]No images match '{search}'.[/yellow]")
+                console.print(f"[yellow]No images match '{escape(search)}'.[/yellow]")
                 console.print("Try a different search term or run without [bold]--search[/bold].")
             else:
                 console.print("[yellow]No images or builds found.[/yellow]")
@@ -738,7 +753,7 @@ def list_images(
             console.size.width, is_team_listing=is_team_listing
         )
 
-        table = Table(title=title)
+        table = Table(title=Text(title))
         table.add_column(
             "Image Reference",
             style="cyan",
@@ -771,7 +786,7 @@ def list_images(
             size_mb: str | Text = _completed_size_mb(preferred)
             date_str: str = _display_created(preferred)
 
-            row: list[str | Text] = [image_ref]
+            row: list[str | Text] = [Text(image_ref)]
             if is_team_listing:
                 owner_display = (
                     Text("Team", style="blue")
@@ -811,7 +826,7 @@ def list_images(
         console.print("[red]Error: Not authenticated. Please run 'prime login' first.[/red]")
         raise typer.Exit(1)
     except APIError as e:
-        console.print(f"[red]Error: {e}[/red]")
+        console.print(f"[red]Error: {escape(str(e))}[/red]")
         raise typer.Exit(1)
 
 
@@ -930,7 +945,8 @@ def _set_image_visibility(image_reference: str, visibility: ImageVisibility) -> 
         raise APIError(message)
     context = f" (team: {team_id})" if team_id else ""
     console.print(
-        f"[green]✓[/green] Updated {image_name}:{image_tag}{context} to {visibility.value}"
+        f"[green]✓[/green] Updated "
+        f"{escape(f'{image_name}:{image_tag}{context}')} to {escape(visibility.value)}"
     )
 
 
@@ -953,14 +969,16 @@ def _parse_bulk_visibility_ref(ref: str, command: str) -> dict[str, str]:
     """Parse a plain name:tag reference for the bulk visibility endpoint."""
     if "/" in ref:
         console.print(
-            f"[red]Error: '{ref}': owner-prefixed references cannot be combined "
-            f"with other images; run 'prime images {command} {ref}' on its own[/red]"
+            f"[red]Error: '{escape(ref)}': owner-prefixed references cannot be combined "
+            f"with other images; run 'prime images {escape(command)} "
+            f"{escape(ref)}' on its own[/red]"
         )
         raise typer.Exit(1)
     name, _, tag = ref.rpartition(":")
     if not name or not tag:
         console.print(
-            f"[red]Error: '{ref}': image reference must include a tag (e.g., myapp:latest)[/red]"
+            f"[red]Error: '{escape(ref)}': image reference must include a tag "
+            f"(e.g., myapp:latest)[/red]"
         )
         raise typer.Exit(1)
     return {"name": name, "tag": tag}
@@ -984,13 +1002,13 @@ def _display_bulk_visibility_result(
             f"{_visibility_label(visibility)}:[/bold green]"
         )
         for ref in succeeded:
-            console.print(f"  ✓ {ref}")
+            console.print(f"  ✓ {escape(str(ref))}")
     if failed:
         console.print(f"\n[bold red]Failed to update {len(failed)} image(s):[/bold red]")
         for failure in failed:
             ref = failure.get("image", "unknown")
             error = failure.get("error", "unknown error")
-            console.print(f"  ✗ {ref}: {error}")
+            console.print(f"  ✗ {escape(str(ref))}: {escape(str(error))}")
 
 
 def _collect_update_results(
@@ -1051,7 +1069,7 @@ def _bulk_set_image_visibility_refs(refs: list[str], visibility: ImageVisibility
             _collect_update_results(response.results, all_succeeded, all_failed)
 
     if batch_error is not None:
-        console.print(f"[red]Error: {batch_error}[/red]")
+        console.print(f"[red]Error: {escape(batch_error)}[/red]")
         if all_succeeded or all_failed:
             _display_bulk_visibility_result(all_succeeded, all_failed, visibility)
             not_processed = len(items) - len(all_succeeded) - len(all_failed)
@@ -1083,7 +1101,7 @@ def _run_visibility_command(
         console.print("[red]Error: Not authenticated. Please run 'prime login' first.[/red]")
         raise typer.Exit(1)
     except APIError as e:
-        console.print(f"[red]Error: {e}[/red]")
+        console.print(f"[red]Error: {escape(str(e))}[/red]")
         raise typer.Exit(1)
 
 
@@ -1265,7 +1283,7 @@ def update_image(
         console.print("[red]Error: Not authenticated. Please run 'prime login' first.[/red]")
         raise typer.Exit(1)
     except APIError as e:
-        console.print(f"[red]Error: {e}[/red]")
+        console.print(f"[red]Error: {escape(str(e))}[/red]")
         raise typer.Exit(1)
 
     result = response.results[0] if response.results else None
@@ -1275,16 +1293,16 @@ def update_image(
             if result is not None and result.error is not None
             else "Failed to update image"
         )
-        console.print(f"[red]Error: {message}[/red]")
+        console.print(f"[red]Error: {escape(message)}[/red]")
         raise typer.Exit(1)
 
     before = format_image_coordinate(result.before, missing="?")
     after = format_image_coordinate(result.after, missing="?")
     if dry_run:
-        console.print(f"[cyan]Dry run:[/cyan] {before} → {after}")
+        console.print(f"[cyan]Dry run:[/cyan] {escape(before)} → {escape(after)}")
         console.print("[dim]No changes were applied.[/dim]")
     else:
-        console.print(f"[green]✓[/green] Updated {before} → {after}")
+        console.print(f"[green]✓[/green] Updated {escape(before)} → {escape(after)}")
 
 
 @app.command("delete")
@@ -1337,19 +1355,19 @@ def delete_image(
         params = {"teamId": team_id} if team_id else None
 
         client.request("DELETE", f"/images/{image_name}/{image_tag}", params=params)
-        console.print(f"[green]✓[/green] Deleted {image_name}:{image_tag}{context}")
+        console.print(f"[green]✓[/green] Deleted {escape(f'{image_name}:{image_tag}{context}')}")
 
     except UnauthorizedError:
         console.print("[red]Error: Not authenticated. Please run 'prime login' first.[/red]")
         raise typer.Exit(1)
     except APIError as e:
         if "404" in str(e):
-            console.print(f"[red]Error: Image {original_reference} not found[/red]")
+            console.print(f"[red]Error: Image {escape(original_reference)} not found[/red]")
         elif "403" in str(e):
             console.print(
                 "[red]Error: You don't have permission to delete this image. "
                 "Only the image creator or team admins can delete team images.[/red]"
             )
         else:
-            console.print(f"[red]Error: {e}[/red]")
+            console.print(f"[red]Error: {escape(str(e))}[/red]")
         raise typer.Exit(1)

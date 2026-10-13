@@ -4,6 +4,9 @@ from pathlib import Path
 from typing import Optional
 
 from prime_evals import EvalsAPIError, EvalsClient
+from rich.markup import escape
+from rich.style import Style
+from rich.text import Text
 
 from prime_cli.core import APIClient
 
@@ -41,8 +44,8 @@ def load_results_jsonl(path: Path) -> list[dict]:
                 skipped.append((line_num, "invalid JSON"))
 
     if skipped:
-        preview = [f"line {num}: {reason}" for num, reason in skipped[:5]]
-        suffix = ", ..." if len(skipped) > 5 else ""
+        preview = [escape(f"line {num}: {reason}") for num, reason in skipped[:5]]
+        suffix = escape(", ...") if len(skipped) > 5 else ""
         console.print(
             f"[yellow]Warning: Skipped {len(skipped)} invalid lines in results.jsonl "
             f"({', '.join(preview)}{suffix})[/yellow]"
@@ -139,7 +142,8 @@ def push_eval_results_to_hub(
                     resolved_env_id = None
             except (KeyError, AttributeError) as e:
                 console.print(
-                    f"[yellow]Warning: Could not parse environment metadata: {e}[/yellow]"
+                    "[yellow]Warning: Could not parse environment metadata: "
+                    f"{escape(str(e))}[/yellow]"
                 )
                 resolved_env_slug = None
                 resolved_env_id = None
@@ -155,7 +159,10 @@ def push_eval_results_to_hub(
         return None
 
     env_identifier = resolved_env_slug or resolved_env_id
-    console.print(f"\n[blue]Uploading evaluation results, using upstream: {env_identifier}[/blue]")
+    console.print(
+        "\n[blue]Uploading evaluation results, using upstream: "
+        f"{escape(str(env_identifier))}[/blue]"
+    )
 
     api_client = APIClient()
 
@@ -217,4 +224,6 @@ def push_eval_results_to_hub(
 
     eval_url = get_eval_viewer_url(eval_id)
     console.print("\n[green]View results at:[/green]")
-    console.print(f"  [link={eval_url}]{eval_url}[/link]")
+    eval_link = Text("  ")
+    eval_link.append(eval_url, style=Style(link=eval_url))
+    console.print(eval_link)

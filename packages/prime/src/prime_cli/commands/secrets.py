@@ -1,7 +1,9 @@
 from typing import Any, Dict, List, Optional
 
 import typer
+from rich.markup import escape
 from rich.table import Table
+from rich.text import Text
 
 from prime_cli.core import Config
 
@@ -80,12 +82,17 @@ def secret_list(
             created = secret.get("createdAt", "")
             if created:
                 created = format_time_ago(created)
-            table.add_row(secret_id, name, description, created)
+            table.add_row(
+                Text(str(secret_id)),
+                Text(str(name)),
+                Text(str(description)),
+                Text(str(created)),
+            )
 
         console.print(table)
 
     except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
 
 
@@ -160,14 +167,14 @@ def secret_create(
             return
 
         scope = "team" if config.team_id else "personal"
-        console.print(f"[green]✓ Created {scope} secret '{name}'[/green]")
-        console.print(f"[dim]ID: {secret.get('id')}[/dim]")
+        console.print(f"[green]✓ Created {scope} secret '{escape(name)}'[/green]")
+        console.print(f"[dim]ID: {escape(str(secret.get('id')))}[/dim]")
 
     except KeyboardInterrupt:
         console.print("\n[dim]Cancelled.[/dim]")
         raise typer.Exit()
     except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
 
 
@@ -247,13 +254,13 @@ def secret_update(
             output_data_as_json(secret, console)
             return
 
-        console.print(f"[green]✓ Updated secret '{secret.get('name')}'[/green]")
+        console.print(f"[green]✓ Updated secret '{escape(str(secret.get('name')))}'[/green]")
 
     except KeyboardInterrupt:
         console.print("\n[dim]Cancelled.[/dim]")
         raise typer.Exit()
     except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
 
 
@@ -293,13 +300,13 @@ def secret_delete(
                 raise typer.Exit()
 
         client.delete(f"/secrets/{secret_id}", params=optional_team_params(config))
-        console.print(f"[green]✓ Deleted secret '{secret_name}'[/green]")
+        console.print(f"[green]✓ Deleted secret '{escape(str(secret_name))}'[/green]")
 
     except KeyboardInterrupt:
         console.print("\n[dim]Cancelled.[/dim]")
         raise typer.Exit()
     except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
 
 
@@ -331,13 +338,13 @@ def secret_get(
             return
 
         console.print("\n[bold]Secret Details[/bold]")
-        console.print(f"  ID:          {secret.get('id')}")
-        console.print(f"  Name:        {secret.get('name')}")
-        console.print(f"  Description: {secret.get('description') or '-'}")
-        console.print(f"  Created:     {format_time_ago(secret.get('createdAt', ''))}")
-        console.print(f"  Updated:     {format_time_ago(secret.get('updatedAt', ''))}")
+        console.print(f"  ID:          {escape(str(secret.get('id')))}")
+        console.print(f"  Name:        {escape(str(secret.get('name')))}")
+        console.print(f"  Description: {escape(str(secret.get('description') or '-'))}")
+        console.print(f"  Created:     {escape(format_time_ago(secret.get('createdAt', '')))}")
+        console.print(f"  Updated:     {escape(format_time_ago(secret.get('updatedAt', '')))}")
         console.print()
 
     except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)

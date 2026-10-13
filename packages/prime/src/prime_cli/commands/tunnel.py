@@ -3,7 +3,9 @@ import signal
 from typing import Any, List, Optional
 
 import typer
+from rich.markup import escape
 from rich.table import Table
+from rich.text import Text
 
 from prime_cli.utils import (
     PlainTyper,
@@ -111,11 +113,11 @@ def start_tunnel(
         try:
             url = await tunnel.start()
             console.print("\n[green]Tunnel started successfully![/green]")
-            console.print(f"[bold]URL:[/bold] {url}")
-            console.print(f"[bold]Tunnel ID:[/bold] {tunnel.tunnel_id}")
+            console.print(f"[bold]URL:[/bold] {escape(url)}")
+            console.print(f"[bold]Tunnel ID:[/bold] {escape(str(tunnel.tunnel_id))}")
             if http_user:
-                console.print(f"[bold]Basic auth user:[/bold] {http_user}")
-                console.print(f"[bold]Basic auth password:[/bold] {tunnel.http_password}")
+                console.print(f"[bold]Basic auth user:[/bold] {escape(http_user)}")
+                console.print(f"[bold]Basic auth password:[/bold] {escape(tunnel.http_password)}")
                 console.print(
                     "[yellow]Save this password - it is shown only once and "
                     "cannot be retrieved later[/yellow]"
@@ -139,19 +141,19 @@ def start_tunnel(
                     pass
 
         except TunnelConnectionError as e:
-            console.print(f"\n[red]Tunnel error:[/red] {e}", style="bold")
+            console.print(f"\n[red]Tunnel error:[/red] {escape(str(e))}", style="bold")
             if e.tunnel_id:
-                console.print(f"[dim]Tunnel ID: {e.tunnel_id}[/dim]")
+                console.print(f"[dim]Tunnel ID: {escape(str(e.tunnel_id))}[/dim]")
             raise typer.Exit(1)
         except TunnelLimitReachedError as e:
-            console.print(f"\n[red]Tunnel limit reached:[/red] {e}", style="bold")
+            console.print(f"\n[red]Tunnel limit reached:[/red] {escape(str(e))}", style="bold")
             console.print("[dim]Delete an existing tunnel before creating a new one.[/dim]")
             raise typer.Exit(1)
         except TunnelTimeoutError as e:
-            console.print(f"\n[red]Connection timed out:[/red] {e}", style="bold")
+            console.print(f"\n[red]Connection timed out:[/red] {escape(str(e))}", style="bold")
             raise typer.Exit(1)
         except Exception as e:
-            console.print(f"[red]Error:[/red] {e}", style="bold")
+            console.print(f"[red]Error:[/red] {escape(str(e))}", style="bold")
             raise typer.Exit(1)
         finally:
             await tunnel.stop()
@@ -164,7 +166,7 @@ def start_tunnel(
     except typer.Exit:
         raise
     except Exception as e:
-        console.print(f"[red]Error:[/red] {e}", style="bold")
+        console.print(f"[red]Error:[/red] {escape(str(e))}", style="bold")
         raise typer.Exit(1)
 
 
@@ -217,7 +219,7 @@ def list_tunnels(
     try:
         page_result = asyncio.run(fetch_tunnels())
     except Exception as e:
-        console.print(f"[red]Error:[/red] {e}", style="bold")
+        console.print(f"[red]Error:[/red] {escape(str(e))}", style="bold")
         raise typer.Exit(1)
 
     tunnels = page_result.tunnels
@@ -242,7 +244,7 @@ def list_tunnels(
         console.print("[dim]No active tunnels[/dim]")
         return
 
-    table = Table(title=f"Active Tunnels (Total: {total})")
+    table = Table(title=Text(f"Active Tunnels (Total: {total})"))
     table.add_column("Tunnel ID", style="cyan")
     table.add_column("Name", style="blue")
     table.add_column("User ID", style="magenta")
@@ -252,25 +254,26 @@ def list_tunnels(
     table.add_column("Created")
 
     for tunnel_data in tunnels_data:
-        status_display = tunnel_data["status"]
-        normalized_status = str(status_display).upper()
+        status_value = str(tunnel_data["status"])
+        status_display = Text(status_value)
+        normalized_status = status_value.upper()
         if normalized_status == "CONNECTED":
-            status_display = "[green]connected[/green]"
+            status_display = Text("connected", style="green")
         elif normalized_status == "PENDING":
-            status_display = "[yellow]pending[/yellow]"
+            status_display = Text("pending", style="yellow")
         elif normalized_status == "DISCONNECTED":
-            status_display = "[red]disconnected[/red]"
+            status_display = Text("disconnected", style="red")
         elif normalized_status == "EXPIRED":
-            status_display = "[dim]expired[/dim]"
+            status_display = Text("expired", style="dim")
 
         table.add_row(
-            tunnel_data["tunnel_id"],
-            tunnel_data["name"] or "",
-            tunnel_data["user_id"] or "",
-            tunnel_data["url"],
+            Text(str(tunnel_data["tunnel_id"])),
+            Text(str(tunnel_data["name"] or "")),
+            Text(str(tunnel_data["user_id"] or "")),
+            Text(str(tunnel_data["url"])),
             status_display,
-            ", ".join(tunnel_data["labels"]) if tunnel_data["labels"] else "-",
-            tunnel_data["created"] or "-",
+            Text(", ".join(tunnel_data["labels"]) if tunnel_data["labels"] else "-"),
+            Text(str(tunnel_data["created"] or "-")),
         )
 
     console.print(table)
@@ -298,20 +301,20 @@ def tunnel_status(
     try:
         tunnel = asyncio.run(fetch_status())
     except Exception as e:
-        console.print(f"[red]Error:[/red] {e}", style="bold")
+        console.print(f"[red]Error:[/red] {escape(str(e))}", style="bold")
         raise typer.Exit(1)
 
     if not tunnel:
-        console.print(f"[red]Tunnel not found:[/red] {tunnel_id}")
+        console.print(f"[red]Tunnel not found:[/red] {escape(tunnel_id)}")
         raise typer.Exit(1)
 
-    console.print(f"[bold]Tunnel ID:[/bold] {tunnel.tunnel_id}")
-    console.print(f"[bold]URL:[/bold] {tunnel.url}")
-    console.print(f"[bold]Hostname:[/bold] {tunnel.hostname}")
-    console.print(f"[bold]Status:[/bold] {tunnel.status or 'unknown'}")
+    console.print(f"[bold]Tunnel ID:[/bold] {escape(str(tunnel.tunnel_id))}")
+    console.print(f"[bold]URL:[/bold] {escape(str(tunnel.url))}")
+    console.print(f"[bold]Hostname:[/bold] {escape(str(tunnel.hostname))}")
+    console.print(f"[bold]Status:[/bold] {escape(str(tunnel.status or 'unknown'))}")
     if tunnel.labels:
-        console.print(f"[bold]Labels:[/bold] {', '.join(tunnel.labels)}")
-    console.print(f"[bold]Expires At:[/bold] {tunnel.expires_at}")
+        console.print(f"[bold]Labels:[/bold] {escape(', '.join(tunnel.labels))}")
+    console.print(f"[bold]Expires At:[/bold] {escape(str(tunnel.expires_at))}")
 
 
 @app.command("stop")
@@ -448,7 +451,7 @@ def stop_tunnel(
         try:
             asyncio.run(validate_filter_scope())
         except Exception as e:
-            console.print(f"[red]Error:[/red] {e}", style="bold")
+            console.print(f"[red]Error:[/red] {escape(str(e))}", style="bold")
             raise typer.Exit(1)
 
         filter_parts: List[str] = []
@@ -524,11 +527,11 @@ def stop_tunnel(
         with console.status("[bold blue]Stopping tunnel(s)...", spinner="dots"):
             succeeded, not_found, failed = asyncio.run(delete_tunnels())
     except Exception as e:
-        console.print(f"[red]Error:[/red] {e}", style="bold")
+        console.print(f"[red]Error:[/red] {escape(str(e))}", style="bold")
         raise typer.Exit(1)
 
     if len(parsed_ids) == 1 and succeeded and not all:
-        console.print(f"[green]Tunnel deleted:[/green] {parsed_ids[0]}")
+        console.print(f"[green]Tunnel deleted:[/green] {escape(parsed_ids[0])}")
         return
 
     total_failed = len(not_found) + len(failed)
@@ -540,17 +543,19 @@ def stop_tunnel(
             f"\n[bold green]Successfully deleted {len(succeeded)} tunnel(s):[/bold green]"
         )
         for tunnel_id in succeeded:
-            console.print(f"  ✓ {tunnel_id}")
+            console.print(f"  ✓ {escape(str(tunnel_id))}")
 
     if not_found:
         console.print(f"\n[bold yellow]Not found ({len(not_found)}):[/bold yellow]")
         for failure in not_found:
-            console.print(f"  - {failure['tunnel_id']}")
+            console.print(f"  - {escape(str(failure['tunnel_id']))}")
 
     if failed:
         console.print(f"\n[bold red]Failed to delete {len(failed)} tunnel(s):[/bold red]")
         for failure in failed:
-            console.print(f"  ✗ {failure['tunnel_id']}: {failure['error']}")
+            console.print(
+                f"  ✗ {escape(str(failure['tunnel_id']))}: {escape(str(failure['error']))}"
+            )
 
     if total_failed > 0:
         raise typer.Exit(1)

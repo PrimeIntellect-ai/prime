@@ -15,7 +15,9 @@ from click.exceptions import Abort
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic import ValidationError as PydanticValidationError
 from rich.markup import escape as rich_escape
+from rich.style import Style
 from rich.table import Table
+from rich.text import Text
 
 from prime_cli.core import Config
 
@@ -42,6 +44,12 @@ from .feedback import submit_feedback
 from .usage import RUN_USAGE_JSON_HELP, run_usage_command
 
 console = get_console()
+
+
+def _escaped(value: object) -> str:
+    """Render an interpolated value literally in a Rich markup string."""
+    return rich_escape(str(value))
+
 
 LEGACY_TRAINING_NOTICE = (
     "Shared Hosted Training for LoRA runs will stop accepting new runs on October 5, 2026. "
@@ -193,7 +201,7 @@ def format_json_log_line(line: str) -> str | None:
             return _SKIP_LINE
 
         # Format timestamp (extract time portion)
-        timestamp = entry.get("timestamp", "")
+        timestamp = str(entry.get("timestamp", ""))
         if "T" in timestamp:
             time_part = timestamp.split("T")[1][:8]  # HH:MM:SS
         else:
@@ -204,11 +212,13 @@ def format_json_log_line(line: str) -> str | None:
 
         # Get style for level
         style = LEVEL_STYLES.get(level, "")
+        time_part = rich_escape(time_part)
+        level_markup = rich_escape(f"[{level}]")
 
         if style:
-            return f"[dim]{time_part}[/dim] [{style}]\\[{level}][/{style}] {message}"
+            return f"[dim]{time_part}[/dim] [{style}]{level_markup}[/{style}] {message}"
         else:
-            return f"[dim]{time_part}[/dim] \\[{level}] {message}"
+            return f"[dim]{time_part}[/dim] {level_markup} {message}"
 
     except (json.JSONDecodeError, TypeError, KeyError):
         return None
@@ -241,7 +251,10 @@ def clean_logs(text: str) -> list[str]:
                 if "100%" not in cleaned:
                     continue
             if cleaned.strip():
-                formatted_lines.append(cleaned)
+                # Legacy logs are displayed in a markup-enabled console, so
+                # escape backend text while keeping the formatted JSON-log
+                # path's intentional level/timestamp styling above.
+                formatted_lines.append(rich_escape(cleaned))
 
     return formatted_lines
 
@@ -879,7 +892,7 @@ def _remove_deprecated_config_keys(data: Dict[str, Any]) -> None:
                 "[yellow]Warning:[/yellow] `eval.eval_base_model` is deprecated: "
                 "prime-rl renamed it to `skip_first_step` with inverted meaning "
                 "(`eval_base_model = false` ≡ `skip_first_step = true`). "
-                f"Translating to `skip_first_step = {str(translated).lower()}` — "
+                f"Translating to `skip_first_step = {_escaped(str(translated).lower())}` — "
                 "update your config to use `skip_first_step` directly."
             )
 
@@ -959,7 +972,7 @@ def _validate_full_finetune_deployment(cfg: Dict[str, Any], config_path: str) ->
     if not _has_full_finetune_deployment(cfg):
         console.print(
             f"[red]Error:[/red] --full-finetune requires an explicit [deployment] "
-            f"block in {config_path} (num_train_gpus/num_infer_gpus for "
+            f"block in {_escaped(config_path)} (num_train_gpus/num_infer_gpus for "
             "single-node, or num_train_nodes/num_infer_nodes for multi-node)."
         )
         raise typer.Exit(1)
@@ -972,7 +985,8 @@ def _warn_legacy_full_finetune_type(cfg: Dict[str, Any], config_path: str) -> No
     cleaned up instead of silently accumulating a field nothing reads."""
     if "type" in cfg:
         console.print(
-            f'[yellow]Warning:[/yellow] `type = "{cfg["type"]}"` in {config_path} '
+            f'[yellow]Warning:[/yellow] `type = "{_escaped(cfg["type"])}"` '
+            f"in {_escaped(config_path)} "
             "is no longer used — dispatch routing is decided by "
             "--full-finetune/--fft on the command line. Remove it from the config."
         )
@@ -1018,7 +1032,7 @@ def _resolve_pr_ref(pr_number: int) -> str:
     try:
         return resolve_pull_request_head(pr_number)
     except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {_escaped(e)}")
         raise typer.Exit(1)
 
 
@@ -1081,7 +1095,7 @@ def _dispatch_full_finetune_run(
     all_env_files = cfg_env_files + (env_file or [])
 
     def _warn(msg: str) -> None:
-        console.print(f"[yellow]Warning:[/yellow] {msg}")
+        console.print(f"[yellow]Warning:[/yellow] {_escaped(msg)}")
 
     try:
         secrets = collect_env_vars(
@@ -1090,7 +1104,7 @@ def _dispatch_full_finetune_run(
             on_warning=_warn,
         )
     except EnvParseError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {_escaped(e)}")
         raise typer.Exit(1)
     secrets = secrets or {}
 
@@ -1108,7 +1122,7 @@ def _dispatch_full_finetune_run(
         console.print(
             "[red]Error:[/red] full-FT runs only forward "
             f"{', '.join(sorted(supported_secret_keys))} today; got "
-            f"unsupported secret(s): {', '.join(unsupported)}."
+            f"unsupported secret(s): {_escaped(', '.join(unsupported))}."
         )
         console.print(
             "[dim]Drop these from --env-var/--env-file, or wait for "
@@ -1127,7 +1141,7 @@ def _dispatch_full_finetune_run(
     config_image_tag = raw_cfg.get("image_tag")
     if config_image_tag is not None and not isinstance(config_image_tag, str):
         console.print(
-            f"[red]Error:[/red] image_tag in {config_path} must be a string, "
+            f"[red]Error:[/red] image_tag in {_escaped(config_path)} must be a string, "
             f"got {type(config_image_tag).__name__}."
         )
         raise typer.Exit(1)
@@ -1141,7 +1155,7 @@ def _dispatch_full_finetune_run(
     config_gpu_type = raw_cfg.get("gpu_type")
     if config_gpu_type is not None and not isinstance(config_gpu_type, str):
         console.print(
-            f"[red]Error:[/red] gpu_type in {config_path} must be a string, "
+            f"[red]Error:[/red] gpu_type in {_escaped(config_path)} must be a string, "
             f"got {type(config_gpu_type).__name__}."
         )
         raise typer.Exit(1)
@@ -1151,7 +1165,7 @@ def _dispatch_full_finetune_run(
     config_volume = raw_cfg.get("volume")
     if config_volume is not None and not isinstance(config_volume, str):
         console.print(
-            f"[red]Error:[/red] volume in {config_path} must be a string, "
+            f"[red]Error:[/red] volume in {_escaped(config_path)} must be a string, "
             f"got {type(config_volume).__name__}."
         )
         raise typer.Exit(1)
@@ -1161,7 +1175,7 @@ def _dispatch_full_finetune_run(
     config_volume_size = raw_cfg.get("volume_size")
     if config_volume_size is not None and not isinstance(config_volume_size, str):
         console.print(
-            f"[red]Error:[/red] volume_size in {config_path} must be a string like "
+            f"[red]Error:[/red] volume_size in {_escaped(config_path)} must be a string like "
             f'"500Gi" or "2Ti", got {type(config_volume_size).__name__}.'
         )
         raise typer.Exit(1)
@@ -1182,7 +1196,7 @@ def _dispatch_full_finetune_run(
     config_source_ref = raw_cfg.get("source_ref")
     if config_source_ref is not None and not isinstance(config_source_ref, str):
         console.print(
-            f"[red]Error:[/red] source_ref in {config_path} must be a string, "
+            f"[red]Error:[/red] source_ref in {_escaped(config_path)} must be a string, "
             f"got {type(config_source_ref).__name__}."
         )
         raise typer.Exit(1)
@@ -1194,7 +1208,7 @@ def _dispatch_full_finetune_run(
     ):
         problem = _source_ref_error(candidate) if candidate is not None else None
         if problem:
-            console.print(f"[red]Error:[/red] {label}: {problem}")
+            console.print(f"[red]Error:[/red] {_escaped(label)}: {_escaped(problem)}")
             raise typer.Exit(1)
     resolved_source_ref = source_ref or config_source_ref
     if source_pr is not None:
@@ -1302,7 +1316,7 @@ def _dispatch_full_finetune_run(
         with status_ctx:
             result = client.create_run(payload)
     except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {_escaped(e)}")
         raise typer.Exit(1)
 
     if output == "json":
@@ -1327,14 +1341,14 @@ def _dispatch_full_finetune_run(
     # per-run k8s Secret automatically (orchestrator's PRIME_API_KEY env
     # via secretKeyRef). Surfacing it on stdout makes it easy to leak into
     # shared shell history/CI logs without buying anything for the user.
-    console.print(f"[green]Dispatched[/green] hosted run [bold]{result.run_id}[/bold]")
+    console.print(f"[green]Dispatched[/green] hosted run [bold]{_escaped(result.run_id)}[/bold]")
 
     # Placement is derived server-side, so state what it resolved to and
     # what it costs. Without this the first time anyone sees the rate is
     # the invoice.
     if result.on_demand and result.price_per_gpu_hour is not None:
         label = "On-demand (beta)" if result.is_beta else "On-demand"
-        line = f"[yellow]{label}[/yellow] {result.gpu_type or ''}".rstrip()
+        line = f"[yellow]{label}[/yellow] {_escaped(result.gpu_type or '')}".rstrip()
         line += f" · ${result.price_per_gpu_hour:.2f}/GPU-hr"
         if result.estimated_cost_per_hour is not None:
             line += f" · ~${result.estimated_cost_per_hour:.2f}/hr"
@@ -1346,7 +1360,7 @@ def _dispatch_full_finetune_run(
 
     dashboard_url = f"{app_config.frontend_url}/dashboard/training/{result.run_id}"
     console.print("\n[cyan]Monitor run at:[/cyan]")
-    console.print(f"  [link={dashboard_url}]{dashboard_url}[/link]")
+    console.print(Text.assemble("  ", (dashboard_url, Style(link=dashboard_url))), markup=False)
 
 
 def _ensure_volume(
@@ -1365,26 +1379,30 @@ def _ensure_volume(
     try:
         existing = [v for v in client.list_volumes(team_id=team_id) if v.name == name]
     except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {_escaped(e)}")
         raise typer.Exit(1)
     if existing:
         if size and size != existing[0].size:
             out.print(
-                f"Volume '{name}' already exists ({existing[0].size or 'unknown size'}); "
-                f"--volume-size {size} is ignored. Expand it with: prime volumes expand"
+                f"Volume '{_escaped(name)}' already exists "
+                f"({_escaped(existing[0].size or 'unknown size')}); "
+                f"--volume-size {_escaped(size)} is ignored. Expand it with: prime volumes expand"
             )
         return
 
     size = size or VOLUME_DEFAULT_SIZE
-    out.print(f"Volume '{name}' doesn't exist, creating it ({size})...")
+    out.print(f"Volume '{_escaped(name)}' doesn't exist, creating it ({_escaped(size)})...")
     try:
         volume = client.create_volume(name, size, team_id=team_id)
     except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {_escaped(e)}")
         raise typer.Exit(1)
 
     status_ctx = (
-        console.status(f"[bold blue]Waiting for volume '{name}' to be ready...", spinner="dots")
+        console.status(
+            f"[bold blue]Waiting for volume '{_escaped(name)}' to be ready...",
+            spinner="dots",
+        )
         if output != "json"
         else nullcontext()
     )
@@ -1393,12 +1411,15 @@ def _ensure_volume(
     with status_ctx:
         while status != "RUNNING":
             if status in ("FAILED", "TOMBSTONED"):
-                console.print(f"[red]Error:[/red] Volume '{name}' is {status}; not dispatching.")
+                console.print(
+                    f"[red]Error:[/red] Volume '{_escaped(name)}' is {_escaped(status)}; "
+                    "not dispatching."
+                )
                 raise typer.Exit(1)
             if time.monotonic() >= deadline:
                 console.print(
-                    f"[red]Error:[/red] Timed out waiting for volume '{name}' "
-                    f"(last status {status}). Check `prime volumes list`."
+                    f"[red]Error:[/red] Timed out waiting for volume '{_escaped(name)}' "
+                    f"(last status {_escaped(status)}). Check `prime volumes list`."
                 )
                 raise typer.Exit(1)
             time.sleep(VOLUME_READY_POLL_SECONDS)
@@ -1414,12 +1435,12 @@ def load_config(path: str) -> RLConfig:
     """Load config from TOML file."""
     p = Path(path)
     if not p.exists():
-        console.print(f"[red]Error:[/red] Config file not found: {path}")
+        console.print(f"[red]Error:[/red] Config file not found: {_escaped(path)}")
         raise typer.Exit(1)
     try:
         data = toml.load(p)
     except toml.TomlDecodeError as e:
-        console.print(f"[red]Error:[/red] Invalid TOML in {path}: {e}")
+        console.print(f"[red]Error:[/red] Invalid TOML in {_escaped(path)}: {_escaped(e)}")
         raise typer.Exit(1)
 
     if isinstance(data, dict):
@@ -1428,9 +1449,9 @@ def load_config(path: str) -> RLConfig:
     try:
         return RLConfig.model_validate(data)
     except PydanticValidationError as e:
-        console.print(f"[red]Error:[/red] Invalid config in {path}:\n")
+        console.print(f"[red]Error:[/red] Invalid config in {_escaped(path)}:\n")
         for msg in _format_validation_errors(e.errors()):
-            console.print(f"  [red]•[/red] {msg}")
+            console.print(f"  [red]•[/red] {_escaped(msg)}")
         console.print()
         raise typer.Exit(1)
 
@@ -1717,7 +1738,7 @@ def create_run(
     if _is_sft(raw_cfg, flag=sft):
         if full_finetune:
             console.print(
-                f"[red]Error:[/red] {config_path} looks like an SFT config "
+                f"[red]Error:[/red] {_escaped(config_path)} looks like an SFT config "
                 "(a \\[data] block, no \\[trainer]/\\[orchestrator]) but "
                 "--full-finetune/--fft was passed. Use --sft instead."
             )
@@ -1797,7 +1818,7 @@ def create_run(
         )
         raise typer.Exit(1)
 
-    console.print(f"[dim]Loading config from {config_path}[/dim]\n")
+    console.print(f"[dim]Loading config from {_escaped(config_path)}[/dim]\n")
     cfg = load_config(config_path)
     if output == "json":
         typer.echo(f"Warning: {LEGACY_TRAINING_NOTICE}", err=True)
@@ -1806,7 +1827,7 @@ def create_run(
 
     # Collect secrets from all sources
     def warn(msg: str) -> None:
-        console.print(f"[yellow]Warning:[/yellow] {msg}")
+        console.print(f"[yellow]Warning:[/yellow] {_escaped(msg)}")
 
     # Resolve config env file paths relative to config file directory
     config_dir = Path(config_path).parent
@@ -1823,7 +1844,7 @@ def create_run(
             on_warning=warn,
         )
     except EnvParseError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {_escaped(e)}")
         raise typer.Exit(1)
 
     # Validate WANDB_API_KEY is present when W&B monitoring is configured
@@ -1870,13 +1891,13 @@ def create_run(
 
         # Model & Environment
         console.print("[cyan]Model & Environment[/cyan]")
-        console.print(f"  Model:        {cfg.model}")
-        console.print(f"  Loss:         {cfg.loss}")
+        console.print(f"  Model:        {_escaped(cfg.model)}")
+        console.print(f"  Loss:         {_escaped(cfg.loss)}")
         if cfg.teacher is not None:
-            console.print(f"  Teacher:      {cfg.teacher.model}")
-        console.print(f"  Environments: {', '.join(e.display_name for e in cfg.env)}")
+            console.print(f"  Teacher:      {_escaped(cfg.teacher.model)}")
+        console.print(f"  Environments: {_escaped(', '.join(e.display_name for e in cfg.env))}")
         if app_config.team_id:
-            console.print(f"  Team:         {app_config.team_id}")
+            console.print(f"  Team:         {_escaped(app_config.team_id)}")
 
         # Training
         console.print("\n[cyan]Training[/cyan]")
@@ -1892,7 +1913,7 @@ def create_run(
         if cfg.oversampling_factor is not None:
             console.print(f"  Oversampling Factor: {cfg.oversampling_factor}")
         if cfg.run_config:
-            console.print(f"  Run Config:          {cfg.run_config}")
+            console.print(f"  Run Config:          {_escaped(cfg.run_config)}")
 
         # Sampling
         has_sampling = (
@@ -1912,9 +1933,9 @@ def create_run(
             if cfg.sampling.temp_scheduler is not None:
                 ts = cfg.sampling.temp_scheduler
                 sched = f"{ts.type} ({ts.start_temperature} → {ts.end_temperature})"
-                console.print(f"  Temp Scheduler:      {sched}")
+                console.print(f"  Temp Scheduler:      {_escaped(sched)}")
             if cfg.sampling.extra_body is not None:
-                console.print(f"  Extra Body:          {cfg.sampling.extra_body}")
+                console.print(f"  Extra Body:          {_escaped(cfg.sampling.extra_body)}")
             if cfg.sampling.enable_thinking is not None:
                 console.print(f"  Enable Thinking:     {cfg.sampling.enable_thinking}")
             if cfg.sampling.reasoning_effort is not None:
@@ -1923,14 +1944,19 @@ def create_run(
         # W&B
         if cfg.wandb.entity or cfg.wandb.project:
             console.print("\n[cyan]Weights & Biases[/cyan]")
-            console.print(f"  Project: {cfg.wandb.entity or '?'}/{cfg.wandb.project or '?'}")
+            console.print(
+                f"  Project: {_escaped(cfg.wandb.entity or '?')}/"
+                f"{_escaped(cfg.wandb.project or '?')}"
+            )
             if cfg.wandb.name:
-                console.print(f"  Run Name: {cfg.wandb.name}")
+                console.print(f"  Run Name: {_escaped(cfg.wandb.name)}")
 
         # Eval
         if cfg.eval.env:
             console.print("\n[cyan]Evaluation[/cyan]")
-            console.print(f"  Environments: {', '.join(e.display_name for e in cfg.eval.env)}")
+            console.print(
+                f"  Environments: {_escaped(', '.join(e.display_name for e in cfg.eval.env))}"
+            )
             if cfg.eval.interval:
                 console.print(f"  Interval:     {cfg.eval.interval}")
 
@@ -1944,16 +1970,18 @@ def create_run(
         # Infrastructure
         if cfg.infrastructure.compute_size:
             console.print("\n[cyan]Infrastructure[/cyan]")
-            console.print(f"  Compute Size: {cfg.infrastructure.compute_size}")
+            console.print(f"  Compute Size: {_escaped(cfg.infrastructure.compute_size)}")
 
         # Checkpoint warm-start
         if cfg.checkpoint_id:
-            console.print(f"\n[cyan]Warm-start from checkpoint:[/cyan] {cfg.checkpoint_id}")
+            console.print(
+                f"\n[cyan]Warm-start from checkpoint:[/cyan] {_escaped(cfg.checkpoint_id)}"
+            )
 
         # Secrets
         if secrets:
             console.print("\n[cyan]Secrets[/cyan]")
-            console.print(f"  Keys: {', '.join(secrets.keys())}")
+            console.print(f"  Keys: {_escaped(', '.join(secrets.keys()))}")
 
         # Pricing (best-effort — skipped silently if /rft/models is unreachable,
         # times out, or doesn't include the chosen model. 8s cap so a slow
@@ -2056,23 +2084,23 @@ def create_run(
             queue_msg = "✓ Run created and queued"
             if run.runs_ahead is not None:
                 queue_msg += f" (~{run.runs_ahead} runs ahead)"
-            console.print(f"[yellow]{queue_msg}[/yellow]")
+            console.print(f"[yellow]{_escaped(queue_msg)}[/yellow]")
             if run.queue_reason:
-                console.print(f"[yellow]Reason:[/yellow] {run.queue_reason}")
+                console.print(f"[yellow]Reason:[/yellow] {_escaped(run.queue_reason)}")
             console.print("[dim]The run will start automatically when capacity is available.[/dim]")
         else:
             console.print("[green]✓ Run created successfully![/green]")
 
         if run.notice:
-            console.print(f"[cyan]{run.notice}[/cyan]")
+            console.print(f"[cyan]{_escaped(run.notice)}[/cyan]")
 
         dashboard_url = f"{app_config.frontend_url}/dashboard/training/{run.id}"
         console.print("\n[cyan]Monitor run at:[/cyan]")
-        console.print(f"  [link={dashboard_url}]{dashboard_url}[/link]")
+        console.print(Text.assemble("  ", (dashboard_url, Style(link=dashboard_url))), markup=False)
 
         if run.status != "QUEUED":
             console.print("\n[dim]View logs with:[/dim]")
-            console.print(f"  prime train logs {run.id} -f")
+            console.print(f"  prime train logs {_escaped(run.id)} -f")
 
     except ValidationError as e:
         console.print("[red]Configuration Error:[/red]")
@@ -2083,12 +2111,12 @@ def create_run(
             if msg.startswith("Value error, "):
                 msg = msg[len("Value error, ") :]
             if path:
-                console.print(f"  [yellow]{path}[/yellow]: {msg}")
+                console.print(f"  [yellow]{_escaped(path)}[/yellow]: {_escaped(msg)}")
             else:
-                console.print(f"  {msg}")
+                console.print(f"  {_escaped(msg)}")
         raise typer.Exit(1)
     except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {_escaped(e)}")
         raise typer.Exit(1)
 
 
@@ -2194,7 +2222,7 @@ def list_models(
             _render_on_demand_table(on_demand)
 
     except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {_escaped(e)}")
         raise typer.Exit(1)
 
 
@@ -2269,7 +2297,7 @@ def _render_lora_models_table(models: list) -> None:
         list_input, eff_input = model.resolve_prices("inference_input")
         list_output, eff_output = model.resolve_prices("inference_output")
         table.add_row(
-            model.name,
+            Text(str(model.name)),
             status,
             format_promo_price(list_input, eff_input) or "-",
             format_promo_price(list_output, eff_output) or "-",
@@ -2307,8 +2335,8 @@ def _render_fft_models_table(fft_models: list) -> None:
     for model in sorted(fft_models, key=lambda m: _model_name_sort_key(m.name)):
         gpu_types = sorted({c.gpu_type for c in model.clusters if c.gpu_type})
         table.add_row(
-            model.name,
-            ", ".join(gpu_types) or "-",
+            Text(str(model.name)),
+            Text(", ".join(gpu_types) or "-"),
         )
 
     table.caption = "[dim]Models pre-cached on clusters you can dispatch FFT runs to.[/dim]"
@@ -2342,7 +2370,7 @@ def _render_on_demand_table(on_demand: list) -> None:
     promos = []
     for entry in on_demand:
         table.add_row(
-            entry.gpu_type,
+            Text(str(entry.gpu_type)),
             f"${entry.price_per_gpu_hour:.2f}",
             "[green]available[/green]" if entry.available_now else "[yellow]busy[/yellow]",
         )
@@ -2384,7 +2412,7 @@ def list_gpus(
         config = Config()
         response = client.list_available_gpu_types(team_id=config.team_id)
     except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {_escaped(e)}")
         raise typer.Exit(1)
 
     if output == "json":
@@ -2399,7 +2427,7 @@ def list_gpus(
 
     console.print("[bold]Available GPU types[/bold] [dim](full-FT dispatch)[/dim]")
     for gpu_type in response.gpu_types:
-        console.print(f"  [cyan]{gpu_type}[/cyan]")
+        console.print(f"  [cyan]{_escaped(gpu_type)}[/cyan]")
 
 
 def _prompt_required_text(label: str, help_text: str, empty_error: str) -> str:
@@ -2452,7 +2480,7 @@ def request_models() -> None:
             category="feature",
         )
     except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {_escaped(e)}")
         raise typer.Exit(1)
 
     console.print("[green]Request submitted. Thanks![/green]")
@@ -2593,7 +2621,12 @@ def list_configs(
             table.add_section()
         display_section = section if section != prev_section else ""
         prev_section = section
-        table.add_row(display_section, name, type_str, default)
+        table.add_row(
+            Text(str(display_section)),
+            Text(str(name)),
+            Text(str(type_str)),
+            Text(str(default)),
+        )
 
     console.print(table)
     console.print(
@@ -2678,12 +2711,12 @@ def _list_runs_impl(
             formatted = _format_run_for_display(run)
             status_color = _get_status_color(run.status)
             table.add_row(
-                formatted["id"],
-                f"[{status_color}]{formatted['status']}[/{status_color}]",
-                formatted["model"][:30],
-                formatted["environments"],
-                formatted["steps"],
-                formatted["created_at"],
+                Text(str(formatted["id"])),
+                Text(str(formatted["status"]), style=status_color),
+                Text(str(formatted["model"])[:30]),
+                Text(str(formatted["environments"])),
+                Text(str(formatted["steps"])),
+                Text(str(formatted["created_at"])),
             )
 
         console.print(table)
@@ -2697,7 +2730,7 @@ def _list_runs_impl(
             console.print(f"\n[dim]Total: {total_count} run(s)[/dim]")
 
     except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {_escaped(e)}")
         raise typer.Exit(1)
 
 
@@ -2744,45 +2777,51 @@ def get_run(
         formatted = _format_run_for_display(run)
         status_color = _get_status_color(run.status)
 
-        console.print(f"[bold]Run {run_id}[/bold]\n")
+        console.print(f"[bold]Run {_escaped(run_id)}[/bold]\n")
         status_text = run.status
         if run.status == "QUEUED" and run.runs_ahead is not None:
             status_text += f" (~{run.runs_ahead} runs ahead)"
-        console.print(f"  Status: [{status_color}]{status_text}[/{status_color}]")
+        console.print(f"  Status: [{status_color}]{_escaped(status_text)}[/{status_color}]")
         # Dedicated runs carry their cluster as primeClusterId
         # (rftClusterId is NULL there); shared runs use cluster_id.
         cluster = run.prime_cluster_id or run.cluster_id
         if cluster:
-            console.print(f"  Cluster: {cluster}")
-        console.print(f"  Model: [magenta]{formatted['model']}[/magenta]")
-        console.print(f"  Environments: [green]{formatted['environments']}[/green]")
-        console.print(f"  Max Steps: {formatted['steps']}")
+            console.print(f"  Cluster: {_escaped(cluster)}")
+        console.print(f"  Model: [magenta]{_escaped(formatted['model'])}[/magenta]")
+        console.print(f"  Environments: [green]{_escaped(formatted['environments'])}[/green]")
+        console.print(f"  Max Steps: {_escaped(formatted['steps'])}")
         batch_size = "-" if run.batch_size is None else str(run.batch_size)
-        console.print(f"  Batch Size: {batch_size}")
-        console.print(f"  Rollouts per Example: {formatted['rollouts']}")
+        console.print(f"  Batch Size: {_escaped(batch_size)}")
+        console.print(f"  Rollouts per Example: {_escaped(formatted['rollouts'])}")
         if run.max_tokens:
-            console.print(f"  Max Tokens: {run.max_tokens}")
+            console.print(f"  Max Tokens: {_escaped(run.max_tokens)}")
         if run.volume_name:
-            console.print(f"  Volume: [cyan]{run.volume_name}[/cyan]")
+            console.print(f"  Volume: [cyan]{_escaped(run.volume_name)}[/cyan]")
         if run.wandb_project:
-            console.print(f"  W&B: {run.wandb_entity or ''}/{run.wandb_project}")
+            console.print(
+                f"  W&B: {_escaped(run.wandb_entity or '')}/{_escaped(run.wandb_project)}"
+            )
         if run.team_id:
-            console.print(f"  Team: {run.team_id}")
+            console.print(f"  Team: {_escaped(run.team_id)}")
         if run.source_commit:
-            console.print(f"  Source Commit: {run.source_commit}")
-        console.print(f"  Created: [dim]{formatted['created_at']}[/dim]")
+            console.print(f"  Source Commit: {_escaped(run.source_commit)}")
+        console.print(f"  Created: [dim]{_escaped(formatted['created_at'])}[/dim]")
         if run.started_at:
-            console.print(f"  Started: [dim]{run.started_at.strftime('%Y-%m-%d %H:%M')}[/dim]")
+            console.print(
+                f"  Started: [dim]{_escaped(run.started_at.strftime('%Y-%m-%d %H:%M'))}[/dim]"
+            )
         if run.completed_at:
-            console.print(f"  Completed: [dim]{run.completed_at.strftime('%Y-%m-%d %H:%M')}[/dim]")
+            console.print(
+                f"  Completed: [dim]{_escaped(run.completed_at.strftime('%Y-%m-%d %H:%M'))}[/dim]"
+            )
         if run.error_message:
-            console.print(f"  Error: [red]{run.error_message}[/red]")
+            console.print(f"  Error: [red]{_escaped(run.error_message)}[/red]")
 
         if run.failure_analysis:
             _render_failure_analysis(run.failure_analysis)
 
     except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {_escaped(e)}")
         raise typer.Exit(1)
 
 
@@ -2833,25 +2872,25 @@ def stop_run(
         status_upper = run.status.upper()
         if status_upper not in TERMINAL_RUN_STATUSES:
             console.print(
-                f"[yellow]Run {run_id} did not reach a terminal state after "
+                f"[yellow]Run {_escaped(run_id)} did not reach a terminal state after "
                 f"{stop_budget_seconds:.0f}s - it's still being torn down in the "
                 f"background.[/yellow]"
             )
-            console.print(f"Check status with: prime train get {run_id}")
+            console.print(f"Check status with: prime train get {_escaped(run_id)}")
             raise typer.Exit(0)
 
         color = _get_status_color(run.status)
         if status_upper == "STOPPED":
-            console.print(f"[green]✓ Run {run_id} stopped successfully[/green]")
+            console.print(f"[green]✓ Run {_escaped(run_id)} stopped successfully[/green]")
         else:
             console.print(
-                f"[yellow]Run {run_id} reached a terminal state before the stop "
+                f"[yellow]Run {_escaped(run_id)} reached a terminal state before the stop "
                 f"completed - it was not actively stopped.[/yellow]"
             )
-        console.print(f"Status: [{color}]{run.status}[/{color}]")
+        console.print(f"Status: [{color}]{_escaped(run.status)}[/{color}]")
 
     except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {_escaped(e)}")
         raise typer.Exit(1)
 
 
@@ -2883,9 +2922,9 @@ def delete_run(
     rl_client = RLClient(api_client)
     try:
         rl_client.delete_run(run_id)
-        console.print(f"[green]✓ Run {run_id} deleted successfully[/green]")
+        console.print(f"[green]✓ Run {_escaped(run_id)} deleted successfully[/green]")
     except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {_escaped(e)}")
         raise typer.Exit(1)
 
 
@@ -2917,15 +2956,17 @@ def restart_run(
 
         run = rl_client.restart_run(run_id)
 
-        console.print(f"[green]✓ Run {run_id} restarting from checkpoint[/green]")
-        console.print(f"Status: {run.status}")
+        console.print(f"[green]✓ Run {_escaped(run_id)} restarting from checkpoint[/green]")
+        console.print(f"Status: {_escaped(run.status)}")
 
     except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {_escaped(e)}")
         raise typer.Exit(1)
 
 
-def _print_new_lines(last_lines: list[str], current_lines: list[str]) -> None:
+def _print_new_lines(
+    last_lines: list[str], current_lines: list[str], *, markup: bool = True
+) -> None:
     """Print only lines in current_lines that aren't in the tail of last_lines.
 
     Uses suffix-prefix overlap detection to avoid reprinting lines between polls.
@@ -2934,7 +2975,7 @@ def _print_new_lines(last_lines: list[str], current_lines: list[str]) -> None:
         return
     if not last_lines:
         for line in current_lines:
-            console.print(line)
+            console.print(line, markup=markup)
         return
     overlap = 0
     max_overlap = min(len(last_lines), len(current_lines))
@@ -2942,7 +2983,7 @@ def _print_new_lines(last_lines: list[str], current_lines: list[str]) -> None:
         if last_lines[-i:] == current_lines[:i]:
             overlap = i
     for line in current_lines[overlap:]:
-        console.print(line)
+        console.print(line, markup=markup)
 
 
 def _is_log_startup_error(error: APIError) -> bool:
@@ -2969,7 +3010,8 @@ def _fetch_logs_with_startup_poll(fetch_fn: Any, tail: int, label: str) -> str:
                 raise
             if poll == 0:
                 console.print(
-                    f"[yellow]Hosted Training run is starting; waiting for {label} logs...[/yellow]"
+                    f"[yellow]Hosted Training run is starting; waiting for "
+                    f"{_escaped(label)} logs...[/yellow]"
                 )
             if poll == HOSTED_TRAINING_LOG_STARTUP_POLLS:
                 console.print(
@@ -2997,7 +3039,7 @@ def _stream_logs(
         return clean_logs(raw_logs)
 
     if follow:
-        console.print(f"[dim]Watching {label} logs... (Ctrl+C to stop)[/dim]\n")
+        console.print(f"[dim]Watching {_escaped(label)} logs... (Ctrl+C to stop)[/dim]\n")
         last_lines: list[str] = []
         consecutive_errors = 0
 
@@ -3023,7 +3065,7 @@ def _stream_logs(
                 raise
 
             current_lines = render(raw_logs)
-            _print_new_lines(last_lines, current_lines)
+            _print_new_lines(last_lines, current_lines, markup=not raw)
             last_lines = current_lines
             time.sleep(HOSTED_TRAINING_LOG_FOLLOW_POLL_SECONDS)
     else:
@@ -3031,7 +3073,7 @@ def _stream_logs(
         rendered = render(raw_logs)
         if rendered:
             for line in rendered:
-                console.print(line)
+                console.print(line, markup=not raw)
         else:
             console.print("[yellow]No logs available yet.[/yellow]")
 
@@ -3041,7 +3083,7 @@ def _handle_logs_api_error(e: APIError) -> None:
         msg = "Hosted Training run has not started yet. Logs will be available once running."
         console.print(f"[yellow]{msg}[/yellow]")
         raise typer.Exit(0)
-    console.print(f"[red]Error:[/red] {e}")
+    console.print(f"[red]Error:[/red] {_escaped(e)}")
     raise typer.Exit(1)
 
 
@@ -3386,10 +3428,10 @@ def list_components(
         run = rl_client.get_run(run_id)
         env_servers: List[EnvServerInfo] = rl_client.list_env_servers(run_id)
     except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {_escaped(e)}")
         raise typer.Exit(1)
 
-    table = Table(title=f"Components for {run_id}")
+    table = Table(title=Text(f"Components for {run_id}"))
     table.add_column("Component", style="cyan")
     table.add_column("Env", style="green")
     table.add_column("Status")
@@ -3405,7 +3447,11 @@ def list_components(
 
     # Only the primary carries the run's status; the platform exposes no
     # per-pod status for the others, so they show "-" like env-servers.
-    table.add_row("trainer" if is_sft else "orchestrator", "-", run.status)
+    table.add_row(
+        "trainer" if is_sft else "orchestrator",
+        "-",
+        Text(str(run.status)),
+    )
     if sft_online_eval:
         # Readable with `-c orchestrator` / `-c inference`; without these rows
         # the eval pod and its inference pool are invisible from the CLI.
@@ -3424,7 +3470,7 @@ def list_components(
             env_label = es.env_name or "?"
         # Dedicated env-servers are discovered from Loki, which has no
         # pod status — show "-" instead of an empty cell.
-        table.add_row("env-server", env_label, es.status or "-")
+        table.add_row("env-server", Text(str(env_label)), Text(str(es.status or "-")))
 
     console.print(table)
     if env_servers:
@@ -3453,7 +3499,9 @@ def init_config(
     path = Path(output_path)
 
     if path.exists() and not force:
-        console.print(f"[red]Error:[/red] {output_path} already exists. Use --force to overwrite.")
+        console.print(
+            f"[red]Error:[/red] {_escaped(output_path)} already exists. Use --force to overwrite."
+        )
         raise typer.Exit(1)
 
     # Auto-detect environment
@@ -3464,16 +3512,16 @@ def init_config(
         name = metadata.get("name")
         if owner and name:
             environment = f"{owner}/{name}"
-            console.print(f"[dim]Detected environment: {environment}[/dim]")
+            console.print(f"[dim]Detected environment: {_escaped(environment)}[/dim]")
 
     path.parent.mkdir(parents=True, exist_ok=True)
 
     template = generate_rl_config_template(environment)
     path.write_text(template)
 
-    console.print(f"[green]✓[/green] Created {output_path}")
+    console.print(f"[green]✓[/green] Created {_escaped(output_path)}")
     console.print(f"[yellow]Warning:[/yellow] {LEGACY_TRAINING_NOTICE}")
-    console.print(f"\n[dim]Run with:[/dim] prime train {output_path}")
+    console.print(f"\n[dim]Run with:[/dim] prime train {_escaped(output_path)}")
 
 
 @app.command("metrics", rich_help_panel="Monitoring", epilog=RL_METRICS_JSON_HELP)
@@ -3507,7 +3555,7 @@ def get_metrics(
         output_data_as_json({"metrics": metrics}, console)
 
     except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {_escaped(e)}")
         raise typer.Exit(1)
 
 
@@ -3540,7 +3588,7 @@ def get_rollouts(
         output_data_as_json(result, console)
 
     except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {_escaped(e)}")
         raise typer.Exit(1)
 
 
@@ -3565,7 +3613,7 @@ def get_progress(
         output_data_as_json(progress, console)
 
     except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {_escaped(e)}")
         raise typer.Exit(1)
 
 
@@ -3600,7 +3648,7 @@ def get_distributions(
         output_data_as_json(result, console)
 
     except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {_escaped(e)}")
         raise typer.Exit(1)
 
 
@@ -3636,7 +3684,7 @@ def list_checkpoints(
             console.print("[yellow]No checkpoints found for this run.[/yellow]")
             return
 
-        table = Table(title=f"Checkpoints for {run_id}")
+        table = Table(title=Text(f"Checkpoints for {run_id}"))
         table.add_column("ID", style="cyan", no_wrap=True)
         table.add_column("Step", justify="right", style="bold")
         table.add_column("Status", style="bold")
@@ -3653,17 +3701,17 @@ def list_checkpoints(
         for cp in checkpoints:
             color = status_colors.get(cp.status, "white")
             table.add_row(
-                cp.id,
-                str(cp.step),
-                f"[{color}]{cp.status}[/{color}]",
-                format_file_size(cp.size_bytes) if cp.size_bytes is not None else "-",
-                cp.created_at.strftime("%Y-%m-%d %H:%M"),
+                Text(str(cp.id)),
+                Text(str(cp.step)),
+                Text(cp.status, style=color),
+                Text(format_file_size(cp.size_bytes) if cp.size_bytes is not None else "-"),
+                Text(cp.created_at.strftime("%Y-%m-%d %H:%M")),
             )
 
         console.print(table)
 
     except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {_escaped(e)}")
         raise typer.Exit(1)
 
 

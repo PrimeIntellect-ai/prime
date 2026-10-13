@@ -1,6 +1,7 @@
 from typing import Any, Dict, Optional
 
 import typer
+from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
 
@@ -29,7 +30,7 @@ LIMIT_ROWS = [
 
 
 def _limit_cell(value: Optional[int]) -> Any:
-    return str(value) if value is not None else Text("-", style="dim")
+    return Text(str(value)) if value is not None else Text("-", style="dim")
 
 
 def build_limits_table(
@@ -90,10 +91,13 @@ def whoami() -> None:
         if config.team_id:
             table.add_row("Type", "Team")
             table.add_section()
-            table.add_row("Team ID", config.team_id)
-            table.add_row("Team Name", config.team_name or Text("Unknown", style="dim"))
+            table.add_row("Team ID", Text(str(config.team_id)))
+            table.add_row(
+                "Team Name",
+                Text(str(config.team_name)) if config.team_name else Text("Unknown", style="dim"),
+            )
             if config.team_role:
-                table.add_row("Role", config.team_role)
+                table.add_row("Role", Text(str(config.team_role)))
         else:
             table.add_row("Type", "Personal")
 
@@ -101,10 +105,10 @@ def whoami() -> None:
         table.add_section()
 
         # User details
-        table.add_row("User ID", user_id or "Unknown")
-        table.add_row("Username", slug or Text("Not set", style="dim"))
-        table.add_row("Name", name or "Unknown")
-        table.add_row("Email", email or "Unknown")
+        table.add_row("User ID", Text(str(user_id)) if user_id else "Unknown")
+        table.add_row("Username", Text(str(slug)) if slug else Text("Not set", style="dim"))
+        table.add_row("Name", Text(str(name)) if name else "Unknown")
+        table.add_row("Email", Text(str(email)) if email else "Unknown")
 
         console.print(table)
 
@@ -118,11 +122,11 @@ def whoami() -> None:
 
             for scope_name, permissions in scope.items():
                 if permissions is None:
-                    perms_table.add_row(scope_name, "-", "-")
+                    perms_table.add_row(Text(str(scope_name)), "-", "-")
                 else:
                     read_val = "✓" if permissions.get("read", False) else "✗"
                     write_val = "✓" if permissions.get("write", False) else "✗"
-                    perms_table.add_row(scope_name, read_val, write_val)
+                    perms_table.add_row(Text(str(scope_name)), read_val, write_val)
 
             console.print(perms_table)
 
@@ -132,8 +136,8 @@ def whoami() -> None:
             console.print("[dim]Account limits are unavailable for this account.[/dim]")
 
     except APIError as e:
-        console.print(f"[red]Error:[/red] {str(e)}")
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except Exception as e:
-        console.print(f"[red]Unexpected error:[/red] {str(e)}")
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         raise typer.Exit(1)

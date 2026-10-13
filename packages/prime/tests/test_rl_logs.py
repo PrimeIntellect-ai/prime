@@ -1,5 +1,6 @@
 """Tests for `prime train logs` (orchestrator + env-server) and components."""
 
+import json
 import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List
@@ -108,6 +109,101 @@ def test_logs_default_hits_orchestrator(monkeypatch: pytest.MonkeyPatch) -> None
     assert len(orch) == 1
     assert orch[0]["tail_lines"] == 1000
     assert env == []
+
+
+@pytest.mark.parametrize("plain", [False, True])
+def test_logs_preserve_rich_markup_in_raw_and_formatted_lines(
+    monkeypatch: pytest.MonkeyPatch,
+    plain: bool,
+) -> None:
+    orch: List[Dict[str, Any]] = []
+    env: List[Dict[str, Any]] = []
+    lst: List[Dict[str, Any]] = []
+    raw_line = "backend says [/INFO] and [bold]this is data[/bold]"
+    mock_get = _make_mock_get({"orchestrator_logs": raw_line}, orch, env, lst)
+    monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+
+    prefix = ["--plain"] if plain else []
+    raw_result = CliRunner().invoke(app, [*prefix, "train", "logs", RUN_ID, "--raw"])
+    assert raw_result.exit_code == 0, raw_result.output
+    assert raw_line in _plain(raw_result.output)
+
+    formatted_result = CliRunner().invoke(app, [*prefix, "train", "logs", RUN_ID])
+    assert formatted_result.exit_code == 0, formatted_result.output
+    assert raw_line in _plain(formatted_result.output)
+
+
+@pytest.mark.parametrize("field", ["timestamp", "level", "message"])
+def test_logs_escape_markup_in_json_log_fields(
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+) -> None:
+    orch: List[Dict[str, Any]] = []
+    env: List[Dict[str, Any]] = []
+    lst: List[Dict[str, Any]] = []
+    entry = {"timestamp": "2026-01-01T12:34:56Z", "level": "INFO", "message": "hello"}
+    entry[field] = "[/INFO]"
+    log_line = json.dumps(entry)
+    mock_get = _make_mock_get({"orchestrator_logs": log_line}, orch, env, lst)
+    monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+
+    result = CliRunner().invoke(app, ["train", "logs", RUN_ID])
+
+    assert result.exit_code == 0, result.output
+    assert "[/INFO]" in _plain(result.output)
+
+
+@pytest.mark.parametrize("plain", [False, True])
+@pytest.mark.parametrize("raw", [False, True])
+def test_logs_follow_preserves_literal_lines_and_deduplication(monkeypatch, plain, raw):
+    first = "one [bold]payload[/bold]"
+    overlap = "two [/INFO]"
+    last = "three [/INFO]"
+    snapshots = iter([f"{first}\n{overlap}", f"{overlap}\n{last}"])
+
+    def fetch(*args, **kwargs):
+        try:
+            return next(snapshots)
+        except StopIteration:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(RLClient, "get_logs", fetch)
+    args = ["--plain"] if plain else []
+    args += ["train", "logs", RUN_ID, "--env", "env[/INFO]", "--follow"]
+    if raw:
+        args.append("--raw")
+    result = CliRunner().invoke(app, args)
+
+    assert result.exit_code == 0, result.output
+    output = _plain(result.output)
+    assert "env[/INFO]" in output
+    for line in (first, overlap, last):
+        assert output.count(line) == 1
+
+
+def test_json_log_format_retains_intentional_level_style():
+    from rich.text import Text
+
+    formatted = rl_commands.format_json_log_line(
+        json.dumps({"timestamp": "12:34:56", "level": "INFO", "message": "[bold]data[/bold]"})
+    )
+    assert formatted is not None
+    text = Text.from_markup(formatted)
+    assert text.plain == "12:34:56 [INFO] [bold]data[/bold]"
+    assert any(span.style == "blue" for span in text.spans)
+    assert all(span.style != "bold" for span in text.spans)
+
+
+def test_logs_escape_backend_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    def mock_get(self: Any, endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        raise APIError("backend rejected request [/INFO]")
+
+    monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+
+    result = CliRunner().invoke(app, ["train", "logs", RUN_ID])
+
+    assert result.exit_code == 1
+    assert "backend rejected request [/INFO]" in _plain(result.output)
 
 
 def test_logs_env_flag_alone_infers_env_server(monkeypatch: pytest.MonkeyPatch) -> None:

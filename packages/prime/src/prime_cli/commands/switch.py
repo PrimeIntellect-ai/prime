@@ -2,6 +2,7 @@ from typing import Optional
 
 import typer
 from click.exceptions import Abort
+from rich.markup import escape
 
 from prime_cli.core import Config
 
@@ -51,13 +52,13 @@ def _switch_to_team(config: Config, team: dict) -> None:
 
     config.set_team(team_id, team_name=team_name, team_role=team_role)
     config.update_current_environment_file()
-    console.print(f"[green]Switched to team '{team_name}'.[/green]")
+    console.print(f"[green]Switched to team '{escape(str(team_name))}'.[/green]")
 
 
 def _print_available_slugs(teams: list[dict]) -> None:
     slugs = [str(team.get("slug", "")).strip() for team in teams if team.get("slug")]
     if slugs:
-        console.print(f"[dim]Available teams: {', '.join(sorted(slugs))}[/dim]")
+        console.print(f"[dim]Available teams: {escape(', '.join(sorted(slugs)))}[/dim]")
 
 
 @app.callback(invoke_without_command=True)
@@ -87,16 +88,16 @@ def switch(
         client = APIClient()
         teams = fetch_teams(client)
     except APIError as e:
-        console.print(f"[red]Error:[/red] {str(e)}")
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except Exception as e:
-        console.print(f"[red]Unexpected error:[/red] {str(e)}")
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
 
     if target is not None:
         selected_team = _select_team_by_target(teams, normalized_target)
         if selected_team is None:
-            console.print(f"[red]Team '{target}' not found.[/red]")
+            console.print(f"[red]Team '{escape(target)}' not found.[/red]")
             _print_available_slugs(teams)
             raise typer.Exit(1)
 
@@ -117,7 +118,10 @@ def switch(
         role = str(team.get("role", "member")).lower()
         current_badge = " [green](current)[/green]" if team.get("teamId") == current_team_id else ""
         details = f"slug: {slug}, role: {role}" if slug else f"role: {role}"
-        console.print(f"  [cyan]({idx})[/cyan] {name} [dim]({details})[/dim]{current_badge}")
+        console.print(
+            f"  [cyan]({idx})[/cyan] {escape(str(name))} "
+            f"[dim]({escape(details)})[/dim]{current_badge}"
+        )
 
     while True:
         try:

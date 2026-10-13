@@ -3,7 +3,9 @@
 from typing import List, Optional
 
 import typer
+from rich.markup import escape
 from rich.table import Table
+from rich.text import Text
 
 from ..api.deployments import DeploymentsClient
 from ..client import APIClient, APIError
@@ -37,20 +39,20 @@ def _print_inference_usage(base_model: str, adapter_id: str) -> None:
     model_id = f"{base_model}:{adapter_id}"
     inference_url = Config().inference_url
     console.print("\n[bold]Once deployed, you can run inference with:[/bold]")
-    console.print(f'[dim]prime inference chat "{model_id}" "Hello" --max-tokens 100[/dim]')
+    console.print(f'[dim]prime inference chat "{escape(model_id)}" "Hello" --max-tokens 100[/dim]')
     console.print(
         "[dim]For scripts or API clients, create a Platform API key at "
-        f"{API_KEYS_DOCS_URL}, export it, then run cURL:[/dim]"
+        f"{escape(API_KEYS_DOCS_URL)}, export it, then run cURL:[/dim]"
     )
     console.print(
         f"""
 [dim]export PRIME_API_KEY=<insert_key_here>
 
-curl -X POST {inference_url}/chat/completions \\
+curl -X POST {escape(inference_url)}/chat/completions \\
   -H "Content-Type: application/json" \\
   -H "Authorization: Bearer $PRIME_API_KEY" \\
   -d '{{
-    "model": "{model_id}",
+    "model": "{escape(model_id)}",
     "messages": [{{"role": "user", "content": "Hello"}}],
     "max_tokens": 100
   }}'[/dim]"""
@@ -64,7 +66,7 @@ def _print_deployment_followup(deployment_status: str) -> None:
     elif deployment_status == "DEPLOYING":
         console.print("[dim]The model is being deployed. This may take a few minutes.[/dim]")
     else:
-        console.print(f"[dim]Deployment status: {deployment_status}[/dim]")
+        console.print(f"[dim]Deployment status: {escape(deployment_status)}[/dim]")
     console.print("[dim]Use 'prime deployments list' to check deployment status.[/dim]")
 
 
@@ -156,22 +158,24 @@ def list_deployments(
             deployed_at = model.deployed_at.strftime("%Y-%m-%d %H:%M") if model.deployed_at else "-"
             base_model = model.base_model[:30] if len(model.base_model) > 30 else model.base_model
             status_color = DEPLOYMENT_STATUS_COLORS.get(model.deployment_status, "white")
-            status = f"[{status_color}]{model.deployment_status}[/{status_color}]"
+            status = Text(model.deployment_status, style=status_color)
 
             if deployable_models is not None:
                 is_deployable = model.base_model in deployable_models
-                deployable = "[green]Yes[/green]" if is_deployable else "[red]No[/red]"
+                deployable = (
+                    Text("Yes", style="green") if is_deployable else Text("No", style="red")
+                )
             else:
-                deployable = "[dim]-[/dim]"
+                deployable = Text("-", style="dim")
 
             table.add_row(
-                model.id,
-                model.display_name or "-",
-                base_model,
-                str(model.step) if model.step is not None else "-",
+                Text(str(model.id)),
+                Text(str(model.display_name or "-")),
+                Text(str(base_model)),
+                Text(str(model.step) if model.step is not None else "-"),
                 status,
                 deployable,
-                deployed_at,
+                Text(deployed_at),
             )
 
         console.print(table)
@@ -185,7 +189,7 @@ def list_deployments(
             console.print(f"\n[dim]Total: {total} adapter(s)[/dim]")
 
     except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
 
 
@@ -239,7 +243,7 @@ def create_deployment(
 
         if checkpoint_id is not None:
             console.print("[bold]Deploying checkpoint:[/bold]")
-            console.print(f"  Checkpoint ID: {checkpoint_id}")
+            console.print(f"  Checkpoint ID: {checkpoint_id}", markup=False)
             console.print()
 
             if not yes:
@@ -251,8 +255,8 @@ def create_deployment(
             adapter = deployments_client.deploy_checkpoint(checkpoint_id)
 
             _print_deployment_success(adapter.deployment_status)
-            console.print(f"Adapter ID: [cyan]{adapter.id}[/cyan]")
-            console.print(f"Status: [yellow]{adapter.deployment_status}[/yellow]")
+            console.print(f"Adapter ID: [cyan]{escape(str(adapter.id))}[/cyan]")
+            console.print(f"Status: [yellow]{escape(adapter.deployment_status)}[/yellow]")
             _print_deployment_followup(adapter.deployment_status)
 
             _print_inference_usage(adapter.base_model, adapter.id)
@@ -265,7 +269,7 @@ def create_deployment(
 
         if model.status != "READY":
             console.print("[red]Error:[/red] Model is not ready for deployment.")
-            console.print(f"Current status: [yellow]{model.status}[/yellow]")
+            console.print(f"Current status: [yellow]{escape(model.status)}[/yellow]")
             console.print("[dim]Only models with READY status can be deployed.[/dim]")
             raise typer.Exit(1)
 
@@ -275,7 +279,7 @@ def create_deployment(
 
         if model.deployment_status in ("DEPLOYING", "UNLOADING"):
             console.print("[yellow]Model deployment is in progress.[/yellow]")
-            console.print(f"Current status: {model.deployment_status}")
+            console.print(f"Current status: {model.deployment_status}", markup=False)
             raise typer.Exit(1)
 
         # Check if base model supports LoRA deployment
@@ -285,7 +289,7 @@ def create_deployment(
                 console.print(
                     "[red]Error:[/red] Base model is not currently available for LoRA deployment."
                 )
-                console.print(f"  Base model: [yellow]{model.base_model}[/yellow]")
+                console.print(f"  Base model: [yellow]{escape(model.base_model)}[/yellow]")
                 raise typer.Exit(1)
         except APIError:
             console.print(
@@ -294,10 +298,10 @@ def create_deployment(
 
         # Show model details and confirm
         console.print("[bold]Deploying model:[/bold]")
-        console.print(f"  ID: {model.id}")
+        console.print(f"  ID: {model.id}", markup=False)
         if model.display_name:
-            console.print(f"  Name: {model.display_name}")
-        console.print(f"  Base Model: {model.base_model}")
+            console.print(f"  Name: {model.display_name}", markup=False)
+        console.print(f"  Base Model: {model.base_model}", markup=False)
         console.print()
 
         if not yes:
@@ -310,13 +314,13 @@ def create_deployment(
         updated_model = deployments_client.deploy_adapter(model_id)
 
         _print_deployment_success(updated_model.deployment_status)
-        console.print(f"Status: [yellow]{updated_model.deployment_status}[/yellow]")
+        console.print(f"Status: [yellow]{escape(updated_model.deployment_status)}[/yellow]")
         _print_deployment_followup(updated_model.deployment_status)
 
         _print_inference_usage(model.base_model, model.id)
 
     except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
 
 
@@ -351,22 +355,22 @@ def delete_deployment(
 
         if model.deployment_status in ("DEPLOYING", "UNLOADING"):
             console.print("[yellow]Model deployment is in progress.[/yellow]")
-            console.print(f"Current status: {model.deployment_status}")
+            console.print(f"Current status: {model.deployment_status}", markup=False)
             raise typer.Exit(1)
 
         if model.deployment_status not in ("DEPLOYED", "DEPLOY_FAILED", "UNLOAD_FAILED"):
             console.print("[red]Error:[/red] Cannot unload model in current state.")
-            console.print(f"Current status: {model.deployment_status}")
+            console.print(f"Current status: {model.deployment_status}", markup=False)
             raise typer.Exit(1)
 
         # Unload the model
         updated_model = deployments_client.unload_adapter(model_id)
 
         console.print("[green]Unload initiated successfully![/green]")
-        console.print(f"Status: [yellow]{updated_model.deployment_status}[/yellow]")
+        console.print(f"Status: [yellow]{escape(updated_model.deployment_status)}[/yellow]")
         console.print("\n[dim]The model is being unloaded.[/dim]")
         console.print("[dim]Use 'prime deployments list' to check status.[/dim]")
 
     except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)

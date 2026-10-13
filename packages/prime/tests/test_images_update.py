@@ -220,7 +220,7 @@ def test_update_failure_reports_error_and_exits_nonzero(monkeypatch):
                     "success": False,
                     "error": {
                         "code": "destination_exists",
-                        "message": "Destination image renamed:v1 already exists",
+                        "message": "Destination image [/INFO] already exists",
                     },
                 }
             ],
@@ -235,7 +235,7 @@ def test_update_failure_reports_error_and_exits_nonzero(monkeypatch):
     )
 
     assert result.exit_code == 1
-    assert "already exists" in result.output
+    assert "Destination image [/INFO] already exists" in result.output
 
 
 def test_publish_multiple_references_batches_explicit_updates(monkeypatch):

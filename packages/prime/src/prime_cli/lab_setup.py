@@ -22,6 +22,7 @@ from urllib.request import urlopen
 import toml
 from rich import box
 from rich.console import Console, Group, RenderableType
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
@@ -172,7 +173,7 @@ def run_lab_setup(passthrough_args: list[str], *, console: Console | None = None
     except SystemExit as exc:
         return int(exc.code or 0)
     except ValueError as exc:
-        console.print(f"[red]Error:[/red] {exc}")
+        console.print(f"[red]Error:[/red] {escape(str(exc))}")
         return 2
 
     result = run_lab_setup_service(
@@ -192,7 +193,7 @@ def run_lab_sync(passthrough_args: list[str], *, console: Console | None = None)
     except SystemExit as exc:
         return int(exc.code or 0)
     except ValueError as exc:
-        console.print(f"[red]Error:[/red] {exc}")
+        console.print(f"[red]Error:[/red] {escape(str(exc))}")
         return 2
 
     result = run_lab_sync_service(
@@ -212,7 +213,7 @@ def run_lab_doctor(passthrough_args: list[str], *, console: Console | None = Non
     except SystemExit as exc:
         return int(exc.code or 0)
     except ValueError as exc:
-        console.print(f"[red]Error:[/red] {exc}")
+        console.print(f"[red]Error:[/red] {escape(str(exc))}")
         return 2
 
     result = run_lab_doctor_service(options, workspace=Path.cwd())
@@ -1381,7 +1382,7 @@ def _post_setup_call_to_action(options: LabSetupOptions) -> RenderableType:
         header_text,
         Panel(
             prompt_text,
-            title=prompt_heading,
+            title=Text(prompt_heading),
             border_style="magenta",
             box=box.ROUNDED,
             padding=(1, 2),
@@ -1795,7 +1796,7 @@ def _remove_if_exists(path: Path) -> None:
 
 
 def _print_lab_doctor_result(result: LabDoctorResult, console: Console) -> None:
-    table = Table(title=f"Lab workspace check: {result.workspace}")
+    table = Table(title=Text(f"Lab workspace check: {result.workspace}"))
     table.add_column("Status", no_wrap=True)
     table.add_column("Check", no_wrap=True)
     table.add_column("Message")
@@ -1808,9 +1809,9 @@ def _print_lab_doctor_result(result: LabDoctorResult, console: Console) -> None:
         }.get(check.status, "dim")
         table.add_row(
             Text(check.status, style=style),
-            check.name,
-            check.message,
-            check.remediation,
+            Text(check.name),
+            Text(check.message),
+            Text(check.remediation),
         )
     console.print(table)
 

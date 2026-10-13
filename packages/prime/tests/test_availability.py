@@ -3,6 +3,7 @@ import os
 from typing import Any, Dict
 
 import pytest
+from prime_cli.api.availability import AvailabilityClient
 from prime_cli.core import APIClient
 from prime_cli.main import app
 from typer.testing import CliRunner
@@ -68,6 +69,15 @@ def test_availability_list(mock_api_client: APIClient, capsys: pytest.CaptureFix
     assert "To deploy a pod with one of these configurations:" in result.output
 
 
+def test_availability_error_escapes_markup(capsys: pytest.CaptureFixture[str]) -> None:
+    class BrokenClient:
+        def get(self, *_args: Any, **_kwargs: Any) -> None:
+            raise RuntimeError("[/INFO]")
+
+    assert AvailabilityClient(BrokenClient())._fetch_paginaged("/availability/gpus", {}) == []
+    assert "[/INFO]" in capsys.readouterr().out
+
+
 def test_availability_gpu_types(
     mock_api_client: APIClient, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -87,6 +97,19 @@ def test_availability_gpu_types(
     # Verify some expected data points (GPU types use underscores)
     assert "A100_80GB" in result.output
     assert "H100_80GB" in result.output
+
+
+def test_availability_gpu_types_renders_brackets_literally(monkeypatch):
+    monkeypatch.setattr(
+        "prime_cli.commands.availability.AvailabilityClient.get_available_gpu_types",
+        lambda self: ["GPU[/INFO]"],
+    )
+    result = CliRunner().invoke(
+        app, ["availability", "gpu-types"], env={"COLUMNS": "200", "LINES": "50"}
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "GPU[/INFO]" in result.output
 
 
 def test_availability_disks(mock_api_client: APIClient, capsys: pytest.CaptureFixture[str]) -> None:

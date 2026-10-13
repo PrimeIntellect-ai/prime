@@ -416,6 +416,26 @@ def test_list_cli_plain_output_has_no_markup_leaks(run_images_list):
         assert tag not in result.output
 
 
+@pytest.mark.parametrize("plain", [False, True])
+def test_list_cli_renders_image_reference_brackets_literally(run_images_list, plain):
+    row = _vm(image="literal:latest", pushed_at="2026-04-16T22:24:07").model_copy(
+        update={"display_ref": "prime/user/literal[/INFO]:latest"}
+    )
+    result = run_images_list([row], plain=plain)
+
+    assert result.exit_code == 0, result.output
+    assert "prime/user/literal[/INFO]:latest" in result.output
+
+
+def test_list_json_preserves_image_reference_brackets(monkeypatch):
+    ref = "prime/user/[bold]literal[/bold]:latest"
+    row = _vm().model_copy(update={"display_ref": ref})
+    result, _ = _run_list_capturing_params(monkeypatch, ["--output", "json"], payload=[row])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["data"][0]["displayRef"] == ref
+
+
 def test_list_cli_team_listing_keeps_owner_column_and_prefix(run_images_list):
     result = run_images_list(
         [

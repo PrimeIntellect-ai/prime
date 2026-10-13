@@ -149,7 +149,7 @@ def test_chat_stream_with_json_errors(monkeypatch):
 def test_chat_reports_api_error(monkeypatch):
     class FailingClient(DummyClient):
         def chat_completion(self, payload, stream=False):
-            raise InferenceAPIError("boom")
+            raise InferenceAPIError("boom [/INFO]")
 
     monkeypatch.setattr("prime_cli.commands.inference.InferenceClient", FailingClient)
 
@@ -161,7 +161,20 @@ def test_chat_reports_api_error(monkeypatch):
     )
 
     assert result.exit_code == 1
-    assert "boom" in result.output
+    assert "boom [/INFO]" in result.output
+
+
+def test_chat_rejects_markup_in_output_format_without_rendering_it(monkeypatch):
+    monkeypatch.setattr("prime_cli.commands.inference.InferenceClient", DummyClient)
+
+    result = CliRunner().invoke(
+        app,
+        ["inference", "chat", "some-model", "hi", "--output", "[/INFO]"],
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 1
+    assert "[/INFO]" in result.output
 
 
 def test_chat_reads_message_from_stdin(monkeypatch):

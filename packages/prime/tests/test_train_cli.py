@@ -129,6 +129,70 @@ def test_train_legacy_json_warning_uses_stderr(monkeypatch, tmp_path: Path) -> N
     assert "stop accepting new runs" not in result.stdout
 
 
+@pytest.mark.parametrize("plain", [False, True])
+def test_train_config_summary_preserves_markup_values(monkeypatch, tmp_path, plain):
+    from prime_cli.commands import rl
+
+    config = tmp_path / "config[bold].toml"
+    config.write_text(
+        'model = "model[/INFO]"\n'
+        'checkpoint_id = "checkpoint[/INFO]"\n'
+        '[run_config]\nlabel = "[bold]data[/bold]"\n'
+        '[[env]]\nid = "owner/env"\nname = "env[/INFO]"\n'
+    )
+    monkeypatch.setattr(rl.RLClient, "list_models", lambda *args, **kwargs: [])
+    monkeypatch.setattr(rl, "confirm_or_skip", lambda *args, **kwargs: False)
+
+    result = runner.invoke(
+        app, [*(["--plain"] if plain else []), "train", str(config)], env=TEST_ENV
+    )
+
+    assert result.exit_code == 0, result.output
+    values = (
+        config.name,
+        "model[/INFO]",
+        "checkpoint[/INFO]",
+        "[bold]data[/bold]",
+        "env[/INFO]",
+    )
+    for value in values:
+        assert value in result.output
+
+
+@pytest.mark.parametrize("plain", [False, True])
+def test_train_fft_dispatch_preserves_id_and_hyperlink(monkeypatch, tmp_path, plain):
+    run_id = "run[/INFO][bold]id[/bold]"
+    _mock_run_post(monkeypatch, {"runId": run_id, "tokenValue": "secret"})
+    cfg = tmp_path / "fft.toml"
+    cfg.write_text(_FFT_BODY)
+
+    result = runner.invoke(
+        app,
+        [*(["--plain"] if plain else []), "train", str(cfg), "--yes"],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key", "COLUMNS": "200"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert f"hosted run {run_id}" in result.output
+    assert f"/dashboard/training/{run_id}" in result.output
+
+
+def test_train_fft_backend_error_is_literal(monkeypatch, tmp_path):
+    from prime_cli.core import APIError
+
+    def fail(*args, **kwargs):
+        raise APIError("dispatch failed [/INFO]")
+
+    monkeypatch.setattr("prime_cli.api.training.HostedTrainingClient.create_run", fail)
+    cfg = tmp_path / "fft.toml"
+    cfg.write_text(_FFT_BODY)
+
+    result = runner.invoke(app, ["train", str(cfg), "--yes"], env=TEST_ENV)
+
+    assert result.exit_code == 1
+    assert "dispatch failed [/INFO]" in result.output
+
+
 def test_train_request_submits_model_request(monkeypatch) -> None:
     captured: dict[str, Any] = {}
 
@@ -823,6 +887,35 @@ def test_train_get_prints_a_shared_runs_cluster(monkeypatch) -> None:
 
     assert result.exit_code == 0, result.output
     assert "Cluster: oes1yd0lubfsku6iekofnoau" in result.output
+
+
+def test_train_get_preserves_markup_like_run_values(monkeypatch) -> None:
+    from prime_cli.api.rl import RLRun
+
+    run = RLRun.model_validate(
+        {
+            "id": "run-[/INFO]",
+            "userId": "user-1",
+            "status": "FAILED[/INFO]",
+            "baseModel": "model[/INFO]",
+            "environments": [{"name": "env[/INFO]"}],
+            "errorMessage": "backend failed [/INFO]",
+            "createdAt": "2026-05-17T00:00:00Z",
+            "updatedAt": "2026-05-17T00:00:00Z",
+        }
+    )
+    monkeypatch.setattr(
+        "prime_cli.commands.rl.RLClient.get_run", lambda self, run_id, timeout=None: run
+    )
+
+    result = runner.invoke(app, ["train", "get", "run-[/INFO]"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    assert "Run run-[/INFO]" in result.output
+    assert "FAILED[/INFO]" in result.output
+    assert "model[/INFO]" in result.output
+    assert "env[/INFO]" in result.output
+    assert "backend failed [/INFO]" in result.output
 
 
 # --- on-demand billed launch output -----------------------------------------

@@ -48,7 +48,7 @@ def view() -> None:
         return any((val := os.getenv(n)) and val.strip() for n in names)
 
     # Show current environment
-    table.add_row("Current Environment", settings["current_environment"])
+    table.add_row("Current Environment", Text(str(settings["current_environment"])))
 
     api_key = settings["api_key"]
     if api_key:
@@ -57,7 +57,7 @@ def view() -> None:
             masked_key += " (from env var)"
     else:
         masked_key = "Not set"
-    table.add_row("API Key", masked_key)
+    table.add_row("API Key", Text(masked_key))
 
     # Show Team
     team_id = settings["team_id"]
@@ -88,19 +88,19 @@ def view() -> None:
     base_label = settings["base_url"]
     if _env_set("PRIME_API_BASE_URL", "PRIME_BASE_URL"):
         base_label += " (from env var)"
-    table.add_row("Base URL", base_label)
+    table.add_row("Base URL", Text(base_label))
 
     # Show frontend URL
     front_label = settings["frontend_url"]
     if _env_set("PRIME_FRONTEND_URL"):
         front_label += " (from env var)"
-    table.add_row("Frontend URL", front_label)
+    table.add_row("Frontend URL", Text(front_label))
 
     # Show inference URL
     inf_label = settings["inference_url"]
     if _env_set("PRIME_INFERENCE_URL"):
         inf_label += " (from env var)"
-    table.add_row("Inference URL", inf_label)
+    table.add_row("Inference URL", Text(inf_label))
 
     # Show traces URL (effective value: falls back to the traces service default)
     traces_label = settings["traces_url"]
@@ -112,17 +112,17 @@ def view() -> None:
     ssh_label = settings["ssh_key_path"]
     if _env_set("PRIME_SSH_KEY_PATH"):
         ssh_label += " (from env var)"
-    table.add_row("SSH Key Path", ssh_label)
+    table.add_row("SSH Key Path", Text(ssh_label))
 
     # Show share resources with team
     share_label = str(settings.get("share_resources_with_team", False))
-    table.add_row("Share Resources With Team", share_label)
+    table.add_row("Share Resources With Team", Text(share_label))
 
     # Show whether runs opt out of Prime Traces (samples go to the legacy tables)
     opt_out_label = str(settings.get("traces_opt_out", False))
     if _env_set("PRIME_TRACES_OPT_OUT"):
         opt_out_label = f"{os.environ['PRIME_TRACES_OPT_OUT']} (from env var)"
-    table.add_row("Traces Opt Out", opt_out_label)
+    table.add_row("Traces Opt Out", Text(opt_out_label))
 
     console.print(table)
 
@@ -165,7 +165,7 @@ def set_api_key(
         except (APIError, Exception):
             pass
 
-        console.print(f"[green]API key {masked_key} configured successfully![/green]")
+        console.print(f"[green]API key {escape(masked_key)} configured successfully![/green]")
         console.print("[blue]You can verify your API key with 'prime config view'[/blue]")
         console.print(
             "\n[yellow]Tip: Get your API key at https://app.primeintellect.ai/dashboard/tokens[/yellow]"
@@ -211,9 +211,12 @@ def set_team_id(
     config.set_team(team_id, team_name=team_name, team_role=team_role)
     if team_id:
         if team_name:
-            console.print(f"[green]Team '{team_name}' ({team_id}) configured successfully![/green]")
+            console.print(
+                f"[green]Team '{escape(str(team_name))}' ({escape(str(team_id))}) "
+                "configured successfully![/green]"
+            )
         else:
-            console.print(f"[green]Team ID '{team_id}' configured successfully![/green]")
+            console.print(f"[green]Team ID '{escape(team_id)}' configured successfully![/green]")
     else:
         console.print("[green]Team ID cleared. Using personal account.[/green]")
 
@@ -249,7 +252,7 @@ def set_base_url(
 
     config = Config()
     config.set_base_url(url)
-    console.print(f"[green]Base URL set to: {url}[/green]")
+    console.print(f"[green]Base URL set to: {escape(url)}[/green]")
 
 
 @app.command()
@@ -274,7 +277,7 @@ def set_frontend_url(
 
     config = Config()
     config.set_frontend_url(url)
-    console.print(f"[green]Frontend URL set to: {url}[/green]")
+    console.print(f"[green]Frontend URL set to: {escape(url)}[/green]")
 
 
 @app.command()
@@ -299,7 +302,7 @@ def set_inference_url(
 
     config = Config()
     config.set_inference_url(url)
-    console.print(f"[green]Inference URL set to: {url}[/green]")
+    console.print(f"[green]Inference URL set to: {escape(url)}[/green]")
 
 
 @app.command()
@@ -348,15 +351,15 @@ def _set_environment(
     # Try to load the environment (handles both built-in and custom)
     try:
         if config.load_environment(env):
-            console.print(f"[green]Switched to environment '{env}'![/green]")
+            console.print(f"[green]Switched to environment '{escape(env)}'![/green]")
         else:
-            console.print(f"[red]Unknown environment: {env}[/red]")
+            console.print(f"[red]Unknown environment: {escape(env)}[/red]")
             console.print("[yellow]Available environments:[/yellow]")
             for env_name in config.list_environments():
-                console.print(f"  - {env_name}")
+                console.print(f"  - {escape(env_name)}")
             raise typer.Exit(1)
     except ValueError as e:
-        console.print(f"[red]Error: {e}[/red]")
+        console.print(f"[red]Error: {escape(str(e))}[/red]")
         raise typer.Exit(1)
 
     console.print("[blue]Run 'prime config view' to see the current configuration[/blue]")
@@ -370,11 +373,13 @@ def _save_environment(
     try:
         config = Config()
         config.save_environment(name)
-        console.print(f"[green]Saved current configuration as environment '{name}'![/green]")
+        console.print(
+            f"[green]Saved current configuration as environment '{escape(name)}'![/green]"
+        )
         console.print("[yellow]Note: This includes your API key and team ID[/yellow]")
-        console.print(f"[blue]Use 'prime config use {name}' to load it later[/blue]")
+        console.print(f"[blue]Use 'prime config use {escape(name)}' to load it later[/blue]")
     except ValueError as e:
-        console.print(f"[red]Error: {e}[/red]")
+        console.print(f"[red]Error: {escape(str(e))}[/red]")
         raise typer.Exit(1)
 
 
@@ -389,7 +394,7 @@ def _list_environments() -> None:
 
     for env in environments:
         env_type = "Built-in" if env == "production" else "Custom"
-        table.add_row(env, env_type)
+        table.add_row(Text(str(env)), env_type)
 
     console.print(table)
 
@@ -402,9 +407,9 @@ def _delete_environment(
     try:
         config = Config()
         config.delete_environment(name)
-        console.print(f"[green]Deleted environment '{name}'![/green]")
+        console.print(f"[green]Deleted environment '{escape(name)}'![/green]")
     except ValueError as e:
-        console.print(f"[red]Error: {e}[/red]")
+        console.print(f"[red]Error: {escape(str(e))}[/red]")
         raise typer.Exit(1)
 
 

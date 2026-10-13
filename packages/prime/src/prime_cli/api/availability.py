@@ -1,6 +1,7 @@
 from typing import Any, Dict, Iterable, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
+from rich.markup import escape
 
 from ..utils.plain import get_console
 
@@ -119,7 +120,7 @@ class AvailabilityClient:
                 total_count = response.get("totalCount", 0)
                 results.extend(response.get("items", []))
             except Exception as e:
-                console.print(f"Error fetching availability page {page}: {e}")
+                console.print(f"Error fetching availability page {page}: {escape(str(e))}")
                 break
             if len(results) >= total_count:
                 break

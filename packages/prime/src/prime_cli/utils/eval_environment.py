@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Optional
 
 import typer
+from rich.markup import escape
 
 from ..client import APIClient, APIError
 from ..core import Config
@@ -291,13 +292,13 @@ def _choose_remote_owner(env_name: str, candidates: list[tuple[str, str]]) -> tu
         selected = candidates[0]
         console.print(
             "[yellow]Warning:[/yellow] Multiple remote owners matched "
-            f"'{env_name}'. Non-interactive mode selected {selected[1]}."
+            f"'{escape(env_name)}'. Non-interactive mode selected {escape(selected[1])}."
         )
         return selected
 
-    console.print(f"[cyan]Multiple remote environments found for '{env_name}':[/cyan]")
+    console.print(f"[cyan]Multiple remote environments found for '{escape(env_name)}':[/cyan]")
     for idx, (label, slug) in enumerate(candidates, start=1):
-        console.print(f"  [cyan]({idx})[/cyan] {slug} [dim]({label})[/dim]")
+        console.print(f"  [cyan]({idx})[/cyan] {escape(slug)} [dim]({escape(label)})[/dim]")
 
     default_idx = 1
     while True:
@@ -313,7 +314,7 @@ def _resolve_environment_reference(env_reference: str, env_dir_path: str) -> Res
     if _is_slug_reference(base_ref):
         parts = base_ref.split("/", 1)
         if len(parts) != 2 or not parts[0] or not parts[1]:
-            console.print(f"[red]Invalid environment reference: {env_reference}[/red]")
+            console.print(f"[red]Invalid environment reference: {escape(env_reference)}[/red]")
             raise typer.Exit(1)
         owner, env_name = parts
         install_slug = f"{owner}/{env_name}"
@@ -410,7 +411,8 @@ def _resolve_environment_reference(env_reference: str, env_dir_path: str) -> Res
         install_slug = f"{install_slug}@{version}"
     upstream_slug = f"{selected_owner}/{env_name}"
     console.print(
-        f"[dim]Using remote environment {selected_owner}/{env_name} ({selected_label})[/dim]"
+        "[dim]Using remote environment "
+        f"{escape(selected_owner)}/{escape(env_name)} ({escape(selected_label)})[/dim]"
     )
     return ResolvedEnvironment(
         original=env_reference,

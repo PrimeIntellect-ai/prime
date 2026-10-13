@@ -59,3 +59,57 @@ def test_prime_main_import_does_not_load_heavy_runtime() -> None:
         "textual": False,
         "verifiers": False,
     }
+
+
+def test_update_notice_renders_remote_version_literally(monkeypatch) -> None:
+    from prime_cli import main
+    from typer.testing import CliRunner
+
+    class EmptyModelsClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def list_models(self):
+            return {"data": []}
+
+    monkeypatch.setattr(main, "check_for_update", lambda: (True, "[/INFO]"))
+    monkeypatch.setattr("prime_cli.commands.inference.InferenceClient", EmptyModelsClient)
+
+    result = CliRunner().invoke(
+        main.app,
+        ["inference", "models"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "0"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "[/INFO]" in result.output
+
+
+def test_upgrade_diagnostic_renders_subprocess_output_literally(monkeypatch, capsys) -> None:
+    from prime_cli.commands import upgrade as upgrade_command
+
+    monkeypatch.setattr(upgrade_command.shutil, "which", lambda _name: "/usr/bin/tool")
+    monkeypatch.setattr(
+        upgrade_command.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            args=["uv"], returncode=1, stderr="backend failed [/INFO]"
+        ),
+    )
+
+    assert upgrade_command._run_upgrade("uv_tool") is False
+    assert "backend failed [/INFO]" in capsys.readouterr().out
+
+
+def test_upgrade_diagnostic_renders_runner_exception_literally(monkeypatch, capsys) -> None:
+    from prime_cli.commands import upgrade as upgrade_command
+
+    monkeypatch.setattr(upgrade_command.shutil, "which", lambda _name: "/usr/bin/tool")
+
+    def raise_runner(*_args, **_kwargs):
+        raise RuntimeError("runner failed [/INFO]")
+
+    monkeypatch.setattr(upgrade_command.subprocess, "run", raise_runner)
+
+    assert upgrade_command._run_upgrade("uv_tool") is False
+    assert "runner failed [/INFO]" in capsys.readouterr().out

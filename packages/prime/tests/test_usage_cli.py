@@ -111,26 +111,74 @@ def test_train_usage_appears_in_train_help() -> None:
     assert "usage" in result.output
 
 
+@pytest.mark.parametrize("plain", [False, True])
 def test_train_usage_escapes_rich_markup_in_run_name_and_status(
     monkeypatch: pytest.MonkeyPatch,
+    plain: bool,
 ) -> None:
     """API-supplied run_name/status must not be parsed as Rich markup."""
     payload = _run_usage_payload()
-    payload["run_name"] = "evil[bold red]name[/bold red]"
-    payload["status"] = "RUN[blink]"
+    payload["run_name"] = "evil[bold red]name[/bold red] [/INFO]"
+    payload["status"] = "RUN[blink] [/INFO]"
+    payload["run_id"] = "run[/INFO]"
+    payload["base_model"] = "model[/INFO]"
 
     monkeypatch.setattr(
         "prime_cli.core.APIClient.get",
         _make_get_mock({"/billing/runs/rft_abc/usage": payload}, []),
     )
 
-    result = CliRunner().invoke(app, ["train", "usage", "rft_abc"], env={"COLUMNS": "200"})
+    result = CliRunner().invoke(
+        app,
+        [*(["--plain"] if plain else []), "train", "usage", "rft_abc"],
+        env={"COLUMNS": "200"},
+    )
 
     assert result.exit_code == 0, result.output
     plain = strip_ansi(result.output)
     # Bracketed text is rendered literally, not consumed as markup.
     assert "evil[bold red]name[/bold red]" in plain
-    assert "RUN[blink]" in plain
+    assert "[/INFO]" in plain
+    assert "RUN[blink] [/INFO]" in plain
+    assert "run[/INFO]" in plain
+    assert "model[/INFO]" in plain
+
+
+@pytest.mark.parametrize("plain", [False, True])
+@pytest.mark.parametrize("output", ["table", "json"])
+@pytest.mark.parametrize("watch", [False, True])
+def test_train_usage_backend_errors_are_literal(monkeypatch, plain, output, watch):
+    from prime_cli.core import APIError
+
+    def fail(*args, **kwargs):
+        raise APIError("billing failed [/INFO] [bold]data[/bold]")
+
+    monkeypatch.setattr("prime_cli.commands.usage.BillingClient.get_run_usage", fail)
+    args = ["--plain"] if plain else []
+    args += ["train", "usage", "rft_abc", "--output", output]
+    if watch:
+        args.append("--watch")
+    result = CliRunner().invoke(app, args)
+
+    assert result.exit_code == 1
+    diagnostic = result.stderr if output == "json" else result.stdout
+    assert "billing failed [/INFO] [bold]data[/bold]" in strip_ansi(diagnostic)
+    if output == "json":
+        assert result.stdout == ""
+
+
+def test_train_usage_json_preserves_markup_values(monkeypatch):
+    payload = _run_usage_payload()
+    payload.update(run_id="run[/INFO]", run_name="[bold]name[/bold]", status="[/INFO]")
+    monkeypatch.setattr(
+        "prime_cli.core.APIClient.get",
+        _make_get_mock({"/billing/runs/rft_abc/usage": payload}, []),
+    )
+
+    result = CliRunner().invoke(app, ["--plain", "train", "usage", "rft_abc", "-o", "json"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == payload
 
 
 def test_train_usage_propagates_typed_api_errors(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -138,7 +186,7 @@ def test_train_usage_propagates_typed_api_errors(monkeypatch: pytest.MonkeyPatch
     from prime_cli.core import UnauthorizedError
 
     def raise_unauthorized(*args: Any, **kwargs: Any) -> Dict[str, Any]:
-        raise UnauthorizedError("token expired")
+        raise UnauthorizedError("token expired [/INFO]")
 
     monkeypatch.setattr("prime_cli.core.APIClient.get", raise_unauthorized)
 
@@ -146,7 +194,7 @@ def test_train_usage_propagates_typed_api_errors(monkeypatch: pytest.MonkeyPatch
 
     assert result.exit_code == 1
     # The original message should appear, not "Failed to get run usage: …".
-    assert "token expired" in result.output
+    assert "token expired [/INFO]" in result.output
     assert "Failed to get run usage" not in result.output
 
 

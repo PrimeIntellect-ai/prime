@@ -2,6 +2,7 @@ import sys
 from typing import Optional
 
 import typer
+from rich.markup import escape
 
 from . import __version__
 from .commands.availability import app as availability_app
@@ -139,8 +140,8 @@ def callback(
         if update_available and latest:
             console = get_console(stderr=True, force_terminal=sys.stderr.isatty())
             console.print(
-                f"[yellow]A new version of prime is available: {latest} "
-                f"(installed: {__version__})[/yellow]"
+                f"[yellow]A new version of prime is available: {escape(str(latest))} "
+                f"(installed: {escape(__version__)})[/yellow]"
             )
             console.print("[dim]Run: prime upgrade[/dim]")
             console.print("[dim]Set PRIME_DISABLE_VERSION_CHECK=1 to disable this check[/dim]\n")

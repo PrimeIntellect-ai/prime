@@ -23,7 +23,9 @@ from prime_sandboxes import (
     UpdateImagesRequest,
 )
 from pydantic import BaseModel, ValidationError
+from rich.markup import escape
 from rich.table import Table
+from rich.text import Text
 
 from ..utils import confirm_or_skip, get_console
 from .images_update_helpers import format_image_coordinate
@@ -239,13 +241,17 @@ def _print_outcomes(
     for item, result in outcomes:
         if result.success:
             console.print(
-                f"  [green]✓[/green] {verb} {format_image_coordinate(result.before)} "
-                f"→ {format_image_coordinate(result.after)}"
+                f"  [green]✓[/green] {verb} "
+                f"{escape(format_image_coordinate(result.before))} "
+                f"→ {escape(format_image_coordinate(result.after))}"
             )
         else:
             message = result.error.message if result.error else "unknown error"
             code = f" ({result.error.code})" if result.error else ""
-            console.print(f"  [red]✗[/red] {_result_source_label(item)}: {message}{code}")
+            console.print(
+                f"  [red]✗[/red] {escape(_result_source_label(item))}: "
+                f"{escape(message)}{escape(code)}"
+            )
 
 
 def _send_update_batch(
@@ -378,7 +384,7 @@ def update_bulk(
             f"[red]Error: cannot start bulk update ({len(exc.problems)} problem(s)):[/red]"
         )
         for problem in exc.problems:
-            console.print(f"  [red]- {problem}[/red]")
+            console.print(f"  [red]- {escape(problem)}[/red]")
         raise typer.Exit(1)
 
     owner_moves = sum(1 for item in items if item.set.owner is not None)
@@ -435,7 +441,7 @@ def update_bulk(
     if auth_failed:
         console.print("[red]Error: Not authenticated. Please run 'prime login' first.[/red]")
     elif transport_error is not None:
-        console.print(f"[red]Error: {transport_error}[/red]")
+        console.print(f"[red]Error: {escape(transport_error)}[/red]")
 
     retry_item_ids = {id(item) for item in failed_items + unsent_items}
     retry_items = [item for item in items if id(item) in retry_item_ids]
@@ -443,8 +449,8 @@ def update_bulk(
         _write_failures_manifest(failures_out, retry_items)
         console.print(
             f"[yellow]Wrote {len(retry_items)} unapplied update(s) to "
-            f"{failures_out}; re-run with: prime images update-bulk "
-            f"--manifest {failures_out}[/yellow]"
+            f"{escape(str(failures_out))}; re-run with: prime images update-bulk "
+            f"--manifest {escape(str(failures_out))}[/yellow]"
         )
 
     if failed_items and len(failed_items) > FAILURE_TABLE_MAX_ROWS:
@@ -455,8 +461,8 @@ def update_bulk(
             if result.success:
                 continue
             table.add_row(
-                _result_source_label(item),
-                result.error.message if result.error else "unknown error",
+                Text(_result_source_label(item)),
+                Text(result.error.message if result.error else "unknown error"),
             )
             if table.row_count >= FAILURE_TABLE_MAX_ROWS:
                 break

@@ -84,6 +84,24 @@ def test_login_sends_requested_key_limits(backend: FakeBackend) -> None:
     assert "maxConcurrentSandboxes=10" in result.output
 
 
+def test_login_escapes_markup_in_challenge_code(
+    backend: FakeBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original_post = backend.post
+
+    def post_with_markup(url: str, json: Dict[str, Any]) -> FakeResponse:
+        response = original_post(url, json)
+        response._payload["challenge"] = "[/INFO]"
+        return response
+
+    monkeypatch.setattr("prime_cli.commands.login.httpx.post", post_with_markup)
+
+    result = runner.invoke(app, ["login", "--headless"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    assert "[/INFO]" in result.output
+
+
 def test_login_without_limit_flags_sends_no_limits(backend: FakeBackend) -> None:
     result = runner.invoke(app, ["login", "--headless"], env=TEST_ENV)
 

@@ -145,6 +145,33 @@ class TestEnvSecretList:
         assert "environment" in result.output
         assert "global-linked" in result.output
 
+    def test_list_secret_name_with_markup_is_literal(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("PRIME_API_KEY", "test-key")
+
+        def mock_get(
+            self: Any, endpoint: str, params: Optional[Dict[str, Any]] = None
+        ) -> Dict[str, Any]:
+            if "/@latest" in endpoint:
+                return {"data": {"id": "env-id"}}
+            return {
+                "data": [
+                    {
+                        "id": "secret-[/INFO]",
+                        "name": "[/INFO]",
+                        "source": "environment",
+                        "description": "literal [/INFO]",
+                        "createdAt": "2026-01-15T10:00:00Z",
+                    }
+                ]
+            }
+
+        monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+
+        result = runner.invoke(app, ["env", "secret", "list", "testuser/test-env"])
+
+        assert result.exit_code == 0, result.output
+        assert "[/INFO]" in result.output
+
     def test_list_empty_secrets(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test listing when no env secrets exist."""
         monkeypatch.setenv("PRIME_API_KEY", "test-key")

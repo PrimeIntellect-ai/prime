@@ -10,10 +10,52 @@ from prime_cli.commands.evals import (
     _validate_eval_path,
 )
 from prime_cli.main import app
+from prime_cli.utils.eval_push import push_eval_results_to_hub
 from typer.testing import CliRunner
 from typing_extensions import cast
 
 runner = CliRunner()
+
+
+def test_push_eval_escapes_markup_in_upstream_and_viewer_url(monkeypatch, tmp_path, capsys):
+    monkeypatch.chdir(tmp_path)
+    output_dir = tmp_path / "outputs" / "evals" / "gsm8k--gpt-4" / "run"
+    output_dir.mkdir(parents=True)
+    (output_dir / "metadata.json").write_text("{}")
+    (output_dir / "results.jsonl").write_text("")
+
+    class DummyAPIClient:
+        def get(self, endpoint):
+            assert endpoint == "/environmentshub/owner/[/INFO]/@latest"
+            return {"data": {"id": "env-123"}}
+
+    class DummyEvalsClient:
+        def __init__(self, _api_client):
+            pass
+
+        def create_evaluation(self, **_kwargs):
+            return {"evaluation_id": "eval-123"}
+
+        def finalize_evaluation(self, evaluation_id, metrics=None):
+            assert evaluation_id == "eval-123"
+            return {}
+
+    monkeypatch.setattr("prime_cli.utils.eval_push.APIClient", DummyAPIClient)
+    monkeypatch.setattr("prime_cli.utils.eval_push.EvalsClient", DummyEvalsClient)
+    monkeypatch.setattr(
+        "prime_cli.utils.eval_push.get_eval_viewer_url",
+        lambda _eval_id: "https://example.test/[/INFO]",
+    )
+
+    push_eval_results_to_hub(
+        env_name="gsm8k",
+        model="gpt-4",
+        job_id="job-1",
+        upstream_slug="owner/[/INFO]",
+    )
+
+    output = capsys.readouterr().out
+    assert "[/INFO]" in output
 
 
 class TestHasEvalFiles:

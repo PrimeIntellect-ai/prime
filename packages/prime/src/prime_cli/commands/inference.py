@@ -4,6 +4,7 @@ import sys
 from typing import Any, Dict, Iterable, List, Optional, cast
 
 import typer
+from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
 
@@ -204,8 +205,8 @@ def list_models(
                 # Raw serving values are untrusted upstream data; Text cells
                 # render them verbatim, so Rich markup cannot restyle the table.
                 row.append(Text(_format_serving(m.get("serving"))))
-            row.append(format_price_per_mtok(pricing.get("input_usd_per_mtok")))
-            row.append(format_price_per_mtok(pricing.get("output_usd_per_mtok")))
+            row.append(Text(format_price_per_mtok(pricing.get("input_usd_per_mtok"))))
+            row.append(Text(format_price_per_mtok(pricing.get("output_usd_per_mtok"))))
             if show_cache:
                 cache_read = pricing.get("cache_read_usd_per_mtok")
                 cache_write = pricing.get("cache_write_usd_per_mtok")
@@ -215,7 +216,7 @@ def list_models(
                     cache_cell = (
                         f"{_format_cache_price(cache_read)} / {_format_cache_price(cache_write)}"
                     )
-                    row.append(cache_cell)
+                    row.append(Text(cache_cell))
             if show_specs:
                 row.append(_format_token_count(specs.get("context_window")))
                 row.append(_format_token_count(specs.get("max_output_tokens")))
@@ -227,10 +228,10 @@ def list_models(
             console.print("[dim]reasoning ✓ = supports reasoning effort[/dim]")
 
     except InferenceAPIError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except Exception as e:
-        console.print(f"[red]Unexpected error:[/red] {e}")
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
 
 
@@ -286,7 +287,9 @@ def chat(
       prime inference chat <model-id> "hi" --stream
     """
     if output not in ("text", "json"):
-        console.print(f"[red]Error:[/red] invalid output format '{output}'. Supported: text, json")
+        console.print(
+            f"[red]Error:[/red] invalid output format '{escape(output)}'. Supported: text, json"
+        )
         raise typer.Exit(1)
 
     if stream and output == "json":
@@ -320,7 +323,7 @@ def chat(
             _print_stream(stream_result)  # type: ignore[arg-type]
             return
 
-        with console.status(f"[bold blue]Waiting for {model}...", spinner="dots"):
+        with console.status(f"[bold blue]Waiting for {escape(model)}...", spinner="dots"):
             raw = client.chat_completion(payload)
         if not isinstance(raw, dict):
             console.print("[red]Error:[/red] unexpected non-JSON response from inference.")
@@ -344,10 +347,10 @@ def chat(
     except typer.Exit:
         raise
     except InferenceAPIError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except Exception as e:
-        console.print(f"[red]Unexpected error:[/red] {e}")
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
 
 
@@ -467,7 +470,9 @@ def evaluate(
         -q "tone:choice:Classify:professional=Formal,casual=Rude" < transcript.txt
     """
     if output not in ("text", "json"):
-        console.print(f"[red]Error:[/red] invalid output format '{output}'. Supported: text, json")
+        console.print(
+            f"[red]Error:[/red] invalid output format '{escape(output)}'. Supported: text, json"
+        )
         raise typer.Exit(1)
 
     if not question:
@@ -478,7 +483,7 @@ def evaluate(
         try:
             state = open(state_file).read()
         except OSError as e:
-            console.print(f"[red]Error:[/red] cannot read --state-file: {e}")
+            console.print(f"[red]Error:[/red] cannot read --state-file: {escape(str(e))}")
             raise typer.Exit(1)
     if state is None:
         if sys.stdin.isatty():
@@ -502,7 +507,7 @@ def evaluate(
                 )
             questions[qid] = q
     except ValueError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
 
     payload: Dict[str, Any] = {
@@ -513,7 +518,7 @@ def evaluate(
 
     try:
         client = InferenceClient()
-        with console.status(f"[bold blue]Evaluating with {model}...", spinner="dots"):
+        with console.status(f"[bold blue]Evaluating with {escape(model)}...", spinner="dots"):
             result = client.evaluation(payload)
 
         if output == "json":
@@ -525,7 +530,7 @@ def evaluate(
             console.print("[yellow]No answers returned.[/yellow]")
             return
 
-        table = Table(title=f"Evaluation — {model}")
+        table = Table(title=Text(f"Evaluation — {model}"))
         table.add_column("Question")
         table.add_column("Type")
         table.add_column("Answer")
@@ -546,18 +551,18 @@ def evaluate(
         usage = result.get("usage") or {}
         warnings = result.get("warnings") or []
         if warnings:
-            console.print(f"[yellow]Warnings:[/yellow] {warnings}")
+            console.print(f"[yellow]Warnings:[/yellow] {escape(str(warnings))}")
         if usage:
             console.print(
-                f"[dim]tokens: {usage.get('inputTokens', '?')} in / "
-                f"{usage.get('outputTokens', '?')} out[/dim]"
+                f"[dim]tokens: {escape(str(usage.get('inputTokens', '?')))} in / "
+                f"{escape(str(usage.get('outputTokens', '?')))} out[/dim]"
             )
 
     except typer.Exit:
         raise
     except InferenceAPIError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except Exception as e:
-        console.print(f"[red]Unexpected error:[/red] {e}")
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         raise typer.Exit(1)

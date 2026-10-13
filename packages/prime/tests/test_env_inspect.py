@@ -30,7 +30,7 @@ def mock_env_inspect_api(monkeypatch: pytest.MonkeyPatch) -> None:
                             "modified_at": None,
                             "content_hash": "hash-readme",
                         },
-                        "content": "# literal [bold]README[/bold]",
+                        "content": "# literal [bold]README[/bold] [/INFO]",
                         "encoding": "utf-8",
                         "truncated": False,
                         "total_bytes": 38,
@@ -79,6 +79,14 @@ def mock_env_inspect_api(monkeypatch: pytest.MonkeyPatch) -> None:
                             "size": 38,
                             "modified_at": None,
                             "content_hash": "hash-readme",
+                        },
+                        {
+                            "name": "[/INFO].md",
+                            "path": "docs/[/INFO].md",
+                            "is_directory": False,
+                            "size": 21,
+                            "modified_at": None,
+                            "content_hash": "hash-markup",
                         },
                     ],
                     "content": None,
@@ -129,6 +137,7 @@ class TestEnvInspect:
         assert "(path:" in result.output
         assert "README.md" in result.output
         assert "src" in result.output
+        assert "docs/[/INFO].md" in result.output
         assert (
             "Inspect a file with: prime env inspect testuser/test-env@latest README.md"
             in result.output
@@ -142,7 +151,7 @@ class TestEnvInspect:
 
         assert result.exit_code == 0, result.output
         assert "README.md" in result.output
-        assert "# literal [bold]README[/bold]" in result.output
+        assert "# literal [bold]README[/bold] [/INFO]" in result.output
 
     def test_plain_file_output_preserves_literal_content(self, mock_env_inspect_api: None) -> None:
         result = runner.invoke(
@@ -151,7 +160,28 @@ class TestEnvInspect:
         )
 
         assert result.exit_code == 0, result.output
-        assert "# literal [bold]README[/bold]" in result.output
+        assert "# literal [bold]README[/bold] [/INFO]" in result.output
+
+    def test_directory_entry_markup_is_literal(self, mock_env_inspect_api: None) -> None:
+        result = runner.invoke(app, ["env", "inspect", "testuser/test-env"])
+
+        assert result.exit_code == 0, result.output
+        assert "docs/[/INFO].md" in result.output
+
+    def test_api_error_markup_is_literal(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("PRIME_API_KEY", "test-key")
+
+        def mock_get(self: Any, endpoint: str, params: Optional[Dict[str, Any]] = None):
+            from prime_cli.api.client import APIError
+
+            raise APIError("backend rejected request [/INFO]")
+
+        monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+
+        result = runner.invoke(app, ["env", "inspect", "testuser/test-env"])
+
+        assert result.exit_code == 1
+        assert "backend rejected request [/INFO]" in result.output
 
     def test_json_output(self, mock_env_inspect_api: None) -> None:
         result = runner.invoke(

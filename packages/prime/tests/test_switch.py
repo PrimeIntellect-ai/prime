@@ -101,6 +101,26 @@ class TestSwitchCommand:
         assert result.exit_code == 0, result.output
         assert "Switched to team 'Prime Team'." in result.output
 
+    def test_switch_escapes_markup_in_team_name(
+        self, temp_home: None, mock_teams_api: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "prime_cli.commands.switch.fetch_teams",
+            lambda _client: [
+                {
+                    "teamId": "team-1",
+                    "name": "Team [/INFO]",
+                    "slug": "markup-team",
+                    "role": "member",
+                }
+            ],
+        )
+
+        result = runner.invoke(app, ["switch", "markup-team"], env=TEST_ENV)
+
+        assert result.exit_code == 0, result.output
+        assert "Switched to team 'Team [/INFO]'." in result.output
+
     def test_switch_to_team_id_fallback(self, temp_home: None, mock_teams_api: None) -> None:
         result = runner.invoke(app, ["switch", "cmf0ohr9s0026ilerf3w68s6n"], env=TEST_ENV)
 

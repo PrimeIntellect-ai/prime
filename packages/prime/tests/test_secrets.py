@@ -146,6 +146,26 @@ class TestSecretsList:
         assert result.exit_code == 0
         assert "No personal secrets found" in result.output
 
+    def test_list_escapes_markup_in_secret_fields(
+        self, mock_secrets_api: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "prime_cli.commands.secrets._fetch_secrets",
+            lambda _client, _config: [
+                {
+                    "id": "secret-[/INFO]",
+                    "name": "SECRET_[/INFO]",
+                    "description": "Description [/INFO]",
+                    "createdAt": "2026-01-15T10:00:00Z",
+                }
+            ],
+        )
+
+        result = runner.invoke(app, ["secret", "list"], env={"COLUMNS": "200"})
+
+        assert result.exit_code == 0, result.output
+        assert "SECRET_[/INFO]" in result.output
+
 
 class TestSecretsCreate:
     """Tests for the secrets create command."""

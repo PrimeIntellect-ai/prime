@@ -3,6 +3,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 import typer
 from rich.markup import escape
+from rich.text import Text
 
 from .plain import get_console
 
@@ -15,9 +16,9 @@ def validate_env_var_name(name: str, item_type: str = "secret") -> bool:
     if _ENV_VAR_NAME_PATTERN.match(name):
         return True
 
-    console.print(f"[red]Invalid {item_type} name: '{name}'[/red]")
+    console.print(f"[red]Invalid {escape(item_type)} name: '{escape(name)}'[/red]")
     console.print(
-        f"[dim]{item_type.capitalize()} names must be uppercase letters, digits, "
+        f"[dim]{escape(item_type.capitalize())} names must be uppercase letters, digits, "
         "and underscores, starting with a letter (e.g., MY_SECRET, API_KEY_2).[/dim]"
     )
     return False
@@ -50,7 +51,7 @@ def require_selection(
     page_size: Optional[int] = None,
 ) -> Dict[str, Any]:
     if not items:
-        console.print(f"[yellow]{empty_message}[/yellow]")
+        console.print(f"[yellow]{escape(empty_message)}[/yellow]")
         raise typer.Exit()
 
     selected = select_item_interactive(
@@ -92,9 +93,9 @@ def select_item_interactive(
     if page_size is not None and len(items) > page_size:
         return _select_item_paged(items, action, item_type, formatter, page_size)
 
-    console.print(f"\n[bold]Select a {item_type} to {action}:[/bold]\n")
+    console.print(f"\n[bold]Select a {escape(item_type)} to {escape(action)}:[/bold]\n")
     for i, item in enumerate(items, 1):
-        console.print(f"  {i}. {formatter(item)}")
+        console.print(f"  {i}.", Text(formatter(item)))
     console.print()
 
     while True:
@@ -133,10 +134,11 @@ def _select_item_paged(
         end = min(start + page_size, total)
 
         console.print(
-            f"\n[bold]Select a {item_type} to {action} (page {page + 1}/{total_pages}):[/bold]\n"
+            f"\n[bold]Select a {escape(item_type)} to {escape(action)} "
+            f"(page {page + 1}/{total_pages}):[/bold]\n"
         )
         for i in range(start, end):
-            console.print(f"  {i + 1}. {formatter(items[i])}")
+            console.print(f"  {i + 1}.", Text(formatter(items[i])))
 
         nav = []
         if page + 1 < total_pages:

@@ -99,6 +99,41 @@ def test_prime_fork_team_slug_overrides_configured_team_id(monkeypatch):
     assert json.loads(result.output)["slug"] == "alice/gsm8k"
 
 
+def test_prime_fork_renders_api_values_and_source_as_literal_text(monkeypatch):
+    class DummyAPIClient:
+        config = SimpleNamespace(team_id=None)
+
+        def post(self, endpoint, json=None):
+            return {
+                "data": {
+                    "slug": "alice/[/INFO]",
+                    "environment_id": "env[/INFO]",
+                    "version_id": "version[/INFO]",
+                }
+            }
+
+    monkeypatch.setattr("prime_cli.commands.fork.APIClient", DummyAPIClient)
+
+    result = runner.invoke(app, ["fork", "openai/[INFO]"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    assert "openai/[INFO]" in result.output
+    assert "alice/[/INFO]" in result.output
+    assert "env[/INFO]" in result.output
+    assert "version[/INFO]" in result.output
+
+
+def test_prime_fork_invalid_output_format_renders_argument_literally():
+    result = runner.invoke(
+        app,
+        ["fork", "openai/gsm8k", "--output", "[/INFO]"],
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 1
+    assert "[/INFO]" in result.output
+
+
 def test_prime_fork_rejects_versioned_sources():
     result = runner.invoke(
         app,

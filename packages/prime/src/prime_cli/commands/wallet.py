@@ -7,6 +7,7 @@ the charge in the Billing table".
 
 import typer
 from rich.markup import escape as rich_escape
+from rich.text import Text
 
 from prime_cli.api.wallet import BillingEntry, Wallet, WalletClient
 from prime_cli.core import APIClient, APIError, Config
@@ -36,7 +37,7 @@ def _format_when(entry: BillingEntry) -> str:
 
 def _format_resource(entry: BillingEntry) -> str:
     if entry.resource_id:
-        return f"{entry.resource_type} ({rich_escape(entry.resource_id)})"
+        return f"{entry.resource_type} ({entry.resource_id})"
     return entry.resource_type
 
 
@@ -47,10 +48,10 @@ def _print_header(wallet: Wallet, team_label: str) -> None:
     the title + first column visibly jump as the eye moves down. Plain
     text keeps everything anchored to the left margin.
     """
-    console.print(f"[bold]Wallet[/bold]  [dim]({team_label})[/dim]")
+    console.print(f"[bold]Wallet[/bold]  [dim]({rich_escape(team_label)})[/dim]")
     console.print(
         f"  Balance:  [bold green]{format_usd(wallet.balance_usd)}[/bold green] "
-        f"[dim]{wallet.currency}[/dim]"
+        f"[dim]{rich_escape(wallet.currency)}[/dim]"
     )
     console.print(f"  Billings: [bold]{wallet.total_billings}[/bold] total")
     console.print(f"  [dim]wallet id: {rich_escape(wallet.wallet_id)}[/dim]")
@@ -70,9 +71,9 @@ def _build_billings_table(wallet: Wallet) -> object:
     )
     for entry in wallet.recent_billings:
         table.add_row(
-            _format_when(entry),
-            _format_resource(entry),
-            format_usd(entry.amount_usd),
+            Text(_format_when(entry)),
+            Text(_format_resource(entry)),
+            Text(format_usd(entry.amount_usd)),
         )
     return table
 
@@ -112,7 +113,7 @@ def wallet_command(
     try:
         wallet = client.get(limit=limit, team_id=config.team_id)
     except APIError as exc:
-        err_console.print(f"[red]Error: {exc}[/red]")
+        err_console.print(f"[red]Error: {rich_escape(str(exc))}[/red]")
         raise typer.Exit(1) from exc
 
     if output == "json":
@@ -126,7 +127,7 @@ def wallet_command(
         # team_name is for a different team — fall back to the id so the
         # header doesn't lie about which wallet we're showing.
         display_name = None if config.team_id_from_env else config.team_name
-        team_label = f"team {rich_escape(display_name or config.team_id)}"
+        team_label = f"team {display_name or config.team_id}"
     else:
         team_label = "personal"
     _print_header(wallet, team_label)

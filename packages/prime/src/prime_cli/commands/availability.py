@@ -1,6 +1,7 @@
 from typing import Any, Dict, List, Optional
 
 import typer
+from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
 
@@ -106,15 +107,15 @@ def gpu_types(
         table.add_column("GPU Type", style="cyan")
 
         for gpu_type in gpu_types:
-            table.add_row(gpu_type)
+            table.add_row(Text(str(gpu_type)))
 
         console.print(table)
 
     except APIError as e:
-        console.print(f"[red]Error:[/red] {str(e)}")
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except Exception as e:
-        console.print(f"[red]Unexpected error:[/red] {str(e)}")
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         import traceback
 
         traceback.print_exc()
@@ -277,18 +278,18 @@ def list(
                 stock_text = Text(display_data["stock_status"], style=stock_status_color)
 
                 table.add_row(
-                    display_data["id"],
-                    display_data["gpu_type"],
-                    str(display_data["gpu_count"]),
-                    display_data["socket"],
-                    display_data["provider"],
-                    display_data["location"],
+                    Text(str(display_data["id"])),
+                    Text(str(display_data["gpu_type"])),
+                    Text(str(display_data["gpu_count"])),
+                    Text(str(display_data["socket"])),
+                    Text(str(display_data["provider"])),
+                    Text(str(display_data["location"])),
                     stock_text,
-                    display_data["price_per_hour"],
-                    display_data["security"],
-                    display_data["vcpus"],
-                    display_data["memory_gb"],
-                    display_data["disk_gb"],
+                    Text(str(display_data["price_per_hour"])),
+                    Text(str(display_data["security"])),
+                    Text(str(display_data["vcpus"])),
+                    Text(str(display_data["memory_gb"])),
+                    Text(str(display_data["disk_gb"])),
                 )
 
             console.print(table)
@@ -306,10 +307,10 @@ def list(
             )
 
     except APIError as e:
-        console.print(f"[red]Error:[/red] {str(e)}")
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except Exception as e:
-        console.print(f"[red]Unexpected error:[/red] {str(e)}")
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         import traceback
 
         traceback.print_exc()
@@ -387,12 +388,12 @@ def disks(
 
             for disk in formatted_disks:
                 table.add_row(
-                    disk["short_id"],
-                    disk["provider"],
-                    disk["location"],
-                    disk["stock_status"],
-                    disk["price"],
-                    disk["max_size"],
+                    Text(str(disk["short_id"])),
+                    Text(str(disk["provider"])),
+                    Text(str(disk["location"])),
+                    Text(str(disk["stock_status"])),
+                    Text(str(disk["price"])),
+                    Text(str(disk["max_size"])),
                     Text("Yes", style="green")
                     if disk["is_multinode"] == "Yes"
                     else Text("No", style="red"),
@@ -412,5 +413,5 @@ def disks(
             )
 
     except APIError as e:
-        console.print(f"[red]Error:[/red] {str(e)}")
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)

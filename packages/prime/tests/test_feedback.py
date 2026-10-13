@@ -1,6 +1,7 @@
 from typing import Any, Dict, Optional
 
 import pytest
+from prime_cli.client import APIError
 from prime_cli.main import app
 from typer.testing import CliRunner
 
@@ -77,3 +78,20 @@ def test_feedback_rejects_empty_message(
     # Two '> ' prompts prove the first empty attempt was re-prompted.
     assert result.output.count("> ") >= 2
     assert capture_feedback_post["json"]["message"] == "Actually here is my feedback"
+
+
+def test_feedback_error_escapes_markup(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail_post(self: Any, endpoint: str, json: Optional[Dict[str, Any]] = None) -> None:
+        raise APIError("[/INFO]")
+
+    monkeypatch.setattr("prime_cli.client.APIClient.post", fail_post)
+
+    result = runner.invoke(
+        app,
+        ["feedback"],
+        input="3\n\nFeedback message\n",
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 1, result.output
+    assert "[/INFO]" in result.output

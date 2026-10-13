@@ -252,6 +252,20 @@ def test_failed_build_writes_failures_manifest(tmp_path, fake_api, monkeypatch):
     assert lines[0]["context"] == str(tmp_path / "b")
 
 
+def test_failed_build_renders_api_error_brackets_literally(tmp_path, fake_api, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _make_context(tmp_path, "a")
+    manifest = tmp_path / "builds.jsonl"
+    _write_manifest(manifest, [{"image": "app-a:v1", "context": "a"}])
+    fake_api.poll_scripts["build-1"] = ["FAILED"]
+    fake_api.poll_error_message = "builder [/INFO] failed"
+
+    result = runner.invoke(app, ["images", "push-bulk", "--manifest", str(manifest)], env=TEST_ENV)
+
+    assert result.exit_code == 1, result.output
+    assert "builder [/INFO] failed" in result.output
+
+
 def test_rate_limited_submit_retries(tmp_path, fake_api, monkeypatch):
     monkeypatch.chdir(tmp_path)
     _make_context(tmp_path, "a")

@@ -2,12 +2,18 @@ import json
 from pathlib import Path
 
 import pytest
+import typer
 from prime_cli.commands.config import validate_team_id
 from prime_cli.core import Config
 from prime_cli.main import app
+from prime_cli.utils.config import load_toml
 from typer.testing import CliRunner
 
 runner = CliRunner()
+
+TEST_ENV = {
+    "PRIME_DISABLE_VERSION_CHECK": "1",
+}
 
 
 class TestTeamIdValidation:
@@ -66,6 +72,25 @@ class TestTeamIdValidation:
         """Test that team IDs with underscores are invalid."""
         invalid_id = "cmf0ohr9s0026ilerf3w68s_n"
         assert validate_team_id(invalid_id) is False
+
+
+def test_load_toml_escapes_markup_in_missing_path(tmp_path: Path, capsys) -> None:
+    path = tmp_path / "[/INFO].toml"
+
+    with pytest.raises(typer.Exit):
+        load_toml(str(path))
+
+    assert "[/INFO].toml" in capsys.readouterr().out
+
+
+def test_set_base_url_escapes_markup(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
+
+    result = runner.invoke(app, ["config", "set-base-url", "[/INFO]"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    assert "Base URL set to: [/INFO]" in result.output
 
 
 class TestTracesOptOut:

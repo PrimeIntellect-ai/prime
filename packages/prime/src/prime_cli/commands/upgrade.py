@@ -3,6 +3,7 @@ import subprocess
 import sys
 
 import typer
+from rich.markup import escape
 
 from prime_cli import __version__
 from prime_cli.utils import PlainTyper, get_console
@@ -59,11 +60,11 @@ def _run_upgrade(method: str) -> bool:
             if result.returncode == 0:
                 return True
             else:
-                console.print(f"[yellow]Command failed: {result.stderr.strip()}[/yellow]")
+                console.print(f"[yellow]Command failed: {escape(result.stderr.strip())}[/yellow]")
         except subprocess.TimeoutExpired:
             console.print("[red]Upgrade command timed out[/red]")
         except Exception as e:
-            console.print(f"[red]Error running upgrade: {e}[/red]")
+            console.print(f"[red]Error running upgrade: {escape(str(e))}[/red]")
 
     return False
 
@@ -118,8 +119,8 @@ def upgrade(
         console.print("[red]Could not fetch latest version from PyPI[/red]")
         raise typer.Exit(1)
 
-    console.print(f"[cyan]Installed version:[/cyan] {__version__}")
-    console.print(f"[cyan]Latest version:[/cyan]    {latest_version}")
+    console.print(f"[cyan]Installed version:[/cyan] {escape(__version__)}")
+    console.print(f"[cyan]Latest version:[/cyan]    {escape(latest_version)}")
 
     from packaging import version
 
@@ -131,7 +132,7 @@ def upgrade(
         raise typer.Exit(0)
 
     if installed < latest:
-        console.print(f"\n[yellow]A newer version is available: {latest_version}[/yellow]")
+        console.print(f"\n[yellow]A newer version is available: {escape(latest_version)}[/yellow]")
 
     if check:
         if installed < latest:
@@ -149,14 +150,16 @@ def upgrade(
         # of trusting the exit code.
         new_version = _installed_version_on_disk()
         if new_version is not None and new_version != __version__:
-            console.print(f"\n[green]✓ Successfully upgraded to {new_version}![/green]")
+            console.print(f"\n[green]✓ Successfully upgraded to {escape(new_version)}![/green]")
             raise typer.Exit(0)
         if new_version is not None and version.parse(new_version) >= latest:
-            console.print(f"\n[green]✓ Already on the latest version: {new_version}[/green]")
+            console.print(
+                f"\n[green]✓ Already on the latest version: {escape(new_version)}[/green]"
+            )
             raise typer.Exit(0)
         console.print(
-            f"\n[red]The upgrade command reported success, but prime is still on {__version__} "
-            f"(expected {latest_version}).[/red]"
+            f"\n[red]The upgrade command reported success, but prime is still on "
+            f"{escape(__version__)} (expected {escape(latest_version)}).[/red]"
         )
         if method == "uv_tool":
             console.print(

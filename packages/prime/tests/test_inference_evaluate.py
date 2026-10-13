@@ -81,6 +81,38 @@ def test_evaluate_prints_markup_in_ids_without_crashing(monkeypatch) -> None:
     assert "[/]q" in result.output
 
 
+def test_evaluate_renders_model_warnings_and_usage_as_literal_text(monkeypatch) -> None:
+    class MarkupClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def evaluation(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+            return {
+                "answers": {"[/INFO]": {"type": "boolean", "probability": 1.0}},
+                "warnings": ["warning [/INFO]"],
+                "usage": {"inputTokens": "in[/INFO]", "outputTokens": "out[/INFO]"},
+            }
+
+    monkeypatch.setattr("prime_cli.commands.inference.InferenceClient", MarkupClient)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "inference",
+            "evaluate",
+            "model[/INFO]",
+            "state",
+            "-q",
+            "q:boolean:Fine?",
+        ],
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 0, result.output
+    for value in ("model[/INFO]", "[/INFO]", "warning [/INFO]", "in[/INFO]", "out[/INFO]"):
+        assert value in result.output
+
+
 def test_evaluate_rejects_duplicate_question_ids(monkeypatch) -> None:
     monkeypatch.setattr("prime_cli.commands.inference.InferenceClient", DummyClient)
 

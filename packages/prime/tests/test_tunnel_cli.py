@@ -227,6 +227,79 @@ def test_tunnel_list_passes_label_filters(monkeypatch: pytest.MonkeyPatch) -> No
     assert captured["sort_by"] == "name"
 
 
+@pytest.mark.parametrize("plain", [False, True])
+def test_tunnel_list_renders_api_values_with_brackets_literally(
+    monkeypatch: pytest.MonkeyPatch,
+    plain: bool,
+) -> None:
+    monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
+    monkeypatch.setenv("COLUMNS", "200")
+
+    class FakeTunnelClient:
+        async def list_tunnels_page(self, **kwargs: Any) -> Any:
+            return SimpleNamespace(
+                tunnels=[
+                    SimpleNamespace(
+                        tunnel_id="t[/INFO]",
+                        name="name[/INFO]",
+                        url="https://example.test/[/INFO]",
+                        hostname="host[/INFO]",
+                        status="status[/INFO]",
+                        labels=["label[/INFO]"],
+                        local_port=8765,
+                        user_id="user[/INFO]",
+                        team_id=None,
+                        created_at=datetime.now(timezone.utc),
+                        expires_at=datetime.now(timezone.utc),
+                    )
+                ],
+                total=1,
+                page=1,
+                per_page=50,
+                has_next=False,
+            )
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr("prime_tunnel.core.client.TunnelClient", FakeTunnelClient)
+    result = runner.invoke(app, ["tunnel", "list", *(["--plain"] if plain else [])])
+
+    assert result.exit_code == 0, result.output
+    for value in ("t[/INFO]", "name[/INFO]", "https://example.test/[/INFO]", "label[/INFO]"):
+        assert value in result.output
+    assert "status[/INFO]" in result.output
+
+
+@pytest.mark.parametrize("plain", [False, True])
+def test_tunnel_process_output_renders_brackets_literally(monkeypatch, plain):
+    monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
+    stopped = []
+
+    class FakeTunnel:
+        tunnel_id = "t[/INFO]"
+        is_running = False
+        recent_output = ["[/INFO] [bold]process output[/bold]"]
+
+        def __init__(self, **kwargs):
+            pass
+
+        async def start(self):
+            return "https://example.test/[/INFO]"
+
+        async def stop(self):
+            stopped.append(True)
+
+    monkeypatch.setattr("prime_tunnel.Tunnel", FakeTunnel)
+    result = runner.invoke(app, ["tunnel", "start", *(["--plain"] if plain else [])])
+
+    assert result.exit_code == 1, result.output
+    assert "Tunnel process exited unexpectedly" in result.output
+    assert "[/INFO] [bold]process output[/bold]" in result.output
+    assert "t[/INFO]" in result.output
+    assert stopped == [True]
+
+
 def test_tunnel_list_uses_temporary_context_config(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

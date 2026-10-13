@@ -103,15 +103,16 @@ def create(
     try:
         volume = client.create_volume(name, size, team_id=team_id, cluster=cluster, warm=warm)
     except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     if output == "json":
         output_data_as_json(volume.model_dump(by_alias=True), console)
         return
     console.print(
-        f"[green]Volume {volume.name} ({volume.size}) is {status_label(volume.status)}.[/green]"
+        f"[green]Volume {escape(volume.name)} ({escape(str(volume.size))}) is "
+        f"{escape(status_label(volume.status))}.[/green]"
     )
-    console.print(f"Use it with: prime train config.toml --volume {volume.name}")
+    console.print(f"Use it with: prime train config.toml --volume {escape(volume.name)}")
     if warm:
         console.print("Starting a session in the background so the volume is ready for put/ssh.")
 
@@ -126,7 +127,7 @@ def list_volumes(
     try:
         volumes = client.list_volumes(team_id=team_id)
     except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     if output == "json":
         output_data_as_json([v.model_dump(by_alias=True) for v in volumes], console)
@@ -134,10 +135,10 @@ def list_volumes(
     table = Table("Name", "Size", "Status", "Created", "Created by")
     for v in volumes:
         table.add_row(
-            v.name,
-            v.size or "-",
-            status_label(v.status),
-            v.created_at or "-",
+            Text(v.name),
+            Text(str(v.size or "-")),
+            Text(status_label(v.status)),
+            Text(str(v.created_at or "-")),
             # Older backends send only the user id.
             Text(v.created_by_name or v.created_by_email or v.created_by or ""),
         )
@@ -155,9 +156,9 @@ def expand(
     try:
         volume = client.expand_volume(name, size, team_id=team_id)
     except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
-    console.print(f"[green]Volume {volume.name} is now {volume.size}.[/green]")
+    console.print(f"[green]Volume {escape(volume.name)} is now {escape(str(volume.size))}.[/green]")
 
 
 @app.command()
@@ -172,9 +173,9 @@ def delete(
     try:
         client.delete_volume(name, team_id=team_id)
     except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
-    console.print(f"[green]Deleting volume {name}.[/green]")
+    console.print(f"[green]Deleting volume {escape(name)}.[/green]")
 
 
 # Explicitly parse the backend endpoint instead of passing an untrusted string
@@ -346,7 +347,7 @@ def _wait_for_connection(client, name: str, session, team_id):
             if session.status in _DEAD_SESSION_STATES or phase in _DEAD_SESSION_PHASES:
                 state = session.status if session.status in _DEAD_SESSION_STATES else str(phase)
                 detail = f": {session.error_message}" if session.error_message else "."
-                console.print(f"[red]Session is {state.upper()}{escape(detail)}[/red]")
+                console.print(f"[red]Session is {escape(state.upper())}{escape(detail)}[/red]")
                 raise typer.Exit(1)
             time.sleep(5)
             try:
@@ -374,11 +375,11 @@ def _stop_quietly(client, name: str, session_id: str, team_id) -> None:
     """Best-effort stop of a session this command created but never used."""
     try:
         client.stop_volume_session(name, session_id, team_id=team_id)
-        console.print(f"Stopped session {session_id}.")
+        console.print(f"Stopped session {session_id}.", markup=False)
     except Exception:
         console.print(
-            f"[yellow]Could not stop session {session_id}; run: "
-            f"prime volumes stop {escape(name)} {session_id}[/yellow]"
+            f"[yellow]Could not stop session {escape(str(session_id))}; run: "
+            f"prime volumes stop {escape(name)} {escape(str(session_id))}[/yellow]"
         )
 
 
@@ -425,7 +426,8 @@ def _open_session(
     reused = existing is not None or (allow_writable and not session.read_only)
     label = "Reusing session" if reused else "Session"
     console.print(
-        f"{label} {session.id} ({mode}). Stop with: prime volumes stop {escape(name)} {session.id}"
+        f"{label} {escape(str(session.id))} ({mode}). Stop with: "
+        f"prime volumes stop {escape(name)} {escape(str(session.id))}"
     )
     connected = False
     try:
@@ -494,13 +496,13 @@ def ssh(
     try:
         code = subprocess.run(base, check=False).returncode
     except OSError as exc:
-        console.print(f"[red]Could not start SSH:[/red] {exc}")
+        console.print(f"[red]Could not start SSH:[/red] {escape(str(exc))}")
         raise typer.Exit(1) from exc
     if not session.read_only:
         console.print("Changes sync to the volume every minute.")
     console.print(
         "The session stops after 30 minutes idle. Stop it now with: "
-        f"prime volumes stop {escape(name)} {session.id}"
+        f"prime volumes stop {escape(name)} {escape(str(session.id))}"
     )
     if code:
         raise typer.Exit(code)
@@ -577,7 +579,7 @@ def _transfer_failed(alias: str, code: int, via_gateway: bool) -> None:
         reach = "that you can reach the gateway (outbound TCP 443)"
     else:
         reach = f"that you are on the tailnet (host {alias} must resolve)"
-    console.print(f"[red]Transfer failed.[/red] Check {reach} and the path exists.")
+    console.print(f"[red]Transfer failed.[/red] Check {escape(reach)} and the path exists.")
     raise typer.Exit(code)
 
 
@@ -910,7 +912,7 @@ def _transfer(
         cmd += [local, remote_arg] if upload else [remote_arg, local]
         code = subprocess.run(cmd, check=False).returncode
     except OSError as exc:
-        console.print(f"[red]Could not start transfer:[/red] {exc}")
+        console.print(f"[red]Could not start transfer:[/red] {escape(str(exc))}")
         raise typer.Exit(1) from exc
     if code:
         _transfer_failed(alias, code, via_gateway)
@@ -1312,8 +1314,8 @@ def ls(
             table = Table("Size", "Modified", "Name")
             for entry in entries:
                 table.add_row(
-                    "-" if entry.size is None else _object_size(entry.size, human),
-                    entry.modified.isoformat() if entry.modified else "-",
+                    Text("-" if entry.size is None else _object_size(entry.size, human)),
+                    Text(entry.modified.isoformat() if entry.modified else "-"),
                     Text(entry.path.removeprefix(base)),
                 )
             console.print(table)
@@ -1614,12 +1616,12 @@ def _transfers_table(transfers: list[VolumeTransfer]) -> Table:
     table = Table("ID", "DIRECTION", "PATH", "URL", "STATUS", "PROGRESS")
     for transfer in transfers:
         table.add_row(
-            transfer.id,
-            transfer.direction,
-            escape(transfer.path or "/"),
-            escape(transfer.url),
-            transfer.status,
-            escape(_progress_cell(transfer)),
+            Text(str(transfer.id)),
+            Text(str(transfer.direction)),
+            Text(str(transfer.path or "/")),
+            Text(str(transfer.url)),
+            Text(str(transfer.status)),
+            Text(_progress_cell(transfer)),
         )
     return table
 
@@ -1642,7 +1644,7 @@ def _follow_transfer(client, name: str, transfer_id: str, team_id: str | None) -
             continue
         line = f"{transfer.status:<11}{_progress_cell(transfer)}"
         if line != shown:
-            console.print(escape(line))
+            console.print(line, markup=False)
             shown = line
         if transfer.status in _TRANSFER_TERMINAL:
             return
@@ -1671,7 +1673,7 @@ def _start_transfer(
             team_id=team_id,
         )
     except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     where = f"{escape(name)}:{escape(path or '/')}"
     if direction == "export":
@@ -1679,8 +1681,9 @@ def _start_transfer(
     else:
         summary = f"Started import of {where} from {escape(url)}"
     console.print(f"[green]{summary}[/green]")
-    check = f"prime volumes transfers list {escape(name)} --id {transfer.id}"
-    console.print(f"Transfer id: {transfer.id}")
+    transfer_id = escape(str(transfer.id))
+    check = f"prime volumes transfers list {escape(name)} --id {transfer_id}"
+    console.print(f"Transfer id: {transfer_id}")
     console.print(f"Check status: {check}")
     console.print(f"Follow:       {check} --follow")
 
@@ -1742,7 +1745,7 @@ def transfers_list(
         else:
             transfers = client.list_volume_transfers(name, team_id=team_id)
     except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     if output == "json":
         data = (
@@ -1765,9 +1768,9 @@ def transfers_cancel(
     try:
         client.cancel_volume_transfer(name, transfer_id, team_id=team_id)
     except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
-    console.print(f"Cancelling transfer {transfer_id}.")
+    console.print(f"Cancelling transfer {transfer_id}.", markup=False)
 
 
 app.add_typer(transfers_app, name="transfers")
@@ -1816,7 +1819,7 @@ def sessions(
                 for v in client.list_volumes(team_id=team_id)
             ]
     except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     rows = [(volume, s) for volume, found in per_volume for s in found]
     if output == "json":
@@ -1825,7 +1828,13 @@ def sessions(
     table = Table("VOLUME", "SESSION ID", "STATUS", "MODE", "CREATED")
     for volume, s in rows:
         mode = "ro" if s.read_only else "rw"
-        table.add_row(volume, s.id, s.status, mode, _session_age(s.created_at))
+        table.add_row(
+            Text(volume),
+            Text(str(s.id)),
+            Text(str(s.status)),
+            Text(mode),
+            Text(_session_age(s.created_at)),
+        )
     console.print(table)
 
 
@@ -1839,6 +1848,6 @@ def stop(
     try:
         client.stop_volume_session(name, session_id, team_id=team_id)
     except APIError as exc:
-        console.print(f"[red]Error:[/red] {exc}")
+        console.print(f"[red]Error:[/red] {escape(str(exc))}")
         raise typer.Exit(1) from exc
-    console.print(f"Stopping session {session_id}.")
+    console.print(f"Stopping session {session_id}.", markup=False)

@@ -12,6 +12,7 @@ import typer
 from rich.live import Live
 from rich.markup import escape as rich_escape
 from rich.table import Table
+from rich.text import Text
 
 from prime_cli.api.billing import BillingClient, RunUsage
 from prime_cli.core import APIClient, APIError
@@ -75,12 +76,12 @@ def _build_run_usage_table(usage: RunUsage) -> Table:
     # Title stays short (run id + status) so long run names don't wrap and
     # mangle the table header. The descriptive name + base model live in
     # the caption below the table.
-    title = f"Run Usage — {rich_escape(usage.run_id)}"
+    title = f"Run Usage — {usage.run_id}"
     if usage.status:
-        title += f"  [{rich_escape(usage.status)}]"
+        title += f"  [{usage.status}]"
 
     table = build_table(
-        title,
+        "Run Usage",
         [
             ("Bucket", "cyan"),
             ("Tokens", "white"),
@@ -89,17 +90,18 @@ def _build_run_usage_table(usage: RunUsage) -> Table:
         ],
         show_lines=False,
     )
+    table.title = Text(title)
 
     # Each piece of metadata goes on its own caption line. Joining with a
     # separator lets Rich wrap mid-label (e.g. "model:" at the end of one
     # line, the value alone on the next) when the model name is long.
     caption_lines: list[str] = []
     if usage.run_name and usage.run_name != usage.run_id:
-        caption_lines.append(rich_escape(usage.run_name))
+        caption_lines.append(usage.run_name)
     if usage.base_model:
-        caption_lines.append(f"model: {rich_escape(usage.base_model)}")
+        caption_lines.append(f"model: {usage.base_model}")
     if caption_lines:
-        table.caption = "[dim]" + "\n".join(caption_lines) + "[/dim]"
+        table.caption = Text("\n".join(caption_lines), style="dim")
 
     # Per-row inference cost is derived from tokens × the *same* snapshotted
     # rate that produced RFTUsage.cost on the backend, so the two derived
@@ -172,7 +174,7 @@ def run_usage_command(
         try:
             usage = billing.get_run_usage(run_id)
         except APIError as exc:
-            err_console.print(f"[red]Error: {exc}[/red]")
+            err_console.print(f"[red]Error: {rich_escape(str(exc))}[/red]")
             raise typer.Exit(1) from exc
 
         if output == "json":
@@ -202,7 +204,7 @@ def _watch_live(fetch, run_id, interval, render):
     except KeyboardInterrupt:
         console.print("\n[dim]Stopped.[/dim]")
     except APIError as exc:
-        console.print(f"[red]Error during watch: {exc}[/red]")
+        console.print(f"[red]Error during watch: {rich_escape(str(exc))}[/red]")
         raise typer.Exit(1) from exc
 
 
@@ -214,7 +216,7 @@ def _watch_plain(fetch, run_id, interval, render):
     except KeyboardInterrupt:
         console.print("\nStopped.")
     except APIError as exc:
-        console.print(f"[red]Error during watch: {exc}[/red]")
+        console.print(f"[red]Error during watch: {rich_escape(str(exc))}[/red]")
         raise typer.Exit(1) from exc
 
 
@@ -230,5 +232,5 @@ def _watch_json(fetch, run_id, interval, to_json):
     except KeyboardInterrupt:
         return
     except APIError as exc:
-        err_console.print(f"[red]Error during watch: {exc}[/red]")
+        err_console.print(f"[red]Error during watch: {rich_escape(str(exc))}[/red]")
         raise typer.Exit(1) from exc

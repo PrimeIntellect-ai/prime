@@ -302,7 +302,7 @@ def test_update_bulk_writes_failures_manifest(tmp_path, monkeypatch):
                             "success": False,
                             "error": {
                                 "code": "destination_exists",
-                                "message": "Destination image b2:v1 already exists",
+                                "message": "Destination image [/INFO] already exists",
                             },
                         }
                     )
@@ -330,7 +330,7 @@ def test_update_bulk_writes_failures_manifest(tmp_path, monkeypatch):
     )
 
     assert result.exit_code == 1
-    assert "already exists" in result.output
+    assert "Destination image [/INFO] already exists" in result.output
     assert failures_out.exists()
     retry_lines = [json.loads(line) for line in failures_out.read_text().splitlines() if line]
     assert retry_lines == [_rename_line("b", "b2")]

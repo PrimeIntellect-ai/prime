@@ -197,6 +197,41 @@ def test_lab_commands_accept_plain_flag(tmp_path: Path, monkeypatch: Any) -> Non
     assert "\u2503" not in doctor.output
 
 
+def test_lab_argument_error_renders_bracket_text_literally() -> None:
+    output = StringIO()
+    console = Console(file=output, record=True)
+
+    result = lab_setup.run_lab_setup(["--agent", "invalid[/INFO]"], console=console)
+
+    assert result == 2
+    assert "invalid[/INFO]" in output.getvalue()
+
+
+def test_lab_doctor_dynamic_values_render_as_literal_table_text() -> None:
+    result = lab_setup.LabDoctorResult(
+        exit_code=1,
+        workspace=Path("/tmp/[/INFO]"),
+        checks=(
+            lab_setup.LabDoctorCheck(
+                name="check[/INFO]",
+                status="WARN",
+                message="message [bold]value[/bold]",
+                remediation="fix [/INFO]",
+            ),
+        ),
+    )
+    output = StringIO()
+    console = Console(file=output, record=True, width=120)
+
+    lab_setup._print_lab_doctor_result(result, console)
+
+    rendered = output.getvalue()
+    assert "Lab workspace check: /tmp/[/INFO]" in rendered
+    assert "check[/INFO]" in rendered
+    assert "message [bold]value[/bold]" in rendered
+    assert "fix [/INFO]" in rendered
+
+
 def test_lab_setup_call_to_action_is_plain_text_in_plain_mode(monkeypatch: Any) -> None:
     monkeypatch.setattr(lab_setup, "is_plain_mode", lambda: True)
 

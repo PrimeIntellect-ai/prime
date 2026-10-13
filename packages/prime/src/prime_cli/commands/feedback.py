@@ -2,6 +2,7 @@ from typing import Literal
 
 import typer
 from click.exceptions import Abort
+from rich.markup import escape
 
 from prime_cli import __version__
 
@@ -92,7 +93,7 @@ def feedback(ctx: typer.Context) -> None:
     try:
         submit_feedback(message=message, category=category, run_id=run_id)
     except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
 
     console.print("[green]Feedback submitted. Thanks![/green]")

@@ -266,6 +266,23 @@ def test_transfers_table(monkeypatch):
     assert "s3://datasets-bucket/raw" in _text(result)
 
 
+@pytest.mark.parametrize("plain", [False, True])
+def test_transfers_table_renders_brackets_literally(monkeypatch, plain):
+    transfer = _transfer(
+        id="t[/INFO]",
+        path="data[/INFO]",
+        url="s3://bucket/[/INFO]",
+        status="failed",
+        errorMessage="rclone [/INFO]",
+    )
+    _client(monkeypatch, list_volume_transfers=lambda name, **kw: [transfer])
+    result = _run("transfers", "list", "data", *(["--plain"] if plain else []))
+
+    assert result.exit_code == 0, _text(result)
+    for value in ("t[/INFO]", "data[/INFO]", "s3://bucket/[/INFO]", "rclone [/INFO]"):
+        assert value in _text(result)
+
+
 def test_transfers_output_json_is_a_list(monkeypatch):
     _client(monkeypatch, list_volume_transfers=lambda name, **kw: [_transfer(), _transfer(id="t2")])
     result = _run("transfers", "list", "data", "--output", "json")

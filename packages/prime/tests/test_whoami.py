@@ -47,6 +47,26 @@ def test_missing_username_renders_without_markup_leak(monkeypatch, plain):
     assert "[dim]" not in result.output
 
 
+def test_whoami_escapes_markup_in_account_fields(monkeypatch):
+    def mock_get(self: Any, endpoint: str, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "data": {
+                "id": "user-[/INFO]",
+                "email": "user[/INFO]@example.com",
+                "name": "User [/INFO]",
+                "slug": "user-[/INFO]",
+                "scope": {"scope[/INFO]": {"read": True, "write": False}},
+            }
+        }
+
+    monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+
+    result = runner.invoke(app, ["whoami"])
+
+    assert result.exit_code == 0, result.output
+    assert "User [/INFO]" in result.output
+
+
 def _mock_whoami_with_limits(
     monkeypatch: pytest.MonkeyPatch, account_limits: Any, calls: list[Any]
 ) -> None:

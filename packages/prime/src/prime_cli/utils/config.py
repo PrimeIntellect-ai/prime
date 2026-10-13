@@ -7,6 +7,7 @@ import toml
 import typer
 from pydantic import BaseModel
 from rich.console import Console
+from rich.markup import escape
 from typing_extensions import Self
 
 from .plain import get_console
@@ -29,13 +30,13 @@ def load_toml(path: str, console: Console | None = None) -> dict[str, Any]:
     p = Path(path)
 
     if not p.exists():
-        console.print(f"[red]Error:[/red] Config file not found: {path}")
+        console.print(f"[red]Error:[/red] Config file not found: {escape(path)}")
         raise typer.Exit(1)
 
     try:
         return toml.load(p)
     except toml.TomlDecodeError as e:
-        console.print(f"[red]Error:[/red] Invalid TOML in {path}: {e}")
+        console.print(f"[red]Error:[/red] Invalid TOML in {escape(path)}: {escape(str(e))}")
         raise typer.Exit(1)
 
 

@@ -11,9 +11,11 @@ from typing import Any, Optional
 import typer
 from click.core import ParameterSource
 from prime_evals import EvalsAPIError, EvalsClient, InvalidEvaluationError
+from rich.markup import escape as rich_escape
 from rich.progress import Progress
 from rich.syntax import Syntax
 from rich.table import Table
+from rich.text import Text
 
 from ..client import APIClient, APIError
 from ..core import Config
@@ -51,6 +53,11 @@ from ..utils.hosted_eval import (
 )
 
 console = get_console()
+
+
+def _escaped(value: object) -> str:
+    """Render an interpolated value literally in a Rich markup string."""
+    return rich_escape(str(value))
 
 
 LIST_EVALS_JSON_HELP = json_output_help(
@@ -219,10 +226,10 @@ def handle_errors(func):
         except typer.Exit:
             raise
         except EvalsAPIError as e:
-            console.print(f"[red]Error:[/red] {e}")
+            console.print(f"[red]Error:[/red] {_escaped(e)}")
             raise typer.Exit(1)
         except Exception as e:
-            console.print(f"[red]Unexpected error:[/red] {e}")
+            console.print(f"[red]Unexpected error:[/red] {_escaped(e)}")
             raise typer.Exit(1)
 
     return wrapper
@@ -248,11 +255,11 @@ def _parse_json_object_option(raw: Optional[str], option_name: str) -> Optional[
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError as exc:
-        console.print(f"[red]Error:[/red] invalid {option_name}: {exc}")
+        console.print(f"[red]Error:[/red] invalid {_escaped(option_name)}: {_escaped(exc)}")
         raise typer.Exit(1) from exc
 
     if type(parsed) is not dict:
-        console.print(f"[red]Error:[/red] {option_name} must be a JSON object")
+        console.print(f"[red]Error:[/red] {_escaped(option_name)} must be a JSON object")
         raise typer.Exit(1)
 
     return parsed
@@ -266,7 +273,8 @@ def _parse_string_map_option(raw: Optional[str], option_name: str) -> Optional[d
     for key, value in parsed.items():
         if type(key) is not str or type(value) is not str:
             console.print(
-                f"[red]Error:[/red] {option_name} must contain only string keys and values"
+                f"[red]Error:[/red] {_escaped(option_name)} must contain only string keys "
+                "and values"
             )
             raise typer.Exit(1)
 
@@ -278,7 +286,9 @@ def _validate_json_object_field(merged: dict[str, Any], field_name: str) -> None
     if field_value is None:
         return
     if not isinstance(field_value, dict):
-        console.print(f"[red]Error:[/red] hosted eval config `{field_name}` must be a TOML table")
+        console.print(
+            f"[red]Error:[/red] hosted eval config `{_escaped(field_name)}` must be a TOML table"
+        )
         raise typer.Exit(1)
 
     try:
@@ -286,7 +296,7 @@ def _validate_json_object_field(merged: dict[str, Any], field_name: str) -> None
     except (TypeError, ValueError) as exc:
         console.print(
             "[red]Error:[/red] hosted eval config "
-            f"`{field_name}` must contain only JSON-serializable values"
+            f"`{_escaped(field_name)}` must contain only JSON-serializable values"
         )
         raise typer.Exit(1) from exc
 
@@ -295,7 +305,7 @@ def _coerce_hosted_headers(raw: dict[str, Any]) -> list[str] | None:
     try:
         normalized = build_extra_headers(raw)
     except ValueError as exc:
-        console.print(f"[red]Error:[/red] {exc}")
+        console.print(f"[red]Error:[/red] {_escaped(exc)}")
         raise typer.Exit(1) from exc
 
     if not normalized:
@@ -330,11 +340,11 @@ def _parse_hosted_eval_args(
     if unsupported_flags:
         console.print(
             "[red]Error:[/red] hosted eval CLI does not support: "
-            + ", ".join(f"`{flag}`" for flag in unsupported_flags)
+            + ", ".join(f"`{_escaped(flag)}`" for flag in unsupported_flags)
         )
         raise typer.Exit(1)
     if unknown:
-        console.print(f"[red]Error:[/red] unrecognized arguments: {' '.join(unknown)}")
+        console.print(f"[red]Error:[/red] unrecognized arguments: {_escaped(' '.join(unknown))}")
         raise typer.Exit(2)
 
     provided_dests = {dest for dest in vars(explicit) if dest != "env_id_or_config"}
@@ -353,7 +363,7 @@ def _reject_legacy_unsupported_hosted_flags(passthrough_args: list[str]) -> None
 
     console.print(
         "[red]Error:[/red] hosted eval CLI does not support: "
-        + ", ".join(f"`{flag}`" for flag in unsupported_flags)
+        + ", ".join(f"`{_escaped(flag)}`" for flag in unsupported_flags)
     )
     raise typer.Exit(1)
 
@@ -373,10 +383,10 @@ def _validate_hosted_config_field(
     if field_value is None:
         return
     if type(field_value) is not expected_type:
-        console.print(f"[red]Error:[/red] `{field_name}` must be {description}")
+        console.print(f"[red]Error:[/red] `{_escaped(field_name)}` must be {_escaped(description)}")
         raise typer.Exit(1)
     if expected_type is str and not field_value:
-        console.print(f"[red]Error:[/red] `{field_name}` must be {description}")
+        console.print(f"[red]Error:[/red] `{_escaped(field_name)}` must be {_escaped(description)}")
         raise typer.Exit(1)
 
 
@@ -422,11 +432,12 @@ def _resolve_hosted_config_model(raw_config: dict[str, Any], config_path: Path) 
     try:
         endpoints = load_endpoint_models(endpoints_path)
     except (OSError, ValueError) as exc:
-        console.print(f"[red]Error:[/red] {exc}")
+        console.print(f"[red]Error:[/red] {_escaped(exc)}")
         raise typer.Exit(1) from exc
     if raw_endpoint_id not in endpoints:
         console.print(
-            f"[red]Error:[/red] endpoint_id '{raw_endpoint_id}' not found in {endpoints_path}"
+            f"[red]Error:[/red] endpoint_id '{_escaped(raw_endpoint_id)}' "
+            f"not found in {_escaped(endpoints_path)}"
         )
         raise typer.Exit(1)
 
@@ -434,8 +445,8 @@ def _resolve_hosted_config_model(raw_config: dict[str, Any], config_path: Path) 
     endpoint_models = set(endpoint_group)
     if len(endpoint_models) != 1:
         console.print(
-            f"[red]Error:[/red] endpoint_id '{raw_endpoint_id}' resolves to multiple models: "
-            f"{sorted(endpoint_models)}"
+            f"[red]Error:[/red] endpoint_id '{_escaped(raw_endpoint_id)}' "
+            f"resolves to multiple models: {_escaped(sorted(endpoint_models))}"
         )
         raise typer.Exit(1)
 
@@ -451,7 +462,7 @@ def _validate_single_hosted_eval_config(
     if unsupported_fields:
         console.print(
             "[red]Error:[/red] hosted eval config does not support: "
-            + ", ".join(f"`{field}`" for field in unsupported_fields)
+            + ", ".join(f"`{_escaped(field)}`" for field in unsupported_fields)
         )
         raise typer.Exit(1)
 
@@ -509,7 +520,7 @@ def _load_hosted_eval_configs(config_path_str: str) -> list[dict[str, Any]]:
             extra_valid_fields=HOSTED_EVAL_CONFIG_EXTRA_FIELDS,
         )
     except Exception as exc:
-        console.print(f"[red]Error:[/red] {exc}")
+        console.print(f"[red]Error:[/red] {_escaped(exc)}")
         raise typer.Exit(1) from exc
 
     return [
@@ -595,20 +606,20 @@ def _print_eval_status(eval_data: dict[str, Any]) -> None:
     status_str, status = _parse_eval_status(eval_data)
     color = status.color if status else "white"
 
-    console.print(f"[{color}]Status: {status_str}[/{color}]")
+    console.print(f"[{color}]Status: {_escaped(status_str)}[/{color}]")
 
     error_message = eval_data.get("error_message")
     if error_message:
-        console.print(f"[red]Error:[/red] {error_message}")
+        console.print(f"[red]Error:[/red] {_escaped(error_message)}")
 
     viewer_url = eval_data.get("viewer_url")
     if viewer_url:
-        console.print(f"[dim]View: {viewer_url}[/dim]")
+        console.print(f"[dim]View: {_escaped(viewer_url)}[/dim]")
         return
 
     eval_id = eval_data.get("evaluation_id")
     if eval_id:
-        console.print(f"[dim]View: {get_eval_viewer_url(eval_id)}[/dim]")
+        console.print(f"[dim]View: {_escaped(get_eval_viewer_url(eval_id))}[/dim]")
 
 
 def _parse_eval_status(eval_data: dict[str, Any]) -> tuple[str, EvalStatus | None]:
@@ -623,7 +634,7 @@ def _parse_eval_status(eval_data: dict[str, Any]) -> tuple[str, EvalStatus | Non
 
 def _handle_log_poll_error(eval_id: str, exc: APIError, consecutive_errors: int) -> None:
     if "404" in str(exc):
-        console.print(f"\n[red]Evaluation {eval_id} not found.[/red]")
+        console.print(f"\n[red]Evaluation {_escaped(eval_id)} not found.[/red]")
         raise typer.Exit(1) from exc
 
     if "429" not in str(exc):
@@ -639,7 +650,9 @@ def _handle_log_poll_error(eval_id: str, exc: APIError, consecutive_errors: int)
 
 
 def _display_logs_follow(eval_id: str, poll_interval: float) -> None:
-    console.print(f"[dim]Watching logs for evaluation {eval_id}... (Ctrl+C to stop)[/dim]\n")
+    console.print(
+        f"[dim]Watching logs for evaluation {_escaped(eval_id)}... (Ctrl+C to stop)[/dim]\n"
+    )
 
     client = APIClient()
     last_logs = ""
@@ -655,7 +668,7 @@ def _display_logs_follow(eval_id: str, poll_interval: float) -> None:
                 final_logs = clean_logs(_fetch_logs(client, eval_id))
                 if final_logs and final_logs != last_logs:
                     for line in get_new_log_lines(last_logs, final_logs):
-                        console.print(line)
+                        console.print(line, markup=False)
                     last_logs = final_logs
                 console.print()
                 _print_eval_status(eval_data)
@@ -669,14 +682,16 @@ def _display_logs_follow(eval_id: str, poll_interval: float) -> None:
 
             if logs and logs != last_logs:
                 for line in get_new_log_lines(last_logs, logs):
-                    console.print(line)
+                    console.print(line, markup=False)
                 last_logs = logs
                 no_logs_polls = 0
             else:
                 no_logs_polls += 1
 
             if no_logs_polls > 0 and no_logs_polls % HOSTED_LOGS_STATUS_UPDATE_EVERY_POLLS == 0:
-                console.print(f"[dim]Evaluation status: {status_str} (waiting for logs...)[/dim]")
+                console.print(
+                    f"[dim]Evaluation status: {_escaped(status_str)} (waiting for logs...)[/dim]"
+                )
         except APIError as exc:
             consecutive_errors += 1
             _handle_log_poll_error(eval_id, exc, consecutive_errors)
@@ -693,7 +708,7 @@ def _display_logs_once(eval_id: str, tail: int) -> None:
 
     if logs:
         for line in logs.splitlines()[-tail:]:
-            console.print(line)
+            console.print(line, markup=False)
     else:
         console.print("[yellow]No logs available.[/yellow]")
 
@@ -717,7 +732,7 @@ def _display_logs(
     except typer.Exit:
         raise
     except APIError as exc:
-        console.print(f"[red]Error:[/red] {exc}")
+        console.print(f"[red]Error:[/red] {_escaped(exc)}")
         raise typer.Exit(1) from exc
 
 
@@ -753,7 +768,7 @@ def _resolve_hosted_environment(
 
     parts = _split_owner_and_name(platform_slug)
     if parts is None:
-        console.print(f"[red]Error:[/red] invalid environment slug: {platform_slug}")
+        console.print(f"[red]Error:[/red] invalid environment slug: {_escaped(platform_slug)}")
         raise typer.Exit(1)
 
     owner, env_name = parts
@@ -767,25 +782,30 @@ def _resolve_hosted_environment(
                 "[red]Error:[/red] hosted evaluations require an environment "
                 "that is published to the platform"
             )
-            console.print(f"[yellow]Publish {platform_slug} with `prime env push` first.[/yellow]")
+            console.print(
+                f"[yellow]Publish {_escaped(platform_slug)} with `prime env push` first.[/yellow]"
+            )
             raise typer.Exit(1) from exc
         raise
 
     details = response.get("data", response)
     environment_id = details.get("id")
     if not environment_id:
-        console.print(f"[red]Error:[/red] could not resolve environment id for {platform_slug}")
+        console.print(
+            f"[red]Error:[/red] could not resolve environment id for {_escaped(platform_slug)}"
+        )
         raise typer.Exit(1)
 
     if resolved.install_mode == "local" and resolved.recommend_push:
         console.print(
             "[yellow]Local environment code differs from the latest published version of "
-            f"{platform_slug}.[/yellow]"
+            f"{_escaped(platform_slug)}.[/yellow]"
         )
     console.print(
-        f"[dim]Hosted evaluations always use the latest published version of {platform_slug}.[/dim]"
+        f"[dim]Hosted evaluations always use the latest published version of "
+        f"{_escaped(platform_slug)}.[/dim]"
     )
-    console.print(f"[dim]Using hosted environment {platform_slug}@latest[/dim]")
+    console.print(f"[dim]Using hosted environment {_escaped(platform_slug)}@latest[/dim]")
     return platform_slug, str(environment_id)
 
 
@@ -860,13 +880,13 @@ def list_evals(
             execution_mode = EVAL_HOSTED_LABEL if is_hosted else EVAL_LOCAL_LABEL
 
             table.add_row(
-                eval_id if eval_id else "",
-                str(env_name)[:EVAL_TABLE_MAX_TEXT_WIDTH],
-                str(e.get("model_name", ""))[:EVAL_TABLE_MAX_TEXT_WIDTH],
-                str(e.get("status", "")),
+                Text(eval_id if eval_id else ""),
+                Text(str(env_name)[:EVAL_TABLE_MAX_TEXT_WIDTH]),
+                Text(str(e.get("model_name", ""))[:EVAL_TABLE_MAX_TEXT_WIDTH]),
+                Text(str(e.get("status", ""))),
                 execution_mode,
-                str(num_examples),
-                str(rollouts_per_example),
+                Text(str(num_examples)),
+                Text(str(rollouts_per_example)),
             )
 
         console.print(table)
@@ -880,10 +900,10 @@ def list_evals(
             console.print(f"\n[dim]Total: {total} evaluation(s)[/dim]")
 
     except EvalsAPIError as e:
-        console.print(f"[red]API Error:[/red] {e}")
+        console.print(f"[red]API Error:[/red] {_escaped(e)}")
         raise typer.Exit(1)
     except Exception as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {_escaped(e)}")
         console.print(
             "[yellow]Response may contain invalid data. "
             "Try --output json to see raw response.[/yellow]"
@@ -1047,12 +1067,15 @@ def _push_samples_accepts_progress_callback(client: EvalsClient) -> bool:
 def _require_published_environment_for_eval_push(env_name: str, eval_path: Path) -> None:
     console.print("[red]Error:[/red] Evaluation uploads require a pushed environment.")
     console.print(
-        f"[yellow]Push '{env_name}' before uploading this evaluation:[/yellow] "
-        f"prime env push {env_name}"
+        f"[yellow]Push '{_escaped(env_name)}' before uploading this evaluation:[/yellow] "
+        f"prime env push {_escaped(env_name)}"
     )
     console.print("[dim]Then retry with an owner-qualified environment:[/dim]")
-    console.print(f"[dim]  --env <owner>/{env_name}[/dim]")
-    console.print(f"[dim]Example: prime eval push {eval_path} --env <owner>/{env_name}[/dim]")
+    console.print(f"[dim]  --env <owner>/{_escaped(env_name)}[/dim]")
+    console.print(
+        f"[dim]Example: prime eval push {_escaped(eval_path)} --env "
+        f"<owner>/{_escaped(env_name)}[/dim]"
+    )
     raise typer.Exit(1)
 
 
@@ -1067,7 +1090,7 @@ def _push_single_eval(
     path = _validate_eval_path(config_path)
     eval_data = _load_eval_directory(path)
     eval_name = name or eval_data["eval_name"]
-    console.print(f"[blue]✓ Loaded eval data:[/blue] {path}")
+    console.print(f"[blue]✓ Loaded eval data:[/blue] {_escaped(path)}")
 
     detected_env = eval_data.get("env_id") or eval_data.get("env")
     if not env_slug and detected_env and not run_id and not eval_id:
@@ -1085,7 +1108,7 @@ def _push_single_eval(
     client = EvalsClient(api_client)
 
     if eval_id:
-        console.print(f"[blue]Checking evaluation:[/blue] {eval_id}")
+        console.print(f"[blue]Checking evaluation:[/blue] {_escaped(eval_id)}")
         try:
             client.get_evaluation(eval_id)
             console.print("[green]✓ Found existing evaluation[/green]")
@@ -1101,9 +1124,11 @@ def _push_single_eval(
                 metrics=eval_data.get("metrics"),
                 tags=eval_data.get("tags", []),
             )
-            console.print(f"[green]✓ Updated evaluation:[/green] {eval_id}")
+            console.print(f"[green]✓ Updated evaluation:[/green] {_escaped(eval_id)}")
         except Exception as e:
-            console.print(f"[red]Error:[/red] Could not update evaluation {eval_id}: {e}")
+            console.print(
+                f"[red]Error:[/red] Could not update evaluation {_escaped(eval_id)}: {_escaped(e)}"
+            )
             raise
         console.print()
     else:
@@ -1125,7 +1150,7 @@ def _push_single_eval(
         if not eval_id:
             raise ValueError("Failed to get evaluation ID from response")
 
-        console.print(f"[green]✓ Created evaluation:[/green] {eval_id}")
+        console.print(f"[green]✓ Created evaluation:[/green] {_escaped(eval_id)}")
         console.print()
 
     results = eval_data.get("results", [])
@@ -1142,12 +1167,12 @@ def _push_single_eval(
     console.print()
 
     console.print("[green]✓ Success[/green]")
-    console.print(f"[blue]Evaluation ID:[/blue] {eval_id}")
-    console.print(f"[dim]View results:[/dim] {viewer_url}")
+    console.print(f"[blue]Evaluation ID:[/blue] {_escaped(eval_id)}")
+    console.print(f"[dim]View results:[/dim] {_escaped(viewer_url)}")
     console.print()
     console.print("[dim]Inspect evaluation data:[/dim]")
-    console.print(f"  prime eval get {eval_id}")
-    console.print(f"  prime eval samples {eval_id}")
+    console.print(f"  prime eval get {_escaped(eval_id)}")
+    console.print(f"  prime eval samples {_escaped(eval_id)}")
 
     return eval_id
 
@@ -1245,7 +1270,7 @@ def push_eval(
 
             console.print(f"[blue]Found {len(eval_dirs)} evaluation(s) to push:[/blue]")
             for eval_dir in eval_dirs:
-                console.print(f"  - {eval_dir}")
+                console.print(f"  - {_escaped(eval_dir)}")
             console.print()
 
             results = []
@@ -1258,7 +1283,7 @@ def push_eval(
                         {"path": str(eval_dir), "eval_id": result_eval_id, "status": "success"}
                     )
                 except Exception as e:
-                    console.print(f"[red]Failed to push {eval_dir}:[/red] {e}")
+                    console.print(f"[red]Failed to push {_escaped(eval_dir)}:[/red] {_escaped(e)}")
                     results.append({"path": str(eval_dir), "error": str(e), "status": "failed"})
                 console.print()
 
@@ -1283,16 +1308,16 @@ def push_eval(
             output_data_as_json({"evaluation_id": result_eval_id}, console)
 
     except FileNotFoundError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {_escaped(e)}")
         raise typer.Exit(1)
     except json.JSONDecodeError as e:
-        console.print(f"[red]Error:[/red] Invalid JSON in metadata.json: {e}")
+        console.print(f"[red]Error:[/red] Invalid JSON in metadata.json: {_escaped(e)}")
         raise typer.Exit(1)
     except ValueError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {_escaped(e)}")
         raise typer.Exit(1)
     except InvalidEvaluationError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {_escaped(e)}")
         console.print()
         console.print("[yellow]Tip:[/yellow] You must provide one of:")
         console.print("  --eval <eval_id>     (to update an existing evaluation)")
@@ -1301,16 +1326,16 @@ def push_eval(
         console.print("  [or ensure owner/name 'env' or 'env_id' is set in metadata.json]")
         raise typer.Exit(1)
     except KeyError as e:
-        console.print(f"[red]Error:[/red] Missing required field: {e}")
+        console.print(f"[red]Error:[/red] Missing required field: {_escaped(e)}")
         console.print(
             "[yellow]Hint:[/yellow] metadata.json must contain 'env' (or 'env_id') and 'model'"
         )
         raise typer.Exit(1)
     except EvalsAPIError as e:
-        console.print(f"[red]API Error:[/red] {e}")
+        console.print(f"[red]API Error:[/red] {_escaped(e)}")
         raise typer.Exit(1)
     except Exception as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {_escaped(e)}")
         raise typer.Exit(1)
 
 
@@ -1354,10 +1379,10 @@ def stop_cmd(
     try:
         result = EvalsClient(APIClient()).cancel_hosted_evaluation(eval_id)
         message = result.get("message") or f"Evaluation {eval_id} cancelled."
-        console.print(f"[green]✓ {message}[/green]")
-        console.print(f"[dim]View results:[/dim] {get_eval_viewer_url(eval_id)}")
+        console.print(f"[green]✓ {_escaped(message)}[/green]")
+        console.print(f"[dim]View results:[/dim] {_escaped(get_eval_viewer_url(eval_id))}")
     except APIError as exc:
-        console.print(f"[red]Error:[/red] {exc}")
+        console.print(f"[red]Error:[/red] {_escaped(exc)}")
         raise typer.Exit(1) from exc
 
 
@@ -1728,7 +1753,7 @@ def run_eval_cmd(
                     group["platform_slugs"].append(platform_slug)
                     group["environment_ids"].append(environment_id)
         except APIError as exc:
-            console.print(f"[red]Error:[/red] {exc}")
+            console.print(f"[red]Error:[/red] {_escaped(exc)}")
             raise typer.Exit(1) from exc
 
         all_platform_slugs: list[str] = []
@@ -1768,13 +1793,13 @@ def run_eval_cmd(
                 all_platform_slugs.extend(group["platform_slugs"])
                 all_evaluation_ids.extend(result.get("evaluation_ids") or [result["evaluation_id"]])
         except APIError as exc:
-            console.print(f"[red]Hosted evaluation failed:[/red] {exc}")
+            console.print(f"[red]Hosted evaluation failed:[/red] {_escaped(exc)}")
             raise typer.Exit(1) from exc
 
         if follow:
             console.print("[green]✓ Hosted evaluation started[/green]")
-            console.print(f"[cyan]Environment:[/cyan] {all_platform_slugs[0]}")
-            console.print(f"[cyan]Evaluation ID:[/cyan] {all_evaluation_ids[0]}")
+            console.print(f"[cyan]Environment:[/cyan] {_escaped(all_platform_slugs[0])}")
+            console.print(f"[cyan]Evaluation ID:[/cyan] {_escaped(all_evaluation_ids[0])}")
             console.print()
             _display_logs(
                 all_evaluation_ids[0],
@@ -1786,15 +1811,18 @@ def run_eval_cmd(
 
         console.print("[green]✓ Hosted evaluation started[/green]")
         if len(all_platform_slugs) == 1:
-            console.print(f"[cyan]Environment:[/cyan] {all_platform_slugs[0]}")
-            console.print(f"[cyan]Evaluation ID:[/cyan] {all_evaluation_ids[0]}")
+            console.print(f"[cyan]Environment:[/cyan] {_escaped(all_platform_slugs[0])}")
+            console.print(f"[cyan]Evaluation ID:[/cyan] {_escaped(all_evaluation_ids[0])}")
             console.print(
-                f"[green]View results:[/green] {get_eval_viewer_url(all_evaluation_ids[0])}"
+                "[green]View results:[/green] "
+                f"{_escaped(get_eval_viewer_url(all_evaluation_ids[0]))}"
             )
-            console.print("[dim]View logs:[/dim] prime eval logs " + all_evaluation_ids[0] + " -f")
+            console.print(
+                "[dim]View logs:[/dim] prime eval logs " + _escaped(all_evaluation_ids[0]) + " -f"
+            )
             return
 
-        console.print(f"[cyan]Environments:[/cyan] {', '.join(all_platform_slugs)}")
-        console.print(f"[cyan]Evaluation IDs:[/cyan] {', '.join(all_evaluation_ids)}")
+        console.print(f"[cyan]Environments:[/cyan] {_escaped(', '.join(all_platform_slugs))}")
+        console.print(f"[cyan]Evaluation IDs:[/cyan] {_escaped(', '.join(all_evaluation_ids))}")
         console.print("[dim]View logs:[/dim] prime eval logs <evaluation-id> -f")
         return

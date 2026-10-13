@@ -115,6 +115,35 @@ class TestEnvVarList:
         assert "LOG_LEVEL" in result.output
         assert "true" in result.output
 
+    def test_list_variable_fields_with_markup_are_literal(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("PRIME_API_KEY", "test-key")
+
+        def mock_get(
+            self: Any, endpoint: str, params: Optional[Dict[str, Any]] = None
+        ) -> Dict[str, Any]:
+            if "/@latest" in endpoint:
+                return {"data": {"id": "env-id"}}
+            return {
+                "data": [
+                    {
+                        "id": "var-[/INFO]",
+                        "name": "[/INFO]",
+                        "value": "value [/INFO]",
+                        "description": "description [/INFO]",
+                        "createdAt": "2026-01-15T10:00:00Z",
+                    }
+                ]
+            }
+
+        monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+
+        result = runner.invoke(app, ["env", "var", "list", "testuser/test-env"])
+
+        assert result.exit_code == 0, result.output
+        assert "[/INFO]" in result.output
+
     def test_list_variables_json_output(self, mock_env_var_api: None) -> None:
         """Test listing variables with JSON output."""
         result = runner.invoke(app, ["env", "var", "list", "testuser/test-env", "-o", "json"])

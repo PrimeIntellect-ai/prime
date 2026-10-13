@@ -24,7 +24,8 @@ _GITHUB_API = "https://api.github.com"
 
 
 # Cold rl-validator (up to 60s) plus the backend's own work (ENG-6696).
-CREATE_RUN_TIMEOUT_SECONDS = 120
+# Only the read wait grows: an unreachable host still fails in 10s.
+CREATE_RUN_TIMEOUT = httpx.Timeout(120.0, connect=10.0)
 
 
 class HostedTrainingRunResponse(BaseModel):
@@ -256,9 +257,7 @@ class HostedTrainingClient:
         # The backend validates the config through the rl-validator before
         # answering, and a cold validator alone may take up to its 60s
         # timeout (ENG-6696); the client default of 30s gave up first.
-        response = self.client.post(
-            "/training/runs", json=payload, timeout=CREATE_RUN_TIMEOUT_SECONDS
-        )
+        response = self.client.post("/training/runs", json=payload, timeout=CREATE_RUN_TIMEOUT)
         return HostedTrainingRunResponse.model_validate(response)
 
     def delete_run(self, run_id: str) -> Dict[str, Any]:

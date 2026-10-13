@@ -980,7 +980,7 @@ def test_create_run_waits_out_a_cold_validator():
     its full 60s when cold (ENG-6696); the 30s client default gave up first."""
     from unittest.mock import MagicMock
 
-    from prime_cli.api.training import CREATE_RUN_TIMEOUT_SECONDS, HostedTrainingClient
+    from prime_cli.api.training import CREATE_RUN_TIMEOUT, HostedTrainingClient
 
     api = MagicMock()
     api.post.return_value = {"id": "r1"}
@@ -989,4 +989,7 @@ def test_create_run_waits_out_a_cold_validator():
     except Exception:
         pass  # response model shape is not what's under test
     assert api.post.call_args.args == ("/training/runs",)
-    assert api.post.call_args.kwargs["timeout"] == CREATE_RUN_TIMEOUT_SECONDS > 60
+    timeout = api.post.call_args.kwargs["timeout"]
+    assert timeout is CREATE_RUN_TIMEOUT
+    # The read wait outlasts the validator; connecting still fails fast.
+    assert timeout.read > 60 and timeout.connect == 10.0

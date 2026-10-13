@@ -499,7 +499,7 @@ def ssh(
         console.print(f"[red]Could not start SSH:[/red] {exc}")
         raise typer.Exit(1) from exc
     if not session.read_only:
-        console.print("Changes sync to the volume every minute.")
+        console.print("Changes are saved to the volume when the session stops.")
     console.print(
         "The session stops after 30 minutes idle. Stop it now with: "
         f"prime volumes stop {escape(name)} {session.id}"

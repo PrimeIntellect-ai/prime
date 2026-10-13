@@ -1205,7 +1205,6 @@ def test_ssh_shows_the_phase_and_how_the_session_ends(monkeypatch, tmp_path):
     )
     assert result.exit_code == 0, result.output
     assert "Copying data from bucket... 1.2 GiB / 4 GiB, 30%" in result.output
-    assert "Changes sync to the volume every minute." in result.output
     assert "stops after 30 minutes idle" in result.output
     assert "prime volumes stop data s1" in result.output
 

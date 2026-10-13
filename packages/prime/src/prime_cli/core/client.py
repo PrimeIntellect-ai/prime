@@ -189,9 +189,14 @@ class APIClient:
         """Make a GET request to the API"""
         return self.request("GET", endpoint, params=params, timeout=timeout)
 
-    def post(self, endpoint: str, json: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Make a POST request to the API"""
-        return self.request("POST", endpoint, json=json)
+    def post(
+        self,
+        endpoint: str,
+        json: Optional[Dict[str, Any]] = None,
+        timeout: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Make a POST request to the API (timeout: per-request override)"""
+        return self.request("POST", endpoint, json=json, timeout=timeout)
 
     def patch(
         self,

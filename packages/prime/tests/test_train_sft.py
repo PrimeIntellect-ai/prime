@@ -52,7 +52,7 @@ def _capture_post(monkeypatch) -> dict[str, Any]:
     """Mock the API layer's post and capture the /training/runs payload."""
     captured: dict[str, Any] = {}
 
-    def mock_post(self: Any, endpoint: str, json: dict[str, Any] | None = None) -> dict:
+    def mock_post(self: Any, endpoint: str, json: dict[str, Any] | None = None, **_: Any) -> dict:
         captured["endpoint"] = endpoint
         captured["json"] = json
         return {"runId": "run-1", "tokenValue": "tok"}
@@ -338,7 +338,7 @@ def test_train_sft_missing_volume_created_with_requested_size(tmp_path: Path, mo
 def _mock_run_post(monkeypatch, response: dict[str, Any]) -> dict[str, Any]:
     captured: dict[str, Any] = {}
 
-    def mock_post(self: Any, endpoint: str, json: dict[str, Any] | None = None) -> dict:
+    def mock_post(self: Any, endpoint: str, json: dict[str, Any] | None = None, **_: Any) -> dict:
         captured["endpoint"] = endpoint
         captured["json"] = json
         return response

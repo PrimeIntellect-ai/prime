@@ -23,6 +23,10 @@ PRIME_RL_GITHUB_REPO = "PrimeIntellect-ai/prime-rl"
 _GITHUB_API = "https://api.github.com"
 
 
+# Cold rl-validator (up to 60s) plus the backend's own work (ENG-6696).
+CREATE_RUN_TIMEOUT_SECONDS = 120
+
+
 class HostedTrainingRunResponse(BaseModel):
     """Response from POST /v1/training/runs.
 
@@ -249,7 +253,12 @@ class HostedTrainingClient:
         …) propagate so callers can branch by exception class instead of
         string-matching the message.
         """
-        response = self.client.post("/training/runs", json=payload)
+        # The backend validates the config through the rl-validator before
+        # answering, and a cold validator alone may take up to its 60s
+        # timeout (ENG-6696); the client default of 30s gave up first.
+        response = self.client.post(
+            "/training/runs", json=payload, timeout=CREATE_RUN_TIMEOUT_SECONDS
+        )
         return HostedTrainingRunResponse.model_validate(response)
 
     def delete_run(self, run_id: str) -> Dict[str, Any]:

@@ -142,7 +142,10 @@ prime env inspect <environment-name>
 # Install an environment locally
 prime env install <environment-name>
 
-# Push your own environment (scaffold one with verifiers' `vf-init`)
+# Scaffold a new v1 environment (delegates to verifiers' `vf-init`)
+prime env init my-environment
+
+# Push your own environment
 prime env push my-environment
 ```
 

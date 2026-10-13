@@ -791,6 +791,86 @@ def _resolve_pull_environment_path(target: Optional[str], env_name: str) -> Path
     return parent / env_folder
 
 
+def _build_init_command(name: Optional[str], passthrough_args: List[str], *, v0: bool) -> List[str]:
+    """Build the command used to scaffold an environment.
+
+    Verifiers v1 exposes ``vf-init`` as its supported initializer.  Keep the
+    old module entry point available only when explicitly requested so an
+    existing v0 workspace can still be bootstrapped.
+    """
+    if v0:
+        command = [
+            resolve_workspace_python(),
+            "-m",
+            "verifiers.cli.commands.init",
+        ]
+    else:
+        command = ["uv", "run", "vf-init"]
+    if name is not None:
+        command.append(name)
+    command.extend(passthrough_args)
+    return command
+
+
+def _is_help_request(name: Optional[str], passthrough_args: List[str]) -> bool:
+    return name in {"-h", "--help"} or any(
+        argument in {"-h", "--help"} for argument in passthrough_args
+    )
+
+
+@app.command(
+    no_args_is_help=True,
+    rich_help_panel="Manage",
+    context_settings={
+        "allow_extra_args": True,
+        "ignore_unknown_options": True,
+        "help_option_names": [],
+    },
+)
+def init(
+    ctx: typer.Context,
+    name: Optional[str] = typer.Argument(None, help="Name of the new environment"),
+    v0: bool = typer.Option(
+        False,
+        "--v0",
+        "--legacy",
+        help="Use the legacy Verifiers v0 initializer instead of vf-init.",
+    ),
+) -> None:
+    """Initialize a new Verifiers v1 environment."""
+    passthrough_args = list(ctx.args)
+
+    if _is_help_request(name, passthrough_args):
+        command = _build_init_command(None, ["--help"], v0=v0)
+        try:
+            result = subprocess.run(command)
+        except FileNotFoundError as exc:
+            command_name = "legacy Verifiers v0" if v0 else "Verifiers vf-init"
+            console.print(f"[red]Could not run {command_name}: {exc}[/red]")
+            raise typer.Exit(1) from exc
+        raise typer.Exit(result.returncode)
+
+    if name is None:
+        console.print("[red]Error:[/red] Missing argument 'NAME'.")
+        console.print("[dim]Example: prime env init my-env --path ./environments[/dim]")
+        raise typer.Exit(2)
+
+    if name.startswith("-"):
+        console.print("[red]Error:[/red] Environment name must be the first argument.")
+        console.print("[dim]Example: prime env init my-env --path ./environments[/dim]")
+        raise typer.Exit(2)
+
+    try:
+        result = subprocess.run(_build_init_command(name, passthrough_args, v0=v0))
+    except FileNotFoundError as exc:
+        command_name = "legacy Verifiers v0" if v0 else "Verifiers vf-init"
+        console.print(f"[red]Could not run {command_name}: {exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    if result.returncode != 0:
+        raise typer.Exit(result.returncode)
+
+
 @app.command(rich_help_panel="Manage")
 def push(
     env_id: Optional[str] = typer.Argument(

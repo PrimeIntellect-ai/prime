@@ -140,15 +140,24 @@ def test_info_displays_scoped_install_index(monkeypatch):
     assert INDEX_URL not in output
 
 
-def test_info_api_environment_name_and_description_with_markup_are_literal(monkeypatch):
+@pytest.mark.parametrize(
+    "value",
+    [
+        "[bold]x[/bold]",
+        "[link=https://example.test]x[/link]",
+        "[red",
+        "🚀",
+    ],
+)
+def test_info_api_environment_name_and_description_with_markup_are_literal(monkeypatch, value):
     client = Mock()
     client.get.return_value = {
         "data": {
             "id": "env-1",
-            "name": "name",
+            "name": value,
             "owner": {"name": "primeintellect"},
             "visibility": "PRIVATE",
-            "metadata": {"description": "description [/INFO]"},
+            "metadata": {"description": value},
             "wheel_url": None,
             "simple_index_url": None,
         }
@@ -158,7 +167,8 @@ def test_info_api_environment_name_and_description_with_markup_are_literal(monke
     result = CliRunner().invoke(env.app, ["info", "primeintellect/name"])
 
     assert result.exit_code == 0, result.output
-    assert "description [/INFO]" in result.output
+    assert value in result.output
+    assert "MarkupError" not in result.output
 
 
 def test_list_api_environment_name_with_markup_is_literal(monkeypatch):

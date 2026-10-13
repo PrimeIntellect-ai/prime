@@ -168,20 +168,32 @@ class TestEnvInspect:
         assert result.exit_code == 0, result.output
         assert "docs/[/INFO].md" in result.output
 
-    def test_api_error_markup_is_literal(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "backend rejected [bold]x[/bold]",
+            "backend rejected [link=https://example.test]x[/link]",
+            "backend rejected [red",
+            "backend rejected 🚀",
+        ],
+    )
+    def test_api_error_markup_is_literal(
+        self, monkeypatch: pytest.MonkeyPatch, message: str
+    ) -> None:
         monkeypatch.setenv("PRIME_API_KEY", "test-key")
 
         def mock_get(self: Any, endpoint: str, params: Optional[Dict[str, Any]] = None):
             from prime_cli.api.client import APIError
 
-            raise APIError("backend rejected request [/INFO]")
+            raise APIError(message)
 
         monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
 
         result = runner.invoke(app, ["env", "inspect", "testuser/test-env"])
 
         assert result.exit_code == 1
-        assert "backend rejected request [/INFO]" in result.output
+        assert message in result.output
+        assert "MarkupError" not in result.output
 
     def test_json_output(self, mock_env_inspect_api: None) -> None:
         result = runner.invoke(

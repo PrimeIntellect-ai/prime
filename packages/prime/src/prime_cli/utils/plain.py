@@ -34,6 +34,37 @@ def _plain_text_console() -> Console:
     )
 
 
+def _plain_table_cell(cell: Any) -> Any:
+    """Turn a table's markup string into a literal plain-text renderable.
+
+    Tables are renderables, so the normal object path below does not get a
+    chance to strip Rich markup from string cells.  Parsing known presentation
+    markup here removes intentional styles (and Rich escapes for literal brackets)
+    while leaving malformed user text such as ``[red`` untouched.
+    """
+    if not isinstance(cell, str):
+        return cell
+    try:
+        return Text.from_markup(cell)
+    except Exception:
+        return Text(cell)
+
+
+def _plain_table(table: Table) -> Table:
+    """Copy a table and make its string renderables safe for plain output."""
+    table = copy(table)
+    table.columns = [copy(column) for column in table.columns]
+    for column in table.columns:
+        column.header = _plain_table_cell(column.header)
+        column.footer = _plain_table_cell(column.footer)
+        column._cells = [_plain_table_cell(cell) for cell in column._cells]
+    if isinstance(table.title, str):
+        table.title = _plain_table_cell(table.title)
+    if isinstance(table.caption, str):
+        table.caption = _plain_table_cell(table.caption)
+    return table
+
+
 def is_plain_mode(args: list[str] | None = None) -> bool:
     ctx = click.get_current_context(silent=True)
     while ctx is not None:
@@ -76,7 +107,7 @@ class PrimeConsole(Console):
         plain_objects = []
         for obj in objects:
             if isinstance(obj, Table):
-                table = copy(obj)
+                table = _plain_table(obj)
                 table.box = None
                 table.show_lines = False
                 table.border_style = ""

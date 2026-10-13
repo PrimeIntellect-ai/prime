@@ -792,7 +792,12 @@ def _refuse_bad_local(local: str, upload: bool) -> None:
         # A top-level link would be followed by the direct upload (and by
         # scp), but copied as a link by rsync; refuse it on both routes.
         if os.path.islink(local):
-            console.print(f"[red]{escape(local)} is a symlink; pass the path it points to.[/red]")
+            console.print(
+                f"{local} is a symlink; pass the path it points to.",
+                markup=False,
+                style="red",
+                soft_wrap=True,
+            )
             raise typer.Exit(1)
         if not (os.path.isfile(local) or os.path.isdir(local)):
             console.print(f"[red]No such file or directory: {escape(local)}[/red]")

@@ -335,6 +335,43 @@ def test_models_table_folds_ids_in_narrow_terminals(monkeypatch: pytest.MonkeyPa
     assert "u-4.5" in result.output
 
 
+@pytest.mark.parametrize("plain", [False, True])
+def test_models_table_keeps_adversarial_values_literal_and_bounded(
+    monkeypatch: pytest.MonkeyPatch, plain: bool
+) -> None:
+    value = "[bold]x[/bold] [link=https://example.test]🚀[/link]"
+    payload = {
+        "object": "list",
+        "data": [
+            {
+                "id": "vendor/[red",
+                "display_name": value,
+                "pricing": {
+                    "input_usd_per_mtok": "[bold]input[/bold]",
+                    "output_usd_per_mtok": "[red",
+                },
+            },
+            {"id": "vendor/long", "display_name": "z" * 280, "pricing": {}},
+        ],
+    }
+    _patch_models(monkeypatch, payload)
+
+    result = CliRunner().invoke(
+        app,
+        [*(["--plain"] if plain else []), "inference", "models"],
+        env={**TEST_ENV, "COLUMNS": "200"},
+    )
+
+    assert result.exit_code == 0, result.output
+    output = result.output
+    assert "[bold]x[/bold]" in output
+    assert "[link=https://example.test]🚀[/link]" in output
+    assert "[bold]input[/bold]" in output
+    assert "[red" in output
+    assert "MarkupError" not in output
+    assert max(map(len, output.splitlines())) <= 200
+
+
 def test_models_table_omits_catalog_columns_for_legacy_payload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

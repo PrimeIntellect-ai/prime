@@ -1,13 +1,16 @@
 """Tests for `prime rl models` — focused on price column rendering."""
 
+import io
 import json
 from typing import Any, Dict, List
 
 import pytest
+from prime_cli.commands import rl as rl_commands
 from prime_cli.commands.rl import _model_name_sort_key
 from prime_cli.core.client import NotFoundError
 from prime_cli.main import app
 from prime_cli.utils.formatters import strip_ansi
+from rich.console import Console
 from typer.testing import CliRunner
 
 
@@ -114,6 +117,40 @@ def test_models_table_renders_pricing(monkeypatch: pytest.MonkeyPatch) -> None:
     assert calls == ["/rft/models", "/training/available-fft-models"]
 
 
+def test_lora_model_style_snapshot_preserves_status_and_price_styles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Model:
+        def __init__(self, name: str, at_capacity: bool) -> None:
+            self.name = name
+            self.at_capacity = at_capacity
+            self.promo_label = None
+
+        def resolve_prices(self, _kind: str) -> tuple[float, None]:
+            return (1.0, None)
+
+    stream = io.StringIO()
+    console = Console(
+        file=stream,
+        record=True,
+        force_terminal=True,
+        color_system="standard",
+        width=100,
+    )
+    monkeypatch.setattr(rl_commands, "console", console)
+
+    rl_commands._render_lora_models_table(
+        [Model("available-model", False), Model("full-model", True)]
+    )
+
+    snapshot = console.export_text(styles=True)
+    assert "\x1b[3mHosted Training — LoRA" in snapshot
+    assert "\x1b[32mAvailable  \x1b[0m" in snapshot
+    assert "\x1b[31mAt Capacity\x1b[0m" in snapshot
+    assert "\x1b[32m   $1\x1b[0m" in snapshot
+    assert "\x1b[2mPrices are per 1M tokens." in snapshot
+
+
 def test_models_json_includes_pricing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("prime_cli.core.APIClient.get", _mock_get_factory([]))
 
@@ -147,11 +184,23 @@ def test_models_handles_backend_without_pricing_fields(
     assert "qwen/qwen3-8b" in result.output
 
 
-def test_models_table_preserves_markup_like_model_names(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("plain", [False, True])
+@pytest.mark.parametrize(
+    "value",
+    [
+        "[bold]x[/bold]",
+        "[link=https://example.test]x[/link]",
+        "[red",
+        "🚀",
+    ],
+)
+def test_models_table_preserves_adversarial_model_names(
+    monkeypatch: pytest.MonkeyPatch, plain: bool, value: str
+) -> None:
     payload = {
         "models": [
             {
-                "name": "model[/INFO]",
+                "name": value,
                 "atCapacity": False,
                 "trainingPricePerMtok": 0.5,
                 "inferenceInputPricePerMtok": 1.0,
@@ -161,10 +210,15 @@ def test_models_table_preserves_markup_like_model_names(monkeypatch: pytest.Monk
     }
     monkeypatch.setattr("prime_cli.core.APIClient.get", _lora_only_mock(payload))
 
-    result = CliRunner().invoke(app, ["train", "models"], env={"COLUMNS": "200"})
+    result = CliRunner().invoke(
+        app,
+        [*(["--plain"] if plain else []), "train", "models"],
+        env={"COLUMNS": "200"},
+    )
 
     assert result.exit_code == 0, result.output
-    assert "model[/INFO]" in strip_ansi(result.output)
+    assert value in strip_ansi(result.output)
+    assert "MarkupError" not in result.output
 
 
 def _promo_payload() -> Dict[str, Any]:

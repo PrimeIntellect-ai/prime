@@ -1,11 +1,15 @@
 """Tests for `prime train usage` (per-run token + price view)."""
 
+import io
 import json
 from typing import Any, Dict, List, Optional
 
 import pytest
+from prime_cli.api.billing import RunUsage
+from prime_cli.commands.usage import _build_run_usage_table
 from prime_cli.main import app
 from prime_cli.utils.formatters import strip_ansi
+from rich.console import Console
 from typer.testing import CliRunner
 
 
@@ -88,6 +92,26 @@ def test_train_usage_table_renders_tokens_and_cost(monkeypatch: pytest.MonkeyPat
     assert calls == [{"endpoint": "/billing/runs/rft_abc/usage", "params": None}]
 
 
+def test_train_usage_style_snapshot_preserves_column_and_total_styles() -> None:
+    stream = io.StringIO()
+    console = Console(
+        file=stream,
+        record=True,
+        force_terminal=True,
+        color_system="standard",
+        width=100,
+    )
+
+    console.print(_build_run_usage_table(RunUsage.model_validate(_run_usage_payload())))
+    snapshot = console.export_text(styles=True)
+
+    assert "\x1b[36mTraining          \x1b[0m" in snapshot
+    assert "\x1b[32m$12.50\x1b[0m" in snapshot
+    assert "\x1b[1;36mTotal             \x1b[0m" in snapshot
+    assert "\x1b[1;32m$17.50\x1b[0m" in snapshot
+    assert "\x1b[2m                   model: qwen2.5-7b                   \x1b[0m" in snapshot
+
+
 def test_train_usage_json_output(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "prime_cli.core.APIClient.get",
@@ -142,6 +166,28 @@ def test_train_usage_escapes_rich_markup_in_run_name_and_status(
     assert "RUN[blink] [/INFO]" in plain
     assert "run[/INFO]" in plain
     assert "model[/INFO]" in plain
+
+
+def test_train_usage_wraps_long_metadata_without_corrupting_table(monkeypatch) -> None:
+    payload = _run_usage_payload()
+    payload["run_name"] = "[bold]" + ("🚀" * 120) + "[/bold]"
+    payload["base_model"] = "model[red" + ("x" * 280)
+    monkeypatch.setattr(
+        "prime_cli.core.APIClient.get",
+        _make_get_mock({"/billing/runs/rft_abc/usage": payload}, []),
+    )
+
+    result = CliRunner().invoke(
+        app,
+        ["train", "usage", "rft_abc"],
+        env={"COLUMNS": "60"},
+    )
+
+    assert result.exit_code == 0, result.output
+    output = strip_ansi(result.output)
+    assert "[bold]" in output
+    assert "model[red" in output
+    assert max(map(len, output.splitlines())) <= 60
 
 
 @pytest.mark.parametrize("plain", [False, True])

@@ -2269,6 +2269,12 @@ def _render_discovery_empty_state(
         console.print("[dim]This could mean no healthy Hosted Training clusters are running.[/dim]")
 
 
+def _promo_price_text(original: Any, effective: Any) -> Text:
+    """Render the formatter's intentional price markup as a styled Text cell."""
+    rendered = format_promo_price(original, effective) or "-"
+    return Text.from_markup(rendered)
+
+
 def _render_lora_models_table(models: list) -> None:
     """Render the classic LoRA Hosted Training model listing.
 
@@ -2289,31 +2295,31 @@ def _render_lora_models_table(models: list) -> None:
 
     promo_labels: list[str] = []
     for model in sorted(models, key=lambda model: _model_name_sort_key(model.name)):
-        if model.at_capacity:
-            status = "[red]At Capacity[/red]"
-        else:
-            status = "[green]Available[/green]"
+        status = Text(
+            "At Capacity" if model.at_capacity else "Available",
+            style="red" if model.at_capacity else "green",
+        )
         list_train, eff_train = model.resolve_prices("training")
         list_input, eff_input = model.resolve_prices("inference_input")
         list_output, eff_output = model.resolve_prices("inference_output")
         table.add_row(
             Text(str(model.name)),
             status,
-            format_promo_price(list_input, eff_input) or "-",
-            format_promo_price(list_output, eff_output) or "-",
-            format_promo_price(list_train, eff_train) or "-",
+            _promo_price_text(list_input, eff_input),
+            _promo_price_text(list_output, eff_output),
+            _promo_price_text(list_train, eff_train),
         )
         if model.promo_label and model.promo_label not in promo_labels:
             promo_labels.append(model.promo_label)
 
-    caption = (
-        "[dim]Prices are per 1M tokens. All models support context windows of 64K tokens.[/dim]"
+    caption = Text(
+        "Prices are per 1M tokens. All models support context windows of 64K tokens.",
+        style="dim",
     )
-    caption_lines = [caption]
     if promo_labels:
-        joined = ", ".join(rich_escape(label) for label in promo_labels)
-        caption_lines.append(f"[bold yellow]{joined}[/bold yellow]")
-    table.caption = "\n".join(caption_lines)
+        caption.append("\n")
+        caption.append(", ".join(promo_labels), style="bold yellow")
+    table.caption = caption
     console.print(table)
 
 
@@ -2339,7 +2345,7 @@ def _render_fft_models_table(fft_models: list) -> None:
             Text(", ".join(gpu_types) or "-"),
         )
 
-    table.caption = "[dim]Models pre-cached on clusters you can dispatch FFT runs to.[/dim]"
+    table.caption = Text("Models pre-cached on clusters you can dispatch FFT runs to.", style="dim")
     console.print(table)
 
 
@@ -2358,11 +2364,10 @@ def _render_on_demand_table(on_demand: list) -> None:
     queue caveat, never a start-time promise.
     """
     beta = any(entry.is_beta for entry in on_demand)
-    table = Table(
-        title="On-Demand Capacity" + (" [yellow](beta)[/yellow]" if beta else ""),
-        title_justify="left",
-        caption_justify="left",
-    )
+    title = Text("On-Demand Capacity")
+    if beta:
+        title.append(" (beta)", style="yellow")
+    table = Table(title=title, title_justify="left", caption_justify="left")
     table.add_column("GPU Type", style="magenta")
     table.add_column("$/GPU-hr", style="green", justify="right")
     table.add_column("Capacity")
@@ -2371,8 +2376,11 @@ def _render_on_demand_table(on_demand: list) -> None:
     for entry in on_demand:
         table.add_row(
             Text(str(entry.gpu_type)),
-            f"${entry.price_per_gpu_hour:.2f}",
-            "[green]available[/green]" if entry.available_now else "[yellow]busy[/yellow]",
+            Text(f"${entry.price_per_gpu_hour:.2f}"),
+            Text(
+                "available" if entry.available_now else "busy",
+                style="green" if entry.available_now else "yellow",
+            ),
         )
         if entry.discount_label:
             promos.append(entry.discount_label)
@@ -2380,15 +2388,16 @@ def _render_on_demand_table(on_demand: list) -> None:
     # The rate is snapshotted at dispatch (queue promotion reuses it),
     # while billable time only starts once pods are ready — two different
     # events the old caption conflated into "when the run starts".
-    caption = [
-        "[dim]Rate fixed at dispatch; billed per GPU-hour from when pods "
-        "are ready, prorated to the second.[/dim]",
-        "[dim]Runs may queue depending on GPU count and topology.[/dim]",
-    ]
+    caption = Text(
+        "Rate fixed at dispatch; billed per GPU-hour from when pods "
+        "are ready, prorated to the second.\n"
+        "Runs may queue depending on GPU count and topology.",
+        style="dim",
+    )
     if promos:
-        joined = ", ".join(rich_escape(label) for label in sorted(set(promos)))
-        caption.append(f"[bold yellow]{joined}[/bold yellow]")
-    table.caption = "\n".join(caption)
+        caption.append("\n")
+        caption.append(", ".join(sorted(set(promos))), style="bold yellow")
+    table.caption = caption
     console.print(table)
 
 

@@ -130,10 +130,10 @@ def _build_run_usage_table(usage: RunUsage) -> Table:
         format_price_per_mtok(usage.pricing.inference_output_per_mtok) or "-",
     )
     table.add_row(
-        "[bold]Total[/bold]",
-        f"[bold]{_format_tokens(usage.total_tokens)}[/bold]",
-        f"[bold]{format_usd(usage.total_cost_usd)}[/bold]",
-        "",
+        Text("Total", style="bold"),
+        Text(_format_tokens(usage.total_tokens), style="bold"),
+        Text(format_usd(usage.total_cost_usd), style="bold"),
+        Text(""),
     )
     return table
 

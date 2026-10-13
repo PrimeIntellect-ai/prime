@@ -205,8 +205,8 @@ def list_models(
                 # Raw serving values are untrusted upstream data; Text cells
                 # render them verbatim, so Rich markup cannot restyle the table.
                 row.append(Text(_format_serving(m.get("serving"))))
-            row.append(Text(format_price_per_mtok(pricing.get("input_usd_per_mtok"))))
-            row.append(Text(format_price_per_mtok(pricing.get("output_usd_per_mtok"))))
+            row.append(Text.from_markup(format_price_per_mtok(pricing.get("input_usd_per_mtok"))))
+            row.append(Text.from_markup(format_price_per_mtok(pricing.get("output_usd_per_mtok"))))
             if show_cache:
                 cache_read = pricing.get("cache_read_usd_per_mtok")
                 cache_write = pricing.get("cache_write_usd_per_mtok")
@@ -216,7 +216,7 @@ def list_models(
                     cache_cell = (
                         f"{_format_cache_price(cache_read)} / {_format_cache_price(cache_write)}"
                     )
-                    row.append(Text(cache_cell))
+                    row.append(Text.from_markup(cache_cell))
             if show_specs:
                 row.append(_format_token_count(specs.get("context_window")))
                 row.append(_format_token_count(specs.get("max_output_tokens")))

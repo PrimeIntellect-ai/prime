@@ -1,6 +1,8 @@
 import re
 from typing import Any, Dict, List, Optional, Union
 
+from rich.markup import escape
+
 ANSI_ESCAPE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 
 
@@ -67,7 +69,7 @@ def format_price_per_mtok(value: Any) -> str:
         f = float(value)
         return f"${f:.6f}".rstrip("0").rstrip(".")
     except (TypeError, ValueError):
-        return str(value)
+        return escape(str(value))
 
 
 def format_promo_price(original: Any, effective: Any) -> str:

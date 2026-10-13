@@ -15,6 +15,11 @@ def test_env_init_uses_verifiers_v1_cli(monkeypatch: Any) -> None:
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(env_command.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        env_command,
+        "resolve_workspace_python",
+        lambda: "/workspace/.venv/bin/python",
+    )
 
     result = runner.invoke(
         env_command.app,
@@ -23,7 +28,15 @@ def test_env_init_uses_verifiers_v1_cli(monkeypatch: Any) -> None:
 
     assert result.exit_code == 0, result.output
     assert commands == [
-        ["uv", "run", "vf-init", "my-env", "--path", "./environments", "--some-v1-option"]
+        [
+            "/workspace/.venv/bin/python",
+            "-m",
+            "verifiers.v1.cli.init",
+            "my-env",
+            "--path",
+            "./environments",
+            "--some-v1-option",
+        ]
     ]
 
 
@@ -76,8 +89,20 @@ def test_env_init_forwards_help_to_verifiers(monkeypatch: Any) -> None:
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(env_command.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        env_command,
+        "resolve_workspace_python",
+        lambda: "/workspace/.venv/bin/python",
+    )
 
     result = runner.invoke(env_command.app, ["init", "--help"])
 
     assert result.exit_code == 0, result.output
-    assert commands == [["uv", "run", "vf-init", "--help"]]
+    assert commands == [
+        [
+            "/workspace/.venv/bin/python",
+            "-m",
+            "verifiers.v1.cli.init",
+            "--help",
+        ]
+    ]

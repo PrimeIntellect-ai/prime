@@ -794,8 +794,8 @@ def _resolve_pull_environment_path(target: Optional[str], env_name: str) -> Path
 def _build_init_command(name: Optional[str], passthrough_args: List[str], *, v0: bool) -> List[str]:
     """Build the command used to scaffold an environment.
 
-    Verifiers v1 exposes ``vf-init`` as its supported initializer.  Keep the
-    old module entry point available only when explicitly requested so an
+    Verifiers v1 exposes ``verifiers.v1.cli.init`` as its initializer. Keep
+    the old module entry point available only when explicitly requested so an
     existing v0 workspace can still be bootstrapped.
     """
     if v0:
@@ -805,7 +805,11 @@ def _build_init_command(name: Optional[str], passthrough_args: List[str], *, v0:
             "verifiers.cli.commands.init",
         ]
     else:
-        command = ["uv", "run", "vf-init"]
+        command = [
+            resolve_workspace_python(),
+            "-m",
+            "verifiers.v1.cli.init",
+        ]
     if name is not None:
         command.append(name)
     command.extend(passthrough_args)
@@ -834,7 +838,7 @@ def init(
         False,
         "--v0",
         "--legacy",
-        help="Use the legacy Verifiers v0 initializer instead of vf-init.",
+        help="Use the legacy Verifiers v0 initializer instead of the v1 initializer.",
     ),
 ) -> None:
     """Initialize a new Verifiers v1 environment."""
@@ -845,7 +849,7 @@ def init(
         try:
             result = subprocess.run(command)
         except FileNotFoundError as exc:
-            command_name = "legacy Verifiers v0" if v0 else "Verifiers vf-init"
+            command_name = "legacy Verifiers v0" if v0 else "Verifiers v1 init"
             console.print(f"[red]Could not run {command_name}: {exc}[/red]")
             raise typer.Exit(1) from exc
         raise typer.Exit(result.returncode)
@@ -863,7 +867,7 @@ def init(
     try:
         result = subprocess.run(_build_init_command(name, passthrough_args, v0=v0))
     except FileNotFoundError as exc:
-        command_name = "legacy Verifiers v0" if v0 else "Verifiers vf-init"
+        command_name = "legacy Verifiers v0" if v0 else "Verifiers v1 init"
         console.print(f"[red]Could not run {command_name}: {exc}[/red]")
         raise typer.Exit(1) from exc
 

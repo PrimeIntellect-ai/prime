@@ -142,7 +142,7 @@ prime env inspect <environment-name>
 # Install an environment locally
 prime env install <environment-name>
 
-# Scaffold a new v1 environment (delegates to verifiers' `vf-init`)
+# Scaffold a new v1 environment (delegates to Verifiers' v1 initializer)
 prime env init my-environment
 
 # Push your own environment
@@ -151,7 +151,7 @@ prime env push my-environment
 
 ### Lab and Hosted Training
 
-Start with `prime lab setup` to create a local workspace with starter configs, coding-agent skills and a verifiers install; build and evaluate environments there with verifiers' `vf-init` and `vf-eval`. Then use `prime train models` to choose a Hosted Training model with current capacity and pricing.
+Start with `prime lab setup` to create a local workspace with starter configs, coding-agent skills and a verifiers install; scaffold environments with `prime env init` and evaluate them with Verifiers' evaluation tools. Then use `prime train models` to choose a Hosted Training model with current capacity and pricing.
 
 ```bash
 # Set up a Lab workspace

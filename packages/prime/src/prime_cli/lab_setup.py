@@ -1352,7 +1352,7 @@ def _post_setup_call_to_action(options: LabSetupOptions) -> RenderableType:
     )
 
     commands = (
-        "uv run vf-init my-env",
+        "prime env init my-env",
         "uv run vf-eval my-env -m openai/gpt-5.4-nano -n 5",
         "prime train configs/rl/qwen.toml",
         "uv run vf-gepa my-env -m openai/gpt-5.4-nano",

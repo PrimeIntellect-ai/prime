@@ -88,7 +88,7 @@ def create(
     warm: bool = typer.Option(
         True,
         "--warm/--no-warm",
-        help="Start a read-write session in the background (stops after 30 min idle)",
+        help="Start a read-only session in the background (stops after 30 min idle)",
     ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
@@ -113,7 +113,11 @@ def create(
     )
     console.print(f"Use it with: prime train config.toml --volume {volume.name}")
     if warm:
-        console.print("Starting a session in the background so the volume is ready for put/ssh.")
+        console.print(
+            "If your account has a cluster allocation or your team owns a cluster, a "
+            "read-only session starts in the background so `prime volumes ssh --read-only` "
+            "is ready faster."
+        )
 
 
 @app.command("list")
@@ -497,7 +501,7 @@ def ssh(
         console.print(f"[red]Could not start SSH:[/red] {exc}")
         raise typer.Exit(1) from exc
     if not session.read_only:
-        console.print("Changes sync to the volume every minute.")
+        console.print("Changes are saved to the volume when the session stops.")
     console.print(
         "The session stops after 30 minutes idle. Stop it now with: "
         f"prime volumes stop {escape(name)} {session.id}"

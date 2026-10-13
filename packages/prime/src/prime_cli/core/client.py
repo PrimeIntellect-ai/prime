@@ -1,5 +1,5 @@
 import sys
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Union
 
 import httpx
 
@@ -110,7 +110,7 @@ class APIClient:
         endpoint: str,
         params: Optional[Dict[str, Any]] = None,
         json: Optional[Dict[str, Any]] = None,
-        timeout: Optional[int] = None,
+        timeout: Optional[Union[float, httpx.Timeout]] = None,
     ) -> Dict[str, Any]:
         """Make a request to the API"""
         self._check_auth_required()
@@ -184,14 +184,19 @@ class APIClient:
         self,
         endpoint: str,
         params: Optional[Dict[str, Any]] = None,
-        timeout: Optional[int] = None,
+        timeout: Optional[Union[float, httpx.Timeout]] = None,
     ) -> Dict[str, Any]:
         """Make a GET request to the API"""
         return self.request("GET", endpoint, params=params, timeout=timeout)
 
-    def post(self, endpoint: str, json: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Make a POST request to the API"""
-        return self.request("POST", endpoint, json=json)
+    def post(
+        self,
+        endpoint: str,
+        json: Optional[Dict[str, Any]] = None,
+        timeout: Optional[Union[float, httpx.Timeout]] = None,
+    ) -> Dict[str, Any]:
+        """Make a POST request to the API (timeout: per-request override)"""
+        return self.request("POST", endpoint, json=json, timeout=timeout)
 
     def patch(
         self,
@@ -260,7 +265,7 @@ class AsyncAPIClient:
         endpoint: str,
         params: Optional[Dict[str, Any]] = None,
         json: Optional[Dict[str, Any]] = None,
-        timeout: Optional[int] = None,
+        timeout: Optional[Union[float, httpx.Timeout]] = None,
     ) -> Dict[str, Any]:
         """Make an async request to the API"""
         self._check_auth_required()

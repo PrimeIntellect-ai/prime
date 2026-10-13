@@ -129,7 +129,7 @@ def test_train_reports_missing_and_invalid_config(monkeypatch, tmp_path: Path) -
 def test_train_request_submits_model_request(monkeypatch) -> None:
     captured: dict[str, Any] = {}
 
-    def mock_post(self: Any, endpoint: str, json: dict[str, Any] | None = None) -> dict:
+    def mock_post(self: Any, endpoint: str, json: dict[str, Any] | None = None, **_: Any) -> dict:
         captured["endpoint"] = endpoint
         captured["json"] = json
         return {"message": "Request submitted"}
@@ -826,7 +826,7 @@ _BILLED_RESPONSE = {
 def _mock_run_post(monkeypatch, response: dict[str, Any]) -> dict[str, Any]:
     captured: dict[str, Any] = {}
 
-    def mock_post(self: Any, endpoint: str, json: dict[str, Any] | None = None) -> dict:
+    def mock_post(self: Any, endpoint: str, json: dict[str, Any] | None = None, **_: Any) -> dict:
         captured["endpoint"] = endpoint
         captured["json"] = json
         return response
@@ -952,3 +952,23 @@ def test_train_fft_billed_zero_rate_is_visible(monkeypatch, tmp_path: Path) -> N
     assert result.exit_code == 0, result.output
     assert "$0.00/GPU-hr" in result.output
     assert "~$0.00/hr" in result.output
+
+
+def test_create_run_waits_out_a_cold_validator():
+    """POST /training/runs validates through the rl-validator, which can take
+    its full 60s when cold (ENG-6696); the 30s client default gave up first."""
+    from unittest.mock import MagicMock
+
+    from prime_cli.api.training import CREATE_RUN_TIMEOUT, HostedTrainingClient
+
+    api = MagicMock()
+    api.post.return_value = {"id": "r1"}
+    try:
+        HostedTrainingClient(api).create_run({"x": 1})
+    except Exception:
+        pass  # response model shape is not what's under test
+    assert api.post.call_args.args == ("/training/runs",)
+    timeout = api.post.call_args.kwargs["timeout"]
+    assert timeout is CREATE_RUN_TIMEOUT
+    # The read wait outlasts the validator; connecting still fails fast.
+    assert timeout.read > 60 and timeout.connect == 10.0

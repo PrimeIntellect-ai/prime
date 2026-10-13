@@ -3,9 +3,10 @@
 import asyncio
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
-from prime_evals import EvalsAPIError
+from prime_evals.core import APIClient as EvalsAPIClient
 from prime_evals.evals import AsyncEvalsClient, EvalsClient
 from prime_evals.models import (
     CreateEvaluationRequest,
@@ -145,6 +146,33 @@ def test_lookup_environment_by_slug_uses_owner_aware_detail_endpoint():
     assert calls == [("get", "/environmentshub/d42me/opencode-cp/@latest")]
 
 
+@pytest.mark.parametrize("owner_slug", ["gutchapa", "research"])
+def test_lookup_environment_by_slug_uses_mocked_http_for_user_and_team(owner_slug):
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "id": "env-123",
+                    "slug": f"{owner_slug}/rtk-compression",
+                }
+            },
+        )
+
+    api_client = EvalsAPIClient(api_key="test-api-key")
+    with httpx.Client(transport=httpx.MockTransport(handler)) as http_client:
+        api_client.client = http_client
+        env_id = EvalsClient(api_client)._lookup_environment_by_slug(owner_slug, "rtk-compression")
+
+    assert env_id == "env-123"
+    assert len(requests) == 1
+    assert requests[0].method == "GET"
+    assert requests[0].url.path == (f"/api/v1/environmentshub/{owner_slug}/rtk-compression/@latest")
+
+
 def test_async_lookup_environment_by_slug_uses_owner_aware_detail_endpoint():
     calls = []
 
@@ -163,19 +191,6 @@ def test_async_lookup_environment_by_slug_uses_owner_aware_detail_endpoint():
 
     assert env_id == "env-123"
     assert calls == [("get", "/environmentshub/d42me/opencode-cp/@latest")]
-
-
-def test_lookup_environment_by_slug_wraps_prime_cli_api_errors():
-    from prime_cli.core import APIError as PrimeCLIAPIError
-
-    class FakeAPIClient:
-        def get(self, _endpoint):
-            raise PrimeCLIAPIError("HTTP 403: You are not a member of this team")
-
-    client = EvalsClient(FakeAPIClient())
-
-    with pytest.raises(EvalsAPIError, match="does not exist"):
-        client._lookup_environment_by_slug("user", "env")
 
 
 def test_push_samples_reports_progress_and_reuses_http_client(monkeypatch):

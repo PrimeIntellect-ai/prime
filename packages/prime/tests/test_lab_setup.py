@@ -373,7 +373,7 @@ def test_lab_setup_service_emits_post_setup_call_to_action(
     assert "I want to train a model for <my task domain>" in output
     assert "uv run vf-init my-env" in output
     assert "uv run vf-eval my-env -m openai/gpt-5.4-nano -n 5" in output
-    assert "prime train configs/rl/" in output
+    assert "prime train configs/rl/" not in output
     assert "uv run vf-gepa my-env -m openai/gpt-5.4-nano" in output
     assert "prime eval view" not in output
 

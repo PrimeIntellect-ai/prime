@@ -115,6 +115,39 @@ class EgressPolicyStatus(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class LanRule(BaseModel):
+    """A directed allow rule: members matching ``from`` may connect to members
+    matching ``to``. Selectors are ``*`` or ``tag:<name>``; ``ports`` limits the
+    destination ports (all ports when omitted)."""
+
+    from_: str = Field(alias="from")
+    to: str
+    ports: Optional[List[int]] = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class LanNetworkMember(BaseModel):
+    """A sandbox in a LAN network, reachable at ``<sandbox_id>.sandbox.internal``."""
+
+    sandbox_id: str
+    tags: List[str]
+    synced: bool
+
+
+class LanNetwork(BaseModel):
+    """A private network between VM sandboxes of one owner."""
+
+    id: str
+    name: str
+    team_id: Optional[str] = None
+    rules: List[LanRule]
+    version: int
+    synced: bool
+    created_at: datetime
+    members: Optional[List[LanNetworkMember]] = None
+
+
 class SSHSession(BaseModel):
     """Ephemeral SSH access to a VM sandbox."""
 

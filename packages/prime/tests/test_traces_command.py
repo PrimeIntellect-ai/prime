@@ -1864,7 +1864,7 @@ def test_plain_list_strips_table_borders_when_rows_share_values(fake_client, arg
 
 
 # ---------------------------------------------------------------------------
-# One trace's index: `prime traces list --nodes|--calls --trace-id`, and --all
+# One trace's index: `prime traces node list` and `call list`, and --all
 # ---------------------------------------------------------------------------
 
 
@@ -1874,9 +1874,8 @@ def test_list_nodes_forwards_filters_and_shows_one_line_per_message(fake_client,
         main_app,
         [
             "traces",
+            "node",
             "list",
-            "--nodes",
-            "--trace-id",
             "t-1",
             "--role",
             "assistant",
@@ -1921,7 +1920,7 @@ def test_list_nodes_sends_after_on_the_first_page_only(fake_client):
     fake_client.list_nodes = list_nodes
 
     result = runner.invoke(
-        main_app, ["traces", "list", "--nodes", "--trace-id", "t-1", "--after", "4", "--page", "2"]
+        main_app, ["traces", "node", "list", "t-1", "--after", "4", "--page", "2"]
     )
 
     assert result.exit_code == 0, result.output
@@ -1929,9 +1928,7 @@ def test_list_nodes_sends_after_on_the_first_page_only(fake_client):
 
 
 def test_list_nodes_json_is_the_page(fake_client):
-    result = runner.invoke(
-        main_app, ["traces", "list", "--nodes", "--trace-id", "t-1", "-o", "json"]
-    )
+    result = runner.invoke(main_app, ["traces", "node", "list", "t-1", "-o", "json"])
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
@@ -1946,7 +1943,7 @@ def test_list_nodes_warns_when_the_trace_outgrew_its_index(fake_client):
         _node(0, "user", content="hi"), partial_index=True
     )
 
-    result = runner.invoke(main_app, ["traces", "list", "--nodes", "--trace-id", "t-1"])
+    result = runner.invoke(main_app, ["traces", "node", "list", "t-1"])
 
     assert result.exit_code == 0, result.output
     assert "longer than its index" in result.stderr
@@ -1959,7 +1956,7 @@ def test_list_nodes_explains_a_trace_that_is_not_indexed_yet(fake_client):
 
     fake_client.list_nodes = not_indexed
 
-    result = runner.invoke(main_app, ["traces", "list", "--nodes", "--trace-id", "t-1"])
+    result = runner.invoke(main_app, ["traces", "node", "list", "t-1"])
 
     assert result.exit_code == 1
     assert "Trace t-1 is still being indexed." in result.stderr
@@ -1971,9 +1968,8 @@ def test_list_calls_forwards_filters_and_shows_each_call(fake_client):
         main_app,
         [
             "traces",
+            "call",
             "list",
-            "--calls",
-            "--trace-id",
             "t-1",
             "--model-id",
             "glm-5.3",
@@ -2002,43 +1998,40 @@ def test_list_calls_forwards_filters_and_shows_each_call(fake_client):
 @pytest.mark.parametrize(
     ("args", "message"),
     [
-        (["--nodes"], "--nodes needs --trace-id"),
-        (["--calls"], "--calls needs --trace-id"),
-        (["--trace-id", "t-1"], "--trace-id cannot be combined with a trace or episode listing"),
-        (["--role", "user"], "--role cannot be combined with a trace or episode listing"),
-        (["--nodes", "--calls", "--trace-id", "t-1"], "--nodes cannot be combined with --calls"),
         (
-            ["--episodes", "--nodes", "--trace-id", "t-1"],
-            "--episodes cannot be combined with --nodes",
-        ),
-        (
-            ["--nodes", "--trace-id", "t-1", "--run-id", "r"],
-            "--run-id cannot be combined with --nodes",
-        ),
-        (
-            ["--nodes", "--trace-id", "t-1", "--model-id", "m"],
-            "--model-id cannot be combined with --nodes",
-        ),
-        (
-            ["--calls", "--trace-id", "t-1", "--role", "user"],
-            "--role cannot be combined with --calls",
-        ),
-        (
-            ["--calls", "--trace-id", "t-1", "--after", "3"],
-            "--after cannot be combined with --calls",
-        ),
-        (
-            ["--nodes", "--trace-id", "t-1", "--after", "3", "--cursor", "c"],
+            ["node", "list", "t-1", "--after", "3", "--cursor", "c"],
             "--after cannot be combined with --cursor",
         ),
-        (["--all", "--page", "2"], "--all cannot be combined with --page"),
+        (["node", "list", "t-1", "--all", "--page", "2"], "--all cannot be combined with --page"),
+        (
+            ["call", "list", "t-1", "--page", "2", "--cursor", "c"],
+            "--page cannot be combined with --cursor",
+        ),
+        (["call", "list", "t-1", "--all", "--page", "2"], "--all cannot be combined with --page"),
+        (["list", "--all", "--page", "2"], "--all cannot be combined with --page"),
     ],
 )
-def test_index_listings_reject_conflicting_options_before_any_request(fake_client, args, message):
-    result = runner.invoke(main_app, ["traces", "list", *args])
+def test_listings_reject_conflicting_paging_options_before_any_request(fake_client, args, message):
+    result = runner.invoke(main_app, ["traces", *args])
 
     assert result.exit_code == 1
     assert message in result.output
+    assert fake_client.calls == {}
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["node", "list", "t-1", "--model-id", "m"],
+        ["call", "list", "t-1", "--role", "user"],
+        ["list", "--trace-id", "t-1"],
+    ],
+)
+def test_index_filters_belong_to_their_own_command(fake_client, args):
+    result = runner.invoke(main_app, ["traces", *args])
+
+    assert result.exit_code == 2
+    assert "No such option" in result.output
     assert fake_client.calls == {}
 
 
@@ -2091,9 +2084,7 @@ def test_list_all_keeps_the_last_pages_index_verdict(fake_client):
     }
     fake_client.list_nodes = lambda trace_id, **kwargs: pages[kwargs["cursor"]]
 
-    result = runner.invoke(
-        main_app, ["traces", "list", "--nodes", "--trace-id", "t-1", "--all", "-o", "json"]
-    )
+    result = runner.invoke(main_app, ["traces", "node", "list", "t-1", "--all", "-o", "json"])
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)

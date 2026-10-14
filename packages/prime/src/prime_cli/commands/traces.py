@@ -1,3 +1,4 @@
+import functools
 import re
 import tempfile
 from pathlib import Path
@@ -70,11 +71,19 @@ LIST_JSON_HELP = json_output_help(
     " duration_ms, created_at, ingested_at, ...}",
     "with --episodes: .items[] = episode summary {episode_id, run_id, environment_id,"
     " outcome, has_error, error{type, message}, created_at, ...}",
-    "with --nodes: .items[] = {node_idx, parent_idx, timestamp, sampled, message{role,"
-    " content, reasoning_content, tool_calls, tool_call_id, name, tool_name}}",
-    "with --calls: .items[] = {call_idx, node_idx, time_start, time_end, model, endpoint,"
-    " finish_reason}",
-    "with --nodes or --calls: .partial_index = bool, .indexed_count? = number",
+    ".next_cursor? = string (null with --all)",
+)
+
+NODE_LIST_JSON_HELP = json_output_help(
+    ".items[] = {node_idx, parent_idx, timestamp, sampled, message{role, content,"
+    " reasoning_content, tool_calls, tool_call_id, name, tool_name}}",
+    ".partial_index = bool, .indexed_count? = number",
+    ".next_cursor? = string (null with --all)",
+)
+
+CALL_LIST_JSON_HELP = json_output_help(
+    ".items[] = {call_idx, node_idx, time_start, time_end, model, endpoint, finish_reason}",
+    ".partial_index = bool, .indexed_count? = number",
     ".next_cursor? = string (null with --all)",
 )
 
@@ -393,6 +402,18 @@ def _check_paging(page: int, cursor: Optional[str]) -> None:
         raise typer.Exit(1)
 
 
+def _check_all_pages(all_pages: bool, page: int) -> None:
+    if all_pages and page != 1:
+        error_console.print("[red]Error:[/red] --all cannot be combined with --page")
+        raise typer.Exit(1)
+
+
+def _page_size(limit: Optional[int], all_pages: bool) -> int:
+    if limit is not None:
+        return limit
+    return 100 if all_pages else 20
+
+
 def _print_empty_page(noun: str, page: int, count: int) -> None:
     if not count and page > 1:
         console.print(f"[yellow]No {noun} on page {page}.[/yellow]")
@@ -497,15 +518,6 @@ def _reject_options(mode: str, given: Dict[str, bool]) -> None:
 @app.command("list", epilog=LIST_JSON_HELP)
 def list_traces(
     episodes: bool = typer.Option(False, "--episodes", help="List episodes instead of traces"),
-    nodes: bool = typer.Option(
-        False, "--nodes", help="List one trace's messages, in order (needs --trace-id)"
-    ),
-    calls: bool = typer.Option(
-        False, "--calls", help="List one trace's model calls, in order (needs --trace-id)"
-    ),
-    trace_id: Optional[str] = typer.Option(
-        None, "--trace-id", help="With --nodes or --calls: the trace to read"
-    ),
     run_id: Optional[str] = typer.Option(None, "--run-id", help="Filter by run ID"),
     upload_id: List[str] = typer.Option(
         [],
@@ -528,7 +540,7 @@ def list_traces(
         None, "--task-id", help="Filter by task ID (traces only)"
     ),
     model_id: Optional[str] = typer.Option(
-        None, "--model-id", help="Filter by model ID (traces, or calls with --calls)"
+        None, "--model-id", help="Filter by model ID (traces only)"
     ),
     outcome: Optional[str] = typer.Option(None, "--outcome", help="Filter by outcome"),
     has_error: Optional[bool] = typer.Option(
@@ -545,25 +557,6 @@ def list_traces(
         "--run-step",
         min=0,
         help="With --episodes: only episodes with a trace from this training step",
-    ),
-    role: List[str] = typer.Option(
-        [],
-        "--role",
-        help="With --nodes: only messages from this role (system, user, assistant, tool);"
-        " repeatable",
-    ),
-    sampled: Optional[bool] = typer.Option(
-        None,
-        "--sampled/--no-sampled",
-        help="With --nodes: only messages the model generated (or only the others)",
-    ),
-    after: Optional[int] = typer.Option(
-        None, "--after", min=0, help="With --nodes: start after this node index"
-    ),
-    finish_reason: List[str] = typer.Option(
-        [],
-        "--finish-reason",
-        help="With --calls: only calls that ended this way (e.g. stop, length); repeatable",
     ),
     created_after: Optional[str] = typer.Option(
         None, "--created-after", help="ISO timestamp; also the cheapest filter"
@@ -598,87 +591,26 @@ def list_traces(
     ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """List trace summaries, or episode summaries with --episodes, newest first.
-
-    With --nodes or --calls, list one trace's messages or model calls in order,
-    read from the trace's index instead of downloading the whole document.
-    """
+    """List trace summaries, or episode summaries with --episodes, newest first."""
     validate_output_format(output, error_console)
     _check_paging(page, cursor)
-    if all_pages and page != 1:
-        error_console.print("[red]Error:[/red] --all cannot be combined with --page")
-        raise typer.Exit(1)
-    modes = [
-        name
-        for name, on in (("--episodes", episodes), ("--nodes", nodes), ("--calls", calls))
-        if on
-    ]
-    if len(modes) > 1:
-        error_console.print(f"[red]Error:[/red] {modes[0]} cannot be combined with {modes[1]}")
-        raise typer.Exit(1)
-    page_size = limit if limit is not None else 100 if all_pages else 20
-    if nodes or calls:
-        mode = modes[0]
-        if trace_id is None:
-            error_console.print(f"[red]Error:[/red] {mode} needs --trace-id")
-            raise typer.Exit(1)
-        # A trace's index is filtered on its own columns only.
+    _check_all_pages(all_pages, page)
+    page_size = _page_size(limit, all_pages)
+    if episodes:
+        # Episodes carry no task, model, reward or sort key of their own.
         _reject_options(
-            mode,
+            "--episodes",
             {
-                "--run-id": run_id is not None,
-                "--upload-id": bool(upload_id),
-                "--context": bool(context),
                 "--episode-id": episode_id is not None,
-                "--environment-id": environment_id is not None,
                 "--task-id": task_id is not None,
-                "--outcome": outcome is not None,
-                "--has-error": has_error is not None,
+                "--model-id": model_id is not None,
                 "--reward-min": reward_min is not None,
                 "--reward-max": reward_max is not None,
-                "--run-step": run_step is not None,
-                "--created-after": created_after is not None,
-                "--created-before": created_before is not None,
                 "--sort": sort is not None,
-                "--model-id": nodes and model_id is not None,
-                "--role": calls and bool(role),
-                "--sampled": calls and sampled is not None,
-                "--after": calls and after is not None,
-                "--finish-reason": nodes and bool(finish_reason),
             },
         )
-        if after is not None and cursor is not None:
-            # A cursor already names where the page starts.
-            error_console.print("[red]Error:[/red] --after cannot be combined with --cursor")
-            raise typer.Exit(1)
     else:
-        _reject_options(
-            "a trace or episode listing (add --nodes or --calls)",
-            {
-                "--trace-id": trace_id is not None,
-                "--role": bool(role),
-                "--sampled": sampled is not None,
-                "--after": after is not None,
-                "--finish-reason": bool(finish_reason),
-            },
-        )
-        if episodes:
-            # Episodes carry no task, model, reward or sort key of their own.
-            _reject_options(
-                "--episodes",
-                {
-                    "--episode-id": episode_id is not None,
-                    "--task-id": task_id is not None,
-                    "--model-id": model_id is not None,
-                    "--reward-min": reward_min is not None,
-                    "--reward-max": reward_max is not None,
-                    "--sort": sort is not None,
-                },
-            )
-        else:
-            _reject_options(
-                "a trace listing (add --episodes)", {"--run-step": run_step is not None}
-            )
+        _reject_options("a trace listing (add --episodes)", {"--run-step": run_step is not None})
     if episode_id is not None:
         _reject_options("--episode-id", {"--upload-id": bool(upload_id)})
     if episode_id is not None and sort is not None:
@@ -742,36 +674,7 @@ def list_traces(
                 cursor=page_cursor,
             )
 
-        def fetch_nodes(page_cursor: Optional[str]) -> TraceNodePage:
-            assert trace_id is not None
-            return client.list_nodes(
-                trace_id,
-                role=role or None,
-                sampled=sampled,
-                # Only the first page starts from --after; later ones from their cursor.
-                after=after if page_cursor is None else None,
-                limit=page_size,
-                cursor=page_cursor,
-            )
-
-        def fetch_calls(page_cursor: Optional[str]) -> TraceCallPage:
-            assert trace_id is not None
-            return client.list_calls(
-                trace_id,
-                model=[model_id] if model_id is not None else None,
-                finish_reason=finish_reason or None,
-                limit=page_size,
-                cursor=page_cursor,
-            )
-
-        if nodes:
-            fetch = fetch_nodes
-        elif calls:
-            fetch = fetch_calls
-        elif episodes:
-            fetch = fetch_episodes
-        else:
-            fetch = fetch_traces
+        fetch = fetch_episodes if episodes else fetch_traces
         if all_pages:
             result = _all_pages(fetch, cursor=cursor)
         else:
@@ -783,12 +686,6 @@ def list_traces(
         raise typer.Exit(1)
     except PaymentRequiredError as e:
         error_console.print(f"[red]Payment Required:[/red] {escape(str(e))}")
-        raise typer.Exit(1)
-    except TraceNotIndexedError:
-        error_console.print(
-            f"[yellow]Trace {escape(str(trace_id))} is still being indexed.[/yellow] Retry"
-            f" shortly, or read the whole document: prime traces get {escape(str(trace_id))} --raw"
-        )
         raise typer.Exit(1)
     except APIError as e:
         if episode_id is not None and _is_episode_not_found(e):
@@ -803,11 +700,6 @@ def list_traces(
 
     if output == "json":
         output_data_as_json(result.model_dump(mode="json"), console)
-        return
-
-    if isinstance(result, (TraceNodePage, TraceCallPage)):
-        assert trace_id is not None
-        _print_index_page(result, trace_id=trace_id, page=page, page_size=page_size, cursor=cursor)
         return
 
     if isinstance(result, EpisodeListPage):
@@ -869,6 +761,166 @@ def _print_index_page(
         page=page,
         limit=page_size,
         cursor=cursor,
+    )
+
+
+def _list_trace_index(
+    trace_id: str,
+    fetch: Callable[[TracesClient, Optional[str]], PageT],
+    *,
+    page: int,
+    page_size: int,
+    all_pages: bool,
+    cursor: Optional[str],
+    output: str,
+) -> None:
+    """Fetch one trace's node or call listing and print it."""
+    try:
+        client = _traces_client()
+        fetch_page = functools.partial(fetch, client)
+        if all_pages:
+            result = _all_pages(fetch_page, cursor=cursor)
+        else:
+            result = _list_page(fetch_page, page=page, cursor=cursor)
+    except UnauthorizedError as e:
+        error_console.print(f"[red]Unauthorized:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except PaymentRequiredError as e:
+        error_console.print(f"[red]Payment Required:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except TraceNotIndexedError:
+        error_console.print(
+            f"[yellow]Trace {escape(trace_id)} is still being indexed.[/yellow] Retry"
+            f" shortly, or read the whole document: prime traces get {escape(trace_id)} --raw"
+        )
+        raise typer.Exit(1)
+    except APIError as e:
+        error_console.print(f"[red]Error:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except Exception as e:
+        error_console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
+        error_console.print_exception()
+        raise typer.Exit(1)
+
+    if output == "json":
+        output_data_as_json(result.model_dump(mode="json"), console)
+        return
+    assert isinstance(result, (TraceNodePage, TraceCallPage))
+    _print_index_page(result, trace_id=trace_id, page=page, page_size=page_size, cursor=cursor)
+
+
+node_app = PlainTyper(help="Read one trace's messages from its index", no_args_is_help=True)
+app.add_typer(node_app, name="node")
+call_app = PlainTyper(help="Read one trace's model calls from its index", no_args_is_help=True)
+app.add_typer(call_app, name="call")
+
+
+@node_app.command("list", epilog=NODE_LIST_JSON_HELP, no_args_is_help=True)
+def list_nodes(
+    trace_id: str = typer.Argument(..., help="Trace ID"),
+    role: List[str] = typer.Option(
+        [],
+        "--role",
+        help="Only messages from this role (system, user, assistant, tool); repeatable",
+    ),
+    sampled: Optional[bool] = typer.Option(
+        None,
+        "--sampled/--no-sampled",
+        help="Only messages the model generated (or only the others)",
+    ),
+    after: Optional[int] = typer.Option(None, "--after", min=0, help="Start after this node index"),
+    page: int = typer.Option(1, "--page", "-p", help="Page number"),
+    limit: Optional[int] = typer.Option(
+        None, "--limit", help="Max results per page, up to 100 (default 20, or 100 with --all)"
+    ),
+    all_pages: bool = typer.Option(
+        False, "--all", help="Follow every page and print the results as one list"
+    ),
+    cursor: Optional[str] = typer.Option(
+        None,
+        "--cursor",
+        help="Resume from a cursor returned by a previous page (cannot be combined with --page)",
+    ),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """List one trace's messages in order, read from its index instead of the whole document."""
+    validate_output_format(output, error_console)
+    _check_paging(page, cursor)
+    _check_all_pages(all_pages, page)
+    if after is not None and cursor is not None:
+        # A cursor already names where the page starts.
+        error_console.print("[red]Error:[/red] --after cannot be combined with --cursor")
+        raise typer.Exit(1)
+    page_size = _page_size(limit, all_pages)
+
+    def fetch(client: TracesClient, page_cursor: Optional[str]) -> TraceNodePage:
+        return client.list_nodes(
+            trace_id,
+            role=role or None,
+            sampled=sampled,
+            # Only the first page starts from --after; later ones from their cursor.
+            after=after if page_cursor is None else None,
+            limit=page_size,
+            cursor=page_cursor,
+        )
+
+    _list_trace_index(
+        trace_id,
+        fetch,
+        page=page,
+        page_size=page_size,
+        all_pages=all_pages,
+        cursor=cursor,
+        output=output,
+    )
+
+
+@call_app.command("list", epilog=CALL_LIST_JSON_HELP, no_args_is_help=True)
+def list_calls(
+    trace_id: str = typer.Argument(..., help="Trace ID"),
+    model_id: Optional[str] = typer.Option(None, "--model-id", help="Filter by model ID"),
+    finish_reason: List[str] = typer.Option(
+        [],
+        "--finish-reason",
+        help="Only calls that ended this way (e.g. stop, length); repeatable",
+    ),
+    page: int = typer.Option(1, "--page", "-p", help="Page number"),
+    limit: Optional[int] = typer.Option(
+        None, "--limit", help="Max results per page, up to 100 (default 20, or 100 with --all)"
+    ),
+    all_pages: bool = typer.Option(
+        False, "--all", help="Follow every page and print the results as one list"
+    ),
+    cursor: Optional[str] = typer.Option(
+        None,
+        "--cursor",
+        help="Resume from a cursor returned by a previous page (cannot be combined with --page)",
+    ),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """List one trace's model calls in order, read from its index instead of the whole document."""
+    validate_output_format(output, error_console)
+    _check_paging(page, cursor)
+    _check_all_pages(all_pages, page)
+    page_size = _page_size(limit, all_pages)
+
+    def fetch(client: TracesClient, page_cursor: Optional[str]) -> TraceCallPage:
+        return client.list_calls(
+            trace_id,
+            model=[model_id] if model_id is not None else None,
+            finish_reason=finish_reason or None,
+            limit=page_size,
+            cursor=page_cursor,
+        )
+
+    _list_trace_index(
+        trace_id,
+        fetch,
+        page=page,
+        page_size=page_size,
+        all_pages=all_pages,
+        cursor=cursor,
+        output=output,
     )
 
 

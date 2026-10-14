@@ -10,6 +10,7 @@ authors = [
     { name = "Prime Intellect", email = "contact@primeintellect.ai" }
 ]
 dependencies = [
+    "prime-dev-sandboxes>=0.1.0",
     "prime-sandboxes>=0.4.3",
     "prime-evals>=0.2.4",
     "prime-traces>=0.0.9",
@@ -59,6 +60,7 @@ dev = [
 ]
 
 [tool.uv.sources]
+prime-dev-sandboxes = { workspace = true }
 prime-sandboxes = { workspace = true }
 prime-evals = { workspace = true }
 prime-traces = { workspace = true }

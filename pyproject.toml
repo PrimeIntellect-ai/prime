@@ -26,6 +26,7 @@ dev-dependencies = [
 # be picked up the day they release. All are PrimeIntellect-ai OIDC Trusted
 # Publisher packages already in this project's `uv tree` closure.
 prime           = false
+prime-dev-sandboxes = false
 prime-sandboxes = false
 prime-tunnel    = false
 prime-evals     = false
@@ -42,6 +43,7 @@ pythonpath = [
     "packages/prime-evals/src",
     "packages/prime-traces/src",
     "packages/prime-runs/src",
+    "packages/prime-dev-sandboxes/src",
 ]
 testpaths = [
     "packages/*/tests",

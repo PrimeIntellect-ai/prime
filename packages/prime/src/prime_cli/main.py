@@ -7,6 +7,7 @@ from . import __version__
 from .commands.availability import app as availability_app
 from .commands.config import app as config_app
 from .commands.deployments import app as deployments_app
+from .commands.dev_sandbox import app as dev_sandbox_app
 from .commands.disks import app as disks_app
 from .commands.env import app as env_app
 from .commands.evals import app as evals_app
@@ -66,6 +67,7 @@ app.add_typer(disks_app, name="disks", rich_help_panel="Compute")
 app.add_typer(pods_app, name="pods", rich_help_panel="Compute")
 app.add_typer(sandbox_app, name="sandbox", rich_help_panel="Compute")
 app.add_typer(images_app, name="images", rich_help_panel="Compute")
+app.add_typer(dev_sandbox_app, name="dev-sandbox", rich_help_panel="Compute")
 app.add_typer(tunnel_app, name="tunnel", rich_help_panel="Compute")
 app.add_typer(inference_app, name="inference", rich_help_panel="Compute")
 

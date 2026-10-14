@@ -3,10 +3,14 @@ import pytest
 from _samples import (
     EMPTY_AGGREGATE,
     ENCODED_EPISODE_PATH,
+    ENCODED_RUN_PATH,
     ENCODED_TRACE_PATH,
     EPISODE,
     RESERVED_EPISODE_ID,
+    RESERVED_RUN_ID,
     RESERVED_TRACE_ID,
+    RUN,
+    RUN_STEPS,
     SUMMARY,
 )
 
@@ -757,6 +761,102 @@ class TestEpisodes:
 
         page = make_client(handler).list_episode_traces(RESERVED_EPISODE_ID)
         assert page.items[0].trace_id == "8d3f1a2b"
+
+
+class TestRuns:
+    def test_list_runs_sends_filters_and_repeats_multi_valued_ones(self, make_client):
+        captured = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/api/v1/runs"
+            captured["params"] = request.url.params.multi_items()
+            return httpx.Response(200, json={"items": [RUN], "next_cursor": "c1"})
+
+        page = make_client(handler).list_runs(
+            run_type=["eval", "train"],
+            created_by="u1",
+            created_after="2026-07-01T00:00:00Z",
+            created_before="2026-08-01T00:00:00Z",
+            limit=10,
+            cursor="c0",
+        )
+        assert captured["params"] == [
+            ("run_type", "eval"),
+            ("run_type", "train"),
+            ("created_by", "u1"),
+            ("created_after", "2026-07-01T00:00:00Z"),
+            ("created_before", "2026-08-01T00:00:00Z"),
+            ("limit", "10"),
+            ("cursor", "c0"),
+        ]
+        [run] = page.items
+        assert run.run_id == "run_9f3k2m"
+        assert run.trace_count == 578
+        assert run.avg_reward == 0.14
+        assert run.context["run_type"] == "train"
+        assert page.next_cursor == "c1"
+
+    def test_list_runs_sends_no_filters_by_default(self, make_client):
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.params.multi_items() == []
+            return httpx.Response(200, json={"items": [], "next_cursor": None})
+
+        assert make_client(handler).list_runs(run_type=[]).items == []
+
+    def test_get_run_reads_the_totals(self, make_client):
+        unscored = {**RUN, "avg_reward": None, "step_min": None, "step_max": None, "step_count": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/api/v1/runs/run_9f3k2m"
+            return httpx.Response(200, json=unscored)
+
+        run = make_client(handler).get_run("run_9f3k2m")
+        assert run.avg_reward is None
+        assert run.step_min is None and run.step_count == 0
+        assert run.has_error is True
+
+    def test_get_run_not_found_is_typed(self, make_client):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                404, json={"error": {"code": "run_not_found", "message": "No run 'x'"}}
+            )
+
+        with pytest.raises(NotFoundError) as excinfo:
+            make_client(handler).get_run("x")
+        assert excinfo.value.code == ErrorCode.RUN_NOT_FOUND
+
+    def test_list_run_steps_reads_every_step(self, make_client):
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/api/v1/runs/run_9f3k2m/steps"
+            assert request.url.params.multi_items() == []
+            return httpx.Response(200, json=RUN_STEPS)
+
+        steps = make_client(handler).list_run_steps("run_9f3k2m")
+        assert steps.step_count == 2
+        assert [step.step for step in steps.items] == [0, 1]
+        assert steps.items[0].avg_reward is None
+
+    def test_run_reads_encode_run_id_as_one_path_segment(self, make_client):
+        paths = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            paths.append(request.url.raw_path)
+            if request.url.raw_path.endswith(b"/steps"):
+                return httpx.Response(200, json=RUN_STEPS)
+            return httpx.Response(200, json={**RUN, "run_id": RESERVED_RUN_ID})
+
+        client = make_client(handler)
+        assert client.get_run(RESERVED_RUN_ID).run_id == RESERVED_RUN_ID
+        client.list_run_steps(RESERVED_RUN_ID)
+        assert paths == [ENCODED_RUN_PATH, ENCODED_RUN_PATH + b"/steps"]
+
+    @pytest.mark.parametrize("method", ["get_run", "list_run_steps"])
+    def test_run_reads_reject_run_id_with_slash_before_request(self, make_client, method):
+        def handler(request: httpx.Request) -> httpx.Response:
+            pytest.fail(f"unexpected request: {request.url}")
+
+        with pytest.raises(ValueError, match="run_id cannot contain '/'"):
+            getattr(make_client(handler), method)("team/run")
 
 
 NODE = {

@@ -1,17 +1,22 @@
-"""Rendering for `prime traces list` and `prime traces get`, for traces and episodes.
+"""Rendering for `prime traces list` and `prime traces get`: traces, episodes, nodes and calls.
 
 Pure functions over SDK models, so the command module keeps the I/O and the
 tests can render without a network. Every producer-written string is wrapped
 in `Text` rather than interpolated into markup, so it is always literal.
 """
 
+import json
+import re
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from prime_traces import (
     EpisodeDetail,
     EpisodeError,
     EpisodeListPage,
+    TraceCallPage,
     TraceListPage,
+    TraceNode,
+    TraceNodePage,
     TraceSummary,
 )
 from rich.console import RenderableType
@@ -271,6 +276,76 @@ def episodes_table(
         ]
         table.add_row(*row)
     return table, note
+
+
+ROLE_STYLES = {"system": "dim", "user": "green", "assistant": "blue", "tool": "yellow"}
+
+
+def _one_line(value: Any) -> str:
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _node_text(node: TraceNode) -> Text:
+    """One line per message: its text, then the tools it called.
+
+    A turn with neither shows its reasoning, dimmed, so no row is blank when
+    the model only thought.
+    """
+    message = node.message
+    text = Text()
+    if message.content not in (None, "", []):
+        text.append(_one_line(message.content))
+    tool_calls = message.tool_calls if isinstance(message.tool_calls, list) else []
+    if tool_calls:
+        if text:
+            text.append("  ")
+        text.append("→ " + ", ".join(_tool_name(call) for call in tool_calls), style="magenta")
+    if not text and message.reasoning_content:
+        text.append(_one_line(message.reasoning_content), style="dim italic")
+    return text
+
+
+def nodes_table(page: TraceNodePage, *, trace_id: str) -> Table:
+    """One row per message, in step order, each on one line."""
+    table = Table(title=Text(f"Nodes · trace {trace_id}"), title_justify="left")
+    table.add_column("Node", justify="right", style="cyan", no_wrap=True)
+    table.add_column("Role", no_wrap=True)
+    # Wrappable, so the column takes what is left; each cell stays on one line.
+    table.add_column("Message")
+    for node in page.items:
+        role = node.message.role or "-"
+        cell = _node_text(node)
+        cell.no_wrap = True
+        cell.overflow = "ellipsis"
+        table.add_row(
+            Text(str(node.node_idx)), Text(role, style=ROLE_STYLES.get(role, "")), cell or Text("-")
+        )
+    return table
+
+
+def calls_table(page: TraceCallPage, *, trace_id: str) -> Table:
+    """One row per model call, in order. Token usage is not in the index."""
+    table = Table(title=Text(f"Calls · trace {trace_id}"), title_justify="left")
+    table.add_column("Call", justify="right", style="cyan", no_wrap=True)
+    table.add_column("Node", justify="right", no_wrap=True)
+    table.add_column("Model", overflow="ellipsis")
+    table.add_column("Finish", no_wrap=True)
+    table.add_column("Duration", justify="right", no_wrap=True)
+    for call in page.items:
+        took = (
+            call.time_end - call.time_start
+            if call.time_start is not None and call.time_end is not None
+            else None
+        )
+        table.add_row(
+            Text(str(call.call_idx)),
+            Text("-" if call.node_idx is None else str(call.node_idx)),
+            Text(call.model or "-"),
+            Text(call.finish_reason or "-"),
+            Text("-" if took is None else f"{took:.1f}s" if took < 60 else _duration(took)),
+        )
+    return table
 
 
 # ---------------------------------------------------------------------------

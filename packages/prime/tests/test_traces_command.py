@@ -16,7 +16,10 @@ from prime_traces import (
     EpisodeListPage,
     EpisodeSummary,
     NotFoundError,
+    TraceCallPage,
     TraceListPage,
+    TraceNodePage,
+    TraceNotIndexedError,
     TraceSummary,
     UploadReceipt,
 )
@@ -385,6 +388,42 @@ def _episode_detail(**overrides):
     )
 
 
+def _node(node_idx, role="assistant", **message):
+    return {
+        "node_idx": node_idx,
+        "parent_idx": node_idx - 1 if node_idx else None,
+        "timestamp": None,
+        "sampled": role == "assistant",
+        "message": {"role": role, **message},
+    }
+
+
+def _node_page(*nodes, next_cursor=None, partial_index=False, **extra):
+    return TraceNodePage.model_validate(
+        {"items": list(nodes), "next_cursor": next_cursor, "partial_index": partial_index, **extra}
+    )
+
+
+def _call(call_idx, **overrides):
+    fields = {
+        "call_idx": call_idx,
+        "node_idx": 2 * call_idx + 2,
+        "time_start": 100.0,
+        "time_end": 111.84,
+        "model": "glm-5.3",
+        "endpoint": "/chat/completions",
+        "finish_reason": "tool_calls",
+    }
+    fields.update(overrides)
+    return fields
+
+
+def _call_page(*calls, next_cursor=None, partial_index=False, **extra):
+    return TraceCallPage.model_validate(
+        {"items": list(calls), "next_cursor": next_cursor, "partial_index": partial_index, **extra}
+    )
+
+
 class FakeTracesClient:
     def __init__(self):
         self.calls: dict = {}
@@ -438,6 +477,27 @@ class FakeTracesClient:
             items=[_summary(episode_id=episode_id, activity={"model_turns": 12})],
             next_cursor=None,
         )
+
+    def list_nodes(self, trace_id, **kwargs):
+        self.calls["list_nodes"] = {"trace_id": trace_id, **kwargs}
+        return _node_page(
+            _node(0, "system", content="You are an agent."),
+            _node(1, "user", content="Find the\n  hidden rule."),
+            _node(
+                2,
+                content=None,
+                reasoning_content="read the README first",
+                tool_calls=[{"id": "c1", "type": "function", "function": {"name": "ipython"}}],
+            ),
+            _node(3, "tool", content=[{"type": "text", "text": "total 12"}]),
+            _node(4, content=None, reasoning_content="only thinking here"),
+            next_cursor="node-cursor-1",
+            indexed_count=39,
+        )
+
+    def list_calls(self, trace_id, **kwargs):
+        self.calls["list_calls"] = {"trace_id": trace_id, **kwargs}
+        return _call_page(_call(0), _call(1, finish_reason=None, time_end=None), indexed_count=153)
 
 
 @pytest.fixture()
@@ -1801,3 +1861,242 @@ def test_plain_list_strips_table_borders_when_rows_share_values(fake_client, arg
     assert result.exit_code == 0, result.output
     assert "All 2 on this page: run run_9f3k2m" in result.output
     assert not set("┏┃━│└") & set(result.output)
+
+
+# ---------------------------------------------------------------------------
+# One trace's index: `prime traces list --nodes|--calls --trace-id`, and --all
+# ---------------------------------------------------------------------------
+
+
+def test_list_nodes_forwards_filters_and_shows_one_line_per_message(fake_client, monkeypatch):
+    monkeypatch.setattr(traces_cmd.console, "width", 120)
+    result = runner.invoke(
+        main_app,
+        [
+            "traces",
+            "list",
+            "--nodes",
+            "--trace-id",
+            "t-1",
+            "--role",
+            "assistant",
+            "--role",
+            "tool",
+            "--sampled",
+            "--after",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert fake_client.calls["list_nodes"] == {
+        "trace_id": "t-1",
+        "role": ["assistant", "tool"],
+        "sampled": True,
+        "after": 1,
+        "limit": 20,
+        "cursor": None,
+    }
+    assert _title(result.output) == "Nodes · trace t-1"
+    assert "You are an agent." in result.output
+    assert "Find the hidden rule." in result.output  # whitespace squashed to one line
+    assert "→ ipython" in result.output
+    assert "read the README first" not in result.output  # it called a tool, so no reasoning
+    assert '[{"type": "text", "text": "total 12"}]' in result.output
+    assert "only thinking here" in result.output
+    assert "39 nodes in this trace's index" in result.output
+    assert "--cursor node-cursor-1" in result.output
+
+
+def test_list_nodes_sends_after_on_the_first_page_only(fake_client):
+    calls = []
+
+    def list_nodes(trace_id, **kwargs):
+        calls.append(kwargs)
+        cursor = kwargs["cursor"]
+        return _node_page(
+            _node(5 if cursor is None else 6), next_cursor="c1" if cursor is None else None
+        )
+
+    fake_client.list_nodes = list_nodes
+
+    result = runner.invoke(
+        main_app, ["traces", "list", "--nodes", "--trace-id", "t-1", "--after", "4", "--page", "2"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert [(call["after"], call["cursor"]) for call in calls] == [(4, None), (None, "c1")]
+
+
+def test_list_nodes_json_is_the_page(fake_client):
+    result = runner.invoke(
+        main_app, ["traces", "list", "--nodes", "--trace-id", "t-1", "-o", "json"]
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["items"][2]["message"]["tool_calls"][0]["function"]["name"] == "ipython"
+    assert payload["partial_index"] is False
+    assert payload["indexed_count"] == 39
+    assert payload["next_cursor"] == "node-cursor-1"
+
+
+def test_list_nodes_warns_when_the_trace_outgrew_its_index(fake_client):
+    fake_client.list_nodes = lambda trace_id, **kwargs: _node_page(
+        _node(0, "user", content="hi"), partial_index=True
+    )
+
+    result = runner.invoke(main_app, ["traces", "list", "--nodes", "--trace-id", "t-1"])
+
+    assert result.exit_code == 0, result.output
+    assert "longer than its index" in result.stderr
+    assert "prime traces get t-1 --raw" in result.stderr
+
+
+def test_list_nodes_explains_a_trace_that_is_not_indexed_yet(fake_client):
+    def not_indexed(trace_id, **kwargs):
+        raise TraceNotIndexedError("not indexed", status_code=409, code="trace_not_indexed")
+
+    fake_client.list_nodes = not_indexed
+
+    result = runner.invoke(main_app, ["traces", "list", "--nodes", "--trace-id", "t-1"])
+
+    assert result.exit_code == 1
+    assert "Trace t-1 is still being indexed." in result.stderr
+    assert "prime traces get t-1 --raw" in result.stderr
+
+
+def test_list_calls_forwards_filters_and_shows_each_call(fake_client):
+    result = runner.invoke(
+        main_app,
+        [
+            "traces",
+            "list",
+            "--calls",
+            "--trace-id",
+            "t-1",
+            "--model-id",
+            "glm-5.3",
+            "--finish-reason",
+            "stop",
+            "--limit",
+            "50",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert fake_client.calls["list_calls"] == {
+        "trace_id": "t-1",
+        "model": ["glm-5.3"],
+        "finish_reason": ["stop"],
+        "limit": 50,
+        "cursor": None,
+    }
+    assert _title(result.output) == "Calls · trace t-1"
+    assert "tool_calls" in result.output
+    assert "11.8s" in result.output
+    assert "153 calls in this trace's index" in result.output
+    assert "--page" not in result.output
+
+
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        (["--nodes"], "--nodes needs --trace-id"),
+        (["--calls"], "--calls needs --trace-id"),
+        (["--trace-id", "t-1"], "--trace-id cannot be combined with a trace or episode listing"),
+        (["--role", "user"], "--role cannot be combined with a trace or episode listing"),
+        (["--nodes", "--calls", "--trace-id", "t-1"], "--nodes cannot be combined with --calls"),
+        (
+            ["--episodes", "--nodes", "--trace-id", "t-1"],
+            "--episodes cannot be combined with --nodes",
+        ),
+        (
+            ["--nodes", "--trace-id", "t-1", "--run-id", "r"],
+            "--run-id cannot be combined with --nodes",
+        ),
+        (
+            ["--nodes", "--trace-id", "t-1", "--model-id", "m"],
+            "--model-id cannot be combined with --nodes",
+        ),
+        (
+            ["--calls", "--trace-id", "t-1", "--role", "user"],
+            "--role cannot be combined with --calls",
+        ),
+        (
+            ["--calls", "--trace-id", "t-1", "--after", "3"],
+            "--after cannot be combined with --calls",
+        ),
+        (
+            ["--nodes", "--trace-id", "t-1", "--after", "3", "--cursor", "c"],
+            "--after cannot be combined with --cursor",
+        ),
+        (["--all", "--page", "2"], "--all cannot be combined with --page"),
+    ],
+)
+def test_index_listings_reject_conflicting_options_before_any_request(fake_client, args, message):
+    result = runner.invoke(main_app, ["traces", "list", *args])
+
+    assert result.exit_code == 1
+    assert message in result.output
+    assert fake_client.calls == {}
+
+
+def test_list_all_follows_every_cursor_with_full_pages(fake_client):
+    calls = []
+    pages = {None: (["t1", "t2"], "c1"), "c1": (["t3"], "c2"), "c2": ([], None)}
+
+    def list_traces(**kwargs):
+        calls.append(kwargs)
+        ids, next_cursor = pages[kwargs["cursor"]]
+        return TraceListPage(items=[_summary(trace_id=i) for i in ids], next_cursor=next_cursor)
+
+    fake_client.list = list_traces
+
+    result = runner.invoke(main_app, ["traces", "list", "--run-id", "r", "--all", "-o", "json"])
+
+    assert result.exit_code == 0, result.output
+    assert [(call["cursor"], call["limit"]) for call in calls] == [
+        (None, 100),
+        ("c1", 100),
+        ("c2", 100),
+    ]
+    payload = json.loads(result.output)
+    assert [item["trace_id"] for item in payload["items"]] == ["t1", "t2", "t3"]
+    assert payload["next_cursor"] is None
+
+
+def test_list_all_resumes_from_a_cursor_and_keeps_an_explicit_limit(fake_client):
+    calls = []
+
+    def list_episodes(**kwargs):
+        calls.append(kwargs)
+        return EpisodeListPage(items=[_episode()], next_cursor=None)
+
+    fake_client.list_episodes = list_episodes
+
+    result = runner.invoke(
+        main_app, ["traces", "list", "--episodes", "--all", "--cursor", "c5", "--limit", "7"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert [(call["cursor"], call["limit"]) for call in calls] == [("c5", 7)]
+    assert "--cursor" not in result.output.split("ep_4c1d", 1)[1]
+
+
+def test_list_all_keeps_the_last_pages_index_verdict(fake_client):
+    pages = {
+        None: _node_page(_node(0, "user", content="a"), next_cursor="c1", indexed_count=2),
+        "c1": _node_page(_node(1, content="b"), partial_index=True, indexed_count=2),
+    }
+    fake_client.list_nodes = lambda trace_id, **kwargs: pages[kwargs["cursor"]]
+
+    result = runner.invoke(
+        main_app, ["traces", "list", "--nodes", "--trace-id", "t-1", "--all", "-o", "json"]
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert [node["node_idx"] for node in payload["items"]] == [0, 1]
+    assert payload["partial_index"] is True
+    assert payload["next_cursor"] is None

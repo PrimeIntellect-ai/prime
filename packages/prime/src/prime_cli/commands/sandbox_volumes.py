@@ -1,0 +1,547 @@
+"""Sandbox volumes: persistent storage attached to VM sandboxes."""
+
+import random
+import shlex
+import shutil
+import string
+import subprocess
+from pathlib import Path
+from typing import List, Optional
+
+import typer
+from prime_sandboxes import (
+    APIClient,
+    APIError,
+    Config,
+    CreateSandboxRequest,
+    PaymentRequiredError,
+    Sandbox,
+    SandboxClient,
+    SandboxNotRunningError,
+    UnauthorizedError,
+    Volume,
+    VolumeMount,
+    VolumesClient,
+)
+from rich.markup import escape
+
+from ..utils import (
+    PlainTyper,
+    build_table,
+    confirm_or_skip,
+    get_console,
+    human_age,
+    json_output_help,
+    output_data_as_json,
+)
+from .sandbox_ssh import SandboxSshTransport, ssh_transport
+
+app = PlainTyper(help="Manage sandbox volumes", no_args_is_help=True)
+console = get_console()
+
+
+VOLUMES_LIST_JSON_HELP = json_output_help(
+    ".volumes[] = {id, name, user_id?, team_id?, created_at}",
+    ".total = number",
+    ".page = number",
+    ".per_page = number",
+    ".has_next = boolean",
+)
+
+# Channel refs verified from the img2vm workflow's publisher variables;
+# image publication per channel is a separate A7 gate.
+_IMPORTER_IMAGE_DEV = "prime/team-cmkvn5hnf0005ywl0imb40jiq/volume-import:dev"
+_IMPORTER_IMAGE_PROD = "prime/team-cm21083en000vzonc01fl6clp/volume-import:prod"
+_IMPORT_MOUNT_PATH = "/volume"
+_IMPORTER_CPU_CORES = 1.0
+_IMPORTER_MEMORY_GB = 1.0
+_IMPORTER_DISK_SIZE_GB = 5.0
+# No lifetime timeout: an import may stream for hours; the idle timeout below
+# still reaps a sandbox nobody transfers through.
+_IMPORTER_TIMEOUT_MINUTES = -1
+_IMPORTER_IDLE_TIMEOUT_MINUTES = 30
+_IMPORTER_LABEL = "prime:volume-import"
+
+
+def _invalid_volume_mount(spec: str, problem: str) -> None:
+    console.print(f"[red]Error:[/red] Invalid volume '{spec}': {problem}")
+    raise typer.Exit(1)
+
+
+def parse_volume_mount_specs(specs: List[str]) -> List[VolumeMount]:
+    """Parse repeatable ``NAME:/mount/path[:ro]`` values into volume mounts.
+
+    Only the syntax is split here; name, mount-path, and count rules are
+    enforced once by the API.
+    """
+    mounts: List[VolumeMount] = []
+    for spec in specs:
+        name, sep, remainder = spec.partition(":")
+        if not sep or not name or not remainder:
+            _invalid_volume_mount(spec, "expected NAME:/mount/path[:ro]")
+        mount_path, read_only = remainder, False
+        if mount_path.endswith(":ro"):
+            mount_path, read_only = mount_path[:-3], True
+        if not mount_path:
+            _invalid_volume_mount(spec, "empty mount path after ':ro'")
+        mounts.append(VolumeMount(name=name, mount_path=mount_path, read_only=read_only))
+    return mounts
+
+
+def _volume_scope(volume: Volume) -> str:
+    if volume.team_id:
+        return f"team: {volume.team_id}"
+    return "Personal"
+
+
+def _print_volume(volume: Volume) -> None:
+    console.print(f"Name: [cyan]{escape(volume.name)}[/cyan]")
+    console.print(f"ID: {escape(volume.id)}")
+    console.print(f"Scope: {_volume_scope(volume)}")
+    # None until the first publish reaches DURABLE, then the newest one.
+    head = volume.head_checkpoint_id
+    console.print(f"Head checkpoint: {escape(head) if head else 'none (never published)'}")
+    console.print(f"Created: {human_age(volume.created_at)}")
+
+
+def _volumes_client() -> VolumesClient:
+    return VolumesClient(APIClient())
+
+
+def _importer_image() -> str:
+    """Resolve the volume-import helper image for the API environment in use.
+
+    Both namespaces are verified; whether a channel's image has actually been
+    published is enforced by the API at sandbox-create time, not here.
+    """
+    if Config().base_url == Config.DEFAULT_BASE_URL:
+        return _IMPORTER_IMAGE_PROD
+    return _IMPORTER_IMAGE_DEV
+
+
+_RSYNC_CAPABILITY_PROBE = ["rsync", "--info=progress2", "--version"]
+
+
+def _require_modern_rsync() -> None:
+    """Reject an rsync that cannot run the transfer, before any API mutation.
+
+    macOS ships openrsync (rsync-2.6.9-compatible, no --info option); without
+    this check it would fail only after the volume and the importer sandbox
+    already exist.
+    """
+    probe = subprocess.run(_RSYNC_CAPABILITY_PROBE, capture_output=True, text=True)
+    if probe.returncode != 0:
+        console.print(
+            "[red]Error:[/red] rsync 3.1+ is required for volume imports; the "
+            f"rsync at '{shutil.which('rsync')}' does not support the transfer "
+            "flags (macOS default is openrsync). Install a modern rsync "
+            "(e.g. 'brew install rsync') and make sure it precedes /usr/bin "
+            "in PATH."
+        )
+        raise typer.Exit(1)
+
+
+def _rsync_command(transport: SandboxSshTransport, path: Path) -> List[str]:
+    remote_shell = shlex.join(
+        [
+            "ssh",
+            "-p",
+            str(transport.port),
+            "-i",
+            transport.key_path,
+            "-o",
+            f"ProxyCommand={transport.proxy_command}",
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+        ]
+    )
+    return [
+        "rsync",
+        "-az",
+        "--partial",
+        "--info=progress2",
+        "-e",
+        remote_shell,
+        f"{path}/",
+        f"{transport.user}@{transport.host}:{_IMPORT_MOUNT_PATH}/",
+    ]
+
+
+def _print_retained_importer(sandbox_id: str, checkpoint_id: Optional[str]) -> None:
+    """Recovery guidance for an importer kept after an unsettled publish."""
+    console.print(
+        f"[yellow]Importer sandbox {escape(sandbox_id)} kept: the publish did "
+        "not reach DURABLE in this run.[/yellow]"
+    )
+    if checkpoint_id:
+        console.print(
+            f"Checkpoint {escape(checkpoint_id)}: check its state with "
+            f"'prime sandbox checkpoint list {escape(sandbox_id)} "
+            f"--checkpoint-id {escape(checkpoint_id)}'."
+        )
+    else:
+        console.print(
+            "If a checkpoint was created, find it with "
+            f"'prime sandbox checkpoint list {escape(sandbox_id)}'."
+        )
+    console.print(
+        "The imported data is private to the importer until a publish "
+        "reaches DURABLE."
+    )
+    # The importer is not kept indefinitely: the idle monitor reaps it after
+    # _IMPORTER_IDLE_TIMEOUT_MINUTES without transfer activity, and the
+    # publish itself does not reset that clock.
+    console.print(
+        "The sandbox is reaped automatically after "
+        f"{_IMPORTER_IDLE_TIMEOUT_MINUTES} minutes without transfer activity. "
+        "Delete it manually with "
+        f"'prime sandbox delete {escape(sandbox_id)}' once you no longer need it."
+    )
+
+
+def _import_volume(name: str, team_id: Optional[str], from_path: str) -> None:
+    # Absolute before rsync: a relative source would be ambiguous in the rsync
+    # argv (rsync reads bare words as remote paths, not only the dest).
+    path = Path(from_path).expanduser().resolve()
+    if not path.is_dir():
+        console.print(f"[red]Error:[/red] --from path is not a local directory: {from_path}")
+        raise typer.Exit(1)
+    if not shutil.which("rsync"):
+        console.print("[red]Error:[/red] rsync is required to import a volume.")
+        raise typer.Exit(1)
+    _require_modern_rsync()
+
+    image = _importer_image()
+
+    base_client = APIClient()
+    volumes_client = VolumesClient(base_client)
+    sandbox_client = SandboxClient(base_client)
+
+    try:
+        volumes_client.create(name, team_id=team_id)
+    except APIError as error:
+        # Prefix match on the SDK's exact format ("HTTP <status>: <body>"):
+        # a detail string that merely mentions "HTTP 409" is not a conflict.
+        if not str(error).startswith("HTTP 409:"):
+            raise
+        # 409 from create is C3's name-taken: the volume already exists in
+        # this scope. The importer attaches at the volume's current durable
+        # head, so this is a fresh copy, not a resume of a failed transfer;
+        # auth, not-found, and server errors are not reuse signals.
+        console.print(
+            f"Volume {escape(name)} already exists in this scope; copying the "
+            "local directory into its current published contents"
+        )
+    else:
+        console.print(f"[green]✓[/green] Created volume {escape(name)}")
+
+    sandbox: Optional[Sandbox] = None
+    checkpoint_id: Optional[str] = None
+    # The importer is deleted only on a pre-publish failure or after a
+    # confirmed DURABLE publish; every unsettled publish keeps it.
+    publish_requested = False
+    durable = False
+    try:
+        suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=4))
+        sandbox = sandbox_client.create(
+            CreateSandboxRequest(
+                name=f"volume-import-{name}-{suffix}",
+                docker_image=image,
+                cpu_cores=_IMPORTER_CPU_CORES,
+                memory_gb=_IMPORTER_MEMORY_GB,
+                disk_size_gb=_IMPORTER_DISK_SIZE_GB,
+                timeout_minutes=_IMPORTER_TIMEOUT_MINUTES,
+                idle_timeout_minutes=_IMPORTER_IDLE_TIMEOUT_MINUTES,
+                labels=[_IMPORTER_LABEL],
+                team_id=team_id,
+                volumes=[VolumeMount(name=name, mount_path=_IMPORT_MOUNT_PATH, read_only=False)],
+            )
+        )
+        with console.status("[bold blue]Waiting for importer sandbox...", spinner="dots"):
+            sandbox_client.wait_for_creation(sandbox.id)
+        console.print("[blue]Importing files with rsync...[/blue]")
+        with ssh_transport(sandbox_client, sandbox.id) as transport:
+            result = subprocess.run(_rsync_command(transport, path))
+        if result.returncode != 0:
+            console.print(
+                "[red]Error:[/red] rsync failed. Nothing was published by this "
+                "attempt; the volume keeps its previously published contents "
+                "(a never-published volume stays empty)."
+            )
+            raise typer.Exit(1)
+        console.print(f"[green]✓[/green] Copied data into volume {escape(name)}")
+        # Flag uncertainty before the POST: from here the publish outcome is
+        # unknown on any failure or interrupt, so the importer is kept.
+        console.print(f"[blue]Publishing volume {escape(name)}...[/blue]")
+        console.print(
+            "If this step fails or is interrupted, the publish state is "
+            f"unknown; the importer sandbox {escape(sandbox.id)} is kept."
+        )
+        publish_requested = True
+        checkpoint = volumes_client.publish(sandbox.id, name, wait=False)
+        checkpoint_id = checkpoint.id
+        console.print(
+            f"Publish requested: checkpoint {escape(checkpoint_id)} "
+            f"(state {escape(checkpoint.state)})"
+        )
+        try:
+            sandbox_client.wait_for_checkpoint(checkpoint_id)
+        except TimeoutError as error:
+            # The wait budget expiring is not a publish failure; the upload
+            # may still complete after the CLI exits.
+            console.print(
+                f"[red]Error:[/red] {escape(str(error))} The publish may still "
+                "complete."
+            )
+            raise typer.Exit(1)
+        except RuntimeError as error:
+            console.print(f"[red]Error:[/red] {escape(str(error))} The publish failed.")
+            raise typer.Exit(1)
+        durable = True
+        console.print(
+            f"[green]✓[/green] Published volume {escape(name)}: checkpoint "
+            f"{escape(checkpoint_id)} is DURABLE"
+        )
+    except KeyboardInterrupt:
+        if publish_requested:
+            console.print(
+                "\n[yellow]Interrupted while publishing:[/yellow] the publish "
+                "state is unknown."
+            )
+        else:
+            console.print(
+                "\n[yellow]Interrupted before publishing:[/yellow] nothing was "
+                "published by this attempt; the volume keeps its previously "
+                "published contents."
+            )
+        raise typer.Exit(130)
+    finally:
+        # No return here: a pre-create failure (sandbox is None) must keep
+        # propagating its exception; there is nothing to clean up yet.
+        if sandbox is not None:
+            if durable or not publish_requested:
+                try:
+                    sandbox_client.delete(sandbox.id)
+                # Broad on purpose: this finally must never mask the in-flight
+                # exception (e.g. the rsync failure) with a cleanup failure.
+                except Exception as error:
+                    warning = (
+                        f"[yellow]Warning:[/yellow] failed to delete importer sandbox "
+                        f"{sandbox.id}: {escape(str(error))} "
+                        f"Remove it manually with 'prime sandbox delete {sandbox.id}'."
+                    )
+                    if not durable:
+                        warning += " It may still hold the unpublished import data."
+                    console.print(warning)
+            else:
+                _print_retained_importer(sandbox.id, checkpoint_id)
+
+
+@app.command("create")
+def create(
+    name: str = typer.Argument(..., help="Volume name, unique within its scope"),
+    team_id: Optional[str] = typer.Option(
+        None, help="Team ID (uses config team_id if not specified)"
+    ),
+    from_path: Optional[str] = typer.Option(
+        None, "--from", help="Import this local directory into the new volume"
+    ),
+) -> None:
+    """Create a volume, optionally importing a local directory."""
+    try:
+        if from_path is None:
+            volume = _volumes_client().create(name, team_id=team_id)
+            console.print(f"[green]✓[/green] Created volume {escape(volume.name)}")
+            _print_volume(volume)
+            return
+        _import_volume(name, team_id, from_path)
+    except typer.Exit:
+        raise
+    except KeyboardInterrupt:
+        # Only the plain create reaches here: the import flow handles its own
+        # interrupts by phase, so no partial-data claim is possible here.
+        console.print(
+            "\n[yellow]Interrupted.[/yellow] The create request may or may not "
+            "have completed; check with 'prime sandbox volumes list'."
+        )
+        raise typer.Exit(130)
+    except SandboxNotRunningError as e:
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except UnauthorizedError as e:
+        console.print(f"[red]Unauthorized:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except PaymentRequiredError as e:
+        console.print(f"[red]Payment Required:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
+        console.print_exception(show_locals=False)
+        raise typer.Exit(1)
+
+
+@app.command("list", epilog=VOLUMES_LIST_JSON_HELP)
+def list_volumes(
+    team_id: Optional[str] = typer.Option(
+        None, help="Team ID (uses config team_id if not specified)"
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", help="Output volumes as JSON instead of a table"
+    ),
+) -> None:
+    """List volumes."""
+    try:
+        response = _volumes_client().list(team_id=team_id)
+    except UnauthorizedError as e:
+        console.print(f"[red]Unauthorized:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except PaymentRequiredError as e:
+        console.print(f"[red]Payment Required:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
+        console.print_exception(show_locals=False)
+        raise typer.Exit(1)
+
+    if json_output:
+        output_data_as_json(response.model_dump(mode="json"), console)
+        return
+    if not response.volumes:
+        console.print("No volumes found.")
+        return
+    table = build_table(
+        "Volumes",
+        [("Name", "cyan"), ("Scope", "white"), ("Created", "white"), ("ID", "dim")],
+    )
+    for volume in response.volumes:
+        table.add_row(
+            escape(volume.name),
+            _volume_scope(volume),
+            human_age(volume.created_at),
+            escape(volume.id),
+        )
+    console.print(table)
+
+
+@app.command(no_args_is_help=True)
+def get(
+    name: str = typer.Argument(..., help="Volume name"),
+    team_id: Optional[str] = typer.Option(
+        None, help="Team ID (uses config team_id if not specified)"
+    ),
+) -> None:
+    """Show a volume's details."""
+    try:
+        volume = _volumes_client().get(name, team_id=team_id)
+    except UnauthorizedError as e:
+        console.print(f"[red]Unauthorized:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except PaymentRequiredError as e:
+        console.print(f"[red]Payment Required:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
+        console.print_exception(show_locals=False)
+        raise typer.Exit(1)
+    _print_volume(volume)
+
+
+@app.command()
+def delete(
+    name: str = typer.Argument(..., help="Volume name"),
+    team_id: Optional[str] = typer.Option(
+        None, help="Team ID (uses config team_id if not specified)"
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
+) -> None:
+    """Delete a volume. Fails while any active sandbox has it attached."""
+    scope = f" (team: {team_id})" if team_id else ""
+    if not confirm_or_skip(f"Are you sure you want to delete volume '{name}'{scope}?", yes):
+        console.print("[yellow]Cancelled[/yellow]")
+        return
+    try:
+        _volumes_client().delete(name, team_id=team_id)
+    except UnauthorizedError as e:
+        console.print(f"[red]Unauthorized:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except PaymentRequiredError as e:
+        console.print(f"[red]Payment Required:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
+        console.print_exception(show_locals=False)
+        raise typer.Exit(1)
+    console.print(f"[green]✓[/green] Deleted volume {escape(name)}")
+
+
+@app.command()
+def publish(
+    name: str = typer.Argument(..., help="Volume name to publish"),
+    sandbox_id: str = typer.Option(
+        ..., "--sandbox", help="ID of the sandbox that publishes the volume"
+    ),
+    force: bool = typer.Option(
+        False, "--force", help="Publish even if the volume's head moved since attach"
+    ),
+    no_wait: bool = typer.Option(
+        False, "--no-wait", help="Do not wait for the publish to become durable"
+    ),
+) -> None:
+    """Publish a sandbox's private volume writes as a durable checkpoint."""
+    try:
+        checkpoint = _volumes_client().publish(sandbox_id, name, force=force, wait=not no_wait)
+    except UnauthorizedError as e:
+        console.print(f"[red]Unauthorized:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except PaymentRequiredError as e:
+        console.print(f"[red]Payment Required:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except APIError as e:
+        # 400 read-only, 404 not attached, 409 stale head or another
+        # sandbox's publish in flight (also with --force).
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except TimeoutError as e:
+        # The SDK wait budget expired; the publish upload may still finish.
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
+        console.print(
+            "The publish may still complete. Check with "
+            f"'prime sandbox checkpoint list {escape(sandbox_id)}'."
+        )
+        raise typer.Exit(1)
+    except RuntimeError as e:
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
+        console.print_exception(show_locals=False)
+        raise typer.Exit(1)
+
+    console.print(f"Checkpoint ID: [cyan]{escape(checkpoint.id)}[/cyan]")
+    console.print(f"State: {escape(checkpoint.state)}")
+    if checkpoint.state == "DURABLE":
+        console.print(
+            f"[green]✓[/green] Published volume {escape(name)}; new sandboxes "
+            "that attach it see this data"
+        )
+    else:
+        console.print(
+            "[yellow]The publish is not yet DURABLE; the volume's published "
+            "contents do not include this data until it is. Check with "
+            f"'prime sandbox checkpoint list {escape(sandbox_id)} "
+            f"--checkpoint-id {escape(checkpoint.id)}'."
+        )

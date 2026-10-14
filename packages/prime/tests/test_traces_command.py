@@ -16,6 +16,9 @@ from prime_traces import (
     EpisodeListPage,
     EpisodeSummary,
     NotFoundError,
+    RunListPage,
+    RunStepList,
+    RunSummary,
     TraceListPage,
     TraceSummary,
     UploadReceipt,
@@ -385,6 +388,43 @@ def _episode_detail(**overrides):
     )
 
 
+def _run(**overrides):
+    fields = {
+        "run_id": "run_9f3k2m",
+        "first_trace_created_at": "2026-07-20T18:02:11.482Z",
+        "last_trace_created_at": "2026-07-21T09:40:43.488Z",
+        "last_trace_ingested_at": "2026-07-21T13:11:05.249Z",
+        "trace_count": 578,
+        "episode_count": 578,
+        "avg_reward": 0.13962,
+        "step_min": None,
+        "step_max": None,
+        "step_count": 0,
+        "has_error": True,
+        "first_user_id": "u1",
+        "environment_ids": ["tb2"],
+        "model_ids": ["deepseek-v4-flash"],
+        "context": {"source": "prime-runs", "run_type": "eval"},
+    }
+    fields.update(overrides)
+    return RunSummary.model_validate(fields)
+
+
+def _run_steps(*steps):
+    items = [
+        {"step": step, "trace_count": 10, "episode_count": 5, "avg_reward": reward}
+        for step, reward in steps
+    ]
+    return RunStepList.model_validate(
+        {
+            "step_min": items[0]["step"] if items else None,
+            "step_max": items[-1]["step"] if items else None,
+            "step_count": len(items),
+            "items": items,
+        }
+    )
+
+
 class FakeTracesClient:
     def __init__(self):
         self.calls: dict = {}
@@ -438,6 +478,18 @@ class FakeTracesClient:
             items=[_summary(episode_id=episode_id, activity={"model_turns": 12})],
             next_cursor=None,
         )
+
+    def list_runs(self, **kwargs):
+        self.calls["list_runs"] = kwargs
+        return RunListPage(items=[_run()], next_cursor="run-cursor-1")
+
+    def get_run(self, run_id):
+        self.calls["get_run"] = run_id
+        return _run(run_id=run_id)
+
+    def list_run_steps(self, run_id):
+        self.calls["list_run_steps"] = run_id
+        return _run_steps((0, None), (1, 0.25))
 
 
 @pytest.fixture()
@@ -1801,3 +1853,239 @@ def test_plain_list_strips_table_borders_when_rows_share_values(fake_client, arg
     assert result.exit_code == 0, result.output
     assert "All 2 on this page: run run_9f3k2m" in result.output
     assert not set("┏┃━│└") & set(result.output)
+
+
+# ---------------------------------------------------------------------------
+# Runs: `prime traces list|get --runs`
+# ---------------------------------------------------------------------------
+
+
+def test_list_runs_forwards_filters_and_names_the_type_in_the_title(fake_client):
+    result = runner.invoke(
+        main_app,
+        [
+            "traces",
+            "list",
+            "--runs",
+            "--run-type",
+            "eval",
+            "--created-after",
+            "2026-07-01T00:00:00Z",
+            "--limit",
+            "5",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert fake_client.calls["list_runs"] == {
+        "run_type": ["eval"],
+        "created_after": "2026-07-01T00:00:00Z",
+        "created_before": None,
+        "limit": 5,
+        "cursor": None,
+    }
+    assert _title(result.output) == "Runs · eval"
+    assert "Type" not in result.output  # the filter already names it
+    assert "run_9f3k2m" in result.output
+    assert "578" in result.output
+    assert "0.14" in result.output
+    assert "yes" in result.output
+    assert "Use --page 2 to see more." in result.output
+    assert "--cursor run-cursor-1" in result.output
+    assert "prime traces get <run_id> --runs" in result.output
+
+
+def test_list_runs_sends_no_run_type_by_default(fake_client):
+    result = runner.invoke(main_app, ["traces", "list", "--runs"])
+
+    assert result.exit_code == 0, result.output
+    assert fake_client.calls["list_runs"]["run_type"] is None
+    assert _title(result.output) == "Runs"
+
+
+def test_list_runs_notes_shared_values_and_keeps_differing_ones(fake_client, monkeypatch):
+    monkeypatch.setattr(traces_cmd, "_user_names", lambda: {"u1": "Ada Lovelace"})
+    monkeypatch.setattr(traces_cmd.console, "width", 160)
+    fake_client.list_runs = lambda **kwargs: RunListPage(
+        items=[
+            _run(run_id="run_a", model_ids=["m-1"]),
+            _run(run_id="run_b", model_ids=["m-2", "m-3"], first_user_id="u2"),
+        ],
+        next_cursor=None,
+    )
+
+    result = runner.invoke(main_app, ["traces", "list", "--runs"])
+
+    assert result.exit_code == 0, result.output
+    assert "All 2 on this page: type eval · environment tb2" in result.output
+    assert "Environment" not in result.output
+    assert "m-2, m-3" in result.output
+    assert "Ada Lovelace" in result.output
+    assert "u2" in result.output  # not a member any more: the ID stands in
+    assert "Steps" not in result.output  # no run on the page recorded any
+    assert "--page" not in result.output
+
+
+def test_list_runs_drops_columns_in_a_narrow_terminal(fake_client, monkeypatch):
+    monkeypatch.setattr(traces_cmd, "_user_names", lambda: {"u1": "Ada Lovelace"})
+    fake_client.list_runs = lambda **kwargs: RunListPage(
+        items=[
+            _run(run_id="0" * 24, model_ids=["m-1"], step_count=3, step_min=0, step_max=2),
+            _run(run_id="1" * 24, model_ids=["m-2"], context={"run_type": "train"}),
+        ],
+        next_cursor=None,
+    )
+    monkeypatch.setattr(traces_cmd.console, "width", 80)
+    narrow = runner.invoke(main_app, ["traces", "list", "--runs"])
+    monkeypatch.setattr(traces_cmd.console, "width", 160)
+    wide = runner.invoke(main_app, ["traces", "list", "--runs"])
+
+    assert narrow.exit_code == 0, narrow.output
+    assert "0" * 24 in narrow.output and "1" * 24 in narrow.output
+    for header in ("Type", "Traces", "Avg reward", "Steps", "Error"):
+        assert header in narrow.output
+    assert "Updated" not in narrow.output and "User" not in narrow.output
+    for header in ("Model", "User", "Updated"):
+        assert header in wide.output
+
+
+def test_list_runs_json_output_is_the_page(fake_client):
+    result = runner.invoke(main_app, ["traces", "list", "--runs", "-o", "json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["items"][0]["run_id"] == "run_9f3k2m"
+    assert payload["items"][0]["trace_count"] == 578
+    assert payload["next_cursor"] == "run-cursor-1"
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--run-id", "run_9f3k2m"],
+        ["--has-error"],
+        ["--outcome", "failed"],
+        ["--run-step", "1"],
+        ["--sort", "reward"],
+        ["-c", "source=x"],
+        ["--episodes"],
+    ],
+)
+def test_list_runs_rejects_trace_and_episode_options(fake_client, extra):
+    result = runner.invoke(main_app, ["traces", "list", "--runs", *extra])
+
+    assert result.exit_code == 1
+    assert "--runs" in result.output
+    assert "list_runs" not in fake_client.calls
+
+
+def test_list_runs_rejects_an_unknown_run_type(fake_client):
+    result = runner.invoke(main_app, ["traces", "list", "--runs", "--run-type", "rl"])
+
+    assert result.exit_code == 1
+    assert "unknown --run-type rl" in result.output
+    assert "list_runs" not in fake_client.calls
+
+
+def test_run_type_requires_runs(fake_client):
+    result = runner.invoke(main_app, ["traces", "list", "--run-type", "eval"])
+
+    assert result.exit_code == 1
+    assert "--run-type cannot be combined with a trace or episode listing" in result.output
+    assert "list" not in fake_client.calls
+
+
+def test_get_runs_without_steps_skips_the_steps_request(fake_client):
+    result = runner.invoke(main_app, ["traces", "get", "run_9f3k2m", "--runs"])
+
+    assert result.exit_code == 0, result.output
+    assert fake_client.calls["get_run"] == "run_9f3k2m"
+    assert "list_run_steps" not in fake_client.calls
+    assert "run_9f3k2m  ·  eval" in result.output
+    assert "578  episodes 578  error yes" in result.output
+    assert "0.14  over scored traces" in result.output
+    assert "none recorded" in result.output
+    assert "source=prime-runs" in result.output
+    assert "Steps" not in result.output
+    assert "prime traces list --run-id run_9f3k2m" in result.output
+
+
+def test_get_runs_shows_each_step(fake_client):
+    fake_client.get_run = lambda run_id: _run(run_id=run_id, step_min=0, step_max=1, step_count=2)
+
+    result = runner.invoke(main_app, ["traces", "get", "run_9f3k2m", "--runs"])
+
+    assert result.exit_code == 0, result.output
+    assert fake_client.calls["list_run_steps"] == "run_9f3k2m"
+    assert "2  from 0 to 1" in result.output
+    assert "Steps" in result.output
+    assert "0.25" in result.output
+    assert "--run-id run_9f3k2m --run-step <step>" in " ".join(result.output.split())
+
+
+def test_get_runs_json_carries_the_steps(fake_client):
+    fake_client.get_run = lambda run_id: _run(run_id=run_id, step_min=0, step_max=1, step_count=2)
+
+    result = runner.invoke(main_app, ["traces", "get", "run_9f3k2m", "--runs", "-o", "json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["run_id"] == "run_9f3k2m"
+    assert payload["avg_reward"] == 0.13962
+    assert payload["steps"] == [
+        {"step": 0, "trace_count": 10, "episode_count": 5, "avg_reward": None},
+        {"step": 1, "trace_count": 10, "episode_count": 5, "avg_reward": 0.25},
+    ]
+
+
+def test_get_runs_json_without_steps_has_an_empty_list(fake_client):
+    result = runner.invoke(main_app, ["traces", "get", "run_9f3k2m", "--runs", "-o", "json"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["steps"] == []
+
+
+@pytest.mark.parametrize("extra", [["--raw"], ["--episodes"]])
+def test_get_runs_rejects_raw_and_episodes(fake_client, extra):
+    result = runner.invoke(main_app, ["traces", "get", "run_9f3k2m", "--runs", *extra])
+
+    assert result.exit_code == 1
+    assert "--runs" in result.output
+    assert "get_run" not in fake_client.calls
+
+
+def test_get_runs_rejects_a_run_id_with_a_slash(fake_client):
+    result = runner.invoke(main_app, ["traces", "get", "team/run", "--runs"])
+
+    assert result.exit_code == 2
+    assert "get_run" not in fake_client.calls
+
+
+def test_get_runs_not_found_names_the_account_it_searched(fake_client, monkeypatch):
+    class _TeamConfig:
+        team_id = "team_1"
+        team_name = "PI Research"
+        team_id_from_env = False
+
+    def missing(run_id):
+        raise NotFoundError("No run 'gone' for this owner", status_code=404, code="run_not_found")
+
+    monkeypatch.setattr(traces_cmd, "Config", _TeamConfig)
+    fake_client.get_run = missing
+
+    result = runner.invoke(main_app, ["traces", "get", "gone", "--runs"])
+
+    assert result.exit_code == 1
+    assert "Not found: no run gone in team PI Research." in result.stderr
+    assert "prime switch" in result.stderr
+
+
+def test_get_runs_hints_quote_the_run_id_for_the_shell(fake_client):
+    fake_client.get_run = lambda run_id: _run(run_id=run_id, step_min=0, step_max=1, step_count=2)
+
+    result = runner.invoke(main_app, ["traces", "get", "run 1;rm", "--runs"])
+
+    assert result.exit_code == 0, result.output
+    output = " ".join(result.output.split())
+    assert "--run-id 'run 1;rm' --run-step <step>" in output
+    assert "Traces: prime traces list --run-id 'run 1;rm'" in output

@@ -13,6 +13,8 @@ from prime_traces import (
     NotFoundError,
     PaymentRequiredError,
     PrimeTracesError,
+    RunListPage,
+    RunStepList,
     TraceListPage,
     TracesClient,
     TraceSearchMatch,
@@ -33,7 +35,14 @@ from ..utils import (
     validate_output_format,
 )
 from .teams import fetch_team_members
-from .traces_views import episode_view, episodes_table, summary_view, traces_table
+from .traces_views import (
+    episode_view,
+    episodes_table,
+    run_view,
+    runs_table,
+    summary_view,
+    traces_table,
+)
 
 app = PlainTyper(help="Upload and query traces (Prime Traces)", no_args_is_help=True)
 console = get_console()
@@ -60,6 +69,8 @@ LIST_JSON_HELP = json_output_help(
     " duration_ms, created_at, ingested_at, ...}",
     "with --episodes: .items[] = episode summary {episode_id, run_id, environment_id,"
     " outcome, has_error, error{type, message}, created_at, ...}",
+    "with --runs: .items[] = run summary {run_id, trace_count, episode_count, avg_reward,"
+    " has_error, step_count, environment_ids[], model_ids[], context, ...}",
     ".next_cursor? = string",
 )
 
@@ -68,12 +79,18 @@ GET_JSON_HELP = json_output_help(
     "with --episodes: . = episode summary plus .traces = {trace_count, total_tokens,"
     " total_duration_ms, any_trace_error, agent_names[]}; with --raw and no --dest,"
     " the exact stored episode (.traces = member trace IDs)",
+    "with --runs: . = run summary {run_id, trace_count, episode_count, avg_reward,"
+    " has_error, step_min, step_max, step_count, environment_ids[], model_ids[], context,"
+    " first_trace_created_at, last_trace_created_at, last_trace_ingested_at, first_user_id}"
+    " plus .steps[] = {step, trace_count, episode_count, avg_reward}",
     "with --raw --dest: {dest, bytes_written}",
 )
 
 # Member traces shown under `prime traces get --episodes`; the rest are one
 # `prime traces list --episode-id` away.
 EPISODE_MEMBERS_SHOWN = 20
+
+RUN_TYPES = ("eval", "train", "unknown")
 
 
 def _parse_context(values: List[str]) -> Optional[Dict[str, str]]:
@@ -331,7 +348,7 @@ def upload_traces(
         console.print(Text(f"List a batch: {list_command} --upload-id <batch id>", style="dim"))
 
 
-PageT = TypeVar("PageT", TraceListPage, EpisodeListPage)
+PageT = TypeVar("PageT", TraceListPage, EpisodeListPage, RunListPage)
 
 
 def _list_page(
@@ -408,12 +425,12 @@ def _write_atomically(dest: Path, data: bytes) -> None:
         raise
 
 
-def _episode_not_found(episode_id: str) -> None:
-    """Explain a missing episode in terms of the account the lookup ran as.
+def _not_found(noun: str, identifier: str) -> None:
+    """Explain a missing episode or run in terms of the account the lookup ran as.
 
-    The service answers the same 404 for an episode that does not exist and
-    for one another account owns, and the account is the active team when
-    one is set, so the wrong team is the likeliest cause.
+    The service answers the same 404 for one that does not exist and for one
+    another account owns, and the account is the active team when one is set,
+    so the wrong team is the likeliest cause.
     """
     config = Config()
     if config.team_id:
@@ -422,9 +439,7 @@ def _episode_not_found(episode_id: str) -> None:
         owner = f"team {name or config.team_id}"
     else:
         owner = "your personal account"
-    error_console.print(
-        f"[red]Not found:[/red] no episode {escape(episode_id)} in {escape(owner)}."
-    )
+    error_console.print(f"[red]Not found:[/red] no {noun} {escape(identifier)} in {escape(owner)}.")
     if config.team_id_from_env:
         # `prime switch` refuses to run while the environment pins the team.
         error_console.print(
@@ -434,8 +449,8 @@ def _episode_not_found(episode_id: str) -> None:
         error_console.print("If another account owns it, switch with [bold]prime switch[/bold].")
 
 
-def _is_episode_not_found(error: APIError) -> bool:
-    return isinstance(error, NotFoundError) and error.code == "episode_not_found"
+def _is_not_found(error: APIError, code: str) -> bool:
+    return isinstance(error, NotFoundError) and error.code == code
 
 
 def _user_names() -> Optional[Dict[str, str]]:
@@ -468,6 +483,9 @@ def _reject_options(mode: str, given: Dict[str, bool]) -> None:
 @app.command("list", epilog=LIST_JSON_HELP)
 def list_traces(
     episodes: bool = typer.Option(False, "--episodes", help="List episodes instead of traces"),
+    runs: bool = typer.Option(
+        False, "--runs", help="List runs, with totals over their traces, instead of traces"
+    ),
     run_id: Optional[str] = typer.Option(None, "--run-id", help="Filter by run ID"),
     upload_id: List[str] = typer.Option(
         [],
@@ -508,8 +526,13 @@ def list_traces(
         min=0,
         help="With --episodes: only episodes with a trace from this training step",
     ),
+    run_type: List[str] = typer.Option(
+        [], "--run-type", help="With --runs: only eval, train or unknown runs; repeatable"
+    ),
     created_after: Optional[str] = typer.Option(
-        None, "--created-after", help="ISO timestamp; also the cheapest filter"
+        None,
+        "--created-after",
+        help="ISO timestamp; also the cheapest filter (with --runs: totals only these traces)",
     ),
     created_before: Optional[str] = typer.Option(None, "--created-before", help="ISO timestamp"),
     sort: Optional[str] = typer.Option(
@@ -534,9 +557,44 @@ def list_traces(
     ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """List trace summaries, or episode summaries with --episodes, newest first."""
+    """List trace summaries, episode summaries with --episodes, or runs with --runs.
+
+    Traces and episodes are listed newest first, runs by their latest upload.
+    """
     validate_output_format(output, error_console)
     _check_paging(page, cursor)
+    if episodes and runs:
+        error_console.print("[red]Error:[/red] --episodes cannot be combined with --runs")
+        raise typer.Exit(1)
+    if runs:
+        # A run listing filters only on its traces' time window and its type.
+        _reject_options(
+            "--runs",
+            {
+                "--run-id": run_id is not None,
+                "--upload-id": bool(upload_id),
+                "--context": bool(context),
+                "--episode-id": episode_id is not None,
+                "--environment-id": environment_id is not None,
+                "--task-id": task_id is not None,
+                "--model-id": model_id is not None,
+                "--outcome": outcome is not None,
+                "--has-error": has_error is not None,
+                "--reward-min": reward_min is not None,
+                "--reward-max": reward_max is not None,
+                "--run-step": run_step is not None,
+                "--sort": sort is not None,
+            },
+        )
+        unknown = [value for value in run_type if value not in RUN_TYPES]
+        if unknown:
+            error_console.print(
+                f"[red]Error:[/red] unknown --run-type {escape(', '.join(unknown))};"
+                " choose eval, train or unknown"
+            )
+            raise typer.Exit(1)
+    else:
+        _reject_options("a trace or episode listing (add --runs)", {"--run-type": bool(run_type)})
     if episodes:
         # Episodes carry no task, model, reward or sort key of their own.
         _reject_options(
@@ -615,7 +673,17 @@ def list_traces(
                 cursor=page_cursor,
             )
 
-        result = _list_page(fetch_episodes if episodes else fetch_traces, page=page, cursor=cursor)
+        def fetch_runs(page_cursor: Optional[str]) -> RunListPage:
+            return client.list_runs(
+                run_type=run_type or None,
+                created_after=created_after,
+                created_before=created_before,
+                limit=limit,
+                cursor=page_cursor,
+            )
+
+        fetch = fetch_runs if runs else fetch_episodes if episodes else fetch_traces
+        result = _list_page(fetch, page=page, cursor=cursor)
     except typer.Exit:
         raise
     except UnauthorizedError as e:
@@ -625,8 +693,8 @@ def list_traces(
         error_console.print(f"[red]Payment Required:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except APIError as e:
-        if episode_id is not None and _is_episode_not_found(e):
-            _episode_not_found(episode_id)
+        if episode_id is not None and _is_not_found(e, "episode_not_found"):
+            _not_found("episode", episode_id)
         else:
             error_console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
@@ -639,7 +707,13 @@ def list_traces(
         output_data_as_json(result.model_dump(mode="json"), console)
         return
 
-    if isinstance(result, EpisodeListPage):
+    if isinstance(result, RunListPage):
+        _print_empty_page("runs", page, len(result.items))
+        user_names = _user_names() if result.items else None
+        table, note = runs_table(
+            result, run_types=run_type, user_names=user_names, width=console.width
+        )
+    elif isinstance(result, EpisodeListPage):
         _print_empty_page("episodes", page, len(result.items))
         table, note = episodes_table(
             result, run_id=run_id, run_step=run_step, environment_id=environment_id
@@ -667,13 +741,20 @@ def list_traces(
     )
     if isinstance(result, EpisodeListPage) and result.items:
         console.print(Text("Details: prime traces get <episode_id> --episodes", style="dim"))
+    if isinstance(result, RunListPage) and result.items:
+        console.print(Text("Details: prime traces get <run_id> --runs", style="dim"))
 
 
 @app.command("get", epilog=GET_JSON_HELP)
 def get_trace(
-    trace_id: str = typer.Argument(..., help="Trace ID, or episode ID with --episodes"),
+    trace_id: str = typer.Argument(
+        ..., help="Trace ID, episode ID with --episodes, or run ID with --runs"
+    ),
     episodes: bool = typer.Option(
         False, "--episodes", help="Get an episode and its newest traces instead of a trace"
+    ),
+    runs: bool = typer.Option(
+        False, "--runs", help="Get a run's totals and per-step counts instead of a trace"
     ),
     raw: bool = typer.Option(False, "--raw", help="Fetch the exact stored document"),
     dest: Optional[Path] = typer.Option(
@@ -681,11 +762,22 @@ def get_trace(
     ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """Get one trace, or one episode with --episodes; --raw fetches the stored document."""
+    """Get one trace, one episode with --episodes, or one run with --runs.
+
+    --raw fetches the stored trace or episode document.
+    """
     validate_output_format(output, error_console)
     if dest is not None and not raw:
         error_console.print("[red]--dest requires --raw[/red]")
         raise typer.Exit(1)
+    if episodes and runs:
+        error_console.print("[red]Error:[/red] --episodes cannot be combined with --runs")
+        raise typer.Exit(1)
+    if runs:
+        # Totals are computed when read; there is no stored run document.
+        _reject_options("--runs", {"--raw": raw})
+        _get_run(trace_id, output=output)
+        return
     if episodes:
         _get_episode(trace_id, raw=raw, dest=dest, output=output)
         return
@@ -754,8 +846,8 @@ def _get_episode(episode_id: str, *, raw: bool, dest: Optional[Path], output: st
         error_console.print(f"[red]Payment Required:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except APIError as e:
-        if _is_episode_not_found(e):
-            _episode_not_found(episode_id)
+        if _is_not_found(e, "episode_not_found"):
+            _not_found("episode", episode_id)
         else:
             error_console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
@@ -790,6 +882,48 @@ def _get_episode(episode_id: str, *, raw: bool, dest: Optional[Path], output: st
         return
     assert members is not None
     for renderable in episode_view(detail, members):
+        console.print(renderable)
+
+
+def _get_run(run_id: str, *, output: str) -> None:
+    """`get --runs`: one run's totals, and its steps when it recorded any."""
+    if "/" in run_id:
+        # The run ID is one URL path segment; the SDK refuses what it cannot address.
+        raise typer.BadParameter("Run IDs containing '/' cannot be read", param_hint="RUN_ID")
+    try:
+        client = _traces_client()
+        run = client.get_run(run_id)
+        # A run without steps would answer an empty list; skip the request.
+        steps = (
+            client.list_run_steps(run_id)
+            if run.step_count
+            else RunStepList(step_min=None, step_max=None, step_count=0, items=[])
+        )
+    except typer.Exit:
+        raise
+    except UnauthorizedError as e:
+        error_console.print(f"[red]Unauthorized:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except PaymentRequiredError as e:
+        error_console.print(f"[red]Payment Required:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except APIError as e:
+        if _is_not_found(e, "run_not_found"):
+            _not_found("run", run_id)
+        else:
+            error_console.print(f"[red]Error:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except Exception as e:
+        error_console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
+        error_console.print_exception()
+        raise typer.Exit(1)
+
+    if output == "json":
+        payload = run.model_dump(mode="json")
+        payload["steps"] = [step.model_dump(mode="json") for step in steps.items]
+        output_data_as_json(payload, console)
+        return
+    for renderable in run_view(run, steps):
         console.print(renderable)
 
 

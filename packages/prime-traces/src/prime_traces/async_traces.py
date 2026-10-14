@@ -32,6 +32,9 @@ from .models import (
     EpisodeDetail,
     EpisodeListPage,
     LineFormat,
+    RunListPage,
+    RunStepList,
+    RunSummary,
     SearchField,
     TraceCallPage,
     TraceListPage,
@@ -42,12 +45,16 @@ from .models import (
 )
 from .traces import (
     DEFAULT_MAX_ATTEMPTS,
+    RunTypes,
     TraceRecord,
     UploadIds,
+    UserIds,
     _build_params,
     _encode_record,
     _episode_endpoint,
     _record_lines,
+    _repeated,
+    _run_endpoint,
     _run_search_endpoint,
     _trace_endpoint,
     _upload_ids,
@@ -693,6 +700,41 @@ class AsyncTracesClient:
         )
         return TraceListPage.model_validate(
             await self.client.get_json(f"{_episode_endpoint(episode_id)}/traces", params=params)
+        )
+
+    # -- runs (read-only) ---------------------------------------------------
+
+    async def list_runs(
+        self,
+        *,
+        run_type: Optional[RunTypes] = None,
+        created_by: Optional[UserIds] = None,
+        created_after: Optional[str] = None,
+        created_before: Optional[str] = None,
+        limit: Optional[int] = None,
+        cursor: Optional[str] = None,
+    ) -> RunListPage:
+        """List runs with totals over their traces. See ``TracesClient.list_runs``."""
+        params = _build_params(
+            (
+                ("run_type", _repeated(run_type)),
+                ("created_by", _repeated(created_by)),
+                ("created_after", created_after),
+                ("created_before", created_before),
+                ("limit", limit),
+                ("cursor", cursor),
+            )
+        )
+        return RunListPage.model_validate(await self.client.get_json("/runs", params=params))
+
+    async def get_run(self, run_id: str) -> RunSummary:
+        """One run's totals over all its traces. See ``TracesClient.get_run``."""
+        return RunSummary.model_validate(await self.client.get_json(_run_endpoint(run_id)))
+
+    async def list_run_steps(self, run_id: str) -> RunStepList:
+        """A run's training steps, oldest first. See ``TracesClient.list_run_steps``."""
+        return RunStepList.model_validate(
+            await self.client.get_json(f"{_run_endpoint(run_id)}/steps")
         )
 
     async def aclose(self) -> None:

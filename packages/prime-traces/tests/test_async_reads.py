@@ -11,6 +11,8 @@ import httpx
 import pytest
 from _samples import (
     EPISODE,
+    RUN,
+    RUN_STEPS,
     SUMMARY,
     UNAVAILABLE,
 )
@@ -499,6 +501,52 @@ class TestEpisodes:
         assert captured["path"] == "/api/v1/episodes/ep-1/traces"
         assert captured["params"] == {"has_error": "true", "context.source": "hosted_eval"}
         assert page.items[0].trace_id == "8d3f1a2b"
+
+
+class TestRuns:
+    @pytest.mark.asyncio
+    async def test_list_runs_sends_filters(self, make_async_client):
+        captured = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/api/v1/runs"
+            captured["params"] = request.url.params.multi_items()
+            return httpx.Response(200, json={"items": [RUN], "next_cursor": None})
+
+        page = await make_async_client(handler).list_runs(
+            run_type="eval", created_by=["u1", "u2"], limit=5
+        )
+        assert captured["params"] == [
+            ("run_type", "eval"),
+            ("created_by", "u1"),
+            ("created_by", "u2"),
+            ("limit", "5"),
+        ]
+        assert page.items[0].run_id == "run_9f3k2m"
+
+    @pytest.mark.asyncio
+    async def test_get_run_and_its_steps(self, make_async_client):
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/api/v1/runs/run_9f3k2m/steps":
+                return httpx.Response(200, json=RUN_STEPS)
+            assert request.url.path == "/api/v1/runs/run_9f3k2m"
+            return httpx.Response(200, json=RUN)
+
+        client = make_async_client(handler)
+        run = await client.get_run("run_9f3k2m")
+        steps = await client.list_run_steps("run_9f3k2m")
+        assert run.step_count == steps.step_count == 2
+        assert steps.items[1].avg_reward == 0.14
+
+    @pytest.mark.asyncio
+    async def test_get_run_not_found_is_typed(self, make_async_client):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                404, json={"error": {"code": "run_not_found", "message": "No run 'x'"}}
+            )
+
+        with pytest.raises(NotFoundError):
+            await make_async_client(handler).get_run("x")
 
 
 class TestClientLifecycle:

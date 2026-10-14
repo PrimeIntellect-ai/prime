@@ -1260,12 +1260,6 @@ def _volume_reads(name: str, path: str):
             raise ValueError("The backend did not return complete volume read credentials")
         _refuse_long(rel, route.prefix, path, error_console=err_console)
         s3 = _r2_client(lambda: _read_route(client, name, team_id), route)
-        err_console.print(
-            "Note: Changes from a live read-write session or run appear here once it ends.",
-            markup=False,
-            highlight=False,
-            soft_wrap=True,
-        )
         yield client, team_id, s3, route, rel
     except typer.Exit:
         raise
@@ -1302,7 +1296,10 @@ def ls(
     human: bool = typer.Option(False, "--human-readable", "-h", help="Show human-readable sizes"),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """List files and directories directly from volume storage, including runs/."""
+    """List files and directories directly from volume storage, including runs/.
+
+    A live read-write session or run's changes appear once it ends.
+    """
     validate_output_format(output, err_console)
     with _volume_reads(name, path) as (_, _, s3, route, rel):
         entries = volume_objects.list_entries(
@@ -1339,7 +1336,10 @@ def du(
     human: bool = typer.Option(False, "--human-readable", "-h", help="Show human-readable sizes"),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """Count stored bytes and objects, and compare whole-volume usage with its cap."""
+    """Count stored bytes and objects, and compare whole-volume usage with its cap.
+
+    A live read-write session or run's changes appear once it ends.
+    """
     validate_output_format(output, err_console)
     with _volume_reads(name, path) as (client, team_id, s3, route, rel):
         volume = next((v for v in client.list_volumes(team_id=team_id) if v.name == name), None)
@@ -1377,7 +1377,10 @@ def cat(
     name: str = typer.Argument(..., help="Volume name"),
     path: str = typer.Argument(..., help="File in the volume"),
 ) -> None:
-    """Stream a stored file to stdout as bytes, with no added newline."""
+    """Stream a stored file to stdout as bytes, with no added newline.
+
+    A live read-write session or run's changes appear once it ends.
+    """
     # Validate before making an API request, including directory operands.
     rel = _remote_path(path, error_console=err_console).removeprefix("/volume/")
     if not rel or rel.endswith("/"):

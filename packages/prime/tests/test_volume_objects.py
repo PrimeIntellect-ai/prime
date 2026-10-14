@@ -202,7 +202,7 @@ def test_ls_root_delimiter_and_pagination(storage):
     assert all(kw["Prefix"] == "vol1/" and kw["Delimiter"] == "/" for kw in requests)
     assert storage.routing == [(("data", "get", "", None), {"team_id": "team1"})]
     assert storage.s3.closed
-    assert result.stderr
+    assert not result.stderr
     assert "secret" not in result.output
 
 
@@ -261,7 +261,7 @@ def test_ls_text_literal_names(storage, flags):
     assert "[red]literal.txt" in strip_ansi(result.stdout)
     assert "root.txt" in result.stdout
     assert "sync" not in result.stdout.lower()
-    assert result.stderr
+    assert not result.stderr
 
 
 def test_ls_short_names_relative_to_operand(storage):
@@ -318,7 +318,7 @@ def test_du_subtree_whole_volume_usage_and_capacity(
     assert all(kw["Prefix"] == "vol1/" and "Delimiter" not in kw for kw in requests)
     assert storage.listing == [{"team_id": "team1"}]
     assert storage.s3.closed
-    assert result.stderr
+    assert not result.stderr
 
 
 def test_du_human_readable(storage):
@@ -346,7 +346,7 @@ def test_cat_binary_stream_and_cleanup(storage):
     assert result.stdout_bytes == payload
     assert storage.s3.body.chunk_sizes == [64 * 1024]
     assert storage.s3.body.closed and storage.s3.closed
-    assert result.stderr
+    assert not result.stderr
     assert storage.routing == [(("data", "get", "", None), {"team_id": "team1"})]
 
 
@@ -543,7 +543,7 @@ def test_cat_closed_stdout_pipe_exits_cleanly():
         assert code == 0, stderr
         assert "Traceback" not in stderr
         assert "BrokenPipeError" not in stderr
-        assert "once it ends" in stderr
+        assert "once it ends" not in stderr
     finally:
         if process.poll() is None:
             process.kill()

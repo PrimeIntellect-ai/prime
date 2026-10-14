@@ -9,7 +9,7 @@ def test_parse_lan_rule_round_trips():
     assert _parse_lan_rule("*->*").ports is None
 
 
-@pytest.mark.parametrize("raw", ["tag:web", "->tag:db", "*->*@http"])
+@pytest.mark.parametrize("raw", ["tag:web", "->tag:db", "*->*@http", "tag:web->tag:db@"])
 def test_parse_lan_rule_rejects_malformed(raw):
     with pytest.raises(ValueError):
         _parse_lan_rule(raw)

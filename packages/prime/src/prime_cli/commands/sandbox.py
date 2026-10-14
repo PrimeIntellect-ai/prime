@@ -487,12 +487,14 @@ app.add_typer(network_app, name="network")
 
 def _parse_lan_rule(raw: str) -> LanRule:
     """Parse ``FROM->TO[@PORT,PORT]``, e.g. ``tag:web->tag:db@5432`` or ``*->*``."""
-    head, _, ports = raw.partition("@")
+    head, sep, ports = raw.partition("@")
     src, arrow, dst = head.partition("->")
     if not arrow or not src.strip() or not dst.strip():
         raise ValueError(f"invalid rule {raw!r}: expected FROM->TO[@PORT,...]")
+    if sep and not ports.strip():
+        raise ValueError(f"invalid rule {raw!r}: '@' needs at least one port")
     try:
-        port_list = [int(p) for p in ports.split(",")] if ports else None
+        port_list = [int(p) for p in ports.split(",")] if sep else None
     except ValueError as exc:
         raise ValueError(f"invalid ports in rule {raw!r}") from exc
     return LanRule(from_=src.strip(), to=dst.strip(), ports=port_list)

@@ -2534,6 +2534,7 @@ class SandboxClient:
         """Create a LAN network. By default every member may reach every other
         member on every port; narrow it with ``set_lan_rules``."""
         payload: Dict[str, Any] = {"name": name}
+        team_id = team_id if team_id is not None else self.client.config.team_id
         if team_id is not None:
             payload["team_id"] = team_id
         response = self.client.request("POST", "/sandbox/networks", json=payload)
@@ -2541,6 +2542,7 @@ class SandboxClient:
 
     def list_lan_networks(self, team_id: Optional[str] = None) -> List[LanNetwork]:
         """List your personal LAN networks, or a team's."""
+        team_id = team_id if team_id is not None else self.client.config.team_id
         params = {"team_id": team_id} if team_id is not None else None
         response = self.client.request("GET", "/sandbox/networks", params=params)
         return [LanNetwork.model_validate(n) for n in response["networks"]]
@@ -4110,6 +4112,7 @@ class AsyncSandboxClient:
         """Create a LAN network. By default every member may reach every other
         member on every port; narrow it with ``set_lan_rules``."""
         payload: Dict[str, Any] = {"name": name}
+        team_id = team_id if team_id is not None else self.client.config.team_id
         if team_id is not None:
             payload["team_id"] = team_id
         response = await self.client.request("POST", "/sandbox/networks", json=payload)
@@ -4117,6 +4120,7 @@ class AsyncSandboxClient:
 
     async def list_lan_networks(self, team_id: Optional[str] = None) -> List[LanNetwork]:
         """List your personal LAN networks, or a team's."""
+        team_id = team_id if team_id is not None else self.client.config.team_id
         params = {"team_id": team_id} if team_id is not None else None
         response = await self.client.request("GET", "/sandbox/networks", params=params)
         return [LanNetwork.model_validate(n) for n in response["networks"]]

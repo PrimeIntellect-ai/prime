@@ -20,9 +20,10 @@ NETWORK = {
 }
 
 
-def _sync_client(response):
+def _sync_client(response, team_id=None):
     client = object.__new__(SandboxClient)
     client.client = MagicMock()
+    client.client.config.team_id = team_id
     client.client.request.return_value = response
     return client
 
@@ -50,6 +51,19 @@ def test_list_lan_networks_unwraps():
     client = _sync_client({"networks": [NETWORK]})
     assert [n.id for n in client.list_lan_networks()] == ["net1"]
     client.client.request.assert_called_once_with("GET", "/sandbox/networks", params=None)
+
+
+def test_lan_networks_default_to_config_team():
+    client = _sync_client(NETWORK, team_id="team1")
+    client.create_lan_network("lab")
+    client.client.request.assert_called_once_with(
+        "POST", "/sandbox/networks", json={"name": "lab", "team_id": "team1"}
+    )
+    client.client.request.return_value = {"networks": []}
+    client.list_lan_networks()
+    client.client.request.assert_called_with(
+        "GET", "/sandbox/networks", params={"team_id": "team1"}
+    )
 
 
 @pytest.mark.asyncio

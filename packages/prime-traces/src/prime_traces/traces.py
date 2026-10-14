@@ -49,6 +49,10 @@ from .models import (
     EpisodeDetail,
     EpisodeListPage,
     LineFormat,
+    RunListPage,
+    RunStepList,
+    RunSummary,
+    RunType,
     SearchField,
     TraceCallPage,
     TraceListPage,
@@ -125,11 +129,19 @@ def _build_params(
 UploadIds = Union[str, Sequence[str]]
 
 
+def _repeated(value: Optional[Union[str, Sequence[str]]]) -> Optional[Union[str, List[str]]]:
+    """One value, or several sent as a repeated parameter; an empty list is unset."""
+    if value is None or isinstance(value, str):
+        return value
+    return list(value) or None
+
+
 def _upload_ids(upload_id: Optional[UploadIds]) -> Optional[Union[str, List[str]]]:
-    """One ID, or several sent as a repeated parameter; an empty list is unset."""
-    if upload_id is None or isinstance(upload_id, str):
-        return upload_id
-    return list(upload_id) or None
+    return _repeated(upload_id)
+
+
+RunTypes = Union[RunType, Sequence[RunType]]
+UserIds = Union[str, Sequence[str]]
 
 
 def _encoded_id_segment(identifier: str, *, parameter_name: str) -> str:
@@ -158,9 +170,14 @@ def _trace_endpoint(trace_id: str) -> str:
     return f"/traces/{_encoded_id_segment(trace_id, parameter_name='trace_id')}"
 
 
+def _run_endpoint(run_id: str) -> str:
+    """Build a run endpoint with the ID encoded as one path segment."""
+    return f"/runs/{_encoded_id_segment(run_id, parameter_name='run_id')}"
+
+
 def _run_search_endpoint(run_id: str) -> str:
     """Build a run's search endpoint with the ID encoded as one path segment."""
-    return f"/runs/{_encoded_id_segment(run_id, parameter_name='run_id')}/search"
+    return f"{_run_endpoint(run_id)}/search"
 
 
 def _episode_endpoint(episode_id: str) -> str:
@@ -669,6 +686,55 @@ class TracesClient:
         return TraceListPage.model_validate(
             self.client.get_json(f"{_episode_endpoint(episode_id)}/traces", params=params)
         )
+
+    # -- runs (read-only) ---------------------------------------------------
+
+    def list_runs(
+        self,
+        *,
+        run_type: Optional[RunTypes] = None,
+        created_by: Optional[UserIds] = None,
+        created_after: Optional[str] = None,
+        created_before: Optional[str] = None,
+        limit: Optional[int] = None,
+        cursor: Optional[str] = None,
+    ) -> RunListPage:
+        """List runs with totals over their traces, most recently ingested first.
+
+        ``run_type`` and ``created_by`` (uploader user IDs) each take one value
+        or several. ``created_by`` keeps runs with at least one trace by those
+        users and still totals every trace in them. ``created_after`` and
+        ``created_before`` choose which traces are totalled, so a run that
+        crosses a bound reports only its traces inside the window.
+        """
+        params = _build_params(
+            (
+                ("run_type", _repeated(run_type)),
+                ("created_by", _repeated(created_by)),
+                ("created_after", created_after),
+                ("created_before", created_before),
+                ("limit", limit),
+                ("cursor", cursor),
+            )
+        )
+        return RunListPage.model_validate(self.client.get_json("/runs", params=params))
+
+    def get_run(self, run_id: str) -> RunSummary:
+        """One run's totals over all its traces.
+
+        Raises ``NotFoundError`` (``run_not_found``) when the owner has no
+        traces in the run.
+        """
+        return RunSummary.model_validate(self.client.get_json(_run_endpoint(run_id)))
+
+    def list_run_steps(self, run_id: str) -> RunStepList:
+        """A run's training steps, oldest first, each with its trace count,
+        episode count and average reward. Not paginated.
+
+        An unknown run returns no steps rather than ``NotFoundError``; use
+        ``get_run`` to tell the two apart.
+        """
+        return RunStepList.model_validate(self.client.get_json(f"{_run_endpoint(run_id)}/steps"))
 
     def close(self) -> None:
         self.client.close()

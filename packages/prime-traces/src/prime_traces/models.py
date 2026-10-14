@@ -1,7 +1,7 @@
 """Pydantic models for the Prime Traces API.
 
-Shapes mirror the service's response models (``prime-traces/src/traces/models.py``
-and ``src/episodes/models.py`` in the platform repo), including their
+Shapes mirror the service's response models (``prime-traces/src/traces/models.py``,
+``src/episodes/models.py`` and ``src/runs/models.py`` in the platform repo), including their
 required/nullable split: a field the service always sends is required here —
 so contract drift fails loudly in tests instead of propagating ``None`` — and
 a field the service sends as ``null`` for "not recorded" is ``Optional``.
@@ -16,6 +16,8 @@ from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, ConfigDict
 
 SearchField = Literal["content", "reasoning_content", "tool_calls"]
+# The service classifies a run from its newest trace's upload context.
+RunType = Literal["eval", "train", "unknown"]
 
 
 class TraceSearchMatch(BaseModel):
@@ -281,6 +283,69 @@ class EpisodeListPage(BaseModel):
 
     items: List[EpisodeSummary]
     next_cursor: Optional[str]
+
+
+class RunSummary(BaseModel):
+    """Totals over one run's traces, computed when read.
+
+    The store records no run entity, so every timestamp is a trace's:
+    ``first_trace_created_at`` and ``last_trace_created_at`` span the
+    producer's clock, and ``last_trace_ingested_at`` (the listing's sort key)
+    is arrival on the service's clock. ``avg_reward`` covers scored traces
+    only and is ``None`` when none is scored. A run without training steps has
+    ``step_min``/``step_max`` of ``None`` and ``step_count`` 0. ``context`` is
+    the whole map of the run's newest trace, not a union.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    run_id: str
+    first_trace_created_at: datetime
+    last_trace_created_at: datetime
+    last_trace_ingested_at: datetime
+    trace_count: int
+    episode_count: int
+    avg_reward: Optional[float]
+    step_min: Optional[int]
+    step_max: Optional[int]
+    step_count: int
+    has_error: bool
+    first_user_id: Optional[str]
+    environment_ids: List[str]
+    model_ids: List[str]
+    context: Dict[str, str]
+
+
+class RunListPage(BaseModel):
+    """One page of runs, most recently ingested first."""
+
+    model_config = ConfigDict(extra="allow")
+
+    items: List[RunSummary]
+    next_cursor: Optional[str]
+
+
+class RunStep(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    step: int
+    trace_count: int
+    episode_count: int
+    avg_reward: Optional[float]
+
+
+class RunStepList(BaseModel):
+    """Every recorded training step of one run, oldest first, in one response.
+
+    A run without steps, or with no traces at all, has no items.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    step_min: Optional[int]
+    step_max: Optional[int]
+    step_count: int
+    items: List[RunStep]
 
 
 class NodeMessage(BaseModel):

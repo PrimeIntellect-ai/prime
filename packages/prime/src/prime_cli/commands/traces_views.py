@@ -1,4 +1,4 @@
-"""Rendering for `prime traces list` and `prime traces get`, for traces and episodes.
+"""Rendering for `prime traces list` and `prime traces get`, for traces, episodes and runs.
 
 Pure functions over SDK models, so the command module keeps the I/O and the
 tests can render without a network. Every producer-written string is wrapped
@@ -11,6 +11,9 @@ from prime_traces import (
     EpisodeDetail,
     EpisodeError,
     EpisodeListPage,
+    RunListPage,
+    RunStepList,
+    RunSummary,
     TraceListPage,
     TraceSummary,
 )
@@ -273,6 +276,121 @@ def episodes_table(
     return table, note
 
 
+def _avg_reward(value: Optional[float]) -> str:
+    return "-" if value is None else f"{value:.2f}"
+
+
+def _joined(values: List[str]) -> Optional[str]:
+    return ", ".join(values) or None
+
+
+# Columns dropped from the runs table, in this order, while the terminal is too
+# narrow for them all. Free-text columns count at FREE_TEXT_FLOOR.
+RUN_DROP_ORDER = ("Updated", "User", "Model")
+
+
+def runs_table(
+    page: RunListPage,
+    *,
+    run_types: Optional[List[str]] = None,
+    user_names: Optional[Dict[str, str]] = None,
+    width: Optional[int] = None,
+) -> Tuple[Table, Optional[Text]]:
+    """One row per run, with its totals.
+
+    The type is the run's `run_type` context value. A type, environment or
+    model that every row shares leaves its column for a line under the table.
+    `user_names` is None for a personal account, whose runs are all the
+    caller's own, so the column of who started each run is left out. Steps
+    show only when a run on the page recorded any.
+
+    The run ID is never shortened. When `width` cannot fit every column, the
+    columns in RUN_DROP_ORDER go; `get --runs` and JSON keep every field.
+    """
+    items = page.items
+    several = len(items) > 1
+
+    def run_type(run: RunSummary) -> Optional[str]:
+        return run.context.get("run_type")
+
+    def name(user_id: Optional[str]) -> str:
+        if user_id is None:
+            return "-"
+        return (user_names or {}).get(user_id) or user_id
+
+    kind = shared_value(run_type(r) for r in items) if several and not run_types else None
+    environment = shared_value(_joined(r.environment_ids) for r in items) if several else None
+    model = shared_value(_joined(r.model_ids) for r in items) if several else None
+    title = " · ".join(part for part in ("Runs", run_types and " or ".join(run_types)) if part)
+    note = page_note(
+        len(items),
+        (
+            kind and f"type {kind}",
+            environment and f"environment {environment}",
+            model and f"model {model}",
+        ),
+    )
+
+    # (header, free text, right-aligned, cell)
+    Column = Tuple[str, bool, bool, Callable[[RunSummary], Text]]
+    columns: List[Column] = []
+    if not run_types and kind is None:
+        columns.append(("Type", False, False, lambda r: Text(run_type(r) or "-")))
+    if environment is None:
+        columns.append(
+            ("Environment", True, False, lambda r: Text(_joined(r.environment_ids) or "-"))
+        )
+    if model is None:
+        columns.append(("Model", True, False, lambda r: Text(_joined(r.model_ids) or "-")))
+    if user_names is not None:
+        columns.append(("User", True, False, lambda r: Text(name(r.first_user_id))))
+    columns.append(("Traces", False, True, lambda r: Text(f"{r.trace_count:,}")))
+    columns.append(("Avg reward", False, True, lambda r: Text(_avg_reward(r.avg_reward))))
+    if any(r.step_count for r in items):
+        columns.append(
+            ("Steps", False, True, lambda r: Text(f"{r.step_count:,}" if r.step_count else "-"))
+        )
+    # A word, not just a color, so a failure still reads in plain output.
+    columns.append(
+        ("Error", False, False, lambda r: Text("yes", style="red") if r.has_error else Text("-"))
+    )
+    columns.append(
+        ("Updated", False, False, lambda r: Text(format_time_ago(r.last_trace_ingested_at)))
+    )
+
+    id_width = max((len(r.run_id) for r in items), default=len("Run ID"))
+    if width is not None and items:
+
+        def needed() -> int:
+            # Every column costs its content plus three characters of border and padding.
+            total = 4 + max(id_width, len("Run ID"))
+            for header, free, _, cell in columns:
+                content = max(len(header), *(len(cell(r).plain) for r in items))
+                total += 3 + (min(content, FREE_TEXT_FLOOR) if free else content)
+            return total
+
+        for header in RUN_DROP_ORDER:
+            if needed() <= width:
+                break
+            columns = [column for column in columns if column[0] != header]
+
+    table = Table(title=Text(title), title_justify="left")
+    table.add_column("Run ID", style="cyan", no_wrap=True, min_width=id_width)
+    for header, free, right, _ in columns:
+        # Free text is wrappable, so the column can shrink; each cell stays on one line.
+        table.add_column(header, justify="right" if right else "left", no_wrap=not free)
+    for run in items:
+        cells = []
+        for _, free, _, cell in columns:
+            text = cell(run)
+            if free:
+                text.no_wrap = True
+                text.overflow = "ellipsis"
+            cells.append(text)
+        table.add_row(Text(run.run_id), *cells)
+    return table, note
+
+
 # ---------------------------------------------------------------------------
 # prime traces get
 # ---------------------------------------------------------------------------
@@ -486,3 +604,80 @@ def members_table(members: List[TraceSummary]) -> Table:
             Text(_duration(trace.duration_ms / 1000)),
         )
     return table
+
+
+def run_view(run: RunSummary, steps: RunStepList) -> List[RenderableType]:
+    """The run's totals, then one row per training step when it recorded any."""
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(style="cyan", no_wrap=True)
+    grid.add_column()
+
+    def row(label: str, *parts: Tuple[str, str]) -> None:
+        grid.add_row(label, Text.assemble(*parts))
+
+    context = dict(run.context)
+    run_type = context.pop("run_type", None)
+    row("run", (run.run_id, "bold"), *([("  ·  ", "dim"), (run_type, "")] if run_type else []))
+    row("environment", (_joined(run.environment_ids) or "-", ""))
+    row("model", (_joined(run.model_ids) or "-", ""))
+    row(
+        "traces",
+        (f"{run.trace_count:,}", ""),
+        ("  episodes ", "dim"),
+        (f"{run.episode_count:,}", ""),
+        ("  error ", "dim"),
+        ("yes" if run.has_error else "no", "red" if run.has_error else ""),
+    )
+    # The mean leaves out unscored traces, so say so beside it.
+    row("avg reward", (_avg_reward(run.avg_reward), ""), ("  over scored traces", "dim"))
+    if run.step_count:
+        row(
+            "steps",
+            (f"{run.step_count:,}", ""),
+            ("  from ", "dim"),
+            (str(run.step_min), ""),
+            (" to ", "dim"),
+            (str(run.step_max), ""),
+        )
+    else:
+        row("steps", ("none recorded", "dim"))
+    row(
+        "created",
+        (run.first_trace_created_at.strftime(TIME_FORMAT), ""),
+        (" to ", "dim"),
+        (run.last_trace_created_at.strftime(TIME_FORMAT), ""),
+    )
+    row("updated", (run.last_trace_ingested_at.strftime(TIME_FORMAT), ""))
+    if context:
+        row("context", (", ".join(f"{k}={v}" for k, v in context.items()), ""))
+
+    out: List[RenderableType] = [grid, Text("")]
+    if steps.items:
+        table = Table(title="Steps", title_justify="left")
+        table.add_column("Step", justify="right", style="cyan", no_wrap=True)
+        table.add_column("Traces", justify="right", no_wrap=True)
+        table.add_column("Episodes", justify="right", no_wrap=True)
+        table.add_column("Avg reward", justify="right", no_wrap=True)
+        for step in steps.items:
+            table.add_row(
+                Text(str(step.step)),
+                Text(f"{step.trace_count:,}"),
+                Text(f"{step.episode_count:,}"),
+                Text(_avg_reward(step.avg_reward)),
+            )
+        out.append(table)
+        out.append(
+            Text.assemble(
+                ("One step's episodes: prime traces list --episodes --run-id ", "dim"),
+                (run.run_id, "dim"),
+                (" --run-step <step>", "dim"),
+            )
+        )
+    out.append(
+        Text.assemble(
+            ("Traces: ", "dim"),
+            ("prime traces list --run-id ", "dim"),
+            (run.run_id, "dim"),
+        )
+    )
+    return out

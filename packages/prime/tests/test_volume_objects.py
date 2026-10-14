@@ -543,7 +543,7 @@ def test_cat_closed_stdout_pipe_exits_cleanly():
         assert code == 0, stderr
         assert "Traceback" not in stderr
         assert "BrokenPipeError" not in stderr
-        assert "next sync" in stderr
+        assert "once it ends" in stderr
     finally:
         if process.poll() is None:
             process.kill()

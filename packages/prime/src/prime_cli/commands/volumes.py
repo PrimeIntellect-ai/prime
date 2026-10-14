@@ -1261,7 +1261,7 @@ def _volume_reads(name: str, path: str):
         _refuse_long(rel, route.prefix, path, error_console=err_console)
         s3 = _r2_client(lambda: _read_route(client, name, team_id), route)
         err_console.print(
-            "Note: Read-write SSH changes appear after the next sync (normally ~60s).",
+            "Note: Changes from a live read-write session or run appear here once it ends.",
             markup=False,
             highlight=False,
             soft_wrap=True,

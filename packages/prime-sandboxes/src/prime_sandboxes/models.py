@@ -307,6 +307,38 @@ class BatchSandboxStatusResponse(BaseModel):
     errors: List[SandboxStatusLookupError]
 
 
+class VolumeMount(BaseModel):
+    """One volume to mount in the sandbox, resolved by name in the
+    caller's scope (team scope when team_id is set)."""
+
+    name: str
+    mount_path: str
+    read_only: bool = False
+
+
+class Volume(BaseModel):
+    """A sandbox volume, owned by exactly one of user/team scope."""
+
+    id: str
+    name: str
+    user_id: Optional[str] = None
+    team_id: Optional[str] = None
+    # Newest durable publish, or null for a volume that was never published.
+    # Older responses may omit the field entirely.
+    head_checkpoint_id: Optional[str] = None
+    created_at: datetime
+
+
+class VolumeListResponse(BaseModel):
+    """Volume list response model"""
+
+    volumes: List[Volume]
+    total: int
+    page: int
+    per_page: int
+    has_next: bool
+
+
 class CreateSandboxRequest(BaseModel):
     """Create sandbox request model"""
 
@@ -336,6 +368,9 @@ class CreateSandboxRequest(BaseModel):
     # the sandbox to this LAN network with these tags.
     lan_network_id: Optional[str] = None
     lan_tags: Optional[List[str]] = None
+    # Unset volumes are omitted from the create payload, so requests without
+    # volume mounts keep their exact previous wire shape.
+    volumes: Optional[List[VolumeMount]] = None
 
     @model_validator(mode="after")
     def validate_restore_source(self) -> "CreateSandboxRequest":

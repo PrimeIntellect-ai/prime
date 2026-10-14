@@ -3661,6 +3661,7 @@ class AsyncSandboxClient:
         max_connections: int = 1000,
         max_keepalive_connections: int = 200,
         *,
+        api_client: Optional[AsyncAPIClient] = None,
         background_job_output_concurrency: int = MAX_CONCURRENT_BACKGROUND_JOB_OUTPUT_READS,
         background_job_output_queue_size: int = MAX_PENDING_BACKGROUND_JOB_OUTPUTS,
         background_job_output_cache_bytes: int = BACKGROUND_JOB_OUTPUT_CACHE_BYTES,
@@ -3671,6 +3672,8 @@ class AsyncSandboxClient:
             api_key: Optional API key (reads from config if not provided)
             max_connections: Maximum number of concurrent connections (default: 1000)
             max_keepalive_connections: Maximum keep-alive connections (default: 200)
+            api_client: Optional shared API client. When supplied, this client
+                borrows its transport and does not close it on aclose()
             background_job_output_concurrency: Maximum completed jobs downloading output at once
             background_job_output_queue_size: Maximum unique completed jobs waiting for output
             background_job_output_cache_bytes: Maximum client-local successful output cache size
@@ -3680,7 +3683,12 @@ class AsyncSandboxClient:
             background_job_output_queue_size,
             background_job_output_cache_bytes,
         )
-        self.client = AsyncAPIClient(api_key=api_key, user_agent=_build_user_agent())
+        # A borrowed client's transport outlives this client; owned ones do not.
+        self._owns_client = api_client is None
+        if api_client is None:
+            self.client = AsyncAPIClient(api_key=api_key, user_agent=_build_user_agent())
+        else:
+            self.client = api_client
         self._auth_cache = AsyncSandboxAuthCache(
             self.client.config.config_dir / "sandbox_auth_cache.json",
             self.client,
@@ -5480,10 +5488,17 @@ class AsyncSandboxClient:
             if self._gateway_client is not None:
                 await self._gateway_client.aclose()
         finally:
-            await self.client.aclose()
+            # Only the transport this client created is closed here; a
+            # borrowed API client stays open for its owner.
+            if self._owns_client:
+                await self.client.aclose()
 
     async def aclose(self) -> None:
-        """Cancel owned status and output tasks before closing async transports."""
+        """Close this client's batchers, leases, and gateway tasks.
+
+        The API transport is closed only when this client owns it; a borrowed
+        client's transport stays open for its owner.
+        """
         if self._close_task is None:
             self._close_task = asyncio.create_task(self._close())
         try:

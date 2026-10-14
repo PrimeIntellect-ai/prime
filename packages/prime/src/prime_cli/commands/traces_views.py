@@ -5,6 +5,7 @@ tests can render without a network. Every producer-written string is wrapped
 in `Text` rather than interpolated into markup, so it is always literal.
 """
 
+import shlex
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from prime_traces import (
@@ -651,6 +652,8 @@ def run_view(run: RunSummary, steps: RunStepList) -> List[RenderableType]:
     if context:
         row("context", (", ".join(f"{k}={v}" for k, v in context.items()), ""))
 
+    # Run IDs may hold spaces or shell syntax; the hints must paste as one argument.
+    run_arg = shlex.quote(run.run_id)
     out: List[RenderableType] = [grid, Text("")]
     if steps.items:
         table = Table(title="Steps", title_justify="left")
@@ -669,7 +672,7 @@ def run_view(run: RunSummary, steps: RunStepList) -> List[RenderableType]:
         out.append(
             Text.assemble(
                 ("One step's episodes: prime traces list --episodes --run-id ", "dim"),
-                (run.run_id, "dim"),
+                (run_arg, "dim"),
                 (" --run-step <step>", "dim"),
             )
         )
@@ -677,7 +680,7 @@ def run_view(run: RunSummary, steps: RunStepList) -> List[RenderableType]:
         Text.assemble(
             ("Traces: ", "dim"),
             ("prime traces list --run-id ", "dim"),
-            (run.run_id, "dim"),
+            (run_arg, "dim"),
         )
     )
     return out

@@ -2078,3 +2078,14 @@ def test_get_runs_not_found_names_the_account_it_searched(fake_client, monkeypat
     assert result.exit_code == 1
     assert "Not found: no run gone in team PI Research." in result.stderr
     assert "prime switch" in result.stderr
+
+
+def test_get_runs_hints_quote_the_run_id_for_the_shell(fake_client):
+    fake_client.get_run = lambda run_id: _run(run_id=run_id, step_min=0, step_max=1, step_count=2)
+
+    result = runner.invoke(main_app, ["traces", "get", "run 1;rm", "--runs"])
+
+    assert result.exit_code == 0, result.output
+    output = " ".join(result.output.split())
+    assert "--run-id 'run 1;rm' --run-step <step>" in output
+    assert "Traces: prime traces list --run-id 'run 1;rm'" in output

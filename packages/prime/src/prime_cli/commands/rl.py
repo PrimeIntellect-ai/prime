@@ -19,10 +19,16 @@ from rich.text import Text
 from prime_cli.core import Config
 
 from ..api.rl import EnvServerInfo, RLClient, RLRun
+from ..api.training import (
+    HostedTrainingClient,
+    build_payload_from_toml,
+    resolve_pull_request_head,
+)
 from ..client import APIClient, APIError
 from ..utils import (
     DefaultCommandGroup,
     PlainTyper,
+    api_detail,
     get_console,
     json_help,
     json_output_help,
@@ -99,7 +105,7 @@ VOLUME_READY_POLL_SECONDS = 3
 VOLUME_READY_MAX_SECONDS = 180
 VOLUME_DEFAULT_SIZE = "5Ti"  # same default as `prime volumes create`
 
-TERMINAL_RUN_STATUSES = {"STOPPED", "FAILED", "COMPLETED"}
+TERMINAL_RUN_STATUSES = {"STOPPED", "FAILED", "COMPLETED", "PAUSED"}
 
 # Log level colors for rich console
 LEVEL_STYLES = {
@@ -400,8 +406,6 @@ def _resolve_pr_ref(pr_number: int) -> str:
     Resolved client-side so the run is pinned to the exact commit the user
     saw, and so a fork or merged PR fails here with an actionable message.
     The caller shows the sha in its pre-confirmation banner."""
-    from ..api.training import resolve_pull_request_head
-
     try:
         return resolve_pull_request_head(pr_number)
     except APIError as e:
@@ -424,6 +428,7 @@ def _dispatch_dedicated_run(
     mode: Optional[str] = None,
     source_ref: Optional[str] = None,
     source_pr: Optional[int] = None,
+    resume_from: Optional[str] = None,
 ) -> None:
     """Hand off to /api/v1/training/runs (prime-rl on a registered
     PrimeCluster). Serves both dedicated run kinds: full-FT RL mega-TOMLs
@@ -433,8 +438,6 @@ def _dispatch_dedicated_run(
     Backend always auto-picks the first uncordoned PrimeCluster — the
     CLI never threads a cluster id, so a config that targets the wrong
     cluster can't be a footgun."""
-    from ..api.training import HostedTrainingClient, build_payload_from_toml
-
     name = raw_cfg.get("name")
 
     # Link the dispatched run to the user's active team. Without this, the
@@ -632,6 +635,7 @@ def _dispatch_dedicated_run(
         volume=resolved_volume,
         mode=mode,
         source_ref=resolved_source_ref,
+        resume_from=resume_from,
     )
 
     # Surface the image + source pins before the confirmation so a typo'd
@@ -672,7 +676,9 @@ def _dispatch_dedicated_run(
     # to a plain print in --plain mode, which would emit "Creating Hosted
     # Training run..." on stdout ahead of the JSON payload and break
     # automation parsing of run_id.
-    if resolved_volume:
+    # A resume runs on the paused run's volume, which the platform attaches
+    # and checks against any volume given here, so none is created for it.
+    if resolved_volume and not resume_from:
         _ensure_volume(client, resolved_volume, team_id, output, size=resolved_volume_size)
     status_ctx = (
         console.status("[bold blue]Creating Hosted Training run...", spinner="dots")
@@ -683,7 +689,12 @@ def _dispatch_dedicated_run(
         with status_ctx:
             result = client.create_run(payload)
     except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {rich_escape(api_detail(e))}")
+        if resume_from:
+            console.print(
+                f"[yellow]Tip:[/yellow] a run resumes once "
+                f"`prime train get {resume_from}` shows PAUSED"
+            )
         raise typer.Exit(1)
 
     if output == "json":
@@ -799,6 +810,8 @@ RUN_STATUS_COLORS = {
     "COMPLETED": "cyan",
     "FAILED": "red",
     "STOPPED": "magenta",
+    "PAUSING": "yellow",
+    "PAUSED": "blue",
 }
 
 
@@ -1031,6 +1044,14 @@ def create_run(
             "--volume, only fake datasets work."
         ),
     ),
+    resume_from: Optional[str] = typer.Option(
+        None,
+        "--resume-from",
+        help=(
+            "ID of a PAUSED run to continue from its checkpoint. The new run "
+            "uses the paused run's volume; --volume, if given, must name it."
+        ),
+    ),
 ) -> None:
     """Launch a Hosted Training run from a config file.
 
@@ -1053,6 +1074,9 @@ def create_run(
         raise typer.Exit(1)
     if ref is not None and pr is not None:
         console.print("[red]Error:[/red] --ref and --pr are mutually exclusive.")
+        raise typer.Exit(1)
+    if resume_from is not None and not resume_from.strip():
+        console.print("[red]Error:[/red] --resume-from needs the ID of a PAUSED run.")
         raise typer.Exit(1)
 
     raw_cfg = _load_toml(config_path)
@@ -1100,6 +1124,7 @@ def create_run(
         mode=mode,
         source_ref=ref,
         source_pr=pr,
+        resume_from=resume_from,
     )
 
 
@@ -1121,8 +1146,6 @@ def list_models(
     reported as backend data; unknown (field absent) is treated as no
     signal, never as a denial.
     """
-    from ..api.training import HostedTrainingClient
-
     validate_output_format(output, console)
 
     try:
@@ -1273,8 +1296,6 @@ def list_gpus(
     personal allocations. Pass any value to `prime train run
     --gpu-type <value>` to steer dispatch.
     """
-    from ..api.training import HostedTrainingClient
-
     validate_output_format(output, console)
 
     try:
@@ -1608,6 +1629,34 @@ def stop_run(
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
+
+
+@app.command("pause", rich_help_panel="Commands")
+def pause_run(
+    run_id: str = typer.Argument(..., help="Run ID to pause"),
+    force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation"),
+) -> None:
+    """Pause a Hosted Training run at a checkpoint and release its GPUs.
+
+    A paused run cannot be unpaused; continue it with
+    `prime train <config> --resume-from <run_id>`.
+    """
+    if not force and not typer.confirm(f"Are you sure you want to pause run {run_id}?"):
+        console.print("Cancelled.")
+        raise typer.Exit(0)
+
+    try:
+        result = HostedTrainingClient(APIClient()).pause_run(run_id)
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {rich_escape(api_detail(e))}")
+        raise typer.Exit(1)
+
+    status = result["status"]
+    color = _get_status_color(status)
+    console.print(f"[green]✓ Run {run_id} is pausing[/green]")
+    console.print(f"Status: [{color}]{status}[/{color}]")
+    console.print(f"Check progress with: prime train get {run_id}")
+    console.print(f"Once PAUSED, resume with: prime train <config> --resume-from {run_id}")
 
 
 @app.command("delete", rich_help_panel="Commands")

@@ -1,13 +1,14 @@
 """Display utilities for table and JSON output."""
 
 import json
+import re
 from typing import Any, Dict, List, Tuple
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
-from prime_cli.core import Config
+from prime_cli.core import APIError, Config
 
 
 def validate_output_format(output: str, console: Console) -> None:
@@ -33,6 +34,11 @@ def output_data_as_json(data: Any, console: Console) -> None:
         emoji=False,
         soft_wrap=True,
     )
+
+
+def api_detail(exc: APIError) -> str:
+    """The route's detail without the "HTTP 400: " / "HTTP 409: " prefix."""
+    return re.sub(r"^HTTP (400|409): ", "", str(exc))
 
 
 def build_table(title: str, columns: List[Tuple[str, str]], show_lines: bool = True) -> Table:

@@ -192,9 +192,7 @@ def test_volume_publish_force_no_wait_flags(
     # No success claim before DURABLE, plus an honest check command.
     assert "Published volume data" not in output
     assert "not yet DURABLE" in output
-    assert "prime sandbox checkpoint list sbx-1 --checkpoint-id chk-1" in " ".join(
-        output.split()
-    )
+    assert "prime sandbox checkpoint get chk-1" in " ".join(output.split())
 
 
 def test_volume_publish_surfaces_api_errors(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
@@ -265,7 +263,8 @@ def test_volume_publish_wait_timeout_reports_recovery(
     output = " ".join(strip_ansi(result.output).split())
     assert "did not become DURABLE within 300s" in output
     assert "The publish may still complete" in output
-    assert "prime sandbox checkpoint list sbx-1" in output
+    assert "prime sandbox checkpoint get" in output
+    assert "the id is in the message above" in output
 
 
 def test_volume_publish_wait_failed_exits_error(
@@ -845,7 +844,10 @@ def test_volume_import_publish_conflict_retains_importer(
     # The importer is kept: no delete call, and recovery output names it.
     assert state["deleted"] == []
     assert "kept" in output
-    assert "prime sandbox checkpoint list sbx-import-1" in output
+    assert "prime sandbox volumes get data" in output
+    assert "may be older or from another publisher" in output
+    assert "does not by itself confirm this publish" in output
+    assert "prime sandbox checkpoint get" in output
     assert "prime sandbox delete sbx-import-1" in output
     assert "30 minutes without transfer activity" in output
 
@@ -877,8 +879,7 @@ def test_volume_import_publish_timeout_retains_importer(
     # head-unchanged claim.
     assert state["deleted"] == []
     assert "kept" in output
-    assert "checkpoint chk-1" in output
-    assert "--checkpoint-id chk-1" in output
+    assert "prime sandbox checkpoint get chk-1" in output
     assert "30 minutes without transfer activity" in output
     assert "unchanged" not in output
 

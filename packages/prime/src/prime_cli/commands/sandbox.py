@@ -738,6 +738,29 @@ def checkpoint_list(
     console.print(table)
 
 
+@checkpoint_app.command("get")
+def checkpoint_get(
+    checkpoint_id: str,
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """Show one checkpoint's state by ID, rootfs or volume."""
+    validate_output_format(output, console)
+    try:
+        checkpoint = SandboxClient(APIClient()).get_checkpoint(checkpoint_id)
+    except APIError as exc:
+        console.print(f"[red]Error:[/red] {escape(str(exc))}")
+        raise typer.Exit(1) from exc
+    if output == "json":
+        output_data_as_json(checkpoint.model_dump(mode="json"), console)
+        return
+    # Neutral output: a checkpoint fetched by id may be a volume checkpoint,
+    # which is never restorable as a sandbox rootfs, so no restorable hint.
+    console.print(f"Checkpoint ID: [cyan]{escape(checkpoint.id)}[/cyan]")
+    console.print(f"State: {escape(checkpoint.state)}")
+    if checkpoint.error:
+        console.print(f"Error: {escape(checkpoint.error)}")
+
+
 @checkpoint_app.command("delete", no_args_is_help=True)
 def checkpoint_delete(
     checkpoint_ids: Optional[List[str]] = typer.Argument(

@@ -202,6 +202,8 @@ prime sandbox run <sandbox-id> --user ubuntu -- id
 # Request a filesystem checkpoint; check again until it is DURABLE
 prime sandbox checkpoint create <sandbox-id>
 prime sandbox checkpoint list <sandbox-id> [--checkpoint-id <checkpoint-id>]
+# Any checkpoint by id, rootfs or volume
+prime sandbox checkpoint get <checkpoint-id>
 prime sandbox checkpoint restore <checkpoint-id> --name restored-sandbox
 # Checkpoint + restore in one step, inheriting the source's resources
 prime sandbox fork <sandbox-id> [--name forked-sandbox]
@@ -237,7 +239,7 @@ whose volume head moved since attach is rejected (409) unless `--force`,
 which still cannot overtake another sandbox's pending publish. `--no-wait`
 prints the checkpoint id and state; the data is published only once that
 checkpoint is DURABLE, checkable with
-`prime sandbox checkpoint list <sandbox-id> --checkpoint-id <checkpoint-id>`.
+`prime sandbox checkpoint get <checkpoint-id>`.
 
 `volumes create --from` copies a local directory into a disposable
 read-write importer sandbox, publishes it, waits until DURABLE, and only

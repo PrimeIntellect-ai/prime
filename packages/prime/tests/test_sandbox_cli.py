@@ -7,7 +7,7 @@ import pytest
 from prime_cli.commands.sandbox import _format_sandbox_expiry
 from prime_cli.main import app
 from prime_cli.utils import strip_ansi
-from prime_sandboxes import SandboxCheckpoint, StartCommand
+from prime_sandboxes import APIError, SandboxCheckpoint, StartCommand
 from typer.testing import CliRunner
 
 runner = CliRunner()
@@ -67,6 +67,56 @@ def test_checkpoint_command_and_status(monkeypatch: pytest.MonkeyPatch) -> None:
     assert durable.exit_code == 0, durable.output
     assert json.loads(durable.output)["checkpoints"][0]["state"] == "DURABLE"
     assert listed == [("sandbox-1", None), ("sandbox-1", "checkpoint-1")]
+
+
+def test_checkpoint_get_by_id_states_and_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_cli(monkeypatch)
+    states = {
+        "cp-pending": ("PENDING", None),
+        "cp-durable": ("DURABLE", None),
+        "cp-failed": ("FAILED", "upload failed"),
+    }
+    requested: list[str] = []
+
+    def get_checkpoint(self: Any, checkpoint_id: str) -> SandboxCheckpoint:
+        requested.append(checkpoint_id)
+        state, error = states[checkpoint_id]
+        return SandboxCheckpoint(
+            id=checkpoint_id,
+            sandbox_id="sandbox-1",
+            state=state,
+            depth=1,
+            docker_image="python:3.11-slim",
+            error=error,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+
+    monkeypatch.setattr(
+        "prime_cli.commands.sandbox.SandboxClient.get_checkpoint", get_checkpoint
+    )
+
+    for checkpoint_id, (state, error) in states.items():
+        result = runner.invoke(app, ["sandbox", "checkpoint", "get", checkpoint_id])
+        assert result.exit_code == 0, result.output
+        output = " ".join(strip_ansi(result.output).split())
+        assert checkpoint_id in output
+        assert state in output
+        # Neutral by-id output: a volume checkpoint is never restorable.
+        assert "Restorable" not in output
+        if error:
+            assert error in output
+
+    assert requested == list(states)
+
+    def missing(self: Any, checkpoint_id: str) -> SandboxCheckpoint:
+        raise APIError(f"HTTP 404: Checkpoint {checkpoint_id} not found")
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.get_checkpoint", missing)
+
+    failing = runner.invoke(app, ["sandbox", "checkpoint", "get", "cp-missing"])
+    assert failing.exit_code == 1, failing.output
+    assert "HTTP 404" in strip_ansi(failing.output)
 
 
 def test_restore_command_creates_from_checkpoint(monkeypatch: pytest.MonkeyPatch) -> None:

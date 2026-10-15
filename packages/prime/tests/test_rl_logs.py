@@ -164,6 +164,44 @@ def test_unrecognized_or_malformed_log_is_literal_fallback(line: str) -> None:
     assert Text.from_markup(rl_commands.clean_logs(line)[0], emoji=False).plain == line
 
 
+@pytest.fixture(params=["integer-digit-limit", "deep-nesting"])
+def unsupported_json_log(request: pytest.FixtureRequest) -> str:
+    # These are syntactically JSON but exceed Python's decoder limits.
+    value = (
+        "1" * 5000 if request.param == "integer-digit-limit" else "[" * 10000 + "0" + "]" * 10000
+    )
+    return '[adminlog] {"timestamp":"12:34:56","level":"INFO","message":' + value + "}"
+
+
+def test_decoder_limit_is_literal_fallback(unsupported_json_log: str) -> None:
+    assert rl_commands.format_json_log_line(unsupported_json_log) is None
+    rendered = rl_commands.clean_logs(unsupported_json_log)
+    assert Text.from_markup(rendered[0], emoji=False).plain == unsupported_json_log
+
+
+@pytest.mark.parametrize("follow", [False, True])
+def test_decoder_limit_does_not_abort_cli_output(
+    monkeypatch: pytest.MonkeyPatch, unsupported_json_log: str, follow: bool
+) -> None:
+    calls = 0
+
+    def get_logs(*args: Any, **kwargs: Any) -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return unsupported_json_log + "\n" + _json_log(message="Continued after decoder limit")
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(RLClient, "get_logs", get_logs)
+    result = CliRunner().invoke(app, ["train", "logs", RUN_ID, *(["--follow"] if follow else [])])
+    assert result.exit_code == 0, type(result.exception).__name__
+    assert unsupported_json_log in _plain(result.output).replace("\n", "")
+    assert "[INFO] Continued after decoder limit" in _plain(result.output)
+    assert calls == (2 if follow else 1)
+    if follow:
+        assert "Stopped watching logs" in result.output
+
+
 def test_progress_filter_still_applies_to_prefixed_json() -> None:
     logs = "\n".join(
         [

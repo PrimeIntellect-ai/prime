@@ -209,7 +209,9 @@ def format_json_log_line(line: str) -> str | None:
         else:
             return f"{context}[dim]{rich_escape(time_part)}[/dim] \\[{safe_level}] {message}"
 
-    except (json.JSONDecodeError, TypeError, KeyError):
+    except (ValueError, RecursionError, TypeError, KeyError):
+        # JSONDecodeError is a ValueError; oversized integers and deeply
+        # nested records can also exceed the decoder/encoder limits.
         return None
 
 

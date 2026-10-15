@@ -114,6 +114,10 @@ LEVEL_STYLES = {
 # Sentinel to indicate "this is JSON but should be skipped"
 _SKIP_LINE = "__SKIP__"
 
+# The API marks admin-visible infrastructure lines; torchrun and vLLM/Ray
+# can also prepend rank/process context before the JSON envelope.
+_LOG_PREFIX = re.compile(r"^(?:\[adminlog\]\s+|\[[a-zA-Z_]+\d+\]:\s*|\(\w+ pid=\d+\)\s+)")
+
 _MODEL_PARAM_COUNT_PATTERN = re.compile(
     r"-(?P<total>\d+(?:\.\d)?)[bB](?:-[aA](?P<active>\d+(?:\.\d)?)[bB])?(?=$|-)"
 )
@@ -147,7 +151,11 @@ def format_json_log_line(line: str) -> str | None:
         - _SKIP_LINE sentinel for JSON logs that should be filtered (e.g., progress)
         - None if not a valid JSON log (falls back to legacy handling)
     """
-    trimmed = line.strip()
+    trimmed = strip_ansi(line).strip()
+    prefix = ""
+    while match := _LOG_PREFIX.match(trimmed):
+        prefix += match.group()
+        trimmed = trimmed[match.end() :]
     if not trimmed.startswith("{") or not trimmed.endswith("}"):
         return None
 
@@ -155,30 +163,51 @@ def format_json_log_line(line: str) -> str | None:
         entry = json.loads(trimmed)
         if not isinstance(entry, dict):
             return None
-        if "timestamp" not in entry or "level" not in entry:
+        timestamp = entry.get("timestamp")
+        level = entry.get("level")
+        if not isinstance(timestamp, str) or not isinstance(level, str):
+            return None
+        if not timestamp or not level:
             return None
 
         # Skip progress logs in CLI - they're too spammy
         if entry.get("type") == "progress":
             return _SKIP_LINE
+        if "message" not in entry:
+            return None
 
         # Format timestamp (extract time portion)
-        timestamp = entry.get("timestamp", "")
         if "T" in timestamp:
             time_part = timestamp.split("T")[1][:8]  # HH:MM:SS
         else:
             time_part = timestamp[:8]
 
-        level = str(entry.get("level", "INFO")).upper()
-        message = rich_escape(str(entry.get("message", "")))
+        level = level.upper()
+        message = entry["message"]
+        if not isinstance(message, str):
+            message = json.dumps(message, ensure_ascii=False)
+        # Keep worker/rank context and exceptions that the flat prime-rl
+        # logger carries outside the message, including nested extra data.
+        if entry.get("tag") is not None:
+            message = f"[{entry['tag']}] {message}"
+        if entry.get("extra"):
+            message += " " + json.dumps(entry["extra"], ensure_ascii=False)
+        if entry.get("exception"):
+            message += "\n" + str(entry["exception"])
+        message = rich_escape(message)
+        context = rich_escape(prefix)
+        safe_level = rich_escape(level)
 
         # Get style for level
         style = LEVEL_STYLES.get(level, "")
 
         if style:
-            return f"[dim]{time_part}[/dim] [{style}]\\[{level}][/{style}] {message}"
+            return (
+                f"{context}[dim]{rich_escape(time_part)}[/dim] "
+                f"[{style}]\\[{safe_level}][/{style}] {message}"
+            )
         else:
-            return f"[dim]{time_part}[/dim] \\[{level}] {message}"
+            return f"{context}[dim]{rich_escape(time_part)}[/dim] \\[{safe_level}] {message}"
 
     except (json.JSONDecodeError, TypeError, KeyError):
         return None
@@ -211,7 +240,7 @@ def clean_logs(text: str) -> list[str]:
                 if "100%" not in cleaned:
                     continue
             if cleaned.strip():
-                formatted_lines.append(cleaned)
+                formatted_lines.append(rich_escape(cleaned))
 
     return formatted_lines
 
@@ -1634,7 +1663,16 @@ def restart_run(
         raise typer.Exit(1)
 
 
-def _print_new_lines(last_lines: list[str], current_lines: list[str]) -> None:
+def _print_log_lines(lines: list[str], raw: bool) -> None:
+    if raw:
+        for line in lines:
+            console.print(line, markup=False, highlight=False, emoji=False, soft_wrap=True)
+    else:
+        for line in clean_logs("\n".join(lines)):
+            console.print(line, highlight=False, emoji=False)
+
+
+def _print_new_lines(last_lines: list[str], current_lines: list[str], raw: bool = False) -> None:
     """Print only lines in current_lines that aren't in the tail of last_lines.
 
     Uses suffix-prefix overlap detection to avoid reprinting lines between polls.
@@ -1642,16 +1680,14 @@ def _print_new_lines(last_lines: list[str], current_lines: list[str]) -> None:
     if current_lines == last_lines:
         return
     if not last_lines:
-        for line in current_lines:
-            console.print(line)
+        _print_log_lines(current_lines, raw)
         return
     overlap = 0
     max_overlap = min(len(last_lines), len(current_lines))
     for i in range(1, max_overlap + 1):
         if last_lines[-i:] == current_lines[:i]:
             overlap = i
-    for line in current_lines[overlap:]:
-        console.print(line)
+    _print_log_lines(current_lines[overlap:], raw)
 
 
 def _is_log_startup_error(error: APIError) -> bool:
@@ -1700,11 +1736,6 @@ def _stream_logs(
 ) -> None:
     """Common print loop for orchestrator and env-server log fetches."""
 
-    def render(raw_logs: str) -> list[str]:
-        if raw:
-            return raw_logs.splitlines()
-        return clean_logs(raw_logs)
-
     if follow:
         console.print(f"[dim]Watching {label} logs... (Ctrl+C to stop)[/dim]\n")
         last_lines: list[str] = []
@@ -1731,16 +1762,18 @@ def _stream_logs(
                     continue
                 raise
 
-            current_lines = render(raw_logs)
-            _print_new_lines(last_lines, current_lines)
+            # Compare original records before presentation removes timestamp
+            # precision or filters progress lines from the polling window.
+            current_lines = raw_logs.splitlines()
+            _print_new_lines(last_lines, current_lines, raw)
             last_lines = current_lines
             time.sleep(HOSTED_TRAINING_LOG_FOLLOW_POLL_SECONDS)
     else:
         raw_logs = _fetch_logs_with_startup_poll(fetch_fn, tail, label)
-        rendered = render(raw_logs)
+        rendered = raw_logs.splitlines() if raw else clean_logs(raw_logs)
         if rendered:
             for line in rendered:
-                console.print(line)
+                console.print(line, markup=not raw, highlight=False, emoji=False, soft_wrap=raw)
         else:
             console.print("[yellow]No logs available yet.[/yellow]")
 
@@ -1875,7 +1908,9 @@ def get_logs(
         ),
     ),
     follow: bool = typer.Option(False, "--follow", "-f", help="Follow log output"),
-    raw: bool = typer.Option(False, "--raw", "-r", help="Show raw logs without formatting"),
+    raw: bool = typer.Option(
+        False, "--raw", "-r", help="Show original log lines (including JSON) without formatting"
+    ),
     search: Optional[str] = typer.Option(
         None,
         "--search",
@@ -1913,6 +1948,9 @@ def get_logs(
 
     List available pods first with ``prime train components <run_id>``.
 
+    JSON logs render as readable text by default. Use ``--raw`` to
+    preserve the original lines, including JSON and process prefixes.
+
     Per-rank narrowing on multi-replica trainer/inference is not yet
     surfaced here: the chart's default torchrun passes
     `--local-ranks-filter=0` (ENG-6449), so each node's logs collapse to
@@ -1929,6 +1967,7 @@ def get_logs(
 
         prime train logs <run_id>
         prime train logs <run_id> -f
+        prime train logs <run_id> --raw
         prime train logs <run_id> --search Backpressure
         prime train logs <run_id> --level ERROR --since 1h
         prime train logs <run_id> --search 'Step \\d+' --regex

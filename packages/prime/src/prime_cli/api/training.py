@@ -481,7 +481,9 @@ class HostedTrainingClient:
         try:
             return AvailableFFTModelsResponse.model_validate(response)
         except PydanticValidationError as exc:
-            raise APIError(f"Failed to parse available FFT models response: {exc}") from exc
+            raise APIError(
+                f"Failed to parse available Hosted Training models response: {exc}"
+            ) from exc
 
     def list_available_fft_models(self, team_id: str | None = None) -> list[AvailableFFTModel]:
         """Reserved-capacity models only. See `get_available_fft`."""

@@ -442,7 +442,7 @@ def _dispatch_dedicated_run(
     unsupported = sorted(k for k in secrets if k not in supported_secret_keys)
     if unsupported:
         console.print(
-            "[red]Error:[/red] full-FT runs only forward "
+            "[red]Error:[/red] Hosted Training runs only forward "
             f"{', '.join(sorted(supported_secret_keys))} today; got "
             f"unsupported secret(s): {', '.join(unsupported)}."
         )
@@ -958,8 +958,8 @@ def create_run(
         "--fft",
         hidden=True,
         help=(
-            "Deprecated: every RL config now runs as a full fine-tune on a "
-            "dedicated cluster, so this flag is a no-op."
+            "Deprecated: every RL config now runs as a Hosted Training run "
+            "on a dedicated cluster, so this flag is a no-op."
         ),
     ),
     sft: bool = typer.Option(
@@ -1164,7 +1164,9 @@ def _render_fft_models_table(fft_models: list) -> None:
             ", ".join(gpu_types) or "-",
         )
 
-    table.caption = "[dim]Models pre-cached on clusters you can dispatch FFT runs to.[/dim]"
+    table.caption = (
+        "[dim]Models pre-cached on clusters you can dispatch Hosted Training runs to.[/dim]"
+    )
     console.print(table)
 
 
@@ -1250,7 +1252,7 @@ def list_gpus(
         )
         return
 
-    console.print("[bold]Available GPU types[/bold] [dim](full-FT dispatch)[/dim]")
+    console.print("[bold]Available GPU types[/bold] [dim](Hosted Training dispatch)[/dim]")
     for gpu_type in response.gpu_types:
         console.print(f"  [cyan]{gpu_type}[/cyan]")
 

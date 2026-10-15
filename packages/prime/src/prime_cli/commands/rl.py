@@ -102,7 +102,7 @@ TERMINAL_RUN_STATUSES = {"STOPPED", "FAILED", "COMPLETED"}
 # Log level colors for rich console
 LEVEL_STYLES = {
     "DEBUG": "dim",
-    "INFO": "blue",
+    "INFO": "",
     "WARNING": "yellow",
     "WARN": "yellow",
     "ERROR": "red",
@@ -152,9 +152,9 @@ def format_json_log_line(line: str) -> str | None:
         - None if not a valid JSON log (falls back to legacy handling)
     """
     trimmed = strip_ansi(line).strip()
-    prefix = ""
+    prefixes = []
     while match := _LOG_PREFIX.match(trimmed):
-        prefix += match.group()
+        prefixes.append(match.group().rstrip().removesuffix(":"))
         trimmed = trimmed[match.end() :]
     if not trimmed.startswith("{") or not trimmed.endswith("}"):
         return None
@@ -186,49 +186,41 @@ def format_json_log_line(line: str) -> str | None:
         message = entry["message"]
         if not isinstance(message, str):
             message = json.dumps(message, ensure_ascii=False)
-        # Keep worker/rank context and exceptions that the flat prime-rl
-        # logger carries outside the message, including nested extra data.
-        if entry.get("tag") is not None:
-            message = f"[{entry['tag']}] {message}"
-        if entry.get("extra"):
-            message += " " + json.dumps(entry["extra"], ensure_ascii=False)
-        # Previously unrecognized prefixes fell back to the complete record.
-        # Keep unfamiliar context when rendering those records as text too.
-        context_fields = {
+        # Match prime-rl's time / padded level / source / message layout.
+        # Keep distinct process/rank prefixes and tags; they need not identify
+        # the same worker, even when their numeric suffixes happen to match.
+        metadata = {
             key: value
             for key, value in entry.items()
-            if key
-            not in {
-                "timestamp",
-                "level",
-                "message",
-                "module",
-                "function",
-                "line",
-                "type",
-                "tag",
-                "extra",
-                "exception",
-            }
+            if key not in {"timestamp", "level", "message"}
         }
-        if context_fields:
-            message += " " + json.dumps(context_fields, ensure_ascii=False)
-        if entry.get("exception"):
-            message += "\n" + str(entry["exception"])
-        message = rich_escape(message)
-        context = rich_escape(prefix)
-        safe_level = rich_escape(level)
+        if entry.get("tag") is not None:
+            tag = metadata.pop("tag")
+            if not isinstance(tag, str):
+                tag = json.dumps(tag, ensure_ascii=False)
+            prefixes.append(f"[{tag}]")
 
-        # Get style for level
+        exception = entry.get("exception")
+        if exception:
+            metadata.pop("exception")
+            if not isinstance(exception, str):
+                exception = json.dumps(exception, ensure_ascii=False)
+
+        # Diagnostic data stays visible, but off the main message row. Retain
+        # source-location and unfamiliar fields rather than silently omitting
+        # them to make the output shorter.
+        context = f"[dim]{rich_escape(' '.join(prefixes))}[/dim] " if prefixes else ""
+        safe_level = rich_escape(f"{level:>7}")
         style = LEVEL_STYLES.get(level, "")
-
         if style:
-            return (
-                f"{context}[dim]{rich_escape(time_part)}[/dim] "
-                f"[{style}]\\[{safe_level}][/{style}] {message}"
-            )
-        else:
-            return f"{context}[dim]{rich_escape(time_part)}[/dim] \\[{safe_level}] {message}"
+            safe_level = f"[{style}]{safe_level}[/{style}]"
+        message = rich_escape(message).replace("\n", "\n    ")
+        rendered = f"[dim]{rich_escape(time_part)}[/dim] {safe_level} {context}{message}"
+        if metadata:
+            rendered += f"\n    [dim]{rich_escape(json.dumps(metadata, ensure_ascii=False))}[/dim]"
+        if exception:
+            rendered += "\n    " + rich_escape(exception.replace("\n", "\n    "))
+        return rendered
 
     except (ValueError, RecursionError, TypeError, KeyError):
         # JSONDecodeError is a ValueError; oversized integers and deeply

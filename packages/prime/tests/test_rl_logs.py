@@ -103,17 +103,20 @@ def _json_log(**fields: Any) -> str:
 
 
 @pytest.mark.parametrize(
-    "prefix",
+    "prefix,context",
     [
-        "",
-        "[adminlog] ",
-        "[trainer0]:",
-        "(APIServer pid=927) ",
-        "[adminlog] [trainer7]:(Worker_TP0 pid=970) ",
-        "\x1b[32m[adminlog] \x1b[0m",
+        ("", ""),
+        ("[adminlog] ", "[adminlog] "),
+        ("[trainer0]:", "[trainer0] "),
+        ("(APIServer pid=927) ", "(APIServer pid=927) "),
+        (
+            "[adminlog] [trainer7]:(Worker_TP0 pid=970) ",
+            "[adminlog] [trainer7] (Worker_TP0 pid=970) ",
+        ),
+        ("\x1b[32m[adminlog] \x1b[0m", "[adminlog] "),
     ],
 )
-def test_json_log_formats_known_prefixes_and_preserves_context(prefix: str) -> None:
+def test_json_log_formats_known_prefixes_and_preserves_context(prefix: str, context: str) -> None:
     # The internal URL mirrors Sami's screenshot: the API adds [adminlog]
     # for ADMIN/MANAGER readers, which used to bypass JSON detection.
     line = prefix + _json_log(message="Waiting for http://inference.svc.cluster.local:8000")
@@ -121,7 +124,7 @@ def test_json_log_formats_known_prefixes_and_preserves_context(prefix: str) -> N
     assert len(rendered) == 1
     plain = Text.from_markup(rendered[0], emoji=False).plain
     assert plain == (
-        _plain(prefix) + "00:22:16 [INFO] Waiting for http://inference.svc.cluster.local:8000"
+        f"00:22:16    INFO {context}Waiting for http://inference.svc.cluster.local:8000"
     )
 
 
@@ -135,7 +138,7 @@ def test_json_log_keeps_nested_message_worker_context_and_exception() -> None:
     plain = Text.from_markup(rl_commands.clean_logs(line)[0], emoji=False).plain
     assert '[T_3] {"event": "step", "values": [0.5, {"loss": 0.1}]}' in plain
     assert '"rank": 3, "metrics": {"tokens": 128}' in plain
-    assert "Traceback:\nValueError: [red]literal[/red]" in plain
+    assert "Traceback:\n    ValueError: [red]literal[/red]" in plain
 
 
 @pytest.mark.parametrize("prefix", ["", "[adminlog] ", "[trainer7]:(Worker_TP0 pid=970) "])
@@ -151,18 +154,66 @@ def test_json_log_keeps_foreign_top_level_context(prefix: str) -> None:
         line=347,
     )
     rendered = rl_commands.clean_logs(line)
-    assert Text.from_markup(rendered[0], emoji=False).plain == (
-        prefix + '00:22:16 [INFO] Ready {"rank": 0, "process": 851, '
-        '"context": {"pod": "synthetic-worker", "labels": ["[red]literal[/red]"]}}'
-    )
+    header, details = Text.from_markup(rendered[0], emoji=False).plain.split("\n", 1)
+    assert header.startswith("00:22:16    INFO ")
+    assert header.endswith("Ready")
+    assert details.startswith("    ")
+    assert json.loads(details) == {
+        "rank": 0,
+        "process": 851,
+        "context": {"pod": "synthetic-worker", "labels": ["[red]literal[/red]"]},
+        "module": "clients",
+        "function": "_check_health",
+        "line": 347,
+    }
 
 
 @pytest.mark.parametrize("level", ["debug", "INFO", "WARNING", "ERROR", "CRITICAL", "custom"])
 def test_json_log_keeps_levels_and_literal_message(level: str) -> None:
     rendered = rl_commands.clean_logs(_json_log(level=level, message="[red]literal[/red] :rocket:"))
     assert Text.from_markup(rendered[0], emoji=False).plain == (
-        f"00:22:16 [{level.upper()}] [red]literal[/red] :rocket:"
+        f"00:22:16 {level.upper():>7} [red]literal[/red] :rocket:"
     )
+
+
+def test_json_log_uses_native_level_alignment_before_distinct_sources() -> None:
+    info = "[trainer0]:" + _json_log(tag="T_7")
+    warning = "(Worker_TP1 pid=4002) " + _json_log(level="WARNING", tag="BATCH_7")
+    rendered = [
+        Text.from_markup(line, emoji=False).plain
+        for line in rl_commands.clean_logs(info + "\n" + warning)
+    ]
+    assert rendered == [
+        "00:22:16    INFO [trainer0] [T_7] Ready",
+        "00:22:16 WARNING (Worker_TP1 pid=4002) [BATCH_7] Ready",
+    ]
+    assert rendered[0].index("[trainer0]") == rendered[1].index("(Worker_TP1")
+
+
+def test_json_log_moves_complete_diagnostics_off_the_message_row() -> None:
+    fields = {
+        "module": "trainer",
+        "function": "save",
+        "line": 347,
+        "type": "event",
+        "extra": {"step": 20, "timing": {"seconds": 1.2}},
+        "rank": 0,
+        "context": {"pod": "synthetic-worker", "labels": ["[red]literal[/red]"]},
+    }
+    rendered = rl_commands.clean_logs(_json_log(message="Checkpoint saved", **fields))[0]
+    text = Text.from_markup(rendered, emoji=False)
+    header, details = text.plain.split("\n", 1)
+    assert header == "00:22:16    INFO Checkpoint saved"
+    assert details.startswith("    ")
+    assert json.loads(details) == fields
+    assert text.get_style_at_offset(rl_commands.console, text.plain.index('"module"')).dim
+
+
+def test_json_log_preserves_empty_and_null_diagnostics() -> None:
+    fields = {"tag": None, "extra": {}, "exception": False, "module": "", "rank": 0}
+    rendered = rl_commands.clean_logs(_json_log(**fields))[0]
+    _, details = Text.from_markup(rendered, emoji=False).plain.split("\n", 1)
+    assert json.loads(details) == fields
 
 
 @pytest.mark.parametrize(
@@ -215,7 +266,7 @@ def test_decoder_limit_does_not_abort_cli_output(
     result = CliRunner().invoke(app, ["train", "logs", RUN_ID, *(["--follow"] if follow else [])])
     assert result.exit_code == 0, type(result.exception).__name__
     assert unsupported_json_log in _plain(result.output).replace("\n", "")
-    assert "[INFO] Continued after decoder limit" in _plain(result.output)
+    assert "INFO Continued after decoder limit" in _plain(result.output)
     assert calls == (2 if follow else 1)
     if follow:
         assert "Stopped watching logs" in result.output
@@ -231,7 +282,7 @@ def test_progress_filter_still_applies_to_prefixed_json() -> None:
         ]
     )
     lines = [Text.from_markup(line, emoji=False).plain for line in rl_commands.clean_logs(logs)]
-    assert lines == ["[trainer0]:00:22:16 [INFO] Done", "100%|██████████| 10/10"]
+    assert lines == ["00:22:16    INFO [trainer0] Done", "100%|██████████| 10/10"]
 
 
 @pytest.mark.parametrize(
@@ -247,7 +298,7 @@ def test_logs_default_renders_api_admin_json_for_each_component(
     monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
     result = CliRunner().invoke(app, ["train", "logs", RUN_ID, *args])
     assert result.exit_code == 0, result.output
-    assert "[adminlog] 00:22:16 [INFO] [T_0] Connecting" in _plain(result.output)
+    assert "00:22:16    INFO [adminlog] [T_0] Connecting" in _plain(result.output)
     assert '"timestamp"' not in result.output
     assert len(orch) == 1
 
@@ -266,7 +317,7 @@ def test_logs_keep_prefixed_foreign_context_with_api_response(
         assert result.stdout == line + "\n"
     else:
         plain = _plain(result.output)
-        assert "[adminlog] 00:22:16 [INFO] Ready" in plain
+        assert "00:22:16    INFO [adminlog] Ready" in plain
         for field in ['"rank": 0', '"process": 851', '"synthetic-worker"']:
             assert field in plain
 
@@ -311,7 +362,7 @@ def test_follow_compares_original_records_before_formatting(
     monkeypatch.setattr(RLClient, "get_logs", get_logs)
     result = CliRunner().invoke(app, ["train", "logs", RUN_ID, "-f", *(["--raw"] if raw else [])])
     assert result.exit_code == 0, result.output
-    assert result.output.count('"message": "Ready"' if raw else "[INFO] Ready") == (3 if raw else 2)
+    assert result.output.count('"message": "Ready"' if raw else "Ready") == (3 if raw else 2)
     assert "Stopped watching logs" in result.output
 
 
@@ -328,7 +379,7 @@ def test_follow_surfaces_api_errors_after_rendering(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(RLClient, "get_logs", get_logs)
     result = CliRunner().invoke(app, ["train", "logs", RUN_ID, "--follow"])
     assert result.exit_code == 1
-    assert "[INFO] Ready" in _plain(result.output)
+    assert "INFO [adminlog] Ready" in _plain(result.output)
     assert "HTTP 403: denied" in result.output
 
 

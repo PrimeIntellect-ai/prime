@@ -44,6 +44,11 @@ from .models import (
     LineFormat,
     ModelInfo,
     NodeMessage,
+    RunListPage,
+    RunStep,
+    RunStepList,
+    RunSummary,
+    RunType,
     Score,
     SearchField,
     TraceCall,
@@ -59,7 +64,7 @@ from .models import (
 )
 from .traces import SupportsToRecord, TraceRecord, TracesClient
 
-__version__ = "0.0.9"
+__version__ = "0.0.10"
 
 __all__ = [
     # Clients & config
@@ -90,6 +95,11 @@ __all__ = [
     "LineFormat",
     "ModelInfo",
     "NodeMessage",
+    "RunListPage",
+    "RunStep",
+    "RunStepList",
+    "RunSummary",
+    "RunType",
     "Score",
     "TraceCall",
     "TraceCallPage",

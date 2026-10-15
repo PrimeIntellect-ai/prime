@@ -78,6 +78,9 @@ from .models import (
     DeleteSandboxCheckpointsResponse,
     EgressPolicyStatus,
     FileUploadResponse,
+    LanNetwork,
+    LanNetworkMember,
+    LanRule,
     ReadFileResponse,
     Sandbox,
     SandboxCheckpoint,
@@ -2527,6 +2530,53 @@ class SandboxClient:
         response = self.client.request("GET", f"/sandbox/{sandbox_id}/egress-policy")
         return EgressPolicyStatus.model_validate(response)
 
+    def create_lan_network(self, name: str, team_id: Optional[str] = None) -> LanNetwork:
+        """Create a LAN network. By default every member may reach every other
+        member on every port; narrow it with ``set_lan_rules``."""
+        payload: Dict[str, Any] = {"name": name}
+        team_id = team_id if team_id is not None else self.client.config.team_id
+        if team_id is not None:
+            payload["team_id"] = team_id
+        response = self.client.request("POST", "/sandbox/networks", json=payload)
+        return LanNetwork.model_validate(response)
+
+    def list_lan_networks(self, team_id: Optional[str] = None) -> List[LanNetwork]:
+        """List your personal LAN networks, or a team's."""
+        team_id = team_id if team_id is not None else self.client.config.team_id
+        params = {"team_id": team_id} if team_id is not None else None
+        response = self.client.request("GET", "/sandbox/networks", params=params)
+        return [LanNetwork.model_validate(n) for n in response["networks"]]
+
+    def get_lan_network(self, network_id: str) -> LanNetwork:
+        """Get a LAN network with its rules and members."""
+        response = self.client.request("GET", f"/sandbox/networks/{network_id}")
+        return LanNetwork.model_validate(response)
+
+    def delete_lan_network(self, network_id: str) -> None:
+        """Delete a LAN network; its members stop reaching each other through it."""
+        self.client.request("DELETE", f"/sandbox/networks/{network_id}")
+
+    def set_lan_rules(self, network_id: str, rules: List[LanRule]) -> LanNetwork:
+        """Replace a LAN network's rules. Rules are directed and allow-only."""
+        payload = {"rules": [r.model_dump(by_alias=True, exclude_none=True) for r in rules]}
+        response = self.client.request("PUT", f"/sandbox/networks/{network_id}/rules", json=payload)
+        return LanNetwork.model_validate(response)
+
+    def add_lan_member(
+        self, network_id: str, sandbox_id: str, tags: Optional[List[str]] = None
+    ) -> LanNetworkMember:
+        """Add a running VM sandbox to a LAN network, or replace its tags."""
+        response = self.client.request(
+            "PUT",
+            f"/sandbox/networks/{network_id}/members/{sandbox_id}",
+            json={"tags": tags or []},
+        )
+        return LanNetworkMember.model_validate(response)
+
+    def remove_lan_member(self, network_id: str, sandbox_id: str) -> None:
+        """Remove a sandbox from a LAN network."""
+        self.client.request("DELETE", f"/sandbox/networks/{network_id}/members/{sandbox_id}")
+
     def create_ssh_session(
         self, sandbox_id: str, public_key: str, ttl_seconds: Optional[int] = None
     ) -> SSHSession:
@@ -2645,8 +2695,8 @@ class SandboxClient:
             gateway_url = auth["gateway_url"].rstrip("/")
             base_url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}"
             headers = {"Authorization": f"Bearer {auth['token']}"}
-            stdout_parts: List[str] = []
-            stderr_parts: List[str] = []
+            stdout_parts = bytearray()
+            stderr_parts = bytearray()
             exit_code: Optional[int] = None
             stream_started = False
 
@@ -2676,8 +2726,8 @@ class SandboxClient:
                     raise APIError("Command stream ended without exit code")
 
                 return CommandResponse(
-                    stdout="".join(stdout_parts),
-                    stderr="".join(stderr_parts),
+                    stdout=stdout_parts.decode("utf-8", errors="replace"),
+                    stderr=stderr_parts.decode("utf-8", errors="replace"),
                     exit_code=exit_code,
                 )
             except ConnectError as e:
@@ -4058,6 +4108,55 @@ class AsyncSandboxClient:
         response = await self.client.request("GET", f"/sandbox/{sandbox_id}/egress-policy")
         return EgressPolicyStatus.model_validate(response)
 
+    async def create_lan_network(self, name: str, team_id: Optional[str] = None) -> LanNetwork:
+        """Create a LAN network. By default every member may reach every other
+        member on every port; narrow it with ``set_lan_rules``."""
+        payload: Dict[str, Any] = {"name": name}
+        team_id = team_id if team_id is not None else self.client.config.team_id
+        if team_id is not None:
+            payload["team_id"] = team_id
+        response = await self.client.request("POST", "/sandbox/networks", json=payload)
+        return LanNetwork.model_validate(response)
+
+    async def list_lan_networks(self, team_id: Optional[str] = None) -> List[LanNetwork]:
+        """List your personal LAN networks, or a team's."""
+        team_id = team_id if team_id is not None else self.client.config.team_id
+        params = {"team_id": team_id} if team_id is not None else None
+        response = await self.client.request("GET", "/sandbox/networks", params=params)
+        return [LanNetwork.model_validate(n) for n in response["networks"]]
+
+    async def get_lan_network(self, network_id: str) -> LanNetwork:
+        """Get a LAN network with its rules and members."""
+        response = await self.client.request("GET", f"/sandbox/networks/{network_id}")
+        return LanNetwork.model_validate(response)
+
+    async def delete_lan_network(self, network_id: str) -> None:
+        """Delete a LAN network; its members stop reaching each other through it."""
+        await self.client.request("DELETE", f"/sandbox/networks/{network_id}")
+
+    async def set_lan_rules(self, network_id: str, rules: List[LanRule]) -> LanNetwork:
+        """Replace a LAN network's rules. Rules are directed and allow-only."""
+        payload = {"rules": [r.model_dump(by_alias=True, exclude_none=True) for r in rules]}
+        response = await self.client.request(
+            "PUT", f"/sandbox/networks/{network_id}/rules", json=payload
+        )
+        return LanNetwork.model_validate(response)
+
+    async def add_lan_member(
+        self, network_id: str, sandbox_id: str, tags: Optional[List[str]] = None
+    ) -> LanNetworkMember:
+        """Add a running VM sandbox to a LAN network, or replace its tags."""
+        response = await self.client.request(
+            "PUT",
+            f"/sandbox/networks/{network_id}/members/{sandbox_id}",
+            json={"tags": tags or []},
+        )
+        return LanNetworkMember.model_validate(response)
+
+    async def remove_lan_member(self, network_id: str, sandbox_id: str) -> None:
+        """Remove a sandbox from a LAN network."""
+        await self.client.request("DELETE", f"/sandbox/networks/{network_id}/members/{sandbox_id}")
+
     async def create_ssh_session(
         self, sandbox_id: str, public_key: str, ttl_seconds: Optional[int] = None
     ) -> SSHSession:
@@ -4370,8 +4469,8 @@ class AsyncSandboxClient:
             gateway_url = auth["gateway_url"].rstrip("/")
             base_url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}"
             headers = {"Authorization": f"Bearer {auth['token']}"}
-            stdout_parts: List[str] = []
-            stderr_parts: List[str] = []
+            stdout_parts = bytearray()
+            stderr_parts = bytearray()
             exit_code: Optional[int] = None
             stream_started = False
 
@@ -4401,8 +4500,8 @@ class AsyncSandboxClient:
                     raise APIError("Command stream ended without exit code")
 
                 return CommandResponse(
-                    stdout="".join(stdout_parts),
-                    stderr="".join(stderr_parts),
+                    stdout=stdout_parts.decode("utf-8", errors="replace"),
+                    stderr=stderr_parts.decode("utf-8", errors="replace"),
                     exit_code=exit_code,
                 )
             except ConnectError as e:

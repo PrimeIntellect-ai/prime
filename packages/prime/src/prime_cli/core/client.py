@@ -1,5 +1,5 @@
 import sys
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Union
 
 import httpx
 
@@ -117,7 +117,7 @@ class APIClient:
         endpoint: str,
         params: Optional[Dict[str, Any]] = None,
         json: Optional[Dict[str, Any]] = None,
-        timeout: Optional[int] = None,
+        timeout: Optional[Union[float, httpx.Timeout]] = None,
     ) -> Dict[str, Any]:
         """Make a request to the API"""
         self._check_auth_required()
@@ -191,7 +191,7 @@ class APIClient:
         self,
         endpoint: str,
         params: Optional[Dict[str, Any]] = None,
-        timeout: Optional[int] = None,
+        timeout: Optional[Union[float, httpx.Timeout]] = None,
     ) -> Dict[str, Any]:
         """Make a GET request to the API"""
         return self.request("GET", endpoint, params=params, timeout=timeout)
@@ -200,15 +200,18 @@ class APIClient:
         self,
         endpoint: str,
         json: Optional[Dict[str, Any]] = None,
-        timeout: Optional[int] = None,
+        timeout: Optional[Union[float, httpx.Timeout]] = None,
     ) -> Dict[str, Any]:
         """Make a POST request to the API
 
-        `timeout` overrides the client default (30s read) for this call
-        only. POSTs need it more than GETs do: a POST that times out
-        client-side may still have been COMMITTED server-side, so an
-        endpoint whose server budget exceeds 30s has to say so here
-        rather than hand the caller an ambiguous failure.
+        `timeout` overrides the client default for this call only. POSTs
+        need it more than GETs do: a POST that times out client-side may
+        still have been COMMITTED server-side, so an endpoint whose
+        server budget exceeds the default has to say so here rather than
+        hand the caller an ambiguous failure. Pass an `httpx.Timeout` to
+        stretch only the read budget — a bare float also stretches
+        connect, which turns an unreachable host into a long hang
+        reported as an ambiguous outcome.
         """
         return self.request("POST", endpoint, json=json, timeout=timeout)
 
@@ -279,7 +282,7 @@ class AsyncAPIClient:
         endpoint: str,
         params: Optional[Dict[str, Any]] = None,
         json: Optional[Dict[str, Any]] = None,
-        timeout: Optional[int] = None,
+        timeout: Optional[Union[float, httpx.Timeout]] = None,
     ) -> Dict[str, Any]:
         """Make an async request to the API"""
         self._check_auth_required()

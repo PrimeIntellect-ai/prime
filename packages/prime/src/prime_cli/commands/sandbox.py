@@ -23,6 +23,8 @@ from prime_sandboxes import (
     Config,
     CreateSandboxRequest,
     EgressPolicyStatus,
+    LanNetwork,
+    LanRule,
     PaymentRequiredError,
     Sandbox,
     SandboxCheckpoint,
@@ -36,6 +38,7 @@ from rich.table import Table
 from rich.text import Text
 
 from ..utils import (
+    DefaultCommandGroup,
     PlainTyper,
     build_table,
     confirm_or_skip,
@@ -465,6 +468,195 @@ def get(
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         console.print_exception(show_locals=True)
         raise typer.Exit(1)
+
+
+class _NetworkGroup(DefaultCommandGroup):
+    """``network SANDBOX_ID [--allow|--deny]`` keeps meaning ``network egress``."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, default_cmd_name="egress", **kwargs)
+
+
+network_app = PlainTyper(
+    cls=_NetworkGroup,
+    help="Manage sandbox egress rules and private LAN networks between VM sandboxes",
+    no_args_is_help=True,
+)
+app.add_typer(network_app, name="network")
+
+
+def _parse_lan_rule(raw: str) -> LanRule:
+    """Parse ``FROM->TO[@PORT,PORT]``, e.g. ``tag:web->tag:db@5432`` or ``*->*``."""
+    head, sep, ports = raw.partition("@")
+    src, arrow, dst = head.partition("->")
+    if not arrow or not src.strip() or not dst.strip():
+        raise ValueError(f"invalid rule {raw!r}: expected FROM->TO[@PORT,...]")
+    if sep and not ports.strip():
+        raise ValueError(f"invalid rule {raw!r}: '@' needs at least one port")
+    try:
+        port_list = [int(p) for p in ports.split(",")] if sep else None
+    except ValueError as exc:
+        raise ValueError(f"invalid ports in rule {raw!r}") from exc
+    return LanRule(from_=src.strip(), to=dst.strip(), ports=port_list)
+
+
+def _lan_rule_text(rule: LanRule) -> str:
+    ports = "@" + ",".join(str(p) for p in rule.ports) if rule.ports else ""
+    return f"{rule.from_}->{rule.to}{ports}"
+
+
+def _print_lan_network(network: LanNetwork, output: str) -> None:
+    if output == "json":
+        output_data_as_json(network.model_dump(mode="json", by_alias=True), console)
+        return
+    console.print(f"Network: [cyan]{escape(network.id)}[/cyan] ({escape(network.name)})")
+    console.print(f"Rules: {escape(', '.join(_lan_rule_text(r) for r in network.rules) or 'none')}")
+    if not network.synced:
+        console.print("[yellow]⚠ Not synced to the VM fleet yet. Retrying automatically.[/yellow]")
+    if network.members is None:
+        return
+    if not network.members:
+        console.print("No members.")
+        return
+    table = build_table(
+        "Members",
+        [("Sandbox", "cyan"), ("Address", "white"), ("Tags", "white"), ("Synced", "white")],
+    )
+    for m in network.members:
+        table.add_row(
+            escape(m.sandbox_id),
+            f"{escape(m.sandbox_id)}.sandbox.internal",
+            escape(", ".join(m.tags)),
+            "yes" if m.synced else "no",
+        )
+    console.print(table)
+
+
+def _lan_error(exc: Exception) -> None:
+    console.print(f"[red]Error:[/red] {escape(str(exc))}")
+    raise typer.Exit(1) from exc
+
+
+@network_app.command("create", no_args_is_help=True)
+def lan_create(
+    name: str,
+    team_id: Optional[str] = typer.Option(None, "--team-id", help="Create the network for a team"),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """Create a network; by default all members reach each other on every port."""
+    validate_output_format(output, console)
+    try:
+        _print_lan_network(SandboxClient(APIClient()).create_lan_network(name, team_id), output)
+    except APIError as exc:
+        _lan_error(exc)
+
+
+@network_app.command("list")
+def lan_list(
+    team_id: Optional[str] = typer.Option(None, "--team-id", help="List a team's networks"),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """List your LAN networks."""
+    validate_output_format(output, console)
+    try:
+        networks = SandboxClient(APIClient()).list_lan_networks(team_id)
+    except APIError as exc:
+        _lan_error(exc)
+    if output == "json":
+        output_data_as_json(
+            {"networks": [n.model_dump(mode="json", by_alias=True) for n in networks]}, console
+        )
+        return
+    if not networks:
+        console.print("No LAN networks found.")
+        return
+    table = build_table(
+        "LAN networks", [("ID", "cyan"), ("Name", "white"), ("Rules", "white"), ("Age", "white")]
+    )
+    for n in networks:
+        table.add_row(
+            escape(n.id),
+            escape(n.name),
+            escape(", ".join(_lan_rule_text(r) for r in n.rules)),
+            human_age(n.created_at),
+        )
+    console.print(table)
+
+
+@network_app.command("get", no_args_is_help=True)
+def lan_get(
+    network_id: str,
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """Show a network with its rules and members."""
+    validate_output_format(output, console)
+    try:
+        _print_lan_network(SandboxClient(APIClient()).get_lan_network(network_id), output)
+    except APIError as exc:
+        _lan_error(exc)
+
+
+@network_app.command("delete", no_args_is_help=True)
+def lan_delete(
+    network_id: str,
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
+) -> None:
+    """Delete a network; its members stop reaching each other through it."""
+    if not confirm_or_skip(f"Delete LAN network {network_id}?", yes):
+        raise typer.Exit(0)
+    try:
+        SandboxClient(APIClient()).delete_lan_network(network_id)
+    except APIError as exc:
+        _lan_error(exc)
+    console.print(f"Deleted LAN network {escape(network_id)}")
+
+
+@network_app.command("add", no_args_is_help=True)
+def lan_add(
+    network_id: str,
+    sandbox_id: str,
+    tag: Optional[List[str]] = typer.Option(None, "--tag", "-t", help="Member tag (repeatable)"),
+) -> None:
+    """Add a running VM sandbox to a network, or replace its tags."""
+    try:
+        member = SandboxClient(APIClient()).add_lan_member(network_id, sandbox_id, tag)
+    except APIError as exc:
+        _lan_error(exc)
+    console.print(
+        f"Added {escape(member.sandbox_id)} as {escape(member.sandbox_id)}.sandbox.internal"
+        + (f" with tags {escape(', '.join(member.tags))}" if member.tags else "")
+    )
+
+
+@network_app.command("remove", no_args_is_help=True)
+def lan_remove(network_id: str, sandbox_id: str) -> None:
+    """Remove a sandbox from a network."""
+    try:
+        SandboxClient(APIClient()).remove_lan_member(network_id, sandbox_id)
+    except APIError as exc:
+        _lan_error(exc)
+    console.print(f"Removed {escape(sandbox_id)} from {escape(network_id)}")
+
+
+@network_app.command("rules", no_args_is_help=True)
+def lan_rules(
+    network_id: str,
+    rule: List[str] = typer.Option(
+        ...,
+        "--rule",
+        "-r",
+        help="Allow rule FROM->TO[@PORT,...] with selectors '*' or 'tag:NAME', "
+        "e.g. 'tag:web->tag:db@5432'. Repeatable; replaces all rules.",
+    ),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """Replace a network's rules. Rules are directed and allow-only."""
+    validate_output_format(output, console)
+    try:
+        rules = [_parse_lan_rule(r) for r in rule]
+        _print_lan_network(SandboxClient(APIClient()).set_lan_rules(network_id, rules), output)
+    except (ValueError, APIError) as exc:
+        _lan_error(exc)
 
 
 checkpoint_app = PlainTyper(help="Manage filesystem checkpoints", no_args_is_help=True)
@@ -1269,7 +1461,7 @@ def delete(
         raise typer.Exit(1)
 
 
-@app.command("network", no_args_is_help=True)
+@network_app.command("egress", no_args_is_help=True)
 def network(
     sandbox_id: str,
     allow: Optional[str] = typer.Option(
@@ -1289,7 +1481,7 @@ def network(
         ),
     ),
 ) -> None:
-    """Show or replace the network access rules of a VM sandbox."""
+    """Show or replace the egress rules of a VM sandbox (default subcommand)."""
     selections = [allow is not None, deny is not None]
     if sum(selections) > 1:
         console.print("[red]Error:[/red] provide at most one of --allow or --deny")

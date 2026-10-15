@@ -1,27 +1,24 @@
 """Hosted Training commands."""
 
 import json
-import os
 import re
 import time
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Optional
 
 import toml
 import typer
 from click.exceptions import Abort
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-from pydantic import ValidationError as PydanticValidationError
 from rich.markup import escape as rich_escape
 from rich.table import Table
 
 from prime_cli.core import Config
 
 from ..api.rl import EnvServerInfo, RLClient, RLRun
-from ..client import APIClient, APIError, APITimeoutError, ValidationError
+from ..client import APIClient, APIError, APITimeoutError
 from ..utils import (
     DefaultCommandGroup,
     PlainTyper,
@@ -31,53 +28,26 @@ from ..utils import (
     output_data_as_json,
     validate_output_format,
 )
-from ..utils.env_metadata import find_environment_metadata
 from ..utils.env_vars import EnvParseError, collect_env_vars
-from ..utils.formatters import (
-    format_file_size,
-    format_promo_price,
-    strip_ansi,
-)
+from ..utils.formatters import format_file_size, strip_ansi
 from ..utils.prompt import confirm_or_skip
 from .feedback import submit_feedback
 from .usage import RUN_USAGE_JSON_HELP, run_usage_command
 
 console = get_console()
 
-LEGACY_TRAINING_NOTICE = (
-    "Shared Hosted Training for LoRA runs will stop accepting new runs on October 5, 2026. "
-    "Hosted Training is transitioning to dedicated runs. "
-    "Existing LoRA adapters will remain downloadable and deployable until further notice."
-)
-
-V1_ENV_CONFIG_FIELDS = (
-    "taskset",
-    "harness",
-    "pool",
-    "timeout",
-    "retries",
-    "sampling",
-    "ratio",
-    "group_size",
-    "max_turns",
-    "max_input_tokens",
-    "max_output_tokens",
-    "max_total_tokens",
-    "multiplex",
-)
-
 RL_RUN_JSON_HELP = json_output_help(
     ".run = {id, name?, status, base_model, environments[], "
     "rollouts_per_example, max_steps, batch_size, created_at, updated_at, ...}",
 )
 
+RL_DISPATCH_JSON_HELP = json_output_help(
+    ".run = {runId, sourceRef?, onDemand?, gpuType?, pricePerGpuHour?, "
+    "estimatedCostPerHour?, isBeta?}",
+)
+
 RL_MODELS_JSON_HELP = json_output_help(
-    ".models[] = {name, at_capacity, training_price_per_mtok, "
-    "inference_input_price_per_mtok, inference_output_price_per_mtok, "
-    "effective_training_price_per_mtok?, "
-    "effective_inference_input_price_per_mtok?, "
-    "effective_inference_output_price_per_mtok?, promo_label?}",
-    ".available_fft_models[]? = {name, clusters[{cluster_id, cluster_name, gpu_type?}]}",
+    ".available_fft_models[] = {name, clusters[{cluster_id, cluster_name, gpu_type?}]}",
     ".on_demand[]? = {gpu_type, price_per_gpu_hour, available_now, discount_label?, is_beta}",
     # available_now = the backend reports some free pool headroom for the
     # GPU type; a run can still queue on GPU count/topology.
@@ -247,128 +217,8 @@ def clean_logs(text: str) -> list[str]:
     return formatted_lines
 
 
-def generate_rl_config_template(environment: str | None = None) -> str:
-    """Generate a TOML config template for Hosted Training."""
-    env_value = environment or "primeintellect/reverse-text"
-
-    return f'''\
-# Shared Hosted Training for LoRA runs will stop accepting new runs on October 5, 2026.
-# Hosted Training is transitioning to dedicated runs.
-# Existing LoRA adapters will remain downloadable and deployable until further notice.
-model = "Qwen/Qwen3.5-0.8B"
-loss = "rl" # "rl" | "sft"; OPD is not yet supported on hosted runtimes
-max_steps = 100
-
-# env_files = ["secrets.env"] # optional file(s) for secrets
-
-# Training
-batch_size = 128
-rollouts_per_example = 8
-# max_inflight_rollouts = 96 # optional hard cap for in-flight rollout capacity
-# learning_rate = 3e-5 # optional; default is 1e-4
-
-# Optional: warm-start from an existing checkpoint
-# checkpoint_id = "..."
-
-# Optional: SFT distillation teacher
-# To use SFT, change loss to "sft" and uncomment this block. Defaults to Prime Inference.
-# [teacher]
-# model = "openai/gpt-oss-120b"
-#
-# [teacher.sampling]
-# max_tokens = 2048
-# reasoning_effort = "medium"
-
-# Optional: override the Prime Inference default with a custom OAI-compatible endpoint.
-# Uncomment this block only when pointing at OpenAI, OpenRouter, self-hosted vLLM, etc.
-# [teacher.client]
-# base_url = "https://api.openai.com/v1"
-# api_key_var = "OPENAI_API_KEY"
-
-[sampling]
-max_tokens = 2048
-# temperature = 0.7
-
-# Optional: Hosted Training reasoning controls (mutually exclusive)
-# enable_thinking = false    # supported models: Qwen3.5, Nemotron
-# reasoning_effort = "high"  # supported models: GPT-OSS ("low" | "medium" | "high")
-
-[[env]]
-id = "{env_value}"
-
-# [[env]] # add multiple [[env]] sections for multi-env training
-# id = "primeintellect/another-env"
-# args = {{ split = "train", max_examples = 1000 }}
-#
-# v1 environment shape: use taskset/harness instead of legacy id.
-# [[env]]
-# name = "alphabet-sort"
-# taskset = {{ id = "alphabet-sort-v1", min_turns = 3, max_turns = 5, power_per_turn = false }}
-# harness = {{ id = "default", runtime = {{ type = "subprocess" }} }}
-
-# Optional: online evaluation
-# [eval]
-# interval = 100
-# # optional: default for all environments
-# num_examples = -1
-# rollouts_per_example = 1
-# skip_first_step = false # set true to skip the pre-training eval of the base model
-#
-# [[eval.env]]
-# id = "primeintellect/eval-env"
-# args = {{ split = "test" }}
-# # environment-specific overrides
-# num_examples = 30
-# rollouts_per_example = 4
-
-# Optional: validation during training
-# [val]
-# num_examples = 64
-# rollouts_per_example = 1
-# interval = 5
-
-# Optional: rollout filters (replaces the removed difficulty buffer).
-# Setting a slot overrides prime-rl's default filter list for that slot.
-# [[pre_batch_filters]]
-# type = "zero_advantage" # "gibberish" | "repetition" | "zero_advantage"
-# enforce = true          # drop flagged rollouts before they fill a batch slot
-
-# Optional: checkpoint configuration
-# [checkpoints]
-# interval = 100              # Save checkpoint every N steps
-# keep_cloud = 5              # Keep N checkpoints in cloud (-1 = keep all)
-
-# Optional: adapter upload configuration
-# [adapters]
-# interval = 0                # Upload adapter every N steps (0 = only at run end)
-# keep_last = 3               # Keep N adapters in cloud (-1 = keep all)
-'''
-
-
-def _validate_env_id_value(v: str, *, field_name: str) -> str:
-    """Validate a legacy env id or v1 plugin id.
-
-    Bare ids are importable runtime ids. Slash-shaped ids are Hub refs and
-    must include both owner and name.
-    """
-    v = v.strip()
-    if not v:
-        raise ValueError(f"{field_name} cannot be empty")
-    if "/" in v:
-        owner, name = v.split("/", 1)
-        if not owner.strip() or not name.strip():
-            raise ValueError(
-                f"{field_name} must have both owner and name (e.g., 'primeintellect/vf-math')"
-            )
-    return v
-
-
 def _dict_id(config: Dict[str, Any] | None) -> Any:
     return config.get("id") if isinstance(config, dict) else None
-
-
-def _is_hub_env_id(value: Any) -> bool:
-    return isinstance(value, str) and "/" in value
 
 
 def _env_display_name(env: Dict[str, Any], index: int | None = None) -> str:
@@ -377,473 +227,6 @@ def _env_display_name(env: Dict[str, Any], index: int | None = None) -> str:
     if value:
         return str(value)
     return f"env-{index}" if index is not None else "?"
-
-
-class EnvConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    id: str | None = None
-    name: str | None = None
-    taskset: Dict[str, Any] | None = None
-    harness: Dict[str, Any] | None = None
-    pool: Dict[str, Any] | None = None
-    timeout: Dict[str, Any] | None = None
-    retries: Dict[str, Any] | None = None
-    sampling: Dict[str, Any] | None = None
-    ratio: float | None = Field(default=None, gt=0)
-    group_size: int | None = Field(default=None, ge=1)
-    max_turns: int | None = Field(default=None, ge=1)
-    max_input_tokens: int | None = Field(default=None, ge=1)
-    max_output_tokens: int | None = Field(default=None, ge=1)
-    max_total_tokens: int | None = Field(default=None, ge=1)
-    multiplex: int | None = Field(default=None, ge=1)
-    args: Dict[str, Any] = Field(default_factory=dict)
-    max_retries: int | None = Field(default=None, ge=0)
-    version: str | None = None
-
-    @field_validator("id")
-    @classmethod
-    def validate_environment_id(cls, v: str | None) -> str | None:
-        if v is None:
-            return None
-        return _validate_env_id_value(v, field_name="Environment ID")
-
-    @model_validator(mode="after")
-    def parse_version_from_id(self) -> "EnvConfig":
-        """Extract version from id if specified as 'owner/name@version'."""
-        if self.id and "@" in self.id:
-            id_part, version_part = self.id.rsplit("@", 1)
-            self.id = _validate_env_id_value(id_part, field_name="Environment ID")
-            if self.version is None and version_part:
-                self.version = version_part
-        return self
-
-    @model_validator(mode="after")
-    def validate_env_selector(self) -> "EnvConfig":
-        taskset_id = _dict_id(self.taskset)
-        if self.id is None and not taskset_id:
-            raise ValueError("Environment config requires either legacy id or v1 taskset.id")
-        if taskset_id is not None:
-            assert self.taskset is not None
-            self.taskset["id"] = _validate_env_id_value(str(taskset_id), field_name="taskset.id")
-        harness_id = _dict_id(self.harness)
-        if harness_id is not None:
-            assert self.harness is not None
-            self.harness["id"] = _validate_env_id_value(str(harness_id), field_name="harness.id")
-        return self
-
-    @property
-    def is_v1(self) -> bool:
-        return bool(_dict_id(self.taskset))
-
-    @property
-    def display_name(self) -> str:
-        return _env_display_name(self.to_api_dict())
-
-    def hub_env_ids(self) -> list[str]:
-        refs: list[str] = []
-        if _is_hub_env_id(self.id):
-            refs.append(str(self.id))
-        for config in (self.taskset, self.harness):
-            plugin_id = _dict_id(config)
-            if _is_hub_env_id(plugin_id):
-                refs.append(str(plugin_id))
-        return refs
-
-    def to_api_dict(self) -> Dict[str, Any]:
-        result: Dict[str, Any] = {}
-        if self.id is not None:
-            result["id"] = self.id
-        if self.name is not None:
-            result["name"] = self.name
-        for field_name in V1_ENV_CONFIG_FIELDS:
-            value = getattr(self, field_name)
-            if value is not None:
-                result[field_name] = value
-        if self.args:
-            result["args"] = self.args
-        if self.max_retries is not None:
-            result["max_retries"] = self.max_retries
-        if self.version is not None:
-            result["version"] = self.version
-        return result
-
-
-class EvalEnvConfig(EnvConfig):
-    num_examples: int | None = None
-    rollouts_per_example: int | None = Field(default=None, ge=1)
-
-    @field_validator("num_examples")
-    @classmethod
-    def validate_num_examples(cls, v: int | None) -> int | None:
-        if v is not None and v != -1 and v < 1:
-            raise ValueError("num_examples must be -1 (all) or a positive integer")
-        return v
-
-    @model_validator(mode="after")
-    def validate_eval_group_size_aliases(self) -> "EvalEnvConfig":
-        if (
-            self.group_size is not None
-            and self.rollouts_per_example is not None
-            and self.group_size != self.rollouts_per_example
-        ):
-            raise ValueError("group_size and rollouts_per_example cannot differ")
-        return self
-
-    def to_api_dict(self) -> Dict[str, Any]:
-        result = super().to_api_dict()
-        if self.num_examples is not None:
-            result["num_examples"] = self.num_examples
-        if self.rollouts_per_example is not None:
-            key = "group_size" if self.is_v1 else "rollouts_per_example"
-            result.setdefault(key, self.rollouts_per_example)
-        return result
-
-
-class TemperatureSchedulerConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    type: str = "linear"  # "linear" or "cosine"
-    start_temperature: float
-    end_temperature: float
-    total_steps: int | None = None
-
-
-class SamplingConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    max_tokens: int | None = None
-    temperature: float | None = None
-    temp_scheduler: TemperatureSchedulerConfig | None = None
-    extra_body: Dict[str, Any] | None = None
-    enable_thinking: bool | None = None
-    reasoning_effort: Literal["low", "medium", "high"] | None = None
-
-    @model_validator(mode="after")
-    def _reasoning_controls_mutually_exclusive(self) -> "SamplingConfig":
-        if self.enable_thinking is not None and self.reasoning_effort is not None:
-            raise ValueError("enable_thinking and reasoning_effort cannot both be set")
-        return self
-
-
-class TeacherSamplingConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    max_tokens: int | None = None
-    temperature: float | None = None
-    extra_body: Dict[str, Any] | None = None
-    enable_thinking: bool | None = None
-    reasoning_effort: Literal["low", "medium", "high"] | None = None
-
-    @model_validator(mode="after")
-    def _reasoning_controls_mutually_exclusive(self) -> "TeacherSamplingConfig":
-        if self.enable_thinking is not None and self.reasoning_effort is not None:
-            raise ValueError("enable_thinking and reasoning_effort cannot both be set")
-        return self
-
-
-class TeacherClientConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    base_url: str = Field(..., min_length=1)
-    api_key_var: str = Field(..., min_length=1)
-    headers_from_env: Dict[str, str] | None = None
-    skip_model_check: bool | None = None
-
-
-class TeacherConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    model: str
-    client: TeacherClientConfig | None = None
-    sampling: TeacherSamplingConfig | None = None
-
-    def to_api_dict(self) -> Dict[str, Any]:
-        result: Dict[str, Any] = {"model": {"name": self.model}}
-        if self.client is not None:
-            result["client"] = self.client.model_dump(exclude_none=True)
-        if self.sampling is not None:
-            result["sampling"] = self.sampling.model_dump(exclude_none=True)
-        return result
-
-
-class EvalSamplingConfig(BaseModel):
-    """Eval-time sampling overrides.
-
-    ``enable_thinking`` / ``reasoning_effort`` are convenience flags the
-     platform merges into ``extra_body.chat_template_kwargs`` for supported models;
-    they cannot both be set on the same block.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    max_tokens: int | None = None
-    temperature: float | None = None
-    extra_body: Dict[str, Any] | None = None
-    enable_thinking: bool | None = None
-    reasoning_effort: Literal["low", "medium", "high"] | None = None
-
-    @model_validator(mode="after")
-    def _reasoning_controls_mutually_exclusive(self) -> "EvalSamplingConfig":
-        if self.enable_thinking is not None and self.reasoning_effort is not None:
-            raise ValueError("enable_thinking and reasoning_effort cannot both be set")
-        return self
-
-
-class EvalConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    interval: int | None = None
-    num_examples: int | None = None
-    rollouts_per_example: int | None = None
-    skip_first_step: bool | None = None
-    """Skip the eval of the base model that otherwise runs before training
-    starts. Replaces the deprecated ``eval_base_model`` with inverted meaning
-    (``eval_base_model = false`` ≡ ``skip_first_step = true``), matching the
-    prime-rl orch v2 rename."""
-    env: List[EvalEnvConfig] = Field(default_factory=list)
-    sampling: EvalSamplingConfig | None = None
-
-    def to_api_dict(self) -> Dict[str, Any] | None:
-        if not self.env:
-            return None
-        result: Dict[str, Any] = {"environments": [e.to_api_dict() for e in self.env]}
-        if self.interval is not None:
-            result["interval"] = self.interval
-        if self.num_examples is not None:
-            result["num_examples"] = self.num_examples
-        if self.rollouts_per_example is not None:
-            result["rollouts_per_example"] = self.rollouts_per_example
-        if self.skip_first_step is not None:
-            result["skip_first_step"] = self.skip_first_step
-        if self.sampling is not None:
-            sampling_dict = self.sampling.model_dump(exclude_none=True)
-            if sampling_dict:
-                result["sampling"] = sampling_dict
-        return result
-
-
-class ValConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    num_examples: int | None = None
-    rollouts_per_example: int | None = None
-    interval: int | None = None
-
-    def to_api_dict(self) -> Dict[str, Any] | None:
-        result: Dict[str, Any] = {}
-        if self.num_examples is not None:
-            result["num_examples"] = self.num_examples
-        if self.rollouts_per_example is not None:
-            result["rollouts_per_example"] = self.rollouts_per_example
-        if self.interval is not None:
-            result["interval"] = self.interval
-        return result if result else None
-
-
-class BatchFilterConfig(BaseModel):
-    """A single prime-rl rollout filter (one ``[[pre_batch_filters]]`` /
-    ``[[post_batch_filters]]`` table).
-
-    Extra keys pass through verbatim so type-specific knobs (e.g.
-    repetition's ``window``) reach the trainer without a CLI release.
-    Enforcing ``zero_advantage`` pre-batch is the orch v2 replacement for
-    the removed ``buffer.online_difficulty_filtering``.
-    """
-
-    model_config = ConfigDict(extra="allow")
-
-    type: str
-    enforce: bool | None = None
-
-
-class WandbConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    entity: str | None = None
-    project: str | None = None
-    name: str | None = None
-
-
-class CheckpointsConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    interval: int | None = None  # Save checkpoint every N steps
-    keep_cloud: int | None = None  # Keep N checkpoints in cloud (-1 = keep all)
-
-    def to_api_dict(self) -> Dict[str, Any] | None:
-        result: Dict[str, Any] = {}
-        if self.interval is not None:
-            result["interval"] = self.interval
-        if self.keep_cloud is not None:
-            result["keep_cloud"] = self.keep_cloud
-        return result if result else None
-
-
-class AdaptersConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    interval: int | None = None  # Upload adapter every N steps (0 = only at run end)
-    keep_last: int | None = None  # Keep N adapters in cloud (-1 = keep all)
-
-    def to_api_dict(self) -> Dict[str, Any] | None:
-        result: Dict[str, Any] = {}
-        if self.interval is not None:
-            result["interval"] = self.interval
-        if self.keep_last is not None:
-            result["keep_last"] = self.keep_last
-        return result if result else None
-
-
-class InfrastructureConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    compute_size: str | None = None
-
-    def to_api_dict(self) -> Dict[str, Any] | None:
-        d: Dict[str, Any] = {}
-        if self.compute_size is not None:
-            d["compute_size"] = self.compute_size
-        return d if d else None
-
-
-class TailscaleConfig(BaseModel):
-    """Optional per-run tailscale sidecar (enterprise-only feature).
-
-    When enabled, every env-server (training + eval) for this run joins the
-    user's tailnet via a sidecar. The orchestrator and other runs are
-    untouched.
-
-    The auth key must be supplied via the ``auth_key`` field or, preferably,
-    via the ``TAILSCALE_AUTH_KEY`` environment variable so the secret never
-    has to live in ``rl.toml``. Only pre-authenticated keys (``tskey-auth-``)
-    are accepted; OAuth client secrets are not supported. Free-form
-    ``tailscale up`` flags are also not accepted — the platform always
-    boots the sidecar with a locked-down arg set to keep tenant isolation.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    enabled: bool = False
-    auth_key: str | None = None
-    hostname_prefix: str = "prime-hosted-training"
-
-    @field_validator("hostname_prefix")
-    @classmethod
-    def validate_hostname_prefix(cls, v: str) -> str:
-        # Must end in alphanumeric — otherwise the derived sidecar hostname
-        # (e.g. f"{prefix}-env-{idx}-{run_id}") would contain consecutive
-        # hyphens which Tailscale rejects. Length cap matches the platform
-        # (backend/app/packages/rft/k8s_resources/tailscale.py).
-        if not re.fullmatch(r"[a-z]([a-z0-9-]{0,28}[a-z0-9])?", v):
-            raise ValueError(
-                "hostname_prefix must be 1-30 chars, lowercase alphanumeric or "
-                "hyphens, starting with a letter and ending with a letter or digit"
-            )
-        return v
-
-    @field_validator("auth_key")
-    @classmethod
-    def validate_auth_key(cls, v: str | None) -> str | None:
-        if v is None:
-            return v
-        if not v.startswith("tskey-auth-"):
-            raise ValueError(
-                "auth_key must be a Tailscale pre-authenticated auth key "
-                "(starting with 'tskey-auth-')"
-            )
-        return v
-
-    @model_validator(mode="after")
-    def fill_auth_key_from_env_and_validate(self) -> "TailscaleConfig":
-        if not self.enabled:
-            return self
-        if self.auth_key is None:
-            env_value = os.environ.get("TAILSCALE_AUTH_KEY")
-            if env_value:
-                if not env_value.startswith("tskey-auth-"):
-                    raise ValueError("TAILSCALE_AUTH_KEY must start with 'tskey-auth-'")
-                self.auth_key = env_value
-        if not self.auth_key:
-            raise ValueError(
-                "auth_key is required when tailscale.enabled is true. "
-                "Set [tailscale] auth_key in your config or export TAILSCALE_AUTH_KEY."
-            )
-        return self
-
-    def to_api_dict(self) -> Dict[str, Any] | None:
-        if not self.enabled:
-            return None
-        return {
-            "enabled": True,
-            "auth_key": self.auth_key,
-            "hostname_prefix": self.hostname_prefix,
-        }
-
-
-class RLConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    name: str | None = None
-    model: str
-    loss: Literal["rl", "sft", "opd"] = "rl"
-    teacher: TeacherConfig | None = None
-    max_steps: int = 100
-    batch_size: int = 128
-    rollouts_per_example: int = 8
-    max_inflight_rollouts: int | None = Field(default=None, ge=1)
-    learning_rate: float | None = None
-    lora_alpha: int | None = None
-    oversampling_factor: float | None = Field(default=None, gt=0)
-    checkpoint_id: str | None = None  # Warm-start from an existing checkpoint
-    cluster_name: str | None = None  # Admin-only: target a specific cluster by name
-    env: List[EnvConfig] = Field(default_factory=list)
-    sampling: SamplingConfig = Field(default_factory=SamplingConfig)
-    eval: EvalConfig = Field(default_factory=EvalConfig)
-    val: ValConfig = Field(default_factory=ValConfig)
-    pre_batch_filters: List[BatchFilterConfig] | None = None
-    post_batch_filters: List[BatchFilterConfig] | None = None
-    wandb: WandbConfig = Field(default_factory=WandbConfig)
-    checkpoints: CheckpointsConfig = Field(default_factory=CheckpointsConfig)
-    adapters: AdaptersConfig = Field(default_factory=AdaptersConfig)
-    infrastructure: InfrastructureConfig = Field(default_factory=InfrastructureConfig)
-    tailscale: TailscaleConfig = Field(default_factory=TailscaleConfig)
-    run_config: Dict[str, Any] = Field(default_factory=dict)
-    env_file: List[str] = Field(default_factory=list)  # deprecated, use env_files
-    env_files: List[str] = Field(default_factory=list)
-
-    @model_validator(mode="after")
-    def validate_config_consistency(self) -> "RLConfig":
-        if self.max_inflight_rollouts is not None and self.oversampling_factor is not None:
-            raise ValueError("Only one of max_inflight_rollouts and oversampling_factor can be set")
-        if (
-            self.max_inflight_rollouts is not None
-            and self.max_inflight_rollouts < self.rollouts_per_example
-        ):
-            raise ValueError("max_inflight_rollouts must be at least rollouts_per_example")
-        if self.loss == "rl" and self.teacher is not None:
-            raise ValueError("teacher can only be set when loss is 'sft' or 'opd'")
-        if self.loss == "sft" and self.teacher is None:
-            raise ValueError("teacher is required when loss is 'sft'")
-        if self.loss == "opd":
-            raise ValueError(
-                "loss='opd' is not supported for hosted runs yet; OPD requires "
-                "teacher logprob scoring support in the hosted runtime"
-            )
-        return self
-
-
-def _format_validation_errors(errors: list[Any]) -> list[str]:
-    """Format Pydantic validation errors into user-friendly messages."""
-    messages = []
-    for error in errors:
-        loc = ".".join(str(x) for x in error["loc"])
-        msg = error["msg"]
-        # Clean up common Pydantic message prefixes
-        if msg.startswith("Value error, "):
-            msg = msg[len("Value error, ") :]
-        messages.append(f"{loc}: {msg}")
-    return messages
 
 
 def _remove_deprecated_config_keys(data: Dict[str, Any]) -> None:
@@ -885,53 +268,27 @@ def _remove_deprecated_config_keys(data: Dict[str, Any]) -> None:
             )
 
 
-def _peek_toml(config_path: str) -> Dict[str, Any]:
-    """Parse the TOML once for the dispatch decision. Returns {} on missing
-    or malformed file — the strict load_config call below produces the
-    user-facing error in that case so we don't double-report here."""
+def _load_toml(config_path: str) -> Dict[str, Any]:
+    """Parse the run config. The raw table is shipped to the platform as-is
+    (prime-rl's schema is validated server-side), so the CLI only checks
+    that the file exists and is valid TOML."""
     p = Path(config_path)
     if not p.exists():
-        return {}
+        console.print(f"[red]Error:[/red] Config file not found: {config_path}")
+        raise typer.Exit(1)
     try:
-        data = toml.load(p)
-    except toml.TomlDecodeError:
-        return {}
-    return data if isinstance(data, dict) else {}
+        return toml.load(p)
+    except toml.TomlDecodeError as e:
+        console.print(f"[red]Error:[/red] Invalid TOML in {config_path}: {e}")
+        raise typer.Exit(1)
 
 
-def _has_full_finetune_deployment(cfg: Dict[str, Any]) -> bool:
-    """True iff `cfg` carries a `[deployment]` table sizing the run — either
-    single-node (`num_train_gpus` / `num_infer_gpus`), multi-node
-    (`num_train_nodes` / `num_infer_nodes`), or an explicit
-    `[deployment].type` of `single_node` / `multi_node`.
-
-    `[deployment]` is a full-FT-only prime-rl concept: RLConfig (the LoRA
-    schema) has no such field and forbids extras, so its presence is
-    unambiguous full-FT intent even without `--full-finetune` on the
-    command line.
-    """
-    deploy = cfg.get("deployment")
-    if not isinstance(deploy, dict):
-        return False
-    if deploy.get("type") in ("single_node", "multi_node"):
-        return True
-    sizing_keys = (
-        "num_train_gpus",
-        "num_infer_gpus",
-        "num_train_nodes",
-        "num_infer_nodes",
-    )
-    return any(k in deploy for k in sizing_keys)
-
-
-def _is_full_finetune(cfg: Dict[str, Any], *, flag: bool) -> bool:
-    """Dispatch as full-FT if `--full-finetune`/`--fft` was passed, or if
-    the config's `[deployment]` block already sizes the run. Either is
-    sufficient on its own — the flag lets a config without `[deployment]`
-    yet still be routed (and get `_validate_full_finetune_deployment`'s
-    clear error instead of silently landing on the LoRA path).
-    """
-    return flag or _has_full_finetune_deployment(cfg)
+def _looks_like_lora(cfg: Dict[str, Any]) -> bool:
+    """True iff the TOML is a retired shared-LoRA config: a top-level
+    `model = "..."` string or a top-level `[[env]]` array. prime-rl's
+    schemas take `[model]` as a table and have no top-level `env`, so
+    neither shape can be a valid dedicated config."""
+    return isinstance(cfg.get("model"), str) or isinstance(cfg.get("env"), list)
 
 
 def _looks_like_sft(cfg: Dict[str, Any]) -> bool:
@@ -951,31 +308,15 @@ def _is_sft(cfg: Dict[str, Any], *, flag: bool) -> bool:
     return flag or _looks_like_sft(cfg)
 
 
-def _validate_full_finetune_deployment(cfg: Dict[str, Any], config_path: str) -> None:
-    """Full-FT dispatch requires an explicit `[deployment]` table sizing the
-    run. Guards the `--full-finetune`-without-`[deployment]` case — the
-    auto-detect path in `_has_full_finetune_deployment` never reaches here
-    without sizing already present.
-    """
-    if not _has_full_finetune_deployment(cfg):
-        console.print(
-            f"[red]Error:[/red] --full-finetune requires an explicit [deployment] "
-            f"block in {config_path} (num_train_gpus/num_infer_gpus for "
-            "single-node, or num_train_nodes/num_infer_nodes for multi-node)."
-        )
-        raise typer.Exit(1)
-
-
 def _warn_legacy_full_finetune_type(cfg: Dict[str, Any], config_path: str) -> None:
     """`type = "full_finetune"` used to be how dispatch routing was decided;
-    --full-finetune/--fft now owns that decision entirely, so a leftover
-    `type` key in a full-FT config is dead weight. Warn so configs get
-    cleaned up instead of silently accumulating a field nothing reads."""
+    every RL run is dedicated now, so a leftover `type` key is dead weight.
+    Warn so configs get cleaned up instead of silently accumulating a field
+    nothing reads."""
     if "type" in cfg:
         console.print(
             f'[yellow]Warning:[/yellow] `type = "{cfg["type"]}"` in {config_path} '
-            "is no longer used — dispatch routing is decided by "
-            "--full-finetune/--fft on the command line. Remove it from the config."
+            "is no longer used. Remove it from the config."
         )
 
 
@@ -1023,7 +364,7 @@ def _resolve_pr_ref(pr_number: int) -> str:
         raise typer.Exit(1)
 
 
-def _dispatch_full_finetune_run(
+def _dispatch_dedicated_run(
     *,
     raw_cfg: Dict[str, Any],
     config_path: str,
@@ -1043,8 +384,6 @@ def _dispatch_full_finetune_run(
     PrimeCluster). Serves both dedicated run kinds: full-FT RL mega-TOMLs
     (mode=None/"rl") and SFT mega-TOMLs (mode="sft" — same endpoint, same
     raw-TOML handoff; only the backend/validator schema dispatch differs).
-    Reuses the shared env-file plumbing for WANDB / HF secrets so the
-    user experience matches the LoRA path.
 
     Backend always auto-picks the first uncordoned PrimeCluster — the
     CLI never threads a cluster id, so a config that targets the wrong
@@ -1053,24 +392,21 @@ def _dispatch_full_finetune_run(
 
     name = raw_cfg.get("name")
 
-    # Link the dispatched run to the user's active team (same convention
-    # as the LoRA path at line 1216). Without this, the RFTRun row gets
-    # team_id=None and lands on the caller's personal account even when
-    # the CLI is configured for a team — confusing for billing + access
-    # scoping. Backend's `CreateDedicatedRunRequest.team_id` is Optional,
-    # so omitting it is silently wrong rather than a 400.
+    # Link the dispatched run to the user's active team. Without this, the
+    # RFTRun row gets team_id=None and lands on the caller's personal
+    # account even when the CLI is configured for a team — confusing for
+    # billing + access scoping. Backend's `CreateDedicatedRunRequest.team_id`
+    # is Optional, so omitting it is silently wrong rather than a 400.
     app_config = Config()
     team_id = app_config.team_id
 
-    # Resolve env files relative to the config dir, same convention as the
-    # LoRA path. We don't validate WANDB presence here — the chart wires
-    # WANDB_API_KEY via secretKeyRef only if `[wandb]` is configured AND
-    # the user passed --wandb-api-key, mirroring the platform's existing
-    # admin-dialog UX.
+    # Resolve env files relative to the config dir. We don't validate
+    # WANDB presence here — the chart wires WANDB_API_KEY via secretKeyRef
+    # only if `[wandb]` is configured AND the user passed --wandb-api-key,
+    # mirroring the platform's existing admin-dialog UX.
     #
     # `env_file` (deprecated, singular) is loaded first so `env_files`
-    # (canonical, plural) overrides it on key collision. Mirrors the
-    # LoRA path at line 947 ("env_files takes precedence").
+    # (canonical, plural) overrides it on key collision.
     config_dir = Path(config_path).parent
     cfg_env_files: List[str] = []
     for key in ("env_file", "env_files"):
@@ -1204,9 +540,9 @@ def _dispatch_full_finetune_run(
         # round trip (and never burns anonymous API quota).
         resolved_source_ref = _resolve_pr_ref(source_pr)
 
-    # Same deprecation pass as the LoRA path. In the prime-rl-native shape
-    # the deprecated keys live one level down, under `[orchestrator]` — and
-    # this config ships verbatim to the dedicated training endpoint, where
+    # Deprecated-key pass. In the prime-rl-native shape the deprecated
+    # keys live one level down, under `[orchestrator]` — and this config
+    # ships verbatim to the dedicated training endpoint, where
     # orch v2 rejects the removed keys as "Extra inputs are not permitted".
     orch_section = raw_cfg.get("orchestrator")
     if isinstance(orch_section, dict):
@@ -1276,12 +612,11 @@ def _dispatch_full_finetune_run(
         console.print()
 
     # `--output json` is a formatting switch: still dispatch the run,
-    # then print the result as JSON. Same contract as the LoRA path
-    # ("create then format"), which automation relies on to parse back
-    # run_id from the response. Confirmation gating is purely on `--yes`
-    # so the JSON output path doesn't accidentally launch an expensive
-    # training job without an explicit ack — matches confirm_or_skip
-    # in the LoRA path.
+    # then print the result as JSON ("create then format"), which
+    # automation relies on to parse back run_id from the response.
+    # Confirmation gating is purely on `--yes` so the JSON output path
+    # doesn't accidentally launch an expensive training job without an
+    # explicit ack.
     if not confirm_or_skip("Launch this Hosted Training run?", yes, default=True):
         console.print("\nRun cancelled")
         raise typer.Exit(0)
@@ -1313,7 +648,7 @@ def _dispatch_full_finetune_run(
         # Reported separately from the generic error arm so the user is
         # never told "Error" for a run that is sitting in PENDING,
         # burning the GPUs of a second paid run when they re-run the
-        # command. See api/training.DISPATCH_HTTP_TIMEOUT_S.
+        # command. See api/training.CREATE_RUN_TIMEOUT.
         _report_timed_out_dispatch(
             e, team_id=team_id, name=name, since=dispatch_started_at, output=output
         )
@@ -1595,31 +930,6 @@ def _ensure_volume(
                 status = match[0].status
 
 
-def load_config(path: str) -> RLConfig:
-    """Load config from TOML file."""
-    p = Path(path)
-    if not p.exists():
-        console.print(f"[red]Error:[/red] Config file not found: {path}")
-        raise typer.Exit(1)
-    try:
-        data = toml.load(p)
-    except toml.TomlDecodeError as e:
-        console.print(f"[red]Error:[/red] Invalid TOML in {path}: {e}")
-        raise typer.Exit(1)
-
-    if isinstance(data, dict):
-        _remove_deprecated_config_keys(data)
-
-    try:
-        return RLConfig.model_validate(data)
-    except PydanticValidationError as e:
-        console.print(f"[red]Error:[/red] Invalid config in {path}:\n")
-        for msg in _format_validation_errors(e.errors()):
-            console.print(f"  [red]•[/red] {msg}")
-        console.print()
-        raise typer.Exit(1)
-
-
 # Status color mapping
 RUN_STATUS_COLORS = {
     "QUEUED": "white",
@@ -1733,7 +1043,7 @@ app = PlainTyper(
 )
 
 
-@app.command("run", rich_help_panel="Commands", hidden=True, epilog=RL_RUN_JSON_HELP)
+@app.command("run", rich_help_panel="Commands", hidden=True, epilog=RL_DISPATCH_JSON_HELP)
 def create_run(
     config_path: str = typer.Argument(
         ...,
@@ -1755,18 +1065,12 @@ def create_run(
         help="Path to .env file containing secrets. Supports ${VAR} expansion from local env.",
     ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
-    skip_action_check: bool = typer.Option(
-        False,
-        "--skip-action-check",
-        hidden=True,
-        help="Deprecated: Environment Actions were removed and no check runs.",
-    ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
     image_tag: Optional[str] = typer.Option(
         None,
         "--image-tag",
         help=(
-            "prime-rl container image tag for the run (full-FT only). "
+            "prime-rl container image tag for the run. "
             'Falls back to a top-level `image_tag = "..."` in the TOML '
             "if unset, then to the backend default."
         ),
@@ -1775,7 +1079,7 @@ def create_run(
         None,
         "--gpu-type",
         help=(
-            "GPU type to dispatch on (full-FT only, e.g. 'H200_141GB', "
+            "GPU type to dispatch on (e.g. 'H200_141GB', "
             "'B200_180GB'). Narrows the backend cluster picker to "
             "PrimeClusters with matching gpuType. Falls back to a top-level "
             '`gpu_type = "..."` in the TOML if unset, then to the backend '
@@ -1793,8 +1097,8 @@ def create_run(
             "the platform resolves it). Get a dataset there yourself with "
             "`prime volumes ssh <volume> --read-write` and the huggingface "
             "CLI inside that session (see `prime volumes`); without a "
-            "volume, SFT only works with fake datasets. Full-FT and SFT "
-            "only; closed beta, see `prime volumes`. Falls back to a "
+            "volume, SFT only works with fake datasets. Closed beta, see "
+            "`prime volumes`. Falls back to a "
             'top-level `volume = "..."` in the TOML. Created on the fly '
             "(default 5Ti) if it doesn't exist."
         ),
@@ -1814,7 +1118,7 @@ def create_run(
         hidden=True,
         help=(
             "Restricted: prime-rl git ref (branch, tag, or sha) to run on top "
-            "of the image (full-FT / SFT only). The dispatch must be a team run and "
+            "of the image. The dispatch must be a team run and "
             "the team needs sourceRef access granted by Prime (contact "
             "support), on a deployment with source overlays enabled; other "
             "callers get a 403. The pods overlay that source onto the image at "
@@ -1828,8 +1132,8 @@ def create_run(
         "--pr",
         hidden=True,
         help=(
-            "Restricted: prime-rl pull request number to run (full-FT / SFT "
-            "only; same access as --ref). Shorthand for --ref <PR head sha>; fork "
+            "Restricted: prime-rl pull request number to run (same access "
+            "as --ref). Shorthand for --ref <PR head sha>; fork "
             "and already-merged PRs are not supported."
         ),
     ),
@@ -1837,12 +1141,10 @@ def create_run(
         False,
         "--full-finetune",
         "--fft",
+        hidden=True,
         help=(
-            "Dispatch this config as a full fine-tune on a dedicated cluster "
-            "(every parameter updated) instead of a shared-deployment LoRA "
-            "run. Usually unnecessary — a config with a [deployment] block "
-            "is auto-detected as full-FT. Requires an explicit [deployment] "
-            "block in the TOML either way."
+            "Deprecated: every RL config now runs as a full fine-tune on a "
+            "dedicated cluster, so this flag is a no-op."
         ),
     ),
     sft: bool = typer.Option(
@@ -1873,32 +1175,41 @@ def create_run(
 
     Example:
 
-        prime train config.toml
-        prime train config.toml --full-finetune
+        prime train rl.toml
         prime train sft.toml --sft
         prime train sft.toml --sft --volume research
     """
     validate_output_format(output, console)
 
     # Mutually exclusive run kinds: accepting both would silently resolve
-    # to whichever branch is checked first.
+    # to whichever branch is checked first. --full-finetune/--fft is
+    # otherwise a no-op now that every RL run is dedicated.
     if sft and full_finetune:
         console.print(
             "[red]Error:[/red] --sft and --full-finetune/--fft are mutually "
             "exclusive — pick the run kind matching the config."
         )
         raise typer.Exit(1)
-
-    # Dispatch routing: SFT first — a [data] block with no [trainer]/
-    # [orchestrator] is unambiguously the prime-rl SFT schema (the two
-    # mega-TOML schemas are disjoint). Then --full-finetune/--fft, or an
-    # unambiguous `[deployment]` block (full-FT-only — the RL/LoRA schema
-    # has no such field).
-    raw_cfg = _peek_toml(config_path)
     if ref is not None and pr is not None:
         console.print("[red]Error:[/red] --ref and --pr are mutually exclusive.")
         raise typer.Exit(1)
 
+    raw_cfg = _load_toml(config_path)
+
+    if _looks_like_lora(raw_cfg):
+        console.print(
+            f"[red]Error:[/red] {config_path} is a shared LoRA training config "
+            '(a top-level `model = "..."` or `\\[\\[env]]`). Shared LoRA training '
+            "no longer accepts new runs; Hosted Training runs prime-rl configs "
+            "on dedicated clusters. See prime-rl's examples/ for starter configs."
+        )
+        raise typer.Exit(1)
+
+    # Dispatch routing: a [data] block with no [trainer]/[orchestrator] is
+    # unambiguously the prime-rl SFT schema (the two mega-TOML schemas are
+    # disjoint); everything else is an RL run. Unset [deployment] sizing
+    # falls through to prime-rl's own default, same as a local run.
+    mode: Optional[str] = None
     if _is_sft(raw_cfg, flag=sft):
         if full_finetune:
             console.print(
@@ -1907,374 +1218,28 @@ def create_run(
                 "--full-finetune/--fft was passed. Use --sft instead."
             )
             raise typer.Exit(1)
-        _dispatch_full_finetune_run(
-            raw_cfg=raw_cfg,
-            config_path=config_path,
-            env=env,
-            env_file=env_file,
-            output=output,
-            yes=yes,
-            image_tag=image_tag,
-            gpu_type=gpu_type,
-            # On SFT the volume is also the dataset contract: it is
-            # mounted read-only at /volume, so `data.name` must point at
-            # a path on the volume (e.g. /volume/datasets/<name> or the
-            # relative datasets/<name> — the platform resolves it; users
-            # stage it via `prime volumes ssh --read-write` + the HF CLI).
-            # Forward --volume instead of dropping it.
-            volume=volume,
-            volume_size=volume_size,
-            mode="sft",
-            # Same dedicated-pod dispatch as full-FT, so the source overlay
-            # applies here too. Forwarded rather than dropped: the helper
-            # already honours a TOML `source_ref` for SFT, and a silently
-            # ignored --ref / --pr would launch without the requested code.
-            source_ref=ref,
-            source_pr=pr,
-        )
-        return
-    if _is_full_finetune(raw_cfg, flag=full_finetune):
-        _validate_full_finetune_deployment(raw_cfg, config_path)
-        _dispatch_full_finetune_run(
-            raw_cfg=raw_cfg,
-            config_path=config_path,
-            env=env,
-            env_file=env_file,
-            output=output,
-            yes=yes,
-            image_tag=image_tag,
-            gpu_type=gpu_type,
-            volume=volume,
-            volume_size=volume_size,
-            source_ref=ref,
-            source_pr=pr,
-        )
-        return
+        # On SFT the volume is also the dataset contract: it is mounted
+        # read-only at /volume, so `data.name` must point at a path on the
+        # volume (e.g. /volume/datasets/<name> or the relative
+        # datasets/<name> — the platform resolves it; users stage it via
+        # `prime volumes ssh --read-write` + the HF CLI).
+        mode = "sft"
 
-    # --ref / --pr are for the dedicated (full-FT / SFT) dispatch only: the
-    # LoRA path runs on shared deployments and has no per-run source to
-    # overlay. Reject rather than silently launching without the requested
-    # code.
-    if ref is not None or pr is not None or raw_cfg.get("source_ref") is not None:
-        console.print(
-            "[red]Error:[/red] --ref / --pr (and top-level `source_ref` in the "
-            "TOML) are only supported for full-FT and SFT runs."
-        )
-        raise typer.Exit(1)
-
-    if volume or volume_size or any(raw_cfg.get(k) is not None for k in ("volume", "volume_size")):
-        console.print(
-            "[red]Error:[/red] --volume / --volume-size (and top-level `volume` / "
-            "`volume_size` in the TOML) are only supported for full-FT and "
-            "SFT runs."
-        )
-        raise typer.Exit(1)
-
-    # --gpu-type is full-FT only. The LoRA path below never reads it, so
-    # silently letting the flag through would launch a run with the GPU
-    # constraint dropped - misleading for a knob that affects expensive
-    # hardware placement. Reject explicitly.
-    if gpu_type or raw_cfg.get("gpu_type") is not None:
-        console.print(
-            "[red]Error:[/red] --gpu-type (and top-level `gpu_type` in the "
-            "TOML) is only supported for full-FT runs. Drop the flag or use "
-            "a full-FT config."
-        )
-        raise typer.Exit(1)
-
-    console.print(f"[dim]Loading config from {config_path}[/dim]\n")
-    cfg = load_config(config_path)
-    if output == "json":
-        typer.echo(f"Warning: {LEGACY_TRAINING_NOTICE}", err=True)
-    else:
-        console.print(f"[yellow]Warning:[/yellow] {LEGACY_TRAINING_NOTICE}\n")
-
-    # Collect secrets from all sources
-    def warn(msg: str) -> None:
-        console.print(f"[yellow]Warning:[/yellow] {msg}")
-
-    # Resolve config env file paths relative to config file directory
-    config_dir = Path(config_path).parent
-    config_env_files = cfg.env_file + cfg.env_files  # support both, env_files takes precedence
-    resolved_config_env_files = [str(config_dir / p) for p in config_env_files]
-
-    # Merge config and CLI env files (CLI takes precedence)
-    all_env_files = resolved_config_env_files + (env_file or [])
-
-    try:
-        secrets = collect_env_vars(
-            env_args=env,
-            env_files=all_env_files if all_env_files else None,
-            on_warning=warn,
-        )
-    except EnvParseError as e:
-        console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
-
-    # Validate WANDB_API_KEY is present when W&B monitoring is configured
-    wandb_configured = cfg.wandb.entity or cfg.wandb.project
-    has_wandb_key = secrets and "WANDB_API_KEY" in secrets
-    if wandb_configured and not has_wandb_key:
-        console.print("[red]Configuration Error:[/red]")
-        console.print("  WANDB_API_KEY is required when W&B monitoring is configured.\n")
-        console.print("Provide it via:")
-        console.print('  - env_files in your config: env_files = ["secrets.env"]')
-        console.print("  - CLI flag: --env-file secrets.env")
-        console.print("  - CLI flag: -e WANDB_API_KEY=your-key")
-        console.print(
-            "  - Environment variable: export WANDB_API_KEY=... && prime train ... -e WANDB_API_KEY"
-        )
-        raise typer.Exit(1)
-
-    try:
-        api_client = APIClient()
-        rl_client = RLClient(api_client)
-        app_config = Config()
-
-        # Kick off pricing fetch in the background so it overlaps with summary
-        # rendering and the action-status checks below. Daemon thread so a slow
-        # /rft/models can't outlive the command (ThreadPoolExecutor workers are
-        # joined at interpreter exit, which would defeat the timeout cap below).
-        import threading
-
-        pricing_state: Dict[str, Any] = {"models": None, "error": None}
-        pricing_done = threading.Event()
-
-        def _fetch_pricing() -> None:
-            try:
-                pricing_state["models"] = rl_client.list_models(team_id=app_config.team_id)
-            except Exception as exc:
-                pricing_state["error"] = exc
-            finally:
-                pricing_done.set()
-
-        threading.Thread(target=_fetch_pricing, daemon=True).start()
-
-        # Show configuration in organized sections
-        console.print("[white]Configuration:[/white]\n")
-
-        # Model & Environment
-        console.print("[cyan]Model & Environment[/cyan]")
-        console.print(f"  Model:        {cfg.model}")
-        console.print(f"  Loss:         {cfg.loss}")
-        if cfg.teacher is not None:
-            console.print(f"  Teacher:      {cfg.teacher.model}")
-        console.print(f"  Environments: {', '.join(e.display_name for e in cfg.env)}")
-        if app_config.team_id:
-            console.print(f"  Team:         {app_config.team_id}")
-
-        # Training
-        console.print("\n[cyan]Training[/cyan]")
-        console.print(f"  Max Steps:           {cfg.max_steps}")
-        console.print(f"  Batch Size:          {cfg.batch_size}")
-        console.print(f"  Rollouts per Example: {cfg.rollouts_per_example}")
-        if cfg.max_inflight_rollouts is not None:
-            console.print(f"  Max Inflight Rollouts: {cfg.max_inflight_rollouts}")
-        if cfg.learning_rate is not None:
-            console.print(f"  Learning Rate:       {cfg.learning_rate}")
-        if cfg.lora_alpha is not None:
-            console.print(f"  LoRA Alpha:          {cfg.lora_alpha}")
-        if cfg.oversampling_factor is not None:
-            console.print(f"  Oversampling Factor: {cfg.oversampling_factor}")
-        if cfg.run_config:
-            console.print(f"  Run Config:          {cfg.run_config}")
-
-        # Sampling
-        has_sampling = (
-            cfg.sampling.max_tokens
-            or cfg.sampling.temperature is not None
-            or cfg.sampling.temp_scheduler is not None
-            or cfg.sampling.extra_body is not None
-            or cfg.sampling.enable_thinking is not None
-            or cfg.sampling.reasoning_effort is not None
-        )
-        if has_sampling:
-            console.print("\n[cyan]Sampling[/cyan]")
-            if cfg.sampling.max_tokens:
-                console.print(f"  Max Tokens:          {cfg.sampling.max_tokens}")
-            if cfg.sampling.temperature is not None:
-                console.print(f"  Temperature:         {cfg.sampling.temperature}")
-            if cfg.sampling.temp_scheduler is not None:
-                ts = cfg.sampling.temp_scheduler
-                sched = f"{ts.type} ({ts.start_temperature} → {ts.end_temperature})"
-                console.print(f"  Temp Scheduler:      {sched}")
-            if cfg.sampling.extra_body is not None:
-                console.print(f"  Extra Body:          {cfg.sampling.extra_body}")
-            if cfg.sampling.enable_thinking is not None:
-                console.print(f"  Enable Thinking:     {cfg.sampling.enable_thinking}")
-            if cfg.sampling.reasoning_effort is not None:
-                console.print(f"  Reasoning Effort:    {cfg.sampling.reasoning_effort}")
-
-        # W&B
-        if cfg.wandb.entity or cfg.wandb.project:
-            console.print("\n[cyan]Weights & Biases[/cyan]")
-            console.print(f"  Project: {cfg.wandb.entity or '?'}/{cfg.wandb.project or '?'}")
-            if cfg.wandb.name:
-                console.print(f"  Run Name: {cfg.wandb.name}")
-
-        # Eval
-        if cfg.eval.env:
-            console.print("\n[cyan]Evaluation[/cyan]")
-            console.print(f"  Environments: {', '.join(e.display_name for e in cfg.eval.env)}")
-            if cfg.eval.interval:
-                console.print(f"  Interval:     {cfg.eval.interval}")
-
-        # Validation
-        if cfg.val.num_examples is not None:
-            console.print("\n[cyan]Validation[/cyan]")
-            console.print(f"  Num Examples: {cfg.val.num_examples}")
-            if cfg.val.interval:
-                console.print(f"  Interval:     {cfg.val.interval}")
-
-        # Infrastructure
-        if cfg.infrastructure.compute_size:
-            console.print("\n[cyan]Infrastructure[/cyan]")
-            console.print(f"  Compute Size: {cfg.infrastructure.compute_size}")
-
-        # Checkpoint warm-start
-        if cfg.checkpoint_id:
-            console.print(f"\n[cyan]Warm-start from checkpoint:[/cyan] {cfg.checkpoint_id}")
-
-        # Secrets
-        if secrets:
-            console.print("\n[cyan]Secrets[/cyan]")
-            console.print(f"  Keys: {', '.join(secrets.keys())}")
-
-        # Pricing (best-effort — skipped silently if /rft/models is unreachable,
-        # times out, or doesn't include the chosen model. 8s cap so a slow
-        # endpoint can't gate the confirmation prompt.)
-        if pricing_done.wait(timeout=8) and pricing_state["error"] is None:
-            available = pricing_state["models"] or []
-        else:
-            available = []
-        priced = next((m for m in available if m.name == cfg.model), None)
-        if priced is not None:
-            list_train, eff_train = priced.resolve_prices("training")
-            list_input, eff_input = priced.resolve_prices("inference_input")
-            list_output, eff_output = priced.resolve_prices("inference_output")
-            console.print(
-                "\n[cyan]Pricing[/cyan] [dim](per 1M tokens, charged on actual usage)[/dim]"
-            )
-
-            def _format(list_p: Any, eff_p: Any) -> str:
-                charged = eff_p if eff_p is not None else list_p
-                if charged is None:
-                    return "-"
-                if float(charged) == 0:
-                    if list_p is not None and float(list_p) > float(charged):
-                        return format_promo_price(list_p, eff_p) or "[bold green]Free[/bold green]"
-                    return "[bold green]Free[/bold green]"
-                return format_promo_price(list_p, eff_p) or "-"
-
-            console.print(f"  Training:         {_format(list_train, eff_train)}")
-            console.print(f"  Inference Input:  {_format(list_input, eff_input)}")
-            console.print(f"  Inference Output: {_format(list_output, eff_output)}")
-            if priced.promo_label:
-                console.print(f"  [bold yellow]{rich_escape(priced.promo_label)}[/bold yellow]")
-
-        console.print()
-
-        if skip_action_check:
-            console.print(
-                "[dim]--skip-action-check is deprecated: Environment Actions were removed "
-                "and no check runs.[/dim]"
-            )
-
-        if not confirm_or_skip("Launch this Hosted Training run?", yes, default=True):
-            console.print("\nRun cancelled")
-            return
-
-        console.print("[dim]Creating Hosted Training run...[/dim]\n")
-
-        # Create the run
-        run = rl_client.create_run(
-            model_name=cfg.model,
-            environments=[e.to_api_dict() for e in cfg.env],
-            rollouts_per_example=cfg.rollouts_per_example,
-            max_steps=cfg.max_steps,
-            max_tokens=cfg.sampling.max_tokens,
-            temperature=cfg.sampling.temperature,
-            temp_scheduler=cfg.sampling.temp_scheduler.model_dump(exclude_none=True)
-            if cfg.sampling.temp_scheduler
-            else None,
-            extra_body=cfg.sampling.extra_body,
-            batch_size=cfg.batch_size,
-            name=cfg.name,
-            wandb_entity=cfg.wandb.entity,
-            wandb_project=cfg.wandb.project,
-            wandb_run_name=cfg.wandb.name,
-            secrets=secrets if secrets else None,
-            team_id=app_config.team_id,
-            eval_config=cfg.eval.to_api_dict(),
-            val_config=cfg.val.to_api_dict(),
-            # `is not None` rather than truthiness: an explicit `= []` means
-            # "replace prime-rl's default filter list with no filters" and
-            # must reach the API as an empty list, not be omitted.
-            pre_batch_filters=[f.model_dump(exclude_none=True) for f in cfg.pre_batch_filters]
-            if cfg.pre_batch_filters is not None
-            else None,
-            post_batch_filters=[f.model_dump(exclude_none=True) for f in cfg.post_batch_filters]
-            if cfg.post_batch_filters is not None
-            else None,
-            learning_rate=cfg.learning_rate,
-            lora_alpha=cfg.lora_alpha,
-            max_inflight_rollouts=cfg.max_inflight_rollouts,
-            oversampling_factor=cfg.oversampling_factor,
-            checkpoints_config=cfg.checkpoints.to_api_dict(),
-            adapters_config=cfg.adapters.to_api_dict(),
-            checkpoint_id=cfg.checkpoint_id,
-            cluster_name=cfg.cluster_name,
-            infrastructure_config=cfg.infrastructure.to_api_dict(),
-            tailscale_config=cfg.tailscale.to_api_dict(),
-            enable_thinking=cfg.sampling.enable_thinking,
-            reasoning_effort=cfg.sampling.reasoning_effort,
-            run_config=cfg.run_config if cfg.run_config else None,
-            loss=cfg.loss,
-            teacher=cfg.teacher.to_api_dict() if cfg.teacher else None,
-        )
-
-        if output == "json":
-            output_data_as_json({"run": run.model_dump()}, console)
-            return
-
-        if run.status == "QUEUED":
-            queue_msg = "✓ Run created and queued"
-            if run.runs_ahead is not None:
-                queue_msg += f" (~{run.runs_ahead} runs ahead)"
-            console.print(f"[yellow]{queue_msg}[/yellow]")
-            if run.queue_reason:
-                console.print(f"[yellow]Reason:[/yellow] {run.queue_reason}")
-            console.print("[dim]The run will start automatically when capacity is available.[/dim]")
-        else:
-            console.print("[green]✓ Run created successfully![/green]")
-
-        if run.notice:
-            console.print(f"[cyan]{run.notice}[/cyan]")
-
-        dashboard_url = f"{app_config.frontend_url}/dashboard/training/{run.id}"
-        console.print("\n[cyan]Monitor run at:[/cyan]")
-        console.print(f"  [link={dashboard_url}]{dashboard_url}[/link]")
-
-        if run.status != "QUEUED":
-            console.print("\n[dim]View logs with:[/dim]")
-            console.print(f"  prime train logs {run.id} -f")
-
-    except ValidationError as e:
-        console.print("[red]Configuration Error:[/red]")
-        for err in e.errors:
-            loc = err.get("loc", [])
-            path = ".".join(str(x) for x in loc if x != "body")
-            msg = err.get("msg", "")
-            if msg.startswith("Value error, "):
-                msg = msg[len("Value error, ") :]
-            if path:
-                console.print(f"  [yellow]{path}[/yellow]: {msg}")
-            else:
-                console.print(f"  {msg}")
-        raise typer.Exit(1)
-    except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+    _dispatch_dedicated_run(
+        raw_cfg=raw_cfg,
+        config_path=config_path,
+        env=env,
+        env_file=env_file,
+        output=output,
+        yes=yes,
+        image_tag=image_tag,
+        gpu_type=gpu_type,
+        volume=volume,
+        volume_size=volume_size,
+        mode=mode,
+        source_ref=ref,
+        source_pr=pr,
+    )
 
 
 @app.command("models", rich_help_panel="Commands", epilog=RL_MODELS_JSON_HELP)
@@ -2283,195 +1248,83 @@ def list_models(
     fft_only: bool = typer.Option(
         False,
         "--fft-only",
-        help="Suppress the LoRA/Hosted Training section and only show FFT models.",
+        hidden=True,
+        help="Deprecated: the shared LoRA section is gone, so this is the default.",
     ),
 ) -> None:
     """List available models for Hosted Training.
 
-    Renders two sections when both are populated: the shared-cluster LoRA
-    models (pricing per 1M tokens) and the models pre-cached on FFT
-    dispatch clusters, plus purchasable on-demand capacity as a third
-    section when the backend reports it. The FFT section is silent when
-    the API returns nothing so users on backends without the endpoint see
-    the pre-4782 output. The on-demand beta-enrollment flag is tri-state:
-    explicit false/true are reported as backend data; unknown (field
-    absent, 404, or a failed fetch) is treated as no signal, never as a
-    denial.
+    Shows the models pre-cached on dedicated dispatch clusters, plus
+    purchasable on-demand capacity when the backend reports it. The
+    on-demand beta-enrollment flag is tri-state: explicit false/true are
+    reported as backend data; unknown (field absent) is treated as no
+    signal, never as a denial.
     """
-    from ..api.training import AvailableFFTModel, HostedTrainingClient
+    from ..api.training import HostedTrainingClient
 
     validate_output_format(output, console)
 
     try:
-        api_client = APIClient()
-        rl_client = RLClient(api_client)
-        training_client = HostedTrainingClient(api_client)
         config = Config()
-
-        models: list = []
-        if not fft_only:
-            models = rl_client.list_models(team_id=config.team_id)
-
-        fft_models: list[AvailableFFTModel] = []
-        try:
-            fft_response = training_client.get_available_fft(team_id=config.team_id)
-            fft_models = fft_response.models
-            on_demand = fft_response.on_demand
-            on_demand_beta_access = fft_response.on_demand_beta_access
-        except APIError:
-            # Never let an FFT fetch failure break the LoRA output — the
-            # endpoint is younger and may still be rolling out. When the
-            # caller explicitly asked for FFT-only we bubble up the
-            # error instead of silently hiding it.
-            if fft_only:
-                raise
-            fft_models = []
-            on_demand = []
-            # Unknown, not denied: a failed fetch is no evidence that the
-            # account lacks beta access, so never fall back to False here.
-            on_demand_beta_access = None
-
-        if output == "json":
-            if fft_only:
-                # --fft-only: LoRA wasn't fetched so emitting `models`
-                # would be misleading. Always include the FFT key
-                # (empty allowed) so scripts using the flag can rely
-                # on `.available_fft_models[]` being present.
-                payload: dict[str, Any] = {
-                    "available_fft_models": [m.model_dump() for m in fft_models]
-                }
-            else:
-                payload = {"models": [m.model_dump() for m in models]}
-                if fft_models:
-                    payload["available_fft_models"] = [m.model_dump() for m in fft_models]
-            if on_demand:
-                payload["on_demand"] = [o.model_dump() for o in on_demand]
-            if on_demand_beta_access is not None:
-                # `is not None` so an explicit false survives (a denial is
-                # data); unknown — older backend, 404, swallowed error —
-                # is omitted so old-backend JSON stays byte-compatible.
-                payload["on_demand_beta_access"] = on_demand_beta_access
-            output_data_as_json(payload, console)
-            return
-
-        if not fft_only and models:
-            _render_lora_models_table(models)
-
-        if fft_models:
-            if not fft_only and models:
-                # Visual break only when the LoRA table above actually
-                # rendered — otherwise we'd print a stray blank line.
-                console.print()
-            _render_fft_models_table(fft_models)
-        elif not fft_models and not on_demand:
-            # Both discovery sections came back empty: explain why from
-            # the enrollment flag the backend actually reported, in either
-            # table mode — never from the mere absence of data. The reason
-            # is shared so the default and --fft-only views cannot
-            # disagree about the enrollment contract.
-            _render_discovery_empty_state(
-                on_demand_beta_access, fft_only=fft_only, lora_rendered=bool(models)
-            )
-
-        if on_demand:
-            if models or fft_models:
-                console.print()
-            _render_on_demand_table(on_demand)
-
+        training_client = HostedTrainingClient(APIClient())
+        response = training_client.get_available_fft(team_id=config.team_id)
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
 
+    fft_models = response.models
+    on_demand = response.on_demand
+    on_demand_beta_access = response.on_demand_beta_access
 
-def _render_discovery_empty_state(
-    on_demand_beta_access: bool | None, *, fft_only: bool, lora_rendered: bool
-) -> None:
-    """Explain an empty FFT/on-demand discovery without guessing the cause.
+    if output == "json":
+        # Always include the models key (empty allowed) so scripts can rely
+        # on `.available_fft_models[]` being present.
+        payload: dict[str, Any] = {"available_fft_models": [m.model_dump() for m in fft_models]}
+        if on_demand:
+            payload["on_demand"] = [o.model_dump() for o in on_demand]
+        if on_demand_beta_access is not None:
+            # `is not None` so an explicit false survives (a denial is
+            # data); unknown — older backend — is omitted.
+            payload["on_demand_beta_access"] = on_demand_beta_access
+        output_data_as_json(payload, console)
+        return
 
-    Shared by the default and `--fft-only` table modes so the enrollment
-    contract reads the same in both. Three states:
+    if fft_models:
+        _render_fft_models_table(fft_models)
+    elif not on_demand:
+        _render_discovery_empty_state(on_demand_beta_access)
+
+    if on_demand:
+        if fft_models:
+            console.print()
+        _render_on_demand_table(on_demand)
+
+
+def _render_discovery_empty_state(on_demand_beta_access: bool | None) -> None:
+    """Explain an empty model/on-demand discovery without guessing the cause.
 
     - Explicit false is the backend saying the account is not enrolled in
       the on-demand beta — the only state where asking for access is the
       right next step.
     - Explicit true means enrollment is fine and no on-demand capacity is
-      currently listed; that must not be blamed on enrollment or a
-      missing endpoint.
-    - None means no enrollment signal reached us (older backend that
-      omits the field, a swallowed 404, or a failed fetch). Stay neutral
-      — an unavailable or empty endpoint is not evidence of missing
-      access — and keep the wording each mode had before on-demand
-      existed.
+      currently listed; that must not be blamed on enrollment.
+    - None means no enrollment signal reached us (older backend that omits
+      the field, or a 404 the client maps to an empty response). Stay
+      neutral — an unavailable or empty endpoint is not evidence of
+      missing access.
     """
-    if fft_only:
-        console.print("[yellow]No FFT models available.[/yellow]")
-    elif not lora_rendered:
-        # Default mode with nothing rendered at all: keep the "you saw
-        # something" banner so the command never exits silently blank.
-        console.print("[yellow]No models available for Hosted Training.[/yellow]")
+    console.print("[yellow]No models available for Hosted Training.[/yellow]")
     if on_demand_beta_access is False:
         console.print(
             "[dim]On-demand training is in beta. Contact Prime support to request access.[/dim]"
         )
     elif on_demand_beta_access is True:
         console.print("[dim]No on-demand capacity is currently listed.[/dim]")
-    elif fft_only:
+    else:
         console.print(
             "[dim]No dispatchable clusters have a warm model cache yet, or the "
             "endpoint isn't deployed on this backend.[/dim]"
         )
-    elif not lora_rendered:
-        # Unknown enrollment in default mode: the legacy neutral fallback,
-        # not a guessed beta denial.
-        console.print("[dim]This could mean no healthy Hosted Training clusters are running.[/dim]")
-
-
-def _render_lora_models_table(models: list) -> None:
-    """Render the classic LoRA Hosted Training model listing.
-
-    Caller is responsible for handling the empty-list case (via
-    `_render_discovery_empty_state`) — this helper assumes at least one
-    row to render.
-    """
-    table = Table(
-        title="Hosted Training — LoRA",
-        title_justify="left",
-        caption_justify="left",
-    )
-    table.add_column("Model", style="cyan")
-    table.add_column("Status")
-    table.add_column("Input", style="green", justify="right")
-    table.add_column("Output", style="green", justify="right")
-    table.add_column("Train", style="green", justify="right")
-
-    promo_labels: list[str] = []
-    for model in sorted(models, key=lambda model: _model_name_sort_key(model.name)):
-        if model.at_capacity:
-            status = "[red]At Capacity[/red]"
-        else:
-            status = "[green]Available[/green]"
-        list_train, eff_train = model.resolve_prices("training")
-        list_input, eff_input = model.resolve_prices("inference_input")
-        list_output, eff_output = model.resolve_prices("inference_output")
-        table.add_row(
-            model.name,
-            status,
-            format_promo_price(list_input, eff_input) or "-",
-            format_promo_price(list_output, eff_output) or "-",
-            format_promo_price(list_train, eff_train) or "-",
-        )
-        if model.promo_label and model.promo_label not in promo_labels:
-            promo_labels.append(model.promo_label)
-
-    caption = (
-        "[dim]Prices are per 1M tokens. All models support context windows of 64K tokens.[/dim]"
-    )
-    caption_lines = [caption]
-    if promo_labels:
-        joined = ", ".join(rich_escape(label) for label in promo_labels)
-        caption_lines.append(f"[bold yellow]{joined}[/bold yellow]")
-    table.caption = "\n".join(caption_lines)
-    console.print(table)
 
 
 def _render_fft_models_table(fft_models: list) -> None:
@@ -2641,150 +1494,6 @@ def request_models() -> None:
         raise typer.Exit(1)
 
     console.print("[green]Request submitted. Thanks![/green]")
-
-
-def _unwrap_single_schema_variant(prop: Dict[str, Any]) -> Dict[str, Any]:
-    """Return the concrete schema when a field is an optional/single wrapped variant."""
-    if "anyOf" in prop:
-        non_null = [variant for variant in prop["anyOf"] if variant.get("type") != "null"]
-        if len(non_null) == 1:
-            return _unwrap_single_schema_variant(non_null[0])
-
-    if "allOf" in prop and len(prop["allOf"]) == 1:
-        return _unwrap_single_schema_variant(prop["allOf"][0])
-
-    return prop
-
-
-def _resolve_schema_ref(prop: Dict[str, Any], defs: Dict[str, Any]) -> Dict[str, Any]:
-    """Resolve a local JSON schema ref into its concrete schema when possible."""
-    if "$ref" not in prop:
-        return prop
-
-    ref_name = prop["$ref"].rsplit("/", 1)[-1]
-    return defs.get(ref_name, prop)
-
-
-def _flatten_config_schema(
-    schema: Dict[str, Any],
-    defs: Dict[str, Any],
-    prefix: str = "",
-) -> list[tuple[str, str, str]]:
-    """Walk a JSON schema and return (dotted_path, type, default) for each leaf field."""
-    leaf_rows: list[tuple[str, str, str]] = []
-    nested_rows: list[tuple[str, str, str]] = []
-    props = schema.get("properties", {})
-    for name, prop in props.items():
-        if name in ("model_config", "env_file"):
-            continue
-        path = f"{prefix}{name}" if not prefix else f"{prefix}.{name}"
-        resolved = _resolve_schema_ref(_unwrap_single_schema_variant(prop), defs)
-
-        if resolved.get("type") == "object" and "properties" in resolved:
-            nested_rows.extend(_flatten_config_schema(resolved, defs, path))
-            continue
-
-        if resolved.get("type") == "array":
-            items = _resolve_schema_ref(
-                _unwrap_single_schema_variant(resolved.get("items", {})),
-                defs,
-            )
-            if items.get("type") == "object" and "properties" in items:
-                nested_rows.extend(_flatten_config_schema(items, defs, f"{path}[]"))
-                continue
-
-        type_str = _schema_type_str(prop, defs)
-        default = str(prop.get("default", "")) if "default" in prop else ""
-        leaf_rows.append((path, type_str, default))
-
-    return leaf_rows + nested_rows
-
-
-def _schema_type_str(prop: Dict[str, Any], defs: Dict[str, Any]) -> str:
-    """Produce a human-readable type string from a JSON schema property."""
-    unwrapped = _unwrap_single_schema_variant(prop)
-    if unwrapped is not prop:
-        return _schema_type_str(unwrapped, defs)
-
-    if "$ref" in prop:
-        return prop["$ref"].rsplit("/", 1)[-1]
-
-    if "anyOf" in prop:
-        parts = [
-            _schema_type_str(variant, defs)
-            for variant in prop["anyOf"]
-            if variant.get("type") != "null"
-        ]
-        return " | ".join(parts) if parts else "any"
-
-    if "allOf" in prop:
-        parts = [_schema_type_str(variant, defs) for variant in prop["allOf"]]
-        return " & ".join(part for part in parts if part) or "any"
-
-    if prop.get("type") == "array":
-        inner = _schema_type_str(prop.get("items", {}), defs)
-        return f"list[{inner}]"
-
-    resolved = _resolve_schema_ref(prop, defs)
-    if resolved is not prop:
-        return _schema_type_str(resolved, defs)
-
-    return prop.get("type", "any")
-
-
-RL_CONFIGS_JSON_HELP = json_output_help(
-    ".configs[] = {section, name, type, default}",
-)
-
-
-@app.command("configs", rich_help_panel="Commands", epilog=RL_CONFIGS_JSON_HELP)
-def list_configs(
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
-) -> None:
-    """List available configuration options for Hosted Training."""
-    validate_output_format(output, console)
-
-    schema = RLConfig.model_json_schema()
-    defs = schema.get("$defs", {})
-    rows = _flatten_config_schema(schema, defs)
-    if output == "json":
-        output_data_as_json(
-            {
-                "configs": [
-                    {
-                        "section": r[0].rsplit(".", 1)[0] if "." in r[0] else "",
-                        "name": r[0].rsplit(".", 1)[-1],
-                        "type": r[1],
-                        "default": r[2],
-                    }
-                    for r in rows
-                ]
-            },
-            console,
-        )
-        return
-
-    table = Table(title="Hosted Training - Config Options")
-    table.add_column("Section", style="magenta")
-    table.add_column("Config", style="cyan")
-    table.add_column("Type", style="green")
-    table.add_column("Default", style="yellow")
-
-    prev_section = None
-    for path, type_str, default in rows:
-        section = path.rsplit(".", 1)[0] if "." in path else ""
-        name = path.rsplit(".", 1)[-1]
-        if prev_section is not None and section != prev_section:
-            table.add_section()
-        display_section = section if section != prev_section else ""
-        prev_section = section
-        table.add_row(display_section, name, type_str, default)
-
-    console.print(table)
-    console.print(
-        "\n[dim]Use these in your TOML config file. "
-        "See 'prime train init' to generate a template.[/dim]"
-    )
 
 
 def _list_runs_impl(
@@ -3617,48 +2326,6 @@ def list_components(
             "\n[dim]View env-server logs with:[/dim] "
             "[bold]prime train logs <run_id> -c env-server --env <env>[/bold]"
         )
-
-
-@app.command("init", rich_help_panel="Commands")
-def init_config(
-    output_path: str = typer.Argument(
-        "rl.toml",
-        help="Output path for the config file",
-    ),
-    force: bool = typer.Option(False, "--force", "-f", help="Overwrite existing file"),
-) -> None:
-    """Generate a template config file for a Hosted Training run.
-
-    Example:
-
-        prime train init           # Creates rl.toml
-
-        prime train init my-config.toml
-    """
-    path = Path(output_path)
-
-    if path.exists() and not force:
-        console.print(f"[red]Error:[/red] {output_path} already exists. Use --force to overwrite.")
-        raise typer.Exit(1)
-
-    # Auto-detect environment
-    environment: str | None = None
-    metadata = find_environment_metadata()
-    if metadata:
-        owner = metadata.get("owner")
-        name = metadata.get("name")
-        if owner and name:
-            environment = f"{owner}/{name}"
-            console.print(f"[dim]Detected environment: {environment}[/dim]")
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    template = generate_rl_config_template(environment)
-    path.write_text(template)
-
-    console.print(f"[green]✓[/green] Created {output_path}")
-    console.print(f"[yellow]Warning:[/yellow] {LEGACY_TRAINING_NOTICE}")
-    console.print(f"\n[dim]Run with:[/dim] prime train {output_path}")
 
 
 @app.command("metrics", rich_help_panel="Monitoring", epilog=RL_METRICS_JSON_HELP)

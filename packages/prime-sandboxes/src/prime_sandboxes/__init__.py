@@ -58,6 +58,9 @@ from .models import (
     ImageUpdateResult,
     ImageUpdateSource,
     ImageVisibility,
+    LanNetwork,
+    LanNetworkMember,
+    LanRule,
     PersonalImageOwner,
     PlatformImageOwner,
     ReadFileResponse,
@@ -78,7 +81,7 @@ from .models import (
 from .process import AsyncSandboxProcess
 from .sandbox import AsyncSandboxClient, SandboxClient
 
-__version__ = "0.4.3"
+__version__ = "0.4.5"
 
 # Deprecated alias for backward compatibility
 TimeoutError = APITimeoutError
@@ -108,6 +111,9 @@ __all__ = [
     "BulkDeleteSandboxRequest",
     "BulkDeleteSandboxResponse",
     "EgressPolicyStatus",
+    "LanNetwork",
+    "LanNetworkMember",
+    "LanRule",
     "AdvancedConfigs",
     "BackgroundJob",
     "BackgroundJobStatus",

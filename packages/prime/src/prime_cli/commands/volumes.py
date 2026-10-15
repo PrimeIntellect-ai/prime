@@ -25,6 +25,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -33,6 +34,7 @@ from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
 
+from prime_cli import volume_objects
 from prime_cli.api.training import HostedTrainingClient, VolumeTransfer
 from prime_cli.core import APIClient, APIError, Config, NotFoundError
 from prime_cli.volume_gateway import GatewayError, relay
@@ -86,7 +88,7 @@ def create(
     warm: bool = typer.Option(
         True,
         "--warm/--no-warm",
-        help="Start a read-write session in the background (stops after 30 min idle)",
+        help="Start a read-only session in the background (stops after 30 min idle)",
     ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
@@ -111,7 +113,11 @@ def create(
     )
     console.print(f"Use it with: prime train config.toml --volume {volume.name}")
     if warm:
-        console.print("Starting a session in the background so the volume is ready for put/ssh.")
+        console.print(
+            "If your account has a cluster allocation or your team owns a cluster, a "
+            "read-only session starts in the background so `prime volumes ssh --read-only` "
+            "is ready faster."
+        )
 
 
 @app.command("list")
@@ -495,7 +501,7 @@ def ssh(
         console.print(f"[red]Could not start SSH:[/red] {exc}")
         raise typer.Exit(1) from exc
     if not session.read_only:
-        console.print("Changes sync to the volume every minute.")
+        console.print("Changes are saved to the volume when the session stops.")
     console.print(
         "The session stops after 30 minutes idle. Stop it now with: "
         f"prime volumes stop {escape(name)} {session.id}"
@@ -511,18 +517,19 @@ def ssh(
 _SAFE_REMOTE_SEGMENT = re.compile(r"[A-Za-z0-9._@%+=,:-]+")
 
 
-def _remote_path(path: str) -> str:
+def _remote_path(path: str, *, error_console=None) -> str:
     """Path under the volume root (/volume on the pod), normalized like
     posixpath: a leading "/" means the root, "." and empty segments are
     dropped and ".." climbs one level. A trailing "/" (or a final "." or
     "..") is kept as a trailing "/". Rejects a ".." that would climb out of
     the root, and any character that would need shell quoting (spaces, *,
     $, quotes, ...)."""
+    errors = error_console or console
     parts: list[str] = []
     for p in path.split("/"):
         if p == "..":
             if not parts:
-                console.print(
+                errors.print(
                     f"[red]Invalid remote path {escape(repr(path))}: '..' climbs above "
                     "the volume root.[/red]"
                 )
@@ -531,13 +538,13 @@ def _remote_path(path: str) -> str:
         elif p not in ("", "."):
             parts.append(p)
     if not all(_SAFE_REMOTE_SEGMENT.fullmatch(p) for p in parts):
-        console.print(
+        errors.print(
             f"[red]Invalid remote path {escape(repr(path))}: use letters, digits and "
             "._-@%+=,: only (no spaces or shell characters). For other names, use "
             "`prime volumes ssh`.[/red]"
         )
         raise typer.Exit(2)
-    _refuse_long("/".join(parts), shown=path)
+    _refuse_long("/".join(parts), shown=path, error_console=errors)
     into = path.endswith("/") or path.rsplit("/", 1)[-1] in (".", "..")
     return "/volume/" + "/".join(parts) + ("/" if parts and into else "")
 
@@ -548,7 +555,7 @@ def _remote_path(path: str) -> str:
 _MAX_SEGMENT, _MAX_KEY = 255, 1024
 
 
-def _refuse_long(rel: str, prefix: str = "", shown: str = "") -> None:
+def _refuse_long(rel: str, prefix: str = "", shown: str = "", *, error_console=None) -> None:
     """Exit if a "/"-segment of `rel` is over _MAX_SEGMENT bytes, or the
     object key `prefix + rel` over _MAX_KEY. `shown` names the path in the
     message (default `rel`). surrogateescape counts an undecodable local
@@ -561,7 +568,10 @@ def _refuse_long(rel: str, prefix: str = "", shown: str = "") -> None:
         why = f"the full path is {key} bytes (at most {_MAX_KEY})"
     else:
         return
-    console.print(f"[red]Path too long: {escape(shown or rel)}: {why}. Nothing was copied.[/red]")
+    suffix = "" if error_console is err_console else " Nothing was copied."
+    (error_console or console).print(
+        f"[red]Path too long: {escape(shown or rel)}: {why}.{suffix}[/red]"
+    )
     raise typer.Exit(2)
 
 
@@ -1224,6 +1234,172 @@ def _read_route(client, name: str, team_id):
     if route.via != "r2":
         raise RuntimeError("a session started on the volume; rerun the command")
     return route
+
+
+@contextmanager
+def _volume_reads(name: str, path: str):
+    """Open renewable root-read credentials; diagnostics never go to stdout."""
+    from botocore.exceptions import BotoCoreError, ClientError
+
+    rel = _remote_path(path, error_console=err_console).removeprefix("/volume/")
+    if volume_objects.is_internal(rel):
+        err_console.print("Error: runs/.sessions/ contains internal sync metadata.")
+        raise typer.Exit(2)
+    s3 = None
+    try:
+        client, team_id = _client()
+        route = _read_route(client, name, team_id)
+        if not (
+            route.bucket
+            and route.prefix
+            and route.prefix.endswith("/")
+            and route.endpoint
+            and route.access_key_id
+            and route.secret_access_key
+        ):
+            raise ValueError("The backend did not return complete volume read credentials")
+        _refuse_long(rel, route.prefix, path, error_console=err_console)
+        s3 = _r2_client(lambda: _read_route(client, name, team_id), route)
+        yield client, team_id, s3, route, rel
+    except typer.Exit:
+        raise
+    except (APIError, BotoCoreError, ClientError, OSError, RuntimeError, ValueError) as exc:
+        err_console.print(
+            f"Error: {_api_detail(exc) if isinstance(exc, APIError) else exc}",
+            markup=False,
+            highlight=False,
+            soft_wrap=True,
+        )
+        raise typer.Exit(1) from exc
+    finally:
+        if s3 is not None:
+            s3.close()
+
+
+def _object_size(size: int, human: bool) -> str:
+    if not human:
+        return str(size)
+    value = float(size)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB", "PiB"):
+        if value < 1024 or unit == "PiB":
+            return f"{int(value)} B" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+    return str(size)
+
+
+@app.command("ls", no_args_is_help=True)
+def ls(
+    name: str = typer.Argument(..., help="Volume name; use volumes list to list volumes"),
+    path: str = typer.Argument("/", help="Path in the volume; / is the volume root"),
+    long: bool = typer.Option(False, "--long", "-l", help="Show size and modified time"),
+    recursive: bool = typer.Option(False, "--recursive", "-R", help="List all descendants"),
+    human: bool = typer.Option(False, "--human-readable", "-h", help="Show human-readable sizes"),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """List files and directories directly from volume storage, including runs/.
+
+    A live read-write session or run's changes appear once it ends.
+    """
+    validate_output_format(output, err_console)
+    with _volume_reads(name, path) as (_, _, s3, route, rel):
+        entries = volume_objects.list_entries(
+            s3, route.bucket, route.prefix, rel, recursive=recursive
+        )
+        if output == "json":
+            output_data_as_json([entry.to_dict() for entry in entries], console)
+            return
+        base = rel.rstrip("/") + "/" if rel.rstrip("/") else ""
+        if long:
+            table = Table("Size", "Modified", "Name")
+            for entry in entries:
+                table.add_row(
+                    "-" if entry.size is None else _object_size(entry.size, human),
+                    entry.modified.isoformat() if entry.modified else "-",
+                    Text(entry.path.removeprefix(base)),
+                )
+            console.print(table)
+        else:
+            for entry in entries:
+                console.print(
+                    entry.path.removeprefix(base),
+                    markup=False,
+                    highlight=False,
+                    emoji=False,
+                    soft_wrap=True,
+                )
+
+
+@app.command(no_args_is_help=True)
+def du(
+    name: str = typer.Argument(..., help="Volume name"),
+    path: str = typer.Argument("/", help="File or directory in the volume"),
+    human: bool = typer.Option(False, "--human-readable", "-h", help="Show human-readable sizes"),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """Count stored bytes and objects, and compare whole-volume usage with its cap.
+
+    A live read-write session or run's changes appear once it ends.
+    """
+    validate_output_format(output, err_console)
+    with _volume_reads(name, path) as (client, team_id, s3, route, rel):
+        volume = next((v for v in client.list_volumes(team_id=team_id) if v.name == name), None)
+        if volume is None:
+            raise ValueError(f"Volume {name!r} is no longer available")
+        usage = volume_objects.read_usage(s3, route.bucket, route.prefix, rel)
+        match = re.fullmatch(r"([0-9]+)(Gi|Ti)", volume.size or "")
+        cap = int(match[1]) * 1024 ** (3 if match[2] == "Gi" else 4) if match else None
+        usage.update(
+            capacity=volume.size,
+            capacityBytes=cap,
+            usedPercent=100 * usage["volumeBytes"] / cap if cap else None,
+        )
+        if output == "json":
+            output_data_as_json(usage, console)
+            return
+        suffix = "" if human else " bytes"
+        console.print(
+            f"{_object_size(usage['bytes'], human)}{suffix} in {usage['objects']} objects\t/{rel}",
+            markup=False,
+            highlight=False,
+            emoji=False,
+            soft_wrap=True,
+        )
+        used = _object_size(usage["volumeBytes"], human) + suffix
+        if cap:
+            limit = _object_size(cap, human) + suffix
+            console.print(f"Volume usage: {used} / {limit} ({usage['usedPercent']:.1f}%)")
+        else:
+            console.print(f"Volume usage: {used} (cap unavailable)")
+
+
+@app.command("cat", no_args_is_help=True)
+def cat(
+    name: str = typer.Argument(..., help="Volume name"),
+    path: str = typer.Argument(..., help="File in the volume"),
+) -> None:
+    """Stream a stored file to stdout as bytes, with no added newline.
+
+    A live read-write session or run's changes appear once it ends.
+    """
+    # Validate before making an API request, including directory operands.
+    rel = _remote_path(path, error_console=err_console).removeprefix("/volume/")
+    if not rel or rel.endswith("/"):
+        err_console.print("Error: cat requires a file path, not a directory.")
+        raise typer.Exit(2)
+    with _volume_reads(name, path) as (_, _, s3, route, rel):
+        body = s3.get_object(Bucket=route.bucket, Key=route.prefix + rel)["Body"]
+        try:
+            for chunk in body.iter_chunks(chunk_size=64 * 1024):
+                sys.stdout.buffer.write(chunk)
+            sys.stdout.buffer.flush()
+        except BrokenPipeError:
+            # Avoid a second broken-pipe error when Python flushes at exit
+            # (e.g. prime volumes cat ... | head). Never decode file bytes.
+            with open(os.devnull, "wb") as sink:
+                os.dup2(sink.fileno(), sys.stdout.fileno())
+            raise typer.Exit(0)
+        finally:
+            body.close()
 
 
 def _r2_transfer(

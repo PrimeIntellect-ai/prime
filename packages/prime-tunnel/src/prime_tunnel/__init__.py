@@ -2,7 +2,7 @@
 
 import logging
 
-__version__ = "0.1.14"
+__version__ = "0.1.15"
 
 from prime_tunnel.core import Config, TunnelClient
 from prime_tunnel.exceptions import (

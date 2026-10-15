@@ -14,6 +14,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+import httpx
 import toml
 from prime_cli.api.training import build_payload_from_toml
 from prime_cli.commands.rl import _is_sft, _looks_like_sft
@@ -56,7 +57,7 @@ def _capture_post(monkeypatch) -> dict[str, Any]:
         self: Any,
         endpoint: str,
         json: dict[str, Any] | None = None,
-        timeout: int | None = None,
+        timeout: float | httpx.Timeout | None = None,
     ) -> dict:
         captured["endpoint"] = endpoint
         captured["json"] = json
@@ -346,12 +347,12 @@ def _mock_run_post(monkeypatch, response: dict[str, Any]) -> dict[str, Any]:
 
     # `timeout` is part of the dispatch POST's signature now: the backend's
     # validator hop needs more than the client's 30s default, and a mock
-    # that rejected the kwarg would hide a regression in that budget.
+    # that swallowed the kwarg would hide a regression in that budget.
     def mock_post(
         self: Any,
         endpoint: str,
         json: dict[str, Any] | None = None,
-        timeout: int | None = None,
+        timeout: float | httpx.Timeout | None = None,
     ) -> dict:
         captured["endpoint"] = endpoint
         captured["json"] = json

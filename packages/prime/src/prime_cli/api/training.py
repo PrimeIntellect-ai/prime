@@ -24,35 +24,26 @@ from ..core.client import DEFAULT_CONNECT_TIMEOUT_S
 PRIME_RL_GITHUB_REPO = "PrimeIntellect-ai/prime-rl"
 _GITHUB_API = "https://api.github.com"
 
-# Read timeout for the dispatch POST, in seconds.
+# Timeout for the dispatch POST (ENG-6696).
 #
 # POST /v1/training/runs is not a cheap write: the backend validates the
 # mega-TOML against the prime-rl config validator with a 60s budget of
-# its own (`_VALIDATOR_HTTP_TIMEOUT_S`) BEFORE it writes the RFTRun row,
-# mints the per-run token and enqueues the create Cloud Task. The shared
-# client default (30s read) was therefore guaranteed to expire first
-# whenever the validator was cold — and because the run is created
-# anyway, the user got `Request timed out` for a run that exists.
-# Re-running the command then dispatched a second paid run.
+# its own BEFORE it writes the RFTRun row, mints the per-run token and
+# enqueues the create Cloud Task. The shared client default (30s read)
+# was therefore guaranteed to expire first whenever the validator was
+# cold — and because the run is created anyway, the user got `Request
+# timed out` for a run that exists. Re-running then dispatched a second
+# paid run.
 #
-# 180s leaves headroom over the server's own budget so a client timeout
-# means "the request really did not finish", not "we gave up early".
-# `_report_timed_out_dispatch` in commands/rl.py still has to handle the
-# residual case: a timeout here is ambiguous by nature, never proof that
-# nothing was created.
-DISPATCH_HTTP_TIMEOUT_S = 180
-
-# Only the READ budget is extended. Handing httpx a bare number sets
-# connect, read, write and pool alike, which would also stretch the
-# client's 10s connect limit to three minutes — so a host that
-# blackholes connections would hang for the full dispatch budget before
-# reporting an ambiguous outcome, when it never reached the backend at
-# all and the outcome is simply "failed". Connect stays short precisely
-# so that case stays unambiguous.
-DISPATCH_TIMEOUT = httpx.Timeout(
-    DISPATCH_HTTP_TIMEOUT_S,
-    connect=DEFAULT_CONNECT_TIMEOUT_S,
-)
+# Only the READ budget grows, deliberately. Handing httpx a bare number
+# sets connect, read, write and pool alike, which would stretch the 10s
+# connect limit too — so a host that blackholes connections would hang
+# for the whole budget before reporting an ambiguous outcome, when it
+# never reached the backend and the outcome is simply "failed".
+# `_report_timed_out_dispatch` in commands/rl.py handles the residual
+# case: a read timeout is ambiguous by nature, never proof that nothing
+# was created.
+CREATE_RUN_TIMEOUT = httpx.Timeout(120.0, connect=DEFAULT_CONNECT_TIMEOUT_S)
 
 
 class HostedTrainingRunResponse(BaseModel):
@@ -281,9 +272,12 @@ class HostedTrainingClient:
         …) propagate so callers can branch by exception class instead of
         string-matching the message — including APITimeoutError, which
         the dispatch command must treat as "outcome unknown" rather than
-        "failed" (see DISPATCH_HTTP_TIMEOUT_S).
+        "failed" (see CREATE_RUN_TIMEOUT).
         """
-        response = self.client.post("/training/runs", json=payload, timeout=DISPATCH_TIMEOUT)
+        # The backend validates the config through the rl-validator before
+        # answering, and a cold validator alone may take up to its 60s
+        # timeout (ENG-6696); the client default of 30s gave up first.
+        response = self.client.post("/training/runs", json=payload, timeout=CREATE_RUN_TIMEOUT)
         return HostedTrainingRunResponse.model_validate(response)
 
     def delete_run(self, run_id: str) -> Dict[str, Any]:

@@ -93,8 +93,7 @@ prime lab setup
 # See available Hosted Training models, capacity, and pricing
 prime train models
 
-# Generate and launch a Hosted Training config
-prime train init
+# Launch a prime-rl config as a Hosted Training run
 prime train rl.toml
 
 # List available GPUs
@@ -114,19 +113,16 @@ prime sandbox create python:3.11
 
 ### Lab and Hosted Training
 
-Start with `prime lab setup` to create a local workspace with starter configs, coding-agent skills and a verifiers install; build and evaluate environments there with verifiers' `vf-init` and `vf-eval`. Then use `prime train models` to choose a Hosted Training model with current capacity and pricing.
+Start with `prime lab setup` to create a local workspace with starter configs, coding-agent skills and a verifiers install; build and evaluate environments there with verifiers' `vf-init` and `vf-eval`. Then use `prime train models` to choose a Hosted Training model with current capacity and pricing. Hosted Training runs take [prime-rl](https://github.com/PrimeIntellect-ai/prime-rl) configs as-is; its [`examples/`](https://github.com/PrimeIntellect-ai/prime-rl/tree/main/examples) are good starting points.
 
 ```bash
 # Set up a Lab workspace
 prime lab setup
 
-# List trainable models, capacity, and token pricing
+# List cached models and on-demand GPU capacity and pricing
 prime train models
 
-# Generate a Hosted Training config
-prime train init
-
-# Launch the run from the generated config
+# Launch a prime-rl config (RL, or SFT with --sft) on a dedicated cluster
 prime train rl.toml
 
 # Inspect and manage Hosted Training runs
@@ -217,6 +213,33 @@ prime sandbox download <sandbox-id> /remote/file.txt ./local/
 # Clean up
 prime sandbox delete <sandbox-id>
 ```
+
+### Volume contents
+
+Inspect stored files without starting an SSH session:
+
+```bash
+prime volumes list                         # List volumes
+prime volumes ls my-data                   # List files and directories
+prime volumes ls my-data datasets/ -l -h   # Sizes and modified times
+prime volumes ls my-data runs/ -R          # Include nested run outputs
+prime volumes ls my-data -o json           # Volume-relative paths and metadata
+prime volumes du my-data -h                # Stored bytes, object count, and cap
+prime volumes du my-data datasets/ -o json # Subtree and whole-volume usage
+prime volumes cat my-data config.json | jq .
+```
+
+Paths use the same validation as `volumes get` and `put`: they are relative
+to the volume root, and `/` selects that root. `ls -R` includes nested
+directories, including empty directories. `du` scans the entire volume
+with paginated listings so the usage percentage always compares the
+whole volume with its cap, even when a file or subtree is selected.
+Directory marker objects count toward the object total; internal SSH sync
+metadata is excluded. These commands report usage without enforcing the cap.
+
+Reads use the stored copy. Read-write SSH changes appear after the next
+sync, normally about 60 seconds later. This freshness note is printed to
+stderr; `cat` writes only the file's bytes to stdout, without adding a newline.
 
 ### Team Management
 

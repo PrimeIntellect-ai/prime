@@ -75,6 +75,23 @@ members = client.list_episode_traces(episode_id, has_error=True)
 `group`, `run`, `ok`, every entry of `errors`) with `traces` narrowed to member
 trace IDs; read each member with `get_raw`.
 
+Runs are read-only totals over their traces, computed when read:
+
+```python
+page  = client.list_runs(run_type="eval")   # most recently ingested first
+run   = client.get_run("run_9f3k2m")        # trace and episode counts, avg_reward, steps
+steps = client.list_run_steps("run_9f3k2m") # per-step trace counts and avg_reward
+```
+
+`avg_reward` covers scored traces only. `list_run_steps` returns every step in
+one response, and an empty list for a run without steps or one you cannot see;
+`get_run` raises `NotFoundError` for the latter.
+
+```bash
+prime traces list --runs --run-type train
+prime traces get run_9f3k2m --runs -o json
+```
+
 ## Search indexed content
 
 Case-sensitive literal search within one run. Requires SDK 0.0.5+ and a server

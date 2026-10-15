@@ -12,7 +12,9 @@ import toml
 import typer
 from click.exceptions import Abort
 from rich.markup import escape as rich_escape
+from rich.padding import Padding
 from rich.table import Table
+from rich.text import Text
 
 from prime_cli.core import Config
 
@@ -1678,13 +1680,23 @@ def restart_run(
         raise typer.Exit(1)
 
 
+def _print_formatted_log_line(line: str) -> None:
+    first, *continuations = line.split("\n")
+    console.print(first, highlight=False, emoji=False)
+    for continuation in continuations:
+        # Padding also applies to physical wraps, unlike leading spaces in a
+        # string. Keep long diagnostic/traceback rows under their own record.
+        content = continuation[4:] if continuation.startswith("    ") else continuation
+        console.print(Padding(Text.from_markup(content, emoji=False), (0, 0, 0, 4)))
+
+
 def _print_log_lines(lines: list[str], raw: bool) -> None:
     if raw:
         for line in lines:
             console.print(line, markup=False, highlight=False, emoji=False, soft_wrap=True)
     else:
         for line in clean_logs("\n".join(lines)):
-            console.print(line, highlight=False, emoji=False)
+            _print_formatted_log_line(line)
 
 
 def _print_new_lines(last_lines: list[str], current_lines: list[str], raw: bool = False) -> None:
@@ -1788,7 +1800,10 @@ def _stream_logs(
         rendered = raw_logs.splitlines() if raw else clean_logs(raw_logs)
         if rendered:
             for line in rendered:
-                console.print(line, markup=not raw, highlight=False, emoji=False, soft_wrap=raw)
+                if raw:
+                    console.print(line, markup=False, highlight=False, emoji=False, soft_wrap=True)
+                else:
+                    _print_formatted_log_line(line)
         else:
             console.print("[yellow]No logs available yet.[/yellow]")
 

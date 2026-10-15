@@ -3,6 +3,7 @@
 import json
 import re
 from datetime import datetime, timezone
+from io import StringIO
 from typing import Any, Dict, List
 
 import pytest
@@ -11,6 +12,7 @@ from prime_cli.api.rl import RLClient
 from prime_cli.client import APIError
 from prime_cli.commands import rl as rl_commands
 from prime_cli.main import app
+from rich.console import Console
 from rich.text import Text
 from typer.testing import CliRunner
 
@@ -214,6 +216,34 @@ def test_json_log_preserves_empty_and_null_diagnostics() -> None:
     rendered = rl_commands.clean_logs(_json_log(**fields))[0]
     _, details = Text.from_markup(rendered, emoji=False).plain.split("\n", 1)
     assert json.loads(details) == fields
+
+
+@pytest.mark.parametrize("follow", [False, True])
+def test_wrapped_diagnostics_stay_indented_without_losing_fields(
+    monkeypatch: pytest.MonkeyPatch, follow: bool
+) -> None:
+    output = StringIO()
+    monkeypatch.setattr(rl_commands, "console", Console(file=output, width=42, color_system=None))
+    metadata = {"extra": {"rank": 0, "tensor": "x" * 100}, "module": "trainer"}
+    responses = iter([_json_log(**metadata)])
+
+    def fetch(tail: int) -> str:
+        try:
+            return next(responses)
+        except StopIteration:
+            raise KeyboardInterrupt
+
+    if follow:
+        with pytest.raises(KeyboardInterrupt):
+            rl_commands._stream_logs(fetch, 1000, False, True, "trainer")
+    else:
+        rl_commands._stream_logs(fetch, 1000, False, False, "trainer")
+    lines = output.getvalue().splitlines()
+    header_index = lines.index("00:22:16    INFO Ready")
+    details = lines[header_index + 1 :]
+    assert len(details) > 1
+    assert all(line.startswith("    ") for line in details)
+    assert json.loads("".join(line[4:] for line in details)) == metadata
 
 
 @pytest.mark.parametrize(

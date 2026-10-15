@@ -192,6 +192,27 @@ def format_json_log_line(line: str) -> str | None:
             message = f"[{entry['tag']}] {message}"
         if entry.get("extra"):
             message += " " + json.dumps(entry["extra"], ensure_ascii=False)
+        # Previously unrecognized prefixes fell back to the complete record.
+        # Keep unfamiliar context when rendering those records as text too.
+        context_fields = {
+            key: value
+            for key, value in entry.items()
+            if key
+            not in {
+                "timestamp",
+                "level",
+                "message",
+                "module",
+                "function",
+                "line",
+                "type",
+                "tag",
+                "extra",
+                "exception",
+            }
+        }
+        if context_fields:
+            message += " " + json.dumps(context_fields, ensure_ascii=False)
         if entry.get("exception"):
             message += "\n" + str(entry["exception"])
         message = rich_escape(message)

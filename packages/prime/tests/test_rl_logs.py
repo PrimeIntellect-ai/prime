@@ -138,6 +138,25 @@ def test_json_log_keeps_nested_message_worker_context_and_exception() -> None:
     assert "Traceback:\nValueError: [red]literal[/red]" in plain
 
 
+@pytest.mark.parametrize("prefix", ["", "[adminlog] ", "[trainer7]:(Worker_TP0 pid=970) "])
+def test_json_log_keeps_foreign_top_level_context(prefix: str) -> None:
+    # On the base branch, prefixed records fell back to raw JSON and kept
+    # these fields. Recognizing the prefix must not make that context vanish.
+    line = prefix + _json_log(
+        rank=0,
+        process=851,
+        context={"pod": "synthetic-worker", "labels": ["[red]literal[/red]"]},
+        module="clients",
+        function="_check_health",
+        line=347,
+    )
+    rendered = rl_commands.clean_logs(line)
+    assert Text.from_markup(rendered[0], emoji=False).plain == (
+        prefix + '00:22:16 [INFO] Ready {"rank": 0, "process": 851, '
+        '"context": {"pod": "synthetic-worker", "labels": ["[red]literal[/red]"]}}'
+    )
+
+
 @pytest.mark.parametrize("level", ["debug", "INFO", "WARNING", "ERROR", "CRITICAL", "custom"])
 def test_json_log_keeps_levels_and_literal_message(level: str) -> None:
     rendered = rl_commands.clean_logs(_json_log(level=level, message="[red]literal[/red] :rocket:"))
@@ -231,6 +250,25 @@ def test_logs_default_renders_api_admin_json_for_each_component(
     assert "[adminlog] 00:22:16 [INFO] [T_0] Connecting" in _plain(result.output)
     assert '"timestamp"' not in result.output
     assert len(orch) == 1
+
+
+@pytest.mark.parametrize("raw", [False, True])
+def test_logs_keep_prefixed_foreign_context_with_api_response(
+    monkeypatch: pytest.MonkeyPatch, raw: bool
+) -> None:
+    line = "[adminlog] " + _json_log(rank=0, process=851, context={"pod": "synthetic-worker"})
+    monkeypatch.setattr(
+        "prime_cli.core.APIClient.get", _make_mock_get({"orchestrator_logs": line}, [], [], [])
+    )
+    result = CliRunner().invoke(app, ["train", "logs", RUN_ID, *(["--raw"] if raw else [])])
+    assert result.exit_code == 0, result.output
+    if raw:
+        assert result.stdout == line + "\n"
+    else:
+        plain = _plain(result.output)
+        assert "[adminlog] 00:22:16 [INFO] Ready" in plain
+        for field in ['"rank": 0', '"process": 851', '"synthetic-worker"']:
+            assert field in plain
 
 
 def test_logs_raw_preserves_json_without_markup_emoji_or_wrapping(

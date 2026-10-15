@@ -24,7 +24,7 @@ from ..api.training import (
     build_payload_from_toml,
     resolve_pull_request_head,
 )
-from ..client import APIClient, APIError
+from ..client import APIClient, APIError, NotFoundError
 from ..utils import (
     DefaultCommandGroup,
     PlainTyper,
@@ -413,6 +413,9 @@ def _resolve_pr_ref(pr_number: int) -> str:
         raise typer.Exit(1)
 
 
+_SFT_ONLINE_EVAL_KEYS = frozenset({"eval", "inference", "weight_broadcast"})
+
+
 def _dispatch_dedicated_run(
     *,
     raw_cfg: Dict[str, Any],
@@ -655,22 +658,31 @@ def _dispatch_dedicated_run(
                 selection["imageTag"] = resolved_image_tag
             if resolved_source_ref:
                 selection["sourceRef"] = resolved_source_ref
-            preparation = client.prepare_local_validation(selection)
-            if preparation.get("submission_supported") is not True:
-                raise CompilationError(
-                    "This Platform deployment does not support locally validated submissions."
+            preparation = None
+            # Online eval needs components the normalized SFT contract rejects.
+            if mode != "sft" or not _SFT_ONLINE_EVAL_KEYS & config_payload.keys():
+                try:
+                    preparation = client.prepare_local_validation(selection)
+                except NotFoundError:
+                    pass
+            if preparation is not None and preparation.get("submission_supported") is True:
+                if preparation.get("mode") != selection["mode"]:
+                    raise CompilationError("Preparation returned a different training mode.")
+                payload["normalizedConfig"] = compile_locally(
+                    {k: v for k, v in config_payload.items() if k != "name"}, preparation
                 )
-            if preparation.get("mode") != selection["mode"]:
-                raise CompilationError("Preparation returned a different training mode.")
-            payload["normalizedConfig"] = compile_locally(
-                {k: v for k, v in config_payload.items() if k != "name"}, preparation
-            )
     except (APIError, CompilationError) as exc:
         console.print(f"[red]Error:[/red] {rich_escape(str(exc))}")
         raise typer.Exit(1) from exc
 
     if output != "json":
-        console.print("[green]✓ Local config validation succeeded[/green]")
+        if "normalizedConfig" in payload:
+            console.print("[green]✓ Local config validation succeeded[/green]")
+        else:
+            console.print(
+                "[yellow]Local validation is unavailable for this run; "
+                "Platform validates it on submission.[/yellow]"
+            )
 
     # Surface the image + source pins before the confirmation so a typo'd
     # ref is caught at the prompt, not by a failed dispatch. Skipped for

@@ -332,7 +332,7 @@ def test_preparation_client_rejects_unsupported_contract():
 
 
 @pytest.mark.parametrize("mode", ["rl", "sft"])
-@pytest.mark.parametrize("failure", [None, "prepare", "schema", "unsupported"])
+@pytest.mark.parametrize("failure", [None, "prepare", "schema"])
 @pytest.mark.parametrize("output", ["table", "json"])
 def test_run_validates_before_volume_creation_and_submits_normalized_config(
     monkeypatch, tmp_path, mode, failure, output
@@ -362,7 +362,7 @@ def test_run_validates_before_volume_creation_and_submits_normalized_config(
     )
     monkeypatch.setattr(rl, "APIClient", lambda: object())
     calls = []
-    preparation = {"mode": mode, "submission_supported": failure != "unsupported"}
+    preparation = {"mode": mode, "submission_supported": True}
     artifact = {
         "contract_version": 3,
         "mode": mode,
@@ -586,3 +586,65 @@ def test_validate_writes_normalized_config_without_rendering_or_submitting(
         assert json.loads(artifact_path.read_text()) == artifact
         if output == "json":
             assert json.loads(result.stdout) == artifact
+
+
+@pytest.mark.parametrize(
+    ("case", "mode", "extra", "exit_code", "normalized"),
+    [
+        ("supported", "rl", {}, 0, True),
+        ("unsupported", "rl", {}, 0, False),
+        ("not_found", "rl", {}, 0, False),
+        ("supported", "sft", {}, 0, True),
+        ("supported", "sft", {"eval": {"interval": 10}}, 0, False),
+        ("supported", "sft", {"inference": {}}, 0, False),
+        ("supported", "sft", {"weight_broadcast": {"type": "nccl"}}, 0, False),
+        ("schema_error", "rl", {}, 1, False),
+    ],
+)
+def test_run_falls_back_to_raw_config_when_local_validation_is_unavailable(
+    monkeypatch, tmp_path, case, mode, extra, exit_code, normalized
+):
+    import toml
+    from prime_cli.api.training import HostedTrainingClient, HostedTrainingRunResponse
+    from prime_cli.commands import rl
+    from prime_cli.core.client import NotFoundError
+
+    body = {"data": {"type": "fake"}} if mode == "sft" else {"trainer": {}, "orchestrator": {}}
+    path = tmp_path / "run.toml"
+    path.write_text(toml.dumps({"name": "review", **body, **extra}))
+    monkeypatch.setattr(
+        rl, "Config", lambda: SimpleNamespace(team_id="team", frontend_url="http://dashboard")
+    )
+    monkeypatch.setattr(rl, "APIClient", lambda: object())
+    artifact = {"contract_version": 3, "mode": mode, "schema_commit": "a" * 40}
+    submitted = []
+
+    def prepare(self, payload):
+        if case == "not_found":
+            raise NotFoundError("HTTP 404: Not Found")
+        return {"mode": mode, "submission_supported": case != "unsupported"}
+
+    def compile(config, prepared):
+        if case == "schema_error":
+            raise training_compiler.CompilationError("invalid schema config")
+        return artifact
+
+    def create(self, payload):
+        submitted.append(payload)
+        return HostedTrainingRunResponse(run_id="run", token_value="secret")
+
+    monkeypatch.setattr(HostedTrainingClient, "prepare_local_validation", prepare)
+    monkeypatch.setattr(training_compiler, "compile_locally", compile)
+    monkeypatch.setattr(HostedTrainingClient, "create_run", create)
+    result = CliRunner().invoke(
+        app,
+        ["train", str(path), "--sft" if mode == "sft" else "--fft", "--yes"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+    assert result.exit_code == exit_code, result.output
+    if exit_code:
+        assert submitted == []
+        return
+    assert len(submitted) == 1
+    assert submitted[0].get("normalizedConfig") == (artifact if normalized else None)
+    assert ("Local validation is unavailable" in result.output) is (not normalized)

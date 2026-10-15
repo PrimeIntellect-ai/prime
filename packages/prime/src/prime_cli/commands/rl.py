@@ -18,7 +18,7 @@ from rich.table import Table
 from prime_cli.core import Config
 
 from ..api.rl import EnvServerInfo, RLClient, RLRun
-from ..client import APIClient, APIError, APITimeoutError
+from ..client import APIClient, APIConnectTimeoutError, APIError, APITimeoutError
 from ..utils import (
     DefaultCommandGroup,
     PlainTyper,
@@ -642,8 +642,16 @@ def _dispatch_dedicated_run(
     try:
         with status_ctx:
             result = client.create_run(payload)
+    except APIConnectTimeoutError as e:
+        # Caught BEFORE the ambiguous arm: a connect/pool timeout means
+        # nothing ever reached the backend, so no run was created. Sending
+        # it through recovery would tell the user "outcome unknown, do not
+        # re-run" about a dispatch that provably did not happen — the
+        # opposite of helpful when all they need to do is try again.
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
     except APITimeoutError as e:
-        # A client-side timeout on a POST is NOT a failed dispatch - the
+        # A read/write timeout on a POST is NOT a failed dispatch - the
         # backend may have committed the run and lost only the response.
         # Reported separately from the generic error arm so the user is
         # never told "Error" for a run that is sitting in PENDING,
@@ -709,6 +717,11 @@ def _dispatch_dedicated_run(
 # that could be mistaken for this dispatch's.
 _DISPATCH_RECOVERY_CLOCK_SKEW = timedelta(minutes=5)
 _DISPATCH_RECOVERY_PAGE_SIZE = 20
+# Bounded so a backend that ignores `page` (or a clock far enough out to
+# defeat the cutoff check) cannot turn recovery into an unbounded crawl
+# while the user waits on an already-failed command. 10 pages = 200 runs
+# created inside the recovery window, far past any real dispatch burst.
+_DISPATCH_RECOVERY_MAX_PAGES = 10
 
 # Statuses a run created seconds ago can legitimately be in. Anything
 # terminal belongs to an older dispatch, so it is never a candidate.
@@ -753,23 +766,50 @@ def _find_runs_created_since(
     """
     cutoff = since - _DISPATCH_RECOVERY_CLOCK_SKEW
     try:
-        page = RLClient(APIClient()).list_runs(
-            team_id=team_id, mine=True, limit=_DISPATCH_RECOVERY_PAGE_SIZE
-        )
-        # `total is None` means the backend predates pagination and
-        # silently ignored page/limit/mine, returning the full team
-        # history — so `mine=True` bought us nothing and a teammate's
-        # recent run could be the only candidate left standing. The list
-        # command applies the same client-side owner filter in this
-        # case; recovery has to as well, or it could name someone
-        # else's run as this dispatch and offer to stop it. Without a
-        # configured user_id there is no way to attribute at all, so
-        # report that we could not check rather than guess.
-        if page.total is None:
-            owner = Config().user_id
-            if not owner:
-                return _LOOKUP_FAILED
-            page.runs = [r for r in page.runs if r.user_id == owner]
+        client = RLClient(APIClient())
+        fetched = []
+        # One page is not enough: a user who dispatches often can push
+        # the lost run past the first 20, and "No matching run found
+        # yet" is precisely the answer that invites the duplicate
+        # dispatch this whole path exists to prevent. The backend orders
+        # `createdAt DESC, id DESC`, so once a page reaches a run older
+        # than the cutoff every later page is older still and we can
+        # stop — recovery stays one page for the common case and only
+        # pages on for the high-throughput one.
+        for page_number in range(1, _DISPATCH_RECOVERY_MAX_PAGES + 1):
+            page = client.list_runs(
+                team_id=team_id,
+                mine=True,
+                page=page_number,
+                limit=_DISPATCH_RECOVERY_PAGE_SIZE,
+            )
+            # `total is None` means the backend predates pagination and
+            # silently ignored page/limit/mine, returning the full team
+            # history — so `mine=True` bought us nothing and a
+            # teammate's recent run could be the only candidate left
+            # standing. The list command applies the same client-side
+            # owner filter in this case; recovery has to as well, or it
+            # could name someone else's run as this dispatch and offer
+            # to stop it. Without a configured user_id there is no way
+            # to attribute at all, so report that we could not check
+            # rather than guess. Such a backend also ignored `page`, so
+            # one request already returned everything.
+            if page.total is None:
+                owner = Config().user_id
+                if not owner:
+                    return _LOOKUP_FAILED
+                fetched.extend(r for r in page.runs if r.user_id == owner)
+                break
+
+            fetched.extend(page.runs)
+            if not page.runs or len(page.runs) < _DISPATCH_RECOVERY_PAGE_SIZE:
+                break
+            if len(fetched) >= page.total:
+                break
+            # Past the window: ordering guarantees nothing newer follows.
+            oldest = _as_utc(page.runs[-1].created_at)
+            if oldest is not None and oldest < cutoff:
+                break
     except Exception:
         # Deliberately broad: this runs inside an error handler, so a
         # second failure here must degrade to "we could not check"
@@ -777,7 +817,7 @@ def _find_runs_created_since(
         return _LOOKUP_FAILED
 
     candidates = []
-    for run in page.runs:
+    for run in fetched:
         # kind is Optional for backward-compat with older backends; an
         # absent discriminator is not grounds to discard a candidate.
         if run.kind is not None and run.kind != "DEDICATED_FULL_FT":

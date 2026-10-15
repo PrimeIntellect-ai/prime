@@ -52,7 +52,26 @@ class PaymentRequiredError(APIError):
 
 
 class APITimeoutError(APIError):
-    """Raised when API request times out"""
+    """Raised when API request times out.
+
+    Ambiguous by default: a read or write timeout means the request was
+    (at least partly) transmitted, so a write the server committed may
+    simply have lost its response. Callers must not report it as a
+    failure. See APIConnectTimeoutError for the timeouts that are
+    provably safe.
+    """
+
+    pass
+
+
+class APIConnectTimeoutError(APITimeoutError):
+    """A timeout that happened BEFORE anything was transmitted.
+
+    Covers connect and pool timeouts: no bytes reached the server, so the
+    request provably did not run and retrying is safe. A subclass of
+    APITimeoutError so existing handlers keep catching it — handlers that
+    care about the distinction must catch this one FIRST.
+    """
 
     pass
 
@@ -179,6 +198,12 @@ class APIClient:
                 pass
 
             raise error_cls(f"HTTP {e.response.status_code}: {e.response.text or str(e)}") from e
+        except (httpx.ConnectTimeout, httpx.PoolTimeout) as e:
+            # Nothing was transmitted, so the request provably did not
+            # run. Kept distinct from the ambiguous read/write case below
+            # so callers can say "this definitely failed" rather than
+            # "outcome unknown, do not retry".
+            raise APIConnectTimeoutError(f"Request timed out: {e}") from e
         except httpx.TimeoutException as e:
             raise APITimeoutError(f"Request timed out: {e}") from e
         except httpx.RequestError as e:
@@ -340,6 +365,12 @@ class AsyncAPIClient:
                 pass
 
             raise error_cls(f"HTTP {e.response.status_code}: {e.response.text or str(e)}") from e
+        except (httpx.ConnectTimeout, httpx.PoolTimeout) as e:
+            # Nothing was transmitted, so the request provably did not
+            # run. Kept distinct from the ambiguous read/write case below
+            # so callers can say "this definitely failed" rather than
+            # "outcome unknown, do not retry".
+            raise APIConnectTimeoutError(f"Request timed out: {e}") from e
         except httpx.TimeoutException as e:
             raise APITimeoutError(f"Request timed out: {e}") from e
         except httpx.RequestError as e:

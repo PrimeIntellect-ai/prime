@@ -522,7 +522,7 @@ def test_volume_import_happy_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Any
     assert state["volume_creates"] == [("data", None)]
     sandbox_request = state["sandbox_request"]
     assert sandbox_request.name.startswith("volume-import-data-")
-    assert sandbox_request.docker_image == "prime/team-cmkvn5hnf0005ywl0imb40jiq/volume-import:dev"
+    assert sandbox_request.docker_image == "volume-import:dev"
     assert sandbox_request.cpu_cores == 1.0
     assert sandbox_request.memory_gb == 1.0
     assert sandbox_request.disk_size_gb == 5.0
@@ -579,10 +579,7 @@ def test_volume_import_uses_prod_channel_on_default_api(
     result = runner.invoke(app, ["sandbox", "volumes", "create", "data", "--from", str(data_dir)])
 
     assert result.exit_code == 0, result.output
-    assert (
-        state["sandbox_request"].docker_image
-        == "prime/team-cm21083en000vzonc01fl6clp/volume-import:prod"
-    )
+    assert state["sandbox_request"].docker_image == "volume-import:prod"
 
 
 def test_volume_import_rsync_failure_keeps_volume_and_cleans_up(

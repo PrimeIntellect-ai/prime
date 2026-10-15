@@ -48,10 +48,10 @@ VOLUMES_LIST_JSON_HELP = json_output_help(
     ".has_next = boolean",
 )
 
-# Channel refs verified from the img2vm workflow's publisher variables;
-# image publication per channel is a separate A7 gate.
-_IMPORTER_IMAGE_DEV = "prime/team-cmkvn5hnf0005ywl0imb40jiq/volume-import:dev"
-_IMPORTER_IMAGE_PROD = "prime/team-cm21083en000vzonc01fl6clp/volume-import:prod"
+# Public platform images (org-less, published via `prime images push
+# --platform-image`); per-channel publication is a separate A7 gate.
+_IMPORTER_IMAGE_DEV = "volume-import:dev"
+_IMPORTER_IMAGE_PROD = "volume-import:prod"
 _IMPORT_MOUNT_PATH = "/volume"
 _IMPORTER_CPU_CORES = 1.0
 _IMPORTER_MEMORY_GB = 1.0
@@ -111,8 +111,9 @@ def _volumes_client() -> VolumesClient:
 def _importer_image() -> str:
     """Resolve the volume-import helper image for the API environment in use.
 
-    Both namespaces are verified; whether a channel's image has actually been
-    published is enforced by the API at sandbox-create time, not here.
+    The image is platform-owned and public; whether a channel's image has
+    actually been published is enforced by the API at sandbox-create time,
+    not here.
     """
     if Config().base_url == Config.DEFAULT_BASE_URL:
         return _IMPORTER_IMAGE_PROD

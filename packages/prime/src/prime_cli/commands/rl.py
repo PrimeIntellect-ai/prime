@@ -1682,12 +1682,19 @@ def restart_run(
 
 def _print_formatted_log_line(line: str) -> None:
     first, *continuations = line.split("\n")
-    console.print(first, highlight=False, emoji=False)
+    # Parse our escaped markup exactly once. PrimeConsole's --plain path
+    # otherwise re-parses renderables and expands literal emoji tokens.
+    console.print(Text.from_markup(first, emoji=False), markup=False, highlight=False, emoji=False)
     for continuation in continuations:
         # Padding also applies to physical wraps, unlike leading spaces in a
         # string. Keep long diagnostic/traceback rows under their own record.
         content = continuation[4:] if continuation.startswith("    ") else continuation
-        console.print(Padding(Text.from_markup(content, emoji=False), (0, 0, 0, 4)))
+        console.print(
+            Padding(Text.from_markup(content, emoji=False), (0, 0, 0, 4)),
+            markup=False,
+            highlight=False,
+            emoji=False,
+        )
 
 
 def _print_log_lines(lines: list[str], raw: bool) -> None:

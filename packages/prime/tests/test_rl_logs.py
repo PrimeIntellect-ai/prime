@@ -12,6 +12,7 @@ from prime_cli.api.rl import RLClient
 from prime_cli.client import APIError
 from prime_cli.commands import rl as rl_commands
 from prime_cli.main import app
+from prime_cli.utils.plain import PrimeConsole
 from rich.console import Console
 from rich.text import Text
 from typer.testing import CliRunner
@@ -335,10 +336,16 @@ def test_logs_default_renders_api_admin_json_for_each_component(
 
 @pytest.mark.parametrize("command", ["train", "rl"])
 @pytest.mark.parametrize("component", [None, "trainer"])
+@pytest.mark.parametrize("plain", [False, True])
 @pytest.mark.parametrize("follow", [False, True])
 @pytest.mark.parametrize("raw", [False, True])
 def test_sft_trainer_commands_preserve_mixed_log_streams(
-    monkeypatch: pytest.MonkeyPatch, command: str, component: str | None, follow: bool, raw: bool
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+    component: str | None,
+    plain: bool,
+    follow: bool,
+    raw: bool,
 ) -> None:
     ordinary = [
         "[trainer0]:Starting SFT [red]literal[/red] :rocket:",
@@ -356,6 +363,8 @@ def test_sft_trainer_commands_preserve_mixed_log_streams(
         module="train",
         function="train",
         line=82,
+        extra={"path": "[red]checkpoint[/red] :rocket:"},
+        exception="[bold]Traceback[/bold]\n[red]ValueError[/red] :rocket:",
     )
     logs = "\n".join([*ordinary, structured, "SFT finished [green]literal[/green]"])
     calls: List[Dict[str, Any]] = []
@@ -368,8 +377,11 @@ def test_sft_trainer_commands_preserve_mixed_log_streams(
 
     output = StringIO()
     monkeypatch.setattr("prime_cli.core.APIClient.get", get)
-    monkeypatch.setattr(rl_commands, "console", Console(file=output, width=2000, color_system=None))
-    args = [command, "logs", RUN_ID, *(["--component", component] if component else [])]
+    monkeypatch.setattr(
+        rl_commands, "console", PrimeConsole(file=output, width=2000, color_system=None)
+    )
+    args = [*(["--plain"] if plain else []), command, "logs", RUN_ID]
+    args += ["--component", component] if component else []
     result = CliRunner().invoke(
         app, args + (["--follow"] if follow else []) + (["--raw"] if raw else [])
     )
@@ -378,13 +390,15 @@ def test_sft_trainer_commands_preserve_mixed_log_streams(
     # No explicit component lets the API select the primary pod (trainer
     # for SFT, orchestrator for RL); an explicit trainer is forwarded.
     assert calls[0].get("component") == component
-    rendered = output.getvalue()
+    rendered = "\n".join(row.rstrip() for row in output.getvalue().splitlines()) + "\n"
     if raw:
         assert logs + "\n" in rendered
     else:
         assert "\n".join(ordinary) + "\n" in rendered
         assert "00:22:16    INFO [trainer0] SFT checkpoint [red]literal[/red] :rocket:" in rendered
-        assert '    {"module": "train", "function": "train", "line": 82}' in rendered
+        assert '"module": "train", "function": "train", "line": 82' in rendered
+        assert '"path": "[red]checkpoint[/red] :rocket:"' in rendered
+        assert "    [bold]Traceback[/bold]\n    [red]ValueError[/red] :rocket:\n" in rendered
         assert structured not in rendered
         assert "SFT finished [green]literal[/green]\n" in rendered
     if follow:

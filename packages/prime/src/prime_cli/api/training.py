@@ -15,6 +15,8 @@ from pydantic import ValidationError as PydanticValidationError
 
 from prime_cli.core import APIClient, APIError, NotFoundError, default_user_agent
 
+from ..core.client import DEFAULT_CONNECT_TIMEOUT_S
+
 # The only repo the hosted source overlay runs code from. The platform and
 # validator enforce the same restriction server-side; the CLI just resolves
 # `--pr N` against it so a fork PR fails here with a clear message instead
@@ -22,10 +24,26 @@ from prime_cli.core import APIClient, APIError, NotFoundError, default_user_agen
 PRIME_RL_GITHUB_REPO = "PrimeIntellect-ai/prime-rl"
 _GITHUB_API = "https://api.github.com"
 
-
-# Cold rl-validator (up to 60s) plus the backend's own work (ENG-6696).
-# Only the read wait grows: an unreachable host still fails in 10s.
-CREATE_RUN_TIMEOUT = httpx.Timeout(120.0, connect=10.0)
+# Timeout for the dispatch POST (ENG-6696).
+#
+# POST /v1/training/runs is not a cheap write: the backend validates the
+# mega-TOML against the prime-rl config validator with a 60s budget of
+# its own BEFORE it writes the RFTRun row, mints the per-run token and
+# enqueues the create Cloud Task. The shared client default (30s read)
+# was therefore guaranteed to expire first whenever the validator was
+# cold — and because the run is created anyway, the user got `Request
+# timed out` for a run that exists. Re-running then dispatched a second
+# paid run.
+#
+# Only the READ budget grows, deliberately. Handing httpx a bare number
+# sets connect, read, write and pool alike, which would stretch the 10s
+# connect limit too — so a host that blackholes connections would hang
+# for the whole budget before reporting an ambiguous outcome, when it
+# never reached the backend and the outcome is simply "failed".
+# `_report_timed_out_dispatch` in commands/rl.py handles the residual
+# case: a read timeout is ambiguous by nature, never proof that nothing
+# was created.
+CREATE_RUN_TIMEOUT = httpx.Timeout(120.0, connect=DEFAULT_CONNECT_TIMEOUT_S)
 
 
 class HostedTrainingRunResponse(BaseModel):
@@ -252,7 +270,9 @@ class HostedTrainingClient:
 
         Lets typed APIError subclasses (NotFoundError, UnauthorizedError,
         …) propagate so callers can branch by exception class instead of
-        string-matching the message.
+        string-matching the message — including APITimeoutError, which
+        the dispatch command must treat as "outcome unknown" rather than
+        "failed" (see CREATE_RUN_TIMEOUT).
         """
         # The backend validates the config through the rl-validator before
         # answering, and a cold validator alone may take up to its 60s

@@ -14,6 +14,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+import httpx
 import toml
 from prime_cli.api.training import build_payload_from_toml
 from prime_cli.commands.rl import _is_sft, _looks_like_sft
@@ -52,9 +53,15 @@ def _capture_post(monkeypatch) -> dict[str, Any]:
     """Mock the API layer's post and capture the /training/runs payload."""
     captured: dict[str, Any] = {}
 
-    def mock_post(self: Any, endpoint: str, json: dict[str, Any] | None = None, **_: Any) -> dict:
+    def mock_post(
+        self: Any,
+        endpoint: str,
+        json: dict[str, Any] | None = None,
+        timeout: float | httpx.Timeout | None = None,
+    ) -> dict:
         captured["endpoint"] = endpoint
         captured["json"] = json
+        captured["timeout"] = timeout
         return {"runId": "run-1", "tokenValue": "tok"}
 
     monkeypatch.setattr("prime_cli.client.APIClient.post", mock_post)
@@ -338,9 +345,18 @@ def test_train_sft_missing_volume_created_with_requested_size(tmp_path: Path, mo
 def _mock_run_post(monkeypatch, response: dict[str, Any]) -> dict[str, Any]:
     captured: dict[str, Any] = {}
 
-    def mock_post(self: Any, endpoint: str, json: dict[str, Any] | None = None, **_: Any) -> dict:
+    # `timeout` is part of the dispatch POST's signature now: the backend's
+    # validator hop needs more than the client's 30s default, and a mock
+    # that swallowed the kwarg would hide a regression in that budget.
+    def mock_post(
+        self: Any,
+        endpoint: str,
+        json: dict[str, Any] | None = None,
+        timeout: float | httpx.Timeout | None = None,
+    ) -> dict:
         captured["endpoint"] = endpoint
         captured["json"] = json
+        captured["timeout"] = timeout
         return response
 
     monkeypatch.setattr("prime_cli.core.APIClient.post", mock_post)

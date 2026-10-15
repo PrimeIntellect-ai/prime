@@ -2,6 +2,7 @@
 
 from prime_cli.core import (
     APIClient,
+    APIConnectTimeoutError,
     APIError,
     APITimeoutError,
     AsyncAPIClient,
@@ -15,6 +16,7 @@ __all__ = [
     "APIClient",
     "AsyncAPIClient",
     "APIError",
+    "APIConnectTimeoutError",
     "APITimeoutError",
     "NotFoundError",
     "PaymentRequiredError",

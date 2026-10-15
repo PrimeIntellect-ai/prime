@@ -2,6 +2,7 @@
 
 from .client import (
     APIClient,
+    APIConnectTimeoutError,
     APIError,
     APITimeoutError,
     AsyncAPIClient,
@@ -16,6 +17,7 @@ from .config import Config
 __all__ = [
     "APIClient",
     "APIError",
+    "APIConnectTimeoutError",
     "APITimeoutError",
     "AsyncAPIClient",
     "Config",

@@ -14,6 +14,13 @@ def default_user_agent() -> str:
     return f"prime-cli/{__version__} python/{python_version}"
 
 
+# Named so callers overriding the READ budget can keep this one.
+# A bare number handed to httpx sets connect/read/write/pool alike,
+# which would turn a blackholed host into a long ambiguous hang.
+DEFAULT_CONNECT_TIMEOUT_S = 10.0
+DEFAULT_READ_TIMEOUT_S = 30.0
+
+
 class APIError(Exception):
     """Base API exception"""
 
@@ -45,7 +52,26 @@ class PaymentRequiredError(APIError):
 
 
 class APITimeoutError(APIError):
-    """Raised when API request times out"""
+    """Raised when API request times out.
+
+    Ambiguous by default: a read or write timeout means the request was
+    (at least partly) transmitted, so a write the server committed may
+    simply have lost its response. Callers must not report it as a
+    failure. See APIConnectTimeoutError for the timeouts that are
+    provably safe.
+    """
+
+    pass
+
+
+class APIConnectTimeoutError(APITimeoutError):
+    """A timeout that happened BEFORE anything was transmitted.
+
+    Covers connect and pool timeouts: no bytes reached the server, so the
+    request provably did not run and retrying is safe. A subclass of
+    APITimeoutError so existing handlers keep catching it — handlers that
+    care about the distinction must catch this one FIRST.
+    """
 
     pass
 
@@ -95,7 +121,7 @@ class APIClient:
         self.client = httpx.Client(
             headers=headers,
             follow_redirects=True,
-            timeout=httpx.Timeout(30.0, connect=10.0),
+            timeout=httpx.Timeout(DEFAULT_READ_TIMEOUT_S, connect=DEFAULT_CONNECT_TIMEOUT_S),
         )
 
     def _check_auth_required(self) -> None:
@@ -172,6 +198,12 @@ class APIClient:
                 pass
 
             raise error_cls(f"HTTP {e.response.status_code}: {e.response.text or str(e)}") from e
+        except (httpx.ConnectTimeout, httpx.PoolTimeout) as e:
+            # Nothing was transmitted, so the request provably did not
+            # run. Kept distinct from the ambiguous read/write case below
+            # so callers can say "this definitely failed" rather than
+            # "outcome unknown, do not retry".
+            raise APIConnectTimeoutError(f"Request timed out: {e}") from e
         except httpx.TimeoutException as e:
             raise APITimeoutError(f"Request timed out: {e}") from e
         except httpx.RequestError as e:
@@ -195,7 +227,17 @@ class APIClient:
         json: Optional[Dict[str, Any]] = None,
         timeout: Optional[Union[float, httpx.Timeout]] = None,
     ) -> Dict[str, Any]:
-        """Make a POST request to the API (timeout: per-request override)"""
+        """Make a POST request to the API
+
+        `timeout` overrides the client default for this call only. POSTs
+        need it more than GETs do: a POST that times out client-side may
+        still have been COMMITTED server-side, so an endpoint whose
+        server budget exceeds the default has to say so here rather than
+        hand the caller an ambiguous failure. Pass an `httpx.Timeout` to
+        stretch only the read budget — a bare float also stretches
+        connect, which turns an unreachable host into a long hang
+        reported as an ambiguous outcome.
+        """
         return self.request("POST", endpoint, json=json, timeout=timeout)
 
     def patch(
@@ -250,7 +292,7 @@ class AsyncAPIClient:
         self.client = httpx.AsyncClient(
             headers=headers,
             follow_redirects=True,
-            timeout=httpx.Timeout(30.0, connect=10.0),
+            timeout=httpx.Timeout(DEFAULT_READ_TIMEOUT_S, connect=DEFAULT_CONNECT_TIMEOUT_S),
         )
 
     def _check_auth_required(self) -> None:
@@ -323,6 +365,12 @@ class AsyncAPIClient:
                 pass
 
             raise error_cls(f"HTTP {e.response.status_code}: {e.response.text or str(e)}") from e
+        except (httpx.ConnectTimeout, httpx.PoolTimeout) as e:
+            # Nothing was transmitted, so the request provably did not
+            # run. Kept distinct from the ambiguous read/write case below
+            # so callers can say "this definitely failed" rather than
+            # "outcome unknown, do not retry".
+            raise APIConnectTimeoutError(f"Request timed out: {e}") from e
         except httpx.TimeoutException as e:
             raise APITimeoutError(f"Request timed out: {e}") from e
         except httpx.RequestError as e:

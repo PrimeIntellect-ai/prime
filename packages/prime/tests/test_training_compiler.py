@@ -293,7 +293,6 @@ def test_existing_cache_bytecode_upgrade_retries_without_reinstalling(
             training_compiler._schema_python(preparation)
         assert ready.is_file() and python.is_file()
         assert not marker.exists()
-        assert not list(target.parent.glob("*.lock"))
         failure = None
     assert training_compiler._schema_python(preparation) == python
     assert marker.is_file()
@@ -648,3 +647,75 @@ def test_run_falls_back_to_raw_config_when_local_validation_is_unavailable(
     assert len(submitted) == 1
     assert submitted[0].get("normalizedConfig") == (artifact if normalized else None)
     assert ("Local validation is unavailable" in result.output) is (not normalized)
+
+
+def test_installer_keeps_network_settings_and_rewrites_ssh_git_urls(monkeypatch):
+    for name in ("HTTPS_PROXY", "https_proxy", "SSL_CERT_FILE", "PRIME_API_KEY", "UV_INDEX_URL"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy:3128")
+    monkeypatch.setenv("SSL_CERT_FILE", "/etc/ca.pem")
+    monkeypatch.setenv("PRIME_API_KEY", "secret")
+    monkeypatch.setenv("UV_INDEX_URL", "https://ambient.example/simple")
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/agent")
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "5")
+    env = training_compiler._installer_environment()
+    assert {k: v for k, v in env.items() if k.startswith(("GIT_", "HTTPS", "SSL"))} == {
+        "HTTPS_PROXY": "http://proxy:3128",
+        "SSL_CERT_FILE": "/etc/ca.pem",
+        "GIT_CONFIG_COUNT": "2",
+        "GIT_CONFIG_KEY_0": "url.https://github.com/.insteadOf",
+        "GIT_CONFIG_VALUE_0": "git@github.com:",
+        "GIT_CONFIG_KEY_1": "url.https://github.com/.insteadOf",
+        "GIT_CONFIG_VALUE_1": "ssh://git@github.com/",
+    }
+    assert not {"PRIME_API_KEY", "UV_INDEX_URL", "SSH_AUTH_SOCK"} & env.keys()
+
+
+def test_install_commands_use_installer_environment_and_worker_keeps_stripped_one(monkeypatch):
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy:3128")
+    seen = []
+
+    def run_process(command, *, timeout, input=None, env=None):
+        seen.append(env)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(training_compiler, "_run_process", run_process)
+    training_compiler._run(["uv", "venv"])
+    assert seen == [training_compiler._installer_environment()]
+    assert seen[0]["HTTPS_PROXY"] == "http://proxy:3128"
+    assert "HTTPS_PROXY" not in training_compiler._worker_environment()
+
+
+def test_cache_lock_is_released_when_holder_is_sigkilled(tmp_path):
+    import subprocess
+
+    lock = tmp_path / "schema.lockfile"
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import sys, time\n"
+            "from pathlib import Path\n"
+            "from prime_cli.utils.training_compiler import _cache_lock\n"
+            "with _cache_lock(Path(sys.argv[1]), 5):\n"
+            "    print('held', flush=True)\n"
+            "    time.sleep(60)\n",
+            str(lock),
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert holder.stdout.readline() == "held\n"
+        with pytest.raises(training_compiler.CompilationError, match="Timed out"):
+            with training_compiler._cache_lock(lock, 0.3):
+                pass
+        holder.kill()
+        holder.wait()
+        started = time.monotonic()
+        with training_compiler._cache_lock(lock, 5):
+            pass
+        assert time.monotonic() - started < 2
+    finally:
+        holder.kill()
+        holder.stdout.close()

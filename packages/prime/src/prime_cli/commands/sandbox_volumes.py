@@ -169,7 +169,7 @@ def _rsync_command(transport: SandboxSshTransport, path: Path) -> List[str]:
     ]
 
 
-def _print_retained_importer(sandbox_id: str, checkpoint_id: Optional[str]) -> None:
+def _print_retained_importer(sandbox_id: str, name: str, checkpoint_id: Optional[str]) -> None:
     """Recovery guidance for an importer kept after an unsettled publish."""
     console.print(
         f"[yellow]Importer sandbox {escape(sandbox_id)} kept: the publish did "
@@ -178,13 +178,18 @@ def _print_retained_importer(sandbox_id: str, checkpoint_id: Optional[str]) -> N
     if checkpoint_id:
         console.print(
             f"Checkpoint {escape(checkpoint_id)}: check its state with "
-            f"'prime sandbox checkpoint list {escape(sandbox_id)} "
-            f"--checkpoint-id {escape(checkpoint_id)}'."
+            f"'prime sandbox checkpoint get {escape(checkpoint_id)}'."
         )
     else:
+        # A volume checkpoint never appears in the sandbox's checkpoint list
+        # (rootfs-only filter), so discovery runs through the volume head.
         console.print(
-            "If a checkpoint was created, find it with "
-            f"'prime sandbox checkpoint list {escape(sandbox_id)}'."
+            "If a checkpoint was created, its id is not known to this run; "
+            "once it reaches DURABLE it becomes the volume's head, shown by "
+            f"'prime sandbox volumes get {escape(name)}'. That head may be "
+            "older or from another publisher and does not by itself "
+            "confirm this publish. Check any checkpoint id with "
+            "'prime sandbox checkpoint get <checkpoint-id>'."
         )
     console.print(
         "The imported data is private to the importer until a publish "
@@ -336,7 +341,7 @@ def _import_volume(name: str, team_id: Optional[str], from_path: str) -> None:
                         warning += " It may still hold the unpublished import data."
                     console.print(warning)
             else:
-                _print_retained_importer(sandbox.id, checkpoint_id)
+                _print_retained_importer(sandbox.id, name, checkpoint_id)
 
 
 @app.command("create")
@@ -519,8 +524,9 @@ def publish(
         # The SDK wait budget expired; the publish upload may still finish.
         console.print(f"[red]Error:[/red] {escape(str(e))}")
         console.print(
-            "The publish may still complete. Check with "
-            f"'prime sandbox checkpoint list {escape(sandbox_id)}'."
+            "The publish may still complete. Check it with "
+            "'prime sandbox checkpoint get <checkpoint-id>' (the id is in "
+            "the message above)."
         )
         raise typer.Exit(1)
     except RuntimeError as e:
@@ -542,6 +548,5 @@ def publish(
         console.print(
             "[yellow]The publish is not yet DURABLE; the volume's published "
             "contents do not include this data until it is. Check with "
-            f"'prime sandbox checkpoint list {escape(sandbox_id)} "
-            f"--checkpoint-id {escape(checkpoint.id)}'."
+            f"'prime sandbox checkpoint get {escape(checkpoint.id)}'."
         )

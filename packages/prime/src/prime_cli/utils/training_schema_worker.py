@@ -4,7 +4,6 @@ import json
 import sys
 from copy import deepcopy
 from importlib import metadata
-from uuid import uuid4
 
 
 def defer_environments(orch):
@@ -24,17 +23,6 @@ def restore_environments(orch, saved):
         orch["eval"] = saved["eval"]
 
 
-def explicit_fields(model, prefix=""):
-    from pydantic import BaseModel
-
-    fields = [prefix + name for name in model.model_fields_set]
-    for name in type(model).model_fields:
-        child = getattr(model, name)
-        if isinstance(child, BaseModel):
-            fields.extend(explicit_fields(child, prefix + name + "."))
-    return sorted(fields)
-
-
 def normalize(request):
     data = deepcopy(request["config"])
     if data.pop("k8s", None):
@@ -48,18 +36,23 @@ def normalize(request):
 
     model = RLConfig if request["mode"] == "rl" else SFTConfig
     saved = defer_environments(data.get("orchestrator") or {}) if request["mode"] == "rl" else {}
-    # Schema launchers normally provide SLURM settings and a run identity.
+    # Schema launchers normally provide SLURM settings.
     if (data.get("deployment") or {}).get("type") == "multi_node" and "slurm" not in data:
         data["slurm"] = {}
-    if "run" in model.model_fields:
-        if "run" not in data:
-            data["run"] = {"name": uuid4().hex}
-        elif isinstance(data["run"], dict) and data["run"].get("name") is None:
-            data["run"]["name"] = uuid4().hex
     config = model.model_validate(data)
-    resolved = config.model_dump(mode="json")
+    if request["mode"] == "rl":
+        # Launcher-only settings never reach hosted components, so Platform cannot see them.
+        if config.clean:
+            raise ValueError(
+                "clean = true is unsupported for hosted runs: start a new run instead."
+            )
+        inference_deployment = getattr(config.inference, "deployment", None)
+        if getattr(inference_deployment, "type", None) == "disaggregated":
+            raise ValueError(
+                'inference.deployment type = "disaggregated" is unsupported for hosted runs.'
+            )
     if request["mode"] == "sft":
-        components = {"trainer": deepcopy(resolved)}
+        components = {"trainer": config.model_dump(mode="json")}
     else:
         dump = getattr(serialization, "dump_rl_components", None)
         if dump is not None:
@@ -76,36 +69,12 @@ def normalize(request):
                 if config.deployment.type == "multi_node":
                     components["inference"]["router"] = None
         restore_environments(components["orchestrator"], saved)
-    # Only launcher metadata crosses this boundary twice; runtime ML fields
-    # travel losslessly in components and remain opaque to Platform.
-    deployment_settings = {key: resolved[key] for key in ("deployment", "output_dir", "clean")}
-    deployment_settings["ckpt"] = (
-        {"output_dir": resolved["ckpt"].get("output_dir")} if resolved.get("ckpt") else None
-    )
-    for key in ("weight_broadcast", "rollout_transport"):
-        block = resolved.get(key)
-        deployment_settings[key] = (
-            {name: block[name] for name in ("type", "port") if name in block} if block else None
-        )
-    inference = resolved.get("inference")
-    deployment_settings["inference"] = (
-        {
-            "deployment": inference.get("deployment"),
-            "vllm": {
-                "tensor_parallel_size": (inference.get("vllm") or {}).get("tensor_parallel_size")
-            },
-        }
-        if inference
-        else None
-    )
     return {
         "contract_version": 4,
         "mode": request["mode"],
         "schema_commit": request["schema_commit"],
+        "deployment": config.deployment.model_dump(mode="json"),
         "components": components,
-        "resolved": deployment_settings,
-        "run_dir": str(config.run_dir),
-        "explicit_fields": explicit_fields(config),
     }
 
 

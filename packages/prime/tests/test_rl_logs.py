@@ -396,8 +396,15 @@ def test_sft_trainer_commands_preserve_mixed_log_streams(
     else:
         assert "\n".join(ordinary) + "\n" in rendered
         assert "00:22:16    INFO [trainer0] SFT checkpoint [red]literal[/red] :rocket:" in rendered
-        assert '"module": "train", "function": "train", "line": 82' in rendered
-        assert '"path": "[red]checkpoint[/red] :rocket:"' in rendered
+        rows = rendered.splitlines()
+        start = next(i for i, row in enumerate(rows) if row.startswith('    {"module"'))
+        end = rows.index("    [bold]Traceback[/bold]")
+        assert json.loads("".join(row[4:] for row in rows[start:end])) == {
+            "module": "train",
+            "function": "train",
+            "line": 82,
+            "extra": {"path": "[red]checkpoint[/red] :rocket:"},
+        }
         assert "    [bold]Traceback[/bold]\n    [red]ValueError[/red] :rocket:\n" in rendered
         assert structured not in rendered
         assert "SFT finished [green]literal[/green]\n" in rendered

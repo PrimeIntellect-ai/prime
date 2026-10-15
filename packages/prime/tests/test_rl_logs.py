@@ -333,6 +333,64 @@ def test_logs_default_renders_api_admin_json_for_each_component(
     assert len(orch) == 1
 
 
+@pytest.mark.parametrize("command", ["train", "rl"])
+@pytest.mark.parametrize("component", [None, "trainer"])
+@pytest.mark.parametrize("follow", [False, True])
+@pytest.mark.parametrize("raw", [False, True])
+def test_sft_trainer_commands_preserve_mixed_log_streams(
+    monkeypatch: pytest.MonkeyPatch, command: str, component: str | None, follow: bool, raw: bool
+) -> None:
+    ordinary = [
+        "[trainer0]:Starting SFT [red]literal[/red] :rocket:",
+        '[adminlog] {"timestamp": "broken", "message": "[green]literal[/green]"',
+        '{"payload": {"message": "[blue]nested[/blue] :rocket:"}}',
+        '{"timestamp":"12:34:56","level":"INFO","record":{"message":"nested"}}',
+        '"[yellow]JSON string[/yellow] :rocket:"',
+        '[1, "[bold]array[/bold]"]',
+        "true",
+        "null",
+        "42",
+    ]
+    structured = "[trainer0]:" + _json_log(
+        message="SFT checkpoint [red]literal[/red] :rocket:",
+        module="train",
+        function="train",
+        line=82,
+    )
+    logs = "\n".join([*ordinary, structured, "SFT finished [green]literal[/green]"])
+    calls: List[Dict[str, Any]] = []
+    mock_get = _make_mock_get({"run_loss": "sft", "orchestrator_logs": logs}, calls, [], [])
+
+    def get(self: Any, endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        if endpoint.endswith("/logs") and calls:
+            raise KeyboardInterrupt
+        return mock_get(self, endpoint, params)
+
+    output = StringIO()
+    monkeypatch.setattr("prime_cli.core.APIClient.get", get)
+    monkeypatch.setattr(rl_commands, "console", Console(file=output, width=2000, color_system=None))
+    args = [command, "logs", RUN_ID, *(["--component", component] if component else [])]
+    result = CliRunner().invoke(
+        app, args + (["--follow"] if follow else []) + (["--raw"] if raw else [])
+    )
+    assert result.exit_code == 0, result.output
+    assert len(calls) == 1
+    # No explicit component lets the API select the primary pod (trainer
+    # for SFT, orchestrator for RL); an explicit trainer is forwarded.
+    assert calls[0].get("component") == component
+    rendered = output.getvalue()
+    if raw:
+        assert logs + "\n" in rendered
+    else:
+        assert "\n".join(ordinary) + "\n" in rendered
+        assert "00:22:16    INFO [trainer0] SFT checkpoint [red]literal[/red] :rocket:" in rendered
+        assert '    {"module": "train", "function": "train", "line": 82}' in rendered
+        assert structured not in rendered
+        assert "SFT finished [green]literal[/green]\n" in rendered
+    if follow:
+        assert "Stopped watching logs" in rendered
+
+
 @pytest.mark.parametrize("raw", [False, True])
 def test_logs_keep_prefixed_foreign_context_with_api_response(
     monkeypatch: pytest.MonkeyPatch, raw: bool

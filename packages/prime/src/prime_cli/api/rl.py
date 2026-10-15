@@ -76,7 +76,7 @@ class RLRun(BaseModel):
     # Stored as a dict to stay forward-compatible if the API adds new fields.
     failure_analysis: Optional[Dict[str, Any]] = Field(None, alias="failureAnalysis")
 
-    # Full-FT source overlay: the prime-rl commit the pods run on top of the
+    # Hosted Training source overlay: the prime-rl commit the pods run on top of the
     # image when the run was dispatched with `--ref` / `--pr`. None for runs
     # that use the image's baked source.
     source_commit: Optional[str] = Field(None, alias="sourceCommit")
@@ -252,7 +252,7 @@ class RLClient:
     ) -> str:
         """Get logs for one component of a Hosted Training run.
 
-        Defaults to the orchestrator pod. Dedicated full-FT runs additionally
+        Defaults to the orchestrator pod. Dedicated Hosted Training runs additionally
         expose `trainer`, `inference`, and `env-server` components.
         `pod_index` narrows to a specific replica for multi-node
         trainer/inference; `env_name` picks among per-env env-server

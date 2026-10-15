@@ -70,7 +70,8 @@ def test_normalization_preserves_selected_schema_fields_without_fft(monkeypatch,
     for name, module in modules.items():
         monkeypatch.setitem(sys.modules, name, module)
     artifact = worker.normalize({"config": {}, "mode": "rl", "schema_commit": "a" * 40})
-    assert artifact["contract_version"] == 3
+    assert artifact["contract_version"] == 4
+    assert "hosted" not in artifact and "submission_supported" not in artifact
     assert artifact["components"]["trainer"]["new_option"] == {"disabled": None}
     assert artifact["components"]["trainer"]["resume"] is None
     assert "trainer" not in artifact["resolved"]
@@ -97,17 +98,24 @@ def test_worker_does_not_inherit_api_credentials_or_schema_path(monkeypatch):
     assert "PYTHONPATH" not in env
 
 
-@pytest.mark.parametrize("supported", [False, True])
-def test_artifact_submission_capability_comes_from_platform(monkeypatch, supported):
+def test_artifact_runtime_comes_from_the_preparation(monkeypatch):
     monkeypatch.setattr(
         training_compiler,
         "_schema_request",
-        lambda *args: {"artifact": {"submission_supported": not supported}},
+        lambda *args: {"artifact": {"contract_version": 4, "runtime": "forged"}},
     )
     result = training_compiler.compile_locally(
-        {}, {"runtime": {}, "submission_supported": supported}
+        {}, {"runtime": {"schema_commit": "a" * 40}, "submission_supported": True}
     )
-    assert result["submission_supported"] is supported
+    assert result == {"contract_version": 4, "runtime": {"schema_commit": "a" * 40}}
+
+
+@pytest.mark.parametrize("k8s", [{"release": "mine"}, {"storage_mount": "/scratch"}])
+def test_hosted_settings_in_the_config_are_rejected(k8s):
+    from prime_cli.utils import training_schema_worker as worker
+
+    with pytest.raises(ValueError, match=r"\[k8s\] is not supported for hosted runs"):
+        worker.normalize({"config": {"k8s": k8s}, "mode": "rl", "schema_commit": "a" * 40})
 
 
 def test_worker_provenance_mismatch_is_a_hard_error(monkeypatch, tmp_path):

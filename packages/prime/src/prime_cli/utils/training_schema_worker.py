@@ -36,12 +36,16 @@ def explicit_fields(model, prefix=""):
 
 
 def normalize(request):
+    data = deepcopy(request["config"])
+    if data.pop("k8s", None):
+        raise ValueError(
+            "[k8s] is not supported for hosted runs: Platform manages deployment settings. "
+            "Remove the [k8s] table."
+        )
     from prime_rl.configs.rl import RLConfig
     from prime_rl.configs.sft import SFTConfig
     from prime_rl.utils import config as serialization
 
-    data = deepcopy(request["config"])
-    hosted = data.pop("k8s", {})
     model = RLConfig if request["mode"] == "rl" else SFTConfig
     saved = defer_environments(data.get("orchestrator") or {}) if request["mode"] == "rl" else {}
     # Schema launchers normally provide SLURM settings and a run identity.
@@ -95,15 +99,13 @@ def normalize(request):
         else None
     )
     return {
-        "contract_version": 3,
+        "contract_version": 4,
         "mode": request["mode"],
         "schema_commit": request["schema_commit"],
         "components": components,
         "resolved": deployment_settings,
         "run_dir": str(config.run_dir),
         "explicit_fields": explicit_fields(config),
-        "hosted": hosted,
-        "submission_supported": False,
     }
 
 

@@ -1,5 +1,6 @@
 """Isolated CPU schema worker for experimental hosted config validation."""
 
+import contextlib
 import hashlib
 import json
 import os
@@ -9,7 +10,12 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 
 class CompilationError(Exception):
@@ -37,8 +43,35 @@ def _worker_environment() -> dict[str, str]:
     } | {"PYTHONDONTWRITEBYTECODE": "1"}
 
 
+_NETWORK_VARIABLES = {
+    name
+    for base in ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY")
+    for name in (base, base.lower())
+} | {"SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE"}
+
+
+def _installer_environment() -> dict[str, str]:
+    # Installers fetch from the network, so they keep proxy and CA settings.
+    # prime-rl registers its submodules with SSH URLs; rewrite them to HTTPS so
+    # a fresh install needs no GitHub keys. Deliberately no UV_* variables.
+    rewrites = ("git@github.com:", "ssh://git@github.com/")
+    git_config = {"GIT_CONFIG_COUNT": str(len(rewrites))}
+    for index, prefix in enumerate(rewrites):
+        git_config[f"GIT_CONFIG_KEY_{index}"] = "url.https://github.com/.insteadOf"
+        git_config[f"GIT_CONFIG_VALUE_{index}"] = prefix
+    return (
+        _worker_environment()
+        | {k: v for k, v in os.environ.items() if k in _NETWORK_VARIABLES}
+        | git_config
+    )
+
+
 def _run_process(
-    command: list[str], *, timeout: float, input: str | None = None
+    command: list[str],
+    *,
+    timeout: float,
+    input: str | None = None,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     # Installers spawn Git and build backends. They must stop before the
     # caller releases the cache lock and a retry replaces their environment.
@@ -48,7 +81,7 @@ def _run_process(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        env=_worker_environment(),
+        env=env if env is not None else _worker_environment(),
         start_new_session=os.name != "nt",
         creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
     ) as process:
@@ -79,13 +112,38 @@ def _run_process(
 
 def _run(command: list[str], *, timeout: int = 300) -> None:
     try:
-        result = _run_process(command, timeout=timeout)
+        result = _run_process(command, timeout=timeout, env=_installer_environment())
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise CompilationError(f"Could not build local schema environment: {exc}") from exc
     if result.returncode:
         raise CompilationError(
             "Could not build local schema environment:\n" + result.stderr[-2000:]
         )
+
+
+@contextlib.contextmanager
+def _cache_lock(path: Path, timeout: float) -> Iterator[None]:
+    # An OS lock dies with its holder, so a killed install never wedges the cache.
+    deadline = time.monotonic() + timeout
+    with path.open("a+b") as handle:
+        while True:
+            try:
+                if os.name == "nt":
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise CompilationError(f"Timed out waiting for schema cache lock: {path}")
+                time.sleep(0.2)
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
 
 
 def _schema_python(preparation: dict[str, Any]) -> Path:
@@ -103,17 +161,8 @@ def _schema_python(preparation: dict[str, Any]) -> Path:
     target = cache / key
     python = target / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     bytecode_ready = target / ".bytecode-v1.ready"
-    lock = cache / (key + ".lock")
-    deadline = time.monotonic() + 300
-    while True:
-        try:
-            lock.mkdir()
-            break
-        except FileExistsError:
-            if time.monotonic() >= deadline:
-                raise CompilationError(f"Timed out waiting for schema cache lock: {lock}")
-            time.sleep(0.2)
-    try:
+    lock = cache / (key + ".lockfile")
+    with _cache_lock(lock, 300):
         if not (target / ".ready").exists() or not python.is_file():
             # Install in the final location: venv scripts contain absolute paths.
             shutil.rmtree(target, ignore_errors=True)
@@ -152,8 +201,6 @@ def _schema_python(preparation: dict[str, Any]) -> Path:
             _run([str(python), "-I", "-B", "-c", _BYTECODE_COMPILER], timeout=120)
             bytecode_ready.touch()
         return python
-    finally:
-        lock.rmdir()
 
 
 def _schema_request(

@@ -12,11 +12,10 @@ from prime_cli.utils import training_compiler
 from typer.testing import CliRunner
 
 
-@pytest.mark.parametrize("shared_serializer", [False, True])
-def test_normalization_preserves_selected_schema_fields_without_fft(monkeypatch, shared_serializer):
+@pytest.fixture
+def fake_schema(monkeypatch):
     from types import ModuleType
 
-    from prime_cli.utils import training_schema_worker as worker
     from pydantic import BaseModel, Field
 
     class Deployment(BaseModel):
@@ -25,9 +24,7 @@ def test_normalization_preserves_selected_schema_fields_without_fft(monkeypatch,
     class Component(BaseModel):
         resume: dict | None = None
         new_option: dict = Field(default_factory=lambda: {"disabled": None})
-
-    class Run(BaseModel):
-        name: str | None = None
+        deployment: Deployment | None = None
 
     class FakeRL(BaseModel):
         deployment: Deployment = Field(default_factory=Deployment)
@@ -36,11 +33,6 @@ def test_normalization_preserves_selected_schema_fields_without_fft(monkeypatch,
         inference: Component = Field(default_factory=Component)
         output_dir: str = "/data/outputs"
         clean: bool = False
-        run: Run = Field(default_factory=Run)
-
-        @property
-        def run_dir(self):
-            return str(Path(self.output_dir) / self.run.name)
 
     modules = {
         name: ModuleType(name)
@@ -56,6 +48,15 @@ def test_normalization_preserves_selected_schema_fields_without_fft(monkeypatch,
     modules["prime_rl.configs.rl"].RLConfig = FakeRL
     modules["prime_rl.configs.sft"].SFTConfig = FakeRL
     modules["prime_rl.utils"].config = modules["prime_rl.utils.config"]
+    for name, module in modules.items():
+        monkeypatch.setitem(sys.modules, name, module)
+    return modules["prime_rl.utils.config"]
+
+
+@pytest.mark.parametrize("shared_serializer", [False, True])
+def test_normalization_preserves_selected_schema_fields_without_fft(fake_schema, shared_serializer):
+    from prime_cli.utils import training_schema_worker as worker
+
     calls = []
     if shared_serializer:
 
@@ -66,26 +67,44 @@ def test_normalization_preserves_selected_schema_fields_without_fft(monkeypatch,
                 for role in ("trainer", "orchestrator", "inference")
             }
 
-        modules["prime_rl.utils.config"].dump_rl_components = dump
-    for name, module in modules.items():
-        monkeypatch.setitem(sys.modules, name, module)
+        fake_schema.dump_rl_components = dump
     artifact = worker.normalize({"config": {}, "mode": "rl", "schema_commit": "a" * 40})
-    assert artifact["contract_version"] == 4
-    assert "hosted" not in artifact and "submission_supported" not in artifact
-    assert artifact["components"]["trainer"]["new_option"] == {"disabled": None}
-    assert artifact["components"]["trainer"]["resume"] is None
-    assert "trainer" not in artifact["resolved"]
-    assert "deployment" not in artifact["components"]["inference"]
-    if shared_serializer:
-        assert len(calls) == 1
-    else:
-        assert artifact["components"]["inference"]["router"] is None
-    another = worker.normalize({"config": {}, "mode": "rl", "schema_commit": "a" * 40})
-    assert artifact["run_dir"] != another["run_dir"]
-    named = worker.normalize(
-        {"config": {"run": {"name": "experiment"}}, "mode": "rl", "schema_commit": "a" * 40}
-    )
-    assert named["run_dir"] == "/data/outputs/experiment"
+    component = {"resume": None, "new_option": {"disabled": None}, "deployment": None}
+    assert artifact == {
+        "contract_version": 4,
+        "mode": "rl",
+        "schema_commit": "a" * 40,
+        "deployment": {"type": "multi_node"},
+        "components": {
+            "trainer": component,
+            "orchestrator": component,
+            "inference": component
+            if shared_serializer
+            else {
+                "resume": None,
+                "new_option": {"disabled": None},
+                "router": None,
+            },
+        },
+    }
+    assert len(calls) == (1 if shared_serializer else 0)
+
+
+@pytest.mark.parametrize(
+    ("config", "message"),
+    [
+        ({"clean": True}, "clean = true is unsupported for hosted runs"),
+        (
+            {"inference": {"deployment": {"type": "disaggregated"}}},
+            'inference.deployment type = "disaggregated" is unsupported',
+        ),
+    ],
+)
+def test_launcher_only_rl_settings_are_rejected_locally(fake_schema, config, message):
+    from prime_cli.utils import training_schema_worker as worker
+
+    with pytest.raises(ValueError, match=message):
+        worker.normalize({"config": config, "mode": "rl", "schema_commit": "a" * 40})
 
 
 def test_worker_does_not_inherit_api_credentials_or_schema_path(monkeypatch):

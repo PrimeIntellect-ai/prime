@@ -295,7 +295,7 @@ def _remove_deprecated_config_keys(data: Dict[str, Any]) -> None:
     if "buffer" in data:
         data.pop("buffer", None)
         console.print(
-            "[yellow]Warning:[/yellow] `[buffer]` is deprecated and ignored: "
+            "[yellow]Warning:[/yellow] `\\[buffer]` is deprecated and ignored: "
             "the difficulty-filtering buffer was removed from the trainer."
         )
 

@@ -232,7 +232,7 @@ def push_image(
         None,
         "--source-image",
         help=(
-            "Build a linux/amd64 VM image from an allowed public registry source; "
+            "Build a VM image from an allowed public registry source; "
             "Docker Hub sources become public platform images automatically"
         ),
     ),
@@ -240,6 +240,9 @@ def push_image(
         False,
         "--platform-image",
         help="Build Dockerfiles or non-Docker-Hub sources as platform VM images (admins only)",
+    ),
+    arch: str = typer.Option(
+        "amd64", "--arch", help="VM architecture: amd64, arm64, or arm (alias)"
     ),
 ):
     """
@@ -262,6 +265,11 @@ def push_image(
         prime images push myapp:v1 --source-image ghcr.io/org/app:v1
     """
     try:
+        if arch == "arm":
+            arch = "arm64"
+        if arch not in ("amd64", "arm64"):
+            console.print("[red]Error: --arch must be amd64, arm64, or arm[/red]")
+            raise typer.Exit(1)
         if public and private:
             console.print("[red]Error: --public and --private cannot be used together[/red]")
             raise typer.Exit(1)
@@ -368,6 +376,7 @@ def push_image(
                     team_id=None if platform_source_build else (config.team_id or None),
                     visibility=visibility,
                     owner_scope="platform" if platform_source_build else None,
+                    platform="linux/arm64" if arch == "arm64" else "linux/amd64",
                 )
             except UnauthorizedError:
                 console.print(
@@ -487,7 +496,7 @@ def push_image(
                     "image_name": image_name,
                     "image_tag": image_tag,
                     "dockerfile_path": PACKAGED_DOCKERFILE_PATH,
-                    "platform": "linux/amd64",
+                    "platform": f"linux/{arch}",
                 }
                 if config.team_id and not platform_image:
                     build_payload["team_id"] = config.team_id

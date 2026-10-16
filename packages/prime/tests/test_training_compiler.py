@@ -202,6 +202,42 @@ def test_worker_provenance_mismatch_is_a_hard_error(monkeypatch, tmp_path):
         )
 
 
+@pytest.mark.parametrize(
+    ("install", "commit"),
+    [
+        ({"vcs_info": {"commit_id": "a" * 40}}, "a" * 40),
+        (
+            {
+                "url": f"https://github.com/PrimeIntellect-ai/prime-rl/archive/{'a' * 40}.tar.gz",
+                "archive_info": {},
+                "subdirectory": "packages/prime-rl-configs",
+            },
+            "a" * 40,
+        ),
+        (
+            {
+                "url": f"https://github.com/PrimeIntellect-ai/prime-rl/archive/{'a' * 40}.tar.gz",
+                "archive_info": {},
+                "subdirectory": "packages/other",
+            },
+            None,
+        ),
+        (
+            {
+                "url": f"https://github.com/someone/prime-rl/archive/{'a' * 40}.tar.gz",
+                "archive_info": {},
+                "subdirectory": "packages/prime-rl-configs",
+            },
+            None,
+        ),
+    ],
+)
+def test_worker_reads_schema_commit_from_git_or_archive_installs(install, commit):
+    from prime_cli.utils import training_schema_worker as worker
+
+    assert worker.installed_commit(install) == commit
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process-group cleanup")
 @pytest.mark.parametrize("interrupted", [False, True])
 def test_installer_stops_descendants_before_returning(monkeypatch, tmp_path, interrupted):

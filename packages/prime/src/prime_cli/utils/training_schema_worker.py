@@ -1,6 +1,7 @@
 """Executed in the selected schema interpreter, without CLI dependencies."""
 
 import json
+import re
 import sys
 from copy import deepcopy
 from importlib import metadata
@@ -21,6 +22,19 @@ def restore_environments(orch, saved):
         orch.setdefault("train", {})["source"] = saved["train_source"]
     if "eval" in saved:
         orch["eval"] = saved["eval"]
+
+
+def installed_commit(install):
+    """The prime-rl commit a git or GitHub-archive install of prime-rl-configs came from."""
+    if "vcs_info" in install:
+        return install["vcs_info"].get("commit_id")
+    archive = re.fullmatch(
+        r"https://github\.com/PrimeIntellect-ai/prime-rl/archive/([0-9a-f]{40})\.tar\.gz",
+        install.get("url", ""),
+    )
+    if archive and install.get("subdirectory") == "packages/prime-rl-configs":
+        return archive.group(1)
+    return None
 
 
 def normalize(request):
@@ -87,7 +101,7 @@ def main():
         request = json.load(sys.stdin)
         dist = metadata.distribution("prime-rl-configs")
         install = json.loads(dist.read_text("direct_url.json") or "{}")
-        actual = install.get("vcs_info", {}).get("commit_id")
+        actual = installed_commit(install)
         expected = request["schema_commit"]
         if actual != expected:
             raise ValueError(f"schema provenance mismatch: expected {expected}, installed {actual}")

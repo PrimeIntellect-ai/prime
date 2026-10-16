@@ -1,4 +1,5 @@
 import json
+import subprocess
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
@@ -454,6 +455,7 @@ def _configure_import_mocks(
             return SimpleNamespace(returncode=0)
         state["order"].append("rsync")
         state["rsync_calls"].append(list(command))
+        state["rsync_kwargs"] = kwargs
         return SimpleNamespace(returncode=rsync_returncode)
 
     def fake_delete(self: Any, sandbox_id: str, **kwargs: Any) -> Any:
@@ -514,10 +516,17 @@ def test_volume_import_happy_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Any
     assert result.exit_code == 0, result.output
     output = strip_ansi(result.output)
     assert "Created volume data" in output
-    assert "Copied data into volume data" in output
-    assert "Publish requested: checkpoint chk-1" in output
-    assert "Published volume data" in output
+    # Two generic phase lines in order, no implementation-detail chatter.
+    assert output.index("Importing files into volume...") < output.index(
+        "Publishing volume..."
+    ) < output.index("✓ Published volume data")
     assert "DURABLE" in output
+    assert "Waiting for importer sandbox" not in output
+    assert "rsync" not in output
+    assert "Copied data into volume" not in output
+    assert "Publish requested" not in output
+    # Success-path rsync progress is suppressed; stderr stays attached.
+    assert state["rsync_kwargs"] == {"stdout": subprocess.DEVNULL}
 
     assert state["volume_creates"] == [("data", None)]
     sandbox_request = state["sandbox_request"]
@@ -751,7 +760,8 @@ def test_volume_import_importer_create_failure_propagates(
     assert result.exit_code == expected_exit, result.output
     output = " ".join(strip_ansi(result.output).split())
     assert expected_line in output
-    assert "Importing files with rsync" not in output
+    assert "Importing files into volume..." in output
+    assert "Publishing volume..." not in output
     assert state["rsync_calls"] == []
     assert state["publish_calls"] == []
     assert state["checkpoint_waits"] == []
@@ -906,7 +916,7 @@ def test_volume_import_publish_failed_retains_importer(
     assert "state=FAILED" in output
     assert "The publish failed" in output
     assert state["deleted"] == []
-    assert "checkpoint chk-1" in output
+    assert "prime sandbox checkpoint get chk-1" in output
     assert "prime sandbox delete sbx-import-1" in output
 
 
@@ -933,7 +943,7 @@ def test_volume_import_interrupt_during_publish_retains_importer(
     assert "Interrupted while publishing" in output
     assert "unknown" in output
     assert state["deleted"] == []
-    assert "checkpoint chk-1" in output
+    assert "prime sandbox checkpoint get chk-1" in output
     assert "prime sandbox delete sbx-import-1" in output
     assert "30 minutes without transfer activity" in output
 

@@ -243,6 +243,8 @@ def _import_volume(name: str, team_id: Optional[str], from_path: str) -> None:
     else:
         console.print(f"[green]✓[/green] Created volume {escape(name)}")
 
+    console.print("[blue]Importing files into volume...[/blue]")
+
     sandbox: Optional[Sandbox] = None
     checkpoint_id: Optional[str] = None
     # The importer is deleted only on a pre-publish failure or after a
@@ -265,11 +267,11 @@ def _import_volume(name: str, team_id: Optional[str], from_path: str) -> None:
                 volumes=[VolumeMount(name=name, mount_path=_IMPORT_MOUNT_PATH, read_only=False)],
             )
         )
-        with console.status("[bold blue]Waiting for importer sandbox...", spinner="dots"):
-            sandbox_client.wait_for_creation(sandbox.id)
-        console.print("[blue]Importing files with rsync...[/blue]")
+        sandbox_client.wait_for_creation(sandbox.id)
         with ssh_transport(sandbox_client, sandbox.id) as transport:
-            result = subprocess.run(_rsync_command(transport, path))
+            # rsync progress is success-path noise; its errors go to stderr,
+            # which stays attached to the terminal.
+            result = subprocess.run(_rsync_command(transport, path), stdout=subprocess.DEVNULL)
         if result.returncode != 0:
             console.print(
                 "[red]Error:[/red] rsync failed. Nothing was published by this "
@@ -277,21 +279,13 @@ def _import_volume(name: str, team_id: Optional[str], from_path: str) -> None:
                 "(a never-published volume stays empty)."
             )
             raise typer.Exit(1)
-        console.print(f"[green]✓[/green] Copied data into volume {escape(name)}")
-        # Flag uncertainty before the POST: from here the publish outcome is
-        # unknown on any failure or interrupt, so the importer is kept.
-        console.print(f"[blue]Publishing volume {escape(name)}...[/blue]")
-        console.print(
-            "If this step fails or is interrupted, the publish state is "
-            f"unknown; the importer sandbox {escape(sandbox.id)} is kept."
-        )
+        # From here the publish outcome is uncertain on any failure or
+        # interrupt; the handlers below and the retention guidance in the
+        # finally carry the full IDs/recovery output, not the success path.
+        console.print("[blue]Publishing volume...[/blue]")
         publish_requested = True
         checkpoint = volumes_client.publish(sandbox.id, name, wait=False)
         checkpoint_id = checkpoint.id
-        console.print(
-            f"Publish requested: checkpoint {escape(checkpoint_id)} "
-            f"(state {escape(checkpoint.state)})"
-        )
         try:
             sandbox_client.wait_for_checkpoint(checkpoint_id)
         except TimeoutError as error:

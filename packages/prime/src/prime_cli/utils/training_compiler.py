@@ -6,12 +6,13 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
 from typing import Any, Iterator
 
-if os.name == "nt":
+if sys.platform == "win32":
     import msvcrt
 else:
     import fcntl
@@ -29,7 +30,7 @@ _CACHE_KEY = re.compile(r"[0-9a-f]{64}")
 
 
 _WORKER = Path(__file__).with_name("training_schema_worker.py").read_text()
-_LOCKS_ARE_INHERITABLE = os.name != "nt"
+_LOCKS_ARE_INHERITABLE = sys.platform != "win32"
 
 
 def _credential_free_environment() -> dict[str, str]:
@@ -133,7 +134,7 @@ def _cache_lock(path: Path, timeout: float, *, shared: bool = False) -> Iterator
     with path.open("a+b") as handle:
         while True:
             try:
-                if os.name == "nt":
+                if sys.platform == "win32":
                     handle.seek(0)
                     msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
                 else:
@@ -147,7 +148,7 @@ def _cache_lock(path: Path, timeout: float, *, shared: bool = False) -> Iterator
         try:
             yield handle.fileno() if _LOCKS_ARE_INHERITABLE else None
         finally:
-            if os.name == "nt":
+            if sys.platform == "win32":
                 handle.seek(0)
                 msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
 

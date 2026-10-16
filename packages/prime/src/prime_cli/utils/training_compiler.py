@@ -75,6 +75,7 @@ def _run_process(
     timeout: float,
     input: str | None = None,
     env: dict[str, str] | None = None,
+    pass_fds: tuple[int, ...] = (),
 ) -> subprocess.CompletedProcess[str]:
     # Installers spawn Git and build backends. They must stop before the
     # caller releases the cache lock and a retry replaces their environment.
@@ -85,6 +86,7 @@ def _run_process(
         stderr=subprocess.PIPE,
         text=True,
         env=env if env is not None else _worker_environment(),
+        pass_fds=pass_fds,
         start_new_session=os.name != "nt",
         creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
     ) as process:
@@ -113,9 +115,16 @@ def _run_process(
         return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
 
-def _run(command: list[str], *, timeout: int = 300) -> None:
+def _run(command: list[str], *, lock: int | None, timeout: int = 300) -> None:
+    # Installers inherit the cache lock: if the CLI is killed, its surviving
+    # installer tree keeps the cache locked until it exits.
     try:
-        result = _run_process(command, timeout=timeout, env=_installer_environment())
+        result = _run_process(
+            command,
+            timeout=timeout,
+            env=_installer_environment(),
+            pass_fds=() if lock is None else (lock,),
+        )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise CompilationError(f"Could not build local schema environment: {exc}") from exc
     if result.returncode:
@@ -125,7 +134,7 @@ def _run(command: list[str], *, timeout: int = 300) -> None:
 
 
 @contextlib.contextmanager
-def _cache_lock(path: Path, timeout: float) -> Iterator[None]:
+def _cache_lock(path: Path, timeout: float) -> Iterator[int | None]:
     # An OS lock dies with its holder, so a killed install never wedges the cache.
     deadline = time.monotonic() + timeout
     with path.open("a+b") as handle:
@@ -142,7 +151,8 @@ def _cache_lock(path: Path, timeout: float) -> Iterator[None]:
                     raise CompilationError(f"Timed out waiting for schema cache lock: {path}")
                 time.sleep(0.2)
         try:
-            yield
+            # Windows region locks belong to the handle, so children cannot share them.
+            yield None if os.name == "nt" else handle.fileno()
         finally:
             if os.name == "nt":
                 handle.seek(0)
@@ -164,8 +174,8 @@ def _schema_python(preparation: dict[str, Any]) -> Path:
     target = cache / key
     python = target / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     bytecode_ready = target / ".bytecode-v1.ready"
-    lock = cache / (key + ".lockfile")
-    with _cache_lock(lock, 300):
+    lock_path = cache / (key + ".lockfile")
+    with _cache_lock(lock_path, 300) as lock:
         if not (target / ".ready").exists() or not python.is_file():
             # Install in the final location: venv scripts contain absolute paths.
             shutil.rmtree(target, ignore_errors=True)
@@ -174,6 +184,7 @@ def _schema_python(preparation: dict[str, Any]) -> Path:
             # must not change how this separate schema environment is built.
             _run(
                 ["uv", "venv", "--no-config", "--python", inputs["python"], str(target)],
+                lock=lock,
                 timeout=60,
             )
             with tempfile.TemporaryDirectory(prefix="prime-schema-") as temp:
@@ -194,14 +205,15 @@ def _schema_python(preparation: dict[str, Any]) -> Path:
                         "--constraints",
                         str(constraints),
                         *inputs["requirements"],
-                    ]
+                    ],
+                    lock=lock,
                 )
             bytecode_ready.touch()
             (target / ".ready").touch()
         elif not bytecode_ready.is_file():
             # Upgrade existing schema caches without resolving or reinstalling
             # dependencies. The cache lock also covers this one-time step.
-            _run([str(python), "-I", "-B", "-c", _BYTECODE_COMPILER], timeout=120)
+            _run([str(python), "-I", "-B", "-c", _BYTECODE_COMPILER], lock=lock, timeout=120)
             bytecode_ready.touch()
         return python
 

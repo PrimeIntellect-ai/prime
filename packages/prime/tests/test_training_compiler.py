@@ -233,7 +233,7 @@ def test_installer_stops_descendants_before_returning(monkeypatch, tmp_path, int
     try:
         expected = KeyboardInterrupt if interrupted else training_compiler.CompilationError
         with pytest.raises(expected):
-            training_compiler._run([sys.executable, "-I", "-c", parent], timeout=2)
+            training_compiler._run([sys.executable, "-I", "-c", parent], lock=None, timeout=2)
         assert started.exists(), "descendant must start before testing cleanup"
         release.touch()
         time.sleep(0.2)
@@ -708,12 +708,12 @@ def test_install_commands_use_installer_environment_and_worker_keeps_stripped_on
     monkeypatch.setenv("HTTPS_PROXY", "http://proxy:3128")
     seen = []
 
-    def run_process(command, *, timeout, input=None, env=None):
+    def run_process(command, *, timeout, input=None, env=None, pass_fds=()):
         seen.append(env)
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(training_compiler, "_run_process", run_process)
-    training_compiler._run(["uv", "venv"])
+    training_compiler._run(["uv", "venv"], lock=None)
     assert seen == [training_compiler._installer_environment()]
     assert seen[0]["HTTPS_PROXY"] == "http://proxy:3128"
     assert "HTTPS_PROXY" not in training_compiler._worker_environment()
@@ -752,3 +752,42 @@ def test_cache_lock_is_released_when_holder_is_sigkilled(tmp_path):
     finally:
         holder.kill()
         holder.stdout.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows region locks cannot be inherited")
+def test_installer_that_outlives_a_killed_cli_keeps_the_cache_locked(tmp_path):
+    import subprocess
+
+    lock = tmp_path / "schema.lockfile"
+    installed = tmp_path / "installed"
+    cli = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import sys\n"
+            "from pathlib import Path\n"
+            "from prime_cli.utils.training_compiler import _cache_lock, _run\n"
+            "with _cache_lock(Path(sys.argv[1]), 5) as lock:\n"
+            "    print('installing', flush=True)\n"
+            "    installer = 'import pathlib, sys, time; time.sleep(2); '\n"
+            "    installer += 'pathlib.Path(sys.argv[1]).touch()'\n"
+            "    _run([sys.executable, '-c', installer, sys.argv[2]], lock=lock)\n",
+            str(lock),
+            str(installed),
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert cli.stdout.readline() == "installing\n"
+        time.sleep(0.3)
+        cli.kill()
+        cli.wait()
+        with pytest.raises(training_compiler.CompilationError, match="Timed out"):
+            with training_compiler._cache_lock(lock, 0.5):
+                pass
+        with training_compiler._cache_lock(lock, 10):
+            assert installed.exists()
+    finally:
+        cli.kill()
+        cli.stdout.close()

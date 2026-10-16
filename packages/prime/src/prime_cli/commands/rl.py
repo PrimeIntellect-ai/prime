@@ -413,6 +413,12 @@ def _resolve_pr_ref(pr_number: int) -> str:
         raise typer.Exit(1)
 
 
+def _supports_local_validation(mode: Optional[str], config: Dict[str, Any]) -> bool:
+    from ..utils.training_compiler import SFT_ONLINE_EVAL_KEYS
+
+    return mode != "sft" or not SFT_ONLINE_EVAL_KEYS & config.keys()
+
+
 def _dispatch_dedicated_run(
     *,
     raw_cfg: Dict[str, Any],
@@ -432,14 +438,12 @@ def _dispatch_dedicated_run(
 ) -> None:
     """Hand off to /api/v1/training/runs (prime-rl on a registered
     PrimeCluster). Serves both dedicated run kinds: full-FT RL mega-TOMLs
-    (mode=None/"rl") and SFT mega-TOMLs (mode="sft" — same endpoint, same
-    schema selection differs). The CLI normalizes the selected schema
-    locally; Platform admits and renders that config for deployment.
+    (mode=None/"rl") and SFT mega-TOMLs (mode="sft" — same endpoint).
 
     Backend always auto-picks the first uncordoned PrimeCluster — the
     CLI never threads a cluster id, so a config that targets the wrong
     cluster can't be a footgun."""
-    from ..utils.training_compiler import SFT_ONLINE_EVAL_KEYS, CompilationError, compile_locally
+    from ..utils.training_compiler import CompilationError, compile_locally
 
     name = raw_cfg.get("name")
 
@@ -656,8 +660,7 @@ def _dispatch_dedicated_run(
             if resolved_source_ref:
                 selection["sourceRef"] = resolved_source_ref
             preparation = None
-            # Online eval needs components the normalized SFT contract rejects.
-            if mode != "sft" or not SFT_ONLINE_EVAL_KEYS & config_payload.keys():
+            if _supports_local_validation(mode, config_payload):
                 try:
                     preparation = client.prepare_local_validation(selection)
                 except NotFoundError:
@@ -981,7 +984,7 @@ def validate_training_config(
     dispatch policy are checked when submitting a run.
     """
     from ..api.training import HostedTrainingClient
-    from ..utils.training_compiler import SFT_ONLINE_EVAL_KEYS, CompilationError, compile_locally
+    from ..utils.training_compiler import CompilationError, compile_locally
 
     validate_output_format(output, console)
     try:
@@ -1040,7 +1043,7 @@ def validate_training_config(
             console.print(
                 "Environment plugins and deployment policy remain deferred; no run submitted."
             )
-            if mode == "sft" and SFT_ONLINE_EVAL_KEYS & config.keys():
+            if not _supports_local_validation(mode, config):
                 console.print(
                     rich_escape(
                         "Online eval ([eval], [inference], [weight_broadcast]) is validated by "

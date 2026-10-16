@@ -27,8 +27,7 @@ TEST_ENV = {"PRIME_DISABLE_VERSION_CHECK": "1", "PRIME_API_KEY": "test-key"}
 
 
 @pytest.fixture(autouse=True)
-def _local_schema_validation(monkeypatch):
-    """Keep dispatch-routing tests independent of schema downloads."""
+def _stub_local_schema_validation(monkeypatch):
     monkeypatch.setattr(
         "prime_cli.api.training.HostedTrainingClient.prepare_local_validation",
         lambda self, payload: {"mode": payload["mode"], "submission_supported": True},

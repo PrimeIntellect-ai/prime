@@ -114,13 +114,12 @@ def test_sft_online_eval_is_deferred_and_the_rest_is_validated(fake_schema):
     class Deployment(BaseModel):
         type: str = "single_node"
 
-    class FakeSFT(BaseModel):
-        # Stands in for eval plugins that cannot import locally: any online-eval block fails.
+    class SFTSchemaRejectingOnlineEval(BaseModel):
         model_config = ConfigDict(extra="forbid")
         deployment: Deployment = Deployment()
         optim: dict = {}
 
-    sys.modules["prime_rl.configs.sft"].SFTConfig = FakeSFT
+    sys.modules["prime_rl.configs.sft"].SFTConfig = SFTSchemaRejectingOnlineEval
     request = {
         "mode": "sft",
         "schema_commit": "a" * 40,
@@ -144,7 +143,7 @@ def test_worker_does_not_inherit_api_credentials_or_schema_path(monkeypatch):
     monkeypatch.setenv("PRIME_API_KEY", "secret")
     monkeypatch.setenv("HF_TOKEN", "secret")
     monkeypatch.setenv("PYTHONPATH", "wrong-schema")
-    env = training_compiler._worker_environment()
+    env = training_compiler._credential_free_environment()
     assert "PRIME_API_KEY" not in env
     assert "HF_TOKEN" not in env
     assert "PYTHONPATH" not in env
@@ -170,9 +169,9 @@ def test_hosted_settings_in_the_config_are_rejected(k8s):
         worker.normalize({"config": {"k8s": k8s}, "mode": "rl", "schema_commit": "a" * 40})
 
 
-def test_worker_provenance_mismatch_is_a_hard_error(monkeypatch, tmp_path):
-    # Neither the working directory nor PYTHONPATH may execute before the
-    # provenance check, even when they shadow a worker's stdlib imports.
+def test_worker_rejects_provenance_mismatch_without_running_cwd_or_pythonpath_code(
+    monkeypatch, tmp_path
+):
     untrusted = tmp_path / "untrusted"
     untrusted.mkdir()
     (untrusted / "json.py").write_text('raise AssertionError("untrusted import")\n')
@@ -269,7 +268,9 @@ def test_installer_stops_descendants_before_returning(monkeypatch, tmp_path, int
     try:
         expected = KeyboardInterrupt if interrupted else training_compiler.CompilationError
         with pytest.raises(expected):
-            training_compiler._run([sys.executable, "-I", "-c", parent], lock=None, timeout=2)
+            training_compiler._run(
+                [sys.executable, "-I", "-c", parent], inherited_lock=None, timeout=2
+            )
         assert started.exists(), "descendant must start before testing cleanup"
         release.touch()
         time.sleep(0.2)
@@ -321,72 +322,6 @@ def test_cache_reuses_complete_install_and_retries_failed_install(monkeypatch, t
     assert len(commands) == 4
     assert training_compiler._schema_python(preparation) == python
     assert len(commands) == 4
-
-
-@pytest.mark.parametrize("failure", [None, "error", "interrupt"])
-def test_existing_cache_bytecode_upgrade_retries_without_reinstalling(
-    monkeypatch, tmp_path, failure
-):
-    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
-    monkeypatch.setattr(training_compiler.shutil, "which", lambda _: "/test/uv")
-    preparation = {
-        "schema_install": {"python": "3.12", "requirements": ["schema"], "constraints": []}
-    }
-    commands = []
-
-    def run(command, **kwargs):
-        commands.append(command)
-        if command[:2] == ["uv", "venv"]:
-            target = Path(command[-1])
-            executable = target / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-            executable.parent.mkdir(parents=True)
-            executable.touch()
-        elif command[0] != "uv":
-            assert command[1:4] == ["-I", "-B", "-c"]
-            if failure == "error":
-                raise training_compiler.CompilationError("bytecode failed")
-            if failure == "interrupt":
-                raise KeyboardInterrupt
-
-    monkeypatch.setattr(training_compiler, "_run", run)
-    python = training_compiler._schema_python(preparation)
-    target = python.parent.parent
-    ready = target / ".ready"
-    marker = target / ".bytecode-v1.ready"
-    assert marker.is_file()
-    marker.unlink()  # Simulate an environment created before bytecode support.
-    commands.clear()
-    if failure:
-        error = KeyboardInterrupt if failure == "interrupt" else training_compiler.CompilationError
-        with pytest.raises(error):
-            training_compiler._schema_python(preparation)
-        assert ready.is_file() and python.is_file()
-        assert not marker.exists()
-        failure = None
-    assert training_compiler._schema_python(preparation) == python
-    assert marker.is_file()
-    assert all(command[0] == str(python) for command in commands)
-    count = len(commands)
-    assert training_compiler._schema_python(preparation) == python
-    assert len(commands) == count
-
-
-def test_bytecode_upgrade_compiles_without_importing_or_rejecting_unused_sources(tmp_path):
-    import subprocess
-
-    source = tmp_path / "module.py"
-    source.write_text('raise AssertionError("must not import during bytecode upgrade")\n')
-    (tmp_path / "unused.py").write_text("invalid Python!\n")
-    script = (
-        "import sysconfig\n"
-        f"sysconfig.get_path = lambda _: {str(tmp_path)!r}\n" + training_compiler._BYTECODE_COMPILER
-    )
-    result = subprocess.run(
-        [sys.executable, "-I", "-B", "-c", script], capture_output=True, text=True, check=True
-    )
-    assert list((tmp_path / "__pycache__").glob("module.*.pyc"))
-    assert not result.stdout
-    assert not result.stderr
 
 
 def test_preparation_client_rejects_unsupported_contract():
@@ -749,10 +684,10 @@ def test_install_commands_use_installer_environment_and_worker_keeps_stripped_on
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(training_compiler, "_run_process", run_process)
-    training_compiler._run(["uv", "venv"], lock=None)
+    training_compiler._run(["uv", "venv"], inherited_lock=None)
     assert seen == [training_compiler._installer_environment()]
     assert seen[0]["HTTPS_PROXY"] == "http://proxy:3128"
-    assert "HTTPS_PROXY" not in training_compiler._worker_environment()
+    assert "HTTPS_PROXY" not in training_compiler._credential_free_environment()
 
 
 def test_cache_lock_is_released_when_holder_is_sigkilled(tmp_path):
@@ -807,7 +742,7 @@ def test_installer_that_outlives_a_killed_cli_keeps_the_cache_locked(tmp_path):
             "    print('installing', flush=True)\n"
             "    installer = 'import pathlib, sys, time; time.sleep(2); '\n"
             "    installer += 'pathlib.Path(sys.argv[1]).touch()'\n"
-            "    _run([sys.executable, '-c', installer, sys.argv[2]], lock=lock)\n",
+            "    _run([sys.executable, '-c', installer, sys.argv[2]], inherited_lock=lock)\n",
             str(lock),
             str(installed),
         ],
@@ -850,7 +785,7 @@ def _fake_environment(cache, key, age, now):
     target = cache / key
     (target / "bin").mkdir(parents=True)
     (target / "bin/python").touch()
-    for marker in (".ready", ".bytecode-v1.ready", ".last-used"):
+    for marker in (".ready", ".last-used"):
         (target / marker).touch()
         os.utime(target / marker, (now - age * DAY, now - age * DAY))
     return target
@@ -863,9 +798,6 @@ def test_cache_sweep_removes_stale_environments_but_not_busy_ones(tmp_path):
     for key, age in ((current, 0), (stale, 20), (busy, 20)):
         _fake_environment(cache, key, age, now)
     (cache / f"{'d' * 64}.trash-123").mkdir()
-    legacy = cache / f"{'e' * 64}.lock"
-    legacy.mkdir()
-    os.utime(legacy, (now - 30 * DAY, now - 30 * DAY))
     with training_compiler._cache_lock(cache / f"{busy}.lockfile", 1, shared=True):
         training_compiler._sweep_cache(cache, current, now)
     assert sorted(path.name for path in cache.iterdir() if path.is_dir()) == [busy, current]

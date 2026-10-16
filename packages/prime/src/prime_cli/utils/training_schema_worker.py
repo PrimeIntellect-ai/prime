@@ -1,5 +1,3 @@
-"""Executed in the selected schema interpreter, without CLI dependencies."""
-
 import json
 import re
 import sys
@@ -24,8 +22,17 @@ def restore_environments(orch, saved):
         orch["eval"] = saved["eval"]
 
 
+def reject_launcher_only_settings(config):
+    if config.clean:
+        raise ValueError("clean = true is unsupported for hosted runs: start a new run instead.")
+    inference_deployment = getattr(config.inference, "deployment", None)
+    if getattr(inference_deployment, "type", None) == "disaggregated":
+        raise ValueError(
+            'inference.deployment type = "disaggregated" is unsupported for hosted runs.'
+        )
+
+
 def installed_commit(install):
-    """The prime-rl commit a git or GitHub-archive install of prime-rl-configs came from."""
     if "vcs_info" in install:
         return install["vcs_info"].get("commit_id")
     archive = re.fullmatch(
@@ -50,27 +57,17 @@ def normalize(request):
 
     model = RLConfig if request["mode"] == "rl" else SFTConfig
     if request["mode"] == "rl":
-        saved = defer_environments(data.get("orchestrator") or {})
+        deferred = defer_environments(data.get("orchestrator") or {})
     else:
-        # Online eval needs environment plugins and Platform's validator path.
-        saved = {key: data.pop(key) for key in request["sft_online_eval_keys"] if key in data}
+        deferred = {key: data.pop(key) for key in request["sft_online_eval_keys"] if key in data}
     # Schema launchers normally provide SLURM settings.
     if (data.get("deployment") or {}).get("type") == "multi_node" and "slurm" not in data:
         data["slurm"] = {}
     config = model.model_validate(data)
     if request["mode"] == "rl":
-        # Launcher-only settings never reach hosted components, so Platform cannot see them.
-        if config.clean:
-            raise ValueError(
-                "clean = true is unsupported for hosted runs: start a new run instead."
-            )
-        inference_deployment = getattr(config.inference, "deployment", None)
-        if getattr(inference_deployment, "type", None) == "disaggregated":
-            raise ValueError(
-                'inference.deployment type = "disaggregated" is unsupported for hosted runs.'
-            )
+        reject_launcher_only_settings(config)
     if request["mode"] == "sft":
-        components = {"trainer": config.model_dump(mode="json") | saved}
+        components = {"trainer": config.model_dump(mode="json") | deferred}
     else:
         dump = getattr(serialization, "dump_rl_components", None)
         if dump is not None:
@@ -86,7 +83,7 @@ def normalize(request):
                 )
                 if config.deployment.type == "multi_node":
                     components["inference"]["router"] = None
-        restore_environments(components["orchestrator"], saved)
+        restore_environments(components["orchestrator"], deferred)
     return {
         "contract_version": 4,
         "mode": request["mode"],

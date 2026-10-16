@@ -1,6 +1,7 @@
 """Sandbox client implementations."""
 
 import asyncio
+import contextlib
 import functools
 import json
 import math
@@ -2287,8 +2288,13 @@ class SandboxClient:
         self._auth_cache.clear()
 
     def create(self, request: CreateSandboxRequest) -> Sandbox:
-        """Create a new sandbox"""
-        payload = request.model_dump(by_alias=False, exclude_none=True)
+        """Create a new sandbox.
+
+        With ``lan_network_id`` set, this waits for the sandbox to be running and
+        joins it to that LAN network; if that fails the sandbox is deleted."""
+        payload = request.model_dump(
+            by_alias=False, exclude_none=True, exclude={"lan_network_id", "lan_tags"}
+        )
         # VM is the only runtime; send it explicitly so the created runtime
         # never depends on server-side defaults changing underneath the SDK.
         payload["vm"] = True
@@ -2303,7 +2309,17 @@ class SandboxClient:
             json=payload,
             idempotent_post=True,
         )
-        return Sandbox.model_validate(response)
+        sandbox = Sandbox.model_validate(response)
+        if request.lan_network_id is None:
+            return sandbox
+        try:
+            self.wait_for_creation(sandbox.id)
+            self.add_lan_member(request.lan_network_id, sandbox.id, request.lan_tags)
+        except Exception:
+            with contextlib.suppress(Exception):
+                self.delete(sandbox.id)
+            raise
+        return self.get(sandbox.id)
 
     def list(
         self,
@@ -3858,8 +3874,13 @@ class AsyncSandboxClient:
         await self._auth_cache.clear()
 
     async def create(self, request: CreateSandboxRequest) -> Sandbox:
-        """Create a new sandbox"""
-        payload = request.model_dump(by_alias=False, exclude_none=True)
+        """Create a new sandbox.
+
+        With ``lan_network_id`` set, this waits for the sandbox to be running and
+        joins it to that LAN network; if that fails the sandbox is deleted."""
+        payload = request.model_dump(
+            by_alias=False, exclude_none=True, exclude={"lan_network_id", "lan_tags"}
+        )
         # VM is the only runtime; send it explicitly so the created runtime
         # never depends on server-side defaults changing underneath the SDK.
         payload["vm"] = True
@@ -3873,7 +3894,17 @@ class AsyncSandboxClient:
             json=payload,
             idempotent_post=True,
         )
-        return Sandbox.model_validate(response)
+        sandbox = Sandbox.model_validate(response)
+        if request.lan_network_id is None:
+            return sandbox
+        try:
+            await self.wait_for_creation(sandbox.id)
+            await self.add_lan_member(request.lan_network_id, sandbox.id, request.lan_tags)
+        except Exception:
+            with contextlib.suppress(Exception):
+                await self.delete(sandbox.id)
+            raise
+        return await self.get(sandbox.id)
 
     async def list(
         self,

@@ -827,3 +827,74 @@ def test_installer_that_outlives_a_killed_cli_keeps_the_cache_locked(tmp_path):
     finally:
         cli.kill()
         cli.stdout.close()
+
+
+DAY = 86400.0
+
+
+@pytest.mark.parametrize(
+    ("ages", "deleted"),
+    [
+        ({"current": 30, "a": 1, "b": 2, "c": 3, "d": 4, "e": 20}, ["d", "e"]),
+        ({"current": 0, "a": 15, "b": 1}, ["a"]),
+        ({"current": 0, "a": 13, "b": 1}, []),
+    ],
+)
+def test_cache_policy_keeps_current_and_recent_environments(ages, deleted):
+    now = 100 * DAY
+    last_used = {key: now - age * DAY for key, age in ages.items()}
+    assert training_compiler.envs_to_delete(last_used, "current", now) == deleted
+
+
+def _fake_environment(cache, key, age, now):
+    target = cache / key
+    (target / "bin").mkdir(parents=True)
+    (target / "bin/python").touch()
+    for marker in (".ready", ".bytecode-v1.ready", ".last-used"):
+        (target / marker).touch()
+        os.utime(target / marker, (now - age * DAY, now - age * DAY))
+    return target
+
+
+def test_cache_sweep_removes_stale_environments_but_not_busy_ones(tmp_path):
+    cache = tmp_path / "training-schemas"
+    now = time.time()
+    current, stale, busy = "c" * 64, "a" * 64, "b" * 64
+    for key, age in ((current, 0), (stale, 20), (busy, 20)):
+        _fake_environment(cache, key, age, now)
+    (cache / f"{'d' * 64}.trash-123").mkdir()
+    legacy = cache / f"{'e' * 64}.lock"
+    legacy.mkdir()
+    os.utime(legacy, (now - 30 * DAY, now - 30 * DAY))
+    with training_compiler._cache_lock(cache / f"{busy}.lockfile", 1, shared=True):
+        training_compiler._sweep_cache(cache, current, now)
+    assert sorted(path.name for path in cache.iterdir() if path.is_dir()) == [busy, current]
+    assert (cache / f"{stale}.lockfile").exists()
+    training_compiler._sweep_cache(cache, current, now)
+    assert (cache / busy).is_dir(), "a second sweep within a day does nothing"
+    os.utime(cache / ".last-sweep", (now - 2 * DAY, now - 2 * DAY))
+    training_compiler._sweep_cache(cache, current, now)
+    assert sorted(path.name for path in cache.iterdir() if path.is_dir()) == [current]
+
+
+def test_worker_environment_is_shared_while_in_use_and_sweeps_afterwards(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    preparation = {
+        "schema_install": {"python": "3.12", "requirements": ["schema"], "constraints": []}
+    }
+    cache, key, target, python = training_compiler._schema_paths(preparation["schema_install"])
+    now = time.time()
+    _fake_environment(cache, key, 30, now)
+    stale = _fake_environment(cache, "a" * 64, 30, now)
+    lock = cache / f"{key}.lockfile"
+    with training_compiler._schema_environment(preparation) as used:
+        assert used == python
+        with training_compiler._cache_lock(lock, 0, shared=True):
+            pass
+        with pytest.raises(training_compiler.CompilationError, match="Timed out"):
+            with training_compiler._cache_lock(lock, 0):
+                pass
+        assert stale.is_dir()
+    assert now - (target / ".last-used").stat().st_mtime < 60
+    assert not stale.exists()
+    assert target.is_dir()

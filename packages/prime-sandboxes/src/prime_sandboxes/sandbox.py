@@ -2664,7 +2664,13 @@ class SandboxClient:
         for sandbox_id in sandbox_ids:
             pending = self._pending_lan_joins.get(sandbox_id)
             if pending is not None:
-                self._join_lan(pending[0], sandbox_id, pending[1])
+                # Leased like other sandbox operations: a delete waits for the join,
+                # and a sandbox being deleted does not start one.
+                lease = self._operation_leases.acquire(sandbox_id)
+                try:
+                    self._join_lan(pending[0], sandbox_id, pending[1])
+                finally:
+                    lease.release()
                 self._pending_lan_joins.pop(sandbox_id, None)
 
     def _join_lan(self, network_id: str, sandbox_id: str, tags: Optional[List[str]]) -> None:
@@ -4299,7 +4305,13 @@ class AsyncSandboxClient:
         async def join(sandbox_id: str) -> None:
             pending = self._pending_lan_joins.get(sandbox_id)
             if pending is not None:
-                await self._join_lan(pending[0], sandbox_id, pending[1])
+                # Leased like other sandbox operations: a delete waits for the join,
+                # and a sandbox being deleted does not start one.
+                lease = self._operation_leases.acquire(sandbox_id)
+                try:
+                    await self._join_lan(pending[0], sandbox_id, pending[1])
+                finally:
+                    lease.release()
                 self._pending_lan_joins.pop(sandbox_id, None)
 
         await asyncio.gather(*(join(sandbox_id) for sandbox_id in sandbox_ids))

@@ -2595,6 +2595,8 @@ class SandboxClient:
 
     def delete(self, sandbox_id: str) -> Dict[str, Any]:
         """Delete a sandbox"""
+        # A deleted sandbox never joins the LAN network create() recorded for it.
+        self._pending_lan_joins.pop(sandbox_id, None)
         scopes = self._operation_leases.start_drain([sandbox_id])
         try:
             self._background_job_output_coordinator.cancel_sandboxes(
@@ -2666,22 +2668,25 @@ class SandboxClient:
                 self._pending_lan_joins.pop(sandbox_id, None)
 
     def _join_lan(self, network_id: str, sandbox_id: str, tags: Optional[List[str]]) -> None:
-        """Add a member and wait until the platform has pushed it to the VM layer.
-        A failed inline push is retried by a background sweep, so poll for it."""
-        member = self.add_lan_member(network_id, sandbox_id, tags)
+        """Add a member and wait until the platform has pushed it, and the network's
+        current rules, to the VM layer. A failed inline push is retried by a background
+        sweep, so poll for it. Until the rules are pushed, the VM layer enforces the
+        network's previous ones: every member reaching every other, on a new network."""
+        self.add_lan_member(network_id, sandbox_id, tags)
         deadline = time.monotonic() + _LAN_SYNC_TIMEOUT_SECONDS
-        while not member.synced:
+        while True:
+            network = self.get_lan_network(network_id)
+            member = next((m for m in network.members or [] if m.sandbox_id == sandbox_id), None)
+            if member is None:
+                raise RuntimeError(f"Sandbox {sandbox_id} left LAN network {network_id}")
+            if member.synced and network.synced:
+                return
             if time.monotonic() > deadline:
                 raise TimeoutError(
-                    f"Sandbox {sandbox_id} joined LAN network {network_id} but was not "
-                    f"synced within {_LAN_SYNC_TIMEOUT_SECONDS}s"
+                    f"Sandbox {sandbox_id} joined LAN network {network_id}, but the "
+                    f"membership and rules were not synced within {_LAN_SYNC_TIMEOUT_SECONDS}s"
                 )
             time.sleep(_LAN_SYNC_POLL_SECONDS)
-            network = self.get_lan_network(network_id)
-            found = next((m for m in network.members or [] if m.sandbox_id == sandbox_id), None)
-            if found is None:
-                raise RuntimeError(f"Sandbox {sandbox_id} left LAN network {network_id}")
-            member = found
 
     def remove_lan_member(self, network_id: str, sandbox_id: str) -> None:
         """Remove a sandbox from a LAN network."""
@@ -2741,6 +2746,8 @@ class SandboxClient:
             all_users=all_users,
         )
         payload = request.model_dump(by_alias=False, exclude_none=True)
+        for sandbox_id in sandbox_ids or []:
+            self._pending_lan_joins.pop(sandbox_id, None)
         scopes = self._operation_leases.start_drain(sandbox_ids or [])
         try:
             self._background_job_output_coordinator.cancel_sandboxes(
@@ -4219,6 +4226,8 @@ class AsyncSandboxClient:
 
     async def delete(self, sandbox_id: str) -> Dict[str, Any]:
         """Delete a sandbox"""
+        # A deleted sandbox never joins the LAN network create() recorded for it.
+        self._pending_lan_joins.pop(sandbox_id, None)
         scopes = await self._operation_leases.start_drain([sandbox_id])
         try:
             await self._background_job_output_coordinator.cancel_sandboxes(
@@ -4295,22 +4304,25 @@ class AsyncSandboxClient:
         await asyncio.gather(*(join(sandbox_id) for sandbox_id in sandbox_ids))
 
     async def _join_lan(self, network_id: str, sandbox_id: str, tags: Optional[List[str]]) -> None:
-        """Add a member and wait until the platform has pushed it to the VM layer.
-        A failed inline push is retried by a background sweep, so poll for it."""
-        member = await self.add_lan_member(network_id, sandbox_id, tags)
+        """Add a member and wait until the platform has pushed it, and the network's
+        current rules, to the VM layer. A failed inline push is retried by a background
+        sweep, so poll for it. Until the rules are pushed, the VM layer enforces the
+        network's previous ones: every member reaching every other, on a new network."""
+        await self.add_lan_member(network_id, sandbox_id, tags)
         deadline = time.monotonic() + _LAN_SYNC_TIMEOUT_SECONDS
-        while not member.synced:
+        while True:
+            network = await self.get_lan_network(network_id)
+            member = next((m for m in network.members or [] if m.sandbox_id == sandbox_id), None)
+            if member is None:
+                raise RuntimeError(f"Sandbox {sandbox_id} left LAN network {network_id}")
+            if member.synced and network.synced:
+                return
             if time.monotonic() > deadline:
                 raise TimeoutError(
-                    f"Sandbox {sandbox_id} joined LAN network {network_id} but was not "
-                    f"synced within {_LAN_SYNC_TIMEOUT_SECONDS}s"
+                    f"Sandbox {sandbox_id} joined LAN network {network_id}, but the "
+                    f"membership and rules were not synced within {_LAN_SYNC_TIMEOUT_SECONDS}s"
                 )
             await asyncio.sleep(_LAN_SYNC_POLL_SECONDS)
-            network = await self.get_lan_network(network_id)
-            found = next((m for m in network.members or [] if m.sandbox_id == sandbox_id), None)
-            if found is None:
-                raise RuntimeError(f"Sandbox {sandbox_id} left LAN network {network_id}")
-            member = found
 
     async def remove_lan_member(self, network_id: str, sandbox_id: str) -> None:
         """Remove a sandbox from a LAN network."""
@@ -4372,6 +4384,8 @@ class AsyncSandboxClient:
             all_users=all_users,
         )
         payload = request.model_dump(by_alias=False, exclude_none=True)
+        for sandbox_id in sandbox_ids or []:
+            self._pending_lan_joins.pop(sandbox_id, None)
         scopes = await self._operation_leases.start_drain(sandbox_ids or [])
         try:
             await self._background_job_output_coordinator.cancel_sandboxes(

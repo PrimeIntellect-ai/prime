@@ -330,8 +330,8 @@ class CreateSandboxRequest(BaseModel):
     region: Optional[str] = None
     advanced_configs: Optional[AdvancedConfigs] = None
     idempotency_key: Optional[str] = None
-    # Client-side only: when set, create() waits for RUNNING and then joins
-    # the sandbox to this LAN network with these tags.
+    # Client-side only: when set, the sandbox joins this LAN network with these
+    # tags during the creating client's wait_for_creation or bulk_wait_for_creation.
     lan_network_id: Optional[str] = None
     lan_tags: Optional[List[str]] = None
 

@@ -107,6 +107,39 @@ def test_launcher_only_rl_settings_are_rejected_locally(fake_schema, config, mes
         worker.normalize({"config": config, "mode": "rl", "schema_commit": "a" * 40})
 
 
+def test_sft_online_eval_is_deferred_and_the_rest_is_validated(fake_schema):
+    from prime_cli.utils import training_schema_worker as worker
+    from pydantic import BaseModel, ConfigDict
+
+    class Deployment(BaseModel):
+        type: str = "single_node"
+
+    class FakeSFT(BaseModel):
+        # Stands in for eval plugins that cannot import locally: any online-eval block fails.
+        model_config = ConfigDict(extra="forbid")
+        deployment: Deployment = Deployment()
+        optim: dict = {}
+
+    sys.modules["prime_rl.configs.sft"].SFTConfig = FakeSFT
+    request = {
+        "mode": "sft",
+        "schema_commit": "a" * 40,
+        "sft_online_eval_keys": sorted(training_compiler.SFT_ONLINE_EVAL_KEYS),
+    }
+    online_eval = {"eval": {"interval": 25, "source": [{"name": "reverse-text"}]}, "inference": {}}
+    artifact = worker.normalize({**request, "config": {"optim": {"lr": 2e-5}, **online_eval}})
+    assert artifact["components"] == {
+        "trainer": {
+            "deployment": {"type": "single_node"},
+            "optim": {"lr": 2e-5},
+            "eval": {"interval": 25, "source": [{"name": "reverse-text"}]},
+            "inference": {},
+        }
+    }
+    with pytest.raises(ValueError, match="lrr"):
+        worker.normalize({**request, "config": {"lrr": 1, **online_eval}})
+
+
 def test_worker_does_not_inherit_api_credentials_or_schema_path(monkeypatch):
     monkeypatch.setenv("PRIME_API_KEY", "secret")
     monkeypatch.setenv("HF_TOKEN", "secret")

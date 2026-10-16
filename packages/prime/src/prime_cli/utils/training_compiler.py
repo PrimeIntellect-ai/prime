@@ -22,6 +22,9 @@ class CompilationError(Exception):
     pass
 
 
+SFT_ONLINE_EVAL_KEYS = frozenset({"eval", "inference", "weight_broadcast"})
+
+
 _WORKER = Path(__file__).with_name("training_schema_worker.py").read_text()
 _BYTECODE_COMPILER = """
 import compileall
@@ -233,5 +236,9 @@ def _schema_request(
 def compile_locally(
     config: dict[str, Any], preparation: dict[str, Any], *, schema_python: Path | None = None
 ) -> dict[str, Any]:
-    response = _schema_request({"config": config}, preparation, schema_python)
+    response = _schema_request(
+        {"config": config, "sft_online_eval_keys": sorted(SFT_ONLINE_EVAL_KEYS)},
+        preparation,
+        schema_python,
+    )
     return {**response["artifact"], "runtime": preparation["runtime"]}

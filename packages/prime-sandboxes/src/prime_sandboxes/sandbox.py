@@ -1,6 +1,7 @@
 """Sandbox client implementations."""
 
 import asyncio
+import contextlib
 import functools
 import json
 import math
@@ -132,6 +133,9 @@ _PROCESS_CONTROL_RPC_ATTEMPTS = 3
 _PROCESS_CONTROL_RETRY_INITIAL_DELAY = 0.5
 _BACKGROUND_JOB_LAUNCH_ATTEMPTS = 3
 _BACKGROUND_JOB_LAUNCH_BACKOFF_SECONDS = 0.5
+# The platform retries a failed LAN push from its scheduled status sweep.
+_LAN_SYNC_TIMEOUT_SECONDS = 120.0
+_LAN_SYNC_POLL_SECONDS = 2.0
 _BACKGROUND_JOB_LAUNCH_TIMEOUT_SECONDS = 30
 _SANDBOX_ERROR_CONTEXT_TIMEOUT_SECONDS = 10.0
 
@@ -2287,8 +2291,13 @@ class SandboxClient:
         self._auth_cache.clear()
 
     def create(self, request: CreateSandboxRequest) -> Sandbox:
-        """Create a new sandbox"""
-        payload = request.model_dump(by_alias=False, exclude_none=True)
+        """Create a new sandbox.
+
+        With ``lan_network_id`` set, this waits for the sandbox to be running and
+        joins it to that LAN network; if that fails the sandbox is deleted."""
+        payload = request.model_dump(
+            by_alias=False, exclude_none=True, exclude={"lan_network_id", "lan_tags"}
+        )
         # VM is the only runtime; send it explicitly so the created runtime
         # never depends on server-side defaults changing underneath the SDK.
         payload["vm"] = True
@@ -2303,7 +2312,17 @@ class SandboxClient:
             json=payload,
             idempotent_post=True,
         )
-        return Sandbox.model_validate(response)
+        sandbox = Sandbox.model_validate(response)
+        if request.lan_network_id is None:
+            return sandbox
+        try:
+            self.wait_for_creation(sandbox.id)
+            self._join_lan(request.lan_network_id, sandbox.id, request.lan_tags)
+        except Exception:
+            with contextlib.suppress(Exception):
+                self.delete(sandbox.id)
+            raise
+        return self.get(sandbox.id)
 
     def list(
         self,
@@ -2572,6 +2591,24 @@ class SandboxClient:
             json={"tags": tags or []},
         )
         return LanNetworkMember.model_validate(response)
+
+    def _join_lan(self, network_id: str, sandbox_id: str, tags: Optional[List[str]]) -> None:
+        """Add a member and wait until the platform has pushed it to the VM layer.
+        A failed inline push is retried by a background sweep, so poll for it."""
+        member = self.add_lan_member(network_id, sandbox_id, tags)
+        deadline = time.monotonic() + _LAN_SYNC_TIMEOUT_SECONDS
+        while not member.synced:
+            if time.monotonic() > deadline:
+                raise TimeoutError(
+                    f"Sandbox {sandbox_id} joined LAN network {network_id} but was not "
+                    f"synced within {_LAN_SYNC_TIMEOUT_SECONDS}s"
+                )
+            time.sleep(_LAN_SYNC_POLL_SECONDS)
+            network = self.get_lan_network(network_id)
+            found = next((m for m in network.members or [] if m.sandbox_id == sandbox_id), None)
+            if found is None:
+                raise RuntimeError(f"Sandbox {sandbox_id} left LAN network {network_id}")
+            member = found
 
     def remove_lan_member(self, network_id: str, sandbox_id: str) -> None:
         """Remove a sandbox from a LAN network."""
@@ -3858,8 +3895,13 @@ class AsyncSandboxClient:
         await self._auth_cache.clear()
 
     async def create(self, request: CreateSandboxRequest) -> Sandbox:
-        """Create a new sandbox"""
-        payload = request.model_dump(by_alias=False, exclude_none=True)
+        """Create a new sandbox.
+
+        With ``lan_network_id`` set, this waits for the sandbox to be running and
+        joins it to that LAN network; if that fails the sandbox is deleted."""
+        payload = request.model_dump(
+            by_alias=False, exclude_none=True, exclude={"lan_network_id", "lan_tags"}
+        )
         # VM is the only runtime; send it explicitly so the created runtime
         # never depends on server-side defaults changing underneath the SDK.
         payload["vm"] = True
@@ -3873,7 +3915,17 @@ class AsyncSandboxClient:
             json=payload,
             idempotent_post=True,
         )
-        return Sandbox.model_validate(response)
+        sandbox = Sandbox.model_validate(response)
+        if request.lan_network_id is None:
+            return sandbox
+        try:
+            await self.wait_for_creation(sandbox.id)
+            await self._join_lan(request.lan_network_id, sandbox.id, request.lan_tags)
+        except Exception:
+            with contextlib.suppress(Exception):
+                await self.delete(sandbox.id)
+            raise
+        return await self.get(sandbox.id)
 
     async def list(
         self,
@@ -4152,6 +4204,24 @@ class AsyncSandboxClient:
             json={"tags": tags or []},
         )
         return LanNetworkMember.model_validate(response)
+
+    async def _join_lan(self, network_id: str, sandbox_id: str, tags: Optional[List[str]]) -> None:
+        """Add a member and wait until the platform has pushed it to the VM layer.
+        A failed inline push is retried by a background sweep, so poll for it."""
+        member = await self.add_lan_member(network_id, sandbox_id, tags)
+        deadline = time.monotonic() + _LAN_SYNC_TIMEOUT_SECONDS
+        while not member.synced:
+            if time.monotonic() > deadline:
+                raise TimeoutError(
+                    f"Sandbox {sandbox_id} joined LAN network {network_id} but was not "
+                    f"synced within {_LAN_SYNC_TIMEOUT_SECONDS}s"
+                )
+            await asyncio.sleep(_LAN_SYNC_POLL_SECONDS)
+            network = await self.get_lan_network(network_id)
+            found = next((m for m in network.members or [] if m.sandbox_id == sandbox_id), None)
+            if found is None:
+                raise RuntimeError(f"Sandbox {sandbox_id} left LAN network {network_id}")
+            member = found
 
     async def remove_lan_member(self, network_id: str, sandbox_id: str) -> None:
         """Remove a sandbox from a LAN network."""

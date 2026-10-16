@@ -330,6 +330,10 @@ class CreateSandboxRequest(BaseModel):
     region: Optional[str] = None
     advanced_configs: Optional[AdvancedConfigs] = None
     idempotency_key: Optional[str] = None
+    # Client-side only: when set, create() waits for RUNNING and then joins
+    # the sandbox to this LAN network with these tags.
+    lan_network_id: Optional[str] = None
+    lan_tags: Optional[List[str]] = None
 
     @model_validator(mode="after")
     def validate_restore_source(self) -> "CreateSandboxRequest":
@@ -354,6 +358,8 @@ class CreateSandboxRequest(BaseModel):
     @model_validator(mode="after")
     def validate_network_lists(self) -> "CreateSandboxRequest":
         validate_egress_lists(self.network_allowlist, self.network_denylist)
+        if self.lan_tags is not None and self.lan_network_id is None:
+            raise ValueError("lan_tags requires lan_network_id")
         return self
 
     @model_validator(mode="after")

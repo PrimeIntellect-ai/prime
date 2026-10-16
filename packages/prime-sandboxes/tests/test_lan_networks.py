@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from prime_sandboxes.models import LanRule
+from prime_sandboxes.models import LanNetwork, LanRule
 from prime_sandboxes.sandbox import AsyncSandboxClient, SandboxClient
 
 NETWORK = {
@@ -77,3 +77,62 @@ async def test_async_add_lan_member():
         "PUT", "/sandbox/networks/net1/members/sbx1", json={"tags": ["db"]}
     )
     assert member.tags == ["db"] and not member.synced
+
+
+def _create_request(**kw):
+    from prime_sandboxes.models import CreateSandboxRequest
+
+    return CreateSandboxRequest(name="a", docker_image="python:3.11", **kw)
+
+
+def test_create_joins_lan_after_running():
+    client = _sync_client({"id": "sbx1"})
+    calls = []
+    client.wait_for_creation = lambda sid: calls.append(("wait", sid))
+    client._join_lan = lambda *a: calls.append(("join", *a))
+    client.get = lambda sid: calls.append(("get", sid)) or "running-sandbox"
+    client.delete = MagicMock()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("prime_sandboxes.sandbox.Sandbox.model_validate", lambda r: SimpleNamespace(**r))
+        result = client.create(_create_request(lan_network_id="net1", lan_tags=["web"]))
+    payload = client.client.request.call_args.kwargs["json"]
+    assert "lan_network_id" not in payload and "lan_tags" not in payload
+    assert calls == [("wait", "sbx1"), ("join", "net1", "sbx1", ["web"]), ("get", "sbx1")]
+    assert result == "running-sandbox"
+    client.delete.assert_not_called()
+
+
+def test_create_deletes_sandbox_when_join_fails():
+    client = _sync_client({"id": "sbx1"})
+    client.wait_for_creation = lambda sid: None
+    client._join_lan = MagicMock(side_effect=RuntimeError("409"))
+    client.delete = MagicMock(side_effect=RuntimeError("delete failed too"))
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("prime_sandboxes.sandbox.Sandbox.model_validate", lambda r: SimpleNamespace(**r))
+        with pytest.raises(RuntimeError, match="409"):
+            client.create(_create_request(lan_network_id="net1"))
+    client.delete.assert_called_once_with("sbx1")
+
+
+def test_lan_tags_require_network():
+    with pytest.raises(ValueError, match="lan_tags requires lan_network_id"):
+        _create_request(lan_tags=["web"])
+
+
+def test_join_lan_polls_until_synced(monkeypatch):
+    monkeypatch.setattr("prime_sandboxes.sandbox.time.sleep", lambda s: None)
+    client = _sync_client({"sandbox_id": "sbx1", "tags": [], "synced": False})
+    unsynced = {**NETWORK, "members": [{"sandbox_id": "sbx1", "tags": [], "synced": False}]}
+    client.get_lan_network = MagicMock(
+        side_effect=[LanNetwork.model_validate(n) for n in (unsynced, NETWORK)]
+    )
+    client._join_lan("net1", "sbx1", None)
+    assert client.get_lan_network.call_count == 2
+
+
+def test_join_lan_times_out(monkeypatch):
+    monkeypatch.setattr("prime_sandboxes.sandbox.time.sleep", lambda s: None)
+    monkeypatch.setattr("prime_sandboxes.sandbox._LAN_SYNC_TIMEOUT_SECONDS", -1)
+    client = _sync_client({"sandbox_id": "sbx1", "tags": [], "synced": False})
+    with pytest.raises(TimeoutError, match="not synced"):
+        client._join_lan("net1", "sbx1", None)

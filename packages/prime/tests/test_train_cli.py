@@ -8,6 +8,8 @@ from prime_cli.core import APIError
 from prime_cli.main import app
 from typer.testing import CliRunner
 
+pytestmark = pytest.mark.usefixtures("stub_local_schema_validation")
+
 runner = CliRunner()
 
 TEST_ENV = {"PRIME_DISABLE_VERSION_CHECK": "1"}
@@ -349,18 +351,6 @@ def test_train_pause(monkeypatch, response, exit_code, expected_output) -> None:
 _FFT_BODY = (
     '[model]\nname = "Qwen/Qwen3-0.6B"\n\n[deployment]\nnum_train_gpus = 1\nnum_infer_gpus = 1\n'
 )
-
-
-@pytest.fixture(autouse=True)
-def _stub_local_schema_validation(monkeypatch):
-    monkeypatch.setattr(
-        "prime_cli.api.training.HostedTrainingClient.prepare_local_validation",
-        lambda self, payload: {"mode": payload["mode"], "submission_supported": True},
-    )
-    monkeypatch.setattr(
-        "prime_cli.utils.training_compiler.compile_locally",
-        lambda config, preparation: {"mode": preparation["mode"], "schema_commit": "a" * 40},
-    )
 
 
 def _capture_fft_dispatch(monkeypatch) -> list[dict[str, Any]]:

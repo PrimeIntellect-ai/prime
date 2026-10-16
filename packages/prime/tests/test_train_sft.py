@@ -21,21 +21,11 @@ from prime_cli.commands.rl import _is_sft, _looks_like_sft
 from prime_cli.main import app
 from typer.testing import CliRunner
 
+pytestmark = pytest.mark.usefixtures("stub_local_schema_validation")
+
 runner = CliRunner()
 
 TEST_ENV = {"PRIME_DISABLE_VERSION_CHECK": "1", "PRIME_API_KEY": "test-key"}
-
-
-@pytest.fixture(autouse=True)
-def _stub_local_schema_validation(monkeypatch):
-    monkeypatch.setattr(
-        "prime_cli.api.training.HostedTrainingClient.prepare_local_validation",
-        lambda self, payload: {"mode": payload["mode"], "submission_supported": True},
-    )
-    monkeypatch.setattr(
-        "prime_cli.utils.training_compiler.compile_locally",
-        lambda config, preparation: {"mode": preparation["mode"], "schema_commit": "a" * 40},
-    )
 
 
 def _sft_config(**overrides: Any) -> str:

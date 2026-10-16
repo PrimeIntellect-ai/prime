@@ -35,7 +35,11 @@ def normalize(request):
     from prime_rl.utils import config as serialization
 
     model = RLConfig if request["mode"] == "rl" else SFTConfig
-    saved = defer_environments(data.get("orchestrator") or {}) if request["mode"] == "rl" else {}
+    if request["mode"] == "rl":
+        saved = defer_environments(data.get("orchestrator") or {})
+    else:
+        # Online eval needs environment plugins and Platform's validator path.
+        saved = {key: data.pop(key) for key in request["sft_online_eval_keys"] if key in data}
     # Schema launchers normally provide SLURM settings.
     if (data.get("deployment") or {}).get("type") == "multi_node" and "slurm" not in data:
         data["slurm"] = {}
@@ -52,7 +56,7 @@ def normalize(request):
                 'inference.deployment type = "disaggregated" is unsupported for hosted runs.'
             )
     if request["mode"] == "sft":
-        components = {"trainer": config.model_dump(mode="json")}
+        components = {"trainer": config.model_dump(mode="json") | saved}
     else:
         dump = getattr(serialization, "dump_rl_components", None)
         if dump is not None:

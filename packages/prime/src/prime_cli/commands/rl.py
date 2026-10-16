@@ -413,9 +413,6 @@ def _resolve_pr_ref(pr_number: int) -> str:
         raise typer.Exit(1)
 
 
-_SFT_ONLINE_EVAL_KEYS = frozenset({"eval", "inference", "weight_broadcast"})
-
-
 def _dispatch_dedicated_run(
     *,
     raw_cfg: Dict[str, Any],
@@ -442,7 +439,7 @@ def _dispatch_dedicated_run(
     Backend always auto-picks the first uncordoned PrimeCluster — the
     CLI never threads a cluster id, so a config that targets the wrong
     cluster can't be a footgun."""
-    from ..utils.training_compiler import CompilationError, compile_locally
+    from ..utils.training_compiler import SFT_ONLINE_EVAL_KEYS, CompilationError, compile_locally
 
     name = raw_cfg.get("name")
 
@@ -660,7 +657,7 @@ def _dispatch_dedicated_run(
                 selection["sourceRef"] = resolved_source_ref
             preparation = None
             # Online eval needs components the normalized SFT contract rejects.
-            if mode != "sft" or not _SFT_ONLINE_EVAL_KEYS & config_payload.keys():
+            if mode != "sft" or not SFT_ONLINE_EVAL_KEYS & config_payload.keys():
                 try:
                     preparation = client.prepare_local_validation(selection)
                 except NotFoundError:
@@ -984,7 +981,7 @@ def validate_training_config(
     dispatch policy are checked when submitting a run.
     """
     from ..api.training import HostedTrainingClient
-    from ..utils.training_compiler import CompilationError, compile_locally
+    from ..utils.training_compiler import SFT_ONLINE_EVAL_KEYS, CompilationError, compile_locally
 
     validate_output_format(output, console)
     try:
@@ -1043,6 +1040,13 @@ def validate_training_config(
             console.print(
                 "Environment plugins and deployment policy remain deferred; no run submitted."
             )
+            if mode == "sft" and SFT_ONLINE_EVAL_KEYS & config.keys():
+                console.print(
+                    rich_escape(
+                        "Online eval ([eval], [inference], [weight_broadcast]) is validated by "
+                        "Platform when you submit."
+                    )
+                )
             if artifact_out:
                 console.print(f"Artifact written to {artifact_out}.")
     except (APIError, CompilationError, OSError, ValueError, TypeError) as exc:

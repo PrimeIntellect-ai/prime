@@ -2595,8 +2595,6 @@ class SandboxClient:
 
     def delete(self, sandbox_id: str) -> Dict[str, Any]:
         """Delete a sandbox"""
-        # A deleted sandbox never joins the LAN network create() recorded for it.
-        self._pending_lan_joins.pop(sandbox_id, None)
         scopes = self._operation_leases.start_drain([sandbox_id])
         try:
             self._background_job_output_coordinator.cancel_sandboxes(
@@ -2607,6 +2605,8 @@ class SandboxClient:
                 scopes, f"APIError: Sandbox {sandbox_id} is being deleted"
             )
             response = self.client.request("DELETE", f"/sandbox/{sandbox_id}")
+            # A deleted sandbox never joins the LAN network create() recorded for it.
+            self._pending_lan_joins.pop(sandbox_id, None)
             return response
         finally:
             self._operation_leases.end_drain(scopes)
@@ -2746,8 +2746,6 @@ class SandboxClient:
             all_users=all_users,
         )
         payload = request.model_dump(by_alias=False, exclude_none=True)
-        for sandbox_id in sandbox_ids or []:
-            self._pending_lan_joins.pop(sandbox_id, None)
         scopes = self._operation_leases.start_drain(sandbox_ids or [])
         try:
             self._background_job_output_coordinator.cancel_sandboxes(
@@ -2762,7 +2760,10 @@ class SandboxClient:
                 "/sandbox",
                 json=payload,
             )
-            return BulkDeleteSandboxResponse.model_validate(response)
+            result = BulkDeleteSandboxResponse.model_validate(response)
+            for sandbox_id in result.succeeded:
+                self._pending_lan_joins.pop(sandbox_id, None)
+            return result
         finally:
             self._operation_leases.end_drain(scopes)
 
@@ -4226,8 +4227,6 @@ class AsyncSandboxClient:
 
     async def delete(self, sandbox_id: str) -> Dict[str, Any]:
         """Delete a sandbox"""
-        # A deleted sandbox never joins the LAN network create() recorded for it.
-        self._pending_lan_joins.pop(sandbox_id, None)
         scopes = await self._operation_leases.start_drain([sandbox_id])
         try:
             await self._background_job_output_coordinator.cancel_sandboxes(
@@ -4238,6 +4237,8 @@ class AsyncSandboxClient:
                 scopes, f"APIError: Sandbox {sandbox_id} is being deleted"
             )
             response = await self.client.request("DELETE", f"/sandbox/{sandbox_id}")
+            # A deleted sandbox never joins the LAN network create() recorded for it.
+            self._pending_lan_joins.pop(sandbox_id, None)
             return response
         finally:
             self._operation_leases.end_drain(scopes)
@@ -4384,8 +4385,6 @@ class AsyncSandboxClient:
             all_users=all_users,
         )
         payload = request.model_dump(by_alias=False, exclude_none=True)
-        for sandbox_id in sandbox_ids or []:
-            self._pending_lan_joins.pop(sandbox_id, None)
         scopes = await self._operation_leases.start_drain(sandbox_ids or [])
         try:
             await self._background_job_output_coordinator.cancel_sandboxes(
@@ -4400,7 +4399,10 @@ class AsyncSandboxClient:
                 "/sandbox",
                 json=payload,
             )
-            return BulkDeleteSandboxResponse.model_validate(response)
+            result = BulkDeleteSandboxResponse.model_validate(response)
+            for sandbox_id in result.succeeded:
+                self._pending_lan_joins.pop(sandbox_id, None)
+            return result
         finally:
             self._operation_leases.end_drain(scopes)
 

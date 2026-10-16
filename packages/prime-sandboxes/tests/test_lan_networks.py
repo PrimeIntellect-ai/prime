@@ -201,13 +201,14 @@ def test_delete_drops_pending_lan_joins():
 
     client = SandboxClient(APIClient(api_key="test-key"))
     client.client.request = MagicMock(
-        return_value={"succeeded": ["sbx2"], "failed": [], "message": "ok"}
+        return_value={"succeeded": ["sbx2"], "failed": [{"sbx3": "busy"}], "message": "ok"}
     )
     client._pending_lan_joins.update(
         {"sbx1": ("net1", None), "sbx2": ("net1", None), "sbx3": ("net1", None)}
     )
     client.delete("sbx1")
-    client.bulk_delete(sandbox_ids=["sbx2"])
+    # sbx3 failed to delete, so it may still be waited on and join.
+    client.bulk_delete(sandbox_ids=["sbx2", "sbx3"])
     assert client._pending_lan_joins == {"sbx3": ("net1", None)}
 
 
@@ -215,12 +216,24 @@ def test_delete_drops_pending_lan_joins():
 async def test_async_delete_drops_pending_lan_joins():
     client = AsyncSandboxClient(api_key="test-key")
     client.client.request = AsyncMock(
-        return_value={"succeeded": ["sbx2"], "failed": [], "message": "ok"}
+        return_value={"succeeded": ["sbx2"], "failed": [{"sbx3": "busy"}], "message": "ok"}
     )
     client._pending_lan_joins.update(
         {"sbx1": ("net1", None), "sbx2": ("net1", None), "sbx3": ("net1", None)}
     )
     await client.delete("sbx1")
-    await client.bulk_delete(sandbox_ids=["sbx2"])
+    # sbx3 failed to delete, so it may still be waited on and join.
+    await client.bulk_delete(sandbox_ids=["sbx2", "sbx3"])
     assert client._pending_lan_joins == {"sbx3": ("net1", None)}
     await client.aclose()
+
+
+def test_a_failed_delete_keeps_the_pending_join():
+    from prime_sandboxes.core import APIClient
+
+    client = SandboxClient(APIClient(api_key="test-key"))
+    client.client.request = MagicMock(side_effect=RuntimeError("503"))
+    client._pending_lan_joins["sbx1"] = ("net1", None)
+    with pytest.raises(RuntimeError):
+        client.delete("sbx1")
+    assert client._pending_lan_joins == {"sbx1": ("net1", None)}

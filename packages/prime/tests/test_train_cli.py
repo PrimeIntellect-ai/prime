@@ -480,6 +480,7 @@ def test_train_resume_from_a_pausing_run_shows_the_detail(monkeypatch, tmp_path:
 
     assert result.exit_code == 1, result.output
     assert result.output.splitlines() == [
+        "✓ Local config validation succeeded",
         f"Error: {detail}",
         "Tip: a run resumes once `prime train get paused-1` shows PAUSED",
     ]

@@ -1,7 +1,6 @@
 """Sandbox client implementations."""
 
 import asyncio
-import contextlib
 import functools
 import json
 import math
@@ -29,6 +28,7 @@ from typing import (
     Literal,
     NoReturn,
     Optional,
+    Tuple,
     TypeVar,
 )
 
@@ -2151,6 +2151,8 @@ class SandboxClient:
             self._operation_leases,
         )
         self._checkpoint_batch_supported: Optional[bool] = None
+        # sandbox_id -> (network_id, tags) recorded by create(), joined by wait_for_creation.
+        self._pending_lan_joins: Dict[str, Tuple[str, Optional[List[str]]]] = {}
         self._sandbox_status_batcher = _SyncRequestBatcher(
             self._fetch_sandbox_statuses,
             lambda sandbox_id: sandbox_id,
@@ -2293,8 +2295,9 @@ class SandboxClient:
     def create(self, request: CreateSandboxRequest) -> Sandbox:
         """Create a new sandbox.
 
-        With ``lan_network_id`` set, this waits for the sandbox to be running and
-        joins it to that LAN network; if that fails the sandbox is deleted."""
+        With ``lan_network_id`` set, the sandbox joins that LAN network once it is
+        running, during this client's ``wait_for_creation`` or
+        ``bulk_wait_for_creation``."""
         payload = request.model_dump(
             by_alias=False, exclude_none=True, exclude={"lan_network_id", "lan_tags"}
         )
@@ -2313,16 +2316,9 @@ class SandboxClient:
             idempotent_post=True,
         )
         sandbox = Sandbox.model_validate(response)
-        if request.lan_network_id is None:
-            return sandbox
-        try:
-            self.wait_for_creation(sandbox.id)
-            self._join_lan(request.lan_network_id, sandbox.id, request.lan_tags)
-        except Exception:
-            with contextlib.suppress(Exception):
-                self.delete(sandbox.id)
-            raise
-        return self.get(sandbox.id)
+        if request.lan_network_id is not None:
+            self._pending_lan_joins[sandbox.id] = (request.lan_network_id, request.lan_tags)
+        return sandbox
 
     def list(
         self,
@@ -2591,6 +2587,14 @@ class SandboxClient:
             json={"tags": tags or []},
         )
         return LanNetworkMember.model_validate(response)
+
+    def _join_pending_lan(self, sandbox_ids: List[str]) -> None:
+        """Join the LAN network create() recorded for each of these sandboxes."""
+        for sandbox_id in sandbox_ids:
+            pending = self._pending_lan_joins.get(sandbox_id)
+            if pending is not None:
+                self._join_lan(pending[0], sandbox_id, pending[1])
+                self._pending_lan_joins.pop(sandbox_id, None)
 
     def _join_lan(self, network_id: str, sandbox_id: str, tags: Optional[List[str]]) -> None:
         """Add a member and wait until the platform has pushed it to the VM layer.
@@ -3256,6 +3260,7 @@ class SandboxClient:
                 if reachable:
                     consecutive_successes += 1
                     if consecutive_successes >= stability_checks:
+                        self._join_pending_lan([sandbox_id])
                         return
                     # Small delay between stability checks
                     time.sleep(0.5)
@@ -3393,6 +3398,7 @@ class SandboxClient:
                             final_statuses.pop(sandbox_id, None)
 
                 if all_reachable:
+                    self._join_pending_lan(sandbox_ids)
                     return final_statuses
 
             if total_image_build_waiting:
@@ -3737,6 +3743,8 @@ class AsyncSandboxClient:
             self._operation_leases,
         )
         self._checkpoint_batch_supported: Optional[bool] = None
+        # sandbox_id -> (network_id, tags) recorded by create(), joined by wait_for_creation.
+        self._pending_lan_joins: Dict[str, Tuple[str, Optional[List[str]]]] = {}
         self._sandbox_status_batcher = _AsyncRequestBatcher(
             self._fetch_sandbox_statuses,
             lambda sandbox_id: sandbox_id,
@@ -3897,8 +3905,9 @@ class AsyncSandboxClient:
     async def create(self, request: CreateSandboxRequest) -> Sandbox:
         """Create a new sandbox.
 
-        With ``lan_network_id`` set, this waits for the sandbox to be running and
-        joins it to that LAN network; if that fails the sandbox is deleted."""
+        With ``lan_network_id`` set, the sandbox joins that LAN network once it is
+        running, during this client's ``wait_for_creation`` or
+        ``bulk_wait_for_creation``."""
         payload = request.model_dump(
             by_alias=False, exclude_none=True, exclude={"lan_network_id", "lan_tags"}
         )
@@ -3916,16 +3925,9 @@ class AsyncSandboxClient:
             idempotent_post=True,
         )
         sandbox = Sandbox.model_validate(response)
-        if request.lan_network_id is None:
-            return sandbox
-        try:
-            await self.wait_for_creation(sandbox.id)
-            await self._join_lan(request.lan_network_id, sandbox.id, request.lan_tags)
-        except Exception:
-            with contextlib.suppress(Exception):
-                await self.delete(sandbox.id)
-            raise
-        return await self.get(sandbox.id)
+        if request.lan_network_id is not None:
+            self._pending_lan_joins[sandbox.id] = (request.lan_network_id, request.lan_tags)
+        return sandbox
 
     async def list(
         self,
@@ -4204,6 +4206,17 @@ class AsyncSandboxClient:
             json={"tags": tags or []},
         )
         return LanNetworkMember.model_validate(response)
+
+    async def _join_pending_lan(self, sandbox_ids: List[str]) -> None:
+        """Join the LAN network create() recorded for each of these sandboxes."""
+
+        async def join(sandbox_id: str) -> None:
+            pending = self._pending_lan_joins.get(sandbox_id)
+            if pending is not None:
+                await self._join_lan(pending[0], sandbox_id, pending[1])
+                self._pending_lan_joins.pop(sandbox_id, None)
+
+        await asyncio.gather(*(join(sandbox_id) for sandbox_id in sandbox_ids))
 
     async def _join_lan(self, network_id: str, sandbox_id: str, tags: Optional[List[str]]) -> None:
         """Add a member and wait until the platform has pushed it to the VM layer.
@@ -5077,6 +5090,7 @@ class AsyncSandboxClient:
                 if reachable:
                     consecutive_successes += 1
                     if consecutive_successes >= stability_checks:
+                        await self._join_pending_lan([sandbox_id])
                         return
                     # Small delay between stability checks
                     await asyncio.sleep(0.5)
@@ -5215,6 +5229,7 @@ class AsyncSandboxClient:
                             final_statuses.pop(sandbox_id, None)
 
                 if all_reachable:
+                    await self._join_pending_lan(sandbox_ids)
                     return final_statuses
 
             if total_image_build_waiting:

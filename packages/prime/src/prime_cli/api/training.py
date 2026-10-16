@@ -268,7 +268,6 @@ class HostedTrainingClient:
         self.client = client
 
     def prepare_local_validation(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Resolve the hosted runtime; no config, secrets or run are submitted."""
         response = self.client.post("/training/runs/prepare", json=payload)
         return LocalValidationPreparation.model_validate(response).model_dump()
 

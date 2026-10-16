@@ -1,5 +1,3 @@
-"""Isolated CPU schema worker for experimental hosted config validation."""
-
 import contextlib
 import hashlib
 import json
@@ -24,7 +22,6 @@ class CompilationError(Exception):
 
 
 SFT_ONLINE_EVAL_KEYS = frozenset({"eval", "inference", "weight_broadcast"})
-# Each schema environment is 250-650 MB; keep a few recent ones.
 _CACHE_KEEP = 4
 _CACHE_MAX_AGE = 14 * 86400
 _CACHE_SWEEP_INTERVAL = 86400
@@ -32,19 +29,10 @@ _CACHE_KEY = re.compile(r"[0-9a-f]{64}")
 
 
 _WORKER = Path(__file__).with_name("training_schema_worker.py").read_text()
-_BYTECODE_COMPILER = """
-import compileall
-import sysconfig
-
-for path in sorted({sysconfig.get_path("purelib"), sysconfig.get_path("platlib")}):
-    # Match uv: an invalid, unused source file must not prevent validation.
-    compileall.compile_dir(path, quiet=2)
-"""
+_LOCKS_ARE_INHERITABLE = os.name != "nt"
 
 
-def _worker_environment() -> dict[str, str]:
-    # Selected schemas execute locally. Do not give the subprocess API tokens
-    # or inherit PYTHONPATH, which could select a different schema installation.
+def _credential_free_environment() -> dict[str, str]:
     return {
         key: value
         for key, value in os.environ.items()
@@ -60,16 +48,15 @@ _NETWORK_VARIABLES = {
 
 
 def _installer_environment() -> dict[str, str]:
-    # Installers fetch from the network, so they keep proxy and CA settings.
     # prime-rl registers its submodules with SSH URLs; rewrite them to HTTPS so
-    # a fresh install needs no GitHub keys. Deliberately no UV_* variables.
+    # a fresh install needs no GitHub keys.
     rewrites = ("git@github.com:", "ssh://git@github.com/")
     git_config = {"GIT_CONFIG_COUNT": str(len(rewrites))}
     for index, prefix in enumerate(rewrites):
         git_config[f"GIT_CONFIG_KEY_{index}"] = "url.https://github.com/.insteadOf"
         git_config[f"GIT_CONFIG_VALUE_{index}"] = prefix
     return (
-        _worker_environment()
+        _credential_free_environment()
         | {k: v for k, v in os.environ.items() if k in _NETWORK_VARIABLES}
         | git_config
     )
@@ -83,15 +70,13 @@ def _run_process(
     env: dict[str, str] | None = None,
     pass_fds: tuple[int, ...] = (),
 ) -> subprocess.CompletedProcess[str]:
-    # Installers spawn Git and build backends. They must stop before the
-    # caller releases the cache lock and a retry replaces their environment.
     with subprocess.Popen(
         command,
         stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        env=env if env is not None else _worker_environment(),
+        env=env if env is not None else _credential_free_environment(),
         pass_fds=pass_fds,
         start_new_session=os.name != "nt",
         creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
@@ -99,37 +84,39 @@ def _run_process(
         try:
             stdout, stderr = process.communicate(input=input, timeout=timeout)
         except BaseException:
-            if os.name == "nt":
-                try:
-                    subprocess.run(
-                        ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        timeout=10,
-                        check=False,
-                    )
-                finally:
-                    process.kill()
-            else:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-            process.kill()
-            process.communicate()
+            _kill_process_tree(process)
             raise
         return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
 
-def _run(command: list[str], *, lock: int | None, timeout: int = 300) -> None:
-    # Installers inherit the cache lock: if the CLI is killed, its surviving
-    # installer tree keeps the cache locked until it exits.
+def _kill_process_tree(process: subprocess.Popen) -> None:
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+                check=False,
+            )
+        finally:
+            process.kill()
+    else:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    process.kill()
+    process.communicate()
+
+
+def _run(command: list[str], *, inherited_lock: int | None, timeout: int = 300) -> None:
     try:
         result = _run_process(
             command,
             timeout=timeout,
             env=_installer_environment(),
-            pass_fds=() if lock is None else (lock,),
+            pass_fds=() if inherited_lock is None else (inherited_lock,),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise CompilationError(f"Could not build local schema environment: {exc}") from exc
@@ -141,7 +128,6 @@ def _run(command: list[str], *, lock: int | None, timeout: int = 300) -> None:
 
 @contextlib.contextmanager
 def _cache_lock(path: Path, timeout: float, *, shared: bool = False) -> Iterator[int | None]:
-    # An OS lock dies with its holder, so a killed install never wedges the cache.
     # Windows region locks are exclusive only, so shared holders take turns there.
     deadline = time.monotonic() + timeout
     with path.open("a+b") as handle:
@@ -159,8 +145,7 @@ def _cache_lock(path: Path, timeout: float, *, shared: bool = False) -> Iterator
                     raise CompilationError(f"Timed out waiting for schema cache lock: {path}")
                 time.sleep(0.2)
         try:
-            # Windows region locks belong to the handle, so children cannot share them.
-            yield None if os.name == "nt" else handle.fileno()
+            yield handle.fileno() if _LOCKS_ARE_INHERITABLE else None
         finally:
             if os.name == "nt":
                 handle.seek(0)
@@ -186,18 +171,14 @@ def _schema_python(preparation: dict[str, Any]) -> Path:
     inputs = preparation["schema_install"]
     cache, key, target, python = _schema_paths(inputs)
     cache.mkdir(parents=True, exist_ok=True)
-    bytecode_ready = target / ".bytecode-v1.ready"
     lock_path = cache / (key + ".lockfile")
     with _cache_lock(lock_path, 300) as lock:
         if not (target / ".ready").exists() or not python.is_file():
             # Install in the final location: venv scripts contain absolute paths.
             shutil.rmtree(target, ignore_errors=True)
-            # The selected runtime supplies the install inputs. Ambient uv
-            # settings (for example, a project's package cooldown or indexes)
-            # must not change how this separate schema environment is built.
             _run(
                 ["uv", "venv", "--no-config", "--python", inputs["python"], str(target)],
-                lock=lock,
+                inherited_lock=lock,
                 timeout=60,
             )
             with tempfile.TemporaryDirectory(prefix="prime-schema-") as temp:
@@ -219,30 +200,19 @@ def _schema_python(preparation: dict[str, Any]) -> Path:
                         str(constraints),
                         *inputs["requirements"],
                     ],
-                    lock=lock,
+                    inherited_lock=lock,
                 )
-            bytecode_ready.touch()
             (target / ".ready").touch()
-        elif not bytecode_ready.is_file():
-            # Upgrade existing schema caches without resolving or reinstalling
-            # dependencies. The cache lock also covers this one-time step.
-            _run([str(python), "-I", "-B", "-c", _BYTECODE_COMPILER], lock=lock, timeout=120)
-            bytecode_ready.touch()
         return python
 
 
 @contextlib.contextmanager
 def _schema_environment(preparation: dict[str, Any]) -> Iterator[Path]:
-    # The worker runs under a shared lock so a cache sweep cannot remove its environment.
     cache, key, target, python = _schema_paths(preparation["schema_install"])
     while True:
         cache.mkdir(parents=True, exist_ok=True)
         with _cache_lock(cache / (key + ".lockfile"), 300, shared=True):
-            if (
-                (target / ".ready").exists()
-                and (target / ".bytecode-v1.ready").exists()
-                and python.is_file()
-            ):
+            if (target / ".ready").exists() and python.is_file():
                 (target / ".last-used").touch()
                 yield python
                 break
@@ -252,7 +222,6 @@ def _schema_environment(preparation: dict[str, Any]) -> Iterator[Path]:
 
 
 def envs_to_delete(last_used: dict[str, float], current: str, now: float) -> list[str]:
-    """Cached environments to remove: unused for too long, or beyond the newest few."""
     others = sorted((key for key in last_used if key != current), key=last_used.get, reverse=True)
     return [
         key
@@ -281,19 +250,14 @@ def _sweep_cache(cache: Path, current: str, now: float) -> None:
     }
     for key in envs_to_delete(last_used, current, now):
         try:
-            # Busy environments are skipped. Lock files stay: removing one could
-            # let two processes lock different files for the same environment.
+            # Lock files stay: removing one could let two processes lock
+            # different files for the same environment.
             with _cache_lock(cache / (key + ".lockfile"), 0):
                 (cache / key).rename(cache / f"{key}.trash-{os.getpid()}")
         except (CompilationError, OSError):
             continue
     for trash in cache.glob("*.trash-*"):
         shutil.rmtree(trash, ignore_errors=True)
-    for legacy in cache.glob("*.lock"):
-        # Directory locks from CLI versions before the OS lock.
-        if legacy.is_dir() and now - legacy.stat().st_mtime > _CACHE_MAX_AGE:
-            with contextlib.suppress(OSError):
-                legacy.rmdir()
 
 
 def _schema_request(

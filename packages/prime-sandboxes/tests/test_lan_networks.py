@@ -85,33 +85,53 @@ def _create_request(**kw):
     return CreateSandboxRequest(name="a", docker_image="python:3.11", **kw)
 
 
-def test_create_joins_lan_after_running():
+def test_create_records_lan_and_returns_immediately():
     client = _sync_client({"id": "sbx1"})
-    calls = []
-    client.wait_for_creation = lambda sid: calls.append(("wait", sid))
-    client._join_lan = lambda *a: calls.append(("join", *a))
-    client.get = lambda sid: calls.append(("get", sid)) or "running-sandbox"
-    client.delete = MagicMock()
+    client._pending_lan_joins = {}
+    client.wait_for_creation = MagicMock()
+    client._join_lan = MagicMock()
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr("prime_sandboxes.sandbox.Sandbox.model_validate", lambda r: SimpleNamespace(**r))
-        result = client.create(_create_request(lan_network_id="net1", lan_tags=["web"]))
+        client.create(_create_request(lan_network_id="net1", lan_tags=["web"]))
     payload = client.client.request.call_args.kwargs["json"]
     assert "lan_network_id" not in payload and "lan_tags" not in payload
-    assert calls == [("wait", "sbx1"), ("join", "net1", "sbx1", ["web"]), ("get", "sbx1")]
-    assert result == "running-sandbox"
-    client.delete.assert_not_called()
+    assert client._pending_lan_joins == {"sbx1": ("net1", ["web"])}
+    client.wait_for_creation.assert_not_called()
+    client._join_lan.assert_not_called()
 
 
-def test_create_deletes_sandbox_when_join_fails():
-    client = _sync_client({"id": "sbx1"})
-    client.wait_for_creation = lambda sid: None
-    client._join_lan = MagicMock(side_effect=RuntimeError("409"))
-    client.delete = MagicMock(side_effect=RuntimeError("delete failed too"))
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setattr("prime_sandboxes.sandbox.Sandbox.model_validate", lambda r: SimpleNamespace(**r))
-        with pytest.raises(RuntimeError, match="409"):
-            client.create(_create_request(lan_network_id="net1"))
-    client.delete.assert_called_once_with("sbx1")
+def test_wait_for_creation_joins_pending_lan():
+    client = _sync_client(None)
+    client._pending_lan_joins = {"sbx1": ("net1", ["web"])}
+    client._sandbox_status_batcher = MagicMock()
+    client._sandbox_status_batcher.get.return_value = SimpleNamespace(status="RUNNING")
+    client._poll_leases = MagicMock()
+    client._is_sandbox_reachable = lambda sid: True
+    client._join_lan = MagicMock()
+    client.wait_for_creation("sbx1")
+    client._join_lan.assert_called_once_with("net1", "sbx1", ["web"])
+    assert client._pending_lan_joins == {}
+    client.wait_for_creation("sbx1")  # already joined: no second join
+    client._join_lan.assert_called_once()
+
+
+def test_failed_join_stays_pending_for_retry():
+    client = _sync_client(None)
+    client._pending_lan_joins = {"sbx1": ("net1", None)}
+    client._join_lan = MagicMock(side_effect=TimeoutError("not synced"))
+    with pytest.raises(TimeoutError):
+        client._join_pending_lan(["sbx1", "sbx2"])
+    assert client._pending_lan_joins == {"sbx1": ("net1", None)}
+
+
+@pytest.mark.asyncio
+async def test_async_join_pending_lan():
+    client = object.__new__(AsyncSandboxClient)
+    client._pending_lan_joins = {"sbx1": ("net1", None), "sbx2": ("net1", ["db"])}
+    client._join_lan = AsyncMock()
+    await client._join_pending_lan(["sbx1", "sbx2", "sbx3"])
+    assert client._join_lan.await_count == 2
+    assert client._pending_lan_joins == {}
 
 
 def test_lan_tags_require_network():

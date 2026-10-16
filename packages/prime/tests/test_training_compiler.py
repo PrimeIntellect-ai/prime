@@ -884,3 +884,26 @@ def test_validate_drops_deprecated_settings_like_submission(monkeypatch, tmp_pat
     assert result.exit_code == 0, result.output
     assert compiled == [{"orchestrator": {"batch_size": 8}}]
     assert "`[buffer]` is deprecated and ignored" in result.output
+
+
+def test_worker_imports_only_what_the_schema_interpreter_provides():
+    import ast
+
+    tree = ast.parse(
+        Path(training_compiler.__file__).with_name("training_schema_worker.py").read_text()
+    )
+    imported = {
+        alias.name.split(".")[0]
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    } | {
+        node.module.split(".")[0]
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module and node.level == 0
+    }
+    relative = [
+        node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.level
+    ]
+    assert relative == []
+    assert imported - sys.stdlib_module_names == {"prime_rl", "pydantic"}

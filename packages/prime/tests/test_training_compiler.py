@@ -830,3 +830,57 @@ def test_worker_environment_is_shared_while_in_use_and_sweeps_afterwards(monkeyp
     assert now - (target / ".last-used").stat().st_mtime < 60
     assert not stale.exists()
     assert target.is_dir()
+
+
+def test_hosted_config_strips_cli_keys_and_deprecated_settings_without_touching_the_toml():
+    from prime_cli.commands import rl
+
+    raw = {
+        "name": "run",
+        "image_tag": "main",
+        "env_file": ".env",
+        "volume": "ckpts",
+        "orchestrator": {"batch_size": 8, "buffer": {"seed": 1}, "trajectory_strategy": "x"},
+        "trainer": {"max_steps": 2},
+    }
+    original = json.loads(json.dumps(raw))
+    config = rl._hosted_config(raw)
+    assert config == {
+        "name": "run",
+        "orchestrator": {"batch_size": 8},
+        "trainer": {"max_steps": 2},
+    }
+    assert rl._schema_input(config) == {
+        "orchestrator": {"batch_size": 8},
+        "trainer": {"max_steps": 2},
+    }
+    assert raw == original
+
+
+def test_validate_drops_deprecated_settings_like_submission(monkeypatch, tmp_path):
+    from prime_cli.api.training import HostedTrainingClient
+    from prime_cli.commands import rl
+
+    config = tmp_path / "rl.toml"
+    config.write_text(
+        'name = "run"\n[orchestrator]\nbatch_size = 8\n[orchestrator.buffer]\nseed = 1\n'
+    )
+    monkeypatch.setattr(rl, "Config", lambda: SimpleNamespace(team_id="team"))
+    monkeypatch.setattr(
+        HostedTrainingClient,
+        "prepare_local_validation",
+        lambda self, payload: {"mode": "rl", "runtime": {"schema_commit": "a" * 40}},
+    )
+    compiled = []
+
+    def compile(config, preparation, **kwargs):
+        compiled.append(config)
+        return {"schema_commit": "a" * 40}
+
+    monkeypatch.setattr(training_compiler, "compile_locally", compile)
+    result = CliRunner().invoke(
+        app, ["train", "validate", str(config)], env={"PRIME_DISABLE_VERSION_CHECK": "1"}
+    )
+    assert result.exit_code == 0, result.output
+    assert compiled == [{"orchestrator": {"batch_size": 8}}]
+    assert "`[buffer]` is deprecated and ignored" in result.output

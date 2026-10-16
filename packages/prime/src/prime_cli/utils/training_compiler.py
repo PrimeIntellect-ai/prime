@@ -4,6 +4,7 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -23,6 +24,11 @@ class CompilationError(Exception):
 
 
 SFT_ONLINE_EVAL_KEYS = frozenset({"eval", "inference", "weight_broadcast"})
+# Each schema environment is 250-650 MB; keep a few recent ones.
+_CACHE_KEEP = 4
+_CACHE_MAX_AGE = 14 * 86400
+_CACHE_SWEEP_INTERVAL = 86400
+_CACHE_KEY = re.compile(r"[0-9a-f]{64}")
 
 
 _WORKER = Path(__file__).with_name("training_schema_worker.py").read_text()
@@ -134,8 +140,9 @@ def _run(command: list[str], *, lock: int | None, timeout: int = 300) -> None:
 
 
 @contextlib.contextmanager
-def _cache_lock(path: Path, timeout: float) -> Iterator[int | None]:
+def _cache_lock(path: Path, timeout: float, *, shared: bool = False) -> Iterator[int | None]:
     # An OS lock dies with its holder, so a killed install never wedges the cache.
+    # Windows region locks are exclusive only, so shared holders take turns there.
     deadline = time.monotonic() + timeout
     with path.open("a+b") as handle:
         while True:
@@ -144,7 +151,8 @@ def _cache_lock(path: Path, timeout: float) -> Iterator[int | None]:
                     handle.seek(0)
                     msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
                 else:
-                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    mode = fcntl.LOCK_SH if shared else fcntl.LOCK_EX
+                    fcntl.flock(handle, mode | fcntl.LOCK_NB)
                 break
             except OSError:
                 if time.monotonic() >= deadline:
@@ -159,10 +167,7 @@ def _cache_lock(path: Path, timeout: float) -> Iterator[int | None]:
                 msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
 
 
-def _schema_python(preparation: dict[str, Any]) -> Path:
-    if not shutil.which("uv"):
-        raise CompilationError("Local config validation requires uv on PATH.")
-    inputs = preparation["schema_install"]
+def _schema_paths(inputs: dict[str, Any]) -> tuple[Path, str, Path, Path]:
     identity = json.dumps({"install": inputs, "cache_version": 2}, sort_keys=True).encode()
     key = hashlib.sha256(identity).hexdigest()
     cache = (
@@ -170,9 +175,17 @@ def _schema_python(preparation: dict[str, Any]) -> Path:
         / "prime"
         / "training-schemas"
     )
-    cache.mkdir(parents=True, exist_ok=True)
     target = cache / key
     python = target / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    return cache, key, target, python
+
+
+def _schema_python(preparation: dict[str, Any]) -> Path:
+    if not shutil.which("uv"):
+        raise CompilationError("Local config validation requires uv on PATH.")
+    inputs = preparation["schema_install"]
+    cache, key, target, python = _schema_paths(inputs)
+    cache.mkdir(parents=True, exist_ok=True)
     bytecode_ready = target / ".bytecode-v1.ready"
     lock_path = cache / (key + ".lockfile")
     with _cache_lock(lock_path, 300) as lock:
@@ -218,6 +231,71 @@ def _schema_python(preparation: dict[str, Any]) -> Path:
         return python
 
 
+@contextlib.contextmanager
+def _schema_environment(preparation: dict[str, Any]) -> Iterator[Path]:
+    # The worker runs under a shared lock so a cache sweep cannot remove its environment.
+    cache, key, target, python = _schema_paths(preparation["schema_install"])
+    while True:
+        cache.mkdir(parents=True, exist_ok=True)
+        with _cache_lock(cache / (key + ".lockfile"), 300, shared=True):
+            if (
+                (target / ".ready").exists()
+                and (target / ".bytecode-v1.ready").exists()
+                and python.is_file()
+            ):
+                (target / ".last-used").touch()
+                yield python
+                break
+        _schema_python(preparation)
+    with contextlib.suppress(OSError):
+        _sweep_cache(cache, key, time.time())
+
+
+def envs_to_delete(last_used: dict[str, float], current: str, now: float) -> list[str]:
+    """Cached environments to remove: unused for too long, or beyond the newest few."""
+    others = sorted((key for key in last_used if key != current), key=last_used.get, reverse=True)
+    return [
+        key
+        for rank, key in enumerate(others)
+        if rank >= _CACHE_KEEP - 1 or now - last_used[key] > _CACHE_MAX_AGE
+    ]
+
+
+def _last_used(target: Path) -> float:
+    for marker in (".last-used", ".ready"):
+        with contextlib.suppress(FileNotFoundError):
+            return (target / marker).stat().st_mtime
+    return target.stat().st_mtime
+
+
+def _sweep_cache(cache: Path, current: str, now: float) -> None:
+    stamp = cache / ".last-sweep"
+    with contextlib.suppress(FileNotFoundError):
+        if now - stamp.stat().st_mtime < _CACHE_SWEEP_INTERVAL:
+            return
+    stamp.touch()
+    last_used = {
+        path.name: _last_used(path)
+        for path in cache.iterdir()
+        if path.is_dir() and _CACHE_KEY.fullmatch(path.name)
+    }
+    for key in envs_to_delete(last_used, current, now):
+        try:
+            # Busy environments are skipped. Lock files stay: removing one could
+            # let two processes lock different files for the same environment.
+            with _cache_lock(cache / (key + ".lockfile"), 0):
+                (cache / key).rename(cache / f"{key}.trash-{os.getpid()}")
+        except (CompilationError, OSError):
+            continue
+    for trash in cache.glob("*.trash-*"):
+        shutil.rmtree(trash, ignore_errors=True)
+    for legacy in cache.glob("*.lock"):
+        # Directory locks from CLI versions before the OS lock.
+        if legacy.is_dir() and now - legacy.stat().st_mtime > _CACHE_MAX_AGE:
+            with contextlib.suppress(OSError):
+                legacy.rmdir()
+
+
 def _schema_request(
     request: dict[str, Any], preparation: dict[str, Any], schema_python: Path | None
 ) -> dict[str, Any]:
@@ -226,12 +304,17 @@ def _schema_request(
     runtime = preparation["runtime"]
     if runtime["schema_commit"] != (runtime.get("source_commit") or runtime["image_commit"]):
         raise CompilationError("Preparation schema commit does not match the selected runtime.")
-    python = schema_python.absolute() if schema_python else _schema_python(preparation)
     request = {**request, "mode": preparation["mode"], "schema_commit": runtime["schema_commit"]}
+    environment = (
+        contextlib.nullcontext(schema_python.absolute())
+        if schema_python
+        else _schema_environment(preparation)
+    )
     try:
-        result = _run_process(
-            [str(python), "-I", "-B", "-c", _WORKER], input=json.dumps(request), timeout=60
-        )
+        with environment as python:
+            result = _run_process(
+                [str(python), "-I", "-B", "-c", _WORKER], input=json.dumps(request), timeout=60
+            )
     except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
         raise CompilationError(f"Local schema worker failed: {exc}") from exc
     try:

@@ -1,5 +1,6 @@
 """Hosted Training commands."""
 
+import copy
 import json
 import re
 import time
@@ -413,6 +414,47 @@ def _resolve_pr_ref(pr_number: int) -> str:
         raise typer.Exit(1)
 
 
+# Strip CLI-only secret-loading keys before shipping the TOML to the
+# backend. `env_file` / `env_files` only meaningfully exist on the
+# caller's filesystem — the hosted pod doesn't see them, and prime-rl
+# has no use for the paths once we've already materialized the secrets
+# into the per-run k8s Secret above. Leaving them in the config either
+# confuses prime-rl (unknown field) or silently sends it chasing
+# phantom paths. `image_tag` is similarly chart-level — the backend
+# parses it off the request body, not the embedded prime-rl config.
+# `type` is stripped here too rather than left for the backend's
+# legacy CLI-metadata cleanup to silently absorb.
+_CLI_ONLY_KEYS = frozenset(
+    {
+        "env_file",
+        "env_files",
+        "image_tag",
+        "gpu_type",
+        "volume",
+        "volume_size",
+        "source_ref",
+        "type",
+    }
+)
+
+
+def _hosted_config(raw_cfg: Dict[str, Any]) -> Dict[str, Any]:
+    config = {k: v for k, v in raw_cfg.items() if k not in _CLI_ONLY_KEYS}
+    # In the prime-rl-native shape the deprecated keys live one level down,
+    # under `[orchestrator]` — and this config ships verbatim to the dedicated
+    # training endpoint, where orch v2 rejects the removed keys as
+    # "Extra inputs are not permitted".
+    orchestrator = config.get("orchestrator")
+    if isinstance(orchestrator, dict):
+        config["orchestrator"] = orchestrator = copy.deepcopy(orchestrator)
+        _remove_deprecated_config_keys(orchestrator)
+    return config
+
+
+def _schema_input(config: Dict[str, Any]) -> Dict[str, Any]:
+    return {k: v for k, v in config.items() if k != "name"}
+
+
 def _supports_local_validation(mode: Optional[str], config: Dict[str, Any]) -> bool:
     from ..utils.training_compiler import SFT_ONLINE_EVAL_KEYS
 
@@ -595,41 +637,8 @@ def _dispatch_dedicated_run(
         # round trip (and never burns anonymous API quota).
         resolved_source_ref = _resolve_pr_ref(source_pr)
 
-    # Deprecated-key pass. In the prime-rl-native shape the deprecated
-    # keys live one level down, under `[orchestrator]` — and this config
-    # ships verbatim to the dedicated training endpoint, where
-    # orch v2 rejects the removed keys as "Extra inputs are not permitted".
-    orch_section = raw_cfg.get("orchestrator")
-    if isinstance(orch_section, dict):
-        _remove_deprecated_config_keys(orch_section)
-
+    config_payload = _hosted_config(raw_cfg)
     _warn_legacy_full_finetune_type(raw_cfg, config_path)
-
-    # Strip CLI-only secret-loading keys before shipping the TOML to the
-    # backend. `env_file` / `env_files` only meaningfully exist on the
-    # caller's filesystem — the hosted pod doesn't see them, and prime-rl
-    # has no use for the paths once we've already materialized the secrets
-    # into the per-run k8s Secret above. Leaving them in the config either
-    # confuses prime-rl (unknown field) or silently sends it chasing
-    # phantom paths. `image_tag` is similarly chart-level — the backend
-    # parses it off the request body, not the embedded prime-rl config.
-    # `type` is stripped here too rather than left for the backend's
-    # legacy CLI-metadata cleanup to silently absorb.
-    config_payload = {
-        k: v
-        for k, v in raw_cfg.items()
-        if k
-        not in (
-            "env_file",
-            "env_files",
-            "image_tag",
-            "gpu_type",
-            "volume",
-            "volume_size",
-            "source_ref",
-            "type",
-        )
-    }
 
     payload = build_payload_from_toml(
         config_payload,
@@ -669,7 +678,7 @@ def _dispatch_dedicated_run(
                 if preparation.get("mode") != selection["mode"]:
                     raise CompilationError("Preparation returned a different training mode.")
                 payload["normalizedConfig"] = compile_locally(
-                    {k: v for k, v in config_payload.items() if k != "name"}, preparation
+                    _schema_input(config_payload), preparation
                 )
     except (APIError, CompilationError) as exc:
         console.print(f"[red]Error:[/red] {rich_escape(str(exc))}")
@@ -1005,18 +1014,7 @@ def validate_training_config(
             not isinstance(selected_image, str) or not selected_image.strip()
         ):
             raise ValueError("image_tag must be a non-empty string.")
-        metadata = {
-            "name",
-            "type",
-            "env_file",
-            "env_files",
-            "image_tag",
-            "gpu_type",
-            "volume",
-            "volume_size",
-            "source_ref",
-        }
-        config = {key: value for key, value in raw.items() if key not in metadata}
+        config = _schema_input(_hosted_config(raw))
         mode = "sft" if _is_sft(raw, flag=sft) else "rl"
         payload: dict[str, Any] = {"mode": mode, "teamId": Config().team_id}
         if selected_image is not None:

@@ -5648,7 +5648,9 @@ class AsyncSandboxClient:
         try:
             if self._gateway_client is not None:
                 await self._gateway_client.aclose()
-            await asyncio.gather(*(transport.aclose() for transport in self._command_transports))
+            # pyqwest's aclose() returns a bare awaitable that gather() rejects on 3.11.
+            for transport in self._command_transports:
+                await transport.aclose()
         finally:
             await self.client.aclose()
 

@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 from prime_cli.commands.rl import _model_name_sort_key
-from prime_cli.core.client import NotFoundError
+from prime_cli.core.client import APIError, NotFoundError
 from prime_cli.main import app
 from prime_cli.utils.formatters import strip_ansi
 from typer.testing import CliRunner
@@ -778,3 +778,273 @@ def test_on_demand_table_escapes_promo_markup(monkeypatch: pytest.MonkeyPatch) -
     # Rich may still wrap the caption to the table width, so compare on
     # whitespace-normalized text.
     assert " ".join(plain.split()).count(" ".join(label.split())) == 1
+
+
+# ---------------------------------------------------------------------------
+# `prime train gpus` — both capacity paths
+#
+# The command's own help, and two public docs pages, promise "every GPU
+# type you can dispatch on". It used to read only
+# `available-gpu-types`, which covers RESERVED capacity alone, so an
+# on-demand-only account was told it had no GPU types and should contact
+# support — while `prime train models` was simultaneously offering it
+# purchasable capacity. That is the single worst message to show a
+# self-serve customer, so it is worth pinning.
+# ---------------------------------------------------------------------------
+
+
+_UNSET = object()
+
+
+def _gpus_mock_get(
+    *,
+    gpu_types: list[str],
+    on_demand: list[dict[str, Any]],
+    beta_access: Any = True,
+):
+    """`beta_access` models the three enrollment states the response can
+    report: True (enrolled), False (not enrolled) and `_UNSET` for a
+    backend that omits the field entirely."""
+
+    def mock_get(self: Any, endpoint: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        if endpoint == "/training/available-gpu-types":
+            return {"gpuTypes": gpu_types}
+        if endpoint == "/training/available-fft-models":
+            payload: dict[str, Any] = {"models": [], "onDemand": on_demand}
+            if beta_access is not _UNSET:
+                payload["onDemandBetaAccess"] = beta_access
+            return payload
+        raise AssertionError(f"Unexpected endpoint: {endpoint}")
+
+    return mock_get
+
+
+_OD_H200 = {
+    "gpuType": "H200_141GB",
+    "pricePerGpuHour": 4.9,
+    "availableNow": True,
+    "discountLabel": None,
+    "isBeta": True,
+}
+
+
+def test_gpus_lists_on_demand_when_no_reserved_capacity(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An on-demand-only account must not be told it has no access."""
+    monkeypatch.setattr(
+        "prime_cli.core.client.APIClient.get",
+        _gpus_mock_get(gpu_types=[], on_demand=[_OD_H200]),
+    )
+    result = CliRunner().invoke(app, ["train", "gpus"])
+    assert result.exit_code == 0, result.output
+    out = strip_ansi(result.output)
+    assert "H200_141GB" in out
+    assert "4.90" in out, f"the hourly rate belongs in the listing:\n{out}"
+    assert "Contact support" not in out, (
+        f"an account that can dispatch on-demand has access:\n{out}"
+    )
+
+
+def test_gpus_does_not_list_a_reserved_type_twice(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reserved wins over on-demand, so a held type is not purchasable."""
+    monkeypatch.setattr(
+        "prime_cli.core.client.APIClient.get",
+        _gpus_mock_get(gpu_types=["H200_141GB"], on_demand=[_OD_H200]),
+    )
+    result = CliRunner().invoke(app, ["train", "gpus"])
+    assert result.exit_code == 0, result.output
+    out = strip_ansi(result.output)
+    assert out.count("H200_141GB") == 1, f"listed twice:\n{out}"
+    assert "On-demand capacity" not in out, (
+        f"a reserved type must not also be offered for purchase:\n{out}"
+    )
+
+
+def test_gpus_asks_for_access_only_when_the_backend_denies_enrollment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit False is the one state where asking for access is right."""
+    monkeypatch.setattr(
+        "prime_cli.core.client.APIClient.get",
+        _gpus_mock_get(gpu_types=[], on_demand=[], beta_access=False),
+    )
+    result = CliRunner().invoke(app, ["train", "gpus"])
+    assert result.exit_code == 0, result.output
+    out = strip_ansi(result.output)
+    assert "No GPU types available" in out
+    assert "Contact Prime support to request access" in out
+
+
+def test_gpus_does_not_ask_an_enrolled_account_to_request_access(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`onDemandBetaAccess: true` with an empty pool is not a denial.
+
+    Sending an already-onboarded customer to support for access they
+    hold is the exact dead end this command was changed to stop
+    producing.
+    """
+    monkeypatch.setattr(
+        "prime_cli.core.client.APIClient.get",
+        _gpus_mock_get(gpu_types=[], on_demand=[], beta_access=True),
+    )
+    result = CliRunner().invoke(app, ["train", "gpus"])
+    assert result.exit_code == 0, result.output
+    out = strip_ansi(result.output)
+    assert "No on-demand capacity is currently listed" in out
+    assert "request access" not in out, f"this account is enrolled:\n{out}"
+    assert "Contact support" not in out, f"this account is enrolled:\n{out}"
+
+
+def test_gpus_stays_neutral_when_the_backend_omits_enrollment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No signal is not evidence of missing access."""
+    monkeypatch.setattr(
+        "prime_cli.core.client.APIClient.get",
+        _gpus_mock_get(gpu_types=[], on_demand=[], beta_access=_UNSET),
+    )
+    result = CliRunner().invoke(app, ["train", "gpus"])
+    assert result.exit_code == 0, result.output
+    out = strip_ansi(result.output)
+    assert "No GPU types available" in out
+    assert "request access" not in out, f"enrollment was never reported:\n{out}"
+
+
+def test_gpus_marks_beta_on_demand_capacity(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Beta capacity must not read as a stable offering.
+
+    The flag is server-controlled so the label retires without a CLI
+    release; the models table and the dispatch result both derive it
+    from the rows, and this listing is what a new customer reads first.
+    """
+    monkeypatch.setattr(
+        "prime_cli.core.client.APIClient.get",
+        _gpus_mock_get(gpu_types=[], on_demand=[_OD_H200]),
+    )
+    result = CliRunner().invoke(app, ["train", "gpus"])
+    assert result.exit_code == 0, result.output
+    out = strip_ansi(result.output)
+    assert "On-demand capacity" in out
+    assert "(beta)" in out, f"isBeta was set on the row:\n{out}"
+
+
+def test_gpus_omits_the_beta_marker_once_capacity_is_stable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """And it disappears when the backend stops flagging it."""
+    stable = {**_OD_H200, "isBeta": False}
+    monkeypatch.setattr(
+        "prime_cli.core.client.APIClient.get",
+        _gpus_mock_get(gpu_types=[], on_demand=[stable]),
+    )
+    result = CliRunner().invoke(app, ["train", "gpus"])
+    assert result.exit_code == 0, result.output
+    out = strip_ansi(result.output)
+    assert "On-demand capacity" in out
+    assert "(beta)" not in out, f"the backend reported stable capacity:\n{out}"
+
+
+def test_gpus_json_carries_both_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Machine-readable output needs the rate, not just the type name."""
+    monkeypatch.setattr(
+        "prime_cli.core.client.APIClient.get",
+        _gpus_mock_get(gpu_types=["B200_180GB"], on_demand=[_OD_H200]),
+    )
+    result = CliRunner().invoke(app, ["train", "gpus", "--output", "json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(strip_ansi(result.output))
+    assert payload["gpuTypes"] == ["B200_180GB"]
+    assert payload["onDemand"][0]["gpuType"] == "H200_141GB"
+    assert payload["onDemand"][0]["pricePerGpuHour"] == 4.9
+
+
+def test_gpus_degrades_when_the_on_demand_endpoint_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reserved types must survive a failure of the newer endpoint.
+
+    This listing worked off `available-gpu-types` alone before on-demand
+    existed, so a transient 5xx or schema drift from the discovery
+    endpoint must not take the caller's reserved types away with it.
+    """
+
+    def mock_get(self: Any, endpoint: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        if endpoint == "/training/available-gpu-types":
+            return {"gpuTypes": ["H200_141GB"]}
+        if endpoint == "/training/available-fft-models":
+            raise APIError("500 Internal Server Error")
+        raise AssertionError(f"Unexpected endpoint: {endpoint}")
+
+    monkeypatch.setattr("prime_cli.core.client.APIClient.get", mock_get)
+    result = CliRunner().invoke(app, ["train", "gpus"])
+    assert result.exit_code == 0, result.output
+    out = strip_ansi(result.output)
+    assert "H200_141GB" in out, f"reserved types must still render:\n{out}"
+    assert "Could not read on-demand capacity" in out
+    assert "Contact support" not in out
+
+
+def test_gpus_escapes_a_discount_label_containing_markup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bracket in a backend promo string must not abort the listing."""
+    monkeypatch.setattr(
+        "prime_cli.core.client.APIClient.get",
+        _gpus_mock_get(
+            gpu_types=[],
+            on_demand=[{**_OD_H200, "discountLabel": "[/dim]launch [bold]50%"}],
+        ),
+    )
+    result = CliRunner().invoke(app, ["train", "gpus"])
+    assert result.exit_code == 0, result.output
+    out = strip_ansi(result.output)
+    assert "H200_141GB" in out
+    assert "launch" in out, f"the label should render as text:\n{out}"
+
+
+def test_gpus_does_not_call_a_failed_lookup_an_access_denial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A discovery failure is "we do not know", not "you have no access".
+
+    Collapsing the two reinstates the original bug: an on-demand-only
+    account whose endpoint 5xxs would be told to contact support for
+    access it already has.
+    """
+
+    def mock_get(self: Any, endpoint: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        if endpoint == "/training/available-gpu-types":
+            return {"gpuTypes": []}
+        if endpoint == "/training/available-fft-models":
+            raise APIError("503 Service Unavailable")
+        raise AssertionError(f"Unexpected endpoint: {endpoint}")
+
+    monkeypatch.setattr("prime_cli.core.client.APIClient.get", mock_get)
+    result = CliRunner().invoke(app, ["train", "gpus"])
+    assert result.exit_code == 0, result.output
+    out = strip_ansi(result.output)
+    assert "Contact support" not in out, (
+        f"a failed lookup must not read as an access denial:\n{out}"
+    )
+    assert "could not be read" in out
+
+
+def test_gpus_json_stdout_stays_parseable_when_discovery_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The degrade warning must not prefix human text onto the payload."""
+
+    def mock_get(self: Any, endpoint: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        if endpoint == "/training/available-gpu-types":
+            return {"gpuTypes": ["H200_141GB"]}
+        if endpoint == "/training/available-fft-models":
+            raise APIError("503 Service Unavailable")
+        raise AssertionError(f"Unexpected endpoint: {endpoint}")
+
+    monkeypatch.setattr("prime_cli.core.client.APIClient.get", mock_get)
+    result = CliRunner().invoke(app, ["train", "gpus", "--output", "json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(strip_ansi(result.stdout))
+    assert payload["gpuTypes"] == ["H200_141GB"]
+    assert payload["onDemand"] == []
+    assert "Could not read on-demand capacity" in strip_ansi(result.stderr)

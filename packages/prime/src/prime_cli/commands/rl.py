@@ -1302,24 +1302,134 @@ def list_gpus(
         api_client = APIClient()
         client = HostedTrainingClient(api_client)
         config = Config()
-        response = client.list_available_gpu_types(team_id=config.team_id)
+        # BOTH capacity paths, because both are dispatchable and the
+        # command promises "every GPU type you can dispatch on".
+        # `available-gpu-types` only covers RESERVED capacity (a non-zero
+        # ClusterAllocation, or a cluster the team owns), so an
+        # on-demand-only account used to be told it had no GPU types and
+        # should contact support — while `prime train models` was
+        # simultaneously offering it purchasable capacity at an hourly
+        # rate. One request for the on-demand half so the two sections
+        # cannot disagree with each other.
+        reserved = client.list_available_gpu_types(team_id=config.team_id)
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
 
+    # The on-demand half degrades instead of failing the command. This
+    # listing worked before on-demand existed, off `available-gpu-types`
+    # alone, so a transient 5xx or a schema-drifted payload from the
+    # newer discovery endpoint must not take the caller's reserved types
+    # away with it. `get_available_fft` already swallows 404 for older
+    # backends; this covers the rest.
+    on_demand_error: str | None = None
+    # Retained, not just the list: the response distinguishes "not
+    # enrolled" (False) from "enrolled, nothing listed" (True) and "no
+    # signal reached us" (None), and only the first is an access denial.
+    # Without it an enrolled account whose pool is momentarily empty gets
+    # told to contact support for access it already has.
+    on_demand_beta_access: bool | None = None
+    try:
+        discovery = client.get_available_fft(team_id=config.team_id)
+        on_demand = discovery.on_demand
+        on_demand_beta_access = discovery.on_demand_beta_access
+    except APIError as e:
+        # "Could not check" is kept DISTINCT from "there is none".
+        # Collapsing them is what would reinstate the very denial this
+        # command was changed to stop showing: an on-demand-only account
+        # whose discovery endpoint 5xxs would be told it has no access
+        # and should contact support. `AvailableFFTModelsResponse` makes
+        # the same distinction for the 404 case.
+        on_demand = []
+        on_demand_error = str(e)
+
+    reserved_types = list(reserved.gpu_types)
+    # A type held on reserved capacity is never dispatched on-demand
+    # (reserved wins, that hardware is already paid for), so listing it
+    # twice would imply a choice the caller does not have.
+    on_demand_only = [c for c in on_demand if c.gpu_type not in set(reserved_types)]
+
     if output == "json":
-        output_data_as_json({"gpuTypes": response.gpu_types}, console)
-        return
-
-    if not response.gpu_types:
-        console.print(
-            "[yellow]No GPU types available.[/yellow] Contact support if you need access."
+        output_data_as_json(
+            {
+                "gpuTypes": reserved_types,
+                "onDemand": [
+                    {
+                        "gpuType": c.gpu_type,
+                        "pricePerGpuHour": c.price_per_gpu_hour,
+                        "availableNow": c.available_now,
+                        "discountLabel": c.discount_label,
+                        "isBeta": c.is_beta,
+                    }
+                    for c in on_demand_only
+                ],
+            },
+            console,
         )
+        if on_demand_error is not None:
+            # stderr, so a discovery failure cannot prefix human text
+            # onto the payload and break `json.loads` on stdout.
+            get_console(stderr=True).print(
+                f"[yellow]Could not read on-demand capacity:[/yellow] "
+                f"{rich_escape(on_demand_error)}"
+            )
         return
 
-    console.print("[bold]Available GPU types[/bold] [dim](full-FT dispatch)[/dim]")
-    for gpu_type in response.gpu_types:
-        console.print(f"  [cyan]{gpu_type}[/cyan]")
+    if on_demand_error is not None:
+        console.print(
+            f"[yellow]Could not read on-demand capacity:[/yellow] {rich_escape(on_demand_error)}"
+        )
+
+    if not reserved_types and not on_demand_only:
+        console.print("[yellow]No GPU types available.[/yellow]")
+        if on_demand_error is not None:
+            # Not a denial — we simply do not know. Saying "contact
+            # support" here would be the original bug wearing a
+            # different hat.
+            console.print(
+                "[dim]On-demand capacity could not be read. Retry, or see "
+                "[cyan]prime train models[/cyan].[/dim]"
+            )
+        elif on_demand_beta_access is False:
+            # The only state where asking for access is the right next
+            # step: the backend said this account is not enrolled.
+            console.print(
+                "[dim]On-demand training is in beta. Contact Prime support to request access.[/dim]"
+            )
+        elif on_demand_beta_access is True:
+            # Enrolled — an empty pool is not an access problem, and
+            # telling them to contact support would send an already
+            # onboarded customer into a pointless support thread.
+            console.print("[dim]No on-demand capacity is currently listed.[/dim]")
+        else:
+            # No enrollment signal (older backend omitting the field, a
+            # swallowed 404). Stay neutral rather than guess a denial.
+            console.print("[dim]No reserved capacity is assigned to this account.[/dim]")
+        return
+
+    if reserved_types:
+        console.print("[bold]Reserved capacity[/bold] [dim](already paid for)[/dim]")
+        for gpu_type in reserved_types:
+            console.print(f"  [cyan]{gpu_type}[/cyan]")
+
+    if on_demand_only:
+        if reserved_types:
+            console.print()
+        # Beta marker derived from the rows, same as
+        # `_render_on_demand_table` and the dispatch result: the field is
+        # server-controlled so the label retires without a CLI release,
+        # and omitting it here would show beta capacity as a stable
+        # offering in the one listing a new customer reads first.
+        beta = " [yellow](beta)[/yellow]" if any(c.is_beta for c in on_demand_only) else ""
+        console.print(f"[bold]On-demand capacity[/bold]{beta} [dim](billed per GPU-hour)[/dim]")
+        for capacity in on_demand_only:
+            rate = f"${capacity.price_per_gpu_hour:.2f}/GPU-hr"
+            # Escaped: the label is backend-provided free text, and a
+            # bracket in a promo string would either restyle the line or
+            # raise MarkupError and abort an otherwise fine listing.
+            # `_render_on_demand_table` escapes this same field.
+            label = f" · {rich_escape(capacity.discount_label)}" if capacity.discount_label else ""
+            console.print(f"  [cyan]{capacity.gpu_type}[/cyan]  [dim]{rate}{label}[/dim]")
 
 
 def _prompt_required_text(label: str, help_text: str, empty_error: str) -> str:

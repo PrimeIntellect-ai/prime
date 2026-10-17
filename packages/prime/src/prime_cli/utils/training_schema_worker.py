@@ -54,14 +54,20 @@ def check_deferred_settings(model, data, deferred, mode):
         error
         for error in errors
         if any(
-            len(error["loc"]) > len(prefix)
-            and tuple(error["loc"][: len(prefix)]) == prefix
-            and error["loc"][len(prefix)] != "source"
-            for prefix in prefixes
+            deferred_block_error(tuple(error["loc"]), error["type"], prefix) for prefix in prefixes
         )
     ]
     if problems:
         raise ValueError(format_errors(problems))
+
+
+def deferred_block_error(loc, kind, block):
+    if loc[: len(block)] != block:
+        return False
+    if len(loc) == len(block):
+        # Validators on the block itself can need the removed sources; its type cannot.
+        return kind not in ("value_error", "assertion_error")
+    return loc[len(block)] != "source"
 
 
 def format_errors(errors):

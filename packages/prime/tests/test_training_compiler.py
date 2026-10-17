@@ -109,15 +109,27 @@ def test_launcher_only_rl_settings_are_rejected_locally(fake_schema, config, mes
 
 def test_sft_online_eval_is_deferred_and_the_rest_is_validated(fake_schema):
     from prime_cli.utils import training_schema_worker as worker
-    from pydantic import BaseModel, ConfigDict
+    from pydantic import BaseModel, ConfigDict, model_validator
 
-    class Deployment(BaseModel):
+    class Strict(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+    class Deployment(Strict):
         type: str = "single_node"
 
-    class SFTSchemaRejectingOnlineEval(BaseModel):
-        model_config = ConfigDict(extra="forbid")
+    class EvalNeedingPlugins(Strict):
+        interval: int = 1
+        source: list[dict] = []
+
+        @model_validator(mode="after")
+        def needs_source_plugins(self):
+            raise ValueError("eval sources need environment plugins")
+
+    class SFTSchemaRejectingOnlineEval(Strict):
         deployment: Deployment = Deployment()
         optim: dict = {}
+        eval: EvalNeedingPlugins | None = None
+        inference: dict | None = None
 
     sys.modules["prime_rl.configs.sft"].SFTConfig = SFTSchemaRejectingOnlineEval
     request = {
@@ -137,6 +149,9 @@ def test_sft_online_eval_is_deferred_and_the_rest_is_validated(fake_schema):
     }
     with pytest.raises(ValueError, match="lrr"):
         worker.normalize({**request, "config": {"lrr": 1, **online_eval}})
+    online_eval["eval"]["intervall"] = online_eval["eval"].pop("interval")
+    with pytest.raises(ValueError, match=r"eval\.intervall: Extra inputs"):
+        worker.normalize({**request, "config": online_eval})
 
 
 def test_worker_does_not_inherit_api_credentials_or_schema_path(monkeypatch):
@@ -940,6 +955,8 @@ def test_deferred_eval_settings_are_checked_without_their_sources(fake_schema):
         worker.normalize(
             {**request, "config": {"orchestrator": {"eval": {"intervall": 10, "source": source}}}}
         )
+    with pytest.raises(ValueError, match=r"orchestrator\.eval: Input should be a valid dictionary"):
+        worker.normalize({**request, "config": {"orchestrator": {"eval": [{"interval": 10}]}}})
 
 
 def test_validate_pr_overrides_config_source_ref_like_submission(monkeypatch, tmp_path):

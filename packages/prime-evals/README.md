@@ -106,7 +106,9 @@ The SDK looks for credentials in this order:
 
 1. **Direct parameter**: `APIClient(api_key="sk-...")`
 2. **Environment variable**: `export PRIME_API_KEY="sk-..."`
-3. **Config file**: `~/.prime/config.json` (created by `prime login` CLI command)
+3. **Config file**: `~/.prime/config.json` (created by `prime login` CLI command), or the
+   team/context pinned for the working directory by `.prime/context.json`
+   (`prime switch --local`)
 
 ## Complete Example
 

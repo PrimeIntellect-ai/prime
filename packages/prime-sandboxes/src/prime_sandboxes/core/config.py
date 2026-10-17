@@ -1,16 +1,60 @@
 """Lightweight configuration for SDK packages."""
 
 import json
+import logging
 import os
 import re
 from pathlib import Path
 from typing import Optional
 
+LOCAL_CONTEXT_FILE = Path(".prime") / "context.json"
+_CONTEXT_NAME = re.compile(r"[a-zA-Z0-9_-]+")
+_logger = logging.getLogger(__name__)
+_LOGGED_PINS: set = set()
+
+
+def find_local_context_file() -> Optional[Path]:
+    """Nearest ``.prime/context.json`` at or above the cwd, as the Prime CLI finds it:
+    stops at ``$HOME``, skips symlinks and files owned by another user."""
+    try:
+        current = Path.cwd().resolve()
+        home = Path.home().resolve()
+    except (OSError, RuntimeError):
+        return None
+    getuid = getattr(os, "getuid", None)
+    for directory in (current, *current.parents):
+        if directory == home:
+            return None
+        candidate = directory / LOCAL_CONTEXT_FILE
+        try:
+            if candidate.parent.is_symlink() or candidate.is_symlink():
+                continue
+            if candidate.is_file() and (getuid is None or candidate.stat().st_uid == getuid()):
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
+def _read_local_context(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
+        raise ValueError(f"Cannot read {path}: {e}") from e
+    if not isinstance(data, dict):
+        raise ValueError(f"Invalid {path}: expected a JSON object")
+    context = data.get("context")
+    if context is not None and not (isinstance(context, str) and _CONTEXT_NAME.fullmatch(context)):
+        raise ValueError(f"Invalid {path}: bad context name {context!r}")
+    if data.get("team_id") is not None and not isinstance(data["team_id"], str):
+        raise ValueError(f"Invalid {path}: team_id must be a string or null")
+    return data
+
 
 class Config:
     """Minimal configuration class for SDK packages.
 
-    Reads from ~/.prime/config.json and environment variables.
+    Reads PRIME_* env vars > PRIME_CONTEXT > .prime/context.json > ~/.prime/config.json.
     This is a simplified version that doesn't write configs.
     """
 
@@ -20,30 +64,67 @@ class Config:
         self.config_dir = Path.home() / ".prime"
         self.config_file = self.config_dir / "config.json"
         self.environments_dir = self.config_dir / "environments"
+        self.local_context_file: Optional[Path] = None
+        self._context_error: Optional[ValueError] = None
         self._load_config()
-        self._load_context()
+        try:
+            self._load_context()
+        except ValueError as e:
+            if self.local_context_file is None:
+                raise  # a broken PRIME_CONTEXT fails immediately
+            # A broken pin fails on first read, so callers passing every value work.
+            self._context_error = e
+
+    @property
+    def config(self) -> dict:
+        if self._context_error is not None:
+            raise self._context_error
+        return self._config
+
+    @config.setter
+    def config(self, value: dict) -> None:
+        self._config = value
 
     def _load_config(self) -> None:
         """Load configuration from file"""
         if self.config_file.exists():
             try:
                 config_data = json.loads(self.config_file.read_text())
-                self.config = config_data
+                self.config = config_data if isinstance(config_data, dict) else {}
             except (json.JSONDecodeError, IOError):
                 self.config = {}
         else:
             self.config = {}
 
     def _load_context(self) -> None:
-        """Overlay the profile selected by the Prime CLI for this process."""
+        """Overlay PRIME_CONTEXT, else the nearest .prime/context.json (a saved
+        context and/or ``team_id``, null meaning personal)."""
         context = os.getenv("PRIME_CONTEXT")
+        local: dict = {}
+        source = "PRIME_CONTEXT"
         if not context:
-            return
+            self.local_context_file = find_local_context_file()
+            if self.local_context_file is None:
+                return
+            local = _read_local_context(self.local_context_file)
+            context = local.get("context")
+            source = str(self.local_context_file)
+        if context:
+            self._apply_context(context, source)
+        if "team_id" in local:
+            self.config.update(team_id=local["team_id"] or None, team_name=None, team_role=None)
+        if self.local_context_file and self.local_context_file not in _LOGGED_PINS:
+            _LOGGED_PINS.add(self.local_context_file)
+            _logger.info("Using %s: %s", self.local_context_file, local)
 
+    def _apply_context(self, context: str, source: str) -> None:
         if context.casefold() == "production":
             self.config.update(
                 {
                     "base_url": self.DEFAULT_BASE_URL,
+                    "frontend_url": None,
+                    "inference_url": None,
+                    "traces_url": None,
                     "team_id": None,
                     "team_name": None,
                     "team_role": None,
@@ -51,12 +132,14 @@ class Config:
             )
             return
 
-        if re.fullmatch(r"[a-zA-Z0-9_-]+", context) is None:
+        if _CONTEXT_NAME.fullmatch(context) is None:
             raise ValueError(f"Invalid context name: {context!r}")
 
         environment_file = self.environments_dir / f"{context}.json"
         if not environment_file.exists():
-            raise ValueError(f"Context file not found: {environment_file}")
+            raise ValueError(
+                f"Context file not found: {environment_file} (context '{context}' from {source})"
+            )
         try:
             environment_config = json.loads(environment_file.read_text())
         except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:

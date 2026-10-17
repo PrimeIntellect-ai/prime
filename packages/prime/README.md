@@ -202,6 +202,8 @@ prime sandbox run <sandbox-id> --user ubuntu -- id
 # Request a filesystem checkpoint; check again until it is DURABLE
 prime sandbox checkpoint create <sandbox-id>
 prime sandbox checkpoint list <sandbox-id> [--checkpoint-id <checkpoint-id>]
+# Any checkpoint by id, rootfs or volume
+prime sandbox checkpoint get <checkpoint-id>
 prime sandbox checkpoint restore <checkpoint-id> --name restored-sandbox
 # Checkpoint + restore in one step, inheriting the source's resources
 prime sandbox fork <sandbox-id> [--name forked-sandbox]
@@ -210,9 +212,45 @@ prime sandbox fork <sandbox-id> [--name forked-sandbox]
 prime sandbox upload <sandbox-id> local_file.py /remote/path/
 prime sandbox download <sandbox-id> /remote/file.txt ./local/
 
+# Attach persistent volumes (repeatable; :ro mounts read-only)
+prime sandbox create --volume data:/data --volume cache:/mnt:ro python:3.11
+
+# Manage volumes
+prime sandbox volumes create data
+prime sandbox volumes list [--json]
+prime sandbox volumes get data
+prime sandbox volumes delete data
+
+# Publish a sandbox's private volume writes as a durable checkpoint
+prime sandbox volumes publish data --sandbox <sandbox-id> [--force] [--no-wait]
+
+# Create a volume and import a local directory into it
+prime sandbox volumes create data --from ~/datasets/my-data
+
 # Clean up
 prime sandbox delete <sandbox-id>
 ```
+
+Volume writes are private to a sandbox until a publish reaches DURABLE. A
+new volume starts empty; each publish becomes the volume's head, and a
+sandbox always sees the volume as of its own creation, so attach a new
+sandbox to read a newer head. Read-only mounts cannot publish. A publish
+whose volume head moved since attach is rejected (409) unless `--force`,
+which still cannot overtake another sandbox's pending publish. `--no-wait`
+prints the checkpoint id and state; the data is published only once that
+checkpoint is DURABLE, checkable with
+`prime sandbox checkpoint get <checkpoint-id>`.
+
+`volumes create --from` copies a local directory into a disposable
+read-write importer sandbox, publishes it, waits until DURABLE, and only
+then deletes the importer. An rsync failure publishes nothing and leaves
+the volume's previous durable contents in place. A publish failure,
+timeout, or interrupt keeps the importer sandbox so the checkpoint state
+can be inspected first; delete it manually once it is no longer needed.
+The importer is reaped automatically after 30 minutes without transfer
+activity, and publishing does not reset that clock. Importing into an
+existing volume attaches it at its current durable head for a fresh copy,
+not a resumption of a failed transfer.
 
 ### Volume contents
 

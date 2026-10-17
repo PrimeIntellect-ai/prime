@@ -1,8 +1,8 @@
 """`prime volumes`: named volumes for dedicated training runs (full-FT and SFT).
 
-A volume is a PVC owned by your team (or you) on the cluster it was
-created on. `prime train config.toml --volume <name>` makes the run
-write under `runs/<runId>/` on it, and it outlives every run.
+A volume is durable object storage owned by your team (or you), available
+across clusters. `prime train config.toml --volume <name>` stages it for a
+run and saves outputs under `runs/<runId>/`. It outlives every run.
 
 Hosted SFT runs also read their dataset from the volume: the training
 container mounts the volume read-only at `/volume`, so an SFT config's
@@ -10,10 +10,11 @@ container mounts the volume read-only at `/volume`, so an SFT config's
 `/volume/datasets/<name>`, or the relative `datasets/<name>` — the
 platform resolves it) before launch. This command manages the
 volume lifecycle (create/list/expand/delete, plus `prime volumes ssh` for
-read-write sessions); put datasets there yourself with
-`prime volumes ssh <name> --read-write` and the huggingface CLI inside
-that session (`hf download <repo> --repo-type dataset --local-dir
-datasets/<name>`) — the trainer never downloads.
+read-write sessions). Upload local datasets with `prime volumes put`, or
+import AWS S3 data with `prime volumes import`. For Hugging Face datasets,
+use `prime volumes ssh <name> --read-write` and `hf download <repo>
+--repo-type dataset --local-dir datasets/<name>` inside the session — the
+trainer never downloads.
 """
 
 import os
@@ -28,6 +29,8 @@ import time
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
+from urllib.parse import urlsplit
 
 import typer
 from rich.markup import escape
@@ -35,7 +38,7 @@ from rich.table import Table
 from rich.text import Text
 
 from prime_cli import volume_objects
-from prime_cli.api.training import HostedTrainingClient
+from prime_cli.api.training import HostedTrainingClient, VolumeTransfer
 from prime_cli.core import APIClient, APIError, Config, NotFoundError
 from prime_cli.volume_gateway import GatewayError, relay
 
@@ -1516,25 +1519,339 @@ def put(
     _transfer(name, False, remote_path, local_path, upload=True, direct=direct)
 
 
-# `import`, `export` and `transfers` shipped in cli 0.9.2 against an S3
-# transfers API that never reached the platform (volumes moved to R2). The
-# hidden names stay so old scripts get a pointer instead of "No such command".
-_GONE = {
-    "context_settings": {"ignore_unknown_options": True, "allow_extra_args": True},
-    "add_help_option": False,
-}
+# --- S3 import/export (ENG-6450) ------------------------------------------
+# Copies run in the platform between AWS S3 and durable volume storage.
+# Create returns a transfer ID; `transfers list --follow` polls to the end.
+
+_TRANSFER_TERMINAL = ("succeeded", "failed", "cancelled")
+_TRANSFER_POLL_SECONDS = 5
 
 
-@app.command("import", hidden=True, **_GONE)
-@app.command("export", hidden=True, **_GONE)
-@app.command("transfers", hidden=True, **_GONE)
-def s3_transfers_removed() -> None:
+def _aws_credentials() -> dict:
+    """S3 credentials from the standard AWS environment variables.
+
+    Prime never takes credentials as flags: they travel in the create
+    request body only, are encrypted while the transfer is active, and are
+    removed when it finishes.
+    """
+    access_key = os.environ.get("AWS_ACCESS_KEY_ID")
+    secret_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
+    if not access_key or not secret_key:
+        missing = "AWS_ACCESS_KEY_ID" if not access_key else "AWS_SECRET_ACCESS_KEY"
+        console.print(
+            f"[red]Error:[/red] {missing} is not set. S3 credentials are read from the "
+            "AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN environment "
+            "variables."
+        )
+        raise typer.Exit(1)
+    return {
+        "accessKeyId": access_key,
+        "secretAccessKey": secret_key,
+        "sessionToken": os.environ.get("AWS_SESSION_TOKEN"),
+    }
+
+
+def _short_number(value: str) -> str:
+    """`412.345 GiB` -> `412.3 GiB` for readable progress."""
+    number, _, unit = value.partition(" ")
+    try:
+        rounded = f"{float(number):.1f}"
+    except ValueError:
+        return value
+    return f"{rounded} {unit}".strip()
+
+
+def _short_eta(eta: str) -> str:
+    """`1h48m0s` -> `1h48m` for readable progress."""
+    return eta[:-2] if eta.endswith("m0s") else eta
+
+
+def _duration(started_at: str | None, completed_at: str | None) -> str | None:
+    """`2h21m` between two ISO timestamps, or None if either is unusable."""
+    if not started_at or not completed_at:
+        return None
+    try:
+        start = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+        end = datetime.fromisoformat(completed_at.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    seconds = int((end - start).total_seconds())
+    if seconds < 0:
+        return None
+    hours, rem = divmod(seconds, 3600)
+    minutes = rem // 60
+    if hours:
+        return f"{hours}h{minutes}m"
+    if minutes:
+        return f"{minutes}m"
+    return f"{seconds}s"
+
+
+def _progress_cell(transfer: VolumeTransfer) -> str:
+    """Show live progress, completed size and duration, or a terminal error."""
+    if transfer.status == "succeeded":
+        progress = transfer.progress
+        size = _short_number(progress.total) if progress and progress.total else "done"
+        took = _duration(transfer.started_at, transfer.completed_at)
+        return f"{size} in {took}" if took else size
+    if transfer.status in ("failed", "cancelled"):
+        return transfer.error_message or "-"
+    progress = transfer.progress
+    if progress is None:
+        return "-"
+    bits = []
+    if progress.transferred or progress.total:
+        size = _short_number(progress.transferred) if progress.transferred else "?"
+        if progress.total:
+            size += f" / {_short_number(progress.total)}"
+        if progress.percentage is not None:
+            size += f" ({progress.percentage}%)"
+        bits.append(size)
+    if progress.rate:
+        bits.append(_short_number(progress.rate))
+    if progress.eta:
+        bits.append(f"ETA {_short_eta(progress.eta)}")
+    return ", ".join(bits) if bits else "-"
+
+
+def _transfers_table(transfers: list[VolumeTransfer]) -> Table:
+    table = Table("ID", "DIRECTION", "PATH", "URL", "STATUS", "PROGRESS")
+    for transfer in transfers:
+        table.add_row(
+            transfer.id,
+            transfer.direction,
+            escape(transfer.path or "/"),
+            escape(transfer.url),
+            transfer.status,
+            escape(_progress_cell(transfer)),
+        )
+    return table
+
+
+def _follow_transfer(client, name: str, transfer_id: str, team_id: str | None) -> None:
+    """Poll one transfer and print each new state line until it is terminal.
+    One failed poll (network blip, 5xx) is retried, like `volumes ssh`."""
+    errors = 0
+    shown = None
+    while True:
+        try:
+            transfer = client.get_volume_transfer(name, transfer_id, team_id=team_id)
+            errors = 0
+        except APIError as exc:
+            errors += 1
+            if errors >= _MAX_POLL_ERRORS:
+                console.print(f"[red]Error:[/red] {escape(str(exc))}")
+                raise typer.Exit(1) from exc
+            time.sleep(_TRANSFER_POLL_SECONDS)
+            continue
+        line = f"{transfer.status:<11}{_progress_cell(transfer)}"
+        if line != shown:
+            console.print(escape(line))
+            shown = line
+        if transfer.status == "failed":
+            raise typer.Exit(1)
+        if transfer.status in _TRANSFER_TERMINAL:
+            return
+        time.sleep(_TRANSFER_POLL_SECONDS)
+
+
+def _start_transfer(
+    name: str,
+    direction: Literal["import", "export"],
+    path: str,
+    url: str,
+    region: str | None,
+    endpoint_url: str | None,
+) -> None:
+    path = _validate_s3_transfer(direction, path, url)
+    credentials = _aws_credentials()
+    client, team_id = _client()
+    try:
+        transfer = client.create_volume_transfer(
+            name,
+            direction=direction,
+            path=path,
+            url=url,
+            credentials=credentials,
+            region=region,
+            endpoint_url=endpoint_url,
+            team_id=team_id,
+        )
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+    where = f"{escape(name)}:{escape(path or '/')}"
+    if direction == "export":
+        summary = f"Started export of {where} to {escape(url)}"
+    else:
+        summary = f"Started import of {where} from {escape(url)}"
+    console.print(f"[green]{summary}[/green]")
+    check = f"prime volumes transfers list {escape(name)} --id {transfer.id}"
+    console.print(f"Transfer id: {transfer.id}")
+    console.print(f"Check status: {check}")
+    console.print(f"Follow:       {check} --follow")
+
+
+def _validate_s3_transfer(direction: str, path: str, url: str) -> str:
+    """Validate copy arguments before loading credentials or making requests."""
+    try:
+        source = urlsplit(url)
+    except ValueError as exc:
+        console.print("[red]Error:[/red] Use an S3 URL: s3://bucket/prefix.")
+        raise typer.Exit(2) from exc
+    if (
+        source.scheme != "s3"
+        or not re.fullmatch(
+            r"(?![0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$)(?!.*\.\.)(?!.*\.-)(?!.*-\.)"
+            r"[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]",
+            source.netloc,
+        )
+        or source.query
+        or source.fragment
+        or any(ord(char) < 32 or ord(char) == 127 for char in url)
+        or "\\" in source.path
+        or (
+            source.path.strip("/")
+            and any(part in ("", ".", "..") for part in source.path.strip("/").split("/"))
+        )
+    ):
+        console.print("[red]Error:[/red] Use an S3 URL: s3://bucket/prefix.")
+        raise typer.Exit(2)
+    normalized = path.strip("/")
+    parts = normalized.split("/") if normalized else []
+    if direction == "import" and normalized in ("", "."):
+        console.print(
+            "[red]Error:[/red] Import needs a non-root destination directory, "
+            "for example: prime volumes import data s3://bucket/prefix datasets/import."
+        )
+        raise typer.Exit(2)
+    if (
+        any(part in ("", ".", "..") for part in parts)
+        or "\\" in path
+        or any(ord(char) < 32 or ord(char) == 127 for char in path)
+    ):
+        console.print(
+            "[red]Error:[/red] Use a volume directory without empty segments, '.', '..', "
+            "backslashes or control characters."
+        )
+        raise typer.Exit(2)
+    if ".prime" in parts or (direction == "import" and parts[0] == "runs"):
+        console.print("[red]Error:[/red] runs/ outputs and .prime metadata are protected.")
+        raise typer.Exit(2)
+    if parts[:2] == ["runs", ".sessions"]:
+        console.print("[red]Error:[/red] runs/.sessions/ contains internal sync metadata.")
+        raise typer.Exit(2)
+    _refuse_long(normalized, shown=path)
+    return normalized
+
+
+@app.command(no_args_is_help=True)
+def export(
+    name: str = typer.Argument(..., help="Volume name"),
+    path: str = typer.Argument(..., help="Volume-relative directory to copy (its contents)"),
+    url: str = typer.Argument(..., help="Destination s3://bucket/prefix"),
+    region: str | None = typer.Option(None, "--region", help="S3 region (default: us-east-1)"),
+    endpoint_url: str | None = typer.Option(
+        None,
+        "--endpoint-url",
+        help="AWS S3 HTTPS endpoint override; other S3-compatible stores are unsupported",
+    ),
+) -> None:
+    """Copy a volume directory's durable contents to AWS S3 asynchronously.
+
+    Stop and sync active writers first to include their latest changes.
+    Copies overwrite matching keys and keep other destination objects.
+    AWS credentials come from the environment; no volume session is needed.
+    """
+    _start_transfer(name, "export", path, url, region, endpoint_url)
+
+
+@app.command("import", no_args_is_help=True)
+def import_(
+    name: str = typer.Argument(..., help="Volume name"),
+    url: str = typer.Argument(..., help="Source s3://bucket/prefix"),
+    path: str = typer.Argument(
+        ..., help="Non-root volume directory to copy into, e.g. datasets/import"
+    ),
+    region: str | None = typer.Option(None, "--region", help="S3 region (default: us-east-1)"),
+    endpoint_url: str | None = typer.Option(
+        None,
+        "--endpoint-url",
+        help="AWS S3 HTTPS endpoint override; other S3-compatible stores are unsupported",
+    ),
+) -> None:
+    """Copy an AWS S3 prefix into a non-root volume directory asynchronously.
+
+    The volume must have no active writer. Root, runs/ and .prime metadata
+    paths are protected. Matching keys are overwritten; other objects stay.
+    AWS credentials come from the environment, are encrypted during the
+    transfer, and are removed when it finishes. No volume session is needed.
+    """
+    _start_transfer(name, "import", path, url, region, endpoint_url)
+
+
+transfers_app = PlainTyper(help="List or cancel a volume's S3 transfers", no_args_is_help=True)
+
+
+@transfers_app.command("list")
+def transfers_list(
+    name: str = typer.Argument(..., help="Volume name"),
+    transfer_id: str | None = typer.Option(None, "--id", help="Show one transfer by id"),
+    follow: bool = typer.Option(False, "--follow", help="Poll one transfer until it finishes"),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """List a volume's transfers, newest first, or one with --id."""
+    validate_output_format(output, console)
+    if follow:
+        if not transfer_id:
+            console.print("[red]Error:[/red] --follow needs --id (one transfer).")
+            raise typer.Exit(2)
+        if output == "json":
+            console.print("[red]Error:[/red] --follow cannot be combined with --output json.")
+            raise typer.Exit(2)
+        client, team_id = _client()
+        _follow_transfer(client, name, transfer_id, team_id)
+        return
+    client, team_id = _client()
+    try:
+        if transfer_id:
+            transfers = [client.get_volume_transfer(name, transfer_id, team_id=team_id)]
+        else:
+            transfers = client.list_volume_transfers(name, team_id=team_id)
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+    if output == "json":
+        data = (
+            transfers[0].model_dump(by_alias=True)
+            if transfer_id
+            else [t.model_dump(by_alias=True) for t in transfers]
+        )
+        output_data_as_json(data, console)
+        return
+    console.print(_transfers_table(transfers))
+
+
+@transfers_app.command("cancel")
+def transfers_cancel(
+    name: str = typer.Argument(..., help="Volume name"),
+    transfer_id: str = typer.Argument(..., help="Transfer ID"),
+) -> None:
+    """Cancel a transfer; the volume and the files already moved stay."""
+    client, team_id = _client()
+    try:
+        client.cancel_volume_transfer(name, transfer_id, team_id=team_id)
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+    console.print(f"Cancellation requested for transfer {escape(transfer_id)}.")
     console.print(
-        "[red]Error:[/red] S3 import/export was removed: the platform never supported it. "
-        "Copy with your own S3 tool (aws s3 sync, rclone) and "
-        "`prime volumes put` / `prime volumes get`."
+        f"Confirm status: prime volumes transfers list {escape(name)} "
+        f"--id {escape(transfer_id)} --follow"
     )
-    raise typer.Exit(1)
+
+
+app.add_typer(transfers_app, name="transfers")
 
 
 @app.command(hidden=True)

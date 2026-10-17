@@ -1762,6 +1762,9 @@ def export(
     Stop and sync active writers first to include their latest changes.
     Copies overwrite matching keys and keep other destination objects.
     AWS credentials come from the environment; no volume session is needed.
+
+    Each object is limited to 156.25 GiB (167,772,160,000 bytes); the total
+    dataset may be larger. Transfers have a 23-hour deadline.
     """
     _start_transfer(name, "export", path, url, region, endpoint_url)
 
@@ -1786,11 +1789,16 @@ def import_(
     paths are protected. Matching keys are overwritten; other objects stay.
     AWS credentials come from the environment, are encrypted during the
     transfer, and are removed when it finishes. No volume session is needed.
+
+    Each object is limited to 156.25 GiB (167,772,160,000 bytes); the total
+    dataset may be larger. Transfers have a 23-hour deadline.
     """
     _start_transfer(name, "import", path, url, region, endpoint_url)
 
 
-transfers_app = PlainTyper(help="List or cancel a volume's S3 transfers", no_args_is_help=True)
+transfers_app = PlainTyper(
+    help="List or cancel your own S3 transfers on a volume", no_args_is_help=True
+)
 
 
 @transfers_app.command("list")
@@ -1800,7 +1808,7 @@ def transfers_list(
     follow: bool = typer.Option(False, "--follow", help="Poll one transfer until it finishes"),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """List a volume's transfers, newest first, or one with --id."""
+    """List your own transfers on a volume, newest first, or one with --id."""
     validate_output_format(output, console)
     if follow:
         if not transfer_id:
@@ -1837,7 +1845,7 @@ def transfers_cancel(
     name: str = typer.Argument(..., help="Volume name"),
     transfer_id: str = typer.Argument(..., help="Transfer ID"),
 ) -> None:
-    """Cancel a transfer; the volume and the files already moved stay."""
+    """Cancel your own transfer; the volume and already copied objects stay."""
     client, team_id = _client()
     try:
         client.cancel_volume_transfer(name, transfer_id, team_id=team_id)

@@ -526,6 +526,14 @@ def test_s3_transfer_help_describes_copy_contract(command, phrases):
 
     assert result.exit_code == 0, _text(result)
     text = " ".join(_text(result).split())
-    for phrase in [*phrases, "AWS S3 HTTPS endpoint", "unsupported", "environment"]:
+    for phrase in [
+        *phrases,
+        "AWS S3 HTTPS endpoint",
+        "unsupported",
+        "environment",
+        "156.25 GiB (167,772,160,000 bytes)",
+        "dataset may be larger",
+        "23-hour deadline",
+    ]:
         assert phrase in text
     assert "rclone" not in text

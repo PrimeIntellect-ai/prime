@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from prime_sandboxes.core import APIError
 from prime_sandboxes.models import LanNetwork, LanRule
 from prime_sandboxes.sandbox import AsyncSandboxClient, SandboxClient
 
@@ -45,6 +46,43 @@ def test_set_lan_rules_sends_wire_names():
     )
     assert network.rules[0].from_ == "tag:web"
     assert network.members[0].sandbox_id == "sbx1"
+
+
+RULES = [LanRule(from_="tag:web", to="tag:db", ports=[5432])]
+
+
+def test_create_lan_network_applies_its_rules_at_creation():
+    client = _sync_client(NETWORK)
+    network = client.create_lan_network("lab", rules=RULES)
+    client.client.request.assert_called_once_with(
+        "POST",
+        "/sandbox/networks",
+        json={"name": "lab", "rules": [{"from": "tag:web", "to": "tag:db", "ports": [5432]}]},
+    )
+    assert network.rules[0].to == "tag:db"
+
+
+def test_create_lan_network_deletes_a_network_whose_rules_were_ignored():
+    # A platform from before rules on create stores its default rules instead.
+    client = _sync_client({**NETWORK, "rules": [{"from": "*", "to": "*"}]})
+    with pytest.raises(APIError, match="ignored the LAN network's rules"):
+        client.create_lan_network("lab", rules=RULES)
+    client.client.request.assert_called_with("DELETE", "/sandbox/networks/net1")
+
+
+@pytest.mark.asyncio
+async def test_async_create_lan_network_deletes_a_network_whose_rules_were_ignored():
+    client = object.__new__(AsyncSandboxClient)
+    client.client = MagicMock()
+    client.client.config.team_id = None
+    client.client.request = AsyncMock(return_value={**NETWORK, "rules": []})
+    with pytest.raises(APIError, match="ignored the LAN network's rules"):
+        await client.create_lan_network("lab", rules=RULES)
+    client.client.request.assert_awaited_with("DELETE", "/sandbox/networks/net1")
+    # Matching rules come back as created.
+    client.client.request = AsyncMock(return_value=NETWORK)
+    network = await client.create_lan_network("lab", rules=RULES)
+    assert network.id == "net1"
 
 
 def test_list_lan_networks_unwraps():

@@ -138,6 +138,26 @@ _BACKGROUND_JOB_LAUNCH_BACKOFF_SECONDS = 0.5
 # The platform retries a failed LAN push from its scheduled status sweep.
 _LAN_SYNC_TIMEOUT_SECONDS = 120.0
 _LAN_SYNC_POLL_SECONDS = 2.0
+
+
+def _lan_rules_payload(rules: List[LanRule]) -> List[Dict[str, Any]]:
+    return [r.model_dump(by_alias=True, exclude_none=True) for r in rules]
+
+
+def _created_with_lan_rules(network: LanNetwork, rules: List[LanRule]) -> bool:
+    """Whether the platform stored ``rules`` at creation. One from before rules on
+    create ignores them and gives the network its default rules instead."""
+
+    def key(rule: LanRule) -> Any:
+        return rule.from_, rule.to, sorted(rule.ports) if rule.ports else None
+
+    return [key(r) for r in network.rules] == [key(r) for r in rules]
+
+
+_IGNORED_LAN_RULES = (
+    "the platform ignored the LAN network's rules at creation, so it was deleted; "
+    "create it without rules and set them with set_lan_rules"
+)
 _BACKGROUND_JOB_LAUNCH_TIMEOUT_SECONDS = 30
 _SANDBOX_ERROR_CONTEXT_TIMEOUT_SECONDS = 10.0
 
@@ -2614,15 +2634,32 @@ class SandboxClient:
         response = self.client.request("GET", f"/sandbox/{sandbox_id}/egress-policy")
         return EgressPolicyStatus.model_validate(response)
 
-    def create_lan_network(self, name: str, team_id: Optional[str] = None) -> LanNetwork:
-        """Create a LAN network. By default every member may reach every other
-        member on every port; narrow it with ``set_lan_rules``."""
+    def create_lan_network(
+        self,
+        name: str,
+        team_id: Optional[str] = None,
+        rules: Optional[List[LanRule]] = None,
+    ) -> LanNetwork:
+        """Create a LAN network. Rules are directed and allow-only. ``rules`` are in
+        force before any member joins. Without them, the network has the platform's
+        default rules: none, so no member reaches another (older platforms let every
+        member reach every other); ``set_lan_rules`` replaces them later. A platform
+        that ignores ``rules`` at creation raises ``APIError``, once the network it
+        created is deleted."""
         payload: Dict[str, Any] = {"name": name}
         team_id = team_id if team_id is not None else self.client.config.team_id
         if team_id is not None:
             payload["team_id"] = team_id
+        if rules is not None:
+            payload["rules"] = _lan_rules_payload(rules)
         response = self.client.request("POST", "/sandbox/networks", json=payload)
-        return LanNetwork.model_validate(response)
+        network = LanNetwork.model_validate(response)
+        if rules is not None and not _created_with_lan_rules(network, rules):
+            # Never hand back a network whose members could reach each other unasked.
+            with contextlib.suppress(APIError):
+                self.delete_lan_network(network.id)
+            raise APIError(_IGNORED_LAN_RULES)
+        return network
 
     def list_lan_networks(self, team_id: Optional[str] = None) -> List[LanNetwork]:
         """List your personal LAN networks, or a team's."""
@@ -2642,7 +2679,7 @@ class SandboxClient:
 
     def set_lan_rules(self, network_id: str, rules: List[LanRule]) -> LanNetwork:
         """Replace a LAN network's rules. Rules are directed and allow-only."""
-        payload = {"rules": [r.model_dump(by_alias=True, exclude_none=True) for r in rules]}
+        payload = {"rules": _lan_rules_payload(rules)}
         response = self.client.request("PUT", f"/sandbox/networks/{network_id}/rules", json=payload)
         return LanNetwork.model_validate(response)
 
@@ -4238,15 +4275,32 @@ class AsyncSandboxClient:
         response = await self.client.request("GET", f"/sandbox/{sandbox_id}/egress-policy")
         return EgressPolicyStatus.model_validate(response)
 
-    async def create_lan_network(self, name: str, team_id: Optional[str] = None) -> LanNetwork:
-        """Create a LAN network. By default every member may reach every other
-        member on every port; narrow it with ``set_lan_rules``."""
+    async def create_lan_network(
+        self,
+        name: str,
+        team_id: Optional[str] = None,
+        rules: Optional[List[LanRule]] = None,
+    ) -> LanNetwork:
+        """Create a LAN network. Rules are directed and allow-only. ``rules`` are in
+        force before any member joins. Without them, the network has the platform's
+        default rules: none, so no member reaches another (older platforms let every
+        member reach every other); ``set_lan_rules`` replaces them later. A platform
+        that ignores ``rules`` at creation raises ``APIError``, once the network it
+        created is deleted."""
         payload: Dict[str, Any] = {"name": name}
         team_id = team_id if team_id is not None else self.client.config.team_id
         if team_id is not None:
             payload["team_id"] = team_id
+        if rules is not None:
+            payload["rules"] = _lan_rules_payload(rules)
         response = await self.client.request("POST", "/sandbox/networks", json=payload)
-        return LanNetwork.model_validate(response)
+        network = LanNetwork.model_validate(response)
+        if rules is not None and not _created_with_lan_rules(network, rules):
+            # Never hand back a network whose members could reach each other unasked.
+            with contextlib.suppress(APIError):
+                await self.delete_lan_network(network.id)
+            raise APIError(_IGNORED_LAN_RULES)
+        return network
 
     async def list_lan_networks(self, team_id: Optional[str] = None) -> List[LanNetwork]:
         """List your personal LAN networks, or a team's."""
@@ -4266,7 +4320,7 @@ class AsyncSandboxClient:
 
     async def set_lan_rules(self, network_id: str, rules: List[LanRule]) -> LanNetwork:
         """Replace a LAN network's rules. Rules are directed and allow-only."""
-        payload = {"rules": [r.model_dump(by_alias=True, exclude_none=True) for r in rules]}
+        payload = {"rules": _lan_rules_payload(rules)}
         response = await self.client.request(
             "PUT", f"/sandbox/networks/{network_id}/rules", json=payload
         )

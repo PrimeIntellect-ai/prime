@@ -546,3 +546,34 @@ def test_sync_client_returns_empty_dict_on_204() -> None:
         transport=httpx.MockTransport(lambda request: httpx.Response(204)),
     )
     assert client.request("DELETE", "/sandbox/checkpoints/c1") == {}
+
+
+def test_pause_and_resume_requests(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = SandboxClient(APIClient(api_key="test-key"))
+    calls = []
+
+    def request(method: str, path: str) -> dict:
+        calls.append((method, path))
+        return sandbox_response()
+
+    monkeypatch.setattr(client.client, "request", request)
+    client.pause("sandbox-1")
+    client.resume("sandbox-1")
+
+    assert calls == [("POST", "/sandbox/sandbox-1/pause"), ("POST", "/sandbox/sandbox-1/resume")]
+
+
+@pytest.mark.asyncio
+async def test_async_pause_and_resume_requests(monkeypatch: pytest.MonkeyPatch) -> None:
+    async with AsyncSandboxClient(api_key="test-key") as client:
+        calls = []
+
+        async def request(method: str, path: str) -> dict:
+            calls.append((method, path))
+            return sandbox_response()
+
+        monkeypatch.setattr(client.client, "request", request)
+        await client.pause("sandbox-1")
+        await client.resume("sandbox-1")
+
+    assert calls == [("POST", "/sandbox/sandbox-1/pause"), ("POST", "/sandbox/sandbox-1/resume")]

@@ -281,7 +281,7 @@ def _env_display_name(env: Dict[str, Any], index: int | None = None) -> str:
     return f"env-{index}" if index is not None else "?"
 
 
-def _remove_deprecated_config_keys(data: Dict[str, Any]) -> None:
+def _remove_deprecated_config_keys(data: Dict[str, Any], out: Any = console) -> None:
     """Remove deprecated config keys while warning users."""
     removed = False
     for key in ("trajectory_strategy", "trajectoryStrategy"):
@@ -290,11 +290,11 @@ def _remove_deprecated_config_keys(data: Dict[str, Any]) -> None:
             removed = True
 
     if removed:
-        console.print("[yellow]Warning:[/yellow] `trajectory_strategy` is deprecated and ignored.")
+        out.print("[yellow]Warning:[/yellow] `trajectory_strategy` is deprecated and ignored.")
 
     if "buffer" in data:
         data.pop("buffer", None)
-        console.print(
+        out.print(
             "[yellow]Warning:[/yellow] `\\[buffer]` is deprecated and ignored: "
             "the difficulty-filtering buffer was removed from the trainer."
         )
@@ -303,7 +303,7 @@ def _remove_deprecated_config_keys(data: Dict[str, Any]) -> None:
     if isinstance(eval_section, dict) and "eval_base_model" in eval_section:
         legacy = eval_section.pop("eval_base_model")
         if "skip_first_step" in eval_section:
-            console.print(
+            out.print(
                 "[yellow]Warning:[/yellow] `eval.eval_base_model` is deprecated and "
                 "ignored because `eval.skip_first_step` is also set. Remove "
                 "`eval_base_model` from your config."
@@ -311,7 +311,7 @@ def _remove_deprecated_config_keys(data: Dict[str, Any]) -> None:
         else:
             translated = (not legacy) if isinstance(legacy, bool) else legacy
             eval_section["skip_first_step"] = translated
-            console.print(
+            out.print(
                 "[yellow]Warning:[/yellow] `eval.eval_base_model` is deprecated: "
                 "prime-rl renamed it to `skip_first_step` with inverted meaning "
                 "(`eval_base_model = false` ≡ `skip_first_step = true`). "
@@ -438,7 +438,7 @@ _CLI_ONLY_KEYS = frozenset(
 )
 
 
-def _hosted_config(raw_cfg: Dict[str, Any]) -> Dict[str, Any]:
+def _hosted_config(raw_cfg: Dict[str, Any], out: Any = console) -> Dict[str, Any]:
     config = {k: v for k, v in raw_cfg.items() if k not in _CLI_ONLY_KEYS}
     # In the prime-rl-native shape the deprecated keys live one level down,
     # under `[orchestrator]` — and this config ships verbatim to the dedicated
@@ -447,8 +447,22 @@ def _hosted_config(raw_cfg: Dict[str, Any]) -> Dict[str, Any]:
     orchestrator = config.get("orchestrator")
     if isinstance(orchestrator, dict):
         config["orchestrator"] = orchestrator = copy.deepcopy(orchestrator)
-        _remove_deprecated_config_keys(orchestrator)
+        _remove_deprecated_config_keys(orchestrator, out)
     return config
+
+
+def _selected_source_ref(ref: Optional[str], config_ref: Any, config_path: Any) -> Optional[str]:
+    if config_ref is not None and not isinstance(config_ref, str):
+        raise ValueError(
+            f"source_ref in {config_path} must be a string, got {type(config_ref).__name__}."
+        )
+    # Each source is checked where it was given (so `--ref ""` is an error,
+    # not a silent fall-through to the TOML) before the CLI flag wins.
+    for label, candidate in (("--ref", ref), (f"source_ref in {config_path}", config_ref)):
+        problem = _source_ref_error(candidate) if candidate is not None else None
+        if problem:
+            raise ValueError(f"{label}: {problem}")
+    return ref or config_ref
 
 
 def _schema_input(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -613,31 +627,22 @@ def _dispatch_dedicated_run(
     # top-level `source_ref = "..."` in the TOML. CLI flag wins. The
     # platform resolves the ref to a commit at dispatch and pins that sha
     # on the run, so a branch name here never drifts mid-run.
-    config_source_ref = raw_cfg.get("source_ref")
-    if config_source_ref is not None and not isinstance(config_source_ref, str):
-        console.print(
-            f"[red]Error:[/red] source_ref in {config_path} must be a string, "
-            f"got {type(config_source_ref).__name__}."
+    try:
+        resolved_source_ref = _selected_source_ref(
+            source_ref, raw_cfg.get("source_ref"), config_path
         )
-        raise typer.Exit(1)
-    # Each source is checked where it was given (so `--ref ""` is an error,
-    # not a silent fall-through to the TOML) before the CLI flag wins.
-    for label, candidate in (
-        ("--ref", source_ref),
-        (f"source_ref in {config_path}", config_source_ref),
-    ):
-        problem = _source_ref_error(candidate) if candidate is not None else None
-        if problem:
-            console.print(f"[red]Error:[/red] {label}: {problem}")
-            raise typer.Exit(1)
-    resolved_source_ref = source_ref or config_source_ref
+    except ValueError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(1) from exc
     if source_pr is not None:
         # Resolved here, after the local checks above, so a run that would
         # fail on a bad secret, image tag or volume never pays the GitHub
         # round trip (and never burns anonymous API quota).
         resolved_source_ref = _resolve_pr_ref(source_pr)
 
-    config_payload = _hosted_config(raw_cfg)
+    config_payload = _hosted_config(
+        raw_cfg, get_console(stderr=True) if output == "json" else console
+    )
     _warn_legacy_full_finetune_type(raw_cfg, config_path)
 
     payload = build_payload_from_toml(
@@ -1001,20 +1006,17 @@ def validate_training_config(
             raw = toml.load(stream)
         if ref is not None and pr is not None:
             raise ValueError("--ref and --pr are mutually exclusive.")
-        source_ref = ref if ref is not None else raw.get("source_ref")
+        source_ref = _selected_source_ref(ref, raw.get("source_ref"), config_path)
         if pr is not None:
-            source_ref = _resolve_pr_ref(pr)
-        if source_ref is not None:
-            if not isinstance(source_ref, str):
-                raise ValueError("source_ref must be a string.")
-            if problem := _source_ref_error(source_ref):
-                raise ValueError(problem)
+            source_ref = resolve_pull_request_head(pr)
         selected_image = image_tag if image_tag is not None else raw.get("image_tag")
         if selected_image is not None and (
             not isinstance(selected_image, str) or not selected_image.strip()
         ):
             raise ValueError("image_tag must be a non-empty string.")
-        config = _schema_input(_hosted_config(raw))
+        config = _schema_input(
+            _hosted_config(raw, get_console(stderr=True) if output == "json" else console)
+        )
         mode = "sft" if _is_sft(raw, flag=sft) else "rl"
         payload: dict[str, Any] = {"mode": mode, "teamId": Config().team_id}
         if selected_image is not None:

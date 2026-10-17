@@ -22,6 +22,54 @@ def restore_environments(orch, saved):
         orch["eval"] = saved["eval"]
 
 
+def check_deferred_settings(model, data, deferred, mode):
+    """Validate deferred blocks without their environment sources, which need plugins."""
+    probe = deepcopy(data)
+    blocks = {"orchestrator.eval": deferred["eval"]} if "eval" in deferred else {}
+    if mode == "sft":
+        blocks = dict(deferred)
+    for path, block in blocks.items():
+        *parents, name = path.split(".")
+        target = probe
+        for parent in parents:
+            target = target.setdefault(parent, {})
+        target[name] = (
+            {key: value for key, value in block.items() if key != "source"}
+            if isinstance(block, dict)
+            else block
+        )
+    if not blocks:
+        return
+    from pydantic import ValidationError
+
+    try:
+        model.model_validate(probe)
+        return
+    except ValidationError as exc:
+        errors = exc.errors(include_input=False)
+    except Exception:
+        return
+    prefixes = [tuple(path.split(".")) for path in blocks]
+    problems = [
+        error
+        for error in errors
+        if any(
+            len(error["loc"]) > len(prefix)
+            and tuple(error["loc"][: len(prefix)]) == prefix
+            and error["loc"][len(prefix)] != "source"
+            for prefix in prefixes
+        )
+    ]
+    if problems:
+        raise ValueError(format_errors(problems))
+
+
+def format_errors(errors):
+    return "Config validation failed:\n" + "\n".join(
+        f"{'.'.join(map(str, error['loc']))}: {error['msg']}" for error in errors
+    )
+
+
 def reject_launcher_only_settings(config):
     if config.clean:
         raise ValueError("clean = true is unsupported for hosted runs: start a new run instead.")
@@ -66,6 +114,7 @@ def normalize(request):
     config = model.model_validate(data)
     if request["mode"] == "rl":
         reject_launcher_only_settings(config)
+    check_deferred_settings(model, data, deferred, request["mode"])
     if request["mode"] == "sft":
         components = {"trainer": config.model_dump(mode="json") | deferred}
     else:
@@ -108,10 +157,7 @@ def main():
         from pydantic import ValidationError
 
         if isinstance(exc, ValidationError):
-            error = "Config validation failed:\n" + "\n".join(
-                f"{'.'.join(map(str, item['loc']))}: {item['msg']}"
-                for item in exc.errors(include_input=False)
-            )
+            error = format_errors(exc.errors(include_input=False))
         else:
             error = str(exc)
         print(json.dumps({"error": error}))

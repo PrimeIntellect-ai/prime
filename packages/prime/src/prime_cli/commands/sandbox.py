@@ -541,13 +541,24 @@ def _lan_error(exc: Exception) -> None:
 def lan_create(
     name: str,
     team_id: Optional[str] = typer.Option(None, "--team-id", help="Create the network for a team"),
+    rule: Optional[List[str]] = typer.Option(
+        None,
+        "--rule",
+        "-r",
+        help="Allow rule FROM->TO[@PORT,...] with selectors '*' or 'tag:NAME', "
+        "e.g. 'tag:web->tag:db@5432', in force before any member joins. Repeatable.",
+    ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """Create a network; by default all members reach each other on every port."""
+    """Create a network. Without --rule, it starts with the platform's default rules:
+    none, so no member reaches another (older platforms let every member reach every
+    other)."""
     validate_output_format(output, console)
     try:
-        _print_lan_network(SandboxClient(APIClient()).create_lan_network(name, team_id), output)
-    except APIError as exc:
+        rules = [_parse_lan_rule(r) for r in rule] if rule else None
+        network = SandboxClient(APIClient()).create_lan_network(name, team_id, rules=rules)
+        _print_lan_network(network, output)
+    except (ValueError, APIError) as exc:
         _lan_error(exc)
 
 

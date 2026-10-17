@@ -907,3 +907,46 @@ def test_worker_imports_only_what_the_schema_interpreter_provides():
     ]
     assert relative == []
     assert imported - sys.stdlib_module_names == {"prime_rl", "pydantic"}
+
+
+def test_deferred_eval_settings_are_checked_without_their_sources(fake_schema):
+    from prime_cli.utils import training_schema_worker as worker
+    from pydantic import BaseModel, ConfigDict, model_validator
+
+    class Strict(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+    class Eval(Strict):
+        interval: int = 1
+        source: list[dict] = []
+
+        @model_validator(mode="after")
+        def needs_source_plugins(self):
+            if not self.source:
+                raise ValueError("At least one eval source is required.")
+            raise ValueError("taskset 'reverse-text' not found")
+
+    class Orchestrator(Strict):
+        eval: Eval | None = None
+
+    class Deployment(Strict):
+        type: str = "single_node"
+
+    class RL(Strict):
+        deployment: Deployment = Deployment()
+        trainer: Strict = Strict()
+        orchestrator: Orchestrator = Orchestrator()
+        inference: Strict | None = None
+        clean: bool = False
+
+    sys.modules["prime_rl.configs.rl"].RLConfig = RL
+    request = {"mode": "rl", "schema_commit": "a" * 40}
+    source = [{"name": "reverse-text"}]
+    artifact = worker.normalize(
+        {**request, "config": {"orchestrator": {"eval": {"interval": 10, "source": source}}}}
+    )
+    assert artifact["components"]["orchestrator"] == {"eval": {"interval": 10, "source": source}}
+    with pytest.raises(ValueError, match=r"orchestrator\.eval\.intervall: Extra inputs"):
+        worker.normalize(
+            {**request, "config": {"orchestrator": {"eval": {"intervall": 10, "source": source}}}}
+        )

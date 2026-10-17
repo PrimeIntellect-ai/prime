@@ -4,6 +4,7 @@ import tarfile
 import pytest
 from prime_cli.commands.images import PACKAGED_DOCKERFILE_PATH
 from prime_cli.main import app
+from prime_cli.utils import strip_ansi
 from typer.testing import CliRunner
 
 runner = CliRunner()
@@ -15,16 +16,17 @@ TEST_ENV = {
 }
 
 
-def test_push_help_documents_amd64_and_docker_hub_contract(monkeypatch):
+def test_push_help_documents_arch_and_docker_hub_contract(monkeypatch):
     monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
 
     result = runner.invoke(app, ["images", "push", "--help"], env=TEST_ENV)
 
     assert result.exit_code == 0, result.output
-    assert "linux/amd64" in result.output
-    assert "linux/arm64" not in result.output
-    assert "Docker Hub" in result.output
-    assert "platform images" in result.output
+    output = strip_ansi(result.output)
+    assert "--arch" in output
+    assert "arm64" in output
+    assert "Docker Hub" in output
+    assert "platform images" in output
 
 
 def test_push_image_defaults_dockerfile_to_context(tmp_path, monkeypatch):

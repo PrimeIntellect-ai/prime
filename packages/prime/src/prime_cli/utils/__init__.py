@@ -4,6 +4,7 @@
 from .config import BaseConfig, load_toml
 from .context import require_persistent_context
 from .display import (
+    api_detail,
     build_table,
     get_eval_viewer_url,
     output_data_as_json,
@@ -32,6 +33,7 @@ from .prompt import (
 from .time_utils import human_age, iso_timestamp, sort_by_created
 
 __all__ = [
+    "api_detail",
     "output_data_as_json",
     "validate_output_format",
     "build_table",

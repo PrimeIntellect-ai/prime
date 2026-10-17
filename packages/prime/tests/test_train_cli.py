@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from prime_cli.core import APIError
 from prime_cli.main import app
 from typer.testing import CliRunner
 
@@ -313,6 +314,38 @@ def test_train_stop_survives_any_poll_api_error(monkeypatch) -> None:
     assert "Error:" not in result.output
 
 
+PAUSE_CONFLICT = "Run run-1 cannot pause: its image predates pause support."
+
+
+@pytest.mark.parametrize(
+    ("response", "exit_code", "expected_output"),
+    [
+        ({"runId": "run-1", "status": "PAUSING"}, 0, "Status: PAUSING"),
+        (APIError(f"HTTP 409: {PAUSE_CONFLICT}"), 1, f"Error: {PAUSE_CONFLICT}"),
+    ],
+)
+def test_train_pause(monkeypatch, response, exit_code, expected_output) -> None:
+    calls: list[tuple[str, str]] = []
+
+    def mock_request(self, method, endpoint, params=None, json=None, timeout=None):
+        calls.append((method, endpoint))
+        if isinstance(response, APIError):
+            raise response
+        return response
+
+    monkeypatch.setattr("prime_cli.core.client.APIClient.request", mock_request)
+
+    result = runner.invoke(
+        app,
+        ["train", "pause", "run-1", "--force"],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key", "COLUMNS": "200"},
+    )
+
+    assert result.exit_code == exit_code, result.output
+    assert expected_output in result.output
+    assert calls == [("POST", "/training/runs/run-1/pause")]
+
+
 _FFT_BODY = (
     '[model]\nname = "Qwen/Qwen3-0.6B"\n\n[deployment]\nnum_train_gpus = 1\nnum_infer_gpus = 1\n'
 )
@@ -390,6 +423,54 @@ def _run_volume(tmp_path: Path, *extra: str, toml_extra: str = ""):
         "[deployment]\nnum_train_gpus = 1\nnum_infer_gpus = 1\n"
     )
     return runner.invoke(app, ["train", str(cfg), "--volume", "ckpts", "-y", *extra], env=TEST_ENV)
+
+
+def test_train_resume_from_never_creates_a_volume(monkeypatch, tmp_path: Path) -> None:
+    creates, dispatched = _mock_volumes(monkeypatch, [])
+
+    result = _run_volume(tmp_path, "--resume-from", "paused-1", "-o", "json")
+
+    assert result.exit_code == 0, result.output
+    assert creates == []
+    assert [(p["resumeFrom"], p["volume"]) for p in dispatched] == [("paused-1", "ckpts")]
+
+
+@pytest.mark.parametrize("resume_from", ["", "  "])
+def test_train_resume_from_rejects_an_empty_id(monkeypatch, tmp_path: Path, resume_from) -> None:
+    captured = _capture_fft_dispatch(monkeypatch)
+    cfg = tmp_path / "rl.toml"
+    cfg.write_text(_FFT_BODY)
+
+    result = runner.invoke(
+        app, ["train", str(cfg), "--resume-from", resume_from, "-y"], env=TEST_ENV
+    )
+
+    assert result.exit_code == 1, result.output
+    assert "--resume-from needs the ID of a PAUSED run" in result.output
+    assert captured == []
+
+
+def test_train_resume_from_a_pausing_run_shows_the_detail(monkeypatch, tmp_path: Path) -> None:
+    detail = "Run paused-1 is PAUSING; only a paused run can be resumed."
+
+    def create_run(self, payload):
+        raise APIError(f"HTTP 400: {detail}")
+
+    monkeypatch.setattr("prime_cli.api.training.HostedTrainingClient.create_run", create_run)
+    cfg = tmp_path / "rl.toml"
+    cfg.write_text(_FFT_BODY)
+
+    result = runner.invoke(
+        app,
+        ["train", str(cfg), "--resume-from", "paused-1", "-y"],
+        env={**TEST_ENV, "COLUMNS": "200"},
+    )
+
+    assert result.exit_code == 1, result.output
+    assert result.output.splitlines() == [
+        f"Error: {detail}",
+        "Tip: a run resumes once `prime train get paused-1` shows PAUSED",
+    ]
 
 
 def test_train_volume_exists_does_not_create(monkeypatch, tmp_path: Path) -> None:
@@ -496,7 +577,7 @@ def test_train_pr_flag_resolves_head_sha_and_conflicts_with_ref(
         seen.append(pr_number)
         return sha
 
-    monkeypatch.setattr("prime_cli.api.training.resolve_pull_request_head", fake_resolve)
+    monkeypatch.setattr("prime_cli.commands.rl.resolve_pull_request_head", fake_resolve)
     cfg = tmp_path / "rl.toml"
     cfg.write_text(_FFT_BODY)
     result = runner.invoke(app, ["train", str(cfg), "--pr", "42", "-y", "-o", "json"], env=TEST_ENV)
@@ -517,13 +598,13 @@ def test_train_pr_flag_resolves_head_sha_and_conflicts_with_ref(
     def never(pr_number: int) -> str:
         raise AssertionError("resolved a PR for a dispatch that fails locally")
 
-    monkeypatch.setattr("prime_cli.api.training.resolve_pull_request_head", never)
+    monkeypatch.setattr("prime_cli.commands.rl.resolve_pull_request_head", never)
     result = runner.invoke(
         app, ["train", str(cfg), "--pr", "42", "-e", "FOO=bar", "-y"], env=TEST_ENV
     )
     assert result.exit_code == 1
     assert "secret(s): FOO" in result.output
-    monkeypatch.setattr("prime_cli.api.training.resolve_pull_request_head", fake_resolve)
+    monkeypatch.setattr("prime_cli.commands.rl.resolve_pull_request_head", fake_resolve)
 
     result = runner.invoke(
         app, ["train", str(cfg), "--pr", "42", "--ref", "main", "-y"], env=TEST_ENV
@@ -600,7 +681,7 @@ def test_train_source_overlay_reaches_the_sft_payload(monkeypatch, tmp_path: Pat
     # are forwarded there too (never silently dropped).
     captured = _capture_fft_dispatch(monkeypatch)
     sha = "0123456789abcdef0123456789abcdef01234567"
-    monkeypatch.setattr("prime_cli.api.training.resolve_pull_request_head", lambda pr_number: sha)
+    monkeypatch.setattr("prime_cli.commands.rl.resolve_pull_request_head", lambda pr_number: sha)
     cfg = tmp_path / "sft.toml"
     sft = '[model]\nname = "Qwen/Qwen3-0.6B"\n\n[data]\nname = "/volume/datasets/x"\n'
     cfg.write_text(sft)

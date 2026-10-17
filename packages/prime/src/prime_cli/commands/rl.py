@@ -12,15 +12,23 @@ import toml
 import typer
 from click.exceptions import Abort
 from rich.markup import escape as rich_escape
+from rich.padding import Padding
 from rich.table import Table
+from rich.text import Text
 
 from prime_cli.core import Config
 
 from ..api.rl import EnvServerInfo, RLClient, RLRun
+from ..api.training import (
+    HostedTrainingClient,
+    build_payload_from_toml,
+    resolve_pull_request_head,
+)
 from ..client import APIClient, APIError
 from ..utils import (
     DefaultCommandGroup,
     PlainTyper,
+    api_detail,
     get_console,
     json_help,
     json_output_help,
@@ -97,12 +105,12 @@ VOLUME_READY_POLL_SECONDS = 3
 VOLUME_READY_MAX_SECONDS = 180
 VOLUME_DEFAULT_SIZE = "5Ti"  # same default as `prime volumes create`
 
-TERMINAL_RUN_STATUSES = {"STOPPED", "FAILED", "COMPLETED"}
+TERMINAL_RUN_STATUSES = {"STOPPED", "FAILED", "COMPLETED", "PAUSED"}
 
 # Log level colors for rich console
 LEVEL_STYLES = {
     "DEBUG": "dim",
-    "INFO": "blue",
+    "INFO": "",
     "WARNING": "yellow",
     "WARN": "yellow",
     "ERROR": "red",
@@ -113,6 +121,10 @@ LEVEL_STYLES = {
 
 # Sentinel to indicate "this is JSON but should be skipped"
 _SKIP_LINE = "__SKIP__"
+
+# The API marks admin-visible infrastructure lines; torchrun and vLLM/Ray
+# can also prepend rank/process context before the JSON envelope.
+_LOG_PREFIX = re.compile(r"^(?:\[adminlog\]\s+|\[[a-zA-Z_]+\d+\]:\s*|\(\w+ pid=\d+\)\s+)")
 
 _MODEL_PARAM_COUNT_PATTERN = re.compile(
     r"-(?P<total>\d+(?:\.\d)?)[bB](?:-[aA](?P<active>\d+(?:\.\d)?)[bB])?(?=$|-)"
@@ -147,7 +159,11 @@ def format_json_log_line(line: str) -> str | None:
         - _SKIP_LINE sentinel for JSON logs that should be filtered (e.g., progress)
         - None if not a valid JSON log (falls back to legacy handling)
     """
-    trimmed = line.strip()
+    trimmed = strip_ansi(line).strip()
+    prefixes = []
+    while match := _LOG_PREFIX.match(trimmed):
+        prefixes.append(match.group().rstrip().removesuffix(":"))
+        trimmed = trimmed[match.end() :]
     if not trimmed.startswith("{") or not trimmed.endswith("}"):
         return None
 
@@ -155,32 +171,68 @@ def format_json_log_line(line: str) -> str | None:
         entry = json.loads(trimmed)
         if not isinstance(entry, dict):
             return None
-        if "timestamp" not in entry or "level" not in entry:
+        timestamp = entry.get("timestamp")
+        level = entry.get("level")
+        if not isinstance(timestamp, str) or not isinstance(level, str):
+            return None
+        if not timestamp or not level:
             return None
 
         # Skip progress logs in CLI - they're too spammy
         if entry.get("type") == "progress":
             return _SKIP_LINE
+        if "message" not in entry:
+            return None
 
         # Format timestamp (extract time portion)
-        timestamp = entry.get("timestamp", "")
         if "T" in timestamp:
             time_part = timestamp.split("T")[1][:8]  # HH:MM:SS
         else:
             time_part = timestamp[:8]
 
-        level = str(entry.get("level", "INFO")).upper()
-        message = rich_escape(str(entry.get("message", "")))
+        level = level.upper()
+        message = entry["message"]
+        if not isinstance(message, str):
+            message = json.dumps(message, ensure_ascii=False)
+        # Match prime-rl's time / padded level / source / message layout.
+        # Keep distinct process/rank prefixes and tags; they need not identify
+        # the same worker, even when their numeric suffixes happen to match.
+        metadata = {
+            key: value
+            for key, value in entry.items()
+            if key not in {"timestamp", "level", "message"}
+        }
+        if entry.get("tag") is not None:
+            tag = metadata.pop("tag")
+            if not isinstance(tag, str):
+                tag = json.dumps(tag, ensure_ascii=False)
+            prefixes.append(f"[{tag}]")
 
-        # Get style for level
+        exception = entry.get("exception")
+        if exception:
+            metadata.pop("exception")
+            if not isinstance(exception, str):
+                exception = json.dumps(exception, ensure_ascii=False)
+
+        # Diagnostic data stays visible, but off the main message row. Retain
+        # source-location and unfamiliar fields rather than silently omitting
+        # them to make the output shorter.
+        context = f"[dim]{rich_escape(' '.join(prefixes))}[/dim] " if prefixes else ""
+        safe_level = rich_escape(f"{level:>7}")
         style = LEVEL_STYLES.get(level, "")
-
         if style:
-            return f"[dim]{time_part}[/dim] [{style}]\\[{level}][/{style}] {message}"
-        else:
-            return f"[dim]{time_part}[/dim] \\[{level}] {message}"
+            safe_level = f"[{style}]{safe_level}[/{style}]"
+        message = rich_escape(message).replace("\n", "\n    ")
+        rendered = f"[dim]{rich_escape(time_part)}[/dim] {safe_level} {context}{message}"
+        if metadata:
+            rendered += f"\n    [dim]{rich_escape(json.dumps(metadata, ensure_ascii=False))}[/dim]"
+        if exception:
+            rendered += "\n    " + rich_escape(exception.replace("\n", "\n    "))
+        return rendered
 
-    except (json.JSONDecodeError, TypeError, KeyError):
+    except (ValueError, RecursionError, TypeError, KeyError):
+        # JSONDecodeError is a ValueError; oversized integers and deeply
+        # nested records can also exceed the decoder/encoder limits.
         return None
 
 
@@ -211,7 +263,7 @@ def clean_logs(text: str) -> list[str]:
                 if "100%" not in cleaned:
                     continue
             if cleaned.strip():
-                formatted_lines.append(cleaned)
+                formatted_lines.append(rich_escape(cleaned))
 
     return formatted_lines
 
@@ -354,8 +406,6 @@ def _resolve_pr_ref(pr_number: int) -> str:
     Resolved client-side so the run is pinned to the exact commit the user
     saw, and so a fork or merged PR fails here with an actionable message.
     The caller shows the sha in its pre-confirmation banner."""
-    from ..api.training import resolve_pull_request_head
-
     try:
         return resolve_pull_request_head(pr_number)
     except APIError as e:
@@ -378,6 +428,7 @@ def _dispatch_dedicated_run(
     mode: Optional[str] = None,
     source_ref: Optional[str] = None,
     source_pr: Optional[int] = None,
+    resume_from: Optional[str] = None,
 ) -> None:
     """Hand off to /api/v1/training/runs (prime-rl on a registered
     PrimeCluster). Serves both dedicated run kinds: full-FT RL mega-TOMLs
@@ -387,8 +438,6 @@ def _dispatch_dedicated_run(
     Backend always auto-picks the first uncordoned PrimeCluster — the
     CLI never threads a cluster id, so a config that targets the wrong
     cluster can't be a footgun."""
-    from ..api.training import HostedTrainingClient, build_payload_from_toml
-
     name = raw_cfg.get("name")
 
     # Link the dispatched run to the user's active team. Without this, the
@@ -586,6 +635,7 @@ def _dispatch_dedicated_run(
         volume=resolved_volume,
         mode=mode,
         source_ref=resolved_source_ref,
+        resume_from=resume_from,
     )
 
     # Surface the image + source pins before the confirmation so a typo'd
@@ -626,7 +676,9 @@ def _dispatch_dedicated_run(
     # to a plain print in --plain mode, which would emit "Creating Hosted
     # Training run..." on stdout ahead of the JSON payload and break
     # automation parsing of run_id.
-    if resolved_volume:
+    # A resume runs on the paused run's volume, which the platform attaches
+    # and checks against any volume given here, so none is created for it.
+    if resolved_volume and not resume_from:
         _ensure_volume(client, resolved_volume, team_id, output, size=resolved_volume_size)
     status_ctx = (
         console.status("[bold blue]Creating Hosted Training run...", spinner="dots")
@@ -637,7 +689,12 @@ def _dispatch_dedicated_run(
         with status_ctx:
             result = client.create_run(payload)
     except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {rich_escape(api_detail(e))}")
+        if resume_from:
+            console.print(
+                f"[yellow]Tip:[/yellow] a run resumes once "
+                f"`prime train get {resume_from}` shows PAUSED"
+            )
         raise typer.Exit(1)
 
     if output == "json":
@@ -753,6 +810,8 @@ RUN_STATUS_COLORS = {
     "COMPLETED": "cyan",
     "FAILED": "red",
     "STOPPED": "magenta",
+    "PAUSING": "yellow",
+    "PAUSED": "blue",
 }
 
 
@@ -985,6 +1044,14 @@ def create_run(
             "--volume, only fake datasets work."
         ),
     ),
+    resume_from: Optional[str] = typer.Option(
+        None,
+        "--resume-from",
+        help=(
+            "ID of a PAUSED run to continue from its checkpoint. The new run "
+            "uses the paused run's volume; --volume, if given, must name it."
+        ),
+    ),
 ) -> None:
     """Launch a Hosted Training run from a config file.
 
@@ -1007,6 +1074,9 @@ def create_run(
         raise typer.Exit(1)
     if ref is not None and pr is not None:
         console.print("[red]Error:[/red] --ref and --pr are mutually exclusive.")
+        raise typer.Exit(1)
+    if resume_from is not None and not resume_from.strip():
+        console.print("[red]Error:[/red] --resume-from needs the ID of a PAUSED run.")
         raise typer.Exit(1)
 
     raw_cfg = _load_toml(config_path)
@@ -1054,6 +1124,7 @@ def create_run(
         mode=mode,
         source_ref=ref,
         source_pr=pr,
+        resume_from=resume_from,
     )
 
 
@@ -1075,8 +1146,6 @@ def list_models(
     reported as backend data; unknown (field absent) is treated as no
     signal, never as a denial.
     """
-    from ..api.training import HostedTrainingClient
-
     validate_output_format(output, console)
 
     try:
@@ -1227,8 +1296,6 @@ def list_gpus(
     personal allocations. Pass any value to `prime train run
     --gpu-type <value>` to steer dispatch.
     """
-    from ..api.training import HostedTrainingClient
-
     validate_output_format(output, console)
 
     try:
@@ -1564,6 +1631,34 @@ def stop_run(
         raise typer.Exit(1)
 
 
+@app.command("pause", rich_help_panel="Commands")
+def pause_run(
+    run_id: str = typer.Argument(..., help="Run ID to pause"),
+    force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation"),
+) -> None:
+    """Pause a Hosted Training run at a checkpoint and release its GPUs.
+
+    A paused run cannot be unpaused; continue it with
+    `prime train <config> --resume-from <run_id>`.
+    """
+    if not force and not typer.confirm(f"Are you sure you want to pause run {run_id}?"):
+        console.print("Cancelled.")
+        raise typer.Exit(0)
+
+    try:
+        result = HostedTrainingClient(APIClient()).pause_run(run_id)
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {rich_escape(api_detail(e))}")
+        raise typer.Exit(1)
+
+    status = result["status"]
+    color = _get_status_color(status)
+    console.print(f"[green]✓ Run {run_id} is pausing[/green]")
+    console.print(f"Status: [{color}]{status}[/{color}]")
+    console.print(f"Check progress with: prime train get {run_id}")
+    console.print(f"Once PAUSED, resume with: prime train <config> --resume-from {run_id}")
+
+
 @app.command("delete", rich_help_panel="Commands")
 def delete_run(
     run_id: str = typer.Argument(..., help="Run ID to delete"),
@@ -1634,7 +1729,33 @@ def restart_run(
         raise typer.Exit(1)
 
 
-def _print_new_lines(last_lines: list[str], current_lines: list[str]) -> None:
+def _print_formatted_log_line(line: str) -> None:
+    first, *continuations = line.split("\n")
+    # Parse our escaped markup exactly once. PrimeConsole's --plain path
+    # otherwise re-parses renderables and expands literal emoji tokens.
+    console.print(Text.from_markup(first, emoji=False), markup=False, highlight=False, emoji=False)
+    for continuation in continuations:
+        # Padding also applies to physical wraps, unlike leading spaces in a
+        # string. Keep long diagnostic/traceback rows under their own record.
+        content = continuation[4:] if continuation.startswith("    ") else continuation
+        console.print(
+            Padding(Text.from_markup(content, emoji=False), (0, 0, 0, 4)),
+            markup=False,
+            highlight=False,
+            emoji=False,
+        )
+
+
+def _print_log_lines(lines: list[str], raw: bool) -> None:
+    if raw:
+        for line in lines:
+            console.print(line, markup=False, highlight=False, emoji=False, soft_wrap=True)
+    else:
+        for line in clean_logs("\n".join(lines)):
+            _print_formatted_log_line(line)
+
+
+def _print_new_lines(last_lines: list[str], current_lines: list[str], raw: bool = False) -> None:
     """Print only lines in current_lines that aren't in the tail of last_lines.
 
     Uses suffix-prefix overlap detection to avoid reprinting lines between polls.
@@ -1642,16 +1763,14 @@ def _print_new_lines(last_lines: list[str], current_lines: list[str]) -> None:
     if current_lines == last_lines:
         return
     if not last_lines:
-        for line in current_lines:
-            console.print(line)
+        _print_log_lines(current_lines, raw)
         return
     overlap = 0
     max_overlap = min(len(last_lines), len(current_lines))
     for i in range(1, max_overlap + 1):
         if last_lines[-i:] == current_lines[:i]:
             overlap = i
-    for line in current_lines[overlap:]:
-        console.print(line)
+    _print_log_lines(current_lines[overlap:], raw)
 
 
 def _is_log_startup_error(error: APIError) -> bool:
@@ -1700,11 +1819,6 @@ def _stream_logs(
 ) -> None:
     """Common print loop for orchestrator and env-server log fetches."""
 
-    def render(raw_logs: str) -> list[str]:
-        if raw:
-            return raw_logs.splitlines()
-        return clean_logs(raw_logs)
-
     if follow:
         console.print(f"[dim]Watching {label} logs... (Ctrl+C to stop)[/dim]\n")
         last_lines: list[str] = []
@@ -1731,16 +1845,21 @@ def _stream_logs(
                     continue
                 raise
 
-            current_lines = render(raw_logs)
-            _print_new_lines(last_lines, current_lines)
+            # Compare original records before presentation removes timestamp
+            # precision or filters progress lines from the polling window.
+            current_lines = raw_logs.splitlines()
+            _print_new_lines(last_lines, current_lines, raw)
             last_lines = current_lines
             time.sleep(HOSTED_TRAINING_LOG_FOLLOW_POLL_SECONDS)
     else:
         raw_logs = _fetch_logs_with_startup_poll(fetch_fn, tail, label)
-        rendered = render(raw_logs)
+        rendered = raw_logs.splitlines() if raw else clean_logs(raw_logs)
         if rendered:
             for line in rendered:
-                console.print(line)
+                if raw:
+                    console.print(line, markup=False, highlight=False, emoji=False, soft_wrap=True)
+                else:
+                    _print_formatted_log_line(line)
         else:
             console.print("[yellow]No logs available yet.[/yellow]")
 
@@ -1875,7 +1994,9 @@ def get_logs(
         ),
     ),
     follow: bool = typer.Option(False, "--follow", "-f", help="Follow log output"),
-    raw: bool = typer.Option(False, "--raw", "-r", help="Show raw logs without formatting"),
+    raw: bool = typer.Option(
+        False, "--raw", "-r", help="Show original log lines (including JSON) without formatting"
+    ),
     search: Optional[str] = typer.Option(
         None,
         "--search",
@@ -1913,6 +2034,9 @@ def get_logs(
 
     List available pods first with ``prime train components <run_id>``.
 
+    JSON logs render as readable text by default. Use ``--raw`` to
+    preserve the original lines, including JSON and process prefixes.
+
     Per-rank narrowing on multi-replica trainer/inference is not yet
     surfaced here: the chart's default torchrun passes
     `--local-ranks-filter=0` (ENG-6449), so each node's logs collapse to
@@ -1929,6 +2053,7 @@ def get_logs(
 
         prime train logs <run_id>
         prime train logs <run_id> -f
+        prime train logs <run_id> --raw
         prime train logs <run_id> --search Backpressure
         prime train logs <run_id> --level ERROR --since 1h
         prime train logs <run_id> --search 'Step \\d+' --regex

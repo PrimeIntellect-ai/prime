@@ -234,6 +234,9 @@ class HostedTrainingClient:
         response = self.client.request("DELETE", f"/training/runs/{run_id}")
         return response if isinstance(response, dict) else {"runId": run_id}
 
+    def pause_run(self, run_id: str) -> Dict[str, Any]:
+        return self.client.post(f"/training/runs/{run_id}/pause")
+
     def create_volume(
         self,
         name: str,
@@ -504,6 +507,7 @@ def build_payload_from_toml(
     volume: Optional[str] = None,
     mode: Optional[str] = None,
     source_ref: Optional[str] = None,
+    resume_from: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build the /v1/training/runs payload from a prime-rl-style TOML dict.
 
@@ -535,6 +539,8 @@ def build_payload_from_toml(
       - source_ref: a prime-rl git ref (branch / tag / sha) the pods
         overlay onto the image at startup, for testing unmerged code
         without an image build. The platform pins the resolved commit.
+      - resume_from: a PAUSED run to continue from. The platform attaches
+        that run's volume when none is given.
 
     Cluster targeting is backend-side (auto-pick first uncordoned).
     """
@@ -557,4 +563,6 @@ def build_payload_from_toml(
         payload["volume"] = volume
     if source_ref:
         payload["sourceRef"] = source_ref
+    if resume_from is not None:
+        payload["resumeFrom"] = resume_from
     return payload

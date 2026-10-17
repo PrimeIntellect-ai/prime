@@ -41,6 +41,7 @@ from prime_cli.volume_gateway import GatewayError, relay
 
 from ..utils import (
     PlainTyper,
+    api_detail,
     confirm_or_skip,
     get_console,
     human_age,
@@ -417,7 +418,7 @@ def _open_session(
         except APIError as exc:
             # 409: one read-write session per volume (someone else's is live,
             # or an upload is in progress). Reported as is, never retried.
-            detail = str(exc).removeprefix("HTTP 409: ")
+            detail = api_detail(exc)
             console.print(f"[red]Error:[/red] {escape(detail)}")
             if from_ssh and not read_only and "active read-write session" in detail:
                 console.print(
@@ -816,11 +817,6 @@ def _refuse_bad_local(local: str, upload: bool) -> None:
         raise typer.Exit(1)
 
 
-def _api_detail(exc: APIError) -> str:
-    """The route's detail without the "HTTP 400: " / "HTTP 409: " prefix."""
-    return re.sub(r"^HTTP (400|409): ", "", str(exc))
-
-
 def _transfer(
     name: str, read_only: bool, remote: str, local: str, upload: bool, direct: bool
 ) -> None:
@@ -838,7 +834,7 @@ def _transfer(
         # 409 (single writer: another read-write session or an upload is
         # live, or yours uses an old key) or 400 (e.g. a root put's
         # entries refused): report it; only a 404 falls back.
-        console.print(f"[red]Error:[/red] {escape(_api_detail(exc))}")
+        console.print(f"[red]Error:[/red] {escape(api_detail(exc))}")
         raise typer.Exit(1) from exc
     if route is not None and route.via == "r2":
         _r2_transfer(client, name, team_id, route, rel, local, upload, entries)
@@ -954,7 +950,7 @@ def _r2_client(refresh, route):
         try:
             r = refresh()
         except APIError as exc:
-            raise RuntimeError(_api_detail(exc)) from exc
+            raise RuntimeError(api_detail(exc)) from exc
         if r.via != "r2":
             raise RuntimeError("a session started on the volume; rerun the command")
         return metadata(r)
@@ -1230,7 +1226,7 @@ def _read_route(client, name: str, team_id):
     try:
         route = client.route_volume_transfer(name, "get", "", None, team_id=team_id)
     except APIError as exc:
-        raise RuntimeError(_api_detail(exc)) from exc
+        raise RuntimeError(api_detail(exc)) from exc
     if route.via != "r2":
         raise RuntimeError("a session started on the volume; rerun the command")
     return route
@@ -1265,7 +1261,7 @@ def _volume_reads(name: str, path: str):
         raise
     except (APIError, BotoCoreError, ClientError, OSError, RuntimeError, ValueError) as exc:
         err_console.print(
-            f"Error: {_api_detail(exc) if isinstance(exc, APIError) else exc}",
+            f"Error: {api_detail(exc) if isinstance(exc, APIError) else exc}",
             markup=False,
             highlight=False,
             soft_wrap=True,

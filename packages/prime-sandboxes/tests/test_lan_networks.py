@@ -1,10 +1,12 @@
 """Tests for the sandbox LAN network SDK surface."""
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from prime_sandboxes.core import APIError
 from prime_sandboxes.models import LanNetwork, LanRule
 from prime_sandboxes.sandbox import AsyncSandboxClient, SandboxClient
 
@@ -105,7 +107,7 @@ def test_wait_for_creation_joins_pending_lan():
     client._pending_lan_joins = {"sbx1": ("net1", ["web"])}
     client._sandbox_status_batcher = MagicMock()
     client._sandbox_status_batcher.get.return_value = SimpleNamespace(status="RUNNING")
-    client._poll_leases = MagicMock()
+    client._poll_leases = client._operation_leases = MagicMock()
     client._is_sandbox_reachable = lambda sid: True
     client._join_lan = MagicMock()
     client.wait_for_creation("sbx1")
@@ -118,6 +120,7 @@ def test_wait_for_creation_joins_pending_lan():
 def test_failed_join_stays_pending_for_retry():
     client = _sync_client(None)
     client._pending_lan_joins = {"sbx1": ("net1", None)}
+    client._operation_leases = MagicMock()
     client._join_lan = MagicMock(side_effect=TimeoutError("not synced"))
     with pytest.raises(TimeoutError):
         client._join_pending_lan(["sbx1", "sbx2"])
@@ -128,6 +131,7 @@ def test_failed_join_stays_pending_for_retry():
 async def test_async_join_pending_lan():
     client = object.__new__(AsyncSandboxClient)
     client._pending_lan_joins = {"sbx1": ("net1", None), "sbx2": ("net1", ["db"])}
+    client._operation_leases = MagicMock()
     client._join_lan = AsyncMock()
     await client._join_pending_lan(["sbx1", "sbx2", "sbx3"])
     assert client._join_lan.await_count == 2
@@ -150,9 +154,126 @@ def test_join_lan_polls_until_synced(monkeypatch):
     assert client.get_lan_network.call_count == 2
 
 
+def test_join_lan_waits_for_the_network_rules(monkeypatch):
+    # The member is pushed, but the network's new rules are not yet: the VM layer
+    # still lets every member reach every other.
+    monkeypatch.setattr("prime_sandboxes.sandbox.time.sleep", lambda s: None)
+    client = _sync_client({"sandbox_id": "sbx1", "tags": ["web"], "synced": True})
+    stale = {**NETWORK, "synced": False}
+    client.get_lan_network = MagicMock(
+        side_effect=[LanNetwork.model_validate(n) for n in (stale, NETWORK)]
+    )
+    client._join_lan("net1", "sbx1", ["web"])
+    assert client.get_lan_network.call_count == 2
+
+
 def test_join_lan_times_out(monkeypatch):
     monkeypatch.setattr("prime_sandboxes.sandbox.time.sleep", lambda s: None)
     monkeypatch.setattr("prime_sandboxes.sandbox._LAN_SYNC_TIMEOUT_SECONDS", -1)
-    client = _sync_client({"sandbox_id": "sbx1", "tags": [], "synced": False})
+    client = _sync_client({"sandbox_id": "sbx1", "tags": [], "synced": True})
+    client.get_lan_network = MagicMock(
+        return_value=LanNetwork.model_validate({**NETWORK, "synced": False})
+    )
     with pytest.raises(TimeoutError, match="not synced"):
         client._join_lan("net1", "sbx1", None)
+
+
+def test_join_lan_fails_if_the_member_left():
+    client = _sync_client({"sandbox_id": "sbx1", "tags": [], "synced": False})
+    client.get_lan_network = MagicMock(
+        return_value=LanNetwork.model_validate({**NETWORK, "members": []})
+    )
+    with pytest.raises(RuntimeError, match="left LAN network"):
+        client._join_lan("net1", "sbx1", None)
+
+
+@pytest.mark.asyncio
+async def test_async_join_lan_waits_for_the_network_rules(monkeypatch):
+    monkeypatch.setattr("prime_sandboxes.sandbox._LAN_SYNC_POLL_SECONDS", 0)
+    client = object.__new__(AsyncSandboxClient)
+    client.add_lan_member = AsyncMock()
+    stale = {**NETWORK, "synced": False}
+    client.get_lan_network = AsyncMock(
+        side_effect=[LanNetwork.model_validate(n) for n in (stale, NETWORK)]
+    )
+    await client._join_lan("net1", "sbx1", ["web"])
+    assert client.get_lan_network.await_count == 2
+
+
+def test_delete_drops_pending_lan_joins():
+    from prime_sandboxes.core import APIClient
+
+    client = SandboxClient(APIClient(api_key="test-key"))
+    client.client.request = MagicMock(
+        return_value={"succeeded": ["sbx2"], "failed": [{"sbx3": "busy"}], "message": "ok"}
+    )
+    client._pending_lan_joins.update(
+        {"sbx1": ("net1", None), "sbx2": ("net1", None), "sbx3": ("net1", None)}
+    )
+    client.delete("sbx1")
+    # sbx3 failed to delete, so it may still be waited on and join.
+    client.bulk_delete(sandbox_ids=["sbx2", "sbx3"])
+    assert client._pending_lan_joins == {"sbx3": ("net1", None)}
+
+
+@pytest.mark.asyncio
+async def test_async_delete_drops_pending_lan_joins():
+    client = AsyncSandboxClient(api_key="test-key")
+    client.client.request = AsyncMock(
+        return_value={"succeeded": ["sbx2"], "failed": [{"sbx3": "busy"}], "message": "ok"}
+    )
+    client._pending_lan_joins.update(
+        {"sbx1": ("net1", None), "sbx2": ("net1", None), "sbx3": ("net1", None)}
+    )
+    await client.delete("sbx1")
+    # sbx3 failed to delete, so it may still be waited on and join.
+    await client.bulk_delete(sandbox_ids=["sbx2", "sbx3"])
+    assert client._pending_lan_joins == {"sbx3": ("net1", None)}
+    await client.aclose()
+
+
+def test_a_failed_delete_keeps_the_pending_join():
+    from prime_sandboxes.core import APIClient
+
+    client = SandboxClient(APIClient(api_key="test-key"))
+    client.client.request = MagicMock(side_effect=RuntimeError("503"))
+    client._pending_lan_joins["sbx1"] = ("net1", None)
+    with pytest.raises(RuntimeError):
+        client.delete("sbx1")
+    assert client._pending_lan_joins == {"sbx1": ("net1", None)}
+
+
+@pytest.mark.asyncio
+async def test_a_delete_waits_for_a_join_in_flight():
+    client = AsyncSandboxClient(api_key="test-key")
+    client.client.request = AsyncMock(return_value={})
+    client._pending_lan_joins["sbx1"] = ("net1", None)
+    joining, release = asyncio.Event(), asyncio.Event()
+
+    async def join_lan(network_id, sandbox_id, tags):
+        joining.set()
+        await release.wait()
+
+    client._join_lan = join_lan
+    join = asyncio.create_task(client._join_pending_lan(["sbx1"]))
+    await joining.wait()
+    delete = asyncio.create_task(client.delete("sbx1"))
+    await asyncio.sleep(0.05)
+    client.client.request.assert_not_awaited()  # the delete waits for the join
+    release.set()
+    await asyncio.gather(join, delete)
+    client.client.request.assert_awaited_once_with("DELETE", "/sandbox/sbx1")
+    assert client._pending_lan_joins == {}
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_sandbox_being_deleted_does_not_join():
+    client = AsyncSandboxClient(api_key="test-key")
+    client._pending_lan_joins["sbx1"] = ("net1", None)
+    client._join_lan = AsyncMock()
+    await client._operation_leases.start_drain(["sbx1"])
+    with pytest.raises(APIError, match="being deleted"):
+        await client._join_pending_lan(["sbx1"])
+    client._join_lan.assert_not_awaited()
+    await client.aclose()

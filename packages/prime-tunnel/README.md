@@ -33,9 +33,9 @@ await tunnel.restart()
 ```
 
 A tunnel that was deleted, expired, or stayed disconnected for too long cannot
-be restarted: `restart()` raises `TunnelGoneError`, and `tunnel.is_gone` turns
-true as soon as the tunnel service rejects the client. Stop it and start a new
-tunnel, which gets a new URL. `await tunnel.status()` reports the client
+be restarted: `restart()` raises `TunnelGoneError`, and `tunnel.state` turns
+`TunnelState.DEAD` as soon as the tunnel service rejects the client. Stop it
+and start a new tunnel, which gets a new URL. `await tunnel.status()` reports the client
 process and the service's record of the tunnel:
 
 ```python
@@ -43,6 +43,43 @@ status = await tunnel.status()
 if status.gone:
     await tunnel.stop()
 ```
+
+### Keeping a tunnel up
+
+Pass `supervise=True` to have the tunnel watch and repair itself after
+`start()`. It restarts its client under the same URL when the client exits or
+when requests through the URL stop reaching your service, and it marks the
+tunnel dead when the registration is gone:
+
+```python
+tunnel = Tunnel(local_port=8765, supervise=True, on_state_change=print)
+await tunnel.start()
+
+if await tunnel.wait_dead():  # False if the tunnel was stopped instead
+    await tunnel.stop()
+    # start a new Tunnel; it gets a new URL
+```
+
+`tunnel.state` is `up`, `recovering`, `dead` or `stopped`, and
+`on_state_change` is called with each new state.
+
+The supervisor sends a GET through the URL every 15 seconds. It blames the
+tunnel only if the same request sent straight to your service succeeds, so a
+service that is down or returns errors itself does not cause restarts. Pass a
+`Supervision` instead of `True` to choose what it requests:
+
+```python
+from prime_tunnel import Supervision, Tunnel
+
+tunnel = Tunnel(
+    local_port=8765,
+    supervise=Supervision(probe_path="/health", probe_header="X-My-Service"),
+)
+```
+
+`probe_header` names a header your service sets on every response. A response
+without it is then known not to come from your service, whatever its status
+code.
 
 ## CLI Usage
 

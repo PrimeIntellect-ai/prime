@@ -1034,3 +1034,28 @@ def test_validate_json_output_stays_parseable(monkeypatch, tmp_path):
     )
     assert result.exit_code == 1
     assert json.loads(result.stdout) == {"error": "PR #42 is already merged"}
+
+
+@pytest.mark.parametrize(
+    ("toml_line", "message"),
+    [
+        ("image_tag = 1", "image_tag in {path} must be a string, got int."),
+        ("gpu_type = 2", "gpu_type in {path} must be a string, got int."),
+    ],
+)
+def test_validate_checks_toml_metadata_like_submission(monkeypatch, tmp_path, toml_line, message):
+    from prime_cli.api.training import HostedTrainingClient
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("an invalid TOML value must fail before preparation")
+
+    monkeypatch.setattr(HostedTrainingClient, "prepare_local_validation", forbidden)
+    config = tmp_path / "rl.toml"
+    config.write_text(f"{toml_line}\n[trainer]\nmax_steps = 2\n")
+    result = CliRunner().invoke(
+        app,
+        ["train", "validate", str(config), "--image-tag", "main", "-o", "json"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+    assert result.exit_code == 1
+    assert json.loads(result.stdout) == {"error": message.format(path=config)}

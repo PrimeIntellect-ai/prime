@@ -999,10 +999,10 @@ def validate_training_config(
     try:
         with config_path.open() as stream:
             raw = toml.load(stream)
+        if ref is not None and pr is not None:
+            raise ValueError("--ref and --pr are mutually exclusive.")
         source_ref = ref if ref is not None else raw.get("source_ref")
         if pr is not None:
-            if source_ref is not None:
-                raise ValueError("--pr cannot be combined with --ref or source_ref in the config.")
             source_ref = _resolve_pr_ref(pr)
         if source_ref is not None:
             if not isinstance(source_ref, str):

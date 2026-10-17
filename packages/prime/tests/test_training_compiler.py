@@ -950,3 +950,32 @@ def test_deferred_eval_settings_are_checked_without_their_sources(fake_schema):
         worker.normalize(
             {**request, "config": {"orchestrator": {"eval": {"intervall": 10, "source": source}}}}
         )
+
+
+def test_validate_pr_overrides_config_source_ref_like_submission(monkeypatch, tmp_path):
+    from prime_cli.api.training import HostedTrainingClient
+    from prime_cli.commands import rl
+
+    config = tmp_path / "rl.toml"
+    config.write_text('source_ref = "dev"\n[trainer]\nmax_steps = 2\n')
+    monkeypatch.setattr(rl, "Config", lambda: SimpleNamespace(team_id="team"))
+    monkeypatch.setattr(rl, "_resolve_pr_ref", lambda number: "b" * 40)
+    seen = []
+
+    def prepare(self, payload):
+        seen.append(payload)
+        return {"mode": "rl", "runtime": {"schema_commit": "b" * 40}}
+
+    monkeypatch.setattr(HostedTrainingClient, "prepare_local_validation", prepare)
+    monkeypatch.setattr(
+        training_compiler, "compile_locally", lambda *a, **kw: {"schema_commit": "b" * 40}
+    )
+    env = {"PRIME_DISABLE_VERSION_CHECK": "1"}
+    result = CliRunner().invoke(app, ["train", "validate", str(config), "--pr", "42"], env=env)
+    assert result.exit_code == 0, result.output
+    assert seen == [{"mode": "rl", "teamId": "team", "sourceRef": "b" * 40}]
+    result = CliRunner().invoke(
+        app, ["train", "validate", str(config), "--pr", "42", "--ref", "main"], env=env
+    )
+    assert result.exit_code == 1
+    assert "--ref and --pr are mutually exclusive." in result.output

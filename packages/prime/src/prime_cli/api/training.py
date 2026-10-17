@@ -1,4 +1,4 @@
-"""Hosted full-FT training API client (POST/DELETE /v1/training/runs).
+"""Hosted Training API client (POST/DELETE /v1/training/runs).
 
 Sibling to api/rl.py — that's the LoRA-shared path. This client speaks to
 the dedicated full-parameter prime-rl endpoint where each run gets its
@@ -58,7 +58,7 @@ class AvailableGpuTypesResponse(BaseModel):
 
 
 class FFTModelClusterInfo(BaseModel):
-    """One cluster the caller can dispatch an FFT run to that already has
+    """One cluster the caller can dispatch a Hosted Training run to that already has
     the parent model cached.
 
     Intentionally narrower than the backend `FFTModelClusterInfo`
@@ -76,7 +76,7 @@ class FFTModelClusterInfo(BaseModel):
 
 
 class AvailableFFTModel(BaseModel):
-    """A model that is cached and ready for FFT dispatch on at least one
+    """A model that is cached and ready for a Hosted Training dispatch on at least one
     eligible PrimeCluster."""
 
     name: str = Field(..., description="Model name")
@@ -240,7 +240,7 @@ class VolumeTransfer(BaseModel):
 
 
 class HostedTrainingClient:
-    """Client for the hosted full-FT training endpoint."""
+    """Client for the Hosted Training endpoint."""
 
     def __init__(self, client: APIClient) -> None:
         self.client = client
@@ -443,7 +443,7 @@ class HostedTrainingClient:
 
     def list_available_gpu_types(self, team_id: Optional[str] = None) -> AvailableGpuTypesResponse:
         """GET /v1/training/available-gpu-types. Distinct GPU types the
-        caller could dispatch a dedicated FFT run on. Same principal
+        caller could dispatch a dedicated Hosted Training run on. Same principal
         collapse as the dispatch picker: `team_id` wins when set,
         otherwise the caller's personal allocations.
         """
@@ -484,7 +484,9 @@ class HostedTrainingClient:
         try:
             return AvailableFFTModelsResponse.model_validate(response)
         except PydanticValidationError as exc:
-            raise APIError(f"Failed to parse available FFT models response: {exc}") from exc
+            raise APIError(
+                f"Failed to parse available Hosted Training models response: {exc}"
+            ) from exc
 
     def list_available_fft_models(self, team_id: str | None = None) -> list[AvailableFFTModel]:
         """Reserved-capacity models only. See `get_available_fft`."""

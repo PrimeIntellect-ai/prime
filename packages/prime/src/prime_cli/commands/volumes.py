@@ -1,4 +1,4 @@
-"""`prime volumes`: named volumes for dedicated training runs (full-FT and SFT).
+"""`prime volumes`: named volumes for dedicated Hosted Training runs (RL and SFT).
 
 A volume is a PVC owned by your team (or you) on the cluster it was
 created on. `prime train config.toml --volume <name>` makes the run

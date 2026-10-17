@@ -431,7 +431,7 @@ def _dispatch_dedicated_run(
     resume_from: Optional[str] = None,
 ) -> None:
     """Hand off to /api/v1/training/runs (prime-rl on a registered
-    PrimeCluster). Serves both dedicated run kinds: full-FT RL mega-TOMLs
+    PrimeCluster). Serves both dedicated run kinds: RL mega-TOMLs
     (mode=None/"rl") and SFT mega-TOMLs (mode="sft" — same endpoint, same
     raw-TOML handoff; only the backend/validator schema dispatch differs).
 
@@ -479,11 +479,11 @@ def _dispatch_dedicated_run(
         raise typer.Exit(1)
     secrets = secrets or {}
 
-    # The full-FT backend schema only knows about WANDB_API_KEY and
+    # The Hosted Training backend schema only knows about WANDB_API_KEY and
     # HF_TOKEN (see platform CreateDedicatedRunRequestBase). Silently
     # dropping anything else here would launch the run without the
     # credentials the orchestrator's env needs — the LoRA path forwards
-    # the whole map via env-server pods, but full-FT runs the env inline
+    # the whole map via env-server pods, but Hosted Training RL runs the env inline
     # in the orchestrator and has no comparable surface today. Reject
     # loudly instead so the user knows up-front rather than discovering
     # via a runtime auth error inside a $$$ hosted pod.
@@ -491,7 +491,7 @@ def _dispatch_dedicated_run(
     unsupported = sorted(k for k in secrets if k not in supported_secret_keys)
     if unsupported:
         console.print(
-            "[red]Error:[/red] full-FT runs only forward "
+            "[red]Error:[/red] Hosted Training runs only forward "
             f"{', '.join(sorted(supported_secret_keys))} today; got "
             f"unsupported secret(s): {', '.join(unsupported)}."
         )
@@ -1017,8 +1017,8 @@ def create_run(
         "--fft",
         hidden=True,
         help=(
-            "Deprecated: every RL config now runs as a full fine-tune on a "
-            "dedicated cluster, so this flag is a no-op."
+            "Deprecated: every RL config now runs as a Hosted Training run "
+            "on a dedicated cluster, so this flag is a no-op."
         ),
     ),
     sft: bool = typer.Option(
@@ -1212,7 +1212,7 @@ def _render_discovery_empty_state(on_demand_beta_access: bool | None) -> None:
 
 
 def _render_fft_models_table(fft_models: list) -> None:
-    """Render the FFT dispatch model listing.
+    """Render the Hosted Training model listing.
 
     Each model may be cached on multiple clusters/GPU types; we collapse
     those into a single row with cluster+GPU joined so the table stays
@@ -1233,7 +1233,9 @@ def _render_fft_models_table(fft_models: list) -> None:
             ", ".join(gpu_types) or "-",
         )
 
-    table.caption = "[dim]Models pre-cached on clusters you can dispatch FFT runs to.[/dim]"
+    table.caption = (
+        "[dim]Models pre-cached on clusters you can dispatch Hosted Training runs to.[/dim]"
+    )
     console.print(table)
 
 
@@ -1290,7 +1292,7 @@ def _render_on_demand_table(on_demand: list) -> None:
 def list_gpus(
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """List GPU types you can dispatch a full-FT run on.
+    """List GPU types you can dispatch a Hosted Training run on.
 
     Uses the active team from `prime config` when set, otherwise your
     personal allocations. Pass any value to `prime train run
@@ -1317,7 +1319,7 @@ def list_gpus(
         )
         return
 
-    console.print("[bold]Available GPU types[/bold] [dim](full-FT dispatch)[/dim]")
+    console.print("[bold]Available GPU types[/bold] [dim](Hosted Training dispatch)[/dim]")
     for gpu_type in response.gpu_types:
         console.print(f"  [cyan]{gpu_type}[/cyan]")
 
@@ -1962,7 +1964,7 @@ def get_logs(
         help=(
             "Pod to read logs from: 'orchestrator' (default), 'trainer', "
             "'inference', or 'env-server'. trainer/inference apply only "
-            "to dedicated full-FT runs. Inferred from --env when omitted."
+            "to dedicated Hosted Training runs. Inferred from --env when omitted."
         ),
     ),
     env: Optional[str] = typer.Option(
@@ -2028,7 +2030,7 @@ def get_logs(
     """Get logs for a run.
 
     Defaults to the orchestrator pod. Use ``--component`` to pick one of
-    ``trainer`` / ``inference`` / ``env-server`` (dedicated full-FT only).
+    ``trainer`` / ``inference`` / ``env-server`` (dedicated Hosted Training only).
     Pass ``--env <name>`` to read an env-server pod by name (shorthand for
     ``--component=env-server``).
 
@@ -2108,12 +2110,12 @@ def get_logs(
             _parse_env_qualifier_with_index(env) if env is not None else (None, 0, False)
         )
 
-        # Dedicated full-FT env-servers run as 1-replica-per-name
+        # Dedicated-run env-servers run as 1-replica-per-name
         # StatefulSets, so a `name/N` qualifier (typed by hand or copied
         # from a stale source) would incorrectly route through the
         # legacy `/env-server-logs` endpoint and 404 on a backend that
         # never registered an indexed pod for this run. Probe the run
-        # kind once and strip the index for full-FT runs so the unified
+        # kind once and strip the index for dedicated runs so the unified
         # `/logs` route handles them. Skipped for the no-index path
         # (already routes correctly) and tolerated on probe failure
         # (preserves prior behaviour for transient API blips).
@@ -2129,7 +2131,7 @@ def get_logs(
             assert env_name_q is not None
             # Legacy shared-RFT env-server (`name/index` qualifier) — go
             # through the dedicated env-server endpoint which uses the
-            # cluster_id-backed pod lookup path. Dedicated full-FT
+            # cluster_id-backed pod lookup path. Dedicated Hosted Training
             # env-servers use the unified /logs route with
             # component=env-server + env_name (StatefulSets always run
             # one pod per env, so no index disambiguation needed).

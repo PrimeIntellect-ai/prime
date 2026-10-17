@@ -274,6 +274,15 @@ class HostedTrainingClient:
     def pause_run(self, run_id: str) -> Dict[str, Any]:
         return self.client.post(f"/training/runs/{run_id}/pause")
 
+    def resume_run(self, run_id: str, payload: Dict[str, Any]) -> HostedTrainingRunResponse:
+        """POST /v1/training/runs/{run_id}/resume: a new run continuing a
+        PAUSED one from its stored config. Validates like a create, so it
+        shares the create timeout."""
+        response = self.client.post(
+            f"/training/runs/{run_id}/resume", json=payload, timeout=CREATE_RUN_TIMEOUT
+        )
+        return HostedTrainingRunResponse.model_validate(response)
+
     def create_volume(
         self,
         name: str,

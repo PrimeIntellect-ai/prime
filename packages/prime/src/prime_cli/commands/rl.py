@@ -1,5 +1,6 @@
 """Hosted Training commands."""
 
+import copy
 import json
 import re
 import time
@@ -24,7 +25,7 @@ from ..api.training import (
     build_payload_from_toml,
     resolve_pull_request_head,
 )
-from ..client import APIClient, APIError
+from ..client import APIClient, APIError, NotFoundError
 from ..utils import (
     DefaultCommandGroup,
     PlainTyper,
@@ -280,7 +281,7 @@ def _env_display_name(env: Dict[str, Any], index: int | None = None) -> str:
     return f"env-{index}" if index is not None else "?"
 
 
-def _remove_deprecated_config_keys(data: Dict[str, Any]) -> None:
+def _remove_deprecated_config_keys(data: Dict[str, Any], out: Any = console) -> None:
     """Remove deprecated config keys while warning users."""
     removed = False
     for key in ("trajectory_strategy", "trajectoryStrategy"):
@@ -289,12 +290,12 @@ def _remove_deprecated_config_keys(data: Dict[str, Any]) -> None:
             removed = True
 
     if removed:
-        console.print("[yellow]Warning:[/yellow] `trajectory_strategy` is deprecated and ignored.")
+        out.print("[yellow]Warning:[/yellow] `trajectory_strategy` is deprecated and ignored.")
 
     if "buffer" in data:
         data.pop("buffer", None)
-        console.print(
-            "[yellow]Warning:[/yellow] `[buffer]` is deprecated and ignored: "
+        out.print(
+            "[yellow]Warning:[/yellow] `\\[buffer]` is deprecated and ignored: "
             "the difficulty-filtering buffer was removed from the trainer."
         )
 
@@ -302,7 +303,7 @@ def _remove_deprecated_config_keys(data: Dict[str, Any]) -> None:
     if isinstance(eval_section, dict) and "eval_base_model" in eval_section:
         legacy = eval_section.pop("eval_base_model")
         if "skip_first_step" in eval_section:
-            console.print(
+            out.print(
                 "[yellow]Warning:[/yellow] `eval.eval_base_model` is deprecated and "
                 "ignored because `eval.skip_first_step` is also set. Remove "
                 "`eval_base_model` from your config."
@@ -310,7 +311,7 @@ def _remove_deprecated_config_keys(data: Dict[str, Any]) -> None:
         else:
             translated = (not legacy) if isinstance(legacy, bool) else legacy
             eval_section["skip_first_step"] = translated
-            console.print(
+            out.print(
                 "[yellow]Warning:[/yellow] `eval.eval_base_model` is deprecated: "
                 "prime-rl renamed it to `skip_first_step` with inverted meaning "
                 "(`eval_base_model = false` ≡ `skip_first_step = true`). "
@@ -413,6 +414,78 @@ def _resolve_pr_ref(pr_number: int) -> str:
         raise typer.Exit(1)
 
 
+# Strip CLI-only secret-loading keys before shipping the TOML to the
+# backend. `env_file` / `env_files` only meaningfully exist on the
+# caller's filesystem — the hosted pod doesn't see them, and prime-rl
+# has no use for the paths once we've already materialized the secrets
+# into the per-run k8s Secret above. Leaving them in the config either
+# confuses prime-rl (unknown field) or silently sends it chasing
+# phantom paths. `image_tag` is similarly chart-level — the backend
+# parses it off the request body, not the embedded prime-rl config.
+# `type` is stripped here too rather than left for the backend's
+# legacy CLI-metadata cleanup to silently absorb.
+_CLI_ONLY_KEYS = frozenset(
+    {
+        "env_file",
+        "env_files",
+        "image_tag",
+        "gpu_type",
+        "volume",
+        "volume_size",
+        "source_ref",
+        "type",
+    }
+)
+
+
+def _hosted_config(raw_cfg: Dict[str, Any], out: Any = console) -> Dict[str, Any]:
+    config = {k: v for k, v in raw_cfg.items() if k not in _CLI_ONLY_KEYS}
+    # In the prime-rl-native shape the deprecated keys live one level down,
+    # under `[orchestrator]` — and this config ships verbatim to the dedicated
+    # training endpoint, where orch v2 rejects the removed keys as
+    # "Extra inputs are not permitted".
+    orchestrator = config.get("orchestrator")
+    if isinstance(orchestrator, dict):
+        config["orchestrator"] = orchestrator = copy.deepcopy(orchestrator)
+        _remove_deprecated_config_keys(orchestrator, out)
+    return config
+
+
+_CONFIG_STRING_FORMS = {"volume_size": 'a string like "500Gi" or "2Ti"'}
+
+
+def _config_string(raw_cfg: Dict[str, Any], key: str, config_path: Any) -> Optional[str]:
+    value = raw_cfg.get(key)
+    if value is not None and not isinstance(value, str):
+        form = _CONFIG_STRING_FORMS.get(key, "a string")
+        raise ValueError(f"{key} in {config_path} must be {form}, got {type(value).__name__}.")
+    return value
+
+
+def _selected_source_ref(ref: Optional[str], config_ref: Any, config_path: Any) -> Optional[str]:
+    if config_ref is not None and not isinstance(config_ref, str):
+        raise ValueError(
+            f"source_ref in {config_path} must be a string, got {type(config_ref).__name__}."
+        )
+    # Each source is checked where it was given (so `--ref ""` is an error,
+    # not a silent fall-through to the TOML) before the CLI flag wins.
+    for label, candidate in (("--ref", ref), (f"source_ref in {config_path}", config_ref)):
+        problem = _source_ref_error(candidate) if candidate is not None else None
+        if problem:
+            raise ValueError(f"{label}: {problem}")
+    return ref or config_ref
+
+
+def _schema_input(config: Dict[str, Any]) -> Dict[str, Any]:
+    return {k: v for k, v in config.items() if k != "name"}
+
+
+def _supports_local_validation(mode: Optional[str], config: Dict[str, Any]) -> bool:
+    from ..utils.training_compiler import SFT_ONLINE_EVAL_KEYS
+
+    return mode != "sft" or not SFT_ONLINE_EVAL_KEYS & config.keys()
+
+
 def _dispatch_dedicated_run(
     *,
     raw_cfg: Dict[str, Any],
@@ -432,12 +505,13 @@ def _dispatch_dedicated_run(
 ) -> None:
     """Hand off to /api/v1/training/runs (prime-rl on a registered
     PrimeCluster). Serves both dedicated run kinds: full-FT RL mega-TOMLs
-    (mode=None/"rl") and SFT mega-TOMLs (mode="sft" — same endpoint, same
-    raw-TOML handoff; only the backend/validator schema dispatch differs).
+    (mode=None/"rl") and SFT mega-TOMLs (mode="sft" — same endpoint).
 
     Backend always auto-picks the first uncordoned PrimeCluster — the
     CLI never threads a cluster id, so a config that targets the wrong
     cluster can't be a footgun."""
+    from ..utils.training_compiler import CompilationError, compile_locally
+
     name = raw_cfg.get("name")
 
     # Link the dispatched run to the user's active team. Without this, the
@@ -509,13 +583,14 @@ def _dispatch_dedicated_run(
     # always beats the file. Backend defaults to "main" when neither is
     # set, so falling through to None is the right "use platform default"
     # signal.
-    config_image_tag = raw_cfg.get("image_tag")
-    if config_image_tag is not None and not isinstance(config_image_tag, str):
-        console.print(
-            f"[red]Error:[/red] image_tag in {config_path} must be a string, "
-            f"got {type(config_image_tag).__name__}."
-        )
-        raise typer.Exit(1)
+    try:
+        config_image_tag = _config_string(raw_cfg, "image_tag", config_path)
+        config_gpu_type = _config_string(raw_cfg, "gpu_type", config_path)
+        config_volume = _config_string(raw_cfg, "volume", config_path)
+        config_volume_size = _config_string(raw_cfg, "volume_size", config_path)
+    except ValueError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(1) from exc
     resolved_image_tag = image_tag or config_image_tag
 
     # `gpu_type` is request-level (narrows the backend cluster picker to
@@ -523,33 +598,12 @@ def _dispatch_dedicated_run(
     # to set it: `--gpu-type` (CLI flag) or top-level `gpu_type = "..."`
     # in the TOML. CLI flag wins. Falling through to None keeps today's
     # "no preference, backend auto-picks" behaviour.
-    config_gpu_type = raw_cfg.get("gpu_type")
-    if config_gpu_type is not None and not isinstance(config_gpu_type, str):
-        console.print(
-            f"[red]Error:[/red] gpu_type in {config_path} must be a string, "
-            f"got {type(config_gpu_type).__name__}."
-        )
-        raise typer.Exit(1)
     resolved_gpu_type = gpu_type or config_gpu_type
 
     # `volume` is request-level too: `--volume` or top-level `volume = "..."`.
-    config_volume = raw_cfg.get("volume")
-    if config_volume is not None and not isinstance(config_volume, str):
-        console.print(
-            f"[red]Error:[/red] volume in {config_path} must be a string, "
-            f"got {type(config_volume).__name__}."
-        )
-        raise typer.Exit(1)
     resolved_volume = volume or config_volume
     # Size for a volume this command creates: `--volume-size` or top-level
     # `volume_size = "..."`. Only used when the volume doesn't exist yet.
-    config_volume_size = raw_cfg.get("volume_size")
-    if config_volume_size is not None and not isinstance(config_volume_size, str):
-        console.print(
-            f"[red]Error:[/red] volume_size in {config_path} must be a string like "
-            f'"500Gi" or "2Ti", got {type(config_volume_size).__name__}.'
-        )
-        raise typer.Exit(1)
     resolved_volume_size = volume_size or config_volume_size
     if resolved_volume_size and not resolved_volume:
         console.print(
@@ -564,65 +618,23 @@ def _dispatch_dedicated_run(
     # top-level `source_ref = "..."` in the TOML. CLI flag wins. The
     # platform resolves the ref to a commit at dispatch and pins that sha
     # on the run, so a branch name here never drifts mid-run.
-    config_source_ref = raw_cfg.get("source_ref")
-    if config_source_ref is not None and not isinstance(config_source_ref, str):
-        console.print(
-            f"[red]Error:[/red] source_ref in {config_path} must be a string, "
-            f"got {type(config_source_ref).__name__}."
+    try:
+        resolved_source_ref = _selected_source_ref(
+            source_ref, raw_cfg.get("source_ref"), config_path
         )
-        raise typer.Exit(1)
-    # Each source is checked where it was given (so `--ref ""` is an error,
-    # not a silent fall-through to the TOML) before the CLI flag wins.
-    for label, candidate in (
-        ("--ref", source_ref),
-        (f"source_ref in {config_path}", config_source_ref),
-    ):
-        problem = _source_ref_error(candidate) if candidate is not None else None
-        if problem:
-            console.print(f"[red]Error:[/red] {label}: {problem}")
-            raise typer.Exit(1)
-    resolved_source_ref = source_ref or config_source_ref
+    except ValueError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(1) from exc
     if source_pr is not None:
         # Resolved here, after the local checks above, so a run that would
         # fail on a bad secret, image tag or volume never pays the GitHub
         # round trip (and never burns anonymous API quota).
         resolved_source_ref = _resolve_pr_ref(source_pr)
 
-    # Deprecated-key pass. In the prime-rl-native shape the deprecated
-    # keys live one level down, under `[orchestrator]` — and this config
-    # ships verbatim to the dedicated training endpoint, where
-    # orch v2 rejects the removed keys as "Extra inputs are not permitted".
-    orch_section = raw_cfg.get("orchestrator")
-    if isinstance(orch_section, dict):
-        _remove_deprecated_config_keys(orch_section)
-
+    config_payload = _hosted_config(
+        raw_cfg, get_console(stderr=True) if output == "json" else console
+    )
     _warn_legacy_full_finetune_type(raw_cfg, config_path)
-
-    # Strip CLI-only secret-loading keys before shipping the TOML to the
-    # backend. `env_file` / `env_files` only meaningfully exist on the
-    # caller's filesystem — the hosted pod doesn't see them, and prime-rl
-    # has no use for the paths once we've already materialized the secrets
-    # into the per-run k8s Secret above. Leaving them in the config either
-    # confuses prime-rl (unknown field) or silently sends it chasing
-    # phantom paths. `image_tag` is similarly chart-level — the backend
-    # parses it off the request body, not the embedded prime-rl config.
-    # `type` is stripped here too rather than left for the backend's
-    # legacy CLI-metadata cleanup to silently absorb.
-    config_payload = {
-        k: v
-        for k, v in raw_cfg.items()
-        if k
-        not in (
-            "env_file",
-            "env_files",
-            "image_tag",
-            "gpu_type",
-            "volume",
-            "volume_size",
-            "source_ref",
-            "type",
-        )
-    }
 
     payload = build_payload_from_toml(
         config_payload,
@@ -637,6 +649,45 @@ def _dispatch_dedicated_run(
         source_ref=resolved_source_ref,
         resume_from=resume_from,
     )
+
+    api_client = APIClient()
+    client = HostedTrainingClient(api_client)
+    validation_ctx = (
+        console.status("[bold blue]Validating training config...", spinner="dots")
+        if output != "json"
+        else nullcontext()
+    )
+    try:
+        with validation_ctx:
+            selection: dict[str, Any] = {"mode": mode or "rl", "teamId": team_id}
+            if resolved_image_tag:
+                selection["imageTag"] = resolved_image_tag
+            if resolved_source_ref:
+                selection["sourceRef"] = resolved_source_ref
+            preparation = None
+            if _supports_local_validation(mode, config_payload):
+                try:
+                    preparation = client.prepare_local_validation(selection)
+                except NotFoundError:
+                    pass
+            if preparation is not None and preparation.get("submission_supported") is True:
+                if preparation.get("mode") != selection["mode"]:
+                    raise CompilationError("Preparation returned a different training mode.")
+                payload["normalizedConfig"] = compile_locally(
+                    _schema_input(config_payload), preparation
+                )
+    except (APIError, CompilationError) as exc:
+        console.print(f"[red]Error:[/red] {rich_escape(str(exc))}")
+        raise typer.Exit(1) from exc
+
+    if output != "json":
+        if "normalizedConfig" in payload:
+            console.print("[green]✓ Local config validation succeeded[/green]")
+        else:
+            console.print(
+                "[yellow]Local validation is unavailable for this run; "
+                "Platform validates it on submission.[/yellow]"
+            )
 
     # Surface the image + source pins before the confirmation so a typo'd
     # ref is caught at the prompt, not by a failed dispatch. Skipped for
@@ -670,8 +721,6 @@ def _dispatch_dedicated_run(
         console.print("\nRun cancelled")
         raise typer.Exit(0)
 
-    api_client = APIClient()
-    client = HostedTrainingClient(api_client)
     # Skip the spinner for --output json: PrimeConsole.status() falls back
     # to a plain print in --plain mode, which would emit "Creating Hosted
     # Training run..." on stdout ahead of the JSON payload and break
@@ -915,6 +964,90 @@ app = PlainTyper(
     ),
     no_args_is_help=True,
 )
+
+
+@app.command("validate", rich_help_panel="Commands")
+def validate_training_config(
+    config_path: Path = typer.Argument(..., exists=True, dir_okay=False),
+    schema_python: Optional[Path] = typer.Option(
+        None,
+        "--schema-python",
+        exists=True,
+        dir_okay=False,
+        help="Reuse an existing schema interpreter; its commit must match the hosted runtime.",
+    ),
+    sft: bool = typer.Option(False, "--sft", help="Validate a dedicated SFT config."),
+    image_tag: Optional[str] = typer.Option(None, "--image-tag"),
+    ref: Optional[str] = typer.Option(None, "--ref"),
+    pr: Optional[int] = typer.Option(None, "--pr", min=1),
+    artifact_out: Optional[Path] = typer.Option(None, "--artifact-out"),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """Validate dedicated RL/SFT config locally against the selected hosted runtime.
+
+    Experimental: creates no training run. Environment plugins and platform
+    dispatch policy are checked when submitting a run.
+    """
+    from ..api.training import HostedTrainingClient
+    from ..utils.training_compiler import CompilationError, compile_locally
+
+    validate_output_format(output, console)
+    try:
+        with config_path.open() as stream:
+            raw = toml.load(stream)
+        if ref is not None and pr is not None:
+            raise ValueError("--ref and --pr are mutually exclusive.")
+        source_ref = _selected_source_ref(ref, raw.get("source_ref"), config_path)
+        if pr is not None:
+            source_ref = resolve_pull_request_head(pr)
+        config_image_tag = _config_string(raw, "image_tag", config_path)
+        for key in ("gpu_type", "volume", "volume_size"):
+            _config_string(raw, key, config_path)
+        selected_image = image_tag or config_image_tag
+        config = _schema_input(
+            _hosted_config(raw, get_console(stderr=True) if output == "json" else console)
+        )
+        mode = "sft" if _is_sft(raw, flag=sft) else "rl"
+        payload: dict[str, Any] = {"mode": mode, "teamId": Config().team_id}
+        if selected_image:
+            payload["imageTag"] = selected_image
+        if source_ref is not None:
+            payload["sourceRef"] = source_ref
+        client = HostedTrainingClient(APIClient())
+        status_ctx = (
+            console.status("[bold blue]Validating training config...", spinner="dots")
+            if output != "json"
+            else nullcontext()
+        )
+        with status_ctx:
+            preparation = client.prepare_local_validation(payload)
+            if preparation.get("mode") != payload["mode"]:
+                raise CompilationError("Preparation returned a different training mode.")
+            artifact = compile_locally(config, preparation, schema_python=schema_python)
+            if artifact_out:
+                artifact_out.write_text(json.dumps(artifact, indent=2) + "\n")
+        if output == "json":
+            output_data_as_json(artifact, console)
+        else:
+            console.print(f"Config validated locally against {artifact['schema_commit']}.")
+            console.print(
+                "Environment plugins and deployment policy remain deferred; no run submitted."
+            )
+            if not _supports_local_validation(mode, config):
+                console.print(
+                    rich_escape(
+                        "Online eval ([eval], [inference], [weight_broadcast]) is validated by "
+                        "Platform when you submit."
+                    )
+                )
+            if artifact_out:
+                console.print(f"Artifact written to {artifact_out}.")
+    except (APIError, CompilationError, OSError, ValueError, TypeError) as exc:
+        if output == "json":
+            output_data_as_json({"error": str(exc)}, console)
+        else:
+            console.print(f"[red]Error:[/red] {rich_escape(str(exc))}")
+        raise typer.Exit(1) from exc
 
 
 @app.command("run", rich_help_panel="Commands", hidden=True, epilog=RL_DISPATCH_JSON_HELP)

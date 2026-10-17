@@ -88,3 +88,11 @@ extend-select = [
     "F",   # pyflakes
     "I",   # isort (import sorting)
 ]
+
+# The schema worker runs inside the selected prime-rl interpreter, not the CLI's;
+# test_worker_imports_only_what_the_schema_interpreter_provides checks its imports.
+[[tool.ty.overrides]]
+include = ["src/prime_cli/utils/training_schema_worker.py"]
+
+[tool.ty.overrides.rules]
+unresolved-import = "ignore"

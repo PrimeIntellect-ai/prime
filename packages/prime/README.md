@@ -375,6 +375,37 @@ prime pods ssh <pod-id>
 
 - **prime-sandboxes** - Lightweight SDK for sandboxes only (if you don't need the full CLI)
 
+## Local dedicated-training validation (experimental)
+
+Validate a dedicated RL or SFT config against the schema of the runtime selected
+by Platform, including its default image:
+
+```bash
+prime train validate rl.toml
+prime train validate rl.toml --ref your-branch
+prime train validate sft.toml --sft --artifact-out normalized.json
+```
+
+The CLI needs `uv` to cache a CPU-only schema environment. An existing matching
+interpreter can be supplied with `--schema-python`. No FFT checkout is required.
+Schema setup precompiles Python bytecode to speed up later validations. Existing
+CLI-managed caches receive a one-time bytecode upgrade without reinstalling packages.
+Platform supplies the pinned image digest and schema commit before local parsing;
+`--image-tag`, `--ref`, and `--pr` override runtime selection when needed.
+
+Validation checks and normalizes the config locally. Platform owns deployment
+adaptation and rendering. Environment plugins and dispatch policy remain deferred.
+Validation creates no run. `--artifact-out` can save the normalized config for
+inspection.
+
+Dedicated submissions (`prime train rl.toml` or `prime train sft.toml --sft`)
+perform local validation automatically before creating a run or volume. Platform
+checks the runtime pins and deployment policy, applies hosted settings, and
+renders the deployment internally. Queued runs keep the same pinned runtime and
+resolved configs. A changed image tag or source branch requires a fresh retry.
+This requires a Platform deployment with JSON-config chart support enabled;
+unsupported deployments return an error before submission.
+
 ## License
 
 MIT License - see [LICENSE](https://github.com/PrimeIntellect-ai/prime/blob/main/LICENSE) file for details.

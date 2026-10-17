@@ -7,7 +7,7 @@ token; admin role is gated server-side.
 """
 
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
@@ -26,6 +26,28 @@ _GITHUB_API = "https://api.github.com"
 # Cold rl-validator (up to 60s) plus the backend's own work (ENG-6696).
 # Only the read wait grows: an unreachable host still fails in 10s.
 CREATE_RUN_TIMEOUT = httpx.Timeout(120.0, connect=10.0)
+
+
+class PreparedTrainingRuntime(BaseModel):
+    repository: Literal["ghcr.io/primeintellect-ai/prime-rl"]
+    digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    image_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
+    source_commit: Optional[str] = Field(None, pattern=r"^[0-9a-f]{40}$")
+    schema_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
+
+
+class SchemaInstallInputs(BaseModel):
+    python: Literal["3.12"]
+    requirements: List[str]
+    constraints: List[str]
+
+
+class LocalValidationPreparation(BaseModel):
+    contract_version: Literal[1]
+    mode: Literal["rl", "sft"]
+    runtime: PreparedTrainingRuntime
+    schema_install: SchemaInstallInputs
+    submission_supported: bool
 
 
 class HostedTrainingRunResponse(BaseModel):
@@ -244,6 +266,13 @@ class HostedTrainingClient:
 
     def __init__(self, client: APIClient) -> None:
         self.client = client
+
+    def prepare_local_validation(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        response = self.client.post("/training/runs/prepare", json=payload)
+        try:
+            return LocalValidationPreparation.model_validate(response).model_dump()
+        except PydanticValidationError as exc:
+            raise APIError(f"Failed to parse local validation preparation: {exc}") from exc
 
     def create_run(self, payload: Dict[str, Any]) -> HostedTrainingRunResponse:
         """POST /v1/training/runs. Backend mints a per-run API token and

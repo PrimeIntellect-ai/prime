@@ -8,6 +8,8 @@ from prime_cli.core import APIError
 from prime_cli.main import app
 from typer.testing import CliRunner
 
+pytestmark = pytest.mark.usefixtures("stub_local_schema_validation")
+
 runner = CliRunner()
 
 TEST_ENV = {"PRIME_DISABLE_VERSION_CHECK": "1"}
@@ -468,6 +470,7 @@ def test_train_resume_from_a_pausing_run_shows_the_detail(monkeypatch, tmp_path:
 
     assert result.exit_code == 1, result.output
     assert result.output.splitlines() == [
+        "✓ Local config validation succeeded",
         f"Error: {detail}",
         "Tip: a run resumes once `prime train get paused-1` shows PAUSED",
     ]

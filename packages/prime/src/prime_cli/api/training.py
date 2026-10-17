@@ -269,7 +269,10 @@ class HostedTrainingClient:
 
     def prepare_local_validation(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         response = self.client.post("/training/runs/prepare", json=payload)
-        return LocalValidationPreparation.model_validate(response).model_dump()
+        try:
+            return LocalValidationPreparation.model_validate(response).model_dump()
+        except PydanticValidationError as exc:
+            raise APIError(f"Failed to parse local validation preparation: {exc}") from exc
 
     def create_run(self, payload: Dict[str, Any]) -> HostedTrainingRunResponse:
         """POST /v1/training/runs. Backend mints a per-run API token and

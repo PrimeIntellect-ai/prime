@@ -324,16 +324,6 @@ def test_cache_reuses_complete_install_and_retries_failed_install(monkeypatch, t
     assert len(commands) == 4
 
 
-def test_preparation_client_rejects_unsupported_contract():
-    from prime_cli.api.training import HostedTrainingClient
-    from pydantic import ValidationError
-
-    with pytest.raises(ValidationError):
-        HostedTrainingClient(
-            SimpleNamespace(post=lambda *a, **kw: {"contract_version": 2})
-        ).prepare_local_validation({})
-
-
 @pytest.mark.parametrize("mode", ["rl", "sft"])
 @pytest.mark.parametrize("failure", [None, "prepare", "schema"])
 @pytest.mark.parametrize("output", ["table", "json"])
@@ -979,3 +969,12 @@ def test_validate_pr_overrides_config_source_ref_like_submission(monkeypatch, tm
     )
     assert result.exit_code == 1
     assert "--ref and --pr are mutually exclusive." in result.output
+
+
+def test_malformed_preparation_is_an_api_error():
+    from prime_cli.api.training import HostedTrainingClient
+    from prime_cli.core import APIError
+
+    client = HostedTrainingClient(SimpleNamespace(post=lambda *a, **kw: {"contract_version": 2}))
+    with pytest.raises(APIError, match="Failed to parse local validation preparation"):
+        client.prepare_local_validation({"mode": "rl"})

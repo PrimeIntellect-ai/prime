@@ -146,18 +146,23 @@ def _lan_rules_payload(rules: List[LanRule]) -> List[Dict[str, Any]]:
 
 def _created_with_lan_rules(network: LanNetwork, rules: List[LanRule]) -> bool:
     """Whether the platform stored ``rules`` at creation. One from before rules on
-    create ignores them and gives the network its default rules instead."""
+    create ignores them and gives the network its default rules instead. Allow rules
+    have no order, so neither do the compared lists."""
 
     def key(rule: LanRule) -> Any:
-        return rule.from_, rule.to, sorted(rule.ports) if rule.ports else None
+        return rule.from_, rule.to, tuple(sorted(set(rule.ports or ())))
 
-    return [key(r) for r in network.rules] == [key(r) for r in rules]
+    return sorted(map(key, network.rules)) == sorted(map(key, rules))
 
 
-_IGNORED_LAN_RULES = (
-    "the platform ignored the LAN network's rules at creation, so it was deleted; "
-    "create it without rules and set them with set_lan_rules"
-)
+def _ignored_lan_rules(network_id: str, deleted: bool) -> APIError:
+    outcome = "it was deleted" if deleted else "deleting it failed, so delete it yourself"
+    return APIError(
+        f"the platform ignored LAN network {network_id}'s rules at creation and "
+        f"{outcome}; create it without rules and set them with set_lan_rules"
+    )
+
+
 _BACKGROUND_JOB_LAUNCH_TIMEOUT_SECONDS = 30
 _SANDBOX_ERROR_CONTEXT_TIMEOUT_SECONDS = 10.0
 
@@ -2656,9 +2661,11 @@ class SandboxClient:
         network = LanNetwork.model_validate(response)
         if rules is not None and not _created_with_lan_rules(network, rules):
             # Never hand back a network whose members could reach each other unasked.
-            with contextlib.suppress(APIError):
+            try:
                 self.delete_lan_network(network.id)
-            raise APIError(_IGNORED_LAN_RULES)
+            except APIError as error:
+                raise _ignored_lan_rules(network.id, deleted=False) from error
+            raise _ignored_lan_rules(network.id, deleted=True)
         return network
 
     def list_lan_networks(self, team_id: Optional[str] = None) -> List[LanNetwork]:
@@ -4297,9 +4304,11 @@ class AsyncSandboxClient:
         network = LanNetwork.model_validate(response)
         if rules is not None and not _created_with_lan_rules(network, rules):
             # Never hand back a network whose members could reach each other unasked.
-            with contextlib.suppress(APIError):
+            try:
                 await self.delete_lan_network(network.id)
-            raise APIError(_IGNORED_LAN_RULES)
+            except APIError as error:
+                raise _ignored_lan_rules(network.id, deleted=False) from error
+            raise _ignored_lan_rules(network.id, deleted=True)
         return network
 
     async def list_lan_networks(self, team_id: Optional[str] = None) -> List[LanNetwork]:

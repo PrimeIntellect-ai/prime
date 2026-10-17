@@ -65,9 +65,33 @@ def test_create_lan_network_applies_its_rules_at_creation():
 def test_create_lan_network_deletes_a_network_whose_rules_were_ignored():
     # A platform from before rules on create stores its default rules instead.
     client = _sync_client({**NETWORK, "rules": [{"from": "*", "to": "*"}]})
-    with pytest.raises(APIError, match="ignored the LAN network's rules"):
+    with pytest.raises(APIError, match="ignored LAN network net1's rules.*was deleted"):
         client.create_lan_network("lab", rules=RULES)
     client.client.request.assert_called_with("DELETE", "/sandbox/networks/net1")
+
+
+def test_create_lan_network_ignores_rule_order_and_port_order():
+    rules = [
+        LanRule(from_="tag:web", to="tag:db", ports=[6379, 5432]),
+        LanRule(from_="*", to="tag:log"),
+    ]
+    stored = [
+        {"from": "*", "to": "tag:log"},
+        {"from": "tag:web", "to": "tag:db", "ports": [5432, 6379]},
+    ]
+    client = _sync_client({**NETWORK, "rules": stored})
+    assert client.create_lan_network("lab", rules=rules).id == "net1"
+    assert client.client.request.call_count == 1  # no delete
+
+
+def test_a_failed_cleanup_names_the_network_left_behind():
+    client = _sync_client({**NETWORK, "rules": [{"from": "*", "to": "*"}]})
+    client.client.request.side_effect = [
+        {**NETWORK, "rules": [{"from": "*", "to": "*"}]},
+        APIError("boom"),
+    ]
+    with pytest.raises(APIError, match="net1.*deleting it failed"):
+        client.create_lan_network("lab", rules=RULES)
 
 
 @pytest.mark.asyncio
@@ -76,7 +100,7 @@ async def test_async_create_lan_network_deletes_a_network_whose_rules_were_ignor
     client.client = MagicMock()
     client.client.config.team_id = None
     client.client.request = AsyncMock(return_value={**NETWORK, "rules": []})
-    with pytest.raises(APIError, match="ignored the LAN network's rules"):
+    with pytest.raises(APIError, match="ignored LAN network net1's rules.*was deleted"):
         await client.create_lan_network("lab", rules=RULES)
     client.client.request.assert_awaited_with("DELETE", "/sandbox/networks/net1")
     # Matching rules come back as created.

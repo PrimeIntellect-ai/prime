@@ -2461,12 +2461,7 @@ def uninstall(
 
         # Generate uninstall command
         if with_tool == "uv":
-            cmd_parts = [
-                "uv",
-                "pip",
-                "uninstall",
-                normalized_name,
-            ]
+            cmd_parts = _uv_pip_command("uninstall", normalized_name)
         else:  # pip
             cmd_parts = [
                 "pip",

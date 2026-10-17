@@ -451,6 +451,17 @@ def _hosted_config(raw_cfg: Dict[str, Any], out: Any = console) -> Dict[str, Any
     return config
 
 
+_CONFIG_STRING_FORMS = {"volume_size": 'a string like "500Gi" or "2Ti"'}
+
+
+def _config_string(raw_cfg: Dict[str, Any], key: str, config_path: Any) -> Optional[str]:
+    value = raw_cfg.get(key)
+    if value is not None and not isinstance(value, str):
+        form = _CONFIG_STRING_FORMS.get(key, "a string")
+        raise ValueError(f"{key} in {config_path} must be {form}, got {type(value).__name__}.")
+    return value
+
+
 def _selected_source_ref(ref: Optional[str], config_ref: Any, config_path: Any) -> Optional[str]:
     if config_ref is not None and not isinstance(config_ref, str):
         raise ValueError(
@@ -572,13 +583,14 @@ def _dispatch_dedicated_run(
     # always beats the file. Backend defaults to "main" when neither is
     # set, so falling through to None is the right "use platform default"
     # signal.
-    config_image_tag = raw_cfg.get("image_tag")
-    if config_image_tag is not None and not isinstance(config_image_tag, str):
-        console.print(
-            f"[red]Error:[/red] image_tag in {config_path} must be a string, "
-            f"got {type(config_image_tag).__name__}."
-        )
-        raise typer.Exit(1)
+    try:
+        config_image_tag = _config_string(raw_cfg, "image_tag", config_path)
+        config_gpu_type = _config_string(raw_cfg, "gpu_type", config_path)
+        config_volume = _config_string(raw_cfg, "volume", config_path)
+        config_volume_size = _config_string(raw_cfg, "volume_size", config_path)
+    except ValueError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(1) from exc
     resolved_image_tag = image_tag or config_image_tag
 
     # `gpu_type` is request-level (narrows the backend cluster picker to
@@ -586,33 +598,12 @@ def _dispatch_dedicated_run(
     # to set it: `--gpu-type` (CLI flag) or top-level `gpu_type = "..."`
     # in the TOML. CLI flag wins. Falling through to None keeps today's
     # "no preference, backend auto-picks" behaviour.
-    config_gpu_type = raw_cfg.get("gpu_type")
-    if config_gpu_type is not None and not isinstance(config_gpu_type, str):
-        console.print(
-            f"[red]Error:[/red] gpu_type in {config_path} must be a string, "
-            f"got {type(config_gpu_type).__name__}."
-        )
-        raise typer.Exit(1)
     resolved_gpu_type = gpu_type or config_gpu_type
 
     # `volume` is request-level too: `--volume` or top-level `volume = "..."`.
-    config_volume = raw_cfg.get("volume")
-    if config_volume is not None and not isinstance(config_volume, str):
-        console.print(
-            f"[red]Error:[/red] volume in {config_path} must be a string, "
-            f"got {type(config_volume).__name__}."
-        )
-        raise typer.Exit(1)
     resolved_volume = volume or config_volume
     # Size for a volume this command creates: `--volume-size` or top-level
     # `volume_size = "..."`. Only used when the volume doesn't exist yet.
-    config_volume_size = raw_cfg.get("volume_size")
-    if config_volume_size is not None and not isinstance(config_volume_size, str):
-        console.print(
-            f"[red]Error:[/red] volume_size in {config_path} must be a string like "
-            f'"500Gi" or "2Ti", got {type(config_volume_size).__name__}.'
-        )
-        raise typer.Exit(1)
     resolved_volume_size = volume_size or config_volume_size
     if resolved_volume_size and not resolved_volume:
         console.print(
@@ -1009,17 +1000,16 @@ def validate_training_config(
         source_ref = _selected_source_ref(ref, raw.get("source_ref"), config_path)
         if pr is not None:
             source_ref = resolve_pull_request_head(pr)
-        selected_image = image_tag if image_tag is not None else raw.get("image_tag")
-        if selected_image is not None and (
-            not isinstance(selected_image, str) or not selected_image.strip()
-        ):
-            raise ValueError("image_tag must be a non-empty string.")
+        config_image_tag = _config_string(raw, "image_tag", config_path)
+        for key in ("gpu_type", "volume", "volume_size"):
+            _config_string(raw, key, config_path)
+        selected_image = image_tag or config_image_tag
         config = _schema_input(
             _hosted_config(raw, get_console(stderr=True) if output == "json" else console)
         )
         mode = "sft" if _is_sft(raw, flag=sft) else "rl"
         payload: dict[str, Any] = {"mode": mode, "teamId": Config().team_id}
-        if selected_image is not None:
+        if selected_image:
             payload["imageTag"] = selected_image
         if source_ref is not None:
             payload["sourceRef"] = source_ref

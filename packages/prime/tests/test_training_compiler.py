@@ -966,7 +966,7 @@ def test_validate_pr_overrides_config_source_ref_like_submission(monkeypatch, tm
     config = tmp_path / "rl.toml"
     config.write_text('source_ref = "dev"\n[trainer]\nmax_steps = 2\n')
     monkeypatch.setattr(rl, "Config", lambda: SimpleNamespace(team_id="team"))
-    monkeypatch.setattr(rl, "_resolve_pr_ref", lambda number: "b" * 40)
+    monkeypatch.setattr(rl, "resolve_pull_request_head", lambda number: "b" * 40)
     seen = []
 
     def prepare(self, payload):
@@ -986,6 +986,12 @@ def test_validate_pr_overrides_config_source_ref_like_submission(monkeypatch, tm
     )
     assert result.exit_code == 1
     assert "--ref and --pr are mutually exclusive." in result.output
+    config.write_text('source_ref = "bad..ref"\n[trainer]\nmax_steps = 2\n')
+    result = CliRunner().invoke(app, ["train", "validate", str(config), "--pr", "42"], env=env)
+    assert result.exit_code == 1
+    assert f"source_ref in {config}: 'bad..ref' is not a valid git ref" in "".join(
+        result.output.split("\n")
+    )
 
 
 def test_malformed_preparation_is_an_api_error():
@@ -995,3 +1001,36 @@ def test_malformed_preparation_is_an_api_error():
     client = HostedTrainingClient(SimpleNamespace(post=lambda *a, **kw: {"contract_version": 2}))
     with pytest.raises(APIError, match="Failed to parse local validation preparation"):
         client.prepare_local_validation({"mode": "rl"})
+
+
+def test_validate_json_output_stays_parseable(monkeypatch, tmp_path):
+    from prime_cli.api.training import HostedTrainingClient
+    from prime_cli.commands import rl
+    from prime_cli.core import APIError
+
+    config = tmp_path / "rl.toml"
+    config.write_text("[orchestrator]\nbatch_size = 8\n[orchestrator.buffer]\nseed = 1\n")
+    monkeypatch.setattr(rl, "Config", lambda: SimpleNamespace(team_id="team"))
+    monkeypatch.setattr(
+        HostedTrainingClient,
+        "prepare_local_validation",
+        lambda self, payload: {"mode": "rl", "runtime": {"schema_commit": "a" * 40}},
+    )
+    monkeypatch.setattr(
+        training_compiler, "compile_locally", lambda *a, **kw: {"schema_commit": "a" * 40}
+    )
+    env = {"PRIME_DISABLE_VERSION_CHECK": "1"}
+    result = CliRunner().invoke(app, ["train", "validate", str(config), "-o", "json"], env=env)
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == {"schema_commit": "a" * 40}
+    assert "`[buffer]` is deprecated" in result.stderr
+
+    def merged(number):
+        raise APIError(f"PR #{number} is already merged")
+
+    monkeypatch.setattr(rl, "resolve_pull_request_head", merged)
+    result = CliRunner().invoke(
+        app, ["train", "validate", str(config), "--pr", "42", "-o", "json"], env=env
+    )
+    assert result.exit_code == 1
+    assert json.loads(result.stdout) == {"error": "PR #42 is already merged"}

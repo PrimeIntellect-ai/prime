@@ -1087,3 +1087,29 @@ def test_validate_checks_toml_metadata_like_submission(monkeypatch, tmp_path, to
     )
     assert result.exit_code == 1
     assert json.loads(result.stdout) == {"error": message.format(path=config)}
+
+
+@pytest.mark.parametrize("toml_volume,warned", [("", True), ('volume = "ckpts"\n', False)])
+def test_validate_warns_when_volume_size_has_no_volume(monkeypatch, tmp_path, toml_volume, warned):
+    from prime_cli.api.training import HostedTrainingClient
+    from prime_cli.commands import rl
+
+    config = tmp_path / "rl.toml"
+    config.write_text(f'volume_size = "500Gi"\n{toml_volume}[trainer]\nmax_steps = 2\n')
+    monkeypatch.setattr(rl, "Config", lambda: SimpleNamespace(team_id="team"))
+    monkeypatch.setattr(
+        HostedTrainingClient,
+        "prepare_local_validation",
+        lambda self, payload: {"mode": "rl", "runtime": {"schema_commit": "a" * 40}},
+    )
+    monkeypatch.setattr(
+        training_compiler, "compile_locally", lambda *a, **kw: {"schema_commit": "a" * 40}
+    )
+    result = CliRunner().invoke(
+        app,
+        ["train", "validate", str(config), "-o", "json"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == {"schema_commit": "a" * 40}
+    assert ("`volume_size` needs a volume" in result.stderr) is warned

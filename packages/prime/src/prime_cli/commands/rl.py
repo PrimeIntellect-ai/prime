@@ -1006,12 +1006,17 @@ def validate_training_config(
         if pr is not None:
             source_ref = resolve_pull_request_head(pr)
         config_image_tag = _config_string(raw, "image_tag", config_path)
-        for key in ("gpu_type", "volume", "volume_size"):
-            _config_string(raw, key, config_path)
+        _config_string(raw, "gpu_type", config_path)
+        config_volume = _config_string(raw, "volume", config_path)
+        config_volume_size = _config_string(raw, "volume_size", config_path)
         selected_image = image_tag or config_image_tag
-        config = _schema_input(
-            _hosted_config(raw, get_console(stderr=True) if output == "json" else console)
-        )
+        notices = get_console(stderr=True) if output == "json" else console
+        if config_volume_size and not config_volume:
+            notices.print(
+                "[yellow]Warning:[/yellow] top-level `volume_size` needs a volume: "
+                "submit with --volume (or set top-level `volume`)."
+            )
+        config = _schema_input(_hosted_config(raw, notices))
         mode = "sft" if _is_sft(raw, flag=sft) else "rl"
         payload: dict[str, Any] = {"mode": mode, "teamId": Config().team_id}
         if selected_image:

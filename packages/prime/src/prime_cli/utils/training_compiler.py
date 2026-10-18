@@ -37,7 +37,19 @@ def _credential_free_environment() -> dict[str, str]:
     return {
         key: value
         for key, value in os.environ.items()
-        if key in {"PATH", "HOME", "SYSTEMROOT", "TMPDIR", "TEMP", "LANG", "LC_ALL"}
+        if key
+        in {
+            "PATH",
+            "HOME",
+            "USERPROFILE",
+            "APPDATA",
+            "LOCALAPPDATA",
+            "SYSTEMROOT",
+            "TMPDIR",
+            "TEMP",
+            "LANG",
+            "LC_ALL",
+        }
     } | {"PYTHONDONTWRITEBYTECODE": "1"}
 
 

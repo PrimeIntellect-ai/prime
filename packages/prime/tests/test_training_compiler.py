@@ -164,6 +164,34 @@ def test_worker_does_not_inherit_api_credentials_or_schema_path(monkeypatch):
     assert "PYTHONPATH" not in env
 
 
+@pytest.mark.parametrize("stage", ["worker", "installer"])
+def test_schema_subprocesses_keep_windows_user_directories(monkeypatch, stage):
+    directories = {
+        "USERPROFILE": r"C:\Users\trainer",
+        "APPDATA": r"C:\Users\trainer\AppData\Roaming",
+        "LOCALAPPDATA": r"C:\Users\trainer\AppData\Local",
+    }
+    secrets = ("PRIME_API_KEY", "HF_TOKEN", "PYTHONPATH", "SSH_AUTH_SOCK")
+    monkeypatch.delenv("HOME", raising=False)
+    for name, value in directories.items():
+        monkeypatch.setenv(name, value)
+    for name in secrets:
+        monkeypatch.setenv(name, "must-not-reach-schema-process")
+    names = [*directories, *secrets]
+    command = [
+        sys.executable,
+        "-c",
+        f"import json, os; print(json.dumps({{k: os.environ.get(k) for k in {names!r}}}))",
+    ]
+    result = training_compiler._run_process(
+        command,
+        timeout=10,
+        env=training_compiler._installer_environment() if stage == "installer" else None,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == directories | {name: None for name in secrets}
+
+
 def test_artifact_runtime_comes_from_the_preparation(monkeypatch):
     monkeypatch.setattr(
         training_compiler,

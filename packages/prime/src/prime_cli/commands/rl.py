@@ -983,8 +983,19 @@ def validate_training_config(
     ),
     sft: bool = typer.Option(False, "--sft", help="Validate a dedicated SFT config."),
     image_tag: Optional[str] = typer.Option(None, "--image-tag"),
-    ref: Optional[str] = typer.Option(None, "--ref"),
-    pr: Optional[int] = typer.Option(None, "--pr", min=1),
+    ref: Optional[str] = typer.Option(
+        None,
+        "--ref",
+        help="prime-rl branch, tag or commit to validate against. Its schema package "
+        "is installed and run on this machine.",
+    ),
+    pr: Optional[int] = typer.Option(
+        None,
+        "--pr",
+        min=1,
+        help="prime-rl pull request whose head commit to validate against. Its schema "
+        "package is installed and run on this machine.",
+    ),
     artifact_out: Optional[Path] = typer.Option(None, "--artifact-out"),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:

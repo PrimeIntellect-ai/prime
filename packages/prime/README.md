@@ -388,10 +388,13 @@ prime train validate sft.toml --sft --artifact-out normalized.json
 
 The CLI needs `uv` to cache a CPU-only schema environment. An existing matching
 interpreter can be supplied with `--schema-python`. No FFT checkout is required.
-Schema setup precompiles Python bytecode to speed up later validations. Existing
-CLI-managed caches receive a one-time bytecode upgrade without reinstalling packages.
+Schema setup precompiles Python bytecode to speed up later validations, and the
+CLI removes cached environments unused for 14 days or beyond the four most recent.
 Platform supplies the pinned image digest and schema commit before local parsing;
 `--image-tag`, `--ref`, and `--pr` override runtime selection when needed.
+With `--ref`, `--pr`, or a top-level `source_ref`, validation installs and runs
+that prime-rl commit's schema package on your machine, including on `prime train`
+before the confirmation prompt.
 
 Validation checks and normalizes the config locally. Platform owns deployment
 adaptation and rendering. Environment plugins and dispatch policy remain deferred.

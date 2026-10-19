@@ -217,7 +217,7 @@ prime sandbox create --volume data:/data --volume cache:/mnt:ro python:3.11
 
 # Manage volumes
 prime sandbox volumes create data
-prime sandbox volumes list [--json]
+prime sandbox volumes list [--page N] [--num N] [--json]
 prime sandbox volumes get data
 prime sandbox volumes delete data
 

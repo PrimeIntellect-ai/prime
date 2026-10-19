@@ -106,6 +106,7 @@ from .rpc_command_session import (
     collect_command_session_start_event,
     is_transient_control_fault,
 )
+from .volumes import AsyncVolumes, Volumes
 
 # Connection-level errors: request never reached the server, so retry is safe
 # for any HTTP method (including non-idempotent POSTs).
@@ -2242,6 +2243,7 @@ class SandboxClient:
         )
         self._sandbox_status_batch_supported: Optional[bool] = None
         self._background_job_status_batch_supported: Optional[bool] = None
+        self.volumes = Volumes(self)
 
     @staticmethod
     @_gateway_post_retry
@@ -3776,7 +3778,6 @@ class AsyncSandboxClient:
         max_connections: int = 1000,
         max_keepalive_connections: int = 200,
         *,
-        api_client: Optional[AsyncAPIClient] = None,
         background_job_output_concurrency: int = MAX_CONCURRENT_BACKGROUND_JOB_OUTPUT_READS,
         background_job_output_queue_size: int = MAX_PENDING_BACKGROUND_JOB_OUTPUTS,
         background_job_output_cache_bytes: int = BACKGROUND_JOB_OUTPUT_CACHE_BYTES,
@@ -3787,8 +3788,6 @@ class AsyncSandboxClient:
             api_key: Optional API key (reads from config if not provided)
             max_connections: Maximum number of concurrent connections (default: 1000)
             max_keepalive_connections: Maximum keep-alive connections (default: 200)
-            api_client: Optional shared API client. When supplied, this client
-                borrows its transport and does not close it on aclose()
             background_job_output_concurrency: Maximum completed jobs downloading output at once
             background_job_output_queue_size: Maximum unique completed jobs waiting for output
             background_job_output_cache_bytes: Maximum client-local successful output cache size
@@ -3798,12 +3797,7 @@ class AsyncSandboxClient:
             background_job_output_queue_size,
             background_job_output_cache_bytes,
         )
-        # A borrowed client's transport outlives this client; owned ones do not.
-        self._owns_client = api_client is None
-        if api_client is None:
-            self.client = AsyncAPIClient(api_key=api_key, user_agent=_build_user_agent())
-        else:
-            self.client = api_client
+        self.client = AsyncAPIClient(api_key=api_key, user_agent=_build_user_agent())
         self._auth_cache = AsyncSandboxAuthCache(
             self.client.config.config_dir / "sandbox_auth_cache.json",
             self.client,
@@ -3849,6 +3843,7 @@ class AsyncSandboxClient:
         self._sandbox_status_batch_supported: Optional[bool] = None
         self._background_job_status_batch_supported: Optional[bool] = None
         self._close_task: Optional[asyncio.Task[None]] = None
+        self.volumes = AsyncVolumes(self)
 
     def _get_gateway_client(self) -> httpx.AsyncClient:
         """Get or create the shared gateway client for connection pooling
@@ -5660,17 +5655,10 @@ class AsyncSandboxClient:
             for transport in self._command_transports:
                 await transport.aclose()
         finally:
-            # Only the transport this client created is closed here; a
-            # borrowed API client stays open for its owner.
-            if self._owns_client:
-                await self.client.aclose()
+            await self.client.aclose()
 
     async def aclose(self) -> None:
-        """Close this client's batchers, leases, and gateway tasks.
-
-        The API transport is closed only when this client owns it; a borrowed
-        client's transport stays open for its owner.
-        """
+        """Close this client's batchers, leases, and gateway tasks."""
         if self._close_task is None:
             self._close_task = asyncio.create_task(self._close())
         try:

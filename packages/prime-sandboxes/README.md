@@ -177,9 +177,9 @@ config) for team scope, otherwise the personal scope applies. `list` responses
 include `total`, `page`, `per_page`, and `has_next`.
 
 ```python
-from prime_sandboxes import VolumesClient
+from prime_sandboxes import APIClient, SandboxClient
 
-volumes = VolumesClient()
+volumes = SandboxClient(APIClient()).volumes
 volume = volumes.create("dataset", team_id="team-id")
 page = volumes.list(team_id="team-id", page=1, per_page=50)
 volume = volumes.get("dataset", team_id="team-id")
@@ -187,20 +187,22 @@ volumes.delete("dataset", team_id="team-id")  # 204, returns None
 ```
 
 Omit `team_id` (and the team in the client config) to work in the personal
-scope instead.
+scope instead. `volumes` is a namespace on the sandbox client: it reaches
+the platform through the client's own transport and owns no transport or
+lifecycle of its own.
 
 Mount volumes when creating a sandbox. Each mount names the volume and the
 absolute guest path to mount it at; a read-only mount cannot publish:
 
 ```python
-from prime_sandboxes import CreateSandboxRequest, SandboxClient, VolumeMount
+from prime_sandboxes import APIClient, CreateSandboxRequest, SandboxClient, VolumeMount
 
 request = CreateSandboxRequest(
     name="trainer",
     docker_image="ubuntu:22.04",
     volumes=[VolumeMount(name="dataset", mount_path="/data", read_only=True)],
 )
-sandbox = SandboxClient().create(request)
+sandbox = SandboxClient(APIClient()).create(request)
 ```
 
 A sandbox sees the volume head from the moment it was created (the attached
@@ -209,9 +211,9 @@ recreate the sandbox. `publish` makes a sandbox's own volume contents durable
 and moves the volume head:
 
 ```python
-from prime_sandboxes import VolumesClient
+from prime_sandboxes import APIClient, SandboxClient
 
-volumes = VolumesClient()
+volumes = SandboxClient(APIClient()).volumes
 checkpoint = volumes.publish("sandbox-id", "dataset")  # waits for DURABLE
 checkpoint = volumes.publish("sandbox-id", "dataset", force=True, wait=False)
 ```
@@ -224,8 +226,9 @@ rejects the publish with HTTP 404 when the sandbox has no writable attachment
 with that name, HTTP 400 when the mount is read-only, and HTTP 409 when
 another sandbox's publish for the same volume is already in flight; a head
 that moved since the sandbox was created is also HTTP 409 unless `force=True`.
-`AsyncVolumesClient` exposes the same operations with `await`; it closes its
-internal checkpoint waiter before its own transport on `aclose()`.
+`AsyncSandboxClient` exposes the same operations with `await` on its own
+`volumes` namespace; the parent client's `aclose()` closes its owned
+transport and polling work, while the namespace owns neither.
 
 Deleting a volume that is attached to a sandbox in any active state (PENDING,
 PROVISIONING, RUNNING, PAUSED, or TERMINATING) fails with HTTP 409. Deleting a

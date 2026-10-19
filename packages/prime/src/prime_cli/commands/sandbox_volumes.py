@@ -21,7 +21,6 @@ from prime_sandboxes import (
     UnauthorizedError,
     Volume,
     VolumeMount,
-    VolumesClient,
 )
 from rich.markup import escape
 
@@ -104,8 +103,9 @@ def _print_volume(volume: Volume) -> None:
     console.print(f"Created: {human_age(volume.created_at)}")
 
 
-def _volumes_client() -> VolumesClient:
-    return VolumesClient(APIClient())
+def _sandbox_client() -> SandboxClient:
+    """One client per command; its volumes namespace rides the same transport."""
+    return SandboxClient(APIClient())
 
 
 def _importer_image() -> str:
@@ -118,28 +118,6 @@ def _importer_image() -> str:
     if Config().base_url == Config.DEFAULT_BASE_URL:
         return _IMPORTER_IMAGE_PROD
     return _IMPORTER_IMAGE_DEV
-
-
-_RSYNC_CAPABILITY_PROBE = ["rsync", "--info=progress2", "--version"]
-
-
-def _require_modern_rsync() -> None:
-    """Reject an rsync that cannot run the transfer, before any API mutation.
-
-    macOS ships openrsync (rsync-2.6.9-compatible, no --info option); without
-    this check it would fail only after the volume and the importer sandbox
-    already exist.
-    """
-    probe = subprocess.run(_RSYNC_CAPABILITY_PROBE, capture_output=True, text=True)
-    if probe.returncode != 0:
-        console.print(
-            "[red]Error:[/red] rsync 3.1+ is required for volume imports; the "
-            f"rsync at '{shutil.which('rsync')}' does not support the transfer "
-            "flags (macOS default is openrsync). Install a modern rsync "
-            "(e.g. 'brew install rsync') and make sure it precedes /usr/bin "
-            "in PATH."
-        )
-        raise typer.Exit(1)
 
 
 def _rsync_command(transport: SandboxSshTransport, path: Path) -> List[str]:
@@ -162,7 +140,6 @@ def _rsync_command(transport: SandboxSshTransport, path: Path) -> List[str]:
         "rsync",
         "-az",
         "--partial",
-        "--info=progress2",
         "-e",
         remote_shell,
         f"{path}/",
@@ -170,8 +147,11 @@ def _rsync_command(transport: SandboxSshTransport, path: Path) -> List[str]:
     ]
 
 
-def _print_retained_importer(sandbox_id: str, name: str, checkpoint_id: Optional[str]) -> None:
+def _print_retained_importer(
+    sandbox_id: str, name: str, checkpoint_id: Optional[str], team_id: Optional[str]
+) -> None:
     """Recovery guidance for an importer kept after an unsettled publish."""
+    scope = f" --team-id {shlex.quote(team_id)}" if team_id else ""
     console.print(
         f"[yellow]Importer sandbox {escape(sandbox_id)} kept: the publish did "
         "not reach DURABLE in this run.[/yellow]"
@@ -179,7 +159,7 @@ def _print_retained_importer(sandbox_id: str, name: str, checkpoint_id: Optional
     if checkpoint_id:
         console.print(
             f"Checkpoint {escape(checkpoint_id)}: check its state with "
-            f"'prime sandbox checkpoint get {escape(checkpoint_id)}'."
+            f"'prime sandbox checkpoint get {shlex.quote(checkpoint_id)}'."
         )
     else:
         # A volume checkpoint never appears in the sandbox's checkpoint list
@@ -187,7 +167,7 @@ def _print_retained_importer(sandbox_id: str, name: str, checkpoint_id: Optional
         console.print(
             "If a checkpoint was created, its id is not known to this run; "
             "once it reaches DURABLE it becomes the volume's head, shown by "
-            f"'prime sandbox volumes get {escape(name)}'. That head may be "
+            f"'prime sandbox volumes get {shlex.quote(name)}{scope}'. That head may be "
             "older or from another publisher and does not by itself "
             "confirm this publish. Check any checkpoint id with "
             "'prime sandbox checkpoint get <checkpoint-id>'."
@@ -203,7 +183,7 @@ def _print_retained_importer(sandbox_id: str, name: str, checkpoint_id: Optional
         "The sandbox is reaped automatically after "
         f"{_IMPORTER_IDLE_TIMEOUT_MINUTES} minutes without transfer activity. "
         "Delete it manually with "
-        f"'prime sandbox delete {escape(sandbox_id)}' once you no longer need it."
+        f"'prime sandbox delete {shlex.quote(sandbox_id)}' once you no longer need it."
     )
 
 
@@ -217,16 +197,20 @@ def _import_volume(name: str, team_id: Optional[str], from_path: str) -> None:
     if not shutil.which("rsync"):
         console.print("[red]Error:[/red] rsync is required to import a volume.")
         raise typer.Exit(1)
-    _require_modern_rsync()
 
     image = _importer_image()
 
-    base_client = APIClient()
-    volumes_client = VolumesClient(base_client)
-    sandbox_client = SandboxClient(base_client)
+    # One client for the whole flow: its volumes namespace shares this
+    # transport, and publish waits go through its checkpoint waiter.
+    sandbox_client = SandboxClient(APIClient())
+    # The retention hint needs the scope the API resolves team_id to; read
+    # it from the client's own config, the same source the requests use.
+    effective_team_id = (
+        team_id if team_id is not None else sandbox_client.client.config.team_id
+    )
 
     try:
-        volumes_client.create(name, team_id=team_id)
+        sandbox_client.volumes.create(name, team_id=team_id)
     except APIError as error:
         # Prefix match on the SDK's exact format ("HTTP <status>: <body>"):
         # a detail string that merely mentions "HTTP 409" is not a conflict.
@@ -284,7 +268,7 @@ def _import_volume(name: str, team_id: Optional[str], from_path: str) -> None:
         # finally carry the full IDs/recovery output, not the success path.
         console.print("[blue]Publishing volume...[/blue]")
         publish_requested = True
-        checkpoint = volumes_client.publish(sandbox.id, name, wait=False)
+        checkpoint = sandbox_client.volumes.publish(sandbox.id, name, wait=False)
         checkpoint_id = checkpoint.id
         try:
             sandbox_client.wait_for_checkpoint(checkpoint_id)
@@ -336,7 +320,7 @@ def _import_volume(name: str, team_id: Optional[str], from_path: str) -> None:
                         warning += " It may still hold the unpublished import data."
                     console.print(warning)
             else:
-                _print_retained_importer(sandbox.id, name, checkpoint_id)
+                _print_retained_importer(sandbox.id, name, checkpoint_id, effective_team_id)
 
 
 @app.command("create")
@@ -352,7 +336,7 @@ def create(
     """Create a volume, optionally importing a local directory."""
     try:
         if from_path is None:
-            volume = _volumes_client().create(name, team_id=team_id)
+            volume = _sandbox_client().volumes.create(name, team_id=team_id)
             console.print(f"[green]✓[/green] Created volume {escape(volume.name)}")
             _print_volume(volume)
             return
@@ -360,8 +344,9 @@ def create(
     except typer.Exit:
         raise
     except KeyboardInterrupt:
-        # Only the plain create reaches here: the import flow handles its own
-        # interrupts by phase, so no partial-data claim is possible here.
+        # Reached from the plain create or from the import flow's
+        # volume-create POST, which runs before its own phase handlers;
+        # either way the request may or may not have completed.
         console.print(
             "\n[yellow]Interrupted.[/yellow] The create request may or may not "
             "have completed; check with 'prime sandbox volumes list'."
@@ -390,13 +375,15 @@ def list_volumes(
     team_id: Optional[str] = typer.Option(
         None, help="Team ID (uses config team_id if not specified)"
     ),
+    page: int = typer.Option(1, "--page", "-p", help="Page number"),
+    num: int = typer.Option(50, "--num", "-n", help="Items per page"),
     json_output: bool = typer.Option(
         False, "--json", help="Output volumes as JSON instead of a table"
     ),
 ) -> None:
     """List volumes."""
     try:
-        response = _volumes_client().list(team_id=team_id)
+        response = _sandbox_client().volumes.list(team_id=team_id, page=page, per_page=num)
     except UnauthorizedError as e:
         console.print(f"[red]Unauthorized:[/red] {escape(str(e))}")
         raise typer.Exit(1)
@@ -440,7 +427,7 @@ def get(
 ) -> None:
     """Show a volume's details."""
     try:
-        volume = _volumes_client().get(name, team_id=team_id)
+        volume = _sandbox_client().volumes.get(name, team_id=team_id)
     except UnauthorizedError as e:
         console.print(f"[red]Unauthorized:[/red] {escape(str(e))}")
         raise typer.Exit(1)
@@ -471,7 +458,7 @@ def delete(
         console.print("[yellow]Cancelled[/yellow]")
         return
     try:
-        _volumes_client().delete(name, team_id=team_id)
+        _sandbox_client().volumes.delete(name, team_id=team_id)
     except UnauthorizedError as e:
         console.print(f"[red]Unauthorized:[/red] {escape(str(e))}")
         raise typer.Exit(1)
@@ -503,7 +490,9 @@ def publish(
 ) -> None:
     """Publish a sandbox's private volume writes as a durable checkpoint."""
     try:
-        checkpoint = _volumes_client().publish(sandbox_id, name, force=force, wait=not no_wait)
+        checkpoint = _sandbox_client().volumes.publish(
+            sandbox_id, name, force=force, wait=not no_wait
+        )
     except UnauthorizedError as e:
         console.print(f"[red]Unauthorized:[/red] {escape(str(e))}")
         raise typer.Exit(1)

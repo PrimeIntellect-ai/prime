@@ -83,9 +83,8 @@ from .models import (
 )
 from .process import AsyncSandboxProcess
 from .sandbox import AsyncSandboxClient, SandboxClient
-from .volumes import AsyncVolumesClient, VolumesClient
 
-__version__ = "0.4.6"
+__version__ = "0.5.0"
 
 # Deprecated alias for backward compatibility
 TimeoutError = APITimeoutError
@@ -101,8 +100,6 @@ __all__ = [
     "AsyncSandboxProcess",
     "ImageClient",
     "AsyncImageClient",
-    "VolumesClient",
-    "AsyncVolumesClient",
     # Models
     "Sandbox",
     "SandboxCheckpoint",

@@ -1,14 +1,18 @@
-"""Sandbox volume SDK client."""
+"""Sandbox volume operations, namespaced under the sandbox clients."""
 
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 from urllib.parse import quote
 
-from .core import APIClient, AsyncAPIClient
 from .models import SandboxCheckpoint, Volume, VolumeListResponse
-from .sandbox import AsyncSandboxClient, SandboxClient
+
+if TYPE_CHECKING:
+    from .core import APIClient, AsyncAPIClient
+    from .sandbox import AsyncSandboxClient, SandboxClient
 
 
-def _resolved_team_id(client: APIClient | AsyncAPIClient, team_id: Optional[str]) -> Optional[str]:
+def _resolved_team_id(
+    client: "APIClient | AsyncAPIClient", team_id: Optional[str]
+) -> Optional[str]:
     """Explicit team wins; otherwise use the team from the client config."""
     return team_id if team_id is not None else client.config.team_id
 
@@ -23,33 +27,33 @@ def _publish_path(sandbox_id: str, name: str) -> str:
     return f"/sandbox/{sandbox_id}/volumes/{quote(name, safe='')}/publish"
 
 
-def _name_params(client: APIClient | AsyncAPIClient, team_id: Optional[str]) -> dict[str, object]:
+def _name_params(
+    client: "APIClient | AsyncAPIClient", team_id: Optional[str]
+) -> dict[str, object]:
     resolved_team_id = _resolved_team_id(client, team_id)
     if resolved_team_id:
         return {"team_id": resolved_team_id}
     return {}
 
 
-class VolumesClient:
-    """Client for Prime sandbox volume APIs."""
+class Volumes:
+    """Volume operations for one owning ``SandboxClient``.
 
-    def __init__(self, api_client: Optional[APIClient] = None):
-        self.client = api_client or APIClient()
-        self._sandbox_client: Optional[SandboxClient] = None
+    Reaches the platform through the parent client's transport and waits for
+    publishes with the parent's checkpoint waiter; it owns no transport,
+    waiter, batcher, or lifecycle of its own.
+    """
 
-    def _waiter(self) -> SandboxClient:
-        """Lazily create the checkpoint waiter sharing this client's transport."""
-        if self._sandbox_client is None:
-            self._sandbox_client = SandboxClient(self.client)
-        return self._sandbox_client
+    def __init__(self, parent: "SandboxClient"):
+        self._parent = parent
 
     def create(self, name: str, *, team_id: Optional[str] = None) -> Volume:
         """Create an empty volume in the caller's personal scope or in a team."""
         payload: dict[str, object] = {"name": name}
-        resolved_team_id = _resolved_team_id(self.client, team_id)
+        resolved_team_id = _resolved_team_id(self._parent.client, team_id)
         if resolved_team_id:
             payload["team_id"] = resolved_team_id
-        response = self.client.request("POST", "/sandbox/volumes", json=payload)
+        response = self._parent.client.request("POST", "/sandbox/volumes", json=payload)
         return Volume.model_validate(response)
 
     def list(
@@ -61,18 +65,18 @@ class VolumesClient:
     ) -> VolumeListResponse:
         """List volumes in the caller's personal scope or in a team."""
         params: dict[str, object] = {"page": page, "per_page": per_page}
-        resolved_team_id = _resolved_team_id(self.client, team_id)
+        resolved_team_id = _resolved_team_id(self._parent.client, team_id)
         if resolved_team_id:
             params["team_id"] = resolved_team_id
-        response = self.client.request("GET", "/sandbox/volumes", params=params)
+        response = self._parent.client.request("GET", "/sandbox/volumes", params=params)
         return VolumeListResponse.model_validate(response)
 
     def get(self, name: str, *, team_id: Optional[str] = None) -> Volume:
         """Get a volume by name in the caller's scope."""
-        response = self.client.request(
+        response = self._parent.client.request(
             "GET",
             _volume_path(name),
-            params=_name_params(self.client, team_id),
+            params=_name_params(self._parent.client, team_id),
         )
         return Volume.model_validate(response)
 
@@ -83,10 +87,10 @@ class VolumesClient:
         DELETE is retried on transient 5xx, so a 503 while the server is
         still removing data can succeed on a later attempt.
         """
-        self.client.request(
+        self._parent.client.request(
             "DELETE",
             _volume_path(name),
-            params=_name_params(self.client, team_id),
+            params=_name_params(self._parent.client, team_id),
         )
 
     def publish(
@@ -101,7 +105,7 @@ class VolumesClient:
         returned checkpoint is the published head once DURABLE; a failed
         publish raises RuntimeError and an unfinished publish TimeoutError.
         """
-        response = self.client.request(
+        response = self._parent.client.request(
             "POST",
             _publish_path(sandbox_id, name),
             json={"force": force},
@@ -109,29 +113,27 @@ class VolumesClient:
         checkpoint = SandboxCheckpoint.model_validate(response)
         if not wait:
             return checkpoint
-        return self._waiter().wait_for_checkpoint(checkpoint.id)
+        return self._parent.wait_for_checkpoint(checkpoint.id)
 
 
-class AsyncVolumesClient:
-    """Async client for Prime sandbox volume APIs."""
+class AsyncVolumes:
+    """Async volume operations for one owning ``AsyncSandboxClient``.
 
-    def __init__(self, api_client: Optional[AsyncAPIClient] = None):
-        self.client = api_client or AsyncAPIClient()
-        self._sandbox_client: Optional[AsyncSandboxClient] = None
+    Reaches the platform through the parent client's transport and waits for
+    publishes with the parent's checkpoint waiter; it owns no transport,
+    waiter, batcher, or lifecycle of its own.
+    """
 
-    def _waiter(self) -> AsyncSandboxClient:
-        """Lazily create the checkpoint waiter sharing this client's transport."""
-        if self._sandbox_client is None:
-            self._sandbox_client = AsyncSandboxClient(api_client=self.client)
-        return self._sandbox_client
+    def __init__(self, parent: "AsyncSandboxClient"):
+        self._parent = parent
 
     async def create(self, name: str, *, team_id: Optional[str] = None) -> Volume:
         """Create an empty volume in the caller's personal scope or in a team."""
         payload: dict[str, object] = {"name": name}
-        resolved_team_id = _resolved_team_id(self.client, team_id)
+        resolved_team_id = _resolved_team_id(self._parent.client, team_id)
         if resolved_team_id:
             payload["team_id"] = resolved_team_id
-        response = await self.client.request("POST", "/sandbox/volumes", json=payload)
+        response = await self._parent.client.request("POST", "/sandbox/volumes", json=payload)
         return Volume.model_validate(response)
 
     async def list(
@@ -143,18 +145,18 @@ class AsyncVolumesClient:
     ) -> VolumeListResponse:
         """List volumes in the caller's personal scope or in a team."""
         params: dict[str, object] = {"page": page, "per_page": per_page}
-        resolved_team_id = _resolved_team_id(self.client, team_id)
+        resolved_team_id = _resolved_team_id(self._parent.client, team_id)
         if resolved_team_id:
             params["team_id"] = resolved_team_id
-        response = await self.client.request("GET", "/sandbox/volumes", params=params)
+        response = await self._parent.client.request("GET", "/sandbox/volumes", params=params)
         return VolumeListResponse.model_validate(response)
 
     async def get(self, name: str, *, team_id: Optional[str] = None) -> Volume:
         """Get a volume by name in the caller's scope."""
-        response = await self.client.request(
+        response = await self._parent.client.request(
             "GET",
             _volume_path(name),
-            params=_name_params(self.client, team_id),
+            params=_name_params(self._parent.client, team_id),
         )
         return Volume.model_validate(response)
 
@@ -165,10 +167,10 @@ class AsyncVolumesClient:
         DELETE is retried on transient 5xx, so a 503 while the server is
         still removing data can succeed on a later attempt.
         """
-        await self.client.request(
+        await self._parent.client.request(
             "DELETE",
             _volume_path(name),
-            params=_name_params(self.client, team_id),
+            params=_name_params(self._parent.client, team_id),
         )
 
     async def publish(
@@ -183,7 +185,7 @@ class AsyncVolumesClient:
         returned checkpoint is the published head once DURABLE; a failed
         publish raises RuntimeError and an unfinished publish TimeoutError.
         """
-        response = await self.client.request(
+        response = await self._parent.client.request(
             "POST",
             _publish_path(sandbox_id, name),
             json={"force": force},
@@ -191,17 +193,4 @@ class AsyncVolumesClient:
         checkpoint = SandboxCheckpoint.model_validate(response)
         if not wait:
             return checkpoint
-        return await self._waiter().wait_for_checkpoint(checkpoint.id)
-
-    async def aclose(self) -> None:
-        # Close the waiter first: it shares this client's transport, so it
-        # must finish its work before the transport is closed.
-        if self._sandbox_client is not None:
-            await self._sandbox_client.aclose()
-        await self.client.aclose()
-
-    async def __aenter__(self) -> "AsyncVolumesClient":
-        return self
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
-        await self.aclose()
+        return await self._parent.wait_for_checkpoint(checkpoint.id)

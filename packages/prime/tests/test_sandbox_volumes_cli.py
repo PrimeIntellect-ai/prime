@@ -5,7 +5,6 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from prime_cli.commands.sandbox_volumes import _RSYNC_CAPABILITY_PROBE
 from prime_cli.main import app
 from prime_cli.utils import strip_ansi
 from prime_sandboxes import (
@@ -40,7 +39,7 @@ def test_volume_create(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
         captured["create_args"] = (name, team_id)
         return Volume(id="cvol-1", name="data", created_at=datetime.now(timezone.utc))
 
-    monkeypatch.setattr("prime_cli.commands.sandbox_volumes.VolumesClient.create", fake_create)
+    monkeypatch.setattr("prime_sandboxes.volumes.Volumes.create", fake_create)
 
     result = runner.invoke(app, ["sandbox", "volumes", "create", "data", "--team-id", "team-1"])
 
@@ -66,17 +65,26 @@ def test_volume_list_table_and_json(monkeypatch: pytest.MonkeyPatch, tmp_path: A
     )
     captured: dict[str, Any] = {}
 
-    def fake_list(self: Any, team_id: Any = None, **kwargs: Any) -> VolumeListResponse:
+    def fake_list(
+        self: Any, team_id: Any = None, page: int = 1, per_page: int = 50, **kwargs: Any
+    ) -> VolumeListResponse:
         captured["team_id"] = team_id
+        captured["page"] = page
+        captured["per_page"] = per_page
         return response
 
-    monkeypatch.setattr("prime_cli.commands.sandbox_volumes.VolumesClient.list", fake_list)
+    monkeypatch.setattr("prime_sandboxes.volumes.Volumes.list", fake_list)
 
     table = runner.invoke(app, ["sandbox", "volumes", "list", "--team-id", "team-1"])
     assert table.exit_code == 0, table.output
     output = strip_ansi(table.output)
     assert "data" in output and "shared" in output and "cvol-1" in output
     assert captured["team_id"] == "team-1"
+    assert captured == {"team_id": "team-1", "page": 1, "per_page": 50}
+
+    paged = runner.invoke(app, ["sandbox", "volumes", "list", "-p", "3", "-n", "7"])
+    assert paged.exit_code == 0, paged.output
+    assert captured == {"team_id": None, "page": 3, "per_page": 7}
 
     as_json = runner.invoke(app, ["sandbox", "volumes", "list", "--json"])
     assert as_json.exit_code == 0, as_json.output
@@ -99,7 +107,7 @@ def test_volume_get(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
             created_at=datetime.now(timezone.utc),
         )
 
-    monkeypatch.setattr("prime_cli.commands.sandbox_volumes.VolumesClient.get", fake_get)
+    monkeypatch.setattr("prime_sandboxes.volumes.Volumes.get", fake_get)
 
     result = runner.invoke(app, ["sandbox", "volumes", "get", "data", "--team-id", "team-1"])
 
@@ -114,7 +122,7 @@ def test_volume_delete_and_in_use_error(monkeypatch: pytest.MonkeyPatch, tmp_pat
     _configure_cli(monkeypatch, tmp_path)
     deleted: list[Any] = []
     monkeypatch.setattr(
-        "prime_cli.commands.sandbox_volumes.VolumesClient.delete",
+        "prime_sandboxes.volumes.Volumes.delete",
         lambda self, name, team_id=None: deleted.append((name, team_id)),
     )
 
@@ -132,7 +140,7 @@ def test_volume_delete_and_in_use_error(monkeypatch: pytest.MonkeyPatch, tmp_pat
     def in_use(self: Any, name: str, team_id: Any = None) -> None:
         raise APIError("HTTP 409 Volume is attached to a running sandbox")
 
-    monkeypatch.setattr("prime_cli.commands.sandbox_volumes.VolumesClient.delete", in_use)
+    monkeypatch.setattr("prime_sandboxes.volumes.Volumes.delete", in_use)
     failing = runner.invoke(app, ["sandbox", "volumes", "delete", "data", "-y"])
     assert failing.exit_code == 1, failing.output
     assert "attached" in strip_ansi(failing.output)
@@ -155,7 +163,7 @@ def test_volume_publish_waits_by_default(monkeypatch: pytest.MonkeyPatch, tmp_pa
     _configure_cli(monkeypatch, tmp_path)
     captured: dict[str, Any] = {}
     monkeypatch.setattr(
-        "prime_cli.commands.sandbox_volumes.VolumesClient.publish",
+        "prime_sandboxes.volumes.Volumes.publish",
         _fake_publish(captured, SimpleNamespace(id="chk-1", state="DURABLE")),
     )
 
@@ -176,7 +184,7 @@ def test_volume_publish_force_no_wait_flags(
     _configure_cli(monkeypatch, tmp_path)
     captured: dict[str, Any] = {}
     monkeypatch.setattr(
-        "prime_cli.commands.sandbox_volumes.VolumesClient.publish",
+        "prime_sandboxes.volumes.Volumes.publish",
         _fake_publish(captured, SimpleNamespace(id="chk-1", state="PENDING")),
     )
 
@@ -215,7 +223,7 @@ def test_volume_publish_surfaces_api_errors(monkeypatch: pytest.MonkeyPatch, tmp
             raise APIError(message)
 
         monkeypatch.setattr(
-            "prime_cli.commands.sandbox_volumes.VolumesClient.publish", raise_api_error
+            "prime_sandboxes.volumes.Volumes.publish", raise_api_error
         )
         result = runner.invoke(app, ["sandbox", "volumes", "publish", "data", "--sandbox", "sbx-1"])
         assert result.exit_code == 1, result.output
@@ -234,7 +242,7 @@ def test_volume_publish_409_even_with_force(
         captured["args"] = (sandbox_id, name, force, wait)
         raise APIError("HTTP 409: Another sandbox's publish is in flight")
 
-    monkeypatch.setattr("prime_cli.commands.sandbox_volumes.VolumesClient.publish", conflict)
+    monkeypatch.setattr("prime_sandboxes.volumes.Volumes.publish", conflict)
 
     result = runner.invoke(
         app, ["sandbox", "volumes", "publish", "data", "--sandbox", "sbx-1", "--force"]
@@ -252,7 +260,7 @@ def test_volume_publish_wait_timeout_reports_recovery(
 ) -> None:
     _configure_cli(monkeypatch, tmp_path)
     monkeypatch.setattr(
-        "prime_cli.commands.sandbox_volumes.VolumesClient.publish",
+        "prime_sandboxes.volumes.Volumes.publish",
         lambda self, sandbox_id, name, force=True, wait=True: (_ for _ in ()).throw(
             TimeoutError("Checkpoint chk-1 did not become DURABLE within 300s")
         ),
@@ -273,7 +281,7 @@ def test_volume_publish_wait_failed_exits_error(
 ) -> None:
     _configure_cli(monkeypatch, tmp_path)
     monkeypatch.setattr(
-        "prime_cli.commands.sandbox_volumes.VolumesClient.publish",
+        "prime_sandboxes.volumes.Volumes.publish",
         lambda self, sandbox_id, name, force=True, wait=True: (_ for _ in ()).throw(
             RuntimeError(
                 "Checkpoint chk-1 cannot become durable (state=FAILED): no error details"
@@ -295,7 +303,7 @@ def test_volume_publish_requires_sandbox_option(
     result = runner.invoke(app, ["sandbox", "volumes", "publish", "data"])
 
     assert result.exit_code == 2, result.output
-    assert "--sandbox" in result.output
+    assert "--sandbox" in strip_ansi(result.output)
 
 
 def test_volume_publish_has_no_team_option(
@@ -395,6 +403,7 @@ class _ProdConfig:
 
     def __init__(self) -> None:
         self.base_url = self.DEFAULT_BASE_URL
+        self.team_id = None
 
 
 class _DevConfig:
@@ -404,6 +413,7 @@ class _DevConfig:
 
     def __init__(self) -> None:
         self.base_url = "https://api.dev.example"
+        self.team_id = None
 
 
 def _configure_import_mocks(
@@ -422,7 +432,7 @@ def _configure_import_mocks(
 
     def fake_volume_create(self: Any, name: str, *, team_id: Any = None) -> Volume:
         state["order"].append("volume_create")
-        state["api_clients"].add(id(self.client))
+        state["api_clients"].add(id(self._parent.client))
         state["volume_creates"] = state.get("volume_creates", [])
         state["volume_creates"].append((name, team_id))
         return Volume(id="cvol-1", name=name, created_at=datetime.now(timezone.utc))
@@ -450,9 +460,6 @@ def _configure_import_mocks(
         state["closed_sessions"].append((sandbox_id, session_id))
 
     def fake_rsync(command: Any, **kwargs: Any) -> Any:
-        if command == _RSYNC_CAPABILITY_PROBE:
-            state["rsync_probes"] = state.get("rsync_probes", 0) + 1
-            return SimpleNamespace(returncode=0)
         state["order"].append("rsync")
         state["rsync_calls"].append(list(command))
         state["rsync_kwargs"] = kwargs
@@ -467,7 +474,7 @@ def _configure_import_mocks(
         self: Any, sandbox_id: str, name: str, force: bool = False, wait: bool = True
     ) -> Any:
         state["order"].append("publish")
-        state["api_clients"].add(id(self.client))
+        state["api_clients"].add(id(self._parent.client))
         state["publish_calls"].append((sandbox_id, name, force, wait))
         return SimpleNamespace(id="chk-1", state="PENDING")
 
@@ -477,10 +484,10 @@ def _configure_import_mocks(
         return SimpleNamespace(id=checkpoint_id, state="DURABLE")
 
     monkeypatch.setattr(
-        "prime_cli.commands.sandbox_volumes.VolumesClient.create", fake_volume_create
+        "prime_sandboxes.volumes.Volumes.create", fake_volume_create
     )
     monkeypatch.setattr(
-        "prime_cli.commands.sandbox_volumes.VolumesClient.publish", fake_publish
+        "prime_sandboxes.volumes.Volumes.publish", fake_publish
     )
     monkeypatch.setattr(
         "prime_cli.commands.sandbox_volumes.SandboxClient.create", fake_sandbox_create
@@ -546,10 +553,10 @@ def test_volume_import_happy_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Any
     assert state["closed_sessions"] == [("sbx-import-1", "sess-1")]
 
     (command,) = state["rsync_calls"]
-    assert command[:5] == ["rsync", "-az", "--partial", "--info=progress2", "-e"]
-    assert command[6] == f"{data_dir}/"
-    assert command[7] == "sess-1@gw.example.com:/volume/"
-    remote_shell = command[5]
+    assert command[:4] == ["rsync", "-az", "--partial", "-e"]
+    assert command[5] == f"{data_dir}/"
+    assert command[6] == "sess-1@gw.example.com:/volume/"
+    remote_shell = command[4]
     assert remote_shell.startswith("ssh -p 2022 -i ")
     assert "ProxyCommand=" in remote_shell
     assert "prime_cli.ssh_proxy gw.example.com 2022 sess-1" in remote_shell
@@ -571,7 +578,7 @@ def test_volume_import_happy_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Any
     ]
     assert state["publish_calls"] == [("sbx-import-1", "data", False, False)]
     assert state["checkpoint_waits"] == ["chk-1"]
-    # Both clients share one API client: same transport, auth, and team scope.
+    # One sandbox client runs the whole flow: one API transport and waiter.
     assert len(state["api_clients"]) == 1
 
 
@@ -615,26 +622,20 @@ def test_volume_import_rsync_failure_keeps_volume_and_cleans_up(
     assert state["closed_sessions"] == [("sbx-import-1", "sess-1")]
 
 
-def test_volume_import_rejects_incapable_rsync_before_any_api_call(
+def test_volume_import_rejects_missing_rsync_before_any_api_call(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:
     _configure_cli(monkeypatch, tmp_path)
     state = _configure_import_mocks(monkeypatch, tmp_path)
+    monkeypatch.setattr("prime_cli.commands.sandbox_volumes.shutil.which", lambda name: False)
 
-    # The local capability probe fails (e.g. macOS openrsync, no --info).
-    monkeypatch.setattr(
-        "prime_cli.commands.sandbox_volumes.subprocess.run",
-        lambda command, **kwargs: SimpleNamespace(returncode=1),
-    )
     data_dir = tmp_path / "data"
     data_dir.mkdir()
 
     result = runner.invoke(app, ["sandbox", "volumes", "create", "data", "--from", str(data_dir)])
 
     assert result.exit_code == 1, result.output
-    output = " ".join(strip_ansi(result.output).split())
-    assert "rsync 3.1+ is required" in output
-    assert "brew install rsync" in output
+    assert "rsync is required" in strip_ansi(result.output)
     # Rejected before any API mutation.
     assert state.get("volume_creates", []) == []
     assert state["rsync_calls"] == []
@@ -662,11 +663,9 @@ def test_volume_import_reuses_existing_volume_scope(
         state["volume_creates"].append((name, team_id))
         raise APIError("HTTP 409: Volume name already taken")
 
-    monkeypatch.setattr("prime_cli.commands.sandbox_volumes.VolumesClient.create", taken)
+    monkeypatch.setattr("prime_sandboxes.volumes.Volumes.create", taken)
 
     def succeeding_rsync(command: Any, **kwargs: Any) -> Any:
-        if command == _RSYNC_CAPABILITY_PROBE:
-            return SimpleNamespace(returncode=0)
         state["rsync_calls"].append(list(command))
         return SimpleNamespace(returncode=0)
 
@@ -694,7 +693,7 @@ def test_volume_import_reuses_existing_volume_scope(
     def server_error(self: Any, name: str, *, team_id: Any = None) -> Volume:
         raise APIError("HTTP 500: detail body mentioning HTTP 409")
 
-    monkeypatch.setattr("prime_cli.commands.sandbox_volumes.VolumesClient.create", server_error)
+    monkeypatch.setattr("prime_sandboxes.volumes.Volumes.create", server_error)
     third = runner.invoke(
         app,
         ["sandbox", "volumes", "create", "data", "--team-id", "team-1", "--from", str(data_dir)],
@@ -803,8 +802,6 @@ def test_volume_import_interrupt_before_publish_cleans_up(
     state = _configure_import_mocks(monkeypatch, tmp_path)
 
     def interrupted_run(command: Any, **kwargs: Any) -> Any:
-        if command == _RSYNC_CAPABILITY_PROBE:
-            return SimpleNamespace(returncode=0)
         state["rsync_calls"].append(list(command))
         raise KeyboardInterrupt()
 
@@ -838,7 +835,7 @@ def test_volume_import_publish_conflict_retains_importer(
         state["publish_calls"].append((sandbox_id, name, force, wait))
         raise APIError("HTTP 409: Another sandbox's publish is in flight")
 
-    monkeypatch.setattr("prime_cli.commands.sandbox_volumes.VolumesClient.publish", conflict)
+    monkeypatch.setattr("prime_sandboxes.volumes.Volumes.publish", conflict)
     data_dir = tmp_path / "data"
     data_dir.mkdir()
 
@@ -857,6 +854,44 @@ def test_volume_import_publish_conflict_retains_importer(
     assert "prime sandbox checkpoint get" in output
     assert "prime sandbox delete sbx-import-1" in output
     assert "30 minutes without transfer activity" in output
+
+
+def test_volume_import_retention_hint_carries_team_scope(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    _configure_cli(monkeypatch, tmp_path)
+    state = _configure_import_mocks(monkeypatch, tmp_path)
+
+    def conflict(
+        self: Any, sandbox_id: str, name: str, force: bool = False, wait: bool = True
+    ) -> Any:
+        state["publish_calls"].append((sandbox_id, name, force, wait))
+        raise APIError("HTTP 409: Another sandbox's publish is in flight")
+
+    monkeypatch.setattr("prime_sandboxes.volumes.Volumes.publish", conflict)
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+
+    result = runner.invoke(
+        app,
+        [
+            "sandbox",
+            "volumes",
+            "create",
+            "weird name",
+            "--team-id",
+            "team 1",
+            "--from",
+            str(data_dir),
+        ],
+    )
+
+    assert result.exit_code == 1, result.output
+    output = " ".join(strip_ansi(result.output).split())
+    assert state["deleted"] == []
+    # The recovery hint carries the effective team scope and quoted arguments.
+    assert "prime sandbox volumes get 'weird name' --team-id 'team 1'" in output
+    assert "prime sandbox delete sbx-import-1" in output
 
 
 def test_volume_import_publish_timeout_retains_importer(
@@ -953,7 +988,7 @@ def test_volume_import_rejects_missing_directory(
     _configure_cli(monkeypatch, tmp_path)
     created: list[Any] = []
     monkeypatch.setattr(
-        "prime_cli.commands.sandbox_volumes.VolumesClient.create",
+        "prime_sandboxes.volumes.Volumes.create",
         lambda self, request: created.append(request),
     )
 

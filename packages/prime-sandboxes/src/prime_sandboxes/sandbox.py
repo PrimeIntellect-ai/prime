@@ -139,6 +139,31 @@ _BACKGROUND_JOB_LAUNCH_BACKOFF_SECONDS = 0.5
 # The platform retries a failed LAN push from its scheduled status sweep.
 _LAN_SYNC_TIMEOUT_SECONDS = 120.0
 _LAN_SYNC_POLL_SECONDS = 2.0
+
+
+def _lan_rules_payload(rules: List[LanRule]) -> List[Dict[str, Any]]:
+    return [r.model_dump(by_alias=True, exclude_none=True) for r in rules]
+
+
+def _created_with_lan_rules(network: LanNetwork, rules: List[LanRule]) -> bool:
+    """Whether the platform stored ``rules`` at creation. One from before rules on
+    create ignores them and gives the network its default rules instead. Allow rules
+    have no order, so neither do the compared lists."""
+
+    def key(rule: LanRule) -> Any:
+        return rule.from_, rule.to, tuple(sorted(set(rule.ports or ())))
+
+    return sorted(map(key, network.rules)) == sorted(map(key, rules))
+
+
+def _ignored_lan_rules(network_id: str, deleted: bool) -> APIError:
+    outcome = "it was deleted" if deleted else "deleting it failed, so delete it yourself"
+    return APIError(
+        f"the platform ignored LAN network {network_id}'s rules at creation and "
+        f"{outcome}; create it without rules and set them with set_lan_rules"
+    )
+
+
 _BACKGROUND_JOB_LAUNCH_TIMEOUT_SECONDS = 30
 _SANDBOX_ERROR_CONTEXT_TIMEOUT_SECONDS = 10.0
 
@@ -2607,6 +2632,8 @@ class SandboxClient:
                 scopes, f"APIError: Sandbox {sandbox_id} is being deleted"
             )
             response = self.client.request("DELETE", f"/sandbox/{sandbox_id}")
+            # A deleted sandbox never joins the LAN network create() recorded for it.
+            self._pending_lan_joins.pop(sandbox_id, None)
             return response
         finally:
             self._operation_leases.end_drain(scopes)
@@ -2616,15 +2643,34 @@ class SandboxClient:
         response = self.client.request("GET", f"/sandbox/{sandbox_id}/egress-policy")
         return EgressPolicyStatus.model_validate(response)
 
-    def create_lan_network(self, name: str, team_id: Optional[str] = None) -> LanNetwork:
-        """Create a LAN network. By default every member may reach every other
-        member on every port; narrow it with ``set_lan_rules``."""
+    def create_lan_network(
+        self,
+        name: str,
+        team_id: Optional[str] = None,
+        rules: Optional[List[LanRule]] = None,
+    ) -> LanNetwork:
+        """Create a LAN network. Rules are directed and allow-only. ``rules`` are in
+        force before any member joins. Without them, the network has the platform's
+        default rules: none, so no member reaches another (older platforms let every
+        member reach every other); ``set_lan_rules`` replaces them later. A platform
+        that ignores ``rules`` at creation raises ``APIError``, once the network it
+        created is deleted."""
         payload: Dict[str, Any] = {"name": name}
         team_id = team_id if team_id is not None else self.client.config.team_id
         if team_id is not None:
             payload["team_id"] = team_id
+        if rules is not None:
+            payload["rules"] = _lan_rules_payload(rules)
         response = self.client.request("POST", "/sandbox/networks", json=payload)
-        return LanNetwork.model_validate(response)
+        network = LanNetwork.model_validate(response)
+        if rules is not None and not _created_with_lan_rules(network, rules):
+            # Never hand back a network whose members could reach each other unasked.
+            try:
+                self.delete_lan_network(network.id)
+            except APIError as error:
+                raise _ignored_lan_rules(network.id, deleted=False) from error
+            raise _ignored_lan_rules(network.id, deleted=True)
+        return network
 
     def list_lan_networks(self, team_id: Optional[str] = None) -> List[LanNetwork]:
         """List your personal LAN networks, or a team's."""
@@ -2644,7 +2690,7 @@ class SandboxClient:
 
     def set_lan_rules(self, network_id: str, rules: List[LanRule]) -> LanNetwork:
         """Replace a LAN network's rules. Rules are directed and allow-only."""
-        payload = {"rules": [r.model_dump(by_alias=True, exclude_none=True) for r in rules]}
+        payload = {"rules": _lan_rules_payload(rules)}
         response = self.client.request("PUT", f"/sandbox/networks/{network_id}/rules", json=payload)
         return LanNetwork.model_validate(response)
 
@@ -2664,26 +2710,35 @@ class SandboxClient:
         for sandbox_id in sandbox_ids:
             pending = self._pending_lan_joins.get(sandbox_id)
             if pending is not None:
-                self._join_lan(pending[0], sandbox_id, pending[1])
+                # Leased like other sandbox operations: a delete waits for the join,
+                # and a sandbox being deleted does not start one.
+                lease = self._operation_leases.acquire(sandbox_id)
+                try:
+                    self._join_lan(pending[0], sandbox_id, pending[1])
+                finally:
+                    lease.release()
                 self._pending_lan_joins.pop(sandbox_id, None)
 
     def _join_lan(self, network_id: str, sandbox_id: str, tags: Optional[List[str]]) -> None:
-        """Add a member and wait until the platform has pushed it to the VM layer.
-        A failed inline push is retried by a background sweep, so poll for it."""
-        member = self.add_lan_member(network_id, sandbox_id, tags)
+        """Add a member and wait until the platform has pushed it, and the network's
+        current rules, to the VM layer. A failed inline push is retried by a background
+        sweep, so poll for it. Until the rules are pushed, the VM layer enforces the
+        network's previous ones: every member reaching every other, on a new network."""
+        self.add_lan_member(network_id, sandbox_id, tags)
         deadline = time.monotonic() + _LAN_SYNC_TIMEOUT_SECONDS
-        while not member.synced:
+        while True:
+            network = self.get_lan_network(network_id)
+            member = next((m for m in network.members or [] if m.sandbox_id == sandbox_id), None)
+            if member is None:
+                raise RuntimeError(f"Sandbox {sandbox_id} left LAN network {network_id}")
+            if member.synced and network.synced:
+                return
             if time.monotonic() > deadline:
                 raise TimeoutError(
-                    f"Sandbox {sandbox_id} joined LAN network {network_id} but was not "
-                    f"synced within {_LAN_SYNC_TIMEOUT_SECONDS}s"
+                    f"Sandbox {sandbox_id} joined LAN network {network_id}, but the "
+                    f"membership and rules were not synced within {_LAN_SYNC_TIMEOUT_SECONDS}s"
                 )
             time.sleep(_LAN_SYNC_POLL_SECONDS)
-            network = self.get_lan_network(network_id)
-            found = next((m for m in network.members or [] if m.sandbox_id == sandbox_id), None)
-            if found is None:
-                raise RuntimeError(f"Sandbox {sandbox_id} left LAN network {network_id}")
-            member = found
 
     def remove_lan_member(self, network_id: str, sandbox_id: str) -> None:
         """Remove a sandbox from a LAN network."""
@@ -2757,7 +2812,10 @@ class SandboxClient:
                 "/sandbox",
                 json=payload,
             )
-            return BulkDeleteSandboxResponse.model_validate(response)
+            result = BulkDeleteSandboxResponse.model_validate(response)
+            for sandbox_id in result.succeeded:
+                self._pending_lan_joins.pop(sandbox_id, None)
+            return result
         finally:
             self._operation_leases.end_drain(scopes)
 
@@ -4232,6 +4290,8 @@ class AsyncSandboxClient:
                 scopes, f"APIError: Sandbox {sandbox_id} is being deleted"
             )
             response = await self.client.request("DELETE", f"/sandbox/{sandbox_id}")
+            # A deleted sandbox never joins the LAN network create() recorded for it.
+            self._pending_lan_joins.pop(sandbox_id, None)
             return response
         finally:
             self._operation_leases.end_drain(scopes)
@@ -4241,15 +4301,34 @@ class AsyncSandboxClient:
         response = await self.client.request("GET", f"/sandbox/{sandbox_id}/egress-policy")
         return EgressPolicyStatus.model_validate(response)
 
-    async def create_lan_network(self, name: str, team_id: Optional[str] = None) -> LanNetwork:
-        """Create a LAN network. By default every member may reach every other
-        member on every port; narrow it with ``set_lan_rules``."""
+    async def create_lan_network(
+        self,
+        name: str,
+        team_id: Optional[str] = None,
+        rules: Optional[List[LanRule]] = None,
+    ) -> LanNetwork:
+        """Create a LAN network. Rules are directed and allow-only. ``rules`` are in
+        force before any member joins. Without them, the network has the platform's
+        default rules: none, so no member reaches another (older platforms let every
+        member reach every other); ``set_lan_rules`` replaces them later. A platform
+        that ignores ``rules`` at creation raises ``APIError``, once the network it
+        created is deleted."""
         payload: Dict[str, Any] = {"name": name}
         team_id = team_id if team_id is not None else self.client.config.team_id
         if team_id is not None:
             payload["team_id"] = team_id
+        if rules is not None:
+            payload["rules"] = _lan_rules_payload(rules)
         response = await self.client.request("POST", "/sandbox/networks", json=payload)
-        return LanNetwork.model_validate(response)
+        network = LanNetwork.model_validate(response)
+        if rules is not None and not _created_with_lan_rules(network, rules):
+            # Never hand back a network whose members could reach each other unasked.
+            try:
+                await self.delete_lan_network(network.id)
+            except APIError as error:
+                raise _ignored_lan_rules(network.id, deleted=False) from error
+            raise _ignored_lan_rules(network.id, deleted=True)
+        return network
 
     async def list_lan_networks(self, team_id: Optional[str] = None) -> List[LanNetwork]:
         """List your personal LAN networks, or a team's."""
@@ -4269,7 +4348,7 @@ class AsyncSandboxClient:
 
     async def set_lan_rules(self, network_id: str, rules: List[LanRule]) -> LanNetwork:
         """Replace a LAN network's rules. Rules are directed and allow-only."""
-        payload = {"rules": [r.model_dump(by_alias=True, exclude_none=True) for r in rules]}
+        payload = {"rules": _lan_rules_payload(rules)}
         response = await self.client.request(
             "PUT", f"/sandbox/networks/{network_id}/rules", json=payload
         )
@@ -4292,28 +4371,37 @@ class AsyncSandboxClient:
         async def join(sandbox_id: str) -> None:
             pending = self._pending_lan_joins.get(sandbox_id)
             if pending is not None:
-                await self._join_lan(pending[0], sandbox_id, pending[1])
+                # Leased like other sandbox operations: a delete waits for the join,
+                # and a sandbox being deleted does not start one.
+                lease = self._operation_leases.acquire(sandbox_id)
+                try:
+                    await self._join_lan(pending[0], sandbox_id, pending[1])
+                finally:
+                    lease.release()
                 self._pending_lan_joins.pop(sandbox_id, None)
 
         await asyncio.gather(*(join(sandbox_id) for sandbox_id in sandbox_ids))
 
     async def _join_lan(self, network_id: str, sandbox_id: str, tags: Optional[List[str]]) -> None:
-        """Add a member and wait until the platform has pushed it to the VM layer.
-        A failed inline push is retried by a background sweep, so poll for it."""
-        member = await self.add_lan_member(network_id, sandbox_id, tags)
+        """Add a member and wait until the platform has pushed it, and the network's
+        current rules, to the VM layer. A failed inline push is retried by a background
+        sweep, so poll for it. Until the rules are pushed, the VM layer enforces the
+        network's previous ones: every member reaching every other, on a new network."""
+        await self.add_lan_member(network_id, sandbox_id, tags)
         deadline = time.monotonic() + _LAN_SYNC_TIMEOUT_SECONDS
-        while not member.synced:
+        while True:
+            network = await self.get_lan_network(network_id)
+            member = next((m for m in network.members or [] if m.sandbox_id == sandbox_id), None)
+            if member is None:
+                raise RuntimeError(f"Sandbox {sandbox_id} left LAN network {network_id}")
+            if member.synced and network.synced:
+                return
             if time.monotonic() > deadline:
                 raise TimeoutError(
-                    f"Sandbox {sandbox_id} joined LAN network {network_id} but was not "
-                    f"synced within {_LAN_SYNC_TIMEOUT_SECONDS}s"
+                    f"Sandbox {sandbox_id} joined LAN network {network_id}, but the "
+                    f"membership and rules were not synced within {_LAN_SYNC_TIMEOUT_SECONDS}s"
                 )
             await asyncio.sleep(_LAN_SYNC_POLL_SECONDS)
-            network = await self.get_lan_network(network_id)
-            found = next((m for m in network.members or [] if m.sandbox_id == sandbox_id), None)
-            if found is None:
-                raise RuntimeError(f"Sandbox {sandbox_id} left LAN network {network_id}")
-            member = found
 
     async def remove_lan_member(self, network_id: str, sandbox_id: str) -> None:
         """Remove a sandbox from a LAN network."""
@@ -4389,7 +4477,10 @@ class AsyncSandboxClient:
                 "/sandbox",
                 json=payload,
             )
-            return BulkDeleteSandboxResponse.model_validate(response)
+            result = BulkDeleteSandboxResponse.model_validate(response)
+            for sandbox_id in result.succeeded:
+                self._pending_lan_joins.pop(sandbox_id, None)
+            return result
         finally:
             self._operation_leases.end_drain(scopes)
 

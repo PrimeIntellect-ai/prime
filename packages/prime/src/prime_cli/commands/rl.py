@@ -21,6 +21,7 @@ from prime_cli.core import Config
 from ..api.rl import EnvServerInfo, RLClient, RLRun
 from ..api.training import (
     HostedTrainingClient,
+    HostedTrainingRunResponse,
     build_payload_from_toml,
     resolve_pull_request_head,
 )
@@ -413,6 +414,38 @@ def _resolve_pr_ref(pr_number: int) -> str:
         raise typer.Exit(1)
 
 
+def _collect_secrets(env: Optional[List[str]], env_files: List[str]) -> Dict[str, str]:
+    def _warn(msg: str) -> None:
+        console.print(f"[yellow]Warning:[/yellow] {msg}")
+
+    try:
+        secrets = collect_env_vars(
+            env_args=env,
+            env_files=env_files or None,
+            on_warning=_warn,
+        )
+    except EnvParseError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+    secrets = secrets or {}
+
+    # Only these two are forwarded; dropping others would fail the run mid-training.
+    supported_secret_keys = {"WANDB_API_KEY", "HF_TOKEN"}
+    unsupported = sorted(k for k in secrets if k not in supported_secret_keys)
+    if unsupported:
+        console.print(
+            "[red]Error:[/red] full-FT runs only forward "
+            f"{', '.join(sorted(supported_secret_keys))} today; got "
+            f"unsupported secret(s): {', '.join(unsupported)}."
+        )
+        console.print(
+            "[dim]Drop these from --env-var/--env-file, or wait for "
+            "generic secret forwarding on the dedicated training endpoint.[/dim]"
+        )
+        raise typer.Exit(1)
+    return secrets
+
+
 def _dispatch_dedicated_run(
     *,
     raw_cfg: Dict[str, Any],
@@ -465,41 +498,7 @@ def _dispatch_dedicated_run(
             cfg_env_files.append(str(config_dir / val))
     all_env_files = cfg_env_files + (env_file or [])
 
-    def _warn(msg: str) -> None:
-        console.print(f"[yellow]Warning:[/yellow] {msg}")
-
-    try:
-        secrets = collect_env_vars(
-            env_args=env,
-            env_files=all_env_files if all_env_files else None,
-            on_warning=_warn,
-        )
-    except EnvParseError as e:
-        console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
-    secrets = secrets or {}
-
-    # The full-FT backend schema only knows about WANDB_API_KEY and
-    # HF_TOKEN (see platform CreateDedicatedRunRequestBase). Silently
-    # dropping anything else here would launch the run without the
-    # credentials the orchestrator's env needs — the LoRA path forwards
-    # the whole map via env-server pods, but full-FT runs the env inline
-    # in the orchestrator and has no comparable surface today. Reject
-    # loudly instead so the user knows up-front rather than discovering
-    # via a runtime auth error inside a $$$ hosted pod.
-    supported_secret_keys = {"WANDB_API_KEY", "HF_TOKEN"}
-    unsupported = sorted(k for k in secrets if k not in supported_secret_keys)
-    if unsupported:
-        console.print(
-            "[red]Error:[/red] full-FT runs only forward "
-            f"{', '.join(sorted(supported_secret_keys))} today; got "
-            f"unsupported secret(s): {', '.join(unsupported)}."
-        )
-        console.print(
-            "[dim]Drop these from --env-var/--env-file, or wait for "
-            "generic secret forwarding on the dedicated training endpoint.[/dim]"
-        )
-        raise typer.Exit(1)
+    secrets = _collect_secrets(env, all_env_files)
 
     # `image_tag` is chart-level — it picks which prime-rl container build
     # the run pulls. Two ways to set it: `--image-tag` (CLI flag, useful
@@ -697,13 +696,19 @@ def _dispatch_dedicated_run(
             )
         raise typer.Exit(1)
 
+    _report_dispatch(result, output=output, source_ref=resolved_source_ref)
+
+
+def _report_dispatch(
+    result: HostedTrainingRunResponse, *, output: str, source_ref: Optional[str] = None
+) -> None:
     if output == "json":
         # Don't expose token_value in JSON output either — the chart
         # binds it via secretKeyRef and printing it leaks credentials
         # into automation logs.
         run_json: Dict[str, Any] = {"runId": result.run_id}
-        if resolved_source_ref:
-            run_json["sourceRef"] = resolved_source_ref
+        if source_ref:
+            run_json["sourceRef"] = source_ref
         if result.on_demand:
             # Only on the billed path: a reserved run has no hourly rate,
             # and emitting nulls would read as "cost unknown".
@@ -736,7 +741,7 @@ def _dispatch_dedicated_run(
             "when the run ends.[/dim]"
         )
 
-    dashboard_url = f"{app_config.frontend_url}/dashboard/training/{result.run_id}"
+    dashboard_url = f"{Config().frontend_url}/dashboard/training/{result.run_id}"
     console.print("\n[cyan]Monitor run at:[/cyan]")
     console.print(f"  [link={dashboard_url}]{dashboard_url}[/link]")
 
@@ -1639,7 +1644,7 @@ def pause_run(
     """Pause a Hosted Training run at a checkpoint and release its GPUs.
 
     A paused run cannot be unpaused; continue it with
-    `prime train <config> --resume-from <run_id>`.
+    `prime train resume <run_id>`.
     """
     if not force and not typer.confirm(f"Are you sure you want to pause run {run_id}?"):
         console.print("Cancelled.")
@@ -1656,7 +1661,78 @@ def pause_run(
     console.print(f"[green]✓ Run {run_id} is pausing[/green]")
     console.print(f"Status: [{color}]{status}[/{color}]")
     console.print(f"Check progress with: prime train get {run_id}")
-    console.print(f"Once PAUSED, resume with: prime train <config> --resume-from {run_id}")
+    console.print(f"Once PAUSED, resume with: prime train resume {run_id}")
+
+
+@app.command("resume", rich_help_panel="Commands")
+def resume_run(
+    run_id: str = typer.Argument(..., help="ID of the PAUSED run to resume"),
+    env: Optional[List[str]] = typer.Option(
+        None,
+        "-e",
+        "--env-var",
+        help=(
+            "Secret to pass to the resumed run (WANDB_API_KEY, HF_TOKEN). "
+            "Accepts: KEY=VALUE (direct value), KEY (reads from $KEY), "
+            "or path/to/file.env (loads env file)."
+        ),
+    ),
+    env_file: Optional[List[str]] = typer.Option(
+        None,
+        "--env-file",
+        help="Path to .env file containing secrets. Supports ${VAR} expansion from local env.",
+    ),
+    gpu_type: Optional[str] = typer.Option(
+        None, "--gpu-type", help="GPU type to resume on. Defaults to the paused run's."
+    ),
+    image_tag: Optional[str] = typer.Option(
+        None,
+        "--image-tag",
+        help="prime-rl image tag to resume with. Defaults to the paused run's.",
+    ),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
+) -> None:
+    """Resume a PAUSED Hosted Training run from its checkpoint as a new run.
+
+    The new run reuses the paused run's config, volume, image and GPU type.
+    Secrets are not kept once a run starts, so pass them again with
+    -e/--env-file.
+
+    Example:
+
+        prime train resume <run_id> -e WANDB_API_KEY
+    """
+    validate_output_format(output, console)
+    secrets = _collect_secrets(env, env_file or [])
+    payload = {
+        key: value
+        for key, value in {
+            "gpuType": gpu_type,
+            "imageTag": image_tag,
+            "wandbApiKey": secrets.get("WANDB_API_KEY"),
+            "hfToken": secrets.get("HF_TOKEN"),
+        }.items()
+        if value is not None
+    }
+
+    if not confirm_or_skip(f"Resume run {run_id} as a new Hosted Training run?", yes, default=True):
+        console.print("\nRun cancelled")
+        raise typer.Exit(0)
+
+    status_ctx = (
+        console.status("[bold blue]Resuming Hosted Training run...", spinner="dots")
+        if output != "json"
+        else nullcontext()
+    )
+    try:
+        with status_ctx:
+            result = HostedTrainingClient(APIClient()).resume_run(run_id, payload)
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {rich_escape(api_detail(e))}")
+        raise typer.Exit(1)
+
+    _report_dispatch(result, output=output)
 
 
 @app.command("delete", rich_help_panel="Commands")

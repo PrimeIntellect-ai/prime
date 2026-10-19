@@ -346,6 +346,53 @@ def test_train_pause(monkeypatch, response, exit_code, expected_output) -> None:
     assert calls == [("POST", "/training/runs/run-1/pause")]
 
 
+RESUME_CONFLICT = "Run run-1 is RUNNING; only a PAUSED run can be resumed."
+
+
+@pytest.mark.parametrize(
+    ("response", "exit_code", "expected_output"),
+    [
+        ({"runId": "run-2", "tokenValue": "t"}, 0, "Dispatched hosted run run-2"),
+        (APIError(f"HTTP 409: {RESUME_CONFLICT}"), 1, f"Error: {RESUME_CONFLICT}"),
+    ],
+)
+def test_train_resume(monkeypatch, response, exit_code, expected_output) -> None:
+    calls: list[tuple[str, str, Any]] = []
+
+    def mock_request(self, method, endpoint, params=None, json=None, timeout=None):
+        calls.append((method, endpoint, json))
+        if isinstance(response, APIError):
+            raise response
+        return response
+
+    monkeypatch.setattr("prime_cli.core.client.APIClient.request", mock_request)
+
+    result = runner.invoke(
+        app,
+        [
+            "train",
+            "resume",
+            "run-1",
+            "-e",
+            "WANDB_API_KEY=wandb-key",
+            "--gpu-type",
+            "B200_180GB",
+            "-y",
+        ],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key", "COLUMNS": "200"},
+    )
+
+    assert result.exit_code == exit_code, result.output
+    assert expected_output in result.output
+    assert calls == [
+        (
+            "POST",
+            "/training/runs/run-1/resume",
+            {"gpuType": "B200_180GB", "wandbApiKey": "wandb-key"},
+        )
+    ]
+
+
 _FFT_BODY = (
     '[model]\nname = "Qwen/Qwen3-0.6B"\n\n[deployment]\nnum_train_gpus = 1\nnum_infer_gpus = 1\n'
 )

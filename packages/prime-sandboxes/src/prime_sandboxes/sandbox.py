@@ -2058,8 +2058,10 @@ class AsyncSandboxAuthCache:
                     await self._save_cache()
                 return dict(response)
             finally:
-                async with self._lock:
-                    ev = self._inflight.pop(sandbox_id, None)
+                # This event-loop-local transition must not suspend. A second cancellation
+                # while reacquiring the cache lock would strand the refresh marker and
+                # make every later operation on this sandbox wait for a vanished owner.
+                ev = self._inflight.pop(sandbox_id, None)
                 if ev is not None:
                     ev.set()
 

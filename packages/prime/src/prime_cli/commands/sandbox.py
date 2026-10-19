@@ -657,7 +657,9 @@ def lan_rules(
         "--rule",
         "-r",
         help="Allow rule FROM->TO[@PORT,...] with selectors '*' or 'tag:NAME', "
-        "e.g. 'tag:web->tag:db@5432'. Repeatable; replaces all rules.",
+        "e.g. 'tag:web->tag:db@5432'. FROM 'internet' exposes the listed ports "
+        "at https://<port>-<sandbox-id>.<gateway domain>, e.g. "
+        "'internet->tag:web@8080'. Repeatable; replaces all rules.",
     ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:

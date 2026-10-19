@@ -118,7 +118,9 @@ class EgressPolicyStatus(BaseModel):
 class LanRule(BaseModel):
     """A directed allow rule: members matching ``from`` may connect to members
     matching ``to``. Selectors are ``*`` or ``tag:<name>``; ``ports`` limits the
-    destination ports (all ports when omitted)."""
+    destination ports (all ports when omitted). A ``from`` of ``internet``
+    instead exposes the listed ``ports`` of members matching ``to`` publicly over
+    HTTP at ``https://<port>-<sandbox-id>.<gateway domain>``."""
 
     from_: str = Field(alias="from")
     to: str

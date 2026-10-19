@@ -14,6 +14,7 @@ def test_parse_lan_rule_round_trips():
     assert (rule.from_, rule.to, rule.ports) == ("tag:web", "tag:db", [5432, 6379])
     assert _lan_rule_text(rule) == "tag:web->tag:db@5432,6379"
     assert _parse_lan_rule("*->*").ports is None
+    assert _lan_rule_text(_parse_lan_rule("internet->tag:web@8080")) == "internet->tag:web@8080"
 
 
 @pytest.mark.parametrize("raw", ["tag:web", "->tag:db", "*->*@http", "tag:web->tag:db@"])

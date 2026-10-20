@@ -30,6 +30,8 @@ prime-sandboxes = false
 prime-tunnel    = false
 prime-evals     = false
 prime-traces    = false
+# certifi 2026.10.19 drops the roots behind the compromised eMudhra intermediates
+certifi         = "2026-10-21T00:00:00Z"
 prime-runs      = false
 
 [tool.uv.sources]

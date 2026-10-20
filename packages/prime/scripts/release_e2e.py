@@ -277,10 +277,7 @@ def remote_script(config: RemoteConfig) -> str:
                 version = "0.0.1"
                 description = "Temporary Prime release e2e smoke environment"
                 requires-python = ">=3.11"
-                dependencies = [
-                  "datasets>=2.18.0",
-                  "verifiers>=0.2.0",
-                ]
+                dependencies = ["verifiers>=0.4.0"]
 
                 [build-system]
                 requires = ["hatchling"]
@@ -288,9 +285,6 @@ def remote_script(config: RemoteConfig) -> str:
 
                 [tool.hatch.build]
                 include = ["{MODULE_NAME}.py", "README.md"]
-
-                [project.entry-points."verifiers.environments"]
-                {MODULE_NAME} = "{MODULE_NAME}:load_environment"
                 ''',
             )
             write_file(
@@ -305,54 +299,47 @@ def remote_script(config: RemoteConfig) -> str:
             write_file(
                 ENV_DIR / f"{MODULE_NAME}.py",
                 '''
-                from __future__ import annotations
+                import re
 
-                from datasets import Dataset
-                import verifiers as vf
+                import verifiers.v1 as vf
 
                 SYSTEM_PROMPT = 'Answer with the exact requested token inside <answer> tags.'
+                _ANSWER = re.compile(r"<answer>(.*?)</answer>", re.DOTALL)
 
 
-                def _rows(split: str, variant: str) -> list[dict[str, str]]:
-                    return [
-                        {
-                            "id": f"{split}-{variant}-0",
-                            "question": "Return only the token prime inside <answer> tags.",
-                            "answer": "prime",
-                        }
-                    ]
+                class SmokeData(vf.TaskData):
+                    answer: str
 
 
-                def load_environment(
-                    split: str = "eval",
-                    variant: str = "default",
-                    num_examples: int = -1,
-                    **kwargs,
-                ) -> vf.Environment:
-                    dataset = Dataset.from_list(_rows(split, variant))
-                    if num_examples > 0:
-                        dataset = dataset.select(range(min(num_examples, len(dataset))))
+                class SmokeTask(vf.Task[SmokeData]):
+                    @vf.stop
+                    async def single_turn(self, trace: vf.Trace) -> bool:
+                        return trace.num_turns >= 1
 
-                    parser = vf.XMLParser(["answer"])
+                    @vf.reward(weight=1.0)
+                    async def exact_answer(self, trace: vf.Trace) -> float:
+                        match = _ANSWER.search(trace.last_reply or "")
+                        response = match.group(1).strip().lower() if match else ""
+                        return float(response == self.data.answer)
 
-                    async def exact_answer(completion, answer, parser) -> float:
-                        parsed = parser.parse_answer(completion)
-                        if parsed is None:
-                            return 0.0
-                        return 1.0 if str(parsed).strip().lower() == str(answer).strip() else 0.0
 
-                    rubric = vf.Rubric(
-                        funcs=[exact_answer, parser.get_format_reward_func()],
-                        weights=[1.0, 0.2],
-                        parser=parser,
-                    )
-                    return vf.SingleTurnEnv(
-                        dataset=dataset,
-                        eval_dataset=dataset,
-                        rubric=rubric,
-                        system_prompt=SYSTEM_PROMPT,
-                        **kwargs,
-                    )
+                class SmokeConfig(vf.TasksetConfig):
+                    split: str = "eval"
+                    variant: str = "default"
+
+
+                class SmokeTaskset(vf.Taskset[SmokeTask, SmokeConfig]):
+                    def load(self) -> list[SmokeTask]:
+                        data = SmokeData(
+                            id=f"{self.config.split}-{self.config.variant}-0",
+                            prompt="Return only the token prime inside <answer> tags.",
+                            system_prompt=SYSTEM_PROMPT,
+                            answer="prime",
+                        )
+                        return [SmokeTask(data, self.config.task)]
+
+
+                __all__ = ["SmokeTaskset"]
                 ''',
             )
 
@@ -564,7 +551,7 @@ def remote_script(config: RemoteConfig) -> str:
 
                 [[eval]]
                 env_id = "{REMOTE_ENV_SLUG}"
-                env_args = {{ split = "eval", variant = "single" }}
+                env_args = {{ taskset = {{ split = "eval", variant = "single" }} }}
                 ''',
             )
             single = run(["prime", "eval", "run", str(single_config), "--hosted"], timeout=600)
@@ -583,14 +570,14 @@ def remote_script(config: RemoteConfig) -> str:
                 env_id = "{REMOTE_ENV_SLUG}"
                 num_examples = 1
                 rollouts_per_example = 1
-                env_args = {{ split = "eval", variant = "multi-a" }}
+                env_args = {{ taskset = {{ split = "eval", variant = "multi-a" }} }}
                 eval_name = "{ENV_NAME} multi config A"
 
                 [[eval]]
                 env_id = "{REMOTE_ENV_SLUG}"
                 num_examples = 1
                 rollouts_per_example = 2
-                env_args = {{ split = "eval", variant = "multi-b" }}
+                env_args = {{ taskset = {{ split = "eval", variant = "multi-b" }} }}
                 eval_name = "{ENV_NAME} multi config B"
                 ''',
             )

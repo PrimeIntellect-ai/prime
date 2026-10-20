@@ -3,6 +3,7 @@ import re
 import sys
 from copy import deepcopy
 from importlib import metadata
+from typing import Any, get_args
 
 
 def defer_environments(orch):
@@ -13,6 +14,33 @@ def defer_environments(orch):
     if "eval" in orch:
         saved["eval"] = orch.pop("eval")
     return saved
+
+
+def inherit_group_defaults(model, orch, saved):
+    """Fill deferred sources with their group's defaults, as prime-rl's validation does."""
+    from pydantic import TypeAdapter
+
+    jsonable = TypeAdapter(Any).dump_python
+    groups = getattr(model.model_fields["orchestrator"].annotation, "model_fields", {})
+    for name, key in (("train", "train_source"), ("eval", "eval")):
+        if key not in saved or name not in groups:
+            continue
+        annotation = groups[name].annotation
+        hook = next(
+            (
+                cls.inherit_group_defaults
+                for cls in get_args(annotation) or (annotation,)
+                if hasattr(cls, "inherit_group_defaults")
+            ),
+            None,
+        )
+        if hook is None:
+            continue
+        if name == "train":
+            block = hook({**deepcopy(orch.get("train") or {}), "source": saved[key]})
+            saved[key] = jsonable(block["source"], mode="json")
+        else:
+            saved[key] = jsonable(hook(deepcopy(saved[key])), mode="json")
 
 
 def restore_environments(orch, saved):
@@ -151,6 +179,7 @@ def normalize(request):
                 )
                 if config.deployment.type == "multi_node":
                     components["inference"]["router"] = None
+        inherit_group_defaults(model, data.get("orchestrator") or {}, deferred)
         restore_environments(components["orchestrator"], deferred)
     return {
         "contract_version": 4,

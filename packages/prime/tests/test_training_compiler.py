@@ -1036,6 +1036,49 @@ def test_deferred_eval_settings_are_checked_without_their_sources(fake_schema):
         worker.normalize({**request, "config": {"orchestrator": {"eval": [{"interval": 10}]}}})
 
 
+def test_deferred_sources_get_their_group_defaults(fake_schema):
+    from prime_cli.utils import training_schema_worker as worker
+    from pydantic import BaseModel
+
+    class Group(BaseModel):
+        env: dict = {}
+
+        @classmethod
+        def inherit_group_defaults(cls, data):
+            sources = [{"env": {**data["env"], **s["env"]}} for s in data["source"]]
+            return {**data, "source": sources}
+
+    class Orchestrator(BaseModel):
+        train: Group | None = None
+        eval: Group | None = None
+
+    class Component(BaseModel):
+        pass
+
+    class Deployment(BaseModel):
+        type: str = "multi_node"
+
+    class RL(BaseModel):
+        deployment: Deployment = Deployment()
+        trainer: Component = Component()
+        orchestrator: Orchestrator = Orchestrator()
+        inference: Component = Component()
+        clean: bool = False
+
+    sys.modules["prime_rl.configs.rl"].RLConfig = RL
+    config = {
+        "orchestrator": {
+            "train": {"env": {"retries": 2}, "source": [{"env": {"id": "a"}}]},
+            "eval": {"env": {"timeout": 1}, "source": [{"env": {"id": "b", "timeout": 5}}]},
+        }
+    }
+    artifact = worker.normalize({"config": config, "mode": "rl", "schema_commit": "a" * 40})
+    assert artifact["components"]["orchestrator"] == {
+        "train": {"env": {"retries": 2}, "source": [{"env": {"retries": 2, "id": "a"}}]},
+        "eval": {"env": {"timeout": 1}, "source": [{"env": {"id": "b", "timeout": 5}}]},
+    }
+
+
 def test_validate_pr_overrides_config_source_ref_like_submission(monkeypatch, tmp_path):
     from prime_cli.api.training import HostedTrainingClient
     from prime_cli.commands import rl

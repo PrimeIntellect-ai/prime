@@ -277,7 +277,9 @@ jobs:
       env:
         PRIME_API_KEY: ${{ secrets.PRIME_API_KEY }}
         PRIME_TEAM_ID: ${{ secrets.PRIME_TEAM_ID }}
-      run: uv run pytest tests/ -v
+      # test_private_env_install.py installs a live Hub env whose unpinned deps break CI
+      # whenever they release; run it locally with PRIME_API_KEY set.
+      run: uv run pytest tests/ -v --ignore=tests/test_private_env_install.py
 
   type-check:
     runs-on: ubuntu-latest

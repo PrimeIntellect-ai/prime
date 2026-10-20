@@ -1,20 +1,14 @@
 import json
-import os
 import random
 import shlex
-import shutil
 import string
 import subprocess
-import sys
-import tempfile
 import time
 from datetime import datetime, timedelta
 from inspect import signature
 from typing import Any, Dict, List, Optional
 
 import typer
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from prime_sandboxes import (
     APIClient,
     APIError,
@@ -32,6 +26,7 @@ from prime_sandboxes import (
     SandboxNotRunningError,
     StartCommand,
     UnauthorizedError,
+    VolumeMount,
 )
 from rich.markup import escape
 from rich.table import Table
@@ -57,6 +52,9 @@ from ..utils import (
 from ..utils.display import SANDBOX_STATUS_COLORS
 from ..utils.plain import _PlainTyperCommand
 from ..utils.time_utils import now_utc, to_utc
+from .sandbox_ssh import ssh_transport
+from .sandbox_volumes import app as sandbox_volumes_app
+from .sandbox_volumes import parse_volume_mount_specs
 
 app = PlainTyper(help="Manage sandboxes", no_args_is_help=True)
 console = get_console()
@@ -674,6 +672,7 @@ def lan_rules(
 
 checkpoint_app = PlainTyper(help="Manage filesystem checkpoints", no_args_is_help=True)
 app.add_typer(checkpoint_app, name="checkpoint")
+app.add_typer(sandbox_volumes_app, name="volumes")
 
 
 def _print_checkpoint(checkpoint: SandboxCheckpoint, output: str) -> None:
@@ -750,6 +749,29 @@ def checkpoint_list(
             escape(c.error or ""),
         )
     console.print(table)
+
+
+@checkpoint_app.command("get")
+def checkpoint_get(
+    checkpoint_id: str,
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """Show one checkpoint's state by ID, rootfs or volume."""
+    validate_output_format(output, console)
+    try:
+        checkpoint = SandboxClient(APIClient()).get_checkpoint(checkpoint_id)
+    except APIError as exc:
+        console.print(f"[red]Error:[/red] {escape(str(exc))}")
+        raise typer.Exit(1) from exc
+    if output == "json":
+        output_data_as_json(checkpoint.model_dump(mode="json"), console)
+        return
+    # Neutral output: a checkpoint fetched by id may be a volume checkpoint,
+    # which is never restorable as a sandbox rootfs, so no restorable hint.
+    console.print(f"Checkpoint ID: [cyan]{escape(checkpoint.id)}[/cyan]")
+    console.print(f"State: {escape(checkpoint.state)}")
+    if checkpoint.error:
+        console.print(f"Error: {escape(checkpoint.error)}")
 
 
 @checkpoint_app.command("delete", no_args_is_help=True)
@@ -984,6 +1006,11 @@ def create(
         "-l",
         help="Labels/tags for the sandbox. Can be specified multiple times.",
     ),
+    volume: Optional[List[str]] = typer.Option(
+        None,
+        "--volume",
+        help="Attach a volume as NAME:/mount/path[:ro]. Can be specified multiple times.",
+    ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ) -> None:
     """Create a new sandbox"""
@@ -1008,6 +1035,10 @@ def create(
                     raise typer.Exit(1)
                 key, value = secret_var.split("=", 1)
                 secrets_vars[key] = value
+
+        volume_mounts: List[VolumeMount] = []
+        if volume:
+            volume_mounts = parse_volume_mount_specs(volume)
 
         # VM is the only runtime. The hidden --vm flag stays accepted for
         # compatibility, and the resolved value is always sent so the created
@@ -1111,6 +1142,7 @@ def create(
             labels=labels if labels else [],
             team_id=team_id,
             region=region,
+            volumes=volume_mounts if volume_mounts else None,
             **request_kwargs,
         )
 
@@ -1140,6 +1172,11 @@ def create(
             console.print(f"Idle Timeout: {idle_timeout_minutes} minutes")
         console.print(f"Team: {team_id or 'Personal'}")
         console.print(f"Region: {region or 'Backend default'}")
+        if volume_mounts:
+            mounts_summary = ", ".join(
+                f"{m.name}:{m.mount_path}" + (" (ro)" if m.read_only else "") for m in volume_mounts
+            )
+            console.print(f"Volumes: {mounts_summary}")
         if labels:
             console.print(f"Labels: {', '.join(labels)}")
         if env_vars:
@@ -1896,83 +1933,33 @@ def ssh_connect(
     shell: Optional[str] = typer.Option(None, "--shell", "-s", help="Remote shell to run"),
 ) -> None:
     """Connect to a VM sandbox with an ephemeral SSH key."""
-    session_id: Optional[str] = None
-    sandbox_client: Optional[SandboxClient] = None
-    temp_dir: Optional[str] = None
-
     try:
-        if not shutil.which("ssh"):
-            console.print("[red]Error:[/red] OpenSSH is required.")
-            raise typer.Exit(1)
-
         sandbox_client = SandboxClient(APIClient())
-        sandbox = sandbox_client.get(sandbox_id)
-        if sandbox.status != "RUNNING":
-            console.print(f"[red]Error:[/red] Sandbox is not running (status: {sandbox.status})")
-            raise typer.Exit(1)
-
-        temp_dir = tempfile.mkdtemp(prefix="prime-ssh-")
-        key_path = os.path.join(temp_dir, "id_ed25519")
-        private_key = Ed25519PrivateKey.generate()
-        key_fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(key_fd, "wb") as key_file:
-            key_file.write(
-                private_key.private_bytes(
-                    serialization.Encoding.PEM,
-                    serialization.PrivateFormat.OpenSSH,
-                    serialization.NoEncryption(),
-                )
-            )
-        public_key = (
-            private_key.public_key()
-            .public_bytes(serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH)
-            .decode()
-        )
-
-        session = sandbox_client.create_ssh_session(sandbox_id, public_key)
-        session_id = session.session_id
-        proxy = shlex.join(
-            [
-                sys.executable,
-                "-m",
-                "prime_cli.ssh_proxy",
-                session.host,
-                str(session.port),
-                session.session_id,
+        with ssh_transport(sandbox_client, sandbox_id) as transport:
+            command = [
+                "ssh",
+                f"{transport.user}@{transport.host}",
+                "-p",
+                str(transport.port),
+                "-i",
+                transport.key_path,
+                "-o",
+                f"ProxyCommand={transport.proxy_command}",
+                "-o",
+                "StrictHostKeyChecking=no",
+                "-o",
+                "UserKnownHostsFile=/dev/null",
             ]
-        )
-        command = [
-            "ssh",
-            f"{session.session_id}@{session.host}",
-            "-p",
-            str(session.port),
-            "-i",
-            key_path,
-            "-o",
-            f"ProxyCommand={proxy}",
-            "-o",
-            "StrictHostKeyChecking=no",
-            "-o",
-            "UserKnownHostsFile=/dev/null",
-        ]
-        if shell:
-            command.append("-t")
-        if ssh_args:
-            command.extend(ssh_args)
-        if shell:
-            command.append(shell)
+            if shell:
+                command.append("-t")
+            if ssh_args:
+                command.extend(ssh_args)
+            if shell:
+                command.append(shell)
 
-        raise typer.Exit(subprocess.run(command).returncode)
+            raise typer.Exit(subprocess.run(command).returncode)
     except KeyboardInterrupt:
         raise typer.Exit(130)
     except APIError as error:
         console.print(f"[red]Error:[/red] {error}")
         raise typer.Exit(1)
-    finally:
-        if session_id and sandbox_client:
-            try:
-                sandbox_client.close_ssh_session(sandbox_id, session_id)
-            except Exception:
-                pass
-        if temp_dir:
-            shutil.rmtree(temp_dir, ignore_errors=True)

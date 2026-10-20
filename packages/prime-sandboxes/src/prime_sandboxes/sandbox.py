@@ -106,6 +106,7 @@ from .rpc_command_session import (
     collect_command_session_start_event,
     is_transient_control_fault,
 )
+from .volumes import AsyncVolumes, Volumes
 
 # Connection-level errors: request never reached the server, so retry is safe
 # for any HTTP method (including non-idempotent POSTs).
@@ -2267,6 +2268,7 @@ class SandboxClient:
         )
         self._sandbox_status_batch_supported: Optional[bool] = None
         self._background_job_status_batch_supported: Optional[bool] = None
+        self.volumes = Volumes(self)
 
     @staticmethod
     @_gateway_post_retry
@@ -3899,6 +3901,7 @@ class AsyncSandboxClient:
         self._sandbox_status_batch_supported: Optional[bool] = None
         self._background_job_status_batch_supported: Optional[bool] = None
         self._close_task: Optional[asyncio.Task[None]] = None
+        self.volumes = AsyncVolumes(self)
 
     def _get_gateway_client(self) -> httpx.AsyncClient:
         """Get or create the shared gateway client for connection pooling
@@ -5746,7 +5749,7 @@ class AsyncSandboxClient:
             await self.client.aclose()
 
     async def aclose(self) -> None:
-        """Cancel owned status and output tasks before closing async transports."""
+        """Close this client's batchers, leases, and gateway tasks."""
         if self._close_task is None:
             self._close_task = asyncio.create_task(self._close())
         try:

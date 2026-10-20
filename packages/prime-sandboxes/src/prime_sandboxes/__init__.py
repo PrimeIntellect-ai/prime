@@ -77,6 +77,9 @@ from .models import (
     TeamImageOwner,
     UpdateImagesRequest,
     UpdateImagesResponse,
+    Volume,
+    VolumeListResponse,
+    VolumeMount,
 )
 from .process import AsyncSandboxProcess
 from .sandbox import AsyncSandboxClient, SandboxClient
@@ -148,6 +151,9 @@ __all__ = [
     "ImageUpdateResult",
     "ImageCoordinateState",
     "ImageMutationError",
+    "Volume",
+    "VolumeListResponse",
+    "VolumeMount",
     # Exceptions
     "APIError",
     "BatchStatusUnsupportedError",

@@ -100,11 +100,59 @@ def test_normalization_preserves_selected_schema_fields_without_fft(fake_schema,
         ),
     ],
 )
-def test_launcher_only_rl_settings_are_rejected_locally(fake_schema, config, message):
+def test_unsupported_hosted_rl_settings_are_rejected_locally(fake_schema, config, message):
     from prime_cli.utils import training_schema_worker as worker
 
     with pytest.raises(ValueError, match=message):
         worker.normalize({"config": config, "mode": "rl", "schema_commit": "a" * 40})
+
+
+@pytest.mark.parametrize(
+    ("config", "accepted"),
+    [
+        ({}, True),
+        ({"deployment": {"num_infer_gpus": 0}}, False),
+        ({"inference": None}, False),
+        ({"deployment": {"num_infer_gpus": 0}, "trainer": {"data": {"fake": {}}}}, True),
+        ({"inference": None, "trainer": {"data": {"fake": {}}}}, True),
+        ({"deployment": {"type": "multi_node", "num_infer_gpus": 0}}, True),
+    ],
+)
+def test_hosted_single_node_rl_without_inference_needs_fake_data(fake_schema, config, accepted):
+    from prime_cli.utils import training_schema_worker as worker
+    from pydantic import BaseModel
+
+    class Deployment(BaseModel):
+        type: str = "single_node"
+        num_infer_gpus: int = 1
+
+    class Data(BaseModel):
+        fake: dict | None = None
+
+    class Trainer(BaseModel):
+        data: Data = Data()
+
+    class Component(BaseModel):
+        pass
+
+    class RL(BaseModel):
+        deployment: Deployment = Deployment()
+        trainer: Trainer = Trainer()
+        orchestrator: Component = Component()
+        inference: Component | None = Component()
+        slurm: dict | None = None
+        clean: bool = False
+
+    sys.modules["prime_rl.configs.rl"].RLConfig = RL
+    request = {"config": config, "mode": "rl", "schema_commit": "a" * 40}
+    if accepted:
+        assert (
+            worker.normalize(request)["deployment"]
+            == Deployment.model_validate(config.get("deployment", {})).model_dump()
+        )
+    else:
+        with pytest.raises(ValueError, match="Hosted RL runs need inference GPUs"):
+            worker.normalize(request)
 
 
 def test_sft_online_eval_is_deferred_and_the_rest_is_validated(fake_schema):
@@ -964,12 +1012,13 @@ def test_deferred_eval_settings_are_checked_without_their_sources(fake_schema):
 
     class Deployment(Strict):
         type: str = "single_node"
+        num_infer_gpus: int = 1
 
     class RL(Strict):
         deployment: Deployment = Deployment()
         trainer: Strict = Strict()
         orchestrator: Orchestrator = Orchestrator()
-        inference: Strict | None = None
+        inference: Strict | None = Strict()
         clean: bool = False
 
     sys.modules["prime_rl.configs.rl"].RLConfig = RL

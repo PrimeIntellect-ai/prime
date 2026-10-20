@@ -76,13 +76,26 @@ def format_errors(errors):
     )
 
 
-def reject_launcher_only_settings(config):
+def reject_unsupported_hosted_settings(config):
     if config.clean:
         raise ValueError("clean = true is unsupported for hosted runs: start a new run instead.")
     inference_deployment = getattr(config.inference, "deployment", None)
     if getattr(inference_deployment, "type", None) == "disaggregated":
         raise ValueError(
             'inference.deployment type = "disaggregated" is unsupported for hosted runs.'
+        )
+    # Hosted runs start the orchestrator only alongside their own inference pods, so a
+    # single-node run without inference GPUs is trainer-only, as multi-node runs with
+    # num_infer_nodes = 0 are in prime-rl.
+    deployment = config.deployment
+    trainer_only = deployment.type == "single_node" and (
+        config.inference is None or deployment.num_infer_gpus == 0
+    )
+    if trainer_only and getattr(getattr(config.trainer, "data", None), "fake", None) is None:
+        raise ValueError(
+            "Hosted RL runs need inference GPUs: set deployment.num_infer_gpus and an "
+            "[inference] table, or use fake trainer data (trainer.data.fake) for a "
+            "trainer-only run."
         )
 
 
@@ -119,7 +132,7 @@ def normalize(request):
         data["slurm"] = {}
     config = model.model_validate(data)
     if request["mode"] == "rl":
-        reject_launcher_only_settings(config)
+        reject_unsupported_hosted_settings(config)
     check_deferred_settings(model, data, deferred, request["mode"])
     if request["mode"] == "sft":
         components = {"trainer": config.model_dump(mode="json") | deferred}

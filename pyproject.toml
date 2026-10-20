@@ -30,6 +30,8 @@ prime-sandboxes = false
 prime-tunnel    = false
 prime-evals     = false
 prime-traces    = false
+# CA bundle: security fixes (e.g. 2026.10.19 for the eMudhra compromise) must not wait out the cooldown
+certifi         = false
 prime-runs      = false
 
 [tool.uv.sources]

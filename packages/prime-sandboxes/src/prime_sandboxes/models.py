@@ -249,6 +249,10 @@ class SandboxCheckpoint(BaseModel):
     docker_image: str
     disk_size_bytes: Optional[int] = None
     stored_bytes: Optional[int] = None
+    # Quota-size measure: non-hole uncompressed bytes of the packed version.
+    # stored_bytes stays the compressed billing metric; do not conflate the two.
+    # 0 for grandfathered pre-measurement records; older responses omit it.
+    occupied_bytes: int = 0
     error: Optional[str] = None
     created_at: datetime
     updated_at: datetime
@@ -329,6 +333,17 @@ class Volume(BaseModel):
     # Older responses may omit the field entirely.
     head_checkpoint_id: Optional[str] = None
     created_at: datetime
+    # Occupied bytes of the latest published version (its checkpoint's
+    # occupied_bytes); 0 until the first publish and for grandfathered
+    # pre-measurement versions. Older responses omit the field.
+    occupied_bytes: int = 0
+    # Account-wide storage usage across all owner volumes (sum of the latest
+    # published versions) and the whole-GiB limit from the wallet's
+    # sandboxVolumeStorageLimitGB.
+    # Populated on single-volume GET; always null on list items. Older
+    # responses omit both.
+    account_storage_used_bytes: Optional[int] = None
+    account_storage_limit_gb: Optional[int] = None
 
 
 class VolumeListResponse(BaseModel):
@@ -339,6 +354,10 @@ class VolumeListResponse(BaseModel):
     page: int
     per_page: int
     has_next: bool
+    # Account-wide storage usage and whole-GiB limit, response-level and
+    # present even when ``volumes`` is empty. Older responses omit them.
+    storage_used_bytes: Optional[int] = None
+    storage_limit_gb: Optional[int] = None
 
 
 class CreateSandboxRequest(BaseModel):

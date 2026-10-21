@@ -733,6 +733,9 @@ def checkpoint_list(
             ("Parent", "white"),
             ("State", "white"),
             ("Depth", "white"),
+            # Size is the quota measure (occupied bytes); Stored is the
+            # compressed billing metric — they differ by design.
+            ("Size", "white"),
             ("Stored", "white"),
             ("Age", "white"),
             ("Error", "red"),
@@ -744,6 +747,7 @@ def checkpoint_list(
             escape(c.parent_id or "-"),
             escape(c.state),
             str(c.depth),
+            f"{c.occupied_bytes / 1024**2:.1f} MiB",
             f"{c.stored_bytes / 1024**2:.1f} MiB" if c.stored_bytes is not None else "-",
             human_age(c.created_at),
             escape(c.error or ""),
@@ -770,6 +774,7 @@ def checkpoint_get(
     # which is never restorable as a sandbox rootfs, so no restorable hint.
     console.print(f"Checkpoint ID: [cyan]{escape(checkpoint.id)}[/cyan]")
     console.print(f"State: {escape(checkpoint.state)}")
+    console.print(f"Size: {checkpoint.occupied_bytes / 1024**2:.1f} MiB")
     if checkpoint.error:
         console.print(f"Error: {escape(checkpoint.error)}")
 

@@ -47,6 +47,10 @@ def test_volume_create(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
     output = strip_ansi(result.output)
     assert "Created volume data" in output
     assert "cvol-1" in output
+    # A fresh volume has no occupied bytes; an older server sends no
+    # account fields, so no account-storage line either.
+    assert "Size: 0 bytes" in output
+    assert "Account storage" not in output
     assert captured["create_args"] == ("data", "team-1")
 
 
@@ -55,13 +59,26 @@ def test_volume_list_table_and_json(monkeypatch: pytest.MonkeyPatch, tmp_path: A
     created = datetime(2026, 10, 12, 12, 0, 0, tzinfo=timezone.utc)
     response = VolumeListResponse(
         volumes=[
-            Volume(id="cvol-1", name="data", created_at=created),
-            Volume(id="cvol-2", name="shared", team_id="team-1", created_at=created),
+            Volume(
+                id="cvol-1",
+                name="data",
+                occupied_bytes=1536 * 1024**2,
+                created_at=created,
+            ),
+            Volume(
+                id="cvol-2",
+                name="shared",
+                team_id="team-1",
+                occupied_bytes=512 * 1024**2,
+                created_at=created,
+            ),
         ],
         total=2,
         page=1,
         per_page=50,
         has_next=False,
+        storage_used_bytes=2 * 1024**3,
+        storage_limit_gb=1024,
     )
     captured: dict[str, Any] = {}
 
@@ -79,6 +96,8 @@ def test_volume_list_table_and_json(monkeypatch: pytest.MonkeyPatch, tmp_path: A
     assert table.exit_code == 0, table.output
     output = strip_ansi(table.output)
     assert "data" in output and "shared" in output and "cvol-1" in output
+    assert "Size" in output and "1.5 GB" in output and "512.0 MB" in output
+    assert "Account storage: 2.0 GB used of 1024 GiB limit" in output
     assert captured["team_id"] == "team-1"
     assert captured == {"team_id": "team-1", "page": 1, "per_page": 50}
 
@@ -91,6 +110,60 @@ def test_volume_list_table_and_json(monkeypatch: pytest.MonkeyPatch, tmp_path: A
     payload = json.loads(as_json.output)
     assert payload["total"] == 2 and payload["has_next"] is False
     assert [v["name"] for v in payload["volumes"]] == ["data", "shared"]
+    assert [v["occupied_bytes"] for v in payload["volumes"]] == [
+        1536 * 1024**2,
+        512 * 1024**2,
+    ]
+    assert payload["storage_used_bytes"] == 2 * 1024**3
+    assert payload["storage_limit_gb"] == 1024
+
+
+@pytest.mark.parametrize(
+    ("storage_used_bytes", "storage_limit_gb", "expected"),
+    [
+        # Explicit 0 used with a limit still shows both.
+        pytest.param(0, 1024, "Account storage: 0 bytes used of 1024 GiB limit", id="zero"),
+        # A missing limit drops only the limit part.
+        pytest.param(2048, None, "Account storage: 2.0 KB used", id="no-limit"),
+        # An older server omits usage entirely; absence is not a known 0 used.
+        pytest.param(None, None, None, id="absent"),
+    ],
+)
+def test_volume_list_empty_page_account_storage(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+    storage_used_bytes: Any,
+    storage_limit_gb: Any,
+    expected: Any,
+) -> None:
+    _configure_cli(monkeypatch, tmp_path)
+
+    def fake_list(
+        self: Any, team_id: Any = None, page: int = 1, per_page: int = 50, **kwargs: Any
+    ) -> VolumeListResponse:
+        return VolumeListResponse(
+            volumes=[],
+            total=0,
+            page=1,
+            per_page=50,
+            has_next=False,
+            storage_used_bytes=storage_used_bytes,
+            storage_limit_gb=storage_limit_gb,
+        )
+
+    monkeypatch.setattr("prime_sandboxes.volumes.Volumes.list", fake_list)
+
+    result = runner.invoke(app, ["sandbox", "volumes", "list"])
+
+    assert result.exit_code == 0, result.output
+    output = strip_ansi(result.output)
+    assert "No volumes found." in output
+    if expected is None:
+        assert "Account storage" not in output
+    else:
+        assert expected in output
+        if storage_limit_gb is None:
+            assert "limit" not in output
 
 
 def test_volume_get(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
@@ -104,6 +177,9 @@ def test_volume_get(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
             name="data",
             user_id="user-1",
             head_checkpoint_id="chk-9",
+            occupied_bytes=1536 * 1024**2,
+            account_storage_used_bytes=2 * 1024**3,
+            account_storage_limit_gb=1024,
             created_at=datetime.now(timezone.utc),
         )
 
@@ -115,6 +191,8 @@ def test_volume_get(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
     output = strip_ansi(result.output)
     assert "data" in output and "cvol-1" in output and "Personal" in output
     assert "Head checkpoint: chk-9" in output
+    assert "Size: 1.5 GB" in output
+    assert "Account storage: 2.0 GB used of 1024 GiB limit" in output
     assert captured["args"] == ("data", "team-1")
 
 

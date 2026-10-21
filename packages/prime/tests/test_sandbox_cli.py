@@ -21,6 +21,8 @@ def test_checkpoint_command_and_status(monkeypatch: pytest.MonkeyPatch) -> None:
         state="PENDING",
         depth=1,
         docker_image="python:3.11-slim",
+        occupied_bytes=2 * 1024**2,
+        stored_bytes=1024**2,
         created_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
     )
@@ -50,6 +52,9 @@ def test_checkpoint_command_and_status(monkeypatch: pytest.MonkeyPatch) -> None:
     table = runner.invoke(app, ["sandbox", "checkpoint", "list", "sandbox-1"])
     assert table.exit_code == 0, table.output
     assert "checkpoint-1" in table.output and "DURABLE" in table.output
+    # Size (quota measure) and Stored (compressed billing metric) both shown.
+    assert "Size" in table.output and "2.0 MiB" in table.output
+    assert "1.0 MiB" in table.output
 
     durable = runner.invoke(
         app,
@@ -87,6 +92,7 @@ def test_checkpoint_get_by_id_states_and_errors(monkeypatch: pytest.MonkeyPatch)
             state=state,
             depth=1,
             docker_image="python:3.11-slim",
+            occupied_bytes=3 * 1024**2,
             error=error,
             created_at=datetime.now(timezone.utc),
             updated_at=datetime.now(timezone.utc),
@@ -102,6 +108,7 @@ def test_checkpoint_get_by_id_states_and_errors(monkeypatch: pytest.MonkeyPatch)
         output = " ".join(strip_ansi(result.output).split())
         assert checkpoint_id in output
         assert state in output
+        assert "Size: 3.0 MiB" in output
         # Neutral by-id output: a volume checkpoint is never restorable.
         assert "Restorable" not in output
         if error:

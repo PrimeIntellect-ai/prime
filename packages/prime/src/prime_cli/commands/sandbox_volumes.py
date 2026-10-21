@@ -33,6 +33,7 @@ from ..utils import (
     json_output_help,
     output_data_as_json,
 )
+from ..utils.formatters import format_file_size
 from .sandbox_ssh import SandboxSshTransport, ssh_transport
 
 app = PlainTyper(help="Manage sandbox volumes", no_args_is_help=True)
@@ -40,11 +41,13 @@ console = get_console()
 
 
 VOLUMES_LIST_JSON_HELP = json_output_help(
-    ".volumes[] = {id, name, user_id?, team_id?, created_at}",
+    ".volumes[] = {id, name, user_id?, team_id?, created_at, occupied_bytes}",
     ".total = number",
     ".page = number",
     ".per_page = number",
     ".has_next = boolean",
+    ".storage_used_bytes = number? (account-wide usage)",
+    ".storage_limit_gb = number? (whole GiB)",
 )
 
 # Public platform images (org-less, published via `prime images push
@@ -93,6 +96,14 @@ def _volume_scope(volume: Volume) -> str:
     return "Personal"
 
 
+def _print_account_storage(used_bytes: int, limit_gb: Optional[int]) -> None:
+    """Show account-wide volume storage usage; the limit may be unset."""
+    line = f"Account storage: {format_file_size(used_bytes)} used"
+    if limit_gb is not None:
+        line += f" of {limit_gb} GiB limit"
+    console.print(line)
+
+
 def _print_volume(volume: Volume) -> None:
     console.print(f"Name: [cyan]{escape(volume.name)}[/cyan]")
     console.print(f"ID: {escape(volume.id)}")
@@ -100,6 +111,9 @@ def _print_volume(volume: Volume) -> None:
     # None until the first publish reaches DURABLE, then the newest one.
     head = volume.head_checkpoint_id
     console.print(f"Head checkpoint: {escape(head) if head else 'none (never published)'}")
+    console.print(f"Size: {format_file_size(volume.occupied_bytes)}")
+    if volume.account_storage_used_bytes is not None:
+        _print_account_storage(volume.account_storage_used_bytes, volume.account_storage_limit_gb)
     console.print(f"Created: {human_age(volume.created_at)}")
 
 
@@ -401,17 +415,28 @@ def list_volumes(
     if json_output:
         output_data_as_json(response.model_dump(mode="json"), console)
         return
+    # Response-level, so the account usage shows even with an empty page;
+    # older servers omit it, and absence is not the same as a known 0 used.
+    if response.storage_used_bytes is not None:
+        _print_account_storage(response.storage_used_bytes, response.storage_limit_gb)
     if not response.volumes:
         console.print("No volumes found.")
         return
     table = build_table(
         "Volumes",
-        [("Name", "cyan"), ("Scope", "white"), ("Created", "white"), ("ID", "dim")],
+        [
+            ("Name", "cyan"),
+            ("Scope", "white"),
+            ("Size", "white"),
+            ("Created", "white"),
+            ("ID", "dim"),
+        ],
     )
     for volume in response.volumes:
         table.add_row(
             escape(volume.name),
             _volume_scope(volume),
+            format_file_size(volume.occupied_bytes),
             human_age(volume.created_at),
             escape(volume.id),
         )

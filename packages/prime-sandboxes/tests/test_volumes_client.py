@@ -621,3 +621,48 @@ def test_volume_model_parses_head_checkpoint_id():
 
     response = VolumeListResponse.model_validate(_volume_list_response())
     assert response.volumes[0].head_checkpoint_id is None
+
+
+def test_volume_model_parses_storage_fields():
+    volume = Volume.model_validate(
+        _volume_response(
+            occupied_bytes=5 * 1024**3,
+            account_storage_used_bytes=6 * 1024**3,
+            account_storage_limit_gb=1024,
+        )
+    )
+    assert volume.occupied_bytes == 5 * 1024**3
+    assert volume.account_storage_used_bytes == 6 * 1024**3
+    assert volume.account_storage_limit_gb == 1024
+
+    # Older responses omit the fields entirely.
+    legacy = Volume.model_validate(_volume_response())
+    assert legacy.occupied_bytes == 0
+    assert legacy.account_storage_used_bytes is None
+    assert legacy.account_storage_limit_gb is None
+
+
+def test_volume_list_response_parses_account_storage_totals():
+    response = VolumeListResponse.model_validate(
+        _volume_list_response() | {"storage_used_bytes": 2048, "storage_limit_gb": 1024}
+    )
+    assert response.storage_used_bytes == 2048
+    assert response.storage_limit_gb == 1024
+
+    # Older responses omit the fields entirely.
+    legacy = VolumeListResponse.model_validate(_volume_list_response())
+    assert legacy.storage_used_bytes is None
+    assert legacy.storage_limit_gb is None
+
+
+def test_publish_response_parses_occupied_bytes():
+    client = RoutingAPIClient(
+        lambda method, path, json: _checkpoint_response() | {"occupied_bytes": 4096}
+    )
+    volumes = SandboxClient(client).volumes  # type: ignore[arg-type]
+
+    checkpoint = volumes.publish("sb-1", "dataset", wait=False)
+
+    assert checkpoint.occupied_bytes == 4096
+    # Older responses omit the field entirely.
+    assert SandboxCheckpoint.model_validate(_checkpoint_response()).occupied_bytes == 0

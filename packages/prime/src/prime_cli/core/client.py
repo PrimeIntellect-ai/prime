@@ -38,10 +38,19 @@ class NotFoundError(APIError):
     pass
 
 
+class MethodNotAllowedError(APIError):
+    """Raised when API returns 405 method not allowed"""
+
+    pass
+
+
 class PaymentRequiredError(APIError):
     """Raised when API returns 402 payment required"""
 
     pass
+
+
+_STATUS_ERRORS = {404: NotFoundError, 405: MethodNotAllowedError}
 
 
 class APITimeoutError(APIError):
@@ -162,7 +171,7 @@ class APIClient:
                 except (ValueError, KeyError):
                     pass
 
-            error_cls = NotFoundError if e.response.status_code == 404 else APIError
+            error_cls = _STATUS_ERRORS.get(e.response.status_code, APIError)
             # For other HTTP errors, try to extract the error message from the response
             try:
                 error_response = e.response.json()
@@ -313,7 +322,7 @@ class AsyncAPIClient:
                 except (ValueError, KeyError):
                     pass
 
-            error_cls = NotFoundError if e.response.status_code == 404 else APIError
+            error_cls = _STATUS_ERRORS.get(e.response.status_code, APIError)
             # For other HTTP errors, try to extract the error message from the response
             try:
                 error_response = e.response.json()

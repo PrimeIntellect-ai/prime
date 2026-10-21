@@ -677,7 +677,9 @@ def test_validate_writes_normalized_config_without_rendering_or_submitting(
     [
         ("supported", "rl", {}, 0, True),
         ("unsupported", "rl", {}, 0, False),
-        ("not_found", "rl", {}, 0, False),
+        ("http_404", "rl", {}, 0, False),
+        ("http_405", "rl", {}, 0, False),
+        ("http_500", "rl", {}, 1, False),
         ("supported", "sft", {}, 0, True),
         ("supported", "sft", {"eval": {"interval": 10}}, 0, False),
         ("supported", "sft", {"inference": {}}, 0, False),
@@ -688,10 +690,11 @@ def test_validate_writes_normalized_config_without_rendering_or_submitting(
 def test_run_falls_back_to_raw_config_when_local_validation_is_unavailable(
     monkeypatch, tmp_path, case, mode, extra, exit_code, normalized
 ):
+    import httpx
     import toml
     from prime_cli.api.training import HostedTrainingClient, HostedTrainingRunResponse
     from prime_cli.commands import rl
-    from prime_cli.core.client import NotFoundError
+    from prime_cli.core.client import APIClient
 
     body = {"data": {"type": "fake"}} if mode == "sft" else {"trainer": {}, "orchestrator": {}}
     path = tmp_path / "run.toml"
@@ -699,13 +702,18 @@ def test_run_falls_back_to_raw_config_when_local_validation_is_unavailable(
     monkeypatch.setattr(
         rl, "Config", lambda: SimpleNamespace(team_id="team", frontend_url="http://dashboard")
     )
-    monkeypatch.setattr(rl, "APIClient", lambda: object())
     artifact = {"contract_version": 3, "mode": mode, "schema_commit": "a" * 40}
     submitted = []
 
+    def api_client():
+        client = APIClient(api_key="test")
+        status = int(case.removeprefix("http_"))
+        client.client = httpx.Client(
+            transport=httpx.MockTransport(lambda request: httpx.Response(status, json={}))
+        )
+        return client
+
     def prepare(self, payload):
-        if case == "not_found":
-            raise NotFoundError("HTTP 404: Not Found")
         return {"mode": mode, "submission_supported": case != "unsupported"}
 
     def compile(config, prepared):
@@ -717,7 +725,11 @@ def test_run_falls_back_to_raw_config_when_local_validation_is_unavailable(
         submitted.append(payload)
         return HostedTrainingRunResponse(run_id="run", token_value="secret")
 
-    monkeypatch.setattr(HostedTrainingClient, "prepare_local_validation", prepare)
+    if case.startswith("http_"):
+        monkeypatch.setattr(rl, "APIClient", api_client)
+    else:
+        monkeypatch.setattr(rl, "APIClient", lambda: object())
+        monkeypatch.setattr(HostedTrainingClient, "prepare_local_validation", prepare)
     monkeypatch.setattr(training_compiler, "compile_locally", compile)
     monkeypatch.setattr(HostedTrainingClient, "create_run", create)
     result = CliRunner().invoke(

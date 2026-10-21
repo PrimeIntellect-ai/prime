@@ -26,7 +26,7 @@ from ..api.training import (
     build_payload_from_toml,
     resolve_pull_request_head,
 )
-from ..client import APIClient, APIError, NotFoundError
+from ..client import APIClient, APIError, MethodNotAllowedError, NotFoundError
 from ..utils import (
     DefaultCommandGroup,
     PlainTyper,
@@ -667,7 +667,9 @@ def _dispatch_dedicated_run(
             if _supports_local_validation(mode, config_payload):
                 try:
                     preparation = client.prepare_local_validation(selection)
-                except NotFoundError:
+                # A Platform without /prepare answers 405: the path matches
+                # DELETE /training/runs/{run_id}.
+                except (NotFoundError, MethodNotAllowedError):
                     pass
             if preparation is not None and preparation.get("submission_supported") is True:
                 if preparation.get("mode") != selection["mode"]:

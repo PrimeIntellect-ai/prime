@@ -681,7 +681,7 @@ def _dispatch_dedicated_run(
 
     if output != "json":
         if "normalizedConfig" in payload:
-            console.print("[green]✓ Local config validation succeeded[/green]")
+            console.print("[green]✓ Run config validation succeeded[/green]")
         else:
             console.print(
                 "[yellow]Local validation is unavailable for this run; "

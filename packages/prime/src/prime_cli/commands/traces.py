@@ -90,7 +90,21 @@ GET_JSON_HELP = json_output_help(
 # `prime traces list --episode-id` away.
 EPISODE_MEMBERS_SHOWN = 20
 
-RUN_TYPES = ("eval", "train", "unknown")
+# `inference` is a captured inference call, grouped under the synthetic
+# `inference/<model>[:<lora_id>]` run that `prime inference trace-capture` turns on.
+RUN_TYPES = ("eval", "train", "inference", "unknown")
+
+# A run ID is one URL path segment, and ASGI decodes %2F before route matching,
+# so the service's /runs/{run_id} routes cannot see a slashed ID at all. Captured
+# inference runs are exactly that shape, so name the form that still works: the
+# listing takes the run ID and its own `--query` as query parameters. That query
+# scans IDs rather than message text, which is the one thing a slashed run loses.
+SLASHED_RUN_ID_HINT = (
+    "Run IDs containing '/' cannot be addressed by this command, which includes the"
+    " inference/<model> runs of captured inference calls. Use the listing instead:"
+    " 'prime traces list --run-id <run_id> --query <text>', which searches a trace's"
+    " IDs. Message text is searchable only within a run without '/' in its ID."
+)
 
 
 def _parse_context(values: List[str]) -> Optional[Dict[str, str]]:
@@ -165,7 +179,11 @@ def search_traces(
         ...,
         help="Exact text to find: case-sensitive, 3-256 characters, no regex or wildcards",
     ),
-    run_id: str = typer.Option(..., "--run-id", help="Run to search (required)"),
+    run_id: str = typer.Option(
+        ...,
+        "--run-id",
+        help="Run to search (required); a run ID containing '/' cannot be searched",
+    ),
     field: str = typer.Option(
         "content",
         "--field",
@@ -211,8 +229,8 @@ def search_traces(
             "Choose content, reasoning_content, or tool_calls", param_hint="--field"
         )
     if "/" in run_id:
-        # The run ID is one URL path segment; the SDK refuses what it cannot address.
-        raise typer.BadParameter("Run IDs containing '/' cannot be searched", param_hint="--run-id")
+        # The SDK refuses what it cannot address; see SLASHED_RUN_ID_HINT.
+        raise typer.BadParameter(SLASHED_RUN_ID_HINT, param_hint="--run-id")
     if not query.strip() or not 3 <= len(query) <= 256:
         raise typer.BadParameter("Provide 3–256 characters of nonblank text", param_hint="query")
     try:
@@ -486,6 +504,16 @@ def list_traces(
     runs: bool = typer.Option(
         False, "--runs", help="List runs, with totals over their traces, instead of traces"
     ),
+    query: Optional[str] = typer.Option(
+        None,
+        "--query",
+        "-q",
+        help=(
+            "Case-insensitive substring over a trace's IDs (trace, run, environment,"
+            " model, task, agent, outcome); traces only. Not message text: for that use"
+            " 'prime traces search'"
+        ),
+    ),
     run_id: Optional[str] = typer.Option(None, "--run-id", help="Filter by run ID"),
     upload_id: List[str] = typer.Option(
         [],
@@ -527,7 +555,9 @@ def list_traces(
         help="With --episodes: only episodes with a trace from this training step",
     ),
     run_type: List[str] = typer.Option(
-        [], "--run-type", help="With --runs: only eval, train or unknown runs; repeatable"
+        [],
+        "--run-type",
+        help=f"With --runs: only {', '.join(RUN_TYPES)} runs; repeatable",
     ),
     created_after: Optional[str] = typer.Option(
         None,
@@ -560,6 +590,9 @@ def list_traces(
     """List trace summaries, episode summaries with --episodes, or runs with --runs.
 
     Traces and episodes are listed newest first, runs by their latest upload.
+
+    --query matches a trace's own IDs, so it is the search that works for a run
+    ID containing '/'. For text inside messages use `prime traces search`.
     """
     validate_output_format(output, error_console)
     _check_paging(page, cursor)
@@ -571,6 +604,7 @@ def list_traces(
         _reject_options(
             "--runs",
             {
+                "--query": query is not None,
                 "--run-id": run_id is not None,
                 "--upload-id": bool(upload_id),
                 "--context": bool(context),
@@ -590,7 +624,7 @@ def list_traces(
         if unknown:
             error_console.print(
                 f"[red]Error:[/red] unknown --run-type {escape(', '.join(unknown))};"
-                " choose eval, train or unknown"
+                f" choose {', '.join(RUN_TYPES)}"
             )
             raise typer.Exit(1)
     else:
@@ -600,6 +634,7 @@ def list_traces(
         _reject_options(
             "--episodes",
             {
+                "--query": query is not None,
                 "--episode-id": episode_id is not None,
                 "--task-id": task_id is not None,
                 "--model-id": model_id is not None,
@@ -611,7 +646,14 @@ def list_traces(
     else:
         _reject_options("a trace listing (add --episodes)", {"--run-step": run_step is not None})
     if episode_id is not None:
-        _reject_options("--episode-id", {"--upload-id": bool(upload_id)})
+        # The member-trace route rejects an unknown parameter rather than
+        # ignoring it, and `query` is not in its vocabulary.
+        _reject_options(
+            "--episode-id",
+            {"--upload-id": bool(upload_id), "--query": query is not None},
+        )
+    if query is not None and (not query.strip() or len(query) > 256):
+        raise typer.BadParameter("Provide 1-256 characters of nonblank text", param_hint="--query")
     if episode_id is not None and sort is not None:
         error_console.print(
             "[red]Error:[/red] --sort cannot be combined with --episode-id;"
@@ -656,6 +698,7 @@ def list_traces(
                     cursor=page_cursor,
                 )
             return client.list(
+                query=query,
                 run_id=run_id,
                 upload_id=upload_id or None,
                 environment_id=environment_id,
@@ -888,8 +931,8 @@ def _get_episode(episode_id: str, *, raw: bool, dest: Optional[Path], output: st
 def _get_run(run_id: str, *, output: str) -> None:
     """`get --runs`: one run's totals, and its steps when it recorded any."""
     if "/" in run_id:
-        # The run ID is one URL path segment; the SDK refuses what it cannot address.
-        raise typer.BadParameter("Run IDs containing '/' cannot be read", param_hint="RUN_ID")
+        # The SDK refuses what it cannot address; see SLASHED_RUN_ID_HINT.
+        raise typer.BadParameter(SLASHED_RUN_ID_HINT, param_hint="RUN_ID")
     try:
         client = _traces_client()
         run = client.get_run(run_id)

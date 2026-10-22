@@ -64,6 +64,22 @@ class TestList:
         assert summary.total_tokens == 84213
         assert summary.episode_id is None
 
+    def test_query_is_a_filter_so_a_slashed_run_id_stays_addressable(self, make_client):
+        """The run-scoped search puts the run ID in the path and so cannot take a
+        slash; the listing takes both as query parameters."""
+        captured = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["params"] = dict(request.url.params)
+            return httpx.Response(200, json={"items": [SUMMARY], "next_cursor": None})
+
+        make_client(handler).list(query="glm-5.3", run_id="inference/z-ai/glm-5.3")
+
+        assert captured["params"] == {
+            "query": "glm-5.3",
+            "run_id": "inference/z-ai/glm-5.3",
+        }
+
     def test_unscored_reward_stays_none_not_zero(self, make_client):
         unscored = {**SUMMARY, "score": {"reward": None, "outcome": None}}
 

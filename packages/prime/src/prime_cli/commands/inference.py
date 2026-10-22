@@ -16,6 +16,7 @@ from ..utils import (
     validate_output_format,
 )
 from ..utils.formatters import format_price_per_mtok
+from .trace_capture import app as trace_capture_app
 
 app = PlainTyper(
     help="Run and manage Prime Inference\n\n"
@@ -23,6 +24,10 @@ app = PlainTyper(
     no_args_is_help=True,
 )
 console = get_console()
+
+# Trace capture configures an inference model, so it belongs here rather than
+# under `prime traces`, which talks to a different host.
+app.add_typer(trace_capture_app, name="trace-capture")
 
 MODELS_JSON_HELP = json_output_help(
     "Typical OpenAI schema: .object?, .data[] = "

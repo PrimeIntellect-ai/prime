@@ -276,6 +276,11 @@ def chat(
     max_tokens: Optional[int] = typer.Option(
         None, "--max-tokens", help="Maximum tokens to generate"
     ),
+    reasoning_effort: Optional[str] = typer.Option(
+        None,
+        "--reasoning-effort",
+        help="Reasoning effort (e.g. low, medium, high). Supported values depend on the model.",
+    ),
     output: str = typer.Option("text", "--output", "-o", help="text|json"),
 ) -> None:
     """Send a one-shot chat message to a Prime Inference model.
@@ -284,6 +289,7 @@ def chat(
       prime inference chat <model-id> "say hi"
       echo "explain RL in one line" | prime inference chat <model-id>
       prime inference chat <model-id> "hi" --stream
+      prime inference chat <model-id> "solve this" --reasoning-effort high
     """
     if output not in ("text", "json"):
         console.print(f"[red]Error:[/red] invalid output format '{output}'. Supported: text, json")
@@ -310,6 +316,8 @@ def chat(
         payload["temperature"] = temperature
     if max_tokens is not None:
         payload["max_tokens"] = max_tokens
+    if reasoning_effort is not None:
+        payload["reasoning_effort"] = reasoning_effort
     if stream:
         payload["stream"] = True
 

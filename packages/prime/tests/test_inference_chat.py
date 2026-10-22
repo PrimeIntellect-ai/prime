@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
+import pytest
 from prime_cli.api.inference import InferenceAPIError
 from prime_cli.main import app
 from typer.testing import CliRunner
@@ -59,6 +60,7 @@ def test_chat_prints_assistant_text(monkeypatch):
     assert DummyClient.last_payload["model"] == "some-model"
     assert DummyClient.last_payload["messages"] == [{"role": "user", "content": "say hi"}]
     assert "stream" not in DummyClient.last_payload
+    assert "reasoning_effort" not in DummyClient.last_payload
 
 
 def test_chat_includes_system_prompt(monkeypatch):
@@ -192,3 +194,34 @@ def test_chat_rejects_empty_stdin(monkeypatch):
 
     assert result.exit_code == 1
     assert "empty message" in result.output
+
+
+@pytest.mark.parametrize("effort", ["none", "minimal", "low", "medium", "high", "xhigh", "max"])
+@pytest.mark.parametrize("mode", [[], ["--stream"], ["--output", "json"]])
+def test_chat_passes_reasoning_effort(monkeypatch, effort, mode):
+    monkeypatch.setattr("prime_cli.commands.inference.InferenceClient", DummyClient)
+
+    result = CliRunner().invoke(
+        app,
+        ["inference", "chat", "some-model", "hi", "--reasoning-effort", effort, *mode],
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert DummyClient.last_payload["reasoning_effort"] == effort
+    assert DummyClient.last_stream is ("--stream" in mode)
+
+
+def test_chat_passes_reasoning_effort_with_stdin(monkeypatch):
+    monkeypatch.setattr("prime_cli.commands.inference.InferenceClient", DummyClient)
+
+    result = CliRunner().invoke(
+        app,
+        ["inference", "chat", "some-model", "--reasoning-effort", "high"],
+        input="hi from stdin\n",
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert DummyClient.last_payload["reasoning_effort"] == "high"
+    assert DummyClient.last_payload["messages"] == [{"role": "user", "content": "hi from stdin"}]

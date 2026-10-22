@@ -249,15 +249,30 @@ def _build_messages(message: str, system: Optional[str]) -> List[Dict[str, str]]
 
 
 def _print_stream(chunks: Iterable[Dict[str, Any]]) -> None:
+    in_reasoning = False
     for chunk in chunks:
         choices = chunk.get("choices") or []
         if not choices:
             continue
         delta = choices[0].get("delta") or {}
+        reasoning = delta.get("reasoning_content")
+        if reasoning:
+            if not in_reasoning:
+                sys.stderr.write("<think>\n")
+                in_reasoning = True
+            sys.stderr.write(reasoning)
+            sys.stderr.flush()
         piece = delta.get("content")
         if piece:
+            if in_reasoning:
+                sys.stderr.write("\n</think>\n\n")
+                sys.stderr.flush()
+                in_reasoning = False
             sys.stdout.write(piece)
             sys.stdout.flush()
+    if in_reasoning:
+        sys.stderr.write("\n</think>\n")
+        sys.stderr.flush()
     sys.stdout.write("\n")
     sys.stdout.flush()
 
@@ -269,7 +284,9 @@ def chat(
         None, help="User message. If omitted, reads from stdin."
     ),
     system: Optional[str] = typer.Option(None, "--system", "-s", help="System prompt"),
-    stream: bool = typer.Option(False, "--stream", help="Stream tokens as they arrive"),
+    stream: bool = typer.Option(
+        False, "--stream", help="Stream answer tokens to stdout and reasoning to stderr"
+    ),
     temperature: Optional[float] = typer.Option(
         None, "--temperature", "-t", help="Sampling temperature"
     ),

@@ -21,7 +21,7 @@ class SandboxStatus(str, Enum):
     TIMEOUT = "TIMEOUT"
 
 
-MAX_EGRESS_POLICY_ENTRIES = 256
+MAX_EGRESS_POLICY_ENTRIES = 1024
 
 
 def _validate_egress_entry(entry: str) -> None:

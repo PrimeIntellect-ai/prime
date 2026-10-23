@@ -90,10 +90,25 @@ class TestCreateSandboxRequestNetworkLists:
         with pytest.raises(ValidationError):
             CreateSandboxRequest(name="t", docker_image="img", network_denylist=[entry])
 
-    def test_rule_count_cap(self):
-        entries = [f"h{i}.example.com" for i in range(257)]
-        with pytest.raises(ValidationError, match="at most"):
-            CreateSandboxRequest(name="t", docker_image="img", network_allowlist=entries)
+
+@pytest.mark.parametrize("mode", ["allow", "deny"])
+def test_rule_count_cap(mode):
+    entries = [f"h{i}.example.com" for i in range(1024)]
+    field = f"network_{mode}list"
+    request = CreateSandboxRequest(name="t", docker_image="img", **{field: entries})
+    assert getattr(request, field) == entries
+
+    client = _sync_client()
+    client.set_network("sbx-1", **{mode: entries})
+    assert client.client.request.call_args.kwargs["json"][f"{mode}list"] == entries
+    client.client.request.reset_mock()
+
+    entries.append("overflow.example.com")
+    with pytest.raises(ValidationError, match="at most 1024 entries"):
+        CreateSandboxRequest(name="t", docker_image="img", **{field: entries})
+    with pytest.raises(ValueError, match="at most 1024 entries"):
+        client.set_network("sbx-1", **{mode: entries})
+    client.client.request.assert_not_called()
 
 
 class TestSandboxModel:

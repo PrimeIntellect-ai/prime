@@ -306,11 +306,19 @@ def _schema_request(
 
 
 def compile_locally(
-    config: dict[str, Any], preparation: dict[str, Any], *, schema_python: Path | None = None
+    config: dict[str, Any],
+    preparation: dict[str, Any],
+    *,
+    schema_python: Path | None = None,
+    overrides: list[str] | None = None,
 ) -> dict[str, Any]:
-    response = _schema_request(
-        {"config": config, "sft_online_eval_keys": sorted(SFT_ONLINE_EVAL_KEYS)},
-        preparation,
-        schema_python,
-    )
+    """`overrides` are prime-rl flags (`--trainer.optim.lr 1e-5`), resolved
+    against the schema before validation."""
+    request: dict[str, Any] = {
+        "config": config,
+        "sft_online_eval_keys": sorted(SFT_ONLINE_EVAL_KEYS),
+    }
+    if overrides:
+        request["overrides"] = overrides
+    response = _schema_request(request, preparation, schema_python)
     return {**response["artifact"], "runtime": preparation["runtime"]}

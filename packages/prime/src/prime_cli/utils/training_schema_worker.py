@@ -139,18 +139,56 @@ def installed_commit(install):
     return None
 
 
-def normalize(request):
-    data = deepcopy(request["config"])
+def resolve_overrides(model, data, overrides):
+    """Apply prime-rl flags with the schema's own parser, as `uv run rl` does.
+
+    The parser ends by validating the merged dict; it is captured there instead,
+    because environment sources must be set aside before validation."""
+    if any(arg in ("-h", "--help") for arg in overrides):
+        raise ValueError("--help is not a config flag; see `uv run rl --help` in prime-rl.")
+    import os
+    import tempfile
+
+    from pydantic_config import cli
+
+    class Resolved(Exception):
+        pass
+
+    class Capture(model):
+        @classmethod
+        def model_validate(cls, obj, *args, **kwargs):
+            raise Resolved(obj)
+
+    with tempfile.TemporaryDirectory() as temp:
+        path = os.path.join(temp, "config.json")
+        with open(path, "w") as stream:
+            json.dump(data, stream)
+        try:
+            cli(Capture, args=["@", path, *overrides])
+        except Resolved as resolved:
+            return resolved.args[0]
+    raise ValueError("This prime-rl schema's config parser cannot resolve command-line flags.")
+
+
+def reject_k8s(data):
     if data.pop("k8s", None):
         raise ValueError(
             "[k8s] is not supported for hosted runs: Platform manages deployment settings. "
             "Remove the [k8s] table."
         )
+
+
+def normalize(request):
+    data = deepcopy(request["config"])
+    reject_k8s(data)
     from prime_rl.configs.rl import RLConfig
     from prime_rl.configs.sft import SFTConfig
     from prime_rl.utils import config as serialization
 
     model = RLConfig if request["mode"] == "rl" else SFTConfig
+    if request.get("overrides"):
+        data = resolve_overrides(model, data, request["overrides"])
+        reject_k8s(data)
     if request["mode"] == "rl":
         deferred = defer_environments(data.get("orchestrator") or {})
     else:

@@ -19,9 +19,9 @@ def test_train_help_promotes_config_run_path() -> None:
     result = runner.invoke(app, ["train", "--help"], env=TEST_ENV)
 
     assert result.exit_code == 0, result.output
-    assert "prime train [OPTIONS] CONFIG_PATH [ARGS]... | COMMAND [ARGS]..." in result.output
+    assert "prime train [OPTIONS] [@] CONFIG [@ CONFIG]... [PRIME_RL_FLAGS]..." in result.output
     assert "Launch and manage Hosted Training runs." in result.output
-    assert "Path to a TOML config file to launch as a" in result.output
+    assert "Pass config files and prime-rl flags" in result.output
     assert "logs" in result.output
     assert "request" in result.output
     # Retired with shared LoRA training: both only knew the LoRA schema.
@@ -1103,3 +1103,120 @@ def test_create_run_waits_out_a_cold_validator():
     assert timeout is CREATE_RUN_TIMEOUT
     # The read wait outlasts the validator; connecting still fails fast.
     assert timeout.read > 60 and timeout.connect == 10.0
+
+
+def _capture_compile(monkeypatch) -> list[dict[str, Any]]:
+    compiled: list[dict[str, Any]] = []
+
+    def compile(config, preparation, **kwargs):
+        compiled.append({"config": config, **kwargs})
+        return {"mode": preparation["mode"], "schema_commit": "a" * 40}
+
+    monkeypatch.setattr("prime_cli.utils.training_compiler.compile_locally", compile)
+    return compiled
+
+
+def test_train_merges_config_files_like_prime_rl_and_forwards_flags(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """`prime train` takes `uv run rl`'s arguments: root `@` files merge in
+    order, `--section @ file` merges under its section, the rest are prime-rl
+    flags for the schema worker, and env files resolve next to the file that
+    names them."""
+    captured = _capture_fft_dispatch(monkeypatch)
+    compiled = _capture_compile(monkeypatch)
+    base = tmp_path / "rl.toml"
+    base.write_text('max_steps = 20\n\n[model]\nname = "Qwen/Qwen3-0.6B"\n\n[orchestrator]\n')
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "secrets.env").write_text("HF_TOKEN=from-sub\n")
+    (sub / "over.toml").write_text(
+        'env_files = ["secrets.env"]\nmax_steps = 5\n\n[model]\nseq_len = 512\n'
+    )
+    (tmp_path / "optim.toml").write_text("lr = 1e-5\n")
+
+    result = runner.invoke(
+        app,
+        [
+            "train",
+            "@",
+            str(base),
+            "--trainer.optim",
+            "@",
+            str(tmp_path / "optim.toml"),
+            "@",
+            str(sub / "over.toml"),
+            "--ckpt",
+            "--orchestrator.batch-size",
+            "64",
+            "-y",
+            "-o",
+            "json",
+        ],
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert compiled[0]["config"] == {
+        "max_steps": 5,
+        "model": {"name": "Qwen/Qwen3-0.6B", "seq_len": 512},
+        "orchestrator": {},
+        "trainer": {"optim": {"lr": 1e-5}},
+    }
+    assert compiled[0]["overrides"] == ["--ckpt", "--orchestrator.batch-size", "64"]
+    assert captured[0]["hfToken"] == "from-sub"
+
+
+def test_train_refuses_flags_when_local_validation_is_unavailable(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Without local validation the config ships raw, so prime-rl flags would
+    be dropped silently; refuse instead."""
+    from prime_cli.client import NotFoundError
+
+    def no_prepare(self, payload):
+        raise NotFoundError("not found")
+
+    monkeypatch.setattr(
+        "prime_cli.api.training.HostedTrainingClient.prepare_local_validation", no_prepare
+    )
+    captured = _capture_fft_dispatch(monkeypatch)
+    cfg = tmp_path / "rl.toml"
+    cfg.write_text('[model]\nname = "Qwen/Qwen3-0.6B"\n\n[orchestrator]\n')
+
+    result = runner.invoke(app, ["train", str(cfg), "--max-steps", "5", "-y"], env=TEST_ENV)
+    assert result.exit_code == 1
+    assert "need local config validation" in result.output
+    result = runner.invoke(app, ["train", str(cfg), "-y", "-o", "json"], env=TEST_ENV)
+    assert result.exit_code == 0, result.output
+    assert len(captured) == 1
+
+
+def test_train_validate_takes_config_files_and_flags(monkeypatch, tmp_path: Path) -> None:
+    compiled = _capture_compile(monkeypatch)
+    monkeypatch.setattr(
+        "prime_cli.api.training.HostedTrainingClient.prepare_local_validation",
+        lambda self, payload: {"mode": payload["mode"], "submission_supported": True},
+    )
+    (tmp_path / "a.toml").write_text('[model]\nname = "Qwen/Qwen3-0.6B"\n')
+    (tmp_path / "b.toml").write_text("max_steps = 3\n")
+
+    result = runner.invoke(
+        app,
+        [
+            "train",
+            "validate",
+            "@",
+            str(tmp_path / "a.toml"),
+            "@",
+            str(tmp_path / "b.toml"),
+            "--no-ckpt",
+            "-o",
+            "json",
+        ],
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert compiled[0]["config"] == {"model": {"name": "Qwen/Qwen3-0.6B"}, "max_steps": 3}
+    assert compiled[0]["overrides"] == ["--no-ckpt"]

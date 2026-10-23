@@ -321,19 +321,85 @@ def _remove_deprecated_config_keys(data: Dict[str, Any], out: Any = console) -> 
             )
 
 
-def _load_toml(config_path: str) -> Dict[str, Any]:
-    """Parse the run config. The raw table is shipped to the platform as-is
-    (prime-rl's schema is validated server-side), so the CLI only checks
-    that the file exists and is valid TOML."""
+def _read_config_file(config_path: str) -> Dict[str, Any]:
+    """Parse one run config file. The raw table is shipped to the platform
+    as-is (prime-rl's schema is validated against the run's runtime), so
+    the CLI only checks that the file exists and is valid TOML."""
     p = Path(config_path)
     if not p.exists():
-        console.print(f"[red]Error:[/red] Config file not found: {config_path}")
-        raise typer.Exit(1)
+        raise ValueError(f"Config file not found: {config_path}")
     try:
-        return toml.load(p)
+        cfg = toml.load(p)
     except toml.TomlDecodeError as e:
-        console.print(f"[red]Error:[/red] Invalid TOML in {config_path}: {e}")
-        raise typer.Exit(1)
+        raise ValueError(f"Invalid TOML in {config_path}: {e}") from e
+    # Env file paths are relative to the file that names them, which a
+    # multi-file merge would otherwise lose.
+    for key in ("env_file", "env_files"):
+        val = cfg.get(key)
+        if isinstance(val, list):
+            cfg[key] = [str(p.parent / str(v)) for v in val]
+        elif isinstance(val, str):
+            cfg[key] = str(p.parent / val)
+    return cfg
+
+
+def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    """pydantic-config's merge: tables merge recursively, anything else in
+    `override` replaces what `base` had."""
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(merged.get(key), dict) and isinstance(value, dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _load_config_args(args: List[str]) -> tuple[Dict[str, Any], List[str], str]:
+    """Read config arguments the way `uv run rl` / `uv run sft` do:
+    `@ file.toml` merges at the root (later files win), then
+    `--section @ file.toml` (or `--section @file.toml`) merges under that
+    section, and everything else is a prime-rl flag, resolved later against
+    the run's schema. A bare first argument is the `prime train rl.toml`
+    form.
+
+    Returns (merged config, prime-rl flags, label naming the files)."""
+    args = list(args)
+    if args and not args[0].startswith(("-", "@")):
+        args.insert(0, "@")
+    roots: List[str] = []
+    nested: Dict[str, str] = {}
+    overrides: List[str] = []
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        follower = args[i + 1] if i + 1 < len(args) else None
+        if arg == "@":
+            if follower is None:
+                raise ValueError("@ must be followed by a config file path")
+            roots.append(follower)
+            i += 2
+        elif arg.startswith("--") and follower == "@":
+            if i + 2 >= len(args):
+                raise ValueError(f"@ after {arg} must be followed by a config file path")
+            nested[arg[2:]] = args[i + 2]
+            i += 3
+        elif arg.startswith("--") and follower and follower.startswith("@") and len(follower) > 1:
+            nested[arg[2:]] = follower[1:]
+            i += 2
+        else:
+            overrides.append(arg)
+            i += 1
+    config: Dict[str, Any] = {}
+    for path in roots:
+        config = _deep_merge(config, _read_config_file(path))
+    for section, path in nested.items():
+        loaded = _read_config_file(path)
+        for part in reversed(section.split(".")):
+            loaded = {part: loaded}
+        config = _deep_merge(config, loaded)
+    files = roots + list(nested.values())
+    return config, overrides, " + ".join(files) or "command-line flags"
 
 
 def _looks_like_lora(cfg: Dict[str, Any]) -> bool:
@@ -535,6 +601,7 @@ def _dispatch_dedicated_run(
     source_ref: Optional[str] = None,
     source_pr: Optional[int] = None,
     resume_from: Optional[str] = None,
+    overrides: Optional[List[str]] = None,
 ) -> None:
     """Hand off to /api/v1/training/runs (prime-rl on a registered
     PrimeCluster). Serves both dedicated run kinds: full-FT RL mega-TOMLs
@@ -675,7 +742,16 @@ def _dispatch_dedicated_run(
                 if preparation.get("mode") != selection["mode"]:
                     raise CompilationError("Preparation returned a different training mode.")
                 payload["normalizedConfig"] = compile_locally(
-                    _schema_input(config_payload), preparation
+                    _schema_input(config_payload), preparation, overrides=overrides
+                )
+            elif overrides:
+                # Only the local schema worker can resolve prime-rl flags; the
+                # raw-config fallback would silently drop them.
+                raise CompilationError(
+                    "prime-rl flags ("
+                    + " ".join(overrides)
+                    + ") need local config validation, which is unavailable for this "
+                    "run. Put these settings in a config file instead."
                 )
     except (APIError, CompilationError) as exc:
         console.print(f"[red]Error:[/red] {rich_escape(str(exc))}")
@@ -933,7 +1009,7 @@ class DefaultGroup(DefaultCommandGroup):
     def format_usage(self, ctx, formatter):
         formatter.write_usage(
             ctx.command_path,
-            "[OPTIONS] CONFIG_PATH [ARGS]... | COMMAND [ARGS]...",
+            "[OPTIONS] [@] CONFIG [@ CONFIG]... [PRIME_RL_FLAGS]... | COMMAND [ARGS]...",
         )
 
     def get_params(self, ctx):
@@ -967,15 +1043,22 @@ class DefaultGroup(DefaultCommandGroup):
 app = PlainTyper(
     cls=DefaultGroup,
     help=(
-        "Launch and manage Hosted Training runs. Pass a config path directly to start a new run."
+        "Launch and manage Hosted Training runs. Pass config files and prime-rl flags "
+        "directly to start a new run, as with `uv run rl`: "
+        "`prime train @ rl.toml @ overrides.toml --max-steps 100`."
     ),
     no_args_is_help=True,
 )
 
 
-@app.command("validate", rich_help_panel="Commands")
+# Config arguments (`@ file.toml`, prime-rl flags) arrive in ctx.args. A
+# positional would let Click bind `--trainer.lr` or `@` as the config path.
+_CONFIG_ARGS = {"allow_extra_args": True, "ignore_unknown_options": True}
+
+
+@app.command("validate", rich_help_panel="Commands", context_settings=_CONFIG_ARGS)
 def validate_training_config(
-    config_path: Path = typer.Argument(..., exists=True, dir_okay=False),
+    ctx: typer.Context,
     schema_python: Optional[Path] = typer.Option(
         None,
         "--schema-python",
@@ -1005,14 +1088,19 @@ def validate_training_config(
 
     Experimental: creates no training run. Environment plugins and platform
     dispatch policy are checked when submitting a run.
+
+    Example:
+
+        prime train validate @ rl.toml @ overrides.toml --trainer.optim.lr 1e-5
     """
     from ..api.training import HostedTrainingClient
     from ..utils.training_compiler import CompilationError, compile_locally
 
     validate_output_format(output, console)
     try:
-        with config_path.open() as stream:
-            raw = toml.load(stream)
+        if not ctx.args:
+            raise ValueError("Missing config: pass a config path or `@ file.toml`.")
+        raw, overrides, config_path = _load_config_args(ctx.args)
         if ref is not None and pr is not None:
             raise ValueError("--ref and --pr are mutually exclusive.")
         source_ref = _selected_source_ref(ref, raw.get("source_ref"), config_path)
@@ -1046,7 +1134,9 @@ def validate_training_config(
             preparation = client.prepare_local_validation(payload)
             if preparation.get("mode") != payload["mode"]:
                 raise CompilationError("Preparation returned a different training mode.")
-            artifact = compile_locally(config, preparation, schema_python=schema_python)
+            artifact = compile_locally(
+                config, preparation, schema_python=schema_python, overrides=overrides
+            )
             if artifact_out:
                 artifact_out.write_text(json.dumps(artifact, indent=2) + "\n")
         if output == "json":
@@ -1073,12 +1163,15 @@ def validate_training_config(
         raise typer.Exit(1) from exc
 
 
-@app.command("run", rich_help_panel="Commands", hidden=True, epilog=RL_DISPATCH_JSON_HELP)
+@app.command(
+    "run",
+    rich_help_panel="Commands",
+    hidden=True,
+    epilog=RL_DISPATCH_JSON_HELP,
+    context_settings=_CONFIG_ARGS,
+)
 def create_run(
-    config_path: str = typer.Argument(
-        ...,
-        help="Path to a TOML config file to launch as a Hosted Training run.",
-    ),
+    ctx: typer.Context,
     env: Optional[List[str]] = typer.Option(
         None,
         "-e",
@@ -1209,11 +1302,17 @@ def create_run(
         ),
     ),
 ) -> None:
-    """Launch a Hosted Training run from a config file.
+    """Launch a Hosted Training run from config files and prime-rl flags.
+
+    Takes the config arguments `uv run rl` / `uv run sft` take: `@ a.toml
+    @ b.toml` (later files win), `--section @ part.toml`, and prime-rl flags
+    such as `--trainer.optim.lr 1e-5` or `--ckpt`, resolved against the run's
+    prime-rl schema.
 
     Example:
 
         prime train rl.toml
+        prime train @ rl.toml @ big-model.toml --max-steps 100 --ckpt
         prime train sft.toml --sft
         prime train sft.toml --sft --volume research
     """
@@ -1235,7 +1334,14 @@ def create_run(
         console.print("[red]Error:[/red] --resume-from needs the ID of a PAUSED run.")
         raise typer.Exit(1)
 
-    raw_cfg = _load_toml(config_path)
+    if not ctx.args:
+        console.print("[red]Error:[/red] Missing config: pass a config path or `@ file.toml`.")
+        raise typer.Exit(2)
+    try:
+        raw_cfg, overrides, config_path = _load_config_args(ctx.args)
+    except ValueError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1) from e
 
     if _looks_like_lora(raw_cfg):
         console.print(
@@ -1281,6 +1387,7 @@ def create_run(
         source_ref=ref,
         source_pr=pr,
         resume_from=resume_from,
+        overrides=overrides,
     )
 
 

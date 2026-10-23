@@ -50,6 +50,12 @@ class PaymentRequiredError(APIError):
     pass
 
 
+class ServerError(APIError):
+    """Raised when API returns a 5xx status"""
+
+    pass
+
+
 _STATUS_ERRORS = {404: NotFoundError, 405: MethodNotAllowedError}
 
 
@@ -171,7 +177,9 @@ class APIClient:
                 except (ValueError, KeyError):
                     pass
 
-            error_cls = _STATUS_ERRORS.get(e.response.status_code, APIError)
+            error_cls = _STATUS_ERRORS.get(
+                e.response.status_code, ServerError if e.response.status_code >= 500 else APIError
+            )
             # For other HTTP errors, try to extract the error message from the response
             try:
                 error_response = e.response.json()
@@ -322,7 +330,9 @@ class AsyncAPIClient:
                 except (ValueError, KeyError):
                     pass
 
-            error_cls = _STATUS_ERRORS.get(e.response.status_code, APIError)
+            error_cls = _STATUS_ERRORS.get(
+                e.response.status_code, ServerError if e.response.status_code >= 500 else APIError
+            )
             # For other HTTP errors, try to extract the error message from the response
             try:
                 error_response = e.response.json()

@@ -8,6 +8,7 @@ from prime_cli.core import (
     MethodNotAllowedError,
     NotFoundError,
     PaymentRequiredError,
+    ServerError,
     UnauthorizedError,
     ValidationError,
 )
@@ -20,6 +21,7 @@ __all__ = [
     "MethodNotAllowedError",
     "NotFoundError",
     "PaymentRequiredError",
+    "ServerError",
     "UnauthorizedError",
     "ValidationError",
 ]

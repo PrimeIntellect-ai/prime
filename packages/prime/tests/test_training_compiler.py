@@ -679,7 +679,11 @@ def test_validate_writes_normalized_config_without_rendering_or_submitting(
         ("unsupported", "rl", {}, 0, False),
         ("http_404", "rl", {}, 0, False),
         ("http_405", "rl", {}, 0, False),
-        ("http_500", "rl", {}, 1, False),
+        ("http_400", "rl", {}, 1, False),
+        ("http_500", "rl", {}, 0, False),
+        ("http_503", "rl", {}, 0, False),
+        ("timeout", "rl", {}, 0, False),
+        ("schema_env_unavailable", "rl", {}, 0, False),
         ("supported", "sft", {}, 0, True),
         ("supported", "sft", {"eval": {"interval": 10}}, 0, False),
         ("supported", "sft", {"inference": {}}, 0, False),
@@ -705,12 +709,14 @@ def test_run_falls_back_to_raw_config_when_local_validation_is_unavailable(
     artifact = {"contract_version": 3, "mode": mode, "schema_commit": "a" * 40}
     submitted = []
 
+    def respond(request):
+        if case == "timeout":
+            raise httpx.ReadTimeout("prepare timed out", request=request)
+        return httpx.Response(int(case.removeprefix("http_")), json={"detail": "runtime down"})
+
     def api_client():
         client = APIClient(api_key="test")
-        status = int(case.removeprefix("http_"))
-        client.client = httpx.Client(
-            transport=httpx.MockTransport(lambda request: httpx.Response(status, json={}))
-        )
+        client.client = httpx.Client(transport=httpx.MockTransport(respond))
         return client
 
     def prepare(self, payload):
@@ -719,13 +725,15 @@ def test_run_falls_back_to_raw_config_when_local_validation_is_unavailable(
     def compile(config, prepared):
         if case == "schema_error":
             raise training_compiler.CompilationError("invalid schema config")
+        if case == "schema_env_unavailable":
+            raise training_compiler.SchemaEnvironmentUnavailable("requires uv on PATH")
         return artifact
 
     def create(self, payload):
         submitted.append(payload)
         return HostedTrainingRunResponse(run_id="run", token_value="secret")
 
-    if case.startswith("http_"):
+    if case.startswith("http_") or case == "timeout":
         monkeypatch.setattr(rl, "APIClient", api_client)
     else:
         monkeypatch.setattr(rl, "APIClient", lambda: object())
@@ -744,6 +752,14 @@ def test_run_falls_back_to_raw_config_when_local_validation_is_unavailable(
     assert len(submitted) == 1
     assert submitted[0].get("normalizedConfig") == (artifact if normalized else None)
     assert ("Local validation is unavailable" in result.output) is (not normalized)
+    reason = {
+        "http_500": "runtime down",
+        "http_503": "runtime down",
+        "timeout": "prepare timed out",
+        "schema_env_unavailable": "requires uv on PATH",
+    }.get(case)
+    if reason:
+        assert reason in result.output
 
 
 def test_installer_keeps_network_settings_and_rewrites_ssh_git_urls(monkeypatch):

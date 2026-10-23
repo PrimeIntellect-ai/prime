@@ -26,7 +26,14 @@ from ..api.training import (
     build_payload_from_toml,
     resolve_pull_request_head,
 )
-from ..client import APIClient, APIError, MethodNotAllowedError, NotFoundError
+from ..client import (
+    APIClient,
+    APIError,
+    APITimeoutError,
+    MethodNotAllowedError,
+    NotFoundError,
+    ServerError,
+)
 from ..utils import (
     DefaultCommandGroup,
     PlainTyper,
@@ -543,7 +550,11 @@ def _dispatch_dedicated_run(
     Backend always auto-picks the first uncordoned PrimeCluster — the
     CLI never threads a cluster id, so a config that targets the wrong
     cluster can't be a footgun."""
-    from ..utils.training_compiler import CompilationError, compile_locally
+    from ..utils.training_compiler import (
+        CompilationError,
+        SchemaEnvironmentUnavailable,
+        compile_locally,
+    )
 
     name = raw_cfg.get("name")
 
@@ -664,6 +675,7 @@ def _dispatch_dedicated_run(
             if resolved_source_ref:
                 selection["sourceRef"] = resolved_source_ref
             preparation = None
+            unavailable: Optional[Exception] = None
             if _supports_local_validation(mode, config_payload):
                 try:
                     preparation = client.prepare_local_validation(selection)
@@ -671,12 +683,17 @@ def _dispatch_dedicated_run(
                 # DELETE /training/runs/{run_id}.
                 except (NotFoundError, MethodNotAllowedError):
                     pass
+                except (ServerError, APITimeoutError) as exc:
+                    unavailable = exc
             if preparation is not None and preparation.get("submission_supported") is True:
                 if preparation.get("mode") != selection["mode"]:
                     raise CompilationError("Preparation returned a different training mode.")
-                payload["normalizedConfig"] = compile_locally(
-                    _schema_input(config_payload), preparation
-                )
+                try:
+                    payload["normalizedConfig"] = compile_locally(
+                        _schema_input(config_payload), preparation
+                    )
+                except SchemaEnvironmentUnavailable as exc:
+                    unavailable = exc
     except (APIError, CompilationError) as exc:
         console.print(f"[red]Error:[/red] {rich_escape(str(exc))}")
         raise typer.Exit(1) from exc
@@ -689,6 +706,8 @@ def _dispatch_dedicated_run(
                 "[yellow]Local validation is unavailable for this run; "
                 "Platform validates it on submission.[/yellow]"
             )
+            if unavailable is not None:
+                console.print(f"[dim]{rich_escape(str(unavailable))}[/dim]")
 
     # Surface the image + source pins before the confirmation so a typo'd
     # ref is caught at the prompt, not by a failed dispatch. Skipped for

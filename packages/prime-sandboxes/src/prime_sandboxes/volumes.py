@@ -100,8 +100,10 @@ class Volumes:
         writable volume with that name (404), makes the volume read-only
         (400), or has another sandbox's publish in flight (409). With
         wait=True (the default), the returned checkpoint is the published
-        head once DURABLE; a failed publish raises RuntimeError and an
-        unfinished publish TimeoutError.
+        head once DURABLE; on servers that report volume-merge status the
+        wait also covers the checkpoint's merge, and a failed merge raises
+        RuntimeError with merge_error. A publish or merge that never
+        finishes raises TimeoutError.
         """
         response = self._parent.client.request(
             "POST",
@@ -178,8 +180,10 @@ class AsyncVolumes:
         writable volume with that name (404), makes the volume read-only
         (400), or has another sandbox's publish in flight (409). With
         wait=True (the default), the returned checkpoint is the published
-        head once DURABLE; a failed publish raises RuntimeError and an
-        unfinished publish TimeoutError.
+        head once DURABLE; on servers that report volume-merge status the
+        wait also covers the checkpoint's merge, and a failed merge raises
+        RuntimeError with merge_error. A publish or merge that never
+        finishes raises TimeoutError.
         """
         response = await self._parent.client.request(
             "POST",

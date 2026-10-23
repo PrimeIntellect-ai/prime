@@ -220,8 +220,10 @@ checkpoint = volumes.publish("sandbox-id", "dataset", wait=False)
 
 By default `publish` waits for the new head checkpoint to become DURABLE and
 returns it; pass `wait=False` to get the pending checkpoint immediately and
-poll it yourself. A failed publish raises `RuntimeError` and a publish that
-never becomes DURABLE within 300 seconds raises `TimeoutError`. The server
+poll it yourself. On servers that report a checkpoint's volume-merge status
+the same wait also covers the merge: `RuntimeError` carries `merge_error`
+when the merge failed, and a publish or merge still unfinished after the
+wait budget (300 seconds by default) raises `TimeoutError`. The server
 rejects the publish with HTTP 404 when the sandbox has no writable attachment
 with that name, HTTP 400 when the mount is read-only, and HTTP 409 when
 another sandbox's publish for the same volume is already in flight. A head

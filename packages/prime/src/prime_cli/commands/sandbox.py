@@ -774,6 +774,10 @@ def checkpoint_get(
     # which is never restorable as a sandbox rootfs, so no restorable hint.
     console.print(f"Checkpoint ID: [cyan]{escape(checkpoint.id)}[/cyan]")
     console.print(f"State: {escape(checkpoint.state)}")
+    if checkpoint.merge is not None:
+        console.print(f"Merge: {escape(checkpoint.merge)}")
+        if checkpoint.merge_error:
+            console.print(f"Merge error: {escape(checkpoint.merge_error)}")
     console.print(f"Size: {checkpoint.occupied_bytes / 1024**2:.1f} MiB")
     if checkpoint.error:
         console.print(f"Error: {escape(checkpoint.error)}")

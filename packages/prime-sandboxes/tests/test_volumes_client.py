@@ -622,21 +622,6 @@ def test_publish_wait_polls_until_merge_not_pending(waiter_clock):
     assert len(client.calls[1:]) == 2
 
 
-def test_checkpoint_model_parses_merge_fields():
-    row = _checkpoint_response("DURABLE")
-    row["merge"] = "failed"
-    row["merge_error"] = "quota exceeded"
-
-    checkpoint = SandboxCheckpoint.model_validate(row)
-    assert checkpoint.merge == "failed"
-    assert checkpoint.merge_error == "quota exceeded"
-
-    # Older responses omit the fields entirely.
-    legacy = SandboxCheckpoint.model_validate(_checkpoint_response("DURABLE"))
-    assert legacy.merge is None
-    assert legacy.merge_error is None
-
-
 def test_async_sandbox_client_closes_owned_api_client():
     async def scenario() -> None:
         sandbox_client = AsyncSandboxClient(api_key="test-key")

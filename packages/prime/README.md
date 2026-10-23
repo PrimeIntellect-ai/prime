@@ -237,8 +237,9 @@ sandbox always sees the volume as of its own creation, so attach a new
 sandbox to read a newer head. Read-only mounts cannot publish. A publish
 whose volume head moved since attach is rejected (409) unless `--force`,
 which still cannot overtake another sandbox's pending publish. `--no-wait`
-prints the checkpoint id and state; the data is published only once that
-checkpoint is DURABLE, checkable with
+prints the checkpoint id and state; the data is published once that
+checkpoint is DURABLE and, on servers that merge volume publishes, its
+merge finishes — both checkable with
 `prime sandbox checkpoint get <checkpoint-id>`.
 
 `volumes create --from` copies a local directory into a disposable

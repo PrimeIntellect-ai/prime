@@ -324,7 +324,7 @@ async def test_wait_for_checkpoint_cancellation(monkeypatch):
 
 
 def mock_checkpoint_merges(client, monkeypatch, merge_states):
-    """Yield DURABLE checkpoints whose merge status follows merge_states."""
+    """Return DURABLE checkpoints whose merge status follows merge_states."""
     calls = []
     responses = iter(merge_states)
 

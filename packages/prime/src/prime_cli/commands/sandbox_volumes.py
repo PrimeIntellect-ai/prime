@@ -180,7 +180,8 @@ def _print_retained_importer(
         # (rootfs-only filter), so discovery runs through the volume head.
         console.print(
             "If a checkpoint was created, its id is not known to this run; "
-            "once it reaches DURABLE it becomes the volume's head, shown by "
+            "once it reaches DURABLE (and its volume merge, on servers that "
+            "run one, finishes) the volume's head moves, shown by "
             f"'prime sandbox volumes get {shlex.quote(name)}{scope}'. That head may be "
             "older or from another publisher and does not by itself "
             "confirm this publish. Check any checkpoint id with "
@@ -188,7 +189,8 @@ def _print_retained_importer(
         )
     console.print(
         "The imported data is private to the importer until a publish "
-        "reaches DURABLE."
+        "reaches DURABLE and, on servers that merge volume publishes, "
+        "its merge finishes."
     )
     # The importer is not kept indefinitely: the idle monitor reaps it after
     # _IMPORTER_IDLE_TIMEOUT_MINUTES without transfer activity, and the
@@ -548,7 +550,14 @@ def publish(
 
     console.print(f"Checkpoint ID: [cyan]{escape(checkpoint.id)}[/cyan]")
     console.print(f"State: {escape(checkpoint.state)}")
-    if checkpoint.state == "DURABLE":
+    if checkpoint.merge == "pending":
+        console.print(
+            "[yellow]The publish is durable but its volume merge is still "
+            "pending; the volume's published contents do not include this "
+            f"data until the merge finishes. Check with 'prime sandbox "
+            f"checkpoint get {escape(checkpoint.id)}'."
+        )
+    elif checkpoint.state == "DURABLE":
         console.print(
             f"[green]✓[/green] Published volume {escape(name)}; new sandboxes "
             "that attach it see this data"

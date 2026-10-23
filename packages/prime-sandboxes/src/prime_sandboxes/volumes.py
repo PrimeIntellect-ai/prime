@@ -105,8 +105,8 @@ class Volumes:
         returned checkpoint is the published head once DURABLE; on servers
         that report volume-merge status the wait also covers the
         checkpoint's merge, and a failed merge raises RuntimeError with
-        merge_error. A failed publish raises RuntimeError and an unfinished
-        publish TimeoutError.
+        merge_error. A publish or merge that never finishes raises
+        TimeoutError.
         """
         response = self._parent.client.request(
             "POST",
@@ -188,8 +188,8 @@ class AsyncVolumes:
         returned checkpoint is the published head once DURABLE; on servers
         that report volume-merge status the wait also covers the
         checkpoint's merge, and a failed merge raises RuntimeError with
-        merge_error. A failed publish raises RuntimeError and an unfinished
-        publish TimeoutError.
+        merge_error. A publish or merge that never finishes raises
+        TimeoutError.
         """
         response = await self._parent.client.request(
             "POST",

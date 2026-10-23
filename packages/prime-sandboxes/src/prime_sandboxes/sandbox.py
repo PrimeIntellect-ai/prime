@@ -2558,14 +2558,12 @@ class SandboxClient:
                 if checkpoint.merge != "pending":
                     return checkpoint
                 merge_pending = True
-            else:
-                merge_pending = False
-                if checkpoint.state in ("FAILED", "DELETING"):
-                    raise RuntimeError(
-                        f"Checkpoint {checkpoint_id} cannot become durable "
-                        f"(state={checkpoint.state}): "
-                        f"{checkpoint.error or 'no error details'}"
-                    )
+            elif checkpoint.state in ("FAILED", "DELETING"):
+                raise RuntimeError(
+                    f"Checkpoint {checkpoint_id} cannot become durable "
+                    f"(state={checkpoint.state}): "
+                    f"{checkpoint.error or 'no error details'}"
+                )
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
@@ -4226,14 +4224,12 @@ class AsyncSandboxClient:
                 if checkpoint.merge != "pending":
                     return checkpoint
                 merge_pending = True
-            else:
-                merge_pending = False
-                if checkpoint.state in ("FAILED", "DELETING"):
-                    raise RuntimeError(
-                        f"Checkpoint {checkpoint_id} cannot become durable "
-                        f"(state={checkpoint.state}): "
-                        f"{checkpoint.error or 'no error details'}"
-                    )
+            elif checkpoint.state in ("FAILED", "DELETING"):
+                raise RuntimeError(
+                    f"Checkpoint {checkpoint_id} cannot become durable "
+                    f"(state={checkpoint.state}): "
+                    f"{checkpoint.error or 'no error details'}"
+                )
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break

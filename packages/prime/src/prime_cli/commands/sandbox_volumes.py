@@ -550,7 +550,7 @@ def publish(
 
     console.print(f"Checkpoint ID: [cyan]{escape(checkpoint.id)}[/cyan]")
     console.print(f"State: {escape(checkpoint.state)}")
-    if checkpoint.merge == "pending":
+    if checkpoint.state == "DURABLE" and checkpoint.merge == "pending":
         console.print(
             "[yellow]The publish is durable but its volume merge is still "
             "pending; the volume's published contents do not include this "

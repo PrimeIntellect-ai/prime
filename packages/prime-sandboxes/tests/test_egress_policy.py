@@ -77,7 +77,15 @@ class TestCreateSandboxRequestNetworkLists:
         [
             "*",
             "https://example.com",
-            "example.com:443",
+            "example.com:22",
+            "example.com:80-443",
+            "1.2.3.4:0",
+            "1.2.3.4:65536",
+            "1.2.3.4:90-80",
+            "1.2.3.4:",
+            "1.2.3.4:ssh",
+            "*:443",
+            "2001:db8::/32:443",
             "example.com?q=1",
             "user@example.com",
             "api.*.example.com",
@@ -89,6 +97,19 @@ class TestCreateSandboxRequestNetworkLists:
     def test_invalid_entries_rejected(self, entry):
         with pytest.raises(ValidationError):
             CreateSandboxRequest(name="t", docker_image="img", network_denylist=[entry])
+
+    @pytest.mark.parametrize(
+        "entry",
+        [
+            "203.0.113.10:22",
+            "10.0.0.0/8:8000-8100",
+            "0.0.0.0/0:25",
+            "example.com:443",
+            "*.example.com:80",
+        ],
+    )
+    def test_port_suffixes_accepted(self, entry):
+        CreateSandboxRequest(name="t", docker_image="img", network_denylist=[entry])
 
 
 @pytest.mark.parametrize("mode", ["allow", "deny"])

@@ -969,15 +969,17 @@ def create(
         "--network-allow",
         help=(
             "Repeatable. Allow egress only to these domains/IPv4 CIDRs "
-            "(hostname-aware). Mutually exclusive with --network-deny."
+            "(hostname-aware), optionally with :port or :low-high (domains: 80 or 443). "
+            "Mutually exclusive with --network-deny."
         ),
     ),
     network_deny: Optional[List[str]] = typer.Option(
         None,
         "--network-deny",
         help=(
-            "Repeatable. Deny egress to these domains/IPv4 CIDRs and "
-            "allow everything else. Mutually exclusive with --network-allow."
+            "Repeatable. Deny egress to these domains/IPv4 CIDRs, optionally with "
+            ":port or :low-high (domains: 80 or 443), and allow everything else. "
+            "Mutually exclusive with --network-allow."
         ),
     ),
     timeout_minutes: int = typer.Option(60, help="Timeout in minutes"),
@@ -1535,7 +1537,8 @@ def network(
         "--allow",
         help=(
             "Replace the allowed destinations with a comma-separated list of "
-            "domains/IPv4 CIDRs. Use '*' to allow all."
+            "domains/IPv4 CIDRs, optionally with :port or :low-high (domains: 80 or 443). "
+            "Use '*' to allow all."
         ),
     ),
     deny: Optional[str] = typer.Option(
@@ -1543,7 +1546,8 @@ def network(
         "--deny",
         help=(
             "Replace the denied destinations with a comma-separated list of "
-            "domains/IPv4 CIDRs. Use '*' to deny all."
+            "domains/IPv4 CIDRs, optionally with :port or :low-high (domains: 80 or 443). "
+            "Use '*' to deny all."
         ),
     ),
 ) -> None:

@@ -93,22 +93,20 @@ class Volumes:
             params=_name_params(self._parent.client, team_id),
         )
 
-    def publish(
-        self, sandbox_id: str, name: str, force: bool = False, wait: bool = True
-    ) -> SandboxCheckpoint:
+    def publish(self, sandbox_id: str, name: str, wait: bool = True) -> SandboxCheckpoint:
         """Publish one of a running sandbox's volume attachments.
 
         The server rejects the publish unless the sandbox is attached to a
         writable volume with that name (404), makes the volume read-only
-        (400), or has another sandbox's publish in flight (409); a moved
-        head is 409 unless force is True. With wait=True (the default), the
-        returned checkpoint is the published head once DURABLE; a failed
-        publish raises RuntimeError and an unfinished publish TimeoutError.
+        (400), or has another sandbox's publish in flight (409). With
+        wait=True (the default), the returned checkpoint is the published
+        head once DURABLE; a failed publish raises RuntimeError and an
+        unfinished publish TimeoutError.
         """
         response = self._parent.client.request(
             "POST",
             _publish_path(sandbox_id, name),
-            json={"force": force},
+            json={},
         )
         checkpoint = SandboxCheckpoint.model_validate(response)
         if not wait:
@@ -173,22 +171,20 @@ class AsyncVolumes:
             params=_name_params(self._parent.client, team_id),
         )
 
-    async def publish(
-        self, sandbox_id: str, name: str, force: bool = False, wait: bool = True
-    ) -> SandboxCheckpoint:
+    async def publish(self, sandbox_id: str, name: str, wait: bool = True) -> SandboxCheckpoint:
         """Publish one of a running sandbox's volume attachments.
 
         The server rejects the publish unless the sandbox is attached to a
         writable volume with that name (404), makes the volume read-only
-        (400), or has another sandbox's publish in flight (409); a moved
-        head is 409 unless force is True. With wait=True (the default), the
-        returned checkpoint is the published head once DURABLE; a failed
-        publish raises RuntimeError and an unfinished publish TimeoutError.
+        (400), or has another sandbox's publish in flight (409). With
+        wait=True (the default), the returned checkpoint is the published
+        head once DURABLE; a failed publish raises RuntimeError and an
+        unfinished publish TimeoutError.
         """
         response = await self._parent.client.request(
             "POST",
             _publish_path(sandbox_id, name),
-            json={"force": force},
+            json={},
         )
         checkpoint = SandboxCheckpoint.model_validate(response)
         if not wait:

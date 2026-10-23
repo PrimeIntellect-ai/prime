@@ -215,7 +215,7 @@ from prime_sandboxes import APIClient, SandboxClient
 
 volumes = SandboxClient(APIClient()).volumes
 checkpoint = volumes.publish("sandbox-id", "dataset")  # waits for DURABLE
-checkpoint = volumes.publish("sandbox-id", "dataset", force=True, wait=False)
+checkpoint = volumes.publish("sandbox-id", "dataset", wait=False)
 ```
 
 By default `publish` waits for the new head checkpoint to become DURABLE and
@@ -224,8 +224,8 @@ poll it yourself. A failed publish raises `RuntimeError` and a publish that
 never becomes DURABLE within 300 seconds raises `TimeoutError`. The server
 rejects the publish with HTTP 404 when the sandbox has no writable attachment
 with that name, HTTP 400 when the mount is read-only, and HTTP 409 when
-another sandbox's publish for the same volume is already in flight; a head
-that moved since the sandbox was created is also HTTP 409 unless `force=True`.
+another sandbox's publish for the same volume is already in flight. A head
+that moved since the sandbox was created is also HTTP 409.
 `AsyncSandboxClient` exposes the same operations with `await` on its own
 `volumes` namespace; the parent client's `aclose()` closes its owned
 transport and polling work, while the namespace owns neither.

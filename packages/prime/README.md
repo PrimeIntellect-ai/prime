@@ -222,7 +222,7 @@ prime sandbox volumes get data
 prime sandbox volumes delete data
 
 # Publish a sandbox's private volume writes as a durable checkpoint
-prime sandbox volumes publish data --sandbox <sandbox-id> [--force] [--no-wait]
+prime sandbox volumes publish data --sandbox <sandbox-id> [--no-wait]
 
 # Create a volume and import a local directory into it
 prime sandbox volumes create data --from ~/datasets/my-data
@@ -235,8 +235,7 @@ Volume writes are private to a sandbox until a publish reaches DURABLE. A
 new volume starts empty; each publish becomes the volume's head, and a
 sandbox always sees the volume as of its own creation, so attach a new
 sandbox to read a newer head. Read-only mounts cannot publish. A publish
-whose volume head moved since attach is rejected (409) unless `--force`,
-which still cannot overtake another sandbox's pending publish. `--no-wait`
+whose volume head moved since attach is rejected (409). `--no-wait`
 prints the checkpoint id and state; the data is published only once that
 checkpoint is DURABLE, checkable with
 `prime sandbox checkpoint get <checkpoint-id>`.

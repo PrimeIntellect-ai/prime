@@ -506,18 +506,13 @@ def publish(
     sandbox_id: str = typer.Option(
         ..., "--sandbox", help="ID of the sandbox that publishes the volume"
     ),
-    force: bool = typer.Option(
-        False, "--force", help="Publish even if the volume's head moved since attach"
-    ),
     no_wait: bool = typer.Option(
         False, "--no-wait", help="Do not wait for the publish to become durable"
     ),
 ) -> None:
     """Publish a sandbox's private volume writes as a durable checkpoint."""
     try:
-        checkpoint = _sandbox_client().volumes.publish(
-            sandbox_id, name, force=force, wait=not no_wait
-        )
+        checkpoint = _sandbox_client().volumes.publish(sandbox_id, name, wait=not no_wait)
     except UnauthorizedError as e:
         console.print(f"[red]Unauthorized:[/red] {escape(str(e))}")
         raise typer.Exit(1)
@@ -526,7 +521,7 @@ def publish(
         raise typer.Exit(1)
     except APIError as e:
         # 400 read-only, 404 not attached, 409 stale head or another
-        # sandbox's publish in flight (also with --force).
+        # sandbox's publish in flight.
         console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except TimeoutError as e:

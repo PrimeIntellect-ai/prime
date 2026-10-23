@@ -457,19 +457,19 @@ def test_publish_sends_exact_post_path_and_body():
 
     checkpoint = volumes.publish("sb-1", "dataset", wait=False)
 
-    assert client.calls == [("POST", "/sandbox/sb-1/volumes/dataset/publish", {"force": False})]
+    assert client.calls == [("POST", "/sandbox/sb-1/volumes/dataset/publish", {})]
     assert isinstance(checkpoint, SandboxCheckpoint)
     assert checkpoint.id == "ckpt-1"
     assert checkpoint.state == "PENDING"
 
 
-def test_publish_force_true_quotes_name_in_path():
+def test_publish_quotes_name_in_path():
     client = RoutingAPIClient(lambda method, path, json: _checkpoint_response())
     volumes = SandboxClient(client).volumes  # type: ignore[arg-type]
 
-    volumes.publish("sb-1", "a/b", force=True, wait=False)
+    volumes.publish("sb-1", "a/b", wait=False)
 
-    assert client.calls == [("POST", "/sandbox/sb-1/volumes/a%2Fb/publish", {"force": True})]
+    assert client.calls == [("POST", "/sandbox/sb-1/volumes/a%2Fb/publish", {})]
 
 
 def test_publish_wait_true_polls_until_durable(waiter_clock):
@@ -526,11 +526,11 @@ def test_async_publish_sends_exact_post_path_and_body():
 
     async def scenario() -> SandboxCheckpoint:
         async with client:
-            return await client.volumes.publish("sb-1", "dataset", force=True, wait=False)
+            return await client.volumes.publish("sb-1", "dataset", wait=False)
 
     checkpoint = asyncio.run(scenario())
 
-    assert calls == [("POST", "/sandbox/sb-1/volumes/dataset/publish", {"force": True})]
+    assert calls == [("POST", "/sandbox/sb-1/volumes/dataset/publish", {})]
     assert checkpoint.id == "ckpt-1"
 
 
@@ -569,7 +569,7 @@ def test_async_publish_wait_timeout_raises_timeout_error(waiter_clock):
     asyncio.run(scenario())
 
 
-def test_publish_conflict_surfaces_api_error_even_with_force():
+def test_publish_conflict_surfaces_api_error():
     from prime_sandboxes.core.client import APIClient as CoreAPIClient
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -581,7 +581,7 @@ def test_publish_conflict_surfaces_api_error_even_with_force():
     api_client.client = httpx.Client(transport=httpx.MockTransport(handler))
 
     with pytest.raises(APIError, match="409"):
-        SandboxClient(api_client).volumes.publish("sb-1", "dataset", force=True)
+        SandboxClient(api_client).volumes.publish("sb-1", "dataset")
 
 
 def test_publish_batch_get_fallback_uses_get_checkpoints():

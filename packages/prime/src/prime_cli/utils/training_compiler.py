@@ -22,6 +22,10 @@ class CompilationError(Exception):
     pass
 
 
+class SchemaEnvironmentUnavailable(CompilationError):
+    """The local schema environment could not be built; the config was not checked."""
+
+
 SFT_ONLINE_EVAL_KEYS = frozenset({"eval", "inference", "weight_broadcast"})
 _CACHE_KEEP = 4
 _CACHE_MAX_AGE = 14 * 86400
@@ -132,9 +136,11 @@ def _run(command: list[str], *, inherited_lock: int | None, timeout: int = 300) 
             pass_fds=() if inherited_lock is None else (inherited_lock,),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise CompilationError(f"Could not build local schema environment: {exc}") from exc
+        raise SchemaEnvironmentUnavailable(
+            f"Could not build local schema environment: {exc}"
+        ) from exc
     if result.returncode:
-        raise CompilationError(
+        raise SchemaEnvironmentUnavailable(
             "Could not build local schema environment:\n" + result.stderr[-2000:]
         )
 
@@ -155,7 +161,9 @@ def _cache_lock(path: Path, timeout: float, *, shared: bool = False) -> Iterator
                 break
             except OSError:
                 if time.monotonic() >= deadline:
-                    raise CompilationError(f"Timed out waiting for schema cache lock: {path}")
+                    raise SchemaEnvironmentUnavailable(
+                        f"Timed out waiting for schema cache lock: {path}"
+                    )
                 time.sleep(0.2)
         try:
             yield handle.fileno() if _LOCKS_ARE_INHERITABLE else None
@@ -180,7 +188,7 @@ def _schema_paths(inputs: dict[str, Any]) -> tuple[Path, str, Path, Path]:
 
 def _schema_python(preparation: dict[str, Any]) -> Path:
     if not shutil.which("uv"):
-        raise CompilationError("Local config validation requires uv on PATH.")
+        raise SchemaEnvironmentUnavailable("Local config validation requires uv on PATH.")
     inputs = preparation["schema_install"]
     cache, key, target, python = _schema_paths(inputs)
     cache.mkdir(parents=True, exist_ok=True)

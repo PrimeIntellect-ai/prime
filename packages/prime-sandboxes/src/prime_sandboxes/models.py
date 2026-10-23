@@ -523,6 +523,10 @@ class SandboxCheckpoint(BaseModel):
     error: Optional[str] = None
     # When the platform deletes it (set by a TTL at creation); None keeps it.
     expires_at: Optional[datetime] = None
+    # Volume-publish merge status; None on other checkpoints and on servers
+    # without volume merges (D29). "failed" carries merge_error.
+    merge: Optional[Literal["merged", "pending", "failed"]] = None
+    merge_error: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 

@@ -1367,7 +1367,7 @@ def du(
             console.print(f"Volume usage: {used} / {limit} ({usage['usedPercent']:.1f}%)")
         else:
             console.print(f"Volume usage: {used} (cap unavailable)")
-        console.print(
+        err_console.print(
             "[dim]Usage may be stale while data is still local to a live session or run.[/dim]"
         )
 

@@ -332,9 +332,9 @@ def test_du_human_readable(storage):
 def test_du_text_notes_usage_may_be_stale(storage):
     result = _run("du", "data")
     assert result.exit_code == 0, result.output
-    assert "Usage may be stale" in strip_ansi(result.stdout)
-    assert "live session or run" in result.stdout
-    assert not result.stderr
+    assert "Usage may be stale" in strip_ansi(result.stderr)
+    assert "live session or run" in result.stderr
+    assert "stale" not in result.stdout
 
 
 def test_du_json_keeps_schema_without_stale_note(storage):

@@ -2412,6 +2412,9 @@ class SandboxClient:
             idempotent_post=True,
         )
         sandbox = Sandbox.model_validate(response)
+        # Seed the auth cache so the first gateway call skips POST /auth.
+        if auth := response.get("gatewayAuth"):
+            self._auth_cache.set(sandbox.id, auth)
         if request.lan_network_id is not None:
             self._pending_lan_joins[sandbox.id] = (request.lan_network_id, request.lan_tags)
         return sandbox
@@ -4062,6 +4065,9 @@ class AsyncSandboxClient:
             idempotent_post=True,
         )
         sandbox = Sandbox.model_validate(response)
+        # Seed the auth cache so the first gateway call skips POST /auth.
+        if auth := response.get("gatewayAuth"):
+            await self._auth_cache.set(sandbox.id, auth)
         if request.lan_network_id is not None:
             self._pending_lan_joins[sandbox.id] = (request.lan_network_id, request.lan_tags)
         return sandbox

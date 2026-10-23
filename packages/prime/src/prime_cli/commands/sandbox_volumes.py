@@ -545,14 +545,10 @@ def publish(
 
     console.print(f"Checkpoint ID: [cyan]{escape(checkpoint.id)}[/cyan]")
     console.print(f"State: {escape(checkpoint.state)}")
-    if checkpoint.state == "DURABLE" and checkpoint.merge == "pending":
-        console.print(
-            "[yellow]The publish is durable but its volume merge is still "
-            "pending; the volume's published contents do not include this "
-            f"data until the merge finishes. Check with 'prime sandbox "
-            f"checkpoint get {escape(checkpoint.id)}'."
-        )
-    elif checkpoint.state == "DURABLE":
+    # No merge-pending case here: wait=True returns only once the merge (if
+    # any) finished, and --no-wait returns the 202 row, which is PENDING
+    # until the upload completes.
+    if checkpoint.state == "DURABLE":
         console.print(
             f"[green]✓[/green] Published volume {escape(name)}; new sandboxes "
             "that attach it see this data"

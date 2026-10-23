@@ -254,26 +254,6 @@ def test_volume_publish_waits_by_default(monkeypatch: pytest.MonkeyPatch, tmp_pa
     assert "not yet DURABLE" not in output
 
 
-def test_volume_publish_merge_pending_reports_head_not_moved(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
-) -> None:
-    _configure_cli(monkeypatch, tmp_path)
-    monkeypatch.setattr(
-        "prime_sandboxes.volumes.Volumes.publish",
-        _fake_publish({}, SimpleNamespace(id="chk-1", state="DURABLE", merge="pending")),
-    )
-
-    result = runner.invoke(app, ["sandbox", "volumes", "publish", "data", "--sandbox", "sbx-1"])
-
-    assert result.exit_code == 0, result.output
-    output = " ".join(strip_ansi(result.output).split())
-    assert "Checkpoint ID: chk-1" in output
-    assert "State: DURABLE" in output
-    # DURABLE is not visibility on a merge-enabled server: the head moves at merge.
-    assert "volume merge is still pending" in output
-    assert "Published volume data" not in output
-
-
 def test_volume_publish_no_wait_flag(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
     _configure_cli(monkeypatch, tmp_path)
     captured: dict[str, Any] = {}

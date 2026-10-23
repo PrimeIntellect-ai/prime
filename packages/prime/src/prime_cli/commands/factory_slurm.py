@@ -320,25 +320,29 @@ RESIZE_JSON_HELP = json_output_help(
 )
 
 
-def _format_error_message(error: APIError) -> str:
-    """Format API error messages with helpful context based on status code."""
+RESIZE_ERROR_HINTS = {
+    "HTTP 400": ("Ensure numNodes is >= 1 and <= max(64, current size) with sufficient resources."),
+    "HTTP 403": (
+        "This operation requires team admin privileges and the cluster must have "
+        "self-service enabled."
+    ),
+    "HTTP 404": "Cluster not found. Check the cluster ID and team context.",
+    "HTTP 409": (
+        "The cluster may not be running, another operation is in progress, "
+        "or there are insufficient idle nodes."
+    ),
+    "HTTP 502": "Node labels were changed but verification failed. Check cluster status.",
+    "HTTP 503": ("Slurm state unavailable. This is likely temporary - please retry in a moment."),
+}
+
+
+def _resize_error_hint(error: APIError) -> Optional[str]:
+    """Status-code-specific guidance for a failed resize request."""
     error_str = str(error)
-    
-    # Extract status code if present
-    if "HTTP 400" in error_str:
-        return f"{error_str}\n[dim]Ensure numNodes is >= 1 and <= max(64, current size) with sufficient resources.[/dim]"
-    elif "HTTP 403" in error_str:
-        return f"{error_str}\n[dim]This operation requires team admin privileges and the cluster must have self-service enabled.[/dim]"
-    elif "HTTP 404" in error_str:
-        return f"{error_str}\n[dim]Cluster not found. Check the cluster ID and team context.[/dim]"
-    elif "HTTP 409" in error_str:
-        return f"{error_str}\n[dim]The cluster may not be running, another operation is in progress, or there are insufficient idle nodes.[/dim]"
-    elif "HTTP 502" in error_str:
-        return f"{error_str}\n[dim]Node labels were changed but verification failed. Check cluster status.[/dim]"
-    elif "HTTP 503" in error_str:
-        return f"{error_str}\n[dim]Slurm state unavailable. This is likely temporary - please retry in a moment.[/dim]"
-    
-    return error_str
+    for status, hint in RESIZE_ERROR_HINTS.items():
+        if status in error_str:
+            return hint
+    return None
 
 
 @app.command(name="resize", no_args_is_help=True, epilog=RESIZE_JSON_HELP)
@@ -348,7 +352,10 @@ def resize_cluster(
         ...,
         "--nodes",
         "-n",
-        help="New total node count (absolute target, not delta; must be >= 1 and <= max(64, current))",
+        help=(
+            "New total node count (absolute target, not delta; "
+            "must be >= 1 and <= max(64, current))"
+        ),
     ),
     team: Optional[str] = TEAM_OPTION,
     yes: bool = typer.Option(
@@ -369,7 +376,7 @@ def resize_cluster(
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
     """Resize a Slurm cluster to the specified node count.
-    
+
     Requires team admin privileges and cluster must have self-service enabled.
     The resize is asynchronous - nodes are added/removed by the reconciler.
     """
@@ -396,7 +403,7 @@ def resize_cluster(
     # Calculate current nodes from GPU count (assume gpus_per_node, or just show GPUs)
     # The API works with nodes, but we display what we know
     current_display = f"{cluster.gpu_count} GPUs"
-    
+
     # Show confirmation unless --yes
     if not yes:
         console.print(f"[yellow]Resize Slurm cluster '{escape(cluster.display_name)}':[/yellow]")
@@ -413,8 +420,10 @@ def resize_cluster(
     try:
         response = _client().resize_cluster(team_id, cluster_id, nodes)
     except APIError as e:
-        formatted_error = _format_error_message(e)
-        err_console.print(f"[red]Error:[/red] {escape(formatted_error)}")
+        err_console.print(f"[red]Error:[/red] {escape(str(e))}")
+        hint = _resize_error_hint(e)
+        if hint:
+            err_console.print(f"[dim]{hint}[/dim]")
         raise typer.Exit(1)
 
     if output == "json":
@@ -426,16 +435,14 @@ def resize_cluster(
     added = response.get("added", [])
     removed = response.get("removed", [])
 
-    console.print(
-        f"[green]Resize initiated for cluster '{escape(cluster.display_name)}'[/green]"
-    )
+    console.print(f"[green]Resize initiated for cluster '{escape(cluster.display_name)}'[/green]")
     console.print(f"Target nodes: {num_nodes}")
-    
+
     if added:
         console.print(f"Nodes to add: {', '.join(escape(n) for n in added)}")
     if removed:
         console.print(f"Nodes to remove: {', '.join(escape(n) for n in removed)}")
-    
+
     if not added and not removed:
         console.print("[dim]No immediate node changes (target matches current)[/dim]")
 
@@ -455,30 +462,33 @@ def resize_cluster(
             try:
                 # Poll the cluster list to check GPU count
                 updated_cluster = _find_cluster(team_id, cluster_id)
-                
+
                 # We can't directly check node count from the API, but we can check status
                 # and GPU count as a proxy
                 console.print(
                     f"  Status: {escape(updated_cluster.status)} | "
                     f"GPUs: {updated_cluster.gpu_count}"
                 )
-                
+
                 # If status is running/ready, assume reconciliation is done
                 # (The exact completion criteria depends on the status values)
                 if updated_cluster.status.lower() in ["running", "ready", "online"]:
                     # Give it a bit more time for the reconciler
                     if elapsed >= 15:  # At least 15 seconds
-                        console.print(f"[green]✓[/green] Cluster is {escape(updated_cluster.status)}")
+                        console.print(
+                            f"[green]✓[/green] Cluster is {escape(updated_cluster.status)}"
+                        )
                         break
-                        
+
             except (APIError, ValueError) as e:
-                err_console.print(f"[yellow]Warning:[/yellow] Status check failed: {escape(str(e))}")
+                err_console.print(
+                    f"[yellow]Warning:[/yellow] Status check failed: {escape(str(e))}"
+                )
 
         if elapsed >= max_wait:
             err_console.print(
                 f"[yellow]Timeout:[/yellow] Resize did not complete within {max_wait} seconds."
             )
             err_console.print(
-                "The resize may still be in progress. "
-                "Check status with: prime factory slurm list"
+                "The resize may still be in progress. Check status with: prime factory slurm list"
             )

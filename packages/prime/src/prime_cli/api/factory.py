@@ -360,3 +360,29 @@ class FactoryClient:
             )
         nodes._raw_response = response
         return nodes
+
+    def resize_cluster(
+        self, team_id: str, cluster_id: str, total_gpus: int, timeout: Optional[float] = None
+    ) -> Dict[str, Any]:
+        """Resize a factory cluster to the specified total GPU count.
+
+        Args:
+            team_id: The team ID that owns the cluster
+            cluster_id: The cluster identifier (display name or backend ID)
+            total_gpus: The desired total GPU count after resize
+            timeout: Optional request timeout in seconds
+
+        Returns:
+            The API response with the updated cluster configuration
+
+        Raises:
+            APIError: If the resize request fails
+        """
+        endpoint = f"/factory/clusters/{cluster_id}/resize"
+        payload = {"team_id": team_id, "total_gpus": total_gpus}
+        try:
+            if timeout is None:
+                return self.client.patch(endpoint, json=payload)
+            return self.client.patch(endpoint, json=payload, params={"timeout": timeout})
+        except ValueError as exc:
+            raise APIError("Factory resize API returned a malformed response body.") from exc

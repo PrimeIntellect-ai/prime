@@ -125,6 +125,9 @@ prime train models
 # Launch a prime-rl config (RL, or SFT with --sft) on a dedicated cluster
 prime train rl.toml
 
+# Same arguments as `uv run rl`: stacked configs and prime-rl flags
+prime train @ rl.toml @ overrides.toml --max-steps 100 --trainer.optim.lr 1e-5
+
 # Inspect and manage Hosted Training runs
 prime train list
 prime train logs <run-id> -f
@@ -400,6 +403,13 @@ Validation checks and normalizes the config locally. Platform owns deployment
 adaptation and rendering. Environment plugins and dispatch policy remain deferred.
 Validation creates no run. `--artifact-out` can save the normalized config for
 inspection.
+
+Both `prime train` and `prime train validate` take the config arguments of
+`uv run rl` / `uv run sft`: `@ a.toml @ b.toml` merges files in order (later wins),
+`--section @ part.toml` merges a file under a section, and remaining flags such as
+`--max-steps 100`, `--ckpt` or `--no-ckpt` are resolved by the run's prime-rl schema
+in the local schema environment. Flags need local validation; when it is unavailable
+the CLI refuses them rather than dropping them.
 
 Dedicated submissions (`prime train rl.toml` or `prime train sft.toml --sft`)
 perform local validation automatically before creating a run or volume. Platform

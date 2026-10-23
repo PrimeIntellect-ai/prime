@@ -1,32 +1,29 @@
 from pathlib import Path
 
 import pytest
-import typer
 from prime_cli.commands.rl import (
-    _load_toml,
     _looks_like_lora,
+    _read_config_file,
     _warn_legacy_full_finetune_type,
 )
 
 
-def test_load_toml_rejects_missing_file(tmp_path: Path) -> None:
-    with pytest.raises(typer.Exit) as exc_info:
-        _load_toml(str(tmp_path / "missing.toml"))
-    assert exc_info.value.exit_code == 1
+def test_read_config_file_rejects_missing_file(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="not found"):
+        _read_config_file(str(tmp_path / "missing.toml"))
 
 
-def test_load_toml_rejects_invalid_toml(tmp_path: Path) -> None:
+def test_read_config_file_rejects_invalid_toml(tmp_path: Path) -> None:
     config_path = tmp_path / "rl.toml"
     config_path.write_text("[model\nname = ")
-    with pytest.raises(typer.Exit) as exc_info:
-        _load_toml(str(config_path))
-    assert exc_info.value.exit_code == 1
+    with pytest.raises(ValueError, match="Invalid TOML"):
+        _read_config_file(str(config_path))
 
 
-def test_load_toml_returns_raw_table(tmp_path: Path) -> None:
+def test_read_config_file_returns_raw_table(tmp_path: Path) -> None:
     config_path = tmp_path / "rl.toml"
     config_path.write_text('[model]\nname = "Qwen/Qwen3-0.6B"\n')
-    assert _load_toml(str(config_path)) == {"model": {"name": "Qwen/Qwen3-0.6B"}}
+    assert _read_config_file(str(config_path)) == {"model": {"name": "Qwen/Qwen3-0.6B"}}
 
 
 def test_looks_like_lora_top_level_model_string() -> None:

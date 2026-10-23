@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import signal
 import sys
 import time
@@ -466,7 +467,7 @@ def test_run_validates_before_volume_creation_and_submits_normalized_config(
             raise APIError("runtime unavailable")
         return preparation
 
-    def compile(config, prepared):
+    def compile(config, prepared, **kwargs):
         calls.append("schema")
         assert config == runtime
         assert prepared == preparation
@@ -716,7 +717,7 @@ def test_run_falls_back_to_raw_config_when_local_validation_is_unavailable(
     def prepare(self, payload):
         return {"mode": mode, "submission_supported": case != "unsupported"}
 
-    def compile(config, prepared):
+    def compile(config, prepared, **kwargs):
         if case == "schema_error":
             raise training_compiler.CompilationError("invalid schema config")
         return artifact
@@ -999,7 +1000,7 @@ def test_worker_imports_only_what_the_schema_interpreter_provides():
         node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.level
     ]
     assert relative == []
-    assert imported - sys.stdlib_module_names == {"prime_rl", "pydantic"}
+    assert imported - sys.stdlib_module_names == {"prime_rl", "pydantic", "pydantic_config"}
 
 
 def test_deferred_eval_settings_are_checked_without_their_sources(fake_schema):
@@ -1217,3 +1218,38 @@ def test_validate_warns_when_volume_size_has_no_volume(monkeypatch, tmp_path, to
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout) == {"schema_commit": "a" * 40}
     assert ("`volume_size` needs a volume" in result.stderr) is warned
+
+
+@pytest.mark.skipif(
+    not os.getenv("PRIME_TEST_SCHEMA_PYTHON"),
+    reason="set PRIME_TEST_SCHEMA_PYTHON (a prime-rl-configs venv) and PRIME_TEST_SCHEMA_COMMIT",
+)
+def test_flags_resolve_against_the_real_schema_like_uv_run():
+    """prime-rl flags go through the schema's own parser: values, the bare
+    `--no-<optional>` form and kebab-case paths match `uv run sft`, and
+    unknown or hosted-only paths are refused."""
+    commit = os.environ["PRIME_TEST_SCHEMA_COMMIT"]
+    preparation = {
+        "contract_version": 1,
+        "mode": "sft",
+        "runtime": {"schema_commit": commit, "image_commit": commit},
+    }
+    config = {"model": {"name": "PrimeIntellect/Qwen3-0.6B"}, "ckpt": {}}
+
+    def compile(*overrides):
+        return training_compiler.compile_locally(
+            config,
+            preparation,
+            schema_python=Path(os.environ["PRIME_TEST_SCHEMA_PYTHON"]),
+            overrides=list(overrides),
+        )["components"]["trainer"]
+
+    trainer = compile("--max-steps=7", "--no-ckpt", "--data.batch-size", "16")
+    assert (trainer["max_steps"], trainer["ckpt"], trainer["data"]["batch_size"]) == (7, None, 16)
+    for flags, message in (
+        (["--data.nope", "1"], "nope"),
+        (["--k8s.namespace", "x"], "[k8s] is not supported"),
+        (["--help"], "--help is not a config flag"),
+    ):
+        with pytest.raises(training_compiler.CompilationError, match=re.escape(message)):
+            compile(*flags)

@@ -2531,32 +2531,51 @@ class SandboxClient:
     def wait_for_checkpoint(
         self, checkpoint_id: str, timeout_seconds: float = 300
     ) -> SandboxCheckpoint:
-        """Wait for a filesystem checkpoint to become DURABLE.
+        """Wait for a filesystem checkpoint to become DURABLE, then for its
+        volume merge to leave "pending" when the checkpoint reports one.
 
         Concurrent waits share cross-sandbox batches of up to 100 checkpoints.
         Polls with backoff until timeout_seconds elapse, returning the durable
-        checkpoint. Raises RuntimeError on FAILED or DELETING and TimeoutError
-        on expiry.
+        checkpoint; checkpoints without a merge field (older servers, plain
+        checkpoints) return at DURABLE. Raises RuntimeError on FAILED,
+        DELETING, or a failed merge (merge_error in the message) and
+        TimeoutError on expiry.
         In-flight requests follow the API client's timeout and retry policy.
         """
         if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be finite and greater than zero")
         deadline = time.monotonic() + timeout_seconds
         poll_index = 0
+        merge_pending = False
         while time.monotonic() < deadline:
             checkpoint = self._checkpoint_batcher.get(checkpoint_id)
             if checkpoint.state == "DURABLE":
-                return checkpoint
-            if checkpoint.state in ("FAILED", "DELETING"):
-                raise RuntimeError(
-                    f"Checkpoint {checkpoint_id} cannot become durable (state={checkpoint.state}): "
-                    f"{checkpoint.error or 'no error details'}"
-                )
+                if checkpoint.merge == "failed":
+                    raise RuntimeError(
+                        f"Checkpoint {checkpoint_id}'s volume merge failed: "
+                        f"{checkpoint.merge_error or 'no error details'}"
+                    )
+                if checkpoint.merge != "pending":
+                    return checkpoint
+                merge_pending = True
+            else:
+                merge_pending = False
+                if checkpoint.state in ("FAILED", "DELETING"):
+                    raise RuntimeError(
+                        f"Checkpoint {checkpoint_id} cannot become durable "
+                        f"(state={checkpoint.state}): "
+                        f"{checkpoint.error or 'no error details'}"
+                    )
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
             time.sleep(min(_creation_poll_delay(poll_index), remaining))
             poll_index += 1
+        if merge_pending:
+            raise TimeoutError(
+                f"Checkpoint {checkpoint_id} did not finish its volume merge "
+                f"within {timeout_seconds:g}s (merge=pending)"
+            )
         raise TimeoutError(
             f"Checkpoint {checkpoint_id} did not become DURABLE within {timeout_seconds:g}s"
         )
@@ -4195,20 +4214,36 @@ class AsyncSandboxClient:
             raise ValueError("timeout_seconds must be finite and greater than zero")
         deadline = time.monotonic() + timeout_seconds
         poll_index = 0
+        merge_pending = False
         while time.monotonic() < deadline:
             checkpoint = await self._checkpoint_batcher.get(checkpoint_id)
             if checkpoint.state == "DURABLE":
-                return checkpoint
-            if checkpoint.state in ("FAILED", "DELETING"):
-                raise RuntimeError(
-                    f"Checkpoint {checkpoint_id} cannot become durable (state={checkpoint.state}): "
-                    f"{checkpoint.error or 'no error details'}"
-                )
+                if checkpoint.merge == "failed":
+                    raise RuntimeError(
+                        f"Checkpoint {checkpoint_id}'s volume merge failed: "
+                        f"{checkpoint.merge_error or 'no error details'}"
+                    )
+                if checkpoint.merge != "pending":
+                    return checkpoint
+                merge_pending = True
+            else:
+                merge_pending = False
+                if checkpoint.state in ("FAILED", "DELETING"):
+                    raise RuntimeError(
+                        f"Checkpoint {checkpoint_id} cannot become durable "
+                        f"(state={checkpoint.state}): "
+                        f"{checkpoint.error or 'no error details'}"
+                    )
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
             await asyncio.sleep(min(_creation_poll_delay(poll_index), remaining))
             poll_index += 1
+        if merge_pending:
+            raise TimeoutError(
+                f"Checkpoint {checkpoint_id} did not finish its volume merge "
+                f"within {timeout_seconds:g}s (merge=pending)"
+            )
         raise TimeoutError(
             f"Checkpoint {checkpoint_id} did not become DURABLE within {timeout_seconds:g}s"
         )

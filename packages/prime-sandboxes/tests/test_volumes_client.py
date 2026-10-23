@@ -603,6 +603,40 @@ def test_publish_batch_get_fallback_uses_get_checkpoints():
     assert checkpoint.state == "DURABLE"
 
 
+def test_publish_wait_polls_until_merge_not_pending(waiter_clock):
+    def handler(method: str, path: str, json: dict[str, Any] | None) -> dict[str, Any]:
+        if method == "POST" and path == "/sandbox/sb-1/volumes/dataset/publish":
+            return _checkpoint_response()
+        assert method == "POST" and path == "/sandbox/checkpoints:batchGet"
+        row = _checkpoint_response("DURABLE")
+        row["merge"] = "pending" if len(client.calls) == 2 else "merged"
+        return {"checkpoints": [row], "errors": []}
+
+    client = RoutingAPIClient(handler)
+    volumes = SandboxClient(client).volumes  # type: ignore[arg-type]
+
+    checkpoint = volumes.publish("sb-1", "dataset")
+
+    assert checkpoint.state == "DURABLE"
+    assert checkpoint.merge == "merged"
+    assert len(client.calls[1:]) == 2
+
+
+def test_checkpoint_model_parses_merge_fields():
+    row = _checkpoint_response("DURABLE")
+    row["merge"] = "failed"
+    row["merge_error"] = "quota exceeded"
+
+    checkpoint = SandboxCheckpoint.model_validate(row)
+    assert checkpoint.merge == "failed"
+    assert checkpoint.merge_error == "quota exceeded"
+
+    # Older responses omit the fields entirely.
+    legacy = SandboxCheckpoint.model_validate(_checkpoint_response("DURABLE"))
+    assert legacy.merge is None
+    assert legacy.merge_error is None
+
+
 def test_async_sandbox_client_closes_owned_api_client():
     async def scenario() -> None:
         sandbox_client = AsyncSandboxClient(api_key="test-key")

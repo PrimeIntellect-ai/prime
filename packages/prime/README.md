@@ -231,7 +231,8 @@ prime sandbox volumes create data --from ~/datasets/my-data
 prime sandbox delete <sandbox-id>
 ```
 
-Volume writes are private to a sandbox until a publish reaches DURABLE. A
+Volume writes are private to a sandbox until a publish reaches DURABLE
+and its merge finishes. A
 new volume starts empty; each publish becomes the volume's head, and a
 sandbox always sees the volume as of its own creation, so attach a new
 sandbox to read a newer head. Read-only mounts cannot publish. A publish

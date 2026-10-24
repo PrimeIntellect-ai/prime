@@ -54,6 +54,9 @@ class RLRun(BaseModel):
     # mounted via --volume (outputs under runs/<runId>/ on it). Only
     # set on the run-detail read; None for runs without a volume.
     volume_name: Optional[str] = Field(None, alias="volumeName")
+    # Resolved GPU footprint (trainer + inference). NULL on legacy rows
+    # that pre-date the column.
+    gpu_count: Optional[int] = Field(None, alias="gpuCount")
 
     # Monitoring
     wandb_entity: Optional[str] = Field(None, alias="wandbEntity")

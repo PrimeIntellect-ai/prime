@@ -54,7 +54,7 @@ console = get_console()
 
 RL_RUN_JSON_HELP = json_output_help(
     ".run = {id, name?, status, base_model, environments[], "
-    "rollouts_per_example, max_steps, batch_size, created_at, updated_at, ...}",
+    "rollouts_per_example, max_steps, batch_size, gpu_count?, created_at, updated_at, ...}",
 )
 
 RL_DISPATCH_JSON_HELP = json_output_help(
@@ -73,7 +73,7 @@ RL_MODELS_JSON_HELP = json_output_help(
 
 RL_LIST_JSON_HELP = json_output_help(
     ".runs[] = {id, name?, status, base_model, environments[], max_steps, "
-    "batch_size, created_at, updated_at, ...}",
+    "batch_size, gpu_count?, created_at, updated_at, ...}",
     ".total = number",
     ".page = number",
     ".per_page = number",
@@ -936,6 +936,7 @@ def _format_run_for_display(run: RLRun) -> Dict[str, Any]:
         "model": run.base_model or "-",
         "environments": envs_display,
         "steps": "-" if run.max_steps is None else f"{run.max_steps}",
+        "gpus": "-" if run.gpu_count is None else str(run.gpu_count),
         "rollouts": "-" if run.rollouts_per_example is None else str(run.rollouts_per_example),
         "created_at": created_at,
         "team_id": run.team_id,
@@ -1623,6 +1624,7 @@ def _list_runs_impl(
         table.add_column("Model", style="magenta")
         table.add_column("Environments", style="green")
         table.add_column("Steps", justify="right")
+        table.add_column("GPUs", justify="right")
         table.add_column("Created", style="dim")
 
         for run in runs:
@@ -1634,6 +1636,7 @@ def _list_runs_impl(
                 formatted["model"][:30],
                 formatted["environments"],
                 formatted["steps"],
+                formatted["gpus"],
                 formatted["created_at"],
             )
 
@@ -1708,6 +1711,7 @@ def get_run(
         console.print(f"  Model: [magenta]{formatted['model']}[/magenta]")
         console.print(f"  Environments: [green]{formatted['environments']}[/green]")
         console.print(f"  Max Steps: {formatted['steps']}")
+        console.print(f"  GPUs: {formatted['gpus']}")
         batch_size = "-" if run.batch_size is None else str(run.batch_size)
         console.print(f"  Batch Size: {batch_size}")
         console.print(f"  Rollouts per Example: {formatted['rollouts']}")

@@ -89,5 +89,46 @@ class FactorySlurmClient:
     def remove_member(self, team_id: str, cluster_id: str, username: str) -> None:
         self.client.delete(f"/slurm-clusters/{team_id}/{cluster_id}/members/{username}")
 
+    def resize_cluster(
+        self, team_id: str, cluster_id: str, num_nodes: int, timeout: Optional[float] = None
+    ) -> Dict[str, Any]:
+        """Resize a Slurm cluster to the specified node count.
+
+        Platform API: POST /api/v1/slurm-clusters/{team_id}/{job_id}/resize
+        Contract: github.com/PrimeIntellect-ai/platform PR #6917
+
+        Args:
+            team_id: The team ID that owns the cluster
+            cluster_id: The cluster/job identifier (id field from list_clusters)
+            num_nodes: The desired total node count (absolute target, not delta)
+                       Must be >= 1 and <= max(64, current_size)
+            timeout: Optional request timeout in seconds
+
+        Returns:
+            API response dict with:
+            - numNodes: int (new total node count)
+            - added: list[str] (names of nodes added)
+            - removed: list[str] (names of nodes removed)
+
+        Raises:
+            APIError: If the resize request fails
+            - 400: invalid numNodes or insufficient resources
+            - 403: not team admin or self-service disabled
+            - 404: cluster not found or wrong team
+            - 409: not running / concurrent operation / insufficient idle nodes
+            - 502: labels changed but verification failed
+            - 503: Slurm state unavailable (retryable)
+        """
+        endpoint = f"/slurm-clusters/{team_id}/{cluster_id}/resize"
+        payload = {"numNodes": num_nodes}
+        try:
+            if timeout is None:
+                return self.client.post(endpoint, json=payload)
+            # httpx.Client.post doesn't accept timeout as a kwarg,
+            # so use request() for timeout override
+            return self.client.request("POST", endpoint, json=payload, timeout=timeout)
+        except ValueError as exc:
+            raise APIError("Slurm cluster resize API returned a malformed response body.") from exc
+
 
 __all__ = ["FactorySlurmClient", "FactorySlurmCluster", "FactorySlurmMember"]

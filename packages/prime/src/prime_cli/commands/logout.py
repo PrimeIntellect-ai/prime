@@ -1,4 +1,3 @@
-import json
 import os
 
 import typer
@@ -12,41 +11,6 @@ console = get_console()
 
 
 _ENV_OVERRIDES = ("PRIME_API_KEY", "PRIME_TEAM_ID", "PRIME_USER_ID")
-
-
-def _clear_env_file(config: Config) -> None:
-    """Rewrite the current environment's saved file from raw cleared config values.
-
-    Config.update_current_environment_file() reads env-precedence properties, so
-    PRIME_* shell vars would otherwise leak back onto disk right after logout.
-    """
-    if config.current_environment == "production":
-        return
-    try:
-        sanitized = config._sanitize_environment_name(config.current_environment)
-    except ValueError:
-        return
-    env_file = config.environments_dir / f"{sanitized}.json"
-    if not env_file.exists():
-        return
-    raw = config.config
-    env_file.write_text(
-        json.dumps(
-            {
-                "api_key": raw.get("api_key", ""),
-                "team_id": raw.get("team_id"),
-                "team_name": raw.get("team_name"),
-                "team_role": raw.get("team_role"),
-                "user_id": raw.get("user_id"),
-                "user_name": raw.get("user_name"),
-                "base_url": raw.get("base_url", Config.DEFAULT_BASE_URL),
-                "frontend_url": raw.get("frontend_url", Config.DEFAULT_FRONTEND_URL),
-                "inference_url": raw.get("inference_url", Config.DEFAULT_INFERENCE_URL),
-                "traces_url": raw.get("traces_url"),
-            },
-            indent=2,
-        )
-    )
 
 
 @app.callback(invoke_without_command=True)
@@ -78,7 +42,8 @@ def logout(
     config.set_api_key("")
     config.set_team(None)
     config.set_user_id(None)
-    _clear_env_file(config)
+    # Mirrors stored values only, so PRIME_* shell vars never leak back onto disk.
+    config.update_current_environment_file()
 
     console.print("[green]Logged out.[/green]")
 

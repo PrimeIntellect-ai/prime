@@ -9,6 +9,7 @@ from click.exceptions import Abort
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
 from cryptography.hazmat.primitives.asymmetric import rsa
+from rich.markup import escape
 
 from prime_cli.core import Config
 
@@ -22,6 +23,12 @@ console = get_console()
 
 def fetch_and_select_team(client: APIClient, config: Config) -> None:
     """Fetch user's teams and prompt for selection."""
+    if config.team_pinned:
+        team = config.team_name or config.team_id or "your personal account"
+        console.print(
+            f"[dim]Using {escape(team)}, pinned by {escape(str(config.local_context_file))}.[/dim]"
+        )
+        return
     try:
         teams = fetch_teams(client)
 

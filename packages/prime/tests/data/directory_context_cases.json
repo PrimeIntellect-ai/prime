@@ -1,0 +1,243 @@
+{
+  "_comment": "How .prime/context.json resolves. Shared spec: the CLI and every SDK Config run these cases (test_directory_context.py::test_resolution); other readers of the pin (prime-agent's Rust resolver, verifiers via prime-sandboxes) should match them. 'pins' maps a directory relative to $HOME to the pin's JSON (a string is written verbatim, except 'symlink-file' / 'symlink-dir'). The cwd is $HOME/code/edison/src.",
+  "global": {
+    "api_key": "global-key",
+    "team_id": "cglobal000000000000000000",
+    "team_name": "Global Team"
+  },
+  "saved_contexts": {
+    "customer": {
+      "api_key": "customer-key",
+      "team_id": "cacme00000000000000000000"
+    }
+  },
+  "cases": [
+    {
+      "name": "no pin uses the global config",
+      "pins": {},
+      "env": {},
+      "team_id": "cglobal000000000000000000",
+      "api_key": "global-key"
+    },
+    {
+      "name": "team pin",
+      "pins": {
+        "code/edison": {
+          "team_id": "cedison000000000000000000"
+        }
+      },
+      "env": {},
+      "team_id": "cedison000000000000000000",
+      "api_key": "global-key"
+    },
+    {
+      "name": "null team pin means the personal account",
+      "pins": {
+        "code/edison": {
+          "team_id": null
+        }
+      },
+      "env": {},
+      "team_id": null,
+      "api_key": "global-key"
+    },
+    {
+      "name": "nearest pin wins",
+      "pins": {
+        "code/edison": {
+          "team_id": "cedison000000000000000000"
+        },
+        "code/edison/src": {
+          "team_id": "cacme00000000000000000000"
+        }
+      },
+      "env": {},
+      "team_id": "cacme00000000000000000000",
+      "api_key": "global-key"
+    },
+    {
+      "name": "context pin brings the context's key and team",
+      "pins": {
+        "code/edison": {
+          "context": "customer"
+        }
+      },
+      "env": {},
+      "team_id": "cacme00000000000000000000",
+      "api_key": "customer-key"
+    },
+    {
+      "name": "team_id overrides the pinned context's team, keeping its key",
+      "pins": {
+        "code/edison": {
+          "context": "customer",
+          "team_id": "cedison000000000000000000"
+        }
+      },
+      "env": {},
+      "team_id": "cedison000000000000000000",
+      "api_key": "customer-key"
+    },
+    {
+      "name": "null team_id over a context means personal with the context's key",
+      "pins": {
+        "code/edison": {
+          "context": "customer",
+          "team_id": null
+        }
+      },
+      "env": {},
+      "team_id": null,
+      "api_key": "customer-key"
+    },
+    {
+      "name": "production context means personal with the global key",
+      "pins": {
+        "code/edison": {
+          "context": "production"
+        }
+      },
+      "env": {},
+      "team_id": null,
+      "api_key": "global-key"
+    },
+    {
+      "name": "PRIME_CONTEXT replaces the pin",
+      "pins": {
+        "code/edison": {
+          "team_id": "cedison000000000000000000"
+        }
+      },
+      "env": {
+        "PRIME_CONTEXT": "customer"
+      },
+      "team_id": "cacme00000000000000000000",
+      "api_key": "customer-key"
+    },
+    {
+      "name": "PRIME_CONTEXT=production replaces the pin",
+      "pins": {
+        "code/edison": {
+          "team_id": "cedison000000000000000000"
+        }
+      },
+      "env": {
+        "PRIME_CONTEXT": "production"
+      },
+      "team_id": null,
+      "api_key": "global-key"
+    },
+    {
+      "name": "PRIME_TEAM_ID beats the pin",
+      "pins": {
+        "code/edison": {
+          "team_id": "cedison000000000000000000"
+        }
+      },
+      "env": {
+        "PRIME_TEAM_ID": "env-team"
+      },
+      "team_id": "env-team",
+      "api_key": "global-key"
+    },
+    {
+      "name": "PRIME_API_KEY beats a context pin's key",
+      "pins": {
+        "code/edison": {
+          "context": "customer"
+        }
+      },
+      "env": {
+        "PRIME_API_KEY": "env-key"
+      },
+      "team_id": "cacme00000000000000000000",
+      "api_key": "env-key"
+    },
+    {
+      "name": "$HOME/.prime is the global config, never a pin",
+      "pins": {
+        "": {
+          "team_id": "cedison000000000000000000"
+        }
+      },
+      "env": {},
+      "team_id": "cglobal000000000000000000",
+      "api_key": "global-key"
+    },
+    {
+      "name": "symlinked context.json is skipped",
+      "pins": {
+        "code/edison": "symlink-file"
+      },
+      "env": {},
+      "team_id": "cglobal000000000000000000",
+      "api_key": "global-key"
+    },
+    {
+      "name": "symlinked .prime is skipped",
+      "pins": {
+        "code/edison": "symlink-dir"
+      },
+      "env": {},
+      "team_id": "cglobal000000000000000000",
+      "api_key": "global-key"
+    },
+    {
+      "name": "pin naming a missing context is an error",
+      "pins": {
+        "code/edison": {
+          "context": "missing"
+        }
+      },
+      "env": {},
+      "error": true
+    },
+    {
+      "name": "missing context is an error even with a team_id",
+      "pins": {
+        "code/edison": {
+          "context": "missing",
+          "team_id": "cedison000000000000000000"
+        }
+      },
+      "env": {},
+      "error": true
+    },
+    {
+      "name": "malformed pin is an error",
+      "pins": {
+        "code/edison": "{not json"
+      },
+      "env": {},
+      "error": true
+    },
+    {
+      "name": "non-object pin is an error",
+      "pins": {
+        "code/edison": []
+      },
+      "env": {},
+      "error": true
+    },
+    {
+      "name": "non-string team_id is an error",
+      "pins": {
+        "code/edison": {
+          "team_id": 5
+        }
+      },
+      "env": {},
+      "error": true
+    },
+    {
+      "name": "bad context name is an error",
+      "pins": {
+        "code/edison": {
+          "context": "../customer"
+        }
+      },
+      "env": {},
+      "error": true
+    }
+  ]
+}

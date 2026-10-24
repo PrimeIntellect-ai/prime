@@ -22,13 +22,21 @@ HELP_NOTE = (
 )
 
 
-def _plain_text_console() -> Console:
+# Plain tables render at their natural width; this is only an upper bound so
+# cells never wrap or truncate.
+_PLAIN_TABLE_WIDTH = 10_000
+
+
+def _plain_text_console(width: int | None = None) -> Console:
     """Recording console that renders markup-free, style-free text."""
     return Console(
         record=True,
         file=io.StringIO(),
+        # Rich treats any non-empty FORCE_COLOR as a terminal and pins a
+        # TERM=dumb terminal to 80 columns, ignoring `width`.
+        force_terminal=False,
+        width=width,
         no_color=True,
-        markup=False,
         highlight=False,
         emoji=False,
     )
@@ -63,6 +71,7 @@ class PrimeConsole(Console):
             markup=False,
             highlight=False,
             emoji=False,
+            soft_wrap=True,
             **plain_console_kwargs,
         )
 
@@ -84,8 +93,8 @@ class PrimeConsole(Console):
                 table.row_styles = []
                 table.pad_edge = False
                 table.padding = (0, 1)
-                console = _plain_text_console()
-                console.print(table)
+                console = _plain_text_console(width=_PLAIN_TABLE_WIDTH)
+                console.print(table, markup=markup)
                 plain_objects.append(console.export_text().rstrip())
                 continue
 
@@ -99,7 +108,7 @@ class PrimeConsole(Console):
                     # Rich renderables (NewLine from Progress, Rule, Control)
                     # render to plain text instead of printing their repr.
                     console = _plain_text_console()
-                    console.print(obj)
+                    console.print(obj, markup=False)
                     text = console.export_text().rstrip("\n")
                 else:
                     text = str(obj)

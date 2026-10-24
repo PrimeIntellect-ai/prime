@@ -10,6 +10,7 @@ import uuid
 from typing import Any, Dict, List, Optional, Protocol
 
 from ._http import PlatformClient
+from .config_privacy import metadata_summary, training_config_summary
 from .exceptions import (
     APIError,
     ConfigurationError,
@@ -103,7 +104,7 @@ class EvalsBackend:
         _set_if(payload, "dataset", _first_environment_name(spec))  # the env under another name
         _set_if(payload, "framework", spec.framework)
         _set_if(payload, "description", spec.description)
-        _set_if(payload, "metadata", spec.config or None)
+        _set_if(payload, "metadata", metadata_summary(spec.config) or None)
         _set_if(payload, "team_id", spec.team_id or self._team_id)
 
         # Not replayable: a retry after a lost response would create a second run.
@@ -139,7 +140,8 @@ class EvalsBackend:
         summary: Optional[Dict[str, Any]] = None,
     ) -> None:
         payload: Dict[str, Any] = {}
-        _set_if(payload, "metadata", config or None)
+        if config is not None:
+            payload["metadata"] = metadata_summary(config)
         _set_if(payload, "metrics", summary or None)
         if payload:
             self._client.put(f"/evaluations/{run_id}", json_body=payload)
@@ -329,7 +331,7 @@ class RftBackend:
         _set_if(payload, "batch_size", training.batch_size)
         _set_if(payload, "rollouts_per_example", training.rollouts_per_example)
         _set_if(payload, "seq_len", training.seq_len)
-        _set_if(payload, "run_config", spec.config or None)
+        _set_if(payload, "run_config", training_config_summary(spec.config) or None)
         _set_if(payload, "wandb_project", training.wandb_project)
         _set_if(payload, "wandb_entity", training.wandb_entity)
         _set_if(payload, "wandb_run_name", training.wandb_run_name)

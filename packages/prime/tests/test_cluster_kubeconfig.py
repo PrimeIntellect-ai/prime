@@ -8,6 +8,7 @@ rather than a test failure anywhere else.
 """
 
 import json
+import re
 
 import httpx
 import pytest
@@ -231,7 +232,8 @@ class TestClusterLogin:
         assert result.exit_code == 0, result.output
         rendered = (tmp_path / "kube" / "c1.yaml").read_text()
         assert "100.64.0.10" not in rendered
-        assert "https://k8s.public.example.com:6443" in rendered
+        server = yaml.safe_load(rendered)["clusters"][0]["cluster"]["server"]
+        assert server == self.INFO["server"]
 
     @pytest.mark.parametrize("missing", ["server", "certificateAuthorityData"])
     def test_incomplete_connection_info_fails_cleanly(self, login, tmp_path, missing):
@@ -264,6 +266,9 @@ class TestClusterLogin:
         assert not (tmp_path / "kube" / "c1.yaml").exists()
 
 
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
 class TestRootWiring:
     def test_auth_k8s_token_is_a_real_subcommand(self):
         # Every generated kubeconfig runs exactly `prime auth k8s-token`.
@@ -271,14 +276,14 @@ class TestRootWiring:
 
         result = runner.invoke(root_app, ["auth", "k8s-token", "--help"])
         assert result.exit_code == 0
-        assert "--cluster" in result.output
+        assert "--cluster" in _ANSI.sub("", result.output)
 
     def test_cluster_login_is_a_real_subcommand(self):
         from prime_cli.main import app as root_app
 
         result = runner.invoke(root_app, ["cluster", "login", "--help"])
         assert result.exit_code == 0
-        assert "CLUSTER" in result.output
+        assert "CLUSTER" in _ANSI.sub("", result.output)
 
 
 class TestCustomBaseUrlSurvivesContextRefresh:

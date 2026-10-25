@@ -22,13 +22,29 @@ def test_plain_table_strips_markup_and_keeps_each_row_on_one_line(
     table.add_column("CLUSTER", style="cyan")
     table.add_column("STATUS")
     table.add_column("URL")
-    table.add_row("[cyan]\\[1][/cyan] us-research-h200", "[green]online[/green]", url)
+    table.add_row("[cyan]\\[1][/cyan] cluster-a", "[green]online[/green]", url)
 
     PrimeConsole().print(table)
 
     assert [line.split() for line in capsys.readouterr().out.splitlines()] == [
         ["CLUSTER", "STATUS", "URL"],
-        ["[1]", "us-research-h200", "online", url],
+        ["[1]", "cluster-a", "online", url],
+    ]
+
+
+def test_plain_table_rows_have_no_trailing_spaces(capsys: pytest.CaptureFixture[str]) -> None:
+    table = Table()
+    table.add_column("NAME")
+    table.add_column("STATE")
+    table.add_row("[1] cluster-a", "")
+    table.add_row("  bash", "running")
+
+    PrimeConsole().print(table)
+
+    assert capsys.readouterr().out.splitlines() == [
+        "NAME           STATE",
+        "[1] cluster-a",
+        "  bash         running",
     ]
 
 

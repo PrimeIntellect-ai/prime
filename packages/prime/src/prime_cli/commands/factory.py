@@ -29,6 +29,7 @@ from ..utils import (
     PlainTyper,
     get_console,
     human_age,
+    is_plain_mode,
     json_output_help,
     output_data_as_json,
     validate_output_format,
@@ -59,12 +60,8 @@ FACTORY_NODES_JSON_HELP = json_output_help(
     "--team: use a different team than the selected account context",
 )
 
-IN_USE_NOTE = "in-use = GPUs held by running jobs (not GPU-activity measurements)"
 SLURM_ESTIMATE_NOTE = (
     "slurm in use = estimated from running jobs (GPUs/8); CPU-only jobs not counted"
-)
-SCHEDULER_LEGEND = (
-    "Slurm cluster: — = direct platform placement; unknown = deployment not identified."
 )
 
 
@@ -143,6 +140,11 @@ class _Usage(NamedTuple):
     down: int
 
 
+def _gpus_per_node(nodes: List[FactoryNode]) -> int:
+    """Node size of a cluster; a few nodes under-report their GPUs, so take the max."""
+    return max((n.gpus_total or 0 for n in nodes), default=0)
+
+
 def _pool_usage(
     nodes: List[FactoryNode],
     slurm_jobs: List[FactoryWorkload],
@@ -155,7 +157,7 @@ def _pool_usage(
     non-Slurm nodes holding GPUs are attributed to training and inference
     from the allocation summary; whatever is left over is "other".
     """
-    gpus_per_node = max((n.gpus_total or 0 for n in nodes), default=0)
+    gpus_per_node = _gpus_per_node(nodes)
 
     slurm = [n for n in nodes if n.assigned_to == "slurm"]
     slurm_down = sum(1 for n in slurm if n.state != "ready")
@@ -313,16 +315,14 @@ def _render_status_table(
 
 
 def _fetch_usage_view(
-    client: FactoryClient, team_id: str
+    client: FactoryClient, team_id: str, **workload_query: Any
 ) -> Tuple[FactoryStatus, FactoryNodes, FactoryWorkloads]:
-    """Status, node inventory, and running Slurm jobs, fetched in parallel."""
+    """Status, node inventory, and workloads, fetched in parallel."""
     with ThreadPoolExecutor(max_workers=3) as executor:
         status = executor.submit(client.get_status, team_id)
         nodes = executor.submit(client.get_nodes, team_id)
-        slurm_jobs = executor.submit(
-            client.get_workloads, team_id, workload_type="slurm", state="running"
-        )
-        return status.result(), nodes.result(), slurm_jobs.result()
+        workloads = executor.submit(client.get_workloads, team_id, **workload_query)
+        return status.result(), nodes.result(), workloads.result()
 
 
 def _select_cluster_indices(
@@ -410,7 +410,9 @@ def factory_status(
         if output == "json":
             status = client.get_status(team_id)
         else:
-            status, nodes, slurm_jobs = _fetch_usage_view(client, team_id)
+            status, nodes, slurm_jobs = _fetch_usage_view(
+                client, team_id, workload_type="slurm", state="running"
+            )
     except APIError as e:
         # Escape upstream error text: raw brackets (e.g. pydantic
         # "[type=...]" metadata) would crash Rich markup rendering.
@@ -566,23 +568,6 @@ def _jobs_unavailable_line(
     return f"{jobs} unavailable — {_last_seen_phrase([source] if source else [])}"
 
 
-def _workload_scheduler_cell(workload: FactoryWorkload) -> str:
-    """Scheduler cell: deployment name, 'unknown' for failed Slurm lookups,
-    a dash for direct platform placement (training/inference).
-
-    A dash and 'unknown' mean different things: the first is direct
-    placement by design, the second is a Slurm row whose deployment could
-    not be identified — never render them the same way.
-    """
-    if workload.scheduler_display_name:
-        return rich_escape(workload.scheduler_display_name)
-    if workload.type == "slurm":
-        return "[dim]unknown[/dim]"
-    # The em dash matches SCHEDULER_LEGEND exactly — never the generic
-    # missing-value hyphen, so direct placement stays distinguishable.
-    return "[dim]—[/dim]"
-
-
 def _workload_owner_cell(workload: FactoryWorkload) -> str:
     owner = workload.owner
     if owner.display_name is None:
@@ -649,30 +634,70 @@ def _workload_duration_cell(workload: FactoryWorkload) -> str:
     return _format_duration(workload.started_at, workload.ended_at)
 
 
+def _workload_age_reference(workload: FactoryWorkload) -> Optional[datetime]:
+    """End time for terminal rows, wait start for queued rows, run start otherwise.
+
+    Queued rows count from created_at: Slurm reports a pending job's start
+    estimate as started_at (sometimes a year ahead), and a requeued row
+    keeps its historical started_at.
+    """
+    if workload.state in WORKLOAD_TERMINAL_STATES:
+        return workload.ended_at
+    if workload.state == "queued":
+        return workload.created_at
+    return workload.started_at if workload.started_at is not None else workload.created_at
+
+
 def _workload_age_cell(workload: FactoryWorkload) -> str:
     """Ended-relative age for terminal rows; run/wait age for live ones."""
-    if workload.state in WORKLOAD_TERMINAL_STATES:
-        if workload.ended_at is None:
-            return "[dim]-[/dim]"
-        return f"{human_age(workload.ended_at)} ago"
-    if workload.state == "queued":
-        # A requeued row keeps its historical started_at; the documented
-        # wait age must come from created_at, not from the old run.
-        reference = workload.created_at
-    else:
-        reference = workload.started_at if workload.started_at is not None else workload.created_at
+    reference = _workload_age_reference(workload)
     if reference is None:
         return "[dim]-[/dim]"
+    if workload.state in WORKLOAD_TERMINAL_STATES:
+        return f"{human_age(reference)} ago"
     return human_age(reference)
 
 
-def _workload_gpu_cell(workload: FactoryWorkload) -> str:
-    """Allocated/requested GPUs; unobserved components stay `-`, never 0."""
+def _workload_gpus(workload: FactoryWorkload) -> Optional[int]:
+    """GPUs a queued job waits for, or that a running job holds.
 
-    def _count(value: Optional[int]) -> str:
-        return str(value) if value is not None else "[dim]-[/dim]"
+    Finished rows often lack the allocation; their request stands in.
+    """
+    if workload.state == "queued":
+        return workload.requested_gpus
+    if workload.state in WORKLOAD_TERMINAL_STATES and workload.allocated_gpus is None:
+        return workload.requested_gpus
+    return workload.allocated_gpus
 
-    return f"{_count(workload.allocated_gpus)}/{_count(workload.requested_gpus)}"
+
+def _workload_nodes_cell(gpus: Optional[int], gpus_per_node: int) -> str:
+    """Whole nodes for node-sized jobs, GPUs below one node, cpu without GPUs."""
+    if gpus is None:
+        return "[dim]-[/dim]"
+    if gpus == 0:
+        return "[dim]cpu[/dim]"
+    if not gpus_per_node or gpus < gpus_per_node:
+        return f"{gpus} gpu"
+    return str(math.ceil(gpus / gpus_per_node))
+
+
+def _workload_sort_key(workload: FactoryWorkload, gpus_per_node: int) -> Tuple[int, int, float]:
+    """Running before queued, then the most nodes, then the oldest."""
+    gpus = _workload_gpus(workload) or 0
+    nodes = math.ceil(gpus / gpus_per_node) if gpus_per_node else gpus
+    reference = _workload_age_reference(workload)
+    return (
+        {"running": 0, "queued": 1}.get(workload.state, 2),
+        -nodes,
+        reference.timestamp() if reference else math.inf,
+    )
+
+
+def _workload_pool(workload: FactoryWorkload) -> Tuple[int, str]:
+    """Sort rank and label of the pool a job runs in: one per Slurm cluster."""
+    if workload.type == "slurm":
+        return 0, f"slurm ({workload.scheduler_display_name or 'unknown'})"
+    return (1 if workload.type == "training" else 2), workload.type
 
 
 def _workload_state_cell(workload: FactoryWorkload) -> str:
@@ -688,52 +713,155 @@ def _workload_state_cell(workload: FactoryWorkload) -> str:
         cell = f"[{state_styles[state]}]{rich_escape(state)}[/{state_styles[state]}]"
     else:
         cell = rich_escape(state or "unknown")
-    if workload.native_state and workload.native_state.lower() != state.lower():
-        cell += f" [dim]({rich_escape(workload.native_state)})[/dim]"
+    native = workload.native_state
+    # PENDING only restates "queued"; other native states add detail, e.g.
+    # "failed (NODE_FAIL)".
+    if (
+        native
+        and native.lower() != state.lower()
+        and (state, native.upper()) != ("queued", "PENDING")
+    ):
+        cell += f" [dim]({rich_escape(native)})[/dim]"
     return cell
 
 
-def _render_workloads_table(rows: List[FactoryWorkload], show_duration: bool = False) -> Table:
-    table = Table(show_header=True, header_style="bold", show_lines=False)
-    table.add_column("ID", style="cyan")
-    table.add_column("TYPE", style="white")
-    table.add_column("NAME")
-    table.add_column("CLUSTER")
-    # Slurm rows name their deployment; training/inference rows are direct
-    # placement (no scheduler application in between).
-    table.add_column("SLURM CLUSTER")
-    table.add_column("OWNER")
-    table.add_column("STATE")
-    table.add_column("GPU A/R", justify="right")
-    table.add_column("AGE", justify="right")
-    # The DURATION column appears only for terminal/history queries; the
-    # live squeue view is unchanged.
-    if show_duration:
-        table.add_column("DURATION", justify="right")
-    # The REASON column exists only when the backend supplied coarse
-    # blocking/waiting labels; it is never invented client-side.
-    show_reason = any(row.reason for row in rows)
-    if show_reason:
-        table.add_column("REASON", style="yellow")
+JOB_NAME_MAX = 40
 
+
+def _short_job_name(name: str) -> str:
+    """Cap a job name at JOB_NAME_MAX characters, cutting the middle so both ends stay."""
+    if len(name) <= JOB_NAME_MAX:
+        return name
+    head = JOB_NAME_MAX // 2
+    tail = JOB_NAME_MAX - head - 1
+    return f"{name[:head]}…{name[-tail:]}"
+
+
+def _name_cell(text: str, style: str = "") -> Text:
+    """A NAME cell: cut with an ellipsis when the terminal is narrow, never wrapped."""
+    return Text(text, style=style, no_wrap=True, overflow="ellipsis")
+
+
+# NAME gives way first on narrow terminals.
+WORKLOAD_COLUMNS: Dict[str, Dict[str, Any]] = {
+    "NAME": {},
+    "USER": {"no_wrap": True},
+    "STATE": {"no_wrap": True},
+    "NODES": {"justify": "right", "no_wrap": True},
+    "AGE": {"justify": "right", "no_wrap": True},
+    "DURATION": {"justify": "right", "no_wrap": True},
+    "REASON": {"style": "yellow"},
+    "ID": {"style": "dim", "no_wrap": True},
+}
+
+
+def _workload_cells(
+    job: FactoryWorkload, gpus_per_node: int, show_duration: bool, show_reason: bool
+) -> List[Any]:
+    cells: List[Any] = [
+        _name_cell(f"    {_short_job_name(job.name)}") if job.name else _name_cell("    -", "dim"),
+        _workload_owner_cell(job),
+        _workload_state_cell(job),
+        _workload_nodes_cell(_workload_gpus(job), gpus_per_node),
+        _workload_age_cell(job),
+    ]
+    if show_duration:
+        cells.append(_workload_duration_cell(job))
+    if show_reason:
+        cells.append(rich_escape(job.reason) if job.reason else "[dim]-[/dim]")
+    cells.append(rich_escape(job.id))
+    return cells
+
+
+def _cell_width(cell: Any) -> int:
+    return (cell if isinstance(cell, Text) else Text.from_markup(cell)).cell_len
+
+
+def _render_workloads_tables(
+    status: FactoryStatus,
+    rows: List[FactoryWorkload],
+    gpus_per_node: Dict[str, int],
+    show_duration: bool = False,
+) -> List[Table]:
+    """One table per cluster, in `prime factory status` order, with a block per pool.
+
+    The tables share their column widths so the columns line up.
+    """
+    # DURATION appears only for terminal/history queries; REASON only when
+    # the backend supplied blocking/waiting labels (never invented here).
+    show_reason = any(row.reason for row in rows)
+    columns = ["NAME", "USER", "STATE", "NODES", "AGE"]
+    if show_duration:
+        columns.append("DURATION")
+    if show_reason:
+        columns.append("REASON")
+    columns.append("ID")
+
+    status_index: Dict[Optional[str], int] = {}
+    for index, cluster in enumerate(status.clusters):
+        status_index.setdefault(cluster.display_name, index)
+    by_cluster: Dict[Optional[str], List[FactoryWorkload]] = {}
     for row in rows:
-        cells = [
-            rich_escape(row.id),
-            rich_escape(row.type),
-            rich_escape(row.name) if row.name else "[dim]-[/dim]",
-            rich_escape(row.cluster_display_name) if row.cluster_display_name else "[dim]-[/dim]",
-            _workload_scheduler_cell(row),
-            _workload_owner_cell(row),
-            _workload_state_cell(row),
-            _workload_gpu_cell(row),
-            _workload_age_cell(row),
+        by_cluster.setdefault(row.cluster_display_name, []).append(row)
+
+    sections: List[Tuple[Text, List[Tuple[Text, List[List[Any]]]]]] = []
+    for name in sorted(
+        by_cluster, key=lambda name: (status_index.get(name, len(status_index)), name or "")
+    ):
+        index = status_index.get(name)
+        if index is None:
+            title = Text(name or "unknown cluster")
+        else:
+            cluster = status.clusters[index]
+            label = cluster.display_name
+            if len(status.clusters) > 1:
+                label = f"[{index + 1}] {label}"
+            title = Text(label, style="cyan")
+            if cluster.gpu_type:
+                title.append(f" · {cluster.gpu_type.split('_')[0]}", style="dim")
+        cluster_gpus_per_node = gpus_per_node.get(name or "", 0)
+        pools: Dict[Tuple[int, str], List[FactoryWorkload]] = {}
+        for row in by_cluster[name]:
+            pools.setdefault(_workload_pool(row), []).append(row)
+        blocks = [
+            (
+                _name_cell(f"  {label}"),
+                [
+                    _workload_cells(job, cluster_gpus_per_node, show_duration, show_reason)
+                    for job in sorted(
+                        jobs, key=lambda j: _workload_sort_key(j, cluster_gpus_per_node)
+                    )
+                ],
+            )
+            for (_, label), jobs in sorted(pools.items())
         ]
-        if show_duration:
-            cells.append(_workload_duration_cell(row))
-        if show_reason:
-            cells.append(rich_escape(row.reason) if row.reason else "[dim]-[/dim]")
-        table.add_row(*cells)
-    return table
+        sections.append((title, blocks))
+
+    widths = [len(column) for column in columns]
+    for _, blocks in sections:
+        for label, jobs in blocks:
+            widths[0] = max(widths[0], label.cell_len)
+            for cells in jobs:
+                widths = [max(w, _cell_width(cell)) for w, cell in zip(widths, cells)]
+    if not is_plain_mode():
+        # NAME never pushes a table past the terminal: it gets the room left
+        # after the other columns, their padding, and the borders.
+        room = console.width - sum(widths[1:]) - 3 * len(columns) - 1
+        widths[0] = max(1, min(widths[0], room))
+
+    tables = []
+    for title, blocks in sections:
+        table = Table(title=title, title_justify="left", header_style="bold")
+        for column, width in zip(columns, widths):
+            table.add_column(column, min_width=width, **WORKLOAD_COLUMNS[column])
+        for position, (label, jobs) in enumerate(blocks):
+            if position:
+                table.add_section()
+            table.add_row(label, *[""] * (len(columns) - 1), style="dim")
+            for cells in jobs:
+                table.add_row(*cells)
+        tables.append(table)
+    return tables
 
 
 def _raw_workload_matches(
@@ -742,8 +870,7 @@ def _raw_workload_matches(
     cluster: Optional[str],
     scheduler: Optional[str] = None,
 ) -> bool:
-    """Raw-payload mirror of the client-side --user/--cluster/--scheduler
-    predicates."""
+    """Raw-payload mirror of the client-side --user/--cluster predicates."""
     owner = raw_workload.get("owner") or {}
     if user is not None and owner.get("display_name") != user:
         return False
@@ -760,7 +887,7 @@ def _filter_workload_rows(
     cluster: Optional[str],
     scheduler: Optional[str] = None,
 ) -> List[FactoryWorkload]:
-    """Client-side narrowing by owner, cluster, and scheduler deployment."""
+    """Client-side narrowing by owner, cluster, and Slurm cluster."""
     if user is not None:
         rows = [r for r in rows if r.owner.display_name == user]
     if cluster is not None:
@@ -770,12 +897,22 @@ def _filter_workload_rows(
     return rows
 
 
-def _distinct_workload_clusters(rows: List[FactoryWorkload]) -> List[str]:
-    names: List[str] = []
-    for row in rows:
-        if row.cluster_display_name and row.cluster_display_name not in names:
-            names.append(row.cluster_display_name)
-    return names
+def _select_workload_scope(
+    selector: str,
+    clusters: List[FactoryCluster],
+    rows: List[FactoryWorkload],
+    err_console: Any,
+) -> Tuple[Optional[str], Optional[str]]:
+    """Resolve --cluster to a (cluster, Slurm cluster) display-name filter.
+
+    Clusters from `prime factory status` (name or 1-based index) win;
+    otherwise the selector may name a Slurm cluster seen in the jobs.
+    """
+    is_cluster_name = any(c.display_name == selector for c in clusters)
+    if not is_cluster_name and any(row.scheduler_display_name == selector for row in rows):
+        return None, selector
+    index = _select_cluster_indices(clusters, selector, err_console)[0]
+    return clusters[index].display_name, None
 
 
 @app.command(name="workloads", epilog=FACTORY_WORKLOADS_JSON_HELP)
@@ -793,7 +930,8 @@ def factory_workloads(
     state: Optional[str] = typer.Option(
         None,
         "--state",
-        help="Filter by state: running, queued, completed, failed, or all",
+        help="Filter by state: running, queued, completed, failed, or all "
+        "(default: running and queued)",
     ),
     since: Optional[str] = typer.Option(
         None,
@@ -805,32 +943,23 @@ def factory_workloads(
         "--limit",
         help=(
             "Maximum rows to fetch (1-200; 50 by default for terminal queries, "
-            "200 when a --scheduler filter narrows them)"
+            "200 when --cluster narrows them)"
         ),
     ),
     user: Optional[str] = typer.Option(None, "--user", help="Filter by owner display name"),
-    slurm_cluster: Optional[str] = typer.Option(
+    cluster: Optional[str] = typer.Option(
         None,
-        "--slurm-cluster",
-        help="Filter by the slurm cluster (deployment) the job runs on",
+        "--cluster",
+        help="Show only one cluster (index or name from `prime factory status`) "
+        "or one Slurm cluster",
     ),
-    scheduler: Optional[str] = typer.Option(
-        None,
-        "--scheduler",
-        help="Alias of --slurm-cluster",
-        hidden=True,
-    ),
-    cluster: Optional[str] = typer.Option(None, "--cluster", help="Filter by cluster display name"),
     json_output: bool = typer.Option(
         False, "--json", help="Print the API response as JSON (same as --output json)"
     ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """Show your team's factory workloads (training, inference, Slurm jobs)."""
+    """Show your team's factory jobs per cluster and pool (squeue-like)."""
 
-    if slurm_cluster is None:
-        # --scheduler is the hidden legacy alias of --slurm-cluster.
-        slurm_cluster = scheduler
     if json_output:
         output = "json"
     validate_output_format(output, console)
@@ -867,14 +996,10 @@ def factory_workloads(
         raise typer.Exit(1)
     if limit is None and state in TERMINAL_QUERY_STATES:
         # History queries can be large; fetch a bounded page by default.
-        # A client-side --scheduler narrow happens AFTER the server pages,
-        # so request the widest bounded page there — otherwise matching
-        # history beyond the default page would be filtered into a false
-        # empty result.
-        if slurm_cluster is not None:
-            limit = WORKLOAD_LIMIT_MAX
-        else:
-            limit = WORKLOAD_TERMINAL_DEFAULT_LIMIT
+        # --cluster narrows AFTER the server pages, so request the widest
+        # bounded page there — otherwise matching history beyond the
+        # default page would be filtered into a false empty result.
+        limit = WORKLOAD_LIMIT_MAX if cluster is not None else WORKLOAD_TERMINAL_DEFAULT_LIMIT
 
     team_id = team or Config().team_id
     if not team_id:
@@ -887,17 +1012,19 @@ def factory_workloads(
         )
         return
 
-    # Scheduler deployments are Slurm: with --scheduler and no explicit
-    # --type, narrow server-side to slurm so the page fills with the only
-    # rows that can match — the client-side predicate then sees all of the
-    # deployment's in-window history instead of a mixed, crowded page.
-    server_type = type if type is not None else ("slurm" if slurm_cluster is not None else None)
-
     try:
-        api_client = APIClient()
-        workloads = FactoryClient(api_client).get_workloads(
-            team_id, workload_type=server_type, state=state, since=since_at, limit=limit
-        )
+        client = FactoryClient(APIClient())
+        if output == "json":
+            # JSON needs the status payload only to resolve --cluster.
+            workloads = client.get_workloads(
+                team_id, workload_type=type, state=state, since=since_at, limit=limit
+            )
+            clusters = client.get_status(team_id).clusters if cluster is not None else []
+        else:
+            status, nodes, workloads = _fetch_usage_view(
+                client, team_id, workload_type=type, state=state, since=since_at, limit=limit
+            )
+            clusters = status.clusters
     except APIError as e:
         # Escape upstream error text: raw brackets (e.g. pydantic
         # "[type=...]" metadata) would crash Rich markup rendering.
@@ -905,39 +1032,15 @@ def factory_workloads(
         raise typer.Exit(1)
 
     rows = workloads.workloads
-
-    # Identity resolution: the workloads envelope carries no cluster list,
-    # only row identities, so a --cluster selector can miss because a
-    # degraded source omitted a cluster's rows entirely. Surface the
-    # degraded-source warnings instead of exiting with a clean miss.
-    if cluster is not None and not any(row.cluster_display_name == cluster for row in rows):
-        fresh_kinds = {row.source.kind for row in rows if row.source.status == "ok"}
-        payload_kinds = {row.source.kind for row in rows}
-        for source in workloads.sources:
-            if source.status != "ok":
-                if (
-                    server_type is not None
-                    and source.kind != server_type
-                    and source.kind not in payload_kinds
-                ):
-                    # Kinds narrowed out server-side (--type, or the
-                    # implicit slurm scope of --scheduler): their absence
-                    # is expected filtering, not a failed read — do not
-                    # report unrelated outages on a miss either.
-                    continue
-                warning = _jobs_unavailable_line(source.kind, source, source.kind in fresh_kinds)
-                err_console.print(f"[yellow]{warning}[/yellow]")
-        err_console.print(f"[red]Error:[/red] No cluster matched '{rich_escape(cluster)}'.")
-        names = _distinct_workload_clusters(rows)
-        if names:
-            listed = ", ".join(rich_escape(n) for n in names)
-            err_console.print(f"[dim]Available clusters: {listed}[/dim]")
-        raise typer.Exit(1)
-    rows = _filter_workload_rows(rows, user, cluster, scheduler=slurm_cluster)
+    cluster_name: Optional[str] = None
+    slurm_cluster: Optional[str] = None
+    if cluster is not None:
+        cluster_name, slurm_cluster = _select_workload_scope(cluster, clusters, rows, err_console)
+    rows = _filter_workload_rows(rows, user, cluster_name, scheduler=slurm_cluster)
 
     if output == "json":
         payload = workloads.raw_response
-        if user is not None or cluster is not None or slurm_cluster is not None:
+        if user is not None or cluster is not None:
             raw_rows = workloads.raw_response.get("workloads", [])
             # Filter the raw response objects with the same predicates as
             # the parsed models, not re-serialized models, so --json stays
@@ -946,24 +1049,30 @@ def factory_workloads(
             payload = {
                 **workloads.raw_response,
                 "workloads": [
-                    w for w in raw_rows if _raw_workload_matches(w, user, cluster, slurm_cluster)
+                    w
+                    for w in raw_rows
+                    if _raw_workload_matches(w, user, cluster_name, slurm_cluster)
                 ],
             }
         output_data_as_json(payload, console)
         return
+
+    if state is None:
+        # The default view is the live queue: hosted runs the backend can
+        # no longer classify (state "unknown") never belong in it.
+        rows = [row for row in rows if row.state in ("running", "queued")]
 
     # Per-row freshness governs rendering: a row renders when its OWN
     # evidence is fresh, never suppressed by an aggregate worst-source or a
     # missing sibling group. Degraded aggregates are warnings only.
     available = [row for row in rows if row.source.status == "ok"]
     suppressed = [row for row in rows if row.source.status != "ok"]
-    # With a scheduler filter and no explicit --type, only Slurm rows can
-    # match: unrelated kind outages are not this view's concern.
+    # A selected Slurm cluster scopes the view to Slurm jobs.
     degraded = _view_degraded_sources(
         workloads,
         rows,
         suppressed,
-        requested_type=server_type,
+        requested_type=type or ("slurm" if slurm_cluster else None),
         scheduler_filter_active=slurm_cluster is not None,
     )
 
@@ -976,11 +1085,13 @@ def factory_workloads(
         console.print(f"[yellow]{warning}[/yellow]")
 
     if available:
+        gpus_per_node = {c.display_name: _gpus_per_node(c.nodes) for c in nodes.clusters}
         show_duration = state in TERMINAL_QUERY_STATES
-        console.print(_render_workloads_table(available, show_duration=show_duration))
-        console.print()
-        console.print(f"[dim]{IN_USE_NOTE}[/dim]")
-        console.print(f"[dim]{SCHEDULER_LEGEND}[/dim]")
+        tables = _render_workloads_tables(status, available, gpus_per_node, show_duration)
+        for position, table in enumerate(tables):
+            if position:
+                console.print()
+            console.print(table)
         if workloads.truncated:
             # The backend caps the unbounded default window at 200.
             effective = limit if limit is not None else WORKLOAD_LIMIT_MAX
@@ -997,7 +1108,6 @@ def factory_workloads(
             since,
             user,
             cluster,
-            slurm_cluster,
             limit,
             bool(workloads.truncated),
             pre_filter_row_count=len(workloads.workloads),
@@ -1011,7 +1121,6 @@ def _print_empty_workloads_result(
     since: Optional[str],
     user: Optional[str],
     cluster: Optional[str],
-    slurm_cluster: Optional[str],
     limit: Optional[int],
     truncated: bool = False,
     pre_filter_row_count: int = 0,
@@ -1025,14 +1134,13 @@ def _print_empty_workloads_result(
         or since is not None
         or user is not None
         or cluster is not None
-        or slurm_cluster is not None
     )
     # The page was cut before any CLIENT predicate when the backend
     # flagged truncation OR the response actually filled the requested
     # limit — merely SUPPLYING a limit proves nothing (a short response
     # was not cut). Server-side filters (--type/--state/--since) apply
     # before the cap: their zero-row results are definitive.
-    client_filters_active = user is not None or cluster is not None or slurm_cluster is not None
+    client_filters_active = user is not None or cluster is not None
     capped_window = None
     if truncated:
         capped_window = limit if limit is not None else WORKLOAD_LIMIT_MAX
@@ -1100,8 +1208,8 @@ def _node_state_cell(node: FactoryNode) -> str:
     }
     state = node.state or "unknown"
     # Customer-facing display: "cordoned" is infra-speak — the public phrase
-    # is "under inspection" (frontierCluster precedent). The contract enum
-    # value never renders.
+    # is "under inspection", as in the web app. The contract enum value
+    # never renders.
     display = "under inspection" if state == "cordoned" else state
     if state in state_styles:
         style = state_styles[state]

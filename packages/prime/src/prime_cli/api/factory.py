@@ -229,12 +229,7 @@ class FactoryClient:
     def __init__(self, client: APIClient) -> None:
         self.client = client
 
-    def _get_json(
-        self,
-        endpoint: str,
-        params: Dict[str, Any],
-        timeout: Optional[float] = None,
-    ) -> Dict[str, Any]:
+    def _get_json(self, endpoint: str, params: Dict[str, Any]) -> Dict[str, Any]:
         """GET one factory endpoint and normalize malformed success bodies.
 
         An HTTP 200 with a non-JSON body (e.g. an HTML proxy error page)
@@ -245,12 +240,7 @@ class FactoryClient:
         commands.
         """
         try:
-            if timeout is None:
-                # Omit the argument entirely: passing timeout=None to httpx
-                # explicitly DISABLES the client's configured default
-                # timeout, letting primary commands hang indefinitely.
-                return self.client.get(endpoint, params=params)
-            return self.client.get(endpoint, params=params, timeout=timeout)
+            return self.client.get(endpoint, params=params)
         except ValueError as exc:
             raise APIError("Factory API returned a malformed response body.") from exc
 
@@ -322,14 +312,13 @@ class FactoryClient:
         workloads._raw_response = response
         return workloads
 
-    def get_nodes(self, team_id: str, timeout: Optional[float] = None) -> FactoryNodes:
+    def get_nodes(self, team_id: str) -> FactoryNodes:
         """Fetch the node inventory for a team.
 
         The backend validates team membership of the caller; the CLI only
-        resolves which team context to ask about. ``timeout`` caps the
-        request for best-effort callers (the compact status glance).
+        resolves which team context to ask about.
         """
-        response = self._get_json("/factory/nodes", {"team_id": team_id}, timeout=timeout)
+        response = self._get_json("/factory/nodes", {"team_id": team_id})
         try:
             nodes = FactoryNodes.model_validate(response)
         except ValidationError as exc:

@@ -1,20 +1,25 @@
 """`prime factory` — Model Factory fleet status and workloads."""
 
+import math
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Protocol, Sequence, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Protocol, Sequence, Tuple
 
 import typer
 from rich.markup import escape as rich_escape
 from rich.table import Table
+from rich.text import Text
 
 from ..api.factory import (
     FactoryClient,
     FactoryCluster,
     FactoryNode,
+    FactoryNodes,
     FactoryNodesCluster,
     FactoryPool,
     FactorySource,
+    FactoryStatus,
     FactoryWorkload,
     FactoryWorkloads,
 )
@@ -55,7 +60,9 @@ FACTORY_NODES_JSON_HELP = json_output_help(
 )
 
 IN_USE_NOTE = "in-use = GPUs held by running jobs (not GPU-activity measurements)"
-UNUSED_NOTE = "unused = reserved by a workload but not running anything — not free capacity"
+SLURM_ESTIMATE_NOTE = (
+    "slurm in use = estimated from running jobs (GPUs/8); CPU-only jobs not counted"
+)
 SCHEDULER_LEGEND = (
     "Slurm cluster: — = direct platform placement; unknown = deployment not identified."
 )
@@ -102,73 +109,12 @@ def _last_seen_phrase(sources: List[FactorySource]) -> str:
     return f"{phrase} unavailable"
 
 
-def _pool_is_all_zero(pool: FactoryPool) -> bool:
-    """The backend's designed inactive-group signal: all-zero counts."""
-    return (
-        pool.reserved_gpus == 0
-        and pool.in_use_gpus == 0
-        and pool.idle_inside_gpus == 0
-        and pool.unknown_gpus == 0
-    )
-
-
-def _pool_is_available(pool: FactoryPool, source_status: dict) -> bool:
-    """A workload-group row renders only with complete evidence behind a fresh source.
-
-    Fail closed on missing freshness evidence: a present allocation whose
-    source entry is omitted from the envelope is unknown, never silently
-    fresh. The one exception is the backend's designed inactive-group
-    signal — an all-zero row with no source entry is complete evidence
-    of nothing.
-    """
-    if pool.type not in source_status:
-        if not _pool_is_all_zero(pool):
-            return False
-    elif source_status[pool.type] != "ok":
-        return False
-    return (
-        pool.reserved_gpus is not None
-        and pool.in_use_gpus is not None
-        and pool.idle_inside_gpus is not None
-    )
-
-
 def _styled_status(status: Optional[str]) -> str:
     if status == "online":
         return "[green]online[/green]"
     if status == "offline":
         return "[red]offline[/red]"
     return rich_escape(status or "unknown")
-
-
-class _ClusterState:
-    """Per-cluster rendering facts shared by the CLUSTERS and WORKLOADS sections."""
-
-    def __init__(self, cluster: FactoryCluster) -> None:
-        source_status = {s.kind: s.status for s in cluster.sources}
-        # Fail closed: a missing capacity source entry is unknown evidence,
-        # never silently fresh.
-        self.capacity_ok = source_status.get("capacity") == "ok"
-        degraded = [s for s in cluster.sources if s.status != "ok"]
-
-        # Split pools by index so duplicate payload rows cannot be
-        # misclassified by model equality.
-        self.renderable: List[FactoryPool] = []
-        suppressed_idx: List[int] = []
-        for i, pool in enumerate(cluster.pools):
-            if self.capacity_ok and _pool_is_available(pool, source_status):
-                self.renderable.append(pool)
-            else:
-                suppressed_idx.append(i)
-        self.suppressed = [cluster.pools[i] for i in suppressed_idx]
-
-        # Sources involved in the suppressed breakdown; anything else
-        # degraded still surfaces as a freshness phrase in the CLUSTERS line.
-        involved: set = {p.type for p in self.suppressed}
-        if not self.capacity_ok:
-            involved.add("capacity")
-        self.remaining_degraded = [s for s in degraded if s.kind not in involved]
-        self.involved_sources = [s for s in degraded if s.kind in involved]
 
 
 class _DisplayNamedCluster(Protocol):
@@ -188,157 +134,56 @@ def _cluster_label(cluster: _DisplayNamedCluster, index: int, multi: bool) -> st
     return f"[bold]{label}[/bold]"
 
 
-def _cluster_header(
-    cluster: FactoryCluster, index: int, multi: bool, freshness: Optional[str]
-) -> str:
-    parts: List[str] = [_cluster_label(cluster, index, multi)]
+class _Usage(NamedTuple):
+    """Node counts for one table row: in_use + free + down == nodes."""
 
-    gpu_bits = [str(cluster.total_gpus)] if cluster.total_gpus is not None else []
-    if cluster.gpu_type:
-        gpu_bits.append(rich_escape(cluster.gpu_type))
-    if gpu_bits:
-        parts.append(" ".join(gpu_bits) + " GPUs")
-    parts.append(_styled_status(cluster.status))
-    if freshness:
-        parts.append(freshness)
-    return " · ".join(parts)
+    nodes: int
+    in_use: int
+    free: int
+    down: int
 
 
-def _render_pool_table(pools: List[FactoryPool]) -> Table:
-    table = Table(show_header=True, header_style="bold", show_lines=False)
-    table.add_column("WORKLOAD", style="cyan")
-    table.add_column("RESERVED", style="white", justify="right")
-    table.add_column("IN USE", style="green", justify="right")
-    table.add_column("UNUSED", style="blue", justify="right")
-    table.add_column("UNKNOWN", style="yellow", justify="right")
+def _pool_usage(
+    nodes: List[FactoryNode],
+    slurm_jobs: List[FactoryWorkload],
+    allocations: List[FactoryPool],
+) -> List[Tuple[str, _Usage]]:
+    """Split one cluster's nodes into pools; every node lands in exactly one.
 
-    for pool in pools:
-        table.add_row(
-            rich_escape(pool.type),
-            str(pool.reserved_gpus),
-            str(pool.in_use_gpus),
-            str(pool.idle_inside_gpus),
-            str(pool.unknown_gpus) if pool.unknown_gpus is not None else "-",
-        )
-    return table
-
-
-def _render_workloads_section(
-    clusters: List[FactoryCluster], states: List["_ClusterState"], multi: bool
-) -> None:
-    footnote = False
-    for index, (cluster, state) in enumerate(zip(clusters, states), start=1):
-        if index > 1:
-            console.print()
-        console.print(_cluster_label(cluster, index, multi))
-
-        if state.suppressed or not state.capacity_ok:
-            if state.suppressed:
-                names = (
-                    "workload"
-                    if not state.renderable and len(state.suppressed) == len(cluster.pools)
-                    else ", ".join(rich_escape(p.type) for p in state.suppressed)
-                )
-            else:
-                # Degraded capacity with no allocation rows at all: still a
-                # coverage failure, never a valid empty cluster.
-                names = "workload"
-            line = f"{names} breakdown unavailable"
-            if state.involved_sources:
-                line += f" — {_last_seen_phrase(state.involved_sources)}"
-            console.print(f"[yellow]{line}[/yellow]")
-
-        if state.renderable:
-            console.print(_render_pool_table(state.renderable))
-            footnote = True
-
-        # Unassigned and unknown GPUs are cluster-level facts, not workload-group rows.
-        if state.capacity_ok and cluster.unassigned_gpus is not None:
-            console.print(f"unassigned: {cluster.unassigned_gpus} GPUs")
-        if state.capacity_ok and cluster.unknown_gpus is not None:
-            console.print(f"unknown: {cluster.unknown_gpus} GPUs")
-
-        # The empty-cluster wording requires fresh evidence: with degraded
-        # capacity the breakdown-unavailable line above already told the
-        # truth about the missing data.
-        if (
-            state.capacity_ok
-            and not state.renderable
-            and not state.suppressed
-            and not (cluster.unassigned_gpus is not None or cluster.unknown_gpus is not None)
-        ):
-            console.print("[dim]no workloads reported[/dim]")
-
-    if footnote:
-        console.print()
-        console.print(f"[dim]{IN_USE_NOTE}[/dim]")
-        console.print(f"[dim]{UNUSED_NOTE}[/dim]")
-        console.print("[dim]drill down: prime factory nodes[/dim]")
-
-
-def _pool_evidence_fresh(pool: FactoryPool, source_status: dict) -> bool:
-    """True when this group's numbers may render.
-
-    A stale/errored source entry — or a missing one on non-zero claims —
-    is unknown evidence. The all-zero row without a source entry is the
-    backend's designed inactive signal and keeps its honest zeros.
+    Slurm nodes report no per-node load, so busy Slurm nodes are estimated
+    from the running jobs' GPUs, capped at the ready Slurm nodes. Ready
+    non-Slurm nodes holding GPUs are attributed to training and inference
+    from the allocation summary; whatever is left over is "other".
     """
-    if pool.type not in source_status:
-        return _pool_is_all_zero(pool)
-    return source_status[pool.type] == "ok"
+    gpus_per_node = max((n.gpus_total or 0 for n in nodes), default=0)
 
+    slurm = [n for n in nodes if n.assigned_to == "slurm"]
+    slurm_down = sum(1 for n in slurm if n.state != "ready")
+    slurm_ready = len(slurm) - slurm_down
+    job_nodes = (
+        sum(math.ceil((job.allocated_gpus or 0) / gpus_per_node) for job in slurm_jobs)
+        if gpus_per_node
+        else 0
+    )
+    slurm_busy = min(job_nodes, slurm_ready)
+    names = sorted({job.scheduler_display_name for job in slurm_jobs if job.scheduler_display_name})
+    slurm_label = f"slurm ({', '.join(names)})" if names else "slurm"
+    pools = [(slurm_label, _Usage(len(slurm), slurm_busy, slurm_ready - slurm_busy, slurm_down))]
 
-def _aggregate_cell(cluster: FactoryCluster, source_status: dict, attr: str) -> str:
-    """One GPU-metric aggregate cell with honest partial sums.
-
-    Plain number when every group contributes (complete evidence);
-    ``<sum>+`` when at least one group contributes AND at least one is
-    unknown — the total is at least the shown number; an em-dash when
-    every group is unknown. Unobserved values count as unknown for their
-    metric; zeros never masquerade as complete totals.
-    """
-    if not cluster.pools:
-        # No allocation rows under fresh capacity: complete evidence of
-        # nothing — zeros, never dashes (the verbose view calls this a
-        # valid empty cluster).
-        return "0"
-    total = 0
-    contributors = 0
-    unknown = 0
-    for pool in cluster.pools:
-        value = getattr(pool, attr)
-        if _pool_evidence_fresh(pool, source_status) and value is not None:
-            total += value
-            contributors += 1
-        else:
-            unknown += 1
-    if contributors and not unknown:
-        return str(total)
-    if contributors:
-        return f"{total}+"
-    return "—"
-
-
-def _compact_nodes_cell(
-    nodes_cluster: Optional[FactoryNodesCluster], source: Optional[FactorySource]
-) -> str:
-    """Healthy/total nodes (plus cordoned count) for the compact status row."""
-    if nodes_cluster is None:
-        return "—"
-    # Fail closed: the envelope-level capacity entry is the freshness
-    # evidence for this cluster's node view.
-    capacity_ok = source is not None and source.kind == "capacity" and source.status == "ok"
-    if not capacity_ok:
-        return "—"
-    total = len(nodes_cluster.nodes)
-    healthy = sum(1 for n in nodes_cluster.nodes if n.state == "ready")
-    cell = f"{healthy}/{total}"
-    cordoned = sum(1 for n in nodes_cluster.nodes if n.state == "cordoned")
-    if cordoned:
-        # Customer-facing phrase (frontierCluster precedent); "cordoned" is
-        # infra-speak and never renders.
-        cell += f" ({cordoned} {UNDER_INSPECTION_DISPLAY})"
-    return cell
+    direct = [n for n in nodes if n.assigned_to != "slurm"]
+    ready = [n for n in direct if n.state == "ready"]
+    busy = sum(1 for n in ready if (n.gpus_used or 0) > 0)
+    unattributed = busy
+    for kind in ("training", "inference"):
+        gpus = sum(a.in_use_gpus or 0 for a in allocations if a.type == kind)
+        count = min(math.ceil(gpus / gpus_per_node) if gpus_per_node else 0, unattributed)
+        pools.append((kind, _Usage(count, count, 0, 0)))
+        unattributed -= count
+    pools.append(("other", _Usage(unattributed, unattributed, 0, 0)))
+    free = len(ready) - busy
+    down = len(direct) - len(ready)
+    pools.append(("unassigned", _Usage(free + down, 0, free, down)))
+    return pools
 
 
 def _short_gpu_type(gpu_type: Optional[str]) -> str:
@@ -348,178 +193,136 @@ def _short_gpu_type(gpu_type: Optional[str]) -> str:
     return rich_escape(gpu_type.split("_")[0])
 
 
-def _compact_data_badge(
+def _paired_nodes(
+    cluster: FactoryCluster, index: int, nodes: FactoryNodes, ambiguous_names: set
+) -> Optional[Tuple[FactoryNodesCluster, FactorySource]]:
+    """The node view of a status cluster, paired by payload position.
+
+    The status and nodes payloads are separate requests: a position whose
+    name differs, or a name that appears twice in either payload, cannot
+    be paired safely — never show one cluster's nodes on another's row.
+    """
+    if index >= len(nodes.clusters) or cluster.display_name in ambiguous_names:
+        return None
+    nodes_cluster = nodes.clusters[index]
+    if nodes_cluster.display_name != cluster.display_name:
+        return None
+    return nodes_cluster, nodes.sources[index]
+
+
+def _cluster_warning(
     cluster: FactoryCluster,
-    node_source: Optional[FactorySource],
-    node_source_joined: bool,
-) -> str:
-    """The single-token staleness badge: 'fresh' | '<age>' | 'partial'.
-
-    The age form is the worst (oldest) degraded source age — including the
-    paired node capacity source when the join succeeded. 'partial' marks
-    source evidence that cannot be aged honestly: missing entries or
-    unavailable sources. Node-view FETCH or JOIN failures are NOT workload
-    degradation and never darken this badge — the em-dash NODES cell and
-    its own legend line carry that instead.
-    """
-    source_kinds = {s.kind for s in cluster.sources}
-    degraded = [s for s in cluster.sources if s.status != "ok"]
-    if node_source_joined and node_source is not None and node_source.status != "ok":
-        degraded.append(node_source)
-    missing = "capacity" not in source_kinds or any(
-        pool.type not in source_kinds and not _pool_is_all_zero(pool) for pool in cluster.pools
-    )
-    unavailable = missing or any(s.observed_at is None for s in degraded)
-    if unavailable:
-        return "partial"
-    if not degraded:
-        return "fresh"
-    return human_age(min(s.observed_at for s in degraded))
+    paired: Optional[Tuple[FactoryNodesCluster, FactorySource]],
+    slurm_jobs: FactoryWorkloads,
+) -> Optional[str]:
+    """One short line when the cluster is not online or its data is degraded."""
+    problems: List[str] = []
+    if cluster.status != "online":
+        problems.append(_styled_status(cluster.status))
+    sources = list(cluster.sources)
+    if paired is None:
+        problems.append("node data unavailable")
+    else:
+        nodes_cluster, node_source = paired
+        sources.append(node_source)
+        if any(n.assigned_to == "slurm" for n in nodes_cluster.nodes):
+            sources.extend(slurm_jobs.sources)
+    degraded = [s for s in sources if s.status != "ok"]
+    if degraded:
+        problems.append(_last_seen_phrase(degraded))
+    return " · ".join(problems) if problems else None
 
 
-PARTIAL_LEGEND = "partial = some fleet data unavailable — run with --verbose for which"
-NODE_VIEW_LEGEND = "no node summary = node view unavailable — run prime factory nodes"
+def _duplicated_names(names: List[str]) -> set:
+    counts: Dict[str, int] = {}
+    for name in names:
+        counts[name] = counts.get(name, 0) + 1
+    return {name for name, count in counts.items() if count > 1}
 
 
-# The best-effort node view must never stall the status glance.
-NODES_FETCH_TIMEOUT_S = 3.0
-
-
-def _fetch_node_pairs(
-    api_client: APIClient, team_id: str
-) -> List[Tuple[FactoryNodesCluster, Optional[FactorySource]]]:
-    """Best-effort node summaries for the compact status table.
-
-    Returns positionally paired (cluster, capacity source) entries — the
-    same identity the envelope sources use. Keying by display name would
-    let duplicate-named clusters overwrite each other. The node view is a
-    display aid, never a hard dependency: on any API error (including a
-    timeout, which the client raises as APIError) the status table renders
-    with an em-dash NODES column.
-    """
-    try:
-        nodes = FactoryClient(api_client).get_nodes(team_id, timeout=NODES_FETCH_TIMEOUT_S)
-        return [
-            (cluster, nodes.sources[i] if i < len(nodes.sources) else None)
-            for i, cluster in enumerate(nodes.clusters)
-        ]
-    except APIError:
-        return []
-    except ValueError:
-        # An HTTP 200 with a non-JSON body escapes the client as a raw
-        # decoding error, not an APIError. The node view is best-effort:
-        # degrade to an em-dash NODES column instead of crashing the
-        # status glance. (The client's error semantics for other commands
-        # stay unchanged.)
-        return []
+def _count_cell(count: int) -> Text:
+    # Zeros are dimmed so the non-zero FREE and DOWN counts stand out.
+    return Text(str(count), style="dim default" if count == 0 else "")
 
 
 def _render_status_table(
-    clusters: List[FactoryCluster],
-    node_pairs: List[Tuple[FactoryNodesCluster, Optional[FactorySource]]],
-    selected: Optional[List[int]] = None,
-    ambiguous_names: Optional[set] = None,
-    original_count: Optional[int] = None,
+    status: FactoryStatus,
+    nodes: FactoryNodes,
+    slurm_jobs: FactoryWorkloads,
+    selected: Optional[List[int]],
+    verbose: bool,
 ) -> None:
-    """The default sinfo-style glance: one row per cluster, no prose.
+    """One row per cluster, counted in nodes (sinfo-style); --verbose adds pool sub-rows.
 
-    ``clusters`` may be a --cluster-selected subset; ``selected`` holds the
-    original payload indices, so node summaries pair positionally with the
-    full payload. ``ambiguous_names`` are display names that appear more
-    than once — equal-name replacement between the two requests is
-    undetectable, so those rows render an em-dash NODES cell. With more than
-    one cluster in the original payload, each row is prefixed with its
-    original 1-based index — the selector `--cluster` error messages direct
-    users to.
-
-    Honesty rules carry into the sums: a plain number only under complete
-    evidence; ``<sum>+`` when some groups are known and others are not;
-    em-dashes when a metric is entirely unknown — never zeros disguised as
-    totals. The DATA badge is one short token; the legend under the table
-    explains 'partial'.
+    ``selected`` holds the original payload indices of a --cluster
+    selection, so rows keep the 1-based index users select by and node
+    views pair positionally with the full payload.
     """
-    any_partial = False
-    any_nodes_missing = False
     table = Table(show_header=True, header_style="bold", show_lines=False)
     table.add_column("CLUSTER", style="cyan")
     table.add_column("GPU")
-    table.add_column("TOTAL", justify="right")
-    table.add_column("HELD", justify="right")
-    table.add_column("IN USE", justify="right")
-    # Unused = reserved by a workload but not running anything — not free
-    # capacity.
-    table.add_column("UNUSED", justify="right")
-    table.add_column("FREE", justify="right")
     table.add_column("NODES", justify="right")
-    table.add_column("STATUS")
-    table.add_column("DATA")
+    table.add_column("IN USE", justify="right")
+    table.add_column("FREE", justify="right", style="green")
+    table.add_column("DOWN", justify="right", style="red")
 
-    for position, cluster in enumerate(clusters):
-        source_status = {s.kind: s.status for s in cluster.sources}
-        capacity_ok = source_status.get("capacity") == "ok"
-        original_index = selected[position] if selected is not None else position
-        nodes_cluster, nodes_source = (
-            node_pairs[original_index] if original_index < len(node_pairs) else (None, None)
-        )
-        if nodes_cluster is not None and nodes_cluster.display_name != cluster.display_name:
-            # The status and nodes responses are separate requests: if the
-            # fleet moved between them, positional identity no longer
-            # holds. Never display one cluster's node counts on another
-            # cluster's row — degrade the NODES cell instead.
-            nodes_cluster, nodes_source = None, None
-        if (
-            nodes_cluster is not None
-            and ambiguous_names
-            and cluster.display_name in ambiguous_names
-        ):
-            # Duplicate display names make the equal-name identity check
-            # blind to replacement; never risk cross-wired counts.
-            nodes_cluster, nodes_source = None, None
-        nodes_cell = _compact_nodes_cell(nodes_cluster, nodes_source)
-        # A discarded or absent pair is a node-VIEW failure (fetch, identity,
-        # or ambiguity) — not workload degradation: the badge ignores it and
-        # the NODES legend carries it. A joined-but-degraded node source IS
-        # evidence the badge ages.
-        node_source_joined = nodes_cluster is not None
-        if nodes_cluster is None:
-            any_nodes_missing = True
-        data_badge = _compact_data_badge(cluster, nodes_source, node_source_joined)
-        if data_badge == "partial":
-            any_partial = True
-        metric_cells = {
-            attr: _aggregate_cell(cluster, source_status, attr) if capacity_ok else "—"
-            for attr in ("reserved_gpus", "in_use_gpus", "idle_inside_gpus")
-        }
-        if any(cell.endswith("+") for cell in metric_cells.values()):
-            any_partial = True
-        multi = (original_count if original_count is not None else len(clusters)) > 1
+    # Ambiguity can arise in EITHER snapshot: the two requests are
+    # independent.
+    ambiguous = _duplicated_names([c.display_name for c in status.clusters]) | _duplicated_names(
+        [c.display_name for c in nodes.clusters]
+    )
+    multi = len(status.clusters) > 1
+    indices = selected if selected is not None else list(range(len(status.clusters)))
+    warnings: List[str] = []
+    for position, index in enumerate(indices):
+        if verbose and position:
+            table.add_section()
+        cluster = status.clusters[index]
         name_cell = rich_escape(cluster.display_name)
         if multi:
-            # 1-based, matching the --cluster selector the error messages
-            # direct users to (and the verbose view's numbering).
-            name_cell = f"[cyan]\\[{original_index + 1}][/cyan] {name_cell}"
-        free_cell = (
-            str(cluster.unassigned_gpus)
-            if capacity_ok and cluster.unassigned_gpus is not None
-            else "—"
-        )
-        table.add_row(
-            name_cell,
-            _short_gpu_type(cluster.gpu_type),
-            str(cluster.total_gpus) if cluster.total_gpus is not None else "—",
-            metric_cells["reserved_gpus"],
-            metric_cells["in_use_gpus"],
-            metric_cells["idle_inside_gpus"],
-            free_cell,
-            nodes_cell,
-            _styled_status(cluster.status),
-            data_badge,
-        )
+            name_cell = f"[cyan]\\[{index + 1}][/cyan] {name_cell}"
+        gpu_cell = _short_gpu_type(cluster.gpu_type)
+        paired = _paired_nodes(cluster, index, nodes, ambiguous)
+        warning = _cluster_warning(cluster, paired, slurm_jobs)
+        if warning:
+            warnings.append(f"{name_cell}: {warning}")
+        if paired is None:
+            table.add_row(name_cell, gpu_cell, *["—"] * 4)
+            continue
+        nodes_cluster, _ = paired
+        jobs = [j for j in slurm_jobs.workloads if j.cluster_display_name == cluster.display_name]
+        pools = _pool_usage(nodes_cluster.nodes, jobs, cluster.pools)
+        total = _Usage(*(sum(column) for column in zip(*(usage for _, usage in pools))))
+        table.add_row(name_cell, gpu_cell, *map(_count_cell, total))
+        if verbose:
+            for label, usage in pools:
+                if usage.nodes:
+                    table.add_row(
+                        f"  {rich_escape(label)}", "", *map(_count_cell, usage), style="dim"
+                    )
     console.print(table)
-    if any_partial:
-        console.print(f"[dim]{PARTIAL_LEGEND}[/dim]")
-    if any_nodes_missing:
-        console.print(f"[dim]{NODE_VIEW_LEGEND}[/dim]")
+    for warning in warnings:
+        console.print(f"[yellow]{warning}[/yellow]")
+    if slurm_jobs.truncated:
+        console.print(
+            "[yellow]running Slurm job list was truncated — busy Slurm nodes may be undercounted"
+            "[/yellow]"
+        )
+    if verbose:
+        console.print(f"[dim]{SLURM_ESTIMATE_NOTE}[/dim]", highlight=False)
+
+
+def _fetch_usage_view(
+    client: FactoryClient, team_id: str
+) -> Tuple[FactoryStatus, FactoryNodes, FactoryWorkloads]:
+    """Status, node inventory, and running Slurm jobs, fetched in parallel."""
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        status = executor.submit(client.get_status, team_id)
+        nodes = executor.submit(client.get_nodes, team_id)
+        slurm_jobs = executor.submit(
+            client.get_workloads, team_id, workload_type="slurm", state="running"
+        )
+        return status.result(), nodes.result(), slurm_jobs.result()
 
 
 def _select_cluster_indices(
@@ -575,14 +378,14 @@ def factory_status(
     verbose: bool = typer.Option(
         False,
         "--verbose",
-        help="Show the detailed per-cluster allocation sections instead of the compact table",
+        help="Break each cluster down by pool: slurm, training, inference, other, unassigned",
     ),
     json_output: bool = typer.Option(
         False, "--json", help="Print the API response as JSON (same as --output json)"
     ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """Show GPU allocation across your team's factory clusters."""
+    """Show node usage across your team's factory clusters."""
 
     if json_output:
         output = "json"
@@ -603,8 +406,11 @@ def factory_status(
         return
 
     try:
-        api_client = APIClient()
-        status = FactoryClient(api_client).get_status(team_id)
+        client = FactoryClient(APIClient())
+        if output == "json":
+            status = client.get_status(team_id)
+        else:
+            status, nodes, slurm_jobs = _fetch_usage_view(client, team_id)
     except APIError as e:
         # Escape upstream error text: raw brackets (e.g. pydantic
         # "[type=...]" metadata) would crash Rich markup rendering.
@@ -631,48 +437,7 @@ def factory_status(
         console.print("No factory clusters allocated.")
         return
 
-    if not verbose:
-        # The default is the compact sinfo-style glance: one row per
-        # cluster, at most one dim line under the table, no prose.
-        all_clusters = status.clusters
-        node_pairs = _fetch_node_pairs(api_client, team_id)
-
-        def _duplicated_names(names: List[str]) -> set:
-            counts: Dict[str, int] = {}
-            for name in names:
-                counts[name] = counts.get(name, 0) + 1
-            return {name for name, count in counts.items() if count > 1}
-
-        # Ambiguity can arise in EITHER snapshot: the two requests are
-        # independent, and a name duplicated only in the nodes payload
-        # can still cross-wire counts through a positional name match.
-        ambiguous = _duplicated_names(
-            [cluster.display_name for cluster in all_clusters]
-        ) | _duplicated_names([pair[0].display_name for pair in node_pairs])
-        _render_status_table(
-            clusters,
-            node_pairs,
-            selected,
-            ambiguous_names=ambiguous,
-            original_count=len(all_clusters),
-        )
-        return
-
-    states = [_ClusterState(c) for c in clusters]
-    multi = len(clusters) > 1
-
-    # CLUSTERS answers "what do I have": one simple inventory line each.
-    console.print("[bold]CLUSTERS[/bold]")
-    for index, (c, state) in enumerate(zip(clusters, states), start=1):
-        freshness = (
-            _last_seen_phrase(state.remaining_degraded) if state.remaining_degraded else None
-        )
-        console.print(_cluster_header(c, index, multi, freshness))
-
-    # WORKLOADS answers "what is running": workload-group holding view per cluster.
-    console.print()
-    console.print("[bold]WORKLOADS[/bold]")
-    _render_workloads_section(clusters, states, multi)
+    _render_status_table(status, nodes, slurm_jobs, selected, verbose)
 
 
 FACTORY_WORKLOADS_JSON_HELP = json_output_help(
@@ -1296,9 +1061,6 @@ def _print_empty_workloads_result(
 # v1.5.2: `draining` = a Slurm-claimed node carrying a drain flag
 # (takes no new work; GPU counts still show what is ON it).
 NODE_STATES = ("ready", "cordoned", "draining", "offline", "unknown")
-# Customer-facing phrase for cordoned nodes (frontierCluster precedent);
-# the contract enum value never renders.
-UNDER_INSPECTION_DISPLAY = "under inspection"
 UNDER_INSPECTION_LEGEND = "under inspection = pulled from scheduling by Prime"
 # The backend only ever populates slurm claims in v1.5; per-node
 # training/inference placement is NOT observed and must not be filterable

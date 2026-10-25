@@ -73,7 +73,12 @@ def _build_kubeconfig(
     # outranks every other source in `Config.base_url`, making each refresh
     # hit the same platform the login did, while `--context` still selects the
     # matching API key.
-    exec_env = [{"name": "PRIME_API_BASE_URL", "value": base_url}]
+    # kubectl forwards plugin stderr to the terminal on every call, so an
+    # update banner would be printed above the output of every kubectl command.
+    exec_env = [
+        {"name": "PRIME_API_BASE_URL", "value": base_url},
+        {"name": "PRIME_DISABLE_VERSION_CHECK", "value": "1"},
+    ]
 
     contexts = []
     users = []
@@ -149,10 +154,21 @@ def login(
         console.print(f"[red]No active access grant for '{cluster}'.[/red]")
         raise typer.Exit(1)
 
+    # `server` is written verbatim. The platform is responsible for returning
+    # the cluster's customer-reachable public endpoint here; researchers are
+    # usually on a different network than the cluster's internal API address.
+    server = info.get("server")
+    ca_data = info.get("certificateAuthorityData")
+    if not server or not ca_data:
+        console.print(
+            f"[red]The platform returned incomplete connection info for '{cluster}'.[/red]"
+        )
+        raise typer.Exit(1)
+
     kubeconfig = _build_kubeconfig(
         cluster=cluster,
-        server=info["server"],
-        ca_data=info["certificateAuthorityData"],
+        server=server,
+        ca_data=ca_data,
         grants=grants,
         # The exact URL this login request just used — not re-derived at
         # refresh time, where context resolution would lose a custom one.

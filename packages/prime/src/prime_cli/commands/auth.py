@@ -107,7 +107,8 @@ def k8s_token(
 
     if response.status_code == 403:
         _fail(
-            f"Access to '{cluster}' has been revoked, or was never granted. Contact an admin.",
+            _detail(response)
+            or f"Access to '{cluster}' has been revoked, or was never granted. Contact an admin.",
             EXIT_FORBIDDEN,
         )
 

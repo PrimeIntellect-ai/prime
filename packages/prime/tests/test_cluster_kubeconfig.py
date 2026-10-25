@@ -124,9 +124,9 @@ class TestKubeconfigRendering:
             base_url="https://api.internal.example.com",
         )
         exec_block = config["users"][0]["user"]["exec"]
-        assert exec_block["env"] == [
-            {"name": "PRIME_API_BASE_URL", "value": "https://api.internal.example.com"}
-        ]
+        assert {"name": "PRIME_API_BASE_URL", "value": "https://api.internal.example.com"} in (
+            exec_block["env"]
+        )
         # The context intent is preserved alongside, not replaced.
         assert exec_block["args"][:2] == ["--context", "production"]
 
@@ -148,6 +148,137 @@ class TestKubeconfigRendering:
         # Each context's plugin invocation names its own pool, otherwise the
         # server would refuse the ambiguous request on every kubectl call.
         assert config["users"][1]["user"]["exec"]["args"][-1] == "beta"
+
+    def test_exec_env_disables_the_update_banner(self, monkeypatch):
+        # kubectl forwards plugin stderr on every call; an update notice there
+        # would sit above the output of every kubectl command.
+        monkeypatch.delenv("PRIME_CONTEXT", raising=False)
+        config = _build_kubeconfig(
+            cluster="c1",
+            server="https://k8s",
+            ca_data="Y2E=",
+            grants=[{"pool": "alpha", "namespace": "ada-alpha"}],
+            base_url="https://api.example.com",
+        )
+        env = config["users"][0]["user"]["exec"]["env"]
+        assert {"name": "PRIME_DISABLE_VERSION_CHECK", "value": "1"} in env
+
+
+class _FakeAPIClient:
+    base_url = "https://api.example.com"
+    payload: dict = {}
+    error: Exception | None = None
+    requested: list = []
+
+    def get(self, endpoint):
+        type(self).requested.append(endpoint)
+        if type(self).error is not None:
+            raise type(self).error
+        return type(self).payload
+
+
+class TestClusterLogin:
+    """`prime cluster login` through the root CLI, with the platform's
+    `kubeconfig-info` response stubbed at the client boundary."""
+
+    INFO = {
+        "server": "https://k8s.public.example.com:6443",
+        "certificateAuthorityData": "Y2E=",
+        "grants": [
+            {"pool": "train", "namespace": "ada-train"},
+            {"pool": "eval", "namespace": "ada-eval"},
+        ],
+    }
+
+    @pytest.fixture
+    def login(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("PRIME_CONTEXT", raising=False)
+        monkeypatch.setattr("prime_cli.commands.cluster.KUBECONFIG_DIR", tmp_path / "kube")
+        monkeypatch.setattr("prime_cli.commands.cluster.APIClient", _FakeAPIClient)
+        _FakeAPIClient.payload = dict(self.INFO)
+        _FakeAPIClient.error = None
+        _FakeAPIClient.requested = []
+
+        def _run(*args):
+            from prime_cli.main import app as root_app
+
+            return runner.invoke(root_app, ["cluster", "login", *args])
+
+        return _run
+
+    def test_writes_a_private_kubeconfig_from_kubeconfig_info(self, login, tmp_path):
+        result = login("c1")
+
+        assert result.exit_code == 0, result.output
+        assert _FakeAPIClient.requested == ["/clusters/c1/kubeconfig-info"]
+        path = tmp_path / "kube" / "c1.yaml"
+        assert path.stat().st_mode & 0o777 == 0o600
+        config = yaml.safe_load(path.read_text())
+        assert config["clusters"][0]["cluster"] == {
+            "server": "https://k8s.public.example.com:6443",
+            "certificate-authority-data": "Y2E=",
+        }
+        assert [c["name"] for c in config["contexts"]] == ["c1-train", "c1-eval"]
+        assert config["contexts"][1]["context"]["namespace"] == "ada-eval"
+
+    def test_server_is_taken_verbatim_and_never_from_api_url(self, login, tmp_path):
+        # Researchers usually can't route to the cluster's internal API
+        # address; only the platform-chosen `server` may reach the kubeconfig.
+        _FakeAPIClient.payload = {**self.INFO, "apiUrl": "https://100.64.0.10:6443"}
+
+        result = login("c1")
+
+        assert result.exit_code == 0, result.output
+        rendered = (tmp_path / "kube" / "c1.yaml").read_text()
+        assert "100.64.0.10" not in rendered
+        assert "https://k8s.public.example.com:6443" in rendered
+
+    @pytest.mark.parametrize("missing", ["server", "certificateAuthorityData"])
+    def test_incomplete_connection_info_fails_cleanly(self, login, tmp_path, missing):
+        _FakeAPIClient.payload = {k: v for k, v in self.INFO.items() if k != missing}
+
+        result = login("c1")
+
+        assert result.exit_code == 1
+        assert "incomplete connection info" in result.output
+        assert not (tmp_path / "kube" / "c1.yaml").exists()
+
+    def test_no_grants_writes_nothing(self, login, tmp_path):
+        _FakeAPIClient.payload = {**self.INFO, "grants": []}
+
+        result = login("c1")
+
+        assert result.exit_code == 1
+        assert "No active access grant" in result.output
+        assert not (tmp_path / "kube" / "c1.yaml").exists()
+
+    def test_platform_refusal_is_reported(self, login, tmp_path):
+        from prime_cli.core.client import NotFoundError
+
+        _FakeAPIClient.error = NotFoundError("HTTP 404: No active grant for 'c1'")
+
+        result = login("c1")
+
+        assert result.exit_code == 1
+        assert "No active grant" in result.output
+        assert not (tmp_path / "kube" / "c1.yaml").exists()
+
+
+class TestRootWiring:
+    def test_auth_k8s_token_is_a_real_subcommand(self):
+        # Every generated kubeconfig runs exactly `prime auth k8s-token`.
+        from prime_cli.main import app as root_app
+
+        result = runner.invoke(root_app, ["auth", "k8s-token", "--help"])
+        assert result.exit_code == 0
+        assert "--cluster" in result.output
+
+    def test_cluster_login_is_a_real_subcommand(self):
+        from prime_cli.main import app as root_app
+
+        result = runner.invoke(root_app, ["cluster", "login", "--help"])
+        assert result.exit_code == 0
+        assert "CLUSTER" in result.output
 
 
 class TestCustomBaseUrlSurvivesContextRefresh:
@@ -212,6 +343,19 @@ class TestCredentialPluginSuccess:
 
         assert urls == ["https://api.example.com/api/v1/clusters/c1/kube-token"]
 
+    def test_forwards_the_pool(self, patch_config, monkeypatch):
+        seen = {}
+
+        def _post(url, **kwargs):
+            seen.update(kwargs)
+            return httpx.Response(200, json={"status": {}}, request=httpx.Request("POST", url))
+
+        monkeypatch.setattr("prime_cli.commands.auth.httpx.post", _post)
+        runner.invoke(auth_app, ["k8s-token", "--cluster", "c1", "--pool", "train"])
+
+        assert seen["params"] == {"pool": "train"}
+        assert seen["headers"]["Authorization"] == "Bearer test-key"
+
 
 class TestCredentialPluginFailures:
     """Each status maps to a distinct exit code so a caller can tell whether
@@ -226,6 +370,8 @@ class TestCredentialPluginFailures:
         result = runner.invoke(auth_app, ["k8s-token", "--cluster", "c1"])
         assert result.exit_code == EXIT_FORBIDDEN
         assert result.stdout.strip() == ""
+        # The platform's reason beats anything reconstructed client-side.
+        assert "No active cluster access grant" in result.stderr
 
     def test_expired_platform_auth_points_at_prime_login(self, patch_config, monkeypatch):
         respond(monkeypatch, status_code=401)

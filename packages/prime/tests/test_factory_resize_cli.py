@@ -2,7 +2,7 @@
 
 import json
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Union
 from unittest.mock import patch
 
 import pytest
@@ -56,12 +56,14 @@ class _StubConfig:
 
 
 class _DummyAPIClient:
+    """GET returns the cluster-list payloads in order, repeating the last one."""
+
     def __init__(
         self,
-        clusters_payload: Dict[str, Any],
+        clusters_payloads: List[Dict[str, Any]],
         resize_response: Optional[Dict[str, Any]] = None,
     ) -> None:
-        self._clusters_payload = clusters_payload
+        self._clusters_payloads = clusters_payloads
         self._resize_response = resize_response or {
             "numNodes": 4,
             "added": ["node-3", "node-4"],
@@ -73,7 +75,8 @@ class _DummyAPIClient:
         self, endpoint: str, params: Optional[Dict[str, Any]] = None, timeout: Any = None
     ) -> Dict[str, Any]:
         self.calls.append({"method": "GET", "endpoint": endpoint, "params": params})
-        return self._clusters_payload
+        gets = sum(1 for c in self.calls if c["method"] == "GET")
+        return self._clusters_payloads[min(gets, len(self._clusters_payloads)) - 1]
 
     def post(
         self,
@@ -84,31 +87,19 @@ class _DummyAPIClient:
         self.calls.append({"method": "POST", "endpoint": endpoint, "json": json})
         return self._resize_response
 
-    def request(
-        self,
-        method: str,
-        endpoint: str,
-        json: Optional[Dict[str, Any]] = None,
-        params: Optional[Dict[str, Any]] = None,
-        timeout: Any = None,
-    ) -> Dict[str, Any]:
-        self.calls.append({"method": method, "endpoint": endpoint, "json": json, "params": params})
-        if method == "POST":
-            return self._resize_response
-        return self._clusters_payload
-
     def delete(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         return {}
 
 
 def _install(
     monkeypatch: pytest.MonkeyPatch,
-    clusters_payload: Dict[str, Any],
+    clusters_payload: Union[Dict[str, Any], List[Dict[str, Any]]],
     team_id: Optional[str] = "team-123",
     resize_response: Optional[Dict[str, Any]] = None,
 ) -> _DummyAPIClient:
     monkeypatch.delenv("PRIME_TEAM_ID", raising=False)
-    dummy = _DummyAPIClient(clusters_payload, resize_response=resize_response)
+    payloads = clusters_payload if isinstance(clusters_payload, list) else [clusters_payload]
+    dummy = _DummyAPIClient(payloads, resize_response=resize_response)
     monkeypatch.setattr("prime_cli.commands.factory_slurm.APIClient", lambda: dummy)
     monkeypatch.setattr("prime_cli.commands.factory_slurm.Config", lambda: _StubConfig(team_id))
     monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
@@ -152,7 +143,7 @@ def test_slurm_resize_with_confirmation_yes(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_slurm_resize_shows_confirmation_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
-    _install(monkeypatch, _clusters_payload(gpu_count=32))
+    _install(monkeypatch, _clusters_payload(gpuCount=32))
 
     # Simulate user declining
     result = runner.invoke(
@@ -230,25 +221,63 @@ def test_slurm_resize_rejects_negative_nodes(monkeypatch: pytest.MonkeyPatch) ->
     assert "must be a positive integer" in output
 
 
-def test_slurm_resize_json_output(monkeypatch: pytest.MonkeyPatch) -> None:
-    resize_response = {
+RESIZE_ARGS = ["factory", "slurm", "resize", "job-123", "--nodes", "4"]
+
+
+def test_slurm_resize_json_with_yes_keeps_stdout_pure(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install(monkeypatch, _clusters_payload())
+
+    result = runner.invoke(app, [*RESIZE_ARGS, "--yes", "--json"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == {
         "numNodes": 4,
         "added": ["node-3", "node-4"],
         "removed": [],
     }
-    _install(monkeypatch, _clusters_payload(), resize_response=resize_response)
+
+
+def test_slurm_resize_json_prompt_goes_to_stderr(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install(monkeypatch, _clusters_payload())
+
+    result = runner.invoke(app, [*RESIZE_ARGS, "--json"], input="y\n", env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    # click.confirm reads via input(" ") and CliRunner echoes the typed answer
+    # to stdout; a real terminal echoes it on the tty, leaving only the space.
+    assert json.loads(result.stdout.removeprefix(" y\n"))["numNodes"] == 4
+    stderr = strip_ansi(result.stderr)
+    assert "Current size: 32 GPUs" in stderr
+    assert "Proceed with resize?" in stderr
+
+
+def test_slurm_resize_json_declined_prints_nothing_to_stdout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dummy = _install(monkeypatch, _clusters_payload())
+
+    result = runner.invoke(app, [*RESIZE_ARGS, "--json"], input="n\n", env=TEST_ENV)
+
+    assert result.exit_code == 0
+    assert result.stdout.removeprefix(" n\n") == ""
+    assert "Resize cancelled." in result.stderr
+    assert not [c for c in dummy.calls if c["method"] == "POST"]
+
+
+def test_slurm_resize_json_cluster_not_found_keeps_stdout_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install(monkeypatch, _clusters_payload())
 
     result = runner.invoke(
         app,
-        ["factory", "slurm", "resize", "job-123", "--nodes", "4", "--yes", "--json"],
+        ["factory", "slurm", "resize", "nonexistent-job", "--nodes", "4", "--yes", "--json"],
         env=TEST_ENV,
     )
 
-    assert result.exit_code == 0, result.output
-    response = json.loads(result.output)
-    assert response["numNodes"] == 4
-    assert response["added"] == ["node-3", "node-4"]
-    assert response["removed"] == []
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert "No Slurm deployment matched" in strip_ansi(result.stderr)
 
 
 def test_slurm_resize_handles_403_error_with_context(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -263,7 +292,21 @@ def test_slurm_resize_handles_403_error_with_context(monkeypatch: pytest.MonkeyP
         output = strip_ansi(result.output)
 
         assert result.exit_code == 1
-        assert "team admin" in output or "self-service" in output
+        assert "factory:write" in output
+        assert "team admin" in output
+        assert "self-service" in output
+
+
+def test_slurm_resize_lookup_403_mentions_read_scope(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install(monkeypatch, _clusters_payload())
+
+    with patch.object(FactorySlurmClient, "list_clusters") as mock_list:
+        mock_list.side_effect = APIError("HTTP 403: Forbidden")
+
+        result = runner.invoke(app, [*RESIZE_ARGS, "--yes"], env=TEST_ENV)
+
+    assert result.exit_code == 1
+    assert "slurm_clusters:read" in strip_ansi(result.output)
 
 
 def test_slurm_resize_handles_503_error_with_retry_hint(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -324,33 +367,96 @@ def test_slurm_resize_cluster_not_found(monkeypatch: pytest.MonkeyPatch) -> None
     assert "No Slurm deployment matched" in output or "nonexistent-job" in output
 
 
-def test_slurm_resize_with_wait_completes(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Start with one state
-    initial_payload = _clusters_payload(status="scaling")
-    # After resize, return running status
-    updated_payload = _clusters_payload(status="running")
+# 2 nodes x 8 GPUs before; the default resize response adds 2 nodes -> 32 GPUs.
+def _sized(gpu_count: int) -> Dict[str, Any]:
+    return _clusters_payload(gpuCount=gpu_count)
 
-    dummy = _install(monkeypatch, initial_payload)
 
-    # Mock time.sleep to avoid actual waiting
-    with patch("time.sleep"):
-        # Replace the get method to return updated status after first call
-        call_count = [0]
+@pytest.fixture
+def sleeps(monkeypatch: pytest.MonkeyPatch) -> List[float]:
+    calls: List[float] = []
+    monkeypatch.setattr("prime_cli.commands.factory_slurm.time.sleep", calls.append)
+    return calls
 
-        def mock_get(endpoint: str, params: Any = None, timeout: Any = None) -> Dict[str, Any]:
-            dummy.calls.append({"method": "GET", "endpoint": endpoint, "params": params})
-            call_count[0] += 1
-            # First two calls return initial state, then return updated
-            return initial_payload if call_count[0] <= 2 else updated_payload
 
-        dummy.get = mock_get
+def test_slurm_resize_wait_polls_until_target_gpu_count(
+    monkeypatch: pytest.MonkeyPatch, sleeps: List[float]
+) -> None:
+    # Pre-flight lookup, then polls; "running" alone must not end the wait.
+    dummy = _install(monkeypatch, [_sized(16), _sized(16), _sized(24), _sized(32)])
 
-        result = runner.invoke(
-            app,
-            ["factory", "slurm", "resize", "job-123", "--nodes", "4", "--yes", "--wait"],
-            env=TEST_ENV,
-        )
-        output = strip_ansi(result.output)
+    result = runner.invoke(app, [*RESIZE_ARGS, "--yes", "--wait"], env=TEST_ENV)
+    output = strip_ansi(result.output)
 
-        assert result.exit_code == 0, result.output
-        assert "Waiting for resize" in output or "Status:" in output
+    assert result.exit_code == 0, result.output
+    assert "Waiting for the cluster to reach 32 GPUs" in output
+    assert "GPUs: 24/32" in output
+    assert "Resize complete: 32 GPUs" in output
+    assert len([c for c in dummy.calls if c["method"] == "GET"]) == 4
+    assert len(sleeps) == 2
+
+
+def test_slurm_resize_wait_handles_scale_down(
+    monkeypatch: pytest.MonkeyPatch, sleeps: List[float]
+) -> None:
+    resize_response = {"numNodes": 2, "added": [], "removed": ["node-3", "node-4"]}
+    _install(monkeypatch, [_sized(32), _sized(32), _sized(16)], resize_response=resize_response)
+
+    result = runner.invoke(
+        app,
+        ["factory", "slurm", "resize", "job-123", "--nodes", "2", "--yes", "--wait"],
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Resize complete: 16 GPUs" in strip_ansi(result.output)
+
+
+def test_slurm_resize_wait_timeout_exits_nonzero(
+    monkeypatch: pytest.MonkeyPatch, sleeps: List[float]
+) -> None:
+    _install(monkeypatch, _sized(16))
+
+    result = runner.invoke(app, [*RESIZE_ARGS, "--yes", "--wait"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 1
+    assert "Timeout:" in output
+    assert "Resize complete" not in output
+    assert sum(sleeps) == 300
+
+
+def test_slurm_resize_wait_rejects_underivable_target(
+    monkeypatch: pytest.MonkeyPatch, sleeps: List[float]
+) -> None:
+    _install(monkeypatch, _sized(15))
+
+    result = runner.invoke(app, [*RESIZE_ARGS, "--yes", "--wait"], env=TEST_ENV)
+
+    assert result.exit_code == 1
+    assert "Cannot derive the target GPU count" in strip_ansi(result.output)
+    assert sleeps == []
+
+
+def test_slurm_resize_json_wait_prints_response_after_wait(
+    monkeypatch: pytest.MonkeyPatch, sleeps: List[float]
+) -> None:
+    _install(monkeypatch, [_sized(16), _sized(24), _sized(32)])
+
+    result = runner.invoke(app, [*RESIZE_ARGS, "--yes", "--wait", "--json"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["numNodes"] == 4
+    assert "Resize complete: 32 GPUs" in strip_ansi(result.stderr)
+
+
+def test_slurm_resize_json_wait_timeout_keeps_stdout_empty(
+    monkeypatch: pytest.MonkeyPatch, sleeps: List[float]
+) -> None:
+    _install(monkeypatch, _sized(16))
+
+    result = runner.invoke(app, [*RESIZE_ARGS, "--yes", "--wait", "--json"], env=TEST_ENV)
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert "Timeout:" in strip_ansi(result.stderr)

@@ -113,20 +113,16 @@ class FactorySlurmClient:
         Raises:
             APIError: If the resize request fails
             - 400: invalid numNodes or insufficient resources
-            - 403: not team admin or self-service disabled
+            - 403: API key lacks the factory:write scope, not team admin,
+                   or self-service disabled
             - 404: cluster not found or wrong team
             - 409: not running / concurrent operation / insufficient idle nodes
             - 502: labels changed but verification failed
             - 503: Slurm state unavailable (retryable)
         """
         endpoint = f"/slurm-clusters/{team_id}/{cluster_id}/resize"
-        payload = {"numNodes": num_nodes}
         try:
-            if timeout is None:
-                return self.client.post(endpoint, json=payload)
-            # httpx.Client.post doesn't accept timeout as a kwarg,
-            # so use request() for timeout override
-            return self.client.request("POST", endpoint, json=payload, timeout=timeout)
+            return self.client.post(endpoint, json={"numNodes": num_nodes}, timeout=timeout)
         except ValueError as exc:
             raise APIError("Slurm cluster resize API returned a malformed response body.") from exc
 

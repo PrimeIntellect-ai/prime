@@ -8,6 +8,7 @@ The `prime factory slurm resize` command allows you to change the node count of 
 
 **Requirements:**
 - Team admin privileges
+- An API key with the `factory:write` scope for the resize itself, plus `slurm_clusters:read` for the pre-flight cluster lookup and `--wait` polling
 - Cluster must have self-service enabled
 - Cluster must be in running state
 
@@ -27,7 +28,7 @@ prime factory slurm resize <cluster_id> --nodes <count> [options]
 
 - `--nodes, -n`: **Required.** New total node count (absolute target, not delta; must be >= 1 and <= max(64, current size))
 - `--yes, -y`: Skip confirmation prompt
-- `--wait, -w`: Wait until the resize operation completes (polls status every 5 seconds, times out after 5 minutes)
+- `--wait, -w`: Wait until the cluster list reports the new GPU count (polls every 5 seconds; exits 1 after 5 minutes)
 - `--team, -t`: Team ID override (defaults to the selected account context)
 - `--json`: Print the API response as JSON
 - `--output, -o`: Output format: table or json
@@ -47,7 +48,7 @@ Output:
 ┌─────────┬────────────────────┬─────────┬──────────┬──────┐
 │ ID      │ NAME               │ STATUS  │ GPU TYPE │ GPUS │
 ├─────────┼────────────────────┼─────────┼──────────┼──────┤
-│ job-123 │ research-cluster   │ running │ H100     │   32 │
+│ job-123 │ research-cluster   │ running │ H100     │   16 │
 └─────────┴────────────────────┴─────────┴──────────┴──────┘
 ```
 
@@ -63,7 +64,7 @@ Output:
 ```
 Resize Slurm cluster 'research-cluster':
   Cluster ID:   job-123
-  Current size: 32 GPUs
+  Current size: 16 GPUs
   New nodes:    4 nodes
 
 Proceed with resize? [y/N]: y
@@ -82,7 +83,7 @@ prime factory slurm resize job-123 --nodes 4 --yes
 
 ### Resize and Wait for Completion
 
-Use `--wait` to poll the status until the resize completes:
+Use `--wait` to poll the cluster list until it reports the new GPU count:
 
 ```bash
 prime factory slurm resize job-123 --nodes 4 --yes --wait
@@ -94,9 +95,11 @@ Resize initiated for cluster 'research-cluster'
 Target nodes: 4
 Nodes to add: node-3, node-4
 
-Waiting for resize to complete (reconciliation is asynchronous)...
-  Status: running | GPUs: 32
-✓ Cluster is running
+Waiting for the cluster to reach 32 GPUs...
+  Status: running | GPUs: 16/32
+  Status: running | GPUs: 24/32
+  Status: running | GPUs: 32/32
+✓ Resize complete: 32 GPUs
 ```
 
 ### JSON Output
@@ -167,10 +170,10 @@ Ensure numNodes is >= 1 and <= max(64, current size) with sufficient resources.
 
 ```
 Error: HTTP 403: Forbidden
-This operation requires team admin privileges and the cluster must have self-service enabled.
+Resizing requires an API key with the factory:write scope, team admin privileges, and a cluster with self-service enabled.
 ```
 
-**Solution:** Verify you are a team admin and that the cluster has self-service enabled.
+**Solution:** Use an API key with the `factory:write` scope, verify you are a team admin, and check that the cluster has self-service enabled. A 403 from the pre-flight cluster lookup instead points at the `slurm_clusters:read` scope.
 
 ### 404: Cluster Not Found
 
@@ -226,7 +229,7 @@ The CLI calls the following endpoint (from [platform PR #6917](https://github.co
 
 - **Method:** `POST`
 - **Endpoint:** `/api/v1/slurm-clusters/{team_id}/{job_id}/resize`
-- **Authentication:** Bearer token (API key) with `slurm_clusters:write` scope
+- **Authentication:** Bearer token (API key) with the `factory:write` scope. The pre-flight lookup and `--wait` polling call `GET /api/v1/slurm-clusters/{team_id}`, which needs `slurm_clusters:read`.
 - **Authorization:** Caller must be team admin; cluster must have `selfServiceEnabled=true`
 - **Request Body:**
   ```json
@@ -253,14 +256,14 @@ The CLI calls the following endpoint (from [platform PR #6917](https://github.co
 ### Status Polling
 
 When `--wait` is used:
-- Polls `prime factory slurm list` every 5 seconds
-- Checks cluster status (running, ready, online indicate completion)
-- Times out after 5 minutes (300 seconds)
-- Shows current status and GPU count on each poll
+- Derives the target GPU count: the node count before the resize is `numNodes - len(added) + len(removed)`, GPUs per node is the pre-resize GPU count divided by that, and the target is `numNodes` times GPUs per node
+- Polls `GET /api/v1/slurm-clusters/{team_id}` every 5 seconds until the cluster's `gpuCount` equals the target
+- Exits 1 if the target is not reached within 5 minutes (300 seconds), or if the pre-resize GPU count does not divide evenly into nodes
+- Progress goes to stderr in `--json` mode; the API response is printed to stdout only after the wait succeeds
 
 ### Node Count vs. GPU Count
 
-The API works with **node counts**, but `prime factory slurm list` shows **GPU counts**. The confirmation prompt displays the GPU count from the current cluster state and the target node count from your `--nodes` argument. After resize, verify the result by checking the updated GPU count in the cluster list.
+The API works with **node counts**, but `prime factory slurm list` shows **GPU counts**. The confirmation prompt displays the GPU count from the current cluster state and the target node count from your `--nodes` argument; `--wait` converts the node target into a GPU count as described above.
 
 ## See Also
 

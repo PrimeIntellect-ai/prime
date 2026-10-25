@@ -50,10 +50,10 @@ def test_an_ambiguous_failure_is_replayed(make_platform_client, rft_routes, no_s
 def test_a_persistent_transient_failure_loses_only_its_step(
     make_platform_client, rft_routes, no_sleep
 ):
-    import json
+    import orjson
 
     def down_for_step_one(request: httpx.Request) -> httpx.Response:
-        if json.loads(request.content)["metrics"]["step"] == 1:
+        if orjson.loads(request.content)["metrics"]["step"] == 1:
             return httpx.Response(502)
         return httpx.Response(200, json={"data": {"status": "success"}})
 

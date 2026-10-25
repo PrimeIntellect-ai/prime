@@ -6,8 +6,9 @@ clients too. (The conftest's home isolation points Path.home at a tmpdir, so
 these tests write ~/.prime/config.json freely.)
 """
 
-import json
 from pathlib import Path
+
+import orjson
 
 from prime_traces import Config, TracesAPIClient
 
@@ -23,7 +24,7 @@ def _write_config(content: str) -> Path:
 def test_non_dict_config_json_degrades_to_empty():
     """Valid JSON that is not an object must degrade exactly like invalid
     JSON: every accessor assumes a dict."""
-    _write_config(json.dumps(["not", "a", "dict"]))
+    _write_config(orjson.dumps(["not", "a", "dict"]).decode())
     assert Config().config == {}
     # The construction path that must survive it: all parameters explicit.
     api = TracesAPIClient(api_key="k", base_url="http://testserver", team_id="")
@@ -46,7 +47,9 @@ def test_non_utf8_config_degrades_to_empty():
 
 def test_config_values_read_from_file():
     _write_config(
-        json.dumps({"api_key": "file-key", "traces_url": "https://traces.example/api/v1"})
+        orjson.dumps(
+            {"api_key": "file-key", "traces_url": "https://traces.example/api/v1"}
+        ).decode()
     )
     config = Config()
     assert config.api_key == "file-key"
@@ -67,7 +70,7 @@ def test_traces_url_defaults_to_the_traces_service(monkeypatch):
 
 
 def test_traces_url_env_overrides_file(monkeypatch):
-    _write_config(json.dumps({"traces_url": "https://traces.file.example"}))
+    _write_config(orjson.dumps({"traces_url": "https://traces.file.example"}).decode())
     assert Config().traces_url == "https://traces.file.example"
     monkeypatch.setenv("PRIME_TRACES_URL", "http://localhost:8083/api/v1/")
     assert Config().traces_url == "http://localhost:8083"

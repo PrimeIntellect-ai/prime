@@ -10,10 +10,10 @@ and keep the event loop free while it reads and hashes.
 import asyncio
 import gzip
 import hashlib
-import json
 import threading
 
 import httpx
+import orjson
 import pytest
 from test_upload_wire import parse_multipart
 
@@ -52,7 +52,7 @@ class TestRequestShape:
 
         parts = parse_multipart(captured["content"], request.headers["content-type"])
         assert parts["traces"][1] == RAW
-        assert json.loads(parts["metadata"][1]) == {
+        assert orjson.loads(parts["metadata"][1]) == {
             "schema_version": 1,
             "context": {"source": "hosted_eval"},
         }

@@ -111,10 +111,10 @@ def test_nothing_to_encode_makes_no_request(make_platform_client, rft_routes):
 
 
 def test_a_failed_presign_loses_that_step_only(make_platform_client, rft_routes):
-    import json
+    import orjson
 
     def flaky(request: httpx.Request) -> httpx.Response:
-        if json.loads(request.content)["step"] == 10:
+        if orjson.loads(request.content)["step"] == 10:
             return httpx.Response(502)
         return rft_routes["POST /api/v1/rft/samples/presign"](request)
 
@@ -319,7 +319,8 @@ def test_the_default_encoder_writes_the_viewer_table():
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     import io
-    import json
+
+    import orjson
 
     from prime_runs.projection import episodes_to_parquet_bytes, train_sample_schema
 
@@ -341,10 +342,10 @@ def test_the_default_encoder_writes_the_viewer_table():
     assert [row["reward"] for row in rows] == [1.0, 0.0]
     assert [row["advantage"] for row in rows] == [0.25, -0.25]
     assert [row["env_name"] for row in rows] == ["gsm8k", "gsm8k"]
-    trajectory = json.loads(rows[0]["trajectory"])
+    trajectory = orjson.loads(rows[0]["trajectory"])
     assert trajectory[-1]["advantage"] == 0.25
     assert rows[0]["num_output_tokens"] == 5
-    info = json.loads(rows[0]["info"])
+    info = orjson.loads(rows[0]["info"])
     assert info["native_wrapper"]["id"] == "e1"
     assert isinstance(pa.Table, type)
 
@@ -352,9 +353,9 @@ def test_the_default_encoder_writes_the_viewer_table():
 def test_the_default_encoder_writes_non_finite_numbers_as_null():
     pytest.importorskip("pyarrow")
     import io
-    import json
     import math
 
+    import orjson
     import pyarrow.parquet as pq
 
     from prime_runs.projection import episodes_to_parquet_bytes
@@ -365,9 +366,9 @@ def test_the_default_encoder_writes_non_finite_numbers_as_null():
     payload = episodes_to_parquet_bytes([episode], "run-abc", 10)
 
     (row,) = pq.read_table(io.BytesIO(payload)).to_pylist()
-    strict = dict(parse_constant=lambda constant: pytest.fail(f"bare {constant} in a column"))
-    assert json.loads(row["metrics"], **strict) == {"kl": None}
-    assert json.loads(row["trajectory"], **strict)[-1]["advantage"] is None
+    # orjson.loads rejects a bare NaN or Infinity
+    assert orjson.loads(row["metrics"]) == {"kl": None}
+    assert orjson.loads(row["trajectory"])[-1]["advantage"] is None
     assert math.isinf(row["advantage"])  # the float column keeps the value
 
 

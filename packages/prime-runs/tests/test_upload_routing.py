@@ -1,8 +1,7 @@
 """Exercise exclusive routing through init, the worker, and real Traces HTTP calls."""
 
-import json
-
 import httpx
+import orjson
 import pytest
 from _fakes import make_episode, make_trace, make_train_episode
 from conftest import FakeSink, RecordingHandler
@@ -123,7 +122,7 @@ def _opt_out_via(source, monkeypatch, home):
         monkeypatch.setenv("PRIME_TRACES_OPT_OUT", "true")
     else:
         (home / ".prime").mkdir()
-        (home / ".prime" / "config.json").write_text(json.dumps({"traces_opt_out": True}))
+        (home / ".prime" / "config.json").write_bytes(orjson.dumps({"traces_opt_out": True}))
     return {}
 
 

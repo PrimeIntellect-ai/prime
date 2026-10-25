@@ -86,7 +86,7 @@ def _record_lines_for(
 
     ``aiter_batches`` consumes a synchronous source entirely in a worker
     thread, so handing it the sync generator — rather than adapting it to an
-    async one here — is what keeps ``json.dumps`` over large records off the
+    async one here — is what keeps encoding large records off the
     event loop.
     """
     if isinstance(records, AsyncIterable):

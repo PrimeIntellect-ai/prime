@@ -157,9 +157,7 @@ def test_checkpoint_get_by_id_shows_volume_merge_status(monkeypatch: pytest.Monk
             updated_at=datetime.now(timezone.utc),
         )
 
-    monkeypatch.setattr(
-        "prime_cli.commands.sandbox.SandboxClient.get_checkpoint", get_checkpoint
-    )
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.get_checkpoint", get_checkpoint)
 
     expected = {
         "cp-merged": "Merge: merged",

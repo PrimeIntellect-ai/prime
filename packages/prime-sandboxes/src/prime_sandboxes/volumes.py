@@ -115,9 +115,12 @@ class Volumes:
         )
         return Volume.model_validate(response)
 
-    def publish(self, sandbox_id: str, name: str, wait: bool = True) -> SandboxCheckpoint:
+    def publish(self, sandbox_id: str, name: str, *, wait: bool = True) -> SandboxCheckpoint:
         """Publish one of a running sandbox's volume attachments.
 
+        ``wait`` is keyword-only so an old third positional argument (the
+        removed ``force`` flag) raises instead of silently meaning
+        ``wait=False``.
         The server rejects the publish unless the sandbox is attached to a
         writable volume with that name (404), makes the volume read-only
         (400), or has another sandbox's publish in flight (409). With
@@ -219,9 +222,12 @@ class AsyncVolumes:
         )
         return Volume.model_validate(response)
 
-    async def publish(self, sandbox_id: str, name: str, wait: bool = True) -> SandboxCheckpoint:
+    async def publish(self, sandbox_id: str, name: str, *, wait: bool = True) -> SandboxCheckpoint:
         """Publish one of a running sandbox's volume attachments.
 
+        ``wait`` is keyword-only so an old third positional argument (the
+        removed ``force`` flag) raises instead of silently meaning
+        ``wait=False``.
         The server rejects the publish unless the sandbox is attached to a
         writable volume with that name (404), makes the volume read-only
         (400), or has another sandbox's publish in flight (409). With

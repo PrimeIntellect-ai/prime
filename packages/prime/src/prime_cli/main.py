@@ -42,8 +42,8 @@ app = PlainTyper(
     context_settings={"help_option_names": ["-h", "--help"]},
 )
 
-# Lab commands
-app.add_typer(lab_app, name="lab", rich_help_panel="Model Factory")
+# Model Factory commands
+app.add_typer(lab_app, name="lab", hidden=True, deprecated=True)
 app.add_typer(env_app, name="env", rich_help_panel="Model Factory")
 app.command("fork", rich_help_panel="Model Factory", epilog=FORK_JSON_HELP)(fork_command)
 app.add_typer(evals_app, name="eval", rich_help_panel="Model Factory")

@@ -100,15 +100,6 @@ DISK_STATUS_COLORS = {
     "TERMINATED": "white",
 }
 
-DEPLOYMENT_STATUS_COLORS = {
-    "NOT_DEPLOYED": "white",
-    "DEPLOYING": "yellow",
-    "DEPLOYED": "green",
-    "UNLOADING": "yellow",
-    "DEPLOY_FAILED": "red",
-    "UNLOAD_FAILED": "red",
-}
-
 SLURM_CLUSTER_STATUS_COLORS = {
     "PENDING": "yellow",
     "DEPLOYING": "yellow",

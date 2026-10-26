@@ -4,11 +4,10 @@ Mirrors the other prime SDK packages: reads ~/.prime/config.json plus
 environment variables, env taking precedence.
 """
 
+import json
 import os
 from pathlib import Path
 from typing import Optional
-
-import orjson
 
 
 class Config:
@@ -30,8 +29,8 @@ class Config:
         config_data: object = {}
         if self.config_file.exists():
             try:
-                config_data = orjson.loads(self.config_file.read_bytes())
-            except (orjson.JSONDecodeError, OSError):
+                config_data = json.loads(self.config_file.read_text())
+            except (json.JSONDecodeError, OSError, UnicodeDecodeError):
                 config_data = {}
         # Valid JSON that is not an object (a list, a bare string) must degrade
         # the same way invalid JSON does: every accessor assumes a dict, and

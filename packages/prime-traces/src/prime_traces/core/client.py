@@ -16,6 +16,7 @@ client in ``core.async_client`` differs only in how it awaits I/O.
 """
 
 import gzip as gzip_module
+import json as json_module
 import random
 import sys
 import time
@@ -24,7 +25,6 @@ from email.utils import parsedate_to_datetime
 from typing import Any, Dict, Iterator, Optional
 
 import httpx
-import orjson
 
 from ..exceptions import (
     AmbiguousDeleteError,
@@ -317,7 +317,7 @@ class BaseTracesAPIClient:
             traces_part = ("traces.jsonl", body, "application/x-ndjson")
 
         return {
-            "metadata": (None, orjson.dumps(metadata), "application/json"),
+            "metadata": (None, json_module.dumps(metadata).encode(), "application/json"),
             "traces": traces_part,
         }
 

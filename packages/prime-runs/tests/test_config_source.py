@@ -1,6 +1,7 @@
 """The config a run is actually configured with: the file someone wrote, kept"""
 
-import orjson
+import json
+
 import pytest
 from conftest import RecordingHandler
 
@@ -138,7 +139,7 @@ def test_an_online_run_sends_the_source_in_create_metadata(tmp_path, online):
     run.finish()
 
     create = next(r for r in handler.requests if r.url.path == "/api/v1/evaluations/")
-    metadata = orjson.loads(create.content)["metadata"]
+    metadata = json.loads(create.content)["metadata"]
     assert metadata[CONFIG_SOURCE_KEY]["text"] == EVAL_TOML
     assert metadata[CONFIG_SOURCE_KEY]["format"] == "toml"
     assert metadata[CONFIG_SOURCE_KEY]["filename"] == "eval.toml"
@@ -156,7 +157,7 @@ def test_extra_values_can_be_merged_onto_a_launch_file(tmp_path, online):
     run.finish()
 
     create = next(r for r in handler.requests if r.url.path == "/api/v1/evaluations/")
-    metadata = orjson.loads(create.content)["metadata"]
+    metadata = json.loads(create.content)["metadata"]
     assert metadata["model"] == "deepseek/deepseek-v4-flash"
     assert metadata[CONFIG_SOURCE_KEY]["text"] == EVAL_TOML
     assert run.config_source.filename == "eval.toml"

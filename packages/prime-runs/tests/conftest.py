@@ -58,9 +58,9 @@ class RecordingHandler:
         return [f"{r.method} {r.url.path}" for r in self.requests]
 
     def bodies_for(self, path: str) -> List[Any]:
-        import orjson
+        import json
 
-        return [orjson.loads(r.content) for r in self.requests if r.url.path == path and r.content]
+        return [json.loads(r.content) for r in self.requests if r.url.path == path and r.content]
 
 
 @pytest.fixture
@@ -149,9 +149,9 @@ def rft_routes() -> Dict[str, Any]:
     """The happy path for a training run: register, metrics, samples, finalize."""
 
     def presign(request: httpx.Request) -> httpx.Response:
-        import orjson
+        import json
 
-        step = orjson.loads(request.content)["step"]
+        step = json.loads(request.content)["step"]
         return httpx.Response(
             200,
             json={

@@ -1,12 +1,12 @@
 import gzip
 import hashlib
+import json
 import re
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 from typing import Dict, Tuple
 
 import httpx
-import orjson
 import pytest
 
 from prime_traces import (
@@ -76,7 +76,7 @@ class TestRequestShape:
         )
         parts = parse_multipart(captured["content"], request.headers["content-type"])
         assert parts["traces"][1] == expected
-        assert orjson.loads(parts["metadata"][1]) == {
+        assert json.loads(parts["metadata"][1]) == {
             "schema_version": 1,
             "context": {"source": "prime-rl"},
         }
@@ -126,7 +126,7 @@ class TestRequestShape:
 
         metadata_headers, metadata_body = parts["metadata"]
         assert metadata_headers["content-type"] == "application/json"
-        assert orjson.loads(metadata_body) == {
+        assert json.loads(metadata_body) == {
             "schema_version": 1,
             "context": {"source": "hosted_eval"},
         }
@@ -175,7 +175,7 @@ class TestRequestShape:
         _, metadata_body = parse_multipart(captured["content"], captured["content_type"])[
             "metadata"
         ]
-        assert orjson.loads(metadata_body) == {"schema_version": 1}
+        assert json.loads(metadata_body) == {"schema_version": 1}
 
 
 class TestRetrySemantics:

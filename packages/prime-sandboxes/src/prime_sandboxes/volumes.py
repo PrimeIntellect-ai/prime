@@ -27,9 +27,7 @@ def _publish_path(sandbox_id: str, name: str) -> str:
     return f"/sandbox/{sandbox_id}/volumes/{quote(name, safe='')}/publish"
 
 
-def _name_params(
-    client: "APIClient | AsyncAPIClient", team_id: Optional[str]
-) -> dict[str, object]:
+def _name_params(client: "APIClient | AsyncAPIClient", team_id: Optional[str]) -> dict[str, object]:
     resolved_team_id = _resolved_team_id(client, team_id)
     if resolved_team_id:
         return {"team_id": resolved_team_id}
@@ -93,9 +91,12 @@ class Volumes:
             params=_name_params(self._parent.client, team_id),
         )
 
-    def publish(self, sandbox_id: str, name: str, wait: bool = True) -> SandboxCheckpoint:
+    def publish(self, sandbox_id: str, name: str, *, wait: bool = True) -> SandboxCheckpoint:
         """Publish one of a running sandbox's volume attachments.
 
+        ``wait`` is keyword-only so an old third positional argument (the
+        removed ``force`` flag) raises instead of silently meaning
+        ``wait=False``.
         The server rejects the publish unless the sandbox is attached to a
         writable volume with that name (404), makes the volume read-only
         (400), or has another sandbox's publish in flight (409). With
@@ -173,9 +174,12 @@ class AsyncVolumes:
             params=_name_params(self._parent.client, team_id),
         )
 
-    async def publish(self, sandbox_id: str, name: str, wait: bool = True) -> SandboxCheckpoint:
+    async def publish(self, sandbox_id: str, name: str, *, wait: bool = True) -> SandboxCheckpoint:
         """Publish one of a running sandbox's volume attachments.
 
+        ``wait`` is keyword-only so an old third positional argument (the
+        removed ``force`` flag) raises instead of silently meaning
+        ``wait=False``.
         The server rejects the publish unless the sandbox is attached to a
         writable volume with that name (404), makes the volume read-only
         (400), or has another sandbox's publish in flight (409). With

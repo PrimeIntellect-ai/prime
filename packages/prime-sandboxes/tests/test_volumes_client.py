@@ -451,6 +451,17 @@ def waiter_clock(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     return sleeps
 
 
+def test_publish_wait_is_keyword_only():
+    # The old third positional argument was `force`; keyword-only wait turns
+    # a stale positional call into a loud TypeError instead of silently
+    # meaning wait=False.
+    client = RoutingAPIClient(lambda method, path, json: _checkpoint_response())
+    volumes = SandboxClient(client).volumes  # type: ignore[arg-type]
+
+    with pytest.raises(TypeError):
+        volumes.publish("sb-1", "dataset", False)
+
+
 def test_publish_sends_exact_post_path_and_body():
     client = RoutingAPIClient(lambda method, path, json: _checkpoint_response())
     volumes = SandboxClient(client).volumes  # type: ignore[arg-type]
@@ -519,6 +530,17 @@ def _async_publish_client(handler: Any) -> tuple[AsyncSandboxClient, list[tuple[
 
     client.client.request = request
     return client, calls
+
+
+def test_async_publish_wait_is_keyword_only():
+    client, _ = _async_publish_client(lambda method, path, json: _checkpoint_response())
+
+    async def scenario() -> None:
+        async with client:
+            await client.volumes.publish("sb-1", "dataset", False)
+
+    with pytest.raises(TypeError):
+        asyncio.run(scenario())
 
 
 def test_async_publish_sends_exact_post_path_and_body():

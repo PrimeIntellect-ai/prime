@@ -26,7 +26,7 @@ import sys
 import tempfile
 import time
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import typer
@@ -213,7 +213,7 @@ _GATEWAY_HOST = re.compile(r"[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9
 _SHA256_HEX = re.compile(r"[0-9a-fA-F]{64}")
 
 
-def _gateway_of(session, direct: bool):
+def _gateway_of(session, direct: bool, ui=console):
     """The session's gateway as (host:port, sha256), or None to connect over
     the tailnet: `--direct`, no gateway offered, or an offer that does not look
     like a host, port and digest (it is written into the ssh config)."""
@@ -225,7 +225,7 @@ def _gateway_of(session, direct: bool):
         and 0 < gateway.port < 65536
         and _SHA256_HEX.fullmatch(gateway.cert_sha256)
     ):
-        console.print("[yellow]Ignoring an invalid gateway from the server.[/yellow]")
+        ui.print("[yellow]Ignoring an invalid gateway from the server.[/yellow]")
         return None
     return f"{gateway.host}:{gateway.port}", gateway.cert_sha256.lower()
 
@@ -332,7 +332,7 @@ def _waiting_text(session) -> str:
     return "Waiting for SSH connection to become available..."
 
 
-def _wait_for_connection(client, name: str, session, team_id):
+def _wait_for_connection(client, name: str, session, team_id, ui=console):
     """Poll until the session publishes its SSH endpoint. Raises typer.Exit
     on a dead session, a timeout, or a status API that keeps failing; a
     single failed poll (network blip, 5xx) is retried.
@@ -344,14 +344,14 @@ def _wait_for_connection(client, name: str, session, team_id):
     shown = _waiting_text(session)
     # No spinner off a terminal (console.status gives None): print each
     # phase change as a line instead.
-    with console.status(shown, spinner="dots") as spinner:
+    with ui.status(shown, spinner="dots") as spinner:
         deadline = time.monotonic() + _SESSION_WAIT_SECONDS
         while not session.ssh_connection and time.monotonic() < deadline:
             phase = getattr(session, "phase", None)
             if session.status in _DEAD_SESSION_STATES or phase in _DEAD_SESSION_PHASES:
                 state = session.status if session.status in _DEAD_SESSION_STATES else str(phase)
                 detail = f": {session.error_message}" if session.error_message else "."
-                console.print(f"[red]Session is {state.upper()}{escape(detail)}[/red]")
+                ui.print(f"[red]Session is {state.upper()}{escape(detail)}[/red]")
                 raise typer.Exit(1)
             time.sleep(5)
             try:
@@ -360,7 +360,7 @@ def _wait_for_connection(client, name: str, session, team_id):
             except APIError as exc:
                 errors += 1
                 if errors >= _MAX_POLL_ERRORS:
-                    console.print(f"[red]Error:[/red] {escape(str(exc))}")
+                    ui.print(f"[red]Error:[/red] {escape(str(exc))}")
                     raise typer.Exit(1) from exc
             text = _waiting_text(session)
             if text != shown:
@@ -368,20 +368,20 @@ def _wait_for_connection(client, name: str, session, team_id):
                 if spinner:
                     spinner.update(text)
                 else:
-                    console.print(text)
+                    ui.print(text)
     if not session.ssh_connection:
-        console.print("[red]Timed out waiting for SSH.[/red]")
+        ui.print("[red]Timed out waiting for SSH.[/red]")
         raise typer.Exit(1)
     return session
 
 
-def _stop_quietly(client, name: str, session_id: str, team_id) -> None:
+def _stop_quietly(client, name: str, session_id: str, team_id, ui=console) -> None:
     """Best-effort stop of a session this command created but never used."""
     try:
         client.stop_volume_session(name, session_id, team_id=team_id)
-        console.print(f"Stopped session {session_id}.")
+        ui.print(f"Stopped session {session_id}.")
     except Exception:
-        console.print(
+        ui.print(
             f"[yellow]Could not stop session {session_id}; run: "
             f"prime volumes stop {escape(name)} {session_id}[/yellow]"
         )
@@ -394,6 +394,7 @@ def _open_session(
     allow_writable: bool = False,
     existing=None,
     from_ssh: bool = False,
+    ui=console,
 ):
     """Create or reuse a session, wait for its endpoint and write the ssh
     config block. Returns (session, alias, key, config, via_gateway).
@@ -401,10 +402,11 @@ def _open_session(
     `allow_writable` lets a read-only request reuse the caller's live
     read-write session. `existing` is a session the server already chose
     (the transfer route): it is used as is, and never stopped here.
-    `from_ssh` adds the --read-only hint to a single-writer 409."""
+    `from_ssh` adds the --read-only hint to a single-writer 409. `ui` is
+    where progress goes (stderr when stdout carries data)."""
     key = Config().ssh_key_path
     if not key or not os.path.isfile(os.path.expanduser(key)):
-        console.print("[red]SSH key not found; use prime config set-ssh-key-path.[/red]")
+        ui.print("[red]SSH key not found; use prime config set-ssh-key-path.[/red]")
         raise typer.Exit(1)
     key = os.path.expanduser(key)
     client, team_id = _client()
@@ -419,7 +421,7 @@ def _open_session(
             # 409: one read-write session per volume (someone else's is live,
             # or an upload is in progress). Reported as is, never retried.
             detail = api_detail(exc)
-            console.print(f"[red]Error:[/red] {escape(detail)}")
+            ui.print(f"[red]Error:[/red] {escape(detail)}")
             if from_ssh and not read_only and "active read-write session" in detail:
                 console.print(
                     f"Tip: prime volumes ssh {name} --read-only opens a read-only session",
@@ -429,12 +431,17 @@ def _open_session(
     mode = "read-only" if session.read_only else "read-write"
     reused = existing is not None or (allow_writable and not session.read_only)
     label = "Reusing session" if reused else "Session"
-    console.print(
+    ui.print(
         f"{label} {session.id} ({mode}). Stop with: prime volumes stop {escape(name)} {session.id}"
     )
+    if writer := getattr(session, "live_view_of", None):
+        ui.print(
+            f"Live read-only view of {escape(writer)}, the run or session "
+            "writing the volume: you see its files as they are now."
+        )
     connected = False
     try:
-        session = _wait_for_connection(client, name, session, team_id)
+        session = _wait_for_connection(client, name, session, team_id, ui)
         connected = True
     finally:
         # Never leave a session behind that this command created but never
@@ -442,14 +449,14 @@ def _open_session(
         # platform's idle watchdog would reap it after 30 minutes anyway;
         # stopping it here is immediate. Best-effort.
         if not connected and existing is None:
-            _stop_quietly(client, name, session.id, team_id)
+            _stop_quietly(client, name, session.id, team_id, ui)
     match = _CONNECTION.fullmatch(session.ssh_connection)
     if not match or not 1 <= int(match.group("port") or 22) <= 65535:
-        console.print("[red]Invalid SSH endpoint returned by server.[/red]")
+        ui.print("[red]Invalid SSH endpoint returned by server.[/red]")
         raise typer.Exit(1)
     host = match.group("host")
     alias = host.split(".", 1)[0]
-    gateway = _gateway_of(session, direct)
+    gateway = _gateway_of(session, direct, ui)
     config = _write_ssh_config(
         session, alias, host, match.group("user"), match.group("port") or "22", key, gateway
     )
@@ -827,7 +834,10 @@ def _transfer(
     client, team_id = _client()
     mode = "put" if upload else "get"
     try:
-        route = client.route_volume_transfer(name, mode, rel, entries, team_id=team_id)
+        # A get reads live while a run or session holds the volume.
+        route = client.route_volume_transfer(
+            name, mode, rel, entries, team_id=team_id, live=not upload
+        )
     except NotFoundError:
         route = None  # an older backend: always through a session
     except APIError as exc:
@@ -837,6 +847,8 @@ def _transfer(
         console.print(f"[red]Error:[/red] {escape(api_detail(exc))}")
         raise typer.Exit(1) from exc
     if route is not None and route.via == "r2":
+        if note := getattr(route, "note", None):
+            console.print(f"[yellow]Note:[/yellow] {escape(note)}")
         _r2_transfer(client, name, team_id, route, rel, local, upload, entries)
         return
     existing = route.session if route is not None else None
@@ -1221,20 +1233,123 @@ def _run_r2_jobs(jobs, verb: str) -> None:
             pool.shutdown(wait=True, cancel_futures=True)
 
 
-def _read_route(client, name: str, team_id):
-    """A root get's route: read-only credentials on the whole volume."""
+def _read_route(client, name: str, team_id, live: bool = False):
+    """A root get's route: read-only credentials on the whole volume, or
+    (`live`) a session onto the volume as its writer has it now."""
     try:
-        route = client.route_volume_transfer(name, "get", "", None, team_id=team_id)
+        route = client.route_volume_transfer(name, "get", "", None, team_id=team_id, live=live)
     except APIError as exc:
         raise RuntimeError(api_detail(exc)) from exc
-    if route.via != "r2":
+    if route.via != "r2" and not live:
         raise RuntimeError("a session started on the volume; rerun the command")
     return route
 
 
+class _Live:
+    """ls/du/cat's source while a run or read-write session holds the volume:
+    the session (a live view of it, or the caller's own read-write one) and
+    its ssh config. Commands run there with `run`."""
+
+    def __init__(self, name: str, route):
+        self.session, self.alias, _key, self.config, _ = _open_session(
+            name, read_only=True, existing=route.session, ui=err_console
+        )
+        if not self.session.live_view_of:  # _open_session announced a live view
+            err_console.print("Reading live from your read-write session.")
+
+    def run(self, command: str, **kw) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["ssh", "-F", str(self.config), self.alias, command], check=False, **kw
+        )
+
+
+# Exit status of the remote commands below for a path that isn't there.
+_LIVE_MISSING = 3
+# One line per entry: size|type|mtime|path (BusyBox and GNU stat alike).
+_STAT = "stat -c '%s|%F|%Y|%n'"
+
+
+def _live_stat(live: _Live, rel: str, *, depth: str) -> list[tuple[str, int, bool, int]]:
+    """(volume-relative path, size, is_dir, mtime) for `rel` on the live
+    volume: a file itself, or a directory's descendants (`depth`: find's
+    -maxdepth option, or "" for all). `rel` is shell-safe (_remote_path)."""
+    base = rel.rstrip("/")
+    target = "/volume/" + base
+    # "dir/" names a directory: a file there is missing, as on R2.
+    file = "" if rel.endswith("/") else f"elif [ -e {target} ]; then {_STAT} {target}; "
+    script = (
+        f"if [ -d {target} ]; then find {target} -mindepth 1 {depth} -exec {_STAT} {{}} +; "
+        f"{file}else exit {_LIVE_MISSING}; fi"
+    )
+    done = live.run(script, capture_output=True, text=True)
+    if done.returncode == _LIVE_MISSING:
+        raise ValueError(f"No such file or directory on the volume: /{base}")
+    if done.returncode:
+        raise RuntimeError(f"live read failed: {done.stderr.strip() or done.returncode}")
+    entries = []
+    for line in done.stdout.splitlines():
+        fields = line.split("|", 3)
+        if len(fields) < 4 or not fields[3].startswith("/volume/"):
+            continue  # the tail of a name with a newline
+        size, kind, mtime, full = fields
+        path = full.removeprefix("/volume/")
+        if not volume_objects.is_internal(path):
+            entries.append((path, int(size), kind == "directory", int(mtime)))
+    return entries
+
+
+def _live_entries(live: _Live, rel: str, recursive: bool) -> list[volume_objects.VolumeObject]:
+    """`ls` on the live volume, in the R2 listing's shape: directories end
+    in "/" with no size."""
+    return sorted(
+        (
+            volume_objects.VolumeObject(
+                path + "/" if is_dir else path,
+                None if is_dir else size,
+                datetime.fromtimestamp(mtime, timezone.utc),
+                is_dir,
+            )
+            for path, size, is_dir, mtime in _live_stat(
+                live, rel, depth="" if recursive else "-maxdepth 1"
+            )
+        ),
+        key=lambda entry: entry.path,
+    )
+
+
+def _live_usage(live: _Live, rel: str) -> dict:
+    """`du` on the live volume, in read_usage's shape: files only (a live
+    volume has no directory markers)."""
+    base = rel.rstrip("/")
+    exists = not base
+    selected_bytes = selected_files = total_bytes = total_files = 0
+    for path, size, is_dir, _ in _live_stat(live, "", depth=""):
+        selected = not base or path == base or path.startswith(base + "/")
+        exists = exists or selected
+        if is_dir:
+            continue
+        total_bytes += size
+        total_files += 1
+        if selected:
+            selected_bytes += size
+            selected_files += 1
+    if not exists:
+        raise ValueError(f"No such file or directory on the volume: /{base}")
+    return {
+        "path": rel or "/",
+        "bytes": selected_bytes,
+        "objects": selected_files,
+        "volumeBytes": total_bytes,
+        "volumeObjects": total_files,
+    }
+
+
 @contextmanager
 def _volume_reads(name: str, path: str):
-    """Open renewable root-read credentials; diagnostics never go to stdout."""
+    """Open the volume for reading: live through an SSH session while a run
+    or read-write session holds it (`s3` is None, `route` a _Live), else
+    renewable root-read credentials on its storage. Diagnostics never go to
+    stdout."""
     from botocore.exceptions import BotoCoreError, ClientError
 
     rel = _remote_path(path, error_console=err_console).removeprefix("/volume/")
@@ -1244,7 +1359,14 @@ def _volume_reads(name: str, path: str):
     s3 = None
     try:
         client, team_id = _client()
-        route = _read_route(client, name, team_id)
+        route = _read_route(client, name, team_id, live=True)
+        if route.via == "session":
+            if route.session is None:
+                raise RuntimeError("the backend routed the read to a session but sent none")
+            yield client, team_id, None, _Live(name, route), rel
+            return
+        if getattr(route, "note", None):
+            err_console.print(f"Note: {route.note}", markup=False, highlight=False)
         if not (
             route.bucket
             and route.prefix
@@ -1292,15 +1414,20 @@ def ls(
     human: bool = typer.Option(False, "--human-readable", "-h", help="Show human-readable sizes"),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """List files and directories directly from volume storage, including runs/.
+    """List files and directories on a volume, including runs/.
 
-    A live read-write session or run's changes appear once it ends.
+    While a run or read-write session holds the volume, lists it live (as
+    the writer has it now) through a read-only SSH session, started or
+    reused for you; otherwise lists the volume's storage.
     """
     validate_output_format(output, err_console)
     with _volume_reads(name, path) as (_, _, s3, route, rel):
-        entries = volume_objects.list_entries(
-            s3, route.bucket, route.prefix, rel, recursive=recursive
-        )
+        if s3 is None:
+            entries = _live_entries(route, rel, recursive)
+        else:
+            entries = volume_objects.list_entries(
+                s3, route.bucket, route.prefix, rel, recursive=recursive
+            )
         if output == "json":
             output_data_as_json([entry.to_dict() for entry in entries], console)
             return
@@ -1332,16 +1459,20 @@ def du(
     human: bool = typer.Option(False, "--human-readable", "-h", help="Show human-readable sizes"),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """Count stored bytes and objects, and compare whole-volume usage with its cap.
+    """Count bytes and objects, and compare whole-volume usage with its cap.
 
-    A live read-write session or run's changes appear once it ends.
+    While a run or read-write session holds the volume, counts its live
+    files through a read-only SSH session; otherwise the stored objects.
     """
     validate_output_format(output, err_console)
     with _volume_reads(name, path) as (client, team_id, s3, route, rel):
         volume = next((v for v in client.list_volumes(team_id=team_id) if v.name == name), None)
         if volume is None:
             raise ValueError(f"Volume {name!r} is no longer available")
-        usage = volume_objects.read_usage(s3, route.bucket, route.prefix, rel)
+        if s3 is None:
+            usage = _live_usage(route, rel)
+        else:
+            usage = volume_objects.read_usage(s3, route.bucket, route.prefix, rel)
         match = re.fullmatch(r"([0-9]+)(Gi|Ti)", volume.size or "")
         cap = int(match[1]) * 1024 ** (3 if match[2] == "Gi" else 4) if match else None
         usage.update(
@@ -1373,9 +1504,10 @@ def cat(
     name: str = typer.Argument(..., help="Volume name"),
     path: str = typer.Argument(..., help="File in the volume"),
 ) -> None:
-    """Stream a stored file to stdout as bytes, with no added newline.
+    """Stream a file to stdout as bytes, with no added newline.
 
-    A live read-write session or run's changes appear once it ends.
+    While a run or read-write session holds the volume, reads the live file
+    through a read-only SSH session; otherwise the stored one.
     """
     # Validate before making an API request, including directory operands.
     rel = _remote_path(path, error_console=err_console).removeprefix("/volume/")
@@ -1383,6 +1515,9 @@ def cat(
         err_console.print("Error: cat requires a file path, not a directory.")
         raise typer.Exit(2)
     with _volume_reads(name, path) as (_, _, s3, route, rel):
+        if s3 is None:
+            _live_cat(route, rel)
+            return
         body = s3.get_object(Bucket=route.bucket, Key=route.prefix + rel)["Body"]
         try:
             for chunk in body.iter_chunks(chunk_size=64 * 1024):
@@ -1396,6 +1531,34 @@ def cat(
             raise typer.Exit(0)
         finally:
             body.close()
+
+
+def _live_cat(live: _Live, rel: str) -> None:
+    """Stream a live file to stdout as bytes."""
+    target = "/volume/" + rel
+    proc = subprocess.Popen(
+        ["ssh", "-F", str(live.config), live.alias,
+         f"[ -f {target} ] || exit {_LIVE_MISSING}; cat {target}"],
+        stdout=subprocess.PIPE,
+    )  # fmt: skip
+    out = proc.stdout
+    assert out is not None  # stdout=PIPE
+    try:
+        for chunk in iter(lambda: out.read(64 * 1024), b""):
+            sys.stdout.buffer.write(chunk)
+        sys.stdout.buffer.flush()
+    except BrokenPipeError:
+        proc.kill()
+        with open(os.devnull, "wb") as sink:
+            os.dup2(sink.fileno(), sys.stdout.fileno())
+        raise typer.Exit(0)
+    finally:
+        out.close()
+        code = proc.wait()
+    if code == _LIVE_MISSING:
+        raise ValueError(f"No such file on the volume: /{rel}")
+    if code:
+        raise RuntimeError(f"live read failed ({code})")
 
 
 def _r2_transfer(
@@ -1499,8 +1662,9 @@ def get(
     local_dest: str = typer.Argument(".", help="Local destination"),
     direct: bool = typer.Option(False, "--direct", help=_DIRECT_HELP),
 ) -> None:
-    """Download from a volume: straight from storage, or through your live
-    read-write session if you have one (rsync, else scp)."""
+    """Download from a volume: live through a read-only SSH session while a
+    run or read-write session holds it (started or reused for you), else
+    straight from storage (rsync, else scp, over SSH)."""
     _transfer(name, True, remote_path, local_dest, upload=False, direct=direct)
 
 

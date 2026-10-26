@@ -39,7 +39,7 @@ def _nullify_non_finite(value: Any) -> Any:
 
 
 def _json_column(value: Any) -> str:
-    return orjson.dumps(value, option=orjson.OPT_NON_STR_KEYS).decode()
+    return orjson.dumps(value, option=orjson.OPT_SERIALIZE_NUMPY | orjson.OPT_NON_STR_KEYS).decode()
 
 
 def summary_trace_index(episode: Any) -> int:

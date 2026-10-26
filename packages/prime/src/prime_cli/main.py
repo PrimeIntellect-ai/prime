@@ -6,7 +6,6 @@ import typer
 from . import __version__
 from .commands.availability import app as availability_app
 from .commands.config import app as config_app
-from .commands.deployments import app as deployments_app
 from .commands.disks import app as disks_app
 from .commands.env import app as env_app
 from .commands.evals import app as evals_app
@@ -49,7 +48,6 @@ app.command("fork", rich_help_panel="Model Factory", epilog=FORK_JSON_HELP)(fork
 app.add_typer(evals_app, name="eval", rich_help_panel="Model Factory")
 app.add_typer(train_app, name="train", rich_help_panel="Model Factory")
 app.add_typer(volumes_app, name="volumes", rich_help_panel="Model Factory")
-app.add_typer(deployments_app, name="deployments", rich_help_panel="Model Factory")
 app.add_typer(
     train_app,
     name="rl",

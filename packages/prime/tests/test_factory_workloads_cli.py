@@ -151,6 +151,16 @@ def _install(
     team_id: Optional[str] = "team-123",
 ) -> _DummyAPIClient:
     monkeypatch.delenv("PRIME_TEAM_ID", raising=False)
+    # Freeze the command's clock just after the rows were built, so live
+    # ages render to the exact second.
+    frozen = datetime.now(timezone.utc)
+
+    class _FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz: Any = None) -> datetime:
+            return frozen
+
+    monkeypatch.setattr("prime_cli.commands.factory.datetime", _FrozenDatetime)
     dummy = _DummyAPIClient(payload)
     monkeypatch.setattr("prime_cli.commands.factory.APIClient", lambda: dummy)
     monkeypatch.setattr("prime_cli.commands.factory.Config", lambda: _StubConfig(team_id))
@@ -179,16 +189,16 @@ def test_workloads_groups_jobs_by_cluster_and_pool(monkeypatch: pytest.MonkeyPat
         ["[1]", "cluster-a", "·", "B300"],
         ["NAME", "USER", "STATE", "NODES", "AGE", "ID"],
         ["slurm", "(slurm-a)"],
-        ["slurm-job", "carol", "running", "2", "30m", "slurm:1"],
+        ["slurm-job", "carol", "running", "2", "30:00", "slurm:1"],
         ["slurm", "(slurm-b)"],
-        ["slurm-job", "carol", "running", "1", "30m", "slurm:2"],
+        ["slurm-job", "carol", "running", "1", "30:00", "slurm:2"],
         ["training"],
-        ["training-job", "carol", "running", "4", "30m", "training:1"],
+        ["training-job", "carol", "running", "4", "30:00", "training:1"],
         [],
         ["[2]", "office-a100", "·", "B300"],
         ["NAME", "USER", "STATE", "NODES", "AGE", "ID"],
         ["inference"],
-        ["inference-job", "carol", "queued", "1", "2h", "inference:1"],
+        ["inference-job", "carol", "queued", "1", "2:00:00", "inference:1"],
     ]
     output = runner.invoke(app, ["factory", "workloads", "--plain"], env=TEST_ENV).output
     headers = [line for line in output.splitlines() if line.startswith("NAME")]
@@ -212,11 +222,11 @@ def test_workloads_nodes_column_and_order_within_a_pool(monkeypatch: pytest.Monk
     # GPUs / 8 rounded up, GPUs below one node, cpu for none; queued jobs
     # count their request.
     assert _plain_rows()[3:] == [
-        ["slurm-job", "carol", "running", "2", "2h", "slurm:16"],
-        ["slurm-job", "carol", "running", "2", "30m", "slurm:12"],
-        ["slurm-job", "carol", "running", "4", "gpu", "30m", "slurm:4"],
-        ["slurm-job", "carol", "running", "cpu", "30m", "slurm:0"],
-        ["slurm-job", "carol", "queued", "8", "2h", "slurm:q64"],
+        ["slurm-job", "carol", "running", "2", "2:00:00", "slurm:16"],
+        ["slurm-job", "carol", "running", "2", "30:00", "slurm:12"],
+        ["slurm-job", "carol", "running", "4", "gpu", "30:00", "slurm:4"],
+        ["slurm-job", "carol", "running", "cpu", "30:00", "slurm:0"],
+        ["slurm-job", "carol", "queued", "8", "2:00:00", "slurm:q64"],
     ]
 
 
@@ -256,8 +266,8 @@ def test_workloads_age_is_run_age_for_running_and_wait_age_for_queued(
 
     assert result.exit_code == 0, result.output
     # started 30m ago (running rows) vs. created 2h ago (queued row)
-    assert "30m" in output
-    assert "2h" in output
+    assert "30:00" in output
+    assert "2:00:00" in output
 
 
 def test_workloads_json_prints_exact_api_response(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -568,7 +578,7 @@ def test_workloads_null_values_render_dashes_never_zeros(
     output = strip_ansi(result.output)
 
     assert result.exit_code == 0, result.output
-    assert "5m" in output
+    assert "5:00" in output
     # Unobserved GPUs render "-", never a fabricated zero ("cpu").
     assert "cpu" not in output
     assert "None" not in output
@@ -607,7 +617,27 @@ def test_workloads_queued_age_counts_from_created_at(monkeypatch: pytest.MonkeyP
 
     ages = {row[-1]: row[-2] for row in _plain_rows() if row[-1].startswith("slurm:")}
 
-    assert ages == {"slurm:1": "2h", "slurm:2": "3h"}
+    assert ages == {"slurm:1": "2:00:00", "slurm:2": "3:00:00"}
+
+
+def test_workloads_live_age_reads_like_squeue_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    now = datetime.now(timezone.utc)
+    rows = [
+        _workload("slurm:1", "slurm", started_at=_iso(now - timedelta(minutes=2, seconds=52))),
+        _workload(
+            "slurm:2", "slurm", started_at=_iso(now - timedelta(hours=5, minutes=34, seconds=21))
+        ),
+        _workload(
+            "slurm:3",
+            "slurm",
+            started_at=_iso(now - timedelta(days=3, hours=9, minutes=54, seconds=8)),
+        ),
+    ]
+    _install(monkeypatch, _workloads_payload(rows))
+
+    ages = {row[-1]: row[-2] for row in _plain_rows() if row[-1].startswith("slurm:")}
+
+    assert ages == {"slurm:1": "2:52", "slurm:2": "5:34:21", "slurm:3": "3-09:54:08"}
 
 
 def test_workloads_filtered_empty_distinguished_from_genuinely_empty(
@@ -719,7 +749,7 @@ def test_workloads_unobserved_allocation_row_renders_with_dash(
 
     rows = _plain_rows()
 
-    assert ["training-job", "carol", "running", "-", "30m", "training:run-5"] in rows
+    assert ["training-job", "carol", "running", "-", "30:00", "training:run-5"] in rows
     assert all("unavailable" not in row for row in rows)  # not degradation
 
 
@@ -887,7 +917,7 @@ def test_workloads_default_view_has_no_duration_column(
 
     assert result.exit_code == 0, result.output
     assert "DURATION" not in output
-    assert "ago" not in output  # live ages stay bare, e.g. "30m"
+    assert "ago" not in output  # live ages stay bare, e.g. "30:00"
 
 
 def test_workloads_state_all_shows_duration_and_default_limit(
@@ -1153,7 +1183,7 @@ def test_workloads_cluster_selects_a_slurm_cluster(monkeypatch: pytest.MonkeyPat
         ["[1]", "cluster-a", "·", "B300"],
         ["NAME", "USER", "STATE", "NODES", "AGE", "ID"],
         ["slurm", "(slurm-a)"],
-        ["slurm-job", "carol", "running", "4", "30m", "slurm:ac12:1"],
+        ["slurm-job", "carol", "running", "4", "30:00", "slurm:ac12:1"],
     ]
 
     dummy = _install(monkeypatch, payload)

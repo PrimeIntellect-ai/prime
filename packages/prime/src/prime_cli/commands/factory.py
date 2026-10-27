@@ -681,14 +681,11 @@ def _workload_nodes_cell(gpus: Optional[int], gpus_per_node: int) -> str:
     return str(math.ceil(gpus / gpus_per_node))
 
 
-def _workload_sort_key(workload: FactoryWorkload, gpus_per_node: int) -> Tuple[int, int, float]:
-    """Running before queued, then the most nodes, then the oldest."""
-    gpus = _workload_gpus(workload) or 0
-    nodes = math.ceil(gpus / gpus_per_node) if gpus_per_node else gpus
+def _workload_sort_key(workload: FactoryWorkload) -> Tuple[int, float]:
+    """Running before queued, then the oldest first, like Slurm."""
     reference = _workload_age_reference(workload)
     return (
         {"running": 0, "queued": 1}.get(workload.state, 2),
-        -nodes,
         reference.timestamp() if reference else math.inf,
     )
 
@@ -828,9 +825,7 @@ def _render_workloads_tables(
                 _name_cell(f"  {label}"),
                 [
                     _workload_cells(job, cluster_gpus_per_node, show_duration, show_reason)
-                    for job in sorted(
-                        jobs, key=lambda j: _workload_sort_key(j, cluster_gpus_per_node)
-                    )
+                    for job in sorted(jobs, key=_workload_sort_key)
                 ],
             )
             for (_, label), jobs in sorted(pools.items())

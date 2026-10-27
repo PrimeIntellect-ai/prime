@@ -198,24 +198,36 @@ def test_workloads_groups_jobs_by_cluster_and_pool(monkeypatch: pytest.MonkeyPat
 def test_workloads_nodes_column_and_order_within_a_pool(monkeypatch: pytest.MonkeyPatch) -> None:
     now = datetime.now(timezone.utc)
     rows = [
-        _workload("slurm:0", "slurm", allocated_gpus=0, requested_gpus=0),
-        _workload("slurm:4", "slurm", allocated_gpus=4, requested_gpus=4),
+        _workload("slurm:q64", "slurm", "queued", requested_gpus=64),
         _workload("slurm:12", "slurm", allocated_gpus=12, requested_gpus=12),
+        _workload(
+            "slurm:4",
+            "slurm",
+            allocated_gpus=4,
+            requested_gpus=4,
+            started_at=_iso(now - timedelta(hours=1)),
+        ),
         _workload(
             "slurm:16", "slurm", allocated_gpus=16, started_at=_iso(now - timedelta(hours=2))
         ),
-        _workload("slurm:q64", "slurm", "queued", requested_gpus=64),
+        _workload(
+            "slurm:0",
+            "slurm",
+            allocated_gpus=0,
+            requested_gpus=0,
+            started_at=_iso(now - timedelta(hours=3)),
+        ),
     ]
     _install(monkeypatch, _workloads_payload(rows))
 
-    # Running before queued, then the most nodes, then the oldest. NODES:
+    # Running before queued, then the oldest first, whatever the size. NODES:
     # GPUs / 8 rounded up, GPUs below one node, cpu for none; queued jobs
     # count their request.
     assert _plain_rows()[3:] == [
+        ["slurm-job", "carol", "running", "cpu", "3h", "slurm:0"],
         ["slurm-job", "carol", "running", "2", "2h", "slurm:16"],
+        ["slurm-job", "carol", "running", "4", "gpu", "1h", "slurm:4"],
         ["slurm-job", "carol", "running", "2", "30m", "slurm:12"],
-        ["slurm-job", "carol", "running", "4", "gpu", "30m", "slurm:4"],
-        ["slurm-job", "carol", "running", "cpu", "30m", "slurm:0"],
         ["slurm-job", "carol", "queued", "8", "2h", "slurm:q64"],
     ]
 

@@ -682,11 +682,11 @@ def _workload_nodes_cell(gpus: Optional[int], gpus_per_node: int) -> str:
 
 
 def _workload_sort_key(workload: FactoryWorkload) -> Tuple[int, float]:
-    """Running before queued, then the oldest first, like Slurm."""
+    """Like squeue: queued before running, then the newest first."""
     reference = _workload_age_reference(workload)
     return (
-        {"running": 0, "queued": 1}.get(workload.state, 2),
-        reference.timestamp() if reference else math.inf,
+        {"queued": 0, "running": 1}.get(workload.state, 2),
+        -reference.timestamp() if reference else math.inf,
     )
 
 

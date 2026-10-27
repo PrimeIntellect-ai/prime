@@ -391,17 +391,22 @@ class HostedTrainingClient:
         *,
         team_id: Optional[str] = None,
         lease_id: Optional[str] = None,
+        size_bytes: Optional[int] = None,
     ) -> VolumeTransferRoute:
         """POST …/volumes/{name}/transfer with mode "get" or "put" and the
         volume-relative path ("" = root): the get source or the put
         destination. A root put also sends `entries`, the top-level names it
         writes; a put's credential refresh sends its `lease_id` to extend
-        that lease. Raises NotFoundError on backends without the route."""
+        that lease. A put also sends `size_bytes`, its total upload size, so
+        the platform can refuse one that would take the volume over its
+        20Ti cap. Raises NotFoundError on backends without the route."""
         payload: Dict[str, Any] = {"mode": mode, "path": path}
         if entries is not None:
             payload["entries"] = entries
         if lease_id:
             payload["leaseId"] = lease_id
+        if size_bytes is not None:
+            payload["sizeBytes"] = size_bytes
         if team_id:
             payload["teamId"] = team_id
         return VolumeTransferRoute.model_validate(

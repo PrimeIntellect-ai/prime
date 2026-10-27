@@ -117,21 +117,24 @@ def _status_payload() -> Dict[str, Any]:
     }
 
 
-def _nodes_payload() -> Dict[str, Any]:
-    node = {"name": "gpu-1", "state": "ready", "gpus_total": 8, "gpus_used": 8}
+def _nodes_payload(nodes: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    if nodes is None:
+        nodes = [{"name": "gpu-1", "state": "ready", "gpus_total": 8, "gpus_used": 8}]
     return {
         "schema_version": 1,
-        "clusters": [{"display_name": name, "nodes": [node]} for name in CLUSTERS],
+        "clusters": [{"display_name": name, "nodes": nodes} for name in CLUSTERS],
         "sources": [_source("capacity") for _ in CLUSTERS],
     }
 
 
 class _DummyAPIClient:
-    def __init__(self, payload: Dict[str, Any]) -> None:
+    def __init__(
+        self, payload: Dict[str, Any], nodes_payload: Optional[Dict[str, Any]] = None
+    ) -> None:
         self._payloads = {
             "/factory/workloads": payload,
             "/factory/status": _status_payload(),
-            "/factory/nodes": _nodes_payload(),
+            "/factory/nodes": nodes_payload or _nodes_payload(),
         }
         self.calls: List[Dict[str, Any]] = []
 
@@ -149,6 +152,7 @@ def _install(
     monkeypatch: pytest.MonkeyPatch,
     payload: Dict[str, Any],
     team_id: Optional[str] = "team-123",
+    nodes_payload: Optional[Dict[str, Any]] = None,
 ) -> _DummyAPIClient:
     monkeypatch.delenv("PRIME_TEAM_ID", raising=False)
     # Freeze the command's clock just after the rows were built, so live
@@ -161,11 +165,15 @@ def _install(
             return frozen
 
     monkeypatch.setattr("prime_cli.commands.factory.datetime", _FrozenDatetime)
-    dummy = _DummyAPIClient(payload)
+    dummy = _DummyAPIClient(payload, nodes_payload)
     monkeypatch.setattr("prime_cli.commands.factory.APIClient", lambda: dummy)
     monkeypatch.setattr("prime_cli.commands.factory.Config", lambda: _StubConfig(team_id))
     monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
     return dummy
+
+
+def _counts(active: int, idle: int, down: int) -> List[str]:
+    return ["·", str(active), "active", "·", str(idle), "idle", "·", str(down), "down"]
 
 
 def _plain_rows(*args: str) -> List[List[str]]:
@@ -185,8 +193,9 @@ def test_workloads_groups_jobs_by_cluster_and_pool(monkeypatch: pytest.MonkeyPat
     # One table per cluster in `prime factory status` order, titled like
     # the status row; one block per pool (Slurm clusters by name, then
     # training, inference); the ID last.
+    counts = _counts(1, 0, 0)
     assert _plain_rows() == [
-        ["[1]", "cluster-a", "·", "B300"],
+        ["[1]", "cluster-a", "·", "B300", *counts],
         ["NAME", "USER", "STATE", "NODES", "AGE", "ID"],
         ["slurm", "(slurm-a)"],
         ["slurm-job", "carol", "running", "2", "30:00", "slurm:1"],
@@ -194,11 +203,13 @@ def test_workloads_groups_jobs_by_cluster_and_pool(monkeypatch: pytest.MonkeyPat
         ["slurm-job", "carol", "running", "1", "30:00", "slurm:2"],
         ["training"],
         ["training-job", "carol", "running", "4", "30:00", "training:1"],
+        ["other", *counts],
         [],
-        ["[2]", "office-a100", "·", "B300"],
+        ["[2]", "office-a100", "·", "B300", *counts],
         ["NAME", "USER", "STATE", "NODES", "AGE", "ID"],
         ["inference"],
         ["inference-job", "carol", "queued", "1", "2:00:00", "inference:1"],
+        ["other", *counts],
     ]
     output = runner.invoke(app, ["factory", "workloads", "--plain"], env=TEST_ENV).output
     headers = [line for line in output.splitlines() if line.startswith("NAME")]
@@ -233,13 +244,106 @@ def test_workloads_nodes_column_and_order_within_a_pool(monkeypatch: pytest.Monk
     # Like squeue: queued before running, then the newest first, whatever
     # the size. NODES: GPUs / 8 rounded up, GPUs below one node, cpu for
     # none; queued jobs count their request.
-    assert _plain_rows()[3:] == [
+    assert _plain_rows()[3:8] == [
         ["slurm-job", "carol", "queued", "8", "2:00:00", "slurm:q64"],
         ["slurm-job", "carol", "running", "2", "30:00", "slurm:12"],
         ["slurm-job", "carol", "running", "4", "gpu", "1:00:00", "slurm:4"],
         ["slurm-job", "carol", "running", "2", "2:00:00", "slurm:16"],
         ["slurm-job", "carol", "running", "cpu", "3:00:00", "slurm:0"],
     ]
+
+
+USAGE_NODES = [
+    *(
+        {
+            "name": f"slurm-{i}",
+            "state": "ready",
+            "gpus_total": 8,
+            "gpus_used": 8,
+            "assigned_to": "slurm",
+        }
+        for i in range(3)
+    ),
+    {
+        "name": "slurm-down",
+        "state": "offline",
+        "gpus_total": 8,
+        "gpus_used": 0,
+        "assigned_to": "slurm",
+    },
+    {"name": "busy", "state": "ready", "gpus_total": 8, "gpus_used": 8},
+    {"name": "idle", "state": "ready", "gpus_total": 8, "gpus_used": 0},
+]
+
+
+def test_workloads_titles_and_pool_headers_count_nodes_like_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    jobs = [
+        _workload("slurm:1", "slurm", allocated_gpus=16, scheduler_display_name="slurm-a"),
+        _workload("slurm:2", "slurm", allocated_gpus=0, scheduler_display_name="slurm-b"),
+    ]
+    _install(monkeypatch, _workloads_payload(jobs), nodes_payload=_nodes_payload(USAGE_NODES))
+
+    status = runner.invoke(app, ["factory", "status", "--plain"], env=TEST_ENV)
+    rows = _plain_rows()
+
+    # The title carries the status row's IN USE / FREE / DOWN.
+    assert status.output.splitlines()[1].split() == ["[1]", "cluster-a", "B300", "6", "3", "2", "1"]
+    assert rows[0] == ["[1]", "cluster-a", "·", "B300", *_counts(3, 2, 1)]
+    # All Slurm nodes count on one "slurm" row: the API cannot split them
+    # between Slurm clusters, so the named groups carry no counts. Pools
+    # without listed jobs close the table so every node is accounted for.
+    assert [row[:2] for row in rows[2:7]] == [
+        ["slurm", "·"],
+        ["slurm", "(slurm-a)"],
+        ["slurm-job", "carol"],
+        ["slurm", "(slurm-b)"],
+        ["slurm-job", "carol"],
+    ]
+    assert rows[2] == ["slurm", *_counts(2, 1, 1)]
+    assert rows[7:9] == [["other", *_counts(1, 0, 0)], ["unassigned", *_counts(0, 1, 0)]]
+    assert "slurm active/idle = estimated from running jobs" in " ".join(rows[-1])
+
+
+def test_workloads_slurm_counts_head_the_table_without_slurm_jobs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install(
+        monkeypatch,
+        _workloads_payload([_workload("training:1", "training")]),
+        nodes_payload=_nodes_payload(USAGE_NODES),
+    )
+
+    rows = _plain_rows("--type", "training")
+
+    assert rows[2:4] == [["slurm", *_counts(0, 3, 1)], ["training"]]
+
+
+def test_workloads_warns_when_slurm_jobs_are_truncated(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Jobs cut from the running Slurm list would count their nodes as idle.
+    payload = _workloads_payload([_workload("slurm:1", "slurm")])
+    payload["truncated"] = True
+    _install(monkeypatch, payload, nodes_payload=_nodes_payload(USAGE_NODES))
+
+    output = " ".join(" ".join(row) for row in _plain_rows())
+
+    assert "busy Slurm nodes may be undercounted" in output
+
+
+def test_workloads_shows_idle_clusters_with_their_counts(monkeypatch: pytest.MonkeyPatch) -> None:
+    job = _workload("slurm:1", "slurm", scheduler_display_name="slurm-a")
+    _install(monkeypatch, _workloads_payload([job]), nodes_payload=_nodes_payload(USAGE_NODES))
+
+    rows = _plain_rows()
+
+    # office-a100 has no jobs: its title and counts still show.
+    assert rows[rows.index([]) + 1 :][:2] == [
+        ["[2]", "office-a100", "·", "B300", *_counts(1, 4, 1)],
+        ["no", "running", "or", "queued", "jobs"],
+    ]
+    # A filtered view shows only clusters with matching jobs.
+    assert "office-a100" not in str(_plain_rows("--type", "slurm"))
 
 
 def test_workloads_long_job_names_are_shortened_in_the_middle(
@@ -315,7 +419,8 @@ def test_workloads_empty_response_prints_friendly_message(
         "workloads": [],
         "sources": [],
     }
-    _install(monkeypatch, empty)
+    # Clusters without nodes have no idle capacity to show either.
+    _install(monkeypatch, empty, nodes_payload=_nodes_payload([]))
 
     result = runner.invoke(app, ["factory", "workloads"], env=TEST_ENV)
     output = strip_ansi(result.output)
@@ -627,7 +732,7 @@ def test_workloads_queued_age_counts_from_created_at(monkeypatch: pytest.MonkeyP
     )
     _install(monkeypatch, _workloads_payload([estimate, requeued]))
 
-    ages = {row[-1]: row[-2] for row in _plain_rows() if row[-1].startswith("slurm:")}
+    ages = {row[-1]: row[-2] for row in _plain_rows() if row and row[-1].startswith("slurm:")}
 
     assert ages == {"slurm:1": "2:00:00", "slurm:2": "3:00:00"}
 
@@ -647,7 +752,7 @@ def test_workloads_live_age_reads_like_squeue_time(monkeypatch: pytest.MonkeyPat
     ]
     _install(monkeypatch, _workloads_payload(rows))
 
-    ages = {row[-1]: row[-2] for row in _plain_rows() if row[-1].startswith("slurm:")}
+    ages = {row[-1]: row[-2] for row in _plain_rows() if row and row[-1].startswith("slurm:")}
 
     assert ages == {"slurm:1": "2:52", "slurm:2": "5:34:21", "slurm:3": "3-09:54:08"}
 
@@ -671,7 +776,7 @@ def test_workloads_filtered_empty_distinguished_from_genuinely_empty(
     assert "No factory workloads match the given filters." in output
     assert "No factory workloads found." not in output
 
-    _install(monkeypatch, empty)
+    _install(monkeypatch, empty, nodes_payload=_nodes_payload([]))
     plain = runner.invoke(app, ["factory", "workloads"], env=TEST_ENV)
     plain_output = strip_ansi(plain.output)
     assert plain.exit_code == 0, plain.output
@@ -1192,10 +1297,11 @@ def test_workloads_cluster_selects_a_slurm_cluster(monkeypatch: pytest.MonkeyPat
     _install(monkeypatch, payload)
 
     assert _plain_rows("--cluster", "slurm-a") == [
-        ["[1]", "cluster-a", "·", "B300"],
+        ["[1]", "cluster-a", "·", "B300", *_counts(1, 0, 0)],
         ["NAME", "USER", "STATE", "NODES", "AGE", "ID"],
         ["slurm", "(slurm-a)"],
         ["slurm-job", "carol", "running", "4", "30:00", "slurm:ac12:1"],
+        ["other", *_counts(1, 0, 0)],
     ]
 
     dummy = _install(monkeypatch, payload)
@@ -1315,8 +1421,9 @@ def test_workloads_cluster_terminal_empty_says_bounded_window(
     assert "in the fetched window (25 rows)" in live_output
 
     # An UNFLAGGED live --cluster miss (no truncation, short response) is
-    # definitive: nothing was cut, so the plain filter wording stands.
-    _install(monkeypatch, unflagged)
+    # definitive: nothing was cut, so the plain filter wording stands (a
+    # cluster with nodes would show its idle capacity instead).
+    _install(monkeypatch, unflagged, nodes_payload=_nodes_payload([]))
     live_plain = runner.invoke(
         app, ["factory", "workloads", "--cluster", "office-a100"], env=TEST_ENV
     )

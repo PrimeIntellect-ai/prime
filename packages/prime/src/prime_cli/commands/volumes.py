@@ -1265,8 +1265,11 @@ class _Live:
 
 # Exit status of the remote commands below for a path that isn't there.
 _LIVE_MISSING = 3
-# One line per entry: size|type|mtime|path (BusyBox and GNU stat alike).
-_STAT = "stat -c '%s|%F|%Y|%n'"
+# One record per entry, NUL-terminated: size|type|mtime, a newline, then
+# the path. A name may contain newlines and |, so a line can never bound a
+# record, and BusyBox stat has no NUL escape — the shell loop prints the
+# records' terminators itself, one process per find batch.
+_RECORD = 'stat -c "%s|%F|%Y" "$f"; printf "%s\\0" "$f"'
 
 
 def _live_stat(live: _Live, rel: str, *, depth: str) -> list[tuple[str, int, bool, int]]:
@@ -1276,9 +1279,10 @@ def _live_stat(live: _Live, rel: str, *, depth: str) -> list[tuple[str, int, boo
     base = rel.rstrip("/")
     target = "/volume/" + base
     # "dir/" names a directory: a file there is missing, as on R2.
-    file = "" if rel.endswith("/") else f"elif [ -e {target} ]; then {_STAT} {target}; "
+    file = "" if rel.endswith("/") else f"elif [ -e {target} ]; then f={target}; {_RECORD}; "
     script = (
-        f"if [ -d {target} ]; then find {target} -mindepth 1 {depth} -exec {_STAT} {{}} +; "
+        f"if [ -d {target} ]; then find {target} -mindepth 1 {depth} "
+        f"-exec sh -c 'for f do {_RECORD}; done' _ {{}} +; "
         f"{file}else exit {_LIVE_MISSING}; fi"
     )
     done = live.run(script, capture_output=True, text=True)
@@ -1287,11 +1291,11 @@ def _live_stat(live: _Live, rel: str, *, depth: str) -> list[tuple[str, int, boo
     if done.returncode:
         raise RuntimeError(f"live read failed: {done.stderr.strip() or done.returncode}")
     entries = []
-    for line in done.stdout.splitlines():
-        fields = line.split("|", 3)
-        if len(fields) < 4 or not fields[3].startswith("/volume/"):
-            continue  # the tail of a name with a newline
-        size, kind, mtime, full = fields
+    for record in done.stdout.split("\0"):
+        head, newline, full = record.partition("\n")
+        if not newline or not full.startswith("/volume/"):
+            continue  # the empty tail after the last NUL
+        size, kind, mtime = head.split("|", 2)
         path = full.removeprefix("/volume/")
         if not volume_objects.is_internal(path):
             entries.append((path, int(size), kind == "directory", int(mtime)))
@@ -1321,10 +1325,12 @@ def _live_usage(live: _Live, rel: str) -> dict:
     """`du` on the live volume, in read_usage's shape: files only (a live
     volume has no directory markers)."""
     base = rel.rstrip("/")
+    # "file/" names a directory: the file it strips to is missing, as on R2.
+    file_ok = not rel.endswith("/")
     exists = not base
     selected_bytes = selected_files = total_bytes = total_files = 0
     for path, size, is_dir, _ in _live_stat(live, "", depth=""):
-        selected = not base or path == base or path.startswith(base + "/")
+        selected = not base or path.startswith(base + "/") or (path == base and (file_ok or is_dir))
         exists = exists or selected
         if is_dir:
             continue

@@ -179,17 +179,18 @@ def test_cat_streams_the_live_file(live):
     assert _run("cat", "data", "runs/run1/").exit_code == 2  # a directory operand
 
 
-def test_live_listing_parses_busybox_stat_lines(monkeypatch):
-    """Hermetic: the remote command's shape and what its lines become."""
+def test_live_listing_parses_nul_separated_records(monkeypatch):
+    """Hermetic: the remote command's shape and what its records become —
+    including a name with a newline and one with a |."""
     seen = []
 
     def run(command, **kw):
         seen.append(command)
         out = (
-            "4096|directory|1700000000|/volume/runs/run1/ckpt\n"
-            "12|regular file|1700000001|/volume/runs/run1/a|b.txt\n"
-            "5|regular empty file|1700000002|/volume/runs/.sessions/x\n"
-            "tail of a name with a newline\n"
+            "4096|directory|1700000000\n/volume/runs/run1/ckpt\0"
+            "12|regular file|1700000001\n/volume/runs/run1/a|b.txt\0"
+            "7|regular file|1700000003\n/volume/runs/run1/first\nsecond.txt\0"
+            "5|regular empty file|1700000002\n/volume/runs/.sessions/x\0"
         )
         return SimpleNamespace(returncode=0, stdout=out, stderr="")
 
@@ -204,8 +205,34 @@ def test_live_listing_parses_busybox_stat_lines(monkeypatch):
         },
         {"path": "runs/run1/ckpt/", "size": None, "modified": "2023-11-14T22:13:20+00:00",
          "type": "directory"},
+        {
+            "path": "runs/run1/first\nsecond.txt",
+            "size": 7,
+            "modified": "2023-11-14T22:13:23+00:00",
+            "type": "file",
+        },
     ]  # fmt: skip
     assert "-maxdepth 1" in seen[0] and "/volume/runs/run1" in seen[0]
+
+
+@docker
+def test_ls_and_du_report_a_name_with_a_newline_whole(live):
+    _files(live.tree, {"datasets/first\nsecond.txt": b"abc"})
+    listing = _run("ls", "data", "datasets", "-R", "-o", "json")
+    assert listing.exit_code == 0, listing.output
+    assert [e["path"] for e in json.loads(listing.stdout)] == ["datasets/first\nsecond.txt"]
+    usage = _run("du", "data", "datasets", "-o", "json")
+    assert json.loads(usage.stdout)["bytes"] == 3
+
+
+@docker
+def test_du_honors_a_trailing_slash_on_a_file(live):
+    _files(live.tree, {"datasets/a.jsonl": b"12345"})
+    plain = _run("du", "data", "datasets/a.jsonl", "-o", "json")
+    assert json.loads(plain.stdout)["bytes"] == 5
+    slashed = _run("du", "data", "datasets/a.jsonl/")
+    assert slashed.exit_code == 1, slashed.output
+    assert "No such file" in slashed.stderr and slashed.stdout == ""
 
 
 def test_get_goes_through_the_live_view(monkeypatch, tmp_path):

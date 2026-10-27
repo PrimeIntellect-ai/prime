@@ -348,6 +348,30 @@ async def test_supervisor_stops_watching_a_stopped_tunnel():
     tunnel.restart.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_supervisor_stop_passes_on_the_cancellation_of_its_caller():
+    supervisor = Supervisor(_supervised_tunnel())
+    release = asyncio.Event()
+
+    async def slow_to_stop():
+        try:
+            await asyncio.sleep(3600)
+        finally:
+            await release.wait()
+
+    supervisor._task = asyncio.create_task(slow_to_stop())
+    await asyncio.sleep(0)
+    caller = asyncio.create_task(supervisor.stop())
+    await asyncio.sleep(0.01)
+    caller.cancel()
+    await asyncio.sleep(0.01)
+    release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+    await asyncio.wait({supervisor._task})
+
+
 class _Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(self.server.status)

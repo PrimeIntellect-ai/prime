@@ -108,13 +108,9 @@ class Supervisor:
         if task is None or task is asyncio.current_task():
             return
         task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            if not task.cancelled():
-                raise  # The caller was cancelled, not the task
-        except Exception:
-            pass
+        # Unlike awaiting the task, wait() raises CancelledError only when
+        # the caller itself is cancelled, and then it propagates.
+        await asyncio.wait({task})
 
     def on_frpc_event(self, event: FrpcEvent) -> None:
         """Take one frpc event. Must be called on the event loop."""

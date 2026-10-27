@@ -437,7 +437,7 @@ class HostedTrainingClient:
         holds through a read-only live view of it (older backends ignore
         it). A put also sends `size_bytes`, its total upload size, so
         the platform can refuse one that would take the volume over its
-        20Ti cap. Raises NotFoundError on backends without the route."""
+        100Ti cap. Raises NotFoundError on backends without the route."""
         payload: Dict[str, Any] = {"mode": mode, "path": path}
         if live:
             payload["live"] = True

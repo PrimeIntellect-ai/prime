@@ -908,10 +908,12 @@ def _transfer(
     entries = _refuse_runs(local, rel) if upload else None
     client, team_id = _client()
     mode = "put" if upload else "get"
+    size = _local_upload_bytes(local) if upload else None
     try:
         # A get reads live while a run or session holds the volume.
         route = client.route_volume_transfer(
-            name, mode, rel, entries, team_id=team_id, live=not upload
+            name, mode, rel, entries, team_id=team_id, live=not upload, size_bytes=size
+
         )
     except NotFoundError:
         route = None  # an older backend: always through a session
@@ -924,7 +926,7 @@ def _transfer(
     if route is not None and route.via == "r2":
         if note := getattr(route, "note", None):
             console.print(f"[yellow]Note:[/yellow] {escape(note)}")
-        _r2_transfer(client, name, team_id, route, rel, local, upload, entries)
+        _r2_transfer(client, name, team_id, route, rel, local, upload, entries, size)
         return
     existing = route.session if route is not None else None
     rsync = shutil.which("rsync")
@@ -1088,6 +1090,24 @@ def _r2_head(s3, bucket: str, key: str) -> dict | None:
         if exc.response.get("Error", {}).get("Code") in ("404", "NoSuchKey", "NotFound"):
             return None
         raise
+
+
+def _local_upload_bytes(local: str) -> int:
+    """Total bytes a put would upload: the file itself, or the regular
+    files in the tree (symlinks are skipped, as the direct upload skips
+    them; empty-directory markers are zero bytes). Sent to the platform so
+    it can refuse a put that would take the volume over its 20Ti cap."""
+    if os.path.isfile(local):
+        return os.path.getsize(local)
+    total = 0
+    # A best-effort estimate: unreadable subtrees are skipped here and the
+    # transfer itself still reports them.
+    for root, dirs, files in os.walk(local, followlinks=False):
+        for entry in dirs + files:
+            full = os.path.join(root, entry)
+            if not os.path.islink(full) and os.path.isfile(full):
+                total += os.path.getsize(full)
+    return total
 
 
 def _put_plan(s3, bucket: str, prefix: str, local: str, rel: str):
@@ -1643,15 +1663,17 @@ def _live_cat(live: _Live, rel: str) -> None:
 
 
 def _r2_transfer(
-    client, name: str, team_id, route, rel: str, local: str, upload: bool, entries=None
+    client, name: str, team_id, route, rel: str, local: str, upload: bool, entries=None, size=None
 ) -> None:
     mode = "put" if upload else "get"
     # Only put credentials carry a lease: refreshes extend it, and it is
-    # released however the put ends (success, failure, Ctrl-C).
+    # released however the put ends (success, failure, Ctrl-C). The size
+    # rides along on refreshes too; the platform only checks it when it
+    # mints a new lease.
     lease = route.lease_id if upload else None
     s3 = _r2_client(
         lambda: client.route_volume_transfer(
-            name, mode, rel, entries, team_id=team_id, lease_id=lease
+            name, mode, rel, entries, team_id=team_id, lease_id=lease, size_bytes=size
         ),
         route,
     )

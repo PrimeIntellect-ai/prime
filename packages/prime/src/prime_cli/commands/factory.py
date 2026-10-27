@@ -648,14 +648,27 @@ def _workload_age_reference(workload: FactoryWorkload) -> Optional[datetime]:
     return workload.started_at if workload.started_at is not None else workload.created_at
 
 
+def _squeue_time(reference: datetime) -> str:
+    """Time since reference like squeue's TIME: M:SS, H:MM:SS, or D-HH:MM:SS."""
+    seconds = max(0, int((datetime.now(timezone.utc) - reference).total_seconds()))
+    days, seconds = divmod(seconds, 86400)
+    hours, seconds = divmod(seconds, 3600)
+    minutes, seconds = divmod(seconds, 60)
+    if days:
+        return f"{days}-{hours:02}:{minutes:02}:{seconds:02}"
+    if hours:
+        return f"{hours}:{minutes:02}:{seconds:02}"
+    return f"{minutes}:{seconds:02}"
+
+
 def _workload_age_cell(workload: FactoryWorkload) -> str:
-    """Ended-relative age for terminal rows; run/wait age for live ones."""
+    """Ended-relative age for terminal rows; squeue-style run/wait time for live ones."""
     reference = _workload_age_reference(workload)
     if reference is None:
         return "[dim]-[/dim]"
     if workload.state in WORKLOAD_TERMINAL_STATES:
         return f"{human_age(reference)} ago"
-    return human_age(reference)
+    return _squeue_time(reference)
 
 
 def _workload_gpus(workload: FactoryWorkload) -> Optional[int]:
@@ -681,15 +694,12 @@ def _workload_nodes_cell(gpus: Optional[int], gpus_per_node: int) -> str:
     return str(math.ceil(gpus / gpus_per_node))
 
 
-def _workload_sort_key(workload: FactoryWorkload, gpus_per_node: int) -> Tuple[int, int, float]:
-    """Running before queued, then the most nodes, then the oldest."""
-    gpus = _workload_gpus(workload) or 0
-    nodes = math.ceil(gpus / gpus_per_node) if gpus_per_node else gpus
+def _workload_sort_key(workload: FactoryWorkload) -> Tuple[int, float]:
+    """Like squeue: queued before running, then the newest first."""
     reference = _workload_age_reference(workload)
     return (
-        {"running": 0, "queued": 1}.get(workload.state, 2),
-        -nodes,
-        reference.timestamp() if reference else math.inf,
+        {"queued": 0, "running": 1}.get(workload.state, 2),
+        -reference.timestamp() if reference else math.inf,
     )
 
 
@@ -828,9 +838,7 @@ def _render_workloads_tables(
                 _name_cell(f"  {label}"),
                 [
                     _workload_cells(job, cluster_gpus_per_node, show_duration, show_reason)
-                    for job in sorted(
-                        jobs, key=lambda j: _workload_sort_key(j, cluster_gpus_per_node)
-                    )
+                    for job in sorted(jobs, key=_workload_sort_key)
                 ],
             )
             for (_, label), jobs in sorted(pools.items())

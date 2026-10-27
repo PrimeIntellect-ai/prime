@@ -320,6 +320,17 @@ def test_workloads_slurm_counts_head_the_table_without_slurm_jobs(
     assert rows[2:4] == [["slurm", *_counts(0, 3, 1)], ["training"]]
 
 
+def test_workloads_warns_when_slurm_jobs_are_truncated(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Jobs cut from the running Slurm list would count their nodes as idle.
+    payload = _workloads_payload([_workload("slurm:1", "slurm")])
+    payload["truncated"] = True
+    _install(monkeypatch, payload, nodes_payload=_nodes_payload(USAGE_NODES))
+
+    output = " ".join(" ".join(row) for row in _plain_rows())
+
+    assert "busy Slurm nodes may be undercounted" in output
+
+
 def test_workloads_shows_idle_clusters_with_their_counts(monkeypatch: pytest.MonkeyPatch) -> None:
     job = _workload("slurm:1", "slurm", scheduler_display_name="slurm-a")
     _install(monkeypatch, _workloads_payload([job]), nodes_payload=_nodes_payload(USAGE_NODES))

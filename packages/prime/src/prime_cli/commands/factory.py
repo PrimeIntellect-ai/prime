@@ -66,6 +66,9 @@ SLURM_ESTIMATE_NOTE = (
 SLURM_ACTIVE_NOTE = (
     "slurm active/idle = estimated from running jobs (GPUs/8); CPU-only jobs not counted"
 )
+SLURM_JOBS_TRUNCATED_WARNING = (
+    "running Slurm job list was truncated — busy Slurm nodes may be undercounted"
+)
 
 
 def _truncated_note(limit: int) -> str:
@@ -328,10 +331,7 @@ def _render_status_table(
     for warning in warnings:
         console.print(f"[yellow]{warning}[/yellow]")
     if slurm_jobs.truncated:
-        console.print(
-            "[yellow]running Slurm job list was truncated — busy Slurm nodes may be undercounted"
-            "[/yellow]"
-        )
+        console.print(f"[yellow]{SLURM_JOBS_TRUNCATED_WARNING}[/yellow]")
     if verbose:
         console.print(f"[dim]{SLURM_ESTIMATE_NOTE}[/dim]", highlight=False)
 
@@ -1240,6 +1240,8 @@ def factory_workloads(
             # The backend caps the unbounded default window at 200.
             effective = limit if limit is not None else WORKLOAD_LIMIT_MAX
             console.print(f"[dim]{_truncated_note(effective)}[/dim]")
+        if slurm_jobs.truncated:
+            console.print(f"[yellow]{SLURM_JOBS_TRUNCATED_WARNING}[/yellow]")
         shown = {row.cluster_display_name for row in available} | set(idle_clusters)
         if any(usage[name][0][1].nodes for name in shown if name in usage):
             console.print(f"[dim]{SLURM_ACTIVE_NOTE}[/dim]", highlight=False)

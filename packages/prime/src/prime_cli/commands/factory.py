@@ -648,14 +648,27 @@ def _workload_age_reference(workload: FactoryWorkload) -> Optional[datetime]:
     return workload.started_at if workload.started_at is not None else workload.created_at
 
 
+def _squeue_time(reference: datetime) -> str:
+    """Time since reference like squeue's TIME: M:SS, H:MM:SS, or D-HH:MM:SS."""
+    seconds = max(0, int((datetime.now(timezone.utc) - reference).total_seconds()))
+    days, seconds = divmod(seconds, 86400)
+    hours, seconds = divmod(seconds, 3600)
+    minutes, seconds = divmod(seconds, 60)
+    if days:
+        return f"{days}-{hours:02}:{minutes:02}:{seconds:02}"
+    if hours:
+        return f"{hours}:{minutes:02}:{seconds:02}"
+    return f"{minutes}:{seconds:02}"
+
+
 def _workload_age_cell(workload: FactoryWorkload) -> str:
-    """Ended-relative age for terminal rows; run/wait age for live ones."""
+    """Ended-relative age for terminal rows; squeue-style run/wait time for live ones."""
     reference = _workload_age_reference(workload)
     if reference is None:
         return "[dim]-[/dim]"
     if workload.state in WORKLOAD_TERMINAL_STATES:
         return f"{human_age(reference)} ago"
-    return human_age(reference)
+    return _squeue_time(reference)
 
 
 def _workload_gpus(workload: FactoryWorkload) -> Optional[int]:

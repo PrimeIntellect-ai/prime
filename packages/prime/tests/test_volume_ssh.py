@@ -1122,7 +1122,7 @@ def _upload_size_cases(tmp_path):
 
 
 def test_local_upload_bytes(tmp_path):
-    """The size a put reports for the platform's 20Ti cap check: the file
+    """The size a put reports for the platform's 100Ti cap check: the file
     itself, or the regular files in the tree; symlinks never count."""
     for local, expected in _upload_size_cases(tmp_path):
         assert volumes._local_upload_bytes(local) == expected
@@ -1132,7 +1132,7 @@ def test_local_upload_bytes(tmp_path):
 
 def test_put_route_sends_the_upload_size(monkeypatch, tmp_path):
     """The route request for a put carries sizeBytes (the local tree's
-    size), so the platform can refuse a put over the 20Ti cap; a get never
+    size), so the platform can refuse a put over the 100Ti cap; a get never
     sends one."""
     _setup(monkeypatch, tmp_path, {"ssh", "rsync"})
     routed = []

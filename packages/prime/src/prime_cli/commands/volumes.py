@@ -1010,7 +1010,7 @@ def _local_upload_bytes(local: str) -> int:
     """Total bytes a put would upload: the file itself, or the regular
     files in the tree (symlinks are skipped, as the direct upload skips
     them; empty-directory markers are zero bytes). Sent to the platform so
-    it can refuse a put that would take the volume over its 20Ti cap."""
+    it can refuse a put that would take the volume over its 100Ti cap."""
     if os.path.isfile(local):
         return os.path.getsize(local)
     total = 0

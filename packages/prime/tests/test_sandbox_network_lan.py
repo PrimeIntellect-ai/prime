@@ -1,9 +1,9 @@
 from typing import Any
 
 import pytest
-from prime_cli.commands.sandbox import _lan_rule_text, _parse_lan_rule
+from prime_cli.commands.sandbox import _lan_rule_text, _parse_lan_rule, _parse_localhost_forward
 from prime_cli.main import app
-from prime_sandboxes.models import LanNetwork
+from prime_sandboxes.models import LanNetwork, LocalhostForwardsStatus
 from typer.testing import CliRunner
 
 runner = CliRunner()
@@ -53,3 +53,48 @@ def test_network_create_passes_its_rules(monkeypatch):
     seen.clear()
     assert runner.invoke(app, ["sandbox", "network", "create", "lab"]).exit_code == 0
     assert seen == [("lab", None)]
+
+
+@pytest.mark.parametrize("raw", ["8000", ":sbx", "http:sbx", "0:sbx", "70000:sbx", "8000:"])
+def test_parse_localhost_forward_rejects_malformed(raw):
+    with pytest.raises(ValueError):
+        _parse_localhost_forward(raw)
+
+
+def test_network_localhost_replaces_shows_and_clears(monkeypatch):
+    seen: list[Any] = []
+
+    def status(forwards: Any) -> LocalhostForwardsStatus:
+        return LocalhostForwardsStatus(
+            forwards=forwards, generation=2, applied_generation=1, applied=False
+        )
+
+    monkeypatch.setattr(
+        "prime_cli.commands.sandbox.SandboxClient.set_localhost_forwards",
+        lambda self, sandbox_id, forwards: seen.append((sandbox_id, forwards)) or status(forwards),
+    )
+    monkeypatch.setattr(
+        "prime_cli.commands.sandbox.SandboxClient.get_localhost_forwards",
+        lambda self, sandbox_id: status([]),
+    )
+    result = runner.invoke(
+        app, ["sandbox", "network", "localhost", "sbx-app", "8000:sbx-api", "5432:sbx-db"]
+    )
+    assert result.exit_code == 0, result.output
+    ((sandbox_id, forwards),) = seen
+    assert sandbox_id == "sbx-app"
+    assert [(f.port, f.sandbox_id) for f in forwards] == [(8000, "sbx-api"), (5432, "sbx-db")]
+    assert "sbx-db.sandbox.internal:5432" in result.output
+    assert "not active yet" in result.output
+
+    result = runner.invoke(app, ["sandbox", "network", "localhost", "sbx-app"])
+    assert result.exit_code == 0 and "No localhost forwards" in result.output
+
+    seen.clear()
+    assert (
+        runner.invoke(app, ["sandbox", "network", "localhost", "sbx-app", "--clear"]).exit_code == 0
+    )
+    assert seen == [("sbx-app", [])]
+
+    result = runner.invoke(app, ["sandbox", "network", "localhost", "sbx-app", "80:a", "80:b"])
+    assert result.exit_code == 1 and "only once" in result.output

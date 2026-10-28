@@ -84,6 +84,8 @@ from .models import (
     LanNetwork,
     LanNetworkMember,
     LanRule,
+    LocalhostForward,
+    LocalhostForwardsStatus,
     ReadFileResponse,
     Sandbox,
     SandboxCheckpoint,
@@ -2784,6 +2786,27 @@ class SandboxClient:
         )
         return EgressPolicyStatus.model_validate(response)
 
+    def get_localhost_forwards(self, sandbox_id: str) -> LocalhostForwardsStatus:
+        """Get the desired and applied localhost forwards of a VM sandbox."""
+        response = self.client.request("GET", f"/sandbox/{sandbox_id}/localhost-forwards")
+        return LocalhostForwardsStatus.model_validate(response)
+
+    def set_localhost_forwards(
+        self, sandbox_id: str, forwards: List[LocalhostForward]
+    ) -> LocalhostForwardsStatus:
+        """Replace the localhost forwards of a running VM sandbox.
+
+        Each forward makes the sandbox's own loopback port reach the same port on a
+        peer sandbox over a LAN network both belong to. Each call is a complete
+        replacement, never a merge; an empty list removes all forwards. New
+        connections follow the replacement once ``applied`` is true.
+        """
+        payload = {"forwards": [f.model_dump() for f in forwards]}
+        response = self.client.request(
+            "PUT", f"/sandbox/{sandbox_id}/localhost-forwards", json=payload
+        )
+        return LocalhostForwardsStatus.model_validate(response)
+
     def bulk_delete(
         self,
         sandbox_ids: Optional[List[str]] = None,
@@ -4451,6 +4474,27 @@ class AsyncSandboxClient:
             json=payload,
         )
         return EgressPolicyStatus.model_validate(response)
+
+    async def get_localhost_forwards(self, sandbox_id: str) -> LocalhostForwardsStatus:
+        """Get the desired and applied localhost forwards of a VM sandbox."""
+        response = await self.client.request("GET", f"/sandbox/{sandbox_id}/localhost-forwards")
+        return LocalhostForwardsStatus.model_validate(response)
+
+    async def set_localhost_forwards(
+        self, sandbox_id: str, forwards: List[LocalhostForward]
+    ) -> LocalhostForwardsStatus:
+        """Replace the localhost forwards of a running VM sandbox.
+
+        Each forward makes the sandbox's own loopback port reach the same port on a
+        peer sandbox over a LAN network both belong to. Each call is a complete
+        replacement, never a merge; an empty list removes all forwards. New
+        connections follow the replacement once ``applied`` is true.
+        """
+        payload = {"forwards": [f.model_dump() for f in forwards]}
+        response = await self.client.request(
+            "PUT", f"/sandbox/{sandbox_id}/localhost-forwards", json=payload
+        )
+        return LocalhostForwardsStatus.model_validate(response)
 
     async def bulk_delete(
         self,

@@ -9,6 +9,7 @@ from pydantic import ValidationError
 from prime_sandboxes.models import (
     CreateSandboxRequest,
     EgressPolicyStatus,
+    LocalhostForward,
     Sandbox,
     validate_egress_lists,
 )
@@ -274,3 +275,38 @@ class TestValidateEgressLists:
 
     def test_both_none_is_valid(self):
         validate_egress_lists(None, None)
+
+
+class TestLocalhostForwardsMethods:
+    @pytest.mark.asyncio
+    async def test_sync_and_async_replace_and_get(self):
+        response = {
+            "forwards": [{"port": 8000, "sandbox_id": "sbx-db"}],
+            "generation": 5,
+            "applied_generation": 4,
+            "applied": False,
+        }
+        sync = _sync_client()
+        sync.client.request.return_value = response
+        status = sync.set_localhost_forwards(
+            "sbx-1", [LocalhostForward(port=8000, sandbox_id="sbx-db")]
+        )
+        sync.client.request.assert_called_once_with(
+            "PUT",
+            "/sandbox/sbx-1/localhost-forwards",
+            json={"forwards": [{"port": 8000, "sandbox_id": "sbx-db"}]},
+        )
+        assert status.forwards[0].sandbox_id == "sbx-db" and not status.applied
+
+        aclient = _async_client()
+        aclient.client.request.return_value = response
+        status = await aclient.get_localhost_forwards("sbx-1")
+        assert aclient.client.request.await_args.args == (
+            "GET",
+            "/sandbox/sbx-1/localhost-forwards",
+        )
+        assert status.generation == 5
+
+    def test_port_range_is_validated(self):
+        with pytest.raises(ValidationError):
+            LocalhostForward(port=0, sandbox_id="sbx-db")

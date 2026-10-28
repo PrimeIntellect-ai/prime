@@ -141,11 +141,17 @@ def _cluster_label(cluster: _DisplayNamedCluster, index: int, multi: bool) -> st
 class _Usage(NamedTuple):
     """Node counts for one table row: free + slurm + busy + unavailable == nodes.
     
-    Matches the dashboard's four capacity buckets:
+    Matches the dashboard's four capacity buckets (mutually exclusive):
     - free: ready nodes outside Slurm with no GPU work
     - slurm: all nodes claimed by Slurm (spare inside is "idle", not "free")
     - busy: ready nodes outside Slurm running GPU work
     - unavailable: not-ready nodes outside Slurm
+    
+    Slurm pools store internal breakdown in separate fields:
+    - slurm_busy: estimated busy nodes within Slurm
+    - slurm_idle: ready spare nodes within Slurm
+    - slurm_down: offline/cordoned/draining Slurm nodes
+    These do NOT participate in the four-bucket sum (they're subdivisions of `slurm`).
     """
 
     nodes: int
@@ -153,6 +159,9 @@ class _Usage(NamedTuple):
     slurm: int
     busy: int
     unavailable: int
+    slurm_busy: int = 0
+    slurm_idle: int = 0
+    slurm_down: int = 0
 
 
 def _gpus_per_node(nodes: List[FactoryNode]) -> int:
@@ -172,9 +181,9 @@ def _pool_usage(
     non-Slurm nodes holding GPUs are attributed to training and inference
     from the allocation summary; whatever is left over is "other".
     
-    Returns pools with _Usage in (nodes, free, slurm, busy, unavailable) format.
-    For Slurm pool: slurm field holds total Slurm nodes, free=idle, busy=busy, unavailable=down.
-    For other pools: only relevant fields are populated.
+    Returns pools with _Usage where the four buckets (free/slurm/busy/unavailable)
+    are mutually exclusive and sum to nodes. Slurm pools store internal breakdown
+    in slurm_busy/slurm_idle/slurm_down fields.
     """
     gpus_per_node = _gpus_per_node(nodes)
 
@@ -190,8 +199,9 @@ def _pool_usage(
     slurm_idle = slurm_ready - slurm_busy
     names = sorted({job.scheduler_display_name for job in slurm_jobs if job.scheduler_display_name})
     slurm_label = f"slurm ({', '.join(names)})" if names else "slurm"
-    # Slurm pool: free=idle (Slurm spare), slurm=total, busy=busy, unavailable=down
-    pools = [(slurm_label, _Usage(len(slurm), slurm_idle, len(slurm), slurm_busy, slurm_down))]
+    # Slurm pool: ALL Slurm nodes go in slurm bucket only (free=0, busy=0, unavailable=0)
+    # Internal breakdown stored separately in slurm_* fields
+    pools = [(slurm_label, _Usage(len(slurm), 0, len(slurm), 0, 0, slurm_busy, slurm_idle, slurm_down))]
 
     direct = [n for n in nodes if n.assigned_to != "slurm"]
     ready = [n for n in direct if n.state == "ready"]
@@ -200,14 +210,14 @@ def _pool_usage(
     for kind in ("training", "inference"):
         gpus = sum(a.in_use_gpus or 0 for a in allocations if a.type == kind)
         count = min(math.ceil(gpus / gpus_per_node) if gpus_per_node else 0, unattributed)
-        # Training/inference pools: all nodes are busy
+        # Training/inference pools: all nodes are busy (outside Slurm)
         pools.append((kind, _Usage(count, 0, 0, count, 0)))
         unattributed -= count
     # Other busy nodes (direct, ready, GPU work but not training/inference)
     pools.append(("other", _Usage(unattributed, 0, 0, unattributed, 0)))
     free = len(ready) - busy
     down = len(direct) - len(ready)
-    # Unassigned: free nodes and unavailable nodes
+    # Unassigned: free nodes and unavailable nodes (outside Slurm)
     pools.append(("unassigned", _Usage(free + down, free, 0, 0, down)))
     return pools
 
@@ -227,7 +237,22 @@ def _cluster_pools(
 
 
 def _usage_total(pools: List[Tuple[str, _Usage]]) -> _Usage:
-    return _Usage(*(sum(column) for column in zip(*(usage for _, usage in pools))))
+    """Sum pools into cluster total; only sums the four-bucket fields.
+    
+    slurm_busy/slurm_idle/slurm_down are internal Slurm breakdown and must not be summed.
+    """
+    usages = [usage for _, usage in pools]
+    return _Usage(
+        nodes=sum(u.nodes for u in usages),
+        free=sum(u.free for u in usages),
+        slurm=sum(u.slurm for u in usages),
+        busy=sum(u.busy for u in usages),
+        unavailable=sum(u.unavailable for u in usages),
+        # Slurm internal fields are not summed (they're already in the slurm pool)
+        slurm_busy=0,
+        slurm_idle=0,
+        slurm_down=0,
+    )
 
 
 def _ambiguous_names(status: FactoryStatus, nodes: FactoryNodes) -> set:
@@ -846,16 +871,13 @@ def _usage_text(usage: _Usage) -> Text:
 def _slurm_usage_text(usage: _Usage) -> Text:
     """Format Slurm pool internal breakdown: `<b> busy · <i> idle · <d> down`.
     
-    For Slurm pools, fields have special semantics:
-    - free field = idle (Slurm spare capacity)
-    - busy field = busy (estimated from running jobs)
-    - unavailable field = down (offline/cordoned/draining Slurm nodes)
+    Uses dedicated slurm_* fields that don't overlap with four-bucket fields.
     """
     text = Text()
     for count, label, style in (
-        (usage.busy, "busy", "default"),
-        (usage.free, "idle", "default"),  # free field holds Slurm idle count
-        (usage.unavailable, "down", "red"),
+        (usage.slurm_busy, "busy", "default"),
+        (usage.slurm_idle, "idle", "default"),
+        (usage.slurm_down, "down", "red"),
     ):
         if text:
             text.append(" · ", style="dim")

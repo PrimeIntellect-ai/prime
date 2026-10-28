@@ -63,8 +63,8 @@ FACTORY_NODES_JSON_HELP = json_output_help(
 SLURM_ESTIMATE_NOTE = (
     "slurm busy = estimated from running jobs (GPUs/8); CPU-only jobs not counted"
 )
-SLURM_BUSY_FREE_NOTE = (
-    "slurm busy/free = estimated from running jobs (GPUs/8); CPU-only jobs not counted"
+SLURM_BUSY_IDLE_NOTE = (
+    "slurm busy/idle = estimated from running jobs (GPUs/8); CPU-only jobs not counted"
 )
 SLURM_JOBS_TRUNCATED_WARNING = (
     "running Slurm job list was truncated — busy Slurm nodes may be undercounted"
@@ -1244,7 +1244,7 @@ def factory_workloads(
             console.print(f"[yellow]{SLURM_JOBS_TRUNCATED_WARNING}[/yellow]")
         shown = {row.cluster_display_name for row in available} | set(idle_clusters)
         if any(usage[name][0][1].nodes for name in shown if name in usage):
-            console.print(f"[dim]{SLURM_BUSY_FREE_NOTE}[/dim]", highlight=False)
+            console.print(f"[dim]{SLURM_BUSY_IDLE_NOTE}[/dim]", highlight=False)
         return
 
     if not rows and not degraded:

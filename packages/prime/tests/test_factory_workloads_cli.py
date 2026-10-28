@@ -303,7 +303,7 @@ def test_workloads_titles_and_pool_headers_count_nodes_like_status(
     ]
     assert rows[2] == ["slurm", *_counts(2, 1, 1)]
     assert rows[7:9] == [["other", *_counts(1, 0, 0)], ["unassigned", *_counts(0, 1, 0)]]
-    assert "slurm busy/free = estimated from running jobs" in " ".join(rows[-1])
+    assert "slurm busy/idle = estimated from running jobs" in " ".join(rows[-1])
 
 
 def test_workloads_slurm_counts_head_the_table_without_slurm_jobs(

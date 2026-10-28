@@ -122,6 +122,25 @@ def _default_nodes_payload() -> Dict[str, Any]:
     }
 
 
+def _utilization_payload(**allocated: Optional[int]) -> Dict[str, Any]:
+    """The latest utilization bucket per cluster, keyed by display name."""
+    return {
+        "schema_version": 1,
+        "as_of": _iso(datetime.now(timezone.utc)),
+        "window": "1h",
+        "bucket_seconds": 60,
+        "clusters": [
+            {
+                "display_name": name,
+                "total_nodes": None,
+                "series": [{"timestamp": _iso(datetime.now(timezone.utc)), "allocated": count}],
+                "source": _source("slurm"),
+            }
+            for name, count in allocated.items()
+        ],
+    }
+
+
 def _workloads_payload(*workloads: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "schema_version": 1,
@@ -137,8 +156,10 @@ class _DummyAPIClient:
         payload: Dict[str, Any],
         nodes_payload: Optional[Dict[str, Any]] = None,
         workloads_payload: Optional[Dict[str, Any]] = None,
+        utilization_payload: Optional[Dict[str, Any]] = None,
     ) -> None:
         self._payload = payload
+        self._utilization_payload = utilization_payload
         self._nodes_payload = (
             nodes_payload if nodes_payload is not None else _default_nodes_payload()
         )
@@ -155,6 +176,10 @@ class _DummyAPIClient:
             return self._nodes_payload
         if endpoint == "/factory/workloads":
             return self._workloads_payload
+        if endpoint == "/factory/utilization":
+            if self._utilization_payload is None:
+                raise APIError("Not found")
+            return self._utilization_payload
         return self._payload
 
 
@@ -164,10 +189,14 @@ def _install(
     team_id: Optional[str] = "team-123",
     nodes_payload: Optional[Dict[str, Any]] = None,
     workloads_payload: Optional[Dict[str, Any]] = None,
+    utilization_payload: Optional[Dict[str, Any]] = None,
 ) -> _DummyAPIClient:
     monkeypatch.delenv("PRIME_TEAM_ID", raising=False)
     dummy = _DummyAPIClient(
-        payload, nodes_payload=nodes_payload, workloads_payload=workloads_payload
+        payload,
+        nodes_payload=nodes_payload,
+        workloads_payload=workloads_payload,
+        utilization_payload=utilization_payload,
     )
     monkeypatch.setattr("prime_cli.commands.factory.APIClient", lambda: dummy)
     monkeypatch.setattr("prime_cli.commands.factory.Config", lambda: _StubConfig(team_id))
@@ -756,6 +785,88 @@ def test_factory_status_slurm_estimate_is_capped_at_ready_slurm_nodes(
     )
 
     assert _plain_status_rows()[1] == ["cluster-a", "B300", "3", "2", "0", "1"]
+
+
+def test_factory_status_counts_busy_slurm_nodes_from_utilization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # CPU-only jobs hold Slurm nodes too: the scheduler's allocated count
+    # replaces the GPU estimate (which would count 0 busy here).
+    nodes = [
+        _node("slurm-1", assigned_to="slurm"),
+        _node("slurm-2", assigned_to="slurm"),
+        _node("slurm-3", assigned_to="slurm"),
+        _node("slurm-cordoned", state="cordoned", assigned_to="slurm"),
+    ]
+    _install(
+        monkeypatch,
+        _status_payload(),
+        nodes_payload=_nodes_payload(("cluster-a", nodes)),
+        workloads_payload=_workloads_payload(_slurm_job(0), _slurm_job(0)),
+        utilization_payload=_utilization_payload(**{"cluster-a": 2}),
+    )
+
+    rows = _plain_status_rows("--verbose")
+
+    assert rows[1] == ["cluster-a", "B300", "4", "2", "1", "1"]
+    assert not any("estimated" in " ".join(row) for row in rows)
+
+
+def test_factory_status_utilization_is_capped_at_ready_slurm_nodes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A draining node can still hold a job; it stays counted as down.
+    nodes = [
+        _node("slurm-1", assigned_to="slurm"),
+        _node("slurm-draining", state="draining", assigned_to="slurm"),
+    ]
+    _install(
+        monkeypatch,
+        _status_payload(),
+        nodes_payload=_nodes_payload(("cluster-a", nodes)),
+        utilization_payload=_utilization_payload(**{"cluster-a": 2}),
+    )
+
+    assert _plain_status_rows()[1] == ["cluster-a", "B300", "2", "1", "0", "1"]
+
+
+def test_factory_status_unreadable_utilization_falls_back_to_the_estimate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    nodes = [_node("slurm-1", assigned_to="slurm"), _node("slurm-2", assigned_to="slurm")]
+    _install(
+        monkeypatch,
+        _status_payload(),
+        nodes_payload=_nodes_payload(("cluster-a", nodes)),
+        workloads_payload=_workloads_payload(_slurm_job(8)),
+        utilization_payload=_utilization_payload(**{"cluster-a": None}),
+    )
+
+    rows = _plain_status_rows("--verbose")
+
+    assert rows[1] == ["cluster-a", "B300", "2", "1", "1", "0"]
+    assert "estimated from running jobs" in " ".join(rows[-1])
+
+
+def test_factory_client_get_utilization_calls_frozen_endpoint() -> None:
+    dummy = _DummyAPIClient(
+        _status_payload(), utilization_payload=_utilization_payload(**{"cluster-a": 3})
+    )
+
+    utilization = FactoryClient(dummy).get_utilization("team-123")  # type: ignore[arg-type]
+
+    assert dummy.calls == [
+        {"endpoint": "/factory/utilization", "params": {"team_id": "team-123", "window": "1h"}}
+    ]
+    assert utilization.clusters[0].series[-1].allocated == 3
+
+
+def test_factory_client_get_utilization_rejects_unknown_schema_version() -> None:
+    payload = {**_utilization_payload(), "schema_version": 2}
+    dummy = _DummyAPIClient(_status_payload(), utilization_payload=payload)
+
+    with pytest.raises(APIError, match="schema version"):
+        FactoryClient(dummy).get_utilization("team-123")  # type: ignore[arg-type]
 
 
 def test_factory_status_verbose_pool_rows_add_up_to_the_cluster_row(

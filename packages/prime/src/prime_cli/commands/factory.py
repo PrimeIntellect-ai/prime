@@ -20,6 +20,7 @@ from ..api.factory import (
     FactoryPool,
     FactorySource,
     FactoryStatus,
+    FactoryUtilization,
     FactoryWorkload,
     FactoryWorkloads,
 )
@@ -60,6 +61,8 @@ FACTORY_NODES_JSON_HELP = json_output_help(
     "--team: use a different team than the selected account context",
 )
 
+# Shown only for clusters whose Slurm node allocation was unavailable, so
+# their busy Slurm nodes fell back to the running jobs' GPU counts.
 SLURM_ESTIMATE_NOTE = (
     "slurm in use = estimated from running jobs (GPUs/8); CPU-only jobs not counted"
 )
@@ -155,24 +158,29 @@ def _pool_usage(
     nodes: List[FactoryNode],
     slurm_jobs: List[FactoryWorkload],
     allocations: List[FactoryPool],
+    slurm_allocated: Optional[int] = None,
 ) -> List[Tuple[str, _Usage]]:
     """Split one cluster's nodes into pools; every node lands in exactly one.
 
-    Slurm nodes report no per-node load, so busy Slurm nodes are estimated
-    from the running jobs' GPUs, capped at the ready Slurm nodes. Ready
-    non-Slurm nodes holding GPUs are attributed to training and inference
-    from the allocation summary; whatever is left over is "other".
+    Slurm nodes report no per-node load (slurmd claims every GPU), so busy
+    Slurm nodes come from ``slurm_allocated``, the scheduler's count of
+    nodes held by any job. Without it they are estimated from the running
+    jobs' GPUs, which misses CPU-only jobs. Either way the count is capped
+    at the ready Slurm nodes. Ready non-Slurm nodes holding GPUs are
+    attributed to training and inference from the allocation summary;
+    whatever is left over is "other".
     """
     gpus_per_node = _gpus_per_node(nodes)
 
     slurm = [n for n in nodes if n.assigned_to == "slurm"]
     slurm_down = sum(1 for n in slurm if n.state != "ready")
     slurm_ready = len(slurm) - slurm_down
-    job_nodes = (
-        sum(math.ceil((job.allocated_gpus or 0) / gpus_per_node) for job in slurm_jobs)
-        if gpus_per_node
-        else 0
-    )
+    if slurm_allocated is not None:
+        job_nodes = slurm_allocated
+    elif gpus_per_node:
+        job_nodes = sum(math.ceil((job.allocated_gpus or 0) / gpus_per_node) for job in slurm_jobs)
+    else:
+        job_nodes = 0
     slurm_busy = min(job_nodes, slurm_ready)
     names = sorted({job.scheduler_display_name for job in slurm_jobs if job.scheduler_display_name})
     slurm_label = f"slurm ({', '.join(names)})" if names else "slurm"
@@ -195,9 +203,12 @@ def _pool_usage(
 
 
 def _cluster_pools(
-    cluster: FactoryCluster, nodes_cluster: FactoryNodesCluster, slurm_jobs: FactoryWorkloads
+    cluster: FactoryCluster,
+    nodes_cluster: FactoryNodesCluster,
+    slurm_jobs: FactoryWorkloads,
+    slurm_allocated: Dict[str, int],
 ) -> List[Tuple[str, _Usage]]:
-    """A cluster's pool usage from its nodes and the running Slurm jobs on it."""
+    """A cluster's pool usage from its nodes and the Slurm jobs on it."""
     jobs = [
         job
         for job in slurm_jobs.workloads
@@ -205,7 +216,38 @@ def _cluster_pools(
         and job.type == "slurm"
         and job.state == "running"
     ]
-    return _pool_usage(nodes_cluster.nodes, jobs, cluster.pools)
+    return _pool_usage(
+        nodes_cluster.nodes, jobs, cluster.pools, slurm_allocated.get(cluster.display_name)
+    )
+
+
+def _slurm_allocated_by_cluster(utilization: Optional[FactoryUtilization]) -> Dict[str, int]:
+    """Each cluster's Slurm nodes held by any job right now, by display name.
+
+    Read from the latest utilization bucket, which the backend pins to the
+    live Slurm job list. Clusters whose latest bucket is unreadable, or
+    whose name is ambiguous, are left out and fall back to the estimate.
+    """
+    if utilization is None:
+        return {}
+    duplicated = _duplicated_names([c.display_name for c in utilization.clusters])
+    return {
+        cluster.display_name: cluster.series[-1].allocated
+        for cluster in utilization.clusters
+        if cluster.series
+        and cluster.series[-1].allocated is not None
+        and cluster.display_name not in duplicated
+    }
+
+
+def _slurm_estimated(
+    pools_by_cluster: Dict[str, List[Tuple[str, _Usage]]], slurm_allocated: Dict[str, int]
+) -> bool:
+    """Whether any of these clusters' Slurm counts fell back to the estimate."""
+    return any(
+        pools[0][1].nodes and name not in slurm_allocated
+        for name, pools in pools_by_cluster.items()
+    )
 
 
 def _usage_total(pools: List[Tuple[str, _Usage]]) -> _Usage:
@@ -283,6 +325,7 @@ def _render_status_table(
     status: FactoryStatus,
     nodes: FactoryNodes,
     slurm_jobs: FactoryWorkloads,
+    slurm_allocated: Dict[str, int],
     selected: Optional[List[int]],
     verbose: bool,
 ) -> None:
@@ -304,6 +347,7 @@ def _render_status_table(
     multi = len(status.clusters) > 1
     indices = selected if selected is not None else list(range(len(status.clusters)))
     warnings: List[str] = []
+    shown: Dict[str, List[Tuple[str, _Usage]]] = {}
     for position, index in enumerate(indices):
         if verbose and position:
             table.add_section()
@@ -319,7 +363,8 @@ def _render_status_table(
         if paired is None:
             table.add_row(name_cell, gpu_cell, *["—"] * 4)
             continue
-        pools = _cluster_pools(cluster, paired[0], slurm_jobs)
+        pools = _cluster_pools(cluster, paired[0], slurm_jobs, slurm_allocated)
+        shown[cluster.display_name] = pools
         table.add_row(name_cell, gpu_cell, *map(_count_cell, _usage_total(pools)))
         if verbose:
             for label, usage in pools:
@@ -330,21 +375,40 @@ def _render_status_table(
     console.print(table)
     for warning in warnings:
         console.print(f"[yellow]{warning}[/yellow]")
-    if slurm_jobs.truncated:
+    estimated = _slurm_estimated(shown, slurm_allocated)
+    if slurm_jobs.truncated and estimated:
         console.print(f"[yellow]{SLURM_JOBS_TRUNCATED_WARNING}[/yellow]")
-    if verbose:
+    if verbose and estimated:
         console.print(f"[dim]{SLURM_ESTIMATE_NOTE}[/dim]", highlight=False)
+
+
+def _get_utilization(client: FactoryClient, team_id: str) -> Optional[FactoryUtilization]:
+    """The Slurm allocation curve, or None when it cannot be read.
+
+    Only the Slurm counts depend on it, and they fall back to the
+    estimate, so a failed read never fails the whole view.
+    """
+    try:
+        return client.get_utilization(team_id)
+    except APIError:
+        return None
 
 
 def _fetch_usage_view(
     client: FactoryClient, team_id: str, **workload_query: Any
-) -> Tuple[FactoryStatus, FactoryNodes, FactoryWorkloads]:
-    """Status, node inventory, and workloads, fetched in parallel."""
-    with ThreadPoolExecutor(max_workers=3) as executor:
+) -> Tuple[FactoryStatus, FactoryNodes, FactoryWorkloads, Dict[str, int]]:
+    """Status, node inventory, workloads, and Slurm allocation, fetched in parallel."""
+    with ThreadPoolExecutor(max_workers=4) as executor:
         status = executor.submit(client.get_status, team_id)
         nodes = executor.submit(client.get_nodes, team_id)
         workloads = executor.submit(client.get_workloads, team_id, **workload_query)
-        return status.result(), nodes.result(), workloads.result()
+        utilization = executor.submit(_get_utilization, client, team_id)
+        return (
+            status.result(),
+            nodes.result(),
+            workloads.result(),
+            _slurm_allocated_by_cluster(utilization.result()),
+        )
 
 
 def _select_cluster_indices(
@@ -432,7 +496,7 @@ def factory_status(
         if output == "json":
             status = client.get_status(team_id)
         else:
-            status, nodes, slurm_jobs = _fetch_usage_view(
+            status, nodes, slurm_jobs, slurm_allocated = _fetch_usage_view(
                 client, team_id, workload_type="slurm", state="running"
             )
     except APIError as e:
@@ -461,7 +525,7 @@ def factory_status(
         console.print("No factory clusters allocated.")
         return
 
-    _render_status_table(status, nodes, slurm_jobs, selected, verbose)
+    _render_status_table(status, nodes, slurm_jobs, slurm_allocated, selected, verbose)
 
 
 FACTORY_WORKLOADS_JSON_HELP = json_output_help(
@@ -846,7 +910,10 @@ def _pool_header(label: str, usage: Optional[_Usage], width: Optional[int] = Non
 
 
 def _usage_by_cluster(
-    status: FactoryStatus, nodes: FactoryNodes, slurm_jobs: FactoryWorkloads
+    status: FactoryStatus,
+    nodes: FactoryNodes,
+    slurm_jobs: FactoryWorkloads,
+    slurm_allocated: Dict[str, int],
 ) -> Dict[str, List[Tuple[str, _Usage]]]:
     """Each cluster's pool usage, counted exactly as `prime factory status` does."""
     ambiguous = _ambiguous_names(status, nodes)
@@ -854,7 +921,9 @@ def _usage_by_cluster(
     for index, cluster in enumerate(status.clusters):
         paired = _paired_nodes(cluster, index, nodes, ambiguous)
         if paired is not None:
-            usage[cluster.display_name] = _cluster_pools(cluster, paired[0], slurm_jobs)
+            usage[cluster.display_name] = _cluster_pools(
+                cluster, paired[0], slurm_jobs, slurm_allocated
+            )
     return usage
 
 
@@ -1148,7 +1217,10 @@ def factory_workloads(
                     since=since_at,
                     limit=limit,
                 )
-                (status, nodes, slurm_jobs), workloads = usage_view.result(), listed.result()
+                (status, nodes, slurm_jobs, slurm_allocated), workloads = (
+                    usage_view.result(),
+                    listed.result(),
+                )
             clusters = status.clusters
     except APIError as e:
         # Escape upstream error text: raw brackets (e.g. pydantic
@@ -1209,7 +1281,7 @@ def factory_workloads(
         warning = _jobs_unavailable_line(source.kind, source, source.kind in fresh_kinds)
         console.print(f"[yellow]{warning}[/yellow]")
 
-    usage = _usage_by_cluster(status, nodes, slurm_jobs)
+    usage = _usage_by_cluster(status, nodes, slurm_jobs, slurm_allocated)
     # The live, unfiltered view also shows clusters without jobs, so idle
     # capacity stays visible — but only when the job list is complete.
     idle_clusters: List[str] = []
@@ -1240,10 +1312,13 @@ def factory_workloads(
             # The backend caps the unbounded default window at 200.
             effective = limit if limit is not None else WORKLOAD_LIMIT_MAX
             console.print(f"[dim]{_truncated_note(effective)}[/dim]")
-        if slurm_jobs.truncated:
-            console.print(f"[yellow]{SLURM_JOBS_TRUNCATED_WARNING}[/yellow]")
         shown = {row.cluster_display_name for row in available} | set(idle_clusters)
-        if any(usage[name][0][1].nodes for name in shown if name in usage):
+        estimated = _slurm_estimated(
+            {name: usage[name] for name in shown if name in usage}, slurm_allocated
+        )
+        if slurm_jobs.truncated and estimated:
+            console.print(f"[yellow]{SLURM_JOBS_TRUNCATED_WARNING}[/yellow]")
+        if estimated:
             console.print(f"[dim]{SLURM_ACTIVE_NOTE}[/dim]", highlight=False)
         return
 

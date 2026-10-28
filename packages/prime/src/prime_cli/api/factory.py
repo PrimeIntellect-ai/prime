@@ -208,6 +208,38 @@ class FactoryNodes(BaseModel):
         return self._raw_response
 
 
+class FactoryUtilizationPoint(BaseModel):
+    """One bucket of a cluster's Slurm node-allocation curve.
+
+    ``allocated`` is the distinct Slurm nodes held by any job (CPU-only
+    jobs included) during the bucket; ``None`` means unreadable, never 0.
+    """
+
+    timestamp: AwareUTCDatetime = None
+    allocated: Optional[int] = None
+    idle: Optional[int] = None
+
+
+class FactoryClusterUtilization(BaseModel):
+    """One cluster's Slurm node-allocation curve, derived from accounting."""
+
+    display_name: str
+    total_nodes: Optional[int] = None
+    series: List[FactoryUtilizationPoint] = []
+    # None when the cluster has no visible Slurm deployment.
+    source: Optional[FactorySource] = None
+
+
+class FactoryUtilization(BaseModel):
+    """Response envelope for ``GET /api/v1/factory/utilization``."""
+
+    schema_version: int
+    as_of: AwareUTCDatetime = None
+    window: str
+    bucket_seconds: int
+    clusters: List[FactoryClusterUtilization]
+
+
 SUPPORTED_SCHEMA_VERSION = 1
 
 
@@ -349,3 +381,21 @@ class FactoryClient:
             )
         nodes._raw_response = response
         return nodes
+
+    def get_utilization(self, team_id: str, window: str = "1h") -> FactoryUtilization:
+        """Fetch each cluster's Slurm node-allocation curve for a team.
+
+        The backend validates team membership of the caller; ``window`` is
+        one of 1h/24h/7d/30d/90d.
+        """
+        response = self._get_json("/factory/utilization", {"team_id": team_id, "window": window})
+        try:
+            utilization = FactoryUtilization.model_validate(response)
+        except ValidationError as exc:
+            raise APIError(_format_validation_error(exc, label="utilization")) from exc
+        if utilization.schema_version != SUPPORTED_SCHEMA_VERSION:
+            raise APIError(
+                f"Unsupported factory utilization schema version: "
+                f"{utilization.schema_version} (expected {SUPPORTED_SCHEMA_VERSION})"
+            )
+        return utilization

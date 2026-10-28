@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 
 import pytest
 from prime_cli.api.factory import FactoryClient
+from prime_cli.client import APIError
 from prime_cli.main import app
 from prime_cli.utils.formatters import strip_ansi
 from typer.testing import CliRunner
@@ -127,21 +128,41 @@ def _nodes_payload(nodes: Optional[List[Dict[str, Any]]] = None) -> Dict[str, An
     }
 
 
+def _utilization_payload(**allocated: Optional[int]) -> Dict[str, Any]:
+    """The latest utilization bucket per cluster, keyed by display name."""
+    return {
+        "schema_version": 1,
+        "window": "1h",
+        "bucket_seconds": 60,
+        "clusters": [
+            {"display_name": name, "series": [{"allocated": count}], "source": _source("slurm")}
+            for name, count in allocated.items()
+        ],
+    }
+
+
 class _DummyAPIClient:
     def __init__(
-        self, payload: Dict[str, Any], nodes_payload: Optional[Dict[str, Any]] = None
+        self,
+        payload: Dict[str, Any],
+        nodes_payload: Optional[Dict[str, Any]] = None,
+        utilization_payload: Optional[Dict[str, Any]] = None,
     ) -> None:
         self._payloads = {
             "/factory/workloads": payload,
             "/factory/status": _status_payload(),
             "/factory/nodes": nodes_payload or _nodes_payload(),
         }
+        if utilization_payload is not None:
+            self._payloads["/factory/utilization"] = utilization_payload
         self.calls: List[Dict[str, Any]] = []
 
     def get(
         self, endpoint: str, params: Optional[Dict[str, Any]] = None, timeout: Any = None
     ) -> Dict[str, Any]:
         self.calls.append({"endpoint": endpoint, "params": params})
+        if endpoint not in self._payloads:
+            raise APIError("Not found")
         return self._payloads[endpoint]
 
     def workloads_params(self) -> Optional[Dict[str, Any]]:
@@ -153,6 +174,7 @@ def _install(
     payload: Dict[str, Any],
     team_id: Optional[str] = "team-123",
     nodes_payload: Optional[Dict[str, Any]] = None,
+    utilization_payload: Optional[Dict[str, Any]] = None,
 ) -> _DummyAPIClient:
     monkeypatch.delenv("PRIME_TEAM_ID", raising=False)
     # Freeze the command's clock just after the rows were built, so live
@@ -165,7 +187,7 @@ def _install(
             return frozen
 
     monkeypatch.setattr("prime_cli.commands.factory.datetime", _FrozenDatetime)
-    dummy = _DummyAPIClient(payload, nodes_payload)
+    dummy = _DummyAPIClient(payload, nodes_payload, utilization_payload)
     monkeypatch.setattr("prime_cli.commands.factory.APIClient", lambda: dummy)
     monkeypatch.setattr("prime_cli.commands.factory.Config", lambda: _StubConfig(team_id))
     monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
@@ -304,6 +326,28 @@ def test_workloads_titles_and_pool_headers_count_nodes_like_status(
     assert rows[2] == ["slurm", *_counts(2, 1, 1)]
     assert rows[7:9] == [["other", *_counts(1, 0, 0)], ["unassigned", *_counts(0, 1, 0)]]
     assert "slurm active/idle = estimated from running jobs" in " ".join(rows[-1])
+
+
+def test_workloads_counts_busy_slurm_nodes_from_utilization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # CPU-only jobs hold nodes: the scheduler's count replaces the estimate.
+    payload = _workloads_payload([_workload("slurm:1", "slurm", allocated_gpus=0)])
+    payload["truncated"] = True
+    _install(
+        monkeypatch,
+        payload,
+        nodes_payload=_nodes_payload(USAGE_NODES),
+        utilization_payload=_utilization_payload(**{"cluster-a": 3}),
+    )
+
+    rows = _plain_rows()
+    output = " ".join(" ".join(row) for row in rows)
+
+    assert rows[0] == ["[1]", "cluster-a", "·", "B300", *_counts(4, 1, 1)]
+    assert rows[2] == ["slurm", *_counts(3, 0, 1)]
+    assert "estimated from running jobs" not in output
+    assert "busy Slurm nodes may be undercounted" not in output
 
 
 def test_workloads_slurm_counts_head_the_table_without_slurm_jobs(

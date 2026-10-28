@@ -64,7 +64,8 @@ SLURM_ESTIMATE_NOTE = (
     "slurm busy = estimated from running jobs (GPUs/8); CPU-only jobs not counted"
 )
 SLURM_BUSY_IDLE_NOTE = (
-    "slurm busy/idle = estimated from running jobs (GPUs/8); CPU-only jobs not counted"
+    "slurm busy/idle = internal Slurm breakdown, estimated from running jobs (GPUs/8); "
+    "CPU-only jobs not counted"
 )
 SLURM_JOBS_TRUNCATED_WARNING = (
     "running Slurm job list was truncated — busy Slurm nodes may be undercounted"
@@ -138,11 +139,19 @@ def _cluster_label(cluster: _DisplayNamedCluster, index: int, multi: bool) -> st
 
 
 class _Usage(NamedTuple):
-    """Node counts for one table row: busy + free + unavailable == nodes."""
+    """Node counts for one table row: free + slurm + busy + unavailable == nodes.
+    
+    Matches the dashboard's four capacity buckets:
+    - free: ready nodes outside Slurm with no GPU work
+    - slurm: all nodes claimed by Slurm (spare inside is "idle", not "free")
+    - busy: ready nodes outside Slurm running GPU work
+    - unavailable: not-ready nodes outside Slurm
+    """
 
     nodes: int
-    busy: int
     free: int
+    slurm: int
+    busy: int
     unavailable: int
 
 
@@ -162,6 +171,10 @@ def _pool_usage(
     from the running jobs' GPUs, capped at the ready Slurm nodes. Ready
     non-Slurm nodes holding GPUs are attributed to training and inference
     from the allocation summary; whatever is left over is "other".
+    
+    Returns pools with _Usage in (nodes, free, slurm, busy, unavailable) format.
+    For Slurm pool: slurm field holds total Slurm nodes, free=idle, busy=busy, unavailable=down.
+    For other pools: only relevant fields are populated.
     """
     gpus_per_node = _gpus_per_node(nodes)
 
@@ -174,9 +187,11 @@ def _pool_usage(
         else 0
     )
     slurm_busy = min(job_nodes, slurm_ready)
+    slurm_idle = slurm_ready - slurm_busy
     names = sorted({job.scheduler_display_name for job in slurm_jobs if job.scheduler_display_name})
     slurm_label = f"slurm ({', '.join(names)})" if names else "slurm"
-    pools = [(slurm_label, _Usage(len(slurm), slurm_busy, slurm_ready - slurm_busy, slurm_down))]
+    # Slurm pool: free=idle (Slurm spare), slurm=total, busy=busy, unavailable=down
+    pools = [(slurm_label, _Usage(len(slurm), slurm_idle, len(slurm), slurm_busy, slurm_down))]
 
     direct = [n for n in nodes if n.assigned_to != "slurm"]
     ready = [n for n in direct if n.state == "ready"]
@@ -185,12 +200,15 @@ def _pool_usage(
     for kind in ("training", "inference"):
         gpus = sum(a.in_use_gpus or 0 for a in allocations if a.type == kind)
         count = min(math.ceil(gpus / gpus_per_node) if gpus_per_node else 0, unattributed)
-        pools.append((kind, _Usage(count, count, 0, 0)))
+        # Training/inference pools: all nodes are busy
+        pools.append((kind, _Usage(count, 0, 0, count, 0)))
         unattributed -= count
-    pools.append(("other", _Usage(unattributed, unattributed, 0, 0)))
+    # Other busy nodes (direct, ready, GPU work but not training/inference)
+    pools.append(("other", _Usage(unattributed, 0, 0, unattributed, 0)))
     free = len(ready) - busy
     down = len(direct) - len(ready)
-    pools.append(("unassigned", _Usage(free + down, 0, free, down)))
+    # Unassigned: free nodes and unavailable nodes
+    pools.append(("unassigned", _Usage(free + down, free, 0, 0, down)))
     return pools
 
 
@@ -275,7 +293,7 @@ def _duplicated_names(names: List[str]) -> set:
 
 
 def _count_cell(count: int) -> Text:
-    # Zeros are dimmed so the non-zero FREE and UNAVAILABLE counts stand out.
+    # Zeros are dimmed so the non-zero counts stand out.
     return Text(str(count), style="dim default" if count == 0 else "")
 
 
@@ -296,8 +314,9 @@ def _render_status_table(
     table.add_column("CLUSTER", style="cyan")
     table.add_column("GPU")
     table.add_column("NODES", justify="right")
-    table.add_column("BUSY", justify="right")
     table.add_column("FREE", justify="right", style="green")
+    table.add_column("SLURM", justify="right")
+    table.add_column("BUSY", justify="right")
     table.add_column("UNAVAILABLE", justify="right", style="red")
 
     ambiguous = _ambiguous_names(status, nodes)
@@ -810,12 +829,33 @@ def _cell_width(cell: Any) -> int:
 
 
 def _usage_text(usage: _Usage) -> Text:
-    """`<b> busy · <f> free · <u> unavailable` in nodes; zero counts are dim."""
+    """`<f> free · <s> slurm · <b> busy · <u> unavailable` in nodes; zero counts are dim."""
     text = Text()
     for count, label, style in (
-        (usage.busy, "busy", "green"),
-        (usage.free, "free", "dark_orange"),
+        (usage.free, "free", "green"),
+        (usage.slurm, "slurm", "default"),
+        (usage.busy, "busy", "default"),
         (usage.unavailable, "unavailable", "red"),
+    ):
+        if text:
+            text.append(" · ", style="dim")
+        text.append(f"{count} {label}", style=style if count else "dim")
+    return text
+
+
+def _slurm_usage_text(usage: _Usage) -> Text:
+    """Format Slurm pool internal breakdown: `<b> busy · <i> idle · <d> down`.
+    
+    For Slurm pools, fields have special semantics:
+    - free field = idle (Slurm spare capacity)
+    - busy field = busy (estimated from running jobs)
+    - unavailable field = down (offline/cordoned/draining Slurm nodes)
+    """
+    text = Text()
+    for count, label, style in (
+        (usage.busy, "busy", "default"),
+        (usage.free, "idle", "default"),  # free field holds Slurm idle count
+        (usage.unavailable, "down", "red"),
     ):
         if text:
             text.append(" · ", style="dim")
@@ -834,11 +874,15 @@ def _pool_header(label: str, usage: Optional[_Usage], width: Optional[int] = Non
 
     When the line is wider than ``width`` the counts move to their own
     line instead of wrapping in the middle of a count.
+    
+    Slurm pools show internal busy/idle/down; other pools show relevant four-bucket fields.
     """
     header = Text()
     header.append(f"  {label}", style="dim")
     if usage is not None and usage.nodes:
-        counts = _usage_text(usage)
+        # Slurm pools use special internal breakdown formatting
+        is_slurm = label.startswith("slurm")
+        counts = _slurm_usage_text(usage) if is_slurm else _usage_text(usage)
         fits = width is None or header.cell_len + 3 + counts.cell_len <= width
         header.append(" · " if fits else "\n    ", style="dim")
         header.append_text(counts)

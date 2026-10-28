@@ -172,8 +172,8 @@ def _install(
     return dummy
 
 
-def _counts(busy: int, free: int, unavailable: int) -> List[str]:
-    return ["·", str(busy), "busy", "·", str(free), "free", "·", str(unavailable), "unavailable"]
+def _counts(free: int, slurm: int, busy: int, unavailable: int) -> List[str]:
+    return ["·", str(free), "free", "·", str(slurm), "slurm", "·", str(busy), "busy", "·", str(unavailable), "unavailable"]
 
 
 def _plain_rows(*args: str) -> List[List[str]]:
@@ -193,7 +193,8 @@ def test_workloads_groups_jobs_by_cluster_and_pool(monkeypatch: pytest.MonkeyPat
     # One table per cluster in `prime factory status` order, titled like
     # the status row; one block per pool (Slurm clusters by name, then
     # training, inference); the ID last.
-    counts = _counts(1, 0, 0)
+    # Default nodes: 1 ready direct node with gpus_used=8 (busy)
+    counts = _counts(0, 0, 1, 0)  # free, slurm, busy, unavailable
     assert _plain_rows() == [
         ["[1]", "cluster-a", "·", "B300", *counts],
         ["NAME", "USER", "STATE", "NODES", "AGE", "ID"],
@@ -288,9 +289,10 @@ def test_workloads_titles_and_pool_headers_count_nodes_like_status(
     status = runner.invoke(app, ["factory", "status", "--plain"], env=TEST_ENV)
     rows = _plain_rows()
 
-    # The title carries the status row's BUSY / FREE / UNAVAILABLE.
-    assert status.output.splitlines()[1].split() == ["[1]", "cluster-a", "B300", "6", "3", "2", "1"]
-    assert rows[0] == ["[1]", "cluster-a", "·", "B300", *_counts(3, 2, 1)]
+    # The title carries the status row's FREE / SLURM / BUSY / UNAVAILABLE.
+    # USAGE_NODES: 1 idle, 4 slurm, 1 busy, 0 unavailable
+    assert status.output.splitlines()[1].split() == ["[1]", "cluster-a", "B300", "6", "1", "4", "1", "0"]
+    assert rows[0] == ["[1]", "cluster-a", "·", "B300", *_counts(1, 4, 1, 0)]
     # All Slurm nodes count on one "slurm" row: the API cannot split them
     # between Slurm clusters, so the named groups carry no counts. Pools
     # without listed jobs close the table so every node is accounted for.
@@ -301,9 +303,11 @@ def test_workloads_titles_and_pool_headers_count_nodes_like_status(
         ["slurm", "(slurm-b)"],
         ["slurm-job", "carol"],
     ]
-    assert rows[2] == ["slurm", *_counts(2, 1, 1)]
-    assert rows[7:9] == [["other", *_counts(1, 0, 0)], ["unassigned", *_counts(0, 1, 0)]]
-    assert "slurm busy/idle = estimated from running jobs" in " ".join(rows[-1])
+    # Slurm pool header shows busy/idle/down (internal Slurm breakdown)
+    assert rows[2] == ["slurm", "·", "2", "busy", "·", "1", "idle", "·", "1", "down"]
+    # Other pools show four-bucket format
+    assert rows[7:9] == [["other", *_counts(0, 0, 1, 0)], ["unassigned", *_counts(1, 0, 0, 0)]]
+    assert "slurm busy/idle = internal Slurm breakdown" in " ".join(rows[-1])
 
 
 def test_workloads_slurm_counts_head_the_table_without_slurm_jobs(
@@ -317,7 +321,8 @@ def test_workloads_slurm_counts_head_the_table_without_slurm_jobs(
 
     rows = _plain_rows("--type", "training")
 
-    assert rows[2:4] == [["slurm", *_counts(0, 3, 1)], ["training"]]
+    # Slurm pool with no jobs: 0 busy, 3 idle, 1 down
+    assert rows[2:4] == [["slurm", "·", "0", "busy", "·", "3", "idle", "·", "1", "down"], ["training"]]
 
 
 def test_workloads_warns_when_slurm_jobs_are_truncated(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -338,8 +343,9 @@ def test_workloads_shows_idle_clusters_with_their_counts(monkeypatch: pytest.Mon
     rows = _plain_rows()
 
     # office-a100 has no jobs: its title and counts still show.
+    # USAGE_NODES: free=1, slurm=4, busy=1, unavailable=0
     assert rows[rows.index([]) + 1 :][:2] == [
-        ["[2]", "office-a100", "·", "B300", *_counts(1, 4, 1)],
+        ["[2]", "office-a100", "·", "B300", *_counts(1, 4, 1, 0)],
         ["no", "running", "or", "queued", "jobs"],
     ]
     # A filtered view shows only clusters with matching jobs.
@@ -1297,11 +1303,11 @@ def test_workloads_cluster_selects_a_slurm_cluster(monkeypatch: pytest.MonkeyPat
     _install(monkeypatch, payload)
 
     assert _plain_rows("--cluster", "slurm-a") == [
-        ["[1]", "cluster-a", "·", "B300", *_counts(1, 0, 0)],
+        ["[1]", "cluster-a", "·", "B300", *_counts(0, 0, 1, 0)],
         ["NAME", "USER", "STATE", "NODES", "AGE", "ID"],
         ["slurm", "(slurm-a)"],
         ["slurm-job", "carol", "running", "4", "30:00", "slurm:ac12:1"],
-        ["other", *_counts(1, 0, 0)],
+        ["other", *_counts(0, 0, 1, 0)],
     ]
 
     dummy = _install(monkeypatch, payload)

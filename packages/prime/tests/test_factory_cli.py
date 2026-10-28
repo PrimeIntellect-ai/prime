@@ -696,15 +696,15 @@ def test_factory_status_default_table_counts_nodes(monkeypatch: pytest.MonkeyPat
     output = strip_ansi(result.output)
 
     assert result.exit_code == 0, result.output
-    for header in ("CLUSTER", "GPU", "NODES", "BUSY", "FREE", "UNAVAILABLE"):
+    for header in ("CLUSTER", "GPU", "NODES", "FREE", "SLURM", "BUSY", "UNAVAILABLE"):
         assert header in output
     for dropped in ("TOTAL", "HELD", "UNUSED", "STATUS", "DATA"):
         assert dropped not in output
-    # Two ready Slurm nodes and no running jobs: both free. Without
-    # --verbose or degraded data there are no sub-rows, notes, or warnings.
+    # Two ready Slurm nodes and no running jobs: 0 free, 2 slurm (idle), 0 busy, 0 unavailable.
+    # Without --verbose or degraded data there are no sub-rows, notes, or warnings.
     assert _plain_status_rows() == [
-        ["CLUSTER", "GPU", "NODES", "BUSY", "FREE", "UNAVAILABLE"],
-        ["cluster-a", "B300", "2", "0", "2", "0"],
+        ["CLUSTER", "GPU", "NODES", "FREE", "SLURM", "BUSY", "UNAVAILABLE"],
+        ["cluster-a", "B300", "2", "0", "2", "0", "0"],
     ]
 
 
@@ -735,9 +735,9 @@ def test_factory_status_counts_nodes_by_state_and_running_slurm_jobs(
         workloads_payload=_workloads_payload(*jobs),
     )
 
-    # NODES 10 = BUSY (2 Slurm + 2 busy) + FREE (1 Slurm + 1 idle)
-    # + UNAVAILABLE (cordoned, draining, offline, unknown).
-    assert _plain_status_rows()[1] == ["cluster-a", "B300", "10", "4", "2", "4"]
+    # NODES 10 = FREE (1 idle direct) + SLURM (5 total: 3 ready + cordoned + draining)
+    # + BUSY (2 direct busy) + UNAVAILABLE (2 direct: offline + unknown).
+    assert _plain_status_rows()[1] == ["cluster-a", "B300", "10", "1", "5", "2", "2"]
 
 
 def test_factory_status_slurm_estimate_is_capped_at_ready_slurm_nodes(

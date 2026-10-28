@@ -317,6 +317,14 @@ def _duplicated_names(names: List[str]) -> set:
     return {name for name, count in counts.items() if count > 1}
 
 
+def _bucket_counts(usage: _Usage) -> tuple:
+    """Extract the four-bucket counts for table display: (nodes, free, slurm, busy, unavailable).
+    
+    Never use the raw _Usage tuple in tables - it has 8 fields but tables only show 5.
+    """
+    return (usage.nodes, usage.free, usage.slurm, usage.busy, usage.unavailable)
+
+
 def _count_cell(count: int) -> Text:
     # Zeros are dimmed so the non-zero counts stand out.
     return Text(str(count), style="dim default" if count == 0 else "")
@@ -361,15 +369,15 @@ def _render_status_table(
         if warning:
             warnings.append(f"{name_cell}: {warning}")
         if paired is None:
-            table.add_row(name_cell, gpu_cell, *["—"] * 4)
+            table.add_row(name_cell, gpu_cell, *["—"] * 5)
             continue
         pools = _cluster_pools(cluster, paired[0], slurm_jobs)
-        table.add_row(name_cell, gpu_cell, *map(_count_cell, _usage_total(pools)))
+        table.add_row(name_cell, gpu_cell, *map(_count_cell, _bucket_counts(_usage_total(pools))))
         if verbose:
             for label, usage in pools:
                 if usage.nodes:
                     table.add_row(
-                        f"  {rich_escape(label)}", "", *map(_count_cell, usage), style="dim"
+                        f"  {rich_escape(label)}", "", *map(_count_cell, _bucket_counts(usage)), style="dim"
                     )
     console.print(table)
     for warning in warnings:

@@ -761,7 +761,8 @@ def test_factory_status_slurm_estimate_is_capped_at_ready_slurm_nodes(
         workloads_payload=_workloads_payload(_slurm_job(64)),
     )
 
-    assert _plain_status_rows()[1] == ["cluster-a", "B300", "3", "2", "0", "1"]
+    # 3 nodes: 0 free, 3 slurm (all Slurm nodes), 0 busy, 0 unavailable
+    assert _plain_status_rows()[1] == ["cluster-a", "B300", "3", "0", "3", "0", "0"]
 
 
 def test_factory_status_verbose_pool_rows_add_up_to_the_cluster_row(
@@ -795,17 +796,22 @@ def test_factory_status_verbose_pool_rows_add_up_to_the_cluster_row(
     rows = _plain_status_rows("--verbose")
 
     # The all-zero inference pool is omitted; one note closes the view.
+    # Cluster: 8 nodes = 1 free + 3 slurm + 3 busy + 1 unavailable
+    # Slurm pool shows four-bucket: 3 nodes, all in slurm bucket (internal breakdown separate)
     assert rows[1:6] == [
-        ["cluster-a", "B300", "8", "5", "1", "2"],
-        ["slurm", "(slurm-a,", "slurm-b)", "3", "2", "0", "1"],
-        ["training", "1", "1", "0", "0"],
-        ["other", "2", "2", "0", "0"],
-        ["unassigned", "2", "0", "1", "1"],
+        ["cluster-a", "B300", "8", "1", "3", "3", "1"],  # nodes, free, slurm, busy, unavailable
+        ["slurm", "(slurm-a,", "slurm-b)", "3", "0", "3", "0", "0"],  # Slurm: all in slurm bucket
+        ["training", "1", "0", "0", "1", "0"],  # training: 1 busy node
+        ["other", "2", "0", "0", "2", "0"],  # other: 2 busy nodes
+        ["unassigned", "2", "1", "0", "0", "1"],  # unassigned: 1 free, 1 unavailable
     ]
-    cluster = [int(cell) for cell in rows[1][-4:]]
-    pools = [[int(cell) for cell in row[-4:]] for row in rows[2:6]]
+    # Verify arithmetic: last 5 columns are nodes, free, slurm, busy, unavailable
+    cluster = [int(cell) for cell in rows[1][-5:]]
+    pools = [[int(cell) for cell in row[-5:]] for row in rows[2:6]]
     assert [sum(column) for column in zip(*pools)] == cluster
-    assert all(in_use + free + down == total for total, in_use, free, down in [cluster, *pools])
+    # Verify four-bucket invariant for cluster and each pool
+    assert all(nodes == free + slurm + busy + unavail 
+               for nodes, free, slurm, busy, unavail in [cluster, *pools])
     assert len(rows) == 7 and "estimated from running jobs" in " ".join(rows[6])
 
 

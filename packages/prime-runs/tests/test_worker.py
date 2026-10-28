@@ -383,6 +383,22 @@ def test_a_success_forgives_earlier_blips():
     worker.close()
 
 
+def test_an_internal_server_error_counts_as_a_transient_strike():
+    class ServerErrorSink(FakeSink):
+        def write(self, records) -> None:
+            raise APIError("internal server error", status_code=500)
+
+    sink = ServerErrorSink("flaky")
+    worker = UploadWorker([sink])
+
+    worker.submit([{"id": 1}])
+    drain(worker)
+
+    assert sink.enabled is True
+    assert worker.failed_records == {"flaky": 1}
+    worker.close()
+
+
 def test_a_permanent_failure_retires_the_sink_immediately():
     from prime_runs.exceptions import UnauthorizedError
 

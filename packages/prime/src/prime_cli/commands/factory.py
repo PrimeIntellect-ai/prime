@@ -61,9 +61,8 @@ FACTORY_NODES_JSON_HELP = json_output_help(
 )
 
 SLURM_ALLOCATED_IDLE_NOTE = (
-    "slurm allocated/idle/draining = internal Slurm breakdown from per-node state and GPU usage; "
-    "allocated = ready nodes with gpus_used > 0, idle = ready with gpus_used = 0, "
-    "draining = nodes with Slurm drain flag"
+    "slurm allocated/idle/draining = internal Slurm breakdown; uses explicit per-node slurm_bucket "
+    "when available (matching dashboard), otherwise derives from state/gpus_used heuristic"
 )
 
 
@@ -171,10 +170,10 @@ def _pool_usage(
 ) -> List[Tuple[str, _Usage]]:
     """Split one cluster's nodes into pools; every node lands in exactly one.
 
-    Uses actual per-node data from the factory nodes API. Slurm breakdown derives
-    from real node state and gpus_used (not estimated from jobs). Ready non-Slurm
-    nodes holding GPUs are attributed to training and inference from the allocation
-    summary; whatever is left over is "other".
+    Uses actual per-node data from the factory nodes API. Slurm breakdown prefers
+    explicit slurm_bucket field when present, falls back to state/gpus_used heuristic.
+    Ready non-Slurm nodes holding GPUs are attributed to training and inference from
+    the allocation summary; whatever is left over is "other".
     
     Returns pools with _Usage where the four buckets (free/slurm/busy/unavailable)
     are mutually exclusive and sum to nodes. Slurm pools store internal breakdown
@@ -183,21 +182,26 @@ def _pool_usage(
     gpus_per_node = _gpus_per_node(nodes)
 
     slurm = [n for n in nodes if n.assigned_to == "slurm"]
-    # Use actual per-node state and gpus_used (not job estimates)
-    slurm_allocated = sum(1 for n in slurm if n.state == "ready" and (n.gpus_used or 0) > 0)
-    slurm_idle = sum(1 for n in slurm if n.state == "ready" and (n.gpus_used or 0) == 0)
-    # Only count nodes with real "draining" state (Slurm drain flag), not all non-ready
-    slurm_draining = sum(1 for n in slurm if n.state == "draining")
-    # Other non-ready Slurm nodes (cordoned/offline/unknown) still in the slurm bucket
-    # but tracked separately for completeness check
-    slurm_other_down = sum(1 for n in slurm if n.state not in ("ready", "draining"))
+    
+    # Prefer explicit slurm_bucket when available, fall back to heuristic
+    slurm_with_bucket = [n for n in slurm if n.slurm_bucket is not None]
+    if slurm_with_bucket:
+        # Use explicit API buckets (matches dashboard bucketSlurmNode)
+        slurm_allocated = sum(1 for n in slurm if n.slurm_bucket == "allocated")
+        slurm_idle = sum(1 for n in slurm if n.slurm_bucket == "idle")
+        slurm_draining = sum(1 for n in slurm if n.slurm_bucket == "draining")
+        # Nodes with null bucket (missing/empty Slurm states) are in IN SLURM total
+        # but not shown in allocated/idle/draining breakdown (matches dashboard treatment)
+    else:
+        # Fall back to state/gpus_used heuristic when slurm_bucket unavailable
+        slurm_allocated = sum(1 for n in slurm if n.state == "ready" and (n.gpus_used or 0) > 0)
+        slurm_idle = sum(1 for n in slurm if n.state == "ready" and (n.gpus_used or 0) == 0)
+        slurm_draining = sum(1 for n in slurm if n.state == "draining")
     
     names = sorted({job.scheduler_display_name for job in slurm_jobs if job.scheduler_display_name})
     slurm_label = f"slurm ({', '.join(names)})" if names else "slurm"
     # Slurm pool: ALL Slurm nodes go in slurm bucket only (free=0, busy=0, unavailable=0)
     # Internal breakdown stored separately in slurm_* fields (allocated/idle/draining)
-    # Note: slurm_draining only counts real "draining" state; other down states exist but
-    # are not shown (cordoned/offline/unknown on Slurm nodes)
     pools = [(slurm_label, _Usage(len(slurm), 0, len(slurm), 0, 0, slurm_allocated, slurm_idle, slurm_draining))]
 
     direct = [n for n in nodes if n.assigned_to != "slurm"]

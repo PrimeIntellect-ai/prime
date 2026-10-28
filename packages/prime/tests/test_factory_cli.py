@@ -814,7 +814,7 @@ def test_factory_status_verbose_pool_rows_add_up_to_the_cluster_row(
     # Verify four-bucket invariant for cluster and each pool
     assert all(nodes == free + slurm + busy + unavail 
                for nodes, free, slurm, busy, unavail in [cluster, *pools])
-    assert len(rows) == 7 and "from per-node state and GPU usage" in " ".join(rows[6])
+    assert len(rows) == 7 and "uses explicit per-node slurm_bucket" in " ".join(rows[6])
 
 
 def test_factory_status_warns_once_per_offline_or_stale_cluster(

@@ -262,6 +262,7 @@ USAGE_NODES = [
             "gpus_total": 8,
             "gpus_used": 8,
             "assigned_to": "slurm",
+            "slurm_bucket": "allocated",
         }
         for i in range(2)
     ),
@@ -271,6 +272,7 @@ USAGE_NODES = [
         "gpus_total": 8,
         "gpus_used": 0,
         "assigned_to": "slurm",
+        "slurm_bucket": "idle",
     },
     {
         "name": "slurm-draining",
@@ -278,6 +280,7 @@ USAGE_NODES = [
         "gpus_total": 8,
         "gpus_used": 0,
         "assigned_to": "slurm",
+        "slurm_bucket": "draining",
     },
     {"name": "busy", "state": "ready", "gpus_total": 8, "gpus_used": 8},
     {"name": "idle", "state": "ready", "gpus_total": 8, "gpus_used": 0},
@@ -314,7 +317,8 @@ def test_workloads_titles_and_pool_headers_count_nodes_like_status(
     assert rows[2] == ["slurm", "·", "2", "allocated", "·", "1", "idle", "·", "1", "draining"]
     # Other pools show four-bucket format
     assert rows[7:9] == [["other", *_counts(0, 0, 1, 0)], ["unassigned", *_counts(1, 0, 0, 0)]]
-    assert "slurm allocated/idle/draining = internal Slurm breakdown" in " ".join(rows[-1])
+    # Note reflects use of explicit slurm_bucket field
+    assert "uses explicit per-node slurm_bucket" in " ".join(rows[-1])
 
 
 def test_workloads_slurm_counts_head_the_table_without_slurm_jobs(
@@ -329,6 +333,7 @@ def test_workloads_slurm_counts_head_the_table_without_slurm_jobs(
                 "gpus_total": 8,
                 "gpus_used": 0,
                 "assigned_to": "slurm",
+                "slurm_bucket": "idle",
             }
             for i in range(3)
         ),
@@ -338,6 +343,7 @@ def test_workloads_slurm_counts_head_the_table_without_slurm_jobs(
             "gpus_total": 8,
             "gpus_used": 0,
             "assigned_to": "slurm",
+            "slurm_bucket": "draining",
         },
         {"name": "busy", "state": "ready", "gpus_total": 8, "gpus_used": 8},
         {"name": "idle", "state": "ready", "gpus_total": 8, "gpus_used": 0},
@@ -363,6 +369,7 @@ def test_workloads_omits_draining_when_zero(monkeypatch: pytest.MonkeyPatch) -> 
             "gpus_total": 8,
             "gpus_used": 8,
             "assigned_to": "slurm",
+            "slurm_bucket": "allocated",
         },
         {
             "name": "slurm-1",
@@ -370,6 +377,7 @@ def test_workloads_omits_draining_when_zero(monkeypatch: pytest.MonkeyPatch) -> 
             "gpus_total": 8,
             "gpus_used": 0,
             "assigned_to": "slurm",
+            "slurm_bucket": "idle",
         },
         {"name": "idle", "state": "ready", "gpus_total": 8, "gpus_used": 0},
     ]
@@ -383,6 +391,45 @@ def test_workloads_omits_draining_when_zero(monkeypatch: pytest.MonkeyPatch) -> 
 
     # Slurm pool header omits "0 draining": shows only "1 allocated · 1 idle"
     assert rows[2] == ["slurm", "·", "1", "allocated", "·", "1", "idle"]
+
+
+def test_workloads_falls_back_when_slurm_bucket_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    # When slurm_bucket is not present (older API), fall back to state/gpus_used heuristic
+    nodes_no_bucket = [
+        {
+            "name": "slurm-0",
+            "state": "ready",
+            "gpus_total": 8,
+            "gpus_used": 8,
+            "assigned_to": "slurm",
+            # slurm_bucket omitted to test fallback
+        },
+        {
+            "name": "slurm-1",
+            "state": "ready",
+            "gpus_total": 8,
+            "gpus_used": 0,
+            "assigned_to": "slurm",
+        },
+        {
+            "name": "slurm-draining",
+            "state": "draining",
+            "gpus_total": 8,
+            "gpus_used": 0,
+            "assigned_to": "slurm",
+        },
+        {"name": "idle", "state": "ready", "gpus_total": 8, "gpus_used": 0},
+    ]
+    _install(
+        monkeypatch,
+        _workloads_payload([_workload("slurm:1", "slurm", allocated_gpus=8)]),
+        nodes_payload=_nodes_payload(nodes_no_bucket),
+    )
+
+    rows = _plain_rows()
+
+    # Should derive breakdown from state/gpus_used: 1 allocated, 1 idle, 1 draining
+    assert rows[2] == ["slurm", "·", "1", "allocated", "·", "1", "idle", "·", "1", "draining"]
 
 
 def test_workloads_no_longer_warns_when_slurm_jobs_are_truncated(

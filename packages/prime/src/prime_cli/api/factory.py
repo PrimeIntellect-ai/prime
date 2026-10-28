@@ -159,7 +159,9 @@ class FactoryNode(BaseModel):
     ``state`` is the coarse public state (ready/cordoned/offline/unknown);
     ``assigned_to`` is the workload group the node is claimed by
     (training/inference/slurm) or ``None`` when unassigned. ``None`` GPU
-    counts mean unobserved, never zero.
+    counts mean unobserved, never zero. ``slurm_bucket`` is the Slurm-specific
+    capacity bucket (allocated/idle/draining) when assigned_to == "slurm" and
+    Slurm states are readable; ``None`` for non-Slurm nodes or when missing.
     """
 
     name: str
@@ -168,6 +170,7 @@ class FactoryNode(BaseModel):
     gpus_total: Optional[int] = None
     gpus_used: Optional[int] = None
     assigned_to: Optional[str] = None
+    slurm_bucket: Optional[str] = None
 
 
 class FactoryNodesCluster(BaseModel):

@@ -176,14 +176,14 @@ def _pool_usage(
 ) -> List[Tuple[str, _Usage]]:
     """Split one cluster's nodes into pools; every node lands in exactly one.
 
-    Slurm nodes report no per-node load, so busy Slurm nodes are estimated
+    Slurm nodes report no per-node load, so allocated Slurm nodes are estimated
     from the running jobs' GPUs, capped at the ready Slurm nodes. Ready
     non-Slurm nodes holding GPUs are attributed to training and inference
     from the allocation summary; whatever is left over is "other".
     
     Returns pools with _Usage where the four buckets (free/slurm/busy/unavailable)
     are mutually exclusive and sum to nodes. Slurm pools store internal breakdown
-    in slurm_busy/slurm_idle/slurm_down fields.
+    in slurm_allocated/slurm_idle/slurm_draining fields.
     """
     gpus_per_node = _gpus_per_node(nodes)
 

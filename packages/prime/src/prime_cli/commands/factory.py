@@ -142,14 +142,14 @@ class _Usage(NamedTuple):
     """Node counts for one table row: free + slurm + busy + unavailable == nodes.
     
     Matches the dashboard's four capacity buckets (mutually exclusive):
-    - free: ready nodes outside Slurm with no GPU work
-    - slurm: all nodes claimed by Slurm (spare inside is "idle", not "free")
+    - free: ready nodes outside Slurm with no GPU work (schedulable)
+    - slurm: all nodes claimed by Slurm (labeled "in Slurm"; idle inside is NOT free)
     - busy: ready nodes outside Slurm running GPU work
     - unavailable: not-ready nodes outside Slurm
     
     Slurm pools store internal breakdown in separate fields:
     - slurm_busy: estimated busy nodes within Slurm
-    - slurm_idle: ready spare nodes within Slurm
+    - slurm_idle: ready spare nodes within Slurm (NOT counted in free)
     - slurm_down: offline/cordoned/draining Slurm nodes
     These do NOT participate in the four-bucket sum (they're subdivisions of `slurm`).
     """
@@ -348,7 +348,7 @@ def _render_status_table(
     table.add_column("GPU")
     table.add_column("NODES", justify="right")
     table.add_column("FREE", justify="right", style="green")
-    table.add_column("SLURM", justify="right")
+    table.add_column("IN SLURM", justify="right")
     table.add_column("BUSY", justify="right")
     table.add_column("UNAVAILABLE", justify="right", style="red")
 
@@ -862,11 +862,11 @@ def _cell_width(cell: Any) -> int:
 
 
 def _usage_text(usage: _Usage) -> Text:
-    """`<f> free · <s> slurm · <b> busy · <u> unavailable` in nodes; zero counts are dim."""
+    """`<f> free · <s> in slurm · <b> busy · <u> unavailable` in nodes; zero counts are dim."""
     text = Text()
     for count, label, style in (
         (usage.free, "free", "green"),
-        (usage.slurm, "slurm", "default"),
+        (usage.slurm, "in slurm", "default"),
         (usage.busy, "busy", "default"),
         (usage.unavailable, "unavailable", "red"),
     ):

@@ -696,18 +696,20 @@ def test_factory_status_default_table_counts_nodes(monkeypatch: pytest.MonkeyPat
     output = strip_ansi(result.output)
 
     assert result.exit_code == 0, result.output
-    for header in ("CLUSTER", "GPU", "NODES", "FREE", "SLURM", "BUSY", "UNAVAILABLE"):
+    for header in ("CLUSTER", "GPU", "NODES", "FREE", "IN SLURM", "BUSY", "UNAVAILABLE"):
         assert header in output
     for dropped in ("TOTAL", "HELD", "UNUSED", "STATUS", "DATA"):
         assert dropped not in output
-    # Two ready Slurm nodes and no running jobs: 0 free, 2 slurm (idle), 0 busy, 0 unavailable.
+    # Two ready Slurm nodes and no running jobs: 0 free, 2 in slurm (idle), 0 busy, 0 unavailable.
     # Without --verbose or degraded data there are no sub-rows, notes, or warnings.
     rows = _plain_status_rows()
     assert rows == [
-        ["CLUSTER", "GPU", "NODES", "FREE", "SLURM", "BUSY", "UNAVAILABLE"],
+        ["CLUSTER", "GPU", "NODES", "FREE", "IN", "SLURM", "BUSY", "UNAVAILABLE"],
         ["cluster-a", "B300", "2", "0", "2", "0", "0"],
     ]
-    # Verify four-bucket invariant: FREE + SLURM + BUSY + UNAVAILABLE == NODES
+    # Verify four-bucket invariant: FREE + IN_SLURM + BUSY + UNAVAILABLE == NODES
+    # Note: rows[1] has 7 data elements (cluster, gpu, nodes, free, in_slurm, busy, unavailable)
+    # but rows[0] header has 8 elements because "IN SLURM" splits into ["IN", "SLURM"]
     assert int(rows[1][3]) + int(rows[1][4]) + int(rows[1][5]) + int(rows[1][6]) == int(rows[1][2])
 
 

@@ -173,7 +173,7 @@ def _install(
 
 
 def _counts(free: int, slurm: int, busy: int, unavailable: int) -> List[str]:
-    return ["·", str(free), "free", "·", str(slurm), "slurm", "·", str(busy), "busy", "·", str(unavailable), "unavailable"]
+    return ["·", str(free), "free", "·", str(slurm), "in", "slurm", "·", str(busy), "busy", "·", str(unavailable), "unavailable"]
 
 
 def _plain_rows(*args: str) -> List[List[str]]:

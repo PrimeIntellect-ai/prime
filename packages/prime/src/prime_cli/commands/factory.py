@@ -61,10 +61,10 @@ FACTORY_NODES_JSON_HELP = json_output_help(
 )
 
 SLURM_ESTIMATE_NOTE = (
-    "slurm in use = estimated from running jobs (GPUs/8); CPU-only jobs not counted"
+    "slurm busy = estimated from running jobs (GPUs/8); CPU-only jobs not counted"
 )
-SLURM_ACTIVE_NOTE = (
-    "slurm active/idle = estimated from running jobs (GPUs/8); CPU-only jobs not counted"
+SLURM_BUSY_FREE_NOTE = (
+    "slurm busy/free = estimated from running jobs (GPUs/8); CPU-only jobs not counted"
 )
 SLURM_JOBS_TRUNCATED_WARNING = (
     "running Slurm job list was truncated — busy Slurm nodes may be undercounted"
@@ -138,12 +138,12 @@ def _cluster_label(cluster: _DisplayNamedCluster, index: int, multi: bool) -> st
 
 
 class _Usage(NamedTuple):
-    """Node counts for one table row: in_use + free + down == nodes."""
+    """Node counts for one table row: busy + free + unavailable == nodes."""
 
     nodes: int
-    in_use: int
+    busy: int
     free: int
-    down: int
+    unavailable: int
 
 
 def _gpus_per_node(nodes: List[FactoryNode]) -> int:
@@ -275,7 +275,7 @@ def _duplicated_names(names: List[str]) -> set:
 
 
 def _count_cell(count: int) -> Text:
-    # Zeros are dimmed so the non-zero FREE and DOWN counts stand out.
+    # Zeros are dimmed so the non-zero FREE and UNAVAILABLE counts stand out.
     return Text(str(count), style="dim default" if count == 0 else "")
 
 
@@ -296,9 +296,9 @@ def _render_status_table(
     table.add_column("CLUSTER", style="cyan")
     table.add_column("GPU")
     table.add_column("NODES", justify="right")
-    table.add_column("IN USE", justify="right")
+    table.add_column("BUSY", justify="right")
     table.add_column("FREE", justify="right", style="green")
-    table.add_column("DOWN", justify="right", style="red")
+    table.add_column("UNAVAILABLE", justify="right", style="red")
 
     ambiguous = _ambiguous_names(status, nodes)
     multi = len(status.clusters) > 1
@@ -810,12 +810,12 @@ def _cell_width(cell: Any) -> int:
 
 
 def _usage_text(usage: _Usage) -> Text:
-    """`<a> active · <i> idle · <d> down` in nodes; zero counts are dim."""
+    """`<b> busy · <f> free · <u> unavailable` in nodes; zero counts are dim."""
     text = Text()
     for count, label, style in (
-        (usage.in_use, "active", "green"),
-        (usage.free, "idle", "dark_orange"),
-        (usage.down, "down", "red"),
+        (usage.busy, "busy", "green"),
+        (usage.free, "free", "dark_orange"),
+        (usage.unavailable, "unavailable", "red"),
     ):
         if text:
             text.append(" · ", style="dim")
@@ -1244,7 +1244,7 @@ def factory_workloads(
             console.print(f"[yellow]{SLURM_JOBS_TRUNCATED_WARNING}[/yellow]")
         shown = {row.cluster_display_name for row in available} | set(idle_clusters)
         if any(usage[name][0][1].nodes for name in shown if name in usage):
-            console.print(f"[dim]{SLURM_ACTIVE_NOTE}[/dim]", highlight=False)
+            console.print(f"[dim]{SLURM_BUSY_FREE_NOTE}[/dim]", highlight=False)
         return
 
     if not rows and not degraded:

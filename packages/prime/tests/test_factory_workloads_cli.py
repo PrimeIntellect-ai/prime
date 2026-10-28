@@ -172,8 +172,8 @@ def _install(
     return dummy
 
 
-def _counts(active: int, idle: int, down: int) -> List[str]:
-    return ["·", str(active), "active", "·", str(idle), "idle", "·", str(down), "down"]
+def _counts(busy: int, free: int, unavailable: int) -> List[str]:
+    return ["·", str(busy), "busy", "·", str(free), "free", "·", str(unavailable), "unavailable"]
 
 
 def _plain_rows(*args: str) -> List[List[str]]:
@@ -288,7 +288,7 @@ def test_workloads_titles_and_pool_headers_count_nodes_like_status(
     status = runner.invoke(app, ["factory", "status", "--plain"], env=TEST_ENV)
     rows = _plain_rows()
 
-    # The title carries the status row's IN USE / FREE / DOWN.
+    # The title carries the status row's BUSY / FREE / UNAVAILABLE.
     assert status.output.splitlines()[1].split() == ["[1]", "cluster-a", "B300", "6", "3", "2", "1"]
     assert rows[0] == ["[1]", "cluster-a", "·", "B300", *_counts(3, 2, 1)]
     # All Slurm nodes count on one "slurm" row: the API cannot split them
@@ -303,7 +303,7 @@ def test_workloads_titles_and_pool_headers_count_nodes_like_status(
     ]
     assert rows[2] == ["slurm", *_counts(2, 1, 1)]
     assert rows[7:9] == [["other", *_counts(1, 0, 0)], ["unassigned", *_counts(0, 1, 0)]]
-    assert "slurm active/idle = estimated from running jobs" in " ".join(rows[-1])
+    assert "slurm busy/free = estimated from running jobs" in " ".join(rows[-1])
 
 
 def test_workloads_slurm_counts_head_the_table_without_slurm_jobs(

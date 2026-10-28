@@ -303,11 +303,11 @@ def test_workloads_titles_and_pool_headers_count_nodes_like_status(
         ["slurm", "(slurm-b)"],
         ["slurm-job", "carol"],
     ]
-    # Slurm pool header shows busy/idle/down (internal Slurm breakdown)
-    assert rows[2] == ["slurm", "·", "2", "busy", "·", "1", "idle", "·", "1", "down"]
+    # Slurm pool header shows allocated/idle/draining (internal Slurm breakdown)
+    assert rows[2] == ["slurm", "·", "2", "allocated", "·", "1", "idle", "·", "1", "draining"]
     # Other pools show four-bucket format
     assert rows[7:9] == [["other", *_counts(0, 0, 1, 0)], ["unassigned", *_counts(1, 0, 0, 0)]]
-    assert "slurm busy/idle = internal Slurm breakdown" in " ".join(rows[-1])
+    assert "slurm allocated/idle = internal Slurm breakdown" in " ".join(rows[-1])
 
 
 def test_workloads_slurm_counts_head_the_table_without_slurm_jobs(
@@ -321,8 +321,8 @@ def test_workloads_slurm_counts_head_the_table_without_slurm_jobs(
 
     rows = _plain_rows("--type", "training")
 
-    # Slurm pool with no jobs: 0 busy, 3 idle, 1 down
-    assert rows[2:4] == [["slurm", "·", "0", "busy", "·", "3", "idle", "·", "1", "down"], ["training"]]
+    # Slurm pool with no jobs: 0 allocated, 3 idle, 1 draining
+    assert rows[2:4] == [["slurm", "·", "0", "allocated", "·", "3", "idle", "·", "1", "draining"], ["training"]]
 
 
 def test_workloads_warns_when_slurm_jobs_are_truncated(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -333,7 +333,7 @@ def test_workloads_warns_when_slurm_jobs_are_truncated(monkeypatch: pytest.Monke
 
     output = " ".join(" ".join(row) for row in _plain_rows())
 
-    assert "busy Slurm nodes may be undercounted" in output
+    assert "allocated Slurm nodes may be undercounted" in output
 
 
 def test_workloads_shows_idle_clusters_with_their_counts(monkeypatch: pytest.MonkeyPatch) -> None:
